@@ -1,0 +1,13 @@
+[package]
+name = "spike-vm-gcarena"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+spike-common.workspace = true
+gc-arena.workspace = true
+
+[lints]
+workspace = true

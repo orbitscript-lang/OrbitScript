@@ -27,3 +27,20 @@ This ADR then records the choice. Switching later means touching every heap type
 - Write barriers are emitted from the first interpreter.
 - A generational mode comes in P5.
 - Weak tables, ephemerons, `__gc` and resurrection are in scope for milestone 1, because the conformance suite tests them.
+
+## Spike S0 results
+
+Full numbers, method and caveats: [`spike/README.md`](../../spike/README.md). Summary against PUC Lua 5.5 (lower is better):
+
+| | fib | loop | str | gc churn | bytes/table | bytes/closure |
+|---|---|---|---|---|---|---|
+| Own arena (+ superinstructions) | 1.77x | 1.50x | 0.78x | 0.80x | 87 (Lua 73) | 93 (Lua 105) |
+| gc-arena (+ superinstructions) | 1.49x | 1.33x | 0.78x | 1.25x | 150 | 147 |
+
+- Both can express ephemerons and `__gc` resurrection (tests pass). On gc-arena this only holds if every cycle is driven by hand through the fully-marked `finalize` hook, with ephemeron values held as `GcWeak` and resurrected each cycle.
+- gc-arena interprets about 20% faster (direct pointers). The arena is about 40% faster on allocation churn and uses half the memory per table or closure (no per-object header or `malloc`).
+- gc-arena paces by object count, not bytes; has no generational mode; can't allocate runtime-sized objects (inline strings) without `unsafe`; and makes collection possible only between `mutate` calls, so all Rust code that calls back into Lua must be resumable.
+- gc-arena 0.7.0 needs Rust 1.95 (MSRV bump from 1.94).
+- Neither option gets near PUC's RAM on large string-keyed tables yet. That's table and string layout (stream B), not the GC.
+
+**Recommendation (pending Tym's decision):** the own safe typed arena, with generation-checked handles in debug builds and flatter storage to cut the handle cost. This reverses the plan's front-runner, so the ADR stays Proposed until Tym decides.
