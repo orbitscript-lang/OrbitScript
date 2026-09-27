@@ -1,9 +1,13 @@
 name: CI
 
+# Automatic runs are paused while the repo is private, to save Actions
+# minutes. Run it by hand from the Actions tab if needed. To re-enable,
+# restore:
+#   push:
+#     branches: [main]
+#   pull_request:
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
