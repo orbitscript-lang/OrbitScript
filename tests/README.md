@@ -8,7 +8,7 @@
 
 All three are driven by `orbit-testkit` (`crates/orbit-testkit`), which runs interpreters as subprocesses, so it tests `orbit` and the reference `lua5.5` the same way. `cargo testkit` is an alias for `cargo run --release -p orbit-testkit --`; every command takes `--help`.
 
-The reference interpreter is built from source by `scripts/build-reference-lua.sh` into `target/reference-lua/` (it needs git and a C compiler).
+GitHub CI runs all three, but its automatic runs are paused for now (see `.github/workflows/ci.yml`), so run them locally before pushing. The reference interpreter is built from source by `scripts/build-reference-lua.sh` into `target/reference-lua/` (it needs git and a C compiler).
 
 ## Expected-pass lists
 
