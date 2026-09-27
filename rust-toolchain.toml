@@ -1,0 +1,4 @@
+# Stable Rust only (ADR-6). The MSRV is `rust-version` in Cargo.toml.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

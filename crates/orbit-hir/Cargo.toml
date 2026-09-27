@@ -1,0 +1,15 @@
+[package]
+name = "orbit-hir"
+description = "Shared high-level IR that both the Lua and OrbitScript front ends lower to"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-lua-syntax = { path = "../orbit-lua-syntax" }
+
+[lints]
+workspace = true

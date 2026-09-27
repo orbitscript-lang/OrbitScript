@@ -1,0 +1,16 @@
+[package]
+name = "orbit-stdlib"
+description = "Lua 5.5 standard library for the OrbitScript VM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-core = { path = "../orbit-core" }
+orbit-vm = { path = "../orbit-vm" }
+
+[lints]
+workspace = true

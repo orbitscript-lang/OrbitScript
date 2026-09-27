@@ -1,0 +1,15 @@
+[package]
+name = "orbit-vm"
+description = "Bytecode interpreter: call frames, coroutines, metamethods and errors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-core = { path = "../orbit-core" }
+
+[lints]
+workspace = true
