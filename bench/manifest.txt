@@ -1,0 +1,14 @@
+# Benchmarks run by `cargo testkit bench`. Each script takes its size as
+# arg[1] and prints a checksum; every interpreter must print the same output.
+#   full=ARGS   inputs for real measurements (about 0.5 to 2.5 s on PUC Lua)
+#   quick=ARGS  small inputs for CI smoke runs
+startup.lua                                    # start-up time and baseline memory
+fib.lua            full=35       quick=24      # calls, integer arithmetic
+binary_trees.lua   full=16       quick=12      # allocation, GC
+nbody.lua          full=1000000  quick=50000   # float arithmetic, table fields
+spectral_norm.lua  full=500      quick=100     # numeric loops, arrays
+fannkuch.lua       full=10       quick=8       # integer arrays, swaps
+strings.lua        full=500000   quick=20000   # string building, format, patterns
+tables.lua         full=1000000  quick=100000  # hash and array tables, sort
+oop.lua            full=2000000  quick=100000  # method calls, metatables, closures
+coroutines.lua     full=4000000  quick=50000   # coroutine switches

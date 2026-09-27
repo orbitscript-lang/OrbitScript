@@ -83,3 +83,66 @@ jobs:
             echo "::error::orbit is $size bytes, over the $SIZE_BUDGET_BYTES byte budget"
             exit 1
           fi
+
+  conformance:
+    name: Lua 5.5 test suite + differential tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: Check the vendored test suite is unmodified
+        working-directory: tests/lua-5.5/testes
+        run: sha256sum --check --quiet ../SHA256SUMS
+      - name: Cache the reference interpreter
+        uses: actions/cache@v4
+        with:
+          path: target/reference-lua
+          key: reference-lua-${{ runner.os }}-${{ hashFiles('tests/lua-5.5/VERSION', 'scripts/build-reference-lua.sh') }}
+      - name: Build reference lua5.5
+        run: scripts/build-reference-lua.sh
+      - run: cargo build --release --locked -p orbit-cli -p orbit-testkit
+      # Real Lua must pass every file: this checks the harness and manifest.
+      - name: Suite against lua5.5
+        run: >
+          cargo testkit conformance --interp target/reference-lua/bin/lua5.5
+          --c-libs target/reference-lua/libs --json target/testkit/conformance-lua5.5.json
+      # orbit fails only on regressions against the expected-pass list.
+      - name: Suite against orbit
+        run: >
+          cargo testkit conformance --interp target/release/orbit
+          --expect tests/lua-5.5/expected-orbit.txt --json target/testkit/conformance-orbit.json
+      - name: Differential tests against lua5.5
+        run: >
+          cargo testkit diff --reference target/reference-lua/bin/lua5.5
+          --interp target/release/orbit --expect tests/diff/expected-orbit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-results
+          path: target/testkit/*.json
+
+  bench:
+    name: benchmarks (quick inputs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: Cache the reference interpreter
+        uses: actions/cache@v4
+        with:
+          path: target/reference-lua
+          key: reference-lua-${{ runner.os }}-${{ hashFiles('tests/lua-5.5/VERSION', 'scripts/build-reference-lua.sh') }}
+      - name: Build reference lua5.5
+        run: scripts/build-reference-lua.sh
+      - run: cargo build --release --locked -p orbit-cli -p orbit-testkit
+      # Shared runners are noisy: this is a smoke run that reports time,
+      # peak RSS and binary size. bench.yml runs the full inputs.
+      - name: Run benchmarks
+        run: >
+          cargo testkit bench --quick --runs 3
+          --interp lua5.5=target/reference-lua/bin/lua5.5 --interp orbit=target/release/orbit
+          --json target/testkit/bench.json --markdown "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-quick
+          path: target/testkit/bench.json

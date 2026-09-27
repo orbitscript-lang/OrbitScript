@@ -1,0 +1,21 @@
+[package]
+name = "orbit-testkit"
+description = "Conformance, differential and benchmark harness for OrbitScript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Development tool only: it drives interpreters as subprocesses and never
+# links the runtime, so it can test any Lua-compatible binary.
+[dependencies]
+
+# getrusage(RUSAGE_CHILDREN) for exact peak RSS, through a safe API (the
+# workspace forbids our own `unsafe`). See DEPS.md.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["resource"] }
+
+[lints]
+workspace = true
