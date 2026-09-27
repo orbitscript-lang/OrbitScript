@@ -29,12 +29,24 @@ One semantic core, two syntaxes: the Lua 5.5 and OrbitScript front ends both low
 | G JIT study | memo, later `orbit-jit` | After ADR-3, 4 drafts |
 
 ## Lua 5.5 changes that matter (versus 5.4)
-- `global` declarations (`global x`, `global <const> x`, `global function f`, `global *`); `global` becomes reserved.
-- Attributes can prefix a whole name list.
-- Named vararg tables: `function f(a, ...args)`.
-- For-loop control variables are read-only.
+
+Checked by stream A against the Lua 5.5.1 manual and sources (the `v5.5.1` tag of the lua/lua mirror).
+
+Incompatibilities the manual lists (section 8):
+- Language:
+  - `global` is a reserved word. The default build defines `LUA_COMPAT_GLOBAL`, which keeps `global` a regular name and only reads it as a declaration when `<`, a name, `*` or `function` follows. The suite relies on the default (its files both declare globals and parse under it), so `orbit-lua-syntax` follows the default and can reserve the word as an option.
+  - The control variable of a `for` loop is read-only (assigning to it is a compile error).
+  - A chain of `__call` metamethods can have at most 15 objects.
+  - A `nil` error object is replaced by a string message.
+- Libraries: GC parameters are set through the new `collectgarbage("param", ...)` option, not the `incremental` and `generational` options, and the parameters themselves changed.
+- C API: several changes (`lua_newstate` seed, `nresults` limit of 250, deprecated `lua_resetthread` and `lua_setcstacklimit`, `lua_dump`, `LUA_GCPARAM`, `lua_pushvfstring`). None applies, since embedding is Rust-only.
+
+New syntax (`orbit-lua-syntax` covers all of it):
+- `global` declarations: `global x`, `global x, y = 1, 2` (which fails at run time if a global already has a value), `global <const> x`, `global function f`, and `global *` / `global <const> *`. Once a declaration is in scope, undeclared free names are compile errors, and `<const>` globals cannot be assigned. Globals cannot be `<close>`.
+- An attribute can prefix a whole name list: `local <const> a, b = 1, 2`.
+- Named vararg tables: `function f(a, ...args)`. The table holds the extra arguments plus `n`, the name is read-only, and the compiler can avoid building a real table when the name is only indexed.
+
+Other changes (not incompatibilities, from the release notes):
 - Floats print with enough digits to round-trip.
 - `table.create`; `utf8.offset` also returns the end position.
 - Incremental major GCs, compact arrays (tags stored apart from payloads).
-
-Stream A confirms the manual's full incompatibility list (section 8) first.
