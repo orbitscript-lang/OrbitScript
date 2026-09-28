@@ -50,7 +50,12 @@ pub fn mark_value(m: &mut Marker<'_, LuaSpace>, v: Value) {
         Value::NativeFn(f) => m.mark(f),
         Value::UserData(u) => m.mark(u),
         Value::Thread(t) => m.mark(t),
-        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::LightNative(_) => {}
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::LightNative(_)
+        | Value::LightUserData(_) => {}
     }
 }
 
@@ -729,15 +734,13 @@ impl Heap {
     }
 
     /// Sets the metatable shared by all values of `ty` (for example, strings'). The heap
-    /// keeps it alive.
+    /// keeps it alive. For `Type::UserData` this is the metatable shared by light
+    /// userdata; full userdata have their own.
     ///
     /// # Panics
-    /// For `Type::Table` and `Type::UserData`, which have per-object metatables.
+    /// For `Type::Table`, which has per-object metatables.
     pub fn set_type_metatable(&mut self, ty: Type, mt: Option<TableRef>) {
-        assert!(
-            !matches!(ty, Type::Table | Type::UserData),
-            "tables and userdata have their own metatables"
-        );
+        assert!(ty != Type::Table, "tables have their own metatables");
         self.type_metatables[ty as usize] = mt;
     }
 

@@ -417,3 +417,21 @@ fn stress_run(seed: u64, steps: usize) {
     assert_eq!(h.gc().count::<Table>(), 0);
     assert_eq!(h.gc().count::<LuaStr>(), Tm::ALL.len());
 }
+
+#[test]
+fn light_userdata_keys_and_weakness() {
+    let mut h = heap();
+    let t = weak_table(&mut h, "kv");
+    let a = Value::LightUserData(0x10);
+    let b = Value::LightUserData(0x20);
+    h.raw_set(t, a, Value::Int(1)).unwrap();
+    h.raw_set(t, Value::Int(5), b).unwrap();
+    assert_eq!(int(h.raw_get(t, Value::LightUserData(0x10))), 1);
+    assert!(h.raw_get(t, b).is_nil());
+    assert!(h.raw_eq(a, Value::LightUserData(0x10)));
+    assert!(!h.raw_eq(a, b));
+    // Light userdata are values, never collected, so weak entries stay.
+    collect(&mut h, &[Value::Table(t)]);
+    assert_eq!(int(h.raw_get(t, a)), 1);
+    assert!(h.raw_eq(h.raw_get_int(t, 5), b));
+}

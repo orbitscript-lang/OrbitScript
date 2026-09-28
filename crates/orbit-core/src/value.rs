@@ -51,6 +51,9 @@ pub enum Value {
     LightNative(NativeId),
     /// A full userdata.
     UserData(UserDataRef),
+    /// A light userdata: an opaque 64-bit value with no storage, compared by value
+    /// (Lua's `lightuserdata`). Type `userdata`; all light userdata share one metatable.
+    LightUserData(u64),
     /// A coroutine.
     Thread(ThreadRef),
 }
@@ -128,7 +131,7 @@ impl Value {
             Value::Str(_) => Type::String,
             Value::Table(_) => Type::Table,
             Value::LuaFn(_) | Value::NativeFn(_) | Value::LightNative(_) => Type::Function,
-            Value::UserData(_) => Type::UserData,
+            Value::UserData(_) | Value::LightUserData(_) => Type::UserData,
             Value::Thread(_) => Type::Thread,
         }
     }
@@ -244,6 +247,7 @@ impl Value {
             (Value::NativeFn(a), Value::NativeFn(b)) => a == b,
             (Value::LightNative(a), Value::LightNative(b)) => a == b,
             (Value::UserData(a), Value::UserData(b)) => a == b,
+            (Value::LightUserData(a), Value::LightUserData(b)) => a == b,
             (Value::Thread(a), Value::Thread(b)) => a == b,
             _ => false,
         }
@@ -288,6 +292,7 @@ impl Value {
             Value::NativeFn(f) => (tag::NATIVE_FN, u64::from(f.index())),
             Value::LightNative(n) => (tag::LIGHT_NATIVE, u64::from(n.0)),
             Value::UserData(u) => (tag::USERDATA, u64::from(u.index())),
+            Value::LightUserData(p) => (tag::LIGHT_USERDATA, p),
             Value::Thread(t) => (tag::THREAD, u64::from(t.index())),
         }
     }
@@ -306,6 +311,7 @@ impl Value {
             tag::NATIVE_FN => Value::NativeFn(Gc::from_index(payload as u32)),
             tag::LIGHT_NATIVE => Value::LightNative(NativeId(payload as u32)),
             tag::USERDATA => Value::UserData(Gc::from_index(payload as u32)),
+            tag::LIGHT_USERDATA => Value::LightUserData(payload),
             tag::THREAD => Value::Thread(Gc::from_index(payload as u32)),
             _ => Value::Nil,
         }
@@ -326,6 +332,7 @@ pub(crate) mod tag {
     pub const LIGHT_NATIVE: u8 = 9;
     pub const USERDATA: u8 = 10;
     pub const THREAD: u8 = 11;
+    pub const LIGHT_USERDATA: u8 = 12;
 }
 
 /// Converts a float to an integer if it has an exact integer value in range
@@ -356,6 +363,7 @@ impl fmt::Debug for Value {
             Value::LightNative(n) => write!(f, "light-native#{}", n.0),
             Value::UserData(u) => write!(f, "userdata#{}", u.index()),
             Value::Thread(t) => write!(f, "thread#{}", t.index()),
+            Value::LightUserData(p) => write!(f, "lightuserdata#{p:#x}"),
         }
     }
 }
@@ -451,6 +459,7 @@ mod tests {
             Value::LuaFn(Gc::from_index(1)),
             Value::NativeFn(Gc::from_index(2)),
             Value::LightNative(NativeId(5)),
+            Value::LightUserData(u64::MAX),
             Value::UserData(Gc::from_index(6)),
             Value::Thread(Gc::from_index(8)),
         ];
@@ -465,6 +474,11 @@ mod tests {
     #[test]
     fn types() {
         assert_eq!(Value::LightNative(NativeId(0)).type_name(), "function");
+        assert_eq!(Value::LightUserData(7).type_name(), "userdata");
+        assert!(Value::LightUserData(7).raw_eq(Value::LightUserData(7)));
+        assert!(!Value::LightUserData(7).raw_eq(Value::LightUserData(8)));
+        assert!(!Value::LightUserData(7).raw_eq(Value::Int(7)));
+        assert!(!Value::LightUserData(7).is_collectable());
         assert_eq!(Value::Float(1.0).type_name(), "number");
         assert!(Value::Int(0).is_truthy());
         assert!(Value::Bool(false).is_falsy());

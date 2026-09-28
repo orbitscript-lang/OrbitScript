@@ -16,3 +16,4 @@ Lua values are nil, booleans, 64-bit integers, 64-bit floats, strings, tables, f
 
 ## Open
 - Whether light C functions and light userdata have analogues. There's no C API, so probably "native function" (a Rust fn pointer, no allocation) and no light userdata.
+  - Update (2026-09-28, pending Tym's OK): light C functions are `Value::LightNative`. Light userdata was added for conformance as `Value::LightUserData(u64)`, an opaque non-collectable payload: `debug.upvalueid` returns one and the official suite compares them. `type()` reports `userdata`, equality compares payloads, it is never marked or weak-cleared, and all light userdata share one type metatable, as in the reference.
