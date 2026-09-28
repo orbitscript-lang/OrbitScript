@@ -2,15 +2,16 @@
 
 ## Non-negotiables
 - **Stable Rust only.** No nightly or beta features, no `#![feature]`, no `-Z` flags.
-- **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The only planned exceptions are the future `orbit-jit` crate and, if ADR-2 picks gc-arena, audited `unsafe impl Collect` blocks. Anything else needs Tym's sign-off in an ADR.
-- **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies without an ADR.
+- **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The only planned exception is the future `orbit-jit` crate. Anything else needs Tym's sign-off in an ADR.
+- **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-gc`, `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies without an ADR.
 - **Lua 5.5 compatibility is judged by behavior.** When unsure, compare against the reference `lua5.5` interpreter and the official test suite, not memory of older Lua versions.
 
 ## Layout
 | Crate | Purpose | Stream |
 |---|---|---|
 | `orbit-lua-syntax` | Lua 5.5 lexer, parser, AST | A |
-| `orbit-core` | Value, GC heap, strings, tables | B |
+| `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates | B |
+| `orbit-core` | Value, strings, tables, built on `orbit-gc` | B |
 | `orbit-hir`, `orbit-compiler`, `orbit-vm` | HIR, bytecode compiler, interpreter | C |
 | `orbit-stdlib` | Lua standard library | D |
 | `orbit` | Rust embedding API | shared |

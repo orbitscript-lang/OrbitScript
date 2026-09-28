@@ -10,3 +10,19 @@ Status: Proposed, pending spike S0
 
 ## Open
 - Instruction width (32-bit like PUC, or wider to leave room for cache indices), decided with S0's numbers.
+
+## Spike S0 results
+
+From [`spike/README.md`](../../spike/README.md), on the arena VM (gc-arena showed the same pattern):
+
+| dispatch | fib | loop | gc churn |
+|---|---|---|---|
+| plain `match` | 2.06x PUC | 1.53x | 0.77x |
+| `match` + superinstructions (compare+jump, call shape) | 1.77x | 1.50x | 0.80x |
+| closure-threaded (`Box<dyn Fn>` per instruction) | 3.24x | 2.02x | 0.89x |
+
+- Superinstructions give about 14% on call- and branch-heavy code and are neutral elsewhere.
+- Closure threading is slower on every benchmark, and closures capturing GC'd constants don't fit gc-arena. Rejected.
+- The remaining 1.5 to 2x gap on pure interpretation is per-instruction overhead: bounds checks on register and code access, `Result` checks, frame setup, and 12-byte instructions (the fused forms carry a 32-bit target). Stream C should measure a per-frame register window slice and a packed 4 or 8 byte encoding first.
+
+**Recommendation (pending Tym's decision):** a `match` loop plus a profile-driven superinstruction set; no closure threading.
