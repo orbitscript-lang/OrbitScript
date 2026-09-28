@@ -19,8 +19,9 @@ pub struct Params {
     pub stepmul: u32,
     /// Bytes allocated between incremental steps (Lua's `stepsize`).
     pub stepsize: usize,
-    /// No cycle starts before the heap holds this many bytes, so small
-    /// programs don't collect over and over. Not a Lua parameter.
+    /// A floor under the threshold, so small programs collect less often.
+    /// Not a Lua parameter, and 0 by default, as in Lua: with a floor, a
+    /// small heap can't shrink back toward its live size.
     pub min_threshold: usize,
 }
 
@@ -30,7 +31,7 @@ impl Default for Params {
             pause: 250,
             stepmul: 200,
             stepsize: 200 * 56,
-            min_threshold: 256 * 1024,
+            min_threshold: 0,
         }
     }
 }
@@ -57,6 +58,8 @@ enum State {
     },
 }
 
+/// How many free slots the sweeper skips for the cost of visiting one object.
+const FREE_SLOT_SHARE: usize = 16;
 /// Work done by one step in stress mode.
 const STRESS_WORK: usize = 256;
 
@@ -72,6 +75,11 @@ pub struct Heap<S: Space> {
     state: State,
     /// Bytes allocated minus bytes freed.
     bytes: usize,
+    /// Bytes live at the end of marking, minus what the sweep has freed
+    /// since: Lua's `GCestimate`. Unlike `bytes`, it leaves out what the
+    /// mutator allocated during the sweep, which would otherwise feed into
+    /// the next threshold and let the heap grow cycle after cycle.
+    estimate: usize,
     /// Positive when a step is due.
     debt: isize,
     threshold: usize,
@@ -135,6 +143,7 @@ impl<S: Space + Default> Heap<S> {
             gray_again: Vec::new(),
             state: State::Pause,
             bytes: 0,
+            estimate: 0,
             debt: -(params.min_threshold as isize),
             threshold: params.min_threshold,
             params,
@@ -513,7 +522,7 @@ impl<S: Space> Heap<S> {
     fn finish_cycle(&mut self) {
         self.state = State::Pause;
         self.cycles += 1;
-        self.threshold = (self.bytes / 100)
+        self.threshold = (self.estimate / 100)
             .saturating_mul(self.params.pause as usize)
             .max(self.params.min_threshold);
         self.debt = if self.stress {
@@ -645,45 +654,55 @@ impl<S: Space> Heap<S> {
         };
         roots.clear_weak(&live);
         self.weak.clear();
+        self.estimate = self.bytes;
     }
 
     // ---- sweeping -------------------------------------------------------
 
-    /// Sweep up to `budget` slots. Returns true when every arena is swept.
-    fn sweep(&mut self, mut budget: usize) -> bool {
-        while budget > 0 {
+    /// Sweep until `budget` objects have been visited. Free slots are cheap
+    /// to skip, so each counts as 1/16 of an object; otherwise an arena that
+    /// grew and then emptied would slow every later sweep down to a crawl.
+    /// Returns true when every arena is swept.
+    fn sweep(&mut self, budget: usize) -> bool {
+        let mut credit = budget.saturating_mul(FREE_SLOT_SHARE);
+        loop {
             let State::Sweep { kind, at } = self.state else {
                 return true;
             };
             if kind as usize >= S::KINDS {
                 return true;
             }
-            let len = self.marks.meta[kind as usize].color.len();
-            let end = (at as usize).saturating_add(budget).min(len);
-            for i in at as usize..end {
-                self.sweep_one(kind, i as u32);
+            if credit == 0 {
+                return false;
             }
-            budget -= end - at as usize;
-            self.state = if end == len {
+            let len = self.marks.meta[kind as usize].color.len();
+            let mut i = at as usize;
+            while i < len && credit > 0 {
+                let cost = if self.sweep_one(kind, i as u32) {
+                    FREE_SLOT_SHARE
+                } else {
+                    1
+                };
+                credit = credit.saturating_sub(cost);
+                i += 1;
+            }
+            self.state = if i == len {
                 State::Sweep {
                     kind: kind + 1,
                     at: 0,
                 }
             } else {
-                State::Sweep {
-                    kind,
-                    at: end as u32,
-                }
+                State::Sweep { kind, at: i as u32 }
             };
         }
-        matches!(self.state, State::Sweep { kind, .. } if kind as usize >= S::KINDS)
     }
 
-    fn sweep_one(&mut self, kind: u8, index: u32) {
+    /// Sweep one slot. Returns false if it was already free.
+    fn sweep_one(&mut self, kind: u8, index: u32) -> bool {
         let meta = &mut self.marks.meta[kind as usize];
         let c = &mut meta.color[index as usize];
         if *c == FREE {
-            return;
+            return false;
         }
         if *c & COLOR == WHITE {
             debug_assert!(
@@ -694,8 +713,10 @@ impl<S: Space> Heap<S> {
             meta.free.push(index);
             let n = self.space.free_slot(kind, index);
             self.bytes = self.bytes.saturating_sub(n);
+            self.estimate = self.estimate.saturating_sub(n);
         } else {
             *c &= !COLOR;
         }
+        true
     }
 }
