@@ -18,6 +18,11 @@ pub struct Chunk {
     pub body: FuncBody,
     /// Every local variable declared in the chunk, indexed by [`LocalId`].
     pub locals: Vec<LocalInfo>,
+    /// Byte offsets where lines 2, 3, ... start, counting line breaks as the lexer does.
+    pub line_starts: Vec<u32>,
+    /// End offsets of every token, in order. Code generation uses them to find the line
+    /// of the last token read before a construct (`ls->lastline`).
+    pub token_ends: Vec<u32>,
 }
 
 impl Chunk {
@@ -25,6 +30,51 @@ impl Chunk {
     pub fn local(&self, id: LocalId) -> &LocalInfo {
         &self.locals[id.0 as usize]
     }
+
+    /// The line holding the byte at `offset`.
+    pub fn line_of(&self, offset: u32) -> u32 {
+        self.line_starts.partition_point(|&s| s <= offset) as u32 + 1
+    }
+
+    /// The reference's `lastline` just before the token at `offset` is read: the line
+    /// where the previous token ends (1 at the start of the chunk).
+    pub fn line_before(&self, offset: u32) -> u32 {
+        let i = self.token_ends.partition_point(|&e| e <= offset);
+        match i {
+            0 => 1,
+            _ => self.line_of(self.token_ends[i - 1] - 1),
+        }
+    }
+
+    /// The line where `span` ends: the reference's `lastline` right after the construct
+    /// is parsed.
+    pub fn end_line(&self, span: Span) -> u32 {
+        if span.end > span.start {
+            self.line_of(span.end - 1)
+        } else {
+            span.line
+        }
+    }
+}
+
+/// Byte offsets where lines 2, 3, ... of `src` start. `\n`, `\r`, `\r\n` and `\n\r`
+/// each end one line, as in the reference lexer.
+pub fn line_starts(src: &[u8]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        let c = src[i];
+        if c == b'\n' || c == b'\r' {
+            i += 1;
+            if i < src.len() && (src[i] == b'\n' || src[i] == b'\r') && src[i] != c {
+                i += 1;
+            }
+            out.push(i as u32);
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Identifies a local variable within its chunk.

@@ -65,8 +65,8 @@ dependencies = [
 name = "orbit-compiler"
 version = "0.0.0"
 dependencies = [
- "orbit-core",
- "orbit-hir",
+ "orbit-bytecode",
+ "orbit-lua-syntax",
 ]
 
 [[package]]

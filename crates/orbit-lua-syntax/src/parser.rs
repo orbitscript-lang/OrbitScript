@@ -159,6 +159,8 @@ struct Parser<'a> {
     lastline: u32,
     /// End offset of the last token consumed.
     prev_end: u32,
+    /// End offsets of all tokens consumed so far, in order.
+    token_ends: Vec<u32>,
     global_is_keyword: bool,
     max_depth: u32,
     depth: u32,
@@ -181,6 +183,7 @@ impl<'a> Parser<'a> {
             ahead: None,
             lastline: 1,
             prev_end: 0,
+            token_ends: Vec::new(),
             global_is_keyword: options.global_is_keyword,
             max_depth: options.max_depth,
             depth: 0,
@@ -206,6 +209,9 @@ impl<'a> Parser<'a> {
     fn next(&mut self) -> PResult<()> {
         self.lastline = self.lx.line();
         self.prev_end = self.tok.span.end;
+        if self.tok.span.end > 0 {
+            self.token_ends.push(self.tok.span.end);
+        }
         self.tok = match self.ahead.take() {
             Some(t) => t,
             None => self.lex()?,
@@ -752,6 +758,8 @@ impl<'a> Parser<'a> {
                 span: Span::new(0, end, 1),
             },
             locals: std::mem::take(&mut self.locals),
+            line_starts: crate::ast::line_starts(self.src),
+            token_ends: std::mem::take(&mut self.token_ends),
         })
     }
 
