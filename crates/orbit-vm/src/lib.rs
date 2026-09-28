@@ -7,6 +7,7 @@
 //! [`Action`]; returning [`Action::Call`], [`Action::PCall`] or [`Action::Yield`] with a
 //! [`Continuation`] lets a native function call Lua code that yields.
 
+mod api;
 mod aux;
 pub mod baselib;
 mod coro;
