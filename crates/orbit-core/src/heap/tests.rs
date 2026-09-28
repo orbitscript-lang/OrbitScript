@@ -274,7 +274,7 @@ fn closures_upvalues_and_protos_trace() {
         constants: vec![konst].into_boxed_slice(),
         protos: vec![inner].into_boxed_slice(),
         source: None,
-        num_upvalues: 1,
+        info: Default::default(),
     });
     let captured = h.new_table();
     let uv = h.alloc(UpVal::Closed(Value::Table(captured)));
@@ -289,6 +289,7 @@ fn closures_upvalues_and_protos_trace() {
     });
     let th = h.alloc(Thread {
         stack: vec![Value::LuaFn(f)],
+        ..Thread::default()
     });
     let open = h.alloc(UpVal::Open {
         thread: th,

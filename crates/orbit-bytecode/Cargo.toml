@@ -1,0 +1,12 @@
+[package]
+name = "orbit-bytecode"
+description = "Register bytecode format shared by the OrbitScript compiler and VM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

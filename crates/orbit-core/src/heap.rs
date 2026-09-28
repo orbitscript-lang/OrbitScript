@@ -262,10 +262,13 @@ impl Trace<LuaSpace> for Thread {
         for &v in &self.stack {
             mark_value(m, v);
         }
+        for &u in &self.open_upvals {
+            m.mark(u);
+        }
     }
 
     fn extra_bytes(&self) -> usize {
-        self.stack.capacity() * size_of::<Value>()
+        self.stack.capacity() * size_of::<Value>() + self.open_upvals.capacity() * 4
     }
 }
 

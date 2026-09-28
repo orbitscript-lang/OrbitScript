@@ -5,9 +5,11 @@
 //! and a coroutine, and will grow those types as they are written.
 
 use crate::value::{NativeId, StrRef, TableRef, ThreadRef, Value};
+use orbit_bytecode::FnInfo;
 use orbit_gc::Gc;
 use std::any::Any;
 use std::fmt;
+use std::rc::Rc;
 
 /// Handle to a function prototype.
 pub type ProtoRef = Gc<Proto>;
@@ -16,8 +18,9 @@ pub type UpValRef = Gc<UpVal>;
 
 /// A compiled Lua function body: bytecode, constants and nested prototypes.
 ///
-/// Placeholder shape for stream C: it holds the fields the collector must trace
-/// (constants, nested prototypes, source name). The compiler adds code and debug info.
+/// The collector traces the constants, nested prototypes and source name. Everything
+/// else (code, line numbers, upvalue descriptors, debug names) is plain data in
+/// [`FnInfo`], shared with every call frame running the function.
 #[derive(Debug, Default)]
 pub struct Proto {
     /// Constants referenced by the bytecode.
@@ -26,8 +29,15 @@ pub struct Proto {
     pub protos: Box<[ProtoRef]>,
     /// Chunk name, for error messages and `debug.getinfo`.
     pub source: Option<StrRef>,
+    /// Code and debug information.
+    pub info: Rc<FnInfo>,
+}
+
+impl Proto {
     /// Number of upvalues a closure of this prototype has.
-    pub num_upvalues: u8,
+    pub fn num_upvalues(&self) -> usize {
+        self.info.upvalues.len()
+    }
 }
 
 /// A captured variable. It is *open* while the variable still lives in a coroutine's
@@ -103,12 +113,30 @@ impl fmt::Debug for UserData {
     }
 }
 
-/// A coroutine.
+/// A coroutine (ADR-3).
 ///
-/// Placeholder shape for stream C (ADR-3): it holds the value stack the collector must
-/// trace. The VM adds frames, status and the open-upvalue list.
-#[derive(Debug, Default)]
+/// While a coroutine runs, the VM keeps its stack, frames and open upvalues in its own
+/// registers (and roots them); they are stored here while it is suspended or waiting on
+/// a coroutine it resumed.
+#[derive(Default)]
 pub struct Thread {
     /// The value stack.
     pub stack: Vec<Value>,
+    /// Upvalues still pointing into `stack`, sorted by slot.
+    pub open_upvals: Vec<UpValRef>,
+    /// The VM's private state for a coroutine that is not running: call frames, status
+    /// and the like.
+    ///
+    /// Contract: this state holds no GC handles. Suspended frames reach their functions
+    /// and values only through stack slots, which [`Thread`]'s trace marks.
+    pub vm_state: Option<Box<dyn Any>>,
+}
+
+impl fmt::Debug for Thread {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Thread")
+            .field("stack", &self.stack.len())
+            .field("open_upvals", &self.open_upvals)
+            .finish_non_exhaustive()
+    }
 }

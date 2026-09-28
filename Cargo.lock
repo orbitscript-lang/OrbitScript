@@ -51,6 +51,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit-bytecode"
+version = "0.0.0"
+
+[[package]]
 name = "orbit-cli"
 version = "0.0.0"
 dependencies = [
@@ -69,6 +73,7 @@ dependencies = [
 name = "orbit-core"
 version = "0.0.0"
 dependencies = [
+ "orbit-bytecode",
  "orbit-gc",
 ]
 
