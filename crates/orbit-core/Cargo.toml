@@ -10,3 +10,6 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+orbit-gc = { path = "../orbit-gc" }
