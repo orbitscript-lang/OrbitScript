@@ -111,5 +111,9 @@ dependencies = [
 name = "orbit-vm"
 version = "0.0.0"
 dependencies = [
+ "orbit-bytecode",
+ "orbit-compiler",
  "orbit-core",
+ "orbit-gc",
+ "orbit-lua-syntax",
 ]
