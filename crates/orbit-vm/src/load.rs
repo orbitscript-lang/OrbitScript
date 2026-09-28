@@ -9,6 +9,7 @@ use orbit_core::object::ProtoRef;
 use orbit_core::object::{LuaClosure, Proto, UpVal};
 use orbit_core::value::StrRef;
 use orbit_lua_syntax::ErrorKind;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 impl Vm {
@@ -48,7 +49,7 @@ impl Vm {
             }
         };
         let source = self.heap.intern(chunkname);
-        let proto = self.make_proto(f, source);
+        let proto = self.make_proto(f, source, &mut HashMap::new());
         let nup = self.heap.get(proto).num_upvalues();
         let mut upvals = Vec::with_capacity(nup);
         for i in 0..nup {
@@ -66,7 +67,14 @@ impl Vm {
         Ok(Value::LuaFn(cl))
     }
 
-    fn make_proto(&mut self, f: CompiledFn, source: StrRef) -> ProtoRef {
+    /// Moves a compiled function into the heap. Equal string constants of one chunk
+    /// share a string object, long ones included, as the reference's lexer does.
+    fn make_proto(
+        &mut self,
+        f: CompiledFn,
+        source: StrRef,
+        strings: &mut HashMap<Vec<u8>, StrRef>,
+    ) -> ProtoRef {
         let constants: Vec<Value> = f
             .constants
             .iter()
@@ -75,13 +83,20 @@ impl Vm {
                 Constant::Bool(b) => Value::Bool(*b),
                 Constant::Int(n) => Value::Int(*n),
                 Constant::Float(x) => Value::Float(*x),
-                Constant::Str(s) => Value::Str(self.heap.intern(s)),
+                Constant::Str(s) => Value::Str(match strings.get(&s[..]) {
+                    Some(&r) => r,
+                    None => {
+                        let r = self.heap.intern(s);
+                        strings.insert(s.to_vec(), r);
+                        r
+                    }
+                }),
             })
             .collect();
         let protos: Vec<ProtoRef> = f
             .protos
             .into_iter()
-            .map(|p| self.make_proto(p, source))
+            .map(|p| self.make_proto(p, source, strings))
             .collect();
         self.heap.alloc(Proto {
             constants: constants.into_boxed_slice(),

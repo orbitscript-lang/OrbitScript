@@ -281,7 +281,7 @@ fn collectgarbage(vm: &mut Vm) -> LuaResult<Action> {
         }
         "count" => Value::Float(vm.heap.gc().bytes() as f64 / 1024.0),
         "step" => {
-            let _n = vm.opt_integer(2, 0)?;
+            let n = vm.opt_integer(2, 0)?;
             if vm.in_finalizers {
                 Value::Nil
             } else {
@@ -291,7 +291,20 @@ fn collectgarbage(vm: &mut Vm) -> LuaResult<Action> {
                 if stopped {
                     vm.heap.gc_mut().restart();
                 }
-                vm.gc_step(live)?;
+                // A positive size does the work of that many KiB of allocation; zero
+                // does one basic step. The collector leaves the step size as its debt
+                // when the cycle goes on, so it is capped at the heap size: a huge
+                // size must not postpone the next automatic step indefinitely.
+                let stepsize = vm.heap.gc().params().stepsize;
+                if n > 0 {
+                    let kib = usize::try_from(n).unwrap_or(usize::MAX);
+                    vm.heap.gc_mut().params_mut().stepsize = kib
+                        .saturating_mul(1024)
+                        .min(vm.heap.gc().bytes().max(stepsize));
+                }
+                let r = vm.gc_step(live);
+                vm.heap.gc_mut().params_mut().stepsize = stepsize;
+                r?;
                 if stopped {
                     vm.heap.gc_mut().stop();
                 }
@@ -480,12 +493,7 @@ fn load_chunk(vm: &mut Vm, src: &[u8], chunkname: &[u8], mode: Option<&[u8]>) ->
         }
     }
     if src.first() == Some(&0x1b) {
-        let mut msg = orbit_lua_syntax::chunk_id(chunkname);
-        msg.extend_from_slice(b": binary chunks are not supported");
-        return Err(crate::Error {
-            value: vm.heap.str_value(msg),
-            status: Status::Syntax,
-        });
+        return vm.undump(src, chunkname);
     }
     vm.load_with_env(src, chunkname, Some(Value::Table(vm.globals)))
 }
@@ -523,7 +531,7 @@ fn load(vm: &mut Vm) -> LuaResult<Action> {
                 vm.check_stack(2)?;
                 let f = vm.arg(1);
                 vm.push(f);
-                if let Err(e) = vm.call(0, Some(1)) {
+                if let Err(e) = vm.pcall(0, Some(1), 0) {
                     vm.push(Value::Nil);
                     vm.push(e.value);
                     return Ok(Action::Return(2));
@@ -594,9 +602,17 @@ pub fn io_error_text(e: &std::io::Error) -> String {
     }
 }
 
-fn load_file(vm: &mut Vm, fname: Option<&[u8]>, mode: Option<&[u8]>) -> LuaResult<Value> {
+/// `luaL_loadfilex`: loads the file `fname` (standard input for `None`) as a text or
+/// binary chunk, skipping a first line starting with `#`. `mode` is as for `load`.
+pub fn load_file(vm: &mut Vm, fname: Option<&[u8]>, mode: Option<&[u8]>) -> LuaResult<Value> {
     let (src, chunkname) = read_source(vm, fname)?;
-    let body = orbit_lua_syntax::skip_file_prefix(&src).to_vec();
+    let mut body = orbit_lua_syntax::skip_file_prefix(&src);
+    // A text chunk keeps the comment's newline, so line numbers stay right; a binary
+    // chunk after a comment starts on the next line.
+    if body.starts_with(b"\n\x1b") {
+        body = &body[1..];
+    }
+    let body = body.to_vec();
     load_chunk(vm, &body, &chunkname, mode)
 }
 
@@ -634,11 +650,18 @@ fn assert(vm: &mut Vm) -> LuaResult<Action> {
         return Ok(Action::Return(vm.top()));
     }
     vm.check_any(1)?;
+    // As `error(msg)`: a string message gets the caller's position.
     let msg = if vm.top() >= 2 {
         vm.arg(2)
     } else {
         vm.heap.str_value("assertion failed!")
     };
+    if let Value::Str(s) = msg {
+        let mut full = vm.where_(1);
+        full.extend_from_slice(vm.heap.string(s).as_bytes());
+        let v = vm.heap.str_value(full);
+        return Err(vm.raise(v));
+    }
     Err(vm.raise(msg))
 }
 

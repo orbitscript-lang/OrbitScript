@@ -11,10 +11,11 @@ use crate::debug::Operand;
 use crate::error::{Error, LuaResult, Status};
 use crate::meta::{Get, Set};
 use crate::number::{self, Arith, F2I};
-use crate::state::{Action, Frame, KStatus, MIN_STACK, Vm, flag};
+use crate::state::{Action, Frame, HookEvent, KStatus, MIN_STACK, Vm, flag, hook_mask};
 use orbit_bytecode::*;
 use orbit_core::object::LuaClosure;
 use orbit_core::{Tm, Value};
+use std::sync::atomic::Ordering;
 
 /// What the frame stack needs next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,8 +43,9 @@ impl Vm {
     // ---- calls ----------------------------------------------------------------
 
     /// Replaces a non-function at `func` by its `__call` metamethod, shifting the
-    /// arguments up (`tryfuncTM`). Returns the callable.
-    fn resolve_callable(&mut self, func: usize) -> LuaResult<Value> {
+    /// arguments up (`tryfuncTM`). Returns the callable and the number of metamethods
+    /// applied.
+    fn resolve_callable(&mut self, func: usize) -> LuaResult<(Value, u8)> {
         let mut f = self.st.stack[func];
         let mut n = 0;
         while !f.is_function() {
@@ -62,14 +64,15 @@ impl Vm {
             self.st.stack[func] = tm;
             f = tm;
         }
-        Ok(f)
+        Ok((f, n as u8))
     }
 
     /// Starts a call of the function at `func` with the arguments above it up to the
     /// top (`luaD_precall`). A Lua function gets a frame and `Flow::RunLua`; a native
     /// function runs now.
     pub(crate) fn precall(&mut self, func: usize, nresults: i32) -> LuaResult<Flow> {
-        match self.resolve_callable(func)? {
+        let (f, extra_args) = self.resolve_callable(func)?;
+        match f {
             Value::LuaFn(cl) => {
                 let p = self.heap.get(self.heap.get(cl).proto);
                 let nparams = usize::from(p.info.num_params);
@@ -93,14 +96,22 @@ impl Vm {
                     handler: 0,
                     pcall_func: 0,
                     pcall_nresults: 0,
+                    extra_args,
+                    closing: None,
                 });
                 Ok(Flow::RunLua)
             }
-            f => self.call_native(f, func, nresults),
+            f => self.call_native(f, func, nresults, extra_args),
         }
     }
 
-    fn call_native(&mut self, f: Value, func: usize, nresults: i32) -> LuaResult<Flow> {
+    fn call_native(
+        &mut self,
+        f: Value,
+        func: usize,
+        nresults: i32,
+        extra_args: u8,
+    ) -> LuaResult<Flow> {
         let entry = self.native_entry(f).expect("native function");
         self.grow_stack(self.st.top + MIN_STACK)?;
         self.st.frames.push(Frame {
@@ -116,7 +127,13 @@ impl Vm {
             handler: 0,
             pcall_func: 0,
             pcall_nresults: 0,
+            extra_args,
+            closing: None,
         });
+        if self.st.hook.mask & hook_mask::CALL != 0 {
+            let narg = self.st.top - func - 1;
+            self.call_hook(HookEvent::Call, -1, 1, narg)?;
+        }
         let action = (entry.f)(self)?;
         self.native_action(action)
     }
@@ -133,6 +150,9 @@ impl Vm {
                         "native returned too many values"
                     );
                     self.check_gc(top)?;
+                    if self.st.hook.mask != 0 {
+                        self.ret_hook(fi, top - n, n)?;
+                    }
                     self.poscall(fi, top - n, n);
                     return Ok(Flow::Returned);
                 }
@@ -142,6 +162,7 @@ impl Vm {
                     k,
                     ctx,
                 } => {
+                    self.enter_kcall()?;
                     let fr = &mut self.st.frames[fi];
                     fr.flags |= flag::KCALL;
                     fr.k = Some(k);
@@ -159,6 +180,7 @@ impl Vm {
                     k,
                     ctx,
                 } => {
+                    self.enter_kcall()?;
                     let func = self.st.top - nargs - 1;
                     let base = self.st.frames[fi].base;
                     let fr = &mut self.st.frames[fi];
@@ -195,9 +217,35 @@ impl Vm {
         }
     }
 
+    /// Counts a native frame starting an `Action::Call` or `Action::PCall` as a nested
+    /// C call, raising "C stack overflow" past the limit (`luaE_checkcstack`).
+    fn enter_kcall(&mut self) -> LuaResult<()> {
+        self.st.nkcalls += 1;
+        let depth = self.c_calls + self.st.nkcalls;
+        if depth == crate::state::MAX_C_CALLS {
+            return Err(self.rt_error("C stack overflow"));
+        } else if depth >= crate::state::MAX_C_CALLS / 10 * 11 {
+            return Err(self.err_in_handler());
+        }
+        Ok(())
+    }
+
+    /// Recounts [`ExecState::nkcalls`](crate::state) after frames were unwound.
+    pub(crate) fn recount_kcalls(&mut self) {
+        self.st.nkcalls = self
+            .st
+            .frames
+            .iter()
+            .filter(|f| f.flags & (flag::KCALL | flag::PCALL) != 0)
+            .count() as u32;
+    }
+
     /// Runs the continuation of the native function on top of the frame stack.
     pub(crate) fn continue_native(&mut self, status: KStatus) -> LuaResult<Action> {
         let fi = self.st.frames.len() - 1;
+        if self.st.frames[fi].flags & (flag::KCALL | flag::PCALL) != 0 {
+            self.st.nkcalls -= 1;
+        }
         let fr = &mut self.st.frames[fi];
         fr.flags &= !(flag::KCALL | flag::PCALL | flag::YIELDED);
         let k = fr.k.take().expect("native frame has a continuation");
@@ -263,8 +311,17 @@ impl Vm {
     /// Recovers from error `e` at the protected call of native frame `fi`: runs the
     /// message handler, closes variables, and resumes the native with the error.
     fn recover(&mut self, fi: usize, e: Error) -> LuaResult<Flow> {
-        let fr = self.st.frames[fi];
         let mut err = e;
+        if let Some((slot, _)) = self.st.frames[fi].closing {
+            // An error in a closing method replaces the one being handled.
+            self.st.frames.truncate(fi + 1);
+            self.recount_kcalls();
+            self.st.stack[slot] = err.value;
+            self.st.frames[fi].closing = Some((slot, err.status));
+            self.st.top = slot + 1;
+            return self.close_step(fi);
+        }
+        let fr = self.st.frames[fi];
         if fr.handler != 0 && err.status == Status::Runtime {
             self.st.top = self.st.top.max(self.frames_top());
             err = self.call_handler(fr.handler, err);
@@ -272,14 +329,69 @@ impl Vm {
         if err.value.is_nil() && err.status == Status::Runtime {
             err.value = self.heap.str_value("<no error object>");
         }
+        // The error object goes above everything the unwound frames used (their
+        // callers' registers above the call are dead); closing methods are called
+        // above it.
+        let above = self.st.frames[fi..]
+            .iter()
+            .map(|f| f.top)
+            .max()
+            .unwrap_or(0);
+        let slot = self.st.top.max(above);
         self.st.frames.truncate(fi + 1);
-        let func = fr.pcall_func;
-        let err = self.close_with_error(func, err);
-        self.st.frames.truncate(fi + 1);
-        self.st.top = func;
-        self.push(err.value);
-        let action = self.continue_native(KStatus::Error(err.status))?;
-        self.native_action(action)
+        self.recount_kcalls();
+        self.ensure_stack(slot + 1);
+        self.st.stack[slot] = err.value;
+        self.st.top = slot + 1;
+        self.st.frames[fi].closing = Some((slot, err.status));
+        self.close_step(fi)
+    }
+
+    /// Closes the next to-be-closed variable of the failed protected call of native
+    /// frame `fi`, or, when none is left, resumes the native with the error. A closing
+    /// method written in Lua runs as a frame of its own (so it may yield); this runs
+    /// again when it returns.
+    pub(crate) fn close_step(&mut self, fi: usize) -> LuaResult<Flow> {
+        loop {
+            let (slot, status) = self.st.frames[fi].closing.expect("closing after an error");
+            let level = self.st.frames[fi].pcall_func;
+            self.close_upvals(level);
+            match self.st.tbc.last() {
+                Some(&var) if var >= level => {
+                    self.st.tbc.pop();
+                    let obj = self.st.stack[var];
+                    let tm = self.heap.tm_of(obj, Tm::Close);
+                    let func = slot + 1;
+                    self.ensure_stack(func + 3);
+                    self.st.stack[func] = tm;
+                    self.st.stack[func + 1] = obj;
+                    self.st.stack[func + 2] = self.st.stack[slot];
+                    self.st.top = func + 3;
+                    match self.precall(func, 0) {
+                        Ok(Flow::Returned) => self.st.top = slot + 1,
+                        Ok(flow) => return Ok(flow),
+                        Err(e) => {
+                            self.st.frames.truncate(fi + 1);
+                            self.recount_kcalls();
+                            if e.status != Status::Exit {
+                                self.st.stack[slot] = e.value;
+                                self.st.frames[fi].closing = Some((slot, e.status));
+                            }
+                            self.st.top = slot + 1;
+                        }
+                    }
+                }
+                _ => {
+                    let v = self.st.stack[slot];
+                    self.st.frames[fi].closing = None;
+                    self.st.top = level;
+                    self.reset_overflow();
+                    self.push(v);
+                    let action = self.continue_native(KStatus::Error(status))?;
+                    return self.native_action(action);
+                }
+            }
+        }
     }
 
     /// The highest slot any frame uses.
@@ -340,6 +452,10 @@ impl Vm {
                                 flow = f;
                             }
                         }
+                    } else if fr.closing.is_some() {
+                        // A closing method returned during error handling.
+                        self.st.top = fr.closing.map_or(0, |(slot, _)| slot + 1);
+                        flow = self.close_step(fi)?;
                     } else {
                         let action = self.continue_native(KStatus::Ok)?;
                         flow = self.native_action(action)?;
@@ -417,6 +533,8 @@ impl Vm {
                     self.st.tbc.len() <= tbc || self.st.tbc[tbc..].iter().all(|&s| s < func)
                 );
                 self.st.top = func;
+                self.reset_overflow();
+                self.recount_kcalls();
                 Err(e)
             }
         }
@@ -486,6 +604,22 @@ impl Vm {
                     self.st.frames[fi].pc += 1;
                 }
             }
+            OpCode::Close => {
+                // A closing method returned: close the remaining variables.
+                self.st.top = fr.top;
+                return self.close(base + arg_a(inst) as usize);
+            }
+            OpCode::Return => {
+                let ra = base + arg_a(inst) as usize;
+                let n = fr.ctx as usize;
+                self.st.top = fr.top.max(ra + n);
+                if let Some(flow) = self.close(base)? {
+                    return Ok(Some(flow));
+                }
+                return self
+                    .finish_return(fi, ra, n, arg_c(inst) as usize)
+                    .map(Some);
+            }
             OpCode::Concat => {
                 let top = self.st.top - 1;
                 let a = arg_a(inst) as usize;
@@ -497,6 +631,27 @@ impl Vm {
             _ => {}
         }
         Ok(None)
+    }
+
+    /// The end of `RETURN` for Lua frame `fi`: the return hook, then the `n` results
+    /// from slot `ra` go to the caller. `nparams1` is the instruction's C operand.
+    fn finish_return(
+        &mut self,
+        fi: usize,
+        ra: usize,
+        n: usize,
+        nparams1: usize,
+    ) -> LuaResult<Flow> {
+        if self.st.hook.mask != 0 {
+            self.st.top = ra + n;
+            self.ret_hook(fi, ra, n)?;
+        }
+        if nparams1 != 0 {
+            let fr = &mut self.st.frames[fi];
+            fr.func -= fr.nextraargs + nparams1;
+        }
+        self.poscall(fi, ra, n);
+        Ok(Flow::Returned)
     }
 
     fn frame_code(&self, fr: &Frame) -> std::rc::Rc<FnInfo> {
@@ -810,6 +965,15 @@ impl Vm {
         let code = &info.code[..];
         let mut base = fr.base;
         let mut pc = fr.pc;
+        // A fresh frame: the call hook, except for vararg functions, whose hooks start
+        // at their VARARGPREP instruction (`luaG_tracecall`).
+        if pc == 0 && self.st.hook.mask != 0 && !info.is_vararg() {
+            self.hook_call(fi)?;
+        }
+        if pc == 0 && self.interrupt.load(Ordering::Relaxed) {
+            self.interrupt.store(false, Ordering::Relaxed);
+            return Err(self.rt_error("interrupted!"));
+        }
 
         macro_rules! r {
             ($i:expr) => {
@@ -851,8 +1015,23 @@ impl Vm {
                 self.heap.get(cl).upvals[($n) as usize]
             };
         }
+        // Polled at backward jumps, so an interrupt stops any loop.
+        macro_rules! check_interrupt {
+            () => {
+                if self.interrupt.load(Ordering::Relaxed) {
+                    self.interrupt.store(false, Ordering::Relaxed);
+                    protect!();
+                    return Err(self.rt_error("interrupted!"));
+                }
+            };
+        }
 
         loop {
+            if self.st.hook.mask & (hook_mask::LINE | hook_mask::COUNT) != 0 {
+                self.st.frames[fi].pc = pc + 1;
+                self.trace_exec(fi, pc, &info)?;
+                base = self.st.frames[fi].base;
+            }
             let i = code[pc];
             pc += 1;
             self.st.frames[fi].pc = pc;
@@ -1240,14 +1419,18 @@ impl Vm {
                 }
                 OpCode::Close => {
                     protect!();
-                    self.close(base + a)?;
+                    slow!(self.close(base + a));
                 }
                 OpCode::Tbc => {
                     protect!();
                     self.new_tbc(base + a)?;
                 }
                 OpCode::Jmp => {
-                    pc = (pc as i64 + i64::from(arg_sj(i))) as usize;
+                    let sj = arg_sj(i);
+                    if sj < 0 {
+                        check_interrupt!();
+                    }
+                    pc = (pc as i64 + i64::from(sj)) as usize;
                 }
                 OpCode::Eq => {
                     let x = r!(a);
@@ -1368,7 +1551,7 @@ impl Vm {
                     if arg_k(i) {
                         self.close_upvals(base);
                     }
-                    let f = self.resolve_callable(func)?;
+                    let (f, _) = self.resolve_callable(func)?;
                     let b = self.st.top - func;
                     match f {
                         Value::LuaFn(ncl) => {
@@ -1412,30 +1595,34 @@ impl Vm {
                     }
                     let n = n as usize;
                     if arg_k(i) {
+                        // Kept for `finish_op` if a closing method runs as a frame.
+                        self.st.frames[fi].ctx = n as isize;
                         let ftop = self.st.frames[fi].top;
-                        if self.st.top < ftop {
-                            self.st.top = ftop;
+                        self.st.top = self.st.top.max(ftop).max(ra + n);
+                        if let Some(flow) = self.close(base)? {
+                            return Ok(flow);
                         }
-                        self.st.top = self.st.top.max(ra + n);
-                        self.close(base)?;
                     }
-                    let nparams1 = arg_c(i) as usize;
-                    if nparams1 != 0 {
-                        let fr = &mut self.st.frames[fi];
-                        fr.func -= fr.nextraargs + nparams1;
-                    }
-                    self.poscall(fi, ra, n);
-                    return Ok(Flow::Returned);
+                    return self.finish_return(fi, ra, n, arg_c(i) as usize);
                 }
                 OpCode::Return0 => {
+                    if self.st.hook.mask != 0 {
+                        self.st.top = base + a;
+                        self.ret_hook(fi, base + a, 0)?;
+                    }
                     self.poscall(fi, base + a, 0);
                     return Ok(Flow::Returned);
                 }
                 OpCode::Return1 => {
+                    if self.st.hook.mask != 0 {
+                        self.st.top = base + a + 1;
+                        self.ret_hook(fi, base + a, 1)?;
+                    }
                     self.poscall(fi, base + a, 1);
                     return Ok(Flow::Returned);
                 }
                 OpCode::ForLoop => {
+                    check_interrupt!();
                     if let Value::Int(step) = r!(a + 1) {
                         let Value::Int(count) = r!(a) else {
                             unreachable!()
@@ -1492,6 +1679,7 @@ impl Vm {
                     }
                 }
                 OpCode::TForLoop => {
+                    check_interrupt!();
                     if !r!(a + 3).is_nil() {
                         pc -= arg_bx(i) as usize;
                     }
@@ -1591,6 +1779,11 @@ impl Vm {
                     let fsize = usize::from(info.max_stack);
                     self.adjust_varargs(fi, nfix, fsize, info.flags)?;
                     base = self.st.frames[fi].base;
+                    if self.st.hook.mask != 0 {
+                        self.hook_call(fi)?;
+                        // The next instruction counts as a new line.
+                        self.st.hook.oldpc = 1;
+                    }
                 }
                 OpCode::ExtraArg => unreachable!("EXTRAARG executed"),
             }

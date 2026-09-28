@@ -179,13 +179,16 @@ impl Vm {
     /// from the frame that called it.
     pub(crate) fn func_name_for_frame(&self, callee_index: usize) -> Option<ObjName> {
         let callee = &self.st.frames[callee_index];
-        if callee.flags & flag::FIN != 0 {
-            return Some(("metamethod", "__gc".to_string()));
-        }
         if callee.flags & flag::TAIL != 0 || callee_index == 0 {
             return None;
         }
         let caller = &self.st.frames[callee_index - 1];
+        if caller.flags & flag::HOOKED != 0 {
+            return Some(("hook", "?".to_string()));
+        }
+        if caller.flags & flag::FIN != 0 {
+            return Some(("metamethod", "__gc".to_string()));
+        }
         self.func_name_from_caller(caller)
     }
 
@@ -284,6 +287,17 @@ impl Vm {
         }
     }
 
+    /// A traceback of coroutine `co` (which may be the running one), like
+    /// `luaL_traceback` with another thread.
+    pub fn thread_traceback(
+        &mut self,
+        co: orbit_core::value::ThreadRef,
+        msg: Option<&[u8]>,
+        level: usize,
+    ) -> Vec<u8> {
+        self.with_thread(co, |vm| vm.traceback(msg, level))
+    }
+
     /// A stack traceback like `luaL_traceback`, starting at frame depth `level` (0 is
     /// the running function).
     pub fn traceback(&self, msg: Option<&[u8]>, level: usize) -> Vec<u8> {
@@ -294,7 +308,24 @@ impl Vm {
         }
         out.extend_from_slice(b"stack traceback:");
         let n = self.st.frames.len();
-        for idx in (0..n.saturating_sub(level)).rev() {
+        // Long stacks show the first LEVELS1 and last LEVELS2 levels.
+        const LEVELS1: usize = 10;
+        const LEVELS2: usize = 11;
+        let shown = n.saturating_sub(level);
+        let skip = if shown > LEVELS1 + LEVELS2 + 1 {
+            shown - LEVELS1 - LEVELS2
+        } else {
+            0
+        };
+        for (k, idx) in (0..shown).rev().enumerate() {
+            if skip > 0 && k >= LEVELS1 && k < LEVELS1 + skip {
+                if k == LEVELS1 {
+                    // The reference reports one level fewer than it leaves out.
+                    let n = skip - 1;
+                    out.extend_from_slice(format!("\n\t...\t(skipping {n} levels)").as_bytes());
+                }
+                continue;
+            }
             let fr = self.st.frames[idx];
             out.extend_from_slice(b"\n\t");
             if fr.is_lua() {

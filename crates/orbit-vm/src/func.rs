@@ -1,7 +1,8 @@
 //! Upvalues and to-be-closed variables (`lfunc.c`).
 
 use crate::error::{Error, LuaResult};
-use crate::state::Vm;
+use crate::exec::Flow;
+use crate::state::{Vm, flag};
 use orbit_core::object::{UpVal, UpValRef};
 use orbit_core::{Tm, Value};
 
@@ -89,10 +90,14 @@ impl Vm {
     }
 
     /// Closes upvalues and to-be-closed variables at or above `level` after normal
-    /// execution (`luaF_close` with `LUA_OK`). Closing calls happen above the current
-    /// top; an error from one propagates, leaving the rest to the error unwinding.
-    pub(crate) fn close(&mut self, level: usize) -> LuaResult<()> {
+    /// execution of the running Lua frame (`luaF_close` with `LUA_OK`). A closing
+    /// method written in Lua runs as a frame of its own, so it may yield: this returns
+    /// the flow to follow, and `finish_op` continues closing when the method returns.
+    /// Closing calls happen above the current top; an error from one propagates,
+    /// leaving the rest to the error unwinding.
+    pub(crate) fn close(&mut self, level: usize) -> LuaResult<Option<Flow>> {
         self.close_upvals(level);
+        let fi = self.st.frames.len() - 1;
         while let Some(&slot) = self.st.tbc.last() {
             if slot < level {
                 break;
@@ -101,14 +106,21 @@ impl Vm {
             let obj = self.st.stack[slot];
             let tm = self.heap.tm_of(obj, Tm::Close);
             let func = self.st.top;
-            self.ensure_stack(func + 3);
+            // Without an error, the method gets no second argument.
+            self.ensure_stack(func + 2);
             self.st.stack[func] = tm;
             self.st.stack[func + 1] = obj;
             self.st.top = func + 2;
-            self.call_close_method(func)?;
-            self.st.top = func;
+            self.st.frames[fi].flags |= flag::FINISH_OP;
+            match self.precall(func, 0)? {
+                Flow::Returned => {
+                    self.st.frames[fi].flags &= !flag::FINISH_OP;
+                    self.st.top = func;
+                }
+                flow => return Ok(Some(flow)),
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Closes upvalues and to-be-closed variables at or above `level` while handling
@@ -142,8 +154,13 @@ impl Vm {
             self.st.stack[func + 2] = err.as_ref().map_or(Value::Nil, |e| e.value);
             self.st.top = func + 3;
             let depth = self.st.frames.len();
-            if let Err(e) = self.call_close_method(func) {
+            // The method may overwrite its argument, so keep the error object alive.
+            let pin = self.pin(err.as_ref().map_or(Value::Nil, |e| e.value));
+            let r = self.call_close_method(func);
+            self.unpin(pin);
+            if let Err(e) = r {
                 self.st.frames.truncate(depth);
+                self.recount_kcalls();
                 // A closing method that closed its own (already closing) coroutine
                 // changes nothing here.
                 if e.status != crate::Status::Exit {

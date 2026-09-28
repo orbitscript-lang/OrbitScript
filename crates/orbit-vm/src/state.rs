@@ -7,12 +7,17 @@ use orbit_core::value::{StrRef, TableRef, ThreadRef};
 use orbit_core::{Heap, NativeId, Value};
 use orbit_gc::{Marker, Roots};
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Maximum number of stack slots a coroutine may use (`LUAI_MAXSTACK`).
 pub const MAX_STACK: usize = 1_000_000;
 /// Maximum depth of nested Rust-level calls: native functions calling back into Lua,
 /// `resume` and the like (`LUAI_MAXCCALLS`).
 pub const MAX_C_CALLS: u32 = 200;
+/// Slots beyond [`MAX_STACK`] available to error handling after a stack overflow
+/// (`ERRORSTACKSIZE - LUAI_MAXSTACK`).
+pub const ERROR_STACK_EXTRA: usize = 200;
 /// Stack slots guaranteed to a native function on entry (`LUA_MINSTACK`).
 pub const MIN_STACK: usize = 20;
 
@@ -120,8 +125,86 @@ pub(crate) mod flag {
     pub const KCALL: u16 = 16;
     /// A native frame that yielded.
     pub const YIELDED: u16 = 32;
-    /// Called as a finalizer (`__gc`).
+    /// Running a finalizer (`__gc`) called from this frame.
     pub const FIN: u16 = 64;
+    /// Running a debug hook called from this frame.
+    pub const HOOKED: u16 = 128;
+}
+
+/// A debug hook event (`LUA_HOOK*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookEvent {
+    /// A function was called.
+    Call,
+    /// A function is returning.
+    Return,
+    /// The interpreter is about to run a new line.
+    Line,
+    /// The instruction count ran out.
+    Count,
+    /// A function was called through a tail call.
+    TailCall,
+}
+
+impl HookEvent {
+    /// The name `debug.sethook` hooks receive.
+    pub fn name(self) -> &'static str {
+        match self {
+            HookEvent::Call => "call",
+            HookEvent::Return => "return",
+            HookEvent::Line => "line",
+            HookEvent::Count => "count",
+            HookEvent::TailCall => "tail call",
+        }
+    }
+}
+
+/// Hook mask bits (`LUA_MASK*`).
+pub mod hook_mask {
+    /// Call events.
+    pub const CALL: u8 = 1;
+    /// Return events.
+    pub const RET: u8 = 2;
+    /// Line events.
+    pub const LINE: u8 = 4;
+    /// Count events.
+    pub const COUNT: u8 = 8;
+}
+
+/// A debug hook (`lua_Hook`): the event, and the new line for line events (-1
+/// otherwise). The hooked function is at level 0 of [`Vm::get_info`]-style
+/// inspection while the hook runs.
+pub type HookFn = fn(&mut crate::Vm, HookEvent, i64) -> LuaResult<()>;
+
+/// Per-coroutine hook settings and state.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HookState {
+    pub func: Option<HookFn>,
+    /// See [`hook_mask`]; 0 when no hook is set.
+    pub mask: u8,
+    pub base_count: u32,
+    pub count: u32,
+    /// Cleared while a hook or finalizer runs (`allowhook`).
+    pub allow: bool,
+    /// Instruction of the last line event (`oldpc`).
+    pub oldpc: usize,
+    /// Values transferred by the call or return being hooked: first slot relative to
+    /// the function, and count (`transferinfo`).
+    pub transfer: (usize, usize),
+}
+
+impl HookState {
+    pub const fn new() -> Self {
+        HookState {
+            func: None,
+            mask: 0,
+            base_count: 0,
+            count: 0,
+            allow: true,
+            oldpc: 0,
+            transfer: (0, 0),
+        }
+    }
 }
 
 /// A call frame (`CallInfo`). It holds no GC handles: the function lives in stack
@@ -152,6 +235,11 @@ pub(crate) struct Frame {
     pub pcall_func: usize,
     /// Native with a pending `PCall`: results wanted from the callee (-1 for all).
     pub pcall_nresults: i32,
+    /// Number of `__call` metamethods the call went through, each adding an argument.
+    pub extra_args: u8,
+    /// Native with a pending `PCall` whose callee failed: the slot holding the error
+    /// object and its status, while to-be-closed variables are being closed.
+    pub closing: Option<(usize, Status)>,
 }
 
 impl Frame {
@@ -194,6 +282,13 @@ pub(crate) struct ExecState {
     pub status: CoStatus,
     /// After a yield: the number of yielded values on top of the stack.
     pub nyield: usize,
+    pub hook: HookState,
+    /// Native frames waiting on an `Action::Call` or `Action::PCall`. They count as
+    /// nested C calls, as `lua_callk` and `lua_pcallk` do in the reference.
+    pub nkcalls: u32,
+    /// Set by a stack overflow: the stack may use [`ERROR_STACK_EXTRA`] more slots
+    /// for error handling, until the error is caught.
+    pub overflow: bool,
 }
 
 impl ExecState {
@@ -207,6 +302,9 @@ impl ExecState {
             nny: 0,
             status: CoStatus::Fresh,
             nyield: 0,
+            hook: HookState::new(),
+            nkcalls: 0,
+            overflow: false,
         }
     }
 }
@@ -222,6 +320,9 @@ pub(crate) struct SavedState {
     pub nny: u32,
     pub status: CoStatus,
     pub nyield: usize,
+    pub hook: HookState,
+    pub nkcalls: u32,
+    pub overflow: bool,
 }
 
 /// A Lua virtual machine: one heap, its globals and its coroutines.
@@ -252,6 +353,12 @@ pub struct Vm {
     /// mode). Only incremental collection is implemented; the setting is remembered,
     /// not acted on.
     pub(crate) gc_generational: bool,
+    /// Set from outside (for example a signal handler) to stop the running script
+    /// with an "interrupted!" error. See [`Vm::interrupt_handle`].
+    pub(crate) interrupt: Arc<AtomicBool>,
+    /// Whether [`Vm::close_state`] has started: objects given a `__gc` from then on
+    /// are never finalized.
+    pub(crate) closing: bool,
 }
 
 impl fmt::Debug for Vm {
@@ -325,6 +432,8 @@ impl Vm {
             warn_fn: None,
             str_n,
             gc_generational: true,
+            interrupt: Arc::new(AtomicBool::new(false)),
+            closing: false,
         };
         // The main thread cannot yield.
         vm.st.nny = 1;
@@ -502,7 +611,12 @@ impl Vm {
     /// Makes sure `n` more values can be pushed (`lua_checkstack`).
     pub fn check_stack(&mut self, n: usize) -> LuaResult<()> {
         let need = self.st.top + n;
-        if need > MAX_STACK {
+        let limit = if self.st.overflow {
+            MAX_STACK + ERROR_STACK_EXTRA
+        } else {
+            MAX_STACK
+        };
+        if need > limit {
             return Err(self.rt_error("stack overflow"));
         }
         self.ensure_stack(need);
@@ -521,12 +635,28 @@ impl Vm {
     /// past the limit.
     pub(crate) fn grow_stack(&mut self, n: usize) -> LuaResult<()> {
         if n > MAX_STACK {
-            // Leave room for the error handling that follows.
-            self.ensure_stack(self.st.top + MIN_STACK);
-            return Err(self.rt_error("stack overflow"));
+            if self.st.overflow {
+                // Already handling an overflow: the extra space is all there is.
+                if n > MAX_STACK + ERROR_STACK_EXTRA {
+                    return Err(self.err_in_handler());
+                }
+            } else {
+                // Leave room for the error handling that follows.
+                self.st.overflow = true;
+                self.ensure_stack(self.st.top + MIN_STACK);
+                return Err(self.rt_error("stack overflow"));
+            }
         }
         self.ensure_stack(n);
         Ok(())
+    }
+
+    /// After an error is caught: the stack is back under its limit, so the extra
+    /// space for error handling is released (`luaD_shrinkstack`).
+    pub(crate) fn reset_overflow(&mut self) {
+        if self.st.top + MIN_STACK < MAX_STACK {
+            self.st.overflow = false;
+        }
     }
 
     /// Upvalue `i` (1-based) of the running native closure.
@@ -586,6 +716,24 @@ impl Vm {
     }
 
     fn roots_clear_dead(&mut self, live: usize) {
+        // Give back most of a stack that grew far beyond what is in use, for example
+        // after deep recursion (`luaD_shrinkstack`), so steps stay cheap.
+        let len = self.st.stack.len();
+        if len > 4096 && len > 4 * live {
+            let keep = self
+                .st
+                .frames
+                .iter()
+                .map(|f| f.top)
+                .max()
+                .unwrap_or(0)
+                .max(live)
+                + MIN_STACK;
+            if keep * 2 < len {
+                self.st.stack.truncate(keep);
+                self.st.stack.shrink_to(keep * 2);
+            }
+        }
         let end = self.st.stack.len();
         for v in &mut self.st.stack[live.min(end)..] {
             *v = Value::Nil;
@@ -608,7 +756,13 @@ impl Vm {
             pinned: &self.pinned,
         };
         self.heap.step(&mut roots);
-        self.run_finalizers()
+        // Finalizers are called right above the live slots: the top of a running Lua
+        // frame is not kept up to date, and may be below its live registers.
+        let top = self.st.top;
+        self.st.top = live;
+        let r = self.run_finalizers();
+        self.st.top = top;
+        r
     }
 
     /// A full collection (`collectgarbage("collect")`), then pending finalizers.
@@ -637,7 +791,14 @@ impl Vm {
         if self.in_finalizers {
             return Ok(());
         }
-        self.in_finalizers = true;
+        self.drain_finalizers();
+        Ok(())
+    }
+
+    /// Runs the pending `__gc` metamethods, even from inside one (as `lua_close`
+    /// called from a finalizer does).
+    pub(crate) fn drain_finalizers(&mut self) {
+        let outer = std::mem::replace(&mut self.in_finalizers, true);
         while let Some(obj) = self.heap.take_finalizable() {
             let tm = self.heap.tm_of(obj, orbit_core::Tm::Gc);
             if !tm.is_function() {
@@ -647,7 +808,17 @@ impl Vm {
             self.ensure_stack(top + 2);
             self.push(tm);
             self.push(obj);
+            // No hooks inside finalizers; the running frame reports calling `__gc`.
+            let allow = std::mem::replace(&mut self.st.hook.allow, false);
+            let fi = self.st.frames.len().checked_sub(1);
+            if let Some(fi) = fi {
+                self.st.frames[fi].flags |= flag::FIN;
+            }
             let r = self.call_raw(top, Some(0), true);
+            if let Some(fi) = fi {
+                self.st.frames[fi].flags &= !flag::FIN;
+            }
+            self.st.hook.allow = allow;
             self.st.top = top;
             if let Err(e) = r {
                 let msg = match e.value {
@@ -660,8 +831,14 @@ impl Vm {
                 self.warn(&w, false);
             }
         }
-        self.in_finalizers = false;
-        Ok(())
+        self.in_finalizers = outer;
+    }
+
+    /// A flag another thread or a signal handler can set to interrupt the running
+    /// script: the VM clears it and raises the error "interrupted!" at the next
+    /// function call or backward jump. Native functions are not interrupted.
+    pub fn interrupt_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.interrupt)
     }
 
     // ---- warnings ------------------------------------------------------------

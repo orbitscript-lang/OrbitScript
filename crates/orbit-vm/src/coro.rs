@@ -8,7 +8,7 @@
 
 use crate::error::{Error, LuaResult, Status};
 use crate::exec::{Exit, Flow};
-use crate::state::{CoStatus, ExecState, MAX_C_CALLS, SavedState, Vm};
+use crate::state::{CoStatus, ExecState, HookState, MAX_C_CALLS, SavedState, Vm};
 use orbit_core::Value;
 use orbit_core::object::Thread;
 use orbit_core::value::ThreadRef;
@@ -67,6 +67,16 @@ impl Vm {
             nny: 0,
             status: CoStatus::Fresh,
             nyield: 0,
+            nkcalls: 0,
+            overflow: false,
+            // New coroutines inherit the creator's hook (`lua_newthread`).
+            hook: HookState {
+                allow: true,
+                oldpc: 0,
+                transfer: (0, 0),
+                count: self.st.hook.base_count,
+                ..self.st.hook
+            },
         };
         self.heap.alloc(Thread {
             stack: vec![f],
@@ -127,6 +137,9 @@ impl Vm {
             nny: st.nny,
             status: st.status,
             nyield: st.nyield,
+            hook: st.hook,
+            nkcalls: st.nkcalls,
+            overflow: st.overflow,
         };
         let mut stack = st.stack;
         // Slots above the top are dead; dropping them keeps suspended coroutines small.
@@ -159,6 +172,9 @@ impl Vm {
             nny: saved.nny,
             status: saved.status,
             nyield: saved.nyield,
+            hook: saved.hook,
+            nkcalls: saved.nkcalls,
+            overflow: saved.overflow,
         };
         self.cur = co;
         // Saving dropped the dead slots above the top; frames still expect their space.
@@ -185,6 +201,19 @@ impl Vm {
         self.save_current();
         let back = self.resumers.pop().expect("a coroutine to return to");
         self.load_thread(back);
+    }
+
+    /// Runs `f` with `co` as the running coroutine's state, for inspecting or changing
+    /// another coroutine (the `L1` of the debug library). `co` may be the running one.
+    /// `f` must not run Lua code.
+    pub(crate) fn with_thread<R>(&mut self, co: ThreadRef, f: impl FnOnce(&mut Vm) -> R) -> R {
+        if co == self.cur {
+            return f(self);
+        }
+        self.enter(co);
+        let r = f(self);
+        self.leave();
+        r
     }
 
     /// Resumes coroutine `co` with the top `nargs` values of the running coroutine as
@@ -276,6 +305,9 @@ impl Vm {
         } else {
             self.st.frames[fi].flags &= !crate::state::flag::YIELDED;
             let top = self.st.top;
+            if self.st.hook.mask != 0 {
+                self.ret_hook(fi, top - n, n)?;
+            }
             self.poscall(fi, top - n, n);
             Ok(Flow::Returned)
         }
@@ -294,6 +326,7 @@ impl Vm {
             None
         };
         self.st.frames.clear();
+        self.st.nkcalls = 0;
         self.st.nny = 1;
         let err = self.close_protected(0, err);
         self.st.nny = 0;
@@ -311,6 +344,7 @@ impl Vm {
     /// unless a closing method failed.
     pub fn close_running(&mut self) -> Error {
         self.st.frames.clear();
+        self.st.nkcalls = 0;
         let err = self.close_protected(0, None);
         self.close_upvals(0);
         self.st.tbc.clear();
@@ -324,14 +358,24 @@ impl Vm {
     /// Shuts the VM down the way `lua_close` does: closes the main coroutine's pending
     /// to-be-closed variables, then runs every pending `__gc` metamethod, reachable
     /// object or not. The VM stays usable, but objects may have been finalized.
+    ///
+    /// Called again while closing (from a finalizer, say by `os.exit(0, true)`), it
+    /// only runs the finalizers still pending: objects given a `__gc` after closing
+    /// started are never finalized.
     pub fn close_state(&mut self) {
+        if self.closing {
+            self.drain_finalizers();
+            return;
+        }
+        self.closing = true;
         while !self.resumers.is_empty() {
             self.leave();
         }
         self.st.frames.clear();
+        self.st.nkcalls = 0;
         let _ = self.close_protected(0, None);
         self.st.top = 0;
         self.heap.gc_mut().finalize_all();
-        let _ = self.run_finalizers();
+        self.drain_finalizers();
     }
 }

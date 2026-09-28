@@ -11,10 +11,13 @@ mod api;
 mod aux;
 pub mod baselib;
 mod coro;
+pub mod dblib;
 mod debug;
+mod dump;
 mod error;
 mod exec;
 mod func;
+mod hook;
 mod load;
 mod meta;
 pub mod number;
@@ -22,8 +25,10 @@ mod state;
 
 pub use aux::{LOADED_TABLE, value_addr};
 pub use coro::{CoroutineStatus, Resumed};
+pub use dblib::DebugInfo;
 pub use error::{Error, LuaResult, Status};
 pub use orbit_lua_syntax::skip_file_prefix;
 pub use state::{
-    Action, Continuation, KStatus, MAX_C_CALLS, MAX_STACK, MIN_STACK, NativeFn, Vm, WarnFn,
+    Action, Continuation, HookEvent, HookFn, KStatus, MAX_C_CALLS, MAX_STACK, MIN_STACK, NativeFn,
+    Vm, WarnFn, hook_mask,
 };
