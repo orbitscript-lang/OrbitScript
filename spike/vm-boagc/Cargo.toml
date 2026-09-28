@@ -1,0 +1,13 @@
+[package]
+name = "spike-vm-boagc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+spike-common.workspace = true
+boa_gc.workspace = true
+
+[lints]
+workspace = true

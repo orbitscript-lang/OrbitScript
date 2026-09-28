@@ -36,11 +36,16 @@ Full numbers, method and caveats: [`spike/README.md`](../../spike/README.md). Su
 |---|---|---|---|---|---|---|
 | Own arena (+ superinstructions) | 1.77x | 1.50x | 0.78x | 0.80x | 87 (Lua 73) | 93 (Lua 105) |
 | gc-arena (+ superinstructions) | 1.49x | 1.33x | 0.78x | 1.25x | 150 | 147 |
+| boa_gc (+ superinstructions, round two) | 1.97x | 1.79x | 0.74x | 1.19x | 168 | 170 |
+
+The boa_gc row comes from a second, noisier run; in that run the arena was 1.62x / 1.68x / 0.58x / 0.78x and gc-arena 1.49x / 1.73x / 0.68x / 1.46x.
 
 - Both can express ephemerons and `__gc` resurrection (tests pass). On gc-arena this only holds if every cycle is driven by hand through the fully-marked `finalize` hook, with ephemeron values held as `GcWeak` and resurrected each cycle.
-- gc-arena interprets about 20% faster (direct pointers). The arena is about 40% faster on allocation churn and uses half the memory per table or closure (no per-object header or `malloc`).
+- gc-arena interprets 10 to 20% faster (direct pointers). The arena is about 40% faster on allocation churn and uses half the memory per table or closure (no per-object header or `malloc`).
 - gc-arena paces by object count, not bytes; has no generational mode; can't allocate runtime-sized objects (inline strings) without `unsafe`; and makes collection possible only between `mutate` calls, so all Rust code that calls back into Lua must be resumable.
 - gc-arena 0.7.0 needs Rust 1.95 (MSRV bump from 1.94).
-- Neither option gets near PUC's RAM on large string-keyed tables yet. That's table and string layout (stream B), not the GC.
+- boa_gc (round two) has the simplest embedding story: roots are reference-counted, so Rust code can hold `Gc` values anywhere with no lifetime or rooting API. But resurrecting an object from its finalizer, which Lua's `__gc` requires, corrupts its children's reference counts and leads to a use-after-free from safe code (reproduced in `spike/vm-boagc/examples/resurrection_uaf.rs`). We can't fix that without `unsafe`. It is also stop-the-world only, paces by boxed size only, shares one heap per thread, and is the slowest and largest of the three.
+- crossbeam-epoch and sdd are epoch-based reclamation for concurrent data structures, not tracing collectors. They can't collect cycles, so they weren't built.
+- None of the options gets near PUC's RAM on large string-keyed tables yet. That's table and string layout (stream B), not the GC.
 
 **Recommendation (pending Tym's decision):** the own safe typed arena, with generation-checked handles in debug builds and flatter storage to cut the handle cost. This reverses the plan's front-runner, so the ADR stays Proposed until Tym decides.

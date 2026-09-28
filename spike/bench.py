@@ -19,6 +19,8 @@ CONFIGS = [
     ("arena, closure", ("arena", "closure")),
     ("gc-arena, match", ("gcarena", "match")),
     ("gc-arena, super", ("gcarena", "super")),
+    ("boa_gc, match", ("boagc", "match")),
+    ("boa_gc, super", ("boagc", "super")),
 ]
 
 def run(cfg, bench, n, reps=REPS):

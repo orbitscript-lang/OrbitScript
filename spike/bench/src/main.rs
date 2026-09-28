@@ -1,4 +1,4 @@
-//! S0 benchmark driver: `spike <arena|gcarena> <match|super|closure> <bench> <n>`.
+//! S0 benchmark driver: `spike <arena|gcarena|boagc> <match|super|closure> <bench> <n>`.
 //! Prints the result, the in-process run time and the heap's GC cycle count.
 
 use std::time::Instant;
@@ -6,7 +6,7 @@ use std::time::Instant;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 5 {
-        eprintln!("usage: spike <arena|gcarena> <match|super|closure> <bench> <n>");
+        eprintln!("usage: spike <arena|gcarena|boagc> <match|super|closure> <bench> <n>");
         std::process::exit(2);
     }
     let (vm, disp, bench) = (&args[1], &args[2], &args[3]);
@@ -36,6 +36,14 @@ fn main() {
                 _ => panic!("gcarena supports match|super"),
             };
             spike_vm_gcarena::run(&proto, super_).expect("run")
+        }
+        "boagc" => {
+            let super_ = match disp.as_str() {
+                "match" => false,
+                "super" => true,
+                _ => panic!("boagc supports match|super"),
+            };
+            spike_vm_boagc::run(&proto, super_).expect("run")
         }
         _ => panic!("vm"),
     };

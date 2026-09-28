@@ -6,8 +6,10 @@ Policy (ADR-7): `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime de
 |---|---|---|---|---|---|
 | `nix` (0.31, `resource` feature only; pulls in `libc`, `bitflags`, `cfg-if`) | `orbit-testkit` (Unix only) | dev tool | Exact peak RSS of benchmark runs via `getrusage(RUSAGE_CHILDREN)`, through a safe wrapper, since the workspace forbids our own `unsafe`. Sampling `/proc` missed short-lived peaks. | None: `orbit-testkit` is a test tool and never linked into `orbit` | 2026-09-27 |
 | gc-arena 0.7.0 | `spike/vm-gcarena` only (S0, own workspace) | spike | Option A of ADR-2, benchmarked against our own arena | None measurable: the stripped spike binary is 430 KiB with only the gc-arena VM vs 442 KiB with only the arena VM. Build-time: gc-arena-derive, syn, quote, proc-macro2, synstructure, unicode-ident | 2026-09-27 |
+| boa_gc 0.22.0 | `spike/vm-boagc` only (S0, own workspace) | spike | Option C of ADR-2, added in round two at Tym's request | None measurable: a stripped binary with only the boa_gc VM is about 430 KiB. Runtime: hashbrown, foldhash, equivalent, allocator-api2. Build-time: boa_macros, cfg-if, cow-utils, syn, quote, proc-macro2, synstructure, unicode-ident | 2026-09-28 |
 
 Candidates under evaluation:
 - `gc-arena`: GC for `orbit-core`, decided by ADR-2. S0 recommends against it (see `spike/README.md`); if chosen it would be the one exception to the no-dependency rule for `orbit-core` and would raise the MSRV to 1.95.
+- `boa_gc`: evaluated in S0 and not recommended: resurrection (needed for `__gc`) corrupts reference counts, and it is slower and larger than the arena (see `spike/README.md`, findings 12 to 16).
 - `cranelift-*`: JIT backend, decided by the JIT study (stream G).
 - `clap` or `lexopt`: argument parsing for `orbit-cli`.

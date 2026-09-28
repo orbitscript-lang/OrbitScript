@@ -2,7 +2,7 @@
 # This is its own workspace so the spike's dependencies never reach the product crates.
 [workspace]
 resolver = "3"
-members = ["common", "vm-arena", "vm-gcarena", "bench", "embed"]
+members = ["common", "vm-arena", "vm-gcarena", "vm-boagc", "bench", "embed"]
 
 [workspace.package]
 version = "0.0.0"
@@ -18,7 +18,9 @@ unsafe_code = "forbid"
 spike-common = { path = "common" }
 spike-vm-arena = { path = "vm-arena" }
 spike-vm-gcarena = { path = "vm-gcarena" }
+spike-vm-boagc = { path = "vm-boagc" }
 gc-arena = { version = "=0.7.0", default-features = false, features = ["std"] }
+boa_gc = { version = "=0.22.0", default-features = false }
 
 [profile.release]
 lto = true
