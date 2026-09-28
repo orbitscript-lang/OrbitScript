@@ -1973,10 +1973,13 @@ impl<'a> Compiler<'a> {
     fn env_var(&mut self, env: EnvRef) -> ExpDesc {
         match env {
             EnvRef::Local(id) => {
-                if let LocalKind::CompileTimeConst(_) = self.local_info(id).kind {
-                    ExpDesc::new(Kind::Const(id))
-                } else {
-                    ExpDesc::new(Kind::Local(self.local_reg[id.0 as usize]))
+                match self.local_info(id).kind {
+                    LocalKind::CompileTimeConst(_) => ExpDesc::new(Kind::Const(id)),
+                    // `_ENV` declared as the named vararg parameter.
+                    LocalKind::VarargTable => {
+                        ExpDesc::new(Kind::VargVar(self.local_reg[id.0 as usize]))
+                    }
+                    _ => ExpDesc::new(Kind::Local(self.local_reg[id.0 as usize])),
                 }
             }
             EnvRef::Upvalue(i) => ExpDesc::new(Kind::Upval(i as i32)),
@@ -2062,6 +2065,8 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Binary { op, lhs, rhs, line } => {
                 let mut v = self.expr(lhs);
+                // The reference discharges the left operand after reading the operator.
+                self.set_line(*line);
                 self.infix(*op, &mut v);
                 let mut v2 = self.expr(rhs);
                 self.posfix(*op, &mut v, &mut v2, *line);
