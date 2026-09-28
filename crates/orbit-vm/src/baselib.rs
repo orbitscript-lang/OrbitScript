@@ -449,8 +449,8 @@ fn load_result(vm: &mut Vm, r: LuaResult<Value>, env: Option<Value>) -> LuaResul
     }
 }
 
-/// Checks the `mode` argument of `load` against the chunk's kind.
-fn check_mode(vm: &mut Vm, arg: usize, src: &[u8]) -> LuaResult<Option<Vec<u8>>> {
+/// The `mode` argument of `load`/`loadfile` (`getMode`): raises for an invalid mode.
+fn get_mode(vm: &mut Vm, arg: usize) -> LuaResult<Option<Vec<u8>>> {
     let Some(mode) = vm.opt_string(arg)? else {
         return Ok(None);
     };
@@ -458,27 +458,26 @@ fn check_mode(vm: &mut Vm, arg: usize, src: &[u8]) -> LuaResult<Option<Vec<u8>>>
     if mode.contains(&b'B') {
         return Err(vm.arg_error(arg, "invalid mode"));
     }
-    let binary = src.first() == Some(&0x1b);
-    let (want, kind) = if binary {
-        (b'b', "binary")
-    } else {
-        (b't', "text")
-    };
-    if !mode.contains(&want) {
-        let m = String::from_utf8_lossy(&mode).into_owned();
-        return Ok(Some(
-            format!("attempt to load a {kind} chunk (mode is '{m}')").into_bytes(),
-        ));
-    }
-    Ok(None)
+    Ok(Some(mode))
 }
 
-fn load_chunk(vm: &mut Vm, src: &[u8], chunkname: &[u8], mode_arg: usize) -> LuaResult<Value> {
-    if let Some(msg) = check_mode(vm, mode_arg, src)? {
-        return Err(crate::Error {
-            value: vm.heap.str_value(msg),
-            status: Status::Syntax,
-        });
+/// Loads a chunk. Errors are load failures (`fail, msg` for `load`).
+fn load_chunk(vm: &mut Vm, src: &[u8], chunkname: &[u8], mode: Option<&[u8]>) -> LuaResult<Value> {
+    if let Some(mode) = mode {
+        let binary = src.first() == Some(&0x1b);
+        let (want, kind) = if binary {
+            (b'b', "binary")
+        } else {
+            (b't', "text")
+        };
+        if !mode.contains(&want) {
+            let m = String::from_utf8_lossy(mode).into_owned();
+            let msg = format!("attempt to load a {kind} chunk (mode is '{m}')");
+            return Err(crate::Error {
+                value: vm.heap.str_value(msg),
+                status: Status::Syntax,
+            });
+        }
     }
     if src.first() == Some(&0x1b) {
         let mut msg = orbit_lua_syntax::chunk_id(chunkname);
@@ -492,6 +491,7 @@ fn load_chunk(vm: &mut Vm, src: &[u8], chunkname: &[u8], mode_arg: usize) -> Lua
 }
 
 fn load(vm: &mut Vm) -> LuaResult<Action> {
+    let mode = get_mode(vm, 3)?;
     let env = (vm.top() >= 4).then(|| vm.arg(4));
     let chunk = vm.arg(1);
     let (src, chunkname) = match chunk {
@@ -551,7 +551,7 @@ fn load(vm: &mut Vm) -> LuaResult<Action> {
             (src, name)
         }
     };
-    let r = load_chunk(vm, &src, &chunkname, 3);
+    let r = load_chunk(vm, &src, &chunkname, mode.as_deref());
     load_result(vm, r, env)
 }
 
@@ -594,18 +594,19 @@ pub fn io_error_text(e: &std::io::Error) -> String {
     }
 }
 
-fn load_file(vm: &mut Vm, fname: Option<&[u8]>, mode_arg: usize) -> LuaResult<Value> {
+fn load_file(vm: &mut Vm, fname: Option<&[u8]>, mode: Option<&[u8]>) -> LuaResult<Value> {
     let (src, chunkname) = read_source(vm, fname)?;
     let body = orbit_lua_syntax::skip_file_prefix(&src).to_vec();
-    load_chunk(vm, &body, &chunkname, mode_arg)
+    load_chunk(vm, &body, &chunkname, mode)
 }
 
 fn loadfile(vm: &mut Vm) -> LuaResult<Action> {
     let fname = vm
         .opt_string(1)?
         .map(|s| vm.heap.string(s).as_bytes().to_vec());
+    let mode = get_mode(vm, 2)?;
     let env = (vm.top() >= 3).then(|| vm.arg(3));
-    let r = load_file(vm, fname.as_deref(), 2);
+    let r = load_file(vm, fname.as_deref(), mode.as_deref());
     load_result(vm, r, env)
 }
 
@@ -618,7 +619,7 @@ fn dofile(vm: &mut Vm) -> LuaResult<Action> {
         .opt_string(1)?
         .map(|s| vm.heap.string(s).as_bytes().to_vec());
     vm.set_top(1);
-    let f = load_file(vm, fname.as_deref(), 0)?;
+    let f = load_file(vm, fname.as_deref(), Some(b"bt"))?;
     vm.push(f);
     Ok(Action::Call {
         nargs: 0,
@@ -830,7 +831,7 @@ fn co_close(vm: &mut Vm) -> LuaResult<Action> {
             if co == vm.main_thread() {
                 Err(vm.error("cannot close main thread"))
             } else {
-                Err(vm.error("cannot close a running coroutine"))
+                Err(vm.close_running())
             }
         }
     }

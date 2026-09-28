@@ -144,7 +144,11 @@ impl Vm {
             let depth = self.st.frames.len();
             if let Err(e) = self.call_close_method(func) {
                 self.st.frames.truncate(depth);
-                err = Some(e);
+                // A closing method that closed its own (already closing) coroutine
+                // changes nothing here.
+                if e.status != crate::Status::Exit {
+                    err = Some(e);
+                }
             }
         }
         err

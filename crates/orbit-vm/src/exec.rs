@@ -240,7 +240,10 @@ impl Vm {
         loop {
             match result {
                 Ok(exit) => return Ok(exit),
-                Err(e) => match self.find_pcall(stop) {
+                Err(e) => match (e.status != Status::Exit)
+                    .then(|| self.find_pcall(stop))
+                    .flatten()
+                {
                     Some(fi) => {
                         result = self.recover(fi, e).and_then(|flow| self.run(stop, flow));
                     }
@@ -395,6 +398,9 @@ impl Vm {
         match self.call_raw(func, nresults, true) {
             Ok(()) => Ok(()),
             Err(mut e) => {
+                if e.status == Status::Exit {
+                    return Err(e);
+                }
                 if let Some(h) = h
                     && e.status == Status::Runtime
                 {

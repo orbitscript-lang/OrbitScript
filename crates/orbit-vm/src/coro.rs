@@ -6,7 +6,7 @@
 //! out. `resume` runs the target on the Rust stack, as the reference does, so nesting
 //! is bounded by [`crate::MAX_C_CALLS`].
 
-use crate::error::{Error, LuaResult};
+use crate::error::{Error, LuaResult, Status};
 use crate::exec::{Exit, Flow};
 use crate::state::{CoStatus, ExecState, MAX_C_CALLS, SavedState, Vm};
 use orbit_core::Value;
@@ -245,6 +245,11 @@ impl Vm {
                 self.st.top = from;
                 (Ok(Resumed::Yielded(n)), vals)
             }
+            Err(e) if e.status == Status::Exit => {
+                self.st.status = CoStatus::Dead;
+                self.st.top = 0;
+                (Ok(Resumed::Returned(0)), Vec::new())
+            }
             Err(e) => {
                 self.st.status = CoStatus::Failed;
                 // Keep the error object on the dead coroutine's stack for `close`.
@@ -298,6 +303,22 @@ impl Vm {
         self.st.status = CoStatus::Dead;
         self.leave();
         err
+    }
+
+    /// Closes the running coroutine from inside itself (`coroutine.close()` on the
+    /// running coroutine): runs its pending to-be-closed variables and returns the error
+    /// to raise, which unwinds to the `resume` that runs it. That is [`Status::Exit`]
+    /// unless a closing method failed.
+    pub fn close_running(&mut self) -> Error {
+        self.st.frames.clear();
+        let err = self.close_protected(0, None);
+        self.close_upvals(0);
+        self.st.tbc.clear();
+        self.st.top = 0;
+        err.unwrap_or(Error {
+            value: Value::Nil,
+            status: Status::Exit,
+        })
     }
 
     /// Shuts the VM down the way `lua_close` does: closes the main coroutine's pending

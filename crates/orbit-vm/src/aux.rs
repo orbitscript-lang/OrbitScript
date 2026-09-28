@@ -21,6 +21,7 @@ pub fn value_addr(heap: &orbit_core::Heap, v: Value) -> u64 {
         Value::LightNative(id) => (5, id.0),
         Value::UserData(u) => (6, u.index()),
         Value::Thread(t) => (7, t.index()),
+        Value::LightUserData(p) => return p,
         _ => return 0,
     };
     let _ = heap;
@@ -57,6 +58,8 @@ impl Vm {
     pub fn type_arg_error(&mut self, arg: usize, tname: &str) -> Error {
         let got = if arg > self.top() {
             "no value".to_string()
+        } else if let Value::LightUserData(_) = self.arg(arg) {
+            "light userdata".to_string()
         } else {
             self.type_name_of(self.arg(arg))
         };

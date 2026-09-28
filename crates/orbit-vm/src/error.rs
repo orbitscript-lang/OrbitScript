@@ -13,6 +13,10 @@ pub enum Status {
     Memory,
     /// An error while running a message handler (`LUA_ERRERR`).
     Handler,
+    /// Not an error: the running coroutine closed itself with `coroutine.close`, and
+    /// its frames unwind to the resume that started it. Protected calls do not catch
+    /// it (`luaD_throwbaselevel` with `LUA_OK`).
+    Exit,
 }
 
 /// A Lua error: the error object and how it arose.
