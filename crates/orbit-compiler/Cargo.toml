@@ -1,0 +1,16 @@
+[package]
+name = "orbit-compiler"
+description = "Compiles OrbitScript HIR to register bytecode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-core = { path = "../orbit-core" }
+orbit-hir = { path = "../orbit-hir" }
+
+[lints]
+workspace = true

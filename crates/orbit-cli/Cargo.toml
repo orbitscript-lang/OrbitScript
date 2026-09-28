@@ -1,0 +1,19 @@
+[package]
+name = "orbit-cli"
+description = "Command-line interpreter for Lua 5.5 and OrbitScript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "orbit"
+path = "src/main.rs"
+
+[dependencies]
+orbit = { path = "../orbit" }
+
+[lints]
+workspace = true

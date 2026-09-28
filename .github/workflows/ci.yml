@@ -1,0 +1,85 @@
+name: CI
+
+# Automatic runs are paused while the repo is private, to save Actions
+# minutes. Run it by hand from the Actions tab if needed. To re-enable,
+# restore:
+#   push:
+#     branches: [main]
+#   pull_request:
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo test --workspace --locked
+
+  msrv:
+    name: build on MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the MSRV from Cargo.toml
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+      - run: cargo +"$MSRV" build --workspace --locked
+
+  aarch64-linux:
+    name: test (aarch64 Linux via QEMU)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross toolchain and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+      - run: rustup target add aarch64-unknown-linux-gnu
+      - run: cargo test --workspace --locked --target aarch64-unknown-linux-gnu
+
+  size:
+    name: binary size
+    runs-on: ubuntu-latest
+    env:
+      # Soft goal from the plan: runtime plus stdlib well under 10 MiB.
+      SIZE_BUDGET_BYTES: 10485760
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo build --release --locked -p orbit-cli
+      - name: Report and check size
+        run: |
+          size=$(stat -c %s target/release/orbit)
+          echo "### Release \`orbit\` binary: $size bytes ($((size / 1024)) KiB)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt "$SIZE_BUDGET_BYTES" ]; then
+            echo "::error::orbit is $size bytes, over the $SIZE_BUDGET_BYTES byte budget"
+            exit 1
+          fi

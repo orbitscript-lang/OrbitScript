@@ -1,0 +1,26 @@
+# OrbitScript: working agreement for contributors and agents
+
+## Non-negotiables
+- **Stable Rust only.** No nightly or beta features, no `#![feature]`, no `-Z` flags.
+- **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The only planned exceptions are the future `orbit-jit` crate and, if ADR-2 picks gc-arena, audited `unsafe impl Collect` blocks. Anything else needs Tym's sign-off in an ADR.
+- **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies without an ADR.
+- **Lua 5.5 compatibility is judged by behavior.** When unsure, compare against the reference `lua5.5` interpreter and the official test suite, not memory of older Lua versions.
+
+## Layout
+| Crate | Purpose | Stream |
+|---|---|---|
+| `orbit-lua-syntax` | Lua 5.5 lexer, parser, AST | A |
+| `orbit-core` | Value, GC heap, strings, tables | B |
+| `orbit-hir`, `orbit-compiler`, `orbit-vm` | HIR, bytecode compiler, interpreter | C |
+| `orbit-stdlib` | Lua standard library | D |
+| `orbit` | Rust embedding API | shared |
+| `orbit-cli` | `orbit` binary | shared |
+
+Design records live in `docs/adr/`. A **Proposed** ADR can be edited freely by its stream. An **Accepted** ADR changes only with Tym's approval, because other streams build on it.
+
+## Before pushing
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
