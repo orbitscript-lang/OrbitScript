@@ -284,6 +284,13 @@ fn collectgarbage(vm: &mut Vm) -> LuaResult<Action> {
             let n = vm.opt_integer(2, 0)?;
             if vm.in_finalizers {
                 Value::Nil
+            } else if vm.gc_generational && n == 0 {
+                // In generational mode a basic step is a minor collection, which
+                // finishes a (young) cycle. With only incremental collection, a full
+                // cycle is the closest match: it clears weak entries a minor
+                // collection would (gengc.lua relies on this).
+                vm.full_gc()?;
+                Value::Bool(true)
             } else {
                 let cycles = vm.heap.gc().cycles();
                 let live = vm.st.top;

@@ -14,6 +14,7 @@ db.lua
 errors.lua
 events.lua
 files.lua
+gc.lua
 gengc.lua
 goto.lua
 literals.lua
