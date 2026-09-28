@@ -2,25 +2,25 @@
 //! interpreter: metatables, the registry, user values and `traceback`.
 //!
 //! `getinfo`, `getlocal`, `setlocal`, `getupvalue`, `setupvalue`, `upvalueid`,
-//! `upvaluejoin`, `sethook`, `gethook` and `setcstacklimit` need access to frames
-//! and closures inside `orbit-vm`, and are not provided yet.
+//! `upvaluejoin`, `sethook` and `gethook` need access to frames and closures, so
+//! they come from [`orbit_vm::dblib`].
 
 use orbit_core::Value;
 use orbit_vm::{Action, LuaResult, Vm};
 
 /// Opens the debug library.
 pub fn open_debug(vm: &mut Vm) {
-    vm.new_lib(
-        "debug",
-        &[
-            ("getmetatable", db_getmetatable),
-            ("getregistry", db_getregistry),
-            ("getuservalue", db_getuservalue),
-            ("setmetatable", db_setmetatable),
-            ("setuservalue", db_setuservalue),
-            ("traceback", db_traceback),
-        ],
-    );
+    let mut funcs: Vec<(&'static str, orbit_vm::NativeFn)> = vec![
+        ("getmetatable", db_getmetatable),
+        ("getregistry", db_getregistry),
+        ("getuservalue", db_getuservalue),
+        ("setmetatable", db_setmetatable),
+        ("setuservalue", db_setuservalue),
+        ("traceback", db_traceback),
+    ];
+    // Introspection and hooks live in the VM crate.
+    funcs.extend_from_slice(orbit_vm::dblib::FUNCTIONS);
+    vm.new_lib("debug", &funcs);
 }
 
 fn db_getregistry(vm: &mut Vm) -> LuaResult<Action> {
@@ -95,12 +95,12 @@ fn db_setuservalue(vm: &mut Vm) -> LuaResult<Action> {
 }
 
 fn db_traceback(vm: &mut Vm) -> LuaResult<Action> {
-    // A thread argument selects another coroutine's stack. Only the running one can
-    // be walked for now, so another thread's traceback lists no frames.
-    let (arg, other) = match vm.arg(1) {
-        Value::Thread(t) => (1, t != vm.current_thread()),
-        _ => (0, false),
+    // A thread argument selects another coroutine's stack.
+    let (arg, co) = match vm.arg(1) {
+        Value::Thread(t) => (1, t),
+        _ => (0, vm.current_thread()),
     };
+    let other = co != vm.current_thread();
     let msg = vm.arg(arg + 1);
     let text = match msg {
         Value::Str(s) => Some(vm.heap.string(s).as_bytes().to_vec()),
@@ -112,17 +112,7 @@ fn db_traceback(vm: &mut Vm) -> LuaResult<Action> {
         }
     };
     let level = vm.opt_integer(arg + 2, if other { 0 } else { 1 })?;
-    let tb = if other {
-        let mut out = Vec::new();
-        if let Some(t) = text {
-            out.extend_from_slice(&t);
-            out.push(b'\n');
-        }
-        out.extend_from_slice(b"stack traceback:");
-        out
-    } else {
-        vm.traceback(text.as_deref(), usize::try_from(level).unwrap_or(0))
-    };
+    let tb = vm.thread_traceback(co, text.as_deref(), usize::try_from(level).unwrap_or(0));
     let v = vm.heap.str_value(tb);
     vm.push(v);
     Ok(Action::Return(1))

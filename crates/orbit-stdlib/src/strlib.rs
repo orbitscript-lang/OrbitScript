@@ -206,11 +206,15 @@ fn str_char(vm: &mut Vm) -> LuaResult<Action> {
 }
 
 fn str_dump(vm: &mut Vm) -> LuaResult<Action> {
-    if !matches!(vm.arg(1), Value::LuaFn(_)) {
+    let f = vm.arg(1);
+    if !matches!(f, Value::LuaFn(_)) {
         return Err(vm.arg_error(1, "Lua function expected"));
     }
-    // Binary chunks are not implemented yet (they need a bytecode format).
-    Err(vm.error("unable to dump given function"))
+    let strip = vm.arg(2).is_truthy();
+    match vm.dump(f, strip) {
+        Some(b) => ret_str(vm, b),
+        None => Err(vm.error("unable to dump given function")),
+    }
 }
 
 // ---- metamethods -------------------------------------------------------------

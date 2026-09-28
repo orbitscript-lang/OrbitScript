@@ -41,10 +41,12 @@ pub fn open_package(vm: &mut Vm) {
             .expect("integer key");
     }
     set_field(vm, pkg, b"searchers", Value::Table(searchers));
-    let path = env_path("LUA_PATH", PATH_DEFAULT);
+    let reg = vm.registry();
+    let noenv = vm.heap.raw_get_name(reg, b"LUA_NOENV").is_truthy();
+    let path = env_path("LUA_PATH", PATH_DEFAULT, noenv);
     let path = vm.heap.str_value(path);
     set_field(vm, pkg, b"path", path);
-    let cpath = env_path("LUA_CPATH", CPATH_DEFAULT);
+    let cpath = env_path("LUA_CPATH", CPATH_DEFAULT, noenv);
     let cpath = vm.heap.str_value(cpath);
     set_field(vm, pkg, b"cpath", cpath);
     let config = vm.heap.str_value("/\n;\n?\n!\n-\n");
@@ -76,9 +78,14 @@ fn preload_table(vm: &mut Vm) -> TableRef {
 }
 
 /// The value of `LUA_PATH_5_5` or `LUA_PATH` (for `var` = `"LUA_PATH"`), with `;;`
-/// replaced by the default path, or the default.
-fn env_path(var: &str, dft: &str) -> Vec<u8> {
-    let val = std::env::var_os(format!("{var}_5_5")).or_else(|| std::env::var_os(var));
+/// replaced by the default path, or the default. With `noenv` (the registry field
+/// `LUA_NOENV`, set by `orbit -E`) the environment is ignored.
+fn env_path(var: &str, dft: &str, noenv: bool) -> Vec<u8> {
+    let val = if noenv {
+        None
+    } else {
+        std::env::var_os(format!("{var}_5_5")).or_else(|| std::env::var_os(var))
+    };
     let Some(val) = val else {
         return dft.as_bytes().to_vec();
     };

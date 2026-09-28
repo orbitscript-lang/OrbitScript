@@ -287,6 +287,9 @@ fn os_exit(vm: &mut Vm) -> LuaResult<Action> {
         Value::Bool(b) => i32::from(!b),
         _ => vm.opt_integer(1, 0)? as i32,
     };
+    if vm.arg(2).is_truthy() {
+        vm.close_state();
+    }
     use std::io::Write;
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
