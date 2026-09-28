@@ -1,8 +1,9 @@
 //! The phase exit check: every file of the official Lua 5.5 test suite parses.
 //!
-//! The suite lives in `tests/lua-5.5/testes` at the workspace root (added by the test
-//! harness). `LUA_TESTES` can point elsewhere. Without either, the test is skipped
-//! with a note.
+//! The suite lives in `tests/lua-5.5/suite` at the workspace root (added by the test
+//! harness). `LUA_SUITE` can point elsewhere. The test is skipped only while the
+//! workspace has no `tests/lua-5.5` at all; if that directory exists but the suite is
+//! not where this test looks, it fails, so a moved suite cannot turn it into a no-op.
 
 use std::path::PathBuf;
 
@@ -10,11 +11,18 @@ use orbit_lua_syntax::printer::{PrintOptions, print_chunk};
 use orbit_lua_syntax::{parse, skip_file_prefix};
 
 fn suite_files() -> Option<Vec<PathBuf>> {
-    let dir = match std::env::var_os("LUA_TESTES") {
+    let dir = match std::env::var_os("LUA_SUITE") {
         Some(d) => PathBuf::from(d),
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/lua-5.5/testes"),
+        None => {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/lua-5.5");
+            if !root.exists() {
+                return None;
+            }
+            root.join("suite")
+        }
     };
-    let entries = std::fs::read_dir(&dir).ok()?;
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read suite directory {}: {e}", dir.display()));
     let mut files: Vec<PathBuf> = entries
         .map(|e| e.expect("readable directory").path())
         .filter(|p| p.extension().is_some_and(|x| x == "lua"))
@@ -27,7 +35,7 @@ fn suite_files() -> Option<Vec<PathBuf>> {
 #[test]
 fn parses_every_suite_file() {
     let Some(files) = suite_files() else {
-        eprintln!("skipped: tests/lua-5.5/testes not found and LUA_TESTES not set");
+        eprintln!("skipped: tests/lua-5.5 not found and LUA_SUITE not set");
         return;
     };
     let mut failures = Vec::new();

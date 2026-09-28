@@ -1,9 +1,9 @@
 #!/bin/sh
 # Differential tests of orbit-lua-syntax against a reference lua5.5; see README.md.
-# Usage: run.sh LUA TESTES_DIR [SEEDS]
+# Usage: run.sh LUA SUITE_DIR [SEEDS]
 set -eu
 LUA=$1
-TESTES=$2
+SUITE=$2
 SEEDS=${3:-"1 2 3"}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
@@ -14,10 +14,10 @@ BIN=$ROOT/target/release/examples/difftest
 status=0
 
 echo "== round trip: printed ASTs compile to the same bytecode"
-"$BIN" print "$WORK/printed" "$TESTES"/*.lua
-names=$(cd "$TESTES" && ls *.lua | sed 's/\.lua$//')
+"$BIN" print "$WORK/printed" "$SUITE"/*.lua
+names=$(cd "$SUITE" && ls *.lua | sed 's/\.lua$//')
 # shellcheck disable=SC2086
-"$LUA" "$HERE/difftest.lua" compare "$TESTES" "$WORK/printed" $names || status=1
+"$LUA" "$HERE/difftest.lua" compare "$SUITE" "$WORK/printed" $names || status=1
 
 compare() { # name generator-args...
   name=$1; shift
@@ -33,7 +33,7 @@ compare() { # name generator-args...
 
 for seed in $SEEDS; do
   echo "== seed $seed"
-  compare mutations "$HERE/gen_mutations.py" "$WORK/corpus" "$seed" 20000 "$TESTES"
+  compare mutations "$HERE/gen_mutations.py" "$WORK/corpus" "$seed" 20000 "$SUITE"
   compare scopes "$HERE/gen_scopes.py" "$WORK/corpus" "$seed" 20000
   compare random "$HERE/gen_random.py" "$WORK/corpus" "$seed" 50000
   python3 "$HERE/gen_consts.py" "$WORK/corpus" "$seed" 20000

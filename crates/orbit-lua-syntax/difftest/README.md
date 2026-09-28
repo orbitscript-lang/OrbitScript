@@ -3,7 +3,7 @@
 These check `orbit-lua-syntax` against the reference interpreter. They need a `lua5.5` binary (`scripts/build-reference-lua.sh` builds one in `target/reference-lua/bin/lua5.5`) and `python3` for the corpus generators. They are not part of `cargo test`, which has no reference interpreter to call.
 
 ```sh
-crates/orbit-lua-syntax/difftest/run.sh target/reference-lua/bin/lua5.5 tests/lua-5.5/testes "1 2 3"
+crates/orbit-lua-syntax/difftest/run.sh target/reference-lua/bin/lua5.5 tests/lua-5.5/suite "1 2 3"
 ```
 
 | Check | What must agree |

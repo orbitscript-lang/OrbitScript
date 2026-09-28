@@ -1,6 +1,6 @@
 """Mutated pieces of the Lua test suite, to compare syntax errors with lua5.5.
 
-Usage: gen_mutations.py OUT SEED COUNT TESTES_DIR
+Usage: gen_mutations.py OUT SEED COUNT SUITE_DIR
 
 Writes COUNT chunks: runs of lines from the suite files with a few token-level edits
 (deletions, insertions from a vocabulary of tokens that trigger interesting errors,
