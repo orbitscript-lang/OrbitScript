@@ -350,31 +350,6 @@ pub(crate) fn fmt_hex_float(out: &mut Vec<u8>, spec: &Spec, v: f64) {
     );
 }
 
-/// Lua's conversion of a float to a string (`tostringbuffFloat`): `%.15g`, or `%.17g`
-/// when that does not read back as the same number, plus ".0" when the result looks like
-/// an integer. Infinities and NaNs print as glibc does ("inf", "-nan").
-pub fn float_to_str(v: f64, out: &mut Vec<u8>) {
-    let start = out.len();
-    let mut spec = Spec {
-        precision: Some(15),
-        conv: b'g',
-        ..Spec::default()
-    };
-    fmt_float(out, &spec, v);
-    let reads_back = std::str::from_utf8(&out[start..])
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        == Some(v);
-    if !reads_back {
-        out.truncate(start);
-        spec.precision = Some(17);
-        fmt_float(out, &spec, v);
-    }
-    if out[start..].iter().all(|c| b"-0123456789".contains(c)) {
-        out.extend_from_slice(b".0");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,10 +364,9 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
+    /// `tostring` of a float is the VM's; these pin it to the reference too.
     fn tostr(v: f64) -> String {
-        let mut out = Vec::new();
-        float_to_str(v, &mut out);
-        String::from_utf8(out).unwrap()
+        orbit_vm::number::fmt_float(v)
     }
 
     // Expected strings come from the reference lua5.5 on x86_64 Linux (glibc).

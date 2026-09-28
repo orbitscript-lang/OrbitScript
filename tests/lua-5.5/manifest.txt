@@ -17,7 +17,7 @@ calls.lua
 strings.lua
 literals.lua
 tpack.lua
-attrib.lua                            # without C loading, package.loadlib must report "absent"
+attrib.lua      needs-clibs=334-352   # without C loading, package.loadlib must report "absent"
 gengc.lua
 locals.lua
 constructs.lua

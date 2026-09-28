@@ -10,11 +10,11 @@ pub use orbit_core as core;
 pub use orbit_vm as vm;
 pub use orbit_vm::{Action, Error, LuaResult, Status, Vm};
 
-/// A VM with every library opened that is available so far (currently the basic and
-/// coroutine libraries).
+/// A VM with the standard libraries opened (`debug` only in part so far).
 pub fn new_vm() -> Vm {
     let mut vm = Vm::new();
     orbit_vm::baselib::open_base(&mut vm);
     orbit_vm::baselib::open_coroutine(&mut vm);
+    orbit_stdlib::open_libs(&mut vm);
     vm
 }

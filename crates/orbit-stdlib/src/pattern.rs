@@ -596,6 +596,16 @@ impl GMatch {
         }
     }
 
+    /// The iterator's position and the end of its last match, for storing it.
+    pub fn state(&self) -> (usize, Option<usize>) {
+        (self.src, self.last_match)
+    }
+
+    /// An iterator restored from [`GMatch::state`].
+    pub fn from_state(src: usize, last_match: Option<usize>) -> Self {
+        GMatch { src, last_match }
+    }
+
     /// The next match's captures, or `None` when the iteration is over.
     pub fn next(&mut self, s: &[u8], p: &[u8]) -> Result<Option<Captures>, LibError> {
         let mut ms = MatchState::new(s, p);

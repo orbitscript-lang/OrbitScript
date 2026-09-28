@@ -11,11 +11,12 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 
+use orbit_stdlib::LibError;
 use orbit_stdlib::format::{FormatArgs, Literal};
 use orbit_stdlib::pack::{PackArgs, Unpacked};
 use orbit_stdlib::pattern::{self, Capture, Captures, GMatch, GsubMatch, Replacement};
 use orbit_stdlib::random::{RandomArgs, RandomValue, Xoshiro256};
-use orbit_stdlib::{LibError, float_to_str};
+use orbit_vm::number::fmt_float;
 
 fn reference_lua() -> Option<PathBuf> {
     let path = match std::env::var_os("LUA55") {
@@ -421,11 +422,7 @@ impl FormatArgs for FArgs {
         Ok(match &self.0[arg - 2] {
             V::S(s) => Cow::Borrowed(s),
             V::I(i) => Cow::Owned(i.to_string().into_bytes()),
-            V::F(f) => {
-                let mut v = Vec::new();
-                float_to_str(*f, &mut v);
-                Cow::Owned(v)
-            }
+            V::F(f) => Cow::Owned(fmt_float(*f).into_bytes()),
             V::Nil => Cow::Borrowed(b"nil"),
             V::B(b) => Cow::Owned(b.to_string().into_bytes()),
         })
@@ -532,8 +529,7 @@ fn tostring_matches_reference() {
     for _ in 0..cases() * 3 {
         let x = g.float();
         let call = format!("tostring({})", lua(&V::F(x)));
-        let mut s = Vec::new();
-        float_to_str(x, &mut s);
+        let s = fmt_float(x).into_bytes();
         ours.push(ser(Ok(vec![V::S(s)])));
         let _ = writeln!(body, "P(pcall(function() return {call} end))");
         calls.push(call);

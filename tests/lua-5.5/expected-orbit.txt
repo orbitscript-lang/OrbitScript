@@ -1,7 +1,18 @@
 # Suite files orbit is expected to pass. Updated with:
 #   cargo testkit conformance --interp ... --expect tests/lua-5.5/expected-orbit.txt --update-expected
 api.lua
+attrib.lua
+big.lua
+bitwise.lua
 code.lua
-main.lua
+events.lua
+gengc.lua
+math.lua
 memerr.lua
+nextvar.lua
+pm.lua
+sort.lua
+strings.lua
+tpack.lua
+utf8.lua
 verybig.lua

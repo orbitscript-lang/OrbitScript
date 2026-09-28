@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 orbit-core = { path = "../orbit-core" }
+orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 orbit-vm = { path = "../orbit-vm" }
 
 [lints]

@@ -97,6 +97,7 @@ name = "orbit-stdlib"
 version = "0.0.0"
 dependencies = [
  "orbit-core",
+ "orbit-lua-syntax",
  "orbit-vm",
 ]
 

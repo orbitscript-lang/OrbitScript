@@ -311,11 +311,7 @@ mod tests {
         fn tostring(&mut self, arg: usize) -> Result<Cow<'_, [u8]>, LibError> {
             Ok(match &self.0[arg - 2] {
                 V::I(i) => Cow::Owned(i.to_string().into_bytes()),
-                V::F(f) => {
-                    let mut v = Vec::new();
-                    crate::float_to_str(*f, &mut v);
-                    Cow::Owned(v)
-                }
+                V::F(f) => Cow::Owned(orbit_vm::number::fmt_float(*f).into_bytes()),
                 V::S(s) => Cow::Borrowed(s),
                 V::Nil => Cow::Borrowed(b"nil"),
                 V::B(b) => Cow::Owned(b.to_string().into_bytes()),
