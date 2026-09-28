@@ -1,15 +1,15 @@
 # Official Lua 5.5 test suite
 
-`testes/` is the Lua team's test suite, copied unmodified from the Lua repository's GitHub mirror, [lua/lua](https://github.com/lua/lua), at the tag in `VERSION` (v5.5.1). The mirror is used because `www.lua.org` is blocked in some of our sandboxes; the files are the same ones the release tarball ships. They are MIT licensed, see `LICENSE-lua.txt`.
+`suite/` is the Lua team's test suite, copied unmodified from the Lua repository's GitHub mirror, [lua/lua](https://github.com/lua/lua), at the tag in `VERSION` (v5.5.1). The mirror is used because `www.lua.org` is blocked in some of our sandboxes; the files are the same ones the release tarball ships. They are MIT licensed, see `LICENSE-lua.txt`. Upstream calls the directory `testes` (Portuguese for "tests"); only the directory is renamed here, so the file headers still say `testes/<file>.lua`.
 
-Don't edit anything under `testes/`. CI checks it against `SHA256SUMS`, and `.gitattributes` keeps Git from converting its line endings (`literals.lua` and `files.lua` test exact bytes). Skips are expressed in `manifest.txt` and applied by the harness to a scratch copy.
+Don't edit anything under `suite/`. CI checks it against `SHA256SUMS`, and `.gitattributes` keeps Git from converting its line endings (`literals.lua` and `files.lua` test exact bytes). Skips are expressed in `manifest.txt` and applied by the harness to a scratch copy.
 
 | File | Purpose |
 |---|---|
 | `manifest.txt` | Which files run, and how (coroutine wrapper for `big.lua`, user mode for `all.lua`, C-library lines) |
 | `SKIPS.md` | Every skipped part of the suite and why: the C API, the internal `T` library, C modules |
 | `expected-orbit.txt` | Files `orbit` currently passes. CI fails if one of them regresses |
-| `VERSION`, `SHA256SUMS` | Provenance of `testes/` |
+| `VERSION`, `SHA256SUMS` | Provenance of `suite/` |
 
 ## Running it
 
@@ -31,14 +31,14 @@ When more files pass, add them with `--update-expected`, and commit the list wit
 
 ## How a file is run
 
-Each file runs in its own process, from a scratch copy of `testes/` in `target/testkit/conformance/<interpreter>/`, as `INTERP __testkit_<file>`. That generated driver sets the globals `all.lua` sets (`_soft`, `_port`, `_nomsg`, `T = nil`, `debug = nil`), runs the file with `dofile`, and then prints a marker. A file passes when the interpreter exits with status 0 after printing the marker. Standard input is an empty pipe, because `files.lua` checks that seeking on stdin fails.
+Each file runs in its own process, from a scratch copy of `suite/` in `target/testkit/conformance/<interpreter>/`, as `INTERP __testkit_<file>`. That generated driver sets the globals `all.lua` sets (`_soft`, `_port`, `_nomsg`, `T = nil`, `debug = nil`), runs the file with `dofile`, and then prints a marker. A file passes when the interpreter exits with status 0 after printing the marker. Standard input is an empty pipe, because `files.lua` checks that seeking on stdin fails.
 
 So besides the language and libraries, the suite needs these from `orbit`'s command line, matching `lua.c`: `orbit script.lua args...`, an `arg` table with the interpreter at a negative index, and exit status 1 on an uncaught error. `main.lua` exercises the rest of `lua.c`'s options (`-e`, `-l`, `-i`, `-`, `LUA_INIT`, `LUA_PATH`), and uses a POSIX shell to do so.
 
 ## Updating to a new Lua release
 
 ```sh
-scripts/update-lua-testes.sh v5.5.2
+scripts/update-lua-suite.sh v5.5.2
 ```
 
 Then review the diff, recheck the line numbers in `manifest.txt` and `SKIPS.md`, and rerun the suite against the new reference interpreter.

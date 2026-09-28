@@ -1,4 +1,4 @@
-Lua 5.5 test suite (tests/lua-5.5/testes), from https://github.com/lua/lua at tag v5.5.1.
+Lua 5.5 test suite (tests/lua-5.5/suite), from https://github.com/lua/lua at tag v5.5.1.
 
 Copyright (C) 1994-2026 Lua.org, PUC-Rio.
 

@@ -1,7 +1,7 @@
 //! `conformance`: runs the official Lua 5.5 test suite against an interpreter.
 //!
 //! Each suite file runs in its own process from a scratch copy of
-//! `tests/lua-5.5/testes`, through a generated driver that sets the globals
+//! `tests/lua-5.5/suite`, through a generated driver that sets the globals
 //! `all.lua` would set and prints a marker when the file finishes. A file
 //! passes when the process exits with code 0 and printed the marker.
 
@@ -215,8 +215,8 @@ pub fn main(args: &[String]) -> Result<bool> {
         }
     }
 
-    let suite = util::repo_root().join("tests/lua-5.5");
-    let manifest_path = suite.join("manifest.txt");
+    let lua_dir = util::repo_root().join("tests/lua-5.5");
+    let manifest_path = lua_dir.join("manifest.txt");
     let manifest_text =
         fs::read_to_string(&manifest_path).map_err(io_err(manifest_path.display()))?;
     let entries = parse_manifest(&manifest_text)?;
@@ -250,10 +250,10 @@ pub fn main(args: &[String]) -> Result<bool> {
             .join(&name),
     };
     util::fresh_dir(&work)?;
-    let testes = work.join("testes");
-    util::copy_dir(&suite.join("testes"), &testes).map_err(io_err("copying the suite"))?;
+    let suite_dir = work.join("suite");
+    util::copy_dir(&lua_dir.join("suite"), &suite_dir).map_err(io_err("copying the suite"))?;
     if let Some(dir) = &c_libs {
-        copy_c_libs(dir, &testes.join("libs"))?;
+        copy_c_libs(dir, &suite_dir.join("libs"))?;
     }
 
     println!("Lua 5.5 test suite against {name} ({})", interp.display());
@@ -262,7 +262,7 @@ pub fn main(args: &[String]) -> Result<bool> {
         .iter()
         .filter(|e| only.is_empty() || only.contains(&e.file))
     {
-        let r = run_entry(e, &interp, &testes, flags, c_libs.is_some(), timeout)?;
+        let r = run_entry(e, &interp, &suite_dir, flags, c_libs.is_some(), timeout)?;
         match (&r.skipped, r.passed) {
             (Some(why), _) => println!("  skip {:<16} {why}", r.file),
             (None, true) => println!("  pass {:<16} {}", r.file, util::secs(r.wall)),
@@ -348,7 +348,7 @@ fn copy_c_libs(from: &Path, to: &Path) -> Result<()> {
 fn run_entry(
     e: &Entry,
     interp: &Path,
-    testes: &Path,
+    suite_dir: &Path,
     flags: Flags,
     have_c_libs: bool,
     default_timeout: Duration,
@@ -367,17 +367,17 @@ fn run_entry(
         return Ok(r);
     }
     if !have_c_libs && !e.needs_clibs.is_empty() {
-        let path = testes.join(&e.file);
+        let path = suite_dir.join(&e.file);
         let src = fs::read_to_string(&path).map_err(io_err(path.display()))?;
         fs::write(&path, disable_lines(&src, &e.needs_clibs)).map_err(io_err(path.display()))?;
     }
     let driver = format!("__testkit_{}", e.file);
-    fs::write(testes.join(&driver), driver_source(e, flags)).map_err(io_err(&driver))?;
+    fs::write(suite_dir.join(&driver), driver_source(e, flags)).map_err(io_err(&driver))?;
 
     let out = process::run(&Spec {
         program: interp.to_path_buf(),
         args: vec![driver.into()],
-        cwd: testes.to_path_buf(),
+        cwd: suite_dir.to_path_buf(),
         timeout: e.timeout.unwrap_or(default_timeout),
         measure_rss: false,
     })
@@ -457,11 +457,11 @@ mod tests {
 
     #[test]
     fn the_real_manifest_parses_and_names_real_files() {
-        let suite = util::repo_root().join("tests/lua-5.5");
-        let m = parse_manifest(&fs::read_to_string(suite.join("manifest.txt")).unwrap()).unwrap();
+        let lua_dir = util::repo_root().join("tests/lua-5.5");
+        let m = parse_manifest(&fs::read_to_string(lua_dir.join("manifest.txt")).unwrap()).unwrap();
         assert!(m.len() > 25);
         for e in m {
-            assert!(suite.join("testes").join(&e.file).is_file(), "{}", e.file);
+            assert!(lua_dir.join("suite").join(&e.file).is_file(), "{}", e.file);
         }
     }
 

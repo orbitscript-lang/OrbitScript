@@ -36,7 +36,7 @@ mkdir -p "$out/bin" "$out/libs"
 # shellcheck disable=SC2086
 $CC -std=gnu99 -O2 $sysdef -o "$out/bin/lua5.5" "$src/onelua.c" $export_flag $syslibs
 
-# C modules loaded by attrib.lua and main.lua, as testes/libs/makefile builds them.
+# C modules loaded by attrib.lua and main.lua, as the suite's libs/makefile builds them.
 for lib in lib1 lib11 lib2 lib21; do
     # shellcheck disable=SC2086
     $CC -O2 -Wall -I"$src" $shared -o "$out/libs/$lib.so" "$src/testes/libs/$lib.c"

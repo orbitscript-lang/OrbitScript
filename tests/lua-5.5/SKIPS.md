@@ -2,7 +2,7 @@
 
 Milestone 1 is "the official Lua 5.5 test suite passes, minus the C API and internal (`T`) parts, each skip documented". This file is that documentation. Every skip below comes from one of three sources, and none of them edits a vendored file on disk: the harness works on a scratch copy.
 
-Line numbers refer to the vendored files in `testes/` (Lua 5.5.1).
+Line numbers refer to the vendored files in `suite/` (Lua 5.5.1).
 
 ## 1. Internal test library (`T`)
 
@@ -32,7 +32,7 @@ PUC Lua can be built with `ltests.c`, which adds a global `T` exposing internals
 
 ## 2. The suite's C modules
 
-`attrib.lua` and `main.lua` load small C libraries from `testes/libs/` (built from `lib1.c`, `lib11.c`, `lib2.c`, `lib21.c`, `lib22.c`). OrbitScript can't load C modules, so:
+`attrib.lua` and `main.lua` load small C libraries from `suite/libs/` (built from `lib1.c`, `lib11.c`, `lib2.c`, `lib21.c`, `lib22.c`). OrbitScript can't load C modules, so:
 
 - **`attrib.lua` needs no skip.** Its C-library block (262 to 356) first calls `package.loadlib`, and when that returns `nil, msg, "absent"` it prints "cannot load dynamic library" and moves on (270). That is the Lua-defined result for a build without dynamic-library support, so OrbitScript's `package.loadlib` must return it.
 - **`main.lua` 250 to 253 are disabled** (`needs-clibs=250-253` in `manifest.txt`): they run `lua -l lib2-v2` and have no fallback. The harness comments these lines out in its scratch copy, keeping line numbers, unless it's given `--c-libs DIR`.
