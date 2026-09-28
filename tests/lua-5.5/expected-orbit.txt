@@ -13,6 +13,7 @@ cstack.lua
 db.lua
 errors.lua
 events.lua
+files.lua
 gengc.lua
 goto.lua
 literals.lua

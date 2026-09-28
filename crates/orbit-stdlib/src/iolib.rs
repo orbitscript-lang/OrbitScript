@@ -84,6 +84,7 @@ pub fn open_io(vm: &mut Vm) {
     for (h, key, name) in std_files {
         let mut s = Stream::new(h);
         s.closef = CloseKind::NoClose;
+        s.writable = key != Some(IO_INPUT);
         let f = new_stream(vm, s);
         if let Some(k) = key {
             set(vm, reg, k, f);
@@ -137,6 +138,9 @@ pub(crate) struct Stream {
     bufsize: usize,
     /// The error indicator (`ferror`), with the error that set it.
     err: Option<io::Error>,
+    /// Whether the mode allows writing. Like C streams, a write to a read-only file
+    /// fails at once rather than when the buffer is flushed.
+    writable: bool,
 }
 
 impl Stream {
@@ -150,6 +154,7 @@ impl Stream {
             mode: BufMode::Full,
             bufsize: BUFSIZE,
             err: None,
+            writable: true,
         }
     }
 
@@ -312,6 +317,9 @@ impl Stream {
     }
 
     fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        if !self.writable {
+            return Err(io::Error::from_raw_os_error(9)); // EBADF
+        }
         self.drop_rbuf()?;
         match self.h {
             // Unbuffered here: Rust's own stdout buffer is shared with `print`.
@@ -508,7 +516,7 @@ fn check_mode(mode: &[u8]) -> bool {
 }
 
 /// `fopen(name, mode)`, for a mode that passed [`check_mode`].
-fn fopen(name: &[u8], mode: &[u8]) -> io::Result<File> {
+fn fopen(name: &[u8], mode: &[u8]) -> io::Result<Stream> {
     let plus = mode.contains(&b'+');
     let mut o = std::fs::OpenOptions::new();
     match mode[0] {
@@ -516,7 +524,9 @@ fn fopen(name: &[u8], mode: &[u8]) -> io::Result<File> {
         b'w' => o.write(true).create(true).truncate(true).read(plus),
         _ => o.append(true).create(true).read(plus),
     };
-    o.open(os_path(name))
+    let mut s = Stream::new(Handle::File(o.open(os_path(name))?));
+    s.writable = mode[0] != b'r' || plus;
+    Ok(s)
 }
 
 fn string_arg(vm: &mut Vm, arg: usize) -> LuaResult<Vec<u8>> {
@@ -538,8 +548,8 @@ fn io_open(vm: &mut Vm) -> LuaResult<Action> {
         return Err(vm.arg_error(2, "invalid mode"));
     }
     match fopen(&name, &mode) {
-        Ok(f) => {
-            let v = new_stream(vm, Stream::new(Handle::File(f)));
+        Ok(s) => {
+            let v = new_stream(vm, s);
             vm.push(v);
             Ok(Action::Return(1))
         }
@@ -550,7 +560,7 @@ fn io_open(vm: &mut Vm) -> LuaResult<Action> {
 /// Opens `name` or raises an error (`opencheck`).
 fn opencheck(vm: &mut Vm, name: &[u8], mode: &[u8]) -> LuaResult<Value> {
     match fopen(name, mode) {
-        Ok(f) => Ok(new_stream(vm, Stream::new(Handle::File(f)))),
+        Ok(s) => Ok(new_stream(vm, s)),
         Err(e) => {
             let msg = format!(
                 "cannot open file '{}' ({})",
@@ -587,6 +597,7 @@ fn io_popen(vm: &mut Vm) -> LuaResult<Action> {
         Ok(h) => {
             let mut s = Stream::new(h);
             s.closef = CloseKind::Popen;
+            s.writable = mode == b"w";
             let v = new_stream(vm, s);
             vm.push(v);
             Ok(Action::Return(1))

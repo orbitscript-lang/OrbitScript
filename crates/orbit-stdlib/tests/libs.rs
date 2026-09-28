@@ -199,6 +199,16 @@ fn io_library() {
               return r, io.open(name) == nil"##),
         ["x", "true"]
     );
+    // A write to a read-only file fails at once, not when the buffer is flushed.
+    assert_eq!(
+        ok(r##"local name = os.tmpname()
+              local f = io.open(name, "r")
+              local r = {f:write("abc", 1)}
+              f:close()
+              os.remove(name)
+              return table.unpack(r)"##),
+        ["nil", "Bad file descriptor", "9", "0"]
+    );
     assert_eq!(
         ok(r##"local f, msg, code = io.open("/nonexistent/file") return f, msg, code"##),
         ["nil", "/nonexistent/file: No such file or directory", "2"]
