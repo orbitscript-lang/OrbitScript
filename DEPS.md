@@ -1,6 +1,6 @@
 # Dependencies
 
-Policy (ADR-7): `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies. Any other runtime dependency is added here in the same PR that introduces it, with its reason and the measured change in release binary size. Dev-dependencies are listed too but are held to a lighter bar, since they don't ship.
+Policy (ADR-7): `orbit-gc`, `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies. Any other runtime dependency is added here in the same PR that introduces it, with its reason and the measured change in release binary size. Dev-dependencies are listed too but are held to a lighter bar, since they don't ship.
 
 | Crate | Used by | Kind | Why | Size cost | Added |
 |---|---|---|---|---|---|
@@ -9,7 +9,7 @@ Policy (ADR-7): `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime de
 | boa_gc 0.22.0 | `spike/vm-boagc` only (S0, own workspace) | spike | Option C of ADR-2, added in round two at Tym's request | None measurable: a stripped binary with only the boa_gc VM is about 430 KiB. Runtime: hashbrown, foldhash, equivalent, allocator-api2. Build-time: boa_macros, cfg-if, cow-utils, syn, quote, proc-macro2, synstructure, unicode-ident | 2026-09-28 |
 
 Candidates under evaluation:
-- `gc-arena`: GC for `orbit-core`, decided by ADR-2. S0 recommends against it (see `spike/README.md`); if chosen it would be the one exception to the no-dependency rule for `orbit-core` and would raise the MSRV to 1.95.
-- `boa_gc`: evaluated in S0 and not recommended: resurrection (needed for `__gc`) corrupts reference counts, and it is slower and larger than the arena (see `spike/README.md`, findings 12 to 16).
 - `cranelift-*`: JIT backend, decided by the JIT study (stream G).
 - `clap` or `lexopt`: argument parsing for `orbit-cli`.
+
+Rejected: `gc-arena` and `boa_gc` (ADR-2 chose our own collector, `orbit-gc`). They remain only in the throwaway `spike/` workspace.

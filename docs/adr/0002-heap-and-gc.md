@@ -1,6 +1,6 @@
 # ADR-2: Heap and garbage collector
 
-Status: Proposed, pending spike S0
+Status: Accepted (Tym, 2026-09-28)
 
 ## Context
 Lua needs cyclic object graphs, incremental collection (5.5 makes major collections incremental too), weak tables including ephemerons, `__gc` finalizers with resurrection, and write barriers. We want low RAM overhead, stable Rust and no `unsafe` in our own code. Tym asked that external GC crates be explored before building our own.
@@ -48,4 +48,13 @@ The boa_gc row comes from a second, noisier run; in that run the arena was 1.62x
 - crossbeam-epoch and sdd are epoch-based reclamation for concurrent data structures, not tracing collectors. They can't collect cycles, so they weren't built.
 - None of the options gets near PUC's RAM on large string-keyed tables yet. That's table and string layout (stream B), not the GC.
 
-**Recommendation (pending Tym's decision):** the own safe typed arena, with generation-checked handles in debug builds and flatter storage to cut the handle cost. This reverses the plan's front-runner, so the ADR stays Proposed until Tym decides.
+**Recommendation:** the own safe typed arena, with generation-checked handles in debug builds and flatter storage to cut the handle cost. This reverses the plan's front-runner.
+
+## Decision
+
+Accepted by Tym on 2026-09-28: we build our own garbage collector instead of depending on gc-arena, boa_gc or another existing crate.
+
+- **The design is the spike's own arena.** It uses typed arenas with `u32` handles and side mark bytes. Collection is incremental tri-color mark-sweep with PUC-style barriers and byte-based pacing, as `lgc.c` does. Ephemerons and `__gc` resurrection are handled in the atomic phase. A generational mode comes later (P5). There is no `unsafe`.
+- **It lives in its own crate, `orbit-gc`, independent of the rest of the runtime.** `orbit-gc` knows nothing about Lua values, tables, strings or the VM. It provides the arenas, handles, marking, sweeping, barriers, pacing, weak and ephemeron support and finalization queues. The object types it manages plug in through a tracing trait. `orbit-core` depends on `orbit-gc` and defines the Lua object types on top of it. Nothing in `orbit-gc` depends on another `orbit-*` crate.
+- `orbit-gc` takes no runtime dependencies, like `orbit-core`.
+- **Not decided here.** The exact shape of the tracing trait and root API, and how per-kind storage is flattened to cut handle cost, are left to `orbit-gc`'s first PR. The borrow-checked embedding layer prototyped in `spike/embed/` sits on top, in `orbit`, and is not part of `orbit-gc`.

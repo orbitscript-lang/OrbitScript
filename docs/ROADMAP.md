@@ -21,7 +21,7 @@ One semantic core, two syntaxes: the Lua 5.5 and OrbitScript front ends both low
 |---|---|---|
 | S0 GC and performance spike | throwaway `spike/` crate | P0 |
 | A Lua front end | `orbit-lua-syntax` | P0 |
-| B Runtime core | `orbit-core` | After ADR-1, 2, 5 are accepted |
+| B Runtime core | `orbit-gc`, `orbit-core` | After ADR-1, 2, 5 are accepted |
 | C Compiler + VM | `orbit-hir`, `orbit-compiler`, `orbit-vm` | After ADR-3, 4 are accepted |
 | D Stdlib | `orbit-stdlib` | Pure pieces early (Lua patterns, `string.format`, `pack`, float formatting); the rest after C's native-function API |
 | E Test, perf and size infra | conformance harness, differential fuzzer, benchmarks, size and RSS tracking | P0 |
