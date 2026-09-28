@@ -2,7 +2,7 @@
 # This is its own workspace so the spike's dependencies never reach the product crates.
 [workspace]
 resolver = "3"
-members = ["common", "vm-arena", "vm-gcarena", "bench"]
+members = ["common", "vm-arena", "vm-gcarena", "bench", "embed"]
 
 [workspace.package]
 version = "0.0.0"

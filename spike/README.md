@@ -76,6 +76,21 @@ Stripped `spike` binary with only one VM linked: arena 442 KiB, gc-arena 430 KiB
 3. **We are 1.5 to 2x behind PUC Lua on pure interpretation** (fib, loop), and at or ahead of it on string and allocation work. The gap is per-instruction overhead that computed goto would hide and safe Rust can't: bounds checks on every register and code access, `Result` checks after every fallible op, nil-filling frames, and 12-byte instructions. It's the target for stream C: a register window slice per frame (one bounds check per frame instead of per access), a 4 or 8 byte instruction encoding, infallible fast paths for int/int arithmetic, and more superinstructions.
 4. **Instruction width:** our `Op` enum is 12 bytes because of the fused forms carrying a 32-bit target. PUC uses 4. ADR-4's open question stays open; a packed `u32`/`u64` encoding with a decoder is worth measuring in stream C.
 
+### Embedding API prototype (`embed/`)
+
+A follow-up asked by Tym: can the own arena give embedders compile-time rooting safety, as gc-arena's `'gc` does, without `unsafe`? It can. `embed/` is a working prototype of that API over `vm-arena`.
+
+- **Two handle types.** `Root` is a rooted `'static` registry handle that embedders keep in their own structs; dropping it unroots it. `Val<'cx>` is a raw value that borrows the `Ctx` it came from.
+- **The rule.** The collector only runs in the interpreter loop, never inside a native call. So everything that allocates but can't collect takes `&self`, and everything that runs Lua (and so may collect) takes `&mut self`. The borrow checker then rejects any raw `Val` still in use after a call back into Lua.
+- **Calls are two steps.** `push_call(f, &[args])` copies the function and arguments onto the Lua stack, where they are rooted. `finish(call)` then runs it. This is the C API's push-then-`lua_call` shape, and it's needed because the arguments are borrowed from the context that `finish` must borrow mutably.
+- **Verified.** Three `compile_fail` doctests check the errors: holding a `Val` across `finish` (E0502), reusing raw arguments after a call (E0502), and letting a raw value escape `Lua::with`. `tests/api.rs` runs a Rust insertion sort that compares through a Lua callback (which allocates) under the GC stress collector: the rooted result table survives more than 10 collection cycles. A control test on the raw internal layer shows an unrooted table held across the same callbacks is freed. Other tests cover dropping a `Root` releasing its value and `Root`s kept in host structs.
+
+Friction found:
+- **A `finish` result can only be used right away.** It keeps `&mut` alive for as long as it lives, a known limit of Rust borrows. `cx.finish(c)?.as_int()` works; to keep using the value alongside other calls, use `cx.result()`.
+- **Native signatures need a named lifetime:** `fn f<'a>(cx: &'a mut Ctx<'_>) -> R<Val<'a>>`. Elision can't choose between the two input lifetimes. Closures passed to `create_function` infer it.
+- **Values taken before a call must be re-read after it** (`cx.arg(1)` again), or converted to Rust data (`i64`, `String`) first.
+- **Not yet covered:** raw values from two different `Lua` instances can be mixed. That yields a wrong object, not memory unsafety. An invariant brand lifetime on `Ctx` (the generativity pattern gc-arena uses) would close it. Also untested: yielding across a native (needs `lua_callk`-style continuations), and userdata.
+
 ## Recommendation
 
 - **ADR-2: build our own safe typed arena, not gc-arena.** gc-arena is about 20% faster to interpret today, but it loses on memory by 1.5 to 2x, on allocation-heavy code, on byte accounting, and on generational mode, and it dictates a resumable design for the whole stdlib. Most of the arena's interpreter overhead is fixable: flat per-kind storage with a reserved address range or larger pages, caching resolved upvalue handles in the frame, and generation-checked handles in debug builds. This reverses the plan's front-runner, so it's Tym's call.

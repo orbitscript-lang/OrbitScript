@@ -59,12 +59,35 @@ pub struct Vm {
     pub stack: Vec<Value>,
     frames: Vec<Frame>,
     open: Vec<(u32, UvRef)>,
-    /// Extra GC roots (used by tests).
+    /// Extra GC roots: constants, tests, and the embedding layer's registry.
     pub roots: Vec<Value>,
+    natives: Natives,
     dispatch: Dispatch,
 }
 
 type R<T> = Result<T, spike_common::VmError>;
+
+/// Where a native call's arguments live on the VM stack.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeCall {
+    /// Stack index of the first argument.
+    pub args: usize,
+    pub nargs: u8,
+    /// First free stack slot: nested calls push their function and arguments here.
+    pub top: usize,
+}
+
+/// A Rust function callable from Lua. The internal layer hands it `&mut Vm`;
+/// the embedding layer wraps that in a borrow-checked context.
+pub type NativeFn = dyn Fn(&mut Vm, NativeCall) -> R<Value>;
+
+struct Natives(Vec<Rc<NativeFn>>);
+
+impl std::fmt::Debug for Natives {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Natives({})", self.0.len())
+    }
+}
 
 impl Vm {
     pub fn new(dispatch: Dispatch) -> Self {
@@ -75,6 +98,7 @@ impl Vm {
             open: Vec::new(),
             roots: Vec::new(),
             protos: Rc::new(Vec::new()),
+            natives: Natives(Vec::new()),
             dispatch,
         }
     }
@@ -123,13 +147,46 @@ impl Vm {
     }
 
     pub fn run(&mut self, main: u32) -> R<Value> {
-        let f = self.heap.new_closure(main, Box::new([]));
-        self.stack[0] = Value::Func(f);
-        let nregs = self.protos[main as usize].p.nregs;
-        self.push_frame(f, main, nregs, 1, 0)?;
-        match self.dispatch {
-            Dispatch::Closure => self.exec_threaded(),
-            _ => self.exec_match(),
+        self.stack[0] = self.new_main_closure(main);
+        self.call_value(0, 0)
+    }
+
+    /// A closure over a loaded main prototype (no upvalues).
+    pub fn new_main_closure(&mut self, main: u32) -> Value {
+        Value::Func(self.heap.new_closure(main, Box::new([])))
+    }
+
+    pub fn register_native(&mut self, f: Rc<NativeFn>) -> Value {
+        self.natives.0.push(f);
+        Value::Native((self.natives.0.len() - 1) as u32)
+    }
+
+    /// Make sure `stack[..n]` exists.
+    pub fn ensure_stack(&mut self, n: usize) {
+        if self.stack.len() < n {
+            self.stack.resize(n * 2, Value::Nil);
+        }
+    }
+
+    /// First stack slot above the running Lua frame (0 when idle).
+    pub fn frame_top(&self) -> usize {
+        self.frames.last().map_or(0, |f| {
+            f.base as usize + self.protos[f.proto as usize].p.nregs as usize
+        })
+    }
+
+    /// Re-entrant call of `stack[slot]` with `stack[slot+1..=slot+nargs]`.
+    /// Runs the interpreter (and so the collector) until the call returns.
+    pub fn call_value(&mut self, slot: usize, nargs: u8) -> R<Value> {
+        let depth = self.frames.len();
+        self.call(slot, nargs)?;
+        if self.frames.len() > depth {
+            match self.dispatch {
+                Dispatch::Closure => self.exec_threaded(depth),
+                _ => self.exec_match(depth),
+            }
+        } else {
+            Ok(self.stack[slot])
         }
     }
 
@@ -289,7 +346,7 @@ impl Vm {
 
     // ---- match dispatch --------------------------------------------------
 
-    fn exec_match(&mut self) -> R<Value> {
+    fn exec_match(&mut self, stop: usize) -> R<Value> {
         let protos = self.protos.clone();
         'frames: loop {
             let fr = self.frames.last().expect("frame");
@@ -426,7 +483,7 @@ impl Vm {
                     }
                     Op::Return { a, n } => {
                         let v = if n == 1 { r!(a) } else { Value::Nil };
-                        if self.do_return(base, v) {
+                        if self.do_return(base, v, stop) {
                             return Ok(v);
                         }
                         continue 'frames;
@@ -438,28 +495,46 @@ impl Vm {
 
     #[inline(always)]
     fn call(&mut self, fslot: usize, nargs: u8) -> R<()> {
-        let Value::Func(f) = self.stack[fslot] else {
-            return Err("attempt to call a non-function value".into());
+        let f = match self.stack[fslot] {
+            Value::Func(f) => f,
+            Value::Native(n) => return self.call_native(n, fslot, nargs),
+            _ => return Err("attempt to call a non-function value".into()),
         };
         let proto = self.heap.fns.get(f.0).proto;
         let nregs = self.protos[proto as usize].p.nregs;
         self.push_frame(f, proto, nregs, fslot + 1, nargs)
     }
 
-    /// Pops a frame; returns true when the outermost frame returned.
+    #[inline(never)]
+    fn call_native(&mut self, n: u32, fslot: usize, nargs: u8) -> R<()> {
+        let f = self.natives.0[n as usize].clone();
+        let top = self.frame_top().max(fslot + 1 + nargs as usize);
+        let v = f(
+            self,
+            NativeCall {
+                args: fslot + 1,
+                nargs,
+                top,
+            },
+        )?;
+        self.stack[fslot] = v;
+        Ok(())
+    }
+
+    /// Pops a frame; returns true when the frame depth drops to `stop`.
     #[inline(always)]
-    fn do_return(&mut self, base: usize, v: Value) -> bool {
+    fn do_return(&mut self, base: usize, v: Value, stop: usize) -> bool {
         if self.open.last().is_some_and(|&(i, _)| i as usize >= base) {
             self.close_upvals(base);
         }
         self.frames.pop();
         self.stack[base - 1] = v;
-        self.frames.is_empty()
+        self.frames.len() == stop
     }
 
     // ---- closure-threaded dispatch -------------------------------------
 
-    fn exec_threaded(&mut self) -> R<Value> {
+    fn exec_threaded(&mut self, stop: usize) -> R<Value> {
         let protos = self.protos.clone();
         loop {
             let fr = self.frames.last().expect("frame");
@@ -488,7 +563,7 @@ impl Vm {
                         } else {
                             Value::Nil
                         };
-                        if self.do_return(base, v) {
+                        if self.do_return(base, v, stop) {
                             return Ok(v);
                         }
                         break;

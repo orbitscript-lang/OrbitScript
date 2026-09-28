@@ -1,0 +1,13 @@
+[package]
+name = "spike-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+spike-common.workspace = true
+spike-vm-arena.workspace = true
+
+[lints]
+workspace = true

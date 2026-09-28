@@ -19,6 +19,8 @@ pub enum Value {
     Str(StrRef),
     Table(TabRef),
     Func(FnRef),
+    /// A Rust function registered with `Vm::register_native` (not GC-managed).
+    Native(u32),
 }
 
 impl Value {
@@ -42,6 +44,7 @@ pub enum Key {
     Str(u32),
     Table(u32),
     Func(u32),
+    Native(u32),
 }
 
 impl Key {
@@ -65,6 +68,7 @@ impl Key {
             Value::Str(s) => Key::Str(s.0),
             Value::Table(t) => Key::Table(t.0),
             Value::Func(f) => Key::Func(f.0),
+            Value::Native(n) => Key::Native(n),
         })
     }
 }
