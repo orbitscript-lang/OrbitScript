@@ -13,8 +13,13 @@ pub use orbit_vm::{Action, Error, LuaResult, Status, Vm};
 /// A VM with the standard libraries opened (`debug` only in part so far).
 pub fn new_vm() -> Vm {
     let mut vm = Vm::new();
-    orbit_vm::baselib::open_base(&mut vm);
-    orbit_vm::baselib::open_coroutine(&mut vm);
-    orbit_stdlib::open_libs(&mut vm);
+    open_libs(&mut vm);
     vm
+}
+
+/// Opens the standard libraries in `vm` (`luaL_openlibs`).
+pub fn open_libs(vm: &mut Vm) {
+    orbit_vm::baselib::open_base(vm);
+    orbit_vm::baselib::open_coroutine(vm);
+    orbit_stdlib::open_libs(vm);
 }
