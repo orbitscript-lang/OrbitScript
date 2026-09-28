@@ -1,8 +1,16 @@
 # Differential corpus files where orbit matches lua5.5. Updated with:
 #   cargo testkit diff ... --expect tests/diff/expected-orbit.txt --update-expected
+arith.lua
 closures.lua
+control.lua
 coroutines.lua
+errors.lua
+floats.lua
 gc.lua
+lua55.lua
+metatables.lua
+strings.lua
+tables.lua
 uncaught.lua
 uncaught_syntax.lua
 uncaught_table.lua
