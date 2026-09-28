@@ -1,6 +1,6 @@
 # ADR-1: Value representation
 
-Status: Proposed
+Status: Accepted (Tym, 2026-09-28)
 
 ## Context
 Lua values are nil, booleans, 64-bit integers, 64-bit floats, strings, tables, functions, userdata and coroutines. The representation drives RAM use, interpreter speed and what a JIT can do. The code must be safe Rust on 64-bit targets.
