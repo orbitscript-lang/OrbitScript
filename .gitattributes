@@ -1,0 +1,3 @@
+# The vendored Lua test suite is checked byte for byte (see
+# tests/lua-5.5/SHA256SUMS), and some tests read their own source.
+tests/lua-5.5/suite/** -text linguist-vendored

@@ -1,0 +1,48 @@
+# Files of the official Lua 5.5 test suite that orbit-testkit runs, one
+# process each, in the order all.lua runs them. See README.md and SKIPS.md.
+#
+# Options:
+#   set=G[,G]        set these globals to true first (all.lua's _U user mode)
+#   yields=V[,V]     run the file as a coroutine that must yield V in order
+#   needs-clibs=A-B  lines that load the suite's C test libraries; they are
+#                    commented out unless --c-libs is given
+#   not-soft         skipped under --soft, as all.lua does
+#   timeout=SECS     per-file timeout override
+#   skip             never run; the # comment gives the reason
+
+main.lua        needs-clibs=250-253   # the lua command line; one check loads a C module
+gc.lua
+db.lua
+calls.lua
+strings.lua
+literals.lua
+tpack.lua
+attrib.lua                            # without C loading, package.loadlib must report "absent"
+gengc.lua
+locals.lua
+constructs.lua
+code.lua                              # entirely T (opcode) tests; checks it skips cleanly
+big.lua         yields=b,a not-soft   # all.lua runs it in a coroutine, and not under _soft
+cstack.lua
+nextvar.lua
+pm.lua
+utf8.lua
+api.lua                               # entirely C API tests; checks it skips cleanly
+memerr.lua                            # entirely T (allocation failure) tests; checks it skips cleanly
+events.lua
+vararg.lua
+closure.lua
+coroutine.lua
+goto.lua
+errors.lua
+math.lua
+sort.lua
+bitwise.lua
+verybig.lua
+files.lua
+
+# The whole suite in one process, in user mode (_U = true), which also
+# round-trips every file through string.dump and load.
+all.lua         set=_U  timeout=600
+
+heavy.lua       skip                  # not part of all.lua: builds multi-gigabyte strings and tables

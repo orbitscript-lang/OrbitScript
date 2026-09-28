@@ -1,0 +1,3 @@
+[alias]
+# `cargo testkit conformance --interp target/release/orbit`, see tests/README.md
+testkit = "run --quiet --release -p orbit-testkit --"
