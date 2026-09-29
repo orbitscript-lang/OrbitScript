@@ -1,6 +1,10 @@
 //! A garbage collector in safe Rust: typed arenas, `u32` handles and an
-//! incremental tri-color mark-sweep collector modeled on PUC Lua's `lgc.c`
-//! (ADR-2).
+//! incremental tri-color mark-sweep collector that provides Lua's weak-table
+//! and finalizer semantics (ADR-2).
+//!
+//! Storage, handles, colors, allocation and sweeping are this crate's own
+//! design. The end of marking and the pacing parameters currently follow PUC
+//! Lua's `lgc.c` in structure; they are due to be redesigned.
 //!
 //! `orbit-gc` knows nothing about Lua. The runtime declares its object types
 //! in a [`space!`], implements [`Trace`] for each, and drives the collector
