@@ -53,6 +53,38 @@ fn stale_handle_panics() {
 }
 
 #[test]
+fn reused_slot_behind_a_stale_handle() {
+    let mut h = TestHeap::new();
+    let a = obj(&mut h, 1);
+    h.full_collect(&mut ());
+    let b = obj(&mut h, 2);
+    assert_eq!(a.index(), b.index(), "the slot was reused");
+    let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.get(a).id));
+    if orbit_gc::CHECKED_HANDLES {
+        assert!(stale.is_err(), "a checked stale handle panics");
+        assert!(!h.is_live(a) && h.is_live(b));
+        assert_ne!(a, b);
+    } else {
+        assert_eq!(stale.ok(), Some(2), "unchecked, it reads the new object");
+    }
+}
+
+#[test]
+fn handle_size_and_bits() {
+    let expected = if orbit_gc::CHECKED_HANDLES { 8 } else { 4 };
+    assert_eq!(size_of::<orbit_gc::Gc<common::Obj>>(), expected);
+    let mut h = TestHeap::new();
+    let a = obj(&mut h, 1);
+    h.full_collect(&mut ());
+    let b = obj(&mut h, 2);
+    assert_eq!(orbit_gc::Gc::from_bits(b.to_bits()), b);
+    assert_eq!(h.handle_at::<common::Obj>(b.index()), b);
+    if orbit_gc::CHECKED_HANDLES {
+        assert_eq!(b.generation(), a.generation() + 1);
+    }
+}
+
+#[test]
 fn bytes_return_to_baseline() {
     let mut h = TestHeap::new();
     assert_eq!(h.bytes(), 0);
