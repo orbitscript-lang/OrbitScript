@@ -28,12 +28,44 @@ fn measure(name: &str, n: usize, f: impl FnOnce(&mut Heap, usize)) {
     );
 }
 
+fn peak_kib() -> usize {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Fill a table with `n` empty tables, drop it, collect, and fill again: the refill
+/// should peak no higher than the first fill (`mem 3`).
+fn refill(n: usize) {
+    let mut h = Heap::new();
+    for round in 1..=2 {
+        let arr = h.new_table();
+        for i in 1..=n {
+            let t = h.new_table();
+            h.raw_set_int(arr, i as i64, Value::Table(t)).unwrap();
+        }
+        println!(
+            "refill round {round}: peak RSS {:.1} MiB",
+            peak_kib() as f64 / 1024.0
+        );
+        h.full_collect(&mut ());
+        h.full_collect(&mut ());
+    }
+}
+
 fn main() {
     const N: usize = 1_000_000;
     // Run one shape per process (`mem 0`, `mem 1`, `mem 2`) so freed memory from an
     // earlier shape doesn't hide the next one's cost. No argument runs all three.
     let only: Option<usize> = std::env::args().nth(1).and_then(|a| a.parse().ok());
     let run = |i: usize| only.is_none_or(|o| o == i);
+    if only == Some(3) {
+        refill(N);
+        return;
+    }
     if run(0) {
         // Same shapes as the spike's "bytes per object" table: each object is held in an
         // array, so figures include one array slot (9 bytes) plus growth slack.
