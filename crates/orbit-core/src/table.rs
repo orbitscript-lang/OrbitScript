@@ -547,7 +547,10 @@ impl Table {
         let old_nodes = std::mem::replace(&mut self.nodes, new_nodes);
         self.last_free = self.nodes.len() as u32;
         let old_asize = self.asize;
-        if new_asize != old_asize {
+        if new_asize > old_asize {
+            self.grow_array(new_asize);
+            self.len_hint.set(new_asize / 2);
+        } else if new_asize < old_asize {
             let old_array = std::mem::take(&mut self.array);
             let old = Table {
                 array: old_array,
@@ -557,8 +560,7 @@ impl Table {
             let tag_words = (new_asize as usize).div_ceil(8);
             self.array = vec![0u64; new_asize as usize + tag_words].into_boxed_slice();
             self.asize = new_asize;
-            let keep = old_asize.min(new_asize) as usize;
-            for i in 0..keep {
+            for i in 0..new_asize as usize {
                 self.array[i] = old.array[i];
                 self.set_arr_tag(i, old.arr_tag(i));
             }
@@ -579,6 +581,26 @@ impl Table {
             }
         }
         Ok(())
+    }
+
+    /// Grows the array part to `new_asize` slots, reallocating the existing block so
+    /// the allocator can extend it in place (as PUC's `luaM_reallocvector` does) instead
+    /// of keeping the old and new arrays live at once. Payloads stay where they are; the
+    /// tag words move up to follow the new payload region.
+    fn grow_array(&mut self, new_asize: u32) {
+        let (old_asize, new_asize) = (self.asize as usize, new_asize as usize);
+        debug_assert!(new_asize > old_asize);
+        let old_tag_words = old_asize.div_ceil(8);
+        let new_len = new_asize + new_asize.div_ceil(8);
+        let mut v = std::mem::take(&mut self.array).into_vec();
+        v.reserve_exact(new_len - v.len());
+        v.resize(new_len, 0);
+        // Move the tags to their new place, then clear the new payload slots. Tag bytes
+        // for slots past the old size were already zero (empty).
+        v.copy_within(old_asize..old_asize + old_tag_words, new_asize);
+        v[old_asize..new_asize].fill(0);
+        self.array = v.into_boxed_slice();
+        self.asize = new_asize as u32;
     }
 
     // ---- length ---------------------------------------------------------
@@ -1083,6 +1105,30 @@ mod tests {
         assert_eq!(t.array_size(), 100);
         for i in 1..=64 {
             assert_int(get(&t, i), i);
+        }
+    }
+
+    #[test]
+    fn array_grows_in_place_keeping_values_and_holes() {
+        for from in 0..20u32 {
+            for to in [from + 1, from + 7, from + 8, 2 * from + 9, 100] {
+                let mut t = Table::with_capacity(from, 0).unwrap();
+                for i in 1..=i64::from(from) {
+                    if i % 3 != 0 {
+                        t.set_int(i, Value::Int(i * 7)).unwrap();
+                    }
+                }
+                t.reserve(to, 0).unwrap();
+                assert_eq!(t.array_size(), to);
+                for i in 1..=i64::from(to) {
+                    let v = get(&t, i);
+                    if i <= i64::from(from) && i % 3 != 0 {
+                        assert_int(v, i * 7);
+                    } else {
+                        assert!(v.is_nil(), "slot {i} after growing {from} -> {to}");
+                    }
+                }
+            }
         }
     }
 
