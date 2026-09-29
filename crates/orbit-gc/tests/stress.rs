@@ -90,13 +90,15 @@ fn check_live(h: &TestHeap, roots: &[Ref], queued: &[Gc<Obj>]) -> HashSet<Ref> {
 
 fn run(seed: u64, ops: usize, stress: bool) {
     let mut rng = Rng(seed);
-    // Without stress mode: small steps and an eager pause, so many cycles
-    // run incrementally.
+    // Without stress mode: small steps and no growth allowance, so many cycles
+    // run incrementally. Tiny pages, so pages are released and reallocated
+    // all the time.
     let mut h = TestHeap::with_params(orbit_gc::Params {
-        pause: 100,
-        stepmul: 100,
-        stepsize: 64,
+        growth: 0,
+        work_ratio: 800,
+        step_bytes: 64,
         min_threshold: 4096,
+        page_bytes: 256,
     });
     h.set_stress(stress);
     let mut roots = Stack(Vec::new());

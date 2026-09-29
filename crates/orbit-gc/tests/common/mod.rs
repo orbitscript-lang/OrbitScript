@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use orbit_gc::{Gc, Heap, Liveness, Marker, Trace, WeakMode, space};
+use orbit_gc::{AnyGc, Gc, Heap, Liveness, Marker, Trace, WeakMode, space};
 
 #[derive(Debug)]
 pub struct Text(pub String);
@@ -40,11 +40,10 @@ impl Ref {
         }
     }
 
-    /// Strings are values, like Lua's: never collected out of a weak table.
-    fn is_marked(self, m: &Marker<'_, TestSpace>) -> bool {
+    fn erase(self, m: &Marker<'_, TestSpace>) -> AnyGc {
         match self {
-            Ref::Obj(o) => m.is_marked(o),
-            Ref::Text(_) => true,
+            Ref::Obj(o) => m.erase(o),
+            Ref::Text(t) => m.erase(t),
         }
     }
 
@@ -84,20 +83,21 @@ impl Trace<TestSpace> for Obj {
             return;
         };
         for &(k, v) in &self.map {
-            // What Lua's traverseephemeron / traverseweakvalue do: strings
-            // are marked, strong halves are marked, a weak half is left alone,
-            // and an ephemeron value is marked once its key is.
-            if !mode.keys || k.is_marked(m) {
+            // Strings are values, never weak. A strong half is marked, a
+            // weak half is left alone, and an ephemeron value lives as long
+            // as its key.
+            let k_weak = mode.keys && matches!(k, Ref::Obj(_));
+            let v_weak = mode.values && matches!(v, Ref::Obj(_));
+            if !k_weak {
                 k.mark(m);
-                if !mode.values {
+            }
+            if !v_weak {
+                if k_weak && !mode.values {
+                    let (ka, va) = (k.erase(m), v.erase(m));
+                    m.ephemeron(ka, va);
+                } else {
                     v.mark(m);
                 }
-            }
-            if let Ref::Text(t) = k {
-                m.mark(t);
-            }
-            if let Ref::Text(t) = v {
-                m.mark(t);
             }
         }
         m.weak(mode);

@@ -2,9 +2,10 @@
 //! incremental tri-color mark-sweep collector that provides Lua's weak-table
 //! and finalizer semantics (ADR-2).
 //!
-//! Storage, handles, colors, allocation and sweeping are this crate's own
-//! design. The end of marking and the pacing parameters currently follow PUC
-//! Lua's `lgc.c` in structure; they are due to be redesigned.
+//! The design is this crate's own. Lua fixes what a program can observe
+//! (which objects survive, when weak entries go, the order finalizers run
+//! in), and that is what the collector reproduces; how it gets there is not
+//! modeled on any Lua implementation.
 //!
 //! `orbit-gc` knows nothing about Lua. The runtime declares its object types
 //! in a [`space!`], implements [`Trace`] for each, and drives the collector
@@ -13,14 +14,21 @@
 //! - **Arenas and handles.** One paged [`Arena`] per object type. A [`Gc<T>`]
 //!   is a 4-byte slot index. Colors live in side byte vectors, so objects
 //!   carry no header.
-//! - **Incremental marking with barriers.** [`Heap::step`] does work in
-//!   proportion to allocation, paced by bytes with Lua 5.5's `pause` and
-//!   `stepmul` defaults ([`Params`]). Stores into already-traced objects need
+//! - **Incremental marking with barriers.** [`Heap::step`] processes heap
+//!   bytes in proportion to bytes allocated, and a cycle starts when the heap
+//!   has grown a set percentage past what the last one found reachable
+//!   ([`Params`]). Stores into already-traced objects need
 //!   [`Heap::barrier_back`] (or [`Heap::update`]) or [`Heap::barrier_forward`].
-//!   Roots are rescanned in the atomic phase, so they need no barrier.
+//!   Roots are rescanned when marking finishes, so they need no barrier.
+//! - **Pages go back to the allocator.** Each arena is split into pages of
+//!   about [`Params::page_bytes`]. New objects fill the lowest pages first, and
+//!   a page the sweep leaves empty is freed, so memory taken during a spike
+//!   is given back when the spike ends.
 //! - **Weak references and ephemerons.** An object declares its weak mode
 //!   while being traced ([`Marker::weak`]) and drops dead entries in
-//!   [`Trace::clear_weak`]. Ephemerons converge in the atomic phase.
+//!   [`Trace::clear_weak`]. Ephemeron entries are reported with
+//!   [`Marker::ephemeron`]: a value whose key is not marked yet waits for it,
+//!   so marking never rescans ephemeron tables.
 //! - **Finalization with resurrection.** [`Heap::register_finalizer`] and
 //!   [`Heap::take_finalizable`] implement Lua's `__gc` semantics and order.
 //! - **Stress mode.** [`Heap::set_stress`] collects at nearly every safe point.
@@ -168,6 +176,33 @@ macro_rules! space {
                     ::core::unreachable!()
                 }
 
+                fn slot_bytes(kind: u8) -> usize {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return ::core::mem::size_of::<::core::option::Option<$ty>>();
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
+                fn set_page_shift(&mut self, kind: u8, shift: u32) {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return self.$field.set_shift(shift);
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
+                fn release_page(&mut self, kind: u8, page: u32) {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return self.$field.release_page(page);
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
                 fn kind_name(kind: u8) -> &'static str {
                     $(
                         if kind == __Kind::$field as u8 {
@@ -201,6 +236,9 @@ pub mod __private {
     use crate::heap::slot_size;
     use crate::{Arena, Liveness, Marker, Space, Trace, WeakMode};
 
+    /// Trace one object. Returns its marking work beyond the references
+    /// it visits: one unit for the object plus one per 16 bytes it owns
+    /// outside its slot, roughly Lua's one unit per slot traversed.
     #[inline]
     pub fn trace<S: Space, T: Trace<S>>(a: &Arena<T>, index: u32, m: &mut Marker<'_, S>) -> usize {
         let obj = a.get_slot(index);

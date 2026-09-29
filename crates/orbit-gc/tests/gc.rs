@@ -139,12 +139,12 @@ fn all_weak_tables_keep_nothing_alive() {
 }
 
 #[test]
-fn ephemerons_converge() {
+fn ephemerons_keep_values_while_keys_live() {
     let mut h = TestHeap::new();
     let eph = weak_obj(&mut h, WeakMode::KEYS);
     // k1 is rooted; v1 is reachable only through the ephemeron.
     let (k1, v1) = (obj(&mut h, 1), obj(&mut h, 2));
-    // k3 is reachable only from v1: a chain that must converge.
+    // k3 is reachable only from v1: a chain, resolved as k3 is marked.
     let (k3, v3) = (obj(&mut h, 3), obj(&mut h, 4));
     // k2 is unreachable and v2 points back at it: the ephemeron cycle a
     // plain weak-key table would leak.
@@ -186,6 +186,70 @@ fn ephemeron_chain_across_tables() {
     h.full_collect(&mut Stack(vec![Ref::Obj(e1), Ref::Obj(k1), Ref::Obj(k2)]));
     assert!(h.is_live(e2) && h.is_live(v));
     assert_eq!(lookup(&h, e2, Ref::Obj(k2)), Some(Ref::Obj(v)));
+}
+
+#[test]
+fn long_ephemeron_chain_is_marked_without_recursion() {
+    // eph[k_i] = k_{i+1}, inserted far end first: each key is released only
+    // by the value before it, one link at a time.
+    let mut h = TestHeap::new();
+    let eph = weak_obj(&mut h, WeakMode::KEYS);
+    let keys: Vec<_> = (0..100_000).map(|i| obj(&mut h, i)).collect();
+    h.get_mut(eph).map = keys
+        .windows(2)
+        .rev()
+        .map(|w| (Ref::Obj(w[0]), Ref::Obj(w[1])))
+        .collect();
+    let mut roots = Stack(vec![Ref::Obj(eph), Ref::Obj(keys[0])]);
+    h.full_collect(&mut roots);
+    assert!(keys.iter().all(|&k| h.is_live(k)));
+    assert_eq!(h.get(eph).map.len(), keys.len() - 1);
+
+    // Unroot the head: the whole chain goes.
+    roots.0.pop();
+    h.full_collect(&mut roots);
+    assert!(h.get(eph).map.is_empty());
+    assert_eq!(h.count::<Obj>(), 1);
+}
+
+#[test]
+fn resurrected_key_keeps_its_ephemeron_value() {
+    let mut h = TestHeap::new();
+    let eph = weak_obj(&mut h, WeakMode::KEYS);
+    let (k, v) = (obj(&mut h, 1), obj(&mut h, 2));
+    put(&mut h, eph, Ref::Obj(k), Ref::Obj(v));
+    h.register_finalizer(k);
+    let mut roots = Stack(vec![Ref::Obj(eph)]);
+    h.full_collect(&mut roots);
+    // k is queued for finalization, so it and its entry survive this cycle.
+    assert_eq!(h.pending_finalizers(), 1);
+    assert!(h.is_live(k) && h.is_live(v));
+    assert_eq!(lookup(&h, eph, Ref::Obj(k)), Some(Ref::Obj(v)));
+    // Once finalized and dropped, the entry goes too.
+    h.take_finalizable();
+    h.full_collect(&mut roots);
+    assert!(!h.is_live(v));
+    assert!(h.get(eph).map.is_empty());
+}
+
+#[test]
+fn incremental_ephemeron_waits_for_a_key_marked_later() {
+    // Tiny steps, so the table is traced before its key is reached.
+    let mut h = TestHeap::with_params(orbit_gc::Params {
+        step_bytes: 1,
+        work_ratio: 1,
+        ..Default::default()
+    });
+    let eph = weak_obj(&mut h, WeakMode::KEYS);
+    let holder = obj(&mut h, 0);
+    let (k, v) = (obj(&mut h, 1), obj(&mut h, 2));
+    put(&mut h, eph, Ref::Obj(k), Ref::Obj(v));
+    link(&mut h, holder, Ref::Obj(k));
+    // eph is traced first (pushed last), holder and k later.
+    let mut roots = Stack(vec![Ref::Obj(holder), Ref::Obj(eph)]);
+    while !h.step(&mut roots) {}
+    assert!(h.is_live(v));
+    assert_eq!(lookup(&h, eph, Ref::Obj(k)), Some(Ref::Obj(v)));
 }
 
 #[test]
@@ -311,8 +375,8 @@ fn start_marking(h: &mut TestHeap) -> (orbit_gc::Gc<common::Obj>, Stack) {
     }
     let holder = obj(h, 1);
     let mut roots = Stack(vec![Ref::Obj(big), Ref::Obj(holder)]);
-    h.params_mut().stepsize = 1;
-    h.params_mut().stepmul = 1;
+    h.params_mut().step_bytes = 1;
+    h.params_mut().work_ratio = 1;
     h.step(&mut roots);
     assert_eq!(h.phase(), Phase::Mark);
     (holder, roots)
@@ -368,8 +432,8 @@ fn objects_allocated_during_sweep_survive() {
     for i in 0..5000 {
         obj(&mut h, i);
     }
-    h.params_mut().stepsize = 1;
-    h.params_mut().stepmul = 1;
+    h.params_mut().step_bytes = 1;
+    h.params_mut().work_ratio = 1;
     while h.phase() != Phase::Sweep {
         h.step(&mut roots);
     }
@@ -501,4 +565,116 @@ fn roots_clear_weak_sees_liveness() {
     h.full_collect(&mut roots);
     assert_eq!(roots.strings, vec![a]);
     assert!(!h.is_live(b));
+}
+
+fn small_pages() -> TestHeap {
+    TestHeap::with_params(orbit_gc::Params {
+        page_bytes: 1024,
+        ..orbit_gc::Params::default()
+    })
+}
+
+#[test]
+fn pages_are_released_after_a_spike() {
+    let mut h = small_pages();
+    let root = obj(&mut h, 0);
+    let mut roots = Stack(vec![Ref::Obj(root)]);
+    h.full_collect(&mut roots);
+    let (idle_pages, idle_reserved) = (h.pages(), h.reserved_bytes());
+    assert_eq!(idle_pages, 1, "one page for the root object");
+
+    // A spike: 20,000 objects, all garbage afterwards.
+    for i in 0..20_000 {
+        let o = obj(&mut h, i);
+        let t = text(&mut h, "spike");
+        link(&mut h, o, Ref::Text(t));
+    }
+    assert!(h.pages() > 100);
+    assert!(h.reserved_bytes() > 100 * idle_reserved);
+    h.full_collect(&mut roots);
+
+    // Each arena keeps one page: the root's, and one for texts.
+    assert_eq!(h.pages(), 2);
+    assert!(h.reserved_bytes() <= 2 * idle_reserved + 2048);
+    assert!(h.is_live(root));
+    assert_eq!(h.count::<common::Obj>(), 1);
+
+    // Released pages come back when needed.
+    let again: Vec<_> = (0..5_000).map(|i| obj(&mut h, i)).collect();
+    roots.0.extend(again.iter().map(|&o| Ref::Obj(o)));
+    h.full_collect(&mut roots);
+    assert!(again.iter().all(|&o| h.is_live(o)));
+    assert_eq!(h.get(again[4_999]).id, 4_999);
+}
+
+#[test]
+fn incremental_cycles_release_pages_too() {
+    let mut h = TestHeap::with_params(orbit_gc::Params {
+        page_bytes: 1024,
+        step_bytes: 1024,
+        ..orbit_gc::Params::default()
+    });
+    let mut roots = Stack(Vec::new());
+    for i in 0..50_000 {
+        obj(&mut h, i);
+        if h.should_step() {
+            h.step(&mut roots);
+        }
+    }
+    let peak = h.pages();
+    // Garbage only: finish the cycle in progress and run another, by steps.
+    while h.cycles() < 3 || h.phase() != Phase::Pause {
+        h.step(&mut roots);
+    }
+    assert_eq!(h.count::<common::Obj>(), 0);
+    assert!(h.pages() <= 2, "{} of {peak} pages still held", h.pages());
+}
+
+#[test]
+fn objects_pack_into_low_pages() {
+    let mut h = small_pages();
+    let all: Vec<_> = (0..2_000).map(|i| obj(&mut h, i)).collect();
+    // Keep every 10th object alive, so every page keeps a few.
+    let mut roots = Stack(all.iter().step_by(10).map(|&o| Ref::Obj(o)).collect());
+    h.full_collect(&mut roots);
+    let before = h.pages();
+    // New objects fill the holes in the lowest pages before any new page.
+    let low = obj(&mut h, 9_999);
+    assert!(low.index() < all[20].index());
+    assert_eq!(h.pages(), before);
+}
+
+#[test]
+#[should_panic(expected = "stale handle")]
+fn stale_handle_into_a_released_page_panics() {
+    let mut h = small_pages();
+    let root = obj(&mut h, 0);
+    let last = (0..1_000).map(|i| obj(&mut h, i)).last().unwrap();
+    h.full_collect(&mut Stack(vec![Ref::Obj(root)]));
+    assert!(h.pages() < 3, "the spike's pages were released");
+    // Checked or not: the page is gone, so the handle can't read anything.
+    let _ = h.get(last);
+}
+
+#[test]
+fn stale_handle_survives_page_reuse_as_stale() {
+    let mut h = small_pages();
+    let root = obj(&mut h, 0);
+    let spike: Vec<_> = (1..1_000).map(|i| obj(&mut h, i)).collect();
+    let stale = *spike.last().unwrap();
+    h.full_collect(&mut Stack(vec![Ref::Obj(root)]));
+    // Allocate the same slots again, in the reallocated pages.
+    let fresh: Vec<_> = (1..1_000).map(|i| obj(&mut h, 10_000 + i)).collect();
+    let same = fresh.iter().find(|g| g.index() == stale.index()).copied();
+    let same = same.expect("the slot was handed out again");
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.get(stale).id));
+    if orbit_gc::CHECKED_HANDLES {
+        assert!(
+            read.is_err(),
+            "a checked handle made before the release panics"
+        );
+        assert!(!h.is_live(stale) && h.is_live(same));
+    } else {
+        assert_eq!(read.ok(), Some(h.get(same).id));
+    }
 }

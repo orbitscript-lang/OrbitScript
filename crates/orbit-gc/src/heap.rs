@@ -1,37 +1,58 @@
 //! The heap: allocation, barriers, pacing and the incremental collector.
 
-use crate::arena::{AnyGc, Gc, Gen};
+use crate::arena::{AnyGc, Gc, Gen, page_shift};
 use crate::trace::{
     BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, Roots, Space, Trace,
-    WHITE, WeakMode,
+    WAIT, WHITE, WeakMode,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::marker::PhantomData;
 
-/// Collector tuning. The defaults are PUC Lua 5.5's.
+/// Collector tuning.
+///
+/// A cycle starts when the heap reaches [`Params::growth`] percent over the
+/// bytes the last cycle found reachable, the way Go's `GOGC` works. While a
+/// cycle runs, every [`Params::step_bytes`] of allocation buys a step that
+/// processes [`Params::work_ratio`] percent of that many bytes of heap:
+/// objects traced while marking, slots visited while sweeping. The higher
+/// the ratio, the less the heap overshoots while a cycle is in progress.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Params {
-    /// How far the heap may grow before the next cycle starts, as a
-    /// percentage of the bytes live after the last one (Lua's `pause`).
-    pub pause: u32,
-    /// Collector work per byte allocated, as a percentage (Lua's `stepmul`).
-    pub stepmul: u32,
-    /// Bytes allocated between incremental steps (Lua's `stepsize`).
-    pub stepsize: usize,
-    /// A floor under the threshold, so small programs collect less often.
-    /// Not a Lua parameter, and 0 by default, as in Lua: with a floor, a
-    /// small heap can't shrink back toward its live size.
+    /// How far the heap may grow past the bytes found reachable by the last
+    /// cycle before the next one starts, in percent. 100 lets it double.
+    pub growth: u32,
+    /// Bytes of heap processed per byte allocated while a cycle runs, in
+    /// percent.
+    pub work_ratio: u32,
+    /// Bytes allocated between steps while a cycle runs. Smaller steps
+    /// mean shorter pauses and more of them.
+    pub step_bytes: usize,
+    /// A floor under the heap size that starts a cycle, so small programs
+    /// collect less often. 0 by default: with a floor, a small heap can't
+    /// shrink back toward its live size.
     pub min_threshold: usize,
+    /// Target size of an arena page in bytes. Each arena rounds its slots
+    /// per page up to a power of two, so a page is between `page_bytes` and
+    /// twice that. A page whose objects are all collected goes back to the
+    /// allocator, except an arena's last one. Read when the heap is created;
+    /// changing it later has no effect.
+    ///
+    /// 64 KiB, the default, is a whole number of pages on systems with 4, 16
+    /// or 64 KiB pages. Whether freed pages then leave the process is up to
+    /// the allocator: glibc, for one, keeps them unless the host calls
+    /// `malloc_trim` or fixes its mmap threshold.
+    pub page_bytes: usize,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Params {
-            pause: 250,
-            stepmul: 200,
-            stepsize: 200 * 56,
+            growth: 100,
+            work_ratio: 400,
+            step_bytes: 16 * 1024,
             min_threshold: 0,
+            page_bytes: 64 * 1024,
         }
     }
 }
@@ -60,8 +81,8 @@ enum State {
 
 /// How many free slots the sweeper skips for the cost of visiting one object.
 const FREE_SLOT_SHARE: usize = 16;
-/// Work done by one step in stress mode.
-const STRESS_WORK: usize = 256;
+/// Bytes of work done by one step in stress mode.
+const STRESS_WORK: usize = 2048;
 
 /// A garbage-collected heap over the arenas of space `S`.
 ///
@@ -71,15 +92,13 @@ const STRESS_WORK: usize = 256;
 pub struct Heap<S: Space> {
     space: S,
     marks: Marks,
-    gray_again: Vec<AnyGc>,
+    /// Objects a write barrier turned back to gray. They are traced again
+    /// when marking finishes, not straight away, so a table written in a
+    /// loop is retraced once rather than after every store.
+    retrace: Vec<AnyGc>,
     state: State,
     /// Bytes allocated minus bytes freed.
     bytes: usize,
-    /// Bytes live at the end of marking, minus what the sweep has freed
-    /// since: Lua's `GCestimate`. Unlike `bytes`, it leaves out what the
-    /// mutator allocated during the sweep, which would otherwise feed into
-    /// the next threshold and let the heap grow cycle after cycle.
-    estimate: usize,
     /// Positive when a step is due.
     debt: isize,
     threshold: usize,
@@ -87,9 +106,9 @@ pub struct Heap<S: Space> {
     /// Objects that declared weak references in this cycle.
     weak: Vec<(AnyGc, WeakMode)>,
     /// Objects registered for finalization, oldest first.
-    finobj: Vec<AnyGc>,
-    /// Unreachable objects waiting for their finalizer, next first.
-    tobefnz: VecDeque<AnyGc>,
+    finalizable: Vec<AnyGc>,
+    /// Unreachable objects whose finalizer is due, next first.
+    finalize_queue: VecDeque<AnyGc>,
     cycles: u64,
     stress: bool,
     stopped: bool,
@@ -133,23 +152,31 @@ impl<S: Space + Default> Heap<S> {
     }
 
     pub fn with_params(params: Params) -> Self {
+        let mut space = S::default();
+        let meta = (0..S::KINDS)
+            .map(|k| {
+                let shift = page_shift(params.page_bytes, S::slot_bytes(k as u8));
+                space.set_page_shift(k as u8, shift);
+                KindMeta::new(shift)
+            })
+            .collect();
         Heap {
-            space: S::default(),
+            space,
             marks: Marks {
-                meta: (0..S::KINDS).map(|_| KindMeta::default()).collect(),
+                meta,
                 gray: Vec::new(),
-                marked: 0,
+                waiting: HashMap::new(),
+                marked_bytes: 0,
             },
-            gray_again: Vec::new(),
+            retrace: Vec::new(),
             state: State::Pause,
             bytes: 0,
-            estimate: 0,
             debt: -(params.min_threshold as isize),
             threshold: params.min_threshold,
             params,
             weak: Vec::new(),
-            finobj: Vec::new(),
-            tobefnz: VecDeque::new(),
+            finalizable: Vec::new(),
+            finalize_queue: VecDeque::new(),
             cycles: 0,
             stress: false,
             stopped: false,
@@ -169,14 +196,7 @@ impl<S: Space> Heap<S> {
         let size = slot_size::<T>() + v.extra_bytes();
         let state = self.state;
         let meta = &mut self.marks.meta[kind as usize];
-        let index = match meta.free.pop() {
-            Some(i) => i,
-            None => {
-                let i = u32::try_from(meta.color.len()).expect("orbit-gc: arena full");
-                meta.color.push(FREE);
-                i
-            }
-        };
+        let index = meta.take_slot();
         meta.color[index as usize] = alloc_color(state, kind, index);
         let gc = self.space.arena_mut().put(index, v);
         self.charge(size);
@@ -269,7 +289,7 @@ impl<S: Space> Heap<S> {
     // ---- barriers -------------------------------------------------------
 
     /// Call before storing a handle into `gc`. If the collector has already
-    /// traced `gc` in this cycle, it is traced again in the atomic phase.
+    /// traced `gc` in this cycle, it is traced again when marking finishes.
     /// Best for objects written often, such as tables.
     #[inline(always)]
     pub fn barrier_back<T>(&mut self, gc: Gc<T>)
@@ -281,7 +301,7 @@ impl<S: Space> Heap<S> {
             let c = &mut self.marks.meta[kind as usize].color[gc.index() as usize];
             if *c & COLOR == BLACK {
                 *c = (*c & !COLOR) | GRAY;
-                self.gray_again.push(AnyGc {
+                self.retrace.push(AnyGc {
                     kind,
                     index: gc.index(),
                     generation: Gen::default(),
@@ -302,8 +322,13 @@ impl<S: Space> Heap<S> {
             && self.marks.meta[<S as Holds<T>>::KIND as usize].color[owner.index() as usize] & COLOR
                 == BLACK
         {
-            self.marks
-                .mark_raw(<S as Holds<U>>::KIND, child.index(), U::LEAF);
+            let mut m = Marker {
+                space: &self.space,
+                marks: &mut self.marks,
+                weak: None,
+                can_register: false,
+            };
+            m.mark(child);
         }
     }
 
@@ -327,7 +352,7 @@ impl<S: Space> Heap<S> {
             return false;
         }
         *c |= FIN;
-        self.finobj.push(AnyGc {
+        self.finalizable.push(AnyGc {
             kind,
             index: gc.index(),
             generation: Gen::new(gc.generation()),
@@ -339,21 +364,21 @@ impl<S: Space> Heap<S> {
     /// first. The heap stops keeping it alive: root it (on the VM stack, say)
     /// before the next step, for as long as the finalizer runs.
     pub fn take_finalizable(&mut self) -> Option<AnyGc> {
-        let gc = self.tobefnz.pop_front()?;
+        let gc = self.finalize_queue.pop_front()?;
         self.marks.meta[gc.kind as usize].color[gc.index as usize] &= !FIN;
         Some(gc)
     }
 
     /// How many objects are waiting in [`Heap::take_finalizable`].
     pub fn pending_finalizers(&self) -> usize {
-        self.tobefnz.len()
+        self.finalize_queue.len()
     }
 
     /// Queue every registered object for finalization, reachable or not, as
     /// when a Lua state closes.
     pub fn finalize_all(&mut self) {
-        for gc in self.finobj.drain(..).rev() {
-            self.tobefnz.push_back(gc);
+        for gc in self.finalizable.drain(..).rev() {
+            self.finalize_queue.push_back(gc);
         }
     }
 
@@ -381,7 +406,7 @@ impl<S: Space> Heap<S> {
     }
 
     /// Bytes in use: arena slots plus what objects report in
-    /// [`Trace::extra_bytes`]. Lua's `collectgarbage("count")`.
+    /// [`Trace::extra_bytes`].
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -396,8 +421,25 @@ impl<S: Space> Heap<S> {
     where
         S: Holds<T>,
     {
-        let meta = &self.marks.meta[<S as Holds<T>>::KIND as usize];
-        meta.color.len() - meta.free.len()
+        self.marks.meta[<S as Holds<T>>::KIND as usize].live
+    }
+
+    /// Arena pages currently allocated, across all object types.
+    pub fn pages(&self) -> usize {
+        self.marks.meta.iter().map(|m| m.allocated).sum()
+    }
+
+    /// Bytes held by allocated pages: every slot, occupied or not, plus the
+    /// collector's color byte per slot. Unlike [`Heap::bytes`], this is what
+    /// the arenas take from the allocator, and it drops when pages are
+    /// released.
+    pub fn reserved_bytes(&self) -> usize {
+        self.marks
+            .meta
+            .iter()
+            .enumerate()
+            .map(|(k, m)| m.allocated * m.page_slots() as usize * (S::slot_bytes(k as u8) + 1))
+            .sum()
     }
 
     /// Completed collection cycles.
@@ -460,33 +502,31 @@ impl<S: Space> Heap<S> {
         let mut work = if self.stress {
             STRESS_WORK
         } else {
-            let debt = self.debt.max(self.params.stepsize as isize) as usize;
-            (debt.saturating_mul(self.params.stepmul as usize) / 100).max(1)
+            let debt = self.debt.max(self.params.step_bytes as isize) as usize;
+            (debt.saturating_mul(self.params.work_ratio as usize) / 100).max(1)
         };
         loop {
             match self.state {
-                State::Pause => {
-                    self.mark_roots(roots);
-                    self.state = State::Mark;
-                }
+                State::Pause => self.start_marking(roots),
                 State::Mark => {
+                    // Objects regrayed by the backward barrier wait in
+                    // `retrace` for the end of marking: retracing a big, hot
+                    // table after every store would be quadratic.
                     while work > 0 {
-                        // As in PUC Lua, objects regrayed by the barrier wait
-                        // for the atomic phase: retracing a big, hot table
-                        // after every store would be quadratic.
                         let Some(g) = self.marks.gray.pop() else {
                             break;
                         };
-                        work = work.saturating_sub(self.blacken(g, true).max(1));
+                        let before = self.marks.marked_bytes;
+                        self.blacken(g);
+                        work = work.saturating_sub((self.marks.marked_bytes - before).max(1));
                     }
                     if !self.marks.gray.is_empty() {
                         break;
                     }
-                    self.atomic(roots);
-                    self.state = State::Sweep { kind: 0, at: 0 };
+                    self.finish_marking(roots);
                 }
                 State::Sweep { .. } => {
-                    if self.sweep(work / 32 + 1) {
+                    if self.sweep(work) {
                         self.finish_cycle();
                         return true;
                     }
@@ -497,7 +537,7 @@ impl<S: Space> Heap<S> {
         self.debt = if self.stress {
             0
         } else {
-            -(self.params.stepsize as isize)
+            -(self.params.step_bytes as isize)
         };
         false
     }
@@ -507,16 +547,14 @@ impl<S: Space> Heap<S> {
     pub fn full_collect<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) {
         match self.state {
             State::Pause => {}
-            // Objects marked earlier in this cycle may have died since. As
-            // Lua does, drop the partial marking and start over, so a full
-            // collection frees everything unreachable now.
+            // Objects marked earlier in this cycle may have died since. Drop
+            // the partial marking and start over, so a full collection frees
+            // everything unreachable now.
             State::Mark => self.unmark_all(),
             State::Sweep { .. } => while !self.sweep(usize::MAX) {},
         }
-        self.mark_roots(roots);
-        self.state = State::Mark;
-        self.atomic(roots);
-        self.state = State::Sweep { kind: 0, at: 0 };
+        self.start_marking(roots);
+        self.finish_marking(roots);
         while !self.sweep(usize::MAX) {}
         self.finish_cycle();
     }
@@ -525,26 +563,33 @@ impl<S: Space> Heap<S> {
         for meta in &mut self.marks.meta {
             for c in &mut meta.color {
                 if *c != FREE {
-                    *c &= !COLOR;
+                    *c &= !(COLOR | WAIT);
                 }
             }
         }
         self.marks.gray.clear();
-        self.gray_again.clear();
+        self.marks.waiting.clear();
+        self.retrace.clear();
         self.weak.clear();
         self.state = State::Pause;
     }
 
+    /// The next cycle starts once the heap grows `growth` percent past what
+    /// this one found reachable.
     fn finish_cycle(&mut self) {
         self.state = State::Pause;
         self.cycles += 1;
-        self.threshold = (self.estimate / 100)
-            .saturating_mul(self.params.pause as usize)
+        let live = self.marks.marked_bytes;
+        self.threshold = live
+            .saturating_add(live.saturating_mul(self.params.growth as usize) / 100)
             .max(self.params.min_threshold);
+        // If the heap is already past the next threshold, start the next
+        // cycle at once, but in ordinary steps: carrying the whole overshoot
+        // as debt would make its first step a long pause.
         self.debt = if self.stress {
             0
         } else {
-            self.bytes as isize - self.threshold as isize
+            (self.bytes as isize - self.threshold as isize).min(0)
         };
     }
 
@@ -559,57 +604,41 @@ impl<S: Space> Heap<S> {
         }
     }
 
+    fn start_marking<R: Roots<S> + ?Sized>(&mut self, roots: &R) {
+        self.marks.marked_bytes = 0;
+        self.mark_roots(roots);
+        self.state = State::Mark;
+    }
+
     fn mark_roots<R: Roots<S> + ?Sized>(&mut self, roots: &R) {
         let mut m = self.marker(false);
         roots.trace(&mut m);
-        for &gc in &self.tobefnz {
+        for &gc in &self.finalize_queue {
             self.marks.mark_raw(gc.kind, gc.index, false);
         }
     }
 
-    /// Trace one gray object and blacken it. Returns the work done, in bytes.
-    fn blacken(&mut self, g: AnyGc, can_register: bool) -> usize {
+    /// Trace one gray object, blacken it, and count its bytes as marked.
+    fn blacken(&mut self, g: AnyGc) {
         let c = &mut self.marks.meta[g.kind as usize].color[g.index as usize];
         *c = (*c & !COLOR) | BLACK;
         let mut m = Marker {
             space: &self.space,
             marks: &mut self.marks,
             weak: None,
-            can_register,
+            can_register: true,
         };
-        let work = self.space.trace_slot(g.kind, g.index, &mut m);
+        let size = self.space.trace_slot(g.kind, g.index, &mut m);
         if let Some(mode) = m.weak {
             self.weak.push((g, mode));
         }
-        work
+        self.marks.marked_bytes += size;
     }
 
-    fn propagate_all(&mut self) {
-        loop {
-            if let Some(g) = self.marks.gray.pop() {
-                self.blacken(g, true);
-            } else if let Some(g) = self.gray_again.pop() {
-                self.blacken(g, true);
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Mark until every ephemeron whose key is marked has its value marked.
-    fn converge_ephemerons(&mut self) {
-        loop {
-            self.propagate_all();
-            let before = self.marks.marked;
-            for i in 0..self.weak.len() {
-                let (g, mode) = self.weak[i];
-                if mode.is_ephemeron() {
-                    self.blacken(g, false);
-                }
-            }
-            if self.marks.marked == before {
-                break;
-            }
+    /// Trace until nothing is gray, including objects waiting for a retrace.
+    fn drain(&mut self) {
+        while let Some(g) = self.marks.gray.pop().or_else(|| self.retrace.pop()) {
+            self.blacken(g);
         }
     }
 
@@ -638,19 +667,24 @@ impl<S: Space> Heap<S> {
         }
     }
 
-    /// The indivisible end of marking, in `lgc.c`'s order.
-    fn atomic<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) {
+    /// Marking's last step, done in one go: after it, the reachable set is
+    /// known and weak references are cleared. Then the sweep starts.
+    ///
+    /// The order follows Lua's documented rules. Weak values are cleared
+    /// before finalizable objects are resurrected, so a weak value never
+    /// exposes an object about to be finalized. Weak keys are cleared after,
+    /// so an entry whose key is being finalized survives until the next
+    /// cycle, and resurrected keys keep their ephemeron values.
+    fn finish_marking<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) {
         // Roots are rescanned, so writes to them need no barrier.
         self.mark_roots(roots);
-        self.propagate_all();
+        self.drain();
         self.dedup_weak();
-        self.converge_ephemerons();
-        // Everything strongly reachable is marked. Clear weak values now, so
-        // none of them exposes an object about to be finalized.
         self.clear_weak(true);
-        // Resurrect unreachable finalizable objects, newest first.
+        // Keep unreachable finalizable objects alive for their finalizers,
+        // and queue them newest first.
         let mut dead = Vec::new();
-        self.finobj.retain(|&g| {
+        self.finalizable.retain(|&g| {
             let alive = self.marks.is_marked(g.kind, g.index);
             if !alive {
                 dead.push(g);
@@ -658,10 +692,11 @@ impl<S: Space> Heap<S> {
             alive
         });
         for &g in dead.iter().rev() {
-            self.tobefnz.push_back(g);
+            self.finalize_queue.push_back(g);
             self.marks.mark_raw(g.kind, g.index, false);
         }
-        self.converge_ephemerons();
+        self.drain();
+        // Objects traced for the first time just now registered too.
         self.dedup_weak();
         self.clear_weak(false);
         let live = Liveness {
@@ -670,15 +705,18 @@ impl<S: Space> Heap<S> {
         };
         roots.clear_weak(&live);
         self.weak.clear();
-        self.estimate = self.bytes;
+        self.marks.clear_waiting();
+        self.state = State::Sweep { kind: 0, at: 0 };
     }
 
     // ---- sweeping -------------------------------------------------------
 
-    /// Sweep until `budget` objects have been visited. Free slots are cheap
-    /// to skip, so each counts as 1/16 of an object; otherwise an arena that
-    /// grew and then emptied would slow every later sweep down to a crawl.
-    /// Returns true when every arena is swept.
+    /// Sweep about `budget` bytes of slots. A free slot is cheap to skip, so
+    /// it counts as 1/16 of its size; otherwise an arena that grew and then
+    /// emptied would slow every later sweep down to a crawl. Released pages
+    /// and never-used slots cost nothing. A page left with no objects is
+    /// released, unless it is its arena's last. Returns true when every arena
+    /// is swept.
     fn sweep(&mut self, budget: usize) -> bool {
         let mut credit = budget.saturating_mul(FREE_SLOT_SHARE);
         loop {
@@ -691,25 +729,56 @@ impl<S: Space> Heap<S> {
             if credit == 0 {
                 return false;
             }
-            let len = self.marks.meta[kind as usize].color.len();
-            let mut i = at as usize;
-            while i < len && credit > 0 {
-                let cost = if self.sweep_one(kind, i as u32) {
-                    FREE_SLOT_SHARE
-                } else {
-                    1
-                };
-                credit = credit.saturating_sub(cost);
-                i += 1;
-            }
-            self.state = if i == len {
-                State::Sweep {
+            let meta = &self.marks.meta[kind as usize];
+            let (p, start) = meta.split(at);
+            let Some(page) = meta.pages.get(p) else {
+                self.state = State::Sweep {
                     kind: kind + 1,
                     at: 0,
+                };
+                continue;
+            };
+            let shift = meta.shift;
+            let end = page.fresh as usize;
+            // In 16ths of a byte, like `credit`.
+            let slot_cost = (S::slot_bytes(kind) + 1) * FREE_SLOT_SHARE;
+            let base = (p as u32) << shift;
+            let mut o = start;
+            while o < end && credit > 0 {
+                let cost = if self.sweep_one(kind, base | o as u32) {
+                    slot_cost
+                } else {
+                    slot_cost / FREE_SLOT_SHARE
+                };
+                credit = credit.saturating_sub(cost);
+                o += 1;
+            }
+            self.state = if o < end {
+                State::Sweep {
+                    kind,
+                    at: ((p as u32) << shift) | o as u32,
                 }
             } else {
-                State::Sweep { kind, at: i as u32 }
+                self.finish_page(kind, p as u32);
+                match ((p as u32) + 1).checked_mul(1 << shift) {
+                    Some(at) => State::Sweep { kind, at },
+                    None => State::Sweep {
+                        kind: kind + 1,
+                        at: 0,
+                    },
+                }
             };
+        }
+    }
+
+    /// Release page `p` of `kind` if the sweep left it empty and it is not
+    /// the arena's last page.
+    fn finish_page(&mut self, kind: u8, p: u32) {
+        let meta = &mut self.marks.meta[kind as usize];
+        let page = &meta.pages[p as usize];
+        if page.allocated && page.live == 0 && meta.allocated > 1 {
+            meta.release_page(p);
+            self.space.release_page(kind, p);
         }
     }
 
@@ -725,11 +794,9 @@ impl<S: Space> Heap<S> {
                 *c & FIN == 0,
                 "orbit-gc: freeing an object awaiting finalization"
             );
-            *c = FREE;
-            meta.free.push(index);
+            meta.free_slot(index);
             let n = self.space.free_slot(kind, index);
             self.bytes = self.bytes.saturating_sub(n);
-            self.estimate = self.estimate.saturating_sub(n);
         } else {
             *c &= !COLOR;
         }
