@@ -309,7 +309,7 @@ impl StringTable {
             match self.slots[i] {
                 (_, EMPTY) => return None,
                 (h, idx) if idx != TOMB && h == hash => {
-                    let s: StrRef = Gc::from_index(idx);
+                    let s: StrRef = space.handle_at(idx);
                     if space.get(s).as_bytes() == bytes {
                         return Some(s);
                     }

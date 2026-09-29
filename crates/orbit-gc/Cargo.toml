@@ -10,3 +10,9 @@ publish = false
 
 [lints]
 workspace = true
+
+[features]
+# Check a generation on every handle access so a stale handle always panics
+# (8-byte `Gc`). Always on in debug builds; this turns it on in release too.
+# It costs about 8% in interpreter speed (measured on the Milestone 1 build).
+checked-handles = []

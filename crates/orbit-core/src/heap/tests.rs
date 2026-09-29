@@ -114,6 +114,25 @@ fn unreachable_objects_are_collected() {
 }
 
 #[test]
+fn removed_key_does_not_alias_a_reused_slot() {
+    let mut h = heap();
+    let t = h.new_table();
+    let a = h.new_table();
+    h.raw_set(t, Value::Table(a), Value::Int(1)).unwrap();
+    h.raw_set(t, Value::Table(a), Value::Nil).unwrap();
+    collect(&mut h, &[Value::Table(t)]);
+    assert!(!h.gc().is_live(a));
+    // The new table may reuse `a`'s slot; the removed entry's key must not stand for it.
+    let b = h.new_table();
+    assert!(h.raw_get(t, Value::Table(b)).is_nil());
+    h.raw_set(t, Value::Table(b), Value::Int(2)).unwrap();
+    assert_eq!(int(h.raw_get(t, Value::Table(b))), 2);
+    let (k, _) = h.next(t, Value::Nil).unwrap().unwrap();
+    assert_eq!(k.as_table(), Some(b));
+    assert!(h.next(t, k).unwrap().is_none());
+}
+
+#[test]
 fn byte_accounting_returns_to_baseline() {
     let mut h = heap();
     collect(&mut h, &[]);
