@@ -142,7 +142,8 @@ pub struct Table {
     metatable: Option<TableRef>,
 }
 
-const _: () = assert!(size_of::<Table>() <= 56);
+// 64 with checked handles, where the metatable handle is 8 bytes.
+const _: () = assert!(size_of::<Table>() <= if orbit_gc::CHECKED_HANDLES { 64 } else { 56 });
 
 /// Result of looking a key up in the array part.
 #[inline(always)]
