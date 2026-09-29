@@ -282,13 +282,13 @@ impl Value {
             Value::Bool(true) => (tag::TRUE, 0),
             Value::Int(i) => (tag::INT, i as u64),
             Value::Float(f) => (tag::FLOAT, f.to_bits()),
-            Value::Str(s) => (tag::STR, u64::from(s.index())),
-            Value::Table(t) => (tag::TABLE, u64::from(t.index())),
-            Value::LuaFn(f) => (tag::LUA_FN, u64::from(f.index())),
-            Value::NativeFn(f) => (tag::NATIVE_FN, u64::from(f.index())),
+            Value::Str(s) => (tag::STR, s.to_bits()),
+            Value::Table(t) => (tag::TABLE, t.to_bits()),
+            Value::LuaFn(f) => (tag::LUA_FN, f.to_bits()),
+            Value::NativeFn(f) => (tag::NATIVE_FN, f.to_bits()),
             Value::LightNative(n) => (tag::LIGHT_NATIVE, u64::from(n.0)),
-            Value::UserData(u) => (tag::USERDATA, u64::from(u.index())),
-            Value::Thread(t) => (tag::THREAD, u64::from(t.index())),
+            Value::UserData(u) => (tag::USERDATA, u.to_bits()),
+            Value::Thread(t) => (tag::THREAD, t.to_bits()),
         }
     }
 
@@ -300,13 +300,13 @@ impl Value {
             tag::TRUE => Value::Bool(true),
             tag::INT => Value::Int(payload as i64),
             tag::FLOAT => Value::Float(f64::from_bits(payload)),
-            tag::STR => Value::Str(Gc::from_index(payload as u32)),
-            tag::TABLE => Value::Table(Gc::from_index(payload as u32)),
-            tag::LUA_FN => Value::LuaFn(Gc::from_index(payload as u32)),
-            tag::NATIVE_FN => Value::NativeFn(Gc::from_index(payload as u32)),
+            tag::STR => Value::Str(Gc::from_bits(payload)),
+            tag::TABLE => Value::Table(Gc::from_bits(payload)),
+            tag::LUA_FN => Value::LuaFn(Gc::from_bits(payload)),
+            tag::NATIVE_FN => Value::NativeFn(Gc::from_bits(payload)),
             tag::LIGHT_NATIVE => Value::LightNative(NativeId(payload as u32)),
-            tag::USERDATA => Value::UserData(Gc::from_index(payload as u32)),
-            tag::THREAD => Value::Thread(Gc::from_index(payload as u32)),
+            tag::USERDATA => Value::UserData(Gc::from_bits(payload)),
+            tag::THREAD => Value::Thread(Gc::from_bits(payload)),
             _ => Value::Nil,
         }
     }
@@ -453,6 +453,8 @@ mod tests {
             Value::LightNative(NativeId(5)),
             Value::UserData(Gc::from_index(6)),
             Value::Thread(Gc::from_index(8)),
+            // With checked handles the generation rides in the high bits.
+            Value::Table(Gc::from_bits(7 | 3 << 32)),
         ];
         for v in vals {
             let (t, p) = v.pack();
