@@ -34,14 +34,14 @@ Checked by stream A against the Lua 5.5.1 manual and sources (the `v5.5.1` tag o
 
 Incompatibilities the manual lists (section 8):
 - Language:
-  - `global` is a reserved word. The default build defines `LUA_COMPAT_GLOBAL`, which keeps `global` a regular name and only reads it as a declaration when `<`, a name, `*` or `function` follows. The suite relies on the default (its files both declare globals and parse under it), so `orbit-lua-syntax` follows the default and can reserve the word as an option.
+  - `global` is a reserved word. The default build defines `LUA_COMPAT_GLOBAL`, which keeps `global` a regular name and only reads it as a declaration when `<`, a name, `*` or `function` follows. The suite relies on the default (its files both declare globals and parse under it), so the Lua front end must follow the default, and can reserve the word as an option.
   - The control variable of a `for` loop is read-only (assigning to it is a compile error).
   - A chain of `__call` metamethods can have at most 15 objects.
   - A `nil` error object is replaced by a string message.
 - Libraries: GC parameters are set through the new `collectgarbage("param", ...)` option, not the `incremental` and `generational` options, and the parameters themselves changed.
 - C API: several changes (`lua_newstate` seed, `nresults` limit of 250, deprecated `lua_resetthread` and `lua_setcstacklimit`, `lua_dump`, `LUA_GCPARAM`, `lua_pushvfstring`). None applies, since embedding is Rust-only.
 
-New syntax (`orbit-lua-syntax` covers all of it):
+New syntax:
 - `global` declarations: `global x`, `global x, y = 1, 2` (which fails at run time if a global already has a value), `global <const> x`, `global function f`, and `global *` / `global <const> *`. Once a declaration is in scope, undeclared free names are compile errors, and `<const>` globals cannot be assigned. Globals cannot be `<close>`.
 - An attribute can prefix a whole name list: `local <const> a, b = 1, 2`.
 - Named vararg tables: `function f(a, ...args)`. The table holds the extra arguments plus `n`, the name is read-only, and the compiler can avoid building a real table when the name is only indexed.
