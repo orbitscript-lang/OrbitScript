@@ -1,6 +1,6 @@
 //! The heap: allocation, barriers, pacing and the incremental collector.
 
-use crate::arena::{AnyGc, Gc};
+use crate::arena::{AnyGc, Gc, Gen};
 use crate::trace::{
     BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, Roots, Space, Trace,
     WHITE, WeakMode,
@@ -178,20 +178,21 @@ impl<S: Space> Heap<S> {
             }
         };
         meta.color[index as usize] = alloc_color(state, kind, index);
-        self.space.arena_mut().put(index, v);
+        let gc = self.space.arena_mut().put(index, v);
         self.charge(size);
-        Gc::from_index(index)
+        gc
     }
 
-    /// The object behind `gc`. Panics if it has been collected and its slot
-    /// not reused.
+    /// The object behind `gc`. Panics if it has been collected: always with
+    /// [`CHECKED_HANDLES`](crate::CHECKED_HANDLES), otherwise only until its
+    /// slot is reused.
     #[inline(always)]
     #[track_caller]
     pub fn get<T>(&self, gc: Gc<T>) -> &T
     where
         S: Holds<T>,
     {
-        self.space.arena().get(gc.index())
+        self.space.arena().get(gc)
     }
 
     /// Mutable access with no write barrier and no byte accounting. Use it
@@ -204,7 +205,7 @@ impl<S: Space> Heap<S> {
     where
         S: Holds<T>,
     {
-        self.space.arena_mut().get_mut(gc.index())
+        self.space.arena_mut().get_mut(gc)
     }
 
     /// Change an object: runs the backward write barrier, then `f`, then
@@ -215,7 +216,7 @@ impl<S: Space> Heap<S> {
         S: Holds<T>,
     {
         self.barrier_back(gc);
-        let obj = self.space.arena_mut().get_mut(gc.index());
+        let obj = self.space.arena_mut().get_mut(gc);
         let before = obj.extra_bytes();
         let r = f(obj);
         let after = obj.extra_bytes();
@@ -223,14 +224,25 @@ impl<S: Space> Heap<S> {
         r
     }
 
-    /// Whether `gc`'s slot holds an object. A collected object's slot may
-    /// have been reused, so this can't prove a handle is still the object it
-    /// was; it is for tests and assertions.
+    /// Whether `gc` still points at a live object. Without
+    /// [`CHECKED_HANDLES`](crate::CHECKED_HANDLES) a reused slot also counts
+    /// as live, so this is for tests and assertions.
     pub fn is_live<T>(&self, gc: Gc<T>) -> bool
     where
         S: Holds<T>,
     {
-        self.space.arena().is_occupied(gc.index())
+        self.space.arena().is_occupied(gc)
+    }
+
+    /// A handle to the object now in slot `index` of `T`'s arena, for code
+    /// that stores bare indexes (an intern table, say) and knows the object
+    /// there is still the one it means.
+    #[track_caller]
+    pub fn handle_at<T>(&self, index: u32) -> Gc<T>
+    where
+        S: Holds<T>,
+    {
+        self.space.arena().handle_at(index)
     }
 
     /// Erase a handle's type.
@@ -241,6 +253,7 @@ impl<S: Space> Heap<S> {
         AnyGc {
             kind: <S as Holds<T>>::KIND,
             index: gc.index(),
+            generation: Gen::new(gc.generation()),
         }
     }
 
@@ -249,7 +262,8 @@ impl<S: Space> Heap<S> {
     where
         S: Holds<T>,
     {
-        (gc.kind == <S as Holds<T>>::KIND).then(|| Gc::from_index(gc.index))
+        (gc.kind == <S as Holds<T>>::KIND)
+            .then(|| Gc::from_bits(u64::from(gc.index) | u64::from(gc.generation.get()) << 32))
     }
 
     // ---- barriers -------------------------------------------------------
@@ -270,6 +284,7 @@ impl<S: Space> Heap<S> {
                 self.gray_again.push(AnyGc {
                     kind,
                     index: gc.index(),
+                    generation: Gen::default(),
                 });
             }
         }
@@ -315,6 +330,7 @@ impl<S: Space> Heap<S> {
         self.finobj.push(AnyGc {
             kind,
             index: gc.index(),
+            generation: Gen::new(gc.generation()),
         });
         true
     }
