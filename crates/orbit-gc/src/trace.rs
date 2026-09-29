@@ -1,6 +1,6 @@
 //! How objects and roots tell the collector what they point to.
 
-use crate::arena::{AnyGc, Arena, Gc};
+use crate::arena::{AnyGc, Arena, Gc, Gen};
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -166,7 +166,11 @@ impl Marks {
                 *c = (*c & !COLOR) | BLACK;
             } else {
                 *c = (*c & !COLOR) | GRAY;
-                self.gray.push(AnyGc { kind, index });
+                self.gray.push(AnyGc {
+                    kind,
+                    index,
+                    generation: Gen::default(),
+                });
             }
             self.marked += 1;
         }
@@ -229,7 +233,7 @@ impl<'a, S: Space> Marker<'a, S> {
     where
         S: Holds<T>,
     {
-        self.space.arena().get(gc.index())
+        self.space.arena().get(gc)
     }
 
     /// Declare that the object being traced holds weak references, so the

@@ -26,8 +26,11 @@
 //! Allocation never collects. Collection happens only inside [`Heap::step`]
 //! and [`Heap::full_collect`], which take the [`Roots`]. Any handle the owner
 //! holds across one of those calls must be reachable from those roots, or it
-//! may be freed. Using a freed handle panics, or reads whichever object reused
-//! the slot; it is never undefined behavior. A borrow-checked rooting layer
+//! may be freed. Using a freed handle is never undefined behavior. In debug
+//! builds, or with the `checked-handles` feature, every handle carries its
+//! slot's generation and a stale one always panics ([`CHECKED_HANDLES`]).
+//! Otherwise handles are 4 bytes and unchecked: a stale one panics until its
+//! slot is reused, then reads the new object. A borrow-checked rooting layer
 //! for embedders belongs in the `orbit` crate, on top of this one.
 //!
 //! # Example
@@ -69,7 +72,7 @@ mod arena;
 mod heap;
 mod trace;
 
-pub use arena::{AnyGc, Arena, Gc};
+pub use arena::{AnyGc, Arena, CHECKED_HANDLES, Gc};
 pub use heap::{Heap, Params, Phase};
 pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 
@@ -196,7 +199,7 @@ pub mod __private {
 
     #[inline]
     pub fn trace<S: Space, T: Trace<S>>(a: &Arena<T>, index: u32, m: &mut Marker<'_, S>) -> usize {
-        let obj = a.get(index);
+        let obj = a.get_slot(index);
         obj.trace(m);
         slot_size::<T>() + obj.extra_bytes()
     }
@@ -207,7 +210,7 @@ pub mod __private {
         mode: WeakMode,
         live: &Liveness<'_, S>,
     ) {
-        a.get_mut(index).clear_weak(mode, live)
+        a.get_slot_mut(index).clear_weak(mode, live)
     }
 
     pub fn free<S: Space, T: Trace<S>>(a: &mut Arena<T>, index: u32) -> usize {

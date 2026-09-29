@@ -53,6 +53,38 @@ fn stale_handle_panics() {
 }
 
 #[test]
+fn reused_slot_behind_a_stale_handle() {
+    let mut h = TestHeap::new();
+    let a = obj(&mut h, 1);
+    h.full_collect(&mut ());
+    let b = obj(&mut h, 2);
+    assert_eq!(a.index(), b.index(), "the slot was reused");
+    let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.get(a).id));
+    if orbit_gc::CHECKED_HANDLES {
+        assert!(stale.is_err(), "a checked stale handle panics");
+        assert!(!h.is_live(a) && h.is_live(b));
+        assert_ne!(a, b);
+    } else {
+        assert_eq!(stale.ok(), Some(2), "unchecked, it reads the new object");
+    }
+}
+
+#[test]
+fn handle_size_and_bits() {
+    let expected = if orbit_gc::CHECKED_HANDLES { 8 } else { 4 };
+    assert_eq!(size_of::<orbit_gc::Gc<common::Obj>>(), expected);
+    let mut h = TestHeap::new();
+    let a = obj(&mut h, 1);
+    h.full_collect(&mut ());
+    let b = obj(&mut h, 2);
+    assert_eq!(orbit_gc::Gc::from_bits(b.to_bits()), b);
+    assert_eq!(h.handle_at::<common::Obj>(b.index()), b);
+    if orbit_gc::CHECKED_HANDLES {
+        assert_eq!(b.generation(), a.generation() + 1);
+    }
+}
+
+#[test]
 fn bytes_return_to_baseline() {
     let mut h = TestHeap::new();
     assert_eq!(h.bytes(), 0);
@@ -356,7 +388,10 @@ fn objects_allocated_during_sweep_survive() {
 
 #[test]
 fn pacing_triggers_steps_and_stop_disables_them() {
-    let mut h = TestHeap::new();
+    let mut h = TestHeap::with_params(orbit_gc::Params {
+        min_threshold: 256 * 1024,
+        ..orbit_gc::Params::default()
+    });
     assert!(!h.should_step());
     let mut n = 0;
     while !h.should_step() {
@@ -376,6 +411,69 @@ fn pacing_triggers_steps_and_stop_disables_them() {
     while !h.step(&mut ()) {}
     assert_eq!(h.count::<common::Obj>(), 0);
     assert_eq!(h.bytes(), 0);
+}
+
+/// Allocate `n` garbage objects, stepping the collector whenever it asks,
+/// and return the largest heap size seen.
+fn churn(h: &mut TestHeap, roots: &mut Stack, n: u64) -> usize {
+    let mut peak = h.bytes();
+    for i in 0..n {
+        let o = obj(h, i);
+        link(h, o, Ref::Obj(o));
+        if h.should_step() {
+            h.step(roots);
+        }
+        peak = peak.max(h.bytes());
+    }
+    peak
+}
+
+#[test]
+fn heap_shrinks_back_after_stop_and_restart() {
+    // gc.lua's pace test: after the heap is let grow while stopped, normal
+    // collection brings it back near its live size.
+    let mut h = TestHeap::new();
+    let mut roots = Stack((0..50).map(|i| Ref::Obj(obj(&mut h, i))).collect());
+    h.full_collect(&mut roots);
+    h.full_collect(&mut roots);
+    let x = h.bytes();
+    h.stop();
+    while h.bytes() <= 3 * x {
+        obj(&mut h, 0);
+    }
+    h.restart();
+    let mut n = 0;
+    while h.bytes() > 2 * x {
+        let o = obj(&mut h, 0);
+        link(&mut h, o, Ref::Obj(o));
+        if h.should_step() {
+            h.step(&mut roots);
+        }
+        n += 1;
+        assert!(n < 100_000, "heap stuck at {} bytes, live {x}", h.bytes());
+    }
+}
+
+#[test]
+fn garbage_churn_stays_bounded() {
+    // Steady allocation with a small live set must reach a steady state, even
+    // after the arena once held a million objects and is now mostly free
+    // slots. Before the sweep stopped charging free slots at full price and
+    // the threshold stopped counting what was allocated during the sweep,
+    // the heap grew every cycle.
+    let mut h = TestHeap::new();
+    let mut roots = Stack((0..1_000_000).map(|i| Ref::Obj(obj(&mut h, i))).collect());
+    h.full_collect(&mut roots);
+    roots.0.truncate(100);
+    h.full_collect(&mut roots);
+    let live = h.bytes();
+    let first = churn(&mut h, &mut roots, 2_000_000);
+    let second = churn(&mut h, &mut roots, 2_000_000);
+    assert!(second <= first, "heap still growing: {first} then {second}");
+    assert!(
+        second < live + 4 * 1024 * 1024,
+        "peak {second} bytes, live {live}"
+    );
 }
 
 #[test]
