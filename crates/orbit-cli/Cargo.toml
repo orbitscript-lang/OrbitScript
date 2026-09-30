@@ -15,5 +15,13 @@ path = "src/main.rs"
 [dependencies]
 orbit = { path = "../orbit" }
 
-[lints]
-workspace = true
+# The workspace lints, except that `unsafe_code` is denied rather than
+# forbidden, so `src/memory.rs` can allow its one glibc call (ADR-6). Keep
+# the rest in step with the workspace `Cargo.toml`.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
