@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run every allocator variant on every workload and print medians.
 
-Usage: python3 alloc/run.py TARGET_ROOT [reps]
+Usage: python3 alloc/run.py TARGET_ROOT [reps] [variant substring]
 TARGET_ROOT holds one Cargo target dir per build variant (see README.md).
 """
 import os, statistics, subprocess, sys
@@ -18,7 +18,13 @@ VARIANTS = [
     ("mimalloc 3 + mi_collect", "mi3c", {}),
     ("mimalloc 2", "mi2", {}),
     ("mimalloc 2, purge_delay=0", "mi2", {"MIMALLOC_PURGE_DELAY": "0"}),
+    ("musl", "musl-system", {}),
+    ("musl + mimalloc 3", "musl-mi3", {}),
+    ("musl + mimalloc 3, purge_delay=0", "musl-mi3", {"MIMALLOC_PURGE_DELAY": "0"}),
+    ("musl + mimalloc 2", "musl-mi2", {}),
 ]
+if len(sys.argv) > 3:
+    VARIANTS = [v for v in VARIANTS if sys.argv[3] in v[0]]
 WORKLOADS = {
     "trees": (["trees", "16"], ["secs", "peak_rss_mib", "longest_step_ms"]),
     "churn": (["churn", "5000000"], ["secs", "peak_rss_mib", "longest_step_ms"]),
