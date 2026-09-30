@@ -67,6 +67,8 @@ A local that no closure captures (the HIR's `Local::captured == false`, most loc
 
 ## Bytecode (`orbit-vm::op`)
 
+The types are defined in `orbit_compiler::bytecode` and re-exported as `orbit_vm::op`, so the compiler, which emits them, stays free of runtime dependencies and there is no crate cycle. That module is the exact contract; the table below is its summary.
+
 Register-based, one Rust enum, **8 bytes per instruction**:
 
 ```rust

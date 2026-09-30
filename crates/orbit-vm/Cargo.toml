@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+orbit-compiler = { path = "../orbit-compiler" }
 orbit-core = { path = "../orbit-core" }
 
 [lints]

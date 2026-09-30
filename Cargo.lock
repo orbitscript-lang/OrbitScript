@@ -61,7 +61,6 @@ dependencies = [
 name = "orbit-compiler"
 version = "0.0.0"
 dependencies = [
- "orbit-core",
  "orbit-hir",
 ]
 
@@ -103,5 +102,6 @@ dependencies = [
 name = "orbit-vm"
 version = "0.0.0"
 dependencies = [
+ "orbit-compiler",
  "orbit-core",
 ]
