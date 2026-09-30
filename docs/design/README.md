@@ -37,7 +37,7 @@ flowchart LR
 
 Everything in the box, before the link step, is plain `Send` data with no GC or VM access, which keeps a parallel front end open (see [lua-front-end.md](lua-front-end.md#parallel-and-async-front-end)).
 
-Crate dependencies this implies: `orbit-hir` depends on nothing; `orbit-lua-syntax` depends on `orbit-hir` (the Phase 0 placeholder has it the other way round); `orbit-compiler` depends on `orbit-hir`; `orbit-vm` depends on `orbit-core` and `orbit-compiler`'s output types.
+Crate dependencies this implies: `orbit-hir` depends on nothing; `orbit-lua-syntax` depends on `orbit-hir` (the Phase 0 placeholder has it the other way round); `orbit-bytecode` (the instruction set and `UnlinkedProto`) depends on nothing; `orbit-compiler` depends on `orbit-hir` and `orbit-bytecode`; `orbit-core` depends on `orbit-gc` and `orbit-bytecode` (prototypes hold code); `orbit-vm` depends on `orbit-core` and `orbit-bytecode`.
 
 ## Choices that need Tym's review
 
