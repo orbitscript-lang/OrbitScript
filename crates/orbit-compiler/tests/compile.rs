@@ -474,6 +474,10 @@ fn recursive_local_function_gets_its_cell_first() {
             Op::CapGet { dst: 1, cap: 0 },
             Op::Move { dst: 2, src: 0 },
             Op::TailCall { func: 1, nargs: 1 },
+            Op::Return {
+                first: 1,
+                count: MULTI
+            },
         ]
     );
     assert_eq!(
