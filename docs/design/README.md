@@ -13,20 +13,29 @@ The first goal after the Phase 0 foundations is "first light": a small but real 
 | [hir.md](hir.md) | `orbit-hir`: the language-neutral IR both front ends produce, and its shared analysis passes |
 | [vm.md](vm.md) | `orbit-core` objects, the bytecode, `orbit-compiler`, the `orbit-vm` interpreter, the stdlib subset, and the CLI |
 
-```
- .lua source ──► orbit-lua-syntax ──┐
-                 (lexer, parser,    │
-                  AST, lowering)    ▼
- .orb source ──► (OrbitScript,  ─► orbit-hir ──► orbit-compiler ──► UnlinkedProto (plain data)
-                  later)           (resolved IR,  (registers,              │
-                                    captures)      bytecode, debug info)   ▼ link (intern, allocate)
-                                                        orbit-vm ◄── orbit-core ◄── orbit-gc
-                                                        (interpreter)  (Value, tables,  (heap)
-                                                             ▲          strings, closures)
-                                                        orbit-stdlib, orbit, orbit-cli
+```mermaid
+flowchart LR
+    lua[".lua source"] --> luasyn["orbit-lua-syntax<br/>lexer, parser, AST, lowering"]
+    orb[".orb source"] -.-> orbsyn["OrbitScript front end<br/>(later)"]
+    luasyn --> hir["orbit-hir<br/>resolved IR, captures"]
+    orbsyn -.-> hir
+    hir --> comp["orbit-compiler<br/>registers, bytecode, debug info"]
+    comp --> unlinked["UnlinkedProto<br/>(plain data)"]
+    unlinked -- "link: intern, allocate" --> vm["orbit-vm<br/>interpreter"]
+    vm --> core["orbit-core<br/>Value, tables, strings, closures"]
+    core --> gc["orbit-gc<br/>heap"]
+    host["orbit-stdlib, orbit, orbit-cli"] --> vm
+
+    subgraph pure ["Pure, Send data: no GC or VM access"]
+        luasyn
+        orbsyn
+        hir
+        comp
+        unlinked
+    end
 ```
 
-Everything left of the link step is pure, `Send` data with no GC or VM access, which keeps a parallel front end open (see [lua-front-end.md](lua-front-end.md#parallel-and-async-front-end)).
+Everything in the box, before the link step, is plain `Send` data with no GC or VM access, which keeps a parallel front end open (see [lua-front-end.md](lua-front-end.md#parallel-and-async-front-end)).
 
 Crate dependencies this implies: `orbit-hir` depends on nothing; `orbit-lua-syntax` depends on `orbit-hir` (the Phase 0 placeholder has it the other way round); `orbit-compiler` depends on `orbit-hir`; `orbit-vm` depends on `orbit-core` and `orbit-compiler`'s output types.
 

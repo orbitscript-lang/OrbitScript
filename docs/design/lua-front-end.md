@@ -6,9 +6,13 @@ The Lua front end turns Lua source bytes into the shared [HIR](hir.md). It is on
 
 ## Shape
 
-```
-source bytes ──► Lexer ──► Parser ──► AST ──► Resolver/Lowering ──► HIR
-              (pull, tokens)      (syntax only)   (scopes, names)
+```mermaid
+flowchart LR
+    src["source bytes"] --> lexer["Lexer<br/>(pull, tokens)"]
+    lexer --> parser["Parser"]
+    parser --> ast["AST<br/>(syntax only)"]
+    ast --> lower["Resolver / lowering<br/>(scopes, names)"]
+    lower --> hir["HIR"]
 ```
 
 Three deliberate differences from a single-pass Lua compiler:
