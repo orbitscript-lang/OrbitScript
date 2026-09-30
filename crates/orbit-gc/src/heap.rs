@@ -81,6 +81,9 @@ enum State {
 
 /// How many free slots the sweeper skips for the cost of visiting one object.
 const FREE_SLOT_SHARE: usize = 16;
+/// How far the reachable heap must fall before freed memory is handed back
+/// to the OS (with the `malloc-trim` feature).
+const TRIM_MIN_DROP: usize = 1 << 20;
 /// Bytes of work done by one step in stress mode.
 const STRESS_WORK: usize = 2048;
 
@@ -110,6 +113,13 @@ pub struct Heap<S: Space> {
     /// Unreachable objects whose finalizer is due, next first.
     finalize_queue: VecDeque<AnyGc>,
     cycles: u64,
+    /// Arena pages released so far.
+    pages_released: u64,
+    /// `pages_released` when memory was last handed back to the OS.
+    released_at_trim: u64,
+    /// The most bytes a cycle has found reachable since memory was last
+    /// handed back to the OS.
+    live_peak: usize,
     stress: bool,
     stopped: bool,
 }
@@ -178,6 +188,9 @@ impl<S: Space + Default> Heap<S> {
             finalizable: Vec::new(),
             finalize_queue: VecDeque::new(),
             cycles: 0,
+            pages_released: 0,
+            released_at_trim: 0,
+            live_peak: 0,
             stress: false,
             stopped: false,
         }
@@ -442,6 +455,14 @@ impl<S: Space> Heap<S> {
             .sum()
     }
 
+    /// Arena pages released since the heap was created. A host that wants
+    /// freed memory back from its allocator (`mi_collect` under mimalloc,
+    /// say) can ask for it after a cycle where this went up; the
+    /// `malloc-trim` feature does that for glibc.
+    pub fn pages_released(&self) -> u64 {
+        self.pages_released
+    }
+
     /// Completed collection cycles.
     pub fn cycles(&self) -> u64 {
         self.cycles
@@ -580,6 +601,7 @@ impl<S: Space> Heap<S> {
         self.state = State::Pause;
         self.cycles += 1;
         let live = self.marks.marked_bytes;
+        self.release_to_os(live);
         self.threshold = live
             .saturating_add(live.saturating_mul(self.params.growth as usize) / 100)
             .max(self.params.min_threshold);
@@ -591,6 +613,27 @@ impl<S: Space> Heap<S> {
         } else {
             (self.bytes as isize - self.threshold as isize).min(0)
         };
+    }
+
+    /// Hand freed memory back to the OS when the heap has shrunk: pages
+    /// were released and the reachable heap is at most half what it was at
+    /// its peak, by at least `TRIM_MIN_DROP`. Trimming on every cycle that
+    /// released a page instead cost 23% on binary trees, because the memory
+    /// is taken straight back; under steady churn the live size holds, so
+    /// this never trims.
+    fn release_to_os(&mut self, live: usize) {
+        if !crate::os::RELEASES {
+            return;
+        }
+        self.live_peak = self.live_peak.max(live);
+        if self.pages_released != self.released_at_trim
+            && live <= self.live_peak / 2
+            && self.live_peak - live >= TRIM_MIN_DROP
+        {
+            crate::os::release_memory();
+            self.released_at_trim = self.pages_released;
+            self.live_peak = live;
+        }
     }
 
     // ---- marking --------------------------------------------------------
@@ -779,6 +822,7 @@ impl<S: Space> Heap<S> {
         if page.allocated && page.live == 0 && meta.allocated > 1 {
             meta.release_page(p);
             self.space.release_page(kind, p);
+            self.pages_released += 1;
         }
     }
 

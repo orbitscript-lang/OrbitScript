@@ -2,7 +2,7 @@
 
 ## Non-negotiables
 - **Stable Rust only.** No nightly or beta features, no `#![feature]`, no `-Z` flags.
-- **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The only planned exception is the future `orbit-jit` crate. Anything else needs Tym's sign-off in an ADR.
+- **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The exceptions are the future `orbit-jit` crate and `orbit-gc`'s one glibc `malloc_trim` call behind its `malloc-trim` feature (ADR-6). Anything else needs Tym's sign-off in an ADR.
 - **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-gc`, `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies without an ADR.
 - **Lua 5.5 compatibility is judged by behavior.** When unsure, compare against the reference `lua5.5` interpreter and the official test suite, not memory of older Lua versions.
 

@@ -8,11 +8,24 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[lints]
-workspace = true
+# The workspace lints, except that `unsafe_code` is denied rather than
+# forbidden, so `src/os.rs` can allow its one glibc call (ADR-6). Keep the
+# rest in step with the workspace `Cargo.toml`.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
 
 [features]
 # Check a generation on every handle access so a stale handle always panics
 # (8-byte `Gc`). Always on in debug builds; this turns it on in release too.
 # It costs about 8% in interpreter speed (measured on the Milestone 1 build).
 checked-handles = []
+# On glibc, call `malloc_trim(0)` after a collection finds the reachable
+# heap has shrunk to half its peak or less and pages were released, so the
+# process gives the memory back to the OS (glibc keeps it otherwise). Does
+# nothing on other targets.
+malloc-trim = []
