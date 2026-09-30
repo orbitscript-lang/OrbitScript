@@ -72,6 +72,10 @@ dependencies = [
 [[package]]
 name = "orbit-core"
 version = "0.0.0"
+dependencies = [
+ "orbit-bytecode",
+ "orbit-gc",
+]
 
 [[package]]
 name = "orbit-gc"
