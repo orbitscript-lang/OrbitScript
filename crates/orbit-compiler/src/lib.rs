@@ -2,4 +2,5 @@
 //!
 //! Placeholder created in Phase 0. See `docs/ROADMAP.md` for the stream that owns this crate.
 
-pub mod bytecode;
+/// The instruction set this compiler emits.
+pub use orbit_bytecode as bytecode;

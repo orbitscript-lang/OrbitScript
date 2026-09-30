@@ -2,9 +2,11 @@
 //!
 //! Everything here is plain `Send` data with no GC handles: the compiler
 //! produces an [`UnlinkedChunk`], and `orbit-vm` links it into a heap
-//! (interning strings, allocating prototypes bottom-up). `orbit-vm`
-//! re-exports this module as `orbit_vm::op`, which is where the design docs
-//! refer to it; it lives here so the compiler doesn't depend on the runtime.
+//! (interning strings, allocating prototypes bottom-up). It is its own crate,
+//! with no dependencies, because three crates need it: `orbit-compiler`
+//! emits it, `orbit-core`'s `Proto` stores it, and `orbit-vm` runs it (and
+//! re-exports it as `orbit_vm::op`). The compiler thereby stays free of the
+//! runtime and the GC.
 //!
 //! Notation in the instruction docs: `R[x]` is register `x` of the current
 //! frame, `K[x]` constant `x`, `C[x]` frame cell slot `x`, `U[x]` capture `x`
@@ -12,7 +14,7 @@
 //! the jump. "Top" is the register just past the last value produced by the
 //! most recent open-ended call or `Vararg` (one whose count is [`MULTI`]).
 //!
-//! [VM design]: ../../../docs/design/vm.md
+//! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
 
 /// A count operand meaning "all values": as `nresults`, keep every result
 /// and set top; as `nargs` or a `count`, use every value up to top.

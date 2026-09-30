@@ -6,7 +6,7 @@ This document covers everything after the [HIR](hir.md): the objects a running p
 
 ## Runtime objects (`orbit-core`)
 
-`orbit-core` defines the Lua object types on top of `orbit-gc` (the API on draft PR #6: `space!`, `Gc<T>`, `Trace`, `Heap::{alloc, get, update, barrier_*, step}`). It takes no dependencies besides `orbit-gc`.
+`orbit-core` defines the Lua object types on top of `orbit-gc` (the API on draft PR #6: `space!`, `Gc<T>`, `Trace`, `Heap::{alloc, get, update, barrier_*, step}`). It takes no dependencies besides `orbit-gc` and `orbit-bytecode` (for `Proto`'s code).
 
 ```rust
 orbit_gc::space! {
@@ -67,7 +67,7 @@ A local that no closure captures (the HIR's `Local::captured == false`, most loc
 
 ## Bytecode (`orbit-vm::op`)
 
-The types are defined in `orbit_compiler::bytecode` and re-exported as `orbit_vm::op`, so the compiler, which emits them, stays free of runtime dependencies and there is no crate cycle. That module is the exact contract; the table below is its summary.
+The types live in their own dependency-free crate, `orbit-bytecode` (re-exported as `orbit_vm::op`), because the compiler emits them, `orbit-core`'s `Proto` stores them and `orbit-vm` runs them; that keeps the compiler free of the runtime and the GC with no crate cycle. That crate is the exact contract; the table below is its summary.
 
 Register-based, one Rust enum, **8 bytes per instruction**:
 

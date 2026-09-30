@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-hir = { path = "../orbit-hir" }
 
 [lints]
