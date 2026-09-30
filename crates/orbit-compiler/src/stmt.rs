@@ -365,6 +365,11 @@ impl FuncState<'_> {
             {
                 let func = self.alloc()?;
                 self.call(e, func, MULTI, true)?;
+                // A native callee runs as an ordinary call; this passes its results on.
+                self.emit(Op::Return {
+                    first: func,
+                    count: MULTI,
+                });
             }
             &[e] if !self.f.expr(e).kind.is_multi() => {
                 let (src, _) = self.expr_any(e)?;
