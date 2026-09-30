@@ -15,6 +15,10 @@ One semantic core, two syntaxes: the Lua 5.5 and OrbitScript front ends both low
 | **P6 OrbitScript** | Language spec, front end, lowering, cross-language tests; later an `orbit-check` type analyzer | Either language can `require` and call the other |
 | **P7 JIT** | Backend study, spike, then build if go (Cargo feature) | Decision memo; if built, measurable wins with no conformance regressions |
 
+## First light
+
+Before the full P1 to P4 scope, a small Lua 5.5 subset runs end to end through our own front end, HIR, compiler and VM. The subset and the designs for each stage are in [`docs/design/`](design/README.md); the demo programs are in `tests/first-light/`.
+
 ## Work streams
 
 | Stream | Owns | Starts |
