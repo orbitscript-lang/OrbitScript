@@ -8,9 +8,16 @@
 //!
 //! This crate has no dependencies, and in particular none on any front end.
 
+mod analyze;
 mod ids;
+mod print;
 mod source;
 mod strings;
+mod verify;
+
+pub use analyze::{AnalysisError, analyze};
+pub use print::print;
+pub use verify::{VerifyError, verify, verify_lowered};
 
 pub use ids::{BlockId, CaptureId, ExprId, FuncId, LocalId, StmtId, StrId, TypeId};
 pub use source::{Language, SourceInfo, Span};
@@ -367,6 +374,53 @@ pub enum ExprKind {
 }
 
 impl ExprKind {
+    /// Calls `f` on each direct sub-expression, in evaluation order.
+    pub fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
+        match self {
+            ExprKind::Nil
+            | ExprKind::Bool(_)
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Vararg
+            | ExprKind::Local(_)
+            | ExprKind::Outer { .. }
+            | ExprKind::Capture(_)
+            | ExprKind::Global(_)
+            | ExprKind::Closure(_) => {}
+            ExprKind::Index { obj, key } => {
+                f(*obj);
+                f(*key);
+            }
+            ExprKind::Call { callee, args } => {
+                f(*callee);
+                args.items.iter().copied().for_each(f);
+            }
+            ExprKind::MethodCall { obj, args, .. } => {
+                f(*obj);
+                args.items.iter().copied().for_each(f);
+            }
+            ExprKind::Table(entries) => {
+                for entry in entries {
+                    match *entry {
+                        TableEntry::Positional(v) => f(v),
+                        TableEntry::Keyed(k, v) => {
+                            f(k);
+                            f(v);
+                        }
+                    }
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. }
+            | ExprKind::And { lhs, rhs }
+            | ExprKind::Or { lhs, rhs } => {
+                f(*lhs);
+                f(*rhs);
+            }
+            ExprKind::Unary { expr, .. } | ExprKind::First(expr) => f(*expr),
+        }
+    }
+
     /// Whether this expression can produce more than one value at the end of an [`ExprList`].
     pub fn is_multi(&self) -> bool {
         matches!(
