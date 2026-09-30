@@ -243,6 +243,12 @@ impl Table {
         }
     }
 
+    /// The value in hash slot `slot` (from [`Table::find_str`]).
+    #[inline(always)]
+    pub fn slot_value(&self, slot: usize) -> Value {
+        self.entries[slot].value
+    }
+
     /// Store into hash slot `slot`, which must hold a key (from
     /// [`Table::find_str`] or a cache hit). Storing `nil` leaves a dead
     /// entry. Use through [`Heap::update`](orbit_gc::Heap::update).
