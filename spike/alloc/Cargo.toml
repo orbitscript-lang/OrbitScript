@@ -1,0 +1,27 @@
+[package]
+name = "spike-alloc"
+description = "Spike: mimalloc vs the system allocator under orbit-gc workloads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Not `lints.workspace`: the `trim` and `mi-collect` variants call one C
+# function each, which needs `unsafe`. Everything else stays safe.
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+# The global allocator. None of these: the system allocator (glibc here).
+mimalloc = ["dep:mimalloc"]
+# mimalloc 2.x instead of the crate's default 3.x.
+mimalloc-v2 = ["mimalloc", "mimalloc/v2"]
+# glibc: call malloc_trim(0) after each full collection.
+trim = []
+# mimalloc: call mi_collect(true) after each full collection.
+mi-collect = ["mimalloc"]
+
+[dependencies]
+orbit-gc = { path = "../../crates/orbit-gc" }
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
