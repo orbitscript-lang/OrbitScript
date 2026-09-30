@@ -4,6 +4,7 @@
 - **Stable Rust only.** No nightly or beta features, no `#![feature]`, no `-Z` flags.
 - **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The only planned exception is the future `orbit-jit` crate. Anything else needs Tym's sign-off in an ADR.
 - **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-gc`, `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies without an ADR.
+- **Greenfield, never ported.** Learn from PUC Lua's observable behavior (the reference `lua5.5` binary, the official suite, the manual), never from its source code. Don't read, translate or mirror PUC Lua's C sources unless Tym explicitly asks for it for a specific purpose. Design for multiple front ends (Lua and OrbitScript) throughout.
 - **Lua 5.5 compatibility is judged by behavior.** When unsure, compare against the reference `lua5.5` interpreter and the official test suite, not memory of older Lua versions.
 
 ## Layout
