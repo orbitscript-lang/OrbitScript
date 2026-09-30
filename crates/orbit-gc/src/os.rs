@@ -18,23 +18,18 @@
 //! `unsafe fn`, so using it would add a dependency and still need `unsafe`
 //! here. Declaring it as a `safe fn` ourselves is the smaller of the two.
 
-#[cfg(all(feature = "malloc-trim", target_os = "linux", target_env = "gnu"))]
-pub(crate) const RELEASES: bool = true;
-#[cfg(not(all(feature = "malloc-trim", target_os = "linux", target_env = "gnu")))]
-pub(crate) const RELEASES: bool = false;
+//! Each supported allocator gets its own `imp` module below, selected by one
+//! `cfg`; the last is the fallback that does nothing. Both export the same
+//! items: `RELEASES` and `release_memory`.
 
-/// Ask the allocator to return free memory to the OS, where this build can.
-#[inline]
-pub(crate) fn release_memory() {
-    #[cfg(all(feature = "malloc-trim", target_os = "linux", target_env = "gnu"))]
-    glibc::trim();
-}
+pub(crate) use imp::{RELEASES, release_memory};
 
+/// glibc's malloc, with the `malloc-trim` feature.
 #[cfg(all(feature = "malloc-trim", target_os = "linux", target_env = "gnu"))]
-mod glibc {
+mod imp {
     use std::ffi::c_int;
 
-    #[allow(unsafe_code, reason = "glibc FFI, ADR-6")]
+    #[allow(unsafe_code, reason = "glibc FFI, ADR-2 and ADR-6")]
     unsafe extern "C" {
         /// Frees memory at the top of the main heap and, since glibc 2.8,
         /// whole free pages anywhere in every arena, leaving `pad` bytes at
@@ -42,7 +37,23 @@ mod glibc {
         safe fn malloc_trim(pad: usize) -> c_int;
     }
 
-    pub(super) fn trim() {
+    /// Whether this build can hand memory back to the OS.
+    pub(crate) const RELEASES: bool = true;
+
+    /// Ask the allocator to return free memory to the OS.
+    #[inline]
+    pub(crate) fn release_memory() {
         malloc_trim(0);
     }
+}
+
+/// Everything else: nothing to do.
+#[cfg(not(all(feature = "malloc-trim", target_os = "linux", target_env = "gnu")))]
+mod imp {
+    /// Whether this build can hand memory back to the OS.
+    pub(crate) const RELEASES: bool = false;
+
+    /// Ask the allocator to return free memory to the OS: a no-op here.
+    #[inline]
+    pub(crate) fn release_memory() {}
 }
