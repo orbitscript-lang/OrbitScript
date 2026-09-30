@@ -226,7 +226,7 @@ Message forms covered at first light (all checked against `lua5.5`):
 - **Roots** (`impl Roots<LuaSpace> for VmRoots`): the stack's registers, cells and frame closures; the globals table; the loader's in-progress prototypes. `clear_weak` prunes the string interner.
 - **Safe points**: after instructions that allocate (`NewTable`, `Closure`, `CellNew`, `Concat`, table stores that grow, native calls that allocated), the loop checks `heap.should_step()` and runs `heap.step(&mut roots)`. At a safe point every live handle is in a register, cell slot, frame or root: the loop itself holds only `Rc<[Op]>`, `Rc<[Value]>` (constants, kept alive by the frame's closure) and integers. Natives never hold handles across `CallThen`; state they need afterwards goes in their frame's registers.
 - **Barriers**: table stores go through `Heap::update` (two-phase, above); `CellSet`, `CapSet` and `SetGlobal` likewise. The running stack is a root and is rescanned when marking finishes, so register writes need no barrier.
-- **Memory release**: after a full collection that frees pages, the CLI calls `orbit-gc`'s allocator release hook (the `malloc_trim` feature being added on the orbit-gc thread).
+- **Memory release**: `orbit-gc`'s `malloc-trim` feature (on PR #6) returns freed pages to the OS after cycles that release them; `orbit-cli` enables it on glibc targets.
 - **Stress mode**: `ORBIT_GC_STRESS=1` turns on `Heap::set_stress`, collecting at nearly every safe point; the first-light tests must pass under it.
 
 ## Standard library subset (`orbit-stdlib`)
