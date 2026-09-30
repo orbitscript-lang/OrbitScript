@@ -1,0 +1,320 @@
+//! Base functions: `print`, `type`, `pcall`, `error`, `pairs` and friends.
+
+use std::io::Write;
+
+use orbit_vm::orbit_core::Value;
+use orbit_vm::orbit_core::number::str_to_number;
+use orbit_vm::orbit_core::table as tbl;
+use orbit_vm::orbit_core::value::raw_eq;
+use orbit_vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+
+type R = Result<NativeReturn, LuaError>;
+
+const FUNCTIONS: &[(&str, NativeFn)] = &[
+    ("print", print),
+    ("type", type_),
+    ("tostring", tostring),
+    ("tonumber", tonumber),
+    ("ipairs", ipairs),
+    ("pairs", pairs),
+    ("select", select),
+    ("error", error),
+    ("pcall", pcall),
+    ("assert", assert),
+    ("rawequal", rawequal),
+    ("rawget", rawget),
+    ("rawset", rawset),
+    ("rawlen", rawlen),
+    ("collectgarbage", collectgarbage),
+];
+
+pub(crate) fn open(vm: &mut Vm) {
+    for &(name, f) in FUNCTIONS {
+        let v = vm.register_native(name, f);
+        vm.set_global(name, v);
+    }
+    // `next` is shared with `pairs`.
+    let next_fn = vm.register_native("next", next);
+    vm.set_global("next", next_fn);
+    let g = vm.rt.globals;
+    vm.set_global("_G", Value::Table(g));
+    let v = vm.new_str(b"Lua 5.5");
+    vm.set_global("_VERSION", v);
+}
+
+fn print(ctx: &mut NativeCtx<'_>) -> R {
+    let mut line = Vec::new();
+    for i in 0..ctx.nargs() {
+        if i > 0 {
+            line.push(b'\t');
+        }
+        ctx.display(ctx.arg(i), &mut line);
+    }
+    line.push(b'\n');
+    let _ = ctx.rt.out.write_all(&line);
+    Ok(NativeReturn::Return(0))
+}
+
+fn type_(ctx: &mut NativeCtx<'_>) -> R {
+    let v = ctx.check_any(0)?;
+    let s = ctx.new_str(v.type_name().as_bytes());
+    ctx.ret1(s)
+}
+
+fn tostring(ctx: &mut NativeCtx<'_>) -> R {
+    let v = ctx.check_any(0)?;
+    if matches!(v, Value::Str(_)) {
+        return ctx.ret1(v);
+    }
+    let mut out = Vec::new();
+    ctx.display(v, &mut out);
+    let s = ctx.new_str_owned(out);
+    ctx.ret1(s)
+}
+
+fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
+    if ctx.arg(1).is_nil() {
+        let v = ctx.check_any(0)?;
+        let r = match v {
+            Value::Int(_) | Value::Float(_) => v,
+            Value::Str(s) => str_to_number(ctx.bytes(s)).unwrap_or(Value::Nil),
+            _ => Value::Nil,
+        };
+        return ctx.ret1(r);
+    }
+    let base = ctx.check_int(1)?;
+    let s = match ctx.arg(0) {
+        Value::Str(s) => s,
+        _ => return Err(ctx.type_error(0, "string")),
+    };
+    if !(2..=36).contains(&base) {
+        return Err(ctx.arg_error(1, "base out of range"));
+    }
+    let r = parse_in_base(ctx.bytes(s), base as u32).map_or(Value::Nil, Value::Int);
+    ctx.ret1(r)
+}
+
+fn parse_in_base(s: &[u8], base: u32) -> Option<i64> {
+    let is_space = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
+    let start = s.iter().position(|b| !is_space(b))?;
+    let end = s.iter().rposition(|b| !is_space(b))? + 1;
+    let mut s = &s[start..end];
+    let neg = s.first() == Some(&b'-');
+    if neg {
+        s = &s[1..];
+    }
+    if s.is_empty() {
+        return None;
+    }
+    let mut n: i64 = 0;
+    for &b in s {
+        let d = (b as char).to_digit(36)?;
+        if d >= base {
+            return None;
+        }
+        n = n.wrapping_mul(base as i64).wrapping_add(d as i64);
+    }
+    Some(if neg { n.wrapping_neg() } else { n })
+}
+
+fn ipairs(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_any(0)?;
+    let iter = ctx.native("ipairs_iter", ipairs_iter);
+    ctx.push(iter);
+    ctx.push(t);
+    ctx.push(Value::Int(0));
+    Ok(NativeReturn::Return(3))
+}
+
+fn ipairs_iter(ctx: &mut NativeCtx<'_>) -> R {
+    let i = ctx.check_int(1)?.wrapping_add(1);
+    let v = match ctx.arg(0) {
+        Value::Table(t) => ctx.heap.get(t).get_int(i),
+        other => {
+            return Err(ctx.error(format!("attempt to index a {} value", other.type_name())));
+        }
+    };
+    if v.is_nil() {
+        return ctx.ret1(Value::Nil);
+    }
+    ctx.push(Value::Int(i));
+    ctx.push(v);
+    Ok(NativeReturn::Return(2))
+}
+
+fn pairs(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_any(0)?;
+    let next_fn = ctx.native("next", next);
+    ctx.push(next_fn);
+    ctx.push(t);
+    ctx.push(Value::Nil);
+    Ok(NativeReturn::Return(3))
+}
+
+fn next(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_table(0)?;
+    let k = ctx.arg(1);
+    match ctx.heap.get(t).next(ctx.heap, k) {
+        Ok(Some((k, v))) => {
+            ctx.push(k);
+            ctx.push(v);
+            Ok(NativeReturn::Return(2))
+        }
+        Ok(None) => ctx.ret1(Value::Nil),
+        Err(_) => Err(ctx.error("invalid key to 'next'")),
+    }
+}
+
+fn select(ctx: &mut NativeCtx<'_>) -> R {
+    let n = ctx.nargs() as i64;
+    if let Value::Str(s) = ctx.arg(0)
+        && ctx.bytes(s) == b"#"
+    {
+        return ctx.ret1(Value::Int(n - 1));
+    }
+    let i = ctx.check_int(0)?;
+    let from = if i < 0 {
+        if -i >= n {
+            return Err(ctx.arg_error(0, "index out of range"));
+        }
+        n + i
+    } else if i == 0 {
+        return Err(ctx.arg_error(0, "index out of range"));
+    } else {
+        i.min(n)
+    };
+    Ok(NativeReturn::Return((n - from) as usize))
+}
+
+fn error(ctx: &mut NativeCtx<'_>) -> R {
+    let v = ctx.arg(0);
+    let level = ctx.opt_int(1, 1)?;
+    if let Value::Str(s) = v
+        && level > 0
+    {
+        let prefix = ctx.where_(level as usize);
+        if !prefix.is_empty() {
+            let mut text = prefix.into_bytes();
+            text.extend_from_slice(ctx.bytes(s));
+            let msg = ctx.new_str_owned(text);
+            return Err(ctx.error_value(msg));
+        }
+    }
+    Err(ctx.error_value(v))
+}
+
+fn pcall(ctx: &mut NativeCtx<'_>) -> R {
+    let f = ctx.check_any(0)?;
+    // Window [f, args...] becomes [true, args...]; the call's results land
+    // after `true`.
+    ctx.set(0, Value::Bool(true));
+    Ok(NativeReturn::CallThen {
+        f,
+        nargs: ctx.nargs() - 1,
+        k: pcall_done,
+        protected: true,
+    })
+}
+
+fn pcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    match outcome {
+        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
+        CallOutcome::Err(e) => {
+            let e = if e.is_nil() {
+                ctx.new_str(b"<no error object>")
+            } else {
+                e
+            };
+            ctx.truncate(0);
+            ctx.push(Value::Bool(false));
+            ctx.push(e);
+            Ok(NativeReturn::Return(2))
+        }
+    }
+}
+
+fn assert(ctx: &mut NativeCtx<'_>) -> R {
+    let v = ctx.check_any(0)?;
+    if !v.is_falsy() {
+        return Ok(NativeReturn::Return(ctx.nargs()));
+    }
+    if ctx.nargs() >= 2 {
+        let msg = ctx.arg(1);
+        return Err(ctx.error_value(msg));
+    }
+    let msg = ctx.new_str(b"assertion failed!");
+    Err(ctx.error_value(msg))
+}
+
+fn rawequal(ctx: &mut NativeCtx<'_>) -> R {
+    let a = ctx.check_any(0)?;
+    let b = ctx.check_any(1)?;
+    let eq = raw_eq(ctx.heap, a, b);
+    ctx.ret1(Value::Bool(eq))
+}
+
+fn rawget(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_table(0)?;
+    let k = ctx.check_any(1)?;
+    let v = tbl::get(ctx.heap, t, k);
+    ctx.ret1(v)
+}
+
+fn rawset(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_table(0)?;
+    let k = ctx.check_any(1)?;
+    let v = ctx.check_any(2)?;
+    if let Err(e) = tbl::set(ctx.heap, t, k, v) {
+        return Err(ctx.error(e.message()));
+    }
+    ctx.ret1(Value::Table(t))
+}
+
+fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
+    let n = match ctx.arg(0) {
+        Value::Table(t) => ctx.heap.get(t).border(),
+        Value::Str(s) => ctx.bytes(s).len() as i64,
+        _ => return Err(ctx.arg_error(0, "table or string expected")),
+    };
+    ctx.ret1(Value::Int(n))
+}
+
+fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
+    let opt = match ctx.arg(0) {
+        Value::Nil => b"collect".to_vec(),
+        _ => {
+            let s = ctx.check_str(0)?;
+            ctx.bytes(s).to_vec()
+        }
+    };
+    match &opt[..] {
+        b"collect" => {
+            ctx.full_collect();
+            ctx.ret1(Value::Int(0))
+        }
+        b"count" => {
+            let kb = ctx.heap.bytes() as f64 / 1024.0;
+            ctx.ret1(Value::Float(kb))
+        }
+        b"step" => {
+            let done = ctx.heap.step(ctx.rt);
+            ctx.ret1(Value::Bool(done))
+        }
+        b"stop" => {
+            ctx.heap.stop();
+            ctx.ret1(Value::Int(0))
+        }
+        b"restart" => {
+            ctx.heap.restart();
+            ctx.ret1(Value::Int(0))
+        }
+        b"isrunning" => {
+            let running = !ctx.heap.is_stopped();
+            ctx.ret1(Value::Bool(running))
+        }
+        other => {
+            let msg = format!("invalid option '{}'", String::from_utf8_lossy(other));
+            Err(ctx.arg_error(0, msg))
+        }
+    }
+}

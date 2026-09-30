@@ -155,7 +155,7 @@ pub struct Frame {
     cell_base: u32,
     nvarargs: u32,           // extra arguments, stored just below `base`
     want: u8,                // results the caller expects (255 = all)
-    kind: FrameKind,         // Lua | NativeContinuation { k, protected }
+    kind: FrameKind,         // Lua | Native { id, k, protected } (a native waiting on CallThen)
 }
 ```
 
@@ -189,7 +189,7 @@ Register access is bounds-checked indexing into `regs` (safe Rust). On each call
 
 - `Call{func, nargs, nresults}`: the callee is in `R[func]`, arguments above it. For a Lua closure, the new frame's `base` is `func + 1`; missing parameters are set to `nil`. For a vararg function, the extra arguments stay where they are and the frame's registers start above them, with the fixed parameters moved up; `Vararg` copies from below `base`. No Rust recursion: the loop saves `pc`, pushes the frame, and reloads `code`, `consts` and `base`.
 - `Return{first, count}` copies results to where the callee was (`R[func]` of the caller), pads or truncates to the caller's `want`, pops the frame and reloads. When `want` is 255 the caller's "top" is set for the following `Call`/`Return`/`SetList` that consumes all values.
-- `TailCall` replaces the current frame, so `loop(200000, 0)` runs in constant space, as Lua requires.
+- `TailCall` replaces the current frame, so `loop(200000, 0)` runs in constant space, as Lua requires. The compiler always follows it with `Return{func, 255}`: when the callee is a native that returns `CallThen`, the VM makes an ordinary call instead and that `Return` passes the results on.
 - **Depth limit**: pushing a frame beyond the configured limit (default one million register slots) raises the catchable error `stack overflow`. The Rust stack never grows with Lua recursion.
 
 ### Native functions
@@ -198,13 +198,13 @@ Register access is bounds-checked indexing into `regs` (safe Rust). On each call
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 
 pub enum NativeReturn {
-    Return(u32),                                   // number of results pushed
-    CallThen { f: Value, nargs: u32, k: Continuation, protected: bool },
+    Return(usize),                                 // the last n values of the window are the results
+    CallThen { f: Value, nargs: usize, k: Continuation, protected: bool },
 }
 pub type Continuation = fn(&mut NativeCtx<'_>, CallOutcome) -> Result<NativeReturn, LuaError>;
 ```
 
-`NativeCtx` gives access to arguments (`arg(i)`, `arg_str(i) -> Option<OrbitStr>`, `check_int(i, fname)` with Lua's `bad argument #2 to 'format' (...)` messages), result pushing, and allocation. A native that needs to call a Lua function doesn't call back into the VM; it returns `CallThen`, the VM runs the call in its own loop, then invokes the continuation with the results or the error. That's ADR-3's continuation style, and it's how `pcall` works at first light:
+`NativeCtx` is the native's window of the register stack: its arguments first, then whatever it pushes. It has argument access and checks (`arg(i)`, `check_str(i)`, `check_int(i)` with Lua's `bad argument #2 to 'format' (...)` messages; the function name comes from the call site's debug info, falling back to the registered name), window editing (`set`, `push`, `truncate`), and allocation. `CallThen` calls `f` with the last `nargs` values of the window; the call's results replace those arguments, and the continuation sees the rest of the window unchanged, so state a native needs afterwards stays in its window. A native that needs to call a Lua function doesn't call back into the VM; it returns `CallThen`, the VM runs the call in its own loop, then invokes the continuation with the results or the error. That's ADR-3's continuation style, and it's how `pcall` works at first light:
 
 ```rust
 fn pcall(ctx) -> ... { Ok(CallThen { f: ctx.arg(0)?, nargs: ctx.nargs() - 1, k: pcall_done, protected: true }) }
