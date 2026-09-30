@@ -20,17 +20,23 @@ orbit_gc::space! {
 }
 
 #[derive(Clone, Copy)]
-pub enum Value {               // 16 bytes (ADR-1)
-    Nil,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(Gc<LuaStr>),
-    Table(Gc<Table>),
-    Closure(Gc<Closure>),
-    Native(NativeId),          // u32 index into the VM's native registry
+#[repr(C, u8)]                 // pinned layout (ADR-1): tag byte at offset 0, payload at offset 8
+pub enum Value {               // 16 bytes
+    Nil = 0,
+    Bool(bool) = 1,
+    Int(i64) = 2,
+    Float(f64) = 3,
+    Str(Gc<LuaStr>) = 4,
+    Table(Gc<Table>) = 5,
+    Closure(Gc<Closure>) = 6,
+    Native(NativeId) = 7,      // u32 index into the VM's native registry
+    // 8 = UserData, 9 = Thread: reserved for when they arrive
 }
+
+const _: () = assert!(core::mem::size_of::<Value>() == 16);
 ```
+
+The layout is pinned so a future JIT can read and write values directly (see [JIT readiness](#jit-readiness)). `#[repr(C, u8)]` and explicit discriminants are plain safe Rust. The tag numbers are also the tag bytes the table array part stores, so a JIT reads a table slot and a register the same way. Rust code outside `orbit-core` still uses `Value`'s API, never its layout.
 
 - **Native functions** are `Value::Native(NativeId)`, an index into a per-VM registry of `{ name, fn }`. That answers ADR-1's open question for first light: natives cost no allocation, compare by id (Rust fn-pointer equality isn't reliable), and print as `function: 0x...` like any function, as the reference does. Natives with captured state come with metatables and coroutines.
 - **Strings** (`LuaStr { hash: Cell<u32>, bytes: Box<[u8]> }`): strings up to 40 bytes are interned (ADR-5) in an `Interner`, a hash set of handles keyed by a seeded hash of the bytes. The interner is weak: the VM's `Roots::clear_weak` drops entries whose strings died. Longer strings are hashed lazily the first time they are used as a key. Equal short strings are the same handle, so key comparison is a handle compare; long strings compare bytes.
@@ -90,6 +96,8 @@ First-light instruction set (`R[x]` is a register, `K[x]` a constant, `C[x]` a f
 | Functions | `Closure{dst,proto}` (captures built from the child prototype's `CaptureSource` list: `Cell(slot)` from the current frame or `Capture(i)` from the current closure) |
 
 `ic` operands index a per-prototype inline-cache array (ADR-4). At first light the cache holds the hash-slot index where the key was last found; a hit is "slot still holds this key", a miss falls back to the normal lookup and refreshes the slot. The operand is in the encoding from day one, so P5 can make caches smarter without changing the format.
+
+**Type feedback.** Each prototype has a feedback byte per instruction (`feedback: Rc<[Cell<u8>]>`, indexed by pc, beside `code`) for the instructions whose operand types a JIT would specialise on: arithmetic, comparisons, `Len`, `Concat`, indexing and calls. The interpreter ORs in a bit for what it saw (integer, float, string, table, closure, native, other), which gives a JIT "this `Add` has only ever seen integers". It's a side table rather than an operand, so no instruction grows past 8 bytes. Recording costs one load and store in the fast paths, so it's compiled in only with the `type-feedback` Cargo feature, which the JIT feature will turn on. First light defines the table and the feature; whether recording is on by default is decided with P5's measurements.
 
 Compare-and-branch fusions are the superinstructions S0 measured at about 14% on branchy code. More (immediate operands for `n < 2`, `GetField`+`Call`) are added in P5 from profiles.
 
@@ -248,6 +256,29 @@ lua.call(f, &[])?;
 ```
 
 `orbit-cli`: `orbit script.lua [args...]` sets the global `arg` table (`arg[0]` is the script), runs it, and on an uncaught error prints `<program>: <message>` and a traceback to stderr with exit status 1, the shape the diff runner expects. `--dump-ast`, `--dump-hir` and `--dump-bytecode` print the intermediate forms.
+
+## JIT readiness
+
+A JIT (P7, an optional Cargo feature; Cranelift is the leading option) would compile hot functions from this bytecode, not from the HIR. The bytecode is where runtime type feedback lives, and HIR type annotations are optional and never enforced, so they can't be trusted for code generation. The design leaves these hooks for it:
+
+| JIT need | Where the design provides it |
+|---|---|
+| Translate a function | Register bytecode maps directly onto Cranelift variables. Fused compare-and-branch instructions become native branches |
+| Read and write values | `Value` has a pinned layout (above): tag byte at offset 0, 8-byte payload at offset 8, fixed tag numbers shared with table array parts |
+| Specialise on types | Per-instruction type-feedback bytes (`type-feedback` feature) |
+| Specialise lookups | Inline-cache slots on global and field instructions, readable as guards ("key still in cached slot") |
+| Uncommon cases | The `*_slow` functions and native functions, called from JIT code as helpers through small shims in `orbit-jit` |
+| Fall back to the interpreter | Frames record closure, pc, base and cell base (ADR-3). JIT code keeps Lua registers in the `regs` stack (or spills them there before any exit), so leaving JIT code is "store pc, return to the loop" |
+| Captured variables | Heap cells: a load or store through the cell, with no open-upvalue bookkeeping |
+| Compile off-thread | The compiler never needs the heap; a JIT takes a copy of a prototype's code, constants and feedback for a background compile, since `Rc` can't cross threads |
+
+**The JIT–VM contract**, which `orbit-jit` (the one crate allowed `unsafe`, ADR-6) must follow:
+
+1. **Store pc before every helper call.** Error messages, tracebacks and `error` levels all come from the frame's pc and the debug info.
+2. **Reload after helpers that can move memory.** Anything that allocates can run a GC step, which can release arena pages, and a call can grow `regs` (a `Vec`, which may reallocate). After such a helper, JIT code reloads the register base and any arena page addresses. Pages are fixed-size boxed slices in `orbit-gc`, so objects never move while their page is live, and between helper calls direct loads through page addresses are valid.
+3. **Handles stay handles.** A `Gc<T>` is an index, not a pointer. JIT code turns it into an address with the arena's page table (page = index >> shift). That needs `orbit-gc` to expose the page table and pin the layout of `Gc<T>` and of its slots as well, which is raised with the `orbit-gc` owner when the JIT work starts, not now.
+4. **Yields leave JIT code.** Coroutine switches and native `CallThen` requests return to the interpreter loop, which handles them as it already does. JIT code never holds Rust frames across a yield.
+5. **Barriers.** Stores into tables and cells from JIT code go through the same write-barrier helpers (or inline the "is the owner black?" check once `orbit-gc` exposes it).
 
 ## Performance expectations
 

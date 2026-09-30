@@ -49,6 +49,8 @@ These designs stay inside the accepted ADRs. Five choices are worth a deliberate
 4. **Error-message variable names come from compile-time debug info** ([vm.md](vm.md#error-messages)) rather than from analysing bytecode when an error happens.
 5. **`os.clock` is monotonic wall time since start** at first light, because stable `std` can't read process CPU time. Stream D settles it for real.
 
+Decided since: Tym asked (2026-09-30) for the designs to prepare for a future JIT. [vm.md](vm.md#jit-readiness) now covers it, ADR-1 is amended to pin `Value`'s layout, and instructions get an optional type-feedback side table.
+
 ## End-to-end demo
 
 First light is done when these programs, in [`tests/first-light/`](../../tests/first-light/), produce output byte-identical to `lua5.5` (after the diff runner's usual normalisations), both normally and with the collector in stress mode:
