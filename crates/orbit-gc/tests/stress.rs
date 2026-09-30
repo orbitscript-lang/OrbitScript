@@ -99,6 +99,7 @@ fn run(seed: u64, ops: usize, stress: bool) {
         step_bytes: 64,
         min_threshold: 4096,
         page_bytes: 256,
+        ..Default::default()
     });
     h.set_stress(stress);
     let mut roots = Stack(Vec::new());

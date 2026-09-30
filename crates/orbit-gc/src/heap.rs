@@ -43,6 +43,16 @@ pub struct Params {
     /// the allocator: glibc, for one, keeps them unless the host calls
     /// `malloc_trim` or fixes its mmap threshold.
     pub page_bytes: usize,
+    /// With the `malloc-trim` feature: hand freed memory back to the OS
+    /// once a cycle finds the reachable heap at or below this percentage of
+    /// its peak since the last trim, and pages were released. 50 by default.
+    /// Higher trims sooner after a smaller drop; trimming after every cycle
+    /// costs time, because memory handed back is soon taken again.
+    pub trim_percent: u32,
+    /// With the `malloc-trim` feature: the least the reachable heap must
+    /// have fallen from its peak, in bytes, before memory is handed back.
+    /// 1 MiB by default, so small heaps are left alone.
+    pub trim_min_bytes: usize,
 }
 
 impl Default for Params {
@@ -53,6 +63,8 @@ impl Default for Params {
             step_bytes: 16 * 1024,
             min_threshold: 0,
             page_bytes: 64 * 1024,
+            trim_percent: 50,
+            trim_min_bytes: 1 << 20,
         }
     }
 }
@@ -81,9 +93,6 @@ enum State {
 
 /// How many free slots the sweeper skips for the cost of visiting one object.
 const FREE_SLOT_SHARE: usize = 16;
-/// How far the reachable heap must fall before freed memory is handed back
-/// to the OS (with the `malloc-trim` feature).
-const TRIM_MIN_DROP: usize = 1 << 20;
 /// Bytes of work done by one step in stress mode.
 const STRESS_WORK: usize = 2048;
 
@@ -115,7 +124,7 @@ pub struct Heap<S: Space> {
     cycles: u64,
     /// Arena pages released so far.
     pages_released: u64,
-    /// `pages_released` when memory was last handed back to the OS.
+    /// `pages_released` when freed memory was last handed back to the OS.
     released_at_trim: u64,
     /// The most bytes a cycle has found reachable since memory was last
     /// handed back to the OS.
@@ -455,14 +464,6 @@ impl<S: Space> Heap<S> {
             .sum()
     }
 
-    /// Arena pages released since the heap was created. A host that wants
-    /// freed memory back from its allocator (`mi_collect` under mimalloc,
-    /// say) can ask for it after a cycle where this went up; the
-    /// `malloc-trim` feature does that for glibc.
-    pub fn pages_released(&self) -> u64 {
-        self.pages_released
-    }
-
     /// Completed collection cycles.
     pub fn cycles(&self) -> u64 {
         self.cycles
@@ -616,8 +617,8 @@ impl<S: Space> Heap<S> {
     }
 
     /// Hand freed memory back to the OS when the heap has shrunk: pages
-    /// were released and the reachable heap is at most half what it was at
-    /// its peak, by at least `TRIM_MIN_DROP`. Trimming on every cycle that
+    /// were released, and the reachable heap is at most `trim_percent` of
+    /// its peak, by at least `trim_min_bytes`. Trimming on every cycle that
     /// released a page instead cost 23% on binary trees, because the memory
     /// is taken straight back; under steady churn the live size holds, so
     /// this never trims.
@@ -627,8 +628,11 @@ impl<S: Space> Heap<S> {
         }
         self.live_peak = self.live_peak.max(live);
         if self.pages_released != self.released_at_trim
-            && live <= self.live_peak / 2
-            && self.live_peak - live >= TRIM_MIN_DROP
+            && live.saturating_mul(100)
+                <= self
+                    .live_peak
+                    .saturating_mul(self.params.trim_percent as usize)
+            && self.live_peak - live >= self.params.trim_min_bytes
         {
             crate::os::release_memory();
             self.released_at_trim = self.pages_released;

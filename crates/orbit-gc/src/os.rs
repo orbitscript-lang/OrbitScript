@@ -8,11 +8,15 @@
 //!
 //! With the `malloc-trim` feature, on glibc, the heap calls `malloc_trim`
 //! at the end of a cycle that released pages after the reachable heap
-//! shrank to half its peak or less (see `Heap::release_to_os`). This is the crate's only
-//! `unsafe`, allowed by ADR-6. Elsewhere, or without the feature, it does
-//! nothing: musl returns memory by itself, and other allocators have their
-//! own calls, which the host can make after
-//! [`Heap::pages_released`](crate::Heap::pages_released) goes up.
+//! shrank well below its peak (see `Heap::release_to_os` and
+//! [`Params::trim_percent`](crate::Params::trim_percent)). This is the
+//! crate's only `unsafe`, allowed by ADR-2 and ADR-6. Elsewhere, or without
+//! the feature, it does nothing: musl returns memory by itself. Other
+//! allocators and systems get their own calls here, not through a hook.
+//!
+//! No crate offers a safe binding: `libc` declares `malloc_trim` as an
+//! `unsafe fn`, so using it would add a dependency and still need `unsafe`
+//! here. Declaring it as a `safe fn` ourselves is the smaller of the two.
 
 #[cfg(all(feature = "malloc-trim", target_os = "linux", target_env = "gnu"))]
 pub(crate) const RELEASES: bool = true;

@@ -25,7 +25,9 @@
 //!   a page the sweep leaves empty is freed, so memory taken during a spike
 //!   is given back when the spike ends. glibc keeps freed memory in the
 //!   process unless asked; the `malloc-trim` feature asks, once a cycle finds
-//!   the reachable heap has shrunk to half its peak or less.
+//!   the reachable heap has shrunk well below its peak
+//!   ([`Params::trim_percent`]). Support for other allocators and systems
+//!   belongs in this crate too, not in its hosts.
 //! - **Weak references and ephemerons.** An object declares its weak mode
 //!   while being traced ([`Marker::weak`]) and drops dead entries in
 //!   [`Trace::clear_weak`]. Ephemeron entries are reported with
@@ -88,10 +90,6 @@ mod os;
 mod trace;
 
 pub use arena::{AnyGc, Arena, CHECKED_HANDLES, Gc};
-
-/// Whether this build hands freed memory back to the OS after collections:
-/// the `malloc-trim` feature on a glibc target.
-pub const RELEASES_TO_OS: bool = os::RELEASES;
 pub use heap::{Heap, Params, Phase};
 pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 
