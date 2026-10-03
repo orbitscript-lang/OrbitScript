@@ -255,12 +255,7 @@ impl Vm {
 
     /// Release the most recent [`Vm::pin`] of `v`.
     pub fn unpin(&mut self, v: Value) {
-        if let Some(i) = self
-            .rt
-            .pinned
-            .iter()
-            .rposition(|&p| p.to_bits() == v.to_bits())
-        {
+        if let Some(i) = self.rt.pinned.iter().rposition(|&p| p.same(v)) {
             self.rt.pinned.remove(i);
         }
     }

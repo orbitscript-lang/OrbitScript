@@ -21,7 +21,7 @@ pub use func::{Cell, Closure, Proto, ProtoCode};
 pub use orbit_gc::{Gc, Heap};
 pub use string::{Interner, LuaStr, OrbitStr, OrbitString};
 pub use table::Table;
-pub use value::{NativeId, Value};
+pub use value::{NativeId, Payload, Tag, Value};
 
 orbit_gc::space! {
     /// Every object type of the Lua heap.
