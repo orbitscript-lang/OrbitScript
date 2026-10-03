@@ -166,11 +166,6 @@ impl ArrayPart {
     }
 
     #[inline(always)]
-    fn payload(&self, i: usize) -> Payload {
-        self.payloads[i]
-    }
-
-    #[inline(always)]
     fn get(&self, i: usize) -> Value {
         Value::unpack(self.tag(i), self.payload(i))
     }
