@@ -14,6 +14,7 @@
 | `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates | B |
 | `orbit-core` | Value, strings, tables, built on `orbit-gc` | B |
 | `orbit-hir`, `orbit-compiler`, `orbit-vm` | HIR, bytecode compiler, interpreter | C |
+| `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) | C |
 | `orbit-stdlib` | Lua standard library | D |
 | `orbit` | Rust embedding API | shared |
 | `orbit-cli` | `orbit` binary | shared |
