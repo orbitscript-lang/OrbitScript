@@ -59,6 +59,10 @@ name = "orbit-cli"
 version = "0.0.0"
 dependencies = [
  "orbit",
+ "orbit-compiler",
+ "orbit-gc",
+ "orbit-hir",
+ "orbit-lua-syntax",
 ]
 
 [[package]]
@@ -114,4 +118,5 @@ version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
  "orbit-core",
+ "orbit-gc",
 ]

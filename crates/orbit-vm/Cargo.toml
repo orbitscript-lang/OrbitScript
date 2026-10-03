@@ -11,6 +11,11 @@ publish = false
 [dependencies]
 orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-core = { path = "../orbit-core" }
+orbit-gc = { path = "../orbit-gc" }
+
+[features]
+# Per-instruction type-feedback bytes on prototypes (docs/design/vm.md).
+type-feedback = ["orbit-core/type-feedback"]
 
 [lints]
 workspace = true
