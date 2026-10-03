@@ -1,12 +1,15 @@
 [package]
 name = "orbit-lua-syntax"
-description = "Lua 5.5 lexer, parser and AST"
+description = "Lua 5.5 front end: lexer, parser, AST and lowering to the HIR"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+
+[dependencies]
+orbit-hir = { path = "../orbit-hir" }
 
 [lints]
 workspace = true
