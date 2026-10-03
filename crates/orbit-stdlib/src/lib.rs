@@ -19,6 +19,9 @@ pub fn open_libs(vm: &mut Vm) {
     open_lib(vm, "table", table::FUNCTIONS);
     let m = open_lib(vm, "math", math::FUNCTIONS);
     math::constants(vm, m);
+    for &(name, fast) in math::FAST {
+        vm.set_native_fast_path(name, fast);
+    }
     open_lib(vm, "os", &[("os.clock", os_clock)]);
 }
 

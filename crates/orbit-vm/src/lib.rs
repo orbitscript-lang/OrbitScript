@@ -21,7 +21,7 @@ use orbit_core::table::{self, mark};
 use orbit_core::{Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Table, Value};
 use orbit_gc::{Liveness, Marker, Roots};
 
-pub use native::{CallOutcome, Continuation, NativeCtx, NativeFn, NativeReturn};
+pub use native::{CallOutcome, Continuation, FastFn, NativeCtx, NativeFn, NativeReturn};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
 pub use orbit_bytecode as op;
 pub use orbit_core;
@@ -67,6 +67,7 @@ pub(crate) struct Native {
     /// none.
     pub name: &'static str,
     pub f: NativeFn,
+    pub fast: Option<FastFn>,
 }
 
 impl fmt::Debug for Native {
@@ -213,9 +214,26 @@ impl Vm {
     /// doesn't name it.
     pub fn register_native(&mut self, name: &'static str, f: NativeFn) -> Value {
         let id = NativeId(self.rt.natives.len() as u32);
-        self.rt.natives.push(Native { name, f });
+        self.rt.natives.push(Native {
+            name,
+            f,
+            fast: None,
+        });
         self.rt.native_ids.insert(name, id);
         Value::Native(id)
+    }
+
+    /// Give the native registered under `name` a [`FastFn`]: calls that want
+    /// at most one result try it first. Returns false if no native has
+    /// that name.
+    pub fn set_native_fast_path(&mut self, name: &str, fast: FastFn) -> bool {
+        match self.rt.native_ids.get(name) {
+            Some(&id) => {
+                self.rt.natives[id.0 as usize].fast = Some(fast);
+                true
+            }
+            None => false,
+        }
     }
 
     /// A string value.
