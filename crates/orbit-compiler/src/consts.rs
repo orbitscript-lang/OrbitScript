@@ -1,0 +1,180 @@
+//! Compile-time constants: literal folding and `<const>` locals.
+
+use orbit_hir::{BinOp, Chunk, ExprId, ExprKind, Function, LocalKind, StmtKind, StrId, UnOp};
+
+/// A value known at compile time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ConstVal {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(StrId),
+}
+
+impl ConstVal {
+    pub(crate) fn truthy(self) -> bool {
+        !matches!(self, ConstVal::Nil | ConstVal::Bool(false))
+    }
+}
+
+/// For every function, the compile-time value of each `Const` local whose initialiser is a
+/// constant expression (`None` for every other local).
+pub(crate) fn const_locals(chunk: &Chunk) -> Vec<Vec<Option<ConstVal>>> {
+    chunk
+        .functions
+        .iter()
+        .map(|f| {
+            let mut values = vec![None; f.locals.len()];
+            // A const initialiser can refer to earlier consts; iterate to a fixpoint.
+            loop {
+                let mut changed = false;
+                for s in &f.stmts {
+                    let StmtKind::Let {
+                        locals,
+                        values: init,
+                    } = &s.kind
+                    else {
+                        continue;
+                    };
+                    for (i, &l) in locals.iter().enumerate() {
+                        let local = &f.locals[l.index()];
+                        if local.kind != LocalKind::Const
+                            || local.reassigned
+                            || values[l.index()].is_some()
+                        {
+                            continue;
+                        }
+                        // Only a value that lines up with its own expression counts: a local
+                        // filled from a multi-value call is not constant.
+                        let Some(&e) = init.items.get(i) else {
+                            continue;
+                        };
+                        if let Some(v) = fold(f, &values, e) {
+                            values[l.index()] = Some(v);
+                            changed = true;
+                        }
+                    }
+                }
+                if !changed {
+                    break values;
+                }
+            }
+        })
+        .collect()
+}
+
+/// The constant value of `e`, if it has one, given the known `<const>` locals of `f`.
+pub(crate) fn fold(f: &Function, locals: &[Option<ConstVal>], e: ExprId) -> Option<ConstVal> {
+    match &f.expr(e).kind {
+        ExprKind::Nil => Some(ConstVal::Nil),
+        ExprKind::Bool(b) => Some(ConstVal::Bool(*b)),
+        ExprKind::Int(i) => Some(ConstVal::Int(*i)),
+        ExprKind::Float(x) => Some(ConstVal::Float(*x)),
+        ExprKind::Str(s) => Some(ConstVal::Str(*s)),
+        ExprKind::Local(l) => locals.get(l.index()).copied().flatten(),
+        ExprKind::Binary { op, lhs, rhs } => {
+            let a = fold(f, locals, *lhs)?;
+            let b = fold(f, locals, *rhs)?;
+            fold_arith(*op, a, b)
+        }
+        ExprKind::Unary {
+            op: UnOp::Neg,
+            expr,
+        } => match fold(f, locals, *expr)? {
+            ConstVal::Int(i) => Some(ConstVal::Int(i.wrapping_neg())),
+            ConstVal::Float(x) => Some(ConstVal::Float(-x)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Folds arithmetic on two numbers, only where the operation can't raise an error. Strings are
+/// never coerced at compile time.
+pub(crate) fn fold_arith(op: BinOp, a: ConstVal, b: ConstVal) -> Option<ConstVal> {
+    use ConstVal::{Float, Int};
+    let float = |v: ConstVal| match v {
+        Int(i) => Some(i as f64),
+        Float(x) => Some(x),
+        _ => None,
+    };
+    if let (Int(x), Int(y)) = (a, b) {
+        return match op {
+            BinOp::Add => Some(Int(x.wrapping_add(y))),
+            BinOp::Sub => Some(Int(x.wrapping_sub(y))),
+            BinOp::Mul => Some(Int(x.wrapping_mul(y))),
+            BinOp::IDiv if y != 0 => {
+                let q = x.wrapping_div(y);
+                Some(Int(if x.wrapping_rem(y) != 0 && (x ^ y) < 0 {
+                    q - 1
+                } else {
+                    q
+                }))
+            }
+            BinOp::Mod if y != 0 => {
+                let r = x.wrapping_rem(y);
+                Some(Int(if r != 0 && (r ^ y) < 0 { r + y } else { r }))
+            }
+            BinOp::Div => Some(Float(x as f64 / y as f64)),
+            BinOp::Pow => Some(Float((x as f64).powf(y as f64))),
+            _ => None,
+        };
+    }
+    let (x, y) = (float(a)?, float(b)?);
+    match op {
+        BinOp::Add => Some(Float(x + y)),
+        BinOp::Sub => Some(Float(x - y)),
+        BinOp::Mul => Some(Float(x * y)),
+        BinOp::Div => Some(Float(x / y)),
+        BinOp::Pow => Some(Float(x.powf(y))),
+        BinOp::IDiv => Some(Float((x / y).floor())),
+        // Float modulo has sign and infinity corner cases; leave it to the VM.
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ConstVal::{Float, Int};
+
+    #[test]
+    fn integer_folding_follows_lua() {
+        assert_eq!(fold_arith(BinOp::IDiv, Int(7), Int(-2)), Some(Int(-4)));
+        assert_eq!(fold_arith(BinOp::Mod, Int(-7), Int(3)), Some(Int(2)));
+        assert_eq!(fold_arith(BinOp::Mod, Int(7), Int(-3)), Some(Int(-2)));
+        assert_eq!(
+            fold_arith(BinOp::IDiv, Int(i64::MIN), Int(-1)),
+            Some(Int(i64::MIN))
+        );
+        assert_eq!(fold_arith(BinOp::Mod, Int(i64::MIN), Int(-1)), Some(Int(0)));
+        assert_eq!(
+            fold_arith(BinOp::Add, Int(i64::MAX), Int(1)),
+            Some(Int(i64::MIN))
+        );
+        assert_eq!(fold_arith(BinOp::Div, Int(1), Int(2)), Some(Float(0.5)));
+    }
+
+    #[test]
+    fn errors_are_not_folded() {
+        assert_eq!(fold_arith(BinOp::IDiv, Int(1), Int(0)), None);
+        assert_eq!(fold_arith(BinOp::Mod, Int(1), Int(0)), None);
+        assert_eq!(fold_arith(BinOp::Concat, Int(1), Int(2)), None);
+        assert_eq!(fold_arith(BinOp::Lt, Int(1), Int(2)), None);
+        assert_eq!(fold_arith(BinOp::Mod, Float(1.0), Int(2)), None);
+    }
+
+    #[test]
+    fn float_folding() {
+        assert_eq!(
+            fold_arith(BinOp::Div, Int(1), Int(0)),
+            Some(Float(f64::INFINITY))
+        );
+        assert_eq!(
+            fold_arith(BinOp::IDiv, Float(7.0), Int(2)),
+            Some(Float(3.0))
+        );
+        assert_eq!(fold_arith(BinOp::Pow, Int(2), Int(10)), Some(Float(1024.0)));
+    }
+}
