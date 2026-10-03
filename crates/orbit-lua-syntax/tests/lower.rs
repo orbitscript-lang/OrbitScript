@@ -1,0 +1,227 @@
+//! Lowering tests: name resolution, the subset gate, and the HIR the first-light programs give.
+
+use std::path::Path;
+
+use orbit_hir::{ExprKind, FunctionName, LocalKind, StmtKind};
+use orbit_lua_syntax::{ParseOptions, lower, parse, to_hir};
+
+fn hir(src: &str) -> orbit_hir::Chunk {
+    to_hir("s.lua", src.as_bytes(), &ParseOptions::default())
+        .unwrap_or_else(|d| panic!("{src}: {}", d.to_lua_message("s.lua")))
+}
+
+fn err(src: &str) -> String {
+    match to_hir("s.lua", src.as_bytes(), &ParseOptions::default()) {
+        Ok(_) => panic!("expected an error for {src:?}"),
+        Err(d) => d.to_lua_message("s.lua"),
+    }
+}
+
+fn dump(src: &str) -> String {
+    orbit_hir::print(&hir(src))
+}
+
+#[test]
+fn const_assignment_matches_the_reference() {
+    let cases = [
+        (
+            "local x <const> = 1; x = 2",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+        (
+            "for i=1,2 do i = 3 end",
+            "s.lua:1: attempt to assign to const variable 'i'",
+        ),
+        (
+            "for k, v in pairs({}) do k = 1 end",
+            "s.lua:1: attempt to assign to const variable 'k'",
+        ),
+        (
+            "local x <const> = 1\nx\n=\n2\n",
+            "s.lua:2: attempt to assign to const variable 'x'",
+        ),
+        (
+            "local x <const> = 1\na,\nx\n=\n1,2",
+            "s.lua:3: attempt to assign to const variable 'x'",
+        ),
+        (
+            "local x <const>\n= 1\nx = 2",
+            "s.lua:3: attempt to assign to const variable 'x'",
+        ),
+        (
+            "local x <const>, y = 1, 2 y = 3 x = 4",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+        (
+            "local <const> a, b = 1, 2 b = 3",
+            "s.lua:1: attempt to assign to const variable 'b'",
+        ),
+        (
+            "local f <const> = 1 function f() end",
+            "s.lua:1: attempt to assign to const variable 'f'",
+        ),
+        (
+            "local x <const> = 1 local function f() local function g() x = 2 end end",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+        (
+            "for i = 1, 2 do local function f() i = 3 end end",
+            "s.lua:1: attempt to assign to const variable 'i'",
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(err(src), expected, "source: {src:?}");
+    }
+    // Only the first generic-for variable is read-only; shadowing lifts the restriction.
+    hir("for k, v in pairs({}) do v = 1 end");
+    hir("local x <const> = 1 do local x = 2 x = 3 end");
+    hir("local t <const> = {} t.x = 1");
+}
+
+#[test]
+fn out_of_subset_constructs_are_rejected() {
+    let cases = [
+        ("goto done", "s.lua:1: 'goto' is not supported yet"),
+        ("do end\n::done::", "s.lua:2: labels are not supported yet"),
+        (
+            "global x",
+            "s.lua:1: 'global' declarations are not supported yet",
+        ),
+        (
+            "global function f() end",
+            "s.lua:1: 'global' declarations are not supported yet",
+        ),
+        (
+            "global <const> *",
+            "s.lua:1: 'global' declarations are not supported yet",
+        ),
+        (
+            "local f <close> = nil",
+            "s.lua:1: '<close>' variables are not supported yet",
+        ),
+        (
+            "x = 1 | 2",
+            "s.lua:1: bitwise operators are not supported yet",
+        ),
+        ("x = ~1", "s.lua:1: bitwise operators are not supported yet"),
+        (
+            "x = a << 1",
+            "s.lua:1: bitwise operators are not supported yet",
+        ),
+        (
+            "function f(...args) end",
+            "s.lua:1: named varargs are not supported yet",
+        ),
+        ("print(_ENV)", "s.lua:1: '_ENV' is not supported yet"),
+        ("local _ENV = {}", "s.lua:1: '_ENV' is not supported yet"),
+        (
+            "x = 0x1p4",
+            "s.lua:1: hexadecimal floats are not supported yet near '0x1p4'",
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(err(src), expected, "source: {src:?}");
+    }
+    // `global` stays an ordinary name, and `_ENV` as a field is just a string key.
+    hir("global = 1 print(global) t = {} t._ENV = 1");
+}
+
+#[test]
+fn scoping_rules() {
+    // `local x = x` reads the outer `x`.
+    let out = dump("local x = 1 do local x = x end");
+    assert!(out.contains("let x#l1 = x#l0"), "{out}");
+
+    // `local function` sees itself, `local f = function` doesn't.
+    let out = dump("local function f() return f end local g = function() return g end");
+    assert!(out.contains("return c0"), "{out}");
+    assert!(out.contains("return global \"g\""), "{out}");
+
+    // `repeat ... until` sees the body's locals.
+    let out = dump("repeat local y = 1 until y");
+    assert!(out.contains("until y#l0"), "{out}");
+
+    // Locals declared after a use don't capture it.
+    let out = dump("print(z) local z = 1");
+    assert!(out.contains("call global \"print\"(global \"z\")"), "{out}");
+}
+
+#[test]
+fn functions_and_methods() {
+    let chunk = hir("function a.b:c(x) return self, x end function g() end local function h() end");
+    let names: Vec<_> = chunk.functions.iter().map(|f| f.name).collect();
+    let s = |b: &[u8]| {
+        (0..chunk.strings.len())
+            .map(|i| orbit_hir::StrId(i as u32))
+            .find(|&id| chunk.strings.get(id) == b)
+            .unwrap()
+    };
+    assert_eq!(
+        names,
+        vec![
+            FunctionName::Main,
+            FunctionName::Method(s(b"c")),
+            FunctionName::Global(s(b"g")),
+            FunctionName::Local(s(b"h")),
+        ]
+    );
+    let method = &chunk.functions[1];
+    assert_eq!(method.params.len(), 2);
+    assert_eq!(method.local(method.params[0]).name, Some(s(b"self")));
+    assert!(chunk.functions[0].is_vararg);
+    assert!(!method.is_vararg);
+}
+
+#[test]
+fn parenthesised_calls_give_one_value() {
+    let chunk = hir("local function f() end return (f()), (...), (1)");
+    let main = &chunk.functions[0];
+    let ret = main.block(main.body).stmts.last().copied().unwrap();
+    let StmtKind::Return(list) = &main.stmt(ret).kind else {
+        panic!()
+    };
+    let kinds: Vec<_> = list
+        .items
+        .iter()
+        .map(|&e| main.expr(e).kind.clone())
+        .collect();
+    assert!(matches!(kinds[0], ExprKind::First(_)));
+    assert!(matches!(kinds[1], ExprKind::First(_)));
+    assert_eq!(kinds[2], ExprKind::Int(1));
+}
+
+#[test]
+fn for_loops() {
+    let chunk = hir("for i = 1, 10, 2 do end for k, v in next, {} do end");
+    let main = &chunk.functions[0];
+    let kinds: Vec<_> = main.locals.iter().map(|l| l.kind).collect();
+    use LocalKind::*;
+    assert_eq!(
+        kinds,
+        vec![ForControl, Hidden, Hidden, Hidden, ForControl, Normal]
+    );
+}
+
+#[test]
+fn lowered_hir_verifies_before_and_after_analysis() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in ["tests/first-light", "bench"] {
+        for entry in std::fs::read_dir(root.join(dir)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "lua") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.len() >= 8);
+    for path in files {
+        let src = std::fs::read(&path).unwrap();
+        let name = path.display().to_string();
+        let ast = parse(&name, &src).unwrap_or_else(|d| panic!("{}", d.to_lua_message(&name)));
+        let mut chunk = lower(ast).unwrap_or_else(|d| panic!("{}", d.to_lua_message(&name)));
+        orbit_hir::verify_lowered(&chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
+        orbit_hir::analyze(&mut chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
+        orbit_hir::verify(&chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+}
