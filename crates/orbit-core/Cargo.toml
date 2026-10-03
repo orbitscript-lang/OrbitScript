@@ -8,5 +8,14 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+orbit-bytecode = { path = "../orbit-bytecode" }
+orbit-gc = { path = "../orbit-gc" }
+
 [lints]
 workspace = true
+
+[features]
+# Per-instruction type-feedback bytes on prototypes, for a future JIT
+# (docs/design/vm.md, "Type feedback").
+type-feedback = []
