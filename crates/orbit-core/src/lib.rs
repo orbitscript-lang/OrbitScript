@@ -17,7 +17,7 @@ pub mod string;
 pub mod table;
 pub mod value;
 
-pub use func::{Cell, Closure, Proto};
+pub use func::{Cell, Closure, Proto, ProtoCode};
 pub use orbit_gc::{Gc, Heap};
 pub use string::{Interner, LuaStr, OrbitStr, OrbitString};
 pub use table::Table;

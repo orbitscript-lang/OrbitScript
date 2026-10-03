@@ -79,7 +79,10 @@ impl fmt::Debug for Native {
 pub(crate) enum FrameKind {
     Lua {
         closure: Gc<Closure>,
-        proto: Gc<orbit_core::Proto>,
+        /// Address of the closure's [`ProtoCode`](orbit_core::ProtoCode),
+        /// only ever compared: when it matches the code the dispatch loop
+        /// already holds, resuming this frame skips the heap.
+        code_id: usize,
     },
     /// A native waiting for a call it asked for with `CallThen`.
     Native {
