@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-use orbit_core::number::{self, float_to_int};
+use orbit_core::number::{self, ArithError, ArithOp, float_to_int};
 use orbit_core::value::raw_eq;
 use orbit_core::{LuaHeap, Value};
 
@@ -55,35 +55,32 @@ impl Arith {
     }
 }
 
+impl Arith {
+    /// The binary operator, or `None` for `Neg`.
+    fn number_op(self) -> Option<ArithOp> {
+        Some(match self {
+            Arith::Add => ArithOp::Add,
+            Arith::Sub => ArithOp::Sub,
+            Arith::Mul => ArithOp::Mul,
+            Arith::Div => ArithOp::Div,
+            Arith::IDiv => ArithOp::IDiv,
+            Arith::Mod => ArithOp::Mod,
+            Arith::Pow => ArithOp::Pow,
+            Arith::Neg => return None,
+        })
+    }
+}
+
 /// Arithmetic on two numbers (either subtype).
 #[inline]
 pub(crate) fn arith_num(op: Arith, a: Value, b: Value) -> Result<Value, &'static str> {
-    use Value::{Float, Int};
-    Ok(match (op, a, b) {
-        (Arith::Add, Int(x), Int(y)) => Int(x.wrapping_add(y)),
-        (Arith::Sub, Int(x), Int(y)) => Int(x.wrapping_sub(y)),
-        (Arith::Mul, Int(x), Int(y)) => Int(x.wrapping_mul(y)),
-        (Arith::IDiv, Int(x), Int(y)) => {
-            Int(number::int_idiv(x, y).ok_or("attempt to divide by zero")?)
-        }
-        (Arith::Mod, Int(x), Int(y)) => {
-            Int(number::int_mod(x, y).ok_or("attempt to perform 'n%%0'")?)
-        }
-        (Arith::Neg, Int(x), _) => Int(x.wrapping_neg()),
-        _ => {
-            let (x, y) = (a.as_f64().unwrap_or(0.0), b.as_f64().unwrap_or(0.0));
-            Float(match op {
-                Arith::Add => x + y,
-                Arith::Sub => x - y,
-                Arith::Mul => x * y,
-                Arith::Div => x / y,
-                Arith::IDiv => number::float_idiv(x, y),
-                Arith::Mod => number::float_mod(x, y),
-                Arith::Pow => x.powf(y),
-                Arith::Neg => -x,
-            })
-        }
-    })
+    let (Some(x), Some(y)) = (a.as_number(), b.as_number()) else {
+        unreachable!("arith_num on numbers")
+    };
+    match op.number_op() {
+        Some(o) => x.arith(o, y).map(Value::from).map_err(ArithError::message),
+        None => Ok((-x).into()),
+    }
 }
 
 fn is_num(v: Value) -> bool {

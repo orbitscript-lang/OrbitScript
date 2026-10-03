@@ -16,6 +16,8 @@
 //!
 //! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
 
+pub mod number;
+
 /// A count operand meaning "all values": as `nresults`, keep every result
 /// and set top; as `nargs` or a `count`, use every value up to top.
 pub const MULTI: u8 = 255;

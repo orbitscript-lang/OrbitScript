@@ -3,6 +3,7 @@
 use std::rc::Rc;
 
 use orbit_bytecode::{CaptureSource, MULTI, Op, Origin};
+use orbit_core::number::{ArithOp, Number};
 use orbit_core::table::{self, Key};
 use orbit_core::{Cell, Closure, Gc, ProtoCode, Table, Value};
 
@@ -475,22 +476,34 @@ impl Vm {
                 };
             }
             macro_rules! arith {
-                ($dst:expr, $a:expr, $b:expr, $op:expr, |$i:ident, $j:ident| $ii:expr, |$f:ident, $g:ident| $ff:expr) => {{
+                ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {{
                     let (x, y) = (reg!($a), reg!($b));
-                    // Each arm stores its own result, so the common cases
-                    // write a known tag and payload instead of copying a
-                    // merged `Value` through the stack.
+                    // `Number::arith` owns the integer/float rules; with a
+                    // constant operator it inlines to the one case. Each arm
+                    // stores its own result, so the common cases write a
+                    // known tag and payload instead of copying a merged
+                    // `Value` through the stack.
+                    macro_rules! store {
+                        ($p:expr, $q:expr) => {
+                            match Number::arith($p, $nop, $q) {
+                                Ok(Number::Int(i)) => reg!($dst) = Value::Int(i),
+                                Ok(Number::Float(f)) => reg!($dst) = Value::Float(f),
+                                Err(e) => throw!(Exc::Rt(e.message().into(), None)),
+                            }
+                        };
+                    }
+                    // One arm per operand pair, so each inlines with both
+                    // subtypes known.
                     match (x, y) {
-                        (Value::Int($i), Value::Int($j)) => reg!($dst) = $ii,
-                        (Value::Float($f), Value::Float($g)) => reg!($dst) = Value::Float($ff),
-                        // Mixed operands convert the integer, as Lua does.
-                        (Value::Int(i), Value::Float($g)) => {
-                            let $f = i as f64;
-                            reg!($dst) = Value::Float($ff)
+                        (Value::Int(i), Value::Int(j)) => store!(Number::Int(i), Number::Int(j)),
+                        (Value::Float(f), Value::Float(g)) => {
+                            store!(Number::Float(f), Number::Float(g))
                         }
-                        (Value::Float($f), Value::Int(j)) => {
-                            let $g = j as f64;
-                            reg!($dst) = Value::Float($ff)
+                        (Value::Int(i), Value::Float(g)) => {
+                            store!(Number::Int(i), Number::Float(g))
+                        }
+                        (Value::Float(f), Value::Int(j)) => {
+                            store!(Number::Float(f), Number::Int(j))
                         }
                         _ => reg!($dst) = tri!(ops::arith_slow(&self.heap, $op, x, y)),
                     }
@@ -743,78 +756,13 @@ impl Vm {
                         reg!(dst) = m;
                     }
 
-                    Op::Add { dst, a, b } => {
-                        arith!(
-                            dst,
-                            a,
-                            b,
-                            Arith::Add,
-                            |i, j| Value::Int(i.wrapping_add(j)),
-                            |f, g| f + g
-                        )
-                    }
-                    Op::Sub { dst, a, b } => {
-                        arith!(
-                            dst,
-                            a,
-                            b,
-                            Arith::Sub,
-                            |i, j| Value::Int(i.wrapping_sub(j)),
-                            |f, g| f - g
-                        )
-                    }
-                    Op::Mul { dst, a, b } => {
-                        arith!(
-                            dst,
-                            a,
-                            b,
-                            Arith::Mul,
-                            |i, j| Value::Int(i.wrapping_mul(j)),
-                            |f, g| f * g
-                        )
-                    }
-                    Op::Div { dst, a, b } => {
-                        arith!(
-                            dst,
-                            a,
-                            b,
-                            Arith::Div,
-                            |i, j| Value::Float(i as f64 / j as f64),
-                            |f, g| f / g
-                        )
-                    }
-                    Op::Pow { dst, a, b } => {
-                        arith!(
-                            dst,
-                            a,
-                            b,
-                            Arith::Pow,
-                            |i, j| Value::Float((i as f64).powf(j as f64)),
-                            |f, g| f.powf(g)
-                        )
-                    }
-                    Op::IDiv { dst, a, b } => arith!(
-                        dst,
-                        a,
-                        b,
-                        Arith::IDiv,
-                        |i, j| match orbit_core::number::int_idiv(i, j) {
-                            Some(q) => Value::Int(q),
-                            None => throw!(Exc::Rt("attempt to divide by zero".into(), None)),
-                        },
-                        |f, g| orbit_core::number::float_idiv(f, g)
-                    ),
-                    Op::Mod { dst, a, b } => arith!(
-                        dst,
-                        a,
-                        b,
-                        Arith::Mod,
-                        |i, j| match orbit_core::number::int_mod(i, j) {
-                            Some(r) => Value::Int(r),
-                            None => throw!(Exc::Rt("attempt to perform 'n%%0'".into(), None)),
-                        },
-                        |f, g| orbit_core::number::float_mod(f, g)
-                    ),
+                    Op::Add { dst, a, b } => arith!(dst, a, b, Arith::Add, ArithOp::Add),
+                    Op::Sub { dst, a, b } => arith!(dst, a, b, Arith::Sub, ArithOp::Sub),
+                    Op::Mul { dst, a, b } => arith!(dst, a, b, Arith::Mul, ArithOp::Mul),
+                    Op::Div { dst, a, b } => arith!(dst, a, b, Arith::Div, ArithOp::Div),
+                    Op::Pow { dst, a, b } => arith!(dst, a, b, Arith::Pow, ArithOp::Pow),
+                    Op::IDiv { dst, a, b } => arith!(dst, a, b, Arith::IDiv, ArithOp::IDiv),
+                    Op::Mod { dst, a, b } => arith!(dst, a, b, Arith::Mod, ArithOp::Mod),
                     Op::AddInt { dst, a, imm } => {
                         let x = reg!(a);
                         match x {

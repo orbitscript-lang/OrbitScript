@@ -4,6 +4,10 @@
 
 use crate::Value;
 
+pub use orbit_bytecode::number::{
+    ArithError, ArithOp, Number, float_arith, float_idiv, float_mod, int_idiv, int_mod,
+};
+
 /// 2^63 as a float: the first float above every `i64`.
 const TWO_63: f64 = 9_223_372_036_854_775_808.0;
 
@@ -65,49 +69,6 @@ pub fn float_le_int(f: f64, i: i64) -> bool {
     } else {
         true
     }
-}
-
-/// Floor division of integers. `None` when dividing by zero.
-#[inline]
-pub fn int_idiv(a: i64, b: i64) -> Option<i64> {
-    match b {
-        0 => None,
-        -1 => Some(a.wrapping_neg()),
-        _ => {
-            let q = a / b;
-            Some(if a % b != 0 && (a ^ b) < 0 { q - 1 } else { q })
-        }
-    }
-}
-
-/// Floored modulo of integers. `None` when dividing by zero.
-#[inline]
-pub fn int_mod(a: i64, b: i64) -> Option<i64> {
-    match b {
-        0 => None,
-        -1 => Some(0),
-        _ => {
-            let r = a % b;
-            Some(if r != 0 && (r ^ b) < 0 { r + b } else { r })
-        }
-    }
-}
-
-/// Floored modulo of floats.
-#[inline]
-pub fn float_mod(a: f64, b: f64) -> f64 {
-    let r = a % b;
-    if r != 0.0 && (r < 0.0) != (b < 0.0) {
-        r + b
-    } else {
-        r
-    }
-}
-
-/// Floor division of floats.
-#[inline]
-pub fn float_idiv(a: f64, b: f64) -> f64 {
-    (a / b).floor()
 }
 
 fn is_space(b: u8) -> bool {
