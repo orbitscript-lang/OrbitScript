@@ -162,6 +162,24 @@ impl Value {
         self.pack() == other.pack()
     }
 
+    /// `*out = Value::unpack(tag, payload)`, with the store in each arm:
+    /// writing a known variant directly is cheaper than building the merged
+    /// value first and copying it.
+    #[inline(always)]
+    pub fn write_unpacked(out: &mut Value, tag: Tag, payload: Payload) {
+        let p = payload.0;
+        match tag {
+            Tag::Nil => *out = Value::Nil,
+            Tag::Bool => *out = Value::Bool(p != 0),
+            Tag::Int => *out = Value::Int(p as i64),
+            Tag::Float => *out = Value::Float(f64::from_bits(p)),
+            Tag::Str => *out = Value::Str(Gc::from_bits(p)),
+            Tag::Table => *out = Value::Table(Gc::from_bits(p)),
+            Tag::Closure => *out = Value::Closure(Gc::from_bits(p)),
+            Tag::Native => *out = Value::Native(NativeId(p as u32)),
+        }
+    }
+
     /// The number, if this is one (no string coercion).
     #[inline(always)]
     pub fn as_f64(self) -> Option<f64> {
@@ -256,6 +274,9 @@ mod tests {
             assert_eq!(t, v.tag());
             let w = Value::unpack(t, p);
             assert!(w.same(v));
+            let mut out = Value::Int(99);
+            Value::write_unpacked(&mut out, t, p);
+            assert!(out.same(v));
         }
     }
 
