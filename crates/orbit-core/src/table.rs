@@ -155,6 +155,11 @@ impl ArrayPart {
     }
 
     #[inline(always)]
+    fn payload(&self, i: usize) -> Payload {
+        self.payloads[i]
+    }
+
+    #[inline(always)]
     fn get(&self, i: usize) -> Value {
         Value::unpack(self.tags[i], self.payloads[i])
     }
@@ -301,6 +306,18 @@ impl Table {
         match self.probe(&key, |_, _| false) {
             Ok(slot) => self.entries[slot].value,
             Err(_) => Value::Nil,
+        }
+    }
+
+    /// `*out = t[i]` for an integer key (see [`Value::write_unpacked`]).
+    #[inline]
+    pub fn read_int(&self, i: i64, out: &mut Value) {
+        let idx = (i as u64).wrapping_sub(1);
+        if idx < self.array.len() as u64 {
+            let idx = idx as usize;
+            Value::write_unpacked(out, self.array.tag(idx), self.array.payload(idx));
+        } else {
+            *out = self.get_int(i);
         }
     }
 

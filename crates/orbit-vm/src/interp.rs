@@ -477,12 +477,14 @@ impl Vm {
             macro_rules! arith {
                 ($dst:expr, $a:expr, $b:expr, $op:expr, |$i:ident, $j:ident| $ii:expr, |$f:ident, $g:ident| $ff:expr) => {{
                     let (x, y) = (reg!($a), reg!($b));
-                    let v = match (x, y) {
-                        (Value::Int($i), Value::Int($j)) => $ii,
-                        (Value::Float($f), Value::Float($g)) => Value::Float($ff),
-                        _ => tri!(ops::arith_slow(&self.heap, $op, x, y)),
-                    };
-                    reg!($dst) = v;
+                    // Each arm stores its own result, so the common cases
+                    // write a known tag and payload instead of copying a
+                    // merged `Value` through the stack.
+                    match (x, y) {
+                        (Value::Int($i), Value::Int($j)) => reg!($dst) = $ii,
+                        (Value::Float($f), Value::Float($g)) => reg!($dst) = Value::Float($ff),
+                        _ => reg!($dst) = tri!(ops::arith_slow(&self.heap, $op, x, y)),
+                    }
                 }};
             }
             macro_rules! compare_jump {
@@ -646,16 +648,16 @@ impl Vm {
                         let Value::Table(t) = o else { index_error!(o) };
                         let tab = self.heap.get(t);
                         let cache = &caches[ic as usize];
-                        reg!(dst) = match tab.cached_str(cache.get() as usize, k) {
-                            Some(v) => v,
+                        match tab.cached_str(cache.get() as usize, k) {
+                            Some(v) => reg!(dst) = v,
                             None => match tab.find_str(&self.heap, k) {
                                 Some(slot) => {
                                     cache.set(slot as u32);
-                                    tab.slot_value(slot)
+                                    reg!(dst) = tab.slot_value(slot)
                                 }
-                                None => Value::Nil,
+                                None => reg!(dst) = Value::Nil,
                             },
-                        };
+                        }
                     }
                     Op::SetField { obj, key, src, ic } => {
                         let o = reg!(obj);
@@ -684,10 +686,10 @@ impl Vm {
                         let Value::Table(t) = o else { index_error!(o) };
                         let k = reg!(key);
                         let tab = self.heap.get(t);
-                        reg!(dst) = match k {
-                            Value::Int(i) => tab.get_int(i),
-                            k => tab.get(&self.heap, k),
-                        };
+                        match k {
+                            Value::Int(i) => tab.read_int(i, &mut reg!(dst)),
+                            k => reg!(dst) = tab.get(&self.heap, k),
+                        }
                     }
                     Op::SetIndex { obj, key, src } => {
                         let o = reg!(obj);
@@ -806,24 +808,26 @@ impl Vm {
                     ),
                     Op::AddInt { dst, a, imm } => {
                         let x = reg!(a);
-                        reg!(dst) = match x {
-                            Value::Int(i) => Value::Int(i.wrapping_add(imm as i64)),
-                            Value::Float(f) => Value::Float(f + imm as f64),
-                            _ => tri!(ops::arith_slow(
-                                &self.heap,
-                                Arith::Add,
-                                x,
-                                Value::Int(imm as i64)
-                            )),
-                        };
+                        match x {
+                            Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_add(imm as i64)),
+                            Value::Float(f) => reg!(dst) = Value::Float(f + imm as f64),
+                            _ => {
+                                reg!(dst) = tri!(ops::arith_slow(
+                                    &self.heap,
+                                    Arith::Add,
+                                    x,
+                                    Value::Int(imm as i64)
+                                ))
+                            }
+                        }
                     }
                     Op::Neg { dst, src } => {
                         let x = reg!(src);
-                        reg!(dst) = match x {
-                            Value::Int(i) => Value::Int(i.wrapping_neg()),
-                            Value::Float(f) => Value::Float(-f),
-                            _ => tri!(ops::arith_slow(&self.heap, Arith::Neg, x, x)),
-                        };
+                        match x {
+                            Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_neg()),
+                            Value::Float(f) => reg!(dst) = Value::Float(-f),
+                            _ => reg!(dst) = tri!(ops::arith_slow(&self.heap, Arith::Neg, x, x)),
+                        }
                     }
                     Op::Not { dst, src } => reg!(dst) = Value::Bool(reg!(src).is_falsy()),
                     Op::Len { dst, src } => {
