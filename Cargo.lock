@@ -71,6 +71,7 @@ version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
  "orbit-hir",
+ "orbit-lua-syntax",
 ]
 
 [[package]]
