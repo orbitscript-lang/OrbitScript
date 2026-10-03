@@ -84,9 +84,6 @@ version = "0.0.0"
 [[package]]
 name = "orbit-hir"
 version = "0.0.0"
-dependencies = [
- "orbit-lua-syntax",
-]
 
 [[package]]
 name = "orbit-lua-syntax"

@@ -61,7 +61,7 @@ pub struct Block {
 }
 ```
 
-Ids (`FuncId`, `LocalId`, `ExprId`, `StmtId`, `BlockId`, `CaptureId`, `StrId`, `TypeId`) are `u32` newtypes. `ExprId`s are only meaningful inside their function.
+`Span` is a byte range `start..end` in the chunk's source and `SourceInfo` maps offsets to lines; both live in `orbit-hir` so front ends share them. Ids (`FuncId`, `LocalId`, `ExprId`, `StmtId`, `BlockId`, `CaptureId`, `StrId`, `TypeId`) are `u32` newtypes. `ExprId`s are only meaningful inside their function.
 
 ### Statements
 
@@ -85,6 +85,7 @@ pub enum StmtKind {
 
 pub enum Place {
     Local(LocalId),
+    Outer { func: FuncId, local: LocalId },   // front-end output, rewritten to Capture
     Capture(CaptureId),
     Global(StrId),
     Index { obj: ExprId, key: ExprId },
@@ -137,7 +138,7 @@ The HIR is where evaluation order is written down once, so the two front ends ca
 
 A shared pass that turns `Outer` references into captures, so no front end has to build upvalue lists itself:
 
-1. For each `Outer { func: F, local: L }` found in function `G`, walk the parent chain from `G` up to (but not including) `F`. Each function on the way gets a capture for `L` (deduplicated): the child of `F` captures `ParentLocal(L)`, each function below it captures `ParentCapture(..)` of its parent's entry.
+1. For each `Outer { func: F, local: L }` found in function `G` (as an expression or an assignment target), walk the parent chain from `G` up to (but not including) `F`. Each function on the way gets a capture for `L` (deduplicated): the child of `F` captures `ParentLocal(L)`, each function below it captures `ParentCapture(..)` of its parent's entry.
 2. Mark `F.locals[L].captured = true`.
 3. Rewrite the `Outer` node as `Capture(id)` in `G`.
 4. Do the same for `Global` references, with `Env` at the top of the chain, so any function that touches a global captures the environment.
