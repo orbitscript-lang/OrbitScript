@@ -2,7 +2,8 @@
 
 use orbit_gc::Gc;
 
-use crate::{Closure, LuaHeap, LuaStr, Table, number};
+use crate::number::{self, Number};
+use crate::{Closure, LuaHeap, LuaStr, Table};
 
 /// An index into the VM's registry of native functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -189,6 +190,16 @@ impl Value {
 
     /// The number, if this is one (no string coercion).
     #[inline(always)]
+    pub fn as_number(self) -> Option<Number> {
+        match self {
+            Value::Int(i) => Some(Number::Int(i)),
+            Value::Float(f) => Some(Number::Float(f)),
+            _ => None,
+        }
+    }
+
+    /// The number as a float, if this is one (no string coercion).
+    #[inline(always)]
     pub fn as_f64(self) -> Option<f64> {
         match self {
             Value::Int(i) => Some(i as f64),
@@ -239,6 +250,16 @@ pub fn raw_eq(heap: &LuaHeap, a: Value, b: Value) -> bool {
 pub fn str_eq(heap: &LuaHeap, a: Gc<LuaStr>, b: Gc<LuaStr>) -> bool {
     let (x, y) = (heap.get(a), heap.get(b));
     !(x.is_short() && y.is_short()) && x.as_bytes() == y.as_bytes()
+}
+
+impl From<Number> for Value {
+    #[inline(always)]
+    fn from(n: Number) -> Value {
+        match n {
+            Number::Int(i) => Value::Int(i),
+            Number::Float(f) => Value::Float(f),
+        }
+    }
 }
 
 #[cfg(test)]

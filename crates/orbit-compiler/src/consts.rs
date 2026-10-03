@@ -1,5 +1,6 @@
 //! Compile-time constants: literal folding and `<const>` locals.
 
+use orbit_bytecode::number::{ArithOp, Number};
 use orbit_hir::{BinOp, Chunk, ExprId, ExprKind, Function, LocalKind, StmtKind, StrId, UnOp};
 
 /// A value known at compile time.
@@ -93,44 +94,27 @@ pub(crate) fn fold(f: &Function, locals: &[Option<ConstVal>], e: ExprId) -> Opti
 /// Folds arithmetic on two numbers, only where the operation can't raise an error. Strings are
 /// never coerced at compile time.
 pub(crate) fn fold_arith(op: BinOp, a: ConstVal, b: ConstVal) -> Option<ConstVal> {
-    use ConstVal::{Float, Int};
-    let float = |v: ConstVal| match v {
-        Int(i) => Some(i as f64),
-        Float(x) => Some(x),
+    let number = |v: ConstVal| match v {
+        ConstVal::Int(i) => Some(Number::Int(i)),
+        ConstVal::Float(x) => Some(Number::Float(x)),
         _ => None,
     };
-    if let (Int(x), Int(y)) = (a, b) {
-        return match op {
-            BinOp::Add => Some(Int(x.wrapping_add(y))),
-            BinOp::Sub => Some(Int(x.wrapping_sub(y))),
-            BinOp::Mul => Some(Int(x.wrapping_mul(y))),
-            BinOp::IDiv if y != 0 => {
-                let q = x.wrapping_div(y);
-                Some(Int(if x.wrapping_rem(y) != 0 && (x ^ y) < 0 {
-                    q - 1
-                } else {
-                    q
-                }))
-            }
-            BinOp::Mod if y != 0 => {
-                let r = x.wrapping_rem(y);
-                Some(Int(if r != 0 && (r ^ y) < 0 { r + y } else { r }))
-            }
-            BinOp::Div => Some(Float(x as f64 / y as f64)),
-            BinOp::Pow => Some(Float((x as f64).powf(y as f64))),
-            _ => None,
-        };
-    }
-    let (x, y) = (float(a)?, float(b)?);
-    match op {
-        BinOp::Add => Some(Float(x + y)),
-        BinOp::Sub => Some(Float(x - y)),
-        BinOp::Mul => Some(Float(x * y)),
-        BinOp::Div => Some(Float(x / y)),
-        BinOp::Pow => Some(Float(x.powf(y))),
-        BinOp::IDiv => Some(Float((x / y).floor())),
+    let (x, y) = (number(a)?, number(b)?);
+    let op = match op {
+        BinOp::Add => ArithOp::Add,
+        BinOp::Sub => ArithOp::Sub,
+        BinOp::Mul => ArithOp::Mul,
+        BinOp::Div => ArithOp::Div,
+        BinOp::IDiv => ArithOp::IDiv,
         // Float modulo has sign and infinity corner cases; leave it to the VM.
-        _ => None,
+        BinOp::Mod if matches!((x, y), (Number::Int(_), Number::Int(_))) => ArithOp::Mod,
+        BinOp::Pow => ArithOp::Pow,
+        _ => return None,
+    };
+    // Integer division by zero is a runtime error: don't fold it.
+    match x.arith(op, y).ok()? {
+        Number::Int(i) => Some(ConstVal::Int(i)),
+        Number::Float(f) => Some(ConstVal::Float(f)),
     }
 }
 
