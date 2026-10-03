@@ -125,14 +125,16 @@ impl Entry {
     }
 }
 
-/// The array part: tags and payloads in two allocations (ADR-1), 9 bytes
-/// per slot. Boxed slices plus one length keep the header at 36 bytes
-/// instead of two `Vec`s' 48.
+/// The array part in one allocation (ADR-1): `cap` payload words followed
+/// by the tag bytes packed eight to a word, 9 bytes per slot. The words are
+/// plain `u64`s because one allocation can hold only one element type; they
+/// never leave this type, whose API takes and returns `Value`s, and tag
+/// bytes are only ever written from a [`Tag`].
 #[derive(Debug, Default)]
 struct ArrayPart {
-    tags: Box<[Tag]>,
-    payloads: Box<[Payload]>,
+    words: Box<[u64]>,
     len: u32,
+    cap: u32,
 }
 
 impl ArrayPart {
@@ -151,52 +153,61 @@ impl ArrayPart {
 
     #[inline(always)]
     fn tag(&self, i: usize) -> Tag {
-        self.tags[i]
+        let byte = (self.words[self.cap as usize + i / 8] >> (i % 8 * 8)) as u8;
+        // Every tag byte was written from a `Tag`, so the fallback never
+        // happens; it folds into `unpack`'s match where `expect` would add
+        // a branch to every array read.
+        Tag::from_u8(byte).unwrap_or(Tag::Nil)
     }
 
     #[inline(always)]
     fn payload(&self, i: usize) -> Payload {
-        self.payloads[i]
+        Payload::from_bits(self.words[i])
     }
 
     #[inline(always)]
     fn get(&self, i: usize) -> Value {
-        Value::unpack(self.tags[i], self.payloads[i])
+        Value::unpack(self.tag(i), self.payload(i))
     }
 
     #[inline(always)]
     fn set(&mut self, i: usize, v: Value) {
         let (t, p) = v.pack();
-        self.tags[i] = t;
-        self.payloads[i] = p;
+        self.words[i] = p.bits();
+        let w = &mut self.words[self.cap as usize + i / 8];
+        let shift = i % 8 * 8;
+        *w = (*w & !(0xff << shift)) | (t as u64) << shift;
     }
 
     fn push(&mut self, v: Value) {
-        if self.len() == self.tags.len() {
-            self.realloc((self.tags.len() * 2).max(4));
+        if self.len == self.cap {
+            self.realloc((self.cap as usize * 2).max(4));
         }
         self.len += 1;
         self.set(self.len() - 1, v);
     }
 
-    /// Grow to room for `cap` slots, reallocating in place where the
-    /// allocator can.
+    /// Grow to room for `cap` slots (more than now). The allocation is
+    /// resized in place where the allocator can, then the tag words move up
+    /// past the new payload words.
     fn realloc(&mut self, cap: usize) {
         assert!(cap <= u32::MAX as usize, "table overflow");
-        self.tags = grow(std::mem::take(&mut self.tags), cap);
-        self.payloads = grow(std::mem::take(&mut self.payloads), cap);
+        let old_cap = self.cap as usize;
+        let tag_words = self.len().div_ceil(8);
+        let mut v = std::mem::take(&mut self.words).into_vec();
+        let total = cap + cap.div_ceil(8);
+        v.reserve_exact(total - v.len());
+        v.resize(total, 0);
+        // Only slots below `len` are ever read, so whatever the moved-over
+        // words leave behind is never seen.
+        v.copy_within(old_cap..old_cap + tag_words, cap);
+        self.words = v.into_boxed_slice();
+        self.cap = cap as u32;
     }
 
     fn bytes(&self) -> usize {
-        self.tags.len() * 9
+        self.words.len() * 8
     }
-}
-
-fn grow<T: Copy + Default>(b: Box<[T]>, cap: usize) -> Box<[T]> {
-    let mut v = b.into_vec();
-    v.reserve_exact(cap - v.len());
-    v.resize(cap, T::default());
-    v.into_boxed_slice()
 }
 
 /// Where a store goes, from [`Table::find_slot`].
@@ -880,6 +891,31 @@ mod tests {
                 assert!(matches!(v, Value::Int(j) if j == i));
             }
         }
+    }
+
+    #[test]
+    fn presized_array_part_grows_with_its_tags() {
+        // Tag words move when the single allocation grows; check every slot
+        // across several growths from an odd starting size.
+        let (mut heap, _, _) = setup();
+        let t = heap.alloc(Table::with_capacity(3, 0));
+        let v = |i: i64| match i % 4 {
+            0 => Value::Bool(i % 8 == 0),
+            1 => Value::Int(i),
+            2 => Value::Float(i as f64 + 0.5),
+            _ => Value::Table(t),
+        };
+        for i in 1..=100 {
+            set(&mut heap, t, Value::Int(i), v(i)).unwrap();
+            for j in 1..=i {
+                assert!(
+                    get(&heap, t, Value::Int(j)).same(v(j)),
+                    "slot {j} after {i}"
+                );
+            }
+        }
+        set(&mut heap, t, Value::Int(100), Value::Nil).unwrap();
+        assert_eq!(heap.get(t).border(), 99);
     }
 
     #[test]

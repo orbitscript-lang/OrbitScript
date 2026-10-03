@@ -72,10 +72,17 @@ impl Tag {
 pub struct Payload(u64);
 
 impl Payload {
-    /// The raw bits, for hashing.
+    /// The raw bits, for hashing and for the array part's single
+    /// allocation, which can only hold plain words.
     #[inline(always)]
     pub(crate) fn bits(self) -> u64 {
         self.0
+    }
+
+    /// Inverse of [`Payload::bits`]. Only for bits that came from it.
+    #[inline(always)]
+    pub(crate) fn from_bits(bits: u64) -> Payload {
+        Payload(bits)
     }
 }
 
