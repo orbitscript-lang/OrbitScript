@@ -386,7 +386,13 @@ impl FuncState<'_> {
                     if let Some(ConstVal::Str(s)) = self.const_of(k) {
                         let key = self.str_constant(s)?;
                         let (src, _) = self.expr_any(v)?;
-                        self.emit(Op::SetField { obj: dst, key, src });
+                        let ic = self.cache();
+                        self.emit(Op::SetField {
+                            obj: dst,
+                            key,
+                            src,
+                            ic,
+                        });
                     } else {
                         let (key, _) = self.expr_any(k)?;
                         let (src, _) = self.expr_any(v)?;

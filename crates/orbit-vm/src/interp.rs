@@ -606,11 +606,11 @@ impl Vm {
                                 let cache = &caches[ic as usize];
                                 let slot = cache.get() as usize;
                                 if self.heap.get(t).cached_str(slot, k).is_some() {
-                                    self.heap.update(t, |tab| tab.set_slot(slot, v));
+                                    self.heap.barrier_back(t);
+                                    self.heap.get_mut(t).set_slot(slot, v);
                                 } else {
                                     let key = Key::str(&self.heap, k);
-                                    table::set_key(&mut self.heap, t, &key, v);
-                                    if let Some(slot) = self.heap.get(t).find_str(&self.heap, k) {
+                                    if let Some(slot) = table::set_key(&mut self.heap, t, &key, v) {
                                         cache.set(slot as u32);
                                     }
                                     safepoint!();
@@ -657,15 +657,27 @@ impl Vm {
                             },
                         };
                     }
-                    Op::SetField { obj, key, src } => {
+                    Op::SetField { obj, key, src, ic } => {
                         let o = reg!(obj);
                         let Value::Str(k) = consts[key as usize] else {
                             unreachable!("field keys are strings")
                         };
                         let Value::Table(t) = o else { index_error!(o) };
-                        let key = Key::str(&self.heap, k);
-                        table::set_key(&mut self.heap, t, &key, reg!(src));
-                        safepoint!();
+                        let v = reg!(src);
+                        let cache = &caches[ic as usize];
+                        let slot = cache.get() as usize;
+                        if self.heap.get(t).cached_str(slot, k).is_some() {
+                            // The key is there: overwrite its value. No
+                            // capacity changes, so no byte accounting.
+                            self.heap.barrier_back(t);
+                            self.heap.get_mut(t).set_slot(slot, v);
+                        } else {
+                            let key = Key::str(&self.heap, k);
+                            if let Some(slot) = table::set_key(&mut self.heap, t, &key, v) {
+                                cache.set(slot as u32);
+                            }
+                            safepoint!();
+                        }
                     }
                     Op::GetIndex { dst, obj, key } => {
                         let o = reg!(obj);

@@ -280,7 +280,7 @@ impl Interp {
                 Op::GetField { dst, obj, key, .. } => {
                     r[dst as usize] = self.index(&r[obj as usize], &self.konst(pi, key))?
                 }
-                Op::SetField { obj, key, src } => self.set(
+                Op::SetField { obj, key, src, .. } => self.set(
                     &r[obj as usize],
                     &self.konst(pi, key),
                     r[src as usize].clone(),
