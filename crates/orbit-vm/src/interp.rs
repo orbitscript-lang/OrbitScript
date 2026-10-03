@@ -695,8 +695,13 @@ impl Vm {
                         let o = reg!(obj);
                         let Value::Table(t) = o else { index_error!(o) };
                         let (k, v) = (reg!(key), reg!(src));
-                        if let Err(e) = table::set(&mut self.heap, t, k, v) {
-                            throw!(Exc::Rt(e.message().into(), None));
+                        match k {
+                            Value::Int(i) => table::set_int(&mut self.heap, t, i, v),
+                            k => {
+                                if let Err(e) = table::set(&mut self.heap, t, k, v) {
+                                    throw!(Exc::Rt(e.message().into(), None));
+                                }
+                            }
                         }
                         safepoint!();
                     }
