@@ -403,10 +403,14 @@ impl Vm {
         };
         'reload: loop {
             let depth = self.rt.stack.frames.len();
-            let frame = self.rt.stack.frames[depth - 1];
+            let frame = &self.rt.stack.frames[depth - 1];
             let FrameKind::Lua { closure, code_id } = frame.kind else {
                 unreachable!("run starts on a Lua frame")
             };
+            let base = frame.base as usize;
+            let cell_base = frame.cell_base as usize;
+            let nvarargs = frame.nvarargs as usize;
+            let mut pc = frame.pc as usize;
             // Both the frame's code and `cur` are alive, so equal addresses
             // mean the same code.
             if code_id != Rc::as_ptr(&cur) as usize {
@@ -415,10 +419,6 @@ impl Vm {
             let code = &cur.code[..];
             let consts = &cur.consts[..];
             let caches = &cur.caches[..];
-            let base = frame.base as usize;
-            let cell_base = frame.cell_base as usize;
-            let nvarargs = frame.nvarargs as usize;
-            let mut pc = frame.pc as usize;
 
             macro_rules! reg {
                 ($r:expr) => {
@@ -951,7 +951,31 @@ impl Vm {
                         flow!(self.do_return(src, n, stop));
                     }
                     Op::Return0 => flow!(self.do_return(base, 0, stop)),
-                    Op::Return1 { src } => flow!(self.do_return(base + src as usize, 1, stop)),
+                    Op::Return1 { src } => {
+                        // The common case, one value back to a Lua caller
+                        // that wants one, without the general return path.
+                        let frames = &self.rt.stack.frames;
+                        let f = &frames[depth - 1];
+                        if f.want == 1
+                            && depth > stop + 1
+                            && let FrameKind::Lua { .. } = frames[depth - 2].kind
+                        {
+                            let (func, cell_base, caller_end) =
+                                (f.func as usize, f.cell_base as usize, frames[depth - 2].end);
+                            self.rt.stack.frames.pop();
+                            if self.rt.stack.cells.len() > cell_base {
+                                self.rt.stack.cells.truncate(cell_base);
+                            }
+                            let regs = &mut self.rt.stack.regs;
+                            regs[func] = regs[base + src as usize];
+                            self.rt.top = func + 1;
+                            if regs.len() < caller_end as usize {
+                                regs.resize(caller_end as usize, Value::Nil);
+                            }
+                            continue 'reload;
+                        }
+                        flow!(self.do_return(base + src as usize, 1, stop))
+                    }
                     Op::Vararg { dst, count } => {
                         let from = base - nvarargs;
                         let to = base + dst as usize;
