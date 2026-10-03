@@ -567,10 +567,32 @@ fn same_key(a: Value, b: Value, long_eq: &impl Fn(Gc<LuaStr>, Gc<LuaStr>) -> boo
 }
 
 /// `t[k] = v` (raw), both phases.
+#[inline]
 pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), KeyError> {
+    if let Value::Int(i) = k {
+        set_int(heap, t, i, v);
+        return Ok(());
+    }
     let key = Key::new(heap, k)?;
     set_key(heap, t, &key, v);
     Ok(())
+}
+
+/// `t[i] = v` (raw) for an integer key. A store into the array part skips
+/// key normalisation, hashing and the byte accounting of
+/// [`Heap::update`](orbit_gc::Heap::update): it changes no capacity.
+#[inline]
+pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) {
+    let idx = (i as u64).wrapping_sub(1);
+    if idx < heap.get(t).tags.len() as u64 {
+        heap.barrier_back(t);
+        let tab = heap.get_mut(t);
+        let (tag, payload) = v.to_bits();
+        tab.tags[idx as usize] = tag;
+        tab.payloads[idx as usize] = payload;
+        return;
+    }
+    set_key(heap, t, &Key::int(i), v);
 }
 
 /// `t[key] = v` (raw) for a normalised key.
