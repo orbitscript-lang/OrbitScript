@@ -85,13 +85,107 @@ impl Key {
     }
 }
 
+/// A hash slot. The key is stored split into tag and payload (like the
+/// array part), which makes an entry 32 bytes instead of 40.
 #[derive(Debug, Clone, Copy, Default)]
 struct Entry {
-    /// `Nil` for an empty slot. A key whose value is `nil` is a dead entry:
-    /// it stays so `next` keeps working while a loop clears the table.
-    key: Value,
     value: Value,
+    key_payload: u64,
     hash: u32,
+    /// `tag::NIL` for an empty slot. A key whose value is `nil` is a dead
+    /// entry: it stays so `next` keeps working while a loop clears the table.
+    key_tag: u8,
+}
+
+impl Entry {
+    #[inline(always)]
+    fn key(&self) -> Value {
+        Value::from_bits(self.key_tag, self.key_payload)
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.key_tag == tag::NIL
+    }
+
+    #[inline(always)]
+    fn new(key: Value, hash: u32, value: Value) -> Entry {
+        let (key_tag, key_payload) = key.to_bits();
+        Entry {
+            value,
+            key_payload,
+            hash,
+            key_tag,
+        }
+    }
+}
+
+/// The array part: `cap` payload words followed by the tag bytes, packed
+/// eight to a word, in one allocation (ADR-1: 9 bytes per slot).
+#[derive(Debug, Default)]
+struct ArrayPart {
+    words: Box<[u64]>,
+    len: u32,
+    cap: u32,
+}
+
+impl ArrayPart {
+    fn with_capacity(cap: usize) -> ArrayPart {
+        let mut a = ArrayPart::default();
+        if cap > 0 {
+            a.realloc(cap);
+        }
+        a
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    #[inline(always)]
+    fn tag(&self, i: usize) -> u8 {
+        (self.words[self.cap as usize + i / 8] >> (i % 8 * 8)) as u8
+    }
+
+    #[inline(always)]
+    fn get(&self, i: usize) -> Value {
+        Value::from_bits(self.tag(i), self.words[i])
+    }
+
+    #[inline(always)]
+    fn set(&mut self, i: usize, v: Value) {
+        let (t, p) = v.to_bits();
+        self.words[i] = p;
+        let w = &mut self.words[self.cap as usize + i / 8];
+        let shift = i % 8 * 8;
+        *w = (*w & !(0xff << shift)) | (t as u64) << shift;
+    }
+
+    fn push(&mut self, v: Value) {
+        if self.len == self.cap {
+            self.realloc((self.cap as usize * 2).max(4));
+        }
+        self.len += 1;
+        self.set(self.len as usize - 1, v);
+    }
+
+    /// Move to an allocation with room for `cap` slots.
+    fn realloc(&mut self, cap: usize) {
+        assert!(cap <= u32::MAX as usize, "table overflow");
+        let old_cap = self.cap as usize;
+        let mut words = vec![0u64; cap + cap.div_ceil(8)].into_boxed_slice();
+        let n = self.len();
+        words[..n].copy_from_slice(&self.words[..n]);
+        let tag_words = n.div_ceil(8);
+        words[cap..cap + tag_words].copy_from_slice(&self.words[old_cap..old_cap + tag_words]);
+        self.words = words;
+        self.cap = cap as u32;
+    }
+
+    fn bytes(&self) -> usize {
+        self.words.len() * 8
+    }
 }
 
 /// Where a store goes, from [`Table::find_slot`].
@@ -114,27 +208,27 @@ pub enum Slot {
 /// A Lua table.
 #[derive(Debug, Default)]
 pub struct Table {
-    tags: Vec<u8>,
-    payloads: Vec<u64>,
-    entries: Vec<Entry>,
+    array: ArrayPart,
+    entries: Box<[Entry]>,
     /// Hash slots in use, dead entries included.
-    used: usize,
+    used: u32,
     /// Reserved for metatables (always `None` at first light).
     pub meta: Option<Gc<Table>>,
 }
 
 impl Trace<LuaSpace> for Table {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        for (&t, &p) in self.tags.iter().zip(&self.payloads) {
+        for i in 0..self.array.len() {
+            let t = self.array.tag(i);
             if t >= tag::STR {
-                mark(m, Value::from_bits(t, p));
+                mark(m, Value::from_bits(t, self.array.words[i]));
             }
         }
         if self.used > 0 {
             for e in &self.entries {
                 // Dead entries keep their keys alive until the next rebuild,
                 // so `next` can still compare against them.
-                mark(m, e.key);
+                mark(m, e.key());
                 mark(m, e.value);
             }
         }
@@ -144,9 +238,7 @@ impl Trace<LuaSpace> for Table {
     }
 
     fn extra_bytes(&self) -> usize {
-        self.tags.capacity()
-            + self.payloads.capacity() * 8
-            + self.entries.capacity() * std::mem::size_of::<Entry>()
+        self.array.bytes() + self.entries.len() * std::mem::size_of::<Entry>()
     }
 }
 
@@ -169,12 +261,11 @@ impl Table {
     /// A table with room for `array` array slots and `hash` hash entries.
     pub fn with_capacity(array: usize, hash: usize) -> Self {
         let mut t = Table {
-            tags: Vec::with_capacity(array),
-            payloads: Vec::with_capacity(array),
+            array: ArrayPart::with_capacity(array),
             ..Table::default()
         };
         if hash > 0 {
-            t.entries = vec![Entry::default(); hash_capacity(hash)];
+            t.entries = vec![Entry::default(); hash_capacity(hash)].into_boxed_slice();
         }
         t
     }
@@ -182,19 +273,19 @@ impl Table {
     /// Length of the array part.
     #[inline(always)]
     pub fn array_len(&self) -> usize {
-        self.tags.len()
+        self.array.len()
     }
 
     #[inline(always)]
     fn array_get(&self, i: usize) -> Value {
-        Value::from_bits(self.tags[i], self.payloads[i])
+        self.array.get(i)
     }
 
     /// `t[i]` for an integer key.
     #[inline]
     pub fn get_int(&self, i: i64) -> Value {
         let idx = (i as u64).wrapping_sub(1);
-        if idx < self.tags.len() as u64 {
+        if idx < self.array.len() as u64 {
             return self.array_get(idx as usize);
         }
         if self.used == 0 {
@@ -234,11 +325,7 @@ impl Table {
     #[inline(always)]
     pub fn cached_str(&self, slot: usize, s: Gc<LuaStr>) -> Option<Value> {
         match self.entries.get(slot) {
-            Some(Entry {
-                key: Value::Str(k),
-                value,
-                ..
-            }) if *k == s => Some(*value),
+            Some(e) if e.key_tag == tag::STR && e.key_payload == s.to_bits() => Some(e.value),
             _ => None,
         }
     }
@@ -292,7 +379,7 @@ impl Table {
 
     /// Find `key` in the hash part: `Ok(slot)` if present, else
     /// `Err(Some(slot))` with the first reusable slot on its probe path, or
-    /// `Err(None)` if the table has no hash part.
+    /// `Err(None)` if there is none (no hash part, or a full one).
     #[inline]
     fn probe(
         &self,
@@ -305,12 +392,14 @@ impl Table {
         let mask = self.entries.len() - 1;
         let mut i = key.hash as usize & mask;
         let mut reuse = None;
-        loop {
+        // Small tables may be full, so the probe also stops after visiting
+        // every slot.
+        for _ in 0..=mask {
             let e = &self.entries[i];
-            if e.key.is_nil() {
+            if e.is_empty() {
                 return Err(Some(reuse.unwrap_or(i)));
             }
-            if e.hash == key.hash && same_key(e.key, key.value, &long_eq) {
+            if e.hash == key.hash && same_key(e.key(), key.value, &long_eq) {
                 return Ok(i);
             }
             if reuse.is_none() && e.value.is_nil() {
@@ -318,6 +407,7 @@ impl Table {
             }
             i = (i + 1) & mask;
         }
+        Err(reuse)
     }
 
     /// Phase one of a store: where `key` goes. `storing_nil` avoids
@@ -325,18 +415,20 @@ impl Table {
     pub fn find_slot(&self, heap: &LuaHeap, key: &Key, storing_nil: bool) -> Slot {
         if let Value::Int(i) = key.value {
             let idx = (i as u64).wrapping_sub(1);
-            if idx < self.tags.len() as u64 {
+            if idx < self.array.len() as u64 {
                 return Slot::Array(idx as usize);
             }
-            if idx == self.tags.len() as u64 && !storing_nil && !self.hash_has(key) {
+            if idx == self.array.len() as u64 && !storing_nil && !self.hash_has(key) {
                 return Slot::Push;
             }
         }
         match self.probe(key, |a, b| str_eq(heap, a, b)) {
             Ok(slot) => Slot::Existing(slot),
             Err(_) if storing_nil => Slot::None,
-            Err(Some(slot)) if !self.entries[slot].key.is_nil() => Slot::New(slot),
-            Err(Some(slot)) if (self.used + 1) * 4 <= self.entries.len() * 3 => Slot::New(slot),
+            Err(Some(slot)) if !self.entries[slot].is_empty() => Slot::New(slot),
+            Err(Some(slot)) if self.used as usize + 1 <= max_used(self.entries.len()) => {
+                Slot::New(slot)
+            }
             Err(_) => Slot::Grow,
         }
     }
@@ -349,33 +441,23 @@ impl Table {
     /// [`Heap::update`](orbit_gc::Heap::update).
     pub fn write(&mut self, slot: Slot, key: &Key, v: Value) {
         match slot {
-            Slot::Array(i) => {
-                let (t, p) = v.to_bits();
-                self.tags[i] = t;
-                self.payloads[i] = p;
-            }
+            Slot::Array(i) => self.array.set(i, v),
             Slot::Push => {
-                let (t, p) = v.to_bits();
-                self.tags.push(t);
-                self.payloads.push(p);
+                self.array.push(v);
                 self.migrate_to_array();
             }
             Slot::Existing(i) => self.entries[i].value = v,
             Slot::New(i) => {
                 let e = &mut self.entries[i];
-                if e.key.is_nil() {
+                if e.is_empty() {
                     self.used += 1;
                 }
-                *e = Entry {
-                    key: key.value,
-                    value: v,
-                    hash: key.hash,
-                };
+                *e = Entry::new(key.value, key.hash, v);
             }
             Slot::Grow => {
                 self.rebuild(1);
                 if let Value::Int(i) = key.value
-                    && i as u64 == self.tags.len() as u64 + 1
+                    && i as u64 == self.array.len() as u64 + 1
                 {
                     return self.write(Slot::Push, key, v);
                 }
@@ -393,13 +475,12 @@ impl Table {
     /// out of the hash part, leaving dead entries behind.
     fn migrate_to_array(&mut self) {
         while self.used > 0 {
-            let key = Key::int(self.tags.len() as i64 + 1);
+            let key = Key::int(self.array.len() as i64 + 1);
             match self.probe(&key, |_, _| false) {
                 Ok(slot) if !self.entries[slot].value.is_nil() => {
-                    let (t, p) = self.entries[slot].value.to_bits();
+                    let v = self.entries[slot].value;
                     self.entries[slot].value = Value::Nil;
-                    self.tags.push(t);
-                    self.payloads.push(p);
+                    self.array.push(v);
                 }
                 _ => break,
             }
@@ -417,31 +498,29 @@ impl Table {
         let mut ints: Vec<(i64, usize)> = live
             .iter()
             .enumerate()
-            .filter_map(|(j, e)| match e.key {
-                Value::Int(i) if i > self.tags.len() as i64 => Some((i, j)),
+            .filter_map(|(j, e)| match e.key() {
+                Value::Int(i) if i > self.array.len() as i64 => Some((i, j)),
                 _ => None,
             })
             .collect();
         ints.sort_unstable();
         for (i, j) in ints {
-            if i != self.tags.len() as i64 + 1 {
+            if i != self.array.len() as i64 + 1 {
                 break;
             }
             moved[j] = true;
-            let (t, p) = live[j].value.to_bits();
-            self.tags.push(t);
-            self.payloads.push(p);
+            self.array.push(live[j].value);
         }
         let remaining = live.len() - moved.iter().filter(|&&m| m).count();
         let need = remaining + extra;
-        self.entries = vec![Entry::default(); hash_capacity(need)];
+        self.entries = vec![Entry::default(); hash_capacity(need)].into_boxed_slice();
         let mask = self.entries.len() - 1;
         for (e, m) in live.into_iter().zip(moved) {
             if m {
                 continue;
             }
             let mut i = e.hash as usize & mask;
-            while !self.entries[i].key.is_nil() {
+            while !self.entries[i].is_empty() {
                 i = (i + 1) & mask;
             }
             self.entries[i] = e;
@@ -454,16 +533,18 @@ impl Table {
     pub fn set_int(&mut self, i: i64, v: Value) {
         let key = Key::int(i);
         let idx = (i as u64).wrapping_sub(1);
-        let slot = if idx < self.tags.len() as u64 {
+        let slot = if idx < self.array.len() as u64 {
             Slot::Array(idx as usize)
-        } else if idx == self.tags.len() as u64 && !v.is_nil() && !self.hash_has(&key) {
+        } else if idx == self.array.len() as u64 && !v.is_nil() && !self.hash_has(&key) {
             Slot::Push
         } else {
             match self.probe(&key, |_, _| false) {
                 Ok(s) => Slot::Existing(s),
                 Err(_) if v.is_nil() => Slot::None,
-                Err(Some(s)) if !self.entries[s].key.is_nil() => Slot::New(s),
-                Err(Some(s)) if (self.used + 1) * 4 <= self.entries.len() * 3 => Slot::New(s),
+                Err(Some(s)) if !self.entries[s].is_empty() => Slot::New(s),
+                Err(Some(s)) if self.used as usize + 1 <= max_used(self.entries.len()) => {
+                    Slot::New(s)
+                }
                 Err(_) => Slot::Grow,
             }
         };
@@ -477,13 +558,13 @@ impl Table {
 
     /// A border: `n` such that `t[n] ~= nil` and `t[n+1] == nil` (or 0).
     pub fn border(&self) -> i64 {
-        let n = self.tags.len();
-        if n > 0 && self.tags[n - 1] == tag::NIL {
+        let n = self.array.len();
+        if n > 0 && self.array.tag(n - 1) == tag::NIL {
             // A border inside the array: t[lo] non-nil (or lo = 0), t[hi] nil.
             let (mut lo, mut hi) = (0usize, n);
             while hi - lo > 1 {
                 let mid = (lo + hi) / 2;
-                if self.tags[mid - 1] == tag::NIL {
+                if self.array.tag(mid - 1) == tag::NIL {
                     hi = mid;
                 } else {
                     lo = mid;
@@ -524,7 +605,7 @@ impl Table {
     /// The entry after `k` in traversal order (array slots, then hash
     /// slots), or `None` at the end. `Err` if `k` is not a key of the table.
     pub fn next(&self, heap: &LuaHeap, k: Value) -> Result<Option<(Value, Value)>, InvalidKey> {
-        let n = self.tags.len();
+        let n = self.array.len();
         let mut pos = match k {
             Value::Nil => 0,
             _ => {
@@ -539,23 +620,34 @@ impl Table {
             }
         };
         while pos < n {
-            if self.tags[pos] != tag::NIL {
+            if self.array.tag(pos) != tag::NIL {
                 return Ok(Some((Value::Int(pos as i64 + 1), self.array_get(pos))));
             }
             pos += 1;
         }
         for e in self.entries.iter().skip(pos - n) {
-            if !e.key.is_nil() && !e.value.is_nil() {
-                return Ok(Some((e.key, e.value)));
+            if !e.is_empty() && !e.value.is_nil() {
+                return Ok(Some((e.key(), e.value)));
             }
         }
         Ok(None)
     }
 }
 
+/// Keys a hash part of `cap` slots may hold, dead entries included. Small
+/// parts may fill up (a probe visits at most `cap` slots); larger ones keep
+/// the load factor at 3/4 so probe sequences stay short.
+fn max_used(cap: usize) -> usize {
+    if cap <= 8 { cap } else { cap / 4 * 3 }
+}
+
+/// The smallest hash part with room for `n` keys.
 fn hash_capacity(n: usize) -> usize {
-    // Load factor at most 3/4.
-    (n * 4).div_ceil(3).next_power_of_two().max(4)
+    let mut cap = n.next_power_of_two().max(1);
+    while max_used(cap) < n {
+        cap *= 2;
+    }
+    cap
 }
 
 #[inline(always)]
@@ -688,5 +780,18 @@ mod tests {
     fn next_rejects_unknown_keys() {
         let (heap, _, t) = setup();
         assert!(heap.get(t).next(&heap, Value::Int(5)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    #[test]
+    fn sizes() {
+        eprintln!(
+            "Table {} Entry {} Option<Table> {}",
+            std::mem::size_of::<super::Table>(),
+            std::mem::size_of::<super::Entry>(),
+            std::mem::size_of::<Option<super::Table>>()
+        );
     }
 }
