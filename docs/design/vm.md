@@ -213,6 +213,8 @@ fn pcall_done(ctx, outcome) -> ... { match outcome { Ok(n) => push true + n resu
 
 The same mechanism will make `pcall`, `table.sort` comparators and metamethods yieldable once coroutines arrive.
 
+**Fast paths.** A native may also have a `FastFn = fn(&[Value]) -> Option<Value>`, set with `vm.set_native_fast_path(name, fast)`. A call that wants at most one result (or all of them) tries it first, with the arguments as a slice of the caller's registers: no window, no frame, no result copying. It returns `None` for anything it doesn't handle (wrong types, coercions, errors), and the full native then runs, so a fast path never changes behavior. It can't allocate or call Lua, which keeps it a plain function a future JIT can call directly. `math.sqrt`, `abs`, `floor`, `max` and `min` have one.
+
 ### Errors
 
 A Lua error is `Err(LuaError { value: Value, traceback: Option<String> })` propagated with `?`, never a Rust panic. When `run` sees an error it unwinds: it pops frames until it reaches a native continuation frame marked `protected`, truncates `regs` and `cells` to that frame, and resumes it with `Err(value)`. With no protected frame left, the error returns to the embedder with a traceback built from the popped frames.
