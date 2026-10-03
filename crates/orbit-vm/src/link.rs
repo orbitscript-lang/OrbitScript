@@ -4,7 +4,7 @@ use std::cell::Cell as StdCell;
 use std::rc::Rc;
 
 use orbit_bytecode::{CaptureSource, Constant, UnlinkedChunk};
-use orbit_core::{Cell, Closure, Gc, Proto, Value};
+use orbit_core::{Cell, Closure, Gc, Proto, ProtoCode, Value};
 
 use crate::Vm;
 
@@ -36,17 +36,19 @@ impl Vm {
                 .map(|&c| linked[c as usize].expect("child prototype comes after its parent"))
                 .collect();
             let proto = Proto {
-                code: u.code.as_slice().into(),
-                consts: consts.into(),
-                caches: (0..u.ncaches).map(|_| StdCell::new(u32::MAX)).collect(),
-                #[cfg(feature = "type-feedback")]
-                feedback: (0..u.code.len()).map(|_| StdCell::new(0)).collect(),
+                code: Rc::new(ProtoCode {
+                    code: u.code.as_slice().into(),
+                    consts: consts.into(),
+                    caches: (0..u.ncaches).map(|_| StdCell::new(u32::MAX)).collect(),
+                    #[cfg(feature = "type-feedback")]
+                    feedback: (0..u.code.len()).map(|_| StdCell::new(0)).collect(),
+                    nparams: u.nparams,
+                    is_vararg: u.is_vararg,
+                    nregs: u.nregs,
+                    ncells: u.ncells,
+                }),
                 children,
                 captures: u.captures.as_slice().into(),
-                nparams: u.nparams,
-                is_vararg: u.is_vararg,
-                nregs: u.nregs,
-                ncells: u.ncells,
                 name: u.name.clone(),
                 line_defined: u.line_defined,
                 chunk: name.clone(),
@@ -58,9 +60,9 @@ impl Vm {
         let env = self.heap.alloc(Cell {
             value: Value::Table(self.rt.globals),
         });
-        let captures = self
-            .heap
-            .get(main)
+        let main_proto = self.heap.get(main);
+        let code = main_proto.code.clone();
+        let captures = main_proto
             .captures
             .iter()
             .map(|c| match c {
@@ -70,6 +72,7 @@ impl Vm {
             .collect();
         Value::Closure(self.heap.alloc(Closure {
             proto: main,
+            code,
             captures,
         }))
     }

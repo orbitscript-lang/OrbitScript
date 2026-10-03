@@ -1,8 +1,10 @@
 //! The dispatch loop, calls, returns and error unwinding.
 
+use std::rc::Rc;
+
 use orbit_bytecode::{CaptureSource, MULTI, Op, Origin};
 use orbit_core::table::{self, Key};
-use orbit_core::{Cell, Closure, Gc, Table, Value};
+use orbit_core::{Cell, Closure, Gc, ProtoCode, Table, Value};
 
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
@@ -80,8 +82,8 @@ impl Vm {
         nargs: usize,
         want: u8,
     ) -> Result<(), Exc> {
-        let proto_gc = self.heap.get(c).proto;
-        let proto = self.heap.get(proto_gc);
+        let proto = &*self.heap.get(c).code;
+        let code_id = proto as *const ProtoCode as usize;
         let np = proto.nparams as usize;
         let nregs = proto.nregs as usize;
         let ncells = proto.ncells as usize;
@@ -113,7 +115,7 @@ impl Vm {
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Lua {
                 closure: c,
-                proto: proto_gc,
+                code_id,
             },
             func: func as u32,
             base: base as u32,
@@ -269,7 +271,10 @@ impl Vm {
                     let proto = self.heap.get(self.heap.get(closure).proto);
                     let pc = f.pc.saturating_sub(1);
                     if op == 0
-                        && matches!(proto.code.get(pc as usize), Some(Op::GenericCall { .. }))
+                        && matches!(
+                            proto.code.code.get(pc as usize),
+                            Some(Op::GenericCall { .. })
+                        )
                     {
                         text.push_str(" (for iterator 'for iterator')");
                     } else if let Some(origin) = proto.debug.origin(pc, op) {
@@ -388,20 +393,28 @@ impl Vm {
     /// The dispatch loop. Runs the top frame (a Lua frame) and everything it
     /// calls until the frame stack is back to `stop` frames.
     pub(crate) fn run(&mut self, stop: usize) -> Result<(), LuaError> {
+        // The running function's code, constants and caches. Returning to or
+        // calling the same function (recursion) keeps the `Rc` instead of
+        // cloning it again; holding it keeps the allocation alive, so pointer
+        // equality identifies the prototype.
+        let mut cur: Rc<ProtoCode> = match self.rt.stack.frames.last().map(|f| f.kind) {
+            Some(FrameKind::Lua { closure, .. }) => self.heap.get(closure).code.clone(),
+            _ => unreachable!("run starts on a Lua frame"),
+        };
         'reload: loop {
             let depth = self.rt.stack.frames.len();
             let frame = self.rt.stack.frames[depth - 1];
-            let FrameKind::Lua {
-                closure,
-                proto: proto_gc,
-            } = frame.kind
-            else {
+            let FrameKind::Lua { closure, code_id } = frame.kind else {
                 unreachable!("run starts on a Lua frame")
             };
-            let proto = self.heap.get(proto_gc);
-            let code = proto.code.clone();
-            let consts = proto.consts.clone();
-            let caches = proto.caches.clone();
+            // Both the frame's code and `cur` are alive, so equal addresses
+            // mean the same code.
+            if code_id != Rc::as_ptr(&cur) as usize {
+                cur = self.heap.get(closure).code.clone();
+            }
+            let code = &cur.code[..];
+            let consts = &cur.consts[..];
+            let caches = &cur.caches[..];
             let base = frame.base as usize;
             let cell_base = frame.cell_base as usize;
             let nvarargs = frame.nvarargs as usize;
@@ -1038,7 +1051,7 @@ impl Vm {
 
                     Op::Closure { dst, proto } => {
                         let parent = self.heap.get(closure);
-                        let child = self.heap.get(proto_gc).children[proto as usize];
+                        let child = self.heap.get(parent.proto).children[proto as usize];
                         let captures: Box<[Gc<Cell>]> = self
                             .heap
                             .get(child)
@@ -1052,8 +1065,10 @@ impl Vm {
                                 CaptureSource::Env => parent.captures[0],
                             })
                             .collect();
+                        let code = self.heap.get(child).code.clone();
                         let c = self.heap.alloc(Closure {
                             proto: child,
+                            code,
                             captures,
                         });
                         reg!(dst) = Value::Closure(c);

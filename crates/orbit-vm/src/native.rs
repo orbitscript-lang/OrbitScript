@@ -185,7 +185,7 @@ impl NativeCtx<'_> {
             let proto = self.heap.get(self.heap.get(closure).proto);
             let pc = f.pc - 1;
             if matches!(
-                proto.code.get(pc as usize),
+                proto.code.code.get(pc as usize),
                 Some(Op::Call { .. } | Op::TailCall { .. })
             ) && let Some(origin) = proto.debug.origin(pc, 0)
             {

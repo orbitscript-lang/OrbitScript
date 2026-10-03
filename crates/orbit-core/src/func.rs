@@ -27,6 +27,9 @@ impl Trace<LuaSpace> for Cell {
 #[derive(Debug)]
 pub struct Closure {
     pub proto: Gc<Proto>,
+    /// The prototype's [`Proto::code`], so a call reaches the code and frame
+    /// sizes without a second heap lookup.
+    pub code: Rc<ProtoCode>,
     pub captures: Box<[Gc<Cell>]>,
 }
 
@@ -43,26 +46,35 @@ impl Trace<LuaSpace> for Closure {
     }
 }
 
-/// A linked function prototype. The code, constants and caches are behind
-/// `Rc` so the interpreter can hold them while it runs without going through
-/// the heap.
+/// What the interpreter needs to run a prototype: its code, constants,
+/// caches and frame sizes. Shared through an `Rc` so the dispatch loop can
+/// hold it while it runs without going through the heap, and one clone covers
+/// all of it.
 #[derive(Debug)]
-pub struct Proto {
-    pub code: Rc<[Op]>,
-    pub consts: Rc<[Value]>,
+pub struct ProtoCode {
+    pub code: Box<[Op]>,
+    /// Kept alive for the collector by the owning [`Proto`], which traces
+    /// them.
+    pub consts: Box<[Value]>,
     /// Inline-cache slots, indexed by the `ic` operands: the hash slot where
     /// the key was last found.
-    pub caches: Rc<[StdCell<u32>]>,
+    pub caches: Box<[StdCell<u32>]>,
     /// Per-instruction type feedback (`type-feedback` feature): bits for the
     /// operand types each instruction has seen.
     #[cfg(feature = "type-feedback")]
-    pub feedback: Rc<[StdCell<u8>]>,
-    pub children: Box<[Gc<Proto>]>,
-    pub captures: Box<[CaptureSource]>,
+    pub feedback: Box<[StdCell<u8>]>,
     pub nparams: u8,
     pub is_vararg: bool,
     pub nregs: u8,
     pub ncells: u8,
+}
+
+/// A linked function prototype.
+#[derive(Debug)]
+pub struct Proto {
+    pub code: Rc<ProtoCode>,
+    pub children: Box<[Gc<Proto>]>,
+    pub captures: Box<[CaptureSource]>,
     pub name: FunctionName,
     pub line_defined: u32,
     /// Chunk name for messages (`script.lua` in `script.lua:3:`).
@@ -72,7 +84,7 @@ pub struct Proto {
 
 impl Trace<LuaSpace> for Proto {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        for &k in self.consts.iter() {
+        for &k in self.code.consts.iter() {
             mark(m, k);
         }
         for &c in &self.children {
@@ -81,8 +93,9 @@ impl Trace<LuaSpace> for Proto {
     }
 
     fn extra_bytes(&self) -> usize {
-        self.code.len() * std::mem::size_of::<Op>()
-            + self.consts.len() * std::mem::size_of::<Value>()
-            + self.caches.len() * 4
+        let c = &self.code;
+        c.code.len() * std::mem::size_of::<Op>()
+            + c.consts.len() * std::mem::size_of::<Value>()
+            + c.caches.len() * 4
     }
 }
