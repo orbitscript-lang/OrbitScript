@@ -153,7 +153,9 @@ pub enum Op {
     /// with nil, or all of them if `nresults` is [`MULTI`] (sets top).
     Call { func: Reg, nargs: u8, nresults: u8 },
     /// `return R[func](args...)` without growing the frame stack. `nargs`
-    /// as in [`Op::Call`].
+    /// as in [`Op::Call`]. Must be followed by `Return { first: func, count:
+    /// MULTI }`: when the callee is a native that itself calls Lua code, the
+    /// VM makes an ordinary call and that `Return` returns its results.
     TailCall { func: Reg, nargs: u8 },
     /// Return `R[first..first+count]` (`count` [`MULTI`]: up to top).
     Return { first: Reg, count: u8 },
