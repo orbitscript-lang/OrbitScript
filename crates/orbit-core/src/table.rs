@@ -682,12 +682,9 @@ pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), K
 #[inline]
 pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) {
     let idx = (i as u64).wrapping_sub(1);
-    if idx < heap.get(t).tags.len() as u64 {
+    if idx < heap.get(t).array.len() as u64 {
         heap.barrier_back(t);
-        let tab = heap.get_mut(t);
-        let (tag, payload) = v.to_bits();
-        tab.tags[idx as usize] = tag;
-        tab.payloads[idx as usize] = payload;
+        heap.get_mut(t).array.set(idx as usize, v);
         return;
     }
     set_key(heap, t, &Key::int(i), v);
