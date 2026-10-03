@@ -40,8 +40,8 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 Op::GetField { dst, obj, key, ic } => {
                     reg(dst) && reg(obj) && (key as usize) < p.consts.len() && ic < p.ncaches
                 }
-                Op::SetField { obj, key, src } => {
-                    reg(obj) && reg(src) && (key as usize) < p.consts.len()
+                Op::SetField { obj, key, src, ic } => {
+                    reg(obj) && reg(src) && (key as usize) < p.consts.len() && ic < p.ncaches
                 }
                 Op::GetIndex { dst, obj, key } => reg(dst) && reg(obj) && reg(key),
                 Op::SetIndex { obj, key, src } => reg(obj) && reg(key) && reg(src),

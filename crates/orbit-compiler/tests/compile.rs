@@ -340,12 +340,13 @@ fn table_constructor_with_multi_value_tail() {
             Op::SetField {
                 obj: 0,
                 key: 0,
-                src: 3
+                src: 3,
+                ic: 0
             },
             Op::GetGlobal {
                 dst: 3,
                 name: 1,
-                ic: 0
+                ic: 1
             },
             Op::Call {
                 func: 3,

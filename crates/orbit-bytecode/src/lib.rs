@@ -83,7 +83,12 @@ pub enum Op {
         ic: Ic,
     },
     /// `R[obj][K[key]] = R[src]` (`K[key]` is a string).
-    SetField { obj: Reg, key: Const, src: Reg },
+    SetField {
+        obj: Reg,
+        key: Const,
+        src: Reg,
+        ic: Ic,
+    },
     /// `R[dst] = R[obj][R[key]]`
     GetIndex { dst: Reg, obj: Reg, key: Reg },
     /// `R[obj][R[key]] = R[src]`

@@ -230,6 +230,7 @@ fn tables_survive_a_stressed_collector() {
                 obj: 5,
                 key: 0,
                 src: 0,
+                ic: 0,
             },
             Op::Move { dst: 0, src: 5 },
             Op::ForLoop { base: 1, back: -4 },

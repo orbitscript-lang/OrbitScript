@@ -259,7 +259,8 @@ impl FuncState<'_> {
                 self.emit(Op::SetGlobal { src, name: k, ic });
             }
             Target::Field { obj, key, origin } => {
-                let pc = self.emit(Op::SetField { obj, key, src });
+                let ic = self.cache();
+                let pc = self.emit(Op::SetField { obj, key, src, ic });
                 self.origin(pc, 0, origin);
             }
             Target::Index { obj, key, origin } => {

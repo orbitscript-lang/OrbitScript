@@ -595,12 +595,18 @@ pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) {
     set_key(heap, t, &Key::int(i), v);
 }
 
-/// `t[key] = v` (raw) for a normalised key.
+/// `t[key] = v` (raw) for a normalised key. Returns the hash slot that now
+/// holds the key, when the store found or claimed one without rebuilding
+/// (for inline caches).
 #[inline]
-pub fn set_key(heap: &mut LuaHeap, t: Gc<Table>, key: &Key, v: Value) {
+pub fn set_key(heap: &mut LuaHeap, t: Gc<Table>, key: &Key, v: Value) -> Option<usize> {
     let slot = heap.get(t).find_slot(heap, key, v.is_nil());
     if slot != Slot::None {
         heap.update(t, |tab| tab.write(slot, key, v));
+    }
+    match slot {
+        Slot::Existing(i) | Slot::New(i) => Some(i),
+        _ => None,
     }
 }
 
