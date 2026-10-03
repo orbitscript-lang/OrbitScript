@@ -10,7 +10,7 @@
 use orbit_gc::{Gc, Marker, Trace};
 
 use crate::string::hash_word;
-use crate::value::{str_eq, tag};
+use crate::value::{Payload, Tag, str_eq};
 use crate::{LuaHeap, LuaSpace, LuaStr, Value, number};
 
 /// Why a value can't be a key.
@@ -58,7 +58,10 @@ impl Key {
         };
         let hash = match value {
             Value::Str(s) => heap.get(s).hash(),
-            other => hash_word(other.to_bits().1 ^ ((other.tag() as u64) << 56)),
+            other => {
+                let (tag, payload) = other.pack();
+                hash_word(payload.bits() ^ ((tag as u64) << 56))
+            }
         };
         Ok(Key { value, hash })
     }
@@ -76,7 +79,7 @@ impl Key {
     pub fn int(i: i64) -> Key {
         Key {
             value: Value::Int(i),
-            hash: hash_word(i as u64 ^ ((tag::INT as u64) << 56)),
+            hash: hash_word(i as u64 ^ ((Tag::Int as u64) << 56)),
         }
     }
 
@@ -90,11 +93,11 @@ impl Key {
 #[derive(Debug, Clone, Copy, Default)]
 struct Entry {
     value: Value,
-    key_payload: u64,
+    key_payload: Payload,
     hash: u32,
-    /// `tag::NIL` for an empty slot. A key whose value is `nil` is a dead
+    /// `Tag::Nil` for an empty slot. A key whose value is `nil` is a dead
     /// entry: it stays so `next` keeps working while a loop clears the table.
-    key_tag: u8,
+    key_tag: Tag,
 }
 
 const _: () = assert!(std::mem::size_of::<Entry>() == 32);
@@ -102,17 +105,17 @@ const _: () = assert!(std::mem::size_of::<Entry>() == 32);
 impl Entry {
     #[inline(always)]
     fn key(&self) -> Value {
-        Value::from_bits(self.key_tag, self.key_payload)
+        Value::unpack(self.key_tag, self.key_payload)
     }
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        self.key_tag == tag::NIL
+        self.key_tag == Tag::Nil
     }
 
     #[inline(always)]
     fn new(key: Value, hash: u32, value: Value) -> Entry {
-        let (key_tag, key_payload) = key.to_bits();
+        let (key_tag, key_payload) = key.pack();
         Entry {
             value,
             key_payload,
@@ -127,8 +130,8 @@ impl Entry {
 /// instead of two `Vec`s' 48.
 #[derive(Debug, Default)]
 struct ArrayPart {
-    tags: Box<[u8]>,
-    payloads: Box<[u64]>,
+    tags: Box<[Tag]>,
+    payloads: Box<[Payload]>,
     len: u32,
 }
 
@@ -147,18 +150,18 @@ impl ArrayPart {
     }
 
     #[inline(always)]
-    fn tag(&self, i: usize) -> u8 {
+    fn tag(&self, i: usize) -> Tag {
         self.tags[i]
     }
 
     #[inline(always)]
     fn get(&self, i: usize) -> Value {
-        Value::from_bits(self.tags[i], self.payloads[i])
+        Value::unpack(self.tags[i], self.payloads[i])
     }
 
     #[inline(always)]
     fn set(&mut self, i: usize, v: Value) {
-        let (t, p) = v.to_bits();
+        let (t, p) = v.pack();
         self.tags[i] = t;
         self.payloads[i] = p;
     }
@@ -223,7 +226,7 @@ impl Trace<LuaSpace> for Table {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         for i in 0..self.array.len() {
             let t = self.array.tag(i);
-            if t >= tag::STR {
+            if matches!(t, Tag::Str | Tag::Table | Tag::Closure) {
                 mark(m, self.array.get(i));
             }
         }
@@ -328,7 +331,9 @@ impl Table {
     #[inline(always)]
     pub fn cached_str(&self, slot: usize, s: Gc<LuaStr>) -> Option<Value> {
         match self.entries.get(slot) {
-            Some(e) if e.key_tag == tag::STR && e.key_payload == s.to_bits() => Some(e.value),
+            Some(e) if e.key_tag == Tag::Str && e.key_payload == Value::Str(s).pack().1 => {
+                Some(e.value)
+            }
             _ => None,
         }
     }
@@ -560,12 +565,12 @@ impl Table {
     /// A border: `n` such that `t[n] ~= nil` and `t[n+1] == nil` (or 0).
     pub fn border(&self) -> i64 {
         let n = self.array.len();
-        if n > 0 && self.array.tag(n - 1) == tag::NIL {
+        if n > 0 && self.array.tag(n - 1) == Tag::Nil {
             // A border inside the array: t[lo] non-nil (or lo = 0), t[hi] nil.
             let (mut lo, mut hi) = (0usize, n);
             while hi - lo > 1 {
                 let mid = (lo + hi) / 2;
-                if self.array.tag(mid - 1) == tag::NIL {
+                if self.array.tag(mid - 1) == Tag::Nil {
                     hi = mid;
                 } else {
                     lo = mid;
@@ -621,7 +626,7 @@ impl Table {
             }
         };
         while pos < n {
-            if self.array.tag(pos) != tag::NIL {
+            if self.array.tag(pos) != Tag::Nil {
                 return Ok(Some((Value::Int(pos as i64 + 1), self.array_get(pos))));
             }
             pos += 1;
@@ -655,7 +660,7 @@ fn hash_capacity(n: usize) -> usize {
 fn same_key(a: Value, b: Value, long_eq: &impl Fn(Gc<LuaStr>, Gc<LuaStr>) -> bool) -> bool {
     match (a, b) {
         (Value::Str(x), Value::Str(y)) => x == y || long_eq(x, y),
-        _ => a.to_bits() == b.to_bits() && a.tag() == b.tag(),
+        _ => a.same(b),
     }
 }
 

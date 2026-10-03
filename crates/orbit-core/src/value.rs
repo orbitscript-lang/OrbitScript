@@ -29,16 +29,54 @@ pub enum Value {
 
 const _: () = assert!(core::mem::size_of::<Value>() == 16);
 
-/// Tag numbers, as stored in table array parts.
-pub mod tag {
-    pub const NIL: u8 = 0;
-    pub const BOOL: u8 = 1;
-    pub const INT: u8 = 2;
-    pub const FLOAT: u8 = 3;
-    pub const STR: u8 = 4;
-    pub const TABLE: u8 = 5;
-    pub const CLOSURE: u8 = 6;
-    pub const NATIVE: u8 = 7;
+/// A [`Value`]'s type tag, as packed storage (table array parts and hash
+/// keys) keeps it: one byte with the pinned tag numbers (amended ADR-1).
+/// Being an enum, a stored tag is always a valid one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum Tag {
+    #[default]
+    Nil = 0,
+    Bool = 1,
+    Int = 2,
+    Float = 3,
+    Str = 4,
+    Table = 5,
+    Closure = 6,
+    Native = 7,
+}
+
+impl Tag {
+    /// The tag with byte value `b`, if there is one.
+    #[inline(always)]
+    pub fn from_u8(b: u8) -> Option<Tag> {
+        Some(match b {
+            0 => Tag::Nil,
+            1 => Tag::Bool,
+            2 => Tag::Int,
+            3 => Tag::Float,
+            4 => Tag::Str,
+            5 => Tag::Table,
+            6 => Tag::Closure,
+            7 => Tag::Native,
+            _ => return None,
+        })
+    }
+}
+
+/// A [`Value`]'s 8-byte payload, separated from its [`Tag`] for packed
+/// storage. Opaque: only [`Value::pack`] makes one and only
+/// [`Value::unpack`] reads one, so a payload can't be mistaken for a number
+/// or a handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Payload(u64);
+
+impl Payload {
+    /// The raw bits, for hashing.
+    #[inline(always)]
+    pub(crate) fn bits(self) -> u64 {
+        self.0
+    }
 }
 
 impl Value {
@@ -70,49 +108,58 @@ impl Value {
         matches!(self, Value::Closure(_) | Value::Native(_))
     }
 
-    /// The tag byte.
+    /// The type tag.
     #[inline(always)]
-    pub fn tag(self) -> u8 {
+    pub fn tag(self) -> Tag {
         match self {
-            Value::Nil => tag::NIL,
-            Value::Bool(_) => tag::BOOL,
-            Value::Int(_) => tag::INT,
-            Value::Float(_) => tag::FLOAT,
-            Value::Str(_) => tag::STR,
-            Value::Table(_) => tag::TABLE,
-            Value::Closure(_) => tag::CLOSURE,
-            Value::Native(_) => tag::NATIVE,
+            Value::Nil => Tag::Nil,
+            Value::Bool(_) => Tag::Bool,
+            Value::Int(_) => Tag::Int,
+            Value::Float(_) => Tag::Float,
+            Value::Str(_) => Tag::Str,
+            Value::Table(_) => Tag::Table,
+            Value::Closure(_) => Tag::Closure,
+            Value::Native(_) => Tag::Native,
         }
     }
 
-    /// Split into tag and payload, the form table array parts store.
+    /// Split into tag and payload, the form packed storage keeps.
     #[inline(always)]
-    pub fn to_bits(self) -> (u8, u64) {
-        match self {
-            Value::Nil => (tag::NIL, 0),
-            Value::Bool(b) => (tag::BOOL, b as u64),
-            Value::Int(i) => (tag::INT, i as u64),
-            Value::Float(f) => (tag::FLOAT, f.to_bits()),
-            Value::Str(s) => (tag::STR, s.to_bits()),
-            Value::Table(t) => (tag::TABLE, t.to_bits()),
-            Value::Closure(c) => (tag::CLOSURE, c.to_bits()),
-            Value::Native(n) => (tag::NATIVE, n.0 as u64),
-        }
+    pub fn pack(self) -> (Tag, Payload) {
+        let (tag, bits) = match self {
+            Value::Nil => (Tag::Nil, 0),
+            Value::Bool(b) => (Tag::Bool, b as u64),
+            Value::Int(i) => (Tag::Int, i as u64),
+            Value::Float(f) => (Tag::Float, f.to_bits()),
+            Value::Str(s) => (Tag::Str, s.to_bits()),
+            Value::Table(t) => (Tag::Table, t.to_bits()),
+            Value::Closure(c) => (Tag::Closure, c.to_bits()),
+            Value::Native(n) => (Tag::Native, n.0 as u64),
+        };
+        (tag, Payload(bits))
     }
 
-    /// Inverse of [`Value::to_bits`]. An unknown tag gives `nil`.
+    /// Inverse of [`Value::pack`].
     #[inline(always)]
-    pub fn from_bits(tag: u8, payload: u64) -> Value {
+    pub fn unpack(tag: Tag, payload: Payload) -> Value {
+        let p = payload.0;
         match tag {
-            tag::BOOL => Value::Bool(payload != 0),
-            tag::INT => Value::Int(payload as i64),
-            tag::FLOAT => Value::Float(f64::from_bits(payload)),
-            tag::STR => Value::Str(Gc::from_bits(payload)),
-            tag::TABLE => Value::Table(Gc::from_bits(payload)),
-            tag::CLOSURE => Value::Closure(Gc::from_bits(payload)),
-            tag::NATIVE => Value::Native(NativeId(payload as u32)),
-            _ => Value::Nil,
+            Tag::Nil => Value::Nil,
+            Tag::Bool => Value::Bool(p != 0),
+            Tag::Int => Value::Int(p as i64),
+            Tag::Float => Value::Float(f64::from_bits(p)),
+            Tag::Str => Value::Str(Gc::from_bits(p)),
+            Tag::Table => Value::Table(Gc::from_bits(p)),
+            Tag::Closure => Value::Closure(Gc::from_bits(p)),
+            Tag::Native => Value::Native(NativeId(p as u32)),
         }
+    }
+
+    /// Whether `self` and `other` are the same value bit for bit (identity
+    /// for objects, no numeric conversion).
+    #[inline]
+    pub fn same(self, other: Value) -> bool {
+        self.pack() == other.pack()
     }
 
     /// The number, if this is one (no string coercion).
@@ -129,10 +176,10 @@ impl Value {
     /// lifetime and distinct between live objects of different types.
     pub fn identity(self) -> Option<u64> {
         let (tag, payload) = match self {
-            Value::Table(t) => (tag::TABLE, t.index() as u64),
-            Value::Closure(c) => (tag::CLOSURE, c.index() as u64),
-            Value::Native(n) => (tag::NATIVE, n.0 as u64),
-            Value::Str(s) => (tag::STR, s.index() as u64),
+            Value::Table(t) => (Tag::Table, t.index() as u64),
+            Value::Closure(c) => (Tag::Closure, c.index() as u64),
+            Value::Native(n) => (Tag::Native, n.0 as u64),
+            Value::Str(s) => (Tag::Str, s.index() as u64),
             _ => return None,
         };
         // Looks like an address: a fixed base, the type in the high bits and
@@ -174,6 +221,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tags_match_the_pinned_numbers() {
+        // amended ADR-1: tag bytes are part of the pinned layout.
+        let pinned = [
+            (Tag::Nil, 0),
+            (Tag::Bool, 1),
+            (Tag::Int, 2),
+            (Tag::Float, 3),
+            (Tag::Str, 4),
+            (Tag::Table, 5),
+            (Tag::Closure, 6),
+            (Tag::Native, 7),
+        ];
+        for (t, b) in pinned {
+            assert_eq!(t as u8, b);
+            assert_eq!(Tag::from_u8(b), Some(t));
+        }
+        assert_eq!(Tag::from_u8(8), None);
+        assert_eq!(std::mem::size_of::<Tag>(), 1);
+    }
+
+    #[test]
     fn bits_round_trip() {
         for v in [
             Value::Nil,
@@ -184,10 +252,10 @@ mod tests {
             Value::Native(NativeId(7)),
             Value::Table(Gc::from_bits(3)),
         ] {
-            let (t, p) = v.to_bits();
+            let (t, p) = v.pack();
             assert_eq!(t, v.tag());
-            let w = Value::from_bits(t, p);
-            assert_eq!(w.to_bits(), (t, p));
+            let w = Value::unpack(t, p);
+            assert!(w.same(v));
         }
     }
 
