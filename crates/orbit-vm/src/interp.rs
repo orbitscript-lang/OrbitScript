@@ -522,12 +522,26 @@ impl Vm {
                     let fa = $fa;
                     let n = $nargs;
                     save_pc!();
+                    let want: u8 = $want;
                     match self.rt.stack.regs[fa] {
                         Value::Closure(c) => {
-                            tri!(self.push_lua_frame(c, fa, n, $want));
+                            tri!(self.push_lua_frame(c, fa, n, want));
                             continue 'reload;
                         }
-                        _ => match self.call_value(fa, n, $want, stop) {
+                        // A native's fast path, when it has one and takes
+                        // these arguments: no window, no frame.
+                        Value::Native(id)
+                            if (want <= 1 || want == MULTI)
+                                && let Some(fast) = self.rt.natives[id.0 as usize].fast
+                                && let Some(v) =
+                                    self.rt.stack.regs.get(fa + 1..fa + 1 + n).and_then(fast) =>
+                        {
+                            if want != 0 {
+                                self.rt.stack.regs[fa] = v;
+                            }
+                            self.rt.top = fa + want.min(1) as usize;
+                        }
+                        _ => match self.call_value(fa, n, want, stop) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
                                 safepoint!();
                             }
