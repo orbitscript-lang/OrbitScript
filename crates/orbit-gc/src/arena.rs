@@ -107,66 +107,59 @@ impl Gens {
     fn on_take(&mut self, _: usize, _: usize) {}
 }
 
+/// Slots per arena page, unless a [`space!`](crate::space) sets its own
+/// `PAGE_SLOTS`.
+pub const DEFAULT_PAGE_SLOTS: usize = 1024;
+/// Pages hold between 2^4 and 2^16 slots, so an in-page offset fits a `u16`.
+const MIN_PAGE_SLOTS: usize = 1 << 4;
+const MAX_PAGE_SLOTS: usize = 1 << 16;
+
 /// Storage for every object of one type.
 ///
-/// Slots live in fixed-size pages, sized by
-/// [`Params::page_bytes`](crate::Params::page_bytes). Pages never move, so
-/// growing an arena never copies live objects and never doubles peak memory,
-/// unlike a single `Vec`. A page whose objects have all been collected is
-/// released back to the allocator. Colors, free lists and counts are kept by
-/// the collector, not here, so an object can be read while the collector
-/// writes colors.
+/// Slots live in pages of `SLOTS` slots each, a power of two fixed at
+/// compile time by the [`space!`](crate::space) (ADR-2). Turning a handle
+/// into a slot is then a shift and a mask by constants, and the in-page
+/// offset needs no bounds check. Pages never move, so growing an arena never
+/// copies live objects and never doubles peak memory, unlike a single `Vec`.
+/// A page whose objects have all been collected is released back to the
+/// allocator. Colors, free lists and counts are kept by the collector, not
+/// here, so an object can be read while the collector writes colors.
 ///
 /// Arenas are created by [`space!`](crate::space) and only reached through a
 /// [`Heap`](crate::Heap).
-pub struct Arena<T> {
-    /// A released page is an empty slice, which costs no allocation and
-    /// makes any handle into it fail its bounds check.
-    pages: Vec<Box<[Option<T>]>>,
-    shift: u32,
-    /// Slots per page minus one.
-    mask: u32,
+pub struct Arena<T, const SLOTS: usize = DEFAULT_PAGE_SLOTS> {
+    /// A released page is `None`, which costs no allocation and makes any
+    /// handle into it fail.
+    pages: Vec<Option<Box<[Option<T>; SLOTS]>>>,
     gens: Gens,
 }
 
-impl<T> Default for Arena<T> {
+impl<T, const SLOTS: usize> Default for Arena<T, SLOTS> {
     fn default() -> Self {
         Arena {
             pages: Vec::new(),
-            shift: DEFAULT_PAGE_SHIFT,
-            mask: (1 << DEFAULT_PAGE_SHIFT) - 1,
             gens: Gens::default(),
         }
     }
 }
 
-impl<T> fmt::Debug for Arena<T> {
+impl<T, const SLOTS: usize> fmt::Debug for Arena<T, SLOTS> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Arena")
-            .field(
-                "pages",
-                &self.pages.iter().filter(|p| !p.is_empty()).count(),
-            )
-            .field("slots_per_page", &(1usize << self.shift))
+            .field("pages", &self.pages.iter().flatten().count())
+            .field("slots_per_page", &SLOTS)
             .finish()
     }
 }
 
-/// Slots per page before the heap configures the arena.
-const DEFAULT_PAGE_SHIFT: u32 = 10;
-/// Pages hold between 2^4 and 2^16 slots, so an in-page offset fits a `u16`.
-pub(crate) const MIN_PAGE_SHIFT: u32 = 4;
-pub(crate) const MAX_PAGE_SHIFT: u32 = 16;
-
-/// The page shift that gives pages of at least `page_bytes` for slots of
-/// `slot_bytes`: the slot count is rounded up to a power of two, so indexing
-/// stays a shift and a mask.
-pub(crate) fn page_shift(page_bytes: usize, slot_bytes: usize) -> u32 {
-    let slots = page_bytes.div_ceil(slot_bytes.max(1)).max(1);
-    slots
-        .next_power_of_two()
-        .trailing_zeros()
-        .clamp(MIN_PAGE_SHIFT, MAX_PAGE_SHIFT)
+/// The page shift for pages of `slots` slots. Fails to compile (when used as
+/// a constant) unless `slots` is a power of two in the supported range.
+pub(crate) const fn page_shift(slots: usize) -> u32 {
+    assert!(
+        slots.is_power_of_two() && slots >= MIN_PAGE_SLOTS && slots <= MAX_PAGE_SLOTS,
+        "orbit-gc: PAGE_SLOTS must be a power of two from 16 to 65536"
+    );
+    slots.trailing_zeros()
 }
 
 #[cold]
@@ -176,57 +169,40 @@ fn stale(i: u32) -> ! {
     panic!("orbit-gc: stale handle (slot {i} was freed)")
 }
 
-impl<T> Arena<T> {
+impl<T, const SLOTS: usize> Arena<T, SLOTS> {
+    const SHIFT: u32 = page_shift(SLOTS);
+
     #[inline(always)]
-    fn split(&self, i: u32) -> (usize, usize) {
-        ((i >> self.shift) as usize, (i & self.mask) as usize)
+    fn split(i: u32) -> (usize, usize) {
+        ((i >> Self::SHIFT) as usize, i as usize & (SLOTS - 1))
     }
 
     #[inline(always)]
     #[track_caller]
     fn slot(&self, i: u32) -> &Option<T> {
-        let (p, o) = self.split(i);
-        match self.pages.get(p).and_then(|page| page.get(o)) {
-            Some(s) => s,
-            None => stale(i),
+        let (p, o) = Self::split(i);
+        match self.pages.get(p) {
+            Some(Some(page)) => &page[o],
+            _ => stale(i),
         }
     }
 
     #[inline(always)]
     #[track_caller]
     fn slot_mut(&mut self, i: u32) -> &mut Option<T> {
-        let (p, o) = self.split(i);
-        match self.pages.get_mut(p).and_then(|page| page.get_mut(o)) {
-            Some(s) => s,
-            None => stale(i),
+        let (p, o) = Self::split(i);
+        match self.pages.get_mut(p) {
+            Some(Some(page)) => &mut page[o],
+            _ => stale(i),
         }
     }
 
     #[inline(always)]
     #[track_caller]
     fn check(&self, gc: Gc<T>) {
-        let (p, o) = self.split(gc.index);
+        let (p, o) = Self::split(gc.index);
         if self.gens.of(p, o) != Some(gc.generation) {
             stale(gc.index)
-        }
-    }
-
-    /// The object `gc` points to. Panics if its slot is free or, with checked
-    /// handles, was freed and reused since the handle was made.
-    #[inline(always)]
-    #[track_caller]
-    pub(crate) fn get(&self, gc: Gc<T>) -> &T {
-        self.check(gc);
-        self.get_slot(gc.index)
-    }
-
-    #[inline(always)]
-    #[track_caller]
-    pub(crate) fn get_mut(&mut self, gc: Gc<T>) -> &mut T {
-        self.check(gc);
-        match self.slot_mut(gc.index) {
-            Some(v) => v,
-            None => stale(gc.index),
         }
     }
 
@@ -241,6 +217,7 @@ impl<T> Arena<T> {
         }
     }
 
+    #[inline(always)]
     #[track_caller]
     pub(crate) fn get_slot_mut(&mut self, i: u32) -> &mut T {
         match self.slot_mut(i) {
@@ -249,59 +226,8 @@ impl<T> Arena<T> {
         }
     }
 
-    /// A handle to the object now in slot `i`.
-    #[track_caller]
-    pub(crate) fn handle_at(&self, i: u32) -> Gc<T> {
-        let (p, o) = self.split(i);
-        match self.gens.of(p, o) {
-            Some(generation) => Gc {
-                index: i,
-                generation,
-                _t: PhantomData,
-            },
-            None => stale(i),
-        }
-    }
-
-    pub(crate) fn is_occupied(&self, gc: Gc<T>) -> bool {
-        let (p, o) = self.split(gc.index);
-        self.gens.of(p, o) == Some(gc.generation)
-            && self
-                .pages
-                .get(p)
-                .and_then(|page| page.get(o))
-                .is_some_and(Option::is_some)
-    }
-
-    /// Set the page size. Only valid before the first allocation.
-    #[doc(hidden)]
-    pub fn set_shift(&mut self, shift: u32) {
-        assert!(
-            self.pages.is_empty(),
-            "orbit-gc: page size set after allocation"
-        );
-        self.shift = shift;
-        self.mask = (1 << shift) - 1;
-    }
-
-    /// Store `v` in slot `i`, allocating its page if it is new or was
-    /// released. The collector decides which pages exist.
-    pub(crate) fn put(&mut self, i: u32, v: T) -> Gc<T> {
-        let (p, o) = self.split(i);
-        if self.pages.get(p).is_none_or(|page| page.is_empty()) {
-            let slots = 1usize << self.shift;
-            if p == self.pages.len() {
-                self.pages.push(Box::default());
-            }
-            self.pages[p] = (0..slots).map(|_| None).collect();
-            self.gens.on_new_page(p, slots);
-        }
-        self.pages[p][o] = Some(v);
-        self.handle_at(i)
-    }
-
     pub(crate) fn take(&mut self, i: u32) -> T {
-        let (p, o) = self.split(i);
+        let (p, o) = Self::split(i);
         self.gens.on_take(p, o);
         match self.slot_mut(i).take() {
             Some(v) => v,
@@ -312,10 +238,78 @@ impl<T> Arena<T> {
     /// Give page `p`'s memory back to the allocator. Every slot must be free.
     #[doc(hidden)]
     pub fn release_page(&mut self, p: u32) {
-        let page = std::mem::take(&mut self.pages[p as usize]);
-        debug_assert!(page.iter().all(Option::is_none));
+        let page = self.pages[p as usize].take();
+        debug_assert!(page.iter().flat_map(|p| p.iter()).all(Option::is_none));
         drop(page);
         self.gens.on_release(p as usize);
+    }
+}
+
+/// What a [`Heap`](crate::Heap) needs from an arena, whatever its page size.
+/// Implemented by [`Arena`] only; not a public API.
+#[doc(hidden)]
+pub trait Store<T> {
+    /// The object `gc` points to. Panics if its slot is free or, with
+    /// checked handles, was freed and reused since the handle was made.
+    fn get(&self, gc: Gc<T>) -> &T;
+    fn get_mut(&mut self, gc: Gc<T>) -> &mut T;
+    /// A handle to the object now in slot `i`.
+    fn handle_at(&self, i: u32) -> Gc<T>;
+    fn is_occupied(&self, gc: Gc<T>) -> bool;
+    /// Store `v` in slot `i`, allocating its page if it is new or was
+    /// released. The collector decides which pages exist.
+    fn put(&mut self, i: u32, v: T) -> Gc<T>;
+}
+
+impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
+    #[inline(always)]
+    #[track_caller]
+    fn get(&self, gc: Gc<T>) -> &T {
+        self.check(gc);
+        self.get_slot(gc.index)
+    }
+
+    #[inline(always)]
+    #[track_caller]
+    fn get_mut(&mut self, gc: Gc<T>) -> &mut T {
+        self.check(gc);
+        self.get_slot_mut(gc.index)
+    }
+
+    #[track_caller]
+    fn handle_at(&self, i: u32) -> Gc<T> {
+        let (p, o) = Self::split(i);
+        match self.gens.of(p, o) {
+            Some(generation) => Gc {
+                index: i,
+                generation,
+                _t: PhantomData,
+            },
+            None => stale(i),
+        }
+    }
+
+    fn is_occupied(&self, gc: Gc<T>) -> bool {
+        let (p, o) = Self::split(gc.index);
+        self.gens.of(p, o) == Some(gc.generation)
+            && matches!(self.pages.get(p), Some(Some(page)) if page[o].is_some())
+    }
+
+    fn put(&mut self, i: u32, v: T) -> Gc<T> {
+        let (p, _) = Self::split(i);
+        if !matches!(self.pages.get(p), Some(Some(_))) {
+            if p == self.pages.len() {
+                self.pages.push(None);
+            }
+            let page: Box<[Option<T>]> = (0..SLOTS).map(|_| None).collect();
+            let Ok(page) = page.try_into() else {
+                unreachable!("the page has SLOTS slots")
+            };
+            self.pages[p] = Some(page);
+            self.gens.on_new_page(p, SLOTS);
+        }
+        *self.slot_mut(i) = Some(v);
+        self.handle_at(i)
     }
 }
 

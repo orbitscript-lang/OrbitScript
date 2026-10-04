@@ -98,7 +98,6 @@ fn run(seed: u64, ops: usize, stress: bool) {
         work_ratio: 800,
         step_bytes: 64,
         min_threshold: 4096,
-        page_bytes: 256,
         ..Default::default()
     });
     h.set_stress(stress);

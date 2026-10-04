@@ -21,7 +21,8 @@
 //!   [`Heap::barrier_back`] (or [`Heap::update`]) or [`Heap::barrier_forward`].
 //!   Roots are rescanned when marking finishes, so they need no barrier.
 //! - **Pages go back to the allocator.** Each arena is split into pages of
-//!   about [`Params::page_bytes`]. New objects fill the lowest pages first, and
+//!   a fixed number of slots ([`DEFAULT_PAGE_SLOTS`] unless the [`space!`]
+//!   sets `PAGE_SLOTS`). New objects fill the lowest pages first, and
 //!   a page the sweep leaves empty is freed, so memory taken during a spike
 //!   is given back when the spike ends. glibc keeps freed memory in the
 //!   process unless asked; the `malloc-trim` feature asks, once a cycle finds
@@ -89,7 +90,7 @@ mod heap;
 mod os;
 mod trace;
 
-pub use arena::{AnyGc, Arena, CHECKED_HANDLES, Gc};
+pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, Store};
 pub use heap::{Heap, Params, Phase};
 pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 
@@ -113,6 +114,24 @@ pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 /// Every type must implement [`Trace`] for the space, and appear only once.
 /// Arenas are numbered in declaration order (the [`AnyGc::kind`]), and swept
 /// in that order. At most 256 types.
+///
+/// Every arena's pages hold [`DEFAULT_PAGE_SLOTS`] slots. A different count,
+/// a power of two from 16 to 65536, goes after the struct:
+///
+/// ```
+/// # use orbit_gc::{Marker, Trace, space};
+/// # pub struct Node;
+/// space! {
+///     pub struct Small {
+///         nodes: Node,
+///     }
+///     const PAGE_SLOTS: usize = 64;
+/// }
+/// # impl Trace<Small> for Node { const LEAF: bool = true; fn trace(&self, _: &mut Marker<'_, Small>) {} }
+/// ```
+///
+/// The count is a constant so that finding a handle's slot is a shift and a
+/// mask by constants, with no bounds check inside the page (ADR-2).
 #[macro_export]
 macro_rules! space {
     (
@@ -121,10 +140,36 @@ macro_rules! space {
             $( $field:ident : $ty:ty ),+ $(,)?
         }
     ) => {
+        $crate::space! {
+            @space ($crate::DEFAULT_PAGE_SLOTS)
+            $(#[$meta])*
+            $vis struct $name { $( $field: $ty, )+ }
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $( $field:ident : $ty:ty ),+ $(,)?
+        }
+        const PAGE_SLOTS: usize = $slots:expr;
+    ) => {
+        $crate::space! {
+            @space ($slots)
+            $(#[$meta])*
+            $vis struct $name { $( $field: $ty, )+ }
+        }
+    };
+    (
+        @space ($slots:expr)
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $( $field:ident : $ty:ty, )+
+        }
+    ) => {
         $(#[$meta])*
         #[derive(Default)]
         $vis struct $name {
-            $( $field: $crate::Arena<$ty>, )+
+            $( $field: $crate::Arena<$ty, { $slots }>, )+
         }
 
         impl ::core::fmt::Debug for $name {
@@ -140,6 +185,7 @@ macro_rules! space {
 
             impl $crate::Space for $name {
                 const KINDS: usize = 0 $( + { let _ = __Kind::$field; 1 } )+;
+                const PAGE_SLOTS: usize = $slots;
 
                 fn trace_slot(
                     &self,
@@ -149,7 +195,7 @@ macro_rules! space {
                 ) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return $crate::__private::trace::<Self, $ty>(&self.$field, index, m);
+                            return $crate::__private::trace::<Self, $ty, _>(&self.$field, index, m);
                         }
                     )+
                     ::core::unreachable!()
@@ -164,7 +210,7 @@ macro_rules! space {
                 ) {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return $crate::__private::clear::<Self, $ty>(
+                            return $crate::__private::clear::<Self, $ty, _>(
                                 &mut self.$field, index, mode, live,
                             );
                         }
@@ -175,7 +221,7 @@ macro_rules! space {
                 fn free_slot(&mut self, kind: u8, index: u32) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return $crate::__private::free::<Self, $ty>(&mut self.$field, index);
+                            return $crate::__private::free::<Self, $ty, _>(&mut self.$field, index);
                         }
                     )+
                     ::core::unreachable!()
@@ -185,15 +231,6 @@ macro_rules! space {
                     $(
                         if kind == __Kind::$field as u8 {
                             return ::core::mem::size_of::<::core::option::Option<$ty>>();
-                        }
-                    )+
-                    ::core::unreachable!()
-                }
-
-                fn set_page_shift(&mut self, kind: u8, shift: u32) {
-                    $(
-                        if kind == __Kind::$field as u8 {
-                            return self.$field.set_shift(shift);
                         }
                     )+
                     ::core::unreachable!()
@@ -221,12 +258,13 @@ macro_rules! space {
             $(
                 impl $crate::Holds<$ty> for $name {
                     const KIND: u8 = __Kind::$field as u8;
+                    type Arena = $crate::Arena<$ty, { $slots }>;
                     #[inline(always)]
-                    fn arena(&self) -> &$crate::Arena<$ty> {
+                    fn arena(&self) -> &Self::Arena {
                         &self.$field
                     }
                     #[inline(always)]
-                    fn arena_mut(&mut self) -> &mut $crate::Arena<$ty> {
+                    fn arena_mut(&mut self) -> &mut Self::Arena {
                         &mut self.$field
                     }
                 }
@@ -245,14 +283,18 @@ pub mod __private {
     /// it visits: one unit for the object plus one per 16 bytes it owns
     /// outside its slot, roughly Lua's one unit per slot traversed.
     #[inline]
-    pub fn trace<S: Space, T: Trace<S>>(a: &Arena<T>, index: u32, m: &mut Marker<'_, S>) -> usize {
+    pub fn trace<S: Space, T: Trace<S>, const N: usize>(
+        a: &Arena<T, N>,
+        index: u32,
+        m: &mut Marker<'_, S>,
+    ) -> usize {
         let obj = a.get_slot(index);
         obj.trace(m);
         slot_size::<T>() + obj.extra_bytes()
     }
 
-    pub fn clear<S: Space, T: Trace<S>>(
-        a: &mut Arena<T>,
+    pub fn clear<S: Space, T: Trace<S>, const N: usize>(
+        a: &mut Arena<T, N>,
         index: u32,
         mode: WeakMode,
         live: &Liveness<'_, S>,
@@ -260,7 +302,7 @@ pub mod __private {
         a.get_slot_mut(index).clear_weak(mode, live)
     }
 
-    pub fn free<S: Space, T: Trace<S>>(a: &mut Arena<T>, index: u32) -> usize {
+    pub fn free<S: Space, T: Trace<S>, const N: usize>(a: &mut Arena<T, N>, index: u32) -> usize {
         let obj = a.take(index);
         slot_size::<T>() + obj.extra_bytes()
     }

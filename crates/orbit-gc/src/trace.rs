@@ -1,6 +1,6 @@
 //! How objects and roots tell the collector what they point to.
 
-use crate::arena::{AnyGc, Arena, Gc, Gen};
+use crate::arena::{AnyGc, Gc, Gen, Store};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::marker::PhantomData;
@@ -24,6 +24,8 @@ pub(crate) const WAIT: u8 = 8;
 pub trait Space: Sized {
     /// How many arenas (object types) the space has.
     const KINDS: usize;
+    /// Slots per page in every arena of the space.
+    const PAGE_SLOTS: usize;
 
     #[doc(hidden)]
     fn trace_slot(&self, kind: u8, index: u32, m: &mut Marker<'_, Self>) -> usize;
@@ -33,8 +35,6 @@ pub trait Space: Sized {
     fn free_slot(&mut self, kind: u8, index: u32) -> usize;
     #[doc(hidden)]
     fn slot_bytes(kind: u8) -> usize;
-    #[doc(hidden)]
-    fn set_page_shift(&mut self, kind: u8, shift: u32);
     #[doc(hidden)]
     fn release_page(&mut self, kind: u8, page: u32);
 
@@ -47,9 +47,11 @@ pub trait Holds<T>: Space {
     /// The arena's kind number: its position in the `space!` declaration.
     const KIND: u8;
     #[doc(hidden)]
-    fn arena(&self) -> &Arena<T>;
+    type Arena: Store<T>;
     #[doc(hidden)]
-    fn arena_mut(&mut self) -> &mut Arena<T>;
+    fn arena(&self) -> &Self::Arena;
+    #[doc(hidden)]
+    fn arena_mut(&mut self) -> &mut Self::Arena;
 }
 
 /// An object the collector manages in space `S`.
@@ -174,6 +176,9 @@ pub(crate) struct KindMeta {
     pub(crate) open: BTreeSet<u32>,
     /// `open`'s first element, cached for the allocation fast path.
     pub(crate) cur: Option<u32>,
+    /// Released pages below `pages.len()`, so allocation finds the lowest
+    /// without scanning every page.
+    pub(crate) released: BTreeSet<u32>,
     /// Occupied slots in the whole arena.
     pub(crate) live: usize,
     /// Pages currently allocated.
@@ -188,6 +193,7 @@ impl KindMeta {
             pages: Vec::new(),
             open: BTreeSet::new(),
             cur: None,
+            released: BTreeSet::new(),
             live: 0,
             allocated: 0,
         }
@@ -230,8 +236,8 @@ impl KindMeta {
         }
         // Every allocated page is full. Reuse the lowest released page, or
         // add one.
-        let p = match self.pages.iter().position(|pg| !pg.allocated) {
-            Some(p) => p,
+        let p = match self.released.pop_first() {
+            Some(p) => p as usize,
             None => {
                 self.pages.push(PageMeta::default());
                 self.pages.len() - 1
@@ -278,8 +284,9 @@ impl KindMeta {
         }
     }
 
-    /// Forget page `p`, which has no live objects, and give back the colors
-    /// of any released pages at the end.
+    /// Forget page `p`, which has no live objects. When it was the last
+    /// allocated page, also drop the released pages at the end and their
+    /// colors.
     pub(crate) fn release_page(&mut self, p: u32) {
         debug_assert_eq!(self.pages[p as usize].live, 0);
         self.pages[p as usize] = PageMeta::default();
@@ -288,11 +295,17 @@ impl KindMeta {
         if self.cur == Some(p) {
             self.cur = self.open.first().copied();
         }
-        let used = self
-            .pages
+        if p as usize + 1 < self.pages.len() {
+            self.released.insert(p);
+            return;
+        }
+        // Each page dropped here was scanned once, so this is linear overall.
+        let used = self.pages[..p as usize]
             .iter()
             .rposition(|pg| pg.allocated)
             .map_or(0, |q| q + 1);
+        self.pages.truncate(used);
+        self.released.split_off(&(used as u32));
         let len = used << self.shift;
         if len < self.color.len() {
             self.color.truncate(len);

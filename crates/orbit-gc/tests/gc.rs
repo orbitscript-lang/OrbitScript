@@ -568,10 +568,8 @@ fn roots_clear_weak_sees_liveness() {
 }
 
 fn small_pages() -> TestHeap {
-    TestHeap::with_params(orbit_gc::Params {
-        page_bytes: 1024,
-        ..orbit_gc::Params::default()
-    })
+    // `TestSpace` pages hold 16 slots.
+    TestHeap::new()
 }
 
 #[test]
@@ -610,7 +608,6 @@ fn pages_are_released_after_a_spike() {
 #[test]
 fn incremental_cycles_release_pages_too() {
     let mut h = TestHeap::with_params(orbit_gc::Params {
-        page_bytes: 1024,
         step_bytes: 1024,
         ..orbit_gc::Params::default()
     });
