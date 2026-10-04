@@ -64,6 +64,8 @@ pub(crate) struct FuncState<'a> {
     const_map: HashMap<ConstKey, u16>,
     ncaches: u32,
     pub children: Vec<FuncId>,
+    /// Each child's index in `children`.
+    child_index: HashMap<FuncId, u16>,
     pub slots: Vec<Slot>,
     cell_of: Vec<Option<u8>>,
     /// Next free register.
@@ -93,7 +95,14 @@ pub(crate) struct ScopeMark {
 }
 
 impl<'a> FuncState<'a> {
-    pub fn new(chunk: &'a Chunk, id: FuncId, const_locals: &'a [Vec<Option<ConstVal>>]) -> Self {
+    /// `self_local` is the parent's local this function is bound to by a `local function`
+    /// statement, if any.
+    pub fn new(
+        chunk: &'a Chunk,
+        id: FuncId,
+        const_locals: &'a [Vec<Option<ConstVal>>],
+        self_local: Option<LocalId>,
+    ) -> Self {
         let f = chunk.function(id);
         FuncState {
             chunk,
@@ -107,6 +116,7 @@ impl<'a> FuncState<'a> {
             const_map: HashMap::new(),
             ncaches: 0,
             children: Vec::new(),
+            child_index: HashMap::new(),
             slots: vec![Slot::Unset; f.locals.len()],
             cell_of: vec![None; f.locals.len()],
             free: 0,
@@ -119,7 +129,7 @@ impl<'a> FuncState<'a> {
             origins: Vec::new(),
             debug_locals: Vec::new(),
             scope: Vec::new(),
-            self_capture: self_capture(chunk, id),
+            self_capture: self_local.and_then(|l| self_capture(chunk, id, l)),
         }
     }
 
@@ -334,13 +344,14 @@ impl<'a> FuncState<'a> {
     }
 
     pub fn child(&mut self, func: FuncId) -> Result<u16> {
-        if let Some(i) = self.children.iter().position(|&c| c == func) {
-            return Ok(i as u16);
+        if let Some(&i) = self.child_index.get(&func) {
+            return Ok(i);
         }
         let Ok(i) = u16::try_from(self.children.len()) else {
             return Err(self.error("too many functions"));
         };
         self.children.push(func);
+        self.child_index.insert(func, i);
         Ok(i)
     }
 
@@ -477,17 +488,13 @@ fn set_offset(op: &mut Op, new: Offset) {
     }
 }
 
-/// The capture of `id` that always holds `id`'s own closure: the one for the local that a
+/// The capture of `id` that always holds `id`'s own closure: the one for `local`, which a
 /// parent's `local function` statement binds `id` to, when nothing ever assigns that local.
 /// The statement stores the closure in the local's cell before anything can call it, so reading
 /// the capture is the same as reading the running closure, and `CapSelf` does that without
 /// going through the closure's captures and the cell.
-fn self_capture(chunk: &Chunk, id: FuncId) -> Option<CaptureId> {
+fn self_capture(chunk: &Chunk, id: FuncId, local: LocalId) -> Option<CaptureId> {
     let parent = chunk.function(chunk.function(id).parent?);
-    let local = parent.stmts.iter().find_map(|s| match s.kind {
-        StmtKind::LocalFunction { local, func } if func == id => Some(local),
-        _ => None,
-    })?;
     if parent.locals[local.index()].reassigned {
         return None;
     }
