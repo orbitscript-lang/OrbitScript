@@ -265,6 +265,7 @@ impl Interp {
                     *cells[cell as usize].borrow_mut() = r[src as usize].clone()
                 }
                 Op::CapGet { dst, cap } => r[dst as usize] = c.caps[cap as usize].borrow().clone(),
+                Op::CapSelf { dst } => r[dst as usize] = V::Func(c.clone()),
                 Op::CapSet { cap, src } => {
                     *c.caps[cap as usize].borrow_mut() = r[src as usize].clone()
                 }
@@ -662,6 +663,26 @@ fn closures_and_fresh_bindings() {
          local function outer() return function() return function() x = x + 1; return x end end end
          print(outer()()(), x)",
         "1\t2\t3\n11\t12\t21\t31\n2\n3628800\n2\t2\n",
+    );
+}
+
+#[test]
+fn local_functions_refer_to_themselves() {
+    check(
+        "local fs = {}
+         for i = 1, 2 do local function k() return k, i end fs[i] = k end
+         local a, i = fs[2]()
+         print(a == fs[2], i, a == fs[1])
+         local function g(n) if n == 0 then return 'base' end g = function() return 'new' end return g(n - 1) end
+         print(g(3), g(3))
+         local function h(n)
+           local function set() h = function() return 'h2' end end
+           if n == 1 then set() end
+           if n == 0 then return 'base' end
+           return h(n - 1)
+         end
+         print(h(2), h(5))",
+        "true\t2\tfalse\nnew\tnew\nh2\th2\n",
     );
 }
 

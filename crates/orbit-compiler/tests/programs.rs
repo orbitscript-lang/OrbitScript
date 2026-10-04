@@ -29,6 +29,7 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 }
                 Op::CellGet { dst, cell } => cell < p.ncells && reg(dst),
                 Op::CapGet { dst, cap } => (cap as usize) < p.captures.len() && reg(dst),
+                Op::CapSelf { dst } => reg(dst),
                 Op::CapSet { cap, src } => (cap as usize) < p.captures.len() && reg(src),
                 Op::GetGlobal { dst: r, name, ic } | Op::SetGlobal { src: r, name, ic } => {
                     reg(r)

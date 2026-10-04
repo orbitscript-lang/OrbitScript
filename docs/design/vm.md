@@ -88,7 +88,7 @@ First-light instruction set (`R[x]` is a register, `K[x]` a constant, `C[x]` a f
 | Group | Instructions |
 |---|---|
 | Loads | `Move{dst,src}`, `LoadNil{dst,count}`, `LoadBool{dst,value}`, `LoadInt{dst,value:i32}`, `LoadConst{dst,k}` |
-| Cells and captures | `CellNew{cell,src}` (fresh cell holding `R[src]`), `CellGet{dst,cell}`, `CellSet{cell,src}`, `CapGet{dst,cap}`, `CapSet{cap,src}` |
+| Cells and captures | `CellNew{cell,src}` (fresh cell holding `R[src]`), `CellGet{dst,cell}`, `CellSet{cell,src}`, `CapGet{dst,cap}`, `CapSet{cap,src}`, `CapSelf{dst}` (the running closure, for a `local function` that refers to itself and is never reassigned) |
 | Globals | `GetGlobal{dst,name:k,ic}`, `SetGlobal{src,name:k,ic}` (through `U[0]`, the `_ENV` cell) |
 | Tables | `NewTable{dst,array_hint,hash_hint}`, `GetField{dst,obj,key:k,ic}`, `SetField{obj,key:k,src,ic}`, `GetIndex{dst,obj,key}`, `SetIndex{obj,key,src}`, `SetList{table,first,count,start}`, `SelfCall{dst,obj,key:k}` (method lookup: `R[dst+1]=R[obj]; R[dst]=R[obj][K[key]]`) |
 | Arithmetic | `Add`, `Sub`, `Mul`, `Div`, `IDiv`, `Mod`, `Pow` as `{dst,a,b}`; `AddInt{dst,a,imm:i16}`; `Neg{dst,src}`, `Not`, `Len`, `Concat{dst,first,count}` |
@@ -195,6 +195,7 @@ Every instruction has an inline fast path for the common types and one out-of-li
 - `Return{first, count}` copies results to where the callee was (`R[func]` of the caller), pads or truncates to the caller's `want`, pops the frame and reloads. When `want` is 255 the caller's "top" is set for the following `Call`/`Return`/`SetList` that consumes all values.
 - `TailCall` replaces the current frame, so `loop(200000, 0)` runs in constant space, as Lua requires. The compiler always follows it with `Return{func, 255}`: when the callee is a native that returns `CallThen`, the VM makes an ordinary call instead and that `Return` passes the results on.
 - **Fast switches.** A call to a Lua closure, and a `Return1` to a Lua caller that wants one value, switch the loop's frame state (`base`, `pc`, code, constants, caches, window) in place from values already in hand, instead of storing them in the frame and reading them back. The code is only reloaded when it changes, so a recursive call or its return never touches it. A closure calling itself skips the heap lookup for its prototype: the running frame keeps `closure` alive, so an equal handle is the same closure. Everything else (natives, errors, multiple results) goes back through the frame stack.
+- **Self reference.** A `local function` that calls itself reads its own name through a capture, which costs two arena lookups (closure, then cell). When the local is never assigned, the compiler emits `CapSelf` instead, which loads the running closure from the loop's frame state. The `local function` statement stores the closure in the cell before anything can call it, so the two always agree. The capture itself stays, so the function still has the upvalue. A future `debug.setupvalue` or `debug.upvaluejoin` on that upvalue would break the assumption, so they must account for it when they land.
 - **Depth limit**: pushing a frame beyond the configured limit (default one million register slots) raises the catchable error `stack overflow`. The Rust stack never grows with Lua recursion.
 
 ### Native functions

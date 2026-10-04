@@ -63,6 +63,10 @@ pub enum Op {
     CapGet { dst: Reg, cap: u8 },
     /// `U[cap].value = R[src]`
     CapSet { cap: u8, src: Reg },
+    /// `R[dst] = ` the running closure. The compiler emits it instead of
+    /// `CapGet` when a `local function` refers to itself and the local is
+    /// never assigned, so the capture always holds this closure.
+    CapSelf { dst: Reg },
 
     // Globals, through the `_ENV` table in `U[0]`.
     /// `R[dst] = U[0].value[K[name]]`

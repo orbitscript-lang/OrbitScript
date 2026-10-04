@@ -7,7 +7,7 @@ use orbit_bytecode::{
     Constant, DebugInfo, FunctionName, LocalInfo, LocalSlot, MAX_CAPTURES, MAX_REGS, Offset, Op,
     OperandOrigin, Origin, UnlinkedProto,
 };
-use orbit_hir::{Chunk, FuncId, Function, LocalId, Span, StmtKind, StrId};
+use orbit_hir::{CaptureFrom, CaptureId, Chunk, FuncId, Function, LocalId, Span, StmtKind, StrId};
 
 use crate::CompileError;
 use crate::consts::ConstVal;
@@ -80,6 +80,8 @@ pub(crate) struct FuncState<'a> {
     debug_locals: Vec<LocalInfo>,
     /// Locals declared in the open scopes, with their `debug_locals` index.
     scope: Vec<(LocalId, Option<usize>)>,
+    /// The capture that always holds the running closure, if any (see [`self_capture`]).
+    pub self_capture: Option<CaptureId>,
 }
 
 /// Saved allocation state at the start of a scope.
@@ -117,6 +119,7 @@ impl<'a> FuncState<'a> {
             origins: Vec::new(),
             debug_locals: Vec::new(),
             scope: Vec::new(),
+            self_capture: self_capture(chunk, id),
         }
     }
 
@@ -467,4 +470,26 @@ fn set_offset(op: &mut Op, new: Offset) {
         Op::ForLoop { back, .. } | Op::GenericLoop { back, .. } => *back = new,
         _ => unreachable!("not a jump: {op:?}"),
     }
+}
+
+/// The capture of `id` that always holds `id`'s own closure: the one for the local that a
+/// parent's `local function` statement binds `id` to, when nothing ever assigns that local.
+/// The statement stores the closure in the local's cell before anything can call it, so reading
+/// the capture is the same as reading the running closure, and `CapSelf` does that without
+/// going through the closure's captures and the cell.
+fn self_capture(chunk: &Chunk, id: FuncId) -> Option<CaptureId> {
+    let parent = chunk.function(chunk.function(id).parent?);
+    let local = parent.stmts.iter().find_map(|s| match s.kind {
+        StmtKind::LocalFunction { local, func } if func == id => Some(local),
+        _ => None,
+    })?;
+    if parent.locals[local.index()].reassigned {
+        return None;
+    }
+    let f = chunk.function(id);
+    let i = f
+        .captures
+        .iter()
+        .position(|c| c.from == CaptureFrom::ParentLocal(local))?;
+    Some(CaptureId::from_index(i))
 }
