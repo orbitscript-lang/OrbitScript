@@ -124,6 +124,11 @@ pub(crate) struct Stack {
     /// Kept here rather than in a local, where it would cost the loop a
     /// machine register.
     pub prev_code: Option<std::rc::Rc<orbit_core::ProtoCode>>,
+    /// The last Lua function called from a frame other than itself, with
+    /// what entering it needs, so calling it again skips looking it up.
+    /// A root: while cached, the handle can't be reused for another
+    /// closure.
+    pub callee: Option<(Gc<Closure>, crate::interp::Shape)>,
 }
 
 /// Everything in the VM except the heap, split off so the heap can be
@@ -166,6 +171,9 @@ impl Roots<LuaSpace> for Runtime {
             if let FrameKind::Lua { closure, .. } = f.kind {
                 m.mark(closure);
             }
+        }
+        if let Some((c, _)) = self.stack.callee {
+            m.mark(c);
         }
         for &v in &self.pinned {
             mark(m, v);

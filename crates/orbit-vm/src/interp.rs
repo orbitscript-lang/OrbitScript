@@ -97,8 +97,62 @@ impl Vm {
         nargs: usize,
         want: u8,
     ) -> Result<Entered, Exc> {
-        let proto = &*self.heap.get(c).code;
-        enter_lua_frame(&mut self.rt, proto, c, func, nargs, want)
+        let shape = Shape::of(&self.heap.get(c).code);
+        enter_lua_frame(&mut self.rt, shape, c, func, nargs, want)
+    }
+}
+
+/// String constant `k`, for the miss paths of field and global accesses.
+#[inline(always)]
+fn const_str(consts: &[Value], k: u16) -> Gc<orbit_core::LuaStr> {
+    match consts[k as usize] {
+        Value::Str(s) => s,
+        _ => unreachable!("field keys are strings"),
+    }
+}
+
+impl Vm {
+    /// The shape of Lua closure `c`, from the one-entry callee cache.
+    #[inline(always)]
+    fn callee_shape(&mut self, c: Gc<Closure>) -> Shape {
+        match self.rt.stack.callee {
+            // The cache roots its closure, so an equal handle is the same
+            // closure.
+            Some((cached, shape)) if cached == c => shape,
+            _ => self.callee_miss(c),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn callee_miss(&mut self, c: Gc<Closure>) -> Shape {
+        let shape = Shape::of(&self.heap.get(c).code);
+        self.rt.stack.callee = Some((c, shape));
+        shape
+    }
+}
+
+/// What entering a frame needs from its code, copied out so a cache can
+/// hold it without borrowing the code.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Shape {
+    code_id: usize,
+    nparams: u8,
+    is_vararg: bool,
+    nregs: u8,
+    ncells: u8,
+}
+
+impl Shape {
+    #[inline(always)]
+    pub(crate) fn of(proto: &ProtoCode) -> Shape {
+        Shape {
+            code_id: proto as *const ProtoCode as usize,
+            nparams: proto.nparams,
+            is_vararg: proto.is_vararg,
+            nregs: proto.nregs,
+            ncells: proto.ncells,
+        }
     }
 }
 
@@ -107,13 +161,13 @@ impl Vm {
 #[inline(always)]
 fn enter_lua_frame(
     rt: &mut crate::Runtime,
-    proto: &ProtoCode,
+    proto: Shape,
     c: Gc<Closure>,
     func: usize,
     nargs: usize,
     want: u8,
 ) -> Result<Entered, Exc> {
-    let code_id = proto as *const ProtoCode as usize;
+    let code_id = proto.code_id;
     let np = proto.nparams as usize;
     let nregs = proto.nregs as usize;
     let ncells = proto.ncells as usize;
@@ -446,8 +500,6 @@ impl Vm {
                 cur = self.heap.get(closure).code.clone();
             }
             let mut code = &cur.code[..];
-            let mut consts = &cur.consts[..];
-            let mut caches = &cur.caches[..];
             macro_rules! switch_code {
                 ($closure:expr, $code_id:expr) => {
                     // A recursive call or its return keeps the same code.
@@ -464,8 +516,6 @@ impl Vm {
                             }
                         }
                         code = &cur.code[..];
-                        consts = &cur.consts[..];
-                        caches = &cur.caches[..];
                     }
                 };
             }
@@ -551,6 +601,31 @@ impl Vm {
                         self.heap.step(&mut self.rt);
                         w = window!();
                     }
+                };
+            }
+            // Run `$body` with `$v` bound to `reg!($src)`, reading a number
+            // by parts. Arithmetic writes its result as a tag store and a
+            // payload store, and a whole 16-byte load of that value soon
+            // after would stall on store forwarding; with the variant known,
+            // `$body` stores it by parts too.
+            macro_rules! by_parts {
+                ($src:expr, |$v:ident| $body:expr) => {
+                    match reg!($src) {
+                        Value::Int(x) => {
+                            let $v = Value::Int(x);
+                            $body
+                        }
+                        Value::Float(f) => {
+                            let $v = Value::Float(f);
+                            $body
+                        }
+                        $v => $body,
+                    }
+                };
+            }
+            macro_rules! set_int_parts {
+                ($t:expr, $i:expr, $src:expr) => {
+                    by_parts!($src, |v| table::set_int(&mut self.heap, $t, $i, v))
                 };
             }
             macro_rules! jump {
@@ -651,11 +726,12 @@ impl Vm {
                             // A function calling itself: the running frame
                             // keeps `closure` alive, so an equal handle is
                             // the same closure, and its code is `cur`.
-                            let e = if c == closure {
-                                tri!(enter_lua_frame(&mut self.rt, &cur, c, fa, n, want))
+                            let shape = if c == closure {
+                                Shape::of(&cur)
                             } else {
-                                tri!(self.push_lua_frame(c, fa, n, want))
+                                self.callee_shape(c)
                             };
+                            let e = tri!(enter_lua_frame(&mut self.rt, shape, c, fa, n, want));
                             depth += 1;
                             closure = c;
                             base = e.base;
@@ -690,7 +766,10 @@ impl Vm {
                 let op = code[pc];
                 pc += 1;
                 match op {
-                    Op::Move { dst, src } => reg!(dst) = reg!(src),
+                    // Numbers are copied by parts: the source was usually
+                    // just written that way, and a whole 16-byte load would
+                    // stall on store forwarding.
+                    Op::Move { dst, src } => by_parts!(src, |v| reg!(dst) = v),
                     Op::LoadNil { dst, count } => {
                         let at = dst as usize;
                         for r in &mut w[at..at + count as usize] {
@@ -699,7 +778,7 @@ impl Vm {
                     }
                     Op::LoadBool { dst, value } => reg!(dst) = Value::Bool(value),
                     Op::LoadInt { dst, value } => reg!(dst) = Value::Int(value as i64),
-                    Op::LoadConst { dst, k } => reg!(dst) = consts[k as usize],
+                    Op::LoadConst { dst, k } => reg!(dst) = cur.consts[k as usize],
 
                     Op::CellNew { cell, src } => {
                         let v = reg!(src);
@@ -713,8 +792,9 @@ impl Vm {
                     }
                     Op::CellSet { cell, src } => {
                         let c = self.rt.stack.cells[cell_base!() + cell as usize];
-                        let v = reg!(src);
-                        self.heap.update(c, |c| c.value = v);
+                        self.heap.barrier_back(c);
+                        let cell = self.heap.get_mut(c);
+                        by_parts!(src, |v| cell.value = v);
                     }
                     Op::CapGet { dst, cap } => {
                         let c = self.heap.get(closure).captures[cap as usize];
@@ -723,21 +803,24 @@ impl Vm {
                     Op::CapSelf { dst } => reg!(dst) = Value::Closure(closure),
                     Op::CapSet { cap, src } => {
                         let c = self.heap.get(closure).captures[cap as usize];
-                        let v = reg!(src);
-                        self.heap.update(c, |c| c.value = v);
+                        self.heap.barrier_back(c);
+                        let cell = self.heap.get_mut(c);
+                        by_parts!(src, |v| cell.value = v);
                     }
 
                     Op::GetGlobal { dst, name, ic } => {
                         let env_cell = self.heap.get(closure).captures[0];
-                        let Value::Str(k) = consts[name as usize] else {
-                            unreachable!("global names are strings")
-                        };
                         let v = match self.heap.get(env_cell).value {
                             Value::Table(t) => {
-                                let cache = &caches[ic as usize];
-                                match self.heap.get(t).cached_str(cache.get() as usize, k) {
+                                let cache = &cur.caches[ic as usize];
+                                match self
+                                    .heap
+                                    .get(t)
+                                    .cached_str(cache.slot.get() as usize, cache.key)
+                                {
                                     Some(v) => v,
                                     None => {
+                                        let k = const_str(&cur.consts, name);
                                         let v = self.get_str_miss(t, k, cache);
                                         w = window!();
                                         v
@@ -750,18 +833,16 @@ impl Vm {
                     }
                     Op::SetGlobal { src, name, ic } => {
                         let env_cell = self.heap.get(closure).captures[0];
-                        let Value::Str(k) = consts[name as usize] else {
-                            unreachable!("global names are strings")
-                        };
                         let v = reg!(src);
                         match self.heap.get(env_cell).value {
                             Value::Table(t) => {
-                                let cache = &caches[ic as usize];
-                                let slot = cache.get() as usize;
-                                if self.heap.get(t).cached_str(slot, k).is_some() {
+                                let cache = &cur.caches[ic as usize];
+                                let slot = cache.slot.get() as usize;
+                                if self.heap.get(t).cached_str(slot, cache.key).is_some() {
                                     self.heap.barrier_back(t);
                                     self.heap.get_mut(t).set_slot(slot, v);
                                 } else {
+                                    let k = const_str(&cur.consts, name);
                                     self.set_str_miss(t, k, v, cache);
                                     w = window!();
                                     safepoint!();
@@ -782,17 +863,19 @@ impl Vm {
                         safepoint!();
                     }
                     Op::GetField { dst, obj, key, ic } => {
-                        let Value::Str(k) = consts[key as usize] else {
-                            unreachable!("field keys are strings")
-                        };
                         let &Value::Table(t) = &reg!(obj) else {
                             let o = reg!(obj);
                             index_error!(o)
                         };
-                        let cache = &caches[ic as usize];
-                        match self.heap.get(t).cached_str(cache.get() as usize, k) {
+                        let cache = &cur.caches[ic as usize];
+                        match self
+                            .heap
+                            .get(t)
+                            .cached_str(cache.slot.get() as usize, cache.key)
+                        {
                             Some(v) => reg!(dst) = v,
                             None => {
+                                let k = const_str(&cur.consts, key);
                                 let v = self.get_str_miss(t, k, cache);
                                 w = window!();
                                 reg!(dst) = v;
@@ -800,22 +883,21 @@ impl Vm {
                         }
                     }
                     Op::SetField { obj, key, src, ic } => {
-                        let Value::Str(k) = consts[key as usize] else {
-                            unreachable!("field keys are strings")
-                        };
                         let &Value::Table(t) = &reg!(obj) else {
                             let o = reg!(obj);
                             index_error!(o)
                         };
-                        let v = reg!(src);
-                        let cache = &caches[ic as usize];
-                        let slot = cache.get() as usize;
-                        if self.heap.get(t).cached_str(slot, k).is_some() {
+                        let cache = &cur.caches[ic as usize];
+                        let slot = cache.slot.get() as usize;
+                        if self.heap.get(t).cached_str(slot, cache.key).is_some() {
                             // The key is there: overwrite its value. No
                             // capacity changes, so no byte accounting.
                             self.heap.barrier_back(t);
-                            self.heap.get_mut(t).set_slot(slot, v);
+                            let tab = self.heap.get_mut(t);
+                            by_parts!(src, |v| tab.set_slot(slot, v));
                         } else {
+                            let k = const_str(&cur.consts, key);
+                            let v = reg!(src);
                             self.set_str_miss(t, k, v, cache);
                             w = window!();
                             safepoint!();
@@ -837,16 +919,16 @@ impl Vm {
                             let o = reg!(obj);
                             index_error!(o)
                         };
-                        let v = reg!(src);
                         match reg!(key) {
                             // A store into the array part allocates
                             // nothing, so it needs no safe point.
                             Value::Int(i) => {
-                                if !table::set_int(&mut self.heap, t, i, v) {
+                                if !set_int_parts!(t, i, src) {
                                     safepoint!();
                                 }
                             }
                             k => {
+                                let v = reg!(src);
                                 if let Err(e) = table::set(&mut self.heap, t, k, v) {
                                     throw!(Exc::Rt(e.message().into(), None));
                                 }
@@ -866,8 +948,7 @@ impl Vm {
                             let o = reg!(obj);
                             index_error!(o)
                         };
-                        let v = reg!(src);
-                        if !table::set_int(&mut self.heap, t, key as i64, v) {
+                        if !set_int_parts!(t, key as i64, src) {
                             safepoint!();
                         }
                     }
@@ -893,7 +974,7 @@ impl Vm {
                     }
                     Op::SelfCall { dst, obj, key } => {
                         let o = reg!(obj);
-                        let Value::Str(k) = consts[key as usize] else {
+                        let Value::Str(k) = cur.consts[key as usize] else {
                             unreachable!("method names are strings")
                         };
                         let Value::Table(t) = o else { index_error!(o) };
@@ -1061,14 +1142,26 @@ impl Vm {
                             } = caller.kind
                         {
                             let (func, own_cells) = (f.func as usize, f.cell_base as usize);
-                            let v = w[src as usize];
+                            // Numbers are copied by parts: the value was
+                            // usually just written that way, and a whole
+                            // 16-byte load would stall on store forwarding.
+                            let v = match w[src as usize] {
+                                Value::Float(f) => Ok(f),
+                                Value::Int(i) => Err(Ok(i)),
+                                v => Err(Err(v)),
+                            };
                             base = caller.base as usize;
                             pc = caller.pc as usize;
                             self.rt.stack.frames.pop();
                             if self.rt.stack.cells.len() > own_cells {
                                 self.rt.stack.cells.truncate(own_cells);
                             }
-                            self.rt.stack.regs[func] = v;
+                            let out = &mut self.rt.stack.regs[func];
+                            match v {
+                                Ok(f) => *out = Value::Float(f),
+                                Err(Ok(i)) => *out = Value::Int(i),
+                                Err(Err(v)) => *out = v,
+                            }
                             self.rt.top = func + 1;
                             depth -= 1;
                             closure = c;
@@ -1108,16 +1201,20 @@ impl Vm {
                         }
                     }
                     Op::ForLoop { base: b, back } => match reg!(b + 1) {
-                        Value::Int(count) => {
-                            if count > 0 {
-                                let (&Value::Int(cur), &Value::Int(s)) = (&reg!(b), &reg!(b + 2))
-                                else {
-                                    unreachable!("integer loop state")
-                                };
-                                let next = Value::Int(cur.wrapping_add(s));
-                                reg!(b) = next;
-                                reg!(b + 1) = Value::Int(count - 1);
-                                reg!(b + 3) = next;
+                        Value::Int(_) => {
+                            // Update the counters' payloads in place: their
+                            // tags are already right, so only the payloads
+                            // need stores.
+                            let at = b as usize;
+                            let [Value::Int(cur), Value::Int(count), Value::Int(s), var] =
+                                &mut w[at..at + 4]
+                            else {
+                                unreachable!("integer loop state")
+                            };
+                            if *count > 0 {
+                                *count -= 1;
+                                *cur = cur.wrapping_add(*s);
+                                *var = Value::Int(*cur);
                                 jump!(back);
                             }
                         }
