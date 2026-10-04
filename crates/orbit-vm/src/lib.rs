@@ -107,8 +107,6 @@ pub(crate) struct Frame {
     /// Saved pc: the instruction after the current one.
     pub pc: u32,
     pub cell_base: u32,
-    /// `base + nregs` for a Lua frame: registers the frame needs.
-    pub end: u32,
     pub nvarargs: u32,
     /// Results the caller wants ([`op::MULTI`] for all).
     pub want: u8,
