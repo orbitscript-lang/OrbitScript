@@ -689,6 +689,7 @@ impl Vm {
                         let c = self.heap.get(closure).captures[cap as usize];
                         reg!(dst) = self.heap.get(c).value;
                     }
+                    Op::CapSelf { dst } => reg!(dst) = Value::Closure(closure),
                     Op::CapSet { cap, src } => {
                         let c = self.heap.get(closure).captures[cap as usize];
                         let v = reg!(src);

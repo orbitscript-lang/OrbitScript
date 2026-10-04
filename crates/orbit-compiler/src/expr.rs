@@ -163,10 +163,14 @@ impl FuncState<'_> {
                 self.local_origin(l)
             }
             &ExprKind::Capture(c) => {
-                self.emit(Op::CapGet {
-                    dst,
-                    cap: c.0 as u8,
-                });
+                if self.self_capture == Some(c) {
+                    self.emit(Op::CapSelf { dst });
+                } else {
+                    self.emit(Op::CapGet {
+                        dst,
+                        cap: c.0 as u8,
+                    });
+                }
                 Some(Origin::Upvalue(self.name_bytes(self.f.capture(c).name)))
             }
             ExprKind::Outer { .. } => return Err(self.error("internal error: HIR not analysed")),
