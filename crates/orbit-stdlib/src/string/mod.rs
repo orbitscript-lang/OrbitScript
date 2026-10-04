@@ -1,6 +1,7 @@
 //! The `string` library.
 
 mod format;
+mod pack;
 pub(crate) mod pattern;
 
 use orbit_vm::orbit_core::{Gc, LuaStr, Value};
@@ -23,6 +24,9 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("string.find", find),
     ("string.match", match_),
     ("string.gsub", gsub),
+    ("string.pack", pack::pack),
+    ("string.unpack", pack::unpack),
+    ("string.packsize", pack::packsize),
 ];
 
 /// Largest string the library builds.
