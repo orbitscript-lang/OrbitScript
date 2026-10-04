@@ -63,6 +63,10 @@ pub enum Op {
     CapGet { dst: Reg, cap: u8 },
     /// `U[cap].value = R[src]`
     CapSet { cap: u8, src: Reg },
+    /// `R[dst] = ` the running closure. The compiler emits it instead of
+    /// `CapGet` when a `local function` refers to itself and the local is
+    /// never assigned, so the capture always holds this closure.
+    CapSelf { dst: Reg },
 
     // Globals, through the `_ENV` table in `U[0]`.
     /// `R[dst] = U[0].value[K[name]]`
@@ -95,6 +99,10 @@ pub enum Op {
     GetIndex { dst: Reg, obj: Reg, key: Reg },
     /// `R[obj][R[key]] = R[src]`
     SetIndex { obj: Reg, key: Reg, src: Reg },
+    /// `R[dst] = R[obj][key]` for an integer constant key.
+    GetIndexInt { dst: Reg, obj: Reg, key: u16 },
+    /// `R[obj][key] = R[src]` for an integer constant key.
+    SetIndexInt { obj: Reg, key: u16, src: Reg },
     /// `R[table][start + i] = R[first + i]` for `i` in `0..count`
     /// (`count` [`MULTI`]: up to top).
     SetList {
@@ -153,6 +161,41 @@ pub enum Op {
     JumpEq { a: Reg, b: Reg, off: Offset },
     /// `if R[a] ~= R[b] { pc += off }`
     JumpNe { a: Reg, b: Reg, off: Offset },
+    /// `if (R[a] == imm) == want { pc += off }`
+    JumpEqInt {
+        a: Reg,
+        imm: i8,
+        want: bool,
+        off: Offset,
+    },
+    /// `if (R[a] < imm) == want { pc += off }`. Errors as for `R[a] < imm`.
+    JumpLtInt {
+        a: Reg,
+        imm: i8,
+        want: bool,
+        off: Offset,
+    },
+    /// `if (R[a] <= imm) == want { pc += off }`. Errors as for `R[a] <= imm`.
+    JumpLeInt {
+        a: Reg,
+        imm: i8,
+        want: bool,
+        off: Offset,
+    },
+    /// `if (R[a] > imm) == want { pc += off }`. Errors as for `imm < R[a]`.
+    JumpGtInt {
+        a: Reg,
+        imm: i8,
+        want: bool,
+        off: Offset,
+    },
+    /// `if (R[a] >= imm) == want { pc += off }`. Errors as for `imm <= R[a]`.
+    JumpGeInt {
+        a: Reg,
+        imm: i8,
+        want: bool,
+        off: Offset,
+    },
 
     // Calls.
     /// Call `R[func]` with `R[func+1..func+1+nargs]` (`nargs` [`MULTI`]: up

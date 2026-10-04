@@ -410,7 +410,7 @@ impl<S: Space> Heap<S> {
     /// Whether the owner should call [`Heap::step`] at its next safe point.
     #[inline(always)]
     pub fn should_step(&self) -> bool {
-        !self.stopped && (self.debt > 0 || self.stress)
+        (self.debt > 0 || self.stress) && !self.stopped
     }
 
     /// Bytes in use: arena slots plus what objects report in
