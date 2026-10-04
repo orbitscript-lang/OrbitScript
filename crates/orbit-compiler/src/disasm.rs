@@ -74,6 +74,11 @@ pub fn disassemble(chunk: &UnlinkedChunk) -> String {
                 | Op::JumpNotLe { off, .. }
                 | Op::JumpEq { off, .. }
                 | Op::JumpNe { off, .. }
+                | Op::JumpEqInt { off, .. }
+                | Op::JumpLtInt { off, .. }
+                | Op::JumpLeInt { off, .. }
+                | Op::JumpGtInt { off, .. }
+                | Op::JumpGeInt { off, .. }
                 | Op::ForPrep { exit: off, .. }
                 | Op::ForLoop { back: off, .. }
                 | Op::GenericLoop { back: off, .. } => Some(pc as i64 + 1 + off as i64),
