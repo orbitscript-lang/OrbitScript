@@ -1,6 +1,6 @@
 //! The heap: allocation, barriers, pacing and the incremental collector.
 
-use crate::arena::{AnyGc, Gc, Gen, page_shift};
+use crate::arena::{AnyGc, Gc, Gen, Store, page_shift};
 use crate::trace::{
     BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, Roots, Space, Trace,
     WAIT, WHITE, WeakMode,
@@ -32,17 +32,6 @@ pub struct Params {
     /// collect less often. 0 by default: with a floor, a small heap can't
     /// shrink back toward its live size.
     pub min_threshold: usize,
-    /// Target size of an arena page in bytes. Each arena rounds its slots
-    /// per page up to a power of two, so a page is between `page_bytes` and
-    /// twice that. A page whose objects are all collected goes back to the
-    /// allocator, except an arena's last one. Read when the heap is created;
-    /// changing it later has no effect.
-    ///
-    /// 64 KiB, the default, is a whole number of pages on systems with 4, 16
-    /// or 64 KiB pages. Whether freed pages then leave the process is up to
-    /// the allocator: glibc, for one, keeps them unless the host calls
-    /// `malloc_trim` or fixes its mmap threshold.
-    pub page_bytes: usize,
     /// With the `malloc-trim` feature: hand freed memory back to the OS
     /// once a cycle finds the reachable heap at or below this percentage of
     /// its peak since the last trim, and pages were released. 50 by default.
@@ -62,7 +51,6 @@ impl Default for Params {
             work_ratio: 800,
             step_bytes: 16 * 1024,
             min_threshold: 0,
-            page_bytes: 64 * 1024,
             trim_percent: 50,
             trim_min_bytes: 1 << 20,
         }
@@ -171,13 +159,9 @@ impl<S: Space + Default> Heap<S> {
     }
 
     pub fn with_params(params: Params) -> Self {
-        let mut space = S::default();
+        let space = S::default();
         let meta = (0..S::KINDS)
-            .map(|k| {
-                let shift = page_shift(params.page_bytes, S::slot_bytes(k as u8));
-                space.set_page_shift(k as u8, shift);
-                KindMeta::new(shift)
-            })
+            .map(|_| KindMeta::new(const { page_shift(S::PAGE_SLOTS) }))
             .collect();
         Heap {
             space,

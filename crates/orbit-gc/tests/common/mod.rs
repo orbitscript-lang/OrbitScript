@@ -28,6 +28,8 @@ space! {
         texts: Text,
         objs: Obj,
     }
+    // Small pages, so tests release and reallocate pages often.
+    const PAGE_SLOTS: usize = 16;
 }
 
 pub type TestHeap = Heap<TestSpace>;
