@@ -46,6 +46,14 @@ impl LuaError {
     }
 }
 
+/// Compiles source text into an unlinked chunk, for `load`, `loadfile`,
+/// `dofile` and `require`. `chunk_name` is the name messages use
+/// (`script.lua` in `script.lua:3:`); an error is the complete message.
+/// The embedder installs it in [`Runtime::compile`] (`orbit::Lua` installs
+/// the Lua front end), so the VM and the libraries don't depend on a front
+/// end and a host can leave the compiler out.
+pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
+
 /// Configurable limits.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -142,6 +150,8 @@ pub struct Runtime {
     pub out: Box<dyn WriteDebug>,
     /// When the VM started (for `os.clock`).
     pub start: Instant,
+    /// The source compiler, if the host installed one.
+    pub compile: Option<CompileFn>,
     pub(crate) natives: Vec<Native>,
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId>,
     pub(crate) stack: Stack,
@@ -212,6 +222,7 @@ impl Vm {
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 start: Instant::now(),
+                compile: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
                 stack: Stack::default(),
