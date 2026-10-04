@@ -142,6 +142,9 @@ pub struct Runtime {
     pub out: Box<dyn WriteDebug>,
     /// When the VM started (for `os.clock`).
     pub start: Instant,
+    /// Per-VM state of host libraries, one value per type (the `math`
+    /// library's random generator, for example).
+    pub ext: Extensions,
     pub(crate) natives: Vec<Native>,
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId>,
     pub(crate) stack: Stack,
@@ -151,6 +154,32 @@ pub struct Runtime {
     pub(crate) pinned: Vec<Value>,
     /// End of the values of the last open-ended call or `Vararg`.
     pub(crate) top: usize,
+}
+
+/// Library state kept per VM, keyed by type. It holds plain Rust data, never
+/// GC values (it is not traced).
+#[derive(Default)]
+pub struct Extensions {
+    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
+}
+
+impl Extensions {
+    /// The value of type `T`, created with `init` on first use.
+    pub fn get_or_insert_with<T: 'static>(&mut self, init: impl FnOnce() -> T) -> &mut T {
+        self.map
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| Box::new(init()))
+            .downcast_mut::<T>()
+            .expect("extension stored under its own TypeId")
+    }
+}
+
+impl fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extensions")
+            .field("len", &self.map.len())
+            .finish()
+    }
 }
 
 /// `Write` that can be printed with `{:?}`.
@@ -212,6 +241,7 @@ impl Vm {
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 start: Instant::now(),
+                ext: Extensions::default(),
                 natives: Vec::new(),
                 native_ids: Default::default(),
                 stack: Stack::default(),
