@@ -33,6 +33,10 @@ malloc-trim = []
 # "value waits on key". Ephemeron objects whose keys are not all marked are
 # revisited at the end of marking until a pass marks nothing new.
 spike-ephemeron-rescan = []
+# Spike only: E1 (values wait on keys) with a cheap slot hasher instead of
+# SipHash and the first waiting value stored inline. Ignored together with
+# `spike-ephemeron-rescan`.
+spike-ephemeron-tuned = []
 # Spike only: find unreachable finalizable objects by scanning the color
 # bytes at the end of marking, ordered by a per-slot registration number,
 # instead of keeping a list of registered objects.

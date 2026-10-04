@@ -351,6 +351,95 @@ impl KindMeta {
     }
 }
 
+/// The values waiting for one key.
+#[cfg(not(feature = "spike-ephemeron-tuned"))]
+pub(crate) type WaitList = Vec<AnyGc>;
+#[cfg(not(feature = "spike-ephemeron-tuned"))]
+pub(crate) type WaitMap = HashMap<(u8, u32), WaitList>;
+
+/// Heap bytes a value list holds.
+#[cfg(all(feature = "spike-stats", not(feature = "spike-ephemeron-tuned")))]
+fn list_bytes(l: &WaitList) -> usize {
+    l.capacity() * size_of::<AnyGc>()
+}
+
+/// Spike E1-tuned: most keys have one waiting value, so it is stored
+/// inline; only a second value allocates.
+#[cfg(feature = "spike-ephemeron-tuned")]
+#[derive(Debug)]
+#[cfg_attr(feature = "spike-ephemeron-rescan", allow(dead_code))]
+pub(crate) enum WaitList {
+    One(AnyGc),
+    Many(Vec<AnyGc>),
+}
+
+#[cfg(feature = "spike-ephemeron-tuned")]
+#[cfg_attr(feature = "spike-ephemeron-rescan", allow(dead_code))]
+impl WaitList {
+    fn push(&mut self, v: AnyGc) {
+        match self {
+            WaitList::One(a) => *self = WaitList::Many(vec![*a, v]),
+            WaitList::Many(l) => l.push(v),
+        }
+    }
+    fn drain_into(self, todo: &mut Vec<AnyGc>) {
+        match self {
+            WaitList::One(a) => todo.push(a),
+            WaitList::Many(l) => todo.extend(l),
+        }
+    }
+    #[cfg(feature = "spike-stats")]
+    fn len(&self) -> usize {
+        match self {
+            WaitList::One(_) => 1,
+            WaitList::Many(l) => l.len(),
+        }
+    }
+}
+
+#[cfg(feature = "spike-ephemeron-tuned")]
+fn list_bytes(l: &WaitList) -> usize {
+    match l {
+        WaitList::One(_) => 0,
+        WaitList::Many(v) => v.capacity() * size_of::<AnyGc>(),
+    }
+}
+
+/// Spike E1-tuned: a multiply-rotate hasher (no dependency) instead of
+/// SipHash, for slot-number keys that need no DoS resistance.
+#[cfg(feature = "spike-ephemeron-tuned")]
+#[derive(Default, Clone, Copy)]
+pub(crate) struct SlotHasher(u64);
+
+#[cfg(feature = "spike-ephemeron-tuned")]
+impl std::hash::Hasher for SlotHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(u64::from(i));
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(u64::from(i));
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+#[cfg(feature = "spike-ephemeron-tuned")]
+pub(crate) type WaitMap = HashMap<(u8, u32), WaitList, std::hash::BuildHasherDefault<SlotHasher>>;
+
 /// The collector state marking needs.
 #[derive(Debug)]
 pub(crate) struct Marks {
@@ -359,13 +448,19 @@ pub(crate) struct Marks {
     /// Ephemeron values by the unmarked key that keeps them alive. Marking a
     /// key marks its values, so ephemerons need no rescans; entries left at
     /// the end of marking belong to dead keys.
-    pub(crate) waiting: HashMap<(u8, u32), Vec<AnyGc>>,
+    pub(crate) waiting: WaitMap,
+    /// Spike E1-tuned: scratch space for `release`.
+    #[cfg(feature = "spike-ephemeron-tuned")]
+    pub(crate) scratch: Vec<AnyGc>,
     /// Spike E2: the object being traced reported an ephemeron entry whose
     /// key is not marked yet, so it must be revisited.
     #[cfg(feature = "spike-ephemeron-rescan")]
     pub(crate) eph_pending: bool,
     #[cfg(feature = "spike-stats")]
     pub(crate) waiting_values: usize,
+    /// Heap bytes held by the value lists in `waiting`.
+    #[cfg(feature = "spike-stats")]
+    pub(crate) waiting_list_bytes: usize,
     #[cfg_attr(not(feature = "spike-stats"), allow(dead_code))]
     pub(crate) stats: SpikeStats,
     /// Bytes of the objects marked so far in this cycle: at the end of
@@ -402,15 +497,14 @@ impl Marks {
     /// Mark the ephemeron values that were waiting for this key, and any
     /// waiting for those in turn. A loop rather than recursion, so a long
     /// chain of ephemerons can't overflow the stack.
+    #[cfg(not(feature = "spike-ephemeron-tuned"))]
     #[cold]
     fn release(&mut self, kind: u8, index: u32) {
         let Some(mut todo) = self.waiting.remove(&(kind, index)) else {
             return;
         };
         #[cfg(feature = "spike-stats")]
-        {
-            self.waiting_values -= todo.len();
-        }
+        self.note_removed(&todo);
         while let Some(v) = todo.pop() {
             let c = &mut self.meta[v.kind as usize].color[v.index as usize];
             debug_assert!(*c != FREE, "orbit-gc: marking a stale handle");
@@ -422,12 +516,40 @@ impl Marks {
             self.gray.push(v);
             if waited && let Some(more) = self.waiting.remove(&(v.kind, v.index)) {
                 #[cfg(feature = "spike-stats")]
-                {
-                    self.waiting_values -= more.len();
-                }
+                self.note_removed(&more);
                 todo.extend(more);
             }
         }
+    }
+
+    /// Spike E1-tuned: as above, with the one-value lists unpacked into a
+    /// reused scratch vector.
+    #[cfg(feature = "spike-ephemeron-tuned")]
+    #[cold]
+    fn release(&mut self, kind: u8, index: u32) {
+        let Some(first) = self.waiting.remove(&(kind, index)) else {
+            return;
+        };
+        #[cfg(feature = "spike-stats")]
+        self.note_removed(&first);
+        let mut todo = std::mem::take(&mut self.scratch);
+        first.drain_into(&mut todo);
+        while let Some(v) = todo.pop() {
+            let c = &mut self.meta[v.kind as usize].color[v.index as usize];
+            debug_assert!(*c != FREE, "orbit-gc: marking a stale handle");
+            if *c & COLOR != WHITE {
+                continue;
+            }
+            let waited = *c & WAIT != 0;
+            *c = (*c & !(COLOR | WAIT)) | GRAY;
+            self.gray.push(v);
+            if waited && let Some(more) = self.waiting.remove(&(v.kind, v.index)) {
+                #[cfg(feature = "spike-stats")]
+                self.note_removed(&more);
+                more.drain_into(&mut todo);
+            }
+        }
+        self.scratch = todo;
     }
 
     /// Keep `value` alive if `key` is, now or once it is marked.
@@ -437,24 +559,55 @@ impl Marks {
             self.mark_raw(value.kind, value.index, false);
         } else if !self.is_marked(value.kind, value.index) {
             self.meta[key.kind as usize].color[key.index as usize] |= WAIT;
-            self.waiting
-                .entry((key.kind, key.index))
-                .or_default()
-                .push(value);
-            #[cfg(feature = "spike-stats")]
-            self.note_waiting();
+            #[cfg(not(feature = "spike-ephemeron-tuned"))]
+            {
+                let list = self.waiting.entry((key.kind, key.index)).or_default();
+                #[cfg(feature = "spike-stats")]
+                let before = list_bytes(list);
+                list.push(value);
+                #[cfg(feature = "spike-stats")]
+                {
+                    let grown = list_bytes(list) - before;
+                    self.note_waiting(grown);
+                }
+            }
+            #[cfg(feature = "spike-ephemeron-tuned")]
+            {
+                use std::collections::hash_map::Entry;
+                #[cfg_attr(not(feature = "spike-stats"), allow(unused_variables))]
+                let grown = match self.waiting.entry((key.kind, key.index)) {
+                    Entry::Vacant(e) => {
+                        e.insert(WaitList::One(value));
+                        0
+                    }
+                    Entry::Occupied(mut e) => {
+                        let before = list_bytes(e.get());
+                        e.get_mut().push(value);
+                        list_bytes(e.get()) - before
+                    }
+                };
+                #[cfg(feature = "spike-stats")]
+                self.note_waiting(grown);
+            }
         }
     }
 
     #[cfg(all(feature = "spike-stats", not(feature = "spike-ephemeron-rescan")))]
-    fn note_waiting(&mut self) {
+    fn note_waiting(&mut self, grown: usize) {
         self.waiting_values += 1;
+        self.waiting_list_bytes += grown;
         let st = &mut self.stats;
         st.waiting_peak_keys = st.waiting_peak_keys.max(self.waiting.len());
         st.waiting_peak_values = st.waiting_peak_values.max(self.waiting_values);
-        let bytes = self.waiting.capacity() * (size_of::<((u8, u32), Vec<AnyGc>)>() + 1)
-            + self.waiting_values * size_of::<AnyGc>();
+        let bytes = self.waiting.capacity() * (size_of::<((u8, u32), WaitList)>() + 1)
+            + self.waiting_list_bytes;
         st.waiting_peak_bytes = st.waiting_peak_bytes.max(bytes);
+    }
+
+    #[cfg(feature = "spike-stats")]
+    fn note_removed(&mut self, list: &WaitList) {
+        self.waiting_values -= list.len();
+        self.waiting_list_bytes -= list_bytes(list);
     }
 
     /// Spike E2: mark `value` if `key` is marked; otherwise note that the
@@ -473,6 +626,7 @@ impl Marks {
         #[cfg(feature = "spike-stats")]
         {
             self.waiting_values = 0;
+            self.waiting_list_bytes = 0;
         }
         for &(kind, index) in self.waiting.keys() {
             self.meta[kind as usize].color[index as usize] &= !WAIT;

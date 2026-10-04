@@ -7,7 +7,7 @@ use crate::trace::{
     BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, Roots, Space,
     SpikeStats, Trace, WAIT, WHITE, WeakMode,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -188,11 +188,15 @@ impl<S: Space + Default> Heap<S> {
             marks: Marks {
                 meta,
                 gray: Vec::new(),
-                waiting: HashMap::new(),
+                waiting: Default::default(),
+                #[cfg(feature = "spike-ephemeron-tuned")]
+                scratch: Vec::new(),
                 #[cfg(feature = "spike-ephemeron-rescan")]
                 eph_pending: false,
                 #[cfg(feature = "spike-stats")]
                 waiting_values: 0,
+                #[cfg(feature = "spike-stats")]
+                waiting_list_bytes: 0,
                 stats: SpikeStats::default(),
                 marked_bytes: 0,
             },
@@ -508,6 +512,20 @@ impl<S: Space> Heap<S> {
         cfg!(feature = "spike-stats").then_some(self.marks.stats)
     }
 
+    /// Spike: bytes the finalizer registry holds (vector capacities),
+    /// not counting `finalize_queue`.
+    #[doc(hidden)]
+    pub fn spike_fin_bytes(&self) -> usize {
+        #[cfg(not(feature = "spike-finalizer-scan"))]
+        return self.finalizable.capacity() * size_of::<AnyGc>();
+        #[cfg(feature = "spike-finalizer-scan")]
+        return self
+            .fin_seq
+            .iter()
+            .map(|v| v.capacity() * size_of::<u32>())
+            .sum();
+    }
+
     // ---- pacing ---------------------------------------------------------
 
     fn charge(&mut self, n: usize) {
@@ -700,6 +718,7 @@ impl<S: Space> Heap<S> {
         #[cfg(feature = "spike-stats")]
         {
             self.marks.waiting_values = 0;
+            self.marks.waiting_list_bytes = 0;
         }
         #[cfg(feature = "spike-ephemeron-rescan")]
         self.ephemerons.clear();
