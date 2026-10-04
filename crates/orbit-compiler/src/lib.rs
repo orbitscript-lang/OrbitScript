@@ -10,11 +10,11 @@ mod expr;
 mod func;
 mod stmt;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
 use orbit_bytecode::{CaptureSource, UnlinkedChunk, UnlinkedProto};
-use orbit_hir::{CaptureFrom, Chunk};
+use orbit_hir::{CaptureFrom, Chunk, StmtKind};
 
 pub use disasm::disassemble;
 /// The instruction set this compiler emits.
@@ -55,11 +55,22 @@ pub fn compile(chunk: &Chunk) -> Result<UnlinkedChunk, CompileError> {
         .iter()
         .map(|_| CaptureSource::Env)
         .collect();
-    let mut queue = VecDeque::from([(Chunk::MAIN, 0usize, main_captures)]);
-    while let Some((id, index, captures)) = queue.pop_front() {
-        let out = func::FuncState::new(chunk, id, &consts).compile()?;
+    let mut queue = VecDeque::from([(Chunk::MAIN, 0usize, main_captures, None)]);
+    while let Some((id, index, captures, self_local)) = queue.pop_front() {
+        let out = func::FuncState::new(chunk, id, &consts, self_local).compile()?;
         let mut proto = out.proto;
         proto.captures = captures;
+        // The local each `local function` statement defines, found in one pass so a
+        // function with many children compiles in linear time.
+        let local_functions: HashMap<_, _> = chunk
+            .function(id)
+            .stmts
+            .iter()
+            .filter_map(|s| match s.kind {
+                StmtKind::LocalFunction { local, func } => Some((func, local)),
+                _ => None,
+            })
+            .collect();
         for child in out.children {
             let child_index = protos.len();
             protos.push(None);
@@ -76,7 +87,12 @@ pub fn compile(chunk: &Chunk) -> Result<UnlinkedChunk, CompileError> {
                     CaptureFrom::Env => CaptureSource::Env,
                 })
                 .collect();
-            queue.push_back((child, child_index, sources));
+            queue.push_back((
+                child,
+                child_index,
+                sources,
+                local_functions.get(&child).copied(),
+            ));
         }
         protos[index] = Some(proto);
     }

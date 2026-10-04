@@ -23,6 +23,11 @@ enum Target {
         key: u8,
         origin: Option<orbit_bytecode::Origin>,
     },
+    IndexInt {
+        obj: u8,
+        key: u16,
+        origin: Option<orbit_bytecode::Origin>,
+    },
 }
 
 impl FuncState<'_> {
@@ -223,6 +228,14 @@ impl FuncState<'_> {
                         key,
                         origin,
                     }
+                } else if let Some(ConstVal::Int(k)) = self.const_of(key)
+                    && let Ok(key) = u16::try_from(k)
+                {
+                    Target::IndexInt {
+                        obj: o,
+                        key,
+                        origin,
+                    }
                 } else {
                     let (mut k, _) = self.expr_any(key)?;
                     if protect.contains(&k) {
@@ -265,6 +278,10 @@ impl FuncState<'_> {
             }
             Target::Index { obj, key, origin } => {
                 let pc = self.emit(Op::SetIndex { obj, key, src });
+                self.origin(pc, 0, origin);
+            }
+            Target::IndexInt { obj, key, origin } => {
+                let pc = self.emit(Op::SetIndexInt { obj, key, src });
                 self.origin(pc, 0, origin);
             }
         }

@@ -469,10 +469,11 @@ fn recursive_local_function_gets_its_cell_first() {
             Op::Return0,
         ]
     );
+    // `f` is never assigned, so its capture always holds the running closure.
     assert_eq!(
         out.protos[1].code,
         vec![
-            Op::CapGet { dst: 1, cap: 0 },
+            Op::CapSelf { dst: 1 },
             Op::Move { dst: 2, src: 0 },
             Op::TailCall { func: 1, nargs: 1 },
             Op::Return {
@@ -485,6 +486,32 @@ fn recursive_local_function_gets_its_cell_first() {
         out.protos[1].debug.origin(2, 0),
         Some(&Origin::Upvalue(b"f".as_slice().into()))
     );
+}
+
+#[test]
+fn reassigned_local_function_reads_its_capture() {
+    // local function f() return f end; f = 1
+    let mut b = B::new();
+    let fl = b.new_local("f", LocalKind::Normal);
+    let (fid, _) = b.begin_fn(&[]);
+    let fr = b.e(ExprKind::Outer {
+        func: FuncId(0),
+        local: fl,
+    });
+    b.stmt(StmtKind::Return(vec![fr].into()));
+    b.end_fn();
+    b.stmt(StmtKind::LocalFunction {
+        local: fl,
+        func: fid,
+    });
+    let one = b.int(1);
+    b.stmt(StmtKind::Assign {
+        targets: vec![Place::Local(fl)],
+        values: vec![one].into(),
+    });
+    let chunk = b.finish();
+    let out = compile(&chunk).unwrap();
+    assert_eq!(out.protos[1].code[0], Op::CapGet { dst: 0, cap: 0 });
 }
 
 #[test]
@@ -646,8 +673,13 @@ fn conditions_branch_without_booleans() {
                 name: 0,
                 ic: 0
             },
-            Op::LoadInt { dst: 1, value: 1 },
-            Op::JumpNotLt { a: 0, b: 1, off: 4 },
+            // `a < 1` compares with an immediate.
+            Op::JumpLtInt {
+                a: 0,
+                imm: 1,
+                want: false,
+                off: 4
+            },
             Op::GetGlobal {
                 dst: 0,
                 name: 1,

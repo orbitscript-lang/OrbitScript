@@ -8,6 +8,7 @@
 //!
 //! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
 
+mod cold;
 mod interp;
 mod link;
 mod native;
@@ -106,8 +107,6 @@ pub(crate) struct Frame {
     /// Saved pc: the instruction after the current one.
     pub pc: u32,
     pub cell_base: u32,
-    /// `base + nregs` for a Lua frame: registers the frame needs.
-    pub end: u32,
     pub nvarargs: u32,
     /// Results the caller wants ([`op::MULTI`] for all).
     pub want: u8,
@@ -119,6 +118,17 @@ pub(crate) struct Stack {
     pub regs: Vec<Value>,
     pub cells: Vec<Gc<Cell>>,
     pub frames: Vec<Frame>,
+    /// The code the dispatch loop ran before its last switch. A call and
+    /// its return usually go back and forth between two functions, so a
+    /// switch to this code swaps it in instead of looking the closure up.
+    /// Kept here rather than in a local, where it would cost the loop a
+    /// machine register.
+    pub prev_code: Option<std::rc::Rc<orbit_core::ProtoCode>>,
+    /// The last Lua function called from a frame other than itself, with
+    /// what entering it needs, so calling it again skips looking it up.
+    /// A root: while cached, the handle can't be reused for another
+    /// closure.
+    pub callee: Option<(Gc<Closure>, crate::interp::Shape)>,
 }
 
 /// Everything in the VM except the heap, split off so the heap can be
@@ -161,6 +171,9 @@ impl Roots<LuaSpace> for Runtime {
             if let FrameKind::Lua { closure, .. } = f.kind {
                 m.mark(closure);
             }
+        }
+        if let Some((c, _)) = self.stack.callee {
+            m.mark(c);
         }
         for &v in &self.pinned {
             mark(m, v);

@@ -134,4 +134,25 @@ mod tests {
         let e = lua.exec(b"x = = 1", "t").unwrap_err();
         assert!(matches!(e, Error::Syntax(_)));
     }
+
+    #[test]
+    fn field_sites_past_the_cache_limit_read_their_own_keys() {
+        // Past 65534 sites in one function, the last inline cache is shared
+        // by sites with different keys; each must still read its own field.
+        let mut src = String::from("local t = {a = 1, b = 2, c = 3} local x\n");
+        for _ in 0..65534 {
+            src.push_str("x = t.a\n");
+        }
+        src.push_str("local s = 0\n");
+        for _ in 0..3 {
+            src.push_str("s = s + t.b * 10 + t.c\nt.b = t.b + 1\n");
+        }
+        src.push_str("return s, t.a, t.b");
+        let mut lua = Lua::new();
+        let r = lua.exec(src.as_bytes(), "t").unwrap();
+        assert!(matches!(
+            r[..],
+            [Value::Int(99), Value::Int(1), Value::Int(5)]
+        ));
+    }
 }
