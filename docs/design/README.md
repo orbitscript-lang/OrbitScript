@@ -79,3 +79,9 @@ cargo testkit bench --interp lua5.5=target/reference-lua/bin/lua5.5 \
 ```
 
 The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass once first light lands go into `tests/diff/expected-orbit.txt`.
+
+## Lua 5.5 compatibility
+
+| Document | Covers |
+|---|---|
+| [vm-semantics.md](vm-semantics.md) | Metatables and metamethods, userdata, coroutines, to-be-closed variables, `xpcall` (milestones C2, C3; ADR-3) |
