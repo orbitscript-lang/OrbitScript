@@ -21,6 +21,8 @@ use std::marker::PhantomData;
 pub struct Params {
     /// How far the heap may grow past the bytes found reachable by the last
     /// cycle before the next one starts, in percent. 100 lets it double.
+    /// 150 by default: on binary trees that keeps peak memory just under PUC
+    /// Lua's while marking a third less often than 100 does.
     pub growth: u32,
     /// Bytes of heap processed per byte allocated while a cycle runs, in
     /// percent.
@@ -47,7 +49,7 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Params {
-            growth: 100,
+            growth: 150,
             work_ratio: 800,
             step_bytes: 16 * 1024,
             min_threshold: 0,
