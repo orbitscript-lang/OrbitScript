@@ -483,6 +483,15 @@ impl Vm {
                     match (x, y) {
                         (Value::Int($i), Value::Int($j)) => reg!($dst) = $ii,
                         (Value::Float($f), Value::Float($g)) => reg!($dst) = Value::Float($ff),
+                        // Mixed operands convert the integer, as Lua does.
+                        (Value::Int(i), Value::Float($g)) => {
+                            let $f = i as f64;
+                            reg!($dst) = Value::Float($ff)
+                        }
+                        (Value::Float($f), Value::Int(j)) => {
+                            let $g = j as f64;
+                            reg!($dst) = Value::Float($ff)
+                        }
                         _ => reg!($dst) = tri!(ops::arith_slow(&self.heap, $op, x, y)),
                     }
                 }};
