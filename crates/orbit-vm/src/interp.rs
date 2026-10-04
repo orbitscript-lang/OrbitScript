@@ -15,6 +15,15 @@ use crate::{Frame, FrameKind, LuaError, Vm};
 /// Registers a frame can address: register numbers are `u8`.
 const WINDOW: usize = 256;
 
+/// Where a new Lua frame's state lives, so the dispatch loop can enter it
+/// without reading the frame back.
+struct Entered {
+    base: usize,
+    cell_base: usize,
+    nvarargs: usize,
+    code_id: usize,
+}
+
 /// What the dispatch loop does next.
 pub(crate) enum Flow {
     /// The top frame changed (or its registers were touched by a call):
@@ -80,59 +89,82 @@ impl Vm {
         }
     }
 
+    /// Push a frame for Lua closure `c`, called at stack index `func` with
+    /// `nargs` arguments, and size the stack for its register window.
+    #[inline(always)]
     fn push_lua_frame(
         &mut self,
         c: Gc<Closure>,
         func: usize,
         nargs: usize,
         want: u8,
-    ) -> Result<(), Exc> {
+    ) -> Result<Entered, Exc> {
         let proto = &*self.heap.get(c).code;
-        let code_id = proto as *const ProtoCode as usize;
-        let np = proto.nparams as usize;
-        let nregs = proto.nregs as usize;
-        let ncells = proto.ncells as usize;
-        let (base, nvar) = if proto.is_vararg && nargs > np {
-            (func + 1 + nargs, nargs - np)
-        } else {
-            (func + 1, 0)
-        };
-        let end = base + nregs.max(np);
-        if end > self.rt.limits.max_stack {
-            return Err(Exc::Rt("stack overflow".into(), None));
-        }
-        let regs = &mut self.rt.stack.regs;
-        if regs.len() < end {
-            regs.resize(end, Value::Nil);
-        }
-        if nvar > 0 {
-            regs.copy_within(func + 1..func + 1 + np, base);
-        } else if nargs < np {
-            for r in &mut regs[base + nargs..base + np] {
-                *r = Value::Nil;
-            }
-        }
-        let cells = &mut self.rt.stack.cells;
-        let cell_base = cells.len();
-        if ncells > 0 {
-            cells.resize(cell_base + ncells, self.rt.dead_cell);
-        }
-        self.rt.stack.frames.push(Frame {
-            kind: FrameKind::Lua {
-                closure: c,
-                code_id,
-            },
-            func: func as u32,
-            base: base as u32,
-            pc: 0,
-            cell_base: cell_base as u32,
-            end: end as u32,
-            nvarargs: nvar as u32,
-            want,
-        });
-        Ok(())
+        enter_lua_frame(&mut self.rt, proto, c, func, nargs, want)
     }
+}
 
+/// Push a frame for Lua closure `c` running `proto`: the body of
+/// [`Vm::push_lua_frame`], for callers that already hold the code.
+#[inline(always)]
+fn enter_lua_frame(
+    rt: &mut crate::Runtime,
+    proto: &ProtoCode,
+    c: Gc<Closure>,
+    func: usize,
+    nargs: usize,
+    want: u8,
+) -> Result<Entered, Exc> {
+    let code_id = proto as *const ProtoCode as usize;
+    let np = proto.nparams as usize;
+    let nregs = proto.nregs as usize;
+    let ncells = proto.ncells as usize;
+    let (base, nvar) = if proto.is_vararg && nargs > np {
+        (func + 1 + nargs, nargs - np)
+    } else {
+        (func + 1, 0)
+    };
+    let end = base + nregs.max(np);
+    if end > rt.limits.max_stack {
+        return Err(Exc::Rt("stack overflow".into(), None));
+    }
+    let regs = &mut rt.stack.regs;
+    if regs.len() < base + WINDOW {
+        regs.resize(base + WINDOW, Value::Nil);
+    }
+    if nvar > 0 {
+        regs.copy_within(func + 1..func + 1 + np, base);
+    } else if nargs < np {
+        for r in &mut regs[base + nargs..base + np] {
+            *r = Value::Nil;
+        }
+    }
+    let cells = &mut rt.stack.cells;
+    let cell_base = cells.len();
+    if ncells > 0 {
+        cells.resize(cell_base + ncells, rt.dead_cell);
+    }
+    rt.stack.frames.push(Frame {
+        kind: FrameKind::Lua {
+            closure: c,
+            code_id,
+        },
+        func: func as u32,
+        base: base as u32,
+        pc: 0,
+        cell_base: cell_base as u32,
+        nvarargs: nvar as u32,
+        want,
+    });
+    Ok(Entered {
+        base,
+        cell_base,
+        nvarargs: nvar,
+        code_id,
+    })
+}
+
+impl Vm {
     /// Copy `n` results from `src` to `dst`, adjusted to `want`.
     #[inline]
     fn place_results(&mut self, src: usize, n: usize, dst: usize, want: u8) {
@@ -177,13 +209,9 @@ impl Vm {
         }
         let f = *self.rt.stack.frames.last().expect("frame");
         match f.kind {
-            FrameKind::Lua { .. } => {
-                let regs = &mut self.rt.stack.regs;
-                if regs.len() < f.end as usize {
-                    regs.resize(f.end as usize, Value::Nil);
-                }
-                Ok(Flow::Reload)
-            }
+            // The frame's window lies below the callee's, so the stack is
+            // long enough for it.
+            FrameKind::Lua { .. } => Ok(Flow::Reload),
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
                 self.rt.stack.regs.truncate(top);
@@ -248,7 +276,6 @@ impl Vm {
                             base: func as u32 + 1,
                             pc: 0,
                             cell_base: self.rt.stack.cells.len() as u32,
-                            end: 0,
                             // For native frames: how many arguments it had.
                             nvarargs: nargs as u32,
                             want,
@@ -407,23 +434,40 @@ impl Vm {
             _ => unreachable!("run starts on a Lua frame"),
         };
         'reload: loop {
-            let depth = self.rt.stack.frames.len();
+            // The running frame's state. Lua-to-Lua calls and returns switch
+            // it in place; everything else comes back through `'reload`.
+            let mut depth = self.rt.stack.frames.len();
             let frame = &self.rt.stack.frames[depth - 1];
-            let FrameKind::Lua { closure, code_id } = frame.kind else {
+            let FrameKind::Lua {
+                mut closure,
+                code_id,
+            } = frame.kind
+            else {
                 unreachable!("run starts on a Lua frame")
             };
-            let base = frame.base as usize;
-            let cell_base = frame.cell_base as usize;
-            let nvarargs = frame.nvarargs as usize;
+            let mut base = frame.base as usize;
+            let mut cell_base = frame.cell_base as usize;
+            let mut nvarargs = frame.nvarargs as usize;
             let mut pc = frame.pc as usize;
             // Both the frame's code and `cur` are alive, so equal addresses
             // mean the same code.
             if code_id != Rc::as_ptr(&cur) as usize {
                 cur = self.heap.get(closure).code.clone();
             }
-            let code = &cur.code[..];
-            let consts = &cur.consts[..];
-            let caches = &cur.caches[..];
+            let mut code = &cur.code[..];
+            let mut consts = &cur.consts[..];
+            let mut caches = &cur.caches[..];
+            macro_rules! switch_code {
+                ($closure:expr, $code_id:expr) => {
+                    // A recursive call or its return keeps the same code.
+                    if $code_id != Rc::as_ptr(&cur) as usize {
+                        cur = self.heap.get($closure).code.clone();
+                        code = &cur.code[..];
+                        consts = &cur.consts[..];
+                        caches = &cur.caches[..];
+                    }
+                };
+            }
 
             // The frame's registers as a fixed-size window, so indexing it
             // with a `u8` register number needs no bounds check, and the
@@ -439,6 +483,16 @@ impl Vm {
                     <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW])
                         .expect("a full window")
                 }};
+            }
+            // The window when the stack is known to be long enough: after
+            // entering a frame (`push_lua_frame` sized it) or returning to
+            // one (its window lies below the callee's).
+            macro_rules! window_sized {
+                () => {
+                    (&mut self.rt.stack.regs[base..])
+                        .first_chunk_mut::<WINDOW>()
+                        .expect("a full window")
+                };
             }
             let mut w = window!();
             macro_rules! reg {
@@ -561,8 +615,22 @@ impl Vm {
                     let want: u8 = $want;
                     match w[f] {
                         Value::Closure(c) => {
-                            tri!(self.push_lua_frame(c, fa, n, want));
-                            continue 'reload;
+                            // A function calling itself: the running frame
+                            // keeps `closure` alive, so an equal handle is
+                            // the same closure, and its code is `cur`.
+                            let e = if c == closure {
+                                tri!(enter_lua_frame(&mut self.rt, &cur, c, fa, n, want))
+                            } else {
+                                tri!(self.push_lua_frame(c, fa, n, want))
+                            };
+                            depth += 1;
+                            closure = c;
+                            base = e.base;
+                            cell_base = e.cell_base;
+                            nvarargs = e.nvarargs;
+                            pc = 0;
+                            switch_code!(c, e.code_id);
+                            w = window_sized!();
                         }
                         // A native's fast path, when it has one and takes
                         // these arguments: no window, no frame.
@@ -907,21 +975,31 @@ impl Vm {
                         // that wants one, without the general return path.
                         // The caller's window lies below this one, so the
                         // stack is already long enough for it.
-                        let frames = &self.rt.stack.frames;
-                        let f = &frames[depth - 1];
-                        if f.want == 1
+                        if let [.., caller, f] = &self.rt.stack.frames[..]
+                            && f.want == 1
                             && depth > stop + 1
-                            && let FrameKind::Lua { .. } = frames[depth - 2].kind
+                            && let FrameKind::Lua {
+                                closure: c,
+                                code_id,
+                            } = caller.kind
                         {
-                            let (func, cell_base) = (f.func as usize, f.cell_base as usize);
+                            let (func, own_cells) = (f.func as usize, f.cell_base as usize);
                             let v = w[src as usize];
+                            base = caller.base as usize;
+                            cell_base = caller.cell_base as usize;
+                            nvarargs = caller.nvarargs as usize;
+                            pc = caller.pc as usize;
                             self.rt.stack.frames.pop();
-                            if self.rt.stack.cells.len() > cell_base {
-                                self.rt.stack.cells.truncate(cell_base);
+                            if self.rt.stack.cells.len() > own_cells {
+                                self.rt.stack.cells.truncate(own_cells);
                             }
                             self.rt.stack.regs[func] = v;
                             self.rt.top = func + 1;
-                            continue 'reload;
+                            depth -= 1;
+                            closure = c;
+                            switch_code!(c, code_id);
+                            w = window_sized!();
+                            continue;
                         }
                         flow!(self.do_return(base + src as usize, 1, stop))
                     }
