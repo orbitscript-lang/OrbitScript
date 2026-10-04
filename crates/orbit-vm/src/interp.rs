@@ -2,14 +2,18 @@
 
 use std::rc::Rc;
 
-use orbit_bytecode::{CaptureSource, MULTI, Op, Origin};
+use orbit_bytecode::{MULTI, Op, Origin};
 use orbit_core::number::{ArithOp, Number};
-use orbit_core::table::{self, Key};
-use orbit_core::{Cell, Closure, Gc, ProtoCode, Table, Value};
+use orbit_core::table;
+use orbit_core::{Closure, Gc, ProtoCode, Value};
 
+use crate::cold::{env_error, index_error};
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
 use crate::{Frame, FrameKind, LuaError, Vm};
+
+/// Registers a frame can address: register numbers are `u8`.
+const WINDOW: usize = 256;
 
 /// What the dispatch loop does next.
 pub(crate) enum Flow {
@@ -421,9 +425,25 @@ impl Vm {
             let consts = &cur.consts[..];
             let caches = &cur.caches[..];
 
+            // The frame's registers as a fixed-size window, so indexing it
+            // with a `u8` register number needs no bounds check, and the
+            // window's address stays in a machine register. Anything that may
+            // resize the stack (calls, collection steps, errors) ends the
+            // borrow; take the window again afterwards.
+            macro_rules! window {
+                () => {{
+                    let regs = &mut self.rt.stack.regs;
+                    if regs.len() < base + WINDOW {
+                        regs.resize(base + WINDOW, Value::Nil);
+                    }
+                    <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW])
+                        .expect("a full window")
+                }};
+            }
+            let mut w = window!();
             macro_rules! reg {
                 ($r:expr) => {
-                    self.rt.stack.regs[base + $r as usize]
+                    w[$r as usize]
                 };
             }
             macro_rules! save_pc {
@@ -437,8 +457,7 @@ impl Vm {
                 ($x:expr) => {{
                     let x = $x;
                     save_pc!();
-                    let e = self.make_error(x, stop);
-                    match self.unwind(e, stop) {
+                    match self.raise(x, stop) {
                         Ok(Flow::Reload) => continue 'reload,
                         Ok(Flow::Done) => return Ok(()),
                         Err(e) => return Err(e),
@@ -467,6 +486,7 @@ impl Vm {
                     if self.heap.should_step() {
                         save_pc!();
                         self.heap.step(&mut self.rt);
+                        w = window!();
                     }
                 };
             }
@@ -477,7 +497,6 @@ impl Vm {
             }
             macro_rules! arith {
                 ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {{
-                    let (x, y) = (reg!($a), reg!($b));
                     // `Number::arith` owns the integer/float rules; with a
                     // constant operator it inlines to the one case. Each arm
                     // stores its own result, so the common cases write a
@@ -494,28 +513,33 @@ impl Vm {
                     }
                     // One arm per operand pair, so each inlines with both
                     // subtypes known.
-                    match (x, y) {
-                        (Value::Int(i), Value::Int(j)) => store!(Number::Int(i), Number::Int(j)),
-                        (Value::Float(f), Value::Float(g)) => {
+                    match (&reg!($a), &reg!($b)) {
+                        (&Value::Int(i), &Value::Int(j)) => store!(Number::Int(i), Number::Int(j)),
+                        (&Value::Float(f), &Value::Float(g)) => {
                             store!(Number::Float(f), Number::Float(g))
                         }
-                        (Value::Int(i), Value::Float(g)) => {
+                        (&Value::Int(i), &Value::Float(g)) => {
                             store!(Number::Int(i), Number::Float(g))
                         }
-                        (Value::Float(f), Value::Int(j)) => {
+                        (&Value::Float(f), &Value::Int(j)) => {
                             store!(Number::Float(f), Number::Int(j))
                         }
-                        _ => reg!($dst) = tri!(ops::arith_slow(&self.heap, $op, x, y)),
+                        _ => {
+                            let (x, y) = (reg!($a), reg!($b));
+                            reg!($dst) = tri!(ops::arith_slow(&self.heap, $op, x, y))
+                        }
                     }
                 }};
             }
             macro_rules! compare_jump {
                 ($a:expr, $b:expr, $off:expr, $want:expr, $slow:path, |$i:ident, $j:ident| $cmp:expr) => {{
-                    let (x, y) = (reg!($a), reg!($b));
-                    let c = match (x, y) {
-                        (Value::Int($i), Value::Int($j)) => $cmp,
-                        (Value::Float($i), Value::Float($j)) => $cmp,
-                        _ => tri!($slow(&self.heap, x, y)),
+                    let c = match (&reg!($a), &reg!($b)) {
+                        (&Value::Int($i), &Value::Int($j)) => $cmp,
+                        (&Value::Float($i), &Value::Float($j)) => $cmp,
+                        _ => {
+                            let (x, y) = (reg!($a), reg!($b));
+                            tri!($slow(&self.heap, x, y))
+                        }
                     };
                     if c == $want {
                         jump!($off);
@@ -524,19 +548,18 @@ impl Vm {
             }
             macro_rules! index_error {
                 ($v:expr) => {
-                    throw!(Exc::Rt(
-                        format!("attempt to index a {} value", $v.type_name()),
-                        Some(0)
-                    ))
+                    throw!(index_error($v))
                 };
             }
             macro_rules! call {
-                ($fa:expr, $nargs:expr, $want:expr) => {{
-                    let fa = $fa;
+                ($f:expr, $nargs:expr, $want:expr) => {{
+                    // `f` is the function's register, `fa` its stack index.
+                    let f: usize = $f;
+                    let fa = base + f;
                     let n = $nargs;
                     save_pc!();
                     let want: u8 = $want;
-                    match self.rt.stack.regs[fa] {
+                    match w[f] {
                         Value::Closure(c) => {
                             tri!(self.push_lua_frame(c, fa, n, want));
                             continue 'reload;
@@ -546,16 +569,16 @@ impl Vm {
                         Value::Native(id)
                             if (want <= 1 || want == MULTI)
                                 && let Some(fast) = self.rt.natives[id.0 as usize].fast
-                                && let Some(v) =
-                                    self.rt.stack.regs.get(fa + 1..fa + 1 + n).and_then(fast) =>
+                                && let Some(v) = w.get(f + 1..f + 1 + n).and_then(fast) =>
                         {
                             if want != 0 {
-                                self.rt.stack.regs[fa] = v;
+                                w[f] = v;
                             }
                             self.rt.top = fa + want.min(1) as usize;
                         }
                         _ => match self.call_value(fa, n, want, stop) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
+                                w = window!();
                                 safepoint!();
                             }
                             other => flow!(other),
@@ -570,8 +593,8 @@ impl Vm {
                 match op {
                     Op::Move { dst, src } => reg!(dst) = reg!(src),
                     Op::LoadNil { dst, count } => {
-                        let at = base + dst as usize;
-                        for r in &mut self.rt.stack.regs[at..at + count as usize] {
+                        let at = dst as usize;
+                        for r in &mut w[at..at + count as usize] {
                             *r = Value::Nil;
                         }
                     }
@@ -580,8 +603,9 @@ impl Vm {
                     Op::LoadConst { dst, k } => reg!(dst) = consts[k as usize],
 
                     Op::CellNew { cell, src } => {
-                        let c = self.heap.alloc(Cell { value: reg!(src) });
-                        self.rt.stack.cells[cell_base + cell as usize] = c;
+                        let v = reg!(src);
+                        self.op_cell_new(cell_base + cell as usize, v);
+                        w = window!();
                         safepoint!();
                     }
                     Op::CellGet { dst, cell } => {
@@ -610,26 +634,17 @@ impl Vm {
                         };
                         let v = match self.heap.get(env_cell).value {
                             Value::Table(t) => {
-                                let tab = self.heap.get(t);
                                 let cache = &caches[ic as usize];
-                                match tab.cached_str(cache.get() as usize, k) {
+                                match self.heap.get(t).cached_str(cache.get() as usize, k) {
                                     Some(v) => v,
-                                    None => match tab.find_str(&self.heap, k) {
-                                        Some(slot) => {
-                                            cache.set(slot as u32);
-                                            tab.slot_value(slot)
-                                        }
-                                        None => Value::Nil,
-                                    },
+                                    None => {
+                                        let v = self.get_str_miss(t, k, cache);
+                                        w = window!();
+                                        v
+                                    }
                                 }
                             }
-                            other => throw!(Exc::Rt(
-                                format!(
-                                    "attempt to index a {} value (upvalue '_ENV')",
-                                    other.type_name()
-                                ),
-                                None
-                            )),
+                            other => throw!(env_error(other)),
                         };
                         reg!(dst) = v;
                     }
@@ -647,20 +662,12 @@ impl Vm {
                                     self.heap.barrier_back(t);
                                     self.heap.get_mut(t).set_slot(slot, v);
                                 } else {
-                                    let key = Key::str(&self.heap, k);
-                                    if let Some(slot) = table::set_key(&mut self.heap, t, &key, v) {
-                                        cache.set(slot as u32);
-                                    }
+                                    self.set_str_miss(t, k, v, cache);
+                                    w = window!();
                                     safepoint!();
                                 }
                             }
-                            other => throw!(Exc::Rt(
-                                format!(
-                                    "attempt to index a {} value (upvalue '_ENV')",
-                                    other.type_name()
-                                ),
-                                None
-                            )),
+                            other => throw!(env_error(other)),
                         }
                     }
 
@@ -669,38 +676,37 @@ impl Vm {
                         array_hint,
                         hash_hint,
                     } => {
-                        let t = self.heap.alloc(Table::with_capacity(
-                            array_hint as usize,
-                            hash_hint as usize,
-                        ));
-                        reg!(dst) = Value::Table(t);
+                        let t = self.op_new_table(array_hint as usize, hash_hint as usize);
+                        w = window!();
+                        reg!(dst) = t;
                         safepoint!();
                     }
                     Op::GetField { dst, obj, key, ic } => {
-                        let o = reg!(obj);
                         let Value::Str(k) = consts[key as usize] else {
                             unreachable!("field keys are strings")
                         };
-                        let Value::Table(t) = o else { index_error!(o) };
-                        let tab = self.heap.get(t);
+                        let &Value::Table(t) = &reg!(obj) else {
+                            let o = reg!(obj);
+                            index_error!(o)
+                        };
                         let cache = &caches[ic as usize];
-                        match tab.cached_str(cache.get() as usize, k) {
+                        match self.heap.get(t).cached_str(cache.get() as usize, k) {
                             Some(v) => reg!(dst) = v,
-                            None => match tab.find_str(&self.heap, k) {
-                                Some(slot) => {
-                                    cache.set(slot as u32);
-                                    reg!(dst) = tab.slot_value(slot)
-                                }
-                                None => reg!(dst) = Value::Nil,
-                            },
+                            None => {
+                                let v = self.get_str_miss(t, k, cache);
+                                w = window!();
+                                reg!(dst) = v;
+                            }
                         }
                     }
                     Op::SetField { obj, key, src, ic } => {
-                        let o = reg!(obj);
                         let Value::Str(k) = consts[key as usize] else {
                             unreachable!("field keys are strings")
                         };
-                        let Value::Table(t) = o else { index_error!(o) };
+                        let &Value::Table(t) = &reg!(obj) else {
+                            let o = reg!(obj);
+                            index_error!(o)
+                        };
                         let v = reg!(src);
                         let cache = &caches[ic as usize];
                         let slot = cache.get() as usize;
@@ -710,28 +716,29 @@ impl Vm {
                             self.heap.barrier_back(t);
                             self.heap.get_mut(t).set_slot(slot, v);
                         } else {
-                            let key = Key::str(&self.heap, k);
-                            if let Some(slot) = table::set_key(&mut self.heap, t, &key, v) {
-                                cache.set(slot as u32);
-                            }
+                            self.set_str_miss(t, k, v, cache);
+                            w = window!();
                             safepoint!();
                         }
                     }
                     Op::GetIndex { dst, obj, key } => {
-                        let o = reg!(obj);
-                        let Value::Table(t) = o else { index_error!(o) };
-                        let k = reg!(key);
+                        let &Value::Table(t) = &reg!(obj) else {
+                            let o = reg!(obj);
+                            index_error!(o)
+                        };
                         let tab = self.heap.get(t);
-                        match k {
+                        match reg!(key) {
                             Value::Int(i) => tab.read_int(i, &mut reg!(dst)),
                             k => reg!(dst) = tab.get(&self.heap, k),
                         }
                     }
                     Op::SetIndex { obj, key, src } => {
-                        let o = reg!(obj);
-                        let Value::Table(t) = o else { index_error!(o) };
-                        let (k, v) = (reg!(key), reg!(src));
-                        match k {
+                        let &Value::Table(t) = &reg!(obj) else {
+                            let o = reg!(obj);
+                            index_error!(o)
+                        };
+                        let v = reg!(src);
+                        match reg!(key) {
                             Value::Int(i) => table::set_int(&mut self.heap, t, i, v),
                             k => {
                                 if let Err(e) = table::set(&mut self.heap, t, k, v) {
@@ -756,12 +763,9 @@ impl Vm {
                         } else {
                             count as usize
                         };
-                        let regs = &self.rt.stack.regs;
-                        self.heap.update(t, |tab| {
-                            for i in 0..n {
-                                tab.set_int(start as i64 + i as i64, regs[from + i]);
-                            }
-                        });
+                        // Open-ended results can run past the window.
+                        self.op_set_list(t, from, n, start as i64);
+                        w = window!();
                         safepoint!();
                     }
                     Op::SelfCall { dst, obj, key } => {
@@ -782,67 +786,38 @@ impl Vm {
                     Op::Pow { dst, a, b } => arith!(dst, a, b, Arith::Pow, ArithOp::Pow),
                     Op::IDiv { dst, a, b } => arith!(dst, a, b, Arith::IDiv, ArithOp::IDiv),
                     Op::Mod { dst, a, b } => arith!(dst, a, b, Arith::Mod, ArithOp::Mod),
-                    Op::AddInt { dst, a, imm } => {
-                        let x = reg!(a);
-                        match x {
-                            Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_add(imm as i64)),
-                            Value::Float(f) => reg!(dst) = Value::Float(f + imm as f64),
-                            _ => {
-                                reg!(dst) = tri!(ops::arith_slow(
-                                    &self.heap,
-                                    Arith::Add,
-                                    x,
-                                    Value::Int(imm as i64)
-                                ))
-                            }
+                    Op::AddInt { dst, a, imm } => match reg!(a) {
+                        Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_add(imm as i64)),
+                        Value::Float(f) => reg!(dst) = Value::Float(f + imm as f64),
+                        _ => {
+                            let x = reg!(a);
+                            reg!(dst) = tri!(ops::arith_slow(
+                                &self.heap,
+                                Arith::Add,
+                                x,
+                                Value::Int(imm as i64)
+                            ))
                         }
-                    }
-                    Op::Neg { dst, src } => {
-                        let x = reg!(src);
-                        match x {
-                            Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_neg()),
-                            Value::Float(f) => reg!(dst) = Value::Float(-f),
-                            _ => reg!(dst) = tri!(ops::arith_slow(&self.heap, Arith::Neg, x, x)),
+                    },
+                    Op::Neg { dst, src } => match reg!(src) {
+                        Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_neg()),
+                        Value::Float(f) => reg!(dst) = Value::Float(-f),
+                        _ => {
+                            let x = reg!(src);
+                            reg!(dst) = tri!(ops::arith_slow(&self.heap, Arith::Neg, x, x))
                         }
-                    }
+                    },
                     Op::Not { dst, src } => reg!(dst) = Value::Bool(reg!(src).is_falsy()),
                     Op::Len { dst, src } => {
                         let x = reg!(src);
-                        reg!(dst) = match x {
-                            Value::Str(s) => Value::Int(self.heap.get(s).len() as i64),
-                            Value::Table(t) => Value::Int(self.heap.get(t).border()),
-                            _ => throw!(Exc::Rt(
-                                format!("attempt to get length of a {} value", x.type_name()),
-                                Some(0)
-                            )),
-                        };
+                        let v = tri!(self.op_len(x));
+                        w = window!();
+                        reg!(dst) = v;
                     }
                     Op::Concat { dst, first, count } => {
-                        let from = base + first as usize;
-                        let n = count as usize;
-                        let mut buf = Vec::new();
-                        let mut bad = None;
-                        for i in 0..n {
-                            let v = self.rt.stack.regs[from + i];
-                            if !ops::concat_piece(&self.heap, v, &mut buf) {
-                                bad = Some(i);
-                            }
-                        }
-                        if let Some(mut j) = bad {
-                            let strnum = |v: Value| {
-                                matches!(v, Value::Str(_) | Value::Int(_) | Value::Float(_))
-                            };
-                            if j == n - 1 && n >= 2 && !strnum(self.rt.stack.regs[from + n - 2]) {
-                                j -= 1;
-                            }
-                            let v = self.rt.stack.regs[from + j];
-                            throw!(Exc::Rt(
-                                format!("attempt to concatenate a {} value", v.type_name()),
-                                Some(j as u8)
-                            ));
-                        }
-                        let s = self.rt.strings.new_str_owned(&mut self.heap, buf);
-                        reg!(dst) = Value::Str(s);
+                        let v = tri!(self.op_concat(base + first as usize, count as usize));
+                        w = window!();
+                        reg!(dst) = v;
                         safepoint!();
                     }
 
@@ -893,7 +868,7 @@ impl Vm {
                         } else {
                             nargs as usize
                         };
-                        call!(fa, n, nresults);
+                        call!(func as usize, n, nresults);
                     }
                     Op::TailCall { func, nargs } => {
                         let fa = base + func as usize;
@@ -902,7 +877,7 @@ impl Vm {
                         } else {
                             nargs as usize
                         };
-                        if let Value::Closure(c) = self.rt.stack.regs[fa] {
+                        if let Value::Closure(c) = w[func as usize] {
                             let f = self.rt.stack.frames.pop().expect("frame");
                             self.rt.stack.cells.truncate(f.cell_base as usize);
                             let dst = f.func as usize;
@@ -915,7 +890,7 @@ impl Vm {
                         }
                         // A native in tail position: an ordinary call whose
                         // results the following `Return` delivers.
-                        call!(fa, n, MULTI);
+                        call!(func as usize, n, MULTI);
                     }
                     Op::Return { first, count } => {
                         let src = base + first as usize;
@@ -930,100 +905,42 @@ impl Vm {
                     Op::Return1 { src } => {
                         // The common case, one value back to a Lua caller
                         // that wants one, without the general return path.
+                        // The caller's window lies below this one, so the
+                        // stack is already long enough for it.
                         let frames = &self.rt.stack.frames;
                         let f = &frames[depth - 1];
                         if f.want == 1
                             && depth > stop + 1
                             && let FrameKind::Lua { .. } = frames[depth - 2].kind
                         {
-                            let (func, cell_base, caller_end) =
-                                (f.func as usize, f.cell_base as usize, frames[depth - 2].end);
+                            let (func, cell_base) = (f.func as usize, f.cell_base as usize);
+                            let v = w[src as usize];
                             self.rt.stack.frames.pop();
                             if self.rt.stack.cells.len() > cell_base {
                                 self.rt.stack.cells.truncate(cell_base);
                             }
-                            let regs = &mut self.rt.stack.regs;
-                            regs[func] = regs[base + src as usize];
+                            self.rt.stack.regs[func] = v;
                             self.rt.top = func + 1;
-                            if regs.len() < caller_end as usize {
-                                regs.resize(caller_end as usize, Value::Nil);
-                            }
                             continue 'reload;
                         }
                         flow!(self.do_return(base + src as usize, 1, stop))
                     }
                     Op::Vararg { dst, count } => {
-                        let from = base - nvarargs;
-                        let to = base + dst as usize;
-                        if count == MULTI {
-                            let regs = &mut self.rt.stack.regs;
-                            if regs.len() < to + nvarargs {
-                                regs.resize(to + nvarargs, Value::Nil);
-                            }
-                            regs.copy_within(from..from + nvarargs, to);
-                            self.rt.top = to + nvarargs;
-                        } else {
-                            for i in 0..count as usize {
-                                self.rt.stack.regs[to + i] = if i < nvarargs {
-                                    self.rt.stack.regs[from + i]
-                                } else {
-                                    Value::Nil
-                                };
-                            }
-                        }
+                        self.op_vararg(base, nvarargs, dst as usize, count);
+                        w = window!();
                     }
 
                     Op::ForPrep { base: b, exit } => {
-                        let (init, limit, step) = (reg!(b), reg!(b + 1), reg!(b + 2));
-                        match (init, step) {
-                            (Value::Int(i), Value::Int(s)) => {
-                                if s == 0 {
-                                    throw!(Exc::Rt("'for' step is zero".into(), None));
-                                }
-                                match ops::for_limit(i, limit, s) {
-                                    Err(_) => throw!(for_error("limit", limit)),
-                                    Ok(None) => jump!(exit),
-                                    Ok(Some(lim)) => {
-                                        let count = if s > 0 {
-                                            (lim as u64).wrapping_sub(i as u64) / s as u64
-                                        } else {
-                                            (i as u64).wrapping_sub(lim as u64)
-                                                / ((-(s + 1)) as u64 + 1)
-                                        };
-                                        reg!(b + 1) = Value::Int(count as i64);
-                                        reg!(b + 3) = Value::Int(i);
-                                    }
-                                }
-                            }
-                            _ => {
-                                let Some(lim) = limit.as_f64() else {
-                                    throw!(for_error("limit", limit))
-                                };
-                                let Some(st) = step.as_f64() else {
-                                    throw!(for_error("step", step))
-                                };
-                                let Some(start) = init.as_f64() else {
-                                    throw!(for_error("initial", init))
-                                };
-                                if st == 0.0 {
-                                    throw!(Exc::Rt("'for' step is zero".into(), None));
-                                }
-                                let runs = if st > 0.0 { start <= lim } else { lim <= start };
-                                if runs {
-                                    reg!(b) = Value::Float(start);
-                                    reg!(b + 1) = Value::Float(lim);
-                                    reg!(b + 2) = Value::Float(st);
-                                    reg!(b + 3) = Value::Float(start);
-                                } else {
-                                    jump!(exit);
-                                }
-                            }
+                        let runs = tri!(self.op_for_prep(base + b as usize));
+                        w = window!();
+                        if !runs {
+                            jump!(exit);
                         }
                     }
                     Op::ForLoop { base: b, back } => match reg!(b + 1) {
                         Value::Int(count) => {
                             if count > 0 {
-                                let (Value::Int(cur), Value::Int(s)) = (reg!(b), reg!(b + 2))
+                                let (&Value::Int(cur), &Value::Int(s)) = (&reg!(b), &reg!(b + 2))
                                 else {
                                     unreachable!("integer loop state")
                                 };
@@ -1035,7 +952,7 @@ impl Vm {
                             }
                         }
                         Value::Float(lim) => {
-                            let (Value::Float(cur), Value::Float(s)) = (reg!(b), reg!(b + 2))
+                            let (&Value::Float(cur), &Value::Float(s)) = (&reg!(b), &reg!(b + 2))
                             else {
                                 unreachable!("float loop state")
                             };
@@ -1049,12 +966,8 @@ impl Vm {
                         _ => unreachable!("loop state"),
                     },
                     Op::GenericCall { base: b, nvars } => {
-                        let at = base + b as usize;
-                        let regs = &mut self.rt.stack.regs;
-                        if regs.len() < at + 7 {
-                            regs.resize(at + 7, Value::Nil);
-                        }
-                        regs.copy_within(at..at + 3, at + 4);
+                        let at = b as usize;
+                        w.copy_within(at..at + 3, at + 4);
                         call!(at + 4, 2, nvars);
                     }
                     Op::GenericLoop { base: b, back } => {
@@ -1066,46 +979,15 @@ impl Vm {
                     }
 
                     Op::Closure { dst, proto } => {
-                        let parent = self.heap.get(closure);
-                        let child = self.heap.get(parent.proto).children[proto as usize];
-                        let captures: Box<[Gc<Cell>]> = self
-                            .heap
-                            .get(child)
-                            .captures
-                            .iter()
-                            .map(|c| match *c {
-                                CaptureSource::Cell(i) => {
-                                    self.rt.stack.cells[cell_base + i as usize]
-                                }
-                                CaptureSource::Capture(i) => parent.captures[i as usize],
-                                CaptureSource::Env => parent.captures[0],
-                            })
-                            .collect();
-                        let code = self.heap.get(child).code.clone();
-                        let c = self.heap.alloc(Closure {
-                            proto: child,
-                            code,
-                            captures,
-                        });
-                        reg!(dst) = Value::Closure(c);
+                        let c = self.op_closure(closure, cell_base, proto as usize);
+                        w = window!();
+                        reg!(dst) = c;
                         safepoint!();
                     }
                 }
             }
         }
     }
-}
-
-fn for_error(what: &str, v: Value) -> Exc {
-    let what = if what == "initial" {
-        "initial value"
-    } else {
-        what
-    };
-    Exc::Rt(
-        format!("bad 'for' {what} (number expected, got {})", v.type_name()),
-        None,
-    )
 }
 
 #[inline(always)]
