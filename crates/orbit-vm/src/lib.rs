@@ -118,6 +118,12 @@ pub(crate) struct Stack {
     pub regs: Vec<Value>,
     pub cells: Vec<Gc<Cell>>,
     pub frames: Vec<Frame>,
+    /// The code the dispatch loop ran before its last switch. A call and
+    /// its return usually go back and forth between two functions, so a
+    /// switch to this code swaps it in instead of looking the closure up.
+    /// Kept here rather than in a local, where it would cost the loop a
+    /// machine register.
+    pub prev_code: Option<std::rc::Rc<orbit_core::ProtoCode>>,
 }
 
 /// Everything in the VM except the heap, split off so the heap can be

@@ -19,8 +19,6 @@ const WINDOW: usize = 256;
 /// without reading the frame back.
 struct Entered {
     base: usize,
-    cell_base: usize,
-    nvarargs: usize,
     code_id: usize,
 }
 
@@ -156,12 +154,7 @@ fn enter_lua_frame(
         nvarargs: nvar as u32,
         want,
     });
-    Ok(Entered {
-        base,
-        cell_base,
-        nvarargs: nvar,
-        code_id,
-    })
+    Ok(Entered { base, code_id })
 }
 
 impl Vm {
@@ -446,8 +439,6 @@ impl Vm {
                 unreachable!("run starts on a Lua frame")
             };
             let mut base = frame.base as usize;
-            let mut cell_base = frame.cell_base as usize;
-            let mut nvarargs = frame.nvarargs as usize;
             let mut pc = frame.pc as usize;
             // Both the frame's code and `cur` are alive, so equal addresses
             // mean the same code.
@@ -461,7 +452,17 @@ impl Vm {
                 ($closure:expr, $code_id:expr) => {
                     // A recursive call or its return keeps the same code.
                     if $code_id != Rc::as_ptr(&cur) as usize {
-                        cur = self.heap.get($closure).code.clone();
+                        match &mut self.rt.stack.prev_code {
+                            // `prev_code` keeps its code alive, so an equal
+                            // address is the same code.
+                            Some(p) if Rc::as_ptr(p) as usize == $code_id => {
+                                std::mem::swap(&mut cur, p)
+                            }
+                            _ => {
+                                let new = self.heap.get($closure).code.clone();
+                                self.rt.stack.prev_code = Some(std::mem::replace(&mut cur, new));
+                            }
+                        }
                         code = &cur.code[..];
                         consts = &cur.consts[..];
                         caches = &cur.caches[..];
@@ -495,6 +496,14 @@ impl Vm {
                 };
             }
             let mut w = window!();
+            // The running frame's cell base and vararg count, for the few
+            // instructions that need them; kept in the frame rather than in
+            // locals so the hot loop has more machine registers.
+            macro_rules! cell_base {
+                () => {
+                    self.rt.stack.frames[depth - 1].cell_base as usize
+                };
+            }
             macro_rules! reg {
                 ($r:expr) => {
                     w[$r as usize]
@@ -600,6 +609,30 @@ impl Vm {
                     }
                 }};
             }
+            macro_rules! compare_int_jump {
+                // `$slow` names an `ops` comparison and its operand order,
+                // with `x` the register and `k` the immediate as values.
+                ($a:expr, $imm:expr, $want:expr, $off:expr, |$x:ident, $k:ident| $cmp:expr,
+                 $slow:ident($s1:ident, $s2:ident)) => {{
+                    let c = match reg!($a) {
+                        Value::Int($x) => {
+                            let $k = $imm as i64;
+                            $cmp
+                        }
+                        Value::Float($x) => {
+                            let $k = $imm as f64;
+                            $cmp
+                        }
+                        v => {
+                            let ($x, $k) = (v, Value::Int($imm as i64));
+                            tri!(ops::$slow(&self.heap, $s1, $s2))
+                        }
+                    };
+                    if c == $want {
+                        jump!($off);
+                    }
+                }};
+            }
             macro_rules! index_error {
                 ($v:expr) => {
                     throw!(index_error($v))
@@ -626,8 +659,6 @@ impl Vm {
                             depth += 1;
                             closure = c;
                             base = e.base;
-                            cell_base = e.cell_base;
-                            nvarargs = e.nvarargs;
                             pc = 0;
                             switch_code!(c, e.code_id);
                             w = window_sized!();
@@ -672,16 +703,16 @@ impl Vm {
 
                     Op::CellNew { cell, src } => {
                         let v = reg!(src);
-                        self.op_cell_new(cell_base + cell as usize, v);
+                        self.op_cell_new(cell_base!() + cell as usize, v);
                         w = window!();
                         safepoint!();
                     }
                     Op::CellGet { dst, cell } => {
-                        let c = self.rt.stack.cells[cell_base + cell as usize];
+                        let c = self.rt.stack.cells[cell_base!() + cell as usize];
                         reg!(dst) = self.heap.get(c).value;
                     }
                     Op::CellSet { cell, src } => {
-                        let c = self.rt.stack.cells[cell_base + cell as usize];
+                        let c = self.rt.stack.cells[cell_base!() + cell as usize];
                         let v = reg!(src);
                         self.heap.update(c, |c| c.value = v);
                     }
@@ -808,14 +839,37 @@ impl Vm {
                         };
                         let v = reg!(src);
                         match reg!(key) {
-                            Value::Int(i) => table::set_int(&mut self.heap, t, i, v),
+                            // A store into the array part allocates
+                            // nothing, so it needs no safe point.
+                            Value::Int(i) => {
+                                if !table::set_int(&mut self.heap, t, i, v) {
+                                    safepoint!();
+                                }
+                            }
                             k => {
                                 if let Err(e) = table::set(&mut self.heap, t, k, v) {
                                     throw!(Exc::Rt(e.message().into(), None));
                                 }
+                                safepoint!();
                             }
                         }
-                        safepoint!();
+                    }
+                    Op::GetIndexInt { dst, obj, key } => {
+                        let &Value::Table(t) = &reg!(obj) else {
+                            let o = reg!(obj);
+                            index_error!(o)
+                        };
+                        self.heap.get(t).read_int(key as i64, &mut reg!(dst));
+                    }
+                    Op::SetIndexInt { obj, key, src } => {
+                        let &Value::Table(t) = &reg!(obj) else {
+                            let o = reg!(obj);
+                            index_error!(o)
+                        };
+                        let v = reg!(src);
+                        if !table::set_int(&mut self.heap, t, key as i64, v) {
+                            safepoint!();
+                        }
                     }
                     Op::SetList {
                         table: tr,
@@ -925,6 +979,28 @@ impl Vm {
                             jump!(off);
                         }
                     }
+                    Op::JumpEqInt { a, imm, want, off } => {
+                        let c = match reg!(a) {
+                            Value::Int(i) => i == imm as i64,
+                            Value::Float(f) => f == imm as f64,
+                            _ => false,
+                        };
+                        if c == want {
+                            jump!(off);
+                        }
+                    }
+                    Op::JumpLtInt { a, imm, want, off } => {
+                        compare_int_jump!(a, imm, want, off, |x, k| x < k, less_than(x, k))
+                    }
+                    Op::JumpLeInt { a, imm, want, off } => {
+                        compare_int_jump!(a, imm, want, off, |x, k| x <= k, less_equal(x, k))
+                    }
+                    Op::JumpGtInt { a, imm, want, off } => {
+                        compare_int_jump!(a, imm, want, off, |x, k| x > k, less_than(k, x))
+                    }
+                    Op::JumpGeInt { a, imm, want, off } => {
+                        compare_int_jump!(a, imm, want, off, |x, k| x >= k, less_equal(k, x))
+                    }
 
                     Op::Call {
                         func,
@@ -987,8 +1063,6 @@ impl Vm {
                             let (func, own_cells) = (f.func as usize, f.cell_base as usize);
                             let v = w[src as usize];
                             base = caller.base as usize;
-                            cell_base = caller.cell_base as usize;
-                            nvarargs = caller.nvarargs as usize;
                             pc = caller.pc as usize;
                             self.rt.stack.frames.pop();
                             if self.rt.stack.cells.len() > own_cells {
@@ -1005,15 +1079,32 @@ impl Vm {
                         flow!(self.do_return(base + src as usize, 1, stop))
                     }
                     Op::Vararg { dst, count } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
                         self.op_vararg(base, nvarargs, dst as usize, count);
                         w = window!();
                     }
 
                     Op::ForPrep { base: b, exit } => {
-                        let runs = tri!(self.op_for_prep(base + b as usize));
-                        w = window!();
-                        if !runs {
-                            jump!(exit);
+                        // The common integer loop counting up; the rest
+                        // (floats, negative steps, errors) is cold.
+                        if let (&Value::Int(i), &Value::Int(lim), &Value::Int(s)) =
+                            (&reg!(b), &reg!(b + 1), &reg!(b + 2))
+                            && s > 0
+                        {
+                            if i <= lim {
+                                // The iterations left replace the limit.
+                                let count = (lim as u64).wrapping_sub(i as u64) / s as u64;
+                                reg!(b + 1) = Value::Int(count as i64);
+                                reg!(b + 3) = Value::Int(i);
+                            } else {
+                                jump!(exit);
+                            }
+                        } else {
+                            let runs = tri!(self.op_for_prep(base + b as usize));
+                            w = window!();
+                            if !runs {
+                                jump!(exit);
+                            }
                         }
                     }
                     Op::ForLoop { base: b, back } => match reg!(b + 1) {
@@ -1058,7 +1149,7 @@ impl Vm {
                     }
 
                     Op::Closure { dst, proto } => {
-                        let c = self.op_closure(closure, cell_base, proto as usize);
+                        let c = self.op_closure(closure, cell_base!(), proto as usize);
                         w = window!();
                         reg!(dst) = c;
                         safepoint!();

@@ -253,6 +253,13 @@ impl FuncState<'_> {
                 }),
                 Origin::Field(self.name_bytes(s)),
             )
+        } else if let Some(ConstVal::Int(k)) = key_const
+            && let Ok(key) = u16::try_from(k)
+        {
+            (
+                self.emit(Op::GetIndexInt { dst, obj: o, key }),
+                Origin::Field(b"integer index".as_slice().into()),
+            )
         } else {
             let (k, _) = self.expr_any(key)?;
             let name: &[u8] = if matches!(key_const, Some(ConstVal::Int(_))) {
@@ -639,6 +646,49 @@ impl FuncState<'_> {
         target: Label,
     ) -> Result<()> {
         let mark = self.free;
+        // A small integer literal on either side uses an immediate form.
+        let small = |c: Option<ConstVal>| match c {
+            Some(ConstVal::Int(k)) => i8::try_from(k).ok(),
+            _ => None,
+        };
+        let (rk, lk) = (small(self.const_of(rhs)), small(self.const_of(lhs)));
+        if rk.is_some() || lk.is_some() {
+            // `k op x` is tested as `x op' k`, with the same operand order
+            // in error messages.
+            let (x, imm, op) = match rk {
+                Some(imm) => (lhs, imm, op),
+                None => {
+                    let flipped = match op {
+                        BinOp::Lt => BinOp::Gt,
+                        BinOp::Le => BinOp::Ge,
+                        BinOp::Gt => BinOp::Lt,
+                        BinOp::Ge => BinOp::Le,
+                        other => other,
+                    };
+                    (rhs, lk.expect("one side is a small integer"), flipped)
+                }
+            };
+            let (a, _) = self.expr_any(x)?;
+            let off = 0;
+            let want = jump_if;
+            let jump = match op {
+                BinOp::Eq => Op::JumpEqInt { a, imm, want, off },
+                BinOp::Ne => Op::JumpEqInt {
+                    a,
+                    imm,
+                    want: !want,
+                    off,
+                },
+                BinOp::Lt => Op::JumpLtInt { a, imm, want, off },
+                BinOp::Le => Op::JumpLeInt { a, imm, want, off },
+                BinOp::Gt => Op::JumpGtInt { a, imm, want, off },
+                BinOp::Ge => Op::JumpGeInt { a, imm, want, off },
+                _ => unreachable!("not a comparison"),
+            };
+            self.jump(jump, target);
+            self.free = mark;
+            return Ok(());
+        }
         let (x, _) = self.expr_any(lhs)?;
         let (y, _) = self.expr_any(rhs)?;
         let off = 0;

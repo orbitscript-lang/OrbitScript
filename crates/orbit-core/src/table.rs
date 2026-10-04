@@ -727,17 +727,20 @@ pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), K
 /// `t[i] = v` (raw) for an integer key. A store into the array part skips
 /// key normalisation, hashing and the byte accounting of
 /// [`Heap::update`](orbit_gc::Heap::update): it changes no capacity.
+/// Returns whether the store went into the array part, which allocates
+/// nothing.
 #[inline(always)]
-pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) {
+pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> bool {
     let idx = (i as u64).wrapping_sub(1);
     // Every store path barriers, so do it first and look the table up once.
     heap.barrier_back(t);
     let tab = heap.get_mut(t);
     if idx < tab.array.len() as u64 {
         tab.array.set(idx as usize, v);
-        return;
+        return true;
     }
     set_key(heap, t, &Key::int(i), v);
+    false
 }
 
 /// `t[key] = v` (raw) for a normalised key. Returns the hash slot that now
