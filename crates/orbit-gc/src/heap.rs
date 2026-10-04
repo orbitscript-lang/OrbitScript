@@ -59,7 +59,7 @@ impl Default for Params {
     fn default() -> Self {
         Params {
             growth: 100,
-            work_ratio: 400,
+            work_ratio: 800,
             step_bytes: 16 * 1024,
             min_threshold: 0,
             page_bytes: 64 * 1024,
