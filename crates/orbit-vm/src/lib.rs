@@ -8,6 +8,7 @@
 //!
 //! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
 
+mod cold;
 mod interp;
 mod link;
 mod native;
