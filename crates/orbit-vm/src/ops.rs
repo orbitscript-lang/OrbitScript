@@ -4,7 +4,8 @@
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-use orbit_core::number::{self, ArithError, ArithOp, float_to_int};
+use orbit_bytecode::number::BitOp;
+use orbit_core::number::{self, ArithError, ArithOp, Number, float_to_int};
 use orbit_core::value::raw_eq;
 use orbit_core::{LuaHeap, Value};
 
@@ -126,6 +127,51 @@ pub(crate) fn arith_slow(heap: &LuaHeap, op: Arith, a: Value, b: Value) -> Resul
         ),
         Some(which),
     ))
+}
+
+/// The error for a float operand of a bitwise operator that has no integer value. When the
+/// operand has a name, the interpreter puts it after "number".
+pub(crate) const NO_INTEGER_REP: &str = "number has no integer representation";
+
+/// A bitwise operator's operand as an integer: an integer, or a float with an integer value.
+fn bit_operand(v: Value) -> Option<Option<i64>> {
+    match v {
+        Value::Int(i) => Some(Some(i)),
+        Value::Float(f) => Some(Number::Float(f).to_int_exact()),
+        _ => None,
+    }
+}
+
+/// A bitwise operator for everything the integer fast path doesn't cover: floats with integer
+/// values convert, other numbers and non-numbers are errors. Strings are not coerced (Lua 5.5
+/// leaves that to string metamethods). Metamethods (`__band` .. `__shr`) plug in here.
+pub(crate) fn bitwise_slow(_heap: &LuaHeap, op: BitOp, a: Value, b: Value) -> Result<Value, Exc> {
+    match (bit_operand(a), bit_operand(b)) {
+        (Some(Some(x)), Some(Some(y))) => Ok(Value::Int(op.apply(x, y))),
+        (Some(None), Some(_)) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(0))),
+        (Some(_), Some(None)) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(1))),
+        (Some(_), None) => Err(bitwise_type_error(b, 1)),
+        (None, _) => Err(bitwise_type_error(a, 0)),
+    }
+}
+
+/// `~a` for everything but an integer. Metamethods (`__bnot`) plug in here.
+pub(crate) fn bnot_slow(_heap: &LuaHeap, a: Value) -> Result<Value, Exc> {
+    match bit_operand(a) {
+        Some(Some(x)) => Ok(Value::Int(!x)),
+        Some(None) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(0))),
+        None => Err(bitwise_type_error(a, 0)),
+    }
+}
+
+fn bitwise_type_error(v: Value, operand: u8) -> Exc {
+    Exc::Rt(
+        format!(
+            "attempt to perform bitwise operation on a {} value",
+            v.type_name()
+        ),
+        Some(operand),
+    )
 }
 
 /// `a < b` for everything but two integers or two floats.

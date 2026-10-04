@@ -553,9 +553,6 @@ impl Lowerer {
                 hir::ExprKind::Table(entries)
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                if op.is_bitwise() {
-                    return Err(self.not_supported(span, "bitwise operators are"));
-                }
                 let lhs = self.expr(lhs)?;
                 let rhs = self.expr(rhs)?;
                 use ast::BinOp as A;
@@ -577,7 +574,11 @@ impl Lowerer {
                     A::Le => H::Le,
                     A::Gt => H::Gt,
                     A::Ge => H::Ge,
-                    A::BOr | A::BXor | A::BAnd | A::Shl | A::Shr => unreachable!("rejected above"),
+                    A::BAnd => H::BAnd,
+                    A::BOr => H::BOr,
+                    A::BXor => H::BXor,
+                    A::Shl => H::Shl,
+                    A::Shr => H::Shr,
                 };
                 hir::ExprKind::Binary { op, lhs, rhs }
             }
@@ -586,9 +587,7 @@ impl Lowerer {
                     ast::UnOp::Neg => hir::UnOp::Neg,
                     ast::UnOp::Not => hir::UnOp::Not,
                     ast::UnOp::Len => hir::UnOp::Len,
-                    ast::UnOp::BNot => {
-                        return Err(self.not_supported(span, "bitwise operators are"));
-                    }
+                    ast::UnOp::BNot => hir::UnOp::BNot,
                 };
                 let expr = self.expr(expr)?;
                 hir::ExprKind::Unary { op, expr }

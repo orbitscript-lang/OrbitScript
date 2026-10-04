@@ -133,8 +133,22 @@ pub enum Op {
     /// `R[dst] = R[a] + imm`. Error messages treat `imm` as a constant
     /// operand (operand 1), as if it were `R[b]`.
     AddInt { dst: Reg, a: Reg, imm: i16 },
+    /// `R[dst] = R[a] & R[b]`. Integer fast path; floats with an integer
+    /// value convert, everything else goes to the VM's slow path.
+    BAnd { dst: Reg, a: Reg, b: Reg },
+    /// `R[dst] = R[a] | R[b]`
+    BOr { dst: Reg, a: Reg, b: Reg },
+    /// `R[dst] = R[a] ~ R[b]` (exclusive or)
+    BXor { dst: Reg, a: Reg, b: Reg },
+    /// `R[dst] = R[a] << R[b]` (logical; counts of 64 or more give 0, negative
+    /// counts shift right)
+    Shl { dst: Reg, a: Reg, b: Reg },
+    /// `R[dst] = R[a] >> R[b]` (logical, like `Shl` with the count negated)
+    Shr { dst: Reg, a: Reg, b: Reg },
     /// `R[dst] = -R[src]`
     Neg { dst: Reg, src: Reg },
+    /// `R[dst] = ~R[src]`
+    BNot { dst: Reg, src: Reg },
     /// `R[dst] = not R[src]`
     Not { dst: Reg, src: Reg },
     /// `R[dst] = #R[src]`
