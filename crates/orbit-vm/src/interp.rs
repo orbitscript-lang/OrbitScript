@@ -2,6 +2,7 @@
 
 use std::rc::Rc;
 
+use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{MULTI, Op, Origin};
 use orbit_core::number::{ArithOp, Number};
 use orbit_core::table;
@@ -365,7 +366,19 @@ impl Vm {
                             Origin::Method(n) => ("method", n),
                             Origin::Constant(n) => ("constant", n),
                         };
-                        text.push_str(&format!(" ({kind} '{}')", String::from_utf8_lossy(name)));
+                        let described = format!(" ({kind} '{}')", String::from_utf8_lossy(name));
+                        // `number (local 'x') has no integer representation`: the name goes
+                        // after the subject, not at the end.
+                        match msg.strip_prefix("number ") {
+                            Some(rest) if msg == ops::NO_INTEGER_REP => {
+                                text.truncate(text.len() - msg.len());
+                                text.push_str("number");
+                                text.push_str(&described);
+                                text.push(' ');
+                                text.push_str(rest);
+                            }
+                            _ => text.push_str(&described),
+                        }
                     }
                 }
                 if msg == "attempt to index a string value" {
@@ -665,6 +678,19 @@ impl Vm {
                         _ => {
                             let (x, y) = (reg!($a), reg!($b));
                             reg!($dst) = tri!(ops::arith_slow(&self.heap, $op, x, y))
+                        }
+                    }
+                }};
+            }
+            macro_rules! bitwise {
+                ($dst:expr, $a:expr, $b:expr, $op:expr) => {{
+                    match (&reg!($a), &reg!($b)) {
+                        (&Value::Int(i), &Value::Int(j)) => {
+                            reg!($dst) = Value::Int($op.apply(i, j))
+                        }
+                        _ => {
+                            let (x, y) = (reg!($a), reg!($b));
+                            reg!($dst) = tri!(ops::bitwise_slow(&self.heap, $op, x, y))
                         }
                     }
                 }};
@@ -1001,6 +1027,18 @@ impl Vm {
                                 x,
                                 Value::Int(imm as i64)
                             ))
+                        }
+                    },
+                    Op::BAnd { dst, a, b } => bitwise!(dst, a, b, BitOp::And),
+                    Op::BOr { dst, a, b } => bitwise!(dst, a, b, BitOp::Or),
+                    Op::BXor { dst, a, b } => bitwise!(dst, a, b, BitOp::Xor),
+                    Op::Shl { dst, a, b } => bitwise!(dst, a, b, BitOp::Shl),
+                    Op::Shr { dst, a, b } => bitwise!(dst, a, b, BitOp::Shr),
+                    Op::BNot { dst, src } => match reg!(src) {
+                        Value::Int(i) => reg!(dst) = Value::Int(!i),
+                        _ => {
+                            let x = reg!(src);
+                            reg!(dst) = tri!(ops::bnot_slow(&self.heap, x))
                         }
                     },
                     Op::Neg { dst, src } => match reg!(src) {

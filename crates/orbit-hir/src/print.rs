@@ -286,6 +286,11 @@ impl Printer<'_> {
                     BinOp::Le => "<=",
                     BinOp::Gt => ">",
                     BinOp::Ge => ">=",
+                    BinOp::BAnd => "&",
+                    BinOp::BOr => "|",
+                    BinOp::BXor => "~",
+                    BinOp::Shl => "<<",
+                    BinOp::Shr => ">>",
                 };
                 format!("({} {op} {})", self.expr(*lhs), self.expr(*rhs))
             }
@@ -294,6 +299,7 @@ impl Printer<'_> {
                     UnOp::Neg => "-",
                     UnOp::Not => "not ",
                     UnOp::Len => "#",
+                    UnOp::BNot => "~",
                 };
                 format!("({op}{})", self.expr(*expr))
             }

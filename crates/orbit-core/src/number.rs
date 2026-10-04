@@ -159,6 +159,7 @@ fn hex_number(neg: bool, b: &[u8]) -> Option<Value> {
     let mut mant: u64 = 0; // up to 15 significant hex digits, for floats
     let mut exp: i64 = 0; // binary exponent adjustment for `mant`
     let mut sig = 0;
+    let mut sticky = false; // a nonzero digit past the 15 kept in `mant`
     let mut any = false;
     let mut is_float = false;
     let mut take = |d: u32, frac: bool, exp: &mut i64| {
@@ -174,8 +175,11 @@ fn hex_number(neg: bool, b: &[u8]) -> Option<Value> {
             if frac {
                 *exp -= 4;
             }
-        } else if !frac {
-            *exp += 4;
+        } else {
+            sticky |= d != 0;
+            if !frac {
+                *exp += 4;
+            }
         }
     };
     while i < b.len() {
@@ -221,12 +225,78 @@ fn hex_number(neg: bool, b: &[u8]) -> Option<Value> {
         return None;
     }
     if is_float {
-        let f = mant as f64 * 2f64.powi(exp.clamp(-2000, 2000) as i32);
+        let f = round_to_f64(mant, exp, sticky);
         Some(Value::Float(if neg { -f } else { f }))
     } else {
         let n = int as i64;
         Some(Value::Int(if neg { n.wrapping_neg() } else { n }))
     }
+}
+
+/// `mant * 2^exp` (plus less than one unit of `mant` when `sticky`) rounded to the nearest
+/// `f64`, ties to even, subnormals included. The Lua lexer converts hexadecimal float literals
+/// the same way; the two share test vectors, not code, because the front end doesn't depend
+/// on the runtime.
+fn round_to_f64(mant: u64, exp: i64, sticky: bool) -> f64 {
+    if mant == 0 {
+        return 0.0;
+    }
+    let bits = 64 - i64::from(mant.leading_zeros());
+    // The value lies in [2^(top-1), 2^top).
+    let top = exp + bits;
+    if top > 1024 {
+        return f64::INFINITY;
+    }
+    // Bits that fit: 53, fewer for subnormals (no f64 bit is worth less than 2^-1074).
+    let keep = 53.min(top + 1074);
+    if keep <= 0 {
+        // At most half the smallest subnormal; exactly half is a tie and rounds to 0.
+        let half = keep == 0 && mant.is_power_of_two() && !sticky;
+        return if keep == 0 && !half {
+            f64::from_bits(1)
+        } else {
+            0.0
+        };
+    }
+    let shift = bits - keep;
+    let (mut m, mut e) = (mant, exp);
+    if shift > 0 {
+        let dropped = mant & ((1u64 << shift) - 1);
+        let half = 1u64 << (shift - 1);
+        m = mant >> shift;
+        e += shift;
+        let above = dropped > half || (dropped == half && sticky);
+        if above || (dropped == half && !sticky && m & 1 == 1) {
+            m += 1;
+            if m >> keep != 0 && keep == 53 {
+                m >>= 1;
+                e += 1;
+            }
+        }
+    }
+    if e + 64 - i64::from(m.leading_zeros()) > 1024 {
+        return f64::INFINITY;
+    }
+    scale(m as f64, e)
+}
+
+/// `x * 2^e` when the result is exactly representable, without double rounding.
+fn scale(mut x: f64, mut e: i64) -> f64 {
+    let pow2 = |k: i64| f64::from_bits(((1023 + k) as u64) << 52);
+    while e > 1000 {
+        x *= pow2(1000);
+        e -= 1000;
+    }
+    // Stay normal until the last step, so only the final, exact multiply goes subnormal.
+    while e < -1000 && x * pow2(-1000) >= f64::MIN_POSITIVE {
+        x *= pow2(-1000);
+        e += 1000;
+    }
+    while e < -1000 {
+        x *= 0.5;
+        e += 1;
+    }
+    x * pow2(e)
 }
 
 /// Append a float formatted like C's `%.<prec>g`.
@@ -307,6 +377,53 @@ pub fn fmt_number(out: &mut String, v: Value) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same vectors as the Lua lexer's `hex_floats` test, from the reference `lua5.5`.
+    #[test]
+    fn hex_floats() {
+        let cases: &[(&str, f64)] = &[
+            ("0x1p4", 16.0),
+            ("0x.8", 0.5),
+            ("0xA.8p1", 21.0),
+            ("0x1P-1", 0.5),
+            ("0x.1p4", 1.0),
+            ("0x10p-4", 1.0),
+            ("0x1.8", 1.5),
+            ("0x0.0p0", 0.0),
+            ("0x0p99999", 0.0),
+            ("0x1p-1074", 4.94065645841247e-324),
+            ("0x1p-1075", 0.0),
+            ("0x1.8p-1075", 4.94065645841247e-324),
+            ("0x1p-1076", 0.0),
+            ("0x3p-1076", 4.94065645841247e-324),
+            ("0x1p-1022", 2.2250738585072014e-308),
+            ("0x.fffffffffffffp-1022", 2.225073858507201e-308),
+            ("0x1p1023", 8.98846567431158e307),
+            ("0x1.fffffffffffffp1023", f64::MAX),
+            ("0x1.fffffffffffff8p1023", f64::INFINITY),
+            ("0x1p1024", f64::INFINITY),
+            ("0x123456789abcdef123p0", 3.358127276707303e20),
+            ("0x1.fffffffffffff8p0", 2.0),
+            ("0x1.fffffffffffff7p0", 1.9999999999999998),
+            ("0x1.00000000000008p0", 1.0),
+            ("0x1.000000000000080000001p0", 1.0000000000000002),
+            ("0x1.00000000000018p0", 1.0000000000000004),
+            ("0x0000000000000000000001p0", 1.0),
+            ("0x.00000000000000000000001p92", 1.0),
+            ("0xffffffffffffffffffffp0", 1.2089258196146292e24),
+        ];
+        for &(src, want) in cases {
+            match str_to_number(src.as_bytes()) {
+                Some(Value::Float(got)) => {
+                    assert_eq!(got.to_bits(), want.to_bits(), "{src}: got {got:e}")
+                }
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        assert!(matches!(str_to_number(b" -0x1.8p1 "), Some(Value::Float(x)) if x == -3.0));
+        assert!(str_to_number(b"0x1p").is_none());
+        assert!(str_to_number(b"0x.p1").is_none());
+    }
 
     fn show(v: Option<Value>) -> String {
         match v {

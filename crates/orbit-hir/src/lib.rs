@@ -480,6 +480,13 @@ pub enum BinOp {
     /// Kept in source form; the compiler evaluates `a` then `b` and tests `b < a`.
     Gt,
     Ge,
+    /// Bitwise operators on integers (floats with an integer value convert).
+    BAnd,
+    BOr,
+    BXor,
+    /// Logical shifts; a count of 64 or more gives 0, a negative count shifts the other way.
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -487,6 +494,8 @@ pub enum UnOp {
     Neg,
     Not,
     Len,
+    /// Bitwise not.
+    BNot,
 }
 
 #[cfg(test)]

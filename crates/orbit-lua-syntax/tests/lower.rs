@@ -100,24 +100,11 @@ fn out_of_subset_constructs_are_rejected() {
             "s.lua:1: '<close>' variables are not supported yet",
         ),
         (
-            "x = 1 | 2",
-            "s.lua:1: bitwise operators are not supported yet",
-        ),
-        ("x = ~1", "s.lua:1: bitwise operators are not supported yet"),
-        (
-            "x = a << 1",
-            "s.lua:1: bitwise operators are not supported yet",
-        ),
-        (
             "function f(...args) end",
             "s.lua:1: named varargs are not supported yet",
         ),
         ("print(_ENV)", "s.lua:1: '_ENV' is not supported yet"),
         ("local _ENV = {}", "s.lua:1: '_ENV' is not supported yet"),
-        (
-            "x = 0x1p4",
-            "s.lua:1: hexadecimal floats are not supported yet near '0x1p4'",
-        ),
     ];
     for (src, expected) in cases {
         assert_eq!(err(src), expected, "source: {src:?}");
