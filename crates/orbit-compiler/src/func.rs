@@ -465,7 +465,12 @@ fn set_offset(op: &mut Op, new: Offset) {
         | Op::JumpLe { off, .. }
         | Op::JumpNotLe { off, .. }
         | Op::JumpEq { off, .. }
-        | Op::JumpNe { off, .. } => *off = new,
+        | Op::JumpNe { off, .. }
+        | Op::JumpEqInt { off, .. }
+        | Op::JumpLtInt { off, .. }
+        | Op::JumpLeInt { off, .. }
+        | Op::JumpGtInt { off, .. }
+        | Op::JumpGeInt { off, .. } => *off = new,
         Op::ForPrep { exit, .. } => *exit = new,
         Op::ForLoop { back, .. } | Op::GenericLoop { back, .. } => *back = new,
         _ => unreachable!("not a jump: {op:?}"),

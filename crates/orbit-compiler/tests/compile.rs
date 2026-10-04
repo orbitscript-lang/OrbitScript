@@ -673,8 +673,13 @@ fn conditions_branch_without_booleans() {
                 name: 0,
                 ic: 0
             },
-            Op::LoadInt { dst: 1, value: 1 },
-            Op::JumpNotLt { a: 0, b: 1, off: 4 },
+            // `a < 1` compares with an immediate.
+            Op::JumpLtInt {
+                a: 0,
+                imm: 1,
+                want: false,
+                off: 4
+            },
             Op::GetGlobal {
                 dst: 0,
                 name: 1,

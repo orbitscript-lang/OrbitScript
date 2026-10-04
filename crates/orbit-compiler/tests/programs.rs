@@ -46,6 +46,8 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 }
                 Op::GetIndex { dst, obj, key } => reg(dst) && reg(obj) && reg(key),
                 Op::SetIndex { obj, key, src } => reg(obj) && reg(key) && reg(src),
+                Op::GetIndexInt { dst, obj, .. } => reg(dst) && reg(obj),
+                Op::SetIndexInt { obj, src, .. } => reg(obj) && reg(src),
                 Op::SetList {
                     table,
                     first,
@@ -77,6 +79,11 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 | Op::JumpNotLe { a, b, off }
                 | Op::JumpEq { a, b, off }
                 | Op::JumpNe { a, b, off } => reg(a) && reg(b) && target(off),
+                Op::JumpEqInt { a, off, .. }
+                | Op::JumpLtInt { a, off, .. }
+                | Op::JumpLeInt { a, off, .. }
+                | Op::JumpGtInt { a, off, .. }
+                | Op::JumpGeInt { a, off, .. } => reg(a) && target(off),
                 Op::Call {
                     func,
                     nargs,

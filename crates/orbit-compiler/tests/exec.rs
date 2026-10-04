@@ -292,6 +292,14 @@ impl Interp {
                 Op::SetIndex { obj, key, src } => {
                     self.set(&r[obj as usize], &r[key as usize], r[src as usize].clone())?
                 }
+                Op::GetIndexInt { dst, obj, key } => {
+                    r[dst as usize] = self.index(&r[obj as usize], &V::Int(key as i64))?
+                }
+                Op::SetIndexInt { obj, key, src } => self.set(
+                    &r[obj as usize],
+                    &V::Int(key as i64),
+                    r[src as usize].clone(),
+                )?,
                 Op::SetList {
                     table,
                     first,
@@ -391,6 +399,31 @@ impl Interp {
                 }
                 Op::JumpNe { a, b, off } => {
                     if !eq(&r[a as usize], &r[b as usize]) {
+                        jump(&mut pc, off)
+                    }
+                }
+                Op::JumpEqInt { a, imm, want, off } => {
+                    if eq(&r[a as usize], &V::Int(imm as i64)) == want {
+                        jump(&mut pc, off)
+                    }
+                }
+                Op::JumpLtInt { a, imm, want, off } => {
+                    if Self::lt(&r[a as usize], &V::Int(imm as i64))? == want {
+                        jump(&mut pc, off)
+                    }
+                }
+                Op::JumpLeInt { a, imm, want, off } => {
+                    if Self::le(&r[a as usize], &V::Int(imm as i64))? == want {
+                        jump(&mut pc, off)
+                    }
+                }
+                Op::JumpGtInt { a, imm, want, off } => {
+                    if Self::lt(&V::Int(imm as i64), &r[a as usize])? == want {
+                        jump(&mut pc, off)
+                    }
+                }
+                Op::JumpGeInt { a, imm, want, off } => {
+                    if Self::le(&V::Int(imm as i64), &r[a as usize])? == want {
                         jump(&mut pc, off)
                     }
                 }
