@@ -152,7 +152,7 @@ impl Entry {
 /// bytes are only ever written from a [`Tag`].
 #[derive(Debug, Default)]
 struct ArrayPart {
-    words: Box<[u64]>,
+    words: Box<[[u8; 8]]>,
     len: u32,
     cap: u32,
 }
@@ -173,7 +173,7 @@ impl ArrayPart {
 
     #[inline(always)]
     fn tag(&self, i: usize) -> Tag {
-        let byte = (self.words[self.cap as usize + i / 8] >> (i % 8 * 8)) as u8;
+        let byte = self.words[self.cap as usize + i / 8][i % 8];
         // Every tag byte was written from a `Tag`, so the fallback never
         // happens; it folds into `unpack`'s match where `expect` would add
         // a branch to every array read.
@@ -182,7 +182,7 @@ impl ArrayPart {
 
     #[inline(always)]
     fn payload(&self, i: usize) -> Payload {
-        Payload::from_bits(self.words[i])
+        Payload::from_bits(u64::from_ne_bytes(self.words[i]))
     }
 
     #[inline(always)]
@@ -193,10 +193,8 @@ impl ArrayPart {
     #[inline(always)]
     fn set(&mut self, i: usize, v: Value) {
         let (t, p) = v.pack();
-        self.words[i] = p.bits();
-        let w = &mut self.words[self.cap as usize + i / 8];
-        let shift = i % 8 * 8;
-        *w = (*w & !(0xff << shift)) | (t as u64) << shift;
+        self.words[i] = p.bits().to_ne_bytes();
+        self.words[self.cap as usize + i / 8][i % 8] = t as u8;
     }
 
     fn push(&mut self, v: Value) {
@@ -217,7 +215,7 @@ impl ArrayPart {
         let mut v = std::mem::take(&mut self.words).into_vec();
         let total = cap + cap.div_ceil(8);
         v.reserve_exact(total - v.len());
-        v.resize(total, 0);
+        v.resize(total, [0; 8]);
         // Only slots below `len` are ever read, so whatever the moved-over
         // words leave behind is never seen.
         v.copy_within(old_cap..old_cap + tag_words, cap);
@@ -341,12 +339,19 @@ impl Table {
     }
 
     /// `*out = t[i]` for an integer key (see [`Value::write_unpacked`]).
-    #[inline]
+    #[inline(always)]
     pub fn read_int(&self, i: i64, out: &mut Value) {
         let idx = (i as u64).wrapping_sub(1);
         if idx < self.array.len() as u64 {
             let idx = idx as usize;
-            Value::write_unpacked(out, self.array.tag(idx), self.array.payload(idx));
+            let p = self.array.payload(idx);
+            // Numbers first, with plain compares: a jump table over every
+            // tag costs an indirect branch on each read.
+            match self.array.tag(idx) {
+                Tag::Int => *out = Value::Int(p.bits() as i64),
+                Tag::Float => *out = Value::Float(f64::from_bits(p.bits())),
+                t => Value::write_unpacked(out, t, p),
+            }
         } else {
             *out = self.get_int(i);
         }

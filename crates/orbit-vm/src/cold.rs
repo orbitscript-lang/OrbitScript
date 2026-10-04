@@ -10,11 +10,9 @@
 //! the rest here. That keeps the loop's size, and the hot instructions'
 //! register allocation, independent of how many instructions there are.
 
-use std::cell::Cell as StdCell;
-
 use orbit_bytecode::{CaptureSource, MULTI};
 use orbit_core::table::{self, Key};
-use orbit_core::{Cell, Closure, Gc, LuaStr, Table, Value};
+use orbit_core::{Cell, Closure, FieldCache, Gc, LuaStr, Table, Value};
 
 use crate::interp::Flow;
 use crate::ops::{self, Exc};
@@ -199,11 +197,11 @@ impl Vm {
     /// The value of string key `k` in `t` when the inline cache missed;
     /// refills the cache.
     #[inline(never)]
-    pub(crate) fn get_str_miss(&self, t: Gc<Table>, k: Gc<LuaStr>, cache: &StdCell<u32>) -> Value {
+    pub(crate) fn get_str_miss(&self, t: Gc<Table>, k: Gc<LuaStr>, cache: &FieldCache) -> Value {
         let tab = self.heap.get(t);
         match tab.find_str(&self.heap, k) {
             Some(slot) => {
-                cache.set(slot as u32);
+                cache.fill(slot);
                 tab.slot_value(slot)
             }
             None => Value::Nil,
@@ -218,11 +216,11 @@ impl Vm {
         t: Gc<Table>,
         k: Gc<LuaStr>,
         v: Value,
-        cache: &StdCell<u32>,
+        cache: &FieldCache,
     ) {
         let key = Key::str(&self.heap, k);
         if let Some(slot) = table::set_key(&mut self.heap, t, &key, v) {
-            cache.set(slot as u32);
+            cache.fill(slot);
         }
     }
 }

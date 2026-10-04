@@ -1,10 +1,9 @@
 //! Linking: turning the compiler's plain-data output into heap objects.
 
-use std::cell::Cell as StdCell;
 use std::rc::Rc;
 
-use orbit_bytecode::{CaptureSource, Constant, UnlinkedChunk};
-use orbit_core::{Cell, Closure, Gc, Proto, ProtoCode, Value};
+use orbit_bytecode::{CaptureSource, Constant, Op, UnlinkedChunk};
+use orbit_core::{Cell, Closure, FieldCache, Gc, Proto, ProtoCode, Value};
 
 use crate::Vm;
 
@@ -30,6 +29,46 @@ impl Vm {
                     Constant::Str(b) => Value::Str(self.rt.strings.new_str(&mut self.heap, b)),
                 })
                 .collect();
+            // Each cache gets its instruction's key. Indexes saturate in a
+            // function with more sites than fit an operand; a cache whose
+            // sites disagree on the key is marked shared and never fills.
+            let mut caches: Vec<Option<FieldCache>> = (0..u.ncaches).map(|_| None).collect();
+            for op in &u.code {
+                let (Op::GetGlobal { name: k, ic, .. }
+                | Op::SetGlobal { name: k, ic, .. }
+                | Op::GetField { key: k, ic, .. }
+                | Op::SetField { key: k, ic, .. }) = *op
+                else {
+                    continue;
+                };
+                let Value::Str(key) = consts[k as usize] else {
+                    unreachable!("field keys are strings")
+                };
+                match &mut caches[ic as usize] {
+                    slot @ None => *slot = Some(FieldCache::new(key)),
+                    Some(c) if c.key != key => c.shared = true,
+                    Some(_) => {}
+                }
+            }
+            // A cache no instruction uses never fills, so it never hits and
+            // its key is never compared: any string will do. Without string
+            // constants there are no field sites, so no cache is used.
+            let unused_key = consts.iter().find_map(|k| match k {
+                Value::Str(s) => Some(*s),
+                _ => None,
+            });
+            let caches: Box<[FieldCache]> = match unused_key {
+                Some(key) => caches
+                    .into_iter()
+                    .map(|c| {
+                        c.unwrap_or(FieldCache {
+                            shared: true,
+                            ..FieldCache::new(key)
+                        })
+                    })
+                    .collect(),
+                None => Box::new([]),
+            };
             let children = u
                 .children
                 .iter()
@@ -39,7 +78,7 @@ impl Vm {
                 code: Rc::new(ProtoCode {
                     code: u.code.as_slice().into(),
                     consts: consts.into(),
-                    caches: (0..u.ncaches).map(|_| StdCell::new(u32::MAX)).collect(),
+                    caches,
                     #[cfg(feature = "type-feedback")]
                     feedback: (0..u.code.len()).map(|_| StdCell::new(0)).collect(),
                     nparams: u.nparams,

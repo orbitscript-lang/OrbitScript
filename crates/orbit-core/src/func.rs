@@ -8,7 +8,7 @@ use orbit_bytecode::{CaptureSource, DebugInfo, FunctionName, Op};
 use orbit_gc::{Gc, Marker, Trace};
 
 use crate::table::mark;
-use crate::{LuaSpace, Value};
+use crate::{LuaSpace, LuaStr, Value};
 
 /// A captured local. Every closure that captures the binding holds the same
 /// cell ([VM design, "Locals, captures and cells"](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md#locals-captures-and-cells)).
@@ -56,9 +56,8 @@ pub struct ProtoCode {
     /// Kept alive for the collector by the owning [`Proto`], which traces
     /// them.
     pub consts: Box<[Value]>,
-    /// Inline-cache slots, indexed by the `ic` operands: the hash slot where
-    /// the key was last found.
-    pub caches: Box<[StdCell<u32>]>,
+    /// Inline caches, indexed by the `ic` operands.
+    pub caches: Box<[FieldCache]>,
     /// Per-instruction type feedback (`type-feedback` feature): bits for the
     /// operand types each instruction has seen.
     #[cfg(feature = "type-feedback")]
@@ -67,6 +66,39 @@ pub struct ProtoCode {
     pub is_vararg: bool,
     pub nregs: u8,
     pub ncells: u8,
+}
+
+/// An inline cache for a field or global access: the instruction's string
+/// key, so the hit path needs no constant lookup, and the hash slot where
+/// the key was last found.
+#[derive(Debug)]
+pub struct FieldCache {
+    /// Kept alive by the prototype's constants, which hold the same string.
+    pub key: Gc<LuaStr>,
+    /// The hash slot, `u32::MAX` before the first fill.
+    pub slot: StdCell<u32>,
+    /// Several instructions share this cache (a function with more sites
+    /// than cache indexes), so `key` isn't theirs: it never fills, and every
+    /// access takes the miss path with the instruction's own key.
+    pub shared: bool,
+}
+
+impl FieldCache {
+    pub fn new(key: Gc<LuaStr>) -> FieldCache {
+        FieldCache {
+            key,
+            slot: StdCell::new(u32::MAX),
+            shared: false,
+        }
+    }
+
+    /// Remember slot `slot` for the next access.
+    #[inline]
+    pub fn fill(&self, slot: usize) {
+        if !self.shared {
+            self.slot.set(slot as u32);
+        }
+    }
 }
 
 /// A linked function prototype.
@@ -96,6 +128,6 @@ impl Trace<LuaSpace> for Proto {
         let c = &self.code;
         c.code.len() * std::mem::size_of::<Op>()
             + c.consts.len() * std::mem::size_of::<Value>()
-            + c.caches.len() * 4
+            + c.caches.len() * std::mem::size_of::<FieldCache>()
     }
 }
