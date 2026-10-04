@@ -30,7 +30,7 @@ It is a backtracking matcher that interprets the pattern bytes as it goes, rathe
 
 Errors use lua5.5's messages: `malformed pattern (ends with '%')`, `malformed pattern (missing ']')`, `missing '[' after '%f' in pattern`, `invalid capture index %N`, `invalid pattern capture`, `unfinished capture`, `invalid use of '%' in replacement string`, `invalid replacement value (a table)`.
 
-`gsub` with a function replacement calls it through `CallThen` (one call per match, the match state kept in the native's window), and with a table replacement it indexes the table with metamethods. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
+`gsub` with a function replacement calls it through a non-yieldable `CallThen` (one call per match, the match state kept in the native's window; see [Yielding](#table)), and with a table replacement it indexes the table with metamethods. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
 
 ## format
 
@@ -76,7 +76,7 @@ lua5.5 raises `invalid order function for sorting` when the comparator is incons
 
 `sort` also checks the length against `INT_MAX`-style limits (`array too big`), and a length below 2 compares nothing.
 
-**Yielding from a comparator.** ADR-3 (Proposed) says sort comparators are yieldable, but the suite requires the opposite: errors.lua:401 and coroutine.lua:344 expect `table.sort({1,2,3}, coroutine.yield)` to fail with `attempt to yield across a C-call boundary`. The proposal is that the comparator calls are marked non-yieldable, which needs a per-call flag on `CallThen` from the VM thread. Callbacks from `gsub` stay yieldable, an extension over lua5.5 (where they fail), recorded in `tests/lua-5.5/DEVIATIONS.md`.
+**Yielding from a comparator.** ADR-3 (Proposed) says sort comparators are yieldable, but the suite requires the opposite: errors.lua:401 and coroutine.lua:344 expect `table.sort({1,2,3}, coroutine.yield)` to fail with `attempt to yield across a C-call boundary`. The comparator calls are marked non-yieldable, which needs a per-call flag on `CallThen` from the VM thread. The project rule is to match lua5.5's yieldability exactly, so `gsub` callbacks and metamethods called from these libraries are non-yieldable too; making any of them yieldable later would be an extension recorded in `tests/lua-5.5/DEVIATIONS.md` with Tym's OK.
 
 `table.create(n, m)` preallocates the array and hash parts (sort.lua measures the memory), checking `out of range` against `INT_MAX` and `table overflow` for the hash part.
 
