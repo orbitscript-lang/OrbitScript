@@ -194,7 +194,13 @@ fn long_ephemeron_chain_is_marked_without_recursion() {
     // by the value before it, one link at a time.
     let mut h = TestHeap::new();
     let eph = weak_obj(&mut h, WeakMode::KEYS);
-    let keys: Vec<_> = (0..100_000).map(|i| obj(&mut h, i)).collect();
+    // The rescan spike (E2) is quadratic on this chain, by design.
+    let n = if cfg!(feature = "spike-ephemeron-rescan") {
+        2_000
+    } else {
+        100_000
+    };
+    let keys: Vec<_> = (0..n).map(|i| obj(&mut h, i)).collect();
     h.get_mut(eph).map = keys
         .windows(2)
         .rev()
@@ -315,6 +321,67 @@ fn finalizers_run_newest_first() {
         order.push(h.get(h.downcast::<common::Obj>(any).unwrap()).id);
     }
     assert_eq!(order, vec![4, 3, 2, 1, 0]);
+}
+
+#[test]
+fn finalizers_run_in_reverse_registration_order() {
+    // Registration order, not allocation or slot order, decides: register
+    // in a scrambled order, across both arenas, over several cycles.
+    let mut h = TestHeap::new();
+    let objs: Vec<_> = (0..40).map(|i| obj(&mut h, i)).collect();
+    let texts: Vec<_> = (0..10).map(|i| text(&mut h, &format!("t{i}"))).collect();
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut order: Vec<usize> = (0..50).collect();
+    for i in (1..order.len()).rev() {
+        order.swap(i, rng.below(i + 1));
+    }
+    let any = |h: &TestHeap, i: usize| {
+        if i < 40 {
+            h.erase(objs[i])
+        } else {
+            h.erase(texts[i - 40])
+        }
+    };
+    for &i in &order {
+        if i < 40 {
+            h.register_finalizer(objs[i]);
+        } else {
+            h.register_finalizer(texts[i - 40]);
+        }
+    }
+    // First cycle: the odd-numbered ones stay reachable.
+    let mut roots = Stack(
+        (0..50)
+            .filter(|i| i % 2 == 1)
+            .map(|i| {
+                if i < 40 {
+                    Ref::Obj(objs[i])
+                } else {
+                    Ref::Text(texts[i - 40])
+                }
+            })
+            .collect(),
+    );
+    let expect = |pick: &dyn Fn(usize) -> bool| -> Vec<usize> {
+        order.iter().rev().copied().filter(|&i| pick(i)).collect()
+    };
+    h.full_collect(&mut roots);
+    let mut got = Vec::new();
+    while let Some(g) = h.take_finalizable() {
+        got.push((0..50).find(|&i| any(&h, i) == g).unwrap());
+    }
+    assert_eq!(got, expect(&|i| i % 2 == 0));
+    // Re-register a finalized one (now the newest), then drop them all.
+    h.register_finalizer(objs[0]);
+    roots.0.clear();
+    h.full_collect(&mut roots);
+    let mut got = Vec::new();
+    while let Some(g) = h.take_finalizable() {
+        got.push((0..50).find(|&i| any(&h, i) == g).unwrap());
+    }
+    let mut want = vec![0];
+    want.extend(expect(&|i| i % 2 == 1));
+    assert_eq!(got, want);
 }
 
 #[test]

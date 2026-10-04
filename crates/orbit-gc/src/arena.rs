@@ -218,6 +218,13 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
         }
     }
 
+    /// The generation of slot `i` (0 when handles are unchecked).
+    #[doc(hidden)]
+    pub fn generation_at(&self, i: u32) -> u32 {
+        let (p, o) = Self::split(i);
+        self.gens.of(p, o).map_or(0, Gen::get)
+    }
+
     /// Mark page `p` released; once every page from some point to the end is
     /// released, give their memory back to the allocator. Every slot of the
     /// page must be free.

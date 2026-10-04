@@ -1,9 +1,11 @@
 //! The heap: allocation, barriers, pacing and the incremental collector.
 
 use crate::arena::{AnyGc, Gc, Gen, Store, page_shift};
+#[cfg(feature = "spike-finalizer-scan")]
+use crate::trace::QUEUED;
 use crate::trace::{
-    BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, Roots, Space, Trace,
-    WAIT, WHITE, WeakMode,
+    BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, Roots, Space,
+    SpikeStats, Trace, WAIT, WHITE, WeakMode,
 };
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -108,7 +110,23 @@ pub struct Heap<S: Space> {
     /// Objects that declared weak references in this cycle.
     weak: Vec<(AnyGc, WeakMode)>,
     /// Objects registered for finalization, oldest first.
+    #[cfg(not(feature = "spike-finalizer-scan"))]
     finalizable: Vec<AnyGc>,
+    /// Spike F3: per arena, each slot's registration number (valid while
+    /// its `FIN` bit is set). Allocated for an arena on its first
+    /// registration.
+    #[cfg(feature = "spike-finalizer-scan")]
+    fin_seq: Vec<Vec<u32>>,
+    /// Spike F3: per arena, registered objects not yet queued, so arenas
+    /// with none are not scanned.
+    #[cfg(feature = "spike-finalizer-scan")]
+    fin_count: Vec<usize>,
+    /// Spike F3: the next registration number.
+    #[cfg(feature = "spike-finalizer-scan")]
+    fin_next: u32,
+    /// Spike E2: ephemeron objects to revisit at the end of marking.
+    #[cfg(feature = "spike-ephemeron-rescan")]
+    ephemerons: Vec<AnyGc>,
     /// Unreachable objects whose finalizer is due, next first.
     finalize_queue: VecDeque<AnyGc>,
     cycles: u64,
@@ -171,6 +189,11 @@ impl<S: Space + Default> Heap<S> {
                 meta,
                 gray: Vec::new(),
                 waiting: HashMap::new(),
+                #[cfg(feature = "spike-ephemeron-rescan")]
+                eph_pending: false,
+                #[cfg(feature = "spike-stats")]
+                waiting_values: 0,
+                stats: SpikeStats::default(),
                 marked_bytes: 0,
             },
             retrace: Vec::new(),
@@ -180,7 +203,16 @@ impl<S: Space + Default> Heap<S> {
             threshold: params.min_threshold,
             params,
             weak: Vec::new(),
+            #[cfg(not(feature = "spike-finalizer-scan"))]
             finalizable: Vec::new(),
+            #[cfg(feature = "spike-finalizer-scan")]
+            fin_seq: (0..S::KINDS).map(|_| Vec::new()).collect(),
+            #[cfg(feature = "spike-finalizer-scan")]
+            fin_count: vec![0; S::KINDS],
+            #[cfg(feature = "spike-finalizer-scan")]
+            fin_next: 0,
+            #[cfg(feature = "spike-ephemeron-rescan")]
+            ephemerons: Vec::new(),
             finalize_queue: VecDeque::new(),
             cycles: 0,
             pages_released: 0,
@@ -360,12 +392,81 @@ impl<S: Space> Heap<S> {
             return false;
         }
         *c |= FIN;
+        #[cfg(not(feature = "spike-finalizer-scan"))]
         self.finalizable.push(AnyGc {
             kind,
             index: gc.index(),
             generation: Gen::new(gc.generation()),
         });
+        #[cfg(feature = "spike-finalizer-scan")]
+        {
+            let i = gc.index() as usize;
+            let seq = &mut self.fin_seq[kind as usize];
+            if seq.len() <= i {
+                // Cover the arena's whole color vector, so growth is
+                // amortized like the arena's own.
+                let len = self.marks.meta[kind as usize].color.len().max(i + 1);
+                seq.resize(len, 0);
+            }
+            seq[i] = self.fin_next;
+            // A real version would renumber the registered objects here.
+            self.fin_next = self
+                .fin_next
+                .checked_add(1)
+                .expect("spike: registration numbers exhausted");
+            self.fin_count[kind as usize] += 1;
+        }
         true
+    }
+
+    /// Spike F3: the registered objects (`FIN` set, not yet queued) for
+    /// which `pick` holds, most recently registered first. Scans the color
+    /// bytes of every arena holding any.
+    #[cfg(feature = "spike-finalizer-scan")]
+    fn scan_finalizable(&mut self, all: bool) -> Vec<AnyGc> {
+        // White, registered and not queued; or, with `all`, any color.
+        let mask = if all {
+            FIN | QUEUED
+        } else {
+            FIN | QUEUED | COLOR
+        };
+        let mut found: Vec<(u32, AnyGc)> = Vec::new();
+        for kind in 0..S::KINDS {
+            if self.fin_count[kind] == 0 {
+                continue;
+            }
+            let color = &self.marks.meta[kind].color;
+            let seq = &self.fin_seq[kind];
+            // Skip 32 bytes at a time while none has the FIN bit.
+            let mut base = 0;
+            for chunk in color.chunks(32) {
+                if chunk.iter().fold(0, |a, &c| a | c) & FIN != 0 {
+                    for (o, &c) in chunk.iter().enumerate() {
+                        // FREE never carries FIN, so this needs no FREE test.
+                        if c & mask == FIN {
+                            let index = (base + o) as u32;
+                            found.push((
+                                seq[index as usize],
+                                AnyGc {
+                                    kind: kind as u8,
+                                    index,
+                                    generation: Gen::new(
+                                        self.space.slot_generation(kind as u8, index),
+                                    ),
+                                },
+                            ));
+                        }
+                    }
+                }
+                base += chunk.len();
+            }
+        }
+        found.sort_unstable_by_key(|&(s, _)| std::cmp::Reverse(s));
+        for &(_, g) in &found {
+            self.marks.meta[g.kind as usize].color[g.index as usize] |= QUEUED;
+            self.fin_count[g.kind as usize] -= 1;
+        }
+        found.into_iter().map(|(_, g)| g).collect()
     }
 
     /// The next object whose finalizer should run, most recently registered
@@ -373,7 +474,11 @@ impl<S: Space> Heap<S> {
     /// before the next step, for as long as the finalizer runs.
     pub fn take_finalizable(&mut self) -> Option<AnyGc> {
         let gc = self.finalize_queue.pop_front()?;
-        self.marks.meta[gc.kind as usize].color[gc.index as usize] &= !FIN;
+        #[cfg(not(feature = "spike-finalizer-scan"))]
+        let bits = FIN;
+        #[cfg(feature = "spike-finalizer-scan")]
+        let bits = FIN | QUEUED;
+        self.marks.meta[gc.kind as usize].color[gc.index as usize] &= !bits;
         Some(gc)
     }
 
@@ -385,9 +490,22 @@ impl<S: Space> Heap<S> {
     /// Queue every registered object for finalization, reachable or not, as
     /// when a Lua state closes.
     pub fn finalize_all(&mut self) {
+        #[cfg(not(feature = "spike-finalizer-scan"))]
         for gc in self.finalizable.drain(..).rev() {
             self.finalize_queue.push_back(gc);
         }
+        #[cfg(feature = "spike-finalizer-scan")]
+        {
+            let all = self.scan_finalizable(true);
+            self.finalize_queue.extend(all);
+        }
+    }
+
+    /// Spike counters and timings for the last cycle; `None` without the
+    /// `spike-stats` feature.
+    #[doc(hidden)]
+    pub fn spike_stats(&self) -> Option<SpikeStats> {
+        cfg!(feature = "spike-stats").then_some(self.marks.stats)
     }
 
     // ---- pacing ---------------------------------------------------------
@@ -579,6 +697,12 @@ impl<S: Space> Heap<S> {
         }
         self.marks.gray.clear();
         self.marks.waiting.clear();
+        #[cfg(feature = "spike-stats")]
+        {
+            self.marks.waiting_values = 0;
+        }
+        #[cfg(feature = "spike-ephemeron-rescan")]
+        self.ephemerons.clear();
         self.retrace.clear();
         self.weak.clear();
         self.state = State::Pause;
@@ -641,6 +765,7 @@ impl<S: Space> Heap<S> {
 
     fn start_marking<R: Roots<S> + ?Sized>(&mut self, roots: &R) {
         self.marks.marked_bytes = 0;
+        self.marks.stats = SpikeStats::default();
         self.mark_roots(roots);
         self.state = State::Mark;
     }
@@ -668,6 +793,66 @@ impl<S: Space> Heap<S> {
             self.weak.push((g, mode));
         }
         self.marks.marked_bytes += size;
+        #[cfg(feature = "spike-ephemeron-rescan")]
+        if std::mem::take(&mut self.marks.eph_pending) {
+            self.ephemerons.push(g);
+        }
+    }
+
+    /// Mark everything reachable: drain the gray objects, and with E2,
+    /// revisit ephemeron objects until a pass marks nothing new.
+    fn mark_all(&mut self) {
+        #[cfg(not(feature = "spike-ephemeron-rescan"))]
+        self.drain();
+        #[cfg(feature = "spike-ephemeron-rescan")]
+        self.converge();
+    }
+
+    /// Spike E2: the classic ephemeron fixpoint. Each pass retraces every
+    /// ephemeron object that still had an entry with an unmarked key, then
+    /// traces whatever that marked; it stops when a pass marks nothing.
+    #[cfg(feature = "spike-ephemeron-rescan")]
+    fn converge(&mut self) {
+        self.drain();
+        // A barrier can regray an object, so it may be listed twice.
+        self.ephemerons.sort_unstable();
+        self.ephemerons.dedup();
+        loop {
+            #[cfg(feature = "spike-stats")]
+            {
+                let st = &mut self.marks.stats;
+                st.rescan_list_peak = st.rescan_list_peak.max(self.ephemerons.len());
+            }
+            if self.ephemerons.is_empty() {
+                return;
+            }
+            let list = std::mem::take(&mut self.ephemerons);
+            #[cfg(feature = "spike-stats")]
+            {
+                self.marks.stats.rescan_passes += 1;
+                self.marks.stats.rescan_traces += list.len();
+            }
+            for &g in &list {
+                let mut m = Marker {
+                    space: &self.space,
+                    marks: &mut self.marks,
+                    weak: None,
+                    can_register: false,
+                };
+                self.space.trace_slot(g.kind, g.index, &mut m);
+                if std::mem::take(&mut self.marks.eph_pending) {
+                    self.ephemerons.push(g);
+                }
+            }
+            if self.marks.gray.is_empty() {
+                // Nothing new: the keys still unmarked are dead. Keep the
+                // list for the pass after finalizers resurrect objects.
+                return;
+            }
+            // Tracing what was marked may find more ephemeron objects; they
+            // join the list for the next pass.
+            self.drain();
+        }
     }
 
     /// Trace until nothing is gray, including objects waiting for a retrace.
@@ -711,26 +896,45 @@ impl<S: Space> Heap<S> {
     /// so an entry whose key is being finalized survives until the next
     /// cycle, and resurrected keys keep their ephemeron values.
     fn finish_marking<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) {
+        #[cfg(feature = "spike-stats")]
+        let t0 = std::time::Instant::now();
         // Roots are rescanned, so writes to them need no barrier.
         self.mark_roots(roots);
-        self.drain();
+        self.mark_all();
         self.dedup_weak();
         self.clear_weak(true);
+        #[cfg(feature = "spike-stats")]
+        let t1 = std::time::Instant::now();
         // Keep unreachable finalizable objects alive for their finalizers,
         // and queue them newest first.
-        let mut dead = Vec::new();
-        self.finalizable.retain(|&g| {
-            let alive = self.marks.is_marked(g.kind, g.index);
-            if !alive {
-                dead.push(g);
+        #[cfg(not(feature = "spike-finalizer-scan"))]
+        {
+            let mut dead = Vec::new();
+            self.finalizable.retain(|&g| {
+                let alive = self.marks.is_marked(g.kind, g.index);
+                if !alive {
+                    dead.push(g);
+                }
+                alive
+            });
+            for &g in dead.iter().rev() {
+                self.finalize_queue.push_back(g);
+                self.marks.mark_raw(g.kind, g.index, false);
             }
-            alive
-        });
-        for &g in dead.iter().rev() {
-            self.finalize_queue.push_back(g);
-            self.marks.mark_raw(g.kind, g.index, false);
         }
-        self.drain();
+        #[cfg(feature = "spike-finalizer-scan")]
+        {
+            let dead = self.scan_finalizable(false);
+            for &g in &dead {
+                self.marks.mark_raw(g.kind, g.index, false);
+            }
+            self.finalize_queue.extend(dead);
+        }
+        #[cfg(feature = "spike-stats")]
+        {
+            self.marks.stats.fin_ns = t1.elapsed().as_nanos() as u64;
+        }
+        self.mark_all();
         // Objects traced for the first time just now registered too.
         self.dedup_weak();
         self.clear_weak(false);
@@ -741,6 +945,12 @@ impl<S: Space> Heap<S> {
         roots.clear_weak(&live);
         self.weak.clear();
         self.marks.clear_waiting();
+        #[cfg(feature = "spike-ephemeron-rescan")]
+        self.ephemerons.clear();
+        #[cfg(feature = "spike-stats")]
+        {
+            self.marks.stats.atomic_ns = t0.elapsed().as_nanos() as u64;
+        }
         self.state = State::Sweep { kind: 0, at: 0 };
     }
 

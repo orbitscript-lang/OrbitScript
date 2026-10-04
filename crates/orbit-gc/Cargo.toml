@@ -29,3 +29,13 @@ checked-handles = []
 # process gives the memory back to the OS (glibc keeps it otherwise). Does
 # nothing on other targets.
 malloc-trim = []
+# Spike only (SPIKE-ephemerons.md): ephemerons by convergence instead of
+# "value waits on key". Ephemeron objects whose keys are not all marked are
+# revisited at the end of marking until a pass marks nothing new.
+spike-ephemeron-rescan = []
+# Spike only: find unreachable finalizable objects by scanning the color
+# bytes at the end of marking, ordered by a per-slot registration number,
+# instead of keeping a list of registered objects.
+spike-finalizer-scan = []
+# Spike only: count and time what the spikes measure (`Heap::spike_stats`).
+spike-stats = []

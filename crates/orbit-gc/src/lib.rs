@@ -94,7 +94,7 @@ mod trace;
 
 pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, Store};
 pub use heap::{Heap, Params, Phase};
-pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
+pub use trace::{Holds, Liveness, Marker, Roots, Space, SpikeStats, Trace, WeakMode};
 
 /// Declare a [`Space`]: a struct with one [`Arena`] per object type.
 ///
@@ -243,6 +243,15 @@ macro_rules! space {
                     $(
                         if kind == __Kind::$field as u8 {
                             return self.$field.release_page(page);
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
+                fn slot_generation(&self, kind: u8, index: u32) -> u32 {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return self.$field.generation_at(index);
                         }
                     )+
                     ::core::unreachable!()
