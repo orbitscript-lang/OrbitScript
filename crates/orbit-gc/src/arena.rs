@@ -116,28 +116,31 @@ const MAX_PAGE_SLOTS: usize = 1 << 16;
 
 /// Storage for every object of one type.
 ///
-/// Slots live in pages of `SLOTS` slots each, a power of two fixed at
-/// compile time by the [`space!`](crate::space) (ADR-2). Turning a handle
-/// into a slot is then a shift and a mask by constants, and the in-page
-/// offset needs no bounds check. Pages never move, so growing an arena never
-/// copies live objects and never doubles peak memory, unlike a single `Vec`.
-/// A page whose objects have all been collected is released back to the
-/// allocator. Colors, free lists and counts are kept by the collector, not
-/// here, so an object can be read while the collector writes colors.
+/// Slots live in one flat vector, so turning a handle into an object is a
+/// single bounds check and one load from the vector's base (ADR-2). The
+/// vector is still cut into pages of `SLOTS` slots, a power of two fixed at
+/// compile time by the [`space!`](crate::space): the collector keeps its
+/// free lists and counts per page and fills the lowest pages first. When
+/// the pages at the end have all been released, the vector is cut back and
+/// its memory returned to the allocator. A released page in the middle
+/// keeps its (empty) slots until every page above it is released too.
+/// Colors, free lists and counts are kept by the collector, not here, so an
+/// object can be read while the collector writes colors.
 ///
 /// Arenas are created by [`space!`](crate::space) and only reached through a
 /// [`Heap`](crate::Heap).
 pub struct Arena<T, const SLOTS: usize = DEFAULT_PAGE_SLOTS> {
-    /// A released page is `None`, which costs no allocation and makes any
-    /// handle into it fail.
-    pages: Vec<Option<Box<[Option<T>; SLOTS]>>>,
+    slots: Vec<Option<T>>,
+    /// Whether each page below `slots.len() / SLOTS` is allocated.
+    live: Vec<bool>,
     gens: Gens,
 }
 
 impl<T, const SLOTS: usize> Default for Arena<T, SLOTS> {
     fn default() -> Self {
         Arena {
-            pages: Vec::new(),
+            slots: Vec::new(),
+            live: Vec::new(),
             gens: Gens::default(),
         }
     }
@@ -146,7 +149,7 @@ impl<T, const SLOTS: usize> Default for Arena<T, SLOTS> {
 impl<T, const SLOTS: usize> fmt::Debug for Arena<T, SLOTS> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Arena")
-            .field("pages", &self.pages.iter().flatten().count())
+            .field("pages", &self.live.iter().filter(|&&l| l).count())
             .field("slots_per_page", &SLOTS)
             .finish()
     }
@@ -179,26 +182,6 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
 
     #[inline(always)]
     #[track_caller]
-    fn slot(&self, i: u32) -> &Option<T> {
-        let (p, o) = Self::split(i);
-        match self.pages.get(p) {
-            Some(Some(page)) => &page[o],
-            _ => stale(i),
-        }
-    }
-
-    #[inline(always)]
-    #[track_caller]
-    fn slot_mut(&mut self, i: u32) -> &mut Option<T> {
-        let (p, o) = Self::split(i);
-        match self.pages.get_mut(p) {
-            Some(Some(page)) => &mut page[o],
-            _ => stale(i),
-        }
-    }
-
-    #[inline(always)]
-    #[track_caller]
     fn check(&self, gc: Gc<T>) {
         let (p, o) = Self::split(gc.index);
         if self.gens.of(p, o) != Some(gc.generation) {
@@ -211,37 +194,53 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
     #[inline(always)]
     #[track_caller]
     pub(crate) fn get_slot(&self, i: u32) -> &T {
-        match self.slot(i) {
-            Some(v) => v,
-            None => stale(i),
+        match self.slots.get(i as usize) {
+            Some(Some(v)) => v,
+            _ => stale(i),
         }
     }
 
     #[inline(always)]
     #[track_caller]
     pub(crate) fn get_slot_mut(&mut self, i: u32) -> &mut T {
-        match self.slot_mut(i) {
-            Some(v) => v,
-            None => stale(i),
+        match self.slots.get_mut(i as usize) {
+            Some(Some(v)) => v,
+            _ => stale(i),
         }
     }
 
     pub(crate) fn take(&mut self, i: u32) -> T {
         let (p, o) = Self::split(i);
         self.gens.on_take(p, o);
-        match self.slot_mut(i).take() {
+        match self.slots.get_mut(i as usize).and_then(Option::take) {
             Some(v) => v,
             None => stale(i),
         }
     }
 
-    /// Give page `p`'s memory back to the allocator. Every slot must be free.
+    /// Mark page `p` released; once every page from some point to the end is
+    /// released, give their memory back to the allocator. Every slot of the
+    /// page must be free.
     #[doc(hidden)]
     pub fn release_page(&mut self, p: u32) {
-        let page = self.pages[p as usize].take();
-        debug_assert!(page.iter().flat_map(|p| p.iter()).all(Option::is_none));
-        drop(page);
-        self.gens.on_release(p as usize);
+        let p = p as usize;
+        debug_assert!(
+            self.slots[p * SLOTS..(p + 1) * SLOTS]
+                .iter()
+                .all(Option::is_none)
+        );
+        self.live[p] = false;
+        self.gens.on_release(p);
+        let keep = self.live.iter().rposition(|&l| l).map_or(0, |q| q + 1);
+        if keep < self.live.len() {
+            self.live.truncate(keep);
+            self.slots.truncate(keep * SLOTS);
+            // Shrinking moves the live slots, so only do it when at least
+            // half the vector would go.
+            if self.slots.len() <= self.slots.capacity() / 2 {
+                self.slots.shrink_to_fit();
+            }
+        }
     }
 }
 
@@ -292,23 +291,20 @@ impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
     fn is_occupied(&self, gc: Gc<T>) -> bool {
         let (p, o) = Self::split(gc.index);
         self.gens.of(p, o) == Some(gc.generation)
-            && matches!(self.pages.get(p), Some(Some(page)) if page[o].is_some())
+            && matches!(self.slots.get(gc.index as usize), Some(Some(_)))
     }
 
     fn put(&mut self, i: u32, v: T) -> Gc<T> {
         let (p, _) = Self::split(i);
-        if !matches!(self.pages.get(p), Some(Some(_))) {
-            if p == self.pages.len() {
-                self.pages.push(None);
+        if self.live.get(p) != Some(&true) {
+            if p >= self.live.len() {
+                self.live.resize(p + 1, false);
+                self.slots.resize_with((p + 1) * SLOTS, || None);
             }
-            let page: Box<[Option<T>]> = (0..SLOTS).map(|_| None).collect();
-            let Ok(page) = page.try_into() else {
-                unreachable!("the page has SLOTS slots")
-            };
-            self.pages[p] = Some(page);
+            self.live[p] = true;
             self.gens.on_new_page(p, SLOTS);
         }
-        *self.slot_mut(i) = Some(v);
+        self.slots[i as usize] = Some(v);
         self.handle_at(i)
     }
 }
