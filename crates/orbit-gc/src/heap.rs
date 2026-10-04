@@ -438,9 +438,11 @@ impl<S: Space> Heap<S> {
     }
 
     /// Bytes held by allocated pages: every slot, occupied or not, plus the
-    /// collector's color byte per slot. Unlike [`Heap::bytes`], this is what
-    /// the arenas take from the allocator, and it drops when pages are
-    /// released.
+    /// collector's color byte per slot. Unlike [`Heap::bytes`], this is
+    /// about what the arenas take from the allocator, and it drops when
+    /// pages are released. A released page below a live one still holds its
+    /// empty slots in its arena's vector until the pages above it go too
+    /// (ADR-2); those are not counted.
     pub fn reserved_bytes(&self) -> usize {
         self.marks
             .meta

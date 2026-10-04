@@ -21,12 +21,17 @@ fn rss_kib() -> u64 {
 fn spike_and_collect(params: Params) -> (u64, u64) {
     let mut h = TestHeap::with_params(params);
     let mut roots = Stack(Vec::new());
+    // Small blocks outside the heap, spread through the spike and kept
+    // alive, as a running program's other allocations are. They keep glibc
+    // from handing back whole stretches of its heap by itself, so only a
+    // trim can return the freed memory between them.
+    let mut pins = Vec::new();
     for i in 0..1 << 20 {
         roots.0.push(Ref::Text(h.alloc(Text(format!("{i:0>100}")))));
+        if i % 1024 == 0 {
+            pins.push(std::hint::black_box(vec![1u8; 64]));
+        }
     }
-    // Allocated after the spike and kept live, as a running program's
-    // objects are. It pins the top of glibc's heap, so glibc can't shrink
-    // the heap by itself.
     let survivor = h.alloc(Text("still here".repeat(10)));
     roots.0.push(Ref::Text(survivor));
     h.full_collect(&mut roots);
@@ -34,7 +39,9 @@ fn spike_and_collect(params: Params) -> (u64, u64) {
     roots.0.clear();
     roots.0.push(Ref::Text(survivor));
     h.full_collect(&mut roots);
-    (during, rss_kib())
+    let after = rss_kib();
+    drop(pins);
+    (during, after)
 }
 
 #[test]

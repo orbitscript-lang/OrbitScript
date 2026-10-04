@@ -11,7 +11,7 @@
 //! in a [`space!`], implements [`Trace`] for each, and drives the collector
 //! from its own safe points. What the crate provides:
 //!
-//! - **Arenas and handles.** One paged [`Arena`] per object type. A [`Gc<T>`]
+//! - **Arenas and handles.** One [`Arena`] per object type, a flat slot vector. A [`Gc<T>`]
 //!   is a 4-byte slot index. Colors live in side byte vectors, so objects
 //!   carry no header.
 //! - **Incremental marking with barriers.** [`Heap::step`] processes heap
@@ -22,9 +22,11 @@
 //!   Roots are rescanned when marking finishes, so they need no barrier.
 //! - **Pages go back to the allocator.** Each arena is split into pages of
 //!   a fixed number of slots ([`DEFAULT_PAGE_SLOTS`] unless the [`space!`]
-//!   sets `PAGE_SLOTS`). New objects fill the lowest pages first, and
-//!   a page the sweep leaves empty is freed, so memory taken during a spike
-//!   is given back when the spike ends. glibc keeps freed memory in the
+//!   sets `PAGE_SLOTS`). New objects fill the lowest pages first, and once
+//!   the sweep leaves the pages at the end of an arena empty, the arena is
+//!   cut back, so memory taken during a spike is given back when the spike
+//!   ends. A live object at the end of an arena keeps the empty slots below
+//!   it until it dies, though the memory those objects owned is freed. glibc keeps freed memory in the
 //!   process unless asked; the `malloc-trim` feature asks, once a cycle finds
 //!   the reachable heap has shrunk well below its peak
 //!   ([`Params::trim_percent`]). Support for other allocators and systems
@@ -130,8 +132,9 @@ pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 /// # impl Trace<Small> for Node { const LEAF: bool = true; fn trace(&self, _: &mut Marker<'_, Small>) {} }
 /// ```
 ///
-/// The count is a constant so that finding a handle's slot is a shift and a
-/// mask by constants, with no bounds check inside the page (ADR-2).
+/// Pages are the collector's unit of free lists and release; the slots of
+/// an arena are one vector, so finding a handle's slot is one bounds check
+/// (ADR-2).
 #[macro_export]
 macro_rules! space {
     (
