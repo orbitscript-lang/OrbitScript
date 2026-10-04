@@ -159,7 +159,7 @@ impl Interp {
                 }
                 Op::Mod { .. } => {
                     if y == 0 {
-                        return Err("attempt to perform 'n%%0'".into());
+                        return Err("attempt to perform 'n%0'".into());
                     }
                     let r = x % y;
                     V::Int(if r != 0 && (r ^ y) < 0 { r + y } else { r })
