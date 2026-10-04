@@ -88,24 +88,42 @@ impl Key {
     }
 }
 
-/// A hash slot. The key is stored split into tag and payload (like the
-/// array part), which makes an entry 32 bytes instead of 40.
+/// A hash slot. Key and value are each stored split into tag and payload
+/// (like the array part), with the two tag bytes side by side, which makes
+/// an entry 24 bytes instead of 40.
 #[derive(Debug, Clone, Copy, Default)]
 struct Entry {
-    value: Value,
+    value_payload: Payload,
     key_payload: Payload,
     hash: u32,
+    value_tag: Tag,
     /// `Tag::Nil` for an empty slot. A key whose value is `nil` is a dead
     /// entry: it stays so `next` keeps working while a loop clears the table.
     key_tag: Tag,
 }
 
-const _: () = assert!(std::mem::size_of::<Entry>() == 32);
+const _: () = assert!(std::mem::size_of::<Entry>() == 24);
 
 impl Entry {
     #[inline(always)]
     fn key(&self) -> Value {
         Value::unpack(self.key_tag, self.key_payload)
+    }
+
+    #[inline(always)]
+    fn value(&self) -> Value {
+        Value::unpack(self.value_tag, self.value_payload)
+    }
+
+    #[inline(always)]
+    fn set_value(&mut self, v: Value) {
+        (self.value_tag, self.value_payload) = v.pack();
+    }
+
+    /// A dead entry (or an empty one).
+    #[inline(always)]
+    fn value_is_nil(&self) -> bool {
+        self.value_tag == Tag::Nil
     }
 
     #[inline(always)]
@@ -116,10 +134,12 @@ impl Entry {
     #[inline(always)]
     fn new(key: Value, hash: u32, value: Value) -> Entry {
         let (key_tag, key_payload) = key.pack();
+        let (value_tag, value_payload) = value.pack();
         Entry {
-            value,
+            value_payload,
             key_payload,
             hash,
+            value_tag,
             key_tag,
         }
     }
@@ -251,7 +271,7 @@ impl Trace<LuaSpace> for Table {
                 // Dead entries keep their keys alive until the next rebuild,
                 // so `next` can still compare against them.
                 mark(m, e.key());
-                mark(m, e.value);
+                mark(m, e.value());
             }
         }
         if let Some(meta) = self.meta {
@@ -315,7 +335,7 @@ impl Table {
         }
         let key = Key::int(i);
         match self.probe(&key, |_, _| false) {
-            Ok(slot) => self.entries[slot].value,
+            Ok(slot) => self.entries[slot].value(),
             Err(_) => Value::Nil,
         }
     }
@@ -339,7 +359,7 @@ impl Table {
             return Value::Nil;
         }
         match self.find_str(heap, s) {
-            Some(slot) => self.entries[slot].value,
+            Some(slot) => self.entries[slot].value(),
             None => Value::Nil,
         }
     }
@@ -360,7 +380,7 @@ impl Table {
     pub fn cached_str(&self, slot: usize, s: Gc<LuaStr>) -> Option<Value> {
         match self.entries.get(slot) {
             Some(e) if e.key_tag == Tag::Str && e.key_payload == Value::Str(s).pack().1 => {
-                Some(e.value)
+                Some(e.value())
             }
             _ => None,
         }
@@ -369,7 +389,7 @@ impl Table {
     /// The value in hash slot `slot` (from [`Table::find_str`]).
     #[inline(always)]
     pub fn slot_value(&self, slot: usize) -> Value {
-        self.entries[slot].value
+        self.entries[slot].value()
     }
 
     /// Store into hash slot `slot`, which must hold a key (from
@@ -377,7 +397,7 @@ impl Table {
     /// entry. Use through [`Heap::update`](orbit_gc::Heap::update).
     #[inline(always)]
     pub fn set_slot(&mut self, slot: usize, v: Value) {
-        self.entries[slot].value = v;
+        self.entries[slot].set_value(v);
     }
 
     /// `t[k]` (raw).
@@ -408,7 +428,7 @@ impl Table {
             return Value::Nil;
         }
         match self.probe(key, |a, b| str_eq(heap, a, b)) {
-            Ok(slot) => self.entries[slot].value,
+            Ok(slot) => self.entries[slot].value(),
             Err(_) => Value::Nil,
         }
     }
@@ -438,7 +458,7 @@ impl Table {
             if e.hash == key.hash && same_key(e.key(), key.value, &long_eq) {
                 return Ok(i);
             }
-            if reuse.is_none() && e.value.is_nil() {
+            if reuse.is_none() && e.value_is_nil() {
                 reuse = Some(i);
             }
             i = (i + 1) & mask;
@@ -482,7 +502,7 @@ impl Table {
                 self.array.push(v);
                 self.migrate_to_array();
             }
-            Slot::Existing(i) => self.entries[i].value = v,
+            Slot::Existing(i) => self.entries[i].set_value(v),
             Slot::New(i) => {
                 let e = &mut self.entries[i];
                 if e.is_empty() {
@@ -513,9 +533,9 @@ impl Table {
         while self.used > 0 {
             let key = Key::int(self.array.len() as i64 + 1);
             match self.probe(&key, |_, _| false) {
-                Ok(slot) if !self.entries[slot].value.is_nil() => {
-                    let v = self.entries[slot].value;
-                    self.entries[slot].value = Value::Nil;
+                Ok(slot) if !self.entries[slot].value_is_nil() => {
+                    let v = self.entries[slot].value();
+                    self.entries[slot].set_value(Value::Nil);
                     self.array.push(v);
                 }
                 _ => break,
@@ -528,7 +548,7 @@ impl Table {
     fn rebuild(&mut self, extra: usize) {
         let old = std::mem::take(&mut self.entries);
         self.used = 0;
-        let live: Vec<Entry> = old.into_iter().filter(|e| !e.value.is_nil()).collect();
+        let live: Vec<Entry> = old.into_iter().filter(|e| !e.value_is_nil()).collect();
         // Integer keys that continue the array part move into it.
         let mut moved = vec![false; live.len()];
         let mut ints: Vec<(i64, usize)> = live
@@ -545,7 +565,7 @@ impl Table {
                 break;
             }
             moved[j] = true;
-            self.array.push(live[j].value);
+            self.array.push(live[j].value());
         }
         let remaining = live.len() - moved.iter().filter(|&&m| m).count();
         let need = remaining + extra;
@@ -660,8 +680,8 @@ impl Table {
             pos += 1;
         }
         for e in self.entries.iter().skip(pos - n) {
-            if !e.is_empty() && !e.value.is_nil() {
-                return Ok(Some((e.key(), e.value)));
+            if !e.is_empty() && !e.value_is_nil() {
+                return Ok(Some((e.key(), e.value())));
             }
         }
         Ok(None)
@@ -707,12 +727,14 @@ pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), K
 /// `t[i] = v` (raw) for an integer key. A store into the array part skips
 /// key normalisation, hashing and the byte accounting of
 /// [`Heap::update`](orbit_gc::Heap::update): it changes no capacity.
-#[inline]
+#[inline(always)]
 pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) {
     let idx = (i as u64).wrapping_sub(1);
-    if idx < heap.get(t).array.len() as u64 {
-        heap.barrier_back(t);
-        heap.get_mut(t).array.set(idx as usize, v);
+    // Every store path barriers, so do it first and look the table up once.
+    heap.barrier_back(t);
+    let tab = heap.get_mut(t);
+    if idx < tab.array.len() as u64 {
+        tab.array.set(idx as usize, v);
         return;
     }
     set_key(heap, t, &Key::int(i), v);

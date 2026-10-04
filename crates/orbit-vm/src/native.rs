@@ -9,6 +9,13 @@ use crate::{FrameKind, LuaError, Runtime, ops};
 /// A native function.
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 
+/// An optional fast path for a native that returns one value and needs
+/// nothing but its arguments (most of `math`). It gets the arguments and
+/// returns the result, or `None` to run the full native instead (wrong
+/// types, errors, anything unusual), so it never changes behavior. It cannot
+/// allocate, call back into Lua, or fail.
+pub type FastFn = fn(&[Value]) -> Option<Value>;
+
 /// What a native does after a call it requested with
 /// [`NativeReturn::CallThen`] finishes.
 pub type Continuation = fn(&mut NativeCtx<'_>, CallOutcome) -> Result<NativeReturn, LuaError>;
@@ -125,7 +132,11 @@ impl NativeCtx<'_> {
             return Value::Native(id);
         }
         let id = NativeId(self.rt.natives.len() as u32);
-        self.rt.natives.push(crate::Native { name, f });
+        self.rt.natives.push(crate::Native {
+            name,
+            f,
+            fast: None,
+        });
         self.rt.native_ids.insert(name, id);
         Value::Native(id)
     }

@@ -404,10 +404,14 @@ impl Vm {
         };
         'reload: loop {
             let depth = self.rt.stack.frames.len();
-            let frame = self.rt.stack.frames[depth - 1];
+            let frame = &self.rt.stack.frames[depth - 1];
             let FrameKind::Lua { closure, code_id } = frame.kind else {
                 unreachable!("run starts on a Lua frame")
             };
+            let base = frame.base as usize;
+            let cell_base = frame.cell_base as usize;
+            let nvarargs = frame.nvarargs as usize;
+            let mut pc = frame.pc as usize;
             // Both the frame's code and `cur` are alive, so equal addresses
             // mean the same code.
             if code_id != Rc::as_ptr(&cur) as usize {
@@ -416,10 +420,6 @@ impl Vm {
             let code = &cur.code[..];
             let consts = &cur.consts[..];
             let caches = &cur.caches[..];
-            let base = frame.base as usize;
-            let cell_base = frame.cell_base as usize;
-            let nvarargs = frame.nvarargs as usize;
-            let mut pc = frame.pc as usize;
 
             macro_rules! reg {
                 ($r:expr) => {
@@ -535,12 +535,26 @@ impl Vm {
                     let fa = $fa;
                     let n = $nargs;
                     save_pc!();
+                    let want: u8 = $want;
                     match self.rt.stack.regs[fa] {
                         Value::Closure(c) => {
-                            tri!(self.push_lua_frame(c, fa, n, $want));
+                            tri!(self.push_lua_frame(c, fa, n, want));
                             continue 'reload;
                         }
-                        _ => match self.call_value(fa, n, $want, stop) {
+                        // A native's fast path, when it has one and takes
+                        // these arguments: no window, no frame.
+                        Value::Native(id)
+                            if (want <= 1 || want == MULTI)
+                                && let Some(fast) = self.rt.natives[id.0 as usize].fast
+                                && let Some(v) =
+                                    self.rt.stack.regs.get(fa + 1..fa + 1 + n).and_then(fast) =>
+                        {
+                            if want != 0 {
+                                self.rt.stack.regs[fa] = v;
+                            }
+                            self.rt.top = fa + want.min(1) as usize;
+                        }
+                        _ => match self.call_value(fa, n, want, stop) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
                                 safepoint!();
                             }
@@ -717,8 +731,13 @@ impl Vm {
                         let o = reg!(obj);
                         let Value::Table(t) = o else { index_error!(o) };
                         let (k, v) = (reg!(key), reg!(src));
-                        if let Err(e) = table::set(&mut self.heap, t, k, v) {
-                            throw!(Exc::Rt(e.message().into(), None));
+                        match k {
+                            Value::Int(i) => table::set_int(&mut self.heap, t, i, v),
+                            k => {
+                                if let Err(e) = table::set(&mut self.heap, t, k, v) {
+                                    throw!(Exc::Rt(e.message().into(), None));
+                                }
+                            }
                         }
                         safepoint!();
                     }
@@ -908,7 +927,31 @@ impl Vm {
                         flow!(self.do_return(src, n, stop));
                     }
                     Op::Return0 => flow!(self.do_return(base, 0, stop)),
-                    Op::Return1 { src } => flow!(self.do_return(base + src as usize, 1, stop)),
+                    Op::Return1 { src } => {
+                        // The common case, one value back to a Lua caller
+                        // that wants one, without the general return path.
+                        let frames = &self.rt.stack.frames;
+                        let f = &frames[depth - 1];
+                        if f.want == 1
+                            && depth > stop + 1
+                            && let FrameKind::Lua { .. } = frames[depth - 2].kind
+                        {
+                            let (func, cell_base, caller_end) =
+                                (f.func as usize, f.cell_base as usize, frames[depth - 2].end);
+                            self.rt.stack.frames.pop();
+                            if self.rt.stack.cells.len() > cell_base {
+                                self.rt.stack.cells.truncate(cell_base);
+                            }
+                            let regs = &mut self.rt.stack.regs;
+                            regs[func] = regs[base + src as usize];
+                            self.rt.top = func + 1;
+                            if regs.len() < caller_end as usize {
+                                regs.resize(caller_end as usize, Value::Nil);
+                            }
+                            continue 'reload;
+                        }
+                        flow!(self.do_return(base + src as usize, 1, stop))
+                    }
                     Op::Vararg { dst, count } => {
                         let from = base - nvarargs;
                         let to = base + dst as usize;
