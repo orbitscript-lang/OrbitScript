@@ -385,7 +385,11 @@ fn push_gap(ctx: &mut NativeCtx<'_>, s: Gc<LuaStr>, a: usize, b: usize) {
 
 /// Add the replacement for one match. Returns a `CallThen` when the
 /// replacement is a function, whose continuation picks the loop up again.
-fn add_value(ctx: &mut NativeCtx<'_>, s: Gc<LuaStr>, f: &Found) -> Result<Option<NativeReturn>, LuaError> {
+fn add_value(
+    ctx: &mut NativeCtx<'_>,
+    s: Gc<LuaStr>,
+    f: &Found,
+) -> Result<Option<NativeReturn>, LuaError> {
     let repl = ctx.arg(2);
     match repl {
         Value::Str(r) => {
@@ -441,7 +445,12 @@ fn gsub_after_call(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
 
 /// Push what a table or function replacement produced: false or nil keeps
 /// the original match.
-fn replacement_result(ctx: &mut NativeCtx<'_>, s: Gc<LuaStr>, f: &Found, v: Value) -> Result<(), LuaError> {
+fn replacement_result(
+    ctx: &mut NativeCtx<'_>,
+    s: Gc<LuaStr>,
+    f: &Found,
+    v: Value,
+) -> Result<(), LuaError> {
     match v {
         Value::Nil | Value::Bool(false) => push_gap(ctx, s, f.start, f.end),
         Value::Str(_) => ctx.push(v),
@@ -452,10 +461,7 @@ fn replacement_result(ctx: &mut NativeCtx<'_>, s: Gc<LuaStr>, f: &Found, v: Valu
             ctx.push(v);
         }
         _ => {
-            return Err(ctx.error(format!(
-                "invalid replacement value (a {})",
-                v.type_name()
-            )));
+            return Err(ctx.error(format!("invalid replacement value (a {})", v.type_name())));
         }
     }
     Ok(())
@@ -486,8 +492,8 @@ fn expand_replacement(
                 } else {
                     let k = (d - b'1') as usize;
                     match f.caps.get(k) {
-                        // With no captures, %1 is the whole match.
-                        Some(&c) if k > 0 || f.caps.len() > 0 => c,
+                        // With no captures, capture 1 is the whole match.
+                        Some(&c) => c,
                         _ => {
                             let msg = PatternError::InvalidCaptureIndex((d - b'0') as usize);
                             return Err(pattern_error(ctx, msg));

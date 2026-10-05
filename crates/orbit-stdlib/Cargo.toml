@@ -12,5 +12,12 @@ publish = false
 orbit-core = { path = "../orbit-core" }
 orbit-vm = { path = "../orbit-vm" }
 
+[features]
+default = ["string", "utf8", "table", "math"]
+string = []
+utf8 = []
+table = []
+math = []
+
 [lints]
 workspace = true

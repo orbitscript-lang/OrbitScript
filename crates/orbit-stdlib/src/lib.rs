@@ -1,26 +1,42 @@
-//! The first-light subset of the Lua 5.5 standard library
-//! ([subset](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/first-light-subset.md#standard-library)).
+//! The Lua 5.5 standard library.
 //!
 //! Every function is a [`NativeFn`] registered with the VM, one table per
-//! library, so hosts can open only the libraries they want.
+//! library, so hosts can open only the libraries they want. The `string`,
+//! `utf8`, `table` and `math` libraries are each behind a Cargo feature of
+//! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
+#[cfg(feature = "math")]
 mod math;
+#[cfg(feature = "string")]
 mod string;
+#[cfg(feature = "table")]
 mod table;
+#[cfg(feature = "utf8")]
+mod utf8;
 
 use orbit_vm::{NativeFn, Vm};
 
-/// Open every first-light library: base functions as globals, plus the
-/// `string`, `table`, `math` and `os` tables.
+/// Open every library this build has: base functions as globals, plus the
+/// library tables.
 pub fn open_libs(vm: &mut Vm) {
     base::open(vm);
+    #[cfg(feature = "string")]
     open_lib(vm, "string", string::FUNCTIONS);
+    #[cfg(feature = "utf8")]
+    {
+        let u = open_lib(vm, "utf8", utf8::FUNCTIONS);
+        utf8::constants(vm, u);
+    }
+    #[cfg(feature = "table")]
     open_lib(vm, "table", table::FUNCTIONS);
-    let m = open_lib(vm, "math", math::FUNCTIONS);
-    math::constants(vm, m);
-    for &(name, fast) in math::FAST {
-        vm.set_native_fast_path(name, fast);
+    #[cfg(feature = "math")]
+    {
+        let m = open_lib(vm, "math", math::FUNCTIONS);
+        math::constants(vm, m);
+        for &(name, fast) in math::FAST {
+            vm.set_native_fast_path(name, fast);
+        }
     }
     open_lib(vm, "os", &[("os.clock", os_clock)]);
 }

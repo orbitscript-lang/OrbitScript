@@ -21,7 +21,9 @@ const MAX_SIZE: usize = i64::MAX as usize;
 /// What one format option does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    Int { signed: bool },
+    Int {
+        signed: bool,
+    },
     Float32,
     Float64,
     /// `cN`: fixed-size string.
@@ -396,9 +398,9 @@ pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
                 match r {
                     Ok(v) => Value::Int(v),
                     Err(size) => {
-                        return Err(ctx.error(format!(
-                            "{size}-byte integer does not fit into Lua Integer"
-                        )));
+                        return Err(
+                            ctx.error(format!("{size}-byte integer does not fit into Lua Integer"))
+                        );
                     }
                 }
             }
@@ -427,9 +429,9 @@ pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
                 let strlen = match r {
                     Ok(v) => v as u64,
                     Err(size) => {
-                        return Err(ctx.error(format!(
-                            "{size}-byte integer does not fit into Lua Integer"
-                        )));
+                        return Err(
+                            ctx.error(format!("{size}-byte integer does not fit into Lua Integer"))
+                        );
                     }
                 };
                 let start = pos + item.size;

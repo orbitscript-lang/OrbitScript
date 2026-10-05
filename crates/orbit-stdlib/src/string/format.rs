@@ -132,10 +132,7 @@ pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
             continue;
         }
         let Some(spec) = parse_spec(body, flags, precision_ok) else {
-            return Err(ctx.error(format!(
-                "invalid conversion specification: '{}'",
-                whole(i)
-            )));
+            return Err(ctx.error(format!("invalid conversion specification: '{}'", whole(i))));
         };
         match conv {
             b'd' | b'i' => {
@@ -166,7 +163,13 @@ pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
                     (true, b'x' | b'X') if n != 0 => prefix,
                     _ => "",
                 };
-                pad(&mut out, &spec, prefix, digits.as_bytes(), spec.precision.is_none());
+                pad(
+                    &mut out,
+                    &spec,
+                    prefix,
+                    digits.as_bytes(),
+                    spec.precision.is_none(),
+                );
             }
             b'c' => {
                 let n = ctx.check_int(arg)?;
@@ -313,7 +316,12 @@ fn exponent(x: f64, p: usize, alt: bool) -> String {
     if alt && p == 0 {
         s.push('.');
     }
-    let _ = write!(s, "e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.unsigned_abs());
+    let _ = write!(
+        s,
+        "e{}{:02}",
+        if exp < 0 { '-' } else { '+' },
+        exp.unsigned_abs()
+    );
     s
 }
 
@@ -397,7 +405,12 @@ pub(crate) fn hex_float(x: f64, precision: Option<usize>, alt: bool) -> (&'stati
         s.push('.');
     }
     s.push_str(&digits);
-    let _ = write!(s, "p{}{}", if exp < 0 { '-' } else { '+' }, exp.unsigned_abs());
+    let _ = write!(
+        s,
+        "p{}{}",
+        if exp < 0 { '-' } else { '+' },
+        exp.unsigned_abs()
+    );
     ("0x", s)
 }
 

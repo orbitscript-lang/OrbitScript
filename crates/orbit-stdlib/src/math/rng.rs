@@ -94,6 +94,9 @@ mod tests {
         assert_eq!(1 + r.project(99), 50);
         assert_eq!(r.next_f64(), 0.546883112434215);
         assert_eq!((-10i64).wrapping_add(r.project(20) as i64), -4);
-        assert_eq!(i64::MIN.wrapping_add(r.project(u64::MAX) as i64), 3891836817331783281);
+        assert_eq!(
+            i64::MIN.wrapping_add(r.project(u64::MAX) as i64),
+            3891836817331783281
+        );
     }
 }

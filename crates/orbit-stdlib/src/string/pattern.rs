@@ -27,16 +27,11 @@ pub fn find_plain(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     let last_start = hay.len().checked_sub(needle.len())?;
     let mut i = from;
     while i <= last_start {
-        match hay[i..=last_start].iter().position(|&b| b == first) {
-            None => return None,
-            Some(off) => {
-                i += off;
-                if &hay[i..i + needle.len()] == needle {
-                    return Some(i);
-                }
-                i += 1;
-            }
+        i += hay[i..=last_start].iter().position(|&b| b == first)?;
+        if &hay[i..i + needle.len()] == needle {
+            return Some(i);
         }
+        i += 1;
     }
     None
 }
@@ -181,16 +176,14 @@ impl<'a> Matcher<'a> {
                 b'$' if p + 1 == pat.len() => {
                     return Ok((s == self.src.len()).then_some(s));
                 }
-                b'%' if pat.get(p + 1) == Some(&b'b') => {
-                    match self.balance(s, p + 2)? {
-                        Some(e) => {
-                            s = e;
-                            p += 4;
-                            continue;
-                        }
-                        None => return Ok(None),
+                b'%' if pat.get(p + 1) == Some(&b'b') => match self.balance(s, p + 2)? {
+                    Some(e) => {
+                        s = e;
+                        p += 4;
+                        continue;
                     }
-                }
+                    None => return Ok(None),
+                },
                 b'%' if pat.get(p + 1) == Some(&b'f') => {
                     p += 2;
                     if pat.get(p) != Some(&b'[') {
