@@ -167,6 +167,10 @@ impl FuncState<'_> {
                 Some(Origin::Upvalue(self.name_bytes(self.f.capture(c).name)))
             }
             ExprKind::Outer { .. } => return Err(self.error("internal error: HIR not analysed")),
+            ExprKind::Env => {
+                self.emit(Op::CapGet { dst, cap: 0 });
+                Some(Origin::Upvalue(b"_ENV".as_slice().into()))
+            }
             &ExprKind::Global(name) => {
                 let k = self.str_constant(name)?;
                 let ic = self.cache();
@@ -231,6 +235,17 @@ impl FuncState<'_> {
         Ok(origin)
     }
 
+    /// Whether `e` is a variable named `_ENV`, whose fields Lua calls globals in messages.
+    pub(crate) fn is_env_variable(&self, e: ExprId) -> bool {
+        let name = match self.f.expr(e).kind {
+            ExprKind::Env => return true,
+            ExprKind::Local(l) => self.f.local(l).name,
+            ExprKind::Capture(c) => Some(self.f.capture(c).name),
+            _ => None,
+        };
+        name.is_some_and(|n| &*self.name_bytes(n) == b"_ENV")
+    }
+
     /// `R[dst] = obj[key]`.
     fn index(&mut self, dst: u8, obj: ExprId, key: ExprId) -> Result<Option<Origin>> {
         let (o, obj_origin) = self.operand(obj, dst)?;
@@ -245,7 +260,11 @@ impl FuncState<'_> {
                     key: k,
                     ic,
                 }),
-                Origin::Field(self.name_bytes(s)),
+                if self.is_env_variable(obj) {
+                    Origin::Global(self.name_bytes(s))
+                } else {
+                    Origin::Field(self.name_bytes(s))
+                },
             )
         } else if let Some(ConstVal::Int(k)) = key_const
             && let Ok(key) = u16::try_from(k)

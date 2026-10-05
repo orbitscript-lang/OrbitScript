@@ -283,7 +283,7 @@ impl<'a> Checker<'a> {
                 self.declare(*local)?;
                 self.child(*func)?;
             }
-            StmtKind::Assign { targets, values } => {
+            StmtKind::Assign { targets, values } | StmtKind::Define { targets, values } => {
                 if targets.is_empty() {
                     return Err("assignment with no targets".into());
                 }
@@ -296,6 +296,7 @@ impl<'a> Checker<'a> {
                             self.string(name)?;
                             self.global()?;
                         }
+                        Place::Env => self.global()?,
                         Place::Index { obj, key } => {
                             self.expr(obj)?;
                             self.expr(key)?;
@@ -377,6 +378,7 @@ impl<'a> Checker<'a> {
                 self.string(*s)?;
                 self.global()?;
             }
+            ExprKind::Env => self.global()?,
             ExprKind::Vararg if !f.is_vararg => {
                 return Err("'...' in a function that isn't vararg".into());
             }
