@@ -233,6 +233,16 @@ pub enum Op {
     /// `R[dst..dst+count] = ...` padded with nil (`count` [`MULTI`]: all of
     /// them, sets top).
     Vararg { dst: Reg, count: u8 },
+    /// `R[dst] = {n = count, ...}`, a new table of the extra arguments (a Lua 5.5 named
+    /// vararg).
+    VarargTable { dst: Reg },
+    /// `R[dst]` = what the vararg table would hold at `R[key]`, without building it: the
+    /// extra argument for an integer key `1..count`, the count for `"n"`, nil otherwise.
+    VarargGet { dst: Reg, key: Reg },
+    /// Like `Vararg`, but reads the vararg table `R[table]` raw: `R[table][1..n]` with
+    /// `n = R[table].n`, which must be an integer in `0..2^30` (error: "vararg table has no
+    /// proper 'n'").
+    VarargUnpack { dst: Reg, table: Reg, count: u8 },
 
     // Loops.
     /// Numeric `for` setup. On entry `R[base]` is the initial value,
