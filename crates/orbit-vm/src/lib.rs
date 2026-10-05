@@ -104,6 +104,9 @@ pub(crate) enum FrameKind {
         action: meta::MetaAction,
         event: Event,
     },
+    /// The bottom of a [`Vm::call`]: returning into it ends the call, and
+    /// an error unwinding to it is returned to the embedder.
+    Boundary,
 }
 
 /// One activation record.
@@ -378,11 +381,19 @@ impl Vm {
     /// Call `f` with `args`, returning all its results. The results are
     /// unrooted once returned: use or pin them before running more code.
     pub fn call(&mut self, f: Value, args: &[Value]) -> Result<Vec<Value>, LuaError> {
-        let stop = self.rt.stack.frames.len();
         let func = self.rt.stack.regs.len();
+        self.rt.stack.frames.push(Frame {
+            kind: FrameKind::Boundary,
+            func: func as u32,
+            base: func as u32,
+            pc: 0,
+            cell_base: self.rt.stack.cells.len() as u32,
+            nvarargs: 0,
+            want: op::MULTI,
+        });
         self.rt.stack.regs.push(f);
         self.rt.stack.regs.extend_from_slice(args);
-        let r = self.call_at(func, args.len(), stop);
+        let r = self.call_at(func, args.len());
         let out = match r {
             Ok(()) => Ok(self.rt.stack.regs[func..self.rt.top].to_vec()),
             Err(e) => Err(e),

@@ -298,7 +298,7 @@ pub(crate) fn where_(heap: &LuaHeap, rt: &Runtime, level: usize) -> String {
             let _ = write!(s, "{}:{}: ", proto.chunk, line);
             s
         }
-        FrameKind::Native { .. } | FrameKind::Meta { .. } => String::new(),
+        FrameKind::Native { .. } | FrameKind::Meta { .. } | FrameKind::Boundary => String::new(),
     }
 }
 

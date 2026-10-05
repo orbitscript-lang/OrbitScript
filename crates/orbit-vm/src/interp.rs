@@ -35,22 +35,17 @@ pub(crate) enum Flow {
 impl Vm {
     /// Call `regs[func]` with the `nargs` values above it and run until it
     /// returns. Its results end up at `regs[func..top]`.
-    pub(crate) fn call_at(
-        &mut self,
-        func: usize,
-        nargs: usize,
-        stop: usize,
-    ) -> Result<(), LuaError> {
-        let flow = match self.call_value(func, nargs, MULTI, stop) {
+    pub(crate) fn call_at(&mut self, func: usize, nargs: usize) -> Result<(), LuaError> {
+        let flow = match self.call_value(func, nargs, MULTI) {
             Ok(f) => f,
             Err(x) => {
-                let e = self.make_error(x, stop);
-                self.unwind(e, stop)?
+                let e = self.make_error(x);
+                self.unwind(e)?
             }
         };
         match flow {
             Flow::Done => Ok(()),
-            Flow::Reload => self.run(stop),
+            Flow::Reload => self.run(),
         }
     }
 
@@ -61,7 +56,6 @@ impl Vm {
         func: usize,
         mut nargs: usize,
         want: u8,
-        stop: usize,
     ) -> Result<Flow, Exc> {
         let mut chain = 0;
         loop {
@@ -103,7 +97,7 @@ impl Vm {
                     id,
                 };
                 let r = f(&mut ctx)?;
-                self.native_returned(r, None, func, want, id, stop)
+                self.native_returned(r, None, func, want, id)
             }
             _ => unreachable!("a function"),
         }
@@ -262,26 +256,27 @@ impl Vm {
 
     /// Pop the running Lua frame, returning `n` values from `src`.
     #[inline]
-    fn do_return(&mut self, src: usize, n: usize, stop: usize) -> Result<Flow, Exc> {
+    fn do_return(&mut self, src: usize, n: usize) -> Result<Flow, Exc> {
         let f = self.rt.stack.frames.pop().expect("a frame to return from");
         if self.rt.stack.cells.len() > f.cell_base as usize {
             self.rt.stack.cells.truncate(f.cell_base as usize);
         }
         self.place_results(src, n, f.func as usize, f.want);
-        self.after_return(stop)
+        self.after_return()
     }
 
     /// Results have been placed for the frame now on top: resume it.
-    fn after_return(&mut self, stop: usize) -> Result<Flow, Exc> {
-        if self.rt.stack.frames.len() <= stop {
-            return Ok(Flow::Done);
-        }
+    fn after_return(&mut self) -> Result<Flow, Exc> {
         let f = *self.rt.stack.frames.last().expect("frame");
         match f.kind {
+            FrameKind::Boundary => {
+                self.rt.stack.frames.pop();
+                Ok(Flow::Done)
+            }
             // The frame's window lies below the callee's, so the stack is
             // long enough for it.
             FrameKind::Lua { .. } => Ok(Flow::Reload),
-            FrameKind::Meta { .. } => self.meta_returned(stop),
+            FrameKind::Meta { .. } => self.meta_returned(),
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
                 self.rt.stack.regs.truncate(top);
@@ -293,7 +288,7 @@ impl Vm {
                     id,
                 };
                 let r = k(&mut ctx, CallOutcome::Ok(top - call_at as usize))?;
-                self.native_returned(r, Some(f), f.func as usize, f.want, id, stop)
+                self.native_returned(r, Some(f), f.func as usize, f.want, id)
             }
         }
     }
@@ -307,7 +302,6 @@ impl Vm {
         func: usize,
         want: u8,
         id: orbit_core::NativeId,
-        stop: usize,
     ) -> Result<Flow, Exc> {
         match r {
             NativeReturn::Return(n) => {
@@ -319,7 +313,7 @@ impl Vm {
                 if want == MULTI {
                     self.rt.stack.regs.truncate(self.rt.top);
                 }
-                self.after_return(stop)
+                self.after_return()
             }
             NativeReturn::CallThen {
                 f,
@@ -352,14 +346,14 @@ impl Vm {
                         })
                     }
                 }
-                self.call_value(at, nargs, MULTI, stop)
+                self.call_value(at, nargs, MULTI)
             }
         }
     }
 
     /// Turn an instruction's error into a Lua error, adding the position of
     /// the running function and the operand's name.
-    pub(crate) fn make_error(&mut self, x: Exc, _stop: usize) -> LuaError {
+    pub(crate) fn make_error(&mut self, x: Exc) -> LuaError {
         match x {
             Exc::Lua(e) => e,
             Exc::Plain(m) => LuaError::new(self.new_str(m.as_bytes())),
@@ -399,44 +393,39 @@ impl Vm {
         }
     }
 
-    /// Unwind to the nearest protected native frame above `stop` and resume
-    /// it with the error, or return the error if there is none.
-    pub(crate) fn unwind(&mut self, mut e: LuaError, stop: usize) -> Result<Flow, LuaError> {
+    /// Unwind to the nearest protected native frame and resume it with the
+    /// error, or, at the call's boundary, return the error.
+    pub(crate) fn unwind(&mut self, mut e: LuaError) -> Result<Flow, LuaError> {
         loop {
-            let frames = &self.rt.stack.frames;
-            let found = frames
+            let idx = self
+                .rt
+                .stack
+                .frames
                 .iter()
-                .enumerate()
-                .skip(stop)
-                .rev()
-                .find(|(_, f)| {
+                .rposition(|f| {
                     matches!(
                         f.kind,
                         FrameKind::Native {
                             protected: true,
                             ..
-                        }
+                        } | FrameKind::Boundary
                     )
                 })
-                .map(|(i, _)| i);
-            let Some(idx) = found else {
+                .expect("a boundary below every running frame");
+            let f = self.rt.stack.frames[idx];
+            let FrameKind::Native { id, k, call_at, .. } = f.kind else {
+                // The boundary: the error leaves the VM.
                 if e.traceback.is_none() {
-                    e.traceback = Some(self.traceback(stop));
+                    e.traceback = Some(self.traceback());
                 }
-                if let Some(f) = self.rt.stack.frames.get(stop) {
-                    self.rt.stack.cells.truncate(f.cell_base as usize);
-                }
-                self.rt.stack.frames.truncate(stop);
+                self.rt.stack.cells.truncate(f.cell_base as usize);
+                self.rt.stack.frames.truncate(idx);
                 return Err(e);
             };
             if let Some(above) = self.rt.stack.frames.get(idx + 1) {
                 self.rt.stack.cells.truncate(above.cell_base as usize);
             }
             self.rt.stack.frames.truncate(idx + 1);
-            let f = self.rt.stack.frames[idx];
-            let FrameKind::Native { id, k, call_at, .. } = f.kind else {
-                unreachable!()
-            };
             self.rt.stack.regs.truncate(call_at as usize);
             let mut ctx = NativeCtx {
                 heap: &mut self.heap,
@@ -451,19 +440,22 @@ impl Vm {
                     self.rt.stack.frames.truncate(idx);
                     e = e2;
                 }
-                Ok(r) => {
-                    match self.native_returned(r, Some(f), f.func as usize, f.want, id, stop) {
-                        Ok(flow) => return Ok(flow),
-                        Err(x) => e = self.make_error(x, stop),
-                    }
-                }
+                Ok(r) => match self.native_returned(r, Some(f), f.func as usize, f.want, id) {
+                    Ok(flow) => return Ok(flow),
+                    Err(x) => e = self.make_error(x),
+                },
             }
         }
     }
 
-    fn traceback(&self, stop: usize) -> String {
+    fn traceback(&self) -> String {
         let mut s = String::from("stack traceback:");
-        let frames = &self.rt.stack.frames[stop..];
+        let frames = &self.rt.stack.frames;
+        let from = frames
+            .iter()
+            .rposition(|f| matches!(f.kind, FrameKind::Boundary))
+            .map_or(0, |i| i + 1);
+        let frames = &frames[from..];
         for (i, f) in frames.iter().enumerate().rev() {
             // A function called as a metamethod sits on a meta frame.
             let as_meta = match i.checked_sub(1).map(|j| frames[j].kind) {
@@ -471,7 +463,7 @@ impl Vm {
                 _ => None,
             };
             match f.kind {
-                FrameKind::Meta { .. } => {}
+                FrameKind::Meta { .. } | FrameKind::Boundary => {}
                 FrameKind::Lua { .. } | FrameKind::Native { .. } if as_meta.is_some() => {
                     let line = match f.kind {
                         FrameKind::Lua { closure, .. } => {
@@ -516,7 +508,7 @@ impl Vm {
 
     /// The dispatch loop. Runs the top frame (a Lua frame) and everything it
     /// calls until the frame stack is back to `stop` frames.
-    pub(crate) fn run(&mut self, stop: usize) -> Result<(), LuaError> {
+    pub(crate) fn run(&mut self) -> Result<(), LuaError> {
         // The running function's code, constants and caches. Returning to or
         // calling the same function (recursion) keeps the `Rc` instead of
         // cloning it again; holding it keeps the allocation alive, so pointer
@@ -615,7 +607,7 @@ impl Vm {
                 ($x:expr) => {{
                     let x = $x;
                     save_pc!();
-                    match self.raise(x, stop) {
+                    match self.raise(x) {
                         Ok(Flow::Reload) => continue 'reload,
                         Ok(Flow::Done) => return Ok(()),
                         Err(e) => return Err(e),
@@ -814,7 +806,7 @@ impl Vm {
                             }
                             self.rt.top = fa + want.min(1) as usize;
                         }
-                        _ => match self.call_value(fa, n, want, stop) {
+                        _ => match self.call_value(fa, n, want) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
                                 w = window!();
                                 safepoint!();
@@ -1224,9 +1216,9 @@ impl Vm {
                         } else {
                             count as usize
                         };
-                        flow!(self.do_return(src, n, stop));
+                        flow!(self.do_return(src, n));
                     }
-                    Op::Return0 => flow!(self.do_return(base, 0, stop)),
+                    Op::Return0 => flow!(self.do_return(base, 0)),
                     Op::Return1 { src } => {
                         // The common case, one value back to a Lua caller
                         // that wants one, without the general return path.
@@ -1234,7 +1226,6 @@ impl Vm {
                         // stack is already long enough for it.
                         if let [.., caller, f] = &self.rt.stack.frames[..]
                             && f.want == 1
-                            && depth > stop + 1
                             && let FrameKind::Lua {
                                 closure: c,
                                 code_id,
@@ -1268,7 +1259,7 @@ impl Vm {
                             w = window_sized!();
                             continue;
                         }
-                        flow!(self.do_return(base + src as usize, 1, stop))
+                        flow!(self.do_return(base + src as usize, 1))
                     }
                     Op::Vararg { dst, count } => {
                         let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;

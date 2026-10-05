@@ -24,9 +24,9 @@ impl Vm {
     /// nearest protected call or return the error.
     #[cold]
     #[inline(never)]
-    pub(crate) fn raise(&mut self, x: Exc, stop: usize) -> Result<Flow, LuaError> {
+    pub(crate) fn raise(&mut self, x: Exc) -> Result<Flow, LuaError> {
         let x = match x {
-            Exc::Meta(call) => match self.call_meta(call, stop) {
+            Exc::Meta(call) => match self.call_meta(call) {
                 Ok(flow) => return Ok(flow),
                 Err(x) => x,
             },
@@ -40,7 +40,7 @@ impl Vm {
                         self.rt.stack.regs[base + dst as usize] = v;
                         return Ok(Flow::Reload);
                     }
-                    Err(Exc::Meta(call)) => match self.call_meta(call, stop) {
+                    Err(Exc::Meta(call)) => match self.call_meta(call) {
                         Ok(flow) => return Ok(flow),
                         Err(x) => x,
                     },
@@ -55,7 +55,7 @@ impl Vm {
                         }
                         return Ok(Flow::Reload);
                     }
-                    Err(Exc::Meta(call)) => match self.call_meta(call, stop) {
+                    Err(Exc::Meta(call)) => match self.call_meta(call) {
                         Ok(flow) => return Ok(flow),
                         Err(x) => x,
                     },
@@ -64,14 +64,14 @@ impl Vm {
             }
             x => x,
         };
-        let e = self.make_error(x, stop);
-        self.unwind(e, stop)
+        let e = self.make_error(x);
+        self.unwind(e)
     }
 
     /// Start metamethod call `call` for the instruction the top (Lua) frame
     /// is running: push a meta frame recording how to finish it, then call
     /// the handler above the frame's registers.
-    pub(crate) fn call_meta(&mut self, call: MetaCall, stop: usize) -> Result<Flow, Exc> {
+    pub(crate) fn call_meta(&mut self, call: MetaCall) -> Result<Flow, Exc> {
         let action = self.pending_action(call.aux);
         if !call.f.is_function() && self.rt.metamethod(&self.heap, call.f, Event::Call).is_nil() {
             return Err(Exc::Rt(
@@ -107,7 +107,7 @@ impl Vm {
             nvarargs: 0,
             want: 1,
         });
-        self.call_value(at, n, 1, stop)
+        self.call_value(at, n, 1)
     }
 
     /// How to finish the instruction the top (Lua) frame is running once
@@ -159,7 +159,7 @@ impl Vm {
 
     /// A metamethod call returned into its meta frame (on top): finish the
     /// instruction that asked for it.
-    pub(crate) fn meta_returned(&mut self, stop: usize) -> Result<Flow, Exc> {
+    pub(crate) fn meta_returned(&mut self) -> Result<Flow, Exc> {
         let m = self.rt.stack.frames.pop().expect("meta frame");
         let FrameKind::Meta { action, .. } = m.kind else {
             unreachable!("meta frame")
@@ -181,7 +181,7 @@ impl Vm {
                 self.rt.stack.regs[from + left - 2] = res;
                 match self.op_concat(from, left - 1) {
                     Ok(v) => self.rt.stack.regs[base + dst as usize] = v,
-                    Err(Exc::Meta(call)) => return self.call_meta(call, stop),
+                    Err(Exc::Meta(call)) => return self.call_meta(call),
                     Err(x) => return Err(x),
                 }
             }
