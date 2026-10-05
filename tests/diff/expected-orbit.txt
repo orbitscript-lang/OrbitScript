@@ -2,4 +2,5 @@
 #   cargo testkit diff ... --expect tests/diff/expected-orbit.txt --update-expected
 load.lua
 os.lua
+require.lua
 uncaught.lua

@@ -10,6 +10,8 @@ mod load;
 mod math;
 #[cfg(feature = "os")]
 mod os;
+#[cfg(feature = "package")]
+mod package;
 mod string;
 mod table;
 #[cfg(feature = "os")]
@@ -40,6 +42,39 @@ pub fn open_libs(vm: &mut Vm) {
     }
     #[cfg(feature = "os")]
     open_lib(vm, "os", os::FUNCTIONS);
+    #[cfg(feature = "package")]
+    package::open(vm);
+    let g = vm.rt.globals;
+    mark_loaded(vm, "_G", orbit_vm::orbit_core::Value::Table(g));
+}
+
+/// Registry key of the table `require` keeps loaded modules in
+/// (`package.loaded`).
+pub const LOADED: &[u8] = b"_LOADED";
+
+/// The registry table under `key`, created on first use.
+pub fn registry_table(
+    vm: &mut Vm,
+    key: &[u8],
+) -> orbit_vm::orbit_core::Gc<orbit_vm::orbit_core::Table> {
+    use orbit_vm::orbit_core::Value;
+    let k = vm.new_str(key);
+    match orbit_vm::orbit_core::table::get(&vm.heap, vm.rt.registry, k) {
+        Value::Table(t) => t,
+        _ => {
+            let t = vm.new_table();
+            let reg = vm.rt.registry;
+            vm.table_set(reg, k, Value::Table(t));
+            t
+        }
+    }
+}
+
+/// Record a library as loaded, so `require "name"` returns it.
+pub fn mark_loaded(vm: &mut Vm, name: &str, lib: orbit_vm::orbit_core::Value) {
+    let loaded = registry_table(vm, LOADED);
+    let k = vm.new_str(name.as_bytes());
+    vm.table_set(loaded, k, lib);
 }
 
 /// Register `functions` (qualified names such as `"string.rep"`) in a new
@@ -58,6 +93,7 @@ pub fn open_lib(
         vm.table_set(t, k, fv);
     }
     vm.set_global(name, orbit_vm::orbit_core::Value::Table(t));
+    mark_loaded(vm, name, orbit_vm::orbit_core::Value::Table(t));
     vm.unpin(orbit_vm::orbit_core::Value::Table(t));
     t
 }

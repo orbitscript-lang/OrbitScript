@@ -55,7 +55,7 @@ pub fn chunk_id(source: &[u8]) -> String {
 }
 
 /// Which kinds of chunk a `mode` string allows.
-struct Mode<'a>(&'a [u8]);
+pub(crate) struct Mode<'a>(pub(crate) &'a [u8]);
 
 impl Mode<'_> {
     fn check(&self, binary: bool) -> Result<(), String> {
@@ -78,7 +78,7 @@ impl Mode<'_> {
 /// Compile and link `bytes` as a chunk named `source` (a Lua source name:
 /// `@file`, `=name` or the text itself), with `env` as its `_ENV`. The
 /// function is unrooted; the error is the message `load` returns.
-fn load_chunk(
+pub(crate) fn load_chunk(
     ctx: &mut NativeCtx<'_>,
     bytes: &[u8],
     source: &[u8],
