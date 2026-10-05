@@ -79,9 +79,11 @@ pub enum StmtKind {
     GenericFor { vars: Vec<LocalId>, iter: ExprList, hidden: [LocalId; 3], body: BlockId },
     Define { targets: Vec<Place>, values: ExprList }, // Assign that fails unless each target is nil
     Break,
+    Goto(LabelId),                                    // to a label in this or an enclosing block
+    Label(LabelId),                                   // Function::labels holds name and span
     Return(ExprList),
     // Reserved, not produced yet:
-    // Goto(LabelId), Label(LabelId), Close(LocalId)
+    // Close(LocalId)
 }
 
 pub enum Place {

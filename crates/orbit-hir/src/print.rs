@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use crate::{
     BinOp, BlockId, CaptureFrom, Chunk, ExprId, ExprKind, ExprList, Function, FunctionName,
-    LocalId, LocalKind, Place, StmtId, StmtKind, TableEntry, UnOp,
+    LabelId, LocalId, LocalKind, Place, StmtId, StmtKind, TableEntry, UnOp,
 };
 
 /// Renders the chunk as indented text. The format is stable: changes to it are reviewed as
@@ -123,6 +123,13 @@ impl Printer<'_> {
             .join(", ")
     }
 
+    fn label_name(&self, l: LabelId) -> String {
+        match self.f.labels.get(l.index()) {
+            Some(label) => format!("{}#L{}", self.s(label.name), l.0),
+            None => format!("?#L{}", l.0),
+        }
+    }
+
     fn place(&self, p: &Place) -> String {
         match *p {
             Place::Local(l) => self.local_name(l),
@@ -161,6 +168,14 @@ impl Printer<'_> {
             }
             StmtKind::Eval(e) => {
                 let text = self.expr(*e);
+                self.line(depth, &text);
+            }
+            StmtKind::Goto(l) => {
+                let text = format!("goto {}", self.label_name(*l));
+                self.line(depth, &text);
+            }
+            StmtKind::Label(l) => {
+                let text = format!("::{}::", self.label_name(*l));
                 self.line(depth, &text);
             }
             StmtKind::Block(b) => {

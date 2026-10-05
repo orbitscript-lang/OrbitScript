@@ -32,6 +32,8 @@ ids! {
     BlockId;
     /// A capture in [`crate::Function::captures`].
     CaptureId;
+    /// A `goto` label in [`crate::Function::labels`].
+    LabelId;
     /// A string in [`crate::Chunk::strings`].
     StrId;
     /// A type annotation. Ignored by the compiler; read by the optional type checker.
