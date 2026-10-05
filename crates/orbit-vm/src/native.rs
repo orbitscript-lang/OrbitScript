@@ -286,7 +286,10 @@ impl NativeCtx<'_> {
         let got = if i >= self.nargs {
             "no value"
         } else {
-            self.arg(i).type_name()
+            match self.arg(i) {
+                Value::LightUserData(_) => "light userdata",
+                v => v.type_name(),
+            }
         };
         self.arg_error(i, format!("{expected} expected, got {got}"))
     }

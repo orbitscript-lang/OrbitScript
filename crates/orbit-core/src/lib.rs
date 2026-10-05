@@ -25,7 +25,7 @@ pub use string::{Interner, LuaStr, OrbitStr, OrbitString};
 pub use table::Table;
 pub use thread::{Thread, ThreadState};
 pub use userdata::UserData;
-pub use value::{NativeId, Payload, Tag, Value};
+pub use value::{LightUserData, NativeId, Payload, Tag, Value};
 
 orbit_gc::space! {
     /// Every object type of the Lua heap.

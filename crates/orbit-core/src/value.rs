@@ -9,6 +9,22 @@ use crate::{Closure, LuaHeap, LuaStr, Table, Thread, UserData};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeId(pub u32);
 
+/// A light userdata: an opaque 8-byte token with identity semantics and no
+/// GC object behind it (the C API's `void*`). The VM makes them for
+/// `debug.upvalueid`; embedders can use them as allocation-free keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LightUserData(u64);
+
+impl LightUserData {
+    pub const fn new(bits: u64) -> LightUserData {
+        LightUserData(bits)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// A Lua value. 16 bytes with a pinned layout (amended ADR-1): the tag byte
 /// at offset 0 and an 8-byte payload at offset 8, with fixed tag numbers,
 /// which are also what table array parts store. Code outside this crate uses
@@ -27,6 +43,7 @@ pub enum Value {
     Native(NativeId) = 7,
     UserData(Gc<UserData>) = 8,
     Thread(Gc<Thread>) = 9,
+    LightUserData(LightUserData) = 10,
 }
 
 const _: () = assert!(core::mem::size_of::<Value>() == 16);
@@ -48,6 +65,7 @@ pub enum Tag {
     Native = 7,
     UserData = 8,
     Thread = 9,
+    LightUserData = 10,
 }
 
 impl Tag {
@@ -65,6 +83,7 @@ impl Tag {
             7 => Tag::Native,
             8 => Tag::UserData,
             9 => Tag::Thread,
+            10 => Tag::LightUserData,
             _ => return None,
         })
     }
@@ -102,8 +121,8 @@ impl Value {
             Value::Str(_) => "string",
             Value::Table(_) => "table",
             Value::Closure(_) | Value::Native(_) => "function",
-            Value::UserData(_) => "userdata",
             Value::Thread(_) => "thread",
+            Value::UserData(_) | Value::LightUserData(_) => "userdata",
         }
     }
 
@@ -137,6 +156,7 @@ impl Value {
             Value::Native(_) => Tag::Native,
             Value::UserData(_) => Tag::UserData,
             Value::Thread(_) => Tag::Thread,
+            Value::LightUserData(_) => Tag::LightUserData,
         }
     }
 
@@ -154,6 +174,7 @@ impl Value {
             Value::Native(n) => (Tag::Native, n.0 as u64),
             Value::UserData(u) => (Tag::UserData, u.to_bits()),
             Value::Thread(t) => (Tag::Thread, t.to_bits()),
+            Value::LightUserData(l) => (Tag::LightUserData, l.0),
         };
         (tag, Payload(bits))
     }
@@ -173,6 +194,7 @@ impl Value {
             Tag::Native => Value::Native(NativeId(p as u32)),
             Tag::UserData => Value::UserData(Gc::from_bits(p)),
             Tag::Thread => Value::Thread(Gc::from_bits(p)),
+            Tag::LightUserData => Value::LightUserData(LightUserData(p)),
         }
     }
 
@@ -200,6 +222,7 @@ impl Value {
             Tag::Native => *out = Value::Native(NativeId(p as u32)),
             Tag::UserData => *out = Value::UserData(Gc::from_bits(p)),
             Tag::Thread => *out = Value::Thread(Gc::from_bits(p)),
+            Tag::LightUserData => *out = Value::LightUserData(LightUserData(p)),
         }
     }
 
@@ -233,6 +256,8 @@ impl Value {
             Value::Str(s) => (Tag::Str, s.index() as u64),
             Value::UserData(u) => (Tag::UserData, u.index() as u64),
             Value::Thread(t) => (Tag::Thread, t.index() as u64),
+            // A light userdata is its own identity.
+            Value::LightUserData(l) => return Some(l.0),
             _ => return None,
         };
         // Looks like an address: a fixed base, the type in the high bits and
@@ -259,6 +284,7 @@ pub fn raw_eq(heap: &LuaHeap, a: Value, b: Value) -> bool {
         (Value::Native(x), Value::Native(y)) => x == y,
         (Value::UserData(x), Value::UserData(y)) => x == y,
         (Value::Thread(x), Value::Thread(y)) => x == y,
+        (Value::LightUserData(x), Value::LightUserData(y)) => x == y,
         _ => false,
     }
 }
@@ -299,12 +325,13 @@ mod tests {
             (Tag::Native, 7),
             (Tag::UserData, 8),
             (Tag::Thread, 9),
+            (Tag::LightUserData, 10),
         ];
         for (t, b) in pinned {
             assert_eq!(t as u8, b);
             assert_eq!(Tag::from_u8(b), Some(t));
         }
-        assert_eq!(Tag::from_u8(10), None);
+        assert_eq!(Tag::from_u8(11), None);
         assert_eq!(std::mem::size_of::<Tag>(), 1);
     }
 
@@ -318,6 +345,7 @@ mod tests {
             Value::Float(-0.0),
             Value::Native(NativeId(7)),
             Value::Table(Gc::from_bits(3)),
+            Value::LightUserData(LightUserData::new(u64::MAX)),
         ] {
             let (t, p) = v.pack();
             assert_eq!(t, v.tag());
