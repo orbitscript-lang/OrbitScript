@@ -19,7 +19,7 @@ pub use analyze::{AnalysisError, analyze};
 pub use print::print;
 pub use verify::{VerifyError, verify, verify_lowered};
 
-pub use ids::{BlockId, CaptureId, ExprId, FuncId, LocalId, StmtId, StrId, TypeId};
+pub use ids::{BlockId, CaptureId, ExprId, FuncId, LabelId, LocalId, StmtId, StrId, TypeId};
 pub use source::{Language, SourceInfo, Span};
 pub use strings::StringPool;
 
@@ -85,6 +85,8 @@ pub struct Function {
     pub exprs: Vec<Expr>,
     pub stmts: Vec<Stmt>,
     pub blocks: Vec<Block>,
+    /// `goto` targets, each placed by exactly one [`StmtKind::Label`].
+    pub labels: Vec<Label>,
     pub body: BlockId,
     pub result_type: Option<TypeId>,
 }
@@ -108,6 +110,7 @@ impl Function {
                 stmts: Vec::new(),
                 span,
             }],
+            labels: Vec::new(),
             body: BlockId(0),
             result_type: None,
         }
@@ -141,6 +144,12 @@ impl Function {
     pub fn add_block(&mut self, block: Block) -> BlockId {
         let id = BlockId::from_index(self.blocks.len());
         self.blocks.push(block);
+        id
+    }
+
+    pub fn add_label(&mut self, label: Label) -> LabelId {
+        let id = LabelId::from_index(self.labels.len());
+        self.labels.push(label);
         id
     }
 
@@ -217,6 +226,13 @@ pub enum LocalKind {
     ForControl,
     /// Compiler-owned state with no source name, such as a generic `for`'s iterator triple.
     Hidden,
+}
+
+/// A `goto` target. Front ends check visibility and scoping rules before lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Label {
+    pub name: StrId,
+    pub span: Span,
 }
 
 /// One entry in a function's capture list.
@@ -306,6 +322,11 @@ pub enum StmtKind {
         values: ExprList,
     },
     Break,
+    /// Jumps to a label in this function, in the current block or an enclosing one. Lua's
+    /// `goto`; OrbitScript would use it for labelled `break` and `continue`.
+    Goto(LabelId),
+    /// Places a label.
+    Label(LabelId),
     /// A list that is a single `Call` or `MethodCall` is a tail call.
     Return(ExprList),
 }

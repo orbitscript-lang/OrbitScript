@@ -6,7 +6,7 @@
 //! `_ENV`. Constructs not implemented yet fail here with `<construct> is not supported yet`.
 
 use orbit_hir as hir;
-use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LocalId, LocalKind, Span, StrId};
+use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};
 
 use crate::ast::{self, Ast, AttribKind, ExprKind, Field, StmtKind};
 use crate::diag::Diagnostic;
@@ -32,7 +32,8 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
     lx.sym_env = lx.chunk.strings.intern(b"_ENV");
     let main = lx.begin_function(FunctionName::Main, chunk.span);
     lx.cur().f.is_vararg = true;
-    let body = lx.block_contents(&chunk.body)?;
+    let end_line = lx.block_end_line(&chunk.body);
+    let body = lx.labelled_block(&chunk.body, false, end_line, None)?;
     lx.cur().f.body = body;
     lx.end_function(main);
     Ok(lx.chunk)
@@ -43,6 +44,45 @@ struct FnCtx {
     f: hir::Function,
     /// Innermost last. Each scope lists the declarations made in it, in order.
     scopes: Vec<Vec<Entry>>,
+    /// `goto` bookkeeping for each block being lowered, innermost last.
+    blocks: Vec<LabelBlock>,
+}
+
+/// What `goto` resolution needs to know about one block.
+struct LabelBlock {
+    /// Labels placed so far.
+    labels: Vec<PlacedLabel>,
+    /// Gotos waiting for a label further on, in this block or an enclosing one.
+    pending: Vec<PendingGoto>,
+    /// The declarations in the block: statement index and the first name declared.
+    decls: Vec<(usize, String)>,
+    /// A label at this statement index or later is at the end of the block (only labels
+    /// follow it), so it is outside the scope of the block's declarations.
+    void_tail: usize,
+    /// For each statement, where its run of consecutive labels starts.
+    run_start: Vec<usize>,
+    /// The statement being lowered.
+    current: usize,
+    /// The line of the block's last token, where its `goto` errors are reported.
+    end_line: u32,
+    /// The `goto` that jumps into a declaration's scope, reported when the block closes, with
+    /// the run of labels its target is in.
+    scope_error: Option<(String, usize)>,
+}
+
+struct PlacedLabel {
+    name: StrId,
+    id: LabelId,
+    index: usize,
+    line: u32,
+}
+
+struct PendingGoto {
+    name: StrId,
+    stmt: hir::StmtId,
+    line: u32,
+    /// The statement of the block it waits in that contains the `goto`.
+    index: usize,
 }
 
 /// One declaration in a scope.
@@ -118,6 +158,7 @@ impl Lowerer {
             id,
             f,
             scopes: vec![Vec::new()],
+            blocks: Vec::new(),
         });
         id
     }
@@ -315,16 +356,234 @@ impl Lowerer {
 
     /// A block's statements in the current scope.
     fn block_contents(&mut self, b: &ast::Block) -> LResult<BlockId> {
+        let end_line = self.block_end_line(b);
+        self.labelled_block(b, false, end_line, None)
+    }
+
+    /// A block's statements with its own label scope. A `repeat` body passes its `until`
+    /// condition, which belongs to the block for `goto` purposes; its HIR id comes back
+    /// through `until_out`.
+    fn labelled_block(
+        &mut self,
+        b: &ast::Block,
+        repeat: bool,
+        end_line: u32,
+        until: Option<(&ast::Expr, &mut Option<ExprId>)>,
+    ) -> LResult<BlockId> {
+        self.begin_labels(b, repeat, end_line);
         let mut stmts = Vec::new();
         self.stmts_into(b, &mut stmts)?;
+        if let Some((cond, out)) = until {
+            *out = Some(self.expr(cond)?);
+        }
+        self.end_labels()?;
         Ok(self.f().add_block(hir::Block {
             stmts,
             span: b.span,
         }))
     }
 
+    /// The line of a block's last token.
+    fn block_end_line(&self, b: &ast::Block) -> u32 {
+        let last = match (&b.ret, b.stmts.last()) {
+            (Some(ret), _) => ret.span,
+            (None, Some(s)) => s.span,
+            (None, None) => return self.line_of(b.span),
+        };
+        self.end_line_of(last)
+    }
+
+    fn end_line_of(&self, span: Span) -> u32 {
+        self.chunk
+            .source
+            .line_of(span.end.saturating_sub(1).max(span.start))
+    }
+
+    // ---- goto and labels ----------------------------------------------------------------------
+
+    fn begin_labels(&mut self, b: &ast::Block, repeat: bool, end_line: u32) {
+        let n = b.stmts.len();
+        let is_label = |i: usize| matches!(b.stmts[i].kind, StmtKind::Label(_));
+        let mut void_tail = n;
+        if repeat || b.ret.is_some() {
+            void_tail = usize::MAX;
+        } else {
+            while void_tail > 0 && is_label(void_tail - 1) {
+                void_tail -= 1;
+            }
+        }
+        let mut run_start = Vec::with_capacity(n);
+        for i in 0..n {
+            let start = if i > 0 && is_label(i) && is_label(i - 1) {
+                run_start[i - 1]
+            } else {
+                i
+            };
+            run_start.push(start);
+        }
+        let mut decls = Vec::new();
+        for (i, st) in b.stmts.iter().enumerate() {
+            let name = match &st.kind {
+                StmtKind::Local { names, .. } | StmtKind::Global { names, .. } => {
+                    names.first().map(|n| n.name.sym)
+                }
+                StmtKind::LocalFunction { name, .. } | StmtKind::GlobalFunction { name, .. } => {
+                    Some(name.sym)
+                }
+                StmtKind::GlobalAll { .. } => {
+                    decls.push((i, "*".to_string()));
+                    None
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                decls.push((i, self.name_text(name)));
+            }
+        }
+        self.cur().blocks.push(LabelBlock {
+            labels: Vec::new(),
+            pending: Vec::new(),
+            decls,
+            void_tail,
+            run_start,
+            current: 0,
+            end_line,
+            scope_error: None,
+        });
+    }
+
+    /// Closes a block's label scope: reports a `goto` into a declaration's scope, and hands
+    /// unresolved gotos to the enclosing block (or reports them at the end of the function).
+    fn end_labels(&mut self) -> LResult<()> {
+        let block = self.cur().blocks.pop().expect("label block");
+        let end_line = block.end_line;
+        let error = |message: String| Diagnostic::new(Span::new(0, 0), end_line, message, None);
+        if let Some((message, _)) = block.scope_error {
+            return Err(error(message));
+        }
+        match self.cur().blocks.last_mut() {
+            Some(parent) => {
+                let index = parent.current;
+                for mut p in block.pending {
+                    p.index = index;
+                    parent.pending.push(p);
+                }
+                Ok(())
+            }
+            None => match block.pending.first() {
+                Some(p) => {
+                    let message = format!(
+                        "no visible label '{}' for <goto> at line {}",
+                        self.name_text(p.name),
+                        p.line
+                    );
+                    Err(error(message))
+                }
+                None => Ok(()),
+            },
+        }
+    }
+
+    /// The innermost label `name` placed so far in this block or an enclosing one, with
+    /// whether it is in the current block.
+    fn visible_label(&self, name: StrId) -> Option<(&PlacedLabel, bool)> {
+        let blocks = &self.funcs.last().expect("function").blocks;
+        let last = blocks.len() - 1;
+        blocks.iter().enumerate().rev().find_map(|(depth, b)| {
+            b.labels
+                .iter()
+                .rev()
+                .find(|l| l.name == name)
+                .map(|l| (l, depth == last))
+        })
+    }
+
+    fn goto(&mut self, name: ast::Name, span: Span, stmts: &mut Vec<hir::StmtId>) {
+        let line = self.line_of(span);
+        let target = self.visible_label(name.sym).map(|(l, _)| l.id);
+        // A forward goto gets its label when the label is placed.
+        let label = target.unwrap_or(LabelId(u32::MAX));
+        let stmt = self.f().add_stmt(hir::StmtKind::Goto(label), span);
+        stmts.push(stmt);
+        if target.is_none() {
+            let block = self.cur().blocks.last_mut().expect("label block");
+            let index = block.current;
+            block.pending.push(PendingGoto {
+                name: name.sym,
+                stmt,
+                line,
+                index,
+            });
+        }
+    }
+
+    fn label(&mut self, name: ast::Name, span: Span) -> LResult<hir::StmtKind> {
+        let line = self.line_of(span);
+        let index = self.cur().blocks.last().expect("label block").current;
+        if let Some((prev, same_block)) = self.visible_label(name.sym) {
+            // Lua takes a run of consecutive labels last to first, so a repeat within one
+            // run is reported as defined on the later label's line.
+            let block = self
+                .funcs
+                .last()
+                .expect("function")
+                .blocks
+                .last()
+                .expect("block");
+            let same_run = same_block && block.run_start[prev.index] == block.run_start[index];
+            let defined = if same_run { line } else { prev.line };
+            let message = format!(
+                "label '{}' already defined on line {defined}",
+                self.name_text(name.sym)
+            );
+            return Err(self.error(span, message));
+        }
+        let id = self.f().add_label(hir::Label {
+            name: name.sym,
+            span,
+        });
+        let label_name = self.name_text(name.sym);
+        let ctx = self.cur();
+        let block = ctx.blocks.last_mut().expect("label block");
+        block.labels.push(PlacedLabel {
+            name: name.sym,
+            id,
+            index,
+            line,
+        });
+        let at_end = index >= block.void_tail;
+        let run = block.run_start[index];
+        // Lua takes a run of labels last to first, so a later label's error in the same run
+        // replaces an earlier one's.
+        let mut found = false;
+        let mut waiting = Vec::new();
+        block.pending.retain(|p| {
+            let matches = p.name == name.sym;
+            if matches {
+                waiting.push((p.stmt, p.line, p.index));
+            }
+            !matches
+        });
+        for (stmt, goto_line, from) in waiting {
+            ctx.f.stmts[stmt.index()].kind = hir::StmtKind::Goto(id);
+            let earlier = block.scope_error.as_ref().is_some_and(|(_, r)| *r != run);
+            if at_end || found || earlier {
+                continue;
+            }
+            if let Some((_, var)) = block.decls.iter().find(|(d, _)| from < *d && *d < index) {
+                let message = format!(
+                    "<goto {label_name}> at line {goto_line} jumps into the scope of '{var}'"
+                );
+                block.scope_error = Some((message, run));
+                found = true;
+            }
+        }
+        Ok(hir::StmtKind::Label(id))
+    }
+
     fn stmts_into(&mut self, b: &ast::Block, stmts: &mut Vec<hir::StmtId>) -> LResult<()> {
-        for s in &b.stmts {
+        for (i, s) in b.stmts.iter().enumerate() {
+            self.cur().blocks.last_mut().expect("label block").current = i;
             self.stmt(s, stmts)?;
         }
         if let Some(ret) = &b.ret {
@@ -383,13 +642,14 @@ impl Lowerer {
                 }
             }
             StmtKind::Repeat { body, until } => {
-                // The condition sees the body's locals.
+                // The condition sees the body's locals, and belongs to the body for `goto`.
                 self.open_scope();
-                let result = self
-                    .block_contents(body)
-                    .and_then(|b| Ok((b, self.expr(until)?)));
+                let end_line = self.end_line_of(until.span);
+                let mut cond = None;
+                let result = self.labelled_block(body, true, end_line, Some((until, &mut cond)));
                 self.close_scope();
-                let (body, until) = result?;
+                let body = result?;
+                let until = cond.expect("until condition");
                 hir::StmtKind::Repeat { body, until }
             }
             StmtKind::If { arms, else_ } => {
@@ -512,8 +772,11 @@ impl Lowerer {
                 hir::StmtKind::LocalFunction { local, func }
             }
             StmtKind::Break => hir::StmtKind::Break,
-            StmtKind::Goto(_) => return Err(self.not_supported(s.span, "'goto' is")),
-            StmtKind::Label(_) => return Err(self.not_supported(s.span, "labels are")),
+            StmtKind::Goto(name) => {
+                self.goto(*name, s.span, stmts);
+                return Ok(());
+            }
+            StmtKind::Label(name) => self.label(*name, s.span)?,
             StmtKind::Global {
                 attrib,
                 names,
@@ -624,7 +887,9 @@ impl Lowerer {
                 self.f().vararg_table = Some(local);
             }
         }
-        let block = self.block_contents(&body.body)?;
+        // A function's `goto` errors are reported at its `end`.
+        let end_line = self.end_line_of(body.span);
+        let block = self.labelled_block(&body.body, false, end_line, None)?;
         self.f().body = block;
         Ok(())
     }

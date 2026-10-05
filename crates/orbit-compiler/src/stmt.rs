@@ -140,6 +140,16 @@ impl FuncState<'_> {
                 hidden,
                 body,
             } => self.generic_for(vars, iter, *hidden, *body),
+            &StmtKind::Goto(l) => {
+                let label = self.goto_label(l);
+                self.jump(Op::Jump { off: 0 }, label);
+                Ok(())
+            }
+            &StmtKind::Label(l) => {
+                let label = self.goto_label(l);
+                self.place(label);
+                Ok(())
+            }
             StmtKind::Break => {
                 let Some(&exit) = self.loops.last() else {
                     return Err(self.error("internal error: break outside a loop"));

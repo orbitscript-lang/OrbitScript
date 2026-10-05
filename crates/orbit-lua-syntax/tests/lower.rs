@@ -80,14 +80,10 @@ fn const_assignment_matches_the_reference() {
 
 #[test]
 fn out_of_subset_constructs_are_rejected() {
-    let cases = [
-        ("goto done", "s.lua:1: 'goto' is not supported yet"),
-        ("do end\n::done::", "s.lua:2: labels are not supported yet"),
-        (
-            "local f <close> = nil",
-            "s.lua:1: '<close>' variables are not supported yet",
-        ),
-    ];
+    let cases = [(
+        "local f <close> = nil",
+        "s.lua:1: '<close>' variables are not supported yet",
+    )];
     for (src, expected) in cases {
         assert_eq!(err(src), expected, "source: {src:?}");
     }
@@ -286,4 +282,76 @@ fn named_varargs_keep_their_table_only_when_needed() {
         let text = dump(src);
         assert!(text.contains("(...t#l0)"), "{src}: {text}");
     }
+}
+
+/// `goto` and labels. Each message was checked against the reference.
+#[test]
+fn goto_rules_match_the_reference() {
+    let cases = [
+        (
+            "goto f\nlocal x\n::f::\nprint(x)",
+            "s.lua:4: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        // Reported at the line of the block's last token (`end` for a function).
+        (
+            "do goto f\nlocal x\n::f::\nprint(x)\n\nend",
+            "s.lua:4: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        (
+            "local function g() goto f\nlocal x\n::f::\nprint(x)\n\nend",
+            "s.lua:6: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        (
+            "repeat goto f\nlocal x\n::f::\nuntil\nx",
+            "s.lua:5: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        (
+            "goto f\nlocal x\n::f::\nreturn",
+            "s.lua:4: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        (
+            "goto f\nglobal *\n::f::\nx = 1",
+            "s.lua:4: <goto f> at line 1 jumps into the scope of '*'",
+        ),
+        (
+            "goto f; local a; goto g; local b; ::g:: ::f:: x = 1",
+            "s.lua:1: <goto f> at line 1 jumps into the scope of 'a'",
+        ),
+        (
+            "goto x\n\ny = 1\n-- c\n",
+            "s.lua:3: no visible label 'x' for <goto> at line 1",
+        ),
+        (
+            "local function f()\n goto x\n end\ny = 2",
+            "s.lua:3: no visible label 'x' for <goto> at line 2",
+        ),
+        (
+            "goto f; do ::f:: end",
+            "s.lua:1: no visible label 'f' for <goto> at line 1",
+        ),
+        (
+            "::a:: do ::a:: end",
+            "s.lua:1: label 'a' already defined on line 1",
+        ),
+        (
+            "::a::\nx=1\n::a::",
+            "s.lua:3: label 'a' already defined on line 1",
+        ),
+        // Lua takes a run of labels last to first.
+        (
+            "::a::\n::b::\n::a::",
+            "s.lua:3: label 'a' already defined on line 3",
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(err(src), expected, "source: {src:?}");
+    }
+    // A label followed only by labels is outside the block's scopes.
+    hir("goto f; local x; ::f:: ::g::");
+    hir("do goto f; local x; ::f:: end");
+    hir("do ::a:: end ::a::");
+    hir("::top:: local x = 1 goto top");
+    let text = dump("do goto f end ::f::");
+    assert!(text.contains("goto \"f\"#L0"), "{text}");
+    assert!(text.contains("::\"f\"#L0::"), "{text}");
 }
