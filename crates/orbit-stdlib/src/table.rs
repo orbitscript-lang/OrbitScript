@@ -216,10 +216,7 @@ fn create(ctx: &mut NativeCtx<'_>) -> R {
     if m > MAX_HASH {
         return Err(ctx.error("table overflow"));
     }
-    let t = Table::with_capacity(
-        (n as usize).min(MAX_RESERVE),
-        (m as usize).min(MAX_RESERVE),
-    );
+    let t = Table::with_capacity((n as usize).min(MAX_RESERVE), (m as usize).min(MAX_RESERVE));
     let t = ctx.new_table(t);
     ctx.ret1(Value::Table(t))
 }
