@@ -11,6 +11,7 @@
 mod cold;
 mod interp;
 mod link;
+mod meta;
 mod native;
 mod ops;
 
@@ -19,10 +20,13 @@ use std::io::Write;
 use std::time::Instant;
 
 use orbit_core::table::{self, mark};
-use orbit_core::{Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Table, Value};
+use orbit_core::{
+    Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Table, UserData, Value,
+};
 use orbit_gc::{Liveness, Marker, Roots};
 
-pub use native::{CallOutcome, Continuation, FastFn, NativeCtx, NativeFn, NativeReturn};
+pub use meta::Event;
+pub use native::{CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
 pub use orbit_bytecode as op;
 pub use orbit_core;
@@ -94,6 +98,12 @@ pub(crate) enum FrameKind {
         /// Where the requested call's function sits.
         call_at: u32,
     },
+    /// Below a metamethod call: how to finish the instruction that needed
+    /// it once the call returns (its result is at the frame's `func`).
+    Meta {
+        action: meta::MetaAction,
+        event: Event,
+    },
 }
 
 /// One activation record.
@@ -154,6 +164,8 @@ pub struct Runtime {
     pub(crate) pinned: Vec<Value>,
     /// End of the values of the last open-ended call or `Vararg`.
     pub(crate) top: usize,
+    /// Event names and per-type metatables.
+    pub(crate) metas: meta::Metas,
 }
 
 /// Library state kept per VM, keyed by type. It holds plain Rust data, never
@@ -207,6 +219,12 @@ impl Roots<LuaSpace> for Runtime {
         for &v in &self.pinned {
             mark(m, v);
         }
+        for &s in self.metas.events.all() {
+            m.mark(s);
+        }
+        for t in self.metas.type_meta.iter().flatten() {
+            m.mark(*t);
+        }
     }
 
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
@@ -233,10 +251,12 @@ impl Vm {
         let mut heap = LuaHeap::new();
         let globals = heap.alloc(Table::new());
         let dead_cell = heap.alloc(Cell::default());
+        let mut strings = Interner::new();
+        let events = meta::Events::new(&mut heap, &mut strings);
         Vm {
             heap,
             rt: Runtime {
-                strings: Interner::new(),
+                strings,
                 globals,
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
@@ -248,6 +268,10 @@ impl Vm {
                 dead_cell,
                 pinned: Vec::new(),
                 top: 0,
+                metas: meta::Metas {
+                    events,
+                    type_meta: Default::default(),
+                },
             },
         }
     }
@@ -307,6 +331,32 @@ impl Vm {
     pub fn global(&mut self, name: &str) -> Value {
         let k = self.new_str(name.as_bytes());
         table::get(&self.heap, self.rt.globals, k)
+    }
+
+    /// A new userdata holding `data`, with no metatable (unrooted until
+    /// stored somewhere Lua can reach, or pinned).
+    pub fn new_userdata<T: std::any::Any>(&mut self, data: T) -> Gc<UserData> {
+        self.heap.alloc(UserData::new(data))
+    }
+
+    /// The host value of userdata `u`, if it is a `T`.
+    pub fn userdata_ref<T: std::any::Any>(&self, u: Gc<UserData>) -> Option<&T> {
+        self.heap.get(u).downcast_ref()
+    }
+
+    /// The host value of userdata `u`, mutably, if it is a `T`.
+    pub fn userdata_mut<T: std::any::Any>(&mut self, u: Gc<UserData>) -> Option<&mut T> {
+        self.heap.get_mut(u).downcast_mut()
+    }
+
+    /// Set (or clear) the metatable of table `t` or userdata `u`.
+    pub fn set_metatable(&mut self, v: Value, meta: Option<Gc<Table>>) -> bool {
+        match v {
+            Value::Table(t) => self.heap.update(t, |t| t.meta = meta),
+            Value::UserData(u) => self.heap.update(u, |u| u.meta = meta),
+            _ => return false,
+        }
+        true
     }
 
     /// Keep `v` alive until [`Vm::unpin`].

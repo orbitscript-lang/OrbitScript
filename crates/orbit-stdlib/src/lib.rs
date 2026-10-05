@@ -22,7 +22,10 @@ use orbit_vm::{NativeFn, Vm};
 pub fn open_libs(vm: &mut Vm) {
     base::open(vm);
     #[cfg(feature = "string")]
-    open_lib(vm, "string", string::FUNCTIONS);
+    {
+        let st = open_lib(vm, "string", string::FUNCTIONS);
+        string::set_metatable_index(vm, st);
+    }
     #[cfg(feature = "utf8")]
     {
         let u = open_lib(vm, "utf8", utf8::FUNCTIONS);

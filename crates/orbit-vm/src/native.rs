@@ -4,7 +4,19 @@ use orbit_bytecode::{Op, Origin};
 use orbit_core::number::{self, float_to_int};
 use orbit_core::{Gc, LuaHeap, LuaStr, NativeId, Table, Value};
 
+use crate::meta::{self, Event};
+use crate::ops::Exc;
 use crate::{FrameKind, LuaError, Runtime, ops};
+
+/// The outcome of an operation that may need a metamethod: either the
+/// answer, or a function to call. For [`Meta::Call`] the arguments are
+/// already pushed on the window; return
+/// `NativeReturn::CallThen { f, nargs, k, .. }` and take the result in `k`.
+#[derive(Debug, Clone, Copy)]
+pub enum Meta<T> {
+    Done(T),
+    Call { f: Value, nargs: usize },
+}
 
 /// A native function.
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
@@ -303,6 +315,116 @@ impl NativeCtx<'_> {
             Value::Table(t) => Ok(t),
             _ => Err(self.type_error(i, "table")),
         }
+    }
+
+    // ---- metatables ------------------------------------------------------
+
+    /// The metatable of `v`, if any.
+    pub fn metatable(&self, v: Value) -> Option<Gc<Table>> {
+        self.rt.metatable(self.heap, v)
+    }
+
+    /// Field `e` of `v`'s metatable (raw), or nil.
+    pub fn metamethod(&self, v: Value, e: Event) -> Value {
+        self.rt.metamethod(self.heap, v, e)
+    }
+
+    /// Turn a slow path's result into a [`Meta`]: a metamethod call gets
+    /// its arguments pushed, an error gets positioned at the caller.
+    fn meta_result<T>(&mut self, r: Result<T, Exc>) -> Result<Meta<T>, LuaError> {
+        match r {
+            Ok(v) => Ok(Meta::Done(v)),
+            Err(Exc::Meta(call)) => {
+                let n = call.nargs as usize;
+                for &a in &call.args[..n] {
+                    self.push(a);
+                }
+                Ok(Meta::Call {
+                    f: call.f,
+                    nargs: n,
+                })
+            }
+            Err(Exc::Rt(msg, _)) => Err(self.error(msg)),
+            Err(Exc::Plain(msg)) => Err(LuaError::new(self.new_str(msg.as_bytes()))),
+            Err(Exc::Lua(e)) => Err(e),
+            Err(Exc::Index { .. } | Exc::NewIndex { .. }) => {
+                unreachable!("only the dispatch loop defers indexing")
+            }
+        }
+    }
+
+    /// `obj[key]` with metamethods.
+    pub fn index(&mut self, obj: Value, key: Value) -> Result<Meta<Value>, LuaError> {
+        let r = match obj {
+            Value::Table(t) => {
+                let tab = self.heap.get(t);
+                let v = tab.get(self.heap, key);
+                if !v.is_nil() || tab.meta.is_none() {
+                    Ok(v)
+                } else {
+                    meta::index(self.heap, &self.rt.metas, obj, key)
+                }
+            }
+            _ => meta::index(self.heap, &self.rt.metas, obj, key),
+        };
+        self.meta_result(r)
+    }
+
+    /// `obj[key] = v` with metamethods.
+    pub fn set_index(&mut self, obj: Value, key: Value, v: Value) -> Result<Meta<()>, LuaError> {
+        let r = meta::new_index(self.heap, &self.rt.metas, obj, key, v);
+        self.meta_result(r)
+    }
+
+    /// `#v` with `__len`.
+    pub fn length(&mut self, v: Value) -> Result<Meta<Value>, LuaError> {
+        let r = crate::cold::op_len(self.heap, &self.rt.metas, v);
+        self.meta_result(r)
+    }
+
+    /// `a < b` with `__lt`.
+    pub fn less_than(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
+        let r = ops::less_than(self.heap, &self.rt.metas, a, b);
+        self.meta_result(r)
+    }
+
+    /// `a == b` with `__eq`.
+    pub fn equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
+        let r = ops::equal(self.heap, &self.rt.metas, a, b);
+        self.meta_result(r)
+    }
+
+    // ---- userdata --------------------------------------------------------
+
+    /// The host value of userdata `u`, if it is a `T`.
+    pub fn userdata_ref<T: std::any::Any>(&self, u: Gc<orbit_core::UserData>) -> Option<&T> {
+        self.heap.get(u).downcast_ref()
+    }
+
+    /// The host value of userdata `u`, mutably, if it is a `T`.
+    pub fn userdata_mut<T: std::any::Any>(
+        &mut self,
+        u: Gc<orbit_core::UserData>,
+    ) -> Option<&mut T> {
+        self.heap.get_mut(u).downcast_mut()
+    }
+
+    /// A userdata argument holding a `T`; `name` is the type the message
+    /// names (`FILE*`).
+    pub fn check_userdata<T: std::any::Any>(
+        &mut self,
+        i: usize,
+        name: &str,
+    ) -> Result<Gc<orbit_core::UserData>, LuaError> {
+        match self.arg(i) {
+            Value::UserData(u) if self.heap.get(u).is::<T>() => Ok(u),
+            _ => Err(self.type_error(i, name)),
+        }
+    }
+
+    /// A new userdata (unrooted until stored in the window).
+    pub fn new_userdata<T: std::any::Any>(&mut self, data: T) -> Gc<orbit_core::UserData> {
+        self.heap.alloc(orbit_core::UserData::new(data))
     }
 
     /// Run a full collection (`collectgarbage("collect")`).
