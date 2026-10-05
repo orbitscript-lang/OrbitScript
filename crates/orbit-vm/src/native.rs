@@ -57,6 +57,21 @@ pub enum NativeReturn {
         k: Continuation,
         protected: bool,
     },
+    /// Resume coroutine `co` with the last `nargs` values of the window,
+    /// then run `k` when it yields (`Ok` with the yielded values), returns
+    /// (`Ok` with its results) or fails (`Err`). A coroutine that isn't
+    /// suspended, or one nested too deeply, gets `k` an `Err` at once.
+    Resume {
+        co: Gc<orbit_core::Thread>,
+        nargs: usize,
+        k: Continuation,
+    },
+    /// Yield the last `nvals` values of the window to the resumer. The
+    /// values the next resume passes become this native's results.
+    Yield { nvals: usize },
+    /// End the running coroutine as if its body had returned nothing
+    /// (`coroutine.close` of itself).
+    Exit,
 }
 
 /// A native function's view of the VM: its window of the stack (arguments,
@@ -68,6 +83,8 @@ pub struct NativeCtx<'a> {
     pub(crate) base: usize,
     pub(crate) nargs: usize,
     pub(crate) id: NativeId,
+    /// The native closure being called, for its upvalues.
+    pub(crate) upvals: Option<Gc<orbit_core::Closure>>,
 }
 
 impl NativeCtx<'_> {

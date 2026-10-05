@@ -12,5 +12,10 @@ publish = false
 orbit-core = { path = "../orbit-core" }
 orbit-vm = { path = "../orbit-vm" }
 
+[features]
+default = ["coroutine"]
+# The `coroutine` library.
+coroutine = []
+
 [lints]
 workspace = true

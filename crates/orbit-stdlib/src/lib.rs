@@ -5,6 +5,8 @@
 //! library, so hosts can open only the libraries they want.
 
 mod base;
+#[cfg(feature = "coroutine")]
+mod coroutine;
 mod math;
 mod string;
 mod table;
@@ -24,6 +26,8 @@ pub fn open_libs(vm: &mut Vm) {
         vm.set_native_fast_path(name, fast);
     }
     open_lib(vm, "os", &[("os.clock", os_clock)]);
+    #[cfg(feature = "coroutine")]
+    open_lib(vm, "coroutine", coroutine::FUNCTIONS);
 }
 
 /// Register `functions` (qualified names such as `"string.rep"`) in a new

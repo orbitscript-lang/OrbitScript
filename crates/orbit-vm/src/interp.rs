@@ -28,8 +28,11 @@ pub(crate) enum Flow {
     /// The top frame changed (or its registers were touched by a call):
     /// reload it.
     Reload,
-    /// The frame stack is back at the level the run started from.
+    /// Returned into the boundary frame the run started from.
     Done,
+    /// A coroutine switch replaced the running stack: reload, and don't
+    /// trust anything the loop knew about the frame.
+    Switched,
 }
 
 impl Vm {
@@ -45,7 +48,10 @@ impl Vm {
         };
         match flow {
             Flow::Done => Ok(()),
-            Flow::Reload => self.run(),
+            Flow::Reload | Flow::Switched => {
+                self.rt.switched = false;
+                self.run()
+            }
         }
     }
 
@@ -95,6 +101,7 @@ impl Vm {
                     base: func + 1,
                     nargs,
                     id,
+                    upvals: None,
                 };
                 let r = f(&mut ctx)?;
                 self.native_returned(r, None, func, want, id)
@@ -273,6 +280,7 @@ impl Vm {
                 self.rt.stack.frames.pop();
                 Ok(Flow::Done)
             }
+            FrameKind::CoBase => self.co_returned(),
             // The frame's window lies below the callee's, so the stack is
             // long enough for it.
             FrameKind::Lua { .. } => Ok(Flow::Reload),
@@ -286,6 +294,7 @@ impl Vm {
                     base: f.base as usize,
                     nargs: f.nvarargs as usize,
                     id,
+                    upvals: None,
                 };
                 let r = k(&mut ctx, CallOutcome::Ok(top - call_at as usize))?;
                 self.native_returned(r, Some(f), f.func as usize, f.want, id)
@@ -295,7 +304,7 @@ impl Vm {
 
     /// Act on what a native returned. `frame` is its continuation frame, if
     /// it has one on top of the stack.
-    fn native_returned(
+    pub(crate) fn native_returned(
         &mut self,
         r: NativeReturn,
         frame: Option<Frame>,
@@ -347,6 +356,14 @@ impl Vm {
                     }
                 }
                 self.call_value(at, nargs, MULTI)
+            }
+            NativeReturn::Resume { co, nargs, k } => {
+                self.resume(co, nargs, k, frame, func, want, id)
+            }
+            NativeReturn::Yield { nvals } => self.yield_(nvals, frame, func, want, id),
+            NativeReturn::Exit => {
+                self.rt.xfer.clear();
+                self.co_finished(Ok(()))
             }
         }
     }
@@ -409,10 +426,21 @@ impl Vm {
                             protected: true,
                             ..
                         } | FrameKind::Boundary
+                            | FrameKind::CoBase
                     )
                 })
                 .expect("a boundary below every running frame");
             let f = self.rt.stack.frames[idx];
+            if let FrameKind::CoBase = f.kind {
+                // The coroutine dies; its resumer gets the error.
+                match self.co_finished(Err(e.value)) {
+                    Ok(flow) => return Ok(flow),
+                    Err(x) => {
+                        e = self.make_error(x);
+                        continue;
+                    }
+                }
+            }
             let FrameKind::Native { id, k, call_at, .. } = f.kind else {
                 // The boundary: the error leaves the VM.
                 if e.traceback.is_none() {
@@ -433,6 +461,7 @@ impl Vm {
                 base: f.base as usize,
                 nargs: f.nvarargs as usize,
                 id,
+                upvals: None,
             };
             match k(&mut ctx, CallOutcome::Err(e.value)) {
                 Err(e2) => {
@@ -453,7 +482,7 @@ impl Vm {
         let frames = &self.rt.stack.frames;
         let from = frames
             .iter()
-            .rposition(|f| matches!(f.kind, FrameKind::Boundary))
+            .rposition(|f| matches!(f.kind, FrameKind::Boundary | FrameKind::CoBase))
             .map_or(0, |i| i + 1);
         let frames = &frames[from..];
         for (i, f) in frames.iter().enumerate().rev() {
@@ -463,7 +492,7 @@ impl Vm {
                 _ => None,
             };
             match f.kind {
-                FrameKind::Meta { .. } | FrameKind::Boundary => {}
+                FrameKind::Meta { .. } | FrameKind::Boundary | FrameKind::CoBase => {}
                 FrameKind::Lua { .. } | FrameKind::Native { .. } if as_meta.is_some() => {
                     let line = match f.kind {
                         FrameKind::Lua { closure, .. } => {
@@ -606,9 +635,16 @@ impl Vm {
             macro_rules! throw {
                 ($x:expr) => {{
                     let x = $x;
-                    save_pc!();
+                    // After a coroutine switch, the running stack isn't the
+                    // one this loop's frame state describes.
+                    if !std::mem::take(&mut self.rt.switched) {
+                        save_pc!();
+                    }
                     match self.raise(x) {
-                        Ok(Flow::Reload) => continue 'reload,
+                        Ok(Flow::Reload | Flow::Switched) => {
+                            self.rt.switched = false;
+                            continue 'reload;
+                        }
                         Ok(Flow::Done) => return Ok(()),
                         Err(e) => return Err(e),
                     }
@@ -626,6 +662,10 @@ impl Vm {
                 ($e:expr) => {
                     match $e {
                         Ok(Flow::Reload) => continue 'reload,
+                        Ok(Flow::Switched) => {
+                            self.rt.switched = false;
+                            continue 'reload;
+                        }
                         Ok(Flow::Done) => return Ok(()),
                         Err(x) => throw!(x),
                     }
@@ -1194,7 +1234,14 @@ impl Vm {
                         } else {
                             nargs as usize
                         };
-                        if let Value::Closure(c) = w[func as usize] {
+                        // A native closure in tail position is called like
+                        // a native, keeping this frame, as natives are.
+                        if let Value::Closure(c) = w[func as usize]
+                            && !matches!(
+                                self.heap.get(c).code.code.first(),
+                                Some(Op::NativeEntry { .. })
+                            )
+                        {
                             let f = self.rt.stack.frames.pop().expect("frame");
                             self.rt.stack.cells.truncate(f.cell_base as usize);
                             let dst = f.func as usize;
@@ -1335,6 +1382,9 @@ impl Vm {
                         }
                     }
 
+                    Op::NativeEntry { id } => {
+                        flow!(self.native_entry(closure, orbit_core::NativeId(id)))
+                    }
                     Op::Closure { dst, proto } => {
                         let c = self.op_closure(closure, cell_base!(), proto as usize);
                         w = window!();

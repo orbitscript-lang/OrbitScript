@@ -105,6 +105,8 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 }
                 Op::GenericLoop { base, back } => regs(base, 5) && target(back),
                 Op::Closure { dst, proto } => reg(dst) && (proto as usize) < p.children.len(),
+                // Only the VM's native-closure stubs hold it.
+                Op::NativeEntry { .. } => false,
             };
             if !ok {
                 return err(pc, "operand out of range");

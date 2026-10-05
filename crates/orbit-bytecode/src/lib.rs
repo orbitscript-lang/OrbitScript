@@ -243,6 +243,10 @@ pub enum Op {
     /// `R[dst] = closure of child prototype proto`, its captures built from
     /// the child's [`CaptureSource`] list.
     Closure { dst: Reg, proto: u16 },
+    /// The whole body of a native closure's stub prototype (never emitted
+    /// by a compiler): run native `id` with the frame's arguments, the
+    /// closure's captures as its upvalues, in place of this frame.
+    NativeEntry { id: u32 },
 }
 
 const _: () = assert!(core::mem::size_of::<Op>() == 8);

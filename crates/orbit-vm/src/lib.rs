@@ -9,6 +9,7 @@
 //! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
 
 mod cold;
+mod coro;
 mod interp;
 mod link;
 mod meta;
@@ -21,10 +22,12 @@ use std::time::Instant;
 
 use orbit_core::table::{self, mark};
 use orbit_core::{
-    Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Table, UserData, Value,
+    Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table, Thread,
+    UserData, Value,
 };
 use orbit_gc::{Liveness, Marker, Roots};
 
+pub use coro::CoStatus;
 pub use meta::Event;
 pub use native::{CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
@@ -107,6 +110,9 @@ pub(crate) enum FrameKind {
     /// The bottom of a [`Vm::call`]: returning into it ends the call, and
     /// an error unwinding to it is returned to the embedder.
     Boundary,
+    /// The bottom of every coroutine's stack: the body returning into it
+    /// finishes the coroutine, and an error reaching it kills it.
+    CoBase,
 }
 
 /// One activation record.
@@ -144,6 +150,34 @@ pub(crate) struct Stack {
     pub callee: Option<(Gc<Closure>, crate::interp::Shape)>,
 }
 
+impl Stack {
+    /// Mark everything the stack refers to (the running stack is a root;
+    /// a parked one is traced through its thread).
+    pub(crate) fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
+        for &v in &self.regs {
+            mark(m, v);
+        }
+        for &c in &self.cells {
+            m.mark(c);
+        }
+        for f in &self.frames {
+            if let FrameKind::Lua { closure, .. } = f.kind {
+                m.mark(closure);
+            }
+        }
+        if let Some((c, _)) = self.callee {
+            m.mark(c);
+        }
+    }
+
+    /// Heap bytes the stack owns.
+    pub(crate) fn bytes(&self) -> usize {
+        self.regs.capacity() * std::mem::size_of::<Value>()
+            + self.cells.capacity() * std::mem::size_of::<Gc<Cell>>()
+            + self.frames.capacity() * std::mem::size_of::<Frame>()
+    }
+}
+
 /// Everything in the VM except the heap, split off so the heap can be
 /// borrowed mutably while this is borrowed as its [`Roots`].
 #[derive(Debug)]
@@ -166,6 +200,19 @@ pub struct Runtime {
     pub(crate) top: usize,
     /// Event names and per-type metatables.
     pub(crate) metas: meta::Metas,
+    /// The thread whose stack is `stack`.
+    pub(crate) current: Gc<Thread>,
+    pub(crate) main_thread: Gc<Thread>,
+    /// The threads waiting in `resume` for the one above them, innermost
+    /// last: the running coroutine's resumer is the last.
+    pub(crate) resumers: Vec<Gc<Thread>>,
+    /// Values moving between two stacks during a switch.
+    pub(crate) xfer: Vec<Value>,
+    /// Set by a stack switch, so the dispatch loop doesn't save its pc into
+    /// the other stack's frames; cleared when the loop reloads.
+    pub(crate) switched: bool,
+    /// The stub prototype of each native that has native closures.
+    pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
 }
 
 /// `Write` that can be printed with `{:?}`.
@@ -176,19 +223,17 @@ impl Roots<LuaSpace> for Runtime {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         m.mark(self.globals);
         m.mark(self.dead_cell);
-        for &v in &self.stack.regs {
+        self.stack.trace(m);
+        m.mark(self.current);
+        m.mark(self.main_thread);
+        for &t in &self.resumers {
+            m.mark(t);
+        }
+        for &v in &self.xfer {
             mark(m, v);
         }
-        for &c in &self.stack.cells {
-            m.mark(c);
-        }
-        for f in &self.stack.frames {
-            if let FrameKind::Lua { closure, .. } = f.kind {
-                m.mark(closure);
-            }
-        }
-        if let Some((c, _)) = self.stack.callee {
-            m.mark(c);
+        for &p in self.native_protos.values() {
+            m.mark(p);
         }
         for &v in &self.pinned {
             mark(m, v);
@@ -227,6 +272,7 @@ impl Vm {
         let dead_cell = heap.alloc(Cell::default());
         let mut strings = Interner::new();
         let events = meta::Events::new(&mut heap, &mut strings);
+        let main_thread = heap.alloc(Thread::new(coro::Coroutine::main()));
         Vm {
             heap,
             rt: Runtime {
@@ -245,6 +291,12 @@ impl Vm {
                     events,
                     type_meta: Default::default(),
                 },
+                current: main_thread,
+                main_thread,
+                resumers: Vec::new(),
+                xfer: Vec::new(),
+                switched: false,
+                native_protos: Default::default(),
             },
         }
     }
