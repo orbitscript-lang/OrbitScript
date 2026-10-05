@@ -242,7 +242,7 @@ fn date(ctx: &mut NativeCtx<'_>) -> R {
         time::breakdown(t, 0, false, "GMT")
     } else {
         let l = tz::at(t);
-        time::breakdown(t + l.offset, l.offset, l.isdst, l.zone)
+        time::breakdown(t + l.offset, l.offset, l.isdst, &l.zone)
     };
     if !year_fits(tm.year) {
         return Err(ctx.error("date result cannot be represented in this installation"));
@@ -336,10 +336,15 @@ fn time_(ctx: &mut NativeCtx<'_>) -> R {
     let hour = get_field(ctx, t, "hour", Some(12), 0)?;
     let min = get_field(ctx, t, "min", Some(0), 0)?;
     let sec = get_field(ctx, t, "sec", Some(0), 0)?;
+    let k = ctx.new_str(b"isdst");
+    let isdst = match tbl::get(ctx.heap, t, k) {
+        Value::Nil => None,
+        v => Some(!v.is_falsy()),
+    };
     let local = time::local_seconds(year, month, day, hour, min, sec);
-    let utc = tz::from_local(local);
+    let utc = tz::from_local(local, isdst);
     let l = tz::at(utc);
-    let tm = time::breakdown(utc + l.offset, l.offset, l.isdst, l.zone);
+    let tm = time::breakdown(utc + l.offset, l.offset, l.isdst, &l.zone);
     if !year_fits(tm.year) {
         return Err(ctx.error("time result cannot be represented in this installation"));
     }
