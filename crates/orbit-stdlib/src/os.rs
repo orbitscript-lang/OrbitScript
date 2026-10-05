@@ -42,8 +42,8 @@ pub(crate) fn file_error(ctx: &mut NativeCtx<'_>, e: &std::io::Error, name: Opti
 }
 
 fn clock(ctx: &mut NativeCtx<'_>) -> R {
-    // Wall time since the VM started until the ADR-7 decision on CPU time
-    // (docs/design/chunks-io-os-cli.md, "os").
+    // Wall time since the VM started, not CPU time: std has no CPU clock and
+    // ADR-7 adds no dependency for one (tests/lua-5.5/DEVIATIONS.md).
     let t = ctx.rt.start.elapsed().as_secs_f64();
     ctx.ret1(Value::Float(t))
 }
