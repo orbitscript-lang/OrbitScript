@@ -4,7 +4,7 @@ mod rng;
 
 use orbit_vm::orbit_core::number::{self, float_to_int, str_to_number};
 use orbit_vm::orbit_core::{Gc, Table, Value};
-use orbit_vm::{FastFn, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_vm::{CallOutcome, FastFn, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
 
 use rng::Xoshiro;
 
@@ -331,40 +331,78 @@ fn less(a: Value, b: Value) -> bool {
     }
 }
 
-/// `a < b` for `min`/`max`: numbers and strings compare directly; other
-/// values need `__lt`.
-fn compare(ctx: &mut NativeCtx<'_>, a: Value, b: Value) -> Result<bool, LuaError> {
-    match (a, b) {
-        (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => Ok(less(a, b)),
-        (Value::Str(x), Value::Str(y)) => Ok(ctx.bytes(x) < ctx.bytes(y)),
-        _ => {
-            // TODO(thread 2 native API): try `__lt` through CallThen.
-            let (ta, tb) = (a.type_name(), b.type_name());
-            let msg = if ta == tb {
-                format!("attempt to compare two {ta} values")
-            } else {
-                format!("attempt to compare {ta} with {tb}")
-            };
-            let e = ctx.new_str(msg.as_bytes());
-            Err(ctx.error_value(e))
+/// `max`/`min`: the first argument that no later one beats under `<`
+/// (`__lt` included). State in the last two window slots: the next index
+/// to compare, then the index of the best so far. (Continuations find it
+/// from the end, because they don't see the original argument count.)
+fn extreme(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
+    ctx.check_any(0)?;
+    let n = ctx.nargs();
+    ctx.truncate(n);
+    ctx.push(Value::Int(1));
+    ctx.push(Value::Int(0));
+    extreme_run(ctx, want_max)
+}
+
+/// The argument count of a running `extreme`.
+fn extreme_nargs(ctx: &NativeCtx<'_>) -> usize {
+    ctx.len() - 2
+}
+
+fn slot(ctx: &NativeCtx<'_>, i: usize) -> usize {
+    match ctx.arg(i) {
+        Value::Int(n) => n as usize,
+        _ => 0,
+    }
+}
+
+fn extreme_run(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
+    let n = extreme_nargs(ctx);
+    loop {
+        let (i, best) = (slot(ctx, n), slot(ctx, n + 1));
+        if i >= n {
+            let v = ctx.arg(best);
+            return ctx.ret1(v);
+        }
+        let (a, b) = if want_max {
+            (ctx.arg(best), ctx.arg(i))
+        } else {
+            (ctx.arg(i), ctx.arg(best))
+        };
+        match ctx.less_than(a, b)? {
+            Meta::Done(better) => extreme_step(ctx, better),
+            Meta::Call { f, nargs } => {
+                return Ok(NativeReturn::CallThen {
+                    f,
+                    nargs,
+                    k: if want_max { max_after_lt } else { min_after_lt },
+                    protected: false,
+                });
+            }
         }
     }
 }
 
-fn extreme(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
-    let mut best = ctx.check_any(0)?;
-    for i in 1..ctx.nargs() {
-        let v = ctx.arg(i);
-        let better = if want_max {
-            compare(ctx, best, v)?
-        } else {
-            compare(ctx, v, best)?
-        };
-        if better {
-            best = v;
-        }
+/// Record one comparison: the candidate wins if `better`.
+fn extreme_step(ctx: &mut NativeCtx<'_>, better: bool) {
+    let n = extreme_nargs(ctx);
+    let i = slot(ctx, n);
+    if better {
+        ctx.set(n + 1, Value::Int(i as i64));
     }
-    ctx.ret1(best)
+    ctx.set(n, Value::Int(i as i64 + 1));
+}
+
+fn max_after_lt(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> R {
+    let r = crate::first_result(ctx, out)?;
+    extreme_step(ctx, !r.is_falsy());
+    extreme_run(ctx, true)
+}
+
+fn min_after_lt(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> R {
+    let r = crate::first_result(ctx, out)?;
+    extreme_step(ctx, !r.is_falsy());
+    extreme_run(ctx, false)
 }
 
 fn max(ctx: &mut NativeCtx<'_>) -> R {

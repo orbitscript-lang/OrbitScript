@@ -4,8 +4,10 @@ floats.lua
 meta_index.lua
 meta_ops.lua
 stdlib_math.lua
+stdlib_meta.lua
 stdlib_pack.lua
 stdlib_string.lua
 stdlib_table.lua
 stdlib_utf8.lua
+tables.lua
 uncaught.lua

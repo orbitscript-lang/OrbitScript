@@ -1,11 +1,12 @@
 //! The `string` library.
 
+mod arith;
 mod format;
 mod pack;
 pub(crate) mod pattern;
 
 use orbit_vm::orbit_core::{Gc, LuaStr, Table, Tag, Value};
-use orbit_vm::{CallOutcome, Event, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_vm::{CallOutcome, Event, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
 
 use pattern::{Capture, Matcher, PatternError};
 
@@ -398,11 +399,26 @@ fn add_value(
             ctx.push(v);
             Ok(None)
         }
-        Value::Table(t) => {
+        Value::Table(_) => {
             let key = capture_value(ctx, s, f.caps[0]);
-            let v = orbit_vm::orbit_core::table::get(ctx.heap, t, key);
-            replacement_result(ctx, s, f, v)?;
-            Ok(None)
+            match ctx.index(repl, key)? {
+                Meta::Done(v) => {
+                    replacement_result(ctx, s, f, v)?;
+                    Ok(None)
+                }
+                // `__index` is a function: call it like a function
+                // replacement.
+                Meta::Call { f: h, nargs } => {
+                    ctx.set(G_MSTART, Value::Int(f.start as i64));
+                    ctx.set(G_MEND, Value::Int(f.end as i64));
+                    Ok(Some(NativeReturn::CallThen {
+                        f: h,
+                        nargs,
+                        k: gsub_after_call,
+                        protected: false,
+                    }))
+                }
+            }
         }
         _ => {
             ctx.set(G_MSTART, Value::Int(f.start as i64));
@@ -525,10 +541,12 @@ fn finish_gsub(ctx: &mut NativeCtx<'_>, count: i64) -> R {
     Ok(NativeReturn::Return(2))
 }
 
-/// Point the shared string metatable's `__index` at the `string` table.
+/// Point the shared string metatable's `__index` at the `string` table and
+/// add its arithmetic metamethods.
 pub(crate) fn set_metatable_index(vm: &mut Vm, string: Gc<Table>) {
     if let Some(mt) = vm.rt.type_meta(Tag::Str) {
         let k = Value::Str(vm.rt.event_name(Event::Index));
         vm.table_set(mt, k, Value::Table(string));
+        arith::install(vm, mt);
     }
 }
