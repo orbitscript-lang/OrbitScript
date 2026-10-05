@@ -477,6 +477,48 @@ fn pacing_triggers_steps_and_stop_disables_them() {
     assert_eq!(h.bytes(), 0);
 }
 
+#[test]
+fn bigger_explicit_steps_finish_a_cycle_in_fewer_calls() {
+    // gc.lua's `dosteps`: `collectgarbage("step", n)` while stopped.
+    fn steps(bytes: usize) -> usize {
+        let mut h = TestHeap::new();
+        let mut roots = Stack((0..100).map(|i| Ref::Obj(obj(&mut h, i))).collect());
+        for i in 0..2000 {
+            obj(&mut h, i);
+        }
+        h.stop();
+        let mut n = 1;
+        while !h.step_with(&mut roots, bytes) {
+            n += 1;
+        }
+        assert!(
+            h.is_stopped(),
+            "an explicit step doesn't restart the collector"
+        );
+        assert_eq!(h.count::<common::Obj>(), 100);
+        n
+    }
+    assert!(steps(10 * 1024) < steps(2 * 1024));
+    // 0 is one basic step, the size of an automatic one.
+    assert!(steps(0) > 1);
+}
+
+#[test]
+fn zero_step_bytes_makes_every_step_a_whole_cycle() {
+    let mut h = TestHeap::new();
+    h.params_mut().step_bytes = 0;
+    let mut roots = Stack(vec![Ref::Obj(obj(&mut h, 0))]);
+    for i in 0..1000 {
+        obj(&mut h, i);
+    }
+    assert!(h.step(&mut roots));
+    assert_eq!(h.count::<common::Obj>(), 1);
+    assert!(h.step_with(&mut roots, 1));
+    assert_eq!(h.phase(), Phase::Pause);
+    // Automatic collection still waits for the heap to grow first.
+    assert!(!h.should_step());
+}
+
 /// Allocate `n` garbage objects, stepping the collector whenever it asks,
 /// and return the largest heap size seen.
 fn churn(h: &mut TestHeap, roots: &mut Stack, n: u64) -> usize {
