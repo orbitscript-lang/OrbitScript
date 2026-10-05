@@ -4,10 +4,11 @@ use std::rc::Rc;
 
 use orbit_bytecode::{MULTI, Op, Origin};
 use orbit_core::number::{ArithOp, Number};
-use orbit_core::table;
+use orbit_core::table::{self, IntStore};
 use orbit_core::{Closure, Gc, ProtoCode, Value};
 
-use crate::cold::{env_error, index_error};
+use crate::cold::{env_error, get_str_miss, op_len, set_str_miss};
+use crate::meta::Event;
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
 use crate::{Frame, FrameKind, LuaError, Vm};
@@ -58,10 +59,34 @@ impl Vm {
     pub(crate) fn call_value(
         &mut self,
         func: usize,
-        nargs: usize,
+        mut nargs: usize,
         want: u8,
         stop: usize,
     ) -> Result<Flow, Exc> {
+        let mut chain = 0;
+        loop {
+            match self.rt.stack.regs[func] {
+                Value::Closure(_) | Value::Native(_) => break,
+                v => {
+                    // `__call`: the handler is called with the value first.
+                    let h = self.rt.metamethod(&self.heap, v, Event::Call);
+                    if h.is_nil() {
+                        return Err(Exc::Rt(
+                            format!("attempt to call a {} value", v.type_name()),
+                            Some(0),
+                        ));
+                    }
+                    if chain == crate::meta::MAX_CHAIN {
+                        return Err(Exc::Plain("'__call' chain too long".into()));
+                    }
+                    let regs = &mut self.rt.stack.regs;
+                    regs.truncate(func + 1 + nargs);
+                    regs.insert(func, h);
+                    nargs += 1;
+                    chain += 1;
+                }
+            }
+        }
         match self.rt.stack.regs[func] {
             Value::Closure(c) => {
                 self.push_lua_frame(c, func, nargs, want)?;
@@ -80,10 +105,7 @@ impl Vm {
                 let r = f(&mut ctx)?;
                 self.native_returned(r, None, func, want, id, stop)
             }
-            v => Err(Exc::Rt(
-                format!("attempt to call a {} value", v.type_name()),
-                Some(0),
-            )),
+            _ => unreachable!("a function"),
         }
     }
 
@@ -259,6 +281,7 @@ impl Vm {
             // The frame's window lies below the callee's, so the stack is
             // long enough for it.
             FrameKind::Lua { .. } => Ok(Flow::Reload),
+            FrameKind::Meta { .. } => self.meta_returned(stop),
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
                 self.rt.stack.regs.truncate(top);
@@ -340,6 +363,9 @@ impl Vm {
         match x {
             Exc::Lua(e) => e,
             Exc::Plain(m) => LuaError::new(self.new_str(m.as_bytes())),
+            Exc::Meta(_) | Exc::Index { .. } | Exc::NewIndex { .. } => {
+                unreachable!("metamethod requests are finished by `raise`")
+            }
             Exc::Rt(msg, operand) => {
                 let mut text = ops::where_(&self.heap, &self.rt, 1);
                 text.push_str(&msg);
@@ -367,9 +393,6 @@ impl Vm {
                         };
                         text.push_str(&format!(" ({kind} '{}')", String::from_utf8_lossy(name)));
                     }
-                }
-                if msg == "attempt to index a string value" {
-                    text.push_str(" (string methods are not supported yet)");
                 }
                 LuaError::new(self.new_str(text.as_bytes()))
             }
@@ -440,8 +463,30 @@ impl Vm {
 
     fn traceback(&self, stop: usize) -> String {
         let mut s = String::from("stack traceback:");
-        for f in self.rt.stack.frames[stop..].iter().rev() {
+        let frames = &self.rt.stack.frames[stop..];
+        for (i, f) in frames.iter().enumerate().rev() {
+            // A function called as a metamethod sits on a meta frame.
+            let as_meta = match i.checked_sub(1).map(|j| frames[j].kind) {
+                Some(FrameKind::Meta { event, .. }) => Some(event),
+                _ => None,
+            };
             match f.kind {
+                FrameKind::Meta { .. } => {}
+                FrameKind::Lua { .. } | FrameKind::Native { .. } if as_meta.is_some() => {
+                    let line = match f.kind {
+                        FrameKind::Lua { closure, .. } => {
+                            let proto = self.heap.get(self.heap.get(closure).proto);
+                            format!(
+                                "{}:{}",
+                                proto.chunk,
+                                proto.debug.line(f.pc.saturating_sub(1))
+                            )
+                        }
+                        _ => "[C]".into(),
+                    };
+                    let e = as_meta.expect("meta").short_name();
+                    s.push_str(&format!("\n\t{line}: in metamethod '{e}'"));
+                }
                 FrameKind::Lua { closure, .. } => {
                     let proto = self.heap.get(self.heap.get(closure).proto);
                     let line = proto.debug.line(f.pc.saturating_sub(1));
@@ -625,7 +670,7 @@ impl Vm {
             }
             macro_rules! set_int_parts {
                 ($t:expr, $i:expr, $src:expr) => {
-                    by_parts!($src, |v| table::set_int(&mut self.heap, $t, $i, v))
+                    by_parts!($src, |v| table::store_int(&mut self.heap, $t, $i, v))
                 };
             }
             macro_rules! jump {
@@ -664,7 +709,8 @@ impl Vm {
                         }
                         _ => {
                             let (x, y) = (reg!($a), reg!($b));
-                            reg!($dst) = tri!(ops::arith_slow(&self.heap, $op, x, y))
+                            reg!($dst) =
+                                tri!(ops::arith_slow(&self.heap, &self.rt.metas, $op, x, y))
                         }
                     }
                 }};
@@ -676,7 +722,7 @@ impl Vm {
                         (&Value::Float($i), &Value::Float($j)) => $cmp,
                         _ => {
                             let (x, y) = (reg!($a), reg!($b));
-                            tri!($slow(&self.heap, x, y))
+                            tri!($slow(&self.heap, &self.rt.metas, x, y))
                         }
                     };
                     if c == $want {
@@ -700,7 +746,7 @@ impl Vm {
                         }
                         v => {
                             let ($x, $k) = (v, Value::Int($imm as i64));
-                            tri!(ops::$slow(&self.heap, $s1, $s2))
+                            tri!(ops::$slow(&self.heap, &self.rt.metas, $s1, $s2))
                         }
                     };
                     if c == $want {
@@ -708,10 +754,27 @@ impl Vm {
                     }
                 }};
             }
-            macro_rules! index_error {
-                ($v:expr) => {
-                    throw!(index_error($v))
-                };
+            // `R[dst] = obj[key]` through the metatable, when the inline
+            // path can't finish (a raw miss on a table with a metatable, or
+            // a value that isn't a table). `raise` finishes the instruction,
+            // so the dispatch loop carries no code for it.
+            macro_rules! get_slow {
+                ($dst:expr, $obj:expr, $key:expr) => {{
+                    let _ = $dst;
+                    throw!(Exc::Index {
+                        obj: $obj,
+                        key: $key
+                    })
+                }};
+            }
+            macro_rules! set_slow {
+                ($obj:expr, $key:expr, $v:expr) => {{
+                    throw!(Exc::NewIndex {
+                        obj: $obj,
+                        key: $key,
+                        v: $v
+                    })
+                }};
             }
             macro_rules! call {
                 ($f:expr, $nargs:expr, $want:expr) => {{
@@ -813,17 +876,14 @@ impl Vm {
                         let v = match self.heap.get(env_cell).value {
                             Value::Table(t) => {
                                 let cache = &cur.caches[ic as usize];
-                                match self
-                                    .heap
-                                    .get(t)
-                                    .cached_str(cache.slot.get() as usize, cache.key)
-                                {
-                                    Some(v) => v,
-                                    None => {
+                                let tab = self.heap.get(t);
+                                match tab.cached_str(cache.slot.get() as usize, cache.key) {
+                                    // A dead entry is a miss when `__index`
+                                    // could apply.
+                                    Some(v) if !v.is_nil() || tab.meta.is_none() => v,
+                                    _ => {
                                         let k = const_str(&cur.consts, name);
-                                        let v = self.get_str_miss(t, k, cache);
-                                        w = window!();
-                                        v
+                                        tri!(get_str_miss(&self.heap, &self.rt.metas, t, k, cache))
                                     }
                                 }
                             }
@@ -838,13 +898,22 @@ impl Vm {
                             Value::Table(t) => {
                                 let cache = &cur.caches[ic as usize];
                                 let slot = cache.slot.get() as usize;
-                                if self.heap.get(t).cached_str(slot, cache.key).is_some() {
+                                let tab = self.heap.get(t);
+                                if matches!(tab.cached_str(slot, cache.key),
+                                    Some(v) if tab.meta.is_none() || !v.is_nil())
+                                {
                                     self.heap.barrier_back(t);
                                     self.heap.get_mut(t).set_slot(slot, v);
                                 } else {
                                     let k = const_str(&cur.consts, name);
-                                    self.set_str_miss(t, k, v, cache);
-                                    w = window!();
+                                    tri!(set_str_miss(
+                                        &mut self.heap,
+                                        &self.rt.metas,
+                                        t,
+                                        k,
+                                        v,
+                                        cache
+                                    ));
                                     safepoint!();
                                 }
                             }
@@ -864,32 +933,31 @@ impl Vm {
                     }
                     Op::GetField { dst, obj, key, ic } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            get_slow!(dst, reg!(obj), cur.consts[key as usize])
                         };
                         let cache = &cur.caches[ic as usize];
-                        match self
-                            .heap
-                            .get(t)
-                            .cached_str(cache.slot.get() as usize, cache.key)
-                        {
-                            Some(v) => reg!(dst) = v,
-                            None => {
+                        let tab = self.heap.get(t);
+                        match tab.cached_str(cache.slot.get() as usize, cache.key) {
+                            // A dead entry is a miss when `__index` could
+                            // apply.
+                            Some(v) if !v.is_nil() || tab.meta.is_none() => reg!(dst) = v,
+                            _ => {
                                 let k = const_str(&cur.consts, key);
-                                let v = self.get_str_miss(t, k, cache);
-                                w = window!();
-                                reg!(dst) = v;
+                                reg!(dst) =
+                                    tri!(get_str_miss(&self.heap, &self.rt.metas, t, k, cache));
                             }
                         }
                     }
                     Op::SetField { obj, key, src, ic } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            set_slow!(reg!(obj), cur.consts[key as usize], reg!(src))
                         };
                         let cache = &cur.caches[ic as usize];
                         let slot = cache.slot.get() as usize;
-                        if self.heap.get(t).cached_str(slot, cache.key).is_some() {
+                        let tab = self.heap.get(t);
+                        if matches!(tab.cached_str(slot, cache.key),
+                            Some(v) if tab.meta.is_none() || !v.is_nil())
+                        {
                             // The key is there: overwrite its value. No
                             // capacity changes, so no byte accounting.
                             self.heap.barrier_back(t);
@@ -898,37 +966,51 @@ impl Vm {
                         } else {
                             let k = const_str(&cur.consts, key);
                             let v = reg!(src);
-                            self.set_str_miss(t, k, v, cache);
-                            w = window!();
+                            tri!(set_str_miss(&mut self.heap, &self.rt.metas, t, k, v, cache));
                             safepoint!();
                         }
                     }
                     Op::GetIndex { dst, obj, key } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            get_slow!(dst, reg!(obj), reg!(key))
                         };
                         let tab = self.heap.get(t);
+                        // A nil result in a table with a metatable may
+                        // come from `__index`. `dst` may be `obj` or `key`.
                         match reg!(key) {
-                            Value::Int(i) => tab.read_int(i, &mut reg!(dst)),
-                            k => reg!(dst) = tab.get(&self.heap, k),
+                            Value::Int(i) => {
+                                tab.read_int(i, &mut reg!(dst));
+                                if tab.meta.is_some() && reg!(dst).is_nil() {
+                                    get_slow!(dst, Value::Table(t), Value::Int(i))
+                                }
+                            }
+                            k => {
+                                reg!(dst) = tab.get(&self.heap, k);
+                                if tab.meta.is_some() && reg!(dst).is_nil() {
+                                    get_slow!(dst, Value::Table(t), k)
+                                }
+                            }
                         }
                     }
                     Op::SetIndex { obj, key, src } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            set_slow!(reg!(obj), reg!(key), reg!(src))
                         };
                         match reg!(key) {
                             // A store into the array part allocates
                             // nothing, so it needs no safe point.
-                            Value::Int(i) => {
-                                if !set_int_parts!(t, i, src) {
-                                    safepoint!();
+                            Value::Int(i) => match set_int_parts!(t, i, src) {
+                                IntStore::Array => {}
+                                IntStore::Other => safepoint!(),
+                                IntStore::Meta => {
+                                    set_slow!(reg!(obj), reg!(key), reg!(src))
                                 }
-                            }
+                            },
                             k => {
                                 let v = reg!(src);
+                                if self.heap.get(t).meta.is_some() {
+                                    set_slow!(reg!(obj), k, v)
+                                }
                                 if let Err(e) = table::set(&mut self.heap, t, k, v) {
                                     throw!(Exc::Rt(e.message().into(), None));
                                 }
@@ -938,18 +1020,24 @@ impl Vm {
                     }
                     Op::GetIndexInt { dst, obj, key } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            get_slow!(dst, reg!(obj), Value::Int(key as i64))
                         };
-                        self.heap.get(t).read_int(key as i64, &mut reg!(dst));
+                        let tab = self.heap.get(t);
+                        tab.read_int(key as i64, &mut reg!(dst));
+                        if tab.meta.is_some() && reg!(dst).is_nil() {
+                            get_slow!(dst, Value::Table(t), Value::Int(key as i64))
+                        }
                     }
                     Op::SetIndexInt { obj, key, src } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            set_slow!(reg!(obj), Value::Int(key as i64), reg!(src))
                         };
-                        if !set_int_parts!(t, key as i64, src) {
-                            safepoint!();
+                        match set_int_parts!(t, key as i64, src) {
+                            IntStore::Array => {}
+                            IntStore::Other => safepoint!(),
+                            IntStore::Meta => {
+                                set_slow!(reg!(obj), Value::Int(key as i64), reg!(src))
+                            }
                         }
                     }
                     Op::SetList {
@@ -977,9 +1065,15 @@ impl Vm {
                         let Value::Str(k) = cur.consts[key as usize] else {
                             unreachable!("method names are strings")
                         };
-                        let Value::Table(t) = o else { index_error!(o) };
-                        let m = self.heap.get(t).get_str(&self.heap, k);
                         reg!(dst + 1) = o;
+                        let Value::Table(t) = o else {
+                            get_slow!(dst, o, Value::Str(k))
+                        };
+                        let tab = self.heap.get(t);
+                        let m = tab.get_str(&self.heap, k);
+                        if m.is_nil() && tab.meta.is_some() {
+                            get_slow!(dst, o, Value::Str(k))
+                        }
                         reg!(dst) = m;
                     }
 
@@ -997,6 +1091,7 @@ impl Vm {
                             let x = reg!(a);
                             reg!(dst) = tri!(ops::arith_slow(
                                 &self.heap,
+                                &self.rt.metas,
                                 Arith::Add,
                                 x,
                                 Value::Int(imm as i64)
@@ -1008,15 +1103,19 @@ impl Vm {
                         Value::Float(f) => reg!(dst) = Value::Float(-f),
                         _ => {
                             let x = reg!(src);
-                            reg!(dst) = tri!(ops::arith_slow(&self.heap, Arith::Neg, x, x))
+                            reg!(dst) = tri!(ops::arith_slow(
+                                &self.heap,
+                                &self.rt.metas,
+                                Arith::Neg,
+                                x,
+                                x
+                            ))
                         }
                     },
                     Op::Not { dst, src } => reg!(dst) = Value::Bool(reg!(src).is_falsy()),
                     Op::Len { dst, src } => {
                         let x = reg!(src);
-                        let v = tri!(self.op_len(x));
-                        w = window!();
-                        reg!(dst) = v;
+                        reg!(dst) = tri!(op_len(&self.heap, &self.rt.metas, x));
                     }
                     Op::Concat { dst, first, count } => {
                         let v = tri!(self.op_concat(base + first as usize, count as usize));
@@ -1050,13 +1149,13 @@ impl Vm {
                     }
                     Op::JumpEq { a, b, off } => {
                         let (x, y) = (reg!(a), reg!(b));
-                        if values_equal(&self.heap, x, y) {
+                        if tri!(values_equal(&self.heap, &self.rt.metas, x, y)) {
                             jump!(off);
                         }
                     }
                     Op::JumpNe { a, b, off } => {
                         let (x, y) = (reg!(a), reg!(b));
-                        if !values_equal(&self.heap, x, y) {
+                        if !tri!(values_equal(&self.heap, &self.rt.metas, x, y)) {
                             jump!(off);
                         }
                     }
@@ -1258,10 +1357,15 @@ impl Vm {
 }
 
 #[inline(always)]
-fn values_equal(heap: &orbit_core::LuaHeap, x: Value, y: Value) -> bool {
+fn values_equal(
+    heap: &orbit_core::LuaHeap,
+    rt: &crate::meta::Metas,
+    x: Value,
+    y: Value,
+) -> Result<bool, Exc> {
     match (x, y) {
-        (Value::Int(i), Value::Int(j)) => i == j,
-        (Value::Float(f), Value::Float(g)) => f == g,
-        _ => ops::equal(heap, x, y),
+        (Value::Int(i), Value::Int(j)) => Ok(i == j),
+        (Value::Float(f), Value::Float(g)) => Ok(f == g),
+        _ => ops::equal(heap, rt, x, y),
     }
 }

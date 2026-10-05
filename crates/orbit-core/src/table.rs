@@ -260,7 +260,7 @@ impl Trace<LuaSpace> for Table {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         for i in 0..self.array.len() {
             let t = self.array.tag(i);
-            if matches!(t, Tag::Str | Tag::Table | Tag::Closure) {
+            if matches!(t, Tag::Str | Tag::Table | Tag::Closure | Tag::UserData) {
                 mark(m, self.array.get(i));
             }
         }
@@ -289,6 +289,7 @@ pub fn mark(m: &mut Marker<'_, LuaSpace>, v: Value) {
         Value::Str(s) => m.mark(s),
         Value::Table(t) => m.mark(t),
         Value::Closure(c) => m.mark(c),
+        Value::UserData(u) => m.mark(u),
         _ => {}
     }
 }
@@ -380,7 +381,8 @@ impl Table {
     }
 
     /// The value in hash slot `slot` if that slot holds exactly key `s` (an
-    /// inline-cache hit).
+    /// inline-cache hit). The value can be nil (a dead entry): with a
+    /// metatable, that hit is a miss.
     #[inline(always)]
     pub fn cached_str(&self, slot: usize, s: Gc<LuaStr>) -> Option<Value> {
         match self.entries.get(slot) {
@@ -746,6 +748,41 @@ pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> bool {
     }
     set_key(heap, t, &Key::int(i), v);
     false
+}
+
+/// What [`store_int`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntStore {
+    /// Stored into the array part; nothing was allocated.
+    Array,
+    /// Stored through the hash part or by growing (may have allocated).
+    Other,
+    /// Nothing stored: the table has a metatable and the key is absent, so
+    /// `__newindex` may apply.
+    Meta,
+}
+
+/// `t[i] = v` for the interpreter: like [`set_int`], but leaves the store
+/// to the caller when a metatable could intercept it (the key is absent).
+#[inline(always)]
+pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore {
+    let idx = (i as u64).wrapping_sub(1);
+    heap.barrier_back(t);
+    let tab = heap.get_mut(t);
+    if idx < tab.array.len() as u64 {
+        let idx = idx as usize;
+        // Metatables are rare: test for one before reading the tag.
+        if tab.meta.is_some() && tab.array.tag(idx) == Tag::Nil {
+            return IntStore::Meta;
+        }
+        tab.array.set(idx, v);
+        return IntStore::Array;
+    }
+    if tab.meta.is_some() {
+        return IntStore::Meta;
+    }
+    set_key(heap, t, &Key::int(i), v);
+    IntStore::Other
 }
 
 /// `t[key] = v` (raw) for a normalised key. Returns the hash slot that now

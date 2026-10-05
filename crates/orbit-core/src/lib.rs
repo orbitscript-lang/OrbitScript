@@ -15,12 +15,14 @@ pub mod func;
 pub mod number;
 pub mod string;
 pub mod table;
+pub mod userdata;
 pub mod value;
 
 pub use func::{Cell, Closure, FieldCache, Proto, ProtoCode};
 pub use orbit_gc::{Gc, Heap};
 pub use string::{Interner, LuaStr, OrbitStr, OrbitString};
 pub use table::Table;
+pub use userdata::UserData;
 pub use value::{NativeId, Payload, Tag, Value};
 
 orbit_gc::space! {
@@ -31,6 +33,7 @@ orbit_gc::space! {
         closures: Closure,
         cells: Cell,
         protos: Proto,
+        userdata: UserData,
     }
 }
 

@@ -4,7 +4,8 @@ use std::fmt::Write as _;
 
 use orbit_vm::orbit_core::Value;
 use orbit_vm::orbit_core::number;
-use orbit_vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
+use orbit_vm::orbit_core::{Gc, Table, Tag};
+use orbit_vm::{Event, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -357,5 +358,13 @@ fn float_conv(x: f64, conv: u8, spec: &Spec) -> String {
         s.to_uppercase()
     } else {
         s
+    }
+}
+
+/// Point the shared string metatable's `__index` at the `string` table.
+pub(crate) fn set_metatable_index(vm: &mut Vm, string: Gc<Table>) {
+    if let Some(mt) = vm.rt.type_meta(Tag::Str) {
+        let k = Value::Str(vm.rt.event_name(Event::Index));
+        vm.table_set(mt, k, Value::Table(string));
     }
 }

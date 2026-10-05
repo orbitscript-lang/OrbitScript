@@ -15,7 +15,8 @@ use orbit_vm::{NativeFn, Vm};
 /// `string`, `table`, `math` and `os` tables.
 pub fn open_libs(vm: &mut Vm) {
     base::open(vm);
-    open_lib(vm, "string", string::FUNCTIONS);
+    let st = open_lib(vm, "string", string::FUNCTIONS);
+    string::set_metatable_index(vm, st);
     open_lib(vm, "table", table::FUNCTIONS);
     let m = open_lib(vm, "math", math::FUNCTIONS);
     math::constants(vm, m);
