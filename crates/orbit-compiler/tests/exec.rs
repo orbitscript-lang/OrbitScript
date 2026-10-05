@@ -285,6 +285,17 @@ impl Interp {
                     let env = c.caps[0].borrow().clone();
                     self.set(&env, &self.konst(pi, name), r[src as usize].clone())?;
                 }
+                Op::CheckUndefined { src, name } => {
+                    if !matches!(r[src as usize], V::Nil) {
+                        let V::Str(n) = self.konst(pi, name) else {
+                            unreachable!()
+                        };
+                        return Err(format!(
+                            "global '{}' already defined",
+                            String::from_utf8_lossy(&n)
+                        ));
+                    }
+                }
                 Op::NewTable { dst, .. } => r[dst as usize] = V::Table(Rc::default()),
                 Op::GetField { dst, obj, key, .. } => {
                     r[dst as usize] = self.index(&r[obj as usize], &self.konst(pi, key))?

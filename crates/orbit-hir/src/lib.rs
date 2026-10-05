@@ -289,9 +289,33 @@ pub enum StmtKind {
         hidden: [LocalId; 3],
         body: BlockId,
     },
+    /// Defines globals: like `Assign`, but each store first reads its target and raises
+    /// "global 'x' already defined" unless it is nil. Lua's `global x = v`; OrbitScript would
+    /// use it for a module-level definition that must not silently replace an existing one.
+    Define {
+        targets: Vec<Place>,
+        values: ExprList,
+    },
     Break,
     /// A list that is a single `Call` or `MethodCall` is a tail call.
     Return(ExprList),
+}
+
+impl StmtKind {
+    /// The targets of an `Assign` or `Define`.
+    pub fn places(&self) -> &[Place] {
+        match self {
+            StmtKind::Assign { targets, .. } | StmtKind::Define { targets, .. } => targets,
+            _ => &[],
+        }
+    }
+
+    pub fn places_mut(&mut self) -> &mut [Place] {
+        match self {
+            StmtKind::Assign { targets, .. } | StmtKind::Define { targets, .. } => targets,
+            _ => &mut [],
+        }
+    }
 }
 
 /// An assignment target.
@@ -306,6 +330,9 @@ pub enum Place {
     },
     Capture(CaptureId),
     Global(StrId),
+    /// The chunk's environment itself (`_ENV = t` in Lua). OrbitScript could use it to
+    /// sandbox a module.
+    Env,
     Index {
         obj: ExprId,
         key: ExprId,
@@ -337,6 +364,8 @@ pub enum ExprKind {
     Capture(CaptureId),
     /// `_ENV[name]`.
     Global(StrId),
+    /// The chunk's environment itself (`_ENV` in Lua); see [`Place::Env`].
+    Env,
     Index {
         obj: ExprId,
         key: ExprId,
@@ -387,6 +416,7 @@ impl ExprKind {
             | ExprKind::Outer { .. }
             | ExprKind::Capture(_)
             | ExprKind::Global(_)
+            | ExprKind::Env
             | ExprKind::Closure(_) => {}
             ExprKind::Index { obj, key } => {
                 f(*obj);

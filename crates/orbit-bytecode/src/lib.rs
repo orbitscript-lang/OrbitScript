@@ -73,6 +73,9 @@ pub enum Op {
     GetGlobal { dst: Reg, name: Const, ic: Ic },
     /// `U[0].value[K[name]] = R[src]`
     SetGlobal { src: Reg, name: Const, ic: Ic },
+    /// Raises "global 'K[name]' already defined" unless `R[src]` is nil (Lua's
+    /// `global x = v`, before the store).
+    CheckUndefined { src: Reg, name: Const },
 
     // Tables.
     /// `R[dst] = {}` with room for `array_hint` array and `hash_hint` hash entries.

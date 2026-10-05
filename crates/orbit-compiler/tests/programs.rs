@@ -37,6 +37,7 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                         && ic < p.ncaches
                         && !p.captures.is_empty()
                 }
+                Op::CheckUndefined { src, name } => reg(src) && (name as usize) < p.consts.len(),
                 Op::NewTable { dst, .. } => reg(dst),
                 Op::GetField { dst, obj, key, ic } => {
                     reg(dst) && reg(obj) && (key as usize) < p.consts.len() && ic < p.ncaches

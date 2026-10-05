@@ -8,7 +8,7 @@ use orbit_core::number::{ArithOp, Number};
 use orbit_core::table;
 use orbit_core::{Closure, Gc, ProtoCode, Value};
 
-use crate::cold::{env_error, index_error};
+use crate::cold::{already_defined, env_error, index_error};
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
 use crate::{Frame, FrameKind, LuaError, Vm};
@@ -856,6 +856,12 @@ impl Vm {
                             other => throw!(env_error(other)),
                         };
                         reg!(dst) = v;
+                    }
+                    Op::CheckUndefined { src, name } => {
+                        if !matches!(reg!(src), Value::Nil) {
+                            let k = const_str(&cur.consts, name);
+                            throw!(already_defined(self.heap.get(k).as_bytes()));
+                        }
                     }
                     Op::SetGlobal { src, name, ic } => {
                         let env_cell = self.heap.get(closure).captures[0];
