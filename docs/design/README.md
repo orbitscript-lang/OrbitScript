@@ -79,3 +79,9 @@ cargo testkit bench --interp lua5.5=target/reference-lua/bin/lua5.5 \
 ```
 
 The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass once first light lands go into `tests/diff/expected-orbit.txt`.
+
+## Lua 5.5 compatibility
+
+| Document | Covers |
+|---|---|
+| [debug.md](debug.md) | The `debug` library, function names and levels, tracebacks, and hooks (milestones C5d, C6) |
