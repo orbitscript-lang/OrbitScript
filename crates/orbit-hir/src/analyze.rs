@@ -34,12 +34,15 @@ impl std::error::Error for AnalysisError {}
 /// - a function that reads or writes a global, or contains a function that does, has the
 ///   environment as capture 0 (`Env` in the main function, `ParentCapture(0)` below it);
 /// - other captures are numbered in first-reference order;
-/// - `Local::captured` and `Local::reassigned` are set.
+/// - `Local::captured` and `Local::reassigned` are set;
+/// - a vararg table that is only ever indexed for reading is elided: those reads are
+///   `VarargIndex` and `Function::vararg_table_elided` is set.
 pub fn analyze(chunk: &mut Chunk) -> Result<(), AnalysisError> {
     check_parents(chunk)?;
     add_env_captures(chunk);
     rewrite_outer(chunk)?;
     mark_reassigned(chunk);
+    elide_vararg_tables(chunk);
     Ok(())
 }
 
@@ -206,6 +209,37 @@ fn capture_for(
     }
     f.captures.push(Capture { name, from });
     Ok(CaptureId::from_index(f.captures.len() - 1))
+}
+
+/// When a function's vararg table isn't captured and every use of it is `t[k]` read, rewrites
+/// those reads to `VarargIndex(k)` so the table is never built. Writes, `#t`, method calls and
+/// passing `t` along all keep it.
+fn elide_vararg_tables(chunk: &mut Chunk) {
+    for f in &mut chunk.functions {
+        let Some(t) = f.vararg_table else { continue };
+        if f.locals[t.index()].captured {
+            continue;
+        }
+        let is_t = |kind: &ExprKind| matches!(*kind, ExprKind::Local(l) if l == t);
+        let uses = f.exprs.iter().filter(|e| is_t(&e.kind)).count();
+        let reads: Vec<usize> = (0..f.exprs.len())
+            .filter(|&i| match f.exprs[i].kind {
+                ExprKind::Index { obj, .. } => is_t(&f.exprs[obj.index()].kind),
+                _ => false,
+            })
+            .collect();
+        if uses != reads.len() {
+            continue;
+        }
+        for i in reads {
+            let ExprKind::Index { obj, key } = f.exprs[i].kind else {
+                unreachable!("collected above")
+            };
+            f.exprs[obj.index()].kind = ExprKind::Nil;
+            f.exprs[i].kind = ExprKind::VarargIndex(key);
+        }
+        f.vararg_table_elided = true;
+    }
 }
 
 fn mark_reassigned(chunk: &mut Chunk) {

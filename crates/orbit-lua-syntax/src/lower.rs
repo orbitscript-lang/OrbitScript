@@ -616,10 +616,13 @@ impl Lowerer {
             self.bind(p.sym, local);
         }
         if let Some(v) = body.vararg {
-            if v.name.is_some() {
-                return Err(self.not_supported(v.span, "named varargs are"));
-            }
             self.f().is_vararg = true;
+            if let Some(name) = v.name {
+                // Read-only, like `<const>`; declared after the parameters.
+                let local = self.new_local(Some(name.sym), name.span, LocalKind::Const);
+                self.bind(name.sym, local);
+                self.f().vararg_table = Some(local);
+            }
         }
         let block = self.block_contents(&body.body)?;
         self.f().body = block;

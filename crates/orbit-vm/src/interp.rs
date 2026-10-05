@@ -1220,6 +1220,25 @@ impl Vm {
                         self.op_vararg(base, nvarargs, dst as usize, count);
                         w = window!();
                     }
+                    Op::VarargTable { dst } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
+                        let t = self.op_vararg_table(base, nvarargs);
+                        w = window!();
+                        reg!(dst) = t;
+                        safepoint!();
+                    }
+                    Op::VarargGet { dst, key } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
+                        let k = reg!(key);
+                        let v = self.op_vararg_get(base, nvarargs, k);
+                        w = window!();
+                        reg!(dst) = v;
+                    }
+                    Op::VarargUnpack { dst, table, count } => {
+                        let t = reg!(table);
+                        tri!(self.op_vararg_unpack(base, t, dst as usize, count));
+                        w = window!();
+                    }
 
                     Op::ForPrep { base: b, exit } => {
                         // The common integer loop counting up; the rest

@@ -296,6 +296,9 @@ impl Interp {
                         ));
                     }
                 }
+                Op::VarargTable { .. } | Op::VarargGet { .. } | Op::VarargUnpack { .. } => {
+                    return Err(format!("{op:?} is not covered by this test interpreter"));
+                }
                 Op::NewTable { dst, .. } => r[dst as usize] = V::Table(Rc::default()),
                 Op::GetField { dst, obj, key, .. } => {
                     r[dst as usize] = self.index(&r[obj as usize], &self.konst(pi, key))?

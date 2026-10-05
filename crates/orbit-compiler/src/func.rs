@@ -146,6 +146,14 @@ impl<'a> FuncState<'a> {
             self.active = self.free;
             self.declare(p, r)?;
         }
+        if let Some(t) = f.vararg_table
+            && !f.vararg_table_elided
+        {
+            let r = self.alloc()?;
+            self.emit(Op::VarargTable { dst: r });
+            self.active = self.free;
+            self.declare(t, r)?;
+        }
         self.block_stmts(f.body)?;
         let body = f.block(f.body);
         let ends_in_return = body

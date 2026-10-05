@@ -72,6 +72,13 @@ pub struct Function {
     /// Parameters in order. `self` is an ordinary first parameter.
     pub params: Vec<LocalId>,
     pub is_vararg: bool,
+    /// A named vararg (`...t` in Lua 5.5): the read-only local bound to a table of the extra
+    /// arguments, `{n = count, ...}`, declared after the parameters. OrbitScript's rest
+    /// parameter would map onto it.
+    pub vararg_table: Option<LocalId>,
+    /// Set by analysis when every use of `vararg_table` became a [`ExprKind::VarargIndex`],
+    /// so the table is never built.
+    pub vararg_table_elided: bool,
     pub locals: Vec<Local>,
     /// Filled by capture analysis; front ends leave it empty.
     pub captures: Vec<Capture>,
@@ -91,6 +98,8 @@ impl Function {
             parent,
             params: Vec::new(),
             is_vararg: false,
+            vararg_table: None,
+            vararg_table_elided: false,
             locals: Vec::new(),
             captures: Vec::new(),
             exprs: Vec::new(),
@@ -354,6 +363,9 @@ pub enum ExprKind {
     Str(StrId),
     /// `...`: all extra arguments, or one of them where a single value is wanted.
     Vararg,
+    /// `t[key]` where `t` is the function's vararg table, read without building it: an
+    /// extra argument for keys `1..n`, the count for `"n"`, nil otherwise.
+    VarargIndex(ExprId),
     Local(LocalId),
     /// A local of an enclosing function, as a front end writes it. Capture analysis rewrites
     /// it to [`ExprKind::Capture`].
@@ -447,7 +459,9 @@ impl ExprKind {
                 f(*lhs);
                 f(*rhs);
             }
-            ExprKind::Unary { expr, .. } | ExprKind::First(expr) => f(*expr),
+            ExprKind::Unary { expr, .. } | ExprKind::First(expr) | ExprKind::VarargIndex(expr) => {
+                f(*expr)
+            }
         }
     }
 

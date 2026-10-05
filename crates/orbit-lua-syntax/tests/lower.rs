@@ -87,10 +87,6 @@ fn out_of_subset_constructs_are_rejected() {
             "local f <close> = nil",
             "s.lua:1: '<close>' variables are not supported yet",
         ),
-        (
-            "function f(...args) end",
-            "s.lua:1: named varargs are not supported yet",
-        ),
     ];
     for (src, expected) in cases {
         assert_eq!(err(src), expected, "source: {src:?}");
@@ -268,4 +264,26 @@ fn env_lowers_to_the_environment_or_a_local() {
     let text = dump("global x = 1; global function f() end");
     assert!(text.contains("define global \"x\" = 1"), "{text}");
     assert!(text.contains("define global \"f\" = closure fn1"), "{text}");
+}
+
+#[test]
+fn named_varargs_keep_their_table_only_when_needed() {
+    assert_eq!(
+        err("local function f(...t) t = 1 end"),
+        "s.lua:1: attempt to assign to const variable 't'"
+    );
+    // Only read by indexing: the table is elided.
+    let text = dump("local function f(...t) return t.n, t[1] end");
+    assert!(text.contains("(...t#l0 elided)"), "{text}");
+    assert!(text.contains("...[\"n\"], ...[1]"), "{text}");
+    // Written, measured, passed on or captured: the table is built.
+    for src in [
+        "local function f(...t) t[1] = 2 end",
+        "local function f(...t) return #t end",
+        "local function f(...t) return g(t) end",
+        "local function f(...t) return function() return t[1] end end",
+    ] {
+        let text = dump(src);
+        assert!(text.contains("(...t#l0)"), "{src}: {text}");
+    }
 }
