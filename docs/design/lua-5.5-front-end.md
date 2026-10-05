@@ -61,9 +61,9 @@ OrbitScript: a module-level definition that must not silently replace an existin
 
 The manual allows not building the table when it can't be observed: when `t` isn't captured and only appears as `t[e]` or `t.k`. We go slightly further for safety and require those uses to be reads.
 
-- **HIR: `Function::vararg_table: Option<LocalId>`**, the local bound to the table (kind `Const`).
-- **Elision pass (shared analysis).** If that local isn't captured and every use is the object of an `Index` read, each such `Index` becomes **`ExprKind::VarargIndex(key)`** and `vararg_table` is cleared. A function whose `...` has no name never has a table. This pass is front-end neutral, so OrbitScript gets the same optimisation.
-- **Bytecode.** `VarargTable { dst }` builds the table at function entry. `VarargGet { dst, key }` reads `key` from the extra arguments without a table (an integer `1..n`, `"n"`, and `nil` for anything else, with float keys normalised). In a function that keeps its table, `...` compiles to `VarargUnpack { dst, table, count }`, which reads `t[1..t.n]` raw and checks `n`.
+- **HIR: `Function::vararg_table: Option<LocalId>`**, the local bound to the table (kind `Const`), and **`Function::vararg_table_elided`**.
+- **Elision pass (shared analysis).** If that local isn't captured and every use is the object of an `Index` read, each such `Index` becomes **`ExprKind::VarargIndex(key)`** and `vararg_table_elided` is set. The local stays declared, so the verifier's rule that every local is declared still holds. A function whose `...` has no name never has a table. This pass is front-end neutral, so OrbitScript gets the same optimisation.
+- **Bytecode.** `VarargTable { dst }` builds the table at function entry. `VarargGet { dst, key }` reads `key` from the extra arguments without a table (an integer `1..n`, `"n"`, and `nil` for anything else, with float keys normalised). Messages call an integer key of a vararg table `field '?'`, as the reference does. In a function that keeps its table, `...` compiles to `VarargUnpack { dst, table, count }`, which reads `t[1..t.n]` raw and checks `n`.
 - A function without a named vararg compiles exactly as today.
 
 OrbitScript: a rest parameter (`fn f(a, ..rest)`) maps onto `vararg_table` directly.
