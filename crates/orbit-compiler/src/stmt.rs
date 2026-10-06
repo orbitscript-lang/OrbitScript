@@ -1,7 +1,7 @@
 //! Statements and blocks.
 
 use orbit_bytecode::{MULTI, Op};
-use orbit_hir::{BlockId, ExprId, ExprKind, ExprList, LocalId, Place, StmtId, StmtKind};
+use orbit_hir::{BlockId, ExprId, ExprKind, ExprList, LocalId, LocalKind, Place, StmtId, StmtKind};
 
 use crate::consts::ConstVal;
 use crate::expr::Want;
@@ -162,6 +162,12 @@ impl FuncState<'_> {
     }
 
     fn let_(&mut self, locals: &[LocalId], values: &ExprList) -> Result<()> {
+        if locals
+            .iter()
+            .any(|&l| self.f.local(l).kind == LocalKind::Close)
+        {
+            return Err(self.error("'<close>' variables are not supported yet"));
+        }
         let first = self.free;
         self.expr_list(values, Want::Exact(locals.len()))?;
         // The new locals come into scope only after the whole statement.
@@ -384,13 +390,13 @@ impl FuncState<'_> {
         &mut self,
         vars: &[LocalId],
         iter: &ExprList,
-        hidden: [LocalId; 3],
+        hidden: [LocalId; 4],
         body: BlockId,
     ) -> Result<()> {
         let mark = self.open_scope();
         let base = self.free as u8;
         self.expr_list(iter, Want::Exact(3))?;
-        self.alloc()?; // R[base+3]: the closing value, reserved.
+        self.alloc()?; // R[base+3]: the closing value, reserved but not yet closed.
         for (i, &h) in hidden.iter().enumerate() {
             self.slots[h.index()] = Slot::Reg(base + i as u8);
             self.push_scope(h, Slot::Reg(base + i as u8));
