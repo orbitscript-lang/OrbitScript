@@ -84,14 +84,13 @@ fn running(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn isyieldable(ctx: &mut NativeCtx<'_>) -> R {
-    // Natives never re-enter the interpreter, so every coroutine can yield.
-    let main = ctx.running_main_thread();
     let t = if ctx.nargs() == 0 {
         ctx.running().0
     } else {
         check_thread(ctx, 0)?
     };
-    ctx.ret1(Value::Bool(t != main))
+    let y = ctx.thread_yieldable(t);
+    ctx.ret1(Value::Bool(y))
 }
 
 fn wrap(ctx: &mut NativeCtx<'_>) -> R {

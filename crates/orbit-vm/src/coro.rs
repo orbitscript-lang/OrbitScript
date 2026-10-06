@@ -247,6 +247,7 @@ impl Vm {
             id,
             k,
             catch: Catch::No,
+            yieldable: true,
             call_at: at as u32,
         };
         match frame {
@@ -369,6 +370,11 @@ impl Vm {
                 "attempt to yield from outside a coroutine".into(),
             ));
         };
+        if !yieldable(&self.rt.stack) {
+            return Err(Exc::Plain(
+                "attempt to yield across a C-call boundary".into(),
+            ));
+        }
         let at = self.rt.top - n;
         self.wait_frame(frame, func, want, id, yield_k, at);
         self.take_values(n);
@@ -450,6 +456,21 @@ impl Vm {
     }
 }
 
+/// Whether code running on top of `stack` (a coroutine's) may yield:
+/// nothing between it and the coroutine's base refuses.
+pub(crate) fn yieldable(stack: &Stack) -> bool {
+    !stack.frames.iter().any(|f| {
+        matches!(
+            f.kind,
+            FrameKind::Native {
+                yieldable: false,
+                ..
+            } | FrameKind::Handler
+                | FrameKind::Boundary
+        )
+    })
+}
+
 /// After a switch the loop must reload: the frame it had is on another
 /// stack.
 fn switched(flow: Result<Flow, Exc>) -> Result<Flow, Exc> {
@@ -465,6 +486,19 @@ pub(crate) fn closing(heap: &LuaHeap, t: Gc<Thread>) -> bool {
 }
 
 impl NativeCtx<'_> {
+    /// Whether thread `t` could yield where it is: it isn't the main thread
+    /// and no frame on its stack refuses (`coroutine.isyieldable`).
+    pub fn thread_yieldable(&self, t: Gc<Thread>) -> bool {
+        if t == self.rt.main_thread {
+            return false;
+        }
+        if t == self.rt.current {
+            yieldable(&self.rt.stack)
+        } else {
+            yieldable(&co(self.heap, t).stack)
+        }
+    }
+
     /// A new suspended coroutine running `f`.
     pub fn new_thread(&mut self, f: Value) -> Gc<Thread> {
         self.heap.alloc(Thread::new(Coroutine::fresh(f)))

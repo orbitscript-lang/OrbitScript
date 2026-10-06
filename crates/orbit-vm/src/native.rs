@@ -50,14 +50,26 @@ pub enum NativeReturn {
     /// Call `f` with the last `nargs` values of the window, then run `k`
     /// with the outcome. The call's results replace its arguments at the end
     /// of the window. With `protected`, an error in the call goes to `k`
-    /// instead of propagating.
+    /// instead of propagating. Code the call runs can't yield across it
+    /// (`attempt to yield across a C-call boundary`), as for most lua5.5
+    /// library callbacks; see [`NativeReturn::CallThenYieldable`].
     CallThen {
         f: Value,
         nargs: usize,
         k: Continuation,
         protected: bool,
     },
-    /// [`NativeReturn::CallThen`] with `protected`, but an error first goes
+    /// [`NativeReturn::CallThen`], but code the call runs may yield across
+    /// it: for the few library functions lua5.5 lets callbacks yield
+    /// through (`pcall`, `pairs` calling `__pairs`, `dofile`).
+    CallThenYieldable {
+        f: Value,
+        nargs: usize,
+        k: Continuation,
+        protected: bool,
+    },
+    /// [`NativeReturn::CallThen`] with `protected`, yieldable (only the
+    /// call itself, not the handler), but an error first goes
     /// to the message handler in the window's first slot, which runs on top
     /// of the frames that raised (so it can see them); its result is the
     /// error `k` gets (`xpcall`).

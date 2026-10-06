@@ -33,6 +33,6 @@ D keeps A's switching speed for the coroutines that are actually running, and B'
 
 ## Consequences
 - Some native library functions are written as small state machines rather than straight-line code.
-- Natives can yield where the reference can't (for example from a `table.sort` comparator). That is recorded as a deviation.
+- Yieldability matches the reference. A native continuation is non-yieldable by default (`CallThen`); only the callbacks the reference lets yield (`pcall`, the `xpcall` body, `__pairs`, `dofile`) use `CallThenYieldable`. `xpcall` handlers and `Vm::call` boundaries never yield. Code that yields across a non-yieldable frame gets "attempt to yield across a C-call boundary", and `coroutine.isyieldable` reports the same rule.
 - A coroutine resumed after going cold pays one stack regrowth.
 - Recursion depth is limited by a configurable memory limit, not the Rust stack. The Lua test suite checks the "stack overflow" error, so the limit must produce that error.

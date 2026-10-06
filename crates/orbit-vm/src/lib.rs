@@ -98,6 +98,10 @@ pub(crate) enum FrameKind {
         id: NativeId,
         k: Continuation,
         catch: Catch,
+        /// Whether code the requested call runs may yield across this
+        /// frame (`pcall`, the body of `xpcall`, `__pairs`, `dofile`), as
+        /// in lua5.5. Most library callbacks may not.
+        yieldable: bool,
         /// Where the requested call's function sits.
         call_at: u32,
     },
@@ -109,6 +113,7 @@ pub(crate) enum FrameKind {
     },
     /// Below an `xpcall` message handler running on top of the frames that
     /// raised: its result is raised again as the error, past the handler.
+    /// Nothing may yield across it.
     Handler,
     /// The bottom of a [`Vm::call`]: returning into it ends the call, and
     /// an error unwinding to it is returned to the embedder.
