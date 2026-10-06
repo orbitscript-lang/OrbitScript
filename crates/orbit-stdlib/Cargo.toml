@@ -12,5 +12,11 @@ publish = false
 orbit-core = { path = "../orbit-core" }
 orbit-vm = { path = "../orbit-vm" }
 
+[features]
+default = ["load"]
+# `load`, `loadfile` and `dofile` (source chunks need the host to install a
+# compiler in `Runtime::compile`).
+load = []
+
 [lints]
 workspace = true
