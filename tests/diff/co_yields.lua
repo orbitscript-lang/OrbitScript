@@ -152,3 +152,39 @@ end
 local okw, ew = pcall(wnest, 300)
 -- One position prefix per wrap level the error passes through.
 print(okw, #ew)
+
+-- Where lua5.5 refuses a yield: across most library callbacks.
+local function try(name, f)
+  local co = coroutine.wrap(function() return "ret", f() end)
+  print(name, pcall(co))
+end
+local Y = coroutine.yield
+try("pcall", function() return pcall(Y, 1) end)
+try("xpcall body", function() return xpcall(Y, print, 1) end)
+try("xpcall handler", function()
+  return xpcall(error, function(m) Y(1) return m end, "e")
+end)
+try("__pairs", function()
+  return pairs(setmetatable({}, { __pairs = function(t) Y(1) return next, t end }))
+end)
+try("__tostring", function()
+  return tostring(setmetatable({}, { __tostring = function() Y(1) return "s" end }))
+end)
+try("print", function()
+  print(setmetatable({}, { __tostring = function() Y(1) return "s" end }))
+end)
+try("ipairs __index", function()
+  for _ in ipairs(setmetatable({}, { __index = function() Y(1) end })) do end
+end)
+try("isyieldable in __tostring", function()
+  return tostring(setmetatable({}, { __tostring = function()
+    return tostring(coroutine.isyieldable())
+  end }))
+end)
+try("isyieldable in pcall", function()
+  return pcall(coroutine.isyieldable)
+end)
+try("Lua metamethods", function()
+  local mt = { __index = function() return Y(1) end }
+  return setmetatable({}, mt).x
+end)
