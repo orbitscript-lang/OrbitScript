@@ -188,6 +188,17 @@ fn format_from(
             quote(ctx, arg, &mut out)?;
             continue;
         }
+        // Most numeric conversions check their argument before their spec
+        // (`%a` checks its spec first).
+        match conv {
+            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => {
+                ctx.check_int(arg)?;
+            }
+            b'e' | b'E' | b'f' | b'g' | b'G' => {
+                ctx.check_f64(arg)?;
+            }
+            _ => {}
+        }
         let Some(spec) = parse_spec(body, flags, precision_ok) else {
             return Err(ctx.error(format!("invalid conversion specification: '{}'", whole(i))));
         };
