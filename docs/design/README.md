@@ -51,6 +51,12 @@ These designs stay inside the accepted ADRs. Five choices are worth a deliberate
 
 Decided since: Tym asked (2026-09-30) for the designs to prepare for a future JIT. [vm.md](vm.md#jit-readiness) now covers it, ADR-1 is amended to pin `Value`'s layout, and instructions get an optional type-feedback side table.
 
+## Lua 5.5 compatibility
+
+| Document | Covers |
+|---|---|
+| [lua-5.5-front-end.md](lua-5.5-front-end.md) | Milestone C1: hexadecimal floats, `_ENV`, `global` declarations, named varargs, bitwise operators, `goto`, and `<close>` through the front end, HIR and bytecode |
+
 ## End-to-end demo
 
 First light is done when these programs, in [`tests/first-light/`](../../tests/first-light/), produce output byte-identical to `lua5.5` (after the diff runner's usual normalisations), both normally and with the collector in stress mode:
