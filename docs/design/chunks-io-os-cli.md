@@ -112,11 +112,11 @@ Implemented on branch `compat/dump`: `orbit_bytecode::format`, `orbit_bytecode::
 
 | 20,000 mutants (4 seeds) | Rejected | Ran | VM panics | Panic sites |
 |---|---|---|---|---|
-| No verifier | 0 | 15,096 | 4,807 | 27 |
+| No verifier | 0 | 15,096 | 4,807 | 26 |
 | Layer 1 (structure) | 11,974 | 7,883 | 98 | 6 |
 | Layers 1 + 2 (full) | 12,572 | 7,383 | **0** | 0 |
 
-The six sites structure alone leaves are all things only data flow can see: `top` underflowing in `Call`, `Return` and `SetList` with a `MULTI` operand (`top - fa - 1`), `ForLoop` on state `ForPrep` didn't set up (three `unreachable!` arms), and `SetList` on a register that isn't a table. About 40 mutants per seed hung, which bad bytecode may do (an infinite loop is a legal program).
+The six sites structure alone leaves are all things only data flow can see: `top` underflowing in `Call`, `Return` and `SetList` with a `MULTI` operand (`top - fa - 1`), `ForLoop` on state `ForPrep` didn't set up (three `unreachable!` arms), and `SetList` on a register that isn't a table. Between 9 and 26 mutants per seed and level hung, which bad bytecode may do (an infinite loop is a legal program).
 
 Cost, release build, over the 35 chunks that compile today (86 KB encoded):
 
