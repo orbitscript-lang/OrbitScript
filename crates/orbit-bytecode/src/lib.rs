@@ -270,6 +270,14 @@ pub enum Op {
     /// `R[dst] = closure of child prototype proto`, its captures built from
     /// the child's [`CaptureSource`] list.
     Closure { dst: Reg, proto: u16 },
+    /// Mark `R[reg]` (a `<close>` local, read-only from here on) to be
+    /// closed. `nil` and `false` are ignored; any other value must have a
+    /// `__close` metamethod. Operand 0's origin names the local.
+    Tbc { reg: Reg },
+    /// Close every marked register at or above `R[from]`, newest first,
+    /// calling `__close(value, nil)` on each. Leaves the other registers
+    /// and the open-ended results of a preceding call or `Vararg` intact.
+    Close { from: Reg },
     /// The whole body of a native closure's stub prototype (never emitted
     /// by a compiler): run native `id` with the frame's arguments, the
     /// closure's captures as its upvalues, in place of this frame.

@@ -108,7 +108,7 @@ impl FuncState<'_> {
                 let top = self.here();
                 let exit = self.label();
                 self.cond(cond, false, exit)?;
-                self.loops.push(exit);
+                self.loops.push((exit, self.tbc.len()));
                 self.block(body)?;
                 self.loops.pop();
                 self.jump(Op::Jump { off: 0 }, top);
@@ -118,10 +118,19 @@ impl FuncState<'_> {
             &StmtKind::Repeat { body, until } => {
                 let top = self.here();
                 let exit = self.label();
-                self.loops.push(exit);
+                self.loops.push((exit, self.tbc.len()));
                 let mark = self.open_scope();
                 self.block_stmts(body)?;
-                self.cond(until, false, top)?;
+                if self.tbc.len() > mark.tbc() {
+                    // Going round again leaves the body's scope too, so close first.
+                    let done = self.label();
+                    self.cond(until, true, done)?;
+                    self.emit_close(mark.tbc());
+                    self.jump(Op::Jump { off: 0 }, top);
+                    self.place(done);
+                } else {
+                    self.cond(until, false, top)?;
+                }
                 self.close_scope(mark);
                 self.loops.pop();
                 self.place(exit);
@@ -141,19 +150,20 @@ impl FuncState<'_> {
                 body,
             } => self.generic_for(vars, iter, *hidden, *body),
             &StmtKind::Goto(l) => {
+                self.goto_close(l);
                 let label = self.goto_label(l);
                 self.jump(Op::Jump { off: 0 }, label);
                 Ok(())
             }
             &StmtKind::Label(l) => {
-                let label = self.goto_label(l);
-                self.place(label);
+                self.place_goto_label(l);
                 Ok(())
             }
             StmtKind::Break => {
-                let Some(&exit) = self.loops.last() else {
+                let Some(&(exit, depth)) = self.loops.last() else {
                     return Err(self.error("internal error: break outside a loop"));
                 };
+                self.emit_close(depth);
                 self.jump(Op::Jump { off: 0 }, exit);
                 Ok(())
             }
@@ -162,18 +172,19 @@ impl FuncState<'_> {
     }
 
     fn let_(&mut self, locals: &[LocalId], values: &ExprList) -> Result<()> {
-        if locals
-            .iter()
-            .any(|&l| self.f.local(l).kind == LocalKind::Close)
-        {
-            return Err(self.error("'<close>' variables are not supported yet"));
-        }
         let first = self.free;
         self.expr_list(values, Want::Exact(locals.len()))?;
         // The new locals come into scope only after the whole statement.
         self.active = self.free;
         for (i, &l) in locals.iter().enumerate() {
             self.declare(l, (first + i) as u8)?;
+        }
+        for (i, &l) in locals.iter().enumerate() {
+            if self.f.local(l).kind == LocalKind::Close {
+                // A captured `<close>` local still has its value in the register: it is
+                // read-only, so the cell never changes.
+                self.mark_tbc(l, (first + i) as u8);
+            }
         }
         Ok(())
     }
@@ -374,7 +385,7 @@ impl FuncState<'_> {
         let exit = self.label();
         self.jump(Op::ForPrep { base, exit: 0 }, exit);
         let top = self.here();
-        self.loops.push(exit);
+        self.loops.push((exit, self.tbc.len()));
         let body_mark = self.open_scope();
         self.declare(var, control)?;
         self.block_stmts(body)?;
@@ -395,12 +406,13 @@ impl FuncState<'_> {
     ) -> Result<()> {
         let mark = self.open_scope();
         let base = self.free as u8;
-        self.expr_list(iter, Want::Exact(3))?;
-        self.alloc()?; // R[base+3]: the closing value, reserved but not yet closed.
+        self.expr_list(iter, Want::Exact(4))?;
         for (i, &h) in hidden.iter().enumerate() {
             self.slots[h.index()] = Slot::Reg(base + i as u8);
             self.push_scope(h, Slot::Reg(base + i as u8));
         }
+        // R[base+3]: the closing value, closed when the loop ends.
+        self.mark_tbc(hidden[3], base + 3);
         let Ok(nvars) = u8::try_from(vars.len()) else {
             return Err(self.error("function or expression needs too many registers"));
         };
@@ -414,7 +426,7 @@ impl FuncState<'_> {
         self.jump(Op::Jump { off: 0 }, call);
         let top = self.here();
         let exit = self.label();
-        self.loops.push(exit);
+        self.loops.push((exit, self.tbc.len()));
         let body_mark = self.open_scope();
         for (i, &v) in vars.iter().enumerate() {
             self.declare(v, base + 4 + i as u8)?;
@@ -431,8 +443,12 @@ impl FuncState<'_> {
     }
 
     fn return_(&mut self, values: &ExprList) -> Result<()> {
+        // With to-be-closed locals open, the values are computed, then the locals closed,
+        // then the function returns, so a call here is not a tail call.
+        let closing = !self.tbc.is_empty();
         match values.items.as_slice() {
             [] => {
+                self.emit_close(0);
                 self.emit(Op::Return0);
             }
             &[e] if matches!(
@@ -441,8 +457,9 @@ impl FuncState<'_> {
             ) =>
             {
                 let func = self.alloc()?;
-                self.call(e, func, MULTI, true)?;
+                self.call(e, func, MULTI, !closing)?;
                 // A native callee runs as an ordinary call; this passes its results on.
+                self.emit_close(0);
                 self.emit(Op::Return {
                     first: func,
                     count: MULTI,
@@ -450,6 +467,7 @@ impl FuncState<'_> {
             }
             &[e] if !self.f.expr(e).kind.is_multi() => {
                 let (src, _) = self.expr_any(e)?;
+                self.emit_close(0);
                 self.emit(Op::Return1 { src });
             }
             _ => {
@@ -463,6 +481,7 @@ impl FuncState<'_> {
                             self.error("function or expression needs too many registers")
                         })?,
                 };
+                self.emit_close(0);
                 self.emit(Op::Return { first, count });
             }
         }

@@ -70,6 +70,9 @@ pub(crate) struct Coroutine {
     /// How many times it has been parked suspended, to tell whether an
     /// entry in `rt.cooling` is still its latest park.
     parks: u32,
+    /// `coroutine.close` is running its `__close` handlers: errors unwind
+    /// straight to the base frame.
+    pub(crate) closing: bool,
 }
 
 impl Coroutine {
@@ -94,6 +97,7 @@ impl Coroutine {
             status: CoStatus::Suspended,
             error: None,
             parks: 0,
+            closing: false,
         }
     }
 
@@ -105,6 +109,7 @@ impl Coroutine {
             error: None,
             bytes: 0,
             parks: 0,
+            closing: false,
         }
     }
 }
@@ -171,7 +176,9 @@ impl Vm {
         // A thread's bytes are its stack's, parked or running: they change
         // only when the stack's capacity does.
         let old = c.bytes;
-        if from_status == CoStatus::Dead {
+        // A coroutine that died with variables still to close keeps its
+        // stack for `coroutine.close`.
+        if from_status == CoStatus::Dead && stack.tbc.is_empty() {
             c.bytes = 0;
             drop(stack);
         } else {
@@ -218,6 +225,7 @@ impl Vm {
         s.regs = s.regs[..c.top].to_vec();
         s.cells = s.cells.to_vec();
         s.frames = s.frames.to_vec();
+        s.tbc = s.tbc.to_vec();
         c.bytes = s.bytes();
         let delta = c.bytes as isize - before as isize;
         self.heap.adjust_bytes(delta);
@@ -374,12 +382,48 @@ impl Vm {
     pub(crate) fn co_finished(&mut self, outcome: Result<(), Value>) -> Result<Flow, Exc> {
         let resumer = self.rt.resumers.pop().expect("a coroutine has a resumer");
         let co = self.rt.current;
-        if let Err(e) = outcome {
+        // A coroutine being closed has reported its error to the closer.
+        let closing = std::mem::take(&mut co_mut(&mut self.heap, co).closing);
+        if let Err(e) = outcome
+            && !closing
+        {
             self.heap.barrier_back(co);
             co_mut(&mut self.heap, co).error = Some(e);
         }
         self.switch_to(resumer, CoStatus::Dead);
         switched(self.deliver(outcome))
+    }
+
+    /// `NativeReturn::Close`: native `id` closes coroutine `co`, which is
+    /// suspended or dead, and waits for the outcome in `k`.
+    pub(crate) fn close_co(
+        &mut self,
+        co: Gc<Thread>,
+        k: Continuation,
+        frame: Option<Frame>,
+        func: usize,
+        want: u8,
+        id: NativeId,
+    ) -> Result<Flow, Exc> {
+        let at = self.rt.top;
+        self.wait_frame(frame, func, want, id, k, at);
+        self.rt.xfer.clear();
+        let c = co_mut(&mut self.heap, co);
+        let error = c.error.take();
+        if c.stack.tbc.is_empty() {
+            c.status = CoStatus::Dead;
+            c.stack = Stack::default();
+            let freed = std::mem::take(&mut c.bytes);
+            self.heap.adjust_bytes(-(freed as isize));
+            return self.deliver(error.map_or(Ok(()), Err));
+        }
+        // Run the handlers on the coroutine's own stack, as an error
+        // unwinding to its base frame would.
+        c.closing = true;
+        self.rt.resumers.push(self.rt.current);
+        self.switch_to(co, CoStatus::Normal);
+        let e = LuaError::new(error.unwrap_or(Value::Nil));
+        switched(self.unwind(e).map_err(Exc::Lua))
     }
 
     /// The body returned into the coroutine's base frame: its results are
@@ -409,6 +453,11 @@ fn switched(flow: Result<Flow, Exc>) -> Result<Flow, Exc> {
     })
 }
 
+/// Whether the running coroutine is being closed by `coroutine.close`.
+pub(crate) fn closing(heap: &LuaHeap, t: Gc<Thread>) -> bool {
+    co(heap, t).closing
+}
+
 impl NativeCtx<'_> {
     /// A new suspended coroutine running `f`.
     pub fn new_thread(&mut self, f: Value) -> Gc<Thread> {
@@ -432,18 +481,6 @@ impl NativeCtx<'_> {
     /// The running thread, and whether it is the main thread.
     pub fn running(&self) -> (Gc<Thread>, bool) {
         (self.rt.current, self.rt.current == self.rt.main_thread)
-    }
-
-    /// Kill suspended or dead thread `t`, releasing its stack. Returns the
-    /// error it died with, if any.
-    pub fn close_thread(&mut self, t: Gc<Thread>) -> Option<Value> {
-        let c = co_mut(self.heap, t);
-        c.status = CoStatus::Dead;
-        c.stack = Stack::default();
-        let freed = std::mem::take(&mut c.bytes);
-        let e = c.error.take();
-        self.heap.adjust_bytes(-(freed as isize));
-        e
     }
 
     // ---- native closures -------------------------------------------------

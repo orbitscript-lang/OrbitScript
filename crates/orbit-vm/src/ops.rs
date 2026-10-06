@@ -333,7 +333,7 @@ pub(crate) fn where_(heap: &LuaHeap, rt: &Runtime, level: usize) -> String {
                 .frames
                 .iter()
                 .rev()
-                .filter(|f| !matches!(f.kind, FrameKind::Meta { .. } | FrameKind::Handler { .. }))
+                .filter(|f| !matches!(f.kind, FrameKind::Meta { .. } | FrameKind::Handler))
                 .nth(level - 1)
         })
         .flatten()
@@ -350,7 +350,7 @@ pub(crate) fn where_(heap: &LuaHeap, rt: &Runtime, level: usize) -> String {
         }
         FrameKind::Native { .. }
         | FrameKind::Meta { .. }
-        | FrameKind::Handler { .. }
+        | FrameKind::Handler
         | FrameKind::Boundary
         | FrameKind::CoBase => String::new(),
     }
