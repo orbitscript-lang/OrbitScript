@@ -79,3 +79,9 @@ cargo testkit bench --interp lua5.5=target/reference-lua/bin/lua5.5 \
 ```
 
 The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass once first light lands go into `tests/diff/expected-orbit.txt`.
+
+## Lua 5.5 compatibility
+
+| Document | Covers |
+|---|---|
+| [stdlib-string-table-math.md](stdlib-string-table-math.md) | The full `string`, `utf8`, `table` and `math` libraries (milestone C5a): patterns, `format`, `pack`, resumable table functions, `sort`, xoshiro256** seeding, differential fuzzers |
