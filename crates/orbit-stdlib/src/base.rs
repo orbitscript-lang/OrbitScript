@@ -21,6 +21,8 @@ const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("select", select),
     ("error", error),
     ("pcall", pcall),
+    ("xpcall", xpcall),
+    ("warn", warn),
     ("assert", assert),
     ("rawequal", rawequal),
     ("rawget", rawget),
@@ -379,6 +381,71 @@ fn pcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             Ok(NativeReturn::Return(2))
         }
     }
+}
+
+fn xpcall(ctx: &mut NativeCtx<'_>) -> R {
+    let h = match ctx.arg(1) {
+        h @ (Value::Closure(_) | Value::Native(_)) => h,
+        _ => return Err(ctx.type_error(1, "function")),
+    };
+    let f = ctx.arg(0);
+    // Window [f, h, args...] becomes [h, true, args...]: the VM finds the
+    // handler in the first slot, and the call's results land after `true`.
+    ctx.set(0, h);
+    ctx.set(1, Value::Bool(true));
+    Ok(NativeReturn::CallHandled {
+        f,
+        nargs: ctx.nargs() - 2,
+        k: xpcall_done,
+    })
+}
+
+fn xpcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    match outcome {
+        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
+        CallOutcome::Err(e) => {
+            let e = if e.is_nil() {
+                ctx.new_str(b"<no error object>")
+            } else {
+                e
+            };
+            ctx.truncate(0);
+            ctx.push(Value::Bool(false));
+            ctx.push(e);
+            Ok(NativeReturn::Return(2))
+        }
+    }
+}
+
+fn warn(ctx: &mut NativeCtx<'_>) -> R {
+    let n = ctx.nargs().max(1);
+    let mut parts = Vec::with_capacity(n);
+    for i in 0..n {
+        parts.push(ctx.check_str(i)?);
+    }
+    // A single message starting with `@` is a control message; unknown ones
+    // are ignored.
+    if let [msg] = parts[..]
+        && let [b'@', control @ ..] = ctx.bytes(msg)
+    {
+        match control {
+            b"on" => ctx.rt.warnings = true,
+            b"off" => ctx.rt.warnings = false,
+            _ => {}
+        }
+        return Ok(NativeReturn::Return(0));
+    }
+    if ctx.rt.warnings {
+        let mut text = b"Lua warning: ".to_vec();
+        for &s in &parts {
+            text.extend_from_slice(ctx.bytes(s));
+        }
+        text.push(b'\n');
+        // Keep the order of output already printed.
+        let _ = ctx.rt.out.flush();
+        let _ = std::io::stderr().write_all(&text);
+    }
+    Ok(NativeReturn::Return(0))
 }
 
 fn assert(ctx: &mut NativeCtx<'_>) -> R {

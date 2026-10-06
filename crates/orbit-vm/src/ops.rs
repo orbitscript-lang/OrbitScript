@@ -262,7 +262,11 @@ pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>)
         Value::Int(_) | Value::Float(_) | Value::Str(_) => {
             concat_piece(heap, v, out);
         }
-        Value::Table(_) | Value::Closure(_) | Value::Native(_) | Value::UserData(_) => {
+        Value::Table(_)
+        | Value::Closure(_)
+        | Value::Native(_)
+        | Value::UserData(_)
+        | Value::Thread(_) => {
             // `__name` (a string) replaces the type name.
             match rt.metamethod(heap, v, Event::Name) {
                 Value::Str(s) => out.extend_from_slice(heap.get(s).as_bytes()),
@@ -283,7 +287,7 @@ pub(crate) fn where_(heap: &LuaHeap, rt: &Runtime, level: usize) -> String {
                 .frames
                 .iter()
                 .rev()
-                .filter(|f| !matches!(f.kind, FrameKind::Meta { .. }))
+                .filter(|f| !matches!(f.kind, FrameKind::Meta { .. } | FrameKind::Handler { .. }))
                 .nth(level - 1)
         })
         .flatten()
@@ -298,7 +302,11 @@ pub(crate) fn where_(heap: &LuaHeap, rt: &Runtime, level: usize) -> String {
             let _ = write!(s, "{}:{}: ", proto.chunk, line);
             s
         }
-        FrameKind::Native { .. } | FrameKind::Meta { .. } => String::new(),
+        FrameKind::Native { .. }
+        | FrameKind::Meta { .. }
+        | FrameKind::Handler { .. }
+        | FrameKind::Boundary
+        | FrameKind::CoBase => String::new(),
     }
 }
 

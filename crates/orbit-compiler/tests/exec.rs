@@ -560,6 +560,7 @@ impl Interp {
                         .collect();
                     r[dst as usize] = V::Func(Rc::new(Closure { proto: child, caps }));
                 }
+                Op::NativeEntry { .. } => unreachable!("compilers never emit NativeEntry"),
             }
         }
     }

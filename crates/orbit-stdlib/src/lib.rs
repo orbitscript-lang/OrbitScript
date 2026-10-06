@@ -6,6 +6,8 @@
 //! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
+#[cfg(feature = "coroutine")]
+mod coroutine;
 #[cfg(feature = "math")]
 mod math;
 #[cfg(feature = "string")]
@@ -63,6 +65,8 @@ pub fn open_libs(vm: &mut Vm) {
         }
     }
     open_lib(vm, "os", &[("os.clock", os_clock)]);
+    #[cfg(feature = "coroutine")]
+    open_lib(vm, "coroutine", coroutine::FUNCTIONS);
 }
 
 /// Register `functions` (qualified names such as `"string.rep"`) in a new

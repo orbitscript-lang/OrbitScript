@@ -260,7 +260,10 @@ impl Trace<LuaSpace> for Table {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         for i in 0..self.array.len() {
             let t = self.array.tag(i);
-            if matches!(t, Tag::Str | Tag::Table | Tag::Closure | Tag::UserData) {
+            if matches!(
+                t,
+                Tag::Str | Tag::Table | Tag::Closure | Tag::UserData | Tag::Thread
+            ) {
                 mark(m, self.array.get(i));
             }
         }
@@ -290,6 +293,7 @@ pub fn mark(m: &mut Marker<'_, LuaSpace>, v: Value) {
         Value::Table(t) => m.mark(t),
         Value::Closure(c) => m.mark(c),
         Value::UserData(u) => m.mark(u),
+        Value::Thread(t) => m.mark(t),
         _ => {}
     }
 }
