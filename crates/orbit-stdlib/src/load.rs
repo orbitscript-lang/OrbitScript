@@ -111,6 +111,16 @@ fn ret_loaded(ctx: &mut NativeCtx<'_>, r: Result<Value, String>) -> R {
     }
 }
 
+/// `load`'s mode argument. `B` (a chunk in a fixed buffer, from the C
+/// API) is something Lua code can't ask for.
+fn load_mode(ctx: &mut NativeCtx<'_>) -> Result<Vec<u8>, LuaError> {
+    let mode = opt_bytes(ctx, 2, b"bt")?;
+    if mode.contains(&b'B') {
+        return Err(ctx.arg_error(2, "invalid mode"));
+    }
+    Ok(mode)
+}
+
 /// An optional string argument (numbers convert), as bytes.
 fn opt_bytes(ctx: &mut NativeCtx<'_>, i: usize, default: &[u8]) -> Result<Vec<u8>, LuaError> {
     if ctx.arg(i).is_nil() {
@@ -136,14 +146,14 @@ fn load(ctx: &mut NativeCtx<'_>) -> R {
             let s = ctx.check_str(0)?;
             let bytes = ctx.bytes(s).to_vec();
             let source = opt_bytes(ctx, 1, &bytes)?;
-            let mode = opt_bytes(ctx, 2, b"bt")?;
+            let mode = load_mode(ctx)?;
             let r = load_chunk(ctx, &bytes, &source, &Mode(&mode), env);
             ret_loaded(ctx, r)
         }
         Value::Closure(_) | Value::Native(_) => {
             // Check the other arguments now, as the reader may run long.
             opt_bytes(ctx, 1, b"")?;
-            opt_bytes(ctx, 2, b"")?;
+            load_mode(ctx)?;
             let given = ctx.nargs() >= 4;
             ctx.truncate(ENV_GIVEN.min(ctx.len()));
             ctx.set(ENV_GIVEN, Value::Bool(given));
