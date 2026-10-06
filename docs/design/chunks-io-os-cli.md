@@ -73,7 +73,7 @@ Standard behaviour throughout, built on a registry table on `Runtime` (or thread
 
 ## Binary chunks
 
-Decision 4 of the compatibility plan: our own format, and a verifier that always runs on load. `all.lua` round-trips every suite file through `string.dump` and `load`, so the format has to carry everything, debug information included unless stripped.
+Decision 4 of the compatibility plan: our own format, and a verifier that runs on load (at a level the build and the environment choose). `all.lua` round-trips every suite file through `string.dump` and `load`, so the format has to carry everything, debug information included unless stripped.
 
 ### Format
 
@@ -131,6 +131,13 @@ The whole `dump` feature (format, verifier, `string.dump`) adds 48 KiB to the re
 
 **Proposal: B.** It reaches zero panics without touching the VM. A would have to turn six sites in thread 2's interpreter loop into errors, three of them on the `MULTI` call and return paths, and the next VM invariant would need another such change. B keeps the VM's assumptions written down in one place, costs 4 KB and under 2 ms per 86 KB of bytecode, and only runs on binary loads.
 
+**Decided (Tym, 2026-10-06):** B, with both layers configurable so embedders and users can trade correctness for load time:
+
+- **Cargo features.** `orbit-stdlib` (and `orbit`, which forwards them) has `verify` for layer 1 and `verify-flow` for both layers, on by default. Layer 2 lives in `orbit_bytecode::verify::flow` behind `orbit-bytecode`'s own `verify-flow` feature, so a build without it doesn't carry the code. Release sizes of the `orbit` CLI (cloud x86_64): no verifier 1,036,504 bytes, layer 1 1,041,928, both layers 1,047,160.
+- **Environment.** `ORBIT_VERIFY=full`, `structure` or `none` lowers the level at run time; anything else keeps the most the build has. A host can also call `orbit::checks::set_level` per VM.
+
+Below both layers, a malformed chunk can make the VM panic (and abort the process, with `panic = "abort"`), but never corrupt memory. The compiler's debug-build self-check always runs the strongest level the build has.
+
 Every new instruction needs an encode, a decode and a verify arm. The matches are exhaustive, so adding an `Op` without them doesn't compile.
 
 ## `io`
@@ -164,7 +171,7 @@ The existing `--dump-ast`, `--dump-hir` and `--dump-bytecode` stay as long optio
 
 ## Cargo features and size
 
-`orbit-stdlib` gets one feature per library: `load`, `package`, `dump`, `io` and `os`, all on by default. Each PR that adds one reports the release binary size with and without it.
+`orbit-stdlib` gets one feature per library: `load`, `package`, `dump`, `io` and `os`, plus `verify` and `verify-flow` for the verifier's layers, all on by default. `orbit` forwards them. Each PR that adds one reports the release binary size with and without it.
 
 ## Deliberate differences
 
