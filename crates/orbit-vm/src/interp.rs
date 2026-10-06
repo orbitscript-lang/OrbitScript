@@ -365,15 +365,26 @@ impl Vm {
                 self.place_results(src, n, func, want);
                 self.after_return()
             }
-            NativeReturn::CallThen { .. } | NativeReturn::CallHandled { .. } => {
-                let (f, nargs, k, catch) = match r {
+            NativeReturn::CallThen { .. }
+            | NativeReturn::CallThenYieldable { .. }
+            | NativeReturn::CallHandled { .. } => {
+                let catch = |protected| if protected { Catch::Yes } else { Catch::No };
+                let (f, nargs, k, catch, yieldable) = match r {
                     NativeReturn::CallThen {
                         f,
                         nargs,
                         k,
                         protected,
-                    } => (f, nargs, k, if protected { Catch::Yes } else { Catch::No }),
-                    NativeReturn::CallHandled { f, nargs, k } => (f, nargs, k, Catch::Handler),
+                    } => (f, nargs, k, catch(protected), false),
+                    NativeReturn::CallThenYieldable {
+                        f,
+                        nargs,
+                        k,
+                        protected,
+                    } => (f, nargs, k, catch(protected), true),
+                    NativeReturn::CallHandled { f, nargs, k } => {
+                        (f, nargs, k, Catch::Handler, true)
+                    }
                     _ => unreachable!(),
                 };
                 let at = self.rt.top - nargs;
@@ -382,6 +393,7 @@ impl Vm {
                     id,
                     k,
                     catch,
+                    yieldable,
                     call_at: at as u32,
                 };
                 match frame {

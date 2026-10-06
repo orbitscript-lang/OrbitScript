@@ -275,7 +275,8 @@ fn pairs(ctx: &mut NativeCtx<'_>) -> R {
     if !h.is_nil() {
         ctx.truncate(1);
         ctx.push(t);
-        return Ok(NativeReturn::CallThen {
+        // lua5.5 lets `__pairs` yield.
+        return Ok(NativeReturn::CallThenYieldable {
             f: h,
             nargs: 1,
             k: pairs_done,
@@ -358,7 +359,7 @@ fn pcall(ctx: &mut NativeCtx<'_>) -> R {
     // Window [f, args...] becomes [true, args...]; the call's results land
     // after `true`.
     ctx.set(0, Value::Bool(true));
-    Ok(NativeReturn::CallThen {
+    Ok(NativeReturn::CallThenYieldable {
         f,
         nargs: ctx.nargs() - 1,
         k: pcall_done,
