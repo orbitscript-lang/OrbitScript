@@ -139,3 +139,29 @@ pub(crate) fn os_error_text(e: &std::io::Error) -> String {
         None => s,
     }
 }
+
+/// A file name from Lua bytes. On Unix any bytes are a valid name; elsewhere
+/// names must be text, and invalid UTF-8 is replaced.
+#[allow(dead_code)]
+pub(crate) fn os_path(bytes: &[u8]) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(bytes).into()
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8_lossy(bytes).into_owned().into()
+    }
+}
+
+/// The C library's text for an I/O error (`No such file or directory`),
+/// without the ` (os error 2)` that Rust appends.
+#[allow(dead_code)]
+pub(crate) fn os_error_text(e: &std::io::Error) -> String {
+    let s = e.to_string();
+    match s.rfind(" (os error ") {
+        Some(i) => s[..i].to_string(),
+        None => s,
+    }
+}
