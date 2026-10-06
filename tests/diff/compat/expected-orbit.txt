@@ -3,5 +3,6 @@
 c1_bitwise.lua
 c1_env.lua
 c1_global.lua
+c1_goto.lua
 c1_hexfloat.lua
 c1_vararg.lua
