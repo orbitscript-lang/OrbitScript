@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::{Capture, CaptureFrom, CaptureId, Chunk, ExprKind, FuncId, LocalId, Place, StmtKind};
+use crate::{Capture, CaptureFrom, CaptureId, Chunk, ExprKind, FuncId, LocalId, Place};
 
 /// A front end produced a reference the passes can't resolve. This is a front-end bug, not a
 /// user error.
@@ -34,12 +34,15 @@ impl std::error::Error for AnalysisError {}
 /// - a function that reads or writes a global, or contains a function that does, has the
 ///   environment as capture 0 (`Env` in the main function, `ParentCapture(0)` below it);
 /// - other captures are numbered in first-reference order;
-/// - `Local::captured` and `Local::reassigned` are set.
+/// - `Local::captured` and `Local::reassigned` are set;
+/// - a vararg table that is only ever indexed for reading is elided: those reads are
+///   `VarargIndex` and `Function::vararg_table_elided` is set.
 pub fn analyze(chunk: &mut Chunk) -> Result<(), AnalysisError> {
     check_parents(chunk)?;
     add_env_captures(chunk);
     rewrite_outer(chunk)?;
     mark_reassigned(chunk);
+    elide_vararg_tables(chunk);
     Ok(())
 }
 
@@ -82,12 +85,12 @@ fn uses_env(chunk: &Chunk, func: usize) -> bool {
     let f = &chunk.functions[func];
     f.exprs
         .iter()
-        .any(|e| matches!(e.kind, ExprKind::Global(_)))
-        || f.stmts.iter().any(|s| match &s.kind {
-            StmtKind::Assign { targets, .. } => {
-                targets.iter().any(|t| matches!(t, Place::Global(_)))
-            }
-            _ => false,
+        .any(|e| matches!(e.kind, ExprKind::Global(_) | ExprKind::Env))
+        || f.stmts.iter().any(|s| {
+            s.kind
+                .places()
+                .iter()
+                .any(|t| matches!(t, Place::Global(_) | Place::Env))
         })
 }
 
@@ -137,11 +140,9 @@ fn rewrite_outer(chunk: &mut Chunk) -> Result<(), AnalysisError> {
                 }
             }
             for (i, s) in f.stmts.iter().enumerate() {
-                if let StmtKind::Assign { targets, .. } = &s.kind {
-                    for (t, place) in targets.iter().enumerate() {
-                        if let Place::Outer { func, local } = *place {
-                            sites.push((Site::Place { stmt: i, target: t }, func, local));
-                        }
+                for (t, place) in s.kind.places().iter().enumerate() {
+                    if let Place::Outer { func, local } = *place {
+                        sites.push((Site::Place { stmt: i, target: t }, func, local));
                     }
                 }
             }
@@ -158,9 +159,7 @@ fn rewrite_outer(chunk: &mut Chunk) -> Result<(), AnalysisError> {
             match site {
                 Site::Expr(i) => f.exprs[i].kind = ExprKind::Capture(cap),
                 Site::Place { stmt, target } => {
-                    if let StmtKind::Assign { targets, .. } = &mut f.stmts[stmt].kind {
-                        targets[target] = Place::Capture(cap);
-                    }
+                    f.stmts[stmt].kind.places_mut()[target] = Place::Capture(cap);
                 }
             }
         }
@@ -212,15 +211,44 @@ fn capture_for(
     Ok(CaptureId::from_index(f.captures.len() - 1))
 }
 
+/// When a function's vararg table isn't captured and every use of it is `t[k]` read, rewrites
+/// those reads to `VarargIndex(k)` so the table is never built. Writes, `#t`, method calls and
+/// passing `t` along all keep it.
+fn elide_vararg_tables(chunk: &mut Chunk) {
+    for f in &mut chunk.functions {
+        let Some(t) = f.vararg_table else { continue };
+        if f.locals[t.index()].captured {
+            continue;
+        }
+        let is_t = |kind: &ExprKind| matches!(*kind, ExprKind::Local(l) if l == t);
+        let uses = f.exprs.iter().filter(|e| is_t(&e.kind)).count();
+        let reads: Vec<usize> = (0..f.exprs.len())
+            .filter(|&i| match f.exprs[i].kind {
+                ExprKind::Index { obj, .. } => is_t(&f.exprs[obj.index()].kind),
+                _ => false,
+            })
+            .collect();
+        if uses != reads.len() {
+            continue;
+        }
+        for i in reads {
+            let ExprKind::Index { obj, key } = f.exprs[i].kind else {
+                unreachable!("collected above")
+            };
+            f.exprs[obj.index()].kind = ExprKind::Nil;
+            f.exprs[i].kind = ExprKind::VarargIndex(key);
+        }
+        f.vararg_table_elided = true;
+    }
+}
+
 fn mark_reassigned(chunk: &mut Chunk) {
     for f in &mut chunk.functions {
         let mut assigned = Vec::new();
         for s in &f.stmts {
-            if let StmtKind::Assign { targets, .. } = &s.kind {
-                for t in targets {
-                    if let Place::Local(l) = *t {
-                        assigned.push(l);
-                    }
+            for t in s.kind.places() {
+                if let Place::Local(l) = *t {
+                    assigned.push(l);
                 }
             }
         }

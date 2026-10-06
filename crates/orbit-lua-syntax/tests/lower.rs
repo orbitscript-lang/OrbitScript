@@ -79,51 +79,74 @@ fn const_assignment_matches_the_reference() {
 }
 
 #[test]
-fn out_of_subset_constructs_are_rejected() {
-    let cases = [
-        ("goto done", "s.lua:1: 'goto' is not supported yet"),
-        ("do end\n::done::", "s.lua:2: labels are not supported yet"),
-        (
-            "global x",
-            "s.lua:1: 'global' declarations are not supported yet",
-        ),
-        (
-            "global function f() end",
-            "s.lua:1: 'global' declarations are not supported yet",
-        ),
-        (
-            "global <const> *",
-            "s.lua:1: 'global' declarations are not supported yet",
-        ),
-        (
-            "local f <close> = nil",
-            "s.lua:1: '<close>' variables are not supported yet",
-        ),
-        (
-            "x = 1 | 2",
-            "s.lua:1: bitwise operators are not supported yet",
-        ),
-        ("x = ~1", "s.lua:1: bitwise operators are not supported yet"),
-        (
-            "x = a << 1",
-            "s.lua:1: bitwise operators are not supported yet",
-        ),
-        (
-            "function f(...args) end",
-            "s.lua:1: named varargs are not supported yet",
-        ),
-        ("print(_ENV)", "s.lua:1: '_ENV' is not supported yet"),
-        ("local _ENV = {}", "s.lua:1: '_ENV' is not supported yet"),
-        (
-            "x = 0x1p4",
-            "s.lua:1: hexadecimal floats are not supported yet near '0x1p4'",
-        ),
-    ];
-    for (src, expected) in cases {
-        assert_eq!(err(src), expected, "source: {src:?}");
-    }
+fn ordinary_names_stay_ordinary() {
     // `global` stays an ordinary name, and `_ENV` as a field is just a string key.
     hir("global = 1 print(global) t = {} t._ENV = 1");
+}
+
+#[test]
+fn to_be_closed_variables_match_the_reference() {
+    let errors = [
+        (
+            "local a <close>, b <close> = nil, nil",
+            "s.lua:1: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local <close> a, b = nil, 1",
+            "s.lua:1: multiple to-be-closed variables in local list",
+        ),
+        // Reported at the end of the second declaration, before the values are read.
+        (
+            "local a <close>, b\n <close\n >\n\n = nil\n",
+            "s.lua:3: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local <close>\n a,\n b\n\n = nil\n",
+            "s.lua:3: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local a <close>,\n b,\n c <close>\n = nil x = = 1\n",
+            "s.lua:3: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local a <close>, b <close> = undeclared",
+            "s.lua:1: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local a <close> = nil; a = 1",
+            "s.lua:1: attempt to assign to const variable 'a'",
+        ),
+        (
+            "local x <close> = nil; return function() x = 1 end",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+        ("local a <foo> = 1", "s.lua:1: unknown attribute 'foo'"),
+        (
+            "global x <close>",
+            "s.lua:1: global variables cannot be to-be-closed",
+        ),
+    ];
+    for (src, expected) in errors {
+        assert_eq!(err(src), expected, "source: {src:?}");
+    }
+    // A per-name attribute overrides the prefix one, and one closing variable per list is fine.
+    for src in [
+        "local <close> a <const> = nil",
+        "local a <const>, b <close> = 1, nil",
+        "local a, b <close> = 1, nil",
+        "local x <close> = nil; local y <close> = nil",
+        "goto l; local x <close> = nil; ::l::",
+    ] {
+        hir(src);
+    }
+    let chunk = hir("local a, b <close>, c <const> = 1, nil, 2");
+    let kinds: Vec<_> = chunk.functions[0].locals.iter().map(|l| l.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![LocalKind::Normal, LocalKind::Close, LocalKind::Const]
+    );
+    let out = dump("local x <close> = nil");
+    assert!(out.contains("close"), "{out}");
 }
 
 #[test]
@@ -198,7 +221,9 @@ fn for_loops() {
     use LocalKind::*;
     assert_eq!(
         kinds,
-        vec![ForControl, Hidden, Hidden, Hidden, ForControl, Normal]
+        vec![
+            ForControl, Hidden, Hidden, Hidden, Hidden, ForControl, Normal
+        ]
     );
 }
 
@@ -224,4 +249,169 @@ fn lowered_hir_verifies_before_and_after_analysis() {
         orbit_hir::analyze(&mut chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
         orbit_hir::verify(&chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
+}
+
+/// `global` declarations and `_ENV`. Each message was checked against the reference.
+#[test]
+fn global_declarations_match_the_reference() {
+    let cases = [
+        ("global x; y = 1", "s.lua:1: variable 'y' not declared"),
+        (
+            "global y; global x = x",
+            "s.lua:1: variable 'x' not declared",
+        ),
+        (
+            "global x; local function f() global y; z = 1 end",
+            "s.lua:1: variable 'z' not declared",
+        ),
+        ("global _ENV; x = 1", "s.lua:1: variable 'x' not declared"),
+        (
+            "global _ENV, x; local function f() return x end",
+            "s.lua:1: _ENV is global when accessing variable 'x'",
+        ),
+        (
+            "global _ENV, x; _ENV = 1",
+            "s.lua:1: _ENV is global when accessing variable '_ENV'",
+        ),
+        (
+            "local _ENV = {}; global _ENV; global x; x = 1",
+            "s.lua:1: _ENV is global when accessing variable 'x'",
+        ),
+        (
+            "global <close> x",
+            "s.lua:1: global variables cannot be to-be-closed",
+        ),
+        (
+            "global x <close>",
+            "s.lua:1: global variables cannot be to-be-closed",
+        ),
+        (
+            "global <const> z = 1; z = 2",
+            "s.lua:1: attempt to assign to const variable 'z'",
+        ),
+        (
+            "global<const> *; x = 1",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+        (
+            "global x <const>; global *; x = 1",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(err(src), expected, "source: {src:?}");
+    }
+    // `global *` covers every other name, `_ENV` is never undeclared, and locals shadow.
+    hir("global *; global x; y = 1");
+    hir("global x; local y = _ENV");
+    hir("global x; local y = 1; y = 2");
+    hir("global <const> x; global x = 3");
+    hir("global x <const>; global function x() end");
+    hir("global x; do local x = 1; x = 3 end");
+}
+
+#[test]
+fn env_lowers_to_the_environment_or_a_local() {
+    let text = dump("_ENV = {}; local e = _ENV; x = 1");
+    assert!(text.contains("env = "), "{text}");
+    assert!(text.contains("global \"x\" = 1"), "{text}");
+    let text = dump("local _ENV = {}; x = y");
+    assert!(text.contains("_ENV#l0[\"x\"] = _ENV#l0[\"y\"]"), "{text}");
+    let text = dump("global x = 1; global function f() end");
+    assert!(text.contains("define global \"x\" = 1"), "{text}");
+    assert!(text.contains("define global \"f\" = closure fn1"), "{text}");
+}
+
+#[test]
+fn named_varargs_keep_their_table_only_when_needed() {
+    assert_eq!(
+        err("local function f(...t) t = 1 end"),
+        "s.lua:1: attempt to assign to const variable 't'"
+    );
+    // Only read by indexing: the table is elided.
+    let text = dump("local function f(...t) return t.n, t[1] end");
+    assert!(text.contains("(...t#l0 elided)"), "{text}");
+    assert!(text.contains("...[\"n\"], ...[1]"), "{text}");
+    // Written, measured, passed on or captured: the table is built.
+    for src in [
+        "local function f(...t) t[1] = 2 end",
+        "local function f(...t) return #t end",
+        "local function f(...t) return g(t) end",
+        "local function f(...t) return function() return t[1] end end",
+    ] {
+        let text = dump(src);
+        assert!(text.contains("(...t#l0)"), "{src}: {text}");
+    }
+}
+
+/// `goto` and labels. Each message was checked against the reference.
+#[test]
+fn goto_rules_match_the_reference() {
+    let cases = [
+        (
+            "goto f\nlocal x\n::f::\nprint(x)",
+            "s.lua:4: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        // Reported at the line of the block's last token (`end` for a function).
+        (
+            "do goto f\nlocal x\n::f::\nprint(x)\n\nend",
+            "s.lua:4: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        (
+            "local function g() goto f\nlocal x\n::f::\nprint(x)\n\nend",
+            "s.lua:6: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        (
+            "repeat goto f\nlocal x\n::f::\nuntil\nx",
+            "s.lua:5: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        (
+            "goto f\nlocal x\n::f::\nreturn",
+            "s.lua:4: <goto f> at line 1 jumps into the scope of 'x'",
+        ),
+        (
+            "goto f\nglobal *\n::f::\nx = 1",
+            "s.lua:4: <goto f> at line 1 jumps into the scope of '*'",
+        ),
+        (
+            "goto f; local a; goto g; local b; ::g:: ::f:: x = 1",
+            "s.lua:1: <goto f> at line 1 jumps into the scope of 'a'",
+        ),
+        (
+            "goto x\n\ny = 1\n-- c\n",
+            "s.lua:3: no visible label 'x' for <goto> at line 1",
+        ),
+        (
+            "local function f()\n goto x\n end\ny = 2",
+            "s.lua:3: no visible label 'x' for <goto> at line 2",
+        ),
+        (
+            "goto f; do ::f:: end",
+            "s.lua:1: no visible label 'f' for <goto> at line 1",
+        ),
+        (
+            "::a:: do ::a:: end",
+            "s.lua:1: label 'a' already defined on line 1",
+        ),
+        (
+            "::a::\nx=1\n::a::",
+            "s.lua:3: label 'a' already defined on line 1",
+        ),
+        // Lua takes a run of labels last to first.
+        (
+            "::a::\n::b::\n::a::",
+            "s.lua:3: label 'a' already defined on line 3",
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(err(src), expected, "source: {src:?}");
+    }
+    // A label followed only by labels is outside the block's scopes.
+    hir("goto f; local x; ::f:: ::g::");
+    hir("do goto f; local x; ::f:: end");
+    hir("do ::a:: end ::a::");
+    hir("::top:: local x = 1 goto top");
+    let text = dump("do goto f end ::f::");
+    assert!(text.contains("goto \"f\"#L0"), "{text}");
+    assert!(text.contains("::\"f\"#L0::"), "{text}");
 }

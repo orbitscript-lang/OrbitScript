@@ -8,3 +8,11 @@ Natives never call back into the interpreter on the Rust stack (ADR-3), so there
 
 - **More places can yield.** A coroutine can yield from inside a `table.sort` comparator, a `string.gsub` replacement function, a metamethod that a library function calls (`__tostring` from `tostring`), or an `xpcall` message handler. lua5.5 raises `attempt to yield across a C-call boundary` in those places (inside a handler, that becomes `error in error handling`).
 - **`coroutine.isyieldable()` is true in every coroutine.** It is false only on the main thread, because nothing on a coroutine's stack is non-yieldable.
+
+## Front end
+
+Proposed in the C1 front-end PRs.
+
+| Area | lua5.5 | OrbitScript | Why |
+|---|---|---|---|
+| Which compile error wins | Compiles in one pass, so a scoping error (`variable 'x' not declared`, `attempt to assign to const variable 'x'`, a `goto` error) is reported if it comes before a syntax error later in the chunk | Parses the whole chunk before resolving names, so a later syntax error is reported instead | The front end keeps parsing and lowering as separate passes so a second front end can share the HIR. Only a chunk with two errors is affected; `cargo testkit fuzz-syntax` lists the cases it finds (`tests/fuzz/syntax-mismatches.txt`) |
