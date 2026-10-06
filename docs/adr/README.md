@@ -7,7 +7,7 @@
 | [0003](0003-frames-and-coroutines.md) | Call frames and coroutines | Proposed |
 | [0004](0004-bytecode.md) | Bytecode and dispatch | Accepted |
 | [0005](0005-strings.md) | Strings | Accepted |
-| [0006](0006-safety-toolchain-size.md) | Safety, toolchain and size | Proposed |
-| [0007](0007-dependencies.md) | Dependency policy | Proposed |
+| [0006](0006-safety-toolchain-size.md) | Safety, toolchain and size | Accepted |
+| [0007](0007-dependencies.md) | Dependency policy | Accepted |
 
 Statuses: **Proposed** (open for edits), **Accepted** (changes need Tym's approval), **Superseded**.
