@@ -61,10 +61,8 @@ suite-files.9.lua
 suite-gengc.4.lua
 suite-gengc.8.lua
 suite-goto.0.lua
-suite-goto.1.lua
 suite-goto.11.lua
 suite-goto.12.lua
-suite-goto.13.lua
 suite-goto.17.lua
 suite-goto.18.lua
 suite-goto.19.lua
@@ -75,7 +73,6 @@ suite-locals.11.lua
 suite-locals.13.lua
 suite-locals.15.lua
 suite-locals.18.lua
-suite-locals.19.lua
 suite-locals.3.lua
 suite-locals.5.lua
 suite-locals.7.lua

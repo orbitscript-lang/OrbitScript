@@ -44,7 +44,7 @@ pub struct Function {
 pub struct Local {
     pub name: Option<StrId>,       // None for compiler temporaries
     pub span: Span,
-    pub kind: LocalKind,           // Normal, Param, Const, ForControl, Hidden
+    pub kind: LocalKind,           // Normal, Param, Const, ForControl, Hidden, Close
     pub captured: bool,            // set by capture analysis
     pub reassigned: bool,          // set by assignment analysis
     pub ty: Option<TypeId>,
@@ -76,7 +76,7 @@ pub enum StmtKind {
     While { cond: ExprId, body: BlockId },
     Repeat { body: BlockId, until: ExprId },          // `until` is evaluated inside body's scope
     NumericFor { var: LocalId, start: ExprId, limit: ExprId, step: Option<ExprId>, body: BlockId },
-    GenericFor { vars: Vec<LocalId>, iter: ExprList, hidden: [LocalId; 3], body: BlockId },
+    GenericFor { vars: Vec<LocalId>, iter: ExprList, hidden: [LocalId; 4], body: BlockId },
     Define { targets: Vec<Place>, values: ExprList }, // Assign that fails unless each target is nil
     Break,
     Goto(LabelId),                                    // to a label in this or an enclosing block
@@ -136,7 +136,8 @@ The HIR is where evaluation order is written down once, so the two front ends ca
 - `Let` and `LocalFunction` create **fresh bindings each time they execute**, and a loop body's locals (including a `for` control variable) are fresh per iteration. A closure captures the binding, not a value. This is what lets the compiler implement captures as heap cells (see [VM](vm.md#locals-captures-and-cells)).
 - `Global(name)` is exactly `Index { obj: <_ENV>, key: Str(name) }`, where `_ENV` is capture `Env` of the main function, threaded down to inner functions. It's a separate node so the compiler can emit a dedicated, inline-cached global access. When `_ENV` becomes a user-visible name, the Lua resolver simply lowers names under a user `_ENV` to `Index` instead.
 - `NumericFor` has Lua 5.4+ semantics: integer loop if start and step are integers (limit floored or clamped), otherwise float loop; the iteration count is computed up front so it can't overflow; step 0 is an error.
-- `GenericFor` calls `iter[0](iter[1], control)` each iteration until the first result is `nil`. The three hidden locals hold the iterator function, state and control value (a fourth, closing value, is reserved for `<close>`).
+- `GenericFor` calls `iter[0](iter[1], control)` each iteration until the first result is `nil`. The four hidden locals hold the iterator function, state, control value and closing value; the closing value is closed like a `Close` local when the loop ends by any exit.
+- A `Close` local is read-only and is closed when its scope ends by any exit: falling through, `break`, `goto`, `return` or an error. Closing calls the value's `__close` metamethod unless the value is `nil` or `false`; locals close in reverse declaration order. The HIR has no explicit close statements: the compiler derives them from scopes. OrbitScript would use it for a `defer`- or `with`-style scoped resource.
 - `Return` whose list is a single `Call` or `MethodCall` is a tail call. That's defined here, not left to each front end.
 
 ## Capture analysis
