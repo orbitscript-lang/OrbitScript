@@ -241,6 +241,13 @@ pub struct Runtime {
     pub(crate) switched: bool,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
+    /// ADR-3 spike (B): big register buffers to copy resumed stacks into.
+    #[cfg(feature = "spike-co-copy")]
+    pub(crate) spare: Vec<Vec<Value>>,
+    /// ADR-3 spike (D): the most recently parked suspended threads.
+    /// Weak: entries die with their thread.
+    #[cfg(feature = "spike-co-lru")]
+    pub(crate) cooling: std::collections::VecDeque<(Gc<Thread>, u32)>,
 }
 
 /// `Write` that can be printed with `{:?}`.
@@ -263,6 +270,7 @@ impl Roots<LuaSpace> for Runtime {
         for &p in self.native_protos.values() {
             m.mark(p);
         }
+
         for &v in &self.pinned {
             mark(m, v);
         }
@@ -276,6 +284,8 @@ impl Roots<LuaSpace> for Runtime {
 
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
         self.strings.clear_dead(live);
+        #[cfg(feature = "spike-co-lru")]
+        self.cooling.retain(|&(t, _)| live.is_live(t));
     }
 }
 
@@ -325,6 +335,10 @@ impl Vm {
                 xfer: Vec::new(),
                 switched: false,
                 native_protos: Default::default(),
+                #[cfg(feature = "spike-co-copy")]
+                spare: Vec::new(),
+                #[cfg(feature = "spike-co-lru")]
+                cooling: Default::default(),
             },
         }
     }

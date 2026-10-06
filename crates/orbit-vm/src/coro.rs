@@ -62,6 +62,9 @@ pub(crate) struct Coroutine {
     error: Option<Value>,
     /// What [`ThreadState::extra_bytes`] reports: the parked stack's size.
     bytes: usize,
+    /// ADR-3 spike (D): how many times it has been parked suspended.
+    #[cfg(feature = "spike-co-lru")]
+    parks: u32,
 }
 
 impl Coroutine {
@@ -85,6 +88,8 @@ impl Coroutine {
             top: 0,
             status: CoStatus::Suspended,
             error: None,
+            #[cfg(feature = "spike-co-lru")]
+            parks: 0,
         }
     }
 
@@ -95,6 +100,8 @@ impl Coroutine {
             status: CoStatus::Running,
             error: None,
             bytes: 0,
+            #[cfg(feature = "spike-co-lru")]
+            parks: 0,
         }
     }
 }
@@ -151,8 +158,29 @@ impl Vm {
     /// run thread `to`'s.
     fn switch_to(&mut self, to: Gc<Thread>, from_status: CoStatus) {
         let from = self.rt.current;
-        let stack = std::mem::take(&mut self.rt.stack);
+        #[allow(unused_mut)]
+        let mut stack = std::mem::take(&mut self.rt.stack);
         let top = self.rt.top;
+        let suspending = from_status == CoStatus::Suspended;
+        #[cfg(feature = "spike-co-shrink")]
+        if suspending {
+            stack.regs.truncate(top);
+            stack.regs.shrink_to_fit();
+            stack.cells.shrink_to_fit();
+            stack.frames.shrink_to_fit();
+        }
+        #[cfg(feature = "spike-co-copy")]
+        if suspending {
+            let exact = stack.regs[..top].to_vec();
+            let mut big = std::mem::replace(&mut stack.regs, exact);
+            big.clear();
+            if self.rt.spare.len() < 4 {
+                self.rt.spare.push(big);
+            }
+            stack.frames = stack.frames.to_vec();
+            stack.cells = stack.cells.to_vec();
+        }
+        let _ = suspending;
         // A parked stack is traced through its thread, which the collector
         // may already have scanned.
         self.heap.barrier_back(from);
@@ -173,10 +201,44 @@ impl Vm {
         if delta != 0 {
             self.heap.adjust_bytes(delta);
         }
+        #[cfg(feature = "spike-co-lru")]
+        if suspending {
+            let c = co_mut(&mut self.heap, from);
+            c.parks = c.parks.wrapping_add(1);
+            let stamp = c.parks;
+            self.rt.cooling.push_back((from, stamp));
+            // A stack not resumed since it left the last few parked is cold:
+            // copy it to an exact buffer, freeing the big one whole.
+            if self.rt.cooling.len() > 16
+                && let Some((old, stamp)) = self.rt.cooling.pop_front()
+                && co(&self.heap, old).status == CoStatus::Suspended
+                && co(&self.heap, old).parks == stamp
+            {
+                let c = co_mut(&mut self.heap, old);
+                let before = c.bytes;
+                let top = c.top;
+                c.stack.regs = c.stack.regs[..top].to_vec();
+                c.stack.cells = c.stack.cells.to_vec();
+                c.stack.frames = c.stack.frames.to_vec();
+                c.bytes = c.stack.bytes();
+                let delta = c.bytes as isize - before as isize;
+                self.heap.adjust_bytes(delta);
+            }
+        }
         let c = co_mut(&mut self.heap, to);
         c.status = CoStatus::Running;
-        self.rt.stack = std::mem::take(&mut c.stack);
+        #[allow(unused_mut)]
+        let mut stack = std::mem::take(&mut c.stack);
         self.rt.top = c.top;
+        #[cfg(feature = "spike-co-copy")]
+        if stack.regs.capacity() == stack.regs.len()
+            && !stack.regs.is_empty()
+            && let Some(mut big) = self.rt.spare.pop()
+        {
+            big.extend_from_slice(&stack.regs);
+            stack.regs = big;
+        }
+        self.rt.stack = stack;
         self.rt.current = to;
         self.rt.switched = true;
     }

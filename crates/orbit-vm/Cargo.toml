@@ -16,6 +16,12 @@ orbit-gc = { path = "../orbit-gc" }
 [features]
 # Per-instruction type-feedback bytes on prototypes (docs/design/vm.md).
 type-feedback = ["orbit-core/type-feedback"]
+# ADR-3 spike only. C: shrink a stack when it yields. B: copy a yielding
+# stack out to an exact buffer and back into a pooled one. D: shrink a
+# parked stack once it is no longer among the last few parked.
+spike-co-shrink = []
+spike-co-copy = []
+spike-co-lru = []
 
 [lints]
 workspace = true
