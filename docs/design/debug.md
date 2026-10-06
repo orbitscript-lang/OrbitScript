@@ -2,7 +2,7 @@
 
 Status: Proposed. Milestones C5d (debug core) and C6 (hooks, tracebacks, error-message parity) of the Lua 5.5 compatibility plan. Crates: `orbit-vm` (introspection, hooks), `orbit-stdlib` (the `debug` library, behind its own Cargo feature), `orbit-compiler` and `orbit-bytecode` (a few debug-info fields), `orbit-cli` (the uncaught-error traceback).
 
-This builds on the [VM design](vm.md) and [VM semantics](vm-semantics.md). Everything here was worked out from the manual, the reference `lua5.5` binary and the official suite (`db.lua`, `calls.lua`, `errors.lua`, `locals.lua`, `coroutine.lua`), never from PUC Lua's sources. It keeps the VM's two structural rules: no Lua code runs on the Rust stack (hooks are stackless calls like metamethods), and fast paths stay as they are (hooks cost nothing until one is set).
+This builds on the [VM design](vm.md) and [VM semantics](vm-semantics.md). Everything here was worked out from the manual, the reference `lua5.5` binary and the official suite (`db.lua`, `calls.lua`, `errors.lua`, `locals.lua`, `coroutine.lua`), never from PUC Lua's sources. It keeps the fast paths as they are (hooks cost nothing until one is set). Hooks are the one place Lua code runs in a nested call on the Rust stack: Lua hooks can't yield in the reference either (see [Hook calls](#hook-calls)).
 
 ## Summary
 
@@ -16,7 +16,7 @@ This builds on the [VM design](vm.md) and [VM semantics](vm-semantics.md). Every
 | `CapSelf` | A debug write that breaks the "self capture holds this closure" assumption swaps that closure's code for a copy where `CapSelf` reads the capture. No cost on the fast path |
 | `upvalueid` | Needs a value type for "light userdata". Proposed as an ADR-1 amendment (tag 10); see [below](#upvalueid-and-light-userdata) |
 | Tracebacks | `debug.traceback` and the CLI's uncaught-error traceback share one formatter, in the reference's exact shape (`in local 'f'`, `in metamethod 'index'`, `(...tail calls...)`, the 10 + 11 level elision) |
-| Hooks | Per stack (so per coroutine). The dispatch loop is compiled twice from one generic function: a plain loop with no hook code, and a hooked loop that checks count and line before each instruction. Switching happens only where a hook can have been set: when the loop (re)starts on a frame and after a native call. Hook functions run in hook frames, stackless, so they can yield |
+| Hooks | Per stack (so per coroutine). The dispatch loop is compiled twice from one generic function: a plain loop with no hook code, and a hooked loop that checks count and line before each instruction. Switching happens only where a hook can have been set: when the loop (re)starts on a frame and after a native call. Hook functions run as nested calls above a hook marker frame; like the reference's Lua hooks, they can't yield |
 
 ## Activations and levels
 
@@ -149,16 +149,17 @@ Each stack (each coroutine, once thread 2's `Thread` lands) has a hook:
 ```rust
 pub(crate) struct Hook {
     func: Value,          // nil when off (traced with the stack)
-    mask: HookMask,       // call, return, line, count bits
-    base_count: u32,      // count interval (0: no count hook)
+    mask: u8,             // call, return, line, count bits, plus the interrupt bit
+    base_count: i64,      // count interval as given (count events only when positive)
     count: u32,           // instructions left until the next count event
     active: bool,         // a hook is running: no hooks fire (the reference's rule)
-    old_pc: u32, old_depth: u32, // last instruction the line check saw
-    resume: Option<Resume>,      // a hook just returned at this pc: skip what already fired
+    old_pc: u32, old_depth: u32,         // last instruction the line check saw
+    call_pending: Option<bool>,          // a frame was just entered (true: a tail call)
+    transfer: Option<(usize, u32, u32)>, // the frame and values a call or return hook reports
 }
 ```
 
-`debug.sethook([thread,] f, mask [, count])` sets it, `debug.gethook` reads it back (`f, mask, count`). The runtime keeps one flag, `hooks_armed`, true when the running stack's mask isn't empty.
+`debug.sethook([thread,] f, mask [, count])` sets it, `debug.gethook([thread])` reads it back (`f, mask, count`). The loops check `mask != 0` on the running stack. A new coroutine inherits its creator's mask and count but not the function, as in the reference: `debug.gethook(co)` returns `nil, mask, count` and no events fire until a function is set.
 
 ### Two loops from one source
 
@@ -167,7 +168,7 @@ The dispatch loop becomes `fn run_loop<const HOOKED: bool>(&mut self, stop)`. Wi
 1. at `'reload`, where every non-inline call, return, metamethod and error resumes the loop;
 2. after a native call returns in place (the `call!` macro's general branch; fast-path natives such as `math.sqrt` can't set hooks).
 
-A hook can only be set by running a native (`debug.sethook`), or by a resume switching to a stack with hooks, which goes through `'reload`, so those two places see every change. When the flag disagrees with the loop it is in, the loop saves its pc and returns `Switch`, and `run` re-enters the other instantiation. No check at backward jumps or Lua-to-Lua calls is needed, so the fast paths keep their exact instruction sequences. The hooked loop is compiled only with the `hooks` feature of `orbit-vm` (enabled by `orbit-stdlib/debug`); without it, `run_loop::<true>` doesn't exist and the flag checks compile away.
+A hook can only be set by running a native (`debug.sethook`), or by a resume switching to a stack with hooks, which goes through `'reload`, so those two places see every change. When the flag disagrees with the loop it is in, the loop saves its pc and returns `Switch`, and `run` re-enters the other instantiation. No check at backward jumps or Lua-to-Lua calls is needed, so the fast paths keep their exact instruction sequences. The one exception is the [interrupt](#interrupts) check at backward jumps. The hooked loop is compiled only with the `hooks` feature of `orbit-vm` (enabled by `orbit-stdlib/debug`); without it, `run_loop::<true>` doesn't exist and the flag checks compile away.
 
 `HOOKED = true` adds, before each instruction, a call to a cold `hook_point(pc, op)` when any of count, line, or (for return instructions) return events are on. It decides, in the reference's order:
 
@@ -175,17 +176,28 @@ A hook can only be set by running a native (`debug.sethook`), or by a resume swi
 2. **line**: fire `"line", n` when the instruction starts a new line (its line differs from the last checked instruction's in this frame), when it is the function's first instruction, or when control jumped backwards (`pc <= old_pc`, so `for i=1,4 do a=1 end` reports line 1 four times). Returning from a call doesn't count as a new line: when the frame depth differs from the one `old_pc` belongs to, `old_pc` is taken as the call instruction.
 3. **return**: before `Return`, `Return0`, `Return1`, fire `"return"` with `ftransfer`/`ntransfer` covering the returned registers.
 
-Call events fire when a frame is entered (`"call"`, or `"tail call"` for `TailCall`), with `ftransfer = 1`, `ntransfer = nargs`.
+Call events fire when a frame is entered (`"call"`, or `"tail call"` for `TailCall`), with `ftransfer = 1` and `ntransfer` the number of parameters (for a native, the number of arguments). Observed from `lua5.5` and matched: a count event makes the same instruction report its line again; the line of a `Closure` instruction is the function's last line; the `for` instruction of a loop reports the `for` line.
 
 ### Hook calls
 
-A hook is called like a metamethod ([VM semantics](vm-semantics.md#calling-a-metamethod-without-recursion)): the cold path saves the frame's pc *at* the instruction (not after it), pushes a **hook frame** (`FrameKind::Hook { event, resume }`), and calls the hook function with `(event, line)` above the frame's registers, wanting no results. While it runs, `active` is set, so nothing inside fires hooks. When it returns into the hook frame, `active` is cleared, the frame is popped and the loop re-runs the instruction at the saved pc; `resume` records which checks already fired there, so the instruction runs once and fires nothing twice. Errors unwind through hook frames like any other (clearing `active`), and since nothing is on the Rust stack a hook can yield (`coroutine.lua:622`).
+A hook runs as an ordinary nested call. The cold path pushes a **hook marker frame** (`FrameKind::Hook`) above everything live (the top frame's registers and any open results), calls the hook function with `(event, line)` above it, and pops the marker when the call returns. The marker names the hook's activation (`hook '?'`) for `getinfo` and tracebacks, and ends the nested call the way a boundary frame does. While a hook runs, `active` is set, so nothing inside fires hooks; errors unwind through the marker and clear it.
+
+This replaces the stackless hook frame this document first proposed. The reference raises `attempt to yield across a C-call boundary` when a Lua hook function yields, so a nested call loses nothing observable, and it avoids re-running the hooked instruction with a record of which checks already fired. `coroutine.lua:622` yields from a hook set through the C testing library (`T.sethook`), which the suite skips without the C API.
 
 Natives called while call or return hooks are on get a `NativeCall` frame, so the hook sees them at level 2 (`db.lua` records `assert` and `debug.getlocal` through `getinfo(2, "f")`). The call hook runs first (hook frame action: "then run the native"), the native runs, and the return hook runs before its results are placed (`ftransfer`/`ntransfer` point at its results in its window). Without call and return hooks, natives run exactly as now, frameless.
 
+### Interrupts
+
+`Vm::interrupt_handle()` returns an `Interrupt` (`Clone + Send + Sync`) whose `request()` sets an atomic flag, for a CLI's Ctrl-C handler or a watchdog thread. The plain loop checks the flag on backward jumps only (a relaxed load on a taken back-edge); when set, it saves its pc, sets the interrupt bit in the stack's hook mask and switches to the hooked loop, whose next hook point raises `interrupted!`. The hooked loop checks the flag at every hook point outside a running hook. The error is an ordinary catchable error, positioned at the interrupted function's caller, as the reference's Ctrl-C error is. A running native finishes first (the reference doesn't interrupt `string.find` either). Without the `hooks` feature, requests are ignored.
+
+### Deviations
+
+- **Count events** fire after the same number of *our* instructions, not the reference's. Bytecode is our own design (ADR-4), so a count hook fires at different points in the source.
+- **`ftransfer` of a native's return** counts from the native's own window. For `debug.sethook`'s own return event the reference reports `ftransfer = 4`, a C stack detail; we report the first result's index.
+
 ### Cost
 
-The plain loop's extra work is the two flag loads above. The PR that adds hooks reports the five-benchmark table against `lua5.5` before and after on the cloud container, plus `orbit` binary size with and without the `debug` feature (two loop copies).
+The plain loop's extra work is the two flag loads above and the interrupt check on taken backward jumps. The PR that adds hooks reports the five-benchmark table against `lua5.5` before and after on the cloud container, plus `orbit` binary size with and without the `debug` feature (two loop copies).
 
 ## Error-message parity
 
