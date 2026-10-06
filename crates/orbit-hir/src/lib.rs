@@ -82,6 +82,10 @@ pub struct Function {
     pub locals: Vec<Local>,
     /// Filled by capture analysis; front ends leave it empty.
     pub captures: Vec<Capture>,
+    /// Filled by capture analysis when capture 0 is the environment: how many
+    /// other captures are first used before it. Debug interfaces list captures
+    /// in first-use order, so this is where `_ENV` appears there.
+    pub env_debug_index: Option<u8>,
     pub exprs: Vec<Expr>,
     pub stmts: Vec<Stmt>,
     pub blocks: Vec<Block>,
@@ -104,6 +108,7 @@ impl Function {
             vararg_table_elided: false,
             locals: Vec::new(),
             captures: Vec::new(),
+            env_debug_index: None,
             exprs: Vec::new(),
             stmts: Vec::new(),
             blocks: vec![Block {

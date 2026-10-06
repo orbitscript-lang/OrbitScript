@@ -415,3 +415,18 @@ fn goto_rules_match_the_reference() {
     assert!(text.contains("goto \"f\"#L0"), "{text}");
     assert!(text.contains("::\"f\"#L0::"), "{text}");
 }
+
+#[test]
+fn captures_are_numbered_by_first_use() {
+    // `_ENV` stays capture 0; `env_debug_index` gives its first-use position, and an
+    // explicit `_ENV` counts as a use like a free name.
+    let chunk = hir("local a, b = 1, 2 return function() local _ = b; _ENV.x = a end");
+    let f = &chunk.functions[1];
+    let names: Vec<_> = f
+        .captures
+        .iter()
+        .map(|c| String::from_utf8_lossy(chunk.strings.get(c.name)).into_owned())
+        .collect();
+    assert_eq!(names, ["_ENV", "b", "a"]);
+    assert_eq!(f.env_debug_index, Some(1));
+}
