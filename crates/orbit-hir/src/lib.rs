@@ -19,7 +19,7 @@ pub use analyze::{AnalysisError, analyze};
 pub use print::print;
 pub use verify::{VerifyError, verify, verify_lowered};
 
-pub use ids::{BlockId, CaptureId, ExprId, FuncId, LocalId, StmtId, StrId, TypeId};
+pub use ids::{BlockId, CaptureId, ExprId, FuncId, LabelId, LocalId, StmtId, StrId, TypeId};
 pub use source::{Language, SourceInfo, Span};
 pub use strings::StringPool;
 
@@ -72,12 +72,25 @@ pub struct Function {
     /// Parameters in order. `self` is an ordinary first parameter.
     pub params: Vec<LocalId>,
     pub is_vararg: bool,
+    /// A named vararg (`...t` in Lua 5.5): the read-only local bound to a table of the extra
+    /// arguments, `{n = count, ...}`, declared after the parameters. OrbitScript's rest
+    /// parameter would map onto it.
+    pub vararg_table: Option<LocalId>,
+    /// Set by analysis when every use of `vararg_table` became a [`ExprKind::VarargIndex`],
+    /// so the table is never built.
+    pub vararg_table_elided: bool,
     pub locals: Vec<Local>,
     /// Filled by capture analysis; front ends leave it empty.
     pub captures: Vec<Capture>,
+    /// Filled by capture analysis when capture 0 is the environment: how many
+    /// other captures are first used before it. Debug interfaces list captures
+    /// in first-use order, so this is where `_ENV` appears there.
+    pub env_debug_index: Option<u8>,
     pub exprs: Vec<Expr>,
     pub stmts: Vec<Stmt>,
     pub blocks: Vec<Block>,
+    /// `goto` targets, each placed by exactly one [`StmtKind::Label`].
+    pub labels: Vec<Label>,
     pub body: BlockId,
     pub result_type: Option<TypeId>,
 }
@@ -91,14 +104,18 @@ impl Function {
             parent,
             params: Vec::new(),
             is_vararg: false,
+            vararg_table: None,
+            vararg_table_elided: false,
             locals: Vec::new(),
             captures: Vec::new(),
+            env_debug_index: None,
             exprs: Vec::new(),
             stmts: Vec::new(),
             blocks: vec![Block {
                 stmts: Vec::new(),
                 span,
             }],
+            labels: Vec::new(),
             body: BlockId(0),
             result_type: None,
         }
@@ -132,6 +149,12 @@ impl Function {
     pub fn add_block(&mut self, block: Block) -> BlockId {
         let id = BlockId::from_index(self.blocks.len());
         self.blocks.push(block);
+        id
+    }
+
+    pub fn add_label(&mut self, label: Label) -> LabelId {
+        let id = LabelId::from_index(self.labels.len());
+        self.labels.push(label);
         id
     }
 
@@ -206,8 +229,21 @@ pub enum LocalKind {
     Const,
     /// A numeric or generic `for` control variable (read-only in Lua 5.5).
     ForControl,
-    /// Compiler-owned state with no source name, such as a generic `for`'s iterator triple.
+    /// Compiler-owned state with no source name, such as a generic `for`'s iterator state.
     Hidden,
+    /// Read-only, and closed when it goes out of scope by any exit (`<close>` in Lua): its
+    /// value's `__close` metamethod runs, unless the value is nil or false. Every exit from
+    /// its scope (falling through, `break`, `goto`, `return`, an error) closes it; the HIR has
+    /// no explicit close statements. OrbitScript would use it for a `defer`- or `with`-style
+    /// scoped resource.
+    Close,
+}
+
+/// A `goto` target. Front ends check visibility and scoping rules before lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Label {
+    pub name: StrId,
+    pub span: Span,
 }
 
 /// One entry in a function's capture list.
@@ -282,16 +318,47 @@ pub enum StmtKind {
         step: Option<ExprId>,
         body: BlockId,
     },
-    /// `hidden` holds the iterator function, state and control value, in that order.
+    /// `hidden` holds the iterator function, state, control value and closing value, in that
+    /// order. The closing value (the fourth value of `iter`) is closed like a `Close` local when
+    /// the loop ends by any exit.
     GenericFor {
         vars: Vec<LocalId>,
         iter: ExprList,
-        hidden: [LocalId; 3],
+        hidden: [LocalId; 4],
         body: BlockId,
     },
+    /// Defines globals: like `Assign`, but each store first reads its target and raises
+    /// "global 'x' already defined" unless it is nil. Lua's `global x = v`; OrbitScript would
+    /// use it for a module-level definition that must not silently replace an existing one.
+    Define {
+        targets: Vec<Place>,
+        values: ExprList,
+    },
     Break,
+    /// Jumps to a label in this function, in the current block or an enclosing one. Lua's
+    /// `goto`; OrbitScript would use it for labelled `break` and `continue`.
+    Goto(LabelId),
+    /// Places a label.
+    Label(LabelId),
     /// A list that is a single `Call` or `MethodCall` is a tail call.
     Return(ExprList),
+}
+
+impl StmtKind {
+    /// The targets of an `Assign` or `Define`.
+    pub fn places(&self) -> &[Place] {
+        match self {
+            StmtKind::Assign { targets, .. } | StmtKind::Define { targets, .. } => targets,
+            _ => &[],
+        }
+    }
+
+    pub fn places_mut(&mut self) -> &mut [Place] {
+        match self {
+            StmtKind::Assign { targets, .. } | StmtKind::Define { targets, .. } => targets,
+            _ => &mut [],
+        }
+    }
 }
 
 /// An assignment target.
@@ -306,6 +373,9 @@ pub enum Place {
     },
     Capture(CaptureId),
     Global(StrId),
+    /// The chunk's environment itself (`_ENV = t` in Lua). OrbitScript could use it to
+    /// sandbox a module.
+    Env,
     Index {
         obj: ExprId,
         key: ExprId,
@@ -327,6 +397,9 @@ pub enum ExprKind {
     Str(StrId),
     /// `...`: all extra arguments, or one of them where a single value is wanted.
     Vararg,
+    /// `t[key]` where `t` is the function's vararg table, read without building it: an
+    /// extra argument for keys `1..n`, the count for `"n"`, nil otherwise.
+    VarargIndex(ExprId),
     Local(LocalId),
     /// A local of an enclosing function, as a front end writes it. Capture analysis rewrites
     /// it to [`ExprKind::Capture`].
@@ -337,6 +410,8 @@ pub enum ExprKind {
     Capture(CaptureId),
     /// `_ENV[name]`.
     Global(StrId),
+    /// The chunk's environment itself (`_ENV` in Lua); see [`Place::Env`].
+    Env,
     Index {
         obj: ExprId,
         key: ExprId,
@@ -387,6 +462,7 @@ impl ExprKind {
             | ExprKind::Outer { .. }
             | ExprKind::Capture(_)
             | ExprKind::Global(_)
+            | ExprKind::Env
             | ExprKind::Closure(_) => {}
             ExprKind::Index { obj, key } => {
                 f(*obj);
@@ -417,7 +493,9 @@ impl ExprKind {
                 f(*lhs);
                 f(*rhs);
             }
-            ExprKind::Unary { expr, .. } | ExprKind::First(expr) => f(*expr),
+            ExprKind::Unary { expr, .. } | ExprKind::First(expr) | ExprKind::VarargIndex(expr) => {
+                f(*expr)
+            }
         }
     }
 
@@ -480,6 +558,13 @@ pub enum BinOp {
     /// Kept in source form; the compiler evaluates `a` then `b` and tests `b < a`.
     Gt,
     Ge,
+    /// Bitwise operators on integers (floats with an integer value convert).
+    BAnd,
+    BOr,
+    BXor,
+    /// Logical shifts; a count of 64 or more gives 0, a negative count shifts the other way.
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -487,6 +572,8 @@ pub enum UnOp {
     Neg,
     Not,
     Len,
+    /// Bitwise not.
+    BNot,
 }
 
 #[cfg(test)]
