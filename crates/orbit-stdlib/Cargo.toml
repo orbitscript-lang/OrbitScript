@@ -13,7 +13,7 @@ orbit-core = { path = "../orbit-core" }
 orbit-vm = { path = "../orbit-vm" }
 
 [features]
-default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine", "debug"]
+default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine", "debug", "dump"]
 string = []
 utf8 = []
 table = []
@@ -21,6 +21,8 @@ math = []
 # `load`, `loadfile` and `dofile` (source chunks need the host to install a
 # compiler in `Runtime::compile`).
 load = []
+# `string.dump`, and loading the binary chunks it writes.
+dump = ["load", "string"]
 # The `os` library (without it, no `os` table at all).
 os = []
 # `require` and the `package` library.
