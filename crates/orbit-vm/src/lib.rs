@@ -241,6 +241,10 @@ pub struct Runtime {
     pub(crate) switched: bool,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
+    /// The threads parked suspended most recently, with their park count
+    /// then (ADR-3): one that leaves this list without being resumed has its
+    /// stack shrunk. Weak: an entry dies with its thread.
+    pub(crate) cooling: std::collections::VecDeque<(Gc<Thread>, u32)>,
 }
 
 /// `Write` that can be printed with `{:?}`.
@@ -276,6 +280,7 @@ impl Roots<LuaSpace> for Runtime {
 
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
         self.strings.clear_dead(live);
+        self.cooling.retain(|&(t, _)| live.is_live(t));
     }
 }
 
@@ -325,6 +330,7 @@ impl Vm {
                 xfer: Vec::new(),
                 switched: false,
                 native_protos: Default::default(),
+                cooling: Default::default(),
             },
         }
     }

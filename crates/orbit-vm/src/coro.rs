@@ -29,6 +29,11 @@ use crate::{Frame, FrameKind, LuaError, Stack, Vm};
 /// stops).
 pub(crate) const MAX_RESUMES: usize = 196;
 
+/// How many suspended stacks stay at full size (ADR-3): a stack parked
+/// longer ago than the last `HOT_STACKS` parks, and not resumed since, is
+/// shrunk to its live values.
+const HOT_STACKS: usize = 16;
+
 /// A thread's status, as `coroutine.status` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoStatus {
@@ -62,6 +67,9 @@ pub(crate) struct Coroutine {
     error: Option<Value>,
     /// What [`ThreadState::extra_bytes`] reports: the parked stack's size.
     bytes: usize,
+    /// How many times it has been parked suspended, to tell whether an
+    /// entry in `rt.cooling` is still its latest park.
+    parks: u32,
 }
 
 impl Coroutine {
@@ -85,6 +93,7 @@ impl Coroutine {
             top: 0,
             status: CoStatus::Suspended,
             error: None,
+            parks: 0,
         }
     }
 
@@ -95,6 +104,7 @@ impl Coroutine {
             status: CoStatus::Running,
             error: None,
             bytes: 0,
+            parks: 0,
         }
     }
 }
@@ -170,8 +180,19 @@ impl Vm {
             c.top = top;
         }
         let delta = c.bytes as isize - old as isize;
+        c.parks = c
+            .parks
+            .wrapping_add((from_status == CoStatus::Suspended) as u32);
+        let stamp = c.parks;
         if delta != 0 {
             self.heap.adjust_bytes(delta);
+        }
+        if from_status == CoStatus::Suspended {
+            self.rt.cooling.push_back((from, stamp));
+            if self.rt.cooling.len() > HOT_STACKS {
+                let (cold, stamp) = self.rt.cooling.pop_front().expect("a parked thread");
+                self.shrink_parked(cold, stamp);
+            }
         }
         let c = co_mut(&mut self.heap, to);
         c.status = CoStatus::Running;
@@ -179,6 +200,27 @@ impl Vm {
         self.rt.top = c.top;
         self.rt.current = to;
         self.rt.switched = true;
+    }
+
+    /// Shrink suspended thread `t`'s stack to its live values, if it hasn't
+    /// been resumed since park number `stamp`. A suspended stack keeps at
+    /// least one 256-register window while it may be resumed soon; one that
+    /// has gone cold costs only what it holds. The copy frees the big
+    /// buffer whole, which a shrink in place would leave fragmented.
+    #[cold]
+    fn shrink_parked(&mut self, t: Gc<Thread>, stamp: u32) {
+        let c = co_mut(&mut self.heap, t);
+        if c.status != CoStatus::Suspended || c.parks != stamp {
+            return;
+        }
+        let before = c.bytes;
+        let s = &mut c.stack;
+        s.regs = s.regs[..c.top].to_vec();
+        s.cells = s.cells.to_vec();
+        s.frames = s.frames.to_vec();
+        c.bytes = s.bytes();
+        let delta = c.bytes as isize - before as isize;
+        self.heap.adjust_bytes(delta);
     }
 
     /// Push (or reuse) the continuation frame of native `id`, which waits
