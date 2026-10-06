@@ -97,9 +97,14 @@ pub(crate) fn load_chunk(
         let bad = |e: &dyn std::fmt::Display| format!("{name}: bad binary format ({e})");
         #[cfg(feature = "dump")]
         {
-            use orbit_vm::op::{format, verify};
+            use orbit_vm::op::format;
+            #[cfg(feature = "verify")]
+            use orbit_vm::op::verify;
             let chunk = format::decode(bytes).map_err(|e| bad(&e))?;
-            verify::verify(&chunk, verify::Level::Full).map_err(|e| bad(&e))?;
+            #[cfg(feature = "verify")]
+            if let Some(level) = crate::checks::level(ctx) {
+                verify::verify(&chunk, level).map_err(|e| bad(&e))?;
+            }
             return Ok(ctx.link(&chunk, env));
         }
         #[cfg(not(feature = "dump"))]

@@ -12,6 +12,10 @@ use orbit_compiler::bytecode::UnlinkedChunk;
 use orbit_lua_syntax::ParseOptions;
 
 pub use orbit_core::Value;
+/// How much `load` checks binary chunks (features `verify`, `verify-flow`;
+/// `ORBIT_VERIFY`).
+#[cfg(feature = "dump")]
+pub use orbit_stdlib::checks;
 pub use orbit_stdlib::{chunk_id, read_chunk_file};
 pub use orbit_vm::{GcMode, LuaError, Vm};
 
@@ -57,7 +61,7 @@ pub fn compile(
     #[cfg(debug_assertions)]
     if let Err(e) = orbit_compiler::bytecode::verify::verify(
         &chunk,
-        orbit_compiler::bytecode::verify::Level::Full,
+        orbit_compiler::bytecode::verify::Level::STRONGEST,
     ) {
         panic!("compiler output fails verification: {e}");
     }

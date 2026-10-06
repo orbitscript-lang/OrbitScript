@@ -11,6 +11,8 @@ mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
 #[cfg(feature = "dump")]
+pub mod checks;
+#[cfg(feature = "dump")]
 mod dump;
 #[cfg(feature = "load")]
 mod load;
@@ -99,6 +101,8 @@ pub fn open_libs(vm: &mut Vm) {
         open_lib(vm, "debug", debug::FUNCTIONS);
         debug::open(vm);
     }
+    #[cfg(feature = "dump")]
+    checks::set_level(vm, checks::from_env());
     let g = vm.rt.globals;
     mark_loaded(vm, "_G", orbit_vm::orbit_core::Value::Table(g));
 }
