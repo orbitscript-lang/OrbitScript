@@ -146,7 +146,8 @@ pub struct Runtime {
     pub strings: Interner,
     pub globals: Gc<Table>,
     /// A table for library state only Rust code reaches, under string
-    /// keys (`_LOADED`, `_PRELOAD`, io's default files). A root.
+    /// keys (`_LOADED`, `_PRELOAD`, io's default files), with the global
+    /// table at index 2 as in the reference. A root.
     pub registry: Gc<Table>,
     pub limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
@@ -217,7 +218,9 @@ impl Vm {
     pub fn new() -> Self {
         let mut heap = LuaHeap::new();
         let globals = heap.alloc(Table::new());
-        let registry = heap.alloc(Table::new());
+        let mut reg = Table::new();
+        reg.set_int(2, Value::Table(globals));
+        let registry = heap.alloc(reg);
         let dead_cell = heap.alloc(Cell::default());
         Vm {
             heap,

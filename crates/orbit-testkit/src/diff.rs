@@ -164,42 +164,18 @@ pub fn main(args: &[String]) -> Result<bool> {
         return Err("--update-expected needs --expect FILE".to_string());
     }
 
-    let mut files: Vec<String> = fs::read_dir(&corpus)
-        .map_err(io_err(corpus.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".lua"))
-        .filter(|n| only.is_empty() || only.contains(n))
-        .collect();
-    files.sort();
-    if files.is_empty() {
-        return Err(format!("no .lua files to run in {}", corpus.display()));
-    }
-
     println!(
-        "differential: {cname} against {rname}, {} files",
-        files.len()
+        "differential: {cname} against {rname}, {}",
+        corpus.display()
     );
-    let mut results = Vec::new();
-    for f in &files {
-        let run = |program: &Path| {
-            process::run(&Spec {
-                program: program.to_path_buf(),
-                args: vec![f.into()],
-                cwd: corpus.clone(),
-                timeout,
-                measure_rss: false,
-            })
-            .map(|o| observe(&o, program))
-            .map_err(io_err(format!("running {}", program.display())))
-        };
-        let r = run(&rpath)?;
-        let c = run(&cpath)?;
-        match describe_mismatch(&r, &c) {
-            None => {
-                println!("  same {f}");
-                results.push((f.as_str(), true));
-            }
+    let outcomes = run_corpus(
+        &corpus,
+        &rpath,
+        &cpath,
+        timeout,
+        &only,
+        |f, mismatch| match mismatch {
+            None => println!("  same {f}"),
             Some(why) => {
                 println!("  DIFF {f}: {}", why.lines().next().unwrap_or(""));
                 print!(
@@ -209,10 +185,13 @@ pub fn main(args: &[String]) -> Result<bool> {
                         "       | "
                     )
                 );
-                results.push((f.as_str(), false));
             }
-        }
-    }
+        },
+    )?;
+    let results: Vec<(&str, bool)> = outcomes
+        .iter()
+        .map(|(f, m)| (f.as_str(), m.is_none()))
+        .collect();
     let same = results.iter().filter(|r| r.1).count();
     println!("\n{same} of {} files matched", results.len());
 
@@ -237,6 +216,56 @@ pub fn main(args: &[String]) -> Result<bool> {
         println!("REGRESSION (listed in {} as matching): {f}", path.display());
     }
     Ok(verdict.regressions.is_empty())
+}
+
+/// Runs every `.lua` file directly in `corpus` (or those in `only`) under both interpreters,
+/// calling `report` after each with the mismatch, if any. Returns `(file, mismatch)` pairs.
+pub fn run_corpus(
+    corpus: &Path,
+    reference: &Path,
+    interp: &Path,
+    timeout: Duration,
+    only: &[String],
+    mut report: impl FnMut(&str, Option<&str>),
+) -> Result<Vec<(String, Option<String>)>> {
+    let mut files: Vec<String> = fs::read_dir(corpus)
+        .map_err(io_err(corpus.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".lua"))
+        .filter(|n| only.is_empty() || only.contains(n))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(format!("no .lua files to run in {}", corpus.display()));
+    }
+    let mut results = Vec::new();
+    for f in files {
+        let run = |program: &Path| {
+            process::run(&Spec {
+                program: program.to_path_buf(),
+                args: vec![f.as_str().into()],
+                cwd: corpus.to_path_buf(),
+                timeout,
+                measure_rss: false,
+            })
+            .map(|o| observe(&o, program))
+            .map_err(io_err(format!("running {}", program.display())))
+        };
+        let r = run(reference)?;
+        let c = run(interp)?;
+        let mismatch = describe_mismatch(&r, &c).map(|m| {
+            // A different exit status is usually an error; say which.
+            match c.error.lines().next() {
+                Some(e) if m.starts_with("exit status") => format!("{m}\ncandidate error: {e}"),
+                _ => m,
+            }
+        });
+        report(&f, mismatch.as_deref());
+        results.push((f, mismatch));
+    }
+    Ok(results)
 }
 
 #[cfg(test)]
