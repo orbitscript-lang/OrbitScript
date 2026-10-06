@@ -480,7 +480,13 @@ impl NativeCtx<'_> {
         if t == self.rt.current {
             return f(self, false);
         }
+        let gc_cycles = self.rt.gc_cycles;
         let c = co_mut(self.heap, t);
+        // As when resuming it: after a sweep, the untraced slots above the
+        // parked top may refer to freed objects.
+        if c.cycle != gc_cycles {
+            c.stack.regs.truncate(c.top);
+        }
         let stack = std::mem::take(&mut c.stack);
         let top = c.top;
         let saved = std::mem::replace(&mut self.rt.stack, stack);
