@@ -11,7 +11,7 @@ use crate::cold::{env_error, get_str_miss, op_len, set_str_miss};
 use crate::meta::Event;
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
-use crate::{Frame, FrameKind, LuaError, Vm};
+use crate::{Catch, Frame, FrameKind, LuaError, Vm};
 
 /// Registers a frame can address: register numbers are `u8`.
 const WINDOW: usize = 256;
@@ -193,6 +193,34 @@ impl Shape {
     }
 }
 
+/// Nested message handlers (an error in a handler calls it again) before
+/// the handler gets `C stack overflow` (about where the reference stops).
+const MAX_HANDLERS: usize = 214;
+
+/// Register slots a message handler may use beyond `Limits::max_stack`, so
+/// it can run after a stack overflow.
+const HANDLER_HEADROOM: usize = 5_000;
+
+/// The stack would grow to `end`, past `max_stack`: `stack overflow`,
+/// unless a message handler is running and stays inside its headroom. Past
+/// that, the error is an error in error handling.
+#[cold]
+fn overflow(rt: &mut crate::Runtime, end: usize) -> Option<Exc> {
+    let handling = rt
+        .stack
+        .frames
+        .iter()
+        .any(|f| matches!(f.kind, FrameKind::Handler { .. }));
+    if !handling {
+        return Some(Exc::Rt("stack overflow".into(), None));
+    }
+    if end <= rt.limits.max_stack + HANDLER_HEADROOM {
+        return None;
+    }
+    rt.errerr = true;
+    Some(Exc::Plain("error in error handling".into()))
+}
+
 /// Push a frame for Lua closure `c` running `proto`: the body of
 /// [`Vm::push_lua_frame`], for callers that already hold the code.
 #[inline(always)]
@@ -214,8 +242,10 @@ fn enter_lua_frame(
         (func + 1, 0)
     };
     let end = base + nregs.max(np);
-    if end > rt.limits.max_stack {
-        return Err(Exc::Rt("stack overflow".into(), None));
+    if end > rt.limits.max_stack
+        && let Some(x) = overflow(rt, end)
+    {
+        return Err(x);
     }
     let regs = &mut rt.stack.regs;
     if regs.len() < base + WINDOW {
@@ -299,6 +329,7 @@ impl Vm {
             // long enough for it.
             FrameKind::Lua { .. } => Ok(Flow::Reload),
             FrameKind::Meta { .. } => self.meta_returned(),
+            FrameKind::Handler { .. } => self.handler_returned(),
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
                 let mut ctx = NativeCtx {
@@ -334,18 +365,23 @@ impl Vm {
                 self.place_results(src, n, func, want);
                 self.after_return()
             }
-            NativeReturn::CallThen {
-                f,
-                nargs,
-                k,
-                protected,
-            } => {
+            NativeReturn::CallThen { .. } | NativeReturn::CallHandled { .. } => {
+                let (f, nargs, k, catch) = match r {
+                    NativeReturn::CallThen {
+                        f,
+                        nargs,
+                        k,
+                        protected,
+                    } => (f, nargs, k, if protected { Catch::Yes } else { Catch::No }),
+                    NativeReturn::CallHandled { f, nargs, k } => (f, nargs, k, Catch::Handler),
+                    _ => unreachable!(),
+                };
                 let at = self.rt.top - nargs;
                 self.rt.stack.insert(at, self.rt.top, f);
                 let kind = FrameKind::Native {
                     id,
                     k,
-                    protected,
+                    catch,
                     call_at: at as u32,
                 };
                 match frame {
@@ -420,26 +456,58 @@ impl Vm {
     }
 
     /// Unwind to the nearest protected native frame and resume it with the
-    /// error, or, at the call's boundary, return the error.
+    /// error, or, at the call's boundary, return the error. A catcher with a
+    /// message handler first runs the handler on top of the frames that
+    /// raised.
     pub(crate) fn unwind(&mut self, mut e: LuaError) -> Result<Flow, LuaError> {
+        let mut errerr = std::mem::take(&mut self.rt.errerr);
         loop {
-            let idx = self
-                .rt
-                .stack
-                .frames
+            let frames = &self.rt.stack.frames;
+            let idx = frames
                 .iter()
                 .rposition(|f| {
                     matches!(
                         f.kind,
                         FrameKind::Native {
-                            protected: true,
+                            catch: Catch::Yes | Catch::Handler,
                             ..
                         } | FrameKind::Boundary
                             | FrameKind::CoBase
                     )
                 })
                 .expect("a boundary below every running frame");
-            let f = self.rt.stack.frames[idx];
+            let f = frames[idx];
+            if let FrameKind::Native {
+                catch: Catch::Handler,
+                ..
+            } = f.kind
+                && !errerr
+            {
+                // An error inside the handler calls it again, up to a limit.
+                let nested = frames[idx..]
+                    .iter()
+                    .filter(|f| matches!(f.kind, FrameKind::Handler { .. }))
+                    .count();
+                if nested <= MAX_HANDLERS {
+                    let v = if nested == MAX_HANDLERS {
+                        self.new_str(b"C stack overflow")
+                    } else {
+                        e.value
+                    };
+                    match self.call_handler(idx, f.base as usize, v) {
+                        Ok(flow) => return Ok(flow),
+                        Err(x) => {
+                            e = self.make_error(x);
+                            errerr = std::mem::take(&mut self.rt.errerr);
+                            continue;
+                        }
+                    }
+                }
+                errerr = true;
+            }
+            if std::mem::take(&mut errerr) {
+                e = LuaError::new(self.new_str(b"error in error handling"));
+            }
             if let FrameKind::CoBase = f.kind {
                 // The coroutine dies; its resumer gets the error.
                 match self.co_finished(Err(e.value)) {
@@ -450,40 +518,89 @@ impl Vm {
                     }
                 }
             }
-            let FrameKind::Native { id, k, call_at, .. } = f.kind else {
-                // The boundary: the error leaves the VM.
+            if let FrameKind::Boundary = f.kind {
+                // The error leaves the VM.
                 if e.traceback.is_none() {
                     e.traceback = Some(self.traceback());
                 }
                 self.rt.stack.cells.truncate(f.cell_base as usize);
                 self.rt.stack.frames.truncate(idx);
                 return Err(e);
-            };
-            if let Some(above) = self.rt.stack.frames.get(idx + 1) {
-                self.rt.stack.cells.truncate(above.cell_base as usize);
             }
-            self.rt.stack.frames.truncate(idx + 1);
-            self.rt.top = call_at as usize;
-            let mut ctx = NativeCtx {
-                heap: &mut self.heap,
-                rt: &mut self.rt,
-                base: f.base as usize,
-                nargs: f.nvarargs as usize,
-                id,
-                upvals: None,
-            };
-            match k(&mut ctx, CallOutcome::Err(e.value)) {
-                Err(e2) => {
-                    // The continuation itself failed: its frame is done.
-                    self.rt.stack.frames.truncate(idx);
-                    e = e2;
-                }
-                Ok(r) => match self.native_returned(r, Some(f), f.func as usize, f.want, id) {
-                    Ok(flow) => return Ok(flow),
-                    Err(x) => e = self.make_error(x),
-                },
+            match self.catch(idx, e.value) {
+                Ok(flow) => return Ok(flow),
+                Err(x) => e = self.make_error(x),
             }
         }
+    }
+
+    /// Pop the frames above the native frame at `idx` and run its
+    /// continuation with error `v`.
+    fn catch(&mut self, idx: usize, v: Value) -> Result<Flow, Exc> {
+        let f = self.rt.stack.frames[idx];
+        let FrameKind::Native { id, k, call_at, .. } = f.kind else {
+            unreachable!("catchers are native frames")
+        };
+        if let Some(above) = self.rt.stack.frames.get(idx + 1) {
+            self.rt.stack.cells.truncate(above.cell_base as usize);
+        }
+        self.rt.stack.frames.truncate(idx + 1);
+        self.rt.top = call_at as usize;
+        let mut ctx = NativeCtx {
+            heap: &mut self.heap,
+            rt: &mut self.rt,
+            base: f.base as usize,
+            nargs: f.nvarargs as usize,
+            id,
+            upvals: None,
+        };
+        match k(&mut ctx, CallOutcome::Err(v)) {
+            Err(e) => {
+                // The continuation itself failed: its frame is done.
+                self.rt.stack.frames.truncate(idx);
+                Err(Exc::Lua(e))
+            }
+            Ok(r) => self.native_returned(r, Some(f), f.func as usize, f.want, id),
+        }
+    }
+
+    /// Call the message handler in the first window slot of the native
+    /// frame at `catcher` with error `v`, above every live frame.
+    fn call_handler(&mut self, catcher: usize, slot: usize, v: Value) -> Result<Flow, Exc> {
+        let h = self.rt.stack.regs[slot];
+        let top = self.rt.stack.frames.last().expect("frame");
+        let end = match top.kind {
+            FrameKind::Lua { closure, .. } => {
+                top.base as usize + self.heap.get(closure).code.nregs as usize
+            }
+            _ => top.base as usize,
+        };
+        let at = end.max(self.rt.top);
+        extend_nil(&mut self.rt.stack.regs, at + 2);
+        self.rt.stack.regs[at] = h;
+        self.rt.stack.regs[at + 1] = v;
+        self.rt.stack.frames.push(Frame {
+            kind: FrameKind::Handler {
+                catcher: catcher as u32,
+            },
+            func: at as u32,
+            base: at as u32,
+            pc: 0,
+            cell_base: self.rt.stack.cells.len() as u32,
+            nvarargs: 0,
+            want: 1,
+        });
+        self.call_value(at, 1, 1)
+    }
+
+    /// A message handler returned: deliver its result to its catcher.
+    fn handler_returned(&mut self) -> Result<Flow, Exc> {
+        let f = self.rt.stack.frames.pop().expect("handler frame");
+        let FrameKind::Handler { catcher } = f.kind else {
+            unreachable!("a handler frame")
+        };
+        let v = self.rt.stack.regs[f.func as usize];
+        self.catch(catcher as usize, v)
     }
 
     fn traceback(&self) -> String {
@@ -501,7 +618,10 @@ impl Vm {
                 _ => None,
             };
             match f.kind {
-                FrameKind::Meta { .. } | FrameKind::Boundary | FrameKind::CoBase => {}
+                FrameKind::Meta { .. }
+                | FrameKind::Handler { .. }
+                | FrameKind::Boundary
+                | FrameKind::CoBase => {}
                 FrameKind::Lua { .. } | FrameKind::Native { .. } if as_meta.is_some() => {
                     let line = match f.kind {
                         FrameKind::Lua { closure, .. } => {

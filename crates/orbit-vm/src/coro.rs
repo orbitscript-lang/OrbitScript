@@ -23,7 +23,7 @@ use orbit_gc::Marker;
 use crate::interp::Flow;
 use crate::native::{CallOutcome, Continuation, NativeCtx, NativeReturn};
 use crate::ops::Exc;
-use crate::{Frame, FrameKind, LuaError, Stack, Vm};
+use crate::{Catch, Frame, FrameKind, LuaError, Stack, Vm};
 
 /// Nested resumes allowed before `C stack overflow` (where the reference
 /// stops).
@@ -238,7 +238,7 @@ impl Vm {
         let kind = FrameKind::Native {
             id,
             k,
-            protected: false,
+            catch: Catch::No,
             call_at: at as u32,
         };
         match frame {

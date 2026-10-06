@@ -57,6 +57,15 @@ pub enum NativeReturn {
         k: Continuation,
         protected: bool,
     },
+    /// [`NativeReturn::CallThen`] with `protected`, but an error first goes
+    /// to the message handler in the window's first slot, which runs on top
+    /// of the frames that raised (so it can see them); its result is the
+    /// error `k` gets (`xpcall`).
+    CallHandled {
+        f: Value,
+        nargs: usize,
+        k: Continuation,
+    },
     /// Resume coroutine `co` with the last `nargs` values of the window,
     /// then run `k` when it yields (`Ok` with the yielded values), returns
     /// (`Ok` with its results) or fails (`Err`). A coroutine that isn't

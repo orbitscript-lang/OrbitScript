@@ -97,7 +97,7 @@ pub(crate) enum FrameKind {
     Native {
         id: NativeId,
         k: Continuation,
-        protected: bool,
+        catch: Catch,
         /// Where the requested call's function sits.
         call_at: u32,
     },
@@ -107,12 +107,26 @@ pub(crate) enum FrameKind {
         action: meta::MetaAction,
         event: Event,
     },
+    /// Below an `xpcall` message handler running on top of the frames that
+    /// raised: its result becomes the error delivered to the native frame
+    /// at index `catcher`.
+    Handler { catcher: u32 },
     /// The bottom of a [`Vm::call`]: returning into it ends the call, and
     /// an error unwinding to it is returned to the embedder.
     Boundary,
     /// The bottom of every coroutine's stack: the body returning into it
     /// finishes the coroutine, and an error reaching it kills it.
     CoBase,
+}
+
+/// Whether a native's requested call catches errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Catch {
+    No,
+    Yes,
+    /// Yes, after running the message handler in the native's first window
+    /// slot on top of the frames that raised.
+    Handler,
 }
 
 /// One activation record.
@@ -215,6 +229,9 @@ pub struct Runtime {
     pub limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
     pub out: Box<dyn WriteDebug>,
+    /// Whether `warn` messages are shown (on stderr). Off at start, as in
+    /// the reference interpreter; `warn("@on")` and `warn("@off")` switch it.
+    pub warnings: bool,
     /// When the VM started (for `os.clock`).
     pub start: Instant,
     pub(crate) natives: Vec<Native>,
@@ -239,6 +256,9 @@ pub struct Runtime {
     /// Set by a stack switch, so the dispatch loop doesn't save its pc into
     /// the other stack's frames; cleared when the loop reloads.
     pub(crate) switched: bool,
+    /// The error being raised is an error in error handling: it skips
+    /// message handlers and becomes `error in error handling`.
+    pub(crate) errerr: bool,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
     /// The threads parked suspended most recently, with their park count
@@ -313,6 +333,7 @@ impl Vm {
                 globals,
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
+                warnings: false,
                 start: Instant::now(),
                 natives: Vec::new(),
                 native_ids: Default::default(),
@@ -329,6 +350,7 @@ impl Vm {
                 resumers: Vec::new(),
                 xfer: Vec::new(),
                 switched: false,
+                errerr: false,
                 native_protos: Default::default(),
                 cooling: Default::default(),
             },
