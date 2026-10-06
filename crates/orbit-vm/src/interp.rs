@@ -476,7 +476,7 @@ impl Vm {
                 unreachable!("metamethod requests are finished by `raise`")
             }
             Exc::Rt(msg, operand) => {
-                let mut text = self.rt.where_(&self.heap, None, 1);
+                let mut text = self.rt.error_where(&self.heap, 1);
                 text.push_str(&msg);
                 if let Some(op) = operand
                     && let Some(f) = self.rt.stack.frames.last()

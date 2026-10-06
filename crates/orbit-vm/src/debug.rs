@@ -226,9 +226,26 @@ impl Runtime {
     }
 
     /// `chunk:line: ` for activation `n` (as [`Runtime::level`] numbers
-    /// them), or empty if it isn't a Lua function: the prefix `error` and
-    /// runtime errors add.
+    /// them), or empty if it isn't a Lua function or its line is unknown (a
+    /// stripped chunk): the prefix `error` and natives' errors add.
     pub(crate) fn where_(&self, heap: &LuaHeap, running: Option<Running>, n: usize) -> String {
+        self.position(heap, running, n, false)
+    }
+
+    /// The prefix of a runtime error raised by an instruction: like
+    /// [`Runtime::where_`], but a stripped chunk gives `chunk:?: `, as in
+    /// the reference.
+    pub(crate) fn error_where(&self, heap: &LuaHeap, n: usize) -> String {
+        self.position(heap, None, n, true)
+    }
+
+    fn position(
+        &self,
+        heap: &LuaHeap,
+        running: Option<Running>,
+        n: usize,
+        unknown_line: bool,
+    ) -> String {
         let Some(l) = self.level(running, n) else {
             return String::new();
         };
@@ -240,8 +257,12 @@ impl Runtime {
             FrameKind::Lua { closure, .. } => {
                 let proto = heap.get(heap.get(closure).proto);
                 let line = pc_line(proto, f.pc.saturating_sub(1));
-                if line < 0 {
-                    format!("{}:?: ", proto.chunk)
+                if line <= 0 {
+                    if unknown_line {
+                        format!("{}:?: ", proto.chunk)
+                    } else {
+                        String::new()
+                    }
                 } else {
                     format!("{}:{}: ", proto.chunk, line)
                 }
