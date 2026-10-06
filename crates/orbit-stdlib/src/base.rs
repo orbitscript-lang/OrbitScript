@@ -513,7 +513,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             ctx.ret1(Value::Float(kb))
         }
         b"step" => {
-            let done = ctx.heap.step(ctx.rt);
+            let done = ctx.gc_step();
             ctx.ret1(Value::Bool(done))
         }
         b"stop" => {

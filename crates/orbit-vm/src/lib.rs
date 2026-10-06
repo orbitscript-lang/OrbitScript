@@ -487,6 +487,7 @@ impl Vm {
 
     /// Run a full collection cycle.
     pub fn full_collect(&mut self) {
+        coro::trim_parked(&mut self.heap, &self.rt);
         self.heap.full_collect(&mut self.rt);
     }
 
