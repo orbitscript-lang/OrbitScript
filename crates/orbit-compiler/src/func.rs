@@ -59,7 +59,7 @@ pub(crate) struct FuncState<'a> {
     pub const_locals: &'a [Vec<Option<ConstVal>>],
     code: Vec<Op>,
     lines: Vec<(u32, u32)>,
-    line: u32,
+    pub(crate) line: u32,
     consts: Vec<Constant>,
     const_map: HashMap<ConstKey, u16>,
     ncaches: u32,
@@ -222,9 +222,21 @@ impl<'a> FuncState<'a> {
     }
 
     fn last_line(&self) -> u32 {
-        self.chunk
-            .source
-            .line_of(self.f.span.end.saturating_sub(1).max(self.f.span.start))
+        end_line(self.chunk, self.f)
+    }
+
+    /// Emits the `Closure` instruction for child `func`. It belongs to the
+    /// function's last line, as `debug` line events in the reference
+    /// report it.
+    pub fn emit_closure(&mut self, dst: u8, func: FuncId) -> Result<()> {
+        let proto = self.child(func)?;
+        let line = std::mem::replace(
+            &mut self.line,
+            end_line(self.chunk, self.chunk.function(func)),
+        );
+        self.emit(Op::Closure { dst, proto });
+        self.line = line;
+        Ok(())
     }
 
     // ---- errors and lines ----
@@ -531,6 +543,13 @@ fn set_offset(op: &mut Op, new: Offset) {
 /// The statement stores the closure in the local's cell before anything can call it, so reading
 /// the capture is the same as reading the running closure, and `CapSelf` does that without
 /// going through the closure's captures and the cell.
+/// The line holding the end of `f`'s source.
+fn end_line(chunk: &Chunk, f: &Function) -> u32 {
+    chunk
+        .source
+        .line_of(f.span.end.saturating_sub(1).max(f.span.start))
+}
+
 fn self_capture(chunk: &Chunk, id: FuncId, local: LocalId) -> Option<CaptureId> {
     let parent = chunk.function(chunk.function(id).parent?);
     if parent.locals[local.index()].reassigned {

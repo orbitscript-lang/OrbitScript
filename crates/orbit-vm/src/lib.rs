@@ -11,6 +11,7 @@
 mod cold;
 mod coro;
 pub mod debug;
+pub mod hook;
 mod interp;
 mod link;
 mod meta;
@@ -127,6 +128,9 @@ pub(crate) enum FrameKind {
     /// tracebacks see it (`[C]: in global 'error'`), and while call or
     /// return hooks are on, so hooks see it.
     NativeCall { id: NativeId },
+    /// Below a hook call ([`hook`]): names the hook function for
+    /// `debug.getinfo` and tracebacks.
+    Hook,
 }
 
 /// Whether a native's requested call catches errors.
@@ -177,6 +181,8 @@ pub(crate) struct Stack {
     /// A root: while cached, the handle can't be reused for another
     /// closure.
     pub callee: Option<(Gc<Closure>, crate::interp::Shape)>,
+    /// The stack's debug hook (`debug.sethook`).
+    pub hook: hook::Hook,
 }
 
 impl Stack {
@@ -198,6 +204,7 @@ impl Stack {
         if let Some((c, _)) = self.callee {
             m.mark(c);
         }
+        mark(m, self.hook.func);
     }
 
     /// `regs[at] = v`, growing the stack if needed.
@@ -287,6 +294,24 @@ pub struct Runtime {
     /// Collections that reached their sweep, to tell whether a parked
     /// stack's dead slots may now refer to freed objects.
     pub(crate) gc_cycles: u32,
+    /// Set by an [`Interrupt`] handle, from any thread.
+    pub(crate) interrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A handle that interrupts a [`Vm`] from another thread (a CLI's Ctrl-C
+/// handler, a watchdog). With the `hooks` feature, the running Lua code
+/// raises the error `interrupted!` at its next loop back-edge or hook point,
+/// as the reference interpreter does; a running native finishes first.
+/// Without it, requests are ignored.
+#[derive(Debug, Clone)]
+pub struct Interrupt(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Interrupt {
+    /// Ask the VM to raise `interrupted!`. Only sets a flag, so it is safe
+    /// to call from a signal handler's thread.
+    pub fn request(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// `Write` that can be printed with `{:?}`.
@@ -381,8 +406,14 @@ impl Vm {
                 native_protos: Default::default(),
                 cooling: Default::default(),
                 gc_cycles: 0,
+                interrupt: Default::default(),
             },
         }
+    }
+
+    /// A handle that interrupts this VM ([`Interrupt`]).
+    pub fn interrupt_handle(&self) -> Interrupt {
+        Interrupt(self.rt.interrupt.clone())
     }
 
     /// Register a native function. `name` is its qualified name

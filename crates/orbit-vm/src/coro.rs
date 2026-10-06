@@ -462,7 +462,34 @@ impl NativeCtx<'_> {
 
     /// A new suspended coroutine running `f`.
     pub fn new_thread(&mut self, f: Value) -> Gc<Thread> {
-        self.heap.alloc(Thread::new(Coroutine::fresh(f)))
+        let mut c = Coroutine::fresh(f);
+        // A new thread gets its creator's hook mask and count, but not its
+        // function (observed from lua5.5: `gethook(co)` is `nil, mask,
+        // count` and no events reach a hook).
+        c.stack.hook = self.rt.stack.hook.inherited();
+        self.heap.alloc(Thread::new(c))
+    }
+
+    /// Run `f` with thread `t`'s stack in place of the running one, for
+    /// the debug library's view of another thread. `f` may read and write
+    /// that stack's frames and registers, but must not touch this native's
+    /// window or run Lua code. The running thread runs `f` directly.
+    pub fn on_thread<R>(&mut self, t: Gc<Thread>, f: impl FnOnce(&mut Self, bool) -> R) -> R {
+        if t == self.rt.current {
+            return f(self, false);
+        }
+        let c = co_mut(self.heap, t);
+        let stack = std::mem::take(&mut c.stack);
+        let top = c.top;
+        let saved = std::mem::replace(&mut self.rt.stack, stack);
+        let saved_top = std::mem::replace(&mut self.rt.top, top);
+        let r = f(self, true);
+        // `f` may have stored values into the parked stack.
+        self.heap.barrier_back(t);
+        let c = co_mut(self.heap, t);
+        c.stack = std::mem::replace(&mut self.rt.stack, saved);
+        c.top = std::mem::replace(&mut self.rt.top, saved_top);
+        r
     }
 
     /// The status of thread `t`.

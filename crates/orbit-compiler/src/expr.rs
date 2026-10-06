@@ -203,8 +203,7 @@ impl FuncState<'_> {
                 None
             }
             &ExprKind::Closure(func) => {
-                let proto = self.child(func)?;
-                self.emit(Op::Closure { dst, proto });
+                self.emit_closure(dst, func)?;
                 None
             }
             ExprKind::Table(entries) => {
