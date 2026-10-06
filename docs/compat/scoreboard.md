@@ -17,6 +17,7 @@ For each suite file the scoreboard says whether `orbit` compiles it, whether it 
 |---|---|---|---|---|---|---|---|
 | 2026-10-04 | 4aea612 (baseline) | 0 of 31 | 5 of 31 | 1 of 12 | 6 of 6 | 0 of 7 | Linux x86_64 cloud container |
 | 2026-10-05 | C1 stack through #67 (hex floats, bitwise, `_ENV`, `global`, named varargs, `goto`) | 0 of 31 | 24 of 31 | 2 of 12 | 6 of 6 | 2 of 7 | Linux x86_64 cloud container |
+| 2026-10-06 | C1 stack through #68 (adds `<close>` in the HIR), on main with `load`/`dofile` (#55) and `os` (#57) | 1 of 31 (api) | 24 of 31 | 4 of 14 | 6 of 6 | 6 of 7 | Linux x86_64 cloud container |
 
 The seven suite files that still don't compile stop at `<close>`, the last C1 gate. Every file still stops at the conformance driver's `dofile` (thread 4).
 
