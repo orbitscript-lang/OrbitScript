@@ -10,7 +10,7 @@ This extends the [VM design](vm.md). It keeps that document's two structural rul
 |---|---|
 | Metatables | `Table.meta` and `UserData.meta`; one metatable per other type in the runtime. Event names are interned once, so a lookup is a handle-keyed hash probe |
 | Metamethod calls | A slow path that needs a metamethod returns `Exc::Meta(call)`. The cold error path pushes a **meta frame** that records how to finish the instruction, then calls the handler like any function. When it returns, the meta frame stores the result, takes the branch, or re-runs the instruction |
-| Fast paths | Unchanged except for one tag compare where a raw miss can now mean "ask the metatable": inline caches never hit on a `nil` value, an integer read or store that finds `nil` checks `meta` |
+| Fast paths | Unchanged except for one tag compare where a raw miss can now mean "ask the metatable": an inline cache hit on a `nil` value, or an integer read or store that finds `nil`, checks `meta` |
 | Userdata | `Value::UserData` (tag 8), a GC object holding any `'static` Rust value (`Box<dyn Any>`), a metatable and one user value. No `Send` requirement |
 | Coroutines | `Value::Thread` (tag 9). Each coroutine owns a `Stack` (registers, cells, frames, to-be-closed list); the running one is swapped into the runtime. Resume and yield are continuation frames, so yields cross `pcall`, metamethods, iterators and `CallThen` natives |
 | Embedder calls | A **boundary frame** marks where a `Vm::call` entered, replacing the `stop` frame count |
@@ -69,7 +69,7 @@ Every metamethod is reached from a path that already exists and is already cold:
 | `__close` | `Close`, unwinding, `coroutine.close` |
 | `__tostring`, `__name`, `__metatable`, `__pairs` | the base library (`tostring`, `print`, `getmetatable`, `pairs`), through `CallThen` |
 
-**A cache never records a miss.** Field and global inline caches only ever hold a slot where the key was found, and a hit now also requires the value to be non-`nil` (a dead entry is a miss). So `__index` and `__newindex` only run on a raw miss, and a cache hit never has to look at the metatable. The cost on the hit path is one tag compare on a byte the hit already loaded.
+**A cache never records a miss.** Field and global inline caches only ever hold a slot where the key was found. A hit whose value is `nil` (a dead entry) counts as a miss only when the table has a metatable, so tables without one keep the old hit path, and `__index` and `__newindex` still only run on a raw miss. The cost on the hit path is a test of `meta`, plus one tag compare when it is set.
 
 `__index` and `__newindex` chains through tables are followed in a loop, without calls; a chain longer than 2000 steps raises `'__index' chain too long; possible loop` (the reference's limit and text). When the next step is a function, it is called. Calling chains of `__call` work the same way: each step inserts the callable as the first argument.
 
@@ -205,7 +205,7 @@ Front end (thread 1): `local x <close>` lowers to a local of kind `LocalKind::Cl
 
 The fast paths change in four places, each a compare on data the path has already loaded:
 
-1. Field and global cache hits reject a `nil` value.
+1. Field and global cache hits on a table with a metatable reject a `nil` value.
 2. An integer-keyed read that produced `nil` checks the table's `meta` (only then).
 3. An integer store that would fill a `nil` array slot checks `meta` (only then).
 4. `JumpEq`/`JumpNe` on two non-numbers goes through `ops::equal`, which now returns a `Result`.
@@ -223,6 +223,22 @@ ADR-3 is Proposed. Its open question is how coroutine stacks are laid out, and t
 Stackful coroutines on separate Rust stacks are out: they need `unsafe` (or a dependency built on it) and would put Lua frames back on a Rust stack.
 
 The spike measures, on the cloud container: resume/yield round trips per second for a shallow generator and for one yielding from 20 frames deep (`bench/coroutines.lua` plus a deep variant), peak RSS with 100 000 suspended coroutines, and the five benchmarks (the window and the in-place switch must not get slower). The resolution proposed for ADR-3 follows the numbers.
+
+**Results** (cloud container, x86_64, 4 cores; best of 5 to 7 pinned runs). A fourth option came out of the first three:
+
+- **D. A, plus shrinking cold stacks.** The 16 most recently parked coroutines keep their stacks. One that falls out of that set while still suspended has its stack copied into exact-size storage (a copy, not an in-place shrink, which fragmented the heap). The cooling list is weak.
+
+| Option | Shallow pipeline | Yield 20 frames deep, 1M times | RSS, 100k suspended (depth 0 / 20) |
+|---|---|---|---|
+| A | 1.25 s | 0.79 s | 829 / 962 MiB |
+| B | 1.53 s | 0.93 s | 56 / 208 MiB |
+| C | 1.67 s | 0.89 s | 56 / 208 MiB |
+| **D (proposed)** | 1.33 s | 0.76 s | 56 / 208 MiB |
+| `lua5.5` | 0.77 s | 0.61 s | 124 / 357 MiB |
+
+Creating and dropping a million coroutines stays at about 10 MiB under D. The spike variants live on the `spike/adr3-stacks` branch.
+
+The spike also found that every native call refilled a 4 KiB window with `nil`. Natives now keep their window end in `rt.top`, which took a loop of native calls from 1.91 s to 1.10 s (`lua5.5`: 0.36 s); the rest of that gap is interpreter tuning, deferred until parity.
 
 ## Implementation order
 
