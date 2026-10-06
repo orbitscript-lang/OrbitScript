@@ -2,6 +2,7 @@
 #   cargo testkit diff ... --expect tests/diff/expected-orbit.txt --update-expected
 close.lua
 closures.lua
+co_yields.lua
 coroutines.lua
 meta_index.lua
 meta_ops.lua

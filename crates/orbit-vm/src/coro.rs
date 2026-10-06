@@ -408,6 +408,12 @@ impl Vm {
         let at = self.rt.top;
         self.wait_frame(frame, func, want, id, k, at);
         self.rt.xfer.clear();
+        if self.rt.resumers.len() >= MAX_RESUMES {
+            // Closing runs on the coroutine's stack, so it nests like a
+            // resume.
+            let e = self.new_str(b"C stack overflow");
+            return self.deliver(Err(e));
+        }
         let c = co_mut(&mut self.heap, co);
         let error = c.error.take();
         if c.stack.tbc.is_empty() {

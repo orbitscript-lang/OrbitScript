@@ -119,12 +119,16 @@ fn wrapped(ctx: &mut NativeCtx<'_>) -> R {
 fn wrapped_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     match outcome {
         CallOutcome::Ok(n) => Ok(NativeReturn::Return(n)),
-        CallOutcome::Err(_) => {
-            // The coroutine is dead: close it, which runs its pending
-            // `__close` handlers, then raise its error (or theirs).
+        CallOutcome::Err(e) => {
+            // Close the coroutine, which runs its pending `__close` handlers,
+            // then raise the error (or theirs). The window keeps the error:
+            // a resume refused at once (say, nested too deeply) leaves the
+            // coroutine without one.
             let Value::Thread(co) = ctx.arg(0) else {
                 unreachable!("wrapped keeps its coroutine in the window")
             };
+            ctx.truncate(1);
+            ctx.push(e);
             Ok(NativeReturn::Close {
                 co,
                 k: wrapped_closed,
@@ -134,8 +138,9 @@ fn wrapped_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
 }
 
 fn wrapped_closed(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let CallOutcome::Err(e) = outcome else {
-        unreachable!("a coroutine that failed closes with its error")
+    let e = match outcome {
+        CallOutcome::Err(e) => e,
+        CallOutcome::Ok(_) => ctx.arg(1),
     };
     // A string error gets the position of the wrapper's caller (level 2:
     // this continuation's own frame is level 1).

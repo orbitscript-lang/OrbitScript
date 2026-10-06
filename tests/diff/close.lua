@@ -208,4 +208,33 @@ do
     collectgarbage()
   end })
 end
-say("done")
+
+-- Closing nests like resuming: a long chain of closes overflows.
+do
+  local count, coro = 0, false
+  for i = 1, 300 do
+    local previous = coro
+    coro = coroutine.create(function()
+      local cc <close> = setmetatable({}, { __close = function()
+        count = count + 1
+        if previous then assert(coroutine.close(previous)) end
+      end })
+      coroutine.yield()
+    end)
+    assert(coroutine.resume(coro))
+  end
+  local st, msg = coroutine.close(coro)
+  -- (lua5.5 adds a position per level and counts one more close.)
+  say("chain", st, type(msg), count > 190)
+end
+
+-- A wrap whose resume is refused still raises that error.
+do
+  local depth = 0
+  local function nest()
+    depth = depth + 1
+    return coroutine.wrap(nest)()
+  end
+  say("nested wraps", pcall(nest))
+end
+say("end")
