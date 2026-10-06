@@ -130,6 +130,58 @@ pub fn int_mod(a: i64, b: i64) -> Option<i64> {
     }
 }
 
+/// A bitwise operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitOp {
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+}
+
+impl BitOp {
+    /// `a op b` on integers. Shifts are logical: a count of 64 or more either way gives 0,
+    /// and a negative count shifts the other way.
+    #[inline(always)]
+    pub fn apply(self, a: i64, b: i64) -> i64 {
+        match self {
+            BitOp::And => a & b,
+            BitOp::Or => a | b,
+            BitOp::Xor => a ^ b,
+            BitOp::Shl => shift_left(a, b),
+            BitOp::Shr => shift_left(a, b.wrapping_neg()),
+        }
+    }
+}
+
+/// `a << n` as Lua defines it (logical; `n` may be negative or 64 and beyond).
+#[inline(always)]
+pub fn shift_left(a: i64, n: i64) -> i64 {
+    if n <= -64 || n >= 64 {
+        0
+    } else if n >= 0 {
+        ((a as u64) << n) as i64
+    } else {
+        ((a as u64) >> -n) as i64
+    }
+}
+
+impl Number {
+    /// The value as an integer for a bitwise operator: an integer, or a float with an exact
+    /// integer value in `i64` range.
+    #[inline]
+    pub fn to_int_exact(self) -> Option<i64> {
+        match self {
+            Number::Int(i) => Some(i),
+            Number::Float(f) => {
+                const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+                (f.floor() == f && (-TWO_63..TWO_63).contains(&f)).then_some(f as i64)
+            }
+        }
+    }
+}
+
 /// Floored modulo of floats.
 #[inline]
 pub fn float_mod(a: f64, b: f64) -> f64 {
@@ -151,6 +203,26 @@ pub fn float_idiv(a: f64, b: f64) -> f64 {
 mod tests {
     use super::Number::{Float, Int};
     use super::*;
+
+    #[test]
+    fn bitwise() {
+        assert_eq!(BitOp::Shl.apply(1, 63), i64::MIN);
+        assert_eq!(BitOp::Shl.apply(1, 64), 0);
+        assert_eq!(BitOp::Shl.apply(1, -1), 0);
+        assert_eq!(BitOp::Shl.apply(2, -1), 1);
+        assert_eq!(BitOp::Shr.apply(-1, 1), i64::MAX);
+        assert_eq!(BitOp::Shr.apply(1, i64::MIN), 0);
+        assert_eq!(BitOp::Shl.apply(1, i64::MIN), 0);
+        assert_eq!(BitOp::Xor.apply(7, 2), 5);
+        assert_eq!(Float(3.0).to_int_exact(), Some(3));
+        assert_eq!(Float(1.5).to_int_exact(), None);
+        assert_eq!(Float(9_223_372_036_854_775_808.0).to_int_exact(), None);
+        assert_eq!(
+            Float(-9_223_372_036_854_775_808.0).to_int_exact(),
+            Some(i64::MIN)
+        );
+        assert_eq!(Float(f64::NAN).to_int_exact(), None);
+    }
 
     #[test]
     fn integers_stay_integers_except_div_and_pow() {

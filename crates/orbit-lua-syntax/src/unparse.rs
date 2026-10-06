@@ -264,8 +264,9 @@ impl Printer<'_> {
             ExprKind::Nil => self.w("nil"),
             ExprKind::True => self.w("true"),
             ExprKind::False => self.w("false"),
-            // The minimum integer has no decimal literal; its hexadecimal one wraps to it.
-            ExprKind::Int(i64::MIN) => self.w("0x8000000000000000"),
+            // A negative integer literal comes from a hexadecimal one that wrapped (decimal
+            // literals are never negative), and only a hexadecimal literal reads back as it.
+            ExprKind::Int(n) if *n < 0 => self.w(&format!("0x{:x}", *n as u64)),
             ExprKind::Int(n) => self.w(&n.to_string()),
             ExprKind::Float(x) if x.is_nan() => self.w("(0/0)"),
             ExprKind::Float(x) if x.is_infinite() => self.w("1e999"),

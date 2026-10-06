@@ -29,14 +29,7 @@ impl FuncState<'_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 consts::fold_arith(*op, self.const_of(*lhs)?, self.const_of(*rhs)?)
             }
-            ExprKind::Unary {
-                op: UnOp::Neg,
-                expr,
-            } => match self.const_of(*expr)? {
-                ConstVal::Int(i) => Some(ConstVal::Int(i.wrapping_neg())),
-                ConstVal::Float(x) => Some(ConstVal::Float(-x)),
-                _ => None,
-            },
+            ExprKind::Unary { op, expr } => consts::fold_unary(*op, self.const_of(*expr)?),
             _ => consts::fold(self.f, &[], e),
         }
     }
@@ -211,6 +204,7 @@ impl FuncState<'_> {
                     UnOp::Neg => self.emit(Op::Neg { dst, src }),
                     UnOp::Not => self.emit(Op::Not { dst, src }),
                     UnOp::Len => self.emit(Op::Len { dst, src }),
+                    UnOp::BNot => self.emit(Op::BNot { dst, src }),
                 };
                 if op != UnOp::Not {
                     self.origin(pc, 0, origin);
@@ -344,6 +338,11 @@ impl FuncState<'_> {
                     BinOp::IDiv => Op::IDiv { dst, a, b },
                     BinOp::Mod => Op::Mod { dst, a, b },
                     BinOp::Pow => Op::Pow { dst, a, b },
+                    BinOp::BAnd => Op::BAnd { dst, a, b },
+                    BinOp::BOr => Op::BOr { dst, a, b },
+                    BinOp::BXor => Op::BXor { dst, a, b },
+                    BinOp::Shl => Op::Shl { dst, a, b },
+                    BinOp::Shr => Op::Shr { dst, a, b },
                     _ => unreachable!(),
                 });
                 self.origin(pc, 0, a_origin);

@@ -63,11 +63,17 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 | Op::Div { dst, a, b }
                 | Op::IDiv { dst, a, b }
                 | Op::Mod { dst, a, b }
-                | Op::Pow { dst, a, b } => reg(dst) && reg(a) && reg(b),
+                | Op::Pow { dst, a, b }
+                | Op::BAnd { dst, a, b }
+                | Op::BOr { dst, a, b }
+                | Op::BXor { dst, a, b }
+                | Op::Shl { dst, a, b }
+                | Op::Shr { dst, a, b } => reg(dst) && reg(a) && reg(b),
                 Op::AddInt { dst, a, .. } => reg(dst) && reg(a),
-                Op::Neg { dst, src } | Op::Not { dst, src } | Op::Len { dst, src } => {
-                    reg(dst) && reg(src)
-                }
+                Op::Neg { dst, src }
+                | Op::BNot { dst, src }
+                | Op::Not { dst, src }
+                | Op::Len { dst, src } => reg(dst) && reg(src),
                 Op::Concat { dst, first, count } => reg(dst) && count >= 2 && regs(first, count),
                 Op::Jump { off } => target(off),
                 Op::JumpIfTrue { src, off } | Op::JumpIfFalse { src, off } => {
