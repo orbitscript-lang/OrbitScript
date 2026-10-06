@@ -373,6 +373,10 @@ impl FuncState<'_> {
         self.active = self.free;
         let exit = self.label();
         self.jump(Op::ForPrep { base, exit: 0 }, exit);
+        // The iteration count and the step, which is what the reference's
+        // two hidden locals hold.
+        self.push_loop_state(base + 1);
+        self.push_loop_state(base + 2);
         let top = self.here();
         self.loops.push(exit);
         let body_mark = self.open_scope();
@@ -395,11 +399,15 @@ impl FuncState<'_> {
     ) -> Result<()> {
         let mark = self.open_scope();
         let base = self.free as u8;
-        self.expr_list(iter, Want::Exact(3))?;
-        self.alloc()?; // R[base+3]: the closing value, reserved but not yet closed.
+        // Iterator, state, control and closing value (R[base+3]).
+        self.expr_list(iter, Want::Exact(4))?;
         for (i, &h) in hidden.iter().enumerate() {
             self.slots[h.index()] = Slot::Reg(base + i as u8);
             self.push_scope(h, Slot::Reg(base + i as u8));
+        }
+        // The reference's hidden locals: iterator, state and closing value.
+        for r in [base, base + 1, base + 3] {
+            self.push_loop_state(r);
         }
         let Ok(nvars) = u8::try_from(vars.len()) else {
             return Err(self.error("function or expression needs too many registers"));

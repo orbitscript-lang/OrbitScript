@@ -621,7 +621,7 @@ fn generic_for_and_break() {
             Op::Call {
                 func: 0,
                 nargs: 1,
-                nresults: 3
+                nresults: 4
             },
             Op::Jump { off: 2 },
             Op::JumpIfFalse { src: 5, off: 1 },

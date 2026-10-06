@@ -13,9 +13,11 @@ orbit-core = { path = "../orbit-core" }
 orbit-vm = { path = "../orbit-vm" }
 
 [features]
-default = ["coroutine"]
+default = ["coroutine", "debug"]
 # The `coroutine` library.
 coroutine = []
+# The `debug` library.
+debug = []
 
 [lints]
 workspace = true

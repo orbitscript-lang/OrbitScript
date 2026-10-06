@@ -7,6 +7,8 @@
 mod base;
 #[cfg(feature = "coroutine")]
 mod coroutine;
+#[cfg(feature = "debug")]
+mod debug;
 mod math;
 mod string;
 mod table;
@@ -28,6 +30,11 @@ pub fn open_libs(vm: &mut Vm) {
     open_lib(vm, "os", &[("os.clock", os_clock)]);
     #[cfg(feature = "coroutine")]
     open_lib(vm, "coroutine", coroutine::FUNCTIONS);
+    #[cfg(feature = "debug")]
+    {
+        open_lib(vm, "debug", debug::FUNCTIONS);
+        debug::open(vm);
+    }
 }
 
 /// Register `functions` (qualified names such as `"string.rep"`) in a new

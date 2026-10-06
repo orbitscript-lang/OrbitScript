@@ -226,7 +226,16 @@ impl NativeCtx<'_> {
     /// `chunk:line: ` for the function at `level` (1 is the caller of this
     /// native), or empty if it isn't a Lua function.
     pub fn where_(&self, level: usize) -> String {
-        ops::where_(self.heap, self.rt, level)
+        self.rt
+            .where_(self.heap, Some(self.running_native()), level)
+    }
+
+    /// This native, as the debug walk sees it (level 0).
+    pub(crate) fn running_native(&self) -> crate::debug::Running {
+        crate::debug::Running {
+            id: self.id,
+            func: self.base - 1,
+        }
     }
 
     /// An error with a message, positioned at the caller (like

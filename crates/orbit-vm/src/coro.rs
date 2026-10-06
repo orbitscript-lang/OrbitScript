@@ -88,6 +88,8 @@ impl Coroutine {
             cell_base: 0,
             nvarargs: 0,
             want: MULTI,
+            tail: false,
+            extra: 0,
         });
         Coroutine {
             bytes: stack.bytes(),
@@ -266,6 +268,8 @@ impl Vm {
                     cell_base: self.rt.stack.cells.len() as u32,
                     nvarargs: nargs as u32,
                     want,
+                    tail: false,
+                    extra: 0,
                 });
             }
         }
@@ -569,8 +573,11 @@ fn stub_proto(id: NativeId) -> Proto {
         captures: Box::new([]),
         name: FunctionName::Anonymous,
         line_defined: 0,
+        last_line: 0,
         chunk: "[C]".into(),
+        source: Rc::from(b"=[C]".as_slice()),
         debug: Rc::default(),
+        self_capture: None,
     }
 }
 

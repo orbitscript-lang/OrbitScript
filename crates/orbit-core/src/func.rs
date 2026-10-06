@@ -68,10 +68,35 @@ pub struct ProtoCode {
     pub ncells: u8,
 }
 
+impl ProtoCode {
+    /// A copy in which [`Op::CapSelf`] reads capture `cap` instead, for a
+    /// closure whose self capture no longer holds it (a `debug` write).
+    pub fn without_cap_self(&self, cap: u8) -> ProtoCode {
+        ProtoCode {
+            code: self
+                .code
+                .iter()
+                .map(|&op| match op {
+                    Op::CapSelf { dst } => Op::CapGet { dst, cap },
+                    op => op,
+                })
+                .collect(),
+            consts: self.consts.clone(),
+            caches: self.caches.clone(),
+            #[cfg(feature = "type-feedback")]
+            feedback: self.feedback.clone(),
+            nparams: self.nparams,
+            is_vararg: self.is_vararg,
+            nregs: self.nregs,
+            ncells: self.ncells,
+        }
+    }
+}
+
 /// An inline cache for a field or global access: the instruction's string
 /// key, so the hit path needs no constant lookup, and the hash slot where
 /// the key was last found.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FieldCache {
     /// Kept alive by the prototype's constants, which hold the same string.
     pub key: Gc<LuaStr>,
@@ -109,8 +134,15 @@ pub struct Proto {
     pub captures: Box<[CaptureSource]>,
     pub name: FunctionName,
     pub line_defined: u32,
+    /// Line of the function's `end` (0 for a main chunk).
+    pub last_line: u32,
     /// Chunk name for messages (`script.lua` in `script.lua:3:`).
     pub chunk: Rc<str>,
+    /// The chunk's source as given to the loader (`@script.lua`), shared
+    /// by all its prototypes.
+    pub source: Rc<[u8]>,
+    /// The capture [`Op::CapSelf`] stands for, if the function has one.
+    pub self_capture: Option<u8>,
     pub debug: Rc<DebugInfo>,
 }
 

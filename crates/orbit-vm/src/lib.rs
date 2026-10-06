@@ -10,6 +10,7 @@
 
 mod cold;
 mod coro;
+pub mod debug;
 mod interp;
 mod link;
 mod meta;
@@ -121,6 +122,11 @@ pub(crate) enum FrameKind {
     /// The bottom of every coroutine's stack: the body returning into it
     /// finishes the coroutine, and an error reaching it kills it.
     CoBase,
+    /// A native that is running without a continuation. Natives normally
+    /// run frameless; one gets this frame when it raises an error, so
+    /// tracebacks see it (`[C]: in global 'error'`), and while call or
+    /// return hooks are on, so hooks see it.
+    NativeCall { id: NativeId },
 }
 
 /// Whether a native's requested call catches errors.
@@ -147,6 +153,11 @@ pub(crate) struct Frame {
     pub nvarargs: u32,
     /// Results the caller wants ([`op::MULTI`] for all).
     pub want: u8,
+    /// Entered by a tail call (`debug.getinfo`'s `istailcall`).
+    pub tail: bool,
+    /// Callables a `__call` chain inserted as extra first arguments
+    /// (`extraargs`).
+    pub extra: u8,
 }
 
 /// The Lua stack: registers, frame cell slots and frames.
@@ -231,6 +242,9 @@ impl Stack {
 pub struct Runtime {
     pub strings: Interner,
     pub globals: Gc<Table>,
+    /// The registry (`debug.getregistry()`): key 2 holds the globals, and
+    /// `_LOADED` is `package.loaded`.
+    pub registry: Gc<Table>,
     pub limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
     pub out: Box<dyn WriteDebug>,
@@ -282,6 +296,7 @@ impl<T: Write + fmt::Debug> WriteDebug for T {}
 impl Roots<LuaSpace> for Runtime {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         m.mark(self.globals);
+        m.mark(self.registry);
         m.mark(self.dead_cell);
         self.stack.trace(m, usize::MAX);
         m.mark(self.current);
@@ -331,6 +346,8 @@ impl Vm {
     pub fn new() -> Self {
         let mut heap = LuaHeap::new();
         let globals = heap.alloc(Table::new());
+        let registry = heap.alloc(Table::new());
+        let _ = table::set(&mut heap, registry, Value::Int(2), Value::Table(globals));
         let dead_cell = heap.alloc(Cell::default());
         let mut strings = Interner::new();
         let events = meta::Events::new(&mut heap, &mut strings);
@@ -340,6 +357,7 @@ impl Vm {
             rt: Runtime {
                 strings,
                 globals,
+                registry,
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 warnings: false,
@@ -508,6 +526,8 @@ impl Vm {
             cell_base: self.rt.stack.cells.len() as u32,
             nvarargs: 0,
             want: op::MULTI,
+            tail: false,
+            extra: 0,
         });
         self.rt.stack.regs.push(f);
         self.rt.stack.regs.extend_from_slice(args);

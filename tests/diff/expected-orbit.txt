@@ -3,6 +3,8 @@
 closures.lua
 co_gc.lua
 co_yields.lua
+debug_info.lua
+debug_locals.lua
 meta_index.lua
 meta_ops.lua
 uncaught.lua

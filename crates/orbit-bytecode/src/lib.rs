@@ -363,11 +363,23 @@ pub struct DebugInfo {
     pub locals: Vec<LocalInfo>,
     /// One name per capture, in capture order.
     pub capture_names: Vec<Box<[u8]>>,
+    /// When capture 0 is the environment: its position in the first-use
+    /// order debug interfaces show (the other captures keep their order).
+    pub env_debug_index: Option<u8>,
     /// Sorted by `(pc, operand)`.
     pub origins: Vec<OperandOrigin>,
 }
 
 impl DebugInfo {
+    /// The capture shown as upvalue `n` (0-based, first-use order).
+    pub fn capture_of_upvalue(&self, n: usize) -> usize {
+        match self.env_debug_index.map(usize::from) {
+            Some(e) if n == e => 0,
+            Some(e) if n < e => n + 1,
+            _ => n,
+        }
+    }
+
     /// The source line of instruction `pc`, or 0 if unknown.
     pub fn line(&self, pc: u32) -> u32 {
         let i = self.lines.partition_point(|&(first, _)| first <= pc);
@@ -403,6 +415,10 @@ pub struct UnlinkedProto {
     /// `proto` operand of [`Op::Closure`] indexes this list.
     pub children: Vec<u32>,
     pub captures: Vec<CaptureSource>,
+    /// The capture that always holds this function's own closure (a
+    /// `local function` never assigned), which [`Op::CapSelf`] reads
+    /// without going through the cell.
+    pub self_capture: Option<u8>,
     pub debug: DebugInfo,
 }
 
@@ -412,6 +428,10 @@ pub struct UnlinkedProto {
 pub struct UnlinkedChunk {
     /// The chunk name used in messages (`script.lua` in `script.lua:3:`).
     pub name: Box<str>,
+    /// The chunk's source name as given to the loader (`@file.lua`,
+    /// `=stdin`, or the source text itself), for `debug.getinfo`'s
+    /// `source`. Empty means `@` followed by `name`.
+    pub source: Box<[u8]>,
     pub protos: Vec<UnlinkedProto>,
 }
 
