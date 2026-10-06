@@ -106,7 +106,30 @@ Two designs are worth measuring against each other, and the spike decides betwee
 - **A: structural verifier, total VM.** Layer 1 only. The VM's few `unreachable!()` arms reachable from bad bytecode (loop state, `SetList` on a non-table, a non-string field key) become ordinary runtime errors in cold code. No fast-path cost, since those arms already exist; it touches thread 2's files.
 - **B: full verifier, VM unchanged.** Layers 1 and 2. No VM change, more verifier code and load time.
 
-The spike measures verifier time against compile time over the whole suite, the code size of each, and robustness: a fuzzer mutates dumped chunks (bit flips, truncation, operand and opcode swaps) and runs whatever loads, under the debug build, counting panics. The proposal to Tym follows the numbers.
+#### Spike results (2026-10-05, cloud x86_64)
+
+Implemented on branch `compat/dump`: `orbit_bytecode::format`, `orbit_bytecode::verify` (with a `Level` switch for the two layers), `string.dump`, and binary loading in `load`. The mutation fuzzer is `crates/orbit/examples/fuzz_chunks.rs`. It mutates compiled chunks from `tests/` and `bench/` (instruction bytes, swapped, duplicated and deleted instructions, register, cell and cache counts, captures, constants) and runs each mutant in a debug-build child process at three levels.
+
+| 20,000 mutants (4 seeds) | Rejected | Ran | VM panics | Panic sites |
+|---|---|---|---|---|
+| No verifier | 0 | 15,096 | 4,807 | 27 |
+| Layer 1 (structure) | 11,974 | 7,883 | 98 | 6 |
+| Layers 1 + 2 (full) | 12,572 | 7,383 | **0** | 0 |
+
+The six sites structure alone leaves are all things only data flow can see: `top` underflowing in `Call`, `Return` and `SetList` with a `MULTI` operand (`top - fa - 1`), `ForLoop` on state `ForPrep` didn't set up (three `unreachable!` arms), and `SetList` on a register that isn't a table. About 40 mutants per seed hung, which bad bytecode may do (an infinite loop is a legal program).
+
+Cost, release build, over the 35 chunks that compile today (86 KB encoded):
+
+| | Time | Code |
+|---|---|---|
+| Decode | 0.63 ms | in the 48 KB below |
+| Layer 1 | 0.10 ms | inlined into `load_chunk` |
+| Layer 2 | 1.69 ms | 4.3 KB (`data_flow`) |
+| Compiling the same sources | 19.9 ms | |
+
+The whole `dump` feature (format, verifier, `string.dump`) adds 48 KiB to the release binary (997,720 to 1,045,816 bytes). A verified binary load is still about 8 times faster than compiling the source. The verifier accepts everything the compiler produces: debug builds verify every compiled chunk, and a test runs it over `tests/` and `bench/`.
+
+**Proposal: B.** It reaches zero panics without touching the VM. A would have to turn six sites in thread 2's interpreter loop into errors, three of them on the `MULTI` call and return paths, and the next VM invariant would need another such change. B keeps the VM's assumptions written down in one place, costs 4 KB and under 2 ms per 86 KB of bytecode, and only runs on binary loads.
 
 Every new instruction needs an encode, a decode and a verify arm. The matches are exhaustive, so adding an `Op` without them doesn't compile.
 
@@ -129,7 +152,7 @@ File handles are userdata with a shared `FILE*` metatable (`__index` methods, `_
 - **Local time.** `os.date` without `!`, `os.date("*t")` and `os.time{...}` work in the local time zone, which `std` can't read. Options for the spike: (a) our own reader for the `TZ` variable's POSIX rules and TZif files under `/usr/share/zoneinfo` (Unix only, a few hundred lines, no dependency; Windows would need another source); (b) a small dependency such as `tz-rs` (pure Rust, the same approach already written); (c) a larger one such as `jiff` or `chrono` with `iana-time-zone` (Windows support, much more code); (d) UTC everywhere, recorded as a deviation. The spike compares binary size and agreement with `lua5.5` over a sweep of timestamps in several zones.
 - **CPU time.** `os.clock` is wall time since start today. Options: (a) `/proc/self/stat` on Linux (no dependency, 10 ms ticks); (b) `getrusage` or `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` through `nix`, already used by the testkit (Unix only); (c) a `cpu-time`-style crate covering Windows; (d) keep wall time as a deviation. The suite only checks that `os.clock` is a number that doesn't go backwards, so this is about honesty more than tests.
 
-Both are dependency decisions under ADR-7, so they come to Tym as one proposal with the spike's numbers. `strftime` formatting itself is our own code: every conversion the C99 and POSIX `strftime` define, with `invalid conversion specifier` for the rest, as `files.lua` checks.
+Both are dependency decisions under ADR-7. **Decided (Tym, 2026-10-05):** our own zone reader for local time, and no dependency for CPU time, so `os.clock` stays wall time. Both gaps (wall-time `os.clock`, UTC on Windows) are in `tests/lua-5.5/DEVIATIONS.md`. Spike numbers: `planning/os-time-spike.md`. `strftime` formatting itself is our own code: every conversion the C99 and POSIX `strftime` define, with `invalid conversion specifier` for the rest, as `files.lua` checks.
 
 ## The command line
 
@@ -149,4 +172,4 @@ Candidates, each to go in `tests/lua-5.5/DEVIATIONS.md` for Tym's approval in th
 
 - Binary chunks are our own format: PUC's don't load in `orbit` and ours don't load in `lua`.
 - `lua5.5` appends a traceback to the message `load` returns when a reader function raises an error. We return the message alone, since the traceback describes the reader's stack rather than the chunk.
-- Whatever the local-time and CPU-time decisions leave out, if anything.
+- `os.clock` is wall time, and local time on Windows is UTC (the ADR-7 decision).
