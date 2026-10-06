@@ -151,6 +151,25 @@ fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
         .expect("threads hold VM coroutines")
 }
 
+/// Cut every parked stack that may run again to its top, ahead of a
+/// collector step. The values above a parked stack's top are dead, but the
+/// collector traces parked stacks whole. Cold suspended stacks are already
+/// cut, so only the main thread, the resumers and the hot suspended
+/// stacks need it.
+#[cold]
+pub(crate) fn trim_parked(heap: &mut LuaHeap, rt: &crate::Runtime) {
+    let mut cut = |t: Gc<Thread>| {
+        if t != rt.current {
+            let c = co_mut(heap, t);
+            let top = c.top;
+            c.stack.regs.truncate(top);
+        }
+    };
+    cut(rt.main_thread);
+    rt.resumers.iter().for_each(|&t| cut(t));
+    rt.cooling.iter().for_each(|&(t, _)| cut(t));
+}
+
 /// The continuation a yielding coroutine waits in: the values the next
 /// resume passes become `yield`'s results.
 fn yield_k(_ctx: &mut NativeCtx<'_>, o: CallOutcome) -> Result<NativeReturn, LuaError> {
