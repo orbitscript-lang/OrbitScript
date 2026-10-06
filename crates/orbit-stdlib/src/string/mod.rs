@@ -24,6 +24,7 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("string.lower", lower),
     ("string.find", find),
     ("string.match", match_),
+    ("string.gmatch", gmatch),
     ("string.gsub", gsub),
     ("string.pack", pack::pack),
     ("string.unpack", pack::unpack),
@@ -236,6 +237,77 @@ fn find_aux(ctx: &mut NativeCtx<'_>, find: bool) -> R {
         ctx.push(Value::Int(b as i64));
         n += 2;
     }
+    for c in caps {
+        let v = capture_value(ctx, s, c);
+        ctx.push(v);
+    }
+    Ok(NativeReturn::Return(n))
+}
+
+// ---- gmatch ---------------------------------------------------------------
+//
+// The iterator is a native closure with upvalues: 0 subject, 1 pattern,
+// 2 where the next search starts, 3 end of the last match (or nil). A
+// leading `^` is an ordinary character here, as in lua5.5.
+
+fn gmatch(ctx: &mut NativeCtx<'_>) -> R {
+    let s = ctx.check_str(0)?;
+    let p = ctx.check_str(1)?;
+    let len = ctx.bytes(s).len();
+    let pos = (start_pos(ctx.opt_int(2, 1)?, len) - 1).min(len);
+    let it = ctx.new_closure(
+        "string.gmatch()",
+        gmatch_step,
+        &[
+            Value::Str(s),
+            Value::Str(p),
+            Value::Int(pos as i64),
+            Value::Nil,
+        ],
+    );
+    ctx.ret1(it)
+}
+
+fn gmatch_step(ctx: &mut NativeCtx<'_>) -> R {
+    let (Value::Str(s), Value::Str(p)) = (ctx.upvalue(0), ctx.upvalue(1)) else {
+        unreachable!("gmatch's upvalues are its subject and pattern")
+    };
+    let start = match ctx.upvalue(2) {
+        Value::Int(n) => n as usize,
+        _ => 0,
+    };
+    let last = match ctx.upvalue(3) {
+        Value::Int(n) => Some(n as usize),
+        _ => None,
+    };
+    let found = {
+        let (src, pat) = (ctx.bytes(s), ctx.bytes(p));
+        let mut found = Ok(None);
+        for pos in start..=src.len() {
+            let mut m = Matcher::new(src, pat);
+            match m.match_at(pos, 0) {
+                // An empty match where the last one ended doesn't count.
+                Ok(Some(e)) if Some(e) != last => {
+                    found = Ok(Some((e, collect_captures(&m, pos, e))));
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    found = Err(e);
+                    break;
+                }
+            }
+        }
+        found
+    };
+    let (e, caps) = match found {
+        Ok(Some((e, Ok(caps)))) => (e, caps),
+        Ok(Some((_, Err(err)))) | Err(err) => return Err(pattern_error(ctx, err)),
+        Ok(None) => return Ok(NativeReturn::Return(0)),
+    };
+    ctx.set_upvalue(2, Value::Int(e as i64));
+    ctx.set_upvalue(3, Value::Int(e as i64));
+    let n = caps.len();
     for c in caps {
         let v = capture_value(ctx, s, c);
         ctx.push(v);

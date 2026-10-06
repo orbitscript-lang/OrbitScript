@@ -4,6 +4,7 @@ co_yields.lua
 floats.lua
 meta_index.lua
 meta_ops.lua
+stdlib_gmatch.lua
 stdlib_math.lua
 stdlib_meta.lua
 stdlib_pack.lua
