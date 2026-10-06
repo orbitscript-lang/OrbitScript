@@ -170,6 +170,34 @@ impl Stack {
         }
     }
 
+    /// `regs[at] = v`, growing the stack if needed.
+    #[inline]
+    pub(crate) fn put(&mut self, at: usize, v: Value) {
+        if at < self.regs.len() {
+            self.regs[at] = v;
+        } else {
+            crate::interp::extend_nil(&mut self.regs, at);
+            self.regs.push(v);
+        }
+    }
+
+    /// Insert `v` at `at` in the values that end at `top`, shifting them up;
+    /// returns the new end.
+    pub(crate) fn insert(&mut self, at: usize, top: usize, v: Value) -> usize {
+        crate::interp::extend_nil(&mut self.regs, top + 1);
+        self.regs.copy_within(at..top, at + 1);
+        self.regs[at] = v;
+        top + 1
+    }
+
+    /// Write `vals` at `at`, growing the stack if needed; returns their end.
+    pub(crate) fn write(&mut self, at: usize, vals: &[Value]) -> usize {
+        let end = at + vals.len();
+        crate::interp::extend_nil(&mut self.regs, end);
+        self.regs[at..end].copy_from_slice(vals);
+        end
+    }
+
     /// Heap bytes the stack owns.
     pub(crate) fn bytes(&self) -> usize {
         self.regs.capacity() * std::mem::size_of::<Value>()

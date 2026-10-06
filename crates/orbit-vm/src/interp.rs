@@ -16,6 +16,20 @@ use crate::{Frame, FrameKind, LuaError, Vm};
 /// Registers a frame can address: register numbers are `u8`.
 const WINDOW: usize = 256;
 
+/// Nils to extend the stack with: a copy from a block compiles to a
+/// `memcpy`, where `resize` fills slot by slot. Natives truncate the stack to
+/// their window, so every return from one into Lua refills a window.
+static NILS: [Value; WINDOW] = [Value::Nil; WINDOW];
+
+/// Grow `regs` with nils to at least `len` values.
+#[inline(always)]
+pub(crate) fn extend_nil(regs: &mut Vec<Value>, len: usize) {
+    while regs.len() < len {
+        let n = (len - regs.len()).min(WINDOW);
+        regs.extend_from_slice(&NILS[..n]);
+    }
+}
+
 /// Where a new Lua frame's state lives, so the dispatch loop can enter it
 /// without reading the frame back.
 struct Entered {
@@ -79,9 +93,7 @@ impl Vm {
                     if chain == crate::meta::MAX_CHAIN {
                         return Err(Exc::Plain("'__call' chain too long".into()));
                     }
-                    let regs = &mut self.rt.stack.regs;
-                    regs.truncate(func + 1 + nargs);
-                    regs.insert(func, h);
+                    self.rt.stack.insert(func, func + 1 + nargs, h);
                     nargs += 1;
                     chain += 1;
                 }
@@ -93,7 +105,9 @@ impl Vm {
                 Ok(Flow::Reload)
             }
             Value::Native(id) => {
-                self.rt.stack.regs.truncate(func + 1 + nargs);
+                // The native's window ends at `top` (natives never shrink
+                // the stack, so returning to Lua needn't refill a window).
+                self.rt.top = func + 1 + nargs;
                 let f = self.rt.natives[id.0 as usize].f;
                 let mut ctx = NativeCtx {
                     heap: &mut self.heap,
@@ -205,7 +219,7 @@ fn enter_lua_frame(
     }
     let regs = &mut rt.stack.regs;
     if regs.len() < base + WINDOW {
-        regs.resize(base + WINDOW, Value::Nil);
+        extend_nil(regs, base + WINDOW);
     }
     if nvar > 0 {
         regs.copy_within(func + 1..func + 1 + np, base);
@@ -287,7 +301,6 @@ impl Vm {
             FrameKind::Meta { .. } => self.meta_returned(),
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
-                self.rt.stack.regs.truncate(top);
                 let mut ctx = NativeCtx {
                     heap: &mut self.heap,
                     rt: &mut self.rt,
@@ -317,11 +330,8 @@ impl Vm {
                 if frame.is_some() {
                     self.rt.stack.frames.pop();
                 }
-                let src = self.rt.stack.regs.len() - n;
+                let src = self.rt.top - n;
                 self.place_results(src, n, func, want);
-                if want == MULTI {
-                    self.rt.stack.regs.truncate(self.rt.top);
-                }
                 self.after_return()
             }
             NativeReturn::CallThen {
@@ -330,9 +340,8 @@ impl Vm {
                 k,
                 protected,
             } => {
-                let regs = &mut self.rt.stack.regs;
-                let at = regs.len() - nargs;
-                regs.insert(at, f);
+                let at = self.rt.top - nargs;
+                self.rt.stack.insert(at, self.rt.top, f);
                 let kind = FrameKind::Native {
                     id,
                     k,
@@ -454,7 +463,7 @@ impl Vm {
                 self.rt.stack.cells.truncate(above.cell_base as usize);
             }
             self.rt.stack.frames.truncate(idx + 1);
-            self.rt.stack.regs.truncate(call_at as usize);
+            self.rt.top = call_at as usize;
             let mut ctx = NativeCtx {
                 heap: &mut self.heap,
                 rt: &mut self.rt,
@@ -595,7 +604,7 @@ impl Vm {
                 () => {{
                     let regs = &mut self.rt.stack.regs;
                     if regs.len() < base + WINDOW {
-                        regs.resize(base + WINDOW, Value::Nil);
+                        extend_nil(regs, base + WINDOW);
                     }
                     <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW])
                         .expect("a full window")
@@ -675,6 +684,10 @@ impl Vm {
                 () => {
                     if self.heap.should_step() {
                         save_pc!();
+                        // Nothing above this frame's window and the last
+                        // open results is live; don't let it keep garbage.
+                        let live = (base + WINDOW).max(self.rt.top);
+                        self.rt.stack.regs.truncate(live);
                         self.heap.step(&mut self.rt);
                         w = window!();
                     }

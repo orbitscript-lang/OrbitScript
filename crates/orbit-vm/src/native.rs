@@ -97,7 +97,7 @@ impl NativeCtx<'_> {
     /// Values currently in the window.
     #[inline]
     pub fn len(&self) -> usize {
-        self.rt.stack.regs.len() - self.base
+        self.rt.top - self.base
     }
 
     #[inline]
@@ -108,43 +108,48 @@ impl NativeCtx<'_> {
     /// Window slot `i` (argument `i` until the native changes it), or nil.
     #[inline]
     pub fn arg(&self, i: usize) -> Value {
-        self.rt
-            .stack
-            .regs
-            .get(self.base + i)
-            .copied()
-            .unwrap_or(Value::Nil)
+        let at = self.base + i;
+        if at < self.rt.top {
+            self.rt.stack.regs[at]
+        } else {
+            Value::Nil
+        }
     }
 
     /// Overwrite window slot `i`, growing the window with nils if needed.
     pub fn set(&mut self, i: usize, v: Value) {
         let at = self.base + i;
+        let top = self.rt.top;
         let regs = &mut self.rt.stack.regs;
-        if at >= regs.len() {
-            regs.resize(at + 1, Value::Nil);
+        if at >= top {
+            crate::interp::extend_nil(regs, at + 1);
+            regs[top..at].fill(Value::Nil);
+            self.rt.top = at + 1;
         }
         regs[at] = v;
     }
 
     /// Insert `v` at window slot `i`, shifting the rest up.
     pub fn insert(&mut self, i: usize, v: Value) {
-        self.rt.stack.regs.insert(self.base + i, v);
+        let at = self.base + i;
+        self.rt.top = self.rt.stack.insert(at, self.rt.top, v);
     }
 
     /// Push a value onto the end of the window.
     #[inline]
     pub fn push(&mut self, v: Value) {
-        self.rt.stack.regs.push(v);
+        self.rt.stack.put(self.rt.top, v);
+        self.rt.top += 1;
     }
 
     /// Shrink the window to `len` values.
     pub fn truncate(&mut self, len: usize) {
-        self.rt.stack.regs.truncate(self.base + len);
+        self.rt.top = self.rt.top.min(self.base + len);
     }
 
     /// The window's values.
     pub fn window(&self) -> &[Value] {
-        &self.rt.stack.regs[self.base..]
+        &self.rt.stack.regs[self.base..self.rt.top]
     }
 
     /// Return one value.
@@ -446,6 +451,9 @@ impl NativeCtx<'_> {
 
     /// Run a full collection (`collectgarbage("collect")`).
     pub fn full_collect(&mut self) {
+        // Values above the window are dead.
+        let top = self.rt.top;
+        self.rt.stack.regs.truncate(top);
         self.heap.full_collect(self.rt);
     }
 }

@@ -128,19 +128,12 @@ fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
         .expect("threads hold VM coroutines")
 }
 
-/// Change thread `t`'s coroutine state through the write barrier, keeping
-/// the collector's byte count in step with its parked stack.
-fn update_co<R>(heap: &mut LuaHeap, t: Gc<Thread>, f: impl FnOnce(&mut Coroutine) -> R) -> R {
-    heap.update(t, |t| {
-        let c = t
-            .state
-            .as_any_mut()
-            .downcast_mut::<Coroutine>()
-            .expect("threads hold VM coroutines");
-        let r = f(c);
-        c.bytes = c.stack.bytes();
-        r
-    })
+fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
+    heap.get_mut(t)
+        .state
+        .as_any_mut()
+        .downcast_mut()
+        .expect("threads hold VM coroutines")
 }
 
 /// The continuation a yielding coroutine waits in: the values the next
@@ -153,23 +146,37 @@ fn yield_k(_ctx: &mut NativeCtx<'_>, o: CallOutcome) -> Result<NativeReturn, Lua
 }
 
 impl Vm {
-    /// Park the running stack in the current thread (or drop it, for a
-    /// coroutine that finished) and run thread `to`'s.
-    fn switch_to(&mut self, to: Gc<Thread>, keep: bool) {
+    /// Park the running stack in the current thread, which becomes
+    /// `from_status` (or drop the stack, for a coroutine that finished), and
+    /// run thread `to`'s.
+    fn switch_to(&mut self, to: Gc<Thread>, from_status: CoStatus) {
         let from = self.rt.current;
         let stack = std::mem::take(&mut self.rt.stack);
         let top = self.rt.top;
-        update_co(&mut self.heap, from, |c| {
-            if keep {
-                c.stack = stack;
-                c.top = top;
-            }
-        });
-        let (stack, top) = update_co(&mut self.heap, to, |c| {
-            (std::mem::take(&mut c.stack), c.top)
-        });
-        self.rt.stack = stack;
-        self.rt.top = top;
+        // A parked stack is traced through its thread, which the collector
+        // may already have scanned.
+        self.heap.barrier_back(from);
+        let c = co_mut(&mut self.heap, from);
+        c.status = from_status;
+        // A thread's bytes are its stack's, parked or running: they change
+        // only when the stack's capacity does.
+        let old = c.bytes;
+        if from_status == CoStatus::Dead {
+            c.bytes = 0;
+            drop(stack);
+        } else {
+            c.bytes = stack.bytes();
+            c.stack = stack;
+            c.top = top;
+        }
+        let delta = c.bytes as isize - old as isize;
+        if delta != 0 {
+            self.heap.adjust_bytes(delta);
+        }
+        let c = co_mut(&mut self.heap, to);
+        c.status = CoStatus::Running;
+        self.rt.stack = std::mem::take(&mut c.stack);
+        self.rt.top = c.top;
         self.rt.current = to;
         self.rt.switched = true;
     }
@@ -211,11 +218,12 @@ impl Vm {
 
     /// Move the last `n` values of the running stack to `xfer`.
     fn take_values(&mut self, n: usize) {
-        let regs = &mut self.rt.stack.regs;
-        let at = regs.len() - n;
+        let at = self.rt.top - n;
         self.rt.xfer.clear();
-        self.rt.xfer.extend_from_slice(&regs[at..]);
-        regs.truncate(at);
+        self.rt
+            .xfer
+            .extend_from_slice(&self.rt.stack.regs[at..self.rt.top]);
+        self.rt.top = at;
     }
 
     /// Run the continuation on top of the running stack with an outcome:
@@ -225,17 +233,17 @@ impl Vm {
         let FrameKind::Native { id, k, call_at, .. } = f.kind else {
             unreachable!("a native waits for every switch")
         };
-        let regs = &mut self.rt.stack.regs;
-        regs.truncate(call_at as usize);
         let o = match outcome {
             Ok(()) => {
-                regs.extend_from_slice(&self.rt.xfer);
+                self.rt.top = self.rt.stack.write(call_at as usize, &self.rt.xfer);
                 CallOutcome::Ok(self.rt.xfer.len())
             }
-            Err(v) => CallOutcome::Err(v),
+            Err(v) => {
+                self.rt.top = call_at as usize;
+                CallOutcome::Err(v)
+            }
         };
         self.rt.xfer.clear();
-        self.rt.top = self.rt.stack.regs.len();
         let mut ctx = NativeCtx {
             heap: &mut self.heap,
             rt: &mut self.rt,
@@ -261,7 +269,7 @@ impl Vm {
         want: u8,
         id: NativeId,
     ) -> Result<Flow, Exc> {
-        let at = self.rt.stack.regs.len() - nargs;
+        let at = self.rt.top - nargs;
         self.wait_frame(frame, func, want, id, k, at);
         self.take_values(nargs);
         let refuse = if self.co_status(co) != CoStatus::Suspended {
@@ -279,19 +287,14 @@ impl Vm {
             let e = self.new_str(msg.as_bytes());
             return self.deliver(Err(e));
         }
-        let from = self.rt.current;
-        update_co(&mut self.heap, from, |c| c.status = CoStatus::Normal);
-        update_co(&mut self.heap, co, |c| c.status = CoStatus::Running);
-        self.rt.resumers.push(from);
-        self.switch_to(co, true);
+        self.rt.resumers.push(self.rt.current);
+        self.switch_to(co, CoStatus::Normal);
         let flow = if matches!(
             self.rt.stack.frames.last().map(|f| f.kind),
             Some(FrameKind::CoBase)
         ) {
             // A fresh coroutine: call its body above the base frame.
-            let regs = &mut self.rt.stack.regs;
-            regs.truncate(1);
-            regs.extend_from_slice(&self.rt.xfer);
+            self.rt.stack.write(1, &self.rt.xfer);
             let n = self.rt.xfer.len();
             self.rt.xfer.clear();
             self.call_value(0, n, MULTI)
@@ -316,14 +319,11 @@ impl Vm {
                 "attempt to yield from outside a coroutine".into(),
             ));
         };
-        let at = self.rt.stack.regs.len() - n;
+        let at = self.rt.top - n;
         self.wait_frame(frame, func, want, id, yield_k, at);
         self.take_values(n);
         self.rt.resumers.pop();
-        let co = self.rt.current;
-        update_co(&mut self.heap, co, |c| c.status = CoStatus::Suspended);
-        update_co(&mut self.heap, resumer, |c| c.status = CoStatus::Running);
-        self.switch_to(resumer, true);
+        self.switch_to(resumer, CoStatus::Suspended);
         switched(self.deliver(Ok(())))
     }
 
@@ -332,12 +332,11 @@ impl Vm {
     pub(crate) fn co_finished(&mut self, outcome: Result<(), Value>) -> Result<Flow, Exc> {
         let resumer = self.rt.resumers.pop().expect("a coroutine has a resumer");
         let co = self.rt.current;
-        update_co(&mut self.heap, co, |c| {
-            c.status = CoStatus::Dead;
-            c.error = outcome.err();
-        });
-        update_co(&mut self.heap, resumer, |c| c.status = CoStatus::Running);
-        self.switch_to(resumer, false);
+        if let Err(e) = outcome {
+            self.heap.barrier_back(co);
+            co_mut(&mut self.heap, co).error = Some(e);
+        }
+        self.switch_to(resumer, CoStatus::Dead);
         switched(self.deliver(outcome))
     }
 
@@ -396,11 +395,13 @@ impl NativeCtx<'_> {
     /// Kill suspended or dead thread `t`, releasing its stack. Returns the
     /// error it died with, if any.
     pub fn close_thread(&mut self, t: Gc<Thread>) -> Option<Value> {
-        update_co(self.heap, t, |c| {
-            c.status = CoStatus::Dead;
-            c.stack = Stack::default();
-            c.error.take()
-        })
+        let c = co_mut(self.heap, t);
+        c.status = CoStatus::Dead;
+        c.stack = Stack::default();
+        let freed = std::mem::take(&mut c.bytes);
+        let e = c.error.take();
+        self.heap.adjust_bytes(-(freed as isize));
+        e
     }
 
     // ---- native closures -------------------------------------------------
@@ -493,7 +494,7 @@ impl Vm {
         let f = self.rt.stack.frames.pop().expect("the stub's frame");
         let func = f.func as usize;
         let nargs = f.nvarargs as usize;
-        self.rt.stack.regs.truncate(func + 1 + nargs);
+        self.rt.top = func + 1 + nargs;
         let nf = self.rt.natives[id.0 as usize].f;
         let mut ctx = NativeCtx {
             heap: &mut self.heap,

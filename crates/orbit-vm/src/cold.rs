@@ -51,6 +51,9 @@ impl Vm {
                 match crate::meta::new_index(&mut self.heap, &self.rt.metas, obj, key, v) {
                     Ok(()) => {
                         if self.heap.should_step() {
+                            let base = self.rt.stack.frames.last().expect("a frame").base as usize;
+                            let live = (base + 256).max(self.rt.top);
+                            self.rt.stack.regs.truncate(live);
                             self.heap.step(&mut self.rt);
                         }
                         return Ok(Flow::Reload);
