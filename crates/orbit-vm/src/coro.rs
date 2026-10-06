@@ -73,9 +73,21 @@ pub(crate) struct Coroutine {
     /// `coroutine.close` is running its `__close` handlers: errors unwind
     /// straight to the base frame.
     pub(crate) closing: bool,
+    /// `rt.gc_cycles` when it was parked.
+    cycle: u32,
 }
 
 impl Coroutine {
+    /// Where a parked stack's live registers end: its top, or past its
+    /// last variable still to close (a dead coroutine kept for
+    /// `coroutine.close`).
+    fn live(&self) -> usize {
+        self.stack
+            .tbc
+            .last()
+            .map_or(self.top, |&r| self.top.max(r as usize + 1))
+    }
+
     /// A suspended coroutine that will call `f`: `f` sits above the base
     /// frame, where the first resume calls it.
     fn fresh(f: Value) -> Coroutine {
@@ -93,11 +105,12 @@ impl Coroutine {
         Coroutine {
             bytes: stack.bytes(),
             stack,
-            top: 0,
+            top: 1,
             status: CoStatus::Suspended,
             error: None,
             parks: 0,
             closing: false,
+            cycle: 0,
         }
     }
 
@@ -110,13 +123,16 @@ impl Coroutine {
             bytes: 0,
             parks: 0,
             closing: false,
+            cycle: 0,
         }
     }
 }
 
 impl ThreadState for Coroutine {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        self.stack.trace(m);
+        // The values above a parked stack's top are dead; `switch_to` cuts
+        // them off before they can be read again.
+        self.stack.trace(m, self.live());
         if let Some(e) = self.error {
             mark(m, e);
         }
@@ -149,25 +165,6 @@ fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
         .as_any_mut()
         .downcast_mut()
         .expect("threads hold VM coroutines")
-}
-
-/// Cut every parked stack that may run again to its top, ahead of a
-/// collector step. The values above a parked stack's top are dead, but the
-/// collector traces parked stacks whole. Cold suspended stacks are already
-/// cut, so only the main thread, the resumers and the hot suspended
-/// stacks need it.
-#[cold]
-pub(crate) fn trim_parked(heap: &mut LuaHeap, rt: &crate::Runtime) {
-    let mut cut = |t: Gc<Thread>| {
-        if t != rt.current {
-            let c = co_mut(heap, t);
-            let top = c.top;
-            c.stack.regs.truncate(top);
-        }
-    };
-    cut(rt.main_thread);
-    rt.resumers.iter().for_each(|&t| cut(t));
-    rt.cooling.iter().for_each(|&(t, _)| cut(t));
 }
 
 /// The continuation a yielding coroutine waits in: the values the next
@@ -204,6 +201,7 @@ impl Vm {
             c.bytes = stack.bytes();
             c.stack = stack;
             c.top = top;
+            c.cycle = self.rt.gc_cycles;
         }
         let delta = c.bytes as isize - old as isize;
         c.parks = c
@@ -224,6 +222,12 @@ impl Vm {
         c.status = CoStatus::Running;
         self.rt.stack = std::mem::take(&mut c.stack);
         self.rt.top = c.top;
+        // If a collection swept while it was parked, the dead slots above
+        // its top (which aren't traced) may refer to freed objects.
+        if c.cycle != self.rt.gc_cycles {
+            let live = c.live();
+            self.rt.stack.regs.truncate(live);
+        }
         self.rt.current = to;
         self.rt.switched = true;
     }

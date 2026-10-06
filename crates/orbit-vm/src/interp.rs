@@ -932,7 +932,6 @@ impl Vm {
                         // open results is live; don't let it keep garbage.
                         let live = (base + WINDOW).max(self.rt.top);
                         self.rt.stack.regs.truncate(live);
-                        crate::coro::trim_parked(&mut self.heap, &self.rt);
                         self.heap.step(&mut self.rt);
                         w = window!();
                     }

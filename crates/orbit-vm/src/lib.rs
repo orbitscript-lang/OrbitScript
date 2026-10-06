@@ -172,10 +172,11 @@ pub(crate) struct Stack {
 }
 
 impl Stack {
-    /// Mark everything the stack refers to (the running stack is a root;
-    /// a parked one is traced through its thread).
-    pub(crate) fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        for &v in &self.regs {
+    /// Mark everything the stack refers to, counting only the registers
+    /// below `end` (the running stack is a root; a parked one is traced
+    /// through its thread).
+    pub(crate) fn trace(&self, m: &mut Marker<'_, LuaSpace>, end: usize) {
+        for &v in &self.regs[..end.min(self.regs.len())] {
             mark(m, v);
         }
         for &c in &self.cells {
@@ -279,6 +280,9 @@ pub struct Runtime {
     /// then (ADR-3): one that leaves this list without being resumed has its
     /// stack shrunk. Weak: an entry dies with its thread.
     pub(crate) cooling: std::collections::VecDeque<(Gc<Thread>, u32)>,
+    /// Collections that reached their sweep, to tell whether a parked
+    /// stack's dead slots may now refer to freed objects.
+    pub(crate) gc_cycles: u32,
 }
 
 /// `Write` that can be printed with `{:?}`.
@@ -289,7 +293,7 @@ impl Roots<LuaSpace> for Runtime {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         m.mark(self.globals);
         m.mark(self.dead_cell);
-        self.stack.trace(m);
+        self.stack.trace(m, usize::MAX);
         m.mark(self.current);
         m.mark(self.main_thread);
         for &t in &self.resumers {
@@ -315,6 +319,7 @@ impl Roots<LuaSpace> for Runtime {
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
         self.strings.clear_dead(live);
         self.cooling.retain(|&(t, _)| live.is_live(t));
+        self.gc_cycles = self.gc_cycles.wrapping_add(1);
     }
 }
 
@@ -369,6 +374,7 @@ impl Vm {
                 unwind_traceback: None,
                 native_protos: Default::default(),
                 cooling: Default::default(),
+                gc_cycles: 0,
             },
         }
     }
@@ -499,7 +505,6 @@ impl Vm {
 
     /// Run a full collection cycle.
     pub fn full_collect(&mut self) {
-        coro::trim_parked(&mut self.heap, &self.rt);
         self.heap.full_collect(&mut self.rt);
     }
 
