@@ -14,6 +14,7 @@ debug_locals.lua
 errors.lua
 floats.lua
 gc.lua
+io.lua
 load.lua
 lua55.lua
 meta_index.lua

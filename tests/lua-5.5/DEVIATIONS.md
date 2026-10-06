@@ -49,3 +49,11 @@ Hooks follow docs/design/debug.md. Proposed in the debug hooks PR.
 
 - **Count hooks.** A count hook with interval N fires every N of OrbitScript's bytecode instructions. The bytecode is our own design (ADR-4), so the events land at different points in the source than lua5.5's, and a different number of them fire for the same code. Events still fire before the instruction, and the line event that follows a count event fires as in lua5.5.
 - **`ftransfer` for `debug.sethook`'s own return event.** When `debug.sethook` turns on return hooks, the return event for that same call reports `ftransfer` from the native's own argument window. lua5.5 reports a value that reflects its C stack (4 where we report 3). Other natives' return events match.
+
+## Standard streams don't seek
+
+`io.stdin:seek()`, `io.stdout:seek()` and `io.stderr:seek()` always fail with `Illegal seek`. lua5.5 can seek a standard stream when it is redirected to a regular file (`lua script.lua < data.txt`).
+
+Why: Rust's standard library can't seek its standard streams, and reopening the file behind them would need `unsafe` or platform paths such as `/dev/stdin`, which behave differently.
+
+Suite: `files.lua` seeks `io.stdin` only to check that a seek can fail.

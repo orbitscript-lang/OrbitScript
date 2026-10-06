@@ -161,7 +161,7 @@ impl Stream {
             };
         }
         let buf = std::mem::take(&mut self.wbuf);
-        let r = match &mut self.kind {
+        match &mut self.kind {
             Kind::File(f) => f.write_all(&buf),
             Kind::Stdout => out.write_all(&buf).and_then(|()| out.flush()),
             Kind::Stderr => io::stderr().write_all(&buf),
@@ -170,8 +170,7 @@ impl Stream {
                 None => Err(bad_fd()),
             },
             Kind::Stdin | Kind::PipeRead(_) | Kind::Closed => Err(bad_fd()),
-        };
-        r
+        }
     }
 
     /// Give back read-ahead bytes before writing or seeking: a file's
@@ -264,7 +263,12 @@ impl Stream {
     }
 
     /// Read up to `n` bytes into `into`.
-    fn read_bytes(&mut self, mut n: usize, into: &mut Vec<u8>, out: &mut dyn Write) -> io::Result<()> {
+    fn read_bytes(
+        &mut self,
+        mut n: usize,
+        into: &mut Vec<u8>,
+        out: &mut dyn Write,
+    ) -> io::Result<()> {
         while n > 0 && self.fill(out)? {
             let avail = &self.rbuf[self.rpos..];
             let k = avail.len().min(n);
@@ -277,7 +281,12 @@ impl Stream {
 
     /// Read through the next newline (kept in `into` if `keep`). Returns
     /// whether anything was read, newline included.
-    fn read_line(&mut self, keep: bool, into: &mut Vec<u8>, out: &mut dyn Write) -> io::Result<bool> {
+    fn read_line(
+        &mut self,
+        keep: bool,
+        into: &mut Vec<u8>,
+        out: &mut dyn Write,
+    ) -> io::Result<bool> {
         let mut any = false;
         while self.fill(out)? {
             any = true;
@@ -318,20 +327,21 @@ impl Stream {
             self.rpos += 1;
         }
         // Take the next byte if `accept` likes it.
-        let mut take = |s: &mut Stream, buf: &mut Vec<u8>, accept: &dyn Fn(u8) -> bool| -> io::Result<bool> {
-            match s.peek(out)? {
-                Some(c) if accept(c) && !too_long => {
-                    if buf.len() >= MAX_NUMERAL {
-                        too_long = true;
-                        return Ok(false);
+        let mut take =
+            |s: &mut Stream, buf: &mut Vec<u8>, accept: &dyn Fn(u8) -> bool| -> io::Result<bool> {
+                match s.peek(out)? {
+                    Some(c) if accept(c) && !too_long => {
+                        if buf.len() >= MAX_NUMERAL {
+                            too_long = true;
+                            return Ok(false);
+                        }
+                        buf.push(c);
+                        s.rpos += 1;
+                        Ok(true)
                     }
-                    buf.push(c);
-                    s.rpos += 1;
-                    Ok(true)
+                    _ => Ok(false),
                 }
-                _ => Ok(false),
-            }
-        };
+            };
         take(self, &mut buf, &|c| c == b'-' || c == b'+')?;
         let mut count = 0;
         let mut hex = false;
@@ -342,7 +352,13 @@ impl Stream {
                 count = 1;
             }
         }
-        let digit = move |c: u8| if hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() };
+        let digit = move |c: u8| {
+            if hex {
+                c.is_ascii_hexdigit()
+            } else {
+                c.is_ascii_digit()
+            }
+        };
         while take(self, &mut buf, &digit)? {
             count += 1;
         }
@@ -352,7 +368,13 @@ impl Stream {
             }
         }
         if count > 0 {
-            let exp = move |c: u8| if hex { c == b'p' || c == b'P' } else { c == b'e' || c == b'E' };
+            let exp = move |c: u8| {
+                if hex {
+                    c == b'p' || c == b'P'
+                } else {
+                    c == b'e' || c == b'E'
+                }
+            };
             if take(self, &mut buf, &exp)? {
                 take(self, &mut buf, &|c| c == b'-' || c == b'+')?;
                 while take(self, &mut buf, &|c: u8| c.is_ascii_digit())? {}
@@ -463,7 +485,10 @@ fn stream_of(ctx: &NativeCtx<'_>, v: Value) -> Option<Rc<RefCell<Stream>>> {
 }
 
 /// The default input or output stream, which must be open.
-fn default_file(ctx: &mut NativeCtx<'_>, key: &[u8]) -> Result<(Value, Rc<RefCell<Stream>>), LuaError> {
+fn default_file(
+    ctx: &mut NativeCtx<'_>,
+    key: &[u8],
+) -> Result<(Value, Rc<RefCell<Stream>>), LuaError> {
     let v = registry_get(ctx, key);
     match stream_of(ctx, v) {
         Some(s) if !s.borrow().is_closed() => Ok((v, s)),
@@ -806,7 +831,9 @@ fn format(ctx: &mut NativeCtx<'_>, v: Value, arg: usize) -> Result<Format, LuaEr
     let count = |n: i64| Format::Count(usize::try_from(n).unwrap_or(0));
     match v {
         Value::Int(n) => Ok(count(n)),
-        Value::Float(f) if f.fract() == 0.0 && (-9.3e18..9.3e18).contains(&f) => Ok(count(f as i64)),
+        Value::Float(f) if f.fract() == 0.0 && (-9.3e18..9.3e18).contains(&f) => {
+            Ok(count(f as i64))
+        }
         Value::Float(_) => Err(ctx.arg_error(arg, "number has no integer representation")),
         Value::Str(s) => {
             let b = ctx.bytes(s);
@@ -886,7 +913,11 @@ fn read_one(ctx: &mut NativeCtx<'_>, s: &Rc<RefCell<Stream>>, fmt: Format) -> io
             }
         }
     };
-    Ok(if ok { ctx.new_str_owned(buf) } else { Value::Nil })
+    Ok(if ok {
+        ctx.new_str_owned(buf)
+    } else {
+        Value::Nil
+    })
 }
 
 // ---- lines -----------------------------------------------------------------
@@ -931,7 +962,12 @@ fn f_lines(ctx: &mut NativeCtx<'_>) -> R {
 /// Until the VM has native closures (thread 2's C3), the iterator is a
 /// tiny Lua function linked here that tail-calls [`lines_step`] with the
 /// file and a state table it captures.
-fn lines_iterator(ctx: &mut NativeCtx<'_>, file: Value, first: usize, close: bool) -> Result<Value, LuaError> {
+fn lines_iterator(
+    ctx: &mut NativeCtx<'_>,
+    file: Value,
+    first: usize,
+    close: bool,
+) -> Result<Value, LuaError> {
     let n = ctx.nargs().saturating_sub(first);
     if n > MAX_LINE_FORMATS {
         return Err(ctx.arg_error(first + MAX_LINE_FORMATS, "too many arguments"));
@@ -1003,7 +1039,9 @@ fn lines_step(ctx: &mut NativeCtx<'_>) -> R {
     let Value::Int(n) = tbl::get(ctx.heap, state, Value::Int(2)) else {
         unreachable!("lines format count")
     };
-    let fmts: Vec<Value> = (0..n).map(|i| tbl::get(ctx.heap, state, Value::Int(i + 3))).collect();
+    let fmts: Vec<Value> = (0..n)
+        .map(|i| tbl::get(ctx.heap, state, Value::Int(i + 3)))
+        .collect();
     let len = ctx.len();
     match read_values(ctx, &s, &fmts, 1)? {
         Ok(k) if !ctx.arg(len).is_falsy() => Ok(NativeReturn::Return(k)),
