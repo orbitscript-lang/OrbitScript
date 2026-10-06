@@ -8,8 +8,14 @@ mod base;
 #[cfg(feature = "load")]
 mod load;
 mod math;
+#[cfg(feature = "os")]
+mod os;
 mod string;
 mod table;
+#[cfg(feature = "os")]
+mod time;
+#[cfg(feature = "os")]
+mod tz;
 
 use orbit_vm::{NativeFn, Vm};
 
@@ -32,7 +38,8 @@ pub fn open_libs(vm: &mut Vm) {
     for &(name, fast) in math::FAST {
         vm.set_native_fast_path(name, fast);
     }
-    open_lib(vm, "os", &[("os.clock", os_clock)]);
+    #[cfg(feature = "os")]
+    open_lib(vm, "os", os::FUNCTIONS);
 }
 
 /// Register `functions` (qualified names such as `"string.rep"`) in a new
@@ -55,15 +62,6 @@ pub fn open_lib(
     t
 }
 
-fn os_clock(
-    ctx: &mut orbit_vm::NativeCtx<'_>,
-) -> Result<orbit_vm::NativeReturn, orbit_vm::LuaError> {
-    // Wall time since the VM started: stable `std` has no process CPU time
-    // (docs/design/first-light-subset.md, deliberate differences).
-    let t = ctx.rt.start.elapsed().as_secs_f64();
-    ctx.ret1(orbit_vm::orbit_core::Value::Float(t))
-}
-
 /// A file name from Lua bytes. On Unix any bytes are a valid name; elsewhere
 /// names must be text, and invalid UTF-8 is replaced.
 #[allow(dead_code)]
@@ -77,6 +75,58 @@ pub(crate) fn os_path(bytes: &[u8]) -> std::path::PathBuf {
     {
         String::from_utf8_lossy(bytes).into_owned().into()
     }
+}
+
+/// The bytes of an OS string (lossy outside Unix).
+#[allow(dead_code)]
+pub(crate) fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        s.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        s.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
+/// Create a new, empty file with a unique name in the temporary directory
+/// (`os.tmpname`, `io.tmpfile`). Creating it, rather than only picking a
+/// name, means no other process can take the name first.
+#[allow(dead_code)]
+pub(crate) fn temp_file() -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let dir = std::env::temp_dir();
+    let mut last = None;
+    for _ in 0..100 {
+        // RandomState is seeded randomly per process; mix in a counter so
+        // every attempt differs.
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+        h.write_u32(std::process::id());
+        let mut bits = h.finish();
+        let mut name = String::from("orbit_");
+        for _ in 0..6 {
+            name.push(CHARS[(bits % CHARS.len() as u64) as usize] as char);
+            bits /= CHARS.len() as u64;
+        }
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no unique name")))
 }
 
 /// The C library's text for an I/O error (`No such file or directory`),
