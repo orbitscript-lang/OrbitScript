@@ -1,6 +1,6 @@
 # ADR-7: Dependency policy
 
-Status: Proposed
+Status: Accepted (Tym, 2026-10-06, PR #49)
 
 ## Decision
 - `orbit-gc`, `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies without an ADR. (ADR-2 chose our own collector, so the gc-arena exception this ADR once expected doesn't apply.)

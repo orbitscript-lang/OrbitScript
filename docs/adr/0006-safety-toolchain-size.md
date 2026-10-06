@@ -1,6 +1,6 @@
 # ADR-6: Safety, toolchain and size
 
-Status: Proposed
+Status: Accepted (Tym, 2026-10-06, PR #49)
 
 ## Decision
 - **Safety:** the workspace lint sets `unsafe_code = "forbid"`. Exceptions are the future `orbit-jit` crate (calling generated code is inherently unsafe; its `unsafe` stays in one small, audited module) and `orbit-gc`'s call to glibc's `malloc_trim` in `src/os.rs`, behind the off-by-default `malloc-trim` feature (approved by Tym on 2026-09-30, recorded in ADR-2). It hands memory the collector freed back to the OS, which glibc otherwise keeps. `orbit-gc` denies `unsafe_code` instead of forbidding it and allows it only on that declaration. Dependencies may contain `unsafe` internally, as `std` does.
