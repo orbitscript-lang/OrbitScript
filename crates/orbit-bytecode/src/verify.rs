@@ -22,9 +22,10 @@
 //!    after the first register a `MULTI` operand counts from.
 //!
 //! The data-flow layer assumes what the VM does: an instruction writes only
-//! the registers its documentation names, a call clobbers every register
-//! from its function slot up (the callee's frame lives there), and
-//! metamethods run above the frame's registers.
+//! the registers its documentation names (and `Concat` its operands, where
+//! `__concat` leaves partial results), a call clobbers every register from
+//! its function slot up (the callee's frame lives there), and metamethods
+//! run above the frame's registers.
 
 use core::fmt;
 
@@ -520,8 +521,12 @@ impl Function<'_> {
             | Op::Neg { dst, .. }
             | Op::Not { dst, .. }
             | Op::Len { dst, .. }
-            | Op::Concat { dst, .. }
             | Op::Closure { dst, .. } => s.kill(dst, 1),
+            // `__concat` leaves partial results in the operand registers.
+            Op::Concat { dst, first, count } => {
+                s.kill(dst, 1);
+                s.kill(first, count as usize);
+            }
             Op::LoadNil { dst, count } => s.kill(dst, count as usize),
             Op::SelfCall { dst, .. } => s.kill(dst, 2),
             Op::NewTable { dst, .. } => {
