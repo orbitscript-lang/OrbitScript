@@ -54,3 +54,8 @@ show(pcall(load, {}))
 -- Files.
 show(loadfile("does/not/exist.lua"))
 show(pcall(dofile, "does/not/exist.lua"))
+
+-- Mode B (fixed buffers) is for the C API only.
+print(pcall(load, "", "", "B"))
+print(pcall(load, function() return nil end, "", "B"))
+print(pcall(load, "", "", "tx"))
