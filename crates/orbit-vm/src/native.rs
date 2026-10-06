@@ -475,16 +475,6 @@ impl NativeCtx<'_> {
         // Values above the window are dead.
         let top = self.rt.top;
         self.rt.stack.regs.truncate(top);
-        crate::coro::trim_parked(self.heap, self.rt);
         self.heap.full_collect(self.rt);
-    }
-
-    /// Run one collector step (`collectgarbage("step")`); true when it
-    /// finished a cycle.
-    pub fn gc_step(&mut self) -> bool {
-        let top = self.rt.top;
-        self.rt.stack.regs.truncate(top);
-        crate::coro::trim_parked(self.heap, self.rt);
-        self.heap.step(self.rt)
     }
 }

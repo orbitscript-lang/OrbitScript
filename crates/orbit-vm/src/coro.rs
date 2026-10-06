@@ -70,6 +70,8 @@ pub(crate) struct Coroutine {
     /// How many times it has been parked suspended, to tell whether an
     /// entry in `rt.cooling` is still its latest park.
     parks: u32,
+    /// `rt.gc_cycles` when it was parked.
+    cycle: u32,
 }
 
 impl Coroutine {
@@ -90,10 +92,11 @@ impl Coroutine {
         Coroutine {
             bytes: stack.bytes(),
             stack,
-            top: 0,
+            top: 1,
             status: CoStatus::Suspended,
             error: None,
             parks: 0,
+            cycle: 0,
         }
     }
 
@@ -105,13 +108,16 @@ impl Coroutine {
             error: None,
             bytes: 0,
             parks: 0,
+            cycle: 0,
         }
     }
 }
 
 impl ThreadState for Coroutine {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        self.stack.trace(m);
+        // The values above a parked stack's top are dead; `switch_to` cuts
+        // them off before they can be read again.
+        self.stack.trace(m, self.top);
         if let Some(e) = self.error {
             mark(m, e);
         }
@@ -146,25 +152,6 @@ fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
         .expect("threads hold VM coroutines")
 }
 
-/// Cut every parked stack that may run again to its top, ahead of a
-/// collector step. The values above a parked stack's top are dead, but the
-/// collector traces parked stacks whole. Cold suspended stacks are already
-/// cut, so only the main thread, the resumers and the hot suspended
-/// stacks need it.
-#[cold]
-pub(crate) fn trim_parked(heap: &mut LuaHeap, rt: &crate::Runtime) {
-    let mut cut = |t: Gc<Thread>| {
-        if t != rt.current {
-            let c = co_mut(heap, t);
-            let top = c.top;
-            c.stack.regs.truncate(top);
-        }
-    };
-    cut(rt.main_thread);
-    rt.resumers.iter().for_each(|&t| cut(t));
-    rt.cooling.iter().for_each(|&(t, _)| cut(t));
-}
-
 /// The continuation a yielding coroutine waits in: the values the next
 /// resume passes become `yield`'s results.
 fn yield_k(_ctx: &mut NativeCtx<'_>, o: CallOutcome) -> Result<NativeReturn, LuaError> {
@@ -197,6 +184,7 @@ impl Vm {
             c.bytes = stack.bytes();
             c.stack = stack;
             c.top = top;
+            c.cycle = self.rt.gc_cycles;
         }
         let delta = c.bytes as isize - old as isize;
         c.parks = c
@@ -217,6 +205,11 @@ impl Vm {
         c.status = CoStatus::Running;
         self.rt.stack = std::mem::take(&mut c.stack);
         self.rt.top = c.top;
+        // If a collection swept while it was parked, the dead slots above
+        // its top (which aren't traced) may refer to freed objects.
+        if c.cycle != self.rt.gc_cycles {
+            self.rt.stack.regs.truncate(c.top);
+        }
         self.rt.current = to;
         self.rt.switched = true;
     }

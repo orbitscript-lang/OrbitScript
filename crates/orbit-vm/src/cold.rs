@@ -54,7 +54,6 @@ impl Vm {
                             let base = self.rt.stack.frames.last().expect("a frame").base as usize;
                             let live = (base + 256).max(self.rt.top);
                             self.rt.stack.regs.truncate(live);
-                            crate::coro::trim_parked(&mut self.heap, &self.rt);
                             self.heap.step(&mut self.rt);
                         }
                         return Ok(Flow::Reload);
