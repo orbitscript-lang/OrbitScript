@@ -41,3 +41,36 @@ p(string.format, "%.99f", 1/3)
 p(string.format, "%5.3s|%-5s|%05d|%+05d|% 05.1f|%-+8.2f|", "abcdef", "ab", 42, 42, 3.14159, 2.5)
 p(string.format, "%g %g %g %g %g", 0/0, -(0/0), 1/0, -1/0, -0.0)
 p(string.format, "%.3g %.10g %#.3g %g %g", 1234567, 1/3, 1, 1e15, 123456)
+
+-- Error order: integer and e/f/g conversions check the argument before the
+-- spec, %a and %c/%s/%p/%q check the spec first; an unfinished capture is
+-- an error only where a result uses it.
+do
+for _, c in ipairs{"d", "i", "u", "o", "x", "X", "c", "a", "e", "f", "g", "s", "p", "q"} do
+  local function t(spec, v) local ok, e = pcall(string.format, spec, v) print(spec, tostring(v), ok, e) end
+  t("%#!" .. c, {})
+  t("%#" .. c, {})
+  t("%.3" .. c, {})
+  t("%5.3" .. c, nil)
+end
+end
+do
+for _, spec in ipairs{"%123d", "%.123d", "%.99d", "%99.99d", "%-+ #0d", "%--5d", "%000005d", "%.180A", "%1234s", "%#.123c"} do
+  print(spec, pcall(string.format, spec, {}))
+end
+end
+do
+for _, c in ipairs{"a", "A", "e", "E", "f", "g", "G"} do print(c, pcall(string.format, "%.180" .. c, {})) print(c, pcall(string.format, "%#!" .. c, {})) end
+print(pcall(string.find, "ab", "(()a"))
+print(pcall(string.find, "ab", "(a"))
+print(pcall(string.match, "ab", "(a"))
+print(pcall(string.gsub, "ab", "(a", "x"))
+print(pcall(string.gsub, "ab", "(a", "%0"))
+print(pcall(string.gsub, "ab", "(a", "%1"))
+print(pcall(string.gsub, "ab", "(a", {}))
+print(pcall(string.gsub, "ab", "(a", print))
+print(pcall(string.gsub, "ab", "(a)(b", "%1"))
+print(pcall(string.gsub, "ab", "(a)(b", "%2"))
+print(pcall(string.find, "ab", "(a)(b", 1, true))
+print(pcall(string.find, "ab", "a(b"))
+end

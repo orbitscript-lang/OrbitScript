@@ -303,7 +303,14 @@ fn str_at(ctx: &NativeCtx<'_>, i: usize) -> Gc<LuaStr> {
 struct Found {
     start: usize,
     end: usize,
-    caps: Vec<Capture>,
+    /// Each capture, or why it can't be used (an unfinished capture is an
+    /// error only if the replacement uses it).
+    caps: Vec<Result<Capture, PatternError>>,
+}
+
+/// Capture `k` of a match, raising its error if it has one.
+fn found_capture(ctx: &mut NativeCtx<'_>, f: &Found, k: usize) -> Result<Capture, LuaError> {
+    f.caps[k].map_err(|e| pattern_error(ctx, e))
 }
 
 fn gsub_loop(ctx: &mut NativeCtx<'_>) -> R {
@@ -336,13 +343,11 @@ fn gsub_resume(ctx: &mut NativeCtx<'_>, after_match: bool) -> R {
         let found = {
             let mut m = Matcher::new(ctx.bytes(s), ctx.bytes(p));
             match m.match_at(pos, pstart) {
-                Ok(Some(e)) if Some(e) != last => collect_captures(&m, pos, e).map(|caps| {
-                    Some(Found {
-                        start: pos,
-                        end: e,
-                        caps,
-                    })
-                }),
+                Ok(Some(e)) if Some(e) != last => Ok(Some(Found {
+                    start: pos,
+                    end: e,
+                    caps: (0..m.nresults()).map(|i| m.capture(i, pos, e)).collect(),
+                })),
                 Ok(_) => Ok(None),
                 Err(e) => Err(e),
             }
@@ -399,7 +404,8 @@ fn add_value(
             Ok(None)
         }
         Value::Table(t) => {
-            let key = capture_value(ctx, s, f.caps[0]);
+            let c = found_capture(ctx, f, 0)?;
+            let key = capture_value(ctx, s, c);
             let v = orbit_vm::orbit_core::table::get(ctx.heap, t, key);
             replacement_result(ctx, s, f, v)?;
             Ok(None)
@@ -407,7 +413,8 @@ fn add_value(
         _ => {
             ctx.set(G_MSTART, Value::Int(f.start as i64));
             ctx.set(G_MEND, Value::Int(f.end as i64));
-            for &c in &f.caps {
+            for k in 0..f.caps.len() {
+                let c = found_capture(ctx, f, k)?;
                 let v = capture_value(ctx, s, c);
                 ctx.push(v);
             }
@@ -493,7 +500,7 @@ fn expand_replacement(
                     let k = (d - b'1') as usize;
                     match f.caps.get(k) {
                         // With no captures, capture 1 is the whole match.
-                        Some(&c) => c,
+                        Some(_) => found_capture(ctx, f, k)?,
                         _ => {
                             let msg = PatternError::InvalidCaptureIndex((d - b'0') as usize);
                             return Err(pattern_error(ctx, msg));
