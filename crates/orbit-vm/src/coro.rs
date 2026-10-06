@@ -433,6 +433,8 @@ pub(crate) fn yieldable(stack: &Stack) -> bool {
                 ..
             } | FrameKind::Handler { .. }
                 | FrameKind::Boundary
+                // A hook is a nested call, as a Lua hook is in the reference.
+                | FrameKind::Hook
         )
     })
 }

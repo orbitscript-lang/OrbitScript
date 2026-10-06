@@ -312,6 +312,13 @@ impl Interrupt {
     pub fn request(&self) {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// Whether a request is waiting for the VM to raise it. A CLI can exit
+    /// on a second Ctrl-C while the first is still pending (a long-running
+    /// native).
+    pub fn pending(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// `Write` that can be printed with `{:?}`.

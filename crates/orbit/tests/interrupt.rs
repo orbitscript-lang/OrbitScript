@@ -12,7 +12,9 @@ fn interrupted(src: &str) -> Vec<String> {
     let handle = lua.vm().interrupt_handle();
     let t = thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
+        assert!(!handle.pending());
         handle.request();
+        assert!(handle.pending());
     });
     let out = lua.exec(src.as_bytes(), "t").unwrap();
     t.join().unwrap();
