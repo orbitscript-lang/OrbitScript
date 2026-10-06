@@ -2,3 +2,5 @@
 #   cargo testkit diff ... --expect tests/diff/compat/expected-orbit.txt --update-expected
 c1_bitwise.lua
 c1_env.lua
+c1_global.lua
+c1_hexfloat.lua
