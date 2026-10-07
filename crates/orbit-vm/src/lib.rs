@@ -122,9 +122,9 @@ pub(crate) enum FrameKind {
         event: Event,
     },
     /// Below an `xpcall` message handler running on top of the frames that
-    /// raised: its result becomes the error delivered to the native frame
-    /// at index `catcher`. Nothing may yield across it.
-    Handler { catcher: u32 },
+    /// raised: its result is raised again as the error, past the handler.
+    /// Nothing may yield across it.
+    Handler,
     /// The bottom of a [`Vm::call`]: returning into it ends the call, and
     /// an error unwinding to it is returned to the embedder.
     Boundary,
@@ -165,6 +165,9 @@ pub(crate) struct Stack {
     pub regs: Vec<Value>,
     pub cells: Vec<Gc<Cell>>,
     pub frames: Vec<Frame>,
+    /// The registers (absolute) of the open to-be-closed variables, oldest
+    /// first.
+    pub tbc: Vec<u32>,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
     /// switch to this code swaps it in instead of looking the closure up.
@@ -232,6 +235,7 @@ impl Stack {
         self.regs.capacity() * std::mem::size_of::<Value>()
             + self.cells.capacity() * std::mem::size_of::<Gc<Cell>>()
             + self.frames.capacity() * std::mem::size_of::<Frame>()
+            + self.tbc.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -286,6 +290,12 @@ pub struct Runtime {
     /// The error being raised is an error in error handling: it skips
     /// message handlers and becomes `error in error handling`.
     pub(crate) errerr: bool,
+    /// The error being raised has already been through its message handler
+    /// (it is being re-raised after a `__close` handler ran).
+    pub(crate) handled: bool,
+    /// The traceback of an error on its way out of a `Vm::call`, taken
+    /// before its to-be-closed variables closed (and popped the frames).
+    pub(crate) unwind_traceback: Option<String>,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
     /// The threads parked suspended most recently, with their park count
@@ -417,6 +427,8 @@ impl Vm {
                 xfer: Vec::new(),
                 switched: false,
                 errerr: false,
+                handled: false,
+                unwind_traceback: None,
                 native_protos: Default::default(),
                 cooling: Default::default(),
                 gc_cycles: 0,

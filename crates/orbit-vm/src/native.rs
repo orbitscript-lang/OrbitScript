@@ -87,6 +87,14 @@ pub enum NativeReturn {
         nargs: usize,
         k: Continuation,
     },
+    /// Close coroutine `co` (suspended, or dead): run its pending `__close`
+    /// handlers on its stack, newest first, with its error (nil if it is
+    /// suspended), then run `k`: `Ok` with no values, or `Err` with the error
+    /// it died with or the last error a handler raised.
+    Close {
+        co: Gc<orbit_core::Thread>,
+        k: Continuation,
+    },
     /// Yield the last `nvals` values of the window to the resumer. The
     /// values the next resume passes become this native's results.
     Yield { nvals: usize },

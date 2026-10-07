@@ -90,7 +90,11 @@ impl Vm {
         let FrameKind::Lua { closure, .. } = f.kind else {
             unreachable!("metamethods are requested by Lua frames")
         };
-        let at = f.base as usize + self.heap.get(closure).code.nregs as usize;
+        let mut at = f.base as usize + self.heap.get(closure).code.nregs as usize;
+        if let MetaAction::Close { top } = action {
+            // Keep the open-ended results a `return` is about to pass on.
+            at = at.max(top as usize);
+        }
         let n = call.nargs as usize;
         let regs = &mut self.rt.stack.regs;
         if regs.len() < at + 1 + n {
@@ -156,6 +160,9 @@ impl Vm {
                 first,
                 left: aux,
             },
+            Op::Close { .. } => MetaAction::Close {
+                top: self.rt.top as u32,
+            },
             other => unreachable!("{other:?} doesn't call metamethods"),
         }
     }
@@ -168,6 +175,11 @@ impl Vm {
             unreachable!("meta frame")
         };
         let res = self.rt.stack.regs[m.func as usize];
+        if let MetaAction::Unwind { handled } = action {
+            // A `__close` handler ran while `res` unwound: carry on.
+            self.rt.handled = handled;
+            return Err(Exc::Lua(crate::LuaError::new(res)));
+        }
         let caller = self.rt.stack.frames.last_mut().expect("caller frame");
         let base = caller.base as usize;
         match action {
@@ -178,6 +190,12 @@ impl Vm {
                 }
             }
             MetaAction::Discard => {}
+            MetaAction::Close { top } => {
+                // Run `Close` again for the next variable.
+                self.rt.top = top as usize;
+                caller.pc -= 1;
+            }
+            MetaAction::Unwind { .. } => unreachable!("handled above"),
             MetaAction::Concat { dst, first, left } => {
                 let from = base + first as usize;
                 let left = left as usize;
@@ -190,6 +208,41 @@ impl Vm {
             }
         }
         Ok(Flow::Reload)
+    }
+
+    /// `Tbc`: mark register `r` (absolute) to be closed. Its value is not
+    /// `nil` or `false`. `pc` is the instruction's, for the local's name.
+    #[inline(never)]
+    pub(crate) fn op_tbc(&mut self, r: usize, pc: usize) -> Result<(), Exc> {
+        let v = self.rt.stack.regs[r];
+        if self.rt.metamethod(&self.heap, v, Event::Close).is_nil() {
+            let f = self.rt.stack.frames.last().expect("a frame");
+            let FrameKind::Lua { closure, .. } = f.kind else {
+                unreachable!("Tbc runs in a Lua frame")
+            };
+            let proto = self.heap.get(self.heap.get(closure).proto);
+            let name = match proto.debug.origin(pc as u32, 0) {
+                Some(orbit_bytecode::Origin::Local(n)) => String::from_utf8_lossy(n).into_owned(),
+                _ => "?".into(),
+            };
+            return Err(Exc::Rt(
+                format!("variable '{name}' got a non-closable value"),
+                None,
+            ));
+        }
+        self.rt.stack.tbc.push(r as u32);
+        Ok(())
+    }
+
+    /// `Close`, with a variable to close at or above register `from`
+    /// (absolute): call the newest one's `__close(value, nil)`. The meta
+    /// frame runs `Close` again when it returns.
+    #[inline(never)]
+    pub(crate) fn op_close(&mut self) -> Exc {
+        let t = self.rt.stack.tbc.pop().expect("a variable to close") as usize;
+        let v = self.rt.stack.regs[t];
+        let h = self.rt.metamethod(&self.heap, v, Event::Close);
+        Exc::Meta(MetaCall::new(h, Event::Close, &[v, Value::Nil]))
     }
 
     /// `NewTable`.
