@@ -50,13 +50,49 @@ pub enum NativeReturn {
     /// Call `f` with the last `nargs` values of the window, then run `k`
     /// with the outcome. The call's results replace its arguments at the end
     /// of the window. With `protected`, an error in the call goes to `k`
-    /// instead of propagating.
+    /// instead of propagating. Code the call runs can't yield across it
+    /// (`attempt to yield across a C-call boundary`), as for most lua5.5
+    /// library callbacks; see [`NativeReturn::CallThenYieldable`].
     CallThen {
         f: Value,
         nargs: usize,
         k: Continuation,
         protected: bool,
     },
+    /// [`NativeReturn::CallThen`], but code the call runs may yield across
+    /// it: for the few library functions lua5.5 lets callbacks yield
+    /// through (`pcall`, `pairs` calling `__pairs`, `dofile`).
+    CallThenYieldable {
+        f: Value,
+        nargs: usize,
+        k: Continuation,
+        protected: bool,
+    },
+    /// [`NativeReturn::CallThen`] with `protected`, yieldable (only the
+    /// call itself, not the handler), but an error first goes
+    /// to the message handler in the window's first slot, which runs on top
+    /// of the frames that raised (so it can see them); its result is the
+    /// error `k` gets (`xpcall`).
+    CallHandled {
+        f: Value,
+        nargs: usize,
+        k: Continuation,
+    },
+    /// Resume coroutine `co` with the last `nargs` values of the window,
+    /// then run `k` when it yields (`Ok` with the yielded values), returns
+    /// (`Ok` with its results) or fails (`Err`). A coroutine that isn't
+    /// suspended, or one nested too deeply, gets `k` an `Err` at once.
+    Resume {
+        co: Gc<orbit_core::Thread>,
+        nargs: usize,
+        k: Continuation,
+    },
+    /// Yield the last `nvals` values of the window to the resumer. The
+    /// values the next resume passes become this native's results.
+    Yield { nvals: usize },
+    /// End the running coroutine as if its body had returned nothing
+    /// (`coroutine.close` of itself).
+    Exit,
 }
 
 /// A native function's view of the VM: its window of the stack (arguments,
@@ -68,6 +104,8 @@ pub struct NativeCtx<'a> {
     pub(crate) base: usize,
     pub(crate) nargs: usize,
     pub(crate) id: NativeId,
+    /// The native closure being called, for its upvalues.
+    pub(crate) upvals: Option<Gc<orbit_core::Closure>>,
 }
 
 impl NativeCtx<'_> {
@@ -80,7 +118,7 @@ impl NativeCtx<'_> {
     /// Values currently in the window.
     #[inline]
     pub fn len(&self) -> usize {
-        self.rt.stack.regs.len() - self.base
+        self.rt.top - self.base
     }
 
     #[inline]
@@ -91,43 +129,48 @@ impl NativeCtx<'_> {
     /// Window slot `i` (argument `i` until the native changes it), or nil.
     #[inline]
     pub fn arg(&self, i: usize) -> Value {
-        self.rt
-            .stack
-            .regs
-            .get(self.base + i)
-            .copied()
-            .unwrap_or(Value::Nil)
+        let at = self.base + i;
+        if at < self.rt.top {
+            self.rt.stack.regs[at]
+        } else {
+            Value::Nil
+        }
     }
 
     /// Overwrite window slot `i`, growing the window with nils if needed.
     pub fn set(&mut self, i: usize, v: Value) {
         let at = self.base + i;
+        let top = self.rt.top;
         let regs = &mut self.rt.stack.regs;
-        if at >= regs.len() {
-            regs.resize(at + 1, Value::Nil);
+        if at >= top {
+            crate::interp::extend_nil(regs, at + 1);
+            regs[top..at].fill(Value::Nil);
+            self.rt.top = at + 1;
         }
         regs[at] = v;
     }
 
     /// Insert `v` at window slot `i`, shifting the rest up.
     pub fn insert(&mut self, i: usize, v: Value) {
-        self.rt.stack.regs.insert(self.base + i, v);
+        let at = self.base + i;
+        self.rt.top = self.rt.stack.insert(at, self.rt.top, v);
     }
 
     /// Push a value onto the end of the window.
     #[inline]
     pub fn push(&mut self, v: Value) {
-        self.rt.stack.regs.push(v);
+        self.rt.stack.put(self.rt.top, v);
+        self.rt.top += 1;
     }
 
     /// Shrink the window to `len` values.
     pub fn truncate(&mut self, len: usize) {
-        self.rt.stack.regs.truncate(self.base + len);
+        self.rt.top = self.rt.top.min(self.base + len);
     }
 
     /// The window's values.
     pub fn window(&self) -> &[Value] {
-        &self.rt.stack.regs[self.base..]
+        &self.rt.stack.regs[self.base..self.rt.top]
     }
 
     /// Return one value.
@@ -435,6 +478,9 @@ impl NativeCtx<'_> {
 
     /// Run a full collection (`collectgarbage("collect")`).
     pub fn full_collect(&mut self) {
+        // Values above the window are dead.
+        let top = self.rt.top;
+        self.rt.stack.regs.truncate(top);
         self.heap.full_collect(self.rt);
     }
 }

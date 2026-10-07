@@ -310,7 +310,8 @@ fn dofile(ctx: &mut NativeCtx<'_>) -> R {
     match load_file_arg(ctx, b"bt", env)? {
         Ok(f) => {
             ctx.truncate(0);
-            Ok(NativeReturn::CallThen {
+            // lua5.5 lets the chunk yield across `dofile`.
+            Ok(NativeReturn::CallThenYieldable {
                 f,
                 nargs: 0,
                 k: dofile_done,

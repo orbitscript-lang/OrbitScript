@@ -6,6 +6,8 @@
 //! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
+#[cfg(feature = "coroutine")]
+mod coroutine;
 #[cfg(feature = "load")]
 mod load;
 #[cfg(feature = "math")]
@@ -63,6 +65,8 @@ pub fn open_libs(vm: &mut Vm) {
     open_lib(vm, "os", os::FUNCTIONS);
     #[cfg(feature = "package")]
     package::open(vm);
+    #[cfg(feature = "coroutine")]
+    open_lib(vm, "coroutine", coroutine::FUNCTIONS);
     let g = vm.rt.globals;
     mark_loaded(vm, "_G", orbit_vm::orbit_core::Value::Table(g));
 }

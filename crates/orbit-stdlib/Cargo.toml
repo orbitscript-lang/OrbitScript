@@ -13,7 +13,7 @@ orbit-core = { path = "../orbit-core" }
 orbit-vm = { path = "../orbit-vm" }
 
 [features]
-default = ["string", "utf8", "table", "math", "load", "os", "package"]
+default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine"]
 string = []
 utf8 = []
 table = []
@@ -25,6 +25,8 @@ load = []
 os = []
 # `require` and the `package` library.
 package = ["load"]
+# The `coroutine` library.
+coroutine = []
 
 [lints]
 workspace = true

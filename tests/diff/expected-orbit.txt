@@ -2,6 +2,9 @@
 #   cargo testkit diff ... --expect tests/diff/expected-orbit.txt --update-expected
 arith.lua
 closures.lua
+co_gc.lua
+co_yields.lua
+errors.lua
 floats.lua
 load.lua
 lua55.lua
@@ -16,3 +19,4 @@ stdlib_table.lua
 stdlib_utf8.lua
 tables.lua
 uncaught.lua
+xpcall.lua
