@@ -4,6 +4,7 @@ arith.lua
 closures.lua
 co_gc.lua
 co_yields.lua
+errors.lua
 floats.lua
 load.lua
 lua55.lua
