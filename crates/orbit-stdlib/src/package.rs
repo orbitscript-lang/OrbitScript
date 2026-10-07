@@ -334,12 +334,11 @@ fn require(ctx: &mut NativeCtx<'_>) -> R {
     ctx.push(Value::Int(1));
     let empty = ctx.new_str(b"");
     ctx.push(empty);
-    next_searcher(ctx, 1)
+    next_searcher(ctx)
 }
 
-/// Call the next searcher. `level` is where messages point: 1 from
-/// `require` itself, 2 from a continuation, which has a frame of its own.
-fn next_searcher(ctx: &mut NativeCtx<'_>, level: usize) -> R {
+/// Call the next searcher.
+fn next_searcher(ctx: &mut NativeCtx<'_>) -> R {
     let (Value::Table(searchers), Value::Int(i)) = (ctx.arg(SEARCHERS_AT), ctx.arg(NEXT)) else {
         unreachable!("require's window")
     };
@@ -356,7 +355,7 @@ fn next_searcher(ctx: &mut NativeCtx<'_>, level: usize) -> R {
         msg.extend_from_slice(b"' not found:");
         msg.extend_from_slice(ctx.bytes(msgs));
         let text = String::from_utf8_lossy(&msg).into_owned();
-        let where_ = ctx.where_(level);
+        let where_ = ctx.where_(1);
         let m = ctx.new_str(format!("{where_}{text}").as_bytes());
         return Err(ctx.error_value(m));
     }
@@ -405,9 +404,9 @@ fn searcher_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             ctx.display(r0, &mut all);
             let m = ctx.new_str_owned(all);
             ctx.set(MSGS, m);
-            next_searcher(ctx, 2)
+            next_searcher(ctx)
         }
-        _ => next_searcher(ctx, 2),
+        _ => next_searcher(ctx),
     }
 }
 

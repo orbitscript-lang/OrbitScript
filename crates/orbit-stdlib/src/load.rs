@@ -205,8 +205,8 @@ fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             false
         }
         _ => {
-            // Level 2: this continuation has a frame of its own.
-            let msg = format!("{}reader function must return a string", ctx.where_(2));
+            // Level 1 is load's caller, from its continuations too.
+            let msg = format!("{}reader function must return a string", ctx.where_(1));
             let m = ctx.new_str(msg.as_bytes());
             ctx.truncate(0);
             ctx.push(Value::Nil);
