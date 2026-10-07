@@ -3,15 +3,37 @@
 use std::rc::Rc;
 
 use orbit_bytecode::{CaptureSource, Constant, Op, UnlinkedChunk};
-use orbit_core::{Cell, Closure, FieldCache, Gc, Proto, ProtoCode, Value};
+use orbit_core::{Cell, Closure, FieldCache, Gc, LuaHeap, Proto, ProtoCode, Value};
 
-use crate::Vm;
+use crate::{Runtime, Vm};
 
 impl Vm {
     /// Link a compiled chunk and return its main function as a closure whose
     /// `_ENV` is the global table. The result is unrooted: call it (or pin
     /// it) before running anything else.
     pub fn load(&mut self, chunk: &UnlinkedChunk) -> Value {
+        let env = Value::Table(self.rt.globals);
+        link(&mut self.heap, &mut self.rt, chunk, env)
+    }
+
+    /// [`Vm::load`] with `env` as the main function's first capture.
+    pub fn load_with_env(&mut self, chunk: &UnlinkedChunk, env: Value) -> Value {
+        link(&mut self.heap, &mut self.rt, chunk, env)
+    }
+}
+
+/// Link `chunk` into the heap. As `load` does in Lua, the main function's
+/// first capture gets a cell holding `env`, and so does any capture of the
+/// chunk's `_ENV` ([`CaptureSource::Env`]); every other capture gets a fresh
+/// cell holding nil. A compiled chunk's main function captures only `_ENV`;
+/// a dumped function keeps one capture per upvalue it had.
+pub(crate) fn link(
+    heap: &mut LuaHeap,
+    rt: &mut Runtime,
+    chunk: &UnlinkedChunk,
+    env: Value,
+) -> Value {
+    {
         let name: Rc<str> = Rc::from(&*chunk.name);
         let n = chunk.protos.len();
         // Children come after their parents, so link from the end and every
@@ -26,7 +48,7 @@ impl Vm {
                 .map(|k| match k {
                     Constant::Int(i) => Value::Int(*i),
                     Constant::Float(f) => Value::Float(*f),
-                    Constant::Str(b) => Value::Str(self.rt.strings.new_str(&mut self.heap, b)),
+                    Constant::Str(b) => Value::Str(rt.strings.new_str(heap, b)),
                 })
                 .collect();
             // Each cache gets its instruction's key. Indexes saturate in a
@@ -93,23 +115,25 @@ impl Vm {
                 chunk: name.clone(),
                 debug: Rc::new(u.debug.clone()),
             };
-            linked[i] = Some(self.heap.alloc(proto));
+            linked[i] = Some(heap.alloc(proto));
         }
         let main = linked[0].expect("chunk has a main function");
-        let env = self.heap.alloc(Cell {
-            value: Value::Table(self.rt.globals),
-        });
-        let main_proto = self.heap.get(main);
+        let main_proto = heap.get(main);
         let code = main_proto.code.clone();
-        let captures = main_proto
-            .captures
+        let sources = main_proto.captures.clone();
+        let env_cell = heap.alloc(Cell { value: env });
+        let captures = sources
             .iter()
-            .map(|c| match c {
-                CaptureSource::Env => env,
-                _ => self.rt.dead_cell,
+            .enumerate()
+            .map(|(i, &c)| {
+                if i == 0 || c == CaptureSource::Env {
+                    env_cell
+                } else {
+                    heap.alloc(Cell::default())
+                }
             })
             .collect();
-        Value::Closure(self.heap.alloc(Closure {
+        Value::Closure(heap.alloc(Closure {
             proto: main,
             code,
             captures,

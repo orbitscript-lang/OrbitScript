@@ -206,6 +206,12 @@ impl NativeCtx<'_> {
         Value::Str(self.rt.strings.new_str_owned(self.heap, bytes))
     }
 
+    /// Link a compiled chunk, as [`Vm::load_with_env`](crate::Vm::load_with_env)
+    /// does. The function is unrooted until stored in the window.
+    pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
+        crate::link::link(self.heap, self.rt, chunk, env)
+    }
+
     /// A new table (unrooted until stored in the window).
     pub fn new_table(&mut self, t: Table) -> Gc<Table> {
         self.heap.alloc(t)

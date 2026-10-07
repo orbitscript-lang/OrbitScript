@@ -29,14 +29,7 @@ impl FuncState<'_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 consts::fold_arith(*op, self.const_of(*lhs)?, self.const_of(*rhs)?)
             }
-            ExprKind::Unary {
-                op: UnOp::Neg,
-                expr,
-            } => match self.const_of(*expr)? {
-                ConstVal::Int(i) => Some(ConstVal::Int(i.wrapping_neg())),
-                ConstVal::Float(x) => Some(ConstVal::Float(-x)),
-                _ => None,
-            },
+            ExprKind::Unary { op, expr } => consts::fold_unary(*op, self.const_of(*expr)?),
             _ => consts::fold(self.f, &[], e),
         }
     }
@@ -142,8 +135,18 @@ impl FuncState<'_> {
             | ExprKind::Float(_)
             | ExprKind::Str(_) => unreachable!("literals fold"),
             ExprKind::Vararg => {
-                self.emit(Op::Vararg { dst, count: 1 });
+                self.vararg(dst, 1)?;
                 None
+            }
+            &ExprKind::VarargIndex(key) => {
+                let name: Box<[u8]> = match self.const_of(key) {
+                    Some(ConstVal::Str(s)) => self.name_bytes(s),
+                    // Lua names no integer key of a vararg table.
+                    _ => b"?".as_slice().into(),
+                };
+                let (k, _) = self.operand(key, dst)?;
+                self.emit(Op::VarargGet { dst, key: k });
+                Some(Origin::Field(name))
             }
             &ExprKind::Local(l) => {
                 match self.slots[l.index()] {
@@ -174,6 +177,10 @@ impl FuncState<'_> {
                 Some(Origin::Upvalue(self.name_bytes(self.f.capture(c).name)))
             }
             ExprKind::Outer { .. } => return Err(self.error("internal error: HIR not analysed")),
+            ExprKind::Env => {
+                self.emit(Op::CapGet { dst, cap: 0 });
+                Some(Origin::Upvalue(b"_ENV".as_slice().into()))
+            }
             &ExprKind::Global(name) => {
                 let k = self.str_constant(name)?;
                 let ic = self.cache();
@@ -211,6 +218,7 @@ impl FuncState<'_> {
                     UnOp::Neg => self.emit(Op::Neg { dst, src }),
                     UnOp::Not => self.emit(Op::Not { dst, src }),
                     UnOp::Len => self.emit(Op::Len { dst, src }),
+                    UnOp::BNot => self.emit(Op::BNot { dst, src }),
                 };
                 if op != UnOp::Not {
                     self.origin(pc, 0, origin);
@@ -237,8 +245,21 @@ impl FuncState<'_> {
         Ok(origin)
     }
 
+    /// Whether `e` is a variable named `_ENV`, whose fields Lua calls globals in messages.
+    pub(crate) fn is_env_variable(&self, e: ExprId) -> bool {
+        let name = match self.f.expr(e).kind {
+            ExprKind::Env => return true,
+            ExprKind::Local(l) => self.f.local(l).name,
+            ExprKind::Capture(c) => Some(self.f.capture(c).name),
+            _ => None,
+        };
+        name.is_some_and(|n| &*self.name_bytes(n) == b"_ENV")
+    }
+
     /// `R[dst] = obj[key]`.
     fn index(&mut self, dst: u8, obj: ExprId, key: ExprId) -> Result<Option<Origin>> {
+        let vararg_table =
+            matches!(self.f.expr(obj).kind, ExprKind::Local(l) if Some(l) == self.f.vararg_table);
         let (o, obj_origin) = self.operand(obj, dst)?;
         let key_const = self.const_of(key);
         let (pc, origin) = if let Some(ConstVal::Str(s)) = key_const {
@@ -251,18 +272,23 @@ impl FuncState<'_> {
                     key: k,
                     ic,
                 }),
-                Origin::Field(self.name_bytes(s)),
+                if self.is_env_variable(obj) {
+                    Origin::Global(self.name_bytes(s))
+                } else {
+                    Origin::Field(self.name_bytes(s))
+                },
             )
         } else if let Some(ConstVal::Int(k)) = key_const
             && let Ok(key) = u16::try_from(k)
         {
+            let name: &[u8] = if vararg_table { b"?" } else { b"integer index" };
             (
                 self.emit(Op::GetIndexInt { dst, obj: o, key }),
-                Origin::Field(b"integer index".as_slice().into()),
+                Origin::Field(name.into()),
             )
         } else {
             let (k, _) = self.expr_any(key)?;
-            let name: &[u8] = if matches!(key_const, Some(ConstVal::Int(_))) {
+            let name: &[u8] = if !vararg_table && matches!(key_const, Some(ConstVal::Int(_))) {
                 b"integer index"
             } else {
                 b"?"
@@ -344,6 +370,11 @@ impl FuncState<'_> {
                     BinOp::IDiv => Op::IDiv { dst, a, b },
                     BinOp::Mod => Op::Mod { dst, a, b },
                     BinOp::Pow => Op::Pow { dst, a, b },
+                    BinOp::BAnd => Op::BAnd { dst, a, b },
+                    BinOp::BOr => Op::BOr { dst, a, b },
+                    BinOp::BXor => Op::BXor { dst, a, b },
+                    BinOp::Shl => Op::Shl { dst, a, b },
+                    BinOp::Shr => Op::Shr { dst, a, b },
                     _ => unreachable!(),
                 });
                 self.origin(pc, 0, a_origin);
@@ -431,15 +462,35 @@ impl FuncState<'_> {
         self.free = base;
     }
 
+    /// `...` into `dst..dst+count` (all of it for [`MULTI`]). A function that keeps its
+    /// vararg table reads the table, since writes to it show up in `...`.
+    fn vararg(&mut self, dst: u8, count: u8) -> Result<()> {
+        let table = self.f.vararg_table.filter(|_| !self.f.vararg_table_elided);
+        let Some(t) = table else {
+            self.emit(Op::Vararg { dst, count });
+            return Ok(());
+        };
+        let mark = self.free;
+        let table = match self.slots[t.index()] {
+            Slot::Reg(r) => r,
+            Slot::Cell(cell) => {
+                let r = self.alloc()?;
+                self.emit(Op::CellGet { dst: r, cell });
+                r
+            }
+            _ => return Err(self.error("internal error: vararg table out of scope")),
+        };
+        self.emit(Op::VarargUnpack { dst, table, count });
+        self.free = mark;
+        Ok(())
+    }
+
     /// Evaluates a call or `...` at the top of the stack (`base == self.free - 1`), leaving
     /// `nresults` values from `base` (or all of them, setting top, for [`MULTI`]).
     pub(crate) fn multi(&mut self, e: ExprId, base: u8, nresults: u8) -> Result<()> {
         if matches!(self.f.expr(e).kind, ExprKind::Vararg) {
             self.at(self.f.expr(e).span);
-            self.emit(Op::Vararg {
-                dst: base,
-                count: nresults,
-            });
+            self.vararg(base, nresults)?;
             if nresults != MULTI {
                 self.reserve_to(base as usize + nresults as usize)?;
             }
