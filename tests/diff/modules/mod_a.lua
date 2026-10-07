@@ -1,0 +1,3 @@
+local name, file = ...
+count = (count or 0) + 1
+return {name = name, file = file}

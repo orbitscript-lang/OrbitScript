@@ -98,6 +98,7 @@ pub fn compile(chunk: &Chunk) -> Result<UnlinkedChunk, CompileError> {
     }
     Ok(UnlinkedChunk {
         name: chunk.source.name.clone(),
+        source: Box::default(),
         protos: protos
             .into_iter()
             .map(|p| p.expect("every queued prototype is compiled"))

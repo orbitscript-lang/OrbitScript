@@ -7,7 +7,10 @@ use orbit_vm::orbit_core::Value;
 use orbit_vm::orbit_core::number::str_to_number;
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::value::raw_eq;
-use orbit_vm::{CallOutcome, Event, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_vm::{
+    CallOutcome, Event, GcMode, GcParam, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm,
+    finalize_then_return,
+};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -21,6 +24,8 @@ const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("select", select),
     ("error", error),
     ("pcall", pcall),
+    ("xpcall", xpcall),
+    ("warn", warn),
     ("assert", assert),
     ("rawequal", rawequal),
     ("rawget", rawget),
@@ -175,7 +180,7 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
     if !ctx.metamethod(Value::Table(t), Event::Metatable).is_nil() {
         return Err(ctx.error("cannot change a protected metatable"));
     }
-    ctx.heap.update(t, |t| t.meta = mt);
+    orbit_vm::orbit_core::gc::set_metatable(ctx.heap, Value::Table(t), mt);
     ctx.ret1(Value::Table(t))
 }
 
@@ -273,7 +278,8 @@ fn pairs(ctx: &mut NativeCtx<'_>) -> R {
     if !h.is_nil() {
         ctx.truncate(1);
         ctx.push(t);
-        return Ok(NativeReturn::CallThen {
+        // lua5.5 lets `__pairs` yield.
+        return Ok(NativeReturn::CallThenYieldable {
             f: h,
             nargs: 1,
             k: pairs_done,
@@ -356,7 +362,7 @@ fn pcall(ctx: &mut NativeCtx<'_>) -> R {
     // Window [f, args...] becomes [true, args...]; the call's results land
     // after `true`.
     ctx.set(0, Value::Bool(true));
-    Ok(NativeReturn::CallThen {
+    Ok(NativeReturn::CallThenYieldable {
         f,
         nargs: ctx.nargs() - 1,
         k: pcall_done,
@@ -379,6 +385,71 @@ fn pcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             Ok(NativeReturn::Return(2))
         }
     }
+}
+
+fn xpcall(ctx: &mut NativeCtx<'_>) -> R {
+    let h = match ctx.arg(1) {
+        h @ (Value::Closure(_) | Value::Native(_)) => h,
+        _ => return Err(ctx.type_error(1, "function")),
+    };
+    let f = ctx.arg(0);
+    // Window [f, h, args...] becomes [h, true, args...]: the VM finds the
+    // handler in the first slot, and the call's results land after `true`.
+    ctx.set(0, h);
+    ctx.set(1, Value::Bool(true));
+    Ok(NativeReturn::CallHandled {
+        f,
+        nargs: ctx.nargs() - 2,
+        k: xpcall_done,
+    })
+}
+
+fn xpcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    match outcome {
+        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
+        CallOutcome::Err(e) => {
+            let e = if e.is_nil() {
+                ctx.new_str(b"<no error object>")
+            } else {
+                e
+            };
+            ctx.truncate(0);
+            ctx.push(Value::Bool(false));
+            ctx.push(e);
+            Ok(NativeReturn::Return(2))
+        }
+    }
+}
+
+fn warn(ctx: &mut NativeCtx<'_>) -> R {
+    let n = ctx.nargs().max(1);
+    let mut parts = Vec::with_capacity(n);
+    for i in 0..n {
+        parts.push(ctx.check_str(i)?);
+    }
+    // A single message starting with `@` is a control message; unknown ones
+    // are ignored.
+    if let [msg] = parts[..]
+        && let [b'@', control @ ..] = ctx.bytes(msg)
+    {
+        match control {
+            b"on" => ctx.rt.warnings = true,
+            b"off" => ctx.rt.warnings = false,
+            _ => {}
+        }
+        return Ok(NativeReturn::Return(0));
+    }
+    if ctx.rt.warnings {
+        let mut text = b"Lua warning: ".to_vec();
+        for &s in &parts {
+            text.extend_from_slice(ctx.bytes(s));
+        }
+        text.push(b'\n');
+        // Keep the order of output already printed.
+        let _ = ctx.rt.out.flush();
+        let _ = std::io::stderr().write_all(&text);
+    }
+    Ok(NativeReturn::Return(0))
 }
 
 fn assert(ctx: &mut NativeCtx<'_>) -> R {
@@ -427,6 +498,11 @@ fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret1(Value::Int(n))
 }
 
+/// `collectgarbage` ([GC semantics design]). Inside a finalizer it does
+/// nothing and returns `nil` (`-1` for `"param"`), as in Lua, so the
+/// collector is never re-entered.
+///
+/// [GC semantics design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/gc-semantics.md
 fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
     let opt = match ctx.arg(0) {
         Value::Nil => b"collect".to_vec(),
@@ -435,18 +511,53 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             ctx.bytes(s).to_vec()
         }
     };
+    const OPTIONS: &[&[u8]] = &[
+        b"collect",
+        b"count",
+        b"step",
+        b"stop",
+        b"restart",
+        b"isrunning",
+        b"incremental",
+        b"generational",
+        b"param",
+    ];
+    if !OPTIONS.contains(&&opt[..]) {
+        let msg = format!("invalid option '{}'", String::from_utf8_lossy(&opt));
+        return Err(ctx.arg_error(0, msg));
+    }
+    if ctx.rt.gc.finalizing() {
+        let v = if &opt[..] == b"param" {
+            Value::Int(-1)
+        } else {
+            Value::Nil
+        };
+        return ctx.ret1(v);
+    }
     match &opt[..] {
         b"collect" => {
             ctx.full_collect();
-            ctx.ret1(Value::Int(0))
+            finalize_then_return(ctx, Value::Int(0))
         }
         b"count" => {
             let kb = ctx.heap.bytes() as f64 / 1024.0;
             ctx.ret1(Value::Float(kb))
         }
         b"step" => {
-            let done = ctx.heap.step(ctx.rt);
-            ctx.ret1(Value::Bool(done))
+            let kb = ctx.opt_int(1, 0)?;
+            let done = match ctx.rt.gc.mode {
+                // A minor collection collects all young garbage; ours
+                // collects all garbage.
+                GcMode::Generational => {
+                    ctx.full_collect();
+                    false
+                }
+                GcMode::Incremental => {
+                    let bytes = usize::try_from(kb).unwrap_or(0).saturating_mul(1024);
+                    ctx.heap.step_with(ctx.rt, bytes)
+                }
+            };
+            finalize_then_return(ctx, Value::Bool(done))
         }
         b"stop" => {
             ctx.heap.stop();
@@ -460,9 +571,32 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             let running = !ctx.heap.is_stopped();
             ctx.ret1(Value::Bool(running))
         }
-        other => {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(other));
-            Err(ctx.arg_error(0, msg))
+        b"incremental" | b"generational" => {
+            let mode = if &opt[..] == b"incremental" {
+                GcMode::Incremental
+            } else {
+                GcMode::Generational
+            };
+            let old = std::mem::replace(&mut ctx.rt.gc.mode, mode);
+            let v = ctx.new_str(old.name().as_bytes());
+            ctx.ret1(v)
+        }
+        _ => {
+            let name = ctx.check_str(1)?;
+            let Some(p) = GcParam::from_name(ctx.bytes(name)) else {
+                let msg = format!(
+                    "invalid option '{}'",
+                    String::from_utf8_lossy(ctx.bytes(name))
+                );
+                return Err(ctx.arg_error(1, msg));
+            };
+            let v = ctx.opt_int(2, -1)?;
+            let old = if v >= 0 {
+                ctx.rt.gc.set_param(ctx.heap, p, v)
+            } else {
+                ctx.rt.gc.param(p)
+            };
+            ctx.ret1(Value::Int(old))
         }
     }
 }

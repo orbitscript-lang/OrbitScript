@@ -1,6 +1,6 @@
 //! Compile-time constants: literal folding and `<const>` locals.
 
-use orbit_bytecode::number::{ArithOp, Number};
+use orbit_bytecode::number::{ArithOp, BitOp, Number};
 use orbit_hir::{BinOp, Chunk, ExprId, ExprKind, Function, LocalKind, StmtKind, StrId, UnOp};
 
 /// A value known at compile time.
@@ -79,14 +79,20 @@ pub(crate) fn fold(f: &Function, locals: &[Option<ConstVal>], e: ExprId) -> Opti
             let b = fold(f, locals, *rhs)?;
             fold_arith(*op, a, b)
         }
-        ExprKind::Unary {
-            op: UnOp::Neg,
-            expr,
-        } => match fold(f, locals, *expr)? {
-            ConstVal::Int(i) => Some(ConstVal::Int(i.wrapping_neg())),
-            ConstVal::Float(x) => Some(ConstVal::Float(-x)),
-            _ => None,
-        },
+        ExprKind::Unary { op, expr } => fold_unary(*op, fold(f, locals, *expr)?),
+        _ => None,
+    }
+}
+
+/// Folds `-x` and `~x` on a number, only where it can't raise an error.
+pub(crate) fn fold_unary(op: UnOp, v: ConstVal) -> Option<ConstVal> {
+    match (op, v) {
+        (UnOp::Neg, ConstVal::Int(i)) => Some(ConstVal::Int(i.wrapping_neg())),
+        (UnOp::Neg, ConstVal::Float(x)) => Some(ConstVal::Float(-x)),
+        (UnOp::BNot, ConstVal::Int(i)) => Some(ConstVal::Int(!i)),
+        (UnOp::BNot, ConstVal::Float(x)) => {
+            Number::Float(x).to_int_exact().map(|i| ConstVal::Int(!i))
+        }
         _ => None,
     }
 }
@@ -100,6 +106,20 @@ pub(crate) fn fold_arith(op: BinOp, a: ConstVal, b: ConstVal) -> Option<ConstVal
         _ => None,
     };
     let (x, y) = (number(a)?, number(b)?);
+    let bit = match op {
+        BinOp::BAnd => Some(BitOp::And),
+        BinOp::BOr => Some(BitOp::Or),
+        BinOp::BXor => Some(BitOp::Xor),
+        BinOp::Shl => Some(BitOp::Shl),
+        BinOp::Shr => Some(BitOp::Shr),
+        _ => None,
+    };
+    if let Some(bit) = bit {
+        // A float without an integer value is a runtime error: don't fold it.
+        return Some(ConstVal::Int(
+            bit.apply(x.to_int_exact()?, y.to_int_exact()?),
+        ));
+    }
     let op = match op {
         BinOp::Add => ArithOp::Add,
         BinOp::Sub => ArithOp::Sub,
@@ -147,6 +167,16 @@ mod tests {
         assert_eq!(fold_arith(BinOp::Concat, Int(1), Int(2)), None);
         assert_eq!(fold_arith(BinOp::Lt, Int(1), Int(2)), None);
         assert_eq!(fold_arith(BinOp::Mod, Float(1.0), Int(2)), None);
+    }
+
+    #[test]
+    fn bitwise_folding() {
+        assert_eq!(fold_arith(BinOp::BAnd, Int(7), Int(3)), Some(Int(3)));
+        assert_eq!(fold_arith(BinOp::Shl, Int(1), Int(64)), Some(Int(0)));
+        assert_eq!(fold_arith(BinOp::BOr, Float(2.0), Int(1)), Some(Int(3)));
+        assert_eq!(fold_arith(BinOp::BOr, Float(1.5), Int(1)), None);
+        assert_eq!(fold_unary(UnOp::BNot, Int(0)), Some(Int(-1)));
+        assert_eq!(fold_unary(UnOp::BNot, Float(0.5)), None);
     }
 
     #[test]
