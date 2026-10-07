@@ -16,3 +16,9 @@ P(math.ldexp, 1, 3) P(math.ldexp, 0.5, 1.0) P(math.ldexp, 1, 1.5) P(math.ldexp, 
 P(math.sin) P(math.sin, 0) P(math.cos, math.pi) P(math.tan, 1) P(math.asin, 1) P(math.acos, 0) P(math.exp, "1") P(math.sqrt, 2)
 P(math.type, 1) P(math.type, 1.0) P(math.type, "1") P(math.type)
 math.randomseed(1007) P(math.random, 0) math.randomseed(1007, 0) P(math.random)
+
+-- String-to-number edges.
+for _, s in ipairs{"-9223372036854775808", "-9223372036854775809", "9223372036854775807"} do
+  print(s, tonumber(s), math.type(tonumber(s)))
+end
+print(tonumber("  +1Z  ", 36), tonumber("+-1", 10), tonumber("+", 10), tonumber("-ff", 16))

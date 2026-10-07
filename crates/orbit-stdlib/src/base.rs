@@ -212,7 +212,7 @@ fn parse_in_base(s: &[u8], base: u32) -> Option<i64> {
     let end = s.iter().rposition(|b| !is_space(b))? + 1;
     let mut s = &s[start..end];
     let neg = s.first() == Some(&b'-');
-    if neg {
+    if neg || s.first() == Some(&b'+') {
         s = &s[1..];
     }
     if s.is_empty() {
