@@ -12,6 +12,7 @@
 //! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
 
 pub mod func;
+pub mod gc;
 pub mod number;
 pub mod string;
 pub mod table;
@@ -25,7 +26,7 @@ pub use string::{Interner, LuaStr, OrbitStr, OrbitString};
 pub use table::Table;
 pub use thread::{Thread, ThreadState};
 pub use userdata::UserData;
-pub use value::{NativeId, Payload, Tag, Value};
+pub use value::{LightUserData, NativeId, Payload, Tag, Value};
 
 orbit_gc::space! {
     /// Every object type of the Lua heap.

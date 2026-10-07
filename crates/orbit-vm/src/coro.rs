@@ -70,9 +70,24 @@ pub(crate) struct Coroutine {
     /// How many times it has been parked suspended, to tell whether an
     /// entry in `rt.cooling` is still its latest park.
     parks: u32,
+    /// `coroutine.close` is running its `__close` handlers: errors unwind
+    /// straight to the base frame.
+    pub(crate) closing: bool,
+    /// `rt.gc_cycles` when it was parked.
+    cycle: u32,
 }
 
 impl Coroutine {
+    /// Where a parked stack's live registers end: its top, or past its
+    /// last variable still to close (a dead coroutine kept for
+    /// `coroutine.close`).
+    fn live(&self) -> usize {
+        self.stack
+            .tbc
+            .last()
+            .map_or(self.top, |&r| self.top.max(r as usize + 1))
+    }
+
     /// A suspended coroutine that will call `f`: `f` sits above the base
     /// frame, where the first resume calls it.
     fn fresh(f: Value) -> Coroutine {
@@ -86,14 +101,18 @@ impl Coroutine {
             cell_base: 0,
             nvarargs: 0,
             want: MULTI,
+            tail: false,
+            extra: 0,
         });
         Coroutine {
             bytes: stack.bytes(),
             stack,
-            top: 0,
+            top: 1,
             status: CoStatus::Suspended,
             error: None,
             parks: 0,
+            closing: false,
+            cycle: 0,
         }
     }
 
@@ -105,13 +124,17 @@ impl Coroutine {
             error: None,
             bytes: 0,
             parks: 0,
+            closing: false,
+            cycle: 0,
         }
     }
 }
 
 impl ThreadState for Coroutine {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        self.stack.trace(m);
+        // The values above a parked stack's top are dead; `switch_to` cuts
+        // them off before they can be read again.
+        self.stack.trace(m, self.live());
         if let Some(e) = self.error {
             mark(m, e);
         }
@@ -146,25 +169,6 @@ fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
         .expect("threads hold VM coroutines")
 }
 
-/// Cut every parked stack that may run again to its top, ahead of a
-/// collector step. The values above a parked stack's top are dead, but the
-/// collector traces parked stacks whole. Cold suspended stacks are already
-/// cut, so only the main thread, the resumers and the hot suspended
-/// stacks need it.
-#[cold]
-pub(crate) fn trim_parked(heap: &mut LuaHeap, rt: &crate::Runtime) {
-    let mut cut = |t: Gc<Thread>| {
-        if t != rt.current {
-            let c = co_mut(heap, t);
-            let top = c.top;
-            c.stack.regs.truncate(top);
-        }
-    };
-    cut(rt.main_thread);
-    rt.resumers.iter().for_each(|&t| cut(t));
-    rt.cooling.iter().for_each(|&(t, _)| cut(t));
-}
-
 /// The continuation a yielding coroutine waits in: the values the next
 /// resume passes become `yield`'s results.
 fn yield_k(_ctx: &mut NativeCtx<'_>, o: CallOutcome) -> Result<NativeReturn, LuaError> {
@@ -190,13 +194,16 @@ impl Vm {
         // A thread's bytes are its stack's, parked or running: they change
         // only when the stack's capacity does.
         let old = c.bytes;
-        if from_status == CoStatus::Dead {
+        // A coroutine that died with variables still to close keeps its
+        // stack for `coroutine.close`.
+        if from_status == CoStatus::Dead && stack.tbc.is_empty() {
             c.bytes = 0;
             drop(stack);
         } else {
             c.bytes = stack.bytes();
             c.stack = stack;
             c.top = top;
+            c.cycle = self.rt.gc_cycles;
         }
         let delta = c.bytes as isize - old as isize;
         c.parks = c
@@ -217,6 +224,12 @@ impl Vm {
         c.status = CoStatus::Running;
         self.rt.stack = std::mem::take(&mut c.stack);
         self.rt.top = c.top;
+        // If a collection swept while it was parked, the dead slots above
+        // its top (which aren't traced) may refer to freed objects.
+        if c.cycle != self.rt.gc_cycles {
+            let live = c.live();
+            self.rt.stack.regs.truncate(live);
+        }
         self.rt.current = to;
         self.rt.switched = true;
     }
@@ -237,6 +250,7 @@ impl Vm {
         s.regs = s.regs[..c.top].to_vec();
         s.cells = s.cells.to_vec();
         s.frames = s.frames.to_vec();
+        s.tbc = s.tbc.to_vec();
         c.bytes = s.bytes();
         let delta = c.bytes as isize - before as isize;
         self.heap.adjust_bytes(delta);
@@ -273,6 +287,8 @@ impl Vm {
                     cell_base: self.rt.stack.cells.len() as u32,
                     nvarargs: nargs as u32,
                     want,
+                    tail: false,
+                    extra: 0,
                 });
             }
         }
@@ -399,12 +415,54 @@ impl Vm {
     pub(crate) fn co_finished(&mut self, outcome: Result<(), Value>) -> Result<Flow, Exc> {
         let resumer = self.rt.resumers.pop().expect("a coroutine has a resumer");
         let co = self.rt.current;
-        if let Err(e) = outcome {
+        // A coroutine being closed has reported its error to the closer.
+        let closing = std::mem::take(&mut co_mut(&mut self.heap, co).closing);
+        if let Err(e) = outcome
+            && !closing
+        {
             self.heap.barrier_back(co);
             co_mut(&mut self.heap, co).error = Some(e);
         }
         self.switch_to(resumer, CoStatus::Dead);
         switched(self.deliver(outcome))
+    }
+
+    /// `NativeReturn::Close`: native `id` closes coroutine `co`, which is
+    /// suspended or dead, and waits for the outcome in `k`.
+    pub(crate) fn close_co(
+        &mut self,
+        co: Gc<Thread>,
+        k: Continuation,
+        frame: Option<Frame>,
+        func: usize,
+        want: u8,
+        id: NativeId,
+    ) -> Result<Flow, Exc> {
+        let at = self.rt.top;
+        self.wait_frame(frame, func, want, id, k, at);
+        self.rt.xfer.clear();
+        if self.rt.resumers.len() >= MAX_RESUMES {
+            // Closing runs on the coroutine's stack, so it nests like a
+            // resume.
+            let e = self.new_str(b"C stack overflow");
+            return self.deliver(Err(e));
+        }
+        let c = co_mut(&mut self.heap, co);
+        let error = c.error.take();
+        if c.stack.tbc.is_empty() {
+            c.status = CoStatus::Dead;
+            c.stack = Stack::default();
+            let freed = std::mem::take(&mut c.bytes);
+            self.heap.adjust_bytes(-(freed as isize));
+            return self.deliver(error.map_or(Ok(()), Err));
+        }
+        // Run the handlers on the coroutine's own stack, as an error
+        // unwinding to its base frame would.
+        c.closing = true;
+        self.rt.resumers.push(self.rt.current);
+        self.switch_to(co, CoStatus::Normal);
+        let e = LuaError::new(error.unwrap_or(Value::Nil));
+        switched(self.unwind(e).map_err(Exc::Lua))
     }
 
     /// The body returned into the coroutine's base frame: its results are
@@ -434,8 +492,10 @@ pub(crate) fn yieldable(stack: &Stack) -> bool {
             FrameKind::Native {
                 yieldable: false,
                 ..
-            } | FrameKind::Handler { .. }
+            } | FrameKind::Handler
                 | FrameKind::Boundary
+                // A hook is a nested call, as a Lua hook is in the reference.
+                | FrameKind::Hook
         )
     })
 }
@@ -447,6 +507,11 @@ fn switched(flow: Result<Flow, Exc>) -> Result<Flow, Exc> {
         Flow::Reload => Flow::Switched,
         f => f,
     })
+}
+
+/// Whether the running coroutine is being closed by `coroutine.close`.
+pub(crate) fn closing(heap: &LuaHeap, t: Gc<Thread>) -> bool {
+    co(heap, t).closing
 }
 
 impl NativeCtx<'_> {
@@ -465,7 +530,40 @@ impl NativeCtx<'_> {
 
     /// A new suspended coroutine running `f`.
     pub fn new_thread(&mut self, f: Value) -> Gc<Thread> {
-        self.heap.alloc(Thread::new(Coroutine::fresh(f)))
+        let mut c = Coroutine::fresh(f);
+        // A new thread gets its creator's hook mask and count, but not its
+        // function (observed from lua5.5: `gethook(co)` is `nil, mask,
+        // count` and no events reach a hook).
+        c.stack.hook = self.rt.stack.hook.inherited();
+        self.heap.alloc(Thread::new(c))
+    }
+
+    /// Run `f` with thread `t`'s stack in place of the running one, for
+    /// the debug library's view of another thread. `f` may read and write
+    /// that stack's frames and registers, but must not touch this native's
+    /// window or run Lua code. The running thread runs `f` directly.
+    pub fn on_thread<R>(&mut self, t: Gc<Thread>, f: impl FnOnce(&mut Self, bool) -> R) -> R {
+        if t == self.rt.current {
+            return f(self, false);
+        }
+        let gc_cycles = self.rt.gc_cycles;
+        let c = co_mut(self.heap, t);
+        // As when resuming it: after a sweep, the untraced slots above the
+        // parked top may refer to freed objects.
+        if c.cycle != gc_cycles {
+            c.stack.regs.truncate(c.top);
+        }
+        let stack = std::mem::take(&mut c.stack);
+        let top = c.top;
+        let saved = std::mem::replace(&mut self.rt.stack, stack);
+        let saved_top = std::mem::replace(&mut self.rt.top, top);
+        let r = f(self, true);
+        // `f` may have stored values into the parked stack.
+        self.heap.barrier_back(t);
+        let c = co_mut(self.heap, t);
+        c.stack = std::mem::replace(&mut self.rt.stack, saved);
+        c.top = std::mem::replace(&mut self.rt.top, saved_top);
+        r
     }
 
     /// The status of thread `t`.
@@ -485,18 +583,6 @@ impl NativeCtx<'_> {
     /// The running thread, and whether it is the main thread.
     pub fn running(&self) -> (Gc<Thread>, bool) {
         (self.rt.current, self.rt.current == self.rt.main_thread)
-    }
-
-    /// Kill suspended or dead thread `t`, releasing its stack. Returns the
-    /// error it died with, if any.
-    pub fn close_thread(&mut self, t: Gc<Thread>) -> Option<Value> {
-        let c = co_mut(self.heap, t);
-        c.status = CoStatus::Dead;
-        c.stack = Stack::default();
-        let freed = std::mem::take(&mut c.bytes);
-        let e = c.error.take();
-        self.heap.adjust_bytes(-(freed as isize));
-        e
     }
 
     // ---- native closures -------------------------------------------------
@@ -576,8 +662,11 @@ fn stub_proto(id: NativeId) -> Proto {
         captures: Box::new([]),
         name: FunctionName::Anonymous,
         line_defined: 0,
+        last_line: 0,
         chunk: "[C]".into(),
+        source: Rc::from(b"=[C]".as_slice()),
         debug: Rc::default(),
+        self_capture: None,
     }
 }
 

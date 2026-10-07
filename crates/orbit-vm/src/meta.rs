@@ -116,7 +116,7 @@ impl Events {
 #[derive(Debug)]
 pub(crate) struct Metas {
     pub(crate) events: Events,
-    pub(crate) type_meta: [Option<Gc<Table>>; 10],
+    pub(crate) type_meta: [Option<Gc<Table>>; 11],
 }
 
 impl Metas {
@@ -177,6 +177,13 @@ pub(crate) enum MetaAction {
     /// A `..` with `left` values still to reduce: the result replaces the
     /// last two of them.
     Concat { dst: u8, first: u8, left: u8 },
+    /// `Close`: restore `rt.top` (the open-ended results the close must
+    /// keep) and run the instruction again for the next variable.
+    Close { top: u32 },
+    /// A `__close` handler run while an error unwinds: raise the error
+    /// (in the frame's `func` slot) again. `handled`: it has been through
+    /// its message handler.
+    Unwind { handled: bool },
 }
 
 impl Runtime {

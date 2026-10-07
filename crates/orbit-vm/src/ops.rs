@@ -1,15 +1,15 @@
 //! Slow paths: everything the interpreter's inline fast paths don't handle
 //! (mixed numbers, string coercion, errors). Metamethods will plug in here.
 
-use std::fmt::Write as _;
 use std::io::Write as _;
 
-use orbit_core::number::{self, ArithError, ArithOp, float_to_int};
+use orbit_bytecode::number::BitOp;
+use orbit_core::number::{self, ArithError, ArithOp, Number, float_to_int};
 use orbit_core::value::raw_eq;
 use orbit_core::{LuaHeap, Value};
 
+use crate::Runtime;
 use crate::meta::{self, Event, MetaCall, Metas};
-use crate::{FrameKind, Runtime};
 
 /// An error raised by an instruction, before the interpreter adds the
 /// position and the operand's name.
@@ -164,6 +164,51 @@ pub(crate) fn arith_slow(
     ))
 }
 
+/// The error for a float operand of a bitwise operator that has no integer value. When the
+/// operand has a name, the interpreter puts it after "number".
+pub(crate) const NO_INTEGER_REP: &str = "number has no integer representation";
+
+/// A bitwise operator's operand as an integer: an integer, or a float with an integer value.
+fn bit_operand(v: Value) -> Option<Option<i64>> {
+    match v {
+        Value::Int(i) => Some(Some(i)),
+        Value::Float(f) => Some(Number::Float(f).to_int_exact()),
+        _ => None,
+    }
+}
+
+/// A bitwise operator for everything the integer fast path doesn't cover: floats with integer
+/// values convert, other numbers and non-numbers are errors. Strings are not coerced (Lua 5.5
+/// leaves that to string metamethods). Metamethods (`__band` .. `__shr`) plug in here.
+pub(crate) fn bitwise_slow(_heap: &LuaHeap, op: BitOp, a: Value, b: Value) -> Result<Value, Exc> {
+    match (bit_operand(a), bit_operand(b)) {
+        (Some(Some(x)), Some(Some(y))) => Ok(Value::Int(op.apply(x, y))),
+        (Some(None), Some(_)) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(0))),
+        (Some(_), Some(None)) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(1))),
+        (Some(_), None) => Err(bitwise_type_error(b, 1)),
+        (None, _) => Err(bitwise_type_error(a, 0)),
+    }
+}
+
+/// `~a` for everything but an integer. Metamethods (`__bnot`) plug in here.
+pub(crate) fn bnot_slow(_heap: &LuaHeap, a: Value) -> Result<Value, Exc> {
+    match bit_operand(a) {
+        Some(Some(x)) => Ok(Value::Int(!x)),
+        Some(None) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(0))),
+        None => Err(bitwise_type_error(a, 0)),
+    }
+}
+
+fn bitwise_type_error(v: Value, operand: u8) -> Exc {
+    Exc::Rt(
+        format!(
+            "attempt to perform bitwise operation on a {} value",
+            v.type_name()
+        ),
+        Some(operand),
+    )
+}
+
 /// `a < b` for everything but two integers or two floats.
 pub(crate) fn less_than(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Exc> {
     use Value::{Float, Int, Str};
@@ -266,7 +311,8 @@ pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>)
         | Value::Closure(_)
         | Value::Native(_)
         | Value::UserData(_)
-        | Value::Thread(_) => {
+        | Value::Thread(_)
+        | Value::LightUserData(_) => {
             // `__name` (a string) replaces the type name.
             match rt.metamethod(heap, v, Event::Name) {
                 Value::Str(s) => out.extend_from_slice(heap.get(s).as_bytes()),
@@ -274,39 +320,6 @@ pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>)
             }
             let _ = write!(out, ": 0x{:012x}", v.identity().unwrap_or(0));
         }
-    }
-}
-
-/// `chunk:line: ` for the frame `level` levels down (1 = top frame), or
-/// empty for a native frame or beyond the stack.
-pub(crate) fn where_(heap: &LuaHeap, rt: &Runtime, level: usize) -> String {
-    // Meta frames aren't functions, so they don't count as levels.
-    let Some(f) = (level > 0)
-        .then(|| {
-            rt.stack
-                .frames
-                .iter()
-                .rev()
-                .filter(|f| !matches!(f.kind, FrameKind::Meta { .. } | FrameKind::Handler { .. }))
-                .nth(level - 1)
-        })
-        .flatten()
-    else {
-        return String::new();
-    };
-    match f.kind {
-        FrameKind::Lua { closure, .. } => {
-            let proto = heap.get(heap.get(closure).proto);
-            let line = proto.debug.line(f.pc.saturating_sub(1));
-            let mut s = String::new();
-            let _ = write!(s, "{}:{}: ", proto.chunk, line);
-            s
-        }
-        FrameKind::Native { .. }
-        | FrameKind::Meta { .. }
-        | FrameKind::Handler { .. }
-        | FrameKind::Boundary
-        | FrameKind::CoBase => String::new(),
     }
 }
 

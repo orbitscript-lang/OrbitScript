@@ -10,6 +10,9 @@
 
 mod cold;
 mod coro;
+pub mod debug;
+mod gc;
+pub mod hook;
 mod interp;
 mod link;
 mod meta;
@@ -28,6 +31,7 @@ use orbit_core::{
 use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::CoStatus;
+pub use gc::{GcMode, GcParam, GcState, finalize_then_return};
 pub use meta::Event;
 pub use native::{CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
@@ -52,6 +56,14 @@ impl LuaError {
         }
     }
 }
+
+/// Compiles source text into an unlinked chunk, for `load`, `loadfile`,
+/// `dofile` and `require`. `chunk_name` is the name messages use
+/// (`script.lua` in `script.lua:3:`); an error is the complete message.
+/// The embedder installs it in [`Runtime::compile`] (`orbit::Lua` installs
+/// the Lua front end), so the VM and the libraries don't depend on a front
+/// end and a host can leave the compiler out.
+pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
 
 /// Configurable limits.
 #[derive(Debug, Clone, Copy)]
@@ -112,15 +124,23 @@ pub(crate) enum FrameKind {
         event: Event,
     },
     /// Below an `xpcall` message handler running on top of the frames that
-    /// raised: its result becomes the error delivered to the native frame
-    /// at index `catcher`. Nothing may yield across it.
-    Handler { catcher: u32 },
+    /// raised: its result is raised again as the error, past the handler.
+    /// Nothing may yield across it.
+    Handler,
     /// The bottom of a [`Vm::call`]: returning into it ends the call, and
     /// an error unwinding to it is returned to the embedder.
     Boundary,
     /// The bottom of every coroutine's stack: the body returning into it
     /// finishes the coroutine, and an error reaching it kills it.
     CoBase,
+    /// A native that is running without a continuation. Natives normally
+    /// run frameless; one gets this frame when it raises an error, so
+    /// tracebacks see it (`[C]: in global 'error'`), and while call or
+    /// return hooks are on, so hooks see it.
+    NativeCall { id: NativeId },
+    /// Below a hook call ([`hook`]): names the hook function for
+    /// `debug.getinfo` and tracebacks.
+    Hook,
 }
 
 /// Whether a native's requested call catches errors.
@@ -147,6 +167,11 @@ pub(crate) struct Frame {
     pub nvarargs: u32,
     /// Results the caller wants ([`op::MULTI`] for all).
     pub want: u8,
+    /// Entered by a tail call (`debug.getinfo`'s `istailcall`).
+    pub tail: bool,
+    /// Callables a `__call` chain inserted as extra first arguments
+    /// (`extraargs`).
+    pub extra: u8,
 }
 
 /// The Lua stack: registers, frame cell slots and frames.
@@ -155,6 +180,9 @@ pub(crate) struct Stack {
     pub regs: Vec<Value>,
     pub cells: Vec<Gc<Cell>>,
     pub frames: Vec<Frame>,
+    /// The registers (absolute) of the open to-be-closed variables, oldest
+    /// first.
+    pub tbc: Vec<u32>,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
     /// switch to this code swaps it in instead of looking the closure up.
@@ -166,13 +194,16 @@ pub(crate) struct Stack {
     /// A root: while cached, the handle can't be reused for another
     /// closure.
     pub callee: Option<(Gc<Closure>, crate::interp::Shape)>,
+    /// The stack's debug hook (`debug.sethook`).
+    pub hook: hook::Hook,
 }
 
 impl Stack {
-    /// Mark everything the stack refers to (the running stack is a root;
-    /// a parked one is traced through its thread).
-    pub(crate) fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        for &v in &self.regs {
+    /// Mark everything the stack refers to, counting only the registers
+    /// below `end` (the running stack is a root; a parked one is traced
+    /// through its thread).
+    pub(crate) fn trace(&self, m: &mut Marker<'_, LuaSpace>, end: usize) {
+        for &v in &self.regs[..end.min(self.regs.len())] {
             mark(m, v);
         }
         for &c in &self.cells {
@@ -186,6 +217,7 @@ impl Stack {
         if let Some((c, _)) = self.callee {
             m.mark(c);
         }
+        mark(m, self.hook.func);
     }
 
     /// `regs[at] = v`, growing the stack if needed.
@@ -221,6 +253,7 @@ impl Stack {
         self.regs.capacity() * std::mem::size_of::<Value>()
             + self.cells.capacity() * std::mem::size_of::<Gc<Cell>>()
             + self.frames.capacity() * std::mem::size_of::<Frame>()
+            + self.tbc.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -230,6 +263,9 @@ impl Stack {
 pub struct Runtime {
     pub strings: Interner,
     pub globals: Gc<Table>,
+    /// The registry (`debug.getregistry()`): key 2 holds the globals, and
+    /// `_LOADED` is `package.loaded`.
+    pub registry: Gc<Table>,
     pub limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
     pub out: Box<dyn WriteDebug>,
@@ -241,6 +277,8 @@ pub struct Runtime {
     /// Per-VM state of host libraries, one value per type (the `math`
     /// library's random generator, for example).
     pub ext: Extensions,
+    /// The source compiler, if the host installed one.
+    pub compile: Option<CompileFn>,
     pub(crate) natives: Vec<Native>,
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId>,
     pub(crate) stack: Stack,
@@ -252,6 +290,9 @@ pub struct Runtime {
     pub(crate) top: usize,
     /// Event names and per-type metatables.
     pub(crate) metas: meta::Metas,
+    /// Collector mode and parameters as `collectgarbage` sees them, and
+    /// finalizer bookkeeping.
+    pub gc: GcState,
     /// The thread whose stack is `stack`.
     pub(crate) current: Gc<Thread>,
     pub(crate) main_thread: Gc<Thread>,
@@ -266,12 +307,46 @@ pub struct Runtime {
     /// The error being raised is an error in error handling: it skips
     /// message handlers and becomes `error in error handling`.
     pub(crate) errerr: bool,
+    /// The error being raised has already been through its message handler
+    /// (it is being re-raised after a `__close` handler ran).
+    pub(crate) handled: bool,
+    /// The traceback of an error on its way out of a `Vm::call`, taken
+    /// before its to-be-closed variables closed (and popped the frames).
+    pub(crate) unwind_traceback: Option<String>,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
     /// The threads parked suspended most recently, with their park count
     /// then (ADR-3): one that leaves this list without being resumed has its
     /// stack shrunk. Weak: an entry dies with its thread.
     pub(crate) cooling: std::collections::VecDeque<(Gc<Thread>, u32)>,
+    /// Collections that reached their sweep, to tell whether a parked
+    /// stack's dead slots may now refer to freed objects.
+    pub(crate) gc_cycles: u32,
+    /// Set by an [`Interrupt`] handle, from any thread.
+    pub(crate) interrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A handle that interrupts a [`Vm`] from another thread (a CLI's Ctrl-C
+/// handler, a watchdog). With the `hooks` feature, the running Lua code
+/// raises the error `interrupted!` at its next loop back-edge or hook point,
+/// as the reference interpreter does; a running native finishes first.
+/// Without it, requests are ignored.
+#[derive(Debug, Clone)]
+pub struct Interrupt(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Interrupt {
+    /// Ask the VM to raise `interrupted!`. Only sets a flag, so it is safe
+    /// to call from a signal handler's thread.
+    pub fn request(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether a request is waiting for the VM to raise it. A CLI can exit
+    /// on a second Ctrl-C while the first is still pending (a long-running
+    /// native).
+    pub fn pending(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Library state kept per VM, keyed by type. It holds plain Rust data, never
@@ -307,8 +382,9 @@ impl<T: Write + fmt::Debug> WriteDebug for T {}
 impl Roots<LuaSpace> for Runtime {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         m.mark(self.globals);
+        m.mark(self.registry);
         m.mark(self.dead_cell);
-        self.stack.trace(m);
+        self.stack.trace(m, usize::MAX);
         m.mark(self.current);
         m.mark(self.main_thread);
         for &t in &self.resumers {
@@ -334,6 +410,7 @@ impl Roots<LuaSpace> for Runtime {
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
         self.strings.clear_dead(live);
         self.cooling.retain(|&(t, _)| live.is_live(t));
+        self.gc_cycles = self.gc_cycles.wrapping_add(1);
     }
 }
 
@@ -355,20 +432,26 @@ impl Vm {
     pub fn new() -> Self {
         let mut heap = LuaHeap::new();
         let globals = heap.alloc(Table::new());
+        let mut reg = Table::new();
+        reg.set_int(2, Value::Table(globals));
+        let registry = heap.alloc(reg);
         let dead_cell = heap.alloc(Cell::default());
         let mut strings = Interner::new();
         let events = meta::Events::new(&mut heap, &mut strings);
+        let gc = GcState::new(&heap);
         let main_thread = heap.alloc(Thread::new(coro::Coroutine::main()));
         Vm {
             heap,
             rt: Runtime {
                 strings,
                 globals,
+                registry,
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 warnings: false,
                 start: Instant::now(),
                 ext: Extensions::default(),
+                compile: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
                 stack: Stack::default(),
@@ -379,16 +462,26 @@ impl Vm {
                     events,
                     type_meta: Default::default(),
                 },
+                gc,
                 current: main_thread,
                 main_thread,
                 resumers: Vec::new(),
                 xfer: Vec::new(),
                 switched: false,
                 errerr: false,
+                handled: false,
+                unwind_traceback: None,
                 native_protos: Default::default(),
                 cooling: Default::default(),
+                gc_cycles: 0,
+                interrupt: Default::default(),
             },
         }
+    }
+
+    /// A handle that interrupts this VM ([`Interrupt`]).
+    pub fn interrupt_handle(&self) -> Interrupt {
+        Interrupt(self.rt.interrupt.clone())
     }
 
     /// Register a native function. `name` is its qualified name
@@ -465,13 +558,9 @@ impl Vm {
     }
 
     /// Set (or clear) the metatable of table `t` or userdata `u`.
+    /// Registers `v` for finalization when `meta` has a `__gc` field.
     pub fn set_metatable(&mut self, v: Value, meta: Option<Gc<Table>>) -> bool {
-        match v {
-            Value::Table(t) => self.heap.update(t, |t| t.meta = meta),
-            Value::UserData(u) => self.heap.update(u, |u| u.meta = meta),
-            _ => return false,
-        }
-        true
+        orbit_core::gc::set_metatable(&mut self.heap, v, meta)
     }
 
     /// Keep `v` alive until [`Vm::unpin`].
@@ -517,7 +606,6 @@ impl Vm {
 
     /// Run a full collection cycle.
     pub fn full_collect(&mut self) {
-        coro::trim_parked(&mut self.heap, &self.rt);
         self.heap.full_collect(&mut self.rt);
     }
 
@@ -533,6 +621,8 @@ impl Vm {
             cell_base: self.rt.stack.cells.len() as u32,
             nvarargs: 0,
             want: op::MULTI,
+            tail: false,
+            extra: 0,
         });
         self.rt.stack.regs.push(f);
         self.rt.stack.regs.extend_from_slice(args);

@@ -580,7 +580,7 @@ fn generic_for_and_break() {
     let mut b = B::new();
     let k = b.new_local("k", LocalKind::ForControl);
     let v = b.new_local("v", LocalKind::Normal);
-    let h: Vec<LocalId> = (0..3)
+    let h: Vec<LocalId> = (0..4)
         .map(|_| b.f().add_local(Local::new(None, SP, LocalKind::Hidden)))
         .collect();
     let pairs = b.global("pairs");
@@ -599,7 +599,7 @@ fn generic_for_and_break() {
     b.stmt(StmtKind::GenericFor {
         vars: vec![k, v],
         iter: vec![call].into(),
-        hidden: [h[0], h[1], h[2]],
+        hidden: [h[0], h[1], h[2], h[3]],
         body,
     });
     let chunk = b.finish();
@@ -621,13 +621,16 @@ fn generic_for_and_break() {
             Op::Call {
                 func: 0,
                 nargs: 1,
-                nresults: 3
+                nresults: 4
             },
+            // The closing value.
+            Op::Tbc { reg: 3 },
             Op::Jump { off: 2 },
             Op::JumpIfFalse { src: 5, off: 1 },
             Op::Jump { off: 2 },
             Op::GenericCall { base: 0, nvars: 2 },
             Op::GenericLoop { base: 0, back: -4 },
+            Op::Close { from: 3 },
             Op::Return0,
         ]
     );

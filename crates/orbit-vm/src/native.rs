@@ -87,6 +87,14 @@ pub enum NativeReturn {
         nargs: usize,
         k: Continuation,
     },
+    /// Close coroutine `co` (suspended, or dead): run its pending `__close`
+    /// handlers on its stack, newest first, with its error (nil if it is
+    /// suspended), then run `k`: `Ok` with no values, or `Err` with the error
+    /// it died with or the last error a handler raised.
+    Close {
+        co: Gc<orbit_core::Thread>,
+        k: Continuation,
+    },
     /// Yield the last `nvals` values of the window to the resumer. The
     /// values the next resume passes become this native's results.
     Yield { nvals: usize },
@@ -206,6 +214,12 @@ impl NativeCtx<'_> {
         Value::Str(self.rt.strings.new_str_owned(self.heap, bytes))
     }
 
+    /// Link a compiled chunk, as [`Vm::load_with_env`](crate::Vm::load_with_env)
+    /// does. The function is unrooted until stored in the window.
+    pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
+        crate::link::link(self.heap, self.rt, chunk, env)
+    }
+
     /// A new table (unrooted until stored in the window).
     pub fn new_table(&mut self, t: Table) -> Gc<Table> {
         self.heap.alloc(t)
@@ -226,7 +240,16 @@ impl NativeCtx<'_> {
     /// `chunk:line: ` for the function at `level` (1 is the caller of this
     /// native), or empty if it isn't a Lua function.
     pub fn where_(&self, level: usize) -> String {
-        ops::where_(self.heap, self.rt, level)
+        self.rt
+            .where_(self.heap, Some(self.running_native()), level)
+    }
+
+    /// This native, as the debug walk sees it (level 0).
+    pub(crate) fn running_native(&self) -> crate::debug::Running {
+        crate::debug::Running {
+            id: self.id,
+            func: self.base - 1,
+        }
     }
 
     /// An error with a message, positioned at the caller (like
@@ -286,7 +309,10 @@ impl NativeCtx<'_> {
         let got = if i >= self.nargs {
             "no value"
         } else {
-            self.arg(i).type_name()
+            match self.arg(i) {
+                Value::LightUserData(_) => "light userdata",
+                v => v.type_name(),
+            }
         };
         self.arg_error(i, format!("{expected} expected, got {got}"))
     }
@@ -475,16 +501,6 @@ impl NativeCtx<'_> {
         // Values above the window are dead.
         let top = self.rt.top;
         self.rt.stack.regs.truncate(top);
-        crate::coro::trim_parked(self.heap, self.rt);
         self.heap.full_collect(self.rt);
-    }
-
-    /// Run one collector step (`collectgarbage("step")`); true when it
-    /// finished a cycle.
-    pub fn gc_step(&mut self) -> bool {
-        let top = self.rt.top;
-        self.rt.stack.regs.truncate(top);
-        crate::coro::trim_parked(self.heap, self.rt);
-        self.heap.step(self.rt)
     }
 }
