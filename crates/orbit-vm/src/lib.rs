@@ -145,6 +145,10 @@ pub(crate) struct Stack {
 pub struct Runtime {
     pub strings: Interner,
     pub globals: Gc<Table>,
+    /// A table for library state only Rust code reaches, under string
+    /// keys (`_LOADED`, `_PRELOAD`, io's default files), with the global
+    /// table at index 2 as in the reference. A root.
+    pub registry: Gc<Table>,
     pub limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
     pub out: Box<dyn WriteDebug>,
@@ -170,6 +174,7 @@ impl<T: Write + fmt::Debug> WriteDebug for T {}
 impl Roots<LuaSpace> for Runtime {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         m.mark(self.globals);
+        m.mark(self.registry);
         m.mark(self.dead_cell);
         for &v in &self.stack.regs {
             mark(m, v);
@@ -213,12 +218,16 @@ impl Vm {
     pub fn new() -> Self {
         let mut heap = LuaHeap::new();
         let globals = heap.alloc(Table::new());
+        let mut reg = Table::new();
+        reg.set_int(2, Value::Table(globals));
+        let registry = heap.alloc(reg);
         let dead_cell = heap.alloc(Cell::default());
         Vm {
             heap,
             rt: Runtime {
                 strings: Interner::new(),
                 globals,
+                registry,
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 start: Instant::now(),

@@ -3,4 +3,5 @@
 closures.lua
 load.lua
 os.lua
+require.lua
 uncaught.lua
