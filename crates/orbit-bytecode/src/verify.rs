@@ -149,6 +149,11 @@ impl Function<'_> {
         if p.captures.len() > MAX_CAPTURES {
             return self.fail(None, "too many captures");
         }
+        if p.self_capture
+            .is_some_and(|c| c as usize >= p.captures.len())
+        {
+            return self.fail(None, "self capture out of range");
+        }
         if let Some(parent) = parent {
             for c in &p.captures {
                 let ok = match *c {
@@ -249,6 +254,11 @@ impl Function<'_> {
         };
         let count = |c: u8| if c == MULTI { 0 } else { c as usize };
         match p.code[pc] {
+            // Only native closures' stubs, which the VM builds itself.
+            Op::NativeEntry { .. } => self.fail(Some(pc), "native entry in a Lua function"),
+            Op::Tbc { reg: r } => reg(r),
+            // Compares `from` with the marked registers, never reads it.
+            Op::Close { .. } => Ok(()),
             Op::Move { dst, src } => {
                 reg(dst)?;
                 reg(src)
@@ -289,7 +299,23 @@ impl Function<'_> {
                 ic(c)?;
                 cap(0)
             }
-            Op::NewTable { dst, .. } => reg(dst),
+            Op::NewTable { dst, .. } | Op::VarargTable { dst } => reg(dst),
+            Op::CheckUndefined { src, name } => {
+                reg(src)?;
+                key(name)
+            }
+            Op::VarargGet { dst, key: k } => {
+                reg(dst)?;
+                reg(k)
+            }
+            Op::VarargUnpack { dst, table, count } => {
+                reg(table)?;
+                if count == MULTI {
+                    open(dst)
+                } else {
+                    span(dst, count as usize)
+                }
+            }
             Op::GetField {
                 dst: a,
                 obj: b,
@@ -323,7 +349,12 @@ impl Function<'_> {
             | Op::Div { dst: a, a: b, b: c }
             | Op::IDiv { dst: a, a: b, b: c }
             | Op::Mod { dst: a, a: b, b: c }
-            | Op::Pow { dst: a, a: b, b: c } => {
+            | Op::Pow { dst: a, a: b, b: c }
+            | Op::BAnd { dst: a, a: b, b: c }
+            | Op::BOr { dst: a, a: b, b: c }
+            | Op::BXor { dst: a, a: b, b: c }
+            | Op::Shl { dst: a, a: b, b: c }
+            | Op::Shr { dst: a, a: b, b: c } => {
                 reg(a)?;
                 reg(b)?;
                 reg(c)
@@ -332,6 +363,7 @@ impl Function<'_> {
             | Op::SetIndexInt { obj: b, src: a, .. }
             | Op::AddInt { dst: a, a: b, .. }
             | Op::Neg { dst: a, src: b }
+            | Op::BNot { dst: a, src: b }
             | Op::Not { dst: a, src: b }
             | Op::Len { dst: a, src: b } => {
                 reg(a)?;
@@ -464,6 +496,11 @@ impl Function<'_> {
         }
         if !d.capture_names.is_empty() && d.capture_names.len() != p.captures.len() {
             return self.fail(None, "capture names don't match the captures");
+        }
+        if d.env_debug_index
+            .is_some_and(|i| i as usize >= p.captures.len())
+        {
+            return self.fail(None, "environment position out of range");
         }
         for l in &d.locals {
             let ok = match l.slot {

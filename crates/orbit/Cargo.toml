@@ -22,11 +22,17 @@ orbit-bytecode = { path = "../orbit-bytecode", features = ["verify-flow"] }
 
 [features]
 # The standard library's optional parts (see `orbit-stdlib`).
-default = ["dump", "load", "os", "package", "verify", "verify-flow"]
-dump = ["orbit-stdlib/dump"]
+default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine", "debug", "dump", "verify", "verify-flow"]
+string = ["orbit-stdlib/string"]
+utf8 = ["orbit-stdlib/utf8"]
+table = ["orbit-stdlib/table"]
+math = ["orbit-stdlib/math"]
 load = ["orbit-stdlib/load"]
 os = ["orbit-stdlib/os"]
 package = ["orbit-stdlib/package"]
+coroutine = ["orbit-stdlib/coroutine"]
+debug = ["orbit-stdlib/debug"]
+dump = ["orbit-stdlib/dump"]
 verify = ["orbit-stdlib/verify"]
 verify-flow = ["orbit-stdlib/verify-flow"]
 

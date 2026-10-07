@@ -60,6 +60,7 @@ pub(crate) fn unlink(heap: &LuaHeap, root: Gc<Proto>) -> UnlinkedChunk {
                 .collect(),
             children,
             captures: p.captures.to_vec(),
+            self_capture: p.self_capture,
             debug: (*p.debug).clone(),
         });
     }
@@ -68,8 +69,15 @@ pub(crate) fn unlink(heap: &LuaHeap, root: Gc<Proto>) -> UnlinkedChunk {
     // capture the environment and every other one a fresh cell, so none
     // may say `Env`.
     let main = &mut protos[0];
+    // Its own closure no longer lives in any capture once loaded.
+    main.self_capture = None;
     main.captures = (0..main.captures.len())
         .map(|i| CaptureSource::Capture(i as u8))
         .collect();
-    UnlinkedChunk { name, protos }
+    let source = heap.get(root).source.as_ref().into();
+    UnlinkedChunk {
+        name,
+        source,
+        protos,
+    }
 }

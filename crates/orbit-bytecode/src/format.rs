@@ -67,6 +67,7 @@ pub fn encode(chunk: &UnlinkedChunk, strip: bool) -> Vec<u8> {
     w.0.push(VERSION);
     w.0.push(if strip { FLAG_STRIPPED } else { 0 });
     w.bytes(if strip { b"?" } else { chunk.name.as_bytes() });
+    w.bytes(if strip { b"=?" } else { &chunk.source });
     w.uint(chunk.protos.len() as u64);
     for p in &chunk.protos {
         proto(&mut w, p, strip);
@@ -97,11 +98,16 @@ pub fn decode(bytes: &[u8]) -> Result<UnlinkedChunk> {
     let name = String::from_utf8(r.bytes()?.into_vec())
         .map_err(|_| FormatError::Malformed("chunk name"))?
         .into_boxed_str();
+    let source = r.bytes()?;
     let protos = r.list(read_proto)?;
     if r.at != bytes.len() {
         return Err(FormatError::Malformed("bytes after the chunk"));
     }
-    Ok(UnlinkedChunk { name, protos })
+    Ok(UnlinkedChunk {
+        name,
+        source,
+        protos,
+    })
 }
 
 struct Writer(Vec<u8>);
@@ -331,6 +337,19 @@ op_table! {
     56 GenericCall { base, nvars };
     57 GenericLoop { base, back };
     58 Closure { dst, proto };
+    59 CheckUndefined { src, name };
+    60 BAnd { dst, a, b };
+    61 BOr { dst, a, b };
+    62 BXor { dst, a, b };
+    63 Shl { dst, a, b };
+    64 Shr { dst, a, b };
+    65 BNot { dst, src };
+    66 VarargTable { dst };
+    67 VarargGet { dst, key };
+    68 VarargUnpack { dst, table, count };
+    69 NativeEntry { id };
+    70 Tbc { reg };
+    71 Close { from };
 }
 
 /// One instruction's encoding (for tests and fuzzing).
@@ -388,6 +407,7 @@ fn proto(w: &mut Writer, p: &UnlinkedProto, strip: bool) {
             CaptureSource::Env => w.0.push(2),
         }
     }
+    put_opt(w, p.self_capture);
     let empty = DebugInfo::default();
     let d = if strip { &empty } else { &p.debug };
     w.uint(d.lines.len() as u64);
@@ -409,6 +429,7 @@ fn proto(w: &mut Writer, p: &UnlinkedProto, strip: bool) {
     for n in &d.capture_names {
         w.bytes(n);
     }
+    put_opt(w, d.env_debug_index);
     w.uint(d.origins.len() as u64);
     for o in &d.origins {
         w.uint(o.pc.into());
@@ -421,6 +442,21 @@ fn proto(w: &mut Writer, p: &UnlinkedProto, strip: bool) {
             Origin::Method(n) => named(w, 4, n),
             Origin::Constant(n) => named(w, 5, n),
         }
+    }
+}
+
+fn put_opt(w: &mut Writer, v: Option<u8>) {
+    match v {
+        None => w.0.push(0),
+        Some(x) => w.0.extend_from_slice(&[1, x]),
+    }
+}
+
+fn get_opt(r: &mut Reader<'_>) -> Result<Option<u8>> {
+    match r.byte()? {
+        0 => Ok(None),
+        1 => Ok(Some(r.byte()?)),
+        _ => Err(FormatError::Malformed("optional byte")),
     }
 }
 
@@ -470,6 +506,7 @@ fn read_proto(r: &mut Reader<'_>) -> Result<UnlinkedProto> {
             _ => return Err(FormatError::Malformed("capture")),
         })
     })?;
+    let self_capture = get_opt(r)?;
     let lines = r.list(|r| Ok((u32::get(r)?, u32::get(r)?)))?;
     let locals = r.list(|r| {
         let name = r.bytes()?;
@@ -486,6 +523,7 @@ fn read_proto(r: &mut Reader<'_>) -> Result<UnlinkedProto> {
         })
     })?;
     let capture_names = r.list(Reader::bytes)?;
+    let env_debug_index = get_opt(r)?;
     let origins = r.list(|r| {
         let pc = u32::get(r)?;
         let operand = r.byte()?;
@@ -519,10 +557,12 @@ fn read_proto(r: &mut Reader<'_>) -> Result<UnlinkedProto> {
         consts,
         children,
         captures,
+        self_capture,
         debug: DebugInfo {
             lines,
             locals,
             capture_names,
+            env_debug_index,
             origins,
         },
     })
@@ -584,7 +624,9 @@ mod tests {
                     operand: 0,
                     origin: Origin::Global(s("print")),
                 }],
+                env_debug_index: Some(0),
             },
+            self_capture: None,
         };
         let child = UnlinkedProto {
             name: FunctionName::Local(s("f")),
@@ -600,9 +642,11 @@ mod tests {
             children: vec![],
             captures: vec![CaptureSource::Cell(0)],
             debug: DebugInfo::default(),
+            self_capture: Some(0),
         };
         UnlinkedChunk {
             name: "sample.lua".into(),
+            source: s("@sample.lua"),
             protos: vec![main, child],
         }
     }

@@ -17,6 +17,9 @@ impl Function<'_> {
             for (to, s) in [next, jump].into_iter().flatten() {
                 let merged = match states[to] {
                     None => s,
+                    Some(old) if old.tbc != s.tbc => {
+                        return self.fail(Some(to), "paths join with different variables to close");
+                    }
                     Some(old) => old.meet(s),
                 };
                 if states[to] != Some(merged) {
@@ -42,7 +45,28 @@ impl Function<'_> {
         let top = s.top.take();
         let next = pc + 1;
         let mut jump = None;
+        if matches!(
+            self.p.code[pc],
+            Op::Return { .. } | Op::Return0 | Op::Return1 { .. } | Op::TailCall { .. }
+        ) && s.tbc != Regs::default()
+        {
+            return self.fail(at, "return with a variable left to close");
+        }
         match self.p.code[pc] {
+            // Layer 1 rejects it.
+            Op::NativeEntry { .. } => return Ok((None, None)),
+            Op::Tbc { reg } => {
+                // `Close` closes the newest first, down to its register.
+                if s.tbc.any_from(reg) {
+                    return self.fail(at, "variable to close below an open one");
+                }
+                s.tbc.insert(reg);
+            }
+            // Open results of the instruction before stay open.
+            Op::Close { from } => {
+                s.tbc.remove_from(from);
+                s.top = top;
+            }
             Op::Move { dst, .. }
             | Op::LoadBool { dst, .. }
             | Op::LoadInt { dst, .. }
@@ -65,7 +89,15 @@ impl Function<'_> {
             | Op::Neg { dst, .. }
             | Op::Not { dst, .. }
             | Op::Len { dst, .. }
+            | Op::BAnd { dst, .. }
+            | Op::BOr { dst, .. }
+            | Op::BXor { dst, .. }
+            | Op::Shl { dst, .. }
+            | Op::Shr { dst, .. }
+            | Op::BNot { dst, .. }
+            | Op::VarargGet { dst, .. }
             | Op::Closure { dst, .. } => s.kill(dst, 1),
+            Op::CheckUndefined { .. } => {}
             // `__concat` leaves partial results in the operand registers.
             Op::Concat { dst, first, count } => {
                 s.kill(dst, 1);
@@ -73,7 +105,7 @@ impl Function<'_> {
             }
             Op::LoadNil { dst, count } => s.kill(dst, count as usize),
             Op::SelfCall { dst, .. } => s.kill(dst, 2),
-            Op::NewTable { dst, .. } => {
+            Op::NewTable { dst, .. } | Op::VarargTable { dst } => {
                 s.kill(dst, 1);
                 s.tables.insert(dst);
             }
@@ -142,7 +174,13 @@ impl Function<'_> {
                 return Ok((None, None));
             }
             Op::Return0 | Op::Return1 { .. } => return Ok((None, None)),
-            Op::Vararg { dst, count } => {
+            Op::VarargUnpack { table, .. } if !s.tables.contains(table) => {
+                return self.fail(
+                    at,
+                    "vararg unpack from a register that may not hold a table",
+                );
+            }
+            Op::Vararg { dst, count } | Op::VarargUnpack { dst, count, .. } => {
                 if count == MULTI {
                     s.kill(dst, 256);
                     s.top = Some(dst);
@@ -171,6 +209,9 @@ impl Function<'_> {
                 jump = Some((self.target(pc, back)?, s));
             }
         }
+        if std::mem::take(&mut s.wrote_tbc) {
+            return self.fail(at, "write to a variable to close");
+        }
         Ok((Some((next, s)), jump))
     }
 
@@ -191,6 +232,10 @@ struct State {
     tables: Regs,
     /// Base registers of numeric `for` loops whose state is set up.
     loops: Regs,
+    /// Registers marked to be closed (`Tbc`) and not closed yet.
+    tbc: Regs,
+    /// The instruction being checked wrote a register in `tbc`.
+    wrote_tbc: bool,
     /// `top` was set by the previous instruction, an open producer whose
     /// values start at this register.
     top: Option<u8>,
@@ -201,6 +246,9 @@ impl State {
         State {
             tables: self.tables.and(other.tables),
             loops: self.loops.and(other.loops),
+            // The pass refuses to join different sets.
+            tbc: self.tbc,
+            wrote_tbc: false,
             top: if self.top == other.top {
                 self.top
             } else {
@@ -214,6 +262,7 @@ impl State {
         let (lo, hi) = (r as usize, (r as usize + n).min(256));
         for x in lo..hi {
             self.tables.remove(x as u8);
+            self.wrote_tbc |= self.tbc.contains(x as u8);
         }
         // A loop's state is its first three registers.
         for b in lo.saturating_sub(2)..hi {
@@ -235,6 +284,15 @@ impl Regs {
     }
     fn contains(&self, r: u8) -> bool {
         self.0[r as usize / 64] & (1 << (r % 64)) != 0
+    }
+    /// Some register `r` or above is in the set.
+    fn any_from(&self, r: u8) -> bool {
+        (r..=u8::MAX).any(|x| self.contains(x))
+    }
+    fn remove_from(&mut self, r: u8) {
+        for x in r..=u8::MAX {
+            self.remove(x);
+        }
     }
     fn and(self, o: Regs) -> Regs {
         Regs(core::array::from_fn(|i| self.0[i] & o.0[i]))

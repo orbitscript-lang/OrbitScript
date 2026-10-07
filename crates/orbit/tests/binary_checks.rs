@@ -51,3 +51,53 @@ fn each_level_runs_its_layers() {
     set_level(lua.vm(), None);
     assert_eq!(load(&mut lua, &structure), Ok(()));
 }
+
+#[test]
+fn variables_to_close_stay_balanced() {
+    let t = Op::LoadBool {
+        dst: 0,
+        value: true,
+    };
+    let cases = [
+        (
+            vec![t, Op::Tbc { reg: 0 }, Op::Close { from: 0 }, Op::Return0],
+            None,
+        ),
+        (
+            vec![t, Op::Tbc { reg: 0 }, Op::Return0],
+            Some("return with a variable left to close"),
+        ),
+        (
+            vec![
+                t,
+                Op::Tbc { reg: 0 },
+                Op::LoadInt { dst: 0, value: 1 },
+                Op::Close { from: 0 },
+                Op::Return0,
+            ],
+            Some("write to a variable to close"),
+        ),
+        (
+            vec![
+                t,
+                Op::JumpIfTrue { src: 0, off: 1 },
+                Op::Tbc { reg: 0 },
+                Op::Close { from: 0 },
+                Op::Return0,
+            ],
+            Some("paths join with different variables to close"),
+        ),
+    ];
+    let mut lua = Lua::new();
+    set_level(lua.vm(), Some(Level::Full));
+    for (code, want) in cases {
+        let r = load(&mut lua, &chunk_with(code.clone()));
+        match want {
+            None => assert_eq!(r, Ok(()), "{code:?}"),
+            Some(w) => {
+                let e = r.unwrap_err();
+                assert!(e.contains(w), "{code:?}: {e}");
+            }
+        }
+    }
+}

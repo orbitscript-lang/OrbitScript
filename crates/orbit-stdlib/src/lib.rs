@@ -6,12 +6,12 @@
 //! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
+#[cfg(feature = "dump")]
+pub mod checks;
 #[cfg(feature = "coroutine")]
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
-#[cfg(feature = "dump")]
-pub mod checks;
 #[cfg(feature = "dump")]
 mod dump;
 #[cfg(feature = "load")]

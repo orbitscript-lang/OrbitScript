@@ -138,6 +138,8 @@ The whole `dump` feature (format, verifier, `string.dump`) adds 48 KiB to the re
 
 Below both layers, a malformed chunk can make the VM panic (and abort the process, with `panic = "abort"`), but never corrupt memory. The compiler's debug-build self-check always runs the strongest level the build has.
 
+**To-be-closed variables (2026-10-07).** `Tbc` and `Close` (from `<close>`, merged after the spike) add one fact to layer 2: the set of registers marked to be closed. Every path into an instruction must carry the same set, a `Tbc` must be above every open one (`Close` closes newest first, down to its register), nothing may write a marked register, and no `Return`, `Return0`, `Return1` or `TailCall` may run with one still open. Otherwise a chunk could leave a stale entry on the VM's to-be-closed stack after its frame is gone. `Close` keeps the open results of the instruction before it, as the VM does. Everything the compiler produces from `tests/` and `bench/` passes, and a 3,000-mutant fuzz run (seed 7) still has no panics at the full level.
+
 Every new instruction needs an encode, a decode and a verify arm. The matches are exhaustive, so adding an `Op` without them doesn't compile.
 
 ## `io`

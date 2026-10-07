@@ -16,6 +16,7 @@ pub use orbit_core::Value;
 /// `ORBIT_VERIFY`).
 #[cfg(feature = "dump")]
 pub use orbit_stdlib::checks;
+#[cfg(feature = "load")]
 pub use orbit_stdlib::{chunk_id, read_chunk_file};
 pub use orbit_vm::{GcMode, LuaError, Vm};
 
