@@ -116,7 +116,7 @@ impl Events {
 #[derive(Debug)]
 pub(crate) struct Metas {
     pub(crate) events: Events,
-    pub(crate) type_meta: [Option<Gc<Table>>; 10],
+    pub(crate) type_meta: [Option<Gc<Table>>; 11],
 }
 
 impl Metas {

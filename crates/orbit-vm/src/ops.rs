@@ -312,7 +312,8 @@ pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>)
         | Value::Closure(_)
         | Value::Native(_)
         | Value::UserData(_)
-        | Value::Thread(_) => {
+        | Value::Thread(_)
+        | Value::LightUserData(_) => {
             // `__name` (a string) replaces the type name.
             match rt.metamethod(heap, v, Event::Name) {
                 Value::Str(s) => out.extend_from_slice(heap.get(s).as_bytes()),
