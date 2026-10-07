@@ -117,6 +117,8 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 }
                 Op::GenericLoop { base, back } => regs(base, 5) && target(back),
                 Op::Closure { dst, proto } => reg(dst) && (proto as usize) < p.children.len(),
+                Op::Tbc { reg: r } => reg(r),
+                Op::Close { from } => reg(from),
                 // Only the VM's native-closure stubs hold it.
                 Op::NativeEntry { .. } => false,
             };

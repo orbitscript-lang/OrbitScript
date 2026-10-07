@@ -598,6 +598,13 @@ impl Interp {
                         .collect();
                     r[dst as usize] = V::Func(Rc::new(Closure { proto: child, caps }));
                 }
+                // No metatables here, so nothing can be closed.
+                Op::Tbc { reg } => {
+                    if !matches!(r[reg as usize], V::Nil | V::Bool(false)) {
+                        return Err("non-closable value".into());
+                    }
+                }
+                Op::Close { .. } => {}
                 Op::NativeEntry { .. } => unreachable!("compilers never emit NativeEntry"),
             }
         }

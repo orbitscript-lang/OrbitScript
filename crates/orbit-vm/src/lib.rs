@@ -11,6 +11,7 @@
 mod cold;
 mod coro;
 pub mod debug;
+mod gc;
 pub mod hook;
 mod interp;
 mod link;
@@ -30,6 +31,7 @@ use orbit_core::{
 use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::CoStatus;
+pub use gc::{GcMode, GcParam, GcState, finalize_then_return};
 pub use meta::Event;
 pub use native::{CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
@@ -54,6 +56,14 @@ impl LuaError {
         }
     }
 }
+
+/// Compiles source text into an unlinked chunk, for `load`, `loadfile`,
+/// `dofile` and `require`. `chunk_name` is the name messages use
+/// (`script.lua` in `script.lua:3:`); an error is the complete message.
+/// The embedder installs it in [`Runtime::compile`] (`orbit::Lua` installs
+/// the Lua front end), so the VM and the libraries don't depend on a front
+/// end and a host can leave the compiler out.
+pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
 
 /// Configurable limits.
 #[derive(Debug, Clone, Copy)]
@@ -114,9 +124,9 @@ pub(crate) enum FrameKind {
         event: Event,
     },
     /// Below an `xpcall` message handler running on top of the frames that
-    /// raised: its result becomes the error delivered to the native frame
-    /// at index `catcher`. Nothing may yield across it.
-    Handler { catcher: u32 },
+    /// raised: its result is raised again as the error, past the handler.
+    /// Nothing may yield across it.
+    Handler,
     /// The bottom of a [`Vm::call`]: returning into it ends the call, and
     /// an error unwinding to it is returned to the embedder.
     Boundary,
@@ -170,6 +180,9 @@ pub(crate) struct Stack {
     pub regs: Vec<Value>,
     pub cells: Vec<Gc<Cell>>,
     pub frames: Vec<Frame>,
+    /// The registers (absolute) of the open to-be-closed variables, oldest
+    /// first.
+    pub tbc: Vec<u32>,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
     /// switch to this code swaps it in instead of looking the closure up.
@@ -240,6 +253,7 @@ impl Stack {
         self.regs.capacity() * std::mem::size_of::<Value>()
             + self.cells.capacity() * std::mem::size_of::<Gc<Cell>>()
             + self.frames.capacity() * std::mem::size_of::<Frame>()
+            + self.tbc.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -260,6 +274,11 @@ pub struct Runtime {
     pub warnings: bool,
     /// When the VM started (for `os.clock`).
     pub start: Instant,
+    /// Per-VM state of host libraries, one value per type (the `math`
+    /// library's random generator, for example).
+    pub ext: Extensions,
+    /// The source compiler, if the host installed one.
+    pub compile: Option<CompileFn>,
     pub(crate) natives: Vec<Native>,
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId>,
     pub(crate) stack: Stack,
@@ -271,6 +290,9 @@ pub struct Runtime {
     pub(crate) top: usize,
     /// Event names and per-type metatables.
     pub(crate) metas: meta::Metas,
+    /// Collector mode and parameters as `collectgarbage` sees them, and
+    /// finalizer bookkeeping.
+    pub gc: GcState,
     /// The thread whose stack is `stack`.
     pub(crate) current: Gc<Thread>,
     pub(crate) main_thread: Gc<Thread>,
@@ -285,6 +307,12 @@ pub struct Runtime {
     /// The error being raised is an error in error handling: it skips
     /// message handlers and becomes `error in error handling`.
     pub(crate) errerr: bool,
+    /// The error being raised has already been through its message handler
+    /// (it is being re-raised after a `__close` handler ran).
+    pub(crate) handled: bool,
+    /// The traceback of an error on its way out of a `Vm::call`, taken
+    /// before its to-be-closed variables closed (and popped the frames).
+    pub(crate) unwind_traceback: Option<String>,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
     /// The threads parked suspended most recently, with their park count
@@ -318,6 +346,32 @@ impl Interrupt {
     /// native).
     pub fn pending(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Library state kept per VM, keyed by type. It holds plain Rust data, never
+/// GC values (it is not traced).
+#[derive(Default)]
+pub struct Extensions {
+    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
+}
+
+impl Extensions {
+    /// The value of type `T`, created with `init` on first use.
+    pub fn get_or_insert_with<T: 'static>(&mut self, init: impl FnOnce() -> T) -> &mut T {
+        self.map
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| Box::new(init()))
+            .downcast_mut::<T>()
+            .expect("extension stored under its own TypeId")
+    }
+}
+
+impl fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extensions")
+            .field("len", &self.map.len())
+            .finish()
     }
 }
 
@@ -378,11 +432,13 @@ impl Vm {
     pub fn new() -> Self {
         let mut heap = LuaHeap::new();
         let globals = heap.alloc(Table::new());
-        let registry = heap.alloc(Table::new());
-        let _ = table::set(&mut heap, registry, Value::Int(2), Value::Table(globals));
+        let mut reg = Table::new();
+        reg.set_int(2, Value::Table(globals));
+        let registry = heap.alloc(reg);
         let dead_cell = heap.alloc(Cell::default());
         let mut strings = Interner::new();
         let events = meta::Events::new(&mut heap, &mut strings);
+        let gc = GcState::new(&heap);
         let main_thread = heap.alloc(Thread::new(coro::Coroutine::main()));
         Vm {
             heap,
@@ -394,6 +450,8 @@ impl Vm {
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 warnings: false,
                 start: Instant::now(),
+                ext: Extensions::default(),
+                compile: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
                 stack: Stack::default(),
@@ -404,12 +462,15 @@ impl Vm {
                     events,
                     type_meta: Default::default(),
                 },
+                gc,
                 current: main_thread,
                 main_thread,
                 resumers: Vec::new(),
                 xfer: Vec::new(),
                 switched: false,
                 errerr: false,
+                handled: false,
+                unwind_traceback: None,
                 native_protos: Default::default(),
                 cooling: Default::default(),
                 gc_cycles: 0,
@@ -497,13 +558,9 @@ impl Vm {
     }
 
     /// Set (or clear) the metatable of table `t` or userdata `u`.
+    /// Registers `v` for finalization when `meta` has a `__gc` field.
     pub fn set_metatable(&mut self, v: Value, meta: Option<Gc<Table>>) -> bool {
-        match v {
-            Value::Table(t) => self.heap.update(t, |t| t.meta = meta),
-            Value::UserData(u) => self.heap.update(u, |u| u.meta = meta),
-            _ => return false,
-        }
-        true
+        orbit_core::gc::set_metatable(&mut self.heap, v, meta)
     }
 
     /// Keep `v` alive until [`Vm::unpin`].

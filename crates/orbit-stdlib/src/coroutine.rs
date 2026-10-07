@@ -105,9 +105,12 @@ fn wrapped(ctx: &mut NativeCtx<'_>) -> R {
     let Value::Thread(co) = ctx.upvalue(0) else {
         unreachable!("wrap's upvalue is its coroutine")
     };
+    // The window keeps `co` below the arguments, for `wrapped_done`.
+    let n = ctx.nargs();
+    ctx.insert(0, Value::Thread(co));
     Ok(NativeReturn::Resume {
         co,
-        nargs: ctx.nargs(),
+        nargs: n,
         k: wrapped_done,
     })
 }
@@ -116,17 +119,48 @@ fn wrapped_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     match outcome {
         CallOutcome::Ok(n) => Ok(NativeReturn::Return(n)),
         CallOutcome::Err(e) => {
-            // A string error gets the position of the wrapper's caller
-            // (level 1).
-            if let Value::Str(s) = e {
-                let mut text = ctx.where_(1).into_bytes();
-                if !text.is_empty() {
-                    text.extend_from_slice(ctx.bytes(s));
-                    let msg = ctx.new_str_owned(text);
-                    return Err(ctx.error_value(msg));
-                }
-            }
-            Err(ctx.error_value(e))
+            // Close the coroutine, which runs its pending `__close` handlers,
+            // then raise the error (or theirs). The window keeps the error:
+            // a resume refused at once (say, nested too deeply) leaves the
+            // coroutine without one.
+            let Value::Thread(co) = ctx.arg(0) else {
+                unreachable!("wrapped keeps its coroutine in the window")
+            };
+            ctx.truncate(1);
+            ctx.push(e);
+            Ok(NativeReturn::Close {
+                co,
+                k: wrapped_closed,
+            })
+        }
+    }
+}
+
+fn wrapped_closed(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let e = match outcome {
+        CallOutcome::Err(e) => e,
+        CallOutcome::Ok(_) => ctx.arg(1),
+    };
+    // A string error gets the position of the wrapper's caller (level 1).
+    if let Value::Str(s) = e {
+        let mut text = ctx.where_(1).into_bytes();
+        if !text.is_empty() {
+            text.extend_from_slice(ctx.bytes(s));
+            let msg = ctx.new_str_owned(text);
+            return Err(ctx.error_value(msg));
+        }
+    }
+    Err(ctx.error_value(e))
+}
+
+fn close_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    ctx.truncate(0);
+    match outcome {
+        CallOutcome::Ok(_) => ctx.ret1(Value::Bool(true)),
+        CallOutcome::Err(e) => {
+            ctx.push(Value::Bool(false));
+            ctx.push(e);
+            Ok(NativeReturn::Return(2))
         }
     }
 }
@@ -134,14 +168,7 @@ fn wrapped_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
 fn close(ctx: &mut NativeCtx<'_>) -> R {
     let co = check_thread(ctx, 0)?;
     match ctx.thread_status(co) {
-        CoStatus::Suspended | CoStatus::Dead => match ctx.close_thread(co) {
-            None => ctx.ret1(Value::Bool(true)),
-            Some(e) => {
-                ctx.push(Value::Bool(false));
-                ctx.push(e);
-                Ok(NativeReturn::Return(2))
-            }
-        },
+        CoStatus::Suspended | CoStatus::Dead => Ok(NativeReturn::Close { co, k: close_done }),
         CoStatus::Running if co == ctx.running_main_thread() => {
             Err(ctx.error("cannot close main thread"))
         }

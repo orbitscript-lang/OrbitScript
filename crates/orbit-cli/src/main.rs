@@ -28,27 +28,39 @@ fn main() -> ExitCode {
         eprintln!("usage: {prog} [--dump-ast|--dump-hir|--dump-bytecode] script.lua [args...]");
         return ExitCode::FAILURE;
     };
-    let src = match std::fs::read(script) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("{prog}: cannot open {script}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let options = ParseOptions {
-        skip_comment_line: true,
-        ..ParseOptions::default()
-    };
     if let Some(what) = dump {
+        let src = match std::fs::read(script) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("{prog}: cannot open {script}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let options = ParseOptions {
+            skip_comment_line: true,
+            ..ParseOptions::default()
+        };
         return dump_stage(&prog, &what, &src, script, &options);
     }
 
     let mut lua = Lua::new();
+    // The standalone lua5.5 reports generational mode from the start. The
+    // incremental collector runs underneath either way.
+    lua.vm().rt.gc.mode = orbit::GcMode::Generational;
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         lua.vm().heap.set_stress(true);
     }
+    // Read the script as `loadfile` does (byte-order mark, `#` first line).
+    let (src, source) = match orbit::read_chunk_file(Some(script.as_bytes())) {
+        Ok(r) => r,
+        Err(m) => {
+            eprintln!("{prog}: {m}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let name = orbit::chunk_id(&source);
     let script_args = &args[i + 1..];
-    let f = match lua.load_with(&src, script, &options) {
+    let f = match lua.load(&src, &name) {
         Ok(f) => f,
         Err(e) => return fail(&mut lua, &prog, e),
     };
@@ -62,10 +74,15 @@ fn main() -> ExitCode {
     }
     let result = lua.call(f, &call_args);
     let _ = lua.vm().flush();
-    match result {
+    let code = match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => fail(&mut lua, &prog, e),
-    }
+    };
+    // Like lua5.5, close the state on the way out, even after an error:
+    // every object with a `__gc` still registered is finalized.
+    lua.vm().close();
+    let _ = lua.vm().flush();
+    code
 }
 
 fn set_arg_table(vm: &mut orbit::Vm, prog: &str, script_and_args: &[String]) {
