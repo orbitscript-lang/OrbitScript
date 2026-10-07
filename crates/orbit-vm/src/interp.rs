@@ -338,7 +338,7 @@ impl Vm {
             // long enough for it.
             FrameKind::Lua { .. } => Ok(Flow::Reload),
             FrameKind::Meta { .. } => self.meta_returned(),
-            FrameKind::Handler { .. } => self.handler_returned(),
+            FrameKind::Handler => self.handler_returned(),
             FrameKind::NativeCall { .. } => unreachable!("a running native returns itself"),
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
@@ -605,7 +605,8 @@ impl Vm {
                     // The error leaves the VM.
                     let taken = self.rt.unwind_traceback.take();
                     if e.traceback.is_none() {
-                        e.traceback = Some(taken.unwrap_or_else(|| self.rt.traceback(&self.heap, None, 1)));
+                        e.traceback =
+                            Some(taken.unwrap_or_else(|| self.rt.traceback(&self.heap, None, 1)));
                     }
                     self.rt.stack.cells.truncate(f.cell_base as usize);
                     self.rt.stack.frames.truncate(idx);

@@ -279,7 +279,7 @@ impl Runtime {
                         (f.base as usize, next.unwrap_or(self.top), None)
                     }
                     FrameKind::Meta { .. }
-                    | FrameKind::Handler { .. }
+                    | FrameKind::Handler
                     | FrameKind::Boundary
                     | FrameKind::CoBase => return None,
                 }
@@ -503,10 +503,9 @@ impl Runtime {
 fn is_activation(k: FrameKind) -> bool {
     match k {
         FrameKind::Lua { .. } | FrameKind::Native { .. } | FrameKind::NativeCall { .. } => true,
-        FrameKind::Meta { .. }
-        | FrameKind::Handler { .. }
-        | FrameKind::Boundary
-        | FrameKind::CoBase => false,
+        FrameKind::Meta { .. } | FrameKind::Handler | FrameKind::Boundary | FrameKind::CoBase => {
+            false
+        }
     }
 }
 
@@ -516,10 +515,9 @@ fn frame_func(stack: &Stack, i: usize) -> Value {
     match f.kind {
         FrameKind::Lua { closure, .. } => Value::Closure(closure),
         FrameKind::Native { id, .. } | FrameKind::NativeCall { id } => Value::Native(id),
-        FrameKind::Meta { .. }
-        | FrameKind::Handler { .. }
-        | FrameKind::Boundary
-        | FrameKind::CoBase => Value::Nil,
+        FrameKind::Meta { .. } | FrameKind::Handler | FrameKind::Boundary | FrameKind::CoBase => {
+            Value::Nil
+        }
     }
 }
 
