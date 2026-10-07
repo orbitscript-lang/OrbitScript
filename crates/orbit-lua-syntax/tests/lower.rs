@@ -79,16 +79,74 @@ fn const_assignment_matches_the_reference() {
 }
 
 #[test]
-fn out_of_subset_constructs_are_rejected() {
-    let cases = [(
-        "local f <close> = nil",
-        "s.lua:1: '<close>' variables are not supported yet",
-    )];
-    for (src, expected) in cases {
-        assert_eq!(err(src), expected, "source: {src:?}");
-    }
+fn ordinary_names_stay_ordinary() {
     // `global` stays an ordinary name, and `_ENV` as a field is just a string key.
     hir("global = 1 print(global) t = {} t._ENV = 1");
+}
+
+#[test]
+fn to_be_closed_variables_match_the_reference() {
+    let errors = [
+        (
+            "local a <close>, b <close> = nil, nil",
+            "s.lua:1: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local <close> a, b = nil, 1",
+            "s.lua:1: multiple to-be-closed variables in local list",
+        ),
+        // Reported at the end of the second declaration, before the values are read.
+        (
+            "local a <close>, b\n <close\n >\n\n = nil\n",
+            "s.lua:3: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local <close>\n a,\n b\n\n = nil\n",
+            "s.lua:3: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local a <close>,\n b,\n c <close>\n = nil x = = 1\n",
+            "s.lua:3: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local a <close>, b <close> = undeclared",
+            "s.lua:1: multiple to-be-closed variables in local list",
+        ),
+        (
+            "local a <close> = nil; a = 1",
+            "s.lua:1: attempt to assign to const variable 'a'",
+        ),
+        (
+            "local x <close> = nil; return function() x = 1 end",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+        ("local a <foo> = 1", "s.lua:1: unknown attribute 'foo'"),
+        (
+            "global x <close>",
+            "s.lua:1: global variables cannot be to-be-closed",
+        ),
+    ];
+    for (src, expected) in errors {
+        assert_eq!(err(src), expected, "source: {src:?}");
+    }
+    // A per-name attribute overrides the prefix one, and one closing variable per list is fine.
+    for src in [
+        "local <close> a <const> = nil",
+        "local a <const>, b <close> = 1, nil",
+        "local a, b <close> = 1, nil",
+        "local x <close> = nil; local y <close> = nil",
+        "goto l; local x <close> = nil; ::l::",
+    ] {
+        hir(src);
+    }
+    let chunk = hir("local a, b <close>, c <const> = 1, nil, 2");
+    let kinds: Vec<_> = chunk.functions[0].locals.iter().map(|l| l.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![LocalKind::Normal, LocalKind::Close, LocalKind::Const]
+    );
+    let out = dump("local x <close> = nil");
+    assert!(out.contains("close"), "{out}");
 }
 
 #[test]
@@ -163,7 +221,9 @@ fn for_loops() {
     use LocalKind::*;
     assert_eq!(
         kinds,
-        vec![ForControl, Hidden, Hidden, Hidden, ForControl, Normal]
+        vec![
+            ForControl, Hidden, Hidden, Hidden, Hidden, ForControl, Normal
+        ]
     );
 }
 
@@ -354,4 +414,19 @@ fn goto_rules_match_the_reference() {
     let text = dump("do goto f end ::f::");
     assert!(text.contains("goto \"f\"#L0"), "{text}");
     assert!(text.contains("::\"f\"#L0::"), "{text}");
+}
+
+#[test]
+fn captures_are_numbered_by_first_use() {
+    // `_ENV` stays capture 0; `env_debug_index` gives its first-use position, and an
+    // explicit `_ENV` counts as a use like a free name.
+    let chunk = hir("local a, b = 1, 2 return function() local _ = b; _ENV.x = a end");
+    let f = &chunk.functions[1];
+    let names: Vec<_> = f
+        .captures
+        .iter()
+        .map(|c| String::from_utf8_lossy(chunk.strings.get(c.name)).into_owned())
+        .collect();
+    assert_eq!(names, ["_ENV", "b", "a"]);
+    assert_eq!(f.env_debug_index, Some(1));
 }

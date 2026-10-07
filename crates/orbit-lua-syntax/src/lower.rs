@@ -177,10 +177,6 @@ impl Lowerer {
         Diagnostic::new(span, self.line_of(span), message, None)
     }
 
-    fn not_supported(&self, span: Span, what: &str) -> Diagnostic {
-        self.error(span, format!("{what} not supported yet"))
-    }
-
     fn name_text(&self, sym: StrId) -> String {
         String::from_utf8_lossy(self.chunk.strings.get(sym)).into_owned()
     }
@@ -329,7 +325,10 @@ impl Lowerer {
             }
             Resolved::Global { constant: false } => return self.global_place(name),
         };
-        if matches!(kind, LocalKind::Const | LocalKind::ForControl) {
+        if matches!(
+            kind,
+            LocalKind::Const | LocalKind::Close | LocalKind::ForControl
+        ) {
             return Err(self.assign_to_const(name));
         }
         Ok(place)
@@ -600,17 +599,19 @@ impl Lowerer {
                 names,
                 values,
             } => {
+                // The parser allows at most one `Close` per list.
+                let kinds: Vec<_> = names
+                    .iter()
+                    .map(|n| match n.attrib.or(*attrib) {
+                        None => LocalKind::Normal,
+                        Some(a) if a.kind == AttribKind::Const => LocalKind::Const,
+                        Some(_) => LocalKind::Close,
+                    })
+                    .collect();
                 let values = self.expr_list(values)?;
                 let mut locals = Vec::with_capacity(names.len());
                 let mut bindings = Vec::with_capacity(names.len());
-                for n in names {
-                    let kind = match n.attrib.or(*attrib) {
-                        None => LocalKind::Normal,
-                        Some(a) if a.kind == AttribKind::Const => LocalKind::Const,
-                        Some(a) => {
-                            return Err(self.not_supported(a.span, "'<close>' variables are"));
-                        }
-                    };
+                for (n, kind) in names.iter().zip(kinds) {
                     let local = self.new_local(Some(n.name.sym), n.name.span, kind);
                     locals.push(local);
                     bindings.push((n.name.sym, local));
@@ -695,7 +696,7 @@ impl Lowerer {
             }
             StmtKind::GenericFor { vars, exprs, body } => {
                 let iter = self.expr_list(exprs)?;
-                let hidden = [(); 3].map(|_| self.new_local(None, s.span, LocalKind::Hidden));
+                let hidden = [(); 4].map(|_| self.new_local(None, s.span, LocalKind::Hidden));
                 self.open_scope();
                 let mut locals = Vec::with_capacity(vars.len());
                 for (i, v) in vars.iter().enumerate() {

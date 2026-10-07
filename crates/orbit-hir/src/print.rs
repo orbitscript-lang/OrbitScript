@@ -66,6 +66,7 @@ impl Printer<'_> {
                 LocalKind::Const => " const",
                 LocalKind::ForControl => " for",
                 LocalKind::Hidden => " hidden",
+                LocalKind::Close => " close",
             };
             let name = l.name.map(|n| self.s(n)).unwrap_or_else(|| "_".into());
             let _ = writeln!(

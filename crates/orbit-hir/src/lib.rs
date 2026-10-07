@@ -82,6 +82,10 @@ pub struct Function {
     pub locals: Vec<Local>,
     /// Filled by capture analysis; front ends leave it empty.
     pub captures: Vec<Capture>,
+    /// Filled by capture analysis when capture 0 is the environment: how many
+    /// other captures are first used before it. Debug interfaces list captures
+    /// in first-use order, so this is where `_ENV` appears there.
+    pub env_debug_index: Option<u8>,
     pub exprs: Vec<Expr>,
     pub stmts: Vec<Stmt>,
     pub blocks: Vec<Block>,
@@ -104,6 +108,7 @@ impl Function {
             vararg_table_elided: false,
             locals: Vec::new(),
             captures: Vec::new(),
+            env_debug_index: None,
             exprs: Vec::new(),
             stmts: Vec::new(),
             blocks: vec![Block {
@@ -224,8 +229,14 @@ pub enum LocalKind {
     Const,
     /// A numeric or generic `for` control variable (read-only in Lua 5.5).
     ForControl,
-    /// Compiler-owned state with no source name, such as a generic `for`'s iterator triple.
+    /// Compiler-owned state with no source name, such as a generic `for`'s iterator state.
     Hidden,
+    /// Read-only, and closed when it goes out of scope by any exit (`<close>` in Lua): its
+    /// value's `__close` metamethod runs, unless the value is nil or false. Every exit from
+    /// its scope (falling through, `break`, `goto`, `return`, an error) closes it; the HIR has
+    /// no explicit close statements. OrbitScript would use it for a `defer`- or `with`-style
+    /// scoped resource.
+    Close,
 }
 
 /// A `goto` target. Front ends check visibility and scoping rules before lowering.
@@ -307,11 +318,13 @@ pub enum StmtKind {
         step: Option<ExprId>,
         body: BlockId,
     },
-    /// `hidden` holds the iterator function, state and control value, in that order.
+    /// `hidden` holds the iterator function, state, control value and closing value, in that
+    /// order. The closing value (the fourth value of `iter`) is closed like a `Close` local when
+    /// the loop ends by any exit.
     GenericFor {
         vars: Vec<LocalId>,
         iter: ExprList,
-        hidden: [LocalId; 3],
+        hidden: [LocalId; 4],
         body: BlockId,
     },
     /// Defines globals: like `Assign`, but each store first reads its target and raises
