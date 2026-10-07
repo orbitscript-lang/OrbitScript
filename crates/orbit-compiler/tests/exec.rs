@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{CaptureSource, Constant, MULTI, Op, UnlinkedChunk};
 use orbit_compiler::{compile, disassemble};
 
@@ -49,6 +50,13 @@ impl V {
             V::Int(i) => Some(*i as f64),
             V::Float(x) => Some(*x),
             _ => None,
+        }
+    }
+    fn int(&self) -> Result<i64, String> {
+        match self {
+            V::Int(i) => Ok(*i),
+            V::Float(x) if x.fract() == 0.0 && x.abs() < 9.2e18 => Ok(*x as i64),
+            _ => Err("attempt to perform bitwise operation".into()),
         }
     }
     fn key(&self) -> Result<Key, String> {
@@ -277,6 +285,20 @@ impl Interp {
                     let env = c.caps[0].borrow().clone();
                     self.set(&env, &self.konst(pi, name), r[src as usize].clone())?;
                 }
+                Op::CheckUndefined { src, name } => {
+                    if !matches!(r[src as usize], V::Nil) {
+                        let V::Str(n) = self.konst(pi, name) else {
+                            unreachable!()
+                        };
+                        return Err(format!(
+                            "global '{}' already defined",
+                            String::from_utf8_lossy(&n)
+                        ));
+                    }
+                }
+                Op::VarargTable { .. } | Op::VarargGet { .. } | Op::VarargUnpack { .. } => {
+                    return Err(format!("{op:?} is not covered by this test interpreter"));
+                }
                 Op::NewTable { dst, .. } => r[dst as usize] = V::Table(Rc::default()),
                 Op::GetField { dst, obj, key, .. } => {
                     r[dst as usize] = self.index(&r[obj as usize], &self.konst(pi, key))?
@@ -335,6 +357,22 @@ impl Interp {
                     }
                 }
                 Op::Not { dst, src } => r[dst as usize] = V::Bool(!r[src as usize].truthy()),
+                Op::BAnd { dst, a, b }
+                | Op::BOr { dst, a, b }
+                | Op::BXor { dst, a, b }
+                | Op::Shl { dst, a, b }
+                | Op::Shr { dst, a, b } => {
+                    let bit = match op {
+                        Op::BAnd { .. } => BitOp::And,
+                        Op::BOr { .. } => BitOp::Or,
+                        Op::BXor { .. } => BitOp::Xor,
+                        Op::Shl { .. } => BitOp::Shl,
+                        _ => BitOp::Shr,
+                    };
+                    let (x, y) = (r[a as usize].int()?, r[b as usize].int()?);
+                    r[dst as usize] = V::Int(bit.apply(x, y));
+                }
+                Op::BNot { dst, src } => r[dst as usize] = V::Int(!r[src as usize].int()?),
                 Op::Len { dst, src } => {
                     let n = match &r[src as usize] {
                         V::Str(s) => s.len() as i64,

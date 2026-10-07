@@ -316,6 +316,83 @@ impl Vm {
         }
     }
 
+    /// `VarargTable`: `{n = count, ...}` of the frame's extra arguments.
+    #[inline(never)]
+    pub(crate) fn op_vararg_table(&mut self, base: usize, nvarargs: usize) -> Value {
+        let t = self.heap.alloc(Table::with_capacity(nvarargs, 1));
+        for i in 0..nvarargs {
+            let v = self.rt.stack.regs[base - nvarargs + i];
+            table::set_int(&mut self.heap, t, i as i64 + 1, v);
+        }
+        let n = self.rt.strings.new_str(&mut self.heap, b"n");
+        let key = Key::str(&self.heap, n);
+        table::set_key(&mut self.heap, t, &key, Value::Int(nvarargs as i64));
+        Value::Table(t)
+    }
+
+    /// `VarargGet`: what the vararg table would hold at `key`.
+    #[inline(never)]
+    pub(crate) fn op_vararg_get(&self, base: usize, nvarargs: usize, key: Value) -> Value {
+        let i = match key {
+            Value::Int(i) => i,
+            Value::Float(x) => match orbit_core::number::float_to_int(x) {
+                Some(i) => i,
+                None => return Value::Nil,
+            },
+            Value::Str(s) if self.heap.get(s).as_bytes() == b"n" => {
+                return Value::Int(nvarargs as i64);
+            }
+            _ => return Value::Nil,
+        };
+        if (1..=nvarargs as i64).contains(&i) {
+            self.rt.stack.regs[base - nvarargs + i as usize - 1]
+        } else {
+            Value::Nil
+        }
+    }
+
+    /// `VarargUnpack`: like `Vararg`, from the vararg table `table`.
+    #[inline(never)]
+    pub(crate) fn op_vararg_unpack(
+        &mut self,
+        base: usize,
+        table: Value,
+        dst: usize,
+        count: u8,
+    ) -> Result<(), Exc> {
+        let Value::Table(t) = table else {
+            unreachable!("the vararg table is a read-only local")
+        };
+        let key = self.rt.strings.new_str(&mut self.heap, b"n");
+        let n = match self.heap.get(t).get_str(&self.heap, key) {
+            Value::Int(n) if (0..1 << 30).contains(&n) => n as usize,
+            _ => return Err(Exc::Rt("vararg table has no proper 'n'".into(), None)),
+        };
+        let to = base + dst;
+        let count = if count == MULTI {
+            if to + n > self.rt.limits.max_stack {
+                return Err(Exc::Rt("stack overflow".into(), None));
+            }
+            let regs = &mut self.rt.stack.regs;
+            if regs.len() < to + n {
+                regs.resize(to + n, Value::Nil);
+            }
+            self.rt.top = to + n;
+            n
+        } else {
+            count as usize
+        };
+        let tab = self.heap.get(t);
+        for i in 0..count {
+            self.rt.stack.regs[to + i] = if i < n {
+                tab.get_int(i as i64 + 1)
+            } else {
+                Value::Nil
+            };
+        }
+        Ok(())
+    }
+
     /// `ForPrep` on the loop state at stack index `at`. Returns whether the
     /// loop runs at all.
     #[inline(never)]
@@ -442,6 +519,16 @@ pub(crate) fn set_str_miss(
         }
         Ok(())
     }
+}
+
+/// `global x = v` found `x` already set.
+#[cold]
+#[inline(never)]
+pub(crate) fn already_defined(name: &[u8]) -> Exc {
+    Exc::Rt(
+        format!("global '{}' already defined", String::from_utf8_lossy(name)),
+        None,
+    )
 }
 
 /// `_ENV` isn't a table.

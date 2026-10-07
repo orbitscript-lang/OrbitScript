@@ -50,6 +50,14 @@ impl LuaError {
     }
 }
 
+/// Compiles source text into an unlinked chunk, for `load`, `loadfile`,
+/// `dofile` and `require`. `chunk_name` is the name messages use
+/// (`script.lua` in `script.lua:3:`); an error is the complete message.
+/// The embedder installs it in [`Runtime::compile`] (`orbit::Lua` installs
+/// the Lua front end), so the VM and the libraries don't depend on a front
+/// end and a host can leave the compiler out.
+pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
+
 /// Configurable limits.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -147,11 +155,20 @@ pub(crate) struct Stack {
 pub struct Runtime {
     pub strings: Interner,
     pub globals: Gc<Table>,
+    /// A table for library state only Rust code reaches, under string
+    /// keys (`_LOADED`, `_PRELOAD`, io's default files), with the global
+    /// table at index 2 as in the reference. A root.
+    pub registry: Gc<Table>,
     pub limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
     pub out: Box<dyn WriteDebug>,
     /// When the VM started (for `os.clock`).
     pub start: Instant,
+    /// Per-VM state of host libraries, one value per type (the `math`
+    /// library's random generator, for example).
+    pub ext: Extensions,
+    /// The source compiler, if the host installed one.
+    pub compile: Option<CompileFn>,
     pub(crate) natives: Vec<Native>,
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId>,
     pub(crate) stack: Stack,
@@ -165,6 +182,32 @@ pub struct Runtime {
     pub(crate) metas: meta::Metas,
 }
 
+/// Library state kept per VM, keyed by type. It holds plain Rust data, never
+/// GC values (it is not traced).
+#[derive(Default)]
+pub struct Extensions {
+    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
+}
+
+impl Extensions {
+    /// The value of type `T`, created with `init` on first use.
+    pub fn get_or_insert_with<T: 'static>(&mut self, init: impl FnOnce() -> T) -> &mut T {
+        self.map
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| Box::new(init()))
+            .downcast_mut::<T>()
+            .expect("extension stored under its own TypeId")
+    }
+}
+
+impl fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extensions")
+            .field("len", &self.map.len())
+            .finish()
+    }
+}
+
 /// `Write` that can be printed with `{:?}`.
 pub trait WriteDebug: Write + fmt::Debug {}
 impl<T: Write + fmt::Debug> WriteDebug for T {}
@@ -172,6 +215,7 @@ impl<T: Write + fmt::Debug> WriteDebug for T {}
 impl Roots<LuaSpace> for Runtime {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         m.mark(self.globals);
+        m.mark(self.registry);
         m.mark(self.dead_cell);
         for &v in &self.stack.regs {
             mark(m, v);
@@ -221,6 +265,9 @@ impl Vm {
     pub fn new() -> Self {
         let mut heap = LuaHeap::new();
         let globals = heap.alloc(Table::new());
+        let mut reg = Table::new();
+        reg.set_int(2, Value::Table(globals));
+        let registry = heap.alloc(reg);
         let dead_cell = heap.alloc(Cell::default());
         let mut strings = Interner::new();
         let events = meta::Events::new(&mut heap, &mut strings);
@@ -229,9 +276,12 @@ impl Vm {
             rt: Runtime {
                 strings,
                 globals,
+                registry,
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 start: Instant::now(),
+                ext: Extensions::default(),
+                compile: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
                 stack: Stack::default(),
