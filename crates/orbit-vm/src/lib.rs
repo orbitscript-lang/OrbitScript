@@ -10,6 +10,7 @@
 
 mod cold;
 mod coro;
+mod gc;
 mod interp;
 mod link;
 mod meta;
@@ -28,6 +29,7 @@ use orbit_core::{
 use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::CoStatus;
+pub use gc::{GcMode, GcParam, GcState, finalize_then_return};
 pub use meta::Event;
 pub use native::{CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
@@ -267,6 +269,9 @@ pub struct Runtime {
     pub(crate) top: usize,
     /// Event names and per-type metatables.
     pub(crate) metas: meta::Metas,
+    /// Collector mode and parameters as `collectgarbage` sees them, and
+    /// finalizer bookkeeping.
+    pub gc: GcState,
     /// The thread whose stack is `stack`.
     pub(crate) current: Gc<Thread>,
     pub(crate) main_thread: Gc<Thread>,
@@ -381,6 +386,7 @@ impl Vm {
         let dead_cell = heap.alloc(Cell::default());
         let mut strings = Interner::new();
         let events = meta::Events::new(&mut heap, &mut strings);
+        let gc = GcState::new(&heap);
         let main_thread = heap.alloc(Thread::new(coro::Coroutine::main()));
         Vm {
             heap,
@@ -404,6 +410,7 @@ impl Vm {
                     events,
                     type_meta: Default::default(),
                 },
+                gc,
                 current: main_thread,
                 main_thread,
                 resumers: Vec::new(),
@@ -491,13 +498,9 @@ impl Vm {
     }
 
     /// Set (or clear) the metatable of table `t` or userdata `u`.
+    /// Registers `v` for finalization when `meta` has a `__gc` field.
     pub fn set_metatable(&mut self, v: Value, meta: Option<Gc<Table>>) -> bool {
-        match v {
-            Value::Table(t) => self.heap.update(t, |t| t.meta = meta),
-            Value::UserData(u) => self.heap.update(u, |u| u.meta = meta),
-            _ => return false,
-        }
-        true
+        orbit_core::gc::set_metatable(&mut self.heap, v, meta)
     }
 
     /// Keep `v` alive until [`Vm::unpin`].

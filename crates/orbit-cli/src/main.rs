@@ -44,6 +44,9 @@ fn main() -> ExitCode {
     }
 
     let mut lua = Lua::new();
+    // The standalone lua5.5 reports generational mode from the start. The
+    // incremental collector runs underneath either way.
+    lua.vm().rt.gc.mode = orbit::GcMode::Generational;
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         lua.vm().heap.set_stress(true);
     }
@@ -71,10 +74,15 @@ fn main() -> ExitCode {
     }
     let result = lua.call(f, &call_args);
     let _ = lua.vm().flush();
-    match result {
+    let code = match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => fail(&mut lua, &prog, e),
-    }
+    };
+    // Like lua5.5, close the state on the way out, even after an error:
+    // every object with a `__gc` still registered is finalized.
+    lua.vm().close();
+    let _ = lua.vm().flush();
+    code
 }
 
 fn set_arg_table(vm: &mut orbit::Vm, prog: &str, script_and_args: &[String]) {

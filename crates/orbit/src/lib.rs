@@ -13,7 +13,7 @@ use orbit_lua_syntax::ParseOptions;
 
 pub use orbit_core::Value;
 pub use orbit_stdlib::{chunk_id, read_chunk_file};
-pub use orbit_vm::{LuaError, Vm};
+pub use orbit_vm::{GcMode, LuaError, Vm};
 
 /// The runtime version, taken from the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
