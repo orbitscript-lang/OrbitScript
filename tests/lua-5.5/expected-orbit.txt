@@ -2,6 +2,7 @@
 #   cargo testkit conformance --interp ... --expect tests/lua-5.5/expected-orbit.txt --update-expected
 api.lua
 big.lua
+bitwise.lua
 closure.lua
 code.lua
 constructs.lua

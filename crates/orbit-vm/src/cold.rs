@@ -171,7 +171,14 @@ impl Vm {
             | Op::Mod { dst, .. }
             | Op::Pow { dst, .. }
             | Op::AddInt { dst, .. }
+            | Op::SubInt { dst, .. }
             | Op::Neg { dst, .. }
+            | Op::BAnd { dst, .. }
+            | Op::BOr { dst, .. }
+            | Op::BXor { dst, .. }
+            | Op::Shl { dst, .. }
+            | Op::Shr { dst, .. }
+            | Op::BNot { dst, .. }
             | Op::Len { dst, .. } => MetaAction::Store { dst },
             Op::SetGlobal { .. }
             | Op::SetField { .. }

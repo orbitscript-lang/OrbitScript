@@ -120,6 +120,11 @@ pub(crate) fn fold_arith(op: BinOp, a: ConstVal, b: ConstVal) -> Option<ConstVal
             bit.apply(x.to_int_exact()?, y.to_int_exact()?),
         ));
     }
+    // `x - k` with an integer constant `k` adds `-k`, as the VM's `SubInt` does; that is
+    // visible only for `-0.0 - 0`, which lua5.5 makes `0.0`.
+    if let (BinOp::Sub, Number::Float(f), Number::Int(0)) = (op, x, y) {
+        return Some(ConstVal::Float(f + 0.0));
+    }
     let op = match op {
         BinOp::Add => ArithOp::Add,
         BinOp::Sub => ArithOp::Sub,

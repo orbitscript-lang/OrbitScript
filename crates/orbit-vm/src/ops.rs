@@ -177,12 +177,38 @@ fn bit_operand(v: Value) -> Option<Option<i64>> {
     }
 }
 
+fn bit_event(op: BitOp) -> Event {
+    match op {
+        BitOp::And => Event::BAnd,
+        BitOp::Or => Event::BOr,
+        BitOp::Xor => Event::BXor,
+        BitOp::Shl => Event::Shl,
+        BitOp::Shr => Event::Shr,
+    }
+}
+
 /// A bitwise operator for everything the integer fast path doesn't cover: floats with integer
-/// values convert, other numbers and non-numbers are errors. Strings are not coerced (Lua 5.5
-/// leaves that to string metamethods). Metamethods (`__band` .. `__shr`) plug in here.
-pub(crate) fn bitwise_slow(_heap: &LuaHeap, op: BitOp, a: Value, b: Value) -> Result<Value, Exc> {
-    match (bit_operand(a), bit_operand(b)) {
-        (Some(Some(x)), Some(Some(y))) => Ok(Value::Int(op.apply(x, y))),
+/// values convert; otherwise the operands' `__band` .. `__shr` metamethod runs, and without one
+/// other numbers and non-numbers are errors. Strings are not coerced (Lua 5.5 leaves that to
+/// string metamethods).
+pub(crate) fn bitwise_slow(
+    heap: &LuaHeap,
+    rt: &Metas,
+    op: BitOp,
+    a: Value,
+    b: Value,
+) -> Result<Value, Exc> {
+    let (x, y) = (bit_operand(a), bit_operand(b));
+    if let (Some(Some(x)), Some(Some(y))) = (x, y) {
+        return Ok(Value::Int(op.apply(x, y)));
+    }
+    let e = bit_event(op);
+    let h = meta::binary_handler(heap, rt, e, a, b);
+    if !h.is_nil() {
+        return Err(Exc::Meta(MetaCall::new(h, e, &[a, b])));
+    }
+    match (x, y) {
+        (Some(Some(_)), Some(Some(_))) => unreachable!("handled above"),
         (Some(None), Some(_)) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(0))),
         (Some(_), Some(None)) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(1))),
         (Some(_), None) => Err(bitwise_type_error(b, 1)),
@@ -190,10 +216,19 @@ pub(crate) fn bitwise_slow(_heap: &LuaHeap, op: BitOp, a: Value, b: Value) -> Re
     }
 }
 
-/// `~a` for everything but an integer. Metamethods (`__bnot`) plug in here.
-pub(crate) fn bnot_slow(_heap: &LuaHeap, a: Value) -> Result<Value, Exc> {
-    match bit_operand(a) {
-        Some(Some(x)) => Ok(Value::Int(!x)),
+/// `~a` for everything but an integer: a float with an integer value converts; otherwise
+/// `__bnot` runs (with `a` as both operands), and without it this is an error.
+pub(crate) fn bnot_slow(heap: &LuaHeap, rt: &Metas, a: Value) -> Result<Value, Exc> {
+    let x = bit_operand(a);
+    if let Some(Some(x)) = x {
+        return Ok(Value::Int(!x));
+    }
+    let h = rt.metamethod(heap, a, Event::BNot);
+    if !h.is_nil() {
+        return Err(Exc::Meta(MetaCall::new(h, Event::BNot, &[a, a])));
+    }
+    match x {
+        Some(Some(_)) => unreachable!("handled above"),
         Some(None) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(0))),
         None => Err(bitwise_type_error(a, 0)),
     }
