@@ -28,7 +28,8 @@ pub struct Params {
     /// percent.
     pub work_ratio: u32,
     /// Bytes allocated between steps while a cycle runs. Smaller steps
-    /// mean shorter pauses and more of them.
+    /// mean shorter pauses and more of them. 0 makes every step finish the
+    /// cycle it is in: stop-the-world collection.
     pub step_bytes: usize,
     /// A floor under the heap size that starts a cycle, so small programs
     /// collect less often. 0 by default: with a floor, a small heap can't
@@ -509,12 +510,40 @@ impl<S: Space> Heap<S> {
     /// Do one increment of collection work, proportional to the allocation
     /// debt. Returns true if this step finished a cycle.
     pub fn step<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) -> bool {
-        let mut work = if self.stress {
+        let work = if self.stress {
             STRESS_WORK
         } else {
             let debt = self.debt.max(self.params.step_bytes as isize) as usize;
-            (debt.saturating_mul(self.params.work_ratio as usize) / 100).max(1)
+            self.work_for(debt)
         };
+        self.step_work(roots, work)
+    }
+
+    /// Do one increment of collection work as if `bytes` had been
+    /// allocated, whatever the debt; 0 means one [`Params::step_bytes`]
+    /// worth. Lua's `collectgarbage("step", n)`. Works while the collector
+    /// is [stopped](Heap::stop), and doesn't restart it. Returns true if this
+    /// step finished a cycle.
+    pub fn step_with<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, bytes: usize) -> bool {
+        let bytes = if bytes == 0 {
+            self.params.step_bytes
+        } else {
+            bytes
+        };
+        let work = self.work_for(bytes);
+        self.step_work(roots, work)
+    }
+
+    /// Bytes of heap to process for `bytes` of allocation. With
+    /// [`Params::step_bytes`] 0, a step finishes its cycle.
+    fn work_for(&self, bytes: usize) -> usize {
+        if self.params.step_bytes == 0 {
+            return usize::MAX;
+        }
+        (bytes.saturating_mul(self.params.work_ratio as usize) / 100).max(1)
+    }
+
+    fn step_work<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, mut work: usize) -> bool {
         loop {
             match self.state {
                 State::Pause => self.start_marking(roots),

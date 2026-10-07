@@ -623,11 +623,14 @@ fn generic_for_and_break() {
                 nargs: 1,
                 nresults: 4
             },
+            // The closing value.
+            Op::Tbc { reg: 3 },
             Op::Jump { off: 2 },
             Op::JumpIfFalse { src: 5, off: 1 },
             Op::Jump { off: 2 },
             Op::GenericCall { base: 0, nvars: 2 },
             Op::GenericLoop { base: 0, back: -4 },
+            Op::Close { from: 3 },
             Op::Return0,
         ]
     );

@@ -1,0 +1,76 @@
+local function p(...) print(pcall(...)) end
+p(string.find, "hello world", "o w")
+p(string.find, "hello world", "(o)(r)")
+p(string.find, "hello", "l", -2)
+p(string.find, "a.b", ".", 1, true)
+p(string.match, "key = value", "(%w+)%s*=%s*(%w+)")
+p(string.match, "  x", "()x")
+p(string.match, "hello", ".-(l+)(.*)")
+p(string.gsub, "hello world", "(o)", "[%1%0]")
+p(string.gsub, "abc", "", "-")
+p(string.gsub, "abc", "b*", "-")
+p(string.gsub, "aaa", "^a", "b")
+p(string.gsub, "abc", "%w", "%0%0", 2)
+p(string.gsub, "abc", "%w", {a=1, b=false})
+p(string.gsub, "abc", "%w", function(c) if c == "b" then return nil end return c .. "!" end)
+p(string.gsub, "hello world", "%w+", function(w) return string.upper(w) end)
+p(string.gsub, "abc", "(b)", {b=true})
+p(string.gsub, "abc", ".", "%2")
+p(string.gsub, "abc", ".", "%")
+p(string.gsub, "", "", "x")
+p(string.gsub, "x = 1, y = 2", "(%w+) = (%w+)", "%2 = %1")
+p(string.gsub, "abc", "^", "x")
+p(string.gsub, "a b c", " ", "", -1)
+p(string.find, "THE (quick) fox", "%((%a+)%)")
+p(string.find, "[[]] [][] [[[[", "%f[[].")
+p(string.gsub, "aaa aa a aaa a", "%f[%w]a", "x")
+p(string.rep, "ab", 3, ",")
+p(string.reverse, "abc") p(string.upper, "aBc1") p(string.lower, "ABc")
+p(string.format, "%5.2f|%e|%g|%g|%g|%g|%#g|%.0e|%#.0f|%G", 3.14159, 12345.678, 1e20, 1e-5, 123456789, 0.0001, 1.0, 5.5, 2.0, 1e-10)
+p(string.format, "%.3f %.20g %g %g %.14g", 2.5, 0.1, 100000, 1e6, 2^53)
+p(string.format, "%q", "\r\n\t\1\0012\127\255x\"\\")
+p(string.format, "%s|%10.4s|", 12.0, 1e100)
+p(string.format, "%i|%5.1f|%-8.3e|% d|%+d", 3.0, -0.05, 1/3, 5, 5)
+p(string.format, "%#12o|%#10x|%#-17X|%013i|%2.5d|%.u|%-16c|", 10, 100, 100, -100, -100, 0, 97)
+p(string.format, "%a %A %.3a %a %a %.0a %.1a %#a", 1.0, 255.5, 1/3, 0.0, -0.0, 1.5, 1.96875, 1.0)
+p(string.format, "%q %q %q %q %q %q", 0.1, math.mininteger, 1/0, 0/0, -1/0, 1e100)
+p(string.format, "%5.1s|%c|%x|%X|%o", "abc", 65, 255, 255, 8)
+p(string.format, "%100.3d", 1) p(string.format, "%10q", 1) p(string.format, "%5%", 1) p(string.format, "%d %d", 1)
+p(string.format, "%10s", "a\0") p(string.format, "%d", 1.5) p(string.format, "%y")
+p(string.format, "%.99f", 1/3)
+p(string.format, "%5.3s|%-5s|%05d|%+05d|% 05.1f|%-+8.2f|", "abcdef", "ab", 42, 42, 3.14159, 2.5)
+p(string.format, "%g %g %g %g %g", 0/0, -(0/0), 1/0, -1/0, -0.0)
+p(string.format, "%.3g %.10g %#.3g %g %g", 1234567, 1/3, 1, 1e15, 123456)
+
+-- Error order: integer and e/f/g conversions check the argument before the
+-- spec, %a and %c/%s/%p/%q check the spec first; an unfinished capture is
+-- an error only where a result uses it.
+do
+for _, c in ipairs{"d", "i", "u", "o", "x", "X", "c", "a", "e", "f", "g", "s", "p", "q"} do
+  local function t(spec, v) local ok, e = pcall(string.format, spec, v) print(spec, tostring(v), ok, e) end
+  t("%#!" .. c, {})
+  t("%#" .. c, {})
+  t("%.3" .. c, {})
+  t("%5.3" .. c, nil)
+end
+end
+do
+for _, spec in ipairs{"%123d", "%.123d", "%.99d", "%99.99d", "%-+ #0d", "%--5d", "%000005d", "%.180A", "%1234s", "%#.123c"} do
+  print(spec, pcall(string.format, spec, {}))
+end
+end
+do
+for _, c in ipairs{"a", "A", "e", "E", "f", "g", "G"} do print(c, pcall(string.format, "%.180" .. c, {})) print(c, pcall(string.format, "%#!" .. c, {})) end
+print(pcall(string.find, "ab", "(()a"))
+print(pcall(string.find, "ab", "(a"))
+print(pcall(string.match, "ab", "(a"))
+print(pcall(string.gsub, "ab", "(a", "x"))
+print(pcall(string.gsub, "ab", "(a", "%0"))
+print(pcall(string.gsub, "ab", "(a", "%1"))
+print(pcall(string.gsub, "ab", "(a", {}))
+print(pcall(string.gsub, "ab", "(a", print))
+print(pcall(string.gsub, "ab", "(a)(b", "%1"))
+print(pcall(string.gsub, "ab", "(a)(b", "%2"))
+print(pcall(string.find, "ab", "(a)(b", 1, true))
+print(pcall(string.find, "ab", "a(b"))
+end

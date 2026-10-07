@@ -7,7 +7,10 @@ use orbit_vm::orbit_core::Value;
 use orbit_vm::orbit_core::number::str_to_number;
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::value::raw_eq;
-use orbit_vm::{CallOutcome, Event, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_vm::{
+    CallOutcome, Event, GcMode, GcParam, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm,
+    finalize_then_return,
+};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -177,7 +180,7 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
     if !ctx.metamethod(Value::Table(t), Event::Metatable).is_nil() {
         return Err(ctx.error("cannot change a protected metatable"));
     }
-    ctx.heap.update(t, |t| t.meta = mt);
+    orbit_vm::orbit_core::gc::set_metatable(ctx.heap, Value::Table(t), mt);
     ctx.ret1(Value::Table(t))
 }
 
@@ -495,6 +498,11 @@ fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret1(Value::Int(n))
 }
 
+/// `collectgarbage` ([GC semantics design]). Inside a finalizer it does
+/// nothing and returns `nil` (`-1` for `"param"`), as in Lua, so the
+/// collector is never re-entered.
+///
+/// [GC semantics design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/gc-semantics.md
 fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
     let opt = match ctx.arg(0) {
         Value::Nil => b"collect".to_vec(),
@@ -503,18 +511,53 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             ctx.bytes(s).to_vec()
         }
     };
+    const OPTIONS: &[&[u8]] = &[
+        b"collect",
+        b"count",
+        b"step",
+        b"stop",
+        b"restart",
+        b"isrunning",
+        b"incremental",
+        b"generational",
+        b"param",
+    ];
+    if !OPTIONS.contains(&&opt[..]) {
+        let msg = format!("invalid option '{}'", String::from_utf8_lossy(&opt));
+        return Err(ctx.arg_error(0, msg));
+    }
+    if ctx.rt.gc.finalizing() {
+        let v = if &opt[..] == b"param" {
+            Value::Int(-1)
+        } else {
+            Value::Nil
+        };
+        return ctx.ret1(v);
+    }
     match &opt[..] {
         b"collect" => {
             ctx.full_collect();
-            ctx.ret1(Value::Int(0))
+            finalize_then_return(ctx, Value::Int(0))
         }
         b"count" => {
             let kb = ctx.heap.bytes() as f64 / 1024.0;
             ctx.ret1(Value::Float(kb))
         }
         b"step" => {
-            let done = ctx.heap.step(ctx.rt);
-            ctx.ret1(Value::Bool(done))
+            let kb = ctx.opt_int(1, 0)?;
+            let done = match ctx.rt.gc.mode {
+                // A minor collection collects all young garbage; ours
+                // collects all garbage.
+                GcMode::Generational => {
+                    ctx.full_collect();
+                    false
+                }
+                GcMode::Incremental => {
+                    let bytes = usize::try_from(kb).unwrap_or(0).saturating_mul(1024);
+                    ctx.heap.step_with(ctx.rt, bytes)
+                }
+            };
+            finalize_then_return(ctx, Value::Bool(done))
         }
         b"stop" => {
             ctx.heap.stop();
@@ -528,9 +571,32 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             let running = !ctx.heap.is_stopped();
             ctx.ret1(Value::Bool(running))
         }
-        other => {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(other));
-            Err(ctx.arg_error(0, msg))
+        b"incremental" | b"generational" => {
+            let mode = if &opt[..] == b"incremental" {
+                GcMode::Incremental
+            } else {
+                GcMode::Generational
+            };
+            let old = std::mem::replace(&mut ctx.rt.gc.mode, mode);
+            let v = ctx.new_str(old.name().as_bytes());
+            ctx.ret1(v)
+        }
+        _ => {
+            let name = ctx.check_str(1)?;
+            let Some(p) = GcParam::from_name(ctx.bytes(name)) else {
+                let msg = format!(
+                    "invalid option '{}'",
+                    String::from_utf8_lossy(ctx.bytes(name))
+                );
+                return Err(ctx.arg_error(1, msg));
+            };
+            let v = ctx.opt_int(2, -1)?;
+            let old = if v >= 0 {
+                ctx.rt.gc.set_param(ctx.heap, p, v)
+            } else {
+                ctx.rt.gc.param(p)
+            };
+            ctx.ret1(Value::Int(old))
         }
     }
 }
