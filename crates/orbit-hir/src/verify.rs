@@ -5,8 +5,8 @@
 use std::fmt;
 
 use crate::{
-    BlockId, CaptureFrom, CaptureId, Chunk, ExprId, ExprKind, ExprList, FuncId, Function, LocalId,
-    Place, StmtId, StmtKind,
+    BlockId, CaptureFrom, CaptureId, Chunk, ExprId, ExprKind, ExprList, FuncId, Function, LabelId,
+    LocalId, Place, StmtId, StmtKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +65,7 @@ struct Checker<'a> {
     seen_stmts: Vec<bool>,
     seen_blocks: Vec<bool>,
     declared: Vec<bool>,
+    placed: Vec<bool>,
     loops: u32,
 }
 
@@ -80,6 +81,7 @@ impl<'a> Checker<'a> {
             seen_stmts: vec![false; f.stmts.len()],
             seen_blocks: vec![false; f.blocks.len()],
             declared: vec![false; f.locals.len()],
+            placed: vec![false; f.labels.len()],
             loops: 0,
         }
     }
@@ -97,6 +99,9 @@ impl<'a> Checker<'a> {
             self.declare(t)?;
         }
         self.block(self.f.body)?;
+        if let Some(i) = self.placed.iter().position(|p| !p) {
+            return Err(format!("label {i} is never placed"));
+        }
         if let Some(i) = self.declared.iter().position(|d| !d) {
             return Err(format!("local {i} is never declared"));
         }
@@ -186,6 +191,13 @@ impl<'a> Checker<'a> {
             return Err("uses a global but capture 0 isn't the environment".into());
         }
         Ok(())
+    }
+
+    fn label(&self, l: LabelId) -> Check {
+        if l.index() >= self.f.labels.len() {
+            return Err(format!("label {} out of range", l.0));
+        }
+        self.string(self.f.labels[l.index()].name)
     }
 
     fn local(&self, l: LocalId) -> Check {
@@ -358,6 +370,13 @@ impl<'a> Checker<'a> {
                     return Err("generic for with no variables".into());
                 }
                 self.loop_body(*body)?;
+            }
+            StmtKind::Goto(l) => self.label(*l)?,
+            StmtKind::Label(l) => {
+                self.label(*l)?;
+                if std::mem::replace(&mut self.placed[l.index()], true) {
+                    return Err(format!("label {} placed twice", l.0));
+                }
             }
             StmtKind::Break => {
                 if self.loops == 0 {
