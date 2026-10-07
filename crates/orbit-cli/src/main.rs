@@ -28,18 +28,18 @@ fn main() -> ExitCode {
         eprintln!("usage: {prog} [--dump-ast|--dump-hir|--dump-bytecode] script.lua [args...]");
         return ExitCode::FAILURE;
     };
-    let src = match std::fs::read(script) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("{prog}: cannot open {script}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let options = ParseOptions {
-        skip_comment_line: true,
-        ..ParseOptions::default()
-    };
     if let Some(what) = dump {
+        let src = match std::fs::read(script) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("{prog}: cannot open {script}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let options = ParseOptions {
+            skip_comment_line: true,
+            ..ParseOptions::default()
+        };
         return dump_stage(&prog, &what, &src, script, &options);
     }
 
@@ -47,8 +47,17 @@ fn main() -> ExitCode {
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         lua.vm().heap.set_stress(true);
     }
+    // Read the script as `loadfile` does (byte-order mark, `#` first line).
+    let (src, source) = match orbit::read_chunk_file(Some(script.as_bytes())) {
+        Ok(r) => r,
+        Err(m) => {
+            eprintln!("{prog}: {m}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let name = orbit::chunk_id(&source);
     let script_args = &args[i + 1..];
-    let f = match lua.load_with(&src, script, &options) {
+    let f = match lua.load(&src, &name) {
         Ok(f) => f,
         Err(e) => return fail(&mut lua, &prog, e),
     };

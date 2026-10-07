@@ -539,21 +539,33 @@ impl Parser<'_> {
         is_local: bool,
     ) -> PResult<(Vec<AttName>, Vec<Expr>)> {
         let mut names = Vec::new();
-        let mut closes = usize::from(prefix.is_some_and(|a| a.kind == AttribKind::Close));
+        let mut closing = false;
         loop {
             let name = self.name()?;
             let attrib = self.opt_attrib()?;
-            if attrib.is_some_and(|a| a.kind == AttribKind::Close) {
-                closes += 1;
+            // A name's own attribute overrides the prefix one.
+            if is_local
+                && attrib
+                    .or(prefix)
+                    .is_some_and(|a| a.kind == AttribKind::Close)
+            {
+                if closing {
+                    // Reported at the end of the second declaration, as lua5.5 does.
+                    let span = span_from(name.span.start, self.prev_end);
+                    let line = self.line_of(self.prev_end.saturating_sub(1).max(span.start));
+                    return Err(Diagnostic::new(
+                        span,
+                        line,
+                        "multiple to-be-closed variables in local list",
+                        None,
+                    ));
+                }
+                closing = true;
             }
             names.push(AttName { name, attrib });
             if !self.test_punct(Punct::Comma)? {
                 break;
             }
-        }
-        if is_local && (closes > 1 || (closes == 1 && prefix.is_some() && names.len() > 1)) {
-            let span = span_from(names[0].name.span.start, self.prev_end);
-            return Err(self.error_at(span, "multiple to-be-closed variables in local list"));
         }
         let values = if self.test_punct(Punct::Assign)? {
             self.expr_list()?

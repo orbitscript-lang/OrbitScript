@@ -42,7 +42,6 @@ fn hex_value(c: u8) -> Option<u32> {
 
 enum NumError {
     Malformed,
-    HexFloat,
 }
 
 impl<'a> Lexer<'a> {
@@ -522,11 +521,6 @@ impl<'a> Lexer<'a> {
             Err(NumError::Malformed) => {
                 Err(self.error(start, "malformed number", Some(Near::Text(text.to_vec()))))
             }
-            Err(NumError::HexFloat) => Err(self.error(
-                start,
-                "hexadecimal floats are not supported yet",
-                Some(Near::Text(text.to_vec())),
-            )),
         }
     }
 }
@@ -614,7 +608,7 @@ fn convert_hex(text: &[u8]) -> Result<TokenKind, NumError> {
         return Err(NumError::Malformed);
     }
     if is_float {
-        return Err(NumError::HexFloat);
+        return Ok(TokenKind::Float(hex_float(text)));
     }
     // Hexadecimal integers wrap around modulo 2^64.
     let mut n: u64 = 0;
@@ -624,6 +618,130 @@ fn convert_hex(text: &[u8]) -> Result<TokenKind, NumError> {
             .wrapping_add(u64::from(hex_value(c).unwrap_or(0)));
     }
     Ok(TokenKind::Int(n as i64))
+}
+
+/// The value of a hexadecimal float numeral, given the already validated text after `0x`
+/// (`hex digits [. hex digits] [p [sign] decimal digits]`), rounded once to the nearest `f64`
+/// (ties to even), subnormals included.
+///
+/// `orbit_core::number` converts the same syntax for `tonumber`; the two share test vectors,
+/// not code, because the front end doesn't depend on the runtime.
+fn hex_float(text: &[u8]) -> f64 {
+    // Significant digits go into `mant` (up to 15 of them, 60 bits); later nonzero digits
+    // only set `sticky`. The value is `mant * 2^exp`, plus a little if `sticky`.
+    let mut mant: u64 = 0;
+    let mut digits = 0;
+    let mut sticky = false;
+    let mut exp: i64 = 0;
+    let mut i = 0;
+    let mut frac = false;
+    while i < text.len() {
+        let c = text[i];
+        if c == b'.' {
+            frac = true;
+        } else if let Some(d) = hex_value(c) {
+            if mant == 0 && d == 0 {
+                // Leading zeros carry no precision.
+                if frac {
+                    exp -= 4;
+                }
+            } else if digits < 15 {
+                mant = mant << 4 | u64::from(d);
+                digits += 1;
+                if frac {
+                    exp -= 4;
+                }
+            } else {
+                sticky |= d != 0;
+                if !frac {
+                    exp += 4;
+                }
+            }
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    if i < text.len() {
+        // `p [sign] digits`; the syntax was validated by the caller.
+        i += 1;
+        let neg = text[i] == b'-';
+        if matches!(text[i], b'+' | b'-') {
+            i += 1;
+        }
+        let mut e: i64 = 0;
+        for &c in &text[i..] {
+            e = (e * 10 + i64::from(c - b'0')).min(1 << 24);
+        }
+        exp += if neg { -e } else { e };
+    }
+    round_to_f64(mant, exp, sticky)
+}
+
+/// `mant * 2^exp` (plus less than one unit of `mant` when `sticky`) rounded to the nearest
+/// `f64`, ties to even.
+fn round_to_f64(mant: u64, exp: i64, sticky: bool) -> f64 {
+    if mant == 0 {
+        return 0.0;
+    }
+    let bits = 64 - i64::from(mant.leading_zeros());
+    // The value lies in [2^(top-1), 2^top).
+    let top = exp + bits;
+    if top > 1024 {
+        return f64::INFINITY;
+    }
+    // Bits we can keep: 53, fewer for subnormals (the least significant bit of any f64 is
+    // worth at least 2^-1074).
+    let keep = 53.min(top + 1074);
+    if keep <= 0 {
+        // Below half the smallest subnormal, or exactly half of it (a tie, rounding to 0).
+        let half = keep == 0 && mant.is_power_of_two() && !sticky;
+        return if keep == 0 && !half {
+            f64::from_bits(1)
+        } else {
+            0.0
+        };
+    }
+    let shift = bits - keep;
+    let (mut m, mut e) = (mant, exp);
+    if shift > 0 {
+        let dropped = mant & ((1u64 << shift) - 1);
+        let half = 1u64 << (shift - 1);
+        m = mant >> shift;
+        e += shift;
+        let above = dropped > half || (dropped == half && sticky);
+        if above || (dropped == half && !sticky && m & 1 == 1) {
+            m += 1;
+            if m >> keep != 0 && keep == 53 {
+                m >>= 1;
+                e += 1;
+            }
+        }
+    }
+    // Now `m` has at most 53 bits and `m * 2^e` is representable (or overflows).
+    if e + 64 - i64::from(m.leading_zeros()) > 1024 {
+        return f64::INFINITY;
+    }
+    scale(m as f64, e)
+}
+
+/// `x * 2^e` when the result is exactly representable, without double rounding.
+fn scale(mut x: f64, mut e: i64) -> f64 {
+    let pow2 = |k: i64| f64::from_bits(((1023 + k) as u64) << 52);
+    while e > 1000 {
+        x *= pow2(1000);
+        e -= 1000;
+    }
+    // Stay normal until the last step, so only the final, exact multiply goes subnormal.
+    while e < -1000 && x * pow2(-1000) >= f64::MIN_POSITIVE {
+        x *= pow2(-1000);
+        e += 1000;
+    }
+    while e < -1000 {
+        x *= 0.5;
+        e += 1;
+    }
+    x * pow2(e)
 }
 
 /// Appends `value` (at most 2^31 - 1) in UTF-8, extended to six bytes as Lua's `\u{...}` allows.
@@ -717,9 +835,58 @@ mod tests {
                 format!("s.lua:1: malformed number near '{near}'")
             );
         }
+    }
+
+    /// Hexadecimal floats, checked against the reference `lua5.5` (`%.17g` of each value).
+    /// `orbit_core::number` has the same table for `tonumber`.
+    #[test]
+    fn hex_floats() {
+        let cases: &[(&str, f64)] = &[
+            ("0x1p4", 16.0),
+            ("0x.8", 0.5),
+            ("0xA.8p1", 21.0),
+            ("0x1P-1", 0.5),
+            ("0x.1p4", 1.0),
+            ("0x10p-4", 1.0),
+            ("0x1.8", 1.5),
+            ("0x0.0p0", 0.0),
+            ("0x0p99999", 0.0),
+            ("0x1p-1074", 4.94065645841247e-324),
+            ("0x1p-1075", 0.0),
+            ("0x1.8p-1075", 4.94065645841247e-324),
+            ("0x1p-1076", 0.0),
+            ("0x3p-1076", 4.94065645841247e-324),
+            ("0x1p-1022", 2.2250738585072014e-308),
+            ("0x.fffffffffffffp-1022", 2.225073858507201e-308),
+            ("0x1p1023", 8.98846567431158e307),
+            ("0x1.fffffffffffffp1023", f64::MAX),
+            ("0x1.fffffffffffff8p1023", f64::INFINITY),
+            ("0x1p1024", f64::INFINITY),
+            ("0x123456789abcdef123p0", 3.358127276707303e20),
+            ("0x1.fffffffffffff8p0", 2.0),
+            ("0x1.fffffffffffff7p0", 1.9999999999999998),
+            ("0x1.00000000000008p0", 1.0),
+            ("0x1.000000000000080000001p0", 1.0000000000000002),
+            ("0x1.00000000000018p0", 1.0000000000000004),
+            ("0x0000000000000000000001p0", 1.0),
+            ("0x.00000000000000000000001p92", 1.0),
+            ("0xffffffffffffffffffffp0", 1.2089258196146292e24),
+        ];
+        for &(src, want) in cases {
+            match lex(src).unwrap().as_slice() {
+                [TokenKind::Float(got)] => {
+                    assert_eq!(got.to_bits(), want.to_bits(), "{src}: got {got:e}")
+                }
+                other => panic!("{src}: {other:?}"),
+            }
+        }
         assert_eq!(
-            lex("0x1p4").unwrap_err(),
-            "s.lua:1: hexadecimal floats are not supported yet near '0x1p4'"
+            lex("0x1p").unwrap_err(),
+            "s.lua:1: malformed number near '0x1p'"
+        );
+        assert_eq!(
+            lex("0x.p1").unwrap_err(),
+            "s.lua:1: malformed number near '0x.p1'"
         );
     }
 

@@ -13,11 +13,18 @@ orbit-core = { path = "../orbit-core" }
 orbit-vm = { path = "../orbit-vm" }
 
 [features]
-default = ["string", "utf8", "table", "math"]
+default = ["string", "utf8", "table", "math", "load", "os", "package"]
 string = []
 utf8 = []
 table = []
 math = []
+# `load`, `loadfile` and `dofile` (source chunks need the host to install a
+# compiler in `Runtime::compile`).
+load = []
+# The `os` library (without it, no `os` table at all).
+os = []
+# `require` and the `package` library.
+package = ["load"]
 
 [lints]
 workspace = true
