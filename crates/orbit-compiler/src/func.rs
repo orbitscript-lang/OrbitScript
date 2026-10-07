@@ -76,6 +76,8 @@ pub(crate) struct FuncState<'a> {
     free_cell: usize,
     ncells: usize,
     labels: Vec<LabelState>,
+    /// The compiler label for each HIR `goto` label, made on first use.
+    goto_labels: Vec<Option<Label>>,
     /// Break targets of the enclosing loops.
     pub loops: Vec<Label>,
     origins: Vec<OperandOrigin>,
@@ -125,6 +127,7 @@ impl<'a> FuncState<'a> {
             free_cell: 0,
             ncells: 0,
             labels: Vec::new(),
+            goto_labels: vec![None; f.labels.len()],
             loops: Vec::new(),
             origins: Vec::new(),
             debug_locals: Vec::new(),
@@ -145,6 +148,14 @@ impl<'a> FuncState<'a> {
             let r = self.alloc()?;
             self.active = self.free;
             self.declare(p, r)?;
+        }
+        if let Some(t) = f.vararg_table
+            && !f.vararg_table_elided
+        {
+            let r = self.alloc()?;
+            self.emit(Op::VarargTable { dst: r });
+            self.active = self.free;
+            self.declare(t, r)?;
         }
         self.block_stmts(f.body)?;
         let body = f.block(f.body);
@@ -259,6 +270,16 @@ impl<'a> FuncState<'a> {
     pub fn label(&mut self) -> Label {
         self.labels.push(LabelState::default());
         Label(self.labels.len() - 1)
+    }
+
+    /// The jump target for HIR label `l`.
+    pub fn goto_label(&mut self, l: orbit_hir::LabelId) -> Label {
+        if let Some(label) = self.goto_labels[l.index()] {
+            return label;
+        }
+        let label = self.label();
+        self.goto_labels[l.index()] = Some(label);
+        label
     }
 
     /// A label placed at the current position (a backward jump target).

@@ -2,11 +2,11 @@
 //!
 //! One walk over the AST builds one `hir::Function` per function body. Names resolve to a local
 //! of the current function, a local of an enclosing function (`Outer`, which the HIR's capture
-//! analysis turns into captures), or a global. This is also the subset gate: constructs outside
-//! the first-light subset fail here with `<construct> is not supported yet`.
+//! analysis turns into captures), or a global, following Lua 5.5's `global` declarations and
+//! `_ENV`. Constructs not implemented yet fail here with `<construct> is not supported yet`.
 
 use orbit_hir as hir;
-use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LocalId, LocalKind, Span, StrId};
+use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};
 
 use crate::ast::{self, Ast, AttribKind, ExprKind, Field, StmtKind};
 use crate::diag::Diagnostic;
@@ -32,7 +32,8 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
     lx.sym_env = lx.chunk.strings.intern(b"_ENV");
     let main = lx.begin_function(FunctionName::Main, chunk.span);
     lx.cur().f.is_vararg = true;
-    let body = lx.block_contents(&chunk.body)?;
+    let end_line = lx.block_end_line(&chunk.body);
+    let body = lx.labelled_block(&chunk.body, false, end_line, None)?;
     lx.cur().f.body = body;
     lx.end_function(main);
     Ok(lx.chunk)
@@ -41,8 +42,62 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
 struct FnCtx {
     id: FuncId,
     f: hir::Function,
-    /// Innermost last. Each scope lists the locals declared in it, in order.
-    scopes: Vec<Vec<(StrId, LocalId)>>,
+    /// Innermost last. Each scope lists the declarations made in it, in order.
+    scopes: Vec<Vec<Entry>>,
+    /// `goto` bookkeeping for each block being lowered, innermost last.
+    blocks: Vec<LabelBlock>,
+}
+
+/// What `goto` resolution needs to know about one block.
+struct LabelBlock {
+    /// Labels placed so far.
+    labels: Vec<PlacedLabel>,
+    /// Gotos waiting for a label further on, in this block or an enclosing one.
+    pending: Vec<PendingGoto>,
+    /// The declarations in the block: statement index and the first name declared.
+    decls: Vec<(usize, String)>,
+    /// A label at this statement index or later is at the end of the block (only labels
+    /// follow it), so it is outside the scope of the block's declarations.
+    void_tail: usize,
+    /// For each statement, where its run of consecutive labels starts.
+    run_start: Vec<usize>,
+    /// The statement being lowered.
+    current: usize,
+    /// The line of the block's last token, where its `goto` errors are reported.
+    end_line: u32,
+    /// The `goto` that jumps into a declaration's scope, reported when the block closes, with
+    /// the run of labels its target is in.
+    scope_error: Option<(String, usize)>,
+}
+
+struct PlacedLabel {
+    name: StrId,
+    id: LabelId,
+    index: usize,
+    line: u32,
+}
+
+struct PendingGoto {
+    name: StrId,
+    stmt: hir::StmtId,
+    line: u32,
+    /// The statement of the block it waits in that contains the `goto`.
+    index: usize,
+}
+
+/// One declaration in a scope.
+#[derive(Clone, Copy)]
+enum Entry {
+    Local(StrId, LocalId),
+    /// `global x`, read-only with `<const>`.
+    Global {
+        name: StrId,
+        constant: bool,
+    },
+    /// `global *`: every name not declared otherwise is a global.
+    GlobalAll {
+        constant: bool,
+    },
 }
 
 struct Lowerer {
@@ -58,8 +113,25 @@ type LResult<T> = Result<T, Diagnostic>;
 /// Where a name refers to.
 enum Resolved {
     Local(LocalId),
-    Outer { func: FuncId, local: LocalId },
-    Global,
+    Outer {
+        func: FuncId,
+        local: LocalId,
+    },
+    Global {
+        constant: bool,
+    },
+    /// A `global` declaration is in scope, and none covers the name.
+    Undeclared,
+}
+
+/// Which `_ENV` a global access goes through.
+enum Env {
+    /// The chunk's own environment.
+    Chunk,
+    /// A local (or enclosing function's local) named `_ENV`.
+    Local(hir::ExprKind),
+    /// `global _ENV` is in scope.
+    Declared,
 }
 
 impl Lowerer {
@@ -86,6 +158,7 @@ impl Lowerer {
             id,
             f,
             scopes: vec![Vec::new()],
+            blocks: Vec::new(),
         });
         id
     }
@@ -104,20 +177,8 @@ impl Lowerer {
         Diagnostic::new(span, self.line_of(span), message, None)
     }
 
-    fn not_supported(&self, span: Span, what: &str) -> Diagnostic {
-        self.error(span, format!("{what} not supported yet"))
-    }
-
     fn name_text(&self, sym: StrId) -> String {
         String::from_utf8_lossy(self.chunk.strings.get(sym)).into_owned()
-    }
-
-    /// Rejects `_ENV`, which first light doesn't give its Lua meaning.
-    fn check_name(&self, name: ast::Name) -> LResult<()> {
-        if name.sym == self.sym_env {
-            return Err(self.not_supported(name.span, "'_ENV' is"));
-        }
-        Ok(())
     }
 
     fn open_scope(&mut self) {
@@ -138,30 +199,102 @@ impl Lowerer {
             .scopes
             .last_mut()
             .expect("scope")
-            .push((name, local));
+            .push(Entry::Local(name, local));
     }
 
+    fn declare(&mut self, entry: Entry) {
+        self.cur().scopes.last_mut().expect("scope").push(entry);
+    }
+
+    /// Resolves a name: the innermost local or `global` declaration of it wins; otherwise the
+    /// innermost `global *` makes it a global; otherwise it is undeclared if any `global`
+    /// declaration is in scope, and a global if none is. Scopes span function boundaries.
     fn resolve(&self, sym: StrId) -> Resolved {
+        let mut fallback = None;
+        let mut declared = false;
         for (depth, ctx) in self.funcs.iter().enumerate().rev() {
-            let found = ctx
-                .scopes
-                .iter()
-                .rev()
-                .flat_map(|scope| scope.iter().rev())
-                .find(|(s, _)| *s == sym)
-                .map(|&(_, l)| l);
-            if let Some(local) = found {
-                return if depth == self.funcs.len() - 1 {
-                    Resolved::Local(local)
-                } else {
-                    Resolved::Outer {
-                        func: ctx.id,
-                        local,
+            let entries = ctx.scopes.iter().rev().flat_map(|scope| scope.iter().rev());
+            for entry in entries {
+                match *entry {
+                    Entry::Local(s, local) if s == sym => {
+                        return if depth == self.funcs.len() - 1 {
+                            Resolved::Local(local)
+                        } else {
+                            Resolved::Outer {
+                                func: ctx.id,
+                                local,
+                            }
+                        };
                     }
-                };
+                    Entry::Global { name, constant } if name == sym => {
+                        return Resolved::Global { constant };
+                    }
+                    Entry::Global { .. } => declared = true,
+                    // `global *` never covers `_ENV`.
+                    Entry::GlobalAll { constant } if fallback.is_none() && sym != self.sym_env => {
+                        fallback = Some(constant)
+                    }
+                    _ => {}
+                }
             }
         }
-        Resolved::Global
+        match fallback {
+            Some(constant) => Resolved::Global { constant },
+            None if declared && sym != self.sym_env => Resolved::Undeclared,
+            None => Resolved::Global { constant: false },
+        }
+    }
+
+    /// The `_ENV` visible here: a local named `_ENV`, an explicit `global _ENV`, or the
+    /// chunk's environment.
+    fn env(&self) -> Env {
+        match self.resolve(self.sym_env) {
+            Resolved::Local(l) => Env::Local(hir::ExprKind::Local(l)),
+            Resolved::Outer { func, local } => Env::Local(hir::ExprKind::Outer { func, local }),
+            Resolved::Global { .. } | Resolved::Undeclared => {
+                let explicit = self.funcs.iter().any(|ctx| {
+                    ctx.scopes
+                        .iter()
+                        .flatten()
+                        .any(|e| matches!(*e, Entry::Global { name, .. } if name == self.sym_env))
+                });
+                if explicit { Env::Declared } else { Env::Chunk }
+            }
+        }
+    }
+
+    fn undeclared(&self, name: ast::Name) -> Diagnostic {
+        let message = format!("variable '{}' not declared", self.name_text(name.sym));
+        self.error(name.span, message)
+    }
+
+    fn env_is_global(&self, name: ast::Name) -> Diagnostic {
+        let message = format!(
+            "_ENV is global when accessing variable '{}'",
+            self.name_text(name.sym)
+        );
+        self.error(name.span, message)
+    }
+
+    fn assign_to_const(&self, name: ast::Name) -> Diagnostic {
+        let message = format!(
+            "attempt to assign to const variable '{}'",
+            self.name_text(name.sym)
+        );
+        self.error(name.span, message)
+    }
+
+    /// The global `name` as a place: `Global`, or a field of a user `_ENV`.
+    fn global_place(&mut self, name: ast::Name) -> LResult<hir::Place> {
+        match self.env() {
+            Env::Chunk => Ok(hir::Place::Global(name.sym)),
+            Env::Local(env) => {
+                let obj = self.add_expr(env, name.span);
+                let key = self.add_expr(hir::ExprKind::Str(name.sym), name.span);
+                Ok(hir::Place::Index { obj, key })
+            }
+            Env::Declared => Err(self.env_is_global(name)),
+        }
     }
 
     fn local_kind(&self, func: FuncId, local: LocalId) -> LocalKind {
@@ -175,7 +308,6 @@ impl Lowerer {
 
     /// The assignment target for a name, checking it isn't read-only.
     fn place_for_name(&mut self, name: ast::Name) -> LResult<hir::Place> {
-        self.check_name(name)?;
         let current = self.cur().id;
         let (place, kind) = match self.resolve(name.sym) {
             Resolved::Local(l) => (hir::Place::Local(l), self.local_kind(current, l)),
@@ -183,14 +315,21 @@ impl Lowerer {
                 hir::Place::Outer { func, local },
                 self.local_kind(func, local),
             ),
-            Resolved::Global => return Ok(hir::Place::Global(name.sym)),
+            Resolved::Undeclared => return Err(self.undeclared(name)),
+            Resolved::Global { constant: true } => return Err(self.assign_to_const(name)),
+            Resolved::Global { constant: false } if name.sym == self.sym_env => {
+                return match self.env() {
+                    Env::Declared => Err(self.env_is_global(name)),
+                    _ => Ok(hir::Place::Env),
+                };
+            }
+            Resolved::Global { constant: false } => return self.global_place(name),
         };
-        if matches!(kind, LocalKind::Const | LocalKind::ForControl) {
-            let message = format!(
-                "attempt to assign to const variable '{}'",
-                self.name_text(name.sym)
-            );
-            return Err(self.error(name.span, message));
+        if matches!(
+            kind,
+            LocalKind::Const | LocalKind::Close | LocalKind::ForControl
+        ) {
+            return Err(self.assign_to_const(name));
         }
         Ok(place)
     }
@@ -216,16 +355,234 @@ impl Lowerer {
 
     /// A block's statements in the current scope.
     fn block_contents(&mut self, b: &ast::Block) -> LResult<BlockId> {
+        let end_line = self.block_end_line(b);
+        self.labelled_block(b, false, end_line, None)
+    }
+
+    /// A block's statements with its own label scope. A `repeat` body passes its `until`
+    /// condition, which belongs to the block for `goto` purposes; its HIR id comes back
+    /// through `until_out`.
+    fn labelled_block(
+        &mut self,
+        b: &ast::Block,
+        repeat: bool,
+        end_line: u32,
+        until: Option<(&ast::Expr, &mut Option<ExprId>)>,
+    ) -> LResult<BlockId> {
+        self.begin_labels(b, repeat, end_line);
         let mut stmts = Vec::new();
         self.stmts_into(b, &mut stmts)?;
+        if let Some((cond, out)) = until {
+            *out = Some(self.expr(cond)?);
+        }
+        self.end_labels()?;
         Ok(self.f().add_block(hir::Block {
             stmts,
             span: b.span,
         }))
     }
 
+    /// The line of a block's last token.
+    fn block_end_line(&self, b: &ast::Block) -> u32 {
+        let last = match (&b.ret, b.stmts.last()) {
+            (Some(ret), _) => ret.span,
+            (None, Some(s)) => s.span,
+            (None, None) => return self.line_of(b.span),
+        };
+        self.end_line_of(last)
+    }
+
+    fn end_line_of(&self, span: Span) -> u32 {
+        self.chunk
+            .source
+            .line_of(span.end.saturating_sub(1).max(span.start))
+    }
+
+    // ---- goto and labels ----------------------------------------------------------------------
+
+    fn begin_labels(&mut self, b: &ast::Block, repeat: bool, end_line: u32) {
+        let n = b.stmts.len();
+        let is_label = |i: usize| matches!(b.stmts[i].kind, StmtKind::Label(_));
+        let mut void_tail = n;
+        if repeat || b.ret.is_some() {
+            void_tail = usize::MAX;
+        } else {
+            while void_tail > 0 && is_label(void_tail - 1) {
+                void_tail -= 1;
+            }
+        }
+        let mut run_start = Vec::with_capacity(n);
+        for i in 0..n {
+            let start = if i > 0 && is_label(i) && is_label(i - 1) {
+                run_start[i - 1]
+            } else {
+                i
+            };
+            run_start.push(start);
+        }
+        let mut decls = Vec::new();
+        for (i, st) in b.stmts.iter().enumerate() {
+            let name = match &st.kind {
+                StmtKind::Local { names, .. } | StmtKind::Global { names, .. } => {
+                    names.first().map(|n| n.name.sym)
+                }
+                StmtKind::LocalFunction { name, .. } | StmtKind::GlobalFunction { name, .. } => {
+                    Some(name.sym)
+                }
+                StmtKind::GlobalAll { .. } => {
+                    decls.push((i, "*".to_string()));
+                    None
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                decls.push((i, self.name_text(name)));
+            }
+        }
+        self.cur().blocks.push(LabelBlock {
+            labels: Vec::new(),
+            pending: Vec::new(),
+            decls,
+            void_tail,
+            run_start,
+            current: 0,
+            end_line,
+            scope_error: None,
+        });
+    }
+
+    /// Closes a block's label scope: reports a `goto` into a declaration's scope, and hands
+    /// unresolved gotos to the enclosing block (or reports them at the end of the function).
+    fn end_labels(&mut self) -> LResult<()> {
+        let block = self.cur().blocks.pop().expect("label block");
+        let end_line = block.end_line;
+        let error = |message: String| Diagnostic::new(Span::new(0, 0), end_line, message, None);
+        if let Some((message, _)) = block.scope_error {
+            return Err(error(message));
+        }
+        match self.cur().blocks.last_mut() {
+            Some(parent) => {
+                let index = parent.current;
+                for mut p in block.pending {
+                    p.index = index;
+                    parent.pending.push(p);
+                }
+                Ok(())
+            }
+            None => match block.pending.first() {
+                Some(p) => {
+                    let message = format!(
+                        "no visible label '{}' for <goto> at line {}",
+                        self.name_text(p.name),
+                        p.line
+                    );
+                    Err(error(message))
+                }
+                None => Ok(()),
+            },
+        }
+    }
+
+    /// The innermost label `name` placed so far in this block or an enclosing one, with
+    /// whether it is in the current block.
+    fn visible_label(&self, name: StrId) -> Option<(&PlacedLabel, bool)> {
+        let blocks = &self.funcs.last().expect("function").blocks;
+        let last = blocks.len() - 1;
+        blocks.iter().enumerate().rev().find_map(|(depth, b)| {
+            b.labels
+                .iter()
+                .rev()
+                .find(|l| l.name == name)
+                .map(|l| (l, depth == last))
+        })
+    }
+
+    fn goto(&mut self, name: ast::Name, span: Span, stmts: &mut Vec<hir::StmtId>) {
+        let line = self.line_of(span);
+        let target = self.visible_label(name.sym).map(|(l, _)| l.id);
+        // A forward goto gets its label when the label is placed.
+        let label = target.unwrap_or(LabelId(u32::MAX));
+        let stmt = self.f().add_stmt(hir::StmtKind::Goto(label), span);
+        stmts.push(stmt);
+        if target.is_none() {
+            let block = self.cur().blocks.last_mut().expect("label block");
+            let index = block.current;
+            block.pending.push(PendingGoto {
+                name: name.sym,
+                stmt,
+                line,
+                index,
+            });
+        }
+    }
+
+    fn label(&mut self, name: ast::Name, span: Span) -> LResult<hir::StmtKind> {
+        let line = self.line_of(span);
+        let index = self.cur().blocks.last().expect("label block").current;
+        if let Some((prev, same_block)) = self.visible_label(name.sym) {
+            // Lua takes a run of consecutive labels last to first, so a repeat within one
+            // run is reported as defined on the later label's line.
+            let block = self
+                .funcs
+                .last()
+                .expect("function")
+                .blocks
+                .last()
+                .expect("block");
+            let same_run = same_block && block.run_start[prev.index] == block.run_start[index];
+            let defined = if same_run { line } else { prev.line };
+            let message = format!(
+                "label '{}' already defined on line {defined}",
+                self.name_text(name.sym)
+            );
+            return Err(self.error(span, message));
+        }
+        let id = self.f().add_label(hir::Label {
+            name: name.sym,
+            span,
+        });
+        let label_name = self.name_text(name.sym);
+        let ctx = self.cur();
+        let block = ctx.blocks.last_mut().expect("label block");
+        block.labels.push(PlacedLabel {
+            name: name.sym,
+            id,
+            index,
+            line,
+        });
+        let at_end = index >= block.void_tail;
+        let run = block.run_start[index];
+        // Lua takes a run of labels last to first, so a later label's error in the same run
+        // replaces an earlier one's.
+        let mut found = false;
+        let mut waiting = Vec::new();
+        block.pending.retain(|p| {
+            let matches = p.name == name.sym;
+            if matches {
+                waiting.push((p.stmt, p.line, p.index));
+            }
+            !matches
+        });
+        for (stmt, goto_line, from) in waiting {
+            ctx.f.stmts[stmt.index()].kind = hir::StmtKind::Goto(id);
+            let earlier = block.scope_error.as_ref().is_some_and(|(_, r)| *r != run);
+            if at_end || found || earlier {
+                continue;
+            }
+            if let Some((_, var)) = block.decls.iter().find(|(d, _)| from < *d && *d < index) {
+                let message = format!(
+                    "<goto {label_name}> at line {goto_line} jumps into the scope of '{var}'"
+                );
+                block.scope_error = Some((message, run));
+                found = true;
+            }
+        }
+        Ok(hir::StmtKind::Label(id))
+    }
+
     fn stmts_into(&mut self, b: &ast::Block, stmts: &mut Vec<hir::StmtId>) -> LResult<()> {
-        for s in &b.stmts {
+        for (i, s) in b.stmts.iter().enumerate() {
+            self.cur().blocks.last_mut().expect("label block").current = i;
             self.stmt(s, stmts)?;
         }
         if let Some(ret) = &b.ret {
@@ -242,18 +599,19 @@ impl Lowerer {
                 names,
                 values,
             } => {
+                // The parser allows at most one `Close` per list.
+                let kinds: Vec<_> = names
+                    .iter()
+                    .map(|n| match n.attrib.or(*attrib) {
+                        None => LocalKind::Normal,
+                        Some(a) if a.kind == AttribKind::Const => LocalKind::Const,
+                        Some(_) => LocalKind::Close,
+                    })
+                    .collect();
                 let values = self.expr_list(values)?;
                 let mut locals = Vec::with_capacity(names.len());
                 let mut bindings = Vec::with_capacity(names.len());
-                for n in names {
-                    self.check_name(n.name)?;
-                    let kind = match n.attrib.or(*attrib) {
-                        None => LocalKind::Normal,
-                        Some(a) if a.kind == AttribKind::Const => LocalKind::Const,
-                        Some(a) => {
-                            return Err(self.not_supported(a.span, "'<close>' variables are"));
-                        }
-                    };
+                for (n, kind) in names.iter().zip(kinds) {
                     let local = self.new_local(Some(n.name.sym), n.name.span, kind);
                     locals.push(local);
                     bindings.push((n.name.sym, local));
@@ -285,13 +643,14 @@ impl Lowerer {
                 }
             }
             StmtKind::Repeat { body, until } => {
-                // The condition sees the body's locals.
+                // The condition sees the body's locals, and belongs to the body for `goto`.
                 self.open_scope();
-                let result = self
-                    .block_contents(body)
-                    .and_then(|b| Ok((b, self.expr(until)?)));
+                let end_line = self.end_line_of(until.span);
+                let mut cond = None;
+                let result = self.labelled_block(body, true, end_line, Some((until, &mut cond)));
                 self.close_scope();
-                let (body, until) = result?;
+                let body = result?;
+                let until = cond.expect("until condition");
                 hir::StmtKind::Repeat { body, until }
             }
             StmtKind::If { arms, else_ } => {
@@ -322,7 +681,6 @@ impl Lowerer {
                     Some(e) => Some(self.expr(e)?),
                     None => None,
                 };
-                self.check_name(*var)?;
                 self.open_scope();
                 let local = self.new_local(Some(var.sym), var.span, LocalKind::ForControl);
                 self.bind(var.sym, local);
@@ -338,15 +696,10 @@ impl Lowerer {
             }
             StmtKind::GenericFor { vars, exprs, body } => {
                 let iter = self.expr_list(exprs)?;
-                let hidden = [(); 3].map(|_| self.new_local(None, s.span, LocalKind::Hidden));
+                let hidden = [(); 4].map(|_| self.new_local(None, s.span, LocalKind::Hidden));
                 self.open_scope();
                 let mut locals = Vec::with_capacity(vars.len());
-                let mut result = Ok(());
                 for (i, v) in vars.iter().enumerate() {
-                    if let Err(e) = self.check_name(*v) {
-                        result = Err(e);
-                        break;
-                    }
                     // Only the first variable is read-only (5.5).
                     let kind = if i == 0 {
                         LocalKind::ForControl
@@ -357,7 +710,7 @@ impl Lowerer {
                     self.bind(v.sym, local);
                     locals.push(local);
                 }
-                let body = result.and_then(|()| self.block(body));
+                let body = self.block(body);
                 self.close_scope();
                 hir::StmtKind::GenericFor {
                     vars: locals,
@@ -397,8 +750,10 @@ impl Lowerer {
                     _ => {
                         let place = self.place_for_name(path.base)?;
                         let name = match place {
-                            hir::Place::Global(_) => FunctionName::Global(path.base.sym),
-                            _ => FunctionName::Local(path.base.sym),
+                            hir::Place::Local(_) | hir::Place::Outer { .. } => {
+                                FunctionName::Local(path.base.sym)
+                            }
+                            _ => FunctionName::Global(path.base.sym),
                         };
                         (place, name)
                     }
@@ -411,7 +766,6 @@ impl Lowerer {
                 }
             }
             StmtKind::LocalFunction { name, func } => {
-                self.check_name(*name)?;
                 // In scope inside its own body, so it can recurse.
                 let local = self.new_local(Some(name.sym), name.span, LocalKind::Normal);
                 self.bind(name.sym, local);
@@ -419,16 +773,71 @@ impl Lowerer {
                 hir::StmtKind::LocalFunction { local, func }
             }
             StmtKind::Break => hir::StmtKind::Break,
-            StmtKind::Goto(_) => return Err(self.not_supported(s.span, "'goto' is")),
-            StmtKind::Label(_) => return Err(self.not_supported(s.span, "labels are")),
-            StmtKind::Global { .. }
-            | StmtKind::GlobalFunction { .. }
-            | StmtKind::GlobalAll { .. } => {
-                return Err(self.not_supported(s.span, "'global' declarations are"));
+            StmtKind::Goto(name) => {
+                self.goto(*name, s.span, stmts);
+                return Ok(());
+            }
+            StmtKind::Label(name) => self.label(*name, s.span)?,
+            StmtKind::Global {
+                attrib,
+                names,
+                values,
+            } => {
+                let mut entries = Vec::with_capacity(names.len());
+                for n in names {
+                    let constant = self.global_attrib(n.attrib.or(*attrib))?;
+                    entries.push(Entry::Global {
+                        name: n.name.sym,
+                        constant,
+                    });
+                }
+                // Like `local`, the names come into scope after the whole statement.
+                let values = if values.is_empty() {
+                    None
+                } else {
+                    Some(self.expr_list(values)?)
+                };
+                entries.into_iter().for_each(|e| self.declare(e));
+                let Some(values) = values else {
+                    return Ok(());
+                };
+                let mut targets = Vec::with_capacity(names.len());
+                for n in names {
+                    targets.push(self.global_place(n.name)?);
+                }
+                hir::StmtKind::Define { targets, values }
+            }
+            StmtKind::GlobalFunction { name, func } => {
+                // `global f; global f = function ... end`: in scope inside its own body.
+                self.declare(Entry::Global {
+                    name: name.sym,
+                    constant: false,
+                });
+                let place = self.global_place(*name)?;
+                let func = self.function(func, FunctionName::Global(name.sym), false)?;
+                let value = self.add_expr(hir::ExprKind::Closure(func), s.span);
+                hir::StmtKind::Define {
+                    targets: vec![place],
+                    values: vec![value].into(),
+                }
+            }
+            StmtKind::GlobalAll { attrib } => {
+                let constant = self.global_attrib(*attrib)?;
+                self.declare(Entry::GlobalAll { constant });
+                return Ok(());
             }
         };
         self.add_stmt(stmts, kind, s.span);
         Ok(())
+    }
+
+    /// Whether a `global` declaration's attribute makes it read-only.
+    fn global_attrib(&self, attrib: Option<ast::Attrib>) -> LResult<bool> {
+        match attrib {
+            None => Ok(false),
+            Some(a) if a.kind == AttribKind::Const => Ok(true),
+            Some(a) => Err(self.error(a.span, "global variables cannot be to-be-closed")),
+        }
     }
 
     fn place(&mut self, target: &ast::Expr) -> LResult<hir::Place> {
@@ -467,17 +876,21 @@ impl Lowerer {
             self.bind(sym, local);
         }
         for p in &body.params {
-            self.check_name(*p)?;
             let local = self.f().add_param(Some(p.sym), p.span);
             self.bind(p.sym, local);
         }
         if let Some(v) = body.vararg {
-            if v.name.is_some() {
-                return Err(self.not_supported(v.span, "named varargs are"));
-            }
             self.f().is_vararg = true;
+            if let Some(name) = v.name {
+                // Read-only, like `<const>`; declared after the parameters.
+                let local = self.new_local(Some(name.sym), name.span, LocalKind::Const);
+                self.bind(name.sym, local);
+                self.f().vararg_table = Some(local);
+            }
         }
-        let block = self.block_contents(&body.body)?;
+        // A function's `goto` errors are reported at its `end`.
+        let end_line = self.end_line_of(body.span);
+        let block = self.labelled_block(&body.body, false, end_line, None)?;
         self.f().body = block;
         Ok(())
     }
@@ -493,11 +906,20 @@ impl Lowerer {
     }
 
     fn name_expr(&mut self, name: ast::Name) -> LResult<ExprId> {
-        self.check_name(name)?;
         let kind = match self.resolve(name.sym) {
             Resolved::Local(l) => hir::ExprKind::Local(l),
             Resolved::Outer { func, local } => hir::ExprKind::Outer { func, local },
-            Resolved::Global => hir::ExprKind::Global(name.sym),
+            Resolved::Undeclared => return Err(self.undeclared(name)),
+            Resolved::Global { .. } => match self.env() {
+                Env::Declared => return Err(self.env_is_global(name)),
+                Env::Chunk if name.sym == self.sym_env => hir::ExprKind::Env,
+                Env::Chunk => hir::ExprKind::Global(name.sym),
+                Env::Local(env) => {
+                    let obj = self.add_expr(env, name.span);
+                    let key = self.add_expr(hir::ExprKind::Str(name.sym), name.span);
+                    hir::ExprKind::Index { obj, key }
+                }
+            },
         };
         Ok(self.add_expr(kind, name.span))
     }
@@ -553,9 +975,6 @@ impl Lowerer {
                 hir::ExprKind::Table(entries)
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                if op.is_bitwise() {
-                    return Err(self.not_supported(span, "bitwise operators are"));
-                }
                 let lhs = self.expr(lhs)?;
                 let rhs = self.expr(rhs)?;
                 use ast::BinOp as A;
@@ -577,7 +996,11 @@ impl Lowerer {
                     A::Le => H::Le,
                     A::Gt => H::Gt,
                     A::Ge => H::Ge,
-                    A::BOr | A::BXor | A::BAnd | A::Shl | A::Shr => unreachable!("rejected above"),
+                    A::BAnd => H::BAnd,
+                    A::BOr => H::BOr,
+                    A::BXor => H::BXor,
+                    A::Shl => H::Shl,
+                    A::Shr => H::Shr,
                 };
                 hir::ExprKind::Binary { op, lhs, rhs }
             }
@@ -586,9 +1009,7 @@ impl Lowerer {
                     ast::UnOp::Neg => hir::UnOp::Neg,
                     ast::UnOp::Not => hir::UnOp::Not,
                     ast::UnOp::Len => hir::UnOp::Len,
-                    ast::UnOp::BNot => {
-                        return Err(self.not_supported(span, "bitwise operators are"));
-                    }
+                    ast::UnOp::BNot => hir::UnOp::BNot,
                 };
                 let expr = self.expr(expr)?;
                 hir::ExprKind::Unary { op, expr }
