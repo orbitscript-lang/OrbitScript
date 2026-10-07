@@ -9,11 +9,14 @@ use crate::string::hash_bytes;
 use crate::{LuaHeap, LuaSpace, LuaStr, Table, UserData, Value};
 
 /// Whether a weak table may drop an entry because of `v`: tables, Lua
-/// functions and userdata (later threads). Strings, numbers, booleans and
+/// functions, userdata and threads. Strings, numbers, booleans and
 /// native functions are values, never collected out of a weak table.
 #[inline]
 pub fn is_weak_ref(v: Value) -> bool {
-    matches!(v, Value::Table(_) | Value::Closure(_) | Value::UserData(_))
+    matches!(
+        v,
+        Value::Table(_) | Value::Closure(_) | Value::UserData(_) | Value::Thread(_)
+    )
 }
 
 /// The heap object `v` refers to, if any (strings included).
@@ -24,6 +27,7 @@ pub fn object(m: &Marker<'_, LuaSpace>, v: Value) -> Option<AnyGc> {
         Value::Table(t) => Some(m.erase(t)),
         Value::Closure(c) => Some(m.erase(c)),
         Value::UserData(u) => Some(m.erase(u)),
+        Value::Thread(t) => Some(m.erase(t)),
         _ => None,
     }
 }
@@ -37,6 +41,7 @@ pub fn is_live(live: &Liveness<'_, LuaSpace>, v: Value) -> bool {
         Value::Table(t) => live.is_live(t),
         Value::Closure(c) => live.is_live(c),
         Value::UserData(u) => live.is_live(u),
+        Value::Thread(t) => live.is_live(t),
         _ => true,
     }
 }
