@@ -8,6 +8,7 @@ co_yields.lua
 coroutines.lua
 errors.lua
 floats.lua
+gc.lua
 load.lua
 lua55.lua
 meta_index.lua

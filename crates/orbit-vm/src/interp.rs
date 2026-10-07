@@ -364,6 +364,16 @@ impl Vm {
                 }
                 let src = self.rt.top - n;
                 self.place_results(src, n, func, want);
+                // Drop the native's arguments and pushes along with any
+                // extra results, so stale copies don't keep objects alive
+                // (a finalizer waiting on an object only a dead argument
+                // slot still holds would never run).
+                let end = if want == MULTI {
+                    self.rt.top
+                } else {
+                    func + want as usize
+                };
+                self.rt.stack.regs.truncate(end);
                 self.after_return()
             }
             NativeReturn::CallThen { .. }
@@ -933,6 +943,9 @@ impl Vm {
                         let live = (base + WINDOW).max(self.rt.top);
                         self.rt.stack.regs.truncate(live);
                         self.heap.step(&mut self.rt);
+                        if self.heap.pending_finalizers() > 0 {
+                            self.run_finalizers();
+                        }
                         w = window!();
                     }
                 };
