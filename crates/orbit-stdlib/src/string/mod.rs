@@ -4,8 +4,8 @@ mod format;
 mod pack;
 pub(crate) mod pattern;
 
-use orbit_vm::orbit_core::{Gc, LuaStr, Value};
-use orbit_vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn};
+use orbit_vm::orbit_core::{Gc, LuaStr, Table, Tag, Value};
+use orbit_vm::{CallOutcome, Event, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
 
 use pattern::{Capture, Matcher, PatternError};
 
@@ -530,4 +530,12 @@ fn finish_gsub(ctx: &mut NativeCtx<'_>, count: i64) -> R {
     ctx.push(r);
     ctx.push(Value::Int(count));
     Ok(NativeReturn::Return(2))
+}
+
+/// Point the shared string metatable's `__index` at the `string` table.
+pub(crate) fn set_metatable_index(vm: &mut Vm, string: Gc<Table>) {
+    if let Some(mt) = vm.rt.type_meta(Tag::Str) {
+        let k = Value::Str(vm.rt.event_name(Event::Index));
+        vm.table_set(mt, k, Value::Table(string));
+    }
 }

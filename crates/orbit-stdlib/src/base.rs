@@ -2,11 +2,12 @@
 
 use std::io::Write;
 
+use orbit_vm::orbit_core::Tag;
 use orbit_vm::orbit_core::Value;
 use orbit_vm::orbit_core::number::str_to_number;
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::value::raw_eq;
-use orbit_vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_vm::{CallOutcome, Event, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -25,6 +26,8 @@ const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("rawget", rawget),
     ("rawset", rawset),
     ("rawlen", rawlen),
+    ("getmetatable", getmetatable),
+    ("setmetatable", setmetatable),
     ("collectgarbage", collectgarbage),
 ];
 
@@ -38,13 +41,44 @@ pub(crate) fn open(vm: &mut Vm) {
     vm.set_global("next", next_fn);
     let g = vm.rt.globals;
     vm.set_global("_G", Value::Table(g));
+    // The shared string metatable: `("x"):upper()` finds `string`'s
+    // functions. The string library replaces `__index` when it opens.
+    let mt = vm.new_table();
+    vm.pin(Value::Table(mt));
+    vm.rt.set_type_meta(Tag::Str, Some(mt));
+    vm.unpin(Value::Table(mt));
     let v = vm.new_str(b"Lua 5.5");
     vm.set_global("_VERSION", v);
 }
 
+/// `print`: arguments with a `__tostring` are converted first, one
+/// `CallThen` each, the result replacing the argument in the window.
 fn print(ctx: &mut NativeCtx<'_>) -> R {
+    let n = ctx.nargs();
+    print_from(ctx, n, 0)
+}
+
+/// Print the `n` arguments, converting from argument `start` on.
+fn print_from(ctx: &mut NativeCtx<'_>, n: usize, start: usize) -> R {
+    for i in start..n {
+        let v = ctx.arg(i);
+        let h = ctx.metamethod(v, Event::ToString);
+        if !h.is_nil() {
+            // Window: args, then the index being converted, then the
+            // call's argument (replaced by its results).
+            ctx.truncate(n);
+            ctx.push(Value::Int(i as i64));
+            ctx.push(v);
+            return Ok(NativeReturn::CallThen {
+                f: h,
+                nargs: 1,
+                k: print_converted,
+                protected: false,
+            });
+        }
+    }
     let mut line = Vec::new();
-    for i in 0..ctx.nargs() {
+    for i in 0..n {
         if i > 0 {
             line.push(b'\t');
         }
@@ -53,6 +87,34 @@ fn print(ctx: &mut NativeCtx<'_>) -> R {
     line.push(b'\n');
     let _ = ctx.rt.out.write_all(&line);
     Ok(NativeReturn::Return(0))
+}
+
+fn print_converted(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
+    };
+    // The window up to the call is print's arguments plus the index.
+    let n = ctx.nargs() - 1;
+    let Value::Int(i) = ctx.arg(n) else {
+        unreachable!("print's progress")
+    };
+    let r = tostring_result(ctx, got, n + 1)?;
+    ctx.set(i as usize, r);
+    ctx.truncate(n);
+    print_from(ctx, n, i as usize + 1)
+}
+
+/// The value `__tostring` returned (`got` results from window slot `at`),
+/// which must be a string or a number.
+fn tostring_result(ctx: &mut NativeCtx<'_>, got: usize, at: usize) -> Result<Value, LuaError> {
+    let r = if got > 0 { ctx.arg(at) } else { Value::Nil };
+    match r {
+        Value::Str(_) | Value::Int(_) | Value::Float(_) => Ok(r),
+        _ => {
+            let msg = ctx.new_str(b"'__tostring' must return a string");
+            Err(ctx.error_value(msg))
+        }
+    }
 }
 
 fn type_(ctx: &mut NativeCtx<'_>) -> R {
@@ -66,10 +128,55 @@ fn tostring(ctx: &mut NativeCtx<'_>) -> R {
     if matches!(v, Value::Str(_)) {
         return ctx.ret1(v);
     }
+    let h = ctx.metamethod(v, Event::ToString);
+    if !h.is_nil() {
+        ctx.truncate(1);
+        ctx.push(v);
+        return Ok(NativeReturn::CallThen {
+            f: h,
+            nargs: 1,
+            k: tostring_done,
+            protected: false,
+        });
+    }
     let mut out = Vec::new();
     ctx.display(v, &mut out);
     let s = ctx.new_str_owned(out);
     ctx.ret1(s)
+}
+
+fn tostring_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
+    };
+    let r = tostring_result(ctx, got, 1)?;
+    ctx.ret1(r)
+}
+
+fn getmetatable(ctx: &mut NativeCtx<'_>) -> R {
+    let v = ctx.check_any(0)?;
+    let Some(mt) = ctx.metatable(v) else {
+        return ctx.ret1(Value::Nil);
+    };
+    let protected = ctx.metamethod(v, Event::Metatable);
+    if !protected.is_nil() {
+        return ctx.ret1(protected);
+    }
+    ctx.ret1(Value::Table(mt))
+}
+
+fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_table(0)?;
+    let mt = match ctx.arg(1) {
+        Value::Nil if ctx.nargs() >= 2 => None,
+        Value::Table(m) => Some(m),
+        _ => return Err(ctx.type_error(1, "nil or table")),
+    };
+    if !ctx.metamethod(Value::Table(t), Event::Metatable).is_nil() {
+        return Err(ctx.error("cannot change a protected metatable"));
+    }
+    ctx.heap.update(t, |t| t.meta = mt);
+    ctx.ret1(Value::Table(t))
 }
 
 fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
@@ -128,12 +235,30 @@ fn ipairs(ctx: &mut NativeCtx<'_>) -> R {
 
 fn ipairs_iter(ctx: &mut NativeCtx<'_>) -> R {
     let i = ctx.check_int(1)?.wrapping_add(1);
-    let v = match ctx.arg(0) {
-        Value::Table(t) => ctx.heap.get(t).get_int(i),
-        other => {
-            return Err(ctx.error(format!("attempt to index a {} value", other.type_name())));
-        }
+    let t = ctx.arg(0);
+    ctx.truncate(2);
+    match ctx.index(t, Value::Int(i))? {
+        Meta::Done(v) => ipairs_step(ctx, i, v),
+        Meta::Call { f, nargs } => Ok(NativeReturn::CallThen {
+            f,
+            nargs,
+            k: ipairs_indexed,
+            protected: false,
+        }),
+    }
+}
+
+fn ipairs_indexed(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
     };
+    let i = ctx.check_int(1)?.wrapping_add(1);
+    let v = if got > 0 { ctx.arg(2) } else { Value::Nil };
+    ctx.truncate(2);
+    ipairs_step(ctx, i, v)
+}
+
+fn ipairs_step(ctx: &mut NativeCtx<'_>, i: i64, v: Value) -> R {
     if v.is_nil() {
         return ctx.ret1(Value::Nil);
     }
@@ -144,10 +269,33 @@ fn ipairs_iter(ctx: &mut NativeCtx<'_>) -> R {
 
 fn pairs(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_any(0)?;
+    let h = ctx.metamethod(t, Event::Pairs);
+    if !h.is_nil() {
+        ctx.truncate(1);
+        ctx.push(t);
+        return Ok(NativeReturn::CallThen {
+            f: h,
+            nargs: 1,
+            k: pairs_done,
+            protected: false,
+        });
+    }
     let next_fn = ctx.native("next", next);
     ctx.push(next_fn);
     ctx.push(t);
     ctx.push(Value::Nil);
+    Ok(NativeReturn::Return(3))
+}
+
+/// `__pairs` returned: pass on exactly three of its results.
+fn pairs_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
+    };
+    ctx.truncate(1 + got.min(3));
+    while ctx.len() < 4 {
+        ctx.push(Value::Nil);
+    }
     Ok(NativeReturn::Return(3))
 }
 
@@ -274,7 +422,7 @@ fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
     let n = match ctx.arg(0) {
         Value::Table(t) => ctx.heap.get(t).border(),
         Value::Str(s) => ctx.bytes(s).len() as i64,
-        _ => return Err(ctx.arg_error(0, "table or string expected")),
+        _ => return Err(ctx.type_error(0, "table or string")),
     };
     ctx.ret1(Value::Int(n))
 }

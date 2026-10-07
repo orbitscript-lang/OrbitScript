@@ -3,7 +3,7 @@
 use orbit_gc::Gc;
 
 use crate::number::{self, Number};
-use crate::{Closure, LuaHeap, LuaStr, Table};
+use crate::{Closure, LuaHeap, LuaStr, Table, UserData};
 
 /// An index into the VM's registry of native functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,7 +25,8 @@ pub enum Value {
     Table(Gc<Table>) = 5,
     Closure(Gc<Closure>) = 6,
     Native(NativeId) = 7,
-    // 8 = UserData and 9 = Thread are reserved.
+    UserData(Gc<UserData>) = 8,
+    // 9 = Thread is reserved.
 }
 
 const _: () = assert!(core::mem::size_of::<Value>() == 16);
@@ -45,6 +46,7 @@ pub enum Tag {
     Table = 5,
     Closure = 6,
     Native = 7,
+    UserData = 8,
 }
 
 impl Tag {
@@ -60,6 +62,7 @@ impl Tag {
             5 => Tag::Table,
             6 => Tag::Closure,
             7 => Tag::Native,
+            8 => Tag::UserData,
             _ => return None,
         })
     }
@@ -97,6 +100,7 @@ impl Value {
             Value::Str(_) => "string",
             Value::Table(_) => "table",
             Value::Closure(_) | Value::Native(_) => "function",
+            Value::UserData(_) => "userdata",
         }
     }
 
@@ -128,6 +132,7 @@ impl Value {
             Value::Table(_) => Tag::Table,
             Value::Closure(_) => Tag::Closure,
             Value::Native(_) => Tag::Native,
+            Value::UserData(_) => Tag::UserData,
         }
     }
 
@@ -143,6 +148,7 @@ impl Value {
             Value::Table(t) => (Tag::Table, t.to_bits()),
             Value::Closure(c) => (Tag::Closure, c.to_bits()),
             Value::Native(n) => (Tag::Native, n.0 as u64),
+            Value::UserData(u) => (Tag::UserData, u.to_bits()),
         };
         (tag, Payload(bits))
     }
@@ -160,6 +166,7 @@ impl Value {
             Tag::Table => Value::Table(Gc::from_bits(p)),
             Tag::Closure => Value::Closure(Gc::from_bits(p)),
             Tag::Native => Value::Native(NativeId(p as u32)),
+            Tag::UserData => Value::UserData(Gc::from_bits(p)),
         }
     }
 
@@ -185,6 +192,7 @@ impl Value {
             Tag::Table => *out = Value::Table(Gc::from_bits(p)),
             Tag::Closure => *out = Value::Closure(Gc::from_bits(p)),
             Tag::Native => *out = Value::Native(NativeId(p as u32)),
+            Tag::UserData => *out = Value::UserData(Gc::from_bits(p)),
         }
     }
 
@@ -216,6 +224,7 @@ impl Value {
             Value::Closure(c) => (Tag::Closure, c.index() as u64),
             Value::Native(n) => (Tag::Native, n.0 as u64),
             Value::Str(s) => (Tag::Str, s.index() as u64),
+            Value::UserData(u) => (Tag::UserData, u.index() as u64),
             _ => return None,
         };
         // Looks like an address: a fixed base, the type in the high bits and
@@ -240,6 +249,7 @@ pub fn raw_eq(heap: &LuaHeap, a: Value, b: Value) -> bool {
         (Value::Table(x), Value::Table(y)) => x == y,
         (Value::Closure(x), Value::Closure(y)) => x == y,
         (Value::Native(x), Value::Native(y)) => x == y,
+        (Value::UserData(x), Value::UserData(y)) => x == y,
         _ => false,
     }
 }
@@ -278,12 +288,13 @@ mod tests {
             (Tag::Table, 5),
             (Tag::Closure, 6),
             (Tag::Native, 7),
+            (Tag::UserData, 8),
         ];
         for (t, b) in pinned {
             assert_eq!(t as u8, b);
             assert_eq!(Tag::from_u8(b), Some(t));
         }
-        assert_eq!(Tag::from_u8(8), None);
+        assert_eq!(Tag::from_u8(9), None);
         assert_eq!(std::mem::size_of::<Tag>(), 1);
     }
 

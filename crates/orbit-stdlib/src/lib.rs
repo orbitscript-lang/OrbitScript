@@ -40,7 +40,10 @@ pub fn open_libs(vm: &mut Vm) {
         vm.set_global(name, v);
     }
     #[cfg(feature = "string")]
-    open_lib(vm, "string", string::FUNCTIONS);
+    {
+        let st = open_lib(vm, "string", string::FUNCTIONS);
+        string::set_metatable_index(vm, st);
+    }
     #[cfg(feature = "utf8")]
     {
         let u = open_lib(vm, "utf8", utf8::FUNCTIONS);
