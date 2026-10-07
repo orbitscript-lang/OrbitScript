@@ -172,12 +172,6 @@ impl FuncState<'_> {
     }
 
     fn let_(&mut self, locals: &[LocalId], values: &ExprList) -> Result<()> {
-        if locals
-            .iter()
-            .any(|&l| self.f.local(l).kind == LocalKind::Close)
-        {
-            return Err(self.error("'<close>' variables are not supported yet"));
-        }
         let first = self.free;
         self.expr_list(values, Want::Exact(locals.len()))?;
         // The new locals come into scope only after the whole statement.
