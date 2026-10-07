@@ -7,11 +7,11 @@
 //! [`set`] writes through [`Heap::update`](orbit_gc::Heap::update), which
 //! runs the write barrier.
 
-use orbit_gc::{Gc, Marker, Trace};
+use orbit_gc::{Gc, Liveness, Marker, Trace, WeakMode};
 
 use crate::string::hash_word;
 use crate::value::{Payload, Tag, str_eq};
-use crate::{LuaHeap, LuaSpace, LuaStr, Value, number};
+use crate::{LuaHeap, LuaSpace, LuaStr, Value, gc, number};
 
 /// Why a value can't be a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +129,14 @@ impl Entry {
     #[inline(always)]
     fn is_empty(&self) -> bool {
         self.key_tag == Tag::Nil
+    }
+
+    /// What a weak table leaves where an entry's key was collected: a dead
+    /// entry whose key is `false` with hash 0. No real key hashes to 0, so
+    /// no lookup matches it; probes pass through it and stores reuse it,
+    /// like any dead entry, and the next rebuild drops it.
+    fn tombstone() -> Entry {
+        Entry::new(Value::Bool(false), 0, Value::Nil)
     }
 
     #[inline(always)]
@@ -252,15 +260,29 @@ pub struct Table {
     entries: Box<[Entry]>,
     /// Hash slots in use, dead entries included.
     used: u32,
-    /// Reserved for metatables (always `None` at first light).
+    /// The metatable. A string `__mode` in it makes the table weak.
     pub meta: Option<Gc<Table>>,
 }
 
 impl Trace<LuaSpace> for Table {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
+        let weak = match self.meta {
+            Some(meta) => {
+                m.mark(meta);
+                let mt = m.get(meta);
+                gc::weak_mode(mt, |s| m.get(s))
+            }
+            None => None,
+        };
+        if let Some(mode) = weak {
+            return self.trace_weak(m, mode);
+        }
         for i in 0..self.array.len() {
             let t = self.array.tag(i);
-            if matches!(t, Tag::Str | Tag::Table | Tag::Closure) {
+            if matches!(
+                t,
+                Tag::Str | Tag::Table | Tag::Closure | Tag::UserData | Tag::Thread
+            ) {
                 mark(m, self.array.get(i));
             }
         }
@@ -272,13 +294,113 @@ impl Trace<LuaSpace> for Table {
                 mark(m, e.value());
             }
         }
-        if let Some(meta) = self.meta {
-            m.mark(meta);
-        }
     }
 
     fn extra_bytes(&self) -> usize {
         self.array.bytes() + self.entries.len() * std::mem::size_of::<Entry>()
+    }
+
+    /// Drop what died from a weak table. An entry whose weak key died
+    /// becomes a tombstone (see [`Entry::tombstone`]), so no handle to a
+    /// freed object stays behind; an entry whose weak value died keeps its
+    /// key as a dead entry, so `next` still finds a key the program holds.
+    fn clear_weak(&mut self, mode: WeakMode, live: &Liveness<'_, LuaSpace>) {
+        if mode.values {
+            for i in 0..self.array.len() {
+                let v = self.array.get(i);
+                if gc::is_weak_ref(v) && !gc::is_live(live, v) {
+                    self.array.set(i, Value::Nil);
+                }
+            }
+        }
+        if self.used == 0 {
+            return;
+        }
+        for e in self.entries.iter_mut() {
+            if e.is_empty() {
+                continue;
+            }
+            if mode.keys && !gc::is_live(live, e.key()) {
+                *e = Entry::tombstone();
+            } else if mode.values {
+                let v = e.value();
+                if gc::is_weak_ref(v) && !gc::is_live(live, v) {
+                    e.set_value(Value::Nil);
+                }
+            }
+        }
+    }
+}
+
+impl Table {
+    /// Trace a table whose metatable makes it weak. Weak references are
+    /// left unmarked; with weak keys, a value is kept only through its key
+    /// (an ephemeron), and dead entries don't keep their keys.
+    fn trace_weak(&self, m: &mut Marker<'_, LuaSpace>, mode: WeakMode) {
+        m.weak(mode);
+        for i in 0..self.array.len() {
+            let v = self.array.get(i);
+            if !(mode.values && gc::is_weak_ref(v)) {
+                mark(m, v);
+            }
+        }
+        if self.used == 0 {
+            return;
+        }
+        for e in &self.entries {
+            if e.is_empty() {
+                continue;
+            }
+            let (k, v) = (e.key(), e.value());
+            if v.is_nil() {
+                if !mode.keys {
+                    mark(m, k);
+                }
+                continue;
+            }
+            let weak_key = mode.keys && gc::is_weak_ref(k);
+            let weak_value = mode.values && gc::is_weak_ref(v);
+            if !weak_key {
+                mark(m, k);
+                if !weak_value {
+                    mark(m, v);
+                }
+            } else if !weak_value
+                && let (Some(key), Some(value)) = (gc::object(m, k), gc::object(m, v))
+            {
+                m.ephemeron(key, value);
+            }
+        }
+    }
+
+    /// `t[name]` (raw) for a string key given by its bytes and hash, reading
+    /// key strings through `str_of`. Needs no interner, so the collector can
+    /// use it while tracing.
+    pub fn get_by_bytes<'a>(
+        &self,
+        name: &[u8],
+        hash: u32,
+        str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
+    ) -> Value {
+        if self.used == 0 {
+            return Value::Nil;
+        }
+        let mask = self.entries.len() - 1;
+        let mut i = hash as usize & mask;
+        for _ in 0..=mask {
+            let e = &self.entries[i];
+            if e.is_empty() {
+                break;
+            }
+            if e.hash == hash
+                && let Value::Str(s) = e.key()
+                && str_of(s).as_bytes() == name
+            {
+                return e.value();
+            }
+            i = (i + 1) & mask;
+        }
+        Value::Nil
     }
 }
 
@@ -289,6 +411,8 @@ pub fn mark(m: &mut Marker<'_, LuaSpace>, v: Value) {
         Value::Str(s) => m.mark(s),
         Value::Table(t) => m.mark(t),
         Value::Closure(c) => m.mark(c),
+        Value::UserData(u) => m.mark(u),
+        Value::Thread(t) => m.mark(t),
         _ => {}
     }
 }
@@ -380,7 +504,8 @@ impl Table {
     }
 
     /// The value in hash slot `slot` if that slot holds exactly key `s` (an
-    /// inline-cache hit).
+    /// inline-cache hit). The value can be nil (a dead entry): with a
+    /// metatable, that hit is a miss.
     #[inline(always)]
     pub fn cached_str(&self, slot: usize, s: Gc<LuaStr>) -> Option<Value> {
         match self.entries.get(slot) {
@@ -746,6 +871,41 @@ pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> bool {
     }
     set_key(heap, t, &Key::int(i), v);
     false
+}
+
+/// What [`store_int`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntStore {
+    /// Stored into the array part; nothing was allocated.
+    Array,
+    /// Stored through the hash part or by growing (may have allocated).
+    Other,
+    /// Nothing stored: the table has a metatable and the key is absent, so
+    /// `__newindex` may apply.
+    Meta,
+}
+
+/// `t[i] = v` for the interpreter: like [`set_int`], but leaves the store
+/// to the caller when a metatable could intercept it (the key is absent).
+#[inline(always)]
+pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore {
+    let idx = (i as u64).wrapping_sub(1);
+    heap.barrier_back(t);
+    let tab = heap.get_mut(t);
+    if idx < tab.array.len() as u64 {
+        let idx = idx as usize;
+        // Metatables are rare: test for one before reading the tag.
+        if tab.meta.is_some() && tab.array.tag(idx) == Tag::Nil {
+            return IntStore::Meta;
+        }
+        tab.array.set(idx, v);
+        return IntStore::Array;
+    }
+    if tab.meta.is_some() {
+        return IntStore::Meta;
+    }
+    set_key(heap, t, &Key::int(i), v);
+    IntStore::Other
 }
 
 /// `t[key] = v` (raw) for a normalised key. Returns the hash slot that now

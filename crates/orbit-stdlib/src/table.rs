@@ -1,5 +1,13 @@
-//! The `table` library subset (raw access: metamethods come later).
+//! The `table` library.
+//!
+//! Each function has a raw loop for tables without a metatable, the common
+//! case, and a resumable slow path in [`slow`] that honours `__index`,
+//! `__newindex` and `__len` (docs/design/stdlib-string-table-math.md#table).
 
+mod slow;
+mod sort;
+
+use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::{Gc, Table, Value};
 use orbit_vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
 
@@ -10,31 +18,58 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("table.remove", remove),
     ("table.concat", concat),
     ("table.unpack", unpack),
+    ("table.pack", pack),
+    ("table.move", move_),
+    ("table.create", create),
+    ("table.sort", sort::sort),
 ];
+
+/// Largest array size `create` and `sort` accept (a C `int`).
+const MAX_INT: i64 = i32::MAX as i64;
+/// Most hash entries `create` preallocates before `table overflow`.
+const MAX_HASH: i64 = 1 << 30;
+/// Most slots `create` actually reserves up front; larger requests grow on
+/// demand instead of failing the allocation outright.
+const MAX_RESERVE: usize = 1 << 24;
 
 fn get(ctx: &NativeCtx<'_>, t: Gc<Table>, i: i64) -> Value {
     ctx.heap.get(t).get_int(i)
 }
 
 fn set(ctx: &mut NativeCtx<'_>, t: Gc<Table>, i: i64, v: Value) {
-    ctx.heap.update(t, |tab| tab.set_int(i, v));
+    tbl::set_int(ctx.heap, t, i, v);
+}
+
+/// Argument `i` as a table without a metatable: the raw loops apply.
+fn plain(ctx: &NativeCtx<'_>, i: usize) -> Option<Gc<Table>> {
+    match ctx.arg(i) {
+        Value::Table(t) if ctx.heap.get(t).meta.is_none() => Some(t),
+        _ => None,
+    }
+}
+
+/// `#t` for the table functions.
+fn length(ctx: &NativeCtx<'_>, t: Gc<Table>) -> i64 {
+    ctx.heap.get(t).border()
 }
 
 fn insert(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
-    let n = ctx.heap.get(t).border();
+    let Some(t) = plain(ctx, 0) else {
+        return slow::insert(ctx);
+    };
+    let end = length(ctx, t).wrapping_add(1);
     match ctx.nargs() {
         2 => {
             let v = ctx.arg(1);
-            set(ctx, t, n.wrapping_add(1), v);
+            set(ctx, t, end, v);
         }
         3 => {
             let pos = ctx.check_int(1)?;
-            // `pos - 1` as unsigned: 1..=n+1 is valid.
-            if (pos as u64).wrapping_sub(1) >= (n as u64).wrapping_add(1) {
+            // `pos - 1` as unsigned: 1..=end is valid.
+            if (pos as u64).wrapping_sub(1) >= end as u64 {
                 return Err(ctx.arg_error(1, "position out of bounds"));
             }
-            let mut i = n + 1;
+            let mut i = end;
             while i > pos {
                 let v = get(ctx, t, i - 1);
                 set(ctx, t, i, v);
@@ -49,14 +84,14 @@ fn insert(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn remove(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
-    let size = ctx.heap.get(t).border();
+    let Some(t) = plain(ctx, 0) else {
+        return slow::remove(ctx);
+    };
+    let size = length(ctx, t);
     let mut pos = ctx.opt_int(1, size)?;
-    if ctx.nargs() > 1 && size.wrapping_add(1) as u64 != pos as u64 {
-        // `pos - 1` as unsigned: 1..=size+1 is valid.
-        if (pos as u64).wrapping_sub(1) >= (size as u64).wrapping_add(1) {
-            return Err(ctx.arg_error(1, "position out of bounds"));
-        }
+    // `pos - 1` as unsigned: 1..=size+1 is valid when a position is given.
+    if ctx.nargs() > 1 && pos != size && (pos as u64).wrapping_sub(1) > size as u64 {
+        return Err(ctx.arg_error(1, "position out of bounds"));
     }
     let v = get(ctx, t, pos);
     while pos < size {
@@ -64,14 +99,14 @@ fn remove(ctx: &mut NativeCtx<'_>) -> R {
         set(ctx, t, pos, next);
         pos += 1;
     }
-    if pos <= size || ctx.nargs() > 1 {
-        set(ctx, t, pos, Value::Nil);
-    }
+    set(ctx, t, pos, Value::Nil);
     ctx.ret1(v)
 }
 
 fn concat(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
+    let Some(t) = plain(ctx, 0) else {
+        return slow::concat(ctx);
+    };
     let sep = if ctx.arg(1).is_nil() {
         Vec::new()
     } else {
@@ -80,7 +115,7 @@ fn concat(ctx: &mut NativeCtx<'_>) -> R {
     };
     let i = ctx.opt_int(2, 1)?;
     let j = if ctx.arg(3).is_nil() {
-        ctx.heap.get(t).border()
+        length(ctx, t)
     } else {
         ctx.check_int(3)?
     };
@@ -97,12 +132,10 @@ fn concat(ctx: &mut NativeCtx<'_>) -> R {
                 )));
             }
         }
-        if k != j {
-            out.extend_from_slice(&sep);
-        }
-        if k == i64::MAX {
+        if k == j {
             break;
         }
+        out.extend_from_slice(&sep);
         k += 1;
     }
     let r = ctx.new_str_owned(out);
@@ -110,10 +143,12 @@ fn concat(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn unpack(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
+    let Some(t) = plain(ctx, 0) else {
+        return slow::unpack(ctx);
+    };
     let i = ctx.opt_int(1, 1)?;
     let j = if ctx.arg(2).is_nil() {
-        ctx.heap.get(t).border()
+        length(ctx, t)
     } else {
         ctx.check_int(2)?
     };
@@ -121,12 +156,84 @@ fn unpack(ctx: &mut NativeCtx<'_>) -> R {
         return Ok(NativeReturn::Return(0));
     }
     let n = (j as i128 - i as i128 + 1) as u128;
-    if n >= 1_000_000 {
+    let room = ctx.rt.limits.max_stack.saturating_sub(ctx.len()) as u128;
+    if n >= MAX_INT as u128 || n >= room {
         return Err(ctx.error("too many results to unpack"));
     }
-    for k in i..=j {
+    let mut k = i;
+    loop {
         let v = get(ctx, t, k);
         ctx.push(v);
+        if k == j {
+            break;
+        }
+        k += 1;
     }
     Ok(NativeReturn::Return(n as usize))
+}
+
+fn pack(ctx: &mut NativeCtx<'_>) -> R {
+    let n = ctx.nargs();
+    let t = ctx.new_table(Table::with_capacity(n, 1));
+    // Root the table in the window before allocating the key.
+    ctx.push(Value::Table(t));
+    for i in 0..n {
+        let v = ctx.arg(i);
+        set(ctx, t, i as i64 + 1, v);
+    }
+    let k = ctx.new_str(b"n");
+    let _ = tbl::set(ctx.heap, t, k, Value::Int(n as i64));
+    Ok(NativeReturn::Return(1))
+}
+
+fn move_(ctx: &mut NativeCtx<'_>) -> R {
+    let (Some(a1), true) = (
+        plain(ctx, 0),
+        ctx.arg(4).is_nil() || plain(ctx, 4).is_some(),
+    ) else {
+        return slow::move_(ctx);
+    };
+    let f = ctx.check_int(1)?;
+    let e = ctx.check_int(2)?;
+    let t = ctx.check_int(3)?;
+    let a2 = plain(ctx, 4).unwrap_or(a1);
+    if e >= f {
+        if !(f > 0 || e < i64::MAX.wrapping_add(f)) {
+            return Err(ctx.arg_error(2, "too many elements to move"));
+        }
+        let n = e - f;
+        if t > i64::MAX - n {
+            return Err(ctx.arg_error(3, "destination wrap around"));
+        }
+        let overlapping = a1 == a2 && t > f && t <= e;
+        if overlapping {
+            for i in (0..=n).rev() {
+                let v = get(ctx, a1, f + i);
+                set(ctx, a2, t + i, v);
+            }
+        } else {
+            for i in 0..=n {
+                let v = get(ctx, a1, f + i);
+                set(ctx, a2, t + i, v);
+            }
+        }
+    }
+    ctx.ret1(Value::Table(a2))
+}
+
+fn create(ctx: &mut NativeCtx<'_>) -> R {
+    let n = ctx.check_int(0)?;
+    if !(0..=MAX_INT).contains(&n) {
+        return Err(ctx.arg_error(0, "out of range"));
+    }
+    let m = ctx.opt_int(1, 0)?;
+    if !(0..=MAX_INT).contains(&m) {
+        return Err(ctx.arg_error(1, "out of range"));
+    }
+    if m > MAX_HASH {
+        return Err(ctx.error("table overflow"));
+    }
+    let t = Table::with_capacity((n as usize).min(MAX_RESERVE), (m as usize).min(MAX_RESERVE));
+    let t = ctx.new_table(t);
+    ctx.ret1(Value::Table(t))
 }

@@ -59,7 +59,7 @@ pub(crate) struct FuncState<'a> {
     pub const_locals: &'a [Vec<Option<ConstVal>>],
     code: Vec<Op>,
     lines: Vec<(u32, u32)>,
-    line: u32,
+    pub(crate) line: u32,
     consts: Vec<Constant>,
     const_map: HashMap<ConstKey, u16>,
     ncaches: u32,
@@ -76,15 +76,37 @@ pub(crate) struct FuncState<'a> {
     free_cell: usize,
     ncells: usize,
     labels: Vec<LabelState>,
-    /// Break targets of the enclosing loops.
-    pub loops: Vec<Label>,
+    /// The compiler label for each HIR `goto` label, made on first use.
+    goto_labels: Vec<Option<Label>>,
+    /// Break targets of the enclosing loops, with how many to-be-closed locals were open
+    /// when each loop started.
+    pub loops: Vec<(Label, usize)>,
+    /// The open to-be-closed locals (`<close>` locals and generic-for closing values) and
+    /// their registers, oldest first.
+    pub tbc: Vec<(LocalId, u8)>,
+    /// For each placed HIR label, the to-be-closed locals open at it.
+    label_tbc: Vec<Option<Vec<LocalId>>>,
+    /// For each HIR label not yet placed, the `Close` placeholders of the gotos aimed at it,
+    /// with the to-be-closed locals open at each goto.
+    goto_closes: Vec<Vec<GotoClose>>,
     origins: Vec<OperandOrigin>,
     debug_locals: Vec<LocalInfo>,
     /// Locals declared in the open scopes, with their `debug_locals` index.
-    scope: Vec<(LocalId, Option<usize>)>,
+    /// Hidden loop state has no `LocalId`.
+    scope: Vec<(Option<LocalId>, Option<usize>)>,
     /// The capture that always holds the running closure, if any (see [`self_capture`]).
     pub self_capture: Option<CaptureId>,
 }
+
+impl ScopeMark {
+    /// How many to-be-closed locals were open when the scope started.
+    pub fn tbc(&self) -> usize {
+        self.tbc
+    }
+}
+
+/// A goto's `Close` placeholder (its pc) and the to-be-closed locals open at the goto.
+type GotoClose = (usize, Vec<(LocalId, u8)>);
 
 /// Saved allocation state at the start of a scope.
 pub(crate) struct ScopeMark {
@@ -92,6 +114,7 @@ pub(crate) struct ScopeMark {
     free: usize,
     active: usize,
     free_cell: usize,
+    tbc: usize,
 }
 
 impl<'a> FuncState<'a> {
@@ -125,7 +148,11 @@ impl<'a> FuncState<'a> {
             free_cell: 0,
             ncells: 0,
             labels: Vec::new(),
+            goto_labels: vec![None; f.labels.len()],
             loops: Vec::new(),
+            tbc: Vec::new(),
+            label_tbc: vec![None; f.labels.len()],
+            goto_closes: vec![Vec::new(); f.labels.len()],
             origins: Vec::new(),
             debug_locals: Vec::new(),
             scope: Vec::new(),
@@ -146,6 +173,14 @@ impl<'a> FuncState<'a> {
             self.active = self.free;
             self.declare(p, r)?;
         }
+        if let Some(t) = f.vararg_table
+            && !f.vararg_table_elided
+        {
+            let r = self.alloc()?;
+            self.emit(Op::VarargTable { dst: r });
+            self.active = self.free;
+            self.declare(t, r)?;
+        }
         self.block_stmts(f.body)?;
         let body = f.block(f.body);
         let ends_in_return = body
@@ -154,6 +189,7 @@ impl<'a> FuncState<'a> {
             .is_some_and(|&s| matches!(f.stmt(s).kind, StmtKind::Return(_)));
         if !ends_in_return {
             self.at_line(self.last_line());
+            self.emit_close(0);
             self.emit(Op::Return0);
         }
         self.close_scope_locals(0);
@@ -193,10 +229,12 @@ impl<'a> FuncState<'a> {
             consts: self.consts,
             children: Vec::new(),
             captures: Vec::new(),
+            self_capture: self.self_capture.map(|c| c.index() as u8),
             debug: DebugInfo {
                 lines: self.lines,
                 locals: self.debug_locals,
                 capture_names: f.captures.iter().map(|c| bytes(c.name)).collect(),
+                env_debug_index: f.env_debug_index,
                 origins,
             },
         };
@@ -208,9 +246,21 @@ impl<'a> FuncState<'a> {
     }
 
     fn last_line(&self) -> u32 {
-        self.chunk
-            .source
-            .line_of(self.f.span.end.saturating_sub(1).max(self.f.span.start))
+        end_line(self.chunk, self.f)
+    }
+
+    /// Emits the `Closure` instruction for child `func`. It belongs to the
+    /// function's last line, as `debug` line events in the reference
+    /// report it.
+    pub fn emit_closure(&mut self, dst: u8, func: FuncId) -> Result<()> {
+        let proto = self.child(func)?;
+        let line = std::mem::replace(
+            &mut self.line,
+            end_line(self.chunk, self.chunk.function(func)),
+        );
+        self.emit(Op::Closure { dst, proto });
+        self.line = line;
+        Ok(())
     }
 
     // ---- errors and lines ----
@@ -259,6 +309,71 @@ impl<'a> FuncState<'a> {
     pub fn label(&mut self) -> Label {
         self.labels.push(LabelState::default());
         Label(self.labels.len() - 1)
+    }
+
+    /// The jump target for HIR label `l`.
+    pub fn goto_label(&mut self, l: orbit_hir::LabelId) -> Label {
+        if let Some(label) = self.goto_labels[l.index()] {
+            return label;
+        }
+        let label = self.label();
+        self.goto_labels[l.index()] = Some(label);
+        label
+    }
+
+    /// Marks local `l`, in register `r`, to be closed when its scope ends.
+    pub fn mark_tbc(&mut self, l: LocalId, r: u8) {
+        let pc = self.emit(Op::Tbc { reg: r });
+        // A generic `for`'s closing value has no name; lua5.5 calls it `(for state)`.
+        let origin = self
+            .local_origin(l)
+            .or_else(|| Some(Origin::Local(b"(for state)"[..].into())));
+        self.origin(pc, 0, origin);
+        self.tbc.push((l, r));
+    }
+
+    /// Emits a `Close` for the to-be-closed locals past the first `depth`, if any (for an
+    /// exit from their scopes).
+    pub fn emit_close(&mut self, depth: usize) {
+        if let Some(&(_, from)) = self.tbc.get(depth) {
+            self.emit(Op::Close { from });
+        }
+    }
+
+    /// Before a `goto` to HIR label `l`: closes the to-be-closed locals that are open here
+    /// but not at the label. For a label not placed yet, emits a placeholder that
+    /// [`place_goto_label`](Self::place_goto_label) fills in.
+    pub fn goto_close(&mut self, l: orbit_hir::LabelId) {
+        if self.tbc.is_empty() {
+            return;
+        }
+        match &self.label_tbc[l.index()] {
+            Some(at_label) => {
+                let depth = common_prefix(&self.tbc, at_label);
+                self.emit_close(depth);
+            }
+            None => {
+                let pc = self.emit(Op::Close { from: 0 });
+                let open = self.tbc.clone();
+                self.goto_closes[l.index()].push((pc, open));
+            }
+        }
+    }
+
+    /// Places HIR label `l` here, finishing the `Close` placeholders of the gotos before it.
+    pub fn place_goto_label(&mut self, l: orbit_hir::LabelId) {
+        let label = self.goto_label(l);
+        self.place(label);
+        let at_label: Vec<LocalId> = self.tbc.iter().map(|&(id, _)| id).collect();
+        for (pc, open) in std::mem::take(&mut self.goto_closes[l.index()]) {
+            let depth = common_prefix(&open, &at_label);
+            self.code[pc] = match open.get(depth) {
+                Some(&(_, from)) => Op::Close { from },
+                // Nothing to close: a jump to the next instruction.
+                None => Op::Jump { off: 0 },
+            };
+        }
+        self.label_tbc[l.index()] = Some(at_label);
     }
 
     /// A label placed at the current position (a backward jump target).
@@ -374,10 +489,15 @@ impl<'a> FuncState<'a> {
             free: self.free,
             active: self.active,
             free_cell: self.free_cell,
+            tbc: self.tbc.len(),
         }
     }
 
+    /// Ends a scope opened by [`open_scope`](Self::open_scope), closing its to-be-closed
+    /// locals.
     pub fn close_scope(&mut self, mark: ScopeMark) {
+        self.emit_close(mark.tbc);
+        self.tbc.truncate(mark.tbc);
         self.close_scope_locals(mark.scope);
         self.free = mark.free;
         self.active = mark.active;
@@ -387,7 +507,9 @@ impl<'a> FuncState<'a> {
     fn close_scope_locals(&mut self, from: usize) {
         let end = self.code.len() as u32;
         for (l, debug) in self.scope.drain(from..) {
-            self.slots[l.index()] = Slot::Unset;
+            if let Some(l) = l {
+                self.slots[l.index()] = Slot::Unset;
+            }
             if let Some(i) = debug {
                 self.debug_locals[i].end_pc = end;
             }
@@ -441,7 +563,19 @@ impl<'a> FuncState<'a> {
             }
             _ => None,
         };
-        self.scope.push((l, debug));
+        self.scope.push((Some(l), debug));
+    }
+
+    /// Records register `r` as hidden loop state, which `debug.getlocal` reports as
+    /// `(for state)`, as the reference does.
+    pub fn push_loop_state(&mut self, r: u8) {
+        self.debug_locals.push(LocalInfo {
+            name: b"(for state)".as_slice().into(),
+            slot: LocalSlot::Reg(r),
+            start_pc: self.code.len() as u32,
+            end_pc: 0,
+        });
+        self.scope.push((None, Some(self.debug_locals.len() - 1)));
     }
 
     /// The compile-time value of capture `c` of this function, if it resolves to a `<const>`
@@ -493,6 +627,13 @@ fn set_offset(op: &mut Op, new: Offset) {
 /// The statement stores the closure in the local's cell before anything can call it, so reading
 /// the capture is the same as reading the running closure, and `CapSelf` does that without
 /// going through the closure's captures and the cell.
+/// The line holding the end of `f`'s source.
+fn end_line(chunk: &Chunk, f: &Function) -> u32 {
+    chunk
+        .source
+        .line_of(f.span.end.saturating_sub(1).max(f.span.start))
+}
+
 fn self_capture(chunk: &Chunk, id: FuncId, local: LocalId) -> Option<CaptureId> {
     let parent = chunk.function(chunk.function(id).parent?);
     if parent.locals[local.index()].reassigned {
@@ -504,4 +645,12 @@ fn self_capture(chunk: &Chunk, id: FuncId, local: LocalId) -> Option<CaptureId> 
         .iter()
         .position(|c| c.from == CaptureFrom::ParentLocal(local))?;
     Some(CaptureId::from_index(i))
+}
+
+/// How many of the to-be-closed locals `open` (at a goto) are also open at a label.
+fn common_prefix(open: &[(LocalId, u8)], at_label: &[LocalId]) -> usize {
+    open.iter()
+        .zip(at_label)
+        .take_while(|((a, _), b)| a == *b)
+        .count()
 }

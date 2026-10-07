@@ -2,11 +2,15 @@
 
 use std::io::Write;
 
+use orbit_vm::orbit_core::Tag;
 use orbit_vm::orbit_core::Value;
 use orbit_vm::orbit_core::number::str_to_number;
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::value::raw_eq;
-use orbit_vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_vm::{
+    CallOutcome, Event, GcMode, GcParam, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm,
+    finalize_then_return,
+};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -20,11 +24,15 @@ const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("select", select),
     ("error", error),
     ("pcall", pcall),
+    ("xpcall", xpcall),
+    ("warn", warn),
     ("assert", assert),
     ("rawequal", rawequal),
     ("rawget", rawget),
     ("rawset", rawset),
     ("rawlen", rawlen),
+    ("getmetatable", getmetatable),
+    ("setmetatable", setmetatable),
     ("collectgarbage", collectgarbage),
 ];
 
@@ -38,13 +46,44 @@ pub(crate) fn open(vm: &mut Vm) {
     vm.set_global("next", next_fn);
     let g = vm.rt.globals;
     vm.set_global("_G", Value::Table(g));
+    // The shared string metatable: `("x"):upper()` finds `string`'s
+    // functions. The string library replaces `__index` when it opens.
+    let mt = vm.new_table();
+    vm.pin(Value::Table(mt));
+    vm.rt.set_type_meta(Tag::Str, Some(mt));
+    vm.unpin(Value::Table(mt));
     let v = vm.new_str(b"Lua 5.5");
     vm.set_global("_VERSION", v);
 }
 
+/// `print`: arguments with a `__tostring` are converted first, one
+/// `CallThen` each, the result replacing the argument in the window.
 fn print(ctx: &mut NativeCtx<'_>) -> R {
+    let n = ctx.nargs();
+    print_from(ctx, n, 0)
+}
+
+/// Print the `n` arguments, converting from argument `start` on.
+fn print_from(ctx: &mut NativeCtx<'_>, n: usize, start: usize) -> R {
+    for i in start..n {
+        let v = ctx.arg(i);
+        let h = ctx.metamethod(v, Event::ToString);
+        if !h.is_nil() {
+            // Window: args, then the index being converted, then the
+            // call's argument (replaced by its results).
+            ctx.truncate(n);
+            ctx.push(Value::Int(i as i64));
+            ctx.push(v);
+            return Ok(NativeReturn::CallThen {
+                f: h,
+                nargs: 1,
+                k: print_converted,
+                protected: false,
+            });
+        }
+    }
     let mut line = Vec::new();
-    for i in 0..ctx.nargs() {
+    for i in 0..n {
         if i > 0 {
             line.push(b'\t');
         }
@@ -53,6 +92,34 @@ fn print(ctx: &mut NativeCtx<'_>) -> R {
     line.push(b'\n');
     let _ = ctx.rt.out.write_all(&line);
     Ok(NativeReturn::Return(0))
+}
+
+fn print_converted(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
+    };
+    // The window up to the call is print's arguments plus the index.
+    let n = ctx.nargs() - 1;
+    let Value::Int(i) = ctx.arg(n) else {
+        unreachable!("print's progress")
+    };
+    let r = tostring_result(ctx, got, n + 1)?;
+    ctx.set(i as usize, r);
+    ctx.truncate(n);
+    print_from(ctx, n, i as usize + 1)
+}
+
+/// The value `__tostring` returned (`got` results from window slot `at`),
+/// which must be a string or a number.
+fn tostring_result(ctx: &mut NativeCtx<'_>, got: usize, at: usize) -> Result<Value, LuaError> {
+    let r = if got > 0 { ctx.arg(at) } else { Value::Nil };
+    match r {
+        Value::Str(_) | Value::Int(_) | Value::Float(_) => Ok(r),
+        _ => {
+            let msg = ctx.new_str(b"'__tostring' must return a string");
+            Err(ctx.error_value(msg))
+        }
+    }
 }
 
 fn type_(ctx: &mut NativeCtx<'_>) -> R {
@@ -66,10 +133,55 @@ fn tostring(ctx: &mut NativeCtx<'_>) -> R {
     if matches!(v, Value::Str(_)) {
         return ctx.ret1(v);
     }
+    let h = ctx.metamethod(v, Event::ToString);
+    if !h.is_nil() {
+        ctx.truncate(1);
+        ctx.push(v);
+        return Ok(NativeReturn::CallThen {
+            f: h,
+            nargs: 1,
+            k: tostring_done,
+            protected: false,
+        });
+    }
     let mut out = Vec::new();
     ctx.display(v, &mut out);
     let s = ctx.new_str_owned(out);
     ctx.ret1(s)
+}
+
+fn tostring_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
+    };
+    let r = tostring_result(ctx, got, 1)?;
+    ctx.ret1(r)
+}
+
+fn getmetatable(ctx: &mut NativeCtx<'_>) -> R {
+    let v = ctx.check_any(0)?;
+    let Some(mt) = ctx.metatable(v) else {
+        return ctx.ret1(Value::Nil);
+    };
+    let protected = ctx.metamethod(v, Event::Metatable);
+    if !protected.is_nil() {
+        return ctx.ret1(protected);
+    }
+    ctx.ret1(Value::Table(mt))
+}
+
+fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_table(0)?;
+    let mt = match ctx.arg(1) {
+        Value::Nil if ctx.nargs() >= 2 => None,
+        Value::Table(m) => Some(m),
+        _ => return Err(ctx.type_error(1, "nil or table")),
+    };
+    if !ctx.metamethod(Value::Table(t), Event::Metatable).is_nil() {
+        return Err(ctx.error("cannot change a protected metatable"));
+    }
+    orbit_vm::orbit_core::gc::set_metatable(ctx.heap, Value::Table(t), mt);
+    ctx.ret1(Value::Table(t))
 }
 
 fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
@@ -128,12 +240,30 @@ fn ipairs(ctx: &mut NativeCtx<'_>) -> R {
 
 fn ipairs_iter(ctx: &mut NativeCtx<'_>) -> R {
     let i = ctx.check_int(1)?.wrapping_add(1);
-    let v = match ctx.arg(0) {
-        Value::Table(t) => ctx.heap.get(t).get_int(i),
-        other => {
-            return Err(ctx.error(format!("attempt to index a {} value", other.type_name())));
-        }
+    let t = ctx.arg(0);
+    ctx.truncate(2);
+    match ctx.index(t, Value::Int(i))? {
+        Meta::Done(v) => ipairs_step(ctx, i, v),
+        Meta::Call { f, nargs } => Ok(NativeReturn::CallThen {
+            f,
+            nargs,
+            k: ipairs_indexed,
+            protected: false,
+        }),
+    }
+}
+
+fn ipairs_indexed(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
     };
+    let i = ctx.check_int(1)?.wrapping_add(1);
+    let v = if got > 0 { ctx.arg(2) } else { Value::Nil };
+    ctx.truncate(2);
+    ipairs_step(ctx, i, v)
+}
+
+fn ipairs_step(ctx: &mut NativeCtx<'_>, i: i64, v: Value) -> R {
     if v.is_nil() {
         return ctx.ret1(Value::Nil);
     }
@@ -144,10 +274,34 @@ fn ipairs_iter(ctx: &mut NativeCtx<'_>) -> R {
 
 fn pairs(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_any(0)?;
+    let h = ctx.metamethod(t, Event::Pairs);
+    if !h.is_nil() {
+        ctx.truncate(1);
+        ctx.push(t);
+        // lua5.5 lets `__pairs` yield.
+        return Ok(NativeReturn::CallThenYieldable {
+            f: h,
+            nargs: 1,
+            k: pairs_done,
+            protected: false,
+        });
+    }
     let next_fn = ctx.native("next", next);
     ctx.push(next_fn);
     ctx.push(t);
     ctx.push(Value::Nil);
+    Ok(NativeReturn::Return(3))
+}
+
+/// `__pairs` returned: pass on exactly three of its results.
+fn pairs_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
+    };
+    ctx.truncate(1 + got.min(3));
+    while ctx.len() < 4 {
+        ctx.push(Value::Nil);
+    }
     Ok(NativeReturn::Return(3))
 }
 
@@ -208,7 +362,7 @@ fn pcall(ctx: &mut NativeCtx<'_>) -> R {
     // Window [f, args...] becomes [true, args...]; the call's results land
     // after `true`.
     ctx.set(0, Value::Bool(true));
-    Ok(NativeReturn::CallThen {
+    Ok(NativeReturn::CallThenYieldable {
         f,
         nargs: ctx.nargs() - 1,
         k: pcall_done,
@@ -231,6 +385,71 @@ fn pcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             Ok(NativeReturn::Return(2))
         }
     }
+}
+
+fn xpcall(ctx: &mut NativeCtx<'_>) -> R {
+    let h = match ctx.arg(1) {
+        h @ (Value::Closure(_) | Value::Native(_)) => h,
+        _ => return Err(ctx.type_error(1, "function")),
+    };
+    let f = ctx.arg(0);
+    // Window [f, h, args...] becomes [h, true, args...]: the VM finds the
+    // handler in the first slot, and the call's results land after `true`.
+    ctx.set(0, h);
+    ctx.set(1, Value::Bool(true));
+    Ok(NativeReturn::CallHandled {
+        f,
+        nargs: ctx.nargs() - 2,
+        k: xpcall_done,
+    })
+}
+
+fn xpcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    match outcome {
+        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
+        CallOutcome::Err(e) => {
+            let e = if e.is_nil() {
+                ctx.new_str(b"<no error object>")
+            } else {
+                e
+            };
+            ctx.truncate(0);
+            ctx.push(Value::Bool(false));
+            ctx.push(e);
+            Ok(NativeReturn::Return(2))
+        }
+    }
+}
+
+fn warn(ctx: &mut NativeCtx<'_>) -> R {
+    let n = ctx.nargs().max(1);
+    let mut parts = Vec::with_capacity(n);
+    for i in 0..n {
+        parts.push(ctx.check_str(i)?);
+    }
+    // A single message starting with `@` is a control message; unknown ones
+    // are ignored.
+    if let [msg] = parts[..]
+        && let [b'@', control @ ..] = ctx.bytes(msg)
+    {
+        match control {
+            b"on" => ctx.rt.warnings = true,
+            b"off" => ctx.rt.warnings = false,
+            _ => {}
+        }
+        return Ok(NativeReturn::Return(0));
+    }
+    if ctx.rt.warnings {
+        let mut text = b"Lua warning: ".to_vec();
+        for &s in &parts {
+            text.extend_from_slice(ctx.bytes(s));
+        }
+        text.push(b'\n');
+        // Keep the order of output already printed.
+        let _ = ctx.rt.out.flush();
+        let _ = std::io::stderr().write_all(&text);
+    }
+    Ok(NativeReturn::Return(0))
 }
 
 fn assert(ctx: &mut NativeCtx<'_>) -> R {
@@ -274,11 +493,16 @@ fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
     let n = match ctx.arg(0) {
         Value::Table(t) => ctx.heap.get(t).border(),
         Value::Str(s) => ctx.bytes(s).len() as i64,
-        _ => return Err(ctx.arg_error(0, "table or string expected")),
+        _ => return Err(ctx.type_error(0, "table or string")),
     };
     ctx.ret1(Value::Int(n))
 }
 
+/// `collectgarbage` ([GC semantics design]). Inside a finalizer it does
+/// nothing and returns `nil` (`-1` for `"param"`), as in Lua, so the
+/// collector is never re-entered.
+///
+/// [GC semantics design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/gc-semantics.md
 fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
     let opt = match ctx.arg(0) {
         Value::Nil => b"collect".to_vec(),
@@ -287,18 +511,53 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             ctx.bytes(s).to_vec()
         }
     };
+    const OPTIONS: &[&[u8]] = &[
+        b"collect",
+        b"count",
+        b"step",
+        b"stop",
+        b"restart",
+        b"isrunning",
+        b"incremental",
+        b"generational",
+        b"param",
+    ];
+    if !OPTIONS.contains(&&opt[..]) {
+        let msg = format!("invalid option '{}'", String::from_utf8_lossy(&opt));
+        return Err(ctx.arg_error(0, msg));
+    }
+    if ctx.rt.gc.finalizing() {
+        let v = if &opt[..] == b"param" {
+            Value::Int(-1)
+        } else {
+            Value::Nil
+        };
+        return ctx.ret1(v);
+    }
     match &opt[..] {
         b"collect" => {
             ctx.full_collect();
-            ctx.ret1(Value::Int(0))
+            finalize_then_return(ctx, Value::Int(0))
         }
         b"count" => {
             let kb = ctx.heap.bytes() as f64 / 1024.0;
             ctx.ret1(Value::Float(kb))
         }
         b"step" => {
-            let done = ctx.heap.step(ctx.rt);
-            ctx.ret1(Value::Bool(done))
+            let kb = ctx.opt_int(1, 0)?;
+            let done = match ctx.rt.gc.mode {
+                // A minor collection collects all young garbage; ours
+                // collects all garbage.
+                GcMode::Generational => {
+                    ctx.full_collect();
+                    false
+                }
+                GcMode::Incremental => {
+                    let bytes = usize::try_from(kb).unwrap_or(0).saturating_mul(1024);
+                    ctx.heap.step_with(ctx.rt, bytes)
+                }
+            };
+            finalize_then_return(ctx, Value::Bool(done))
         }
         b"stop" => {
             ctx.heap.stop();
@@ -312,9 +571,32 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             let running = !ctx.heap.is_stopped();
             ctx.ret1(Value::Bool(running))
         }
-        other => {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(other));
-            Err(ctx.arg_error(0, msg))
+        b"incremental" | b"generational" => {
+            let mode = if &opt[..] == b"incremental" {
+                GcMode::Incremental
+            } else {
+                GcMode::Generational
+            };
+            let old = std::mem::replace(&mut ctx.rt.gc.mode, mode);
+            let v = ctx.new_str(old.name().as_bytes());
+            ctx.ret1(v)
+        }
+        _ => {
+            let name = ctx.check_str(1)?;
+            let Some(p) = GcParam::from_name(ctx.bytes(name)) else {
+                let msg = format!(
+                    "invalid option '{}'",
+                    String::from_utf8_lossy(ctx.bytes(name))
+                );
+                return Err(ctx.arg_error(1, msg));
+            };
+            let v = ctx.opt_int(2, -1)?;
+            let old = if v >= 0 {
+                ctx.rt.gc.set_param(ctx.heap, p, v)
+            } else {
+                ctx.rt.gc.param(p)
+            };
+            ctx.ret1(Value::Int(old))
         }
     }
 }

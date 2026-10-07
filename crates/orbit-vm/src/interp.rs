@@ -2,18 +2,34 @@
 
 use std::rc::Rc;
 
+use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{MULTI, Op, Origin};
 use orbit_core::number::{ArithOp, Number};
-use orbit_core::table;
+use orbit_core::table::{self, IntStore};
 use orbit_core::{Closure, Gc, ProtoCode, Value};
 
-use crate::cold::{env_error, index_error};
+use crate::cold::{already_defined, env_error, get_str_miss, op_len, set_str_miss};
+use crate::meta::Event;
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
-use crate::{Frame, FrameKind, LuaError, Vm};
+use crate::{Catch, Frame, FrameKind, LuaError, Vm};
 
 /// Registers a frame can address: register numbers are `u8`.
 const WINDOW: usize = 256;
+
+/// Nils to extend the stack with: a copy from a block compiles to a
+/// `memcpy`, where `resize` fills slot by slot. Natives truncate the stack to
+/// their window, so every return from one into Lua refills a window.
+static NILS: [Value; WINDOW] = [Value::Nil; WINDOW];
+
+/// Grow `regs` with nils to at least `len` values.
+#[inline(always)]
+pub(crate) fn extend_nil(regs: &mut Vec<Value>, len: usize) {
+    while regs.len() < len {
+        let n = (len - regs.len()).min(WINDOW);
+        regs.extend_from_slice(&NILS[..n]);
+    }
+}
 
 /// Where a new Lua frame's state lives, so the dispatch loop can enter it
 /// without reading the frame back.
@@ -22,34 +38,43 @@ struct Entered {
     code_id: usize,
 }
 
+/// How a run of one dispatch loop instantiation ended.
+pub(crate) enum Ran {
+    /// The frame stack is back at the level the run started from.
+    Done,
+    /// A hook was armed or disarmed: continue in the other loop.
+    Switch,
+}
+
 /// What the dispatch loop does next.
 pub(crate) enum Flow {
     /// The top frame changed (or its registers were touched by a call):
     /// reload it.
     Reload,
-    /// The frame stack is back at the level the run started from.
+    /// Returned into the boundary frame the run started from.
     Done,
+    /// A coroutine switch replaced the running stack: reload, and don't
+    /// trust anything the loop knew about the frame.
+    Switched,
 }
 
 impl Vm {
     /// Call `regs[func]` with the `nargs` values above it and run until it
     /// returns. Its results end up at `regs[func..top]`.
-    pub(crate) fn call_at(
-        &mut self,
-        func: usize,
-        nargs: usize,
-        stop: usize,
-    ) -> Result<(), LuaError> {
-        let flow = match self.call_value(func, nargs, MULTI, stop) {
+    pub(crate) fn call_at(&mut self, func: usize, nargs: usize) -> Result<(), LuaError> {
+        let flow = match self.call_value(func, nargs, MULTI) {
             Ok(f) => f,
             Err(x) => {
-                let e = self.make_error(x, stop);
-                self.unwind(e, stop)?
+                let e = self.make_error(x);
+                self.unwind(e)?
             }
         };
         match flow {
             Flow::Done => Ok(()),
-            Flow::Reload => self.run(stop),
+            Flow::Reload | Flow::Switched => {
+                self.rt.switched = false;
+                self.run()
+            }
         }
     }
 
@@ -58,17 +83,49 @@ impl Vm {
     pub(crate) fn call_value(
         &mut self,
         func: usize,
-        nargs: usize,
+        mut nargs: usize,
         want: u8,
-        stop: usize,
     ) -> Result<Flow, Exc> {
+        let mut chain = 0;
+        loop {
+            match self.rt.stack.regs[func] {
+                Value::Closure(_) | Value::Native(_) => break,
+                v => {
+                    // `__call`: the handler is called with the value first.
+                    let h = self.rt.metamethod(&self.heap, v, Event::Call);
+                    if h.is_nil() {
+                        return Err(Exc::Rt(
+                            format!("attempt to call a {} value", v.type_name()),
+                            Some(0),
+                        ));
+                    }
+                    if chain == crate::meta::MAX_CHAIN {
+                        return Err(Exc::Plain("'__call' chain too long".into()));
+                    }
+                    self.rt.stack.insert(func, func + 1 + nargs, h);
+                    nargs += 1;
+                    chain += 1;
+                }
+            }
+        }
         match self.rt.stack.regs[func] {
             Value::Closure(c) => {
                 self.push_lua_frame(c, func, nargs, want)?;
+                if chain > 0 {
+                    self.rt.stack.frames.last_mut().expect("frame").extra = chain as u8;
+                }
+                if self.rt.stack.hook.armed() {
+                    self.rt.stack.hook.call_pending = Some(false);
+                }
                 Ok(Flow::Reload)
             }
             Value::Native(id) => {
-                self.rt.stack.regs.truncate(func + 1 + nargs);
+                // The native's window ends at `top` (natives never shrink
+                // the stack, so returning to Lua needn't refill a window).
+                self.rt.top = func + 1 + nargs;
+                if self.rt.stack.hook.wants(crate::hook::CALL) {
+                    self.native_call_hook(func, nargs, id).map_err(Exc::Lua)?;
+                }
                 let f = self.rt.natives[id.0 as usize].f;
                 let mut ctx = NativeCtx {
                     heap: &mut self.heap,
@@ -76,14 +133,20 @@ impl Vm {
                     base: func + 1,
                     nargs,
                     id,
+                    upvals: None,
                 };
-                let r = f(&mut ctx)?;
-                self.native_returned(r, None, func, want, id, stop)
+                let r = match f(&mut ctx) {
+                    Ok(r) => r,
+                    Err(e) => return Err(self.native_raised(id, func, e)),
+                };
+                if let NativeReturn::Return(n) = r
+                    && self.rt.stack.hook.wants(crate::hook::RETURN)
+                {
+                    self.native_return_hook(func, id, n).map_err(Exc::Lua)?;
+                }
+                self.native_returned(r, None, func, want, id)
             }
-            v => Err(Exc::Rt(
-                format!("attempt to call a {} value", v.type_name()),
-                Some(0),
-            )),
+            _ => unreachable!("a function"),
         }
     }
 
@@ -156,6 +219,34 @@ impl Shape {
     }
 }
 
+/// Nested message handlers (an error in a handler calls it again) before
+/// the handler gets `C stack overflow` (about where the reference stops).
+const MAX_HANDLERS: usize = 214;
+
+/// Register slots a message handler may use beyond `Limits::max_stack`, so
+/// it can run after a stack overflow.
+const HANDLER_HEADROOM: usize = 5_000;
+
+/// The stack would grow to `end`, past `max_stack`: `stack overflow`,
+/// unless a message handler is running and stays inside its headroom. Past
+/// that, the error is an error in error handling.
+#[cold]
+fn overflow(rt: &mut crate::Runtime, end: usize) -> Option<Exc> {
+    let handling = rt
+        .stack
+        .frames
+        .iter()
+        .any(|f| matches!(f.kind, FrameKind::Handler));
+    if !handling {
+        return Some(Exc::Rt("stack overflow".into(), None));
+    }
+    if end <= rt.limits.max_stack + HANDLER_HEADROOM {
+        return None;
+    }
+    rt.errerr = true;
+    Some(Exc::Plain("error in error handling".into()))
+}
+
 /// Push a frame for Lua closure `c` running `proto`: the body of
 /// [`Vm::push_lua_frame`], for callers that already hold the code.
 #[inline(always)]
@@ -177,12 +268,14 @@ fn enter_lua_frame(
         (func + 1, 0)
     };
     let end = base + nregs.max(np);
-    if end > rt.limits.max_stack {
-        return Err(Exc::Rt("stack overflow".into(), None));
+    if end > rt.limits.max_stack
+        && let Some(x) = overflow(rt, end)
+    {
+        return Err(x);
     }
     let regs = &mut rt.stack.regs;
     if regs.len() < base + WINDOW {
-        regs.resize(base + WINDOW, Value::Nil);
+        extend_nil(regs, base + WINDOW);
     }
     if nvar > 0 {
         regs.copy_within(func + 1..func + 1 + np, base);
@@ -207,6 +300,8 @@ fn enter_lua_frame(
         cell_base: cell_base as u32,
         nvarargs: nvar as u32,
         want,
+        tail: false,
+        extra: 0,
     });
     Ok(Entered { base, code_id })
 }
@@ -240,77 +335,114 @@ impl Vm {
 
     /// Pop the running Lua frame, returning `n` values from `src`.
     #[inline]
-    fn do_return(&mut self, src: usize, n: usize, stop: usize) -> Result<Flow, Exc> {
+    fn do_return(&mut self, src: usize, n: usize) -> Result<Flow, Exc> {
         let f = self.rt.stack.frames.pop().expect("a frame to return from");
         if self.rt.stack.cells.len() > f.cell_base as usize {
             self.rt.stack.cells.truncate(f.cell_base as usize);
         }
         self.place_results(src, n, f.func as usize, f.want);
-        self.after_return(stop)
+        self.after_return()
     }
 
     /// Results have been placed for the frame now on top: resume it.
-    fn after_return(&mut self, stop: usize) -> Result<Flow, Exc> {
-        if self.rt.stack.frames.len() <= stop {
-            return Ok(Flow::Done);
-        }
+    fn after_return(&mut self) -> Result<Flow, Exc> {
         let f = *self.rt.stack.frames.last().expect("frame");
         match f.kind {
+            FrameKind::Boundary => {
+                self.rt.stack.frames.pop();
+                Ok(Flow::Done)
+            }
+            FrameKind::CoBase => self.co_returned(),
             // The frame's window lies below the callee's, so the stack is
             // long enough for it.
             FrameKind::Lua { .. } => Ok(Flow::Reload),
+            FrameKind::Meta { .. } => self.meta_returned(),
+            FrameKind::Handler => self.handler_returned(),
+            FrameKind::NativeCall { .. } => unreachable!("a running native returns itself"),
+            FrameKind::Hook => {
+                self.rt.stack.frames.pop();
+                Ok(Flow::Done)
+            }
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
-                self.rt.stack.regs.truncate(top);
                 let mut ctx = NativeCtx {
                     heap: &mut self.heap,
                     rt: &mut self.rt,
                     base: f.base as usize,
                     nargs: f.nvarargs as usize,
                     id,
+                    upvals: None,
                 };
                 let r = k(&mut ctx, CallOutcome::Ok(top - call_at as usize))?;
-                self.native_returned(r, Some(f), f.func as usize, f.want, id, stop)
+                self.native_returned(r, Some(f), f.func as usize, f.want, id)
             }
         }
     }
 
     /// Act on what a native returned. `frame` is its continuation frame, if
     /// it has one on top of the stack.
-    fn native_returned(
+    pub(crate) fn native_returned(
         &mut self,
         r: NativeReturn,
         frame: Option<Frame>,
         func: usize,
         want: u8,
         id: orbit_core::NativeId,
-        stop: usize,
     ) -> Result<Flow, Exc> {
         match r {
             NativeReturn::Return(n) => {
                 if frame.is_some() {
+                    if self.rt.stack.hook.wants(crate::hook::RETURN) {
+                        let fi = self.rt.stack.frames.len() - 1;
+                        let first = self.rt.top - n - func;
+                        self.call_hook(b"return", None, Some((fi, first as u32, n as u32)))
+                            .map_err(Exc::Lua)?;
+                    }
                     self.rt.stack.frames.pop();
                 }
-                let src = self.rt.stack.regs.len() - n;
+                let src = self.rt.top - n;
                 self.place_results(src, n, func, want);
-                if want == MULTI {
-                    self.rt.stack.regs.truncate(self.rt.top);
-                }
-                self.after_return(stop)
+                // Drop the native's arguments and pushes along with any
+                // extra results, so stale copies don't keep objects alive
+                // (a finalizer waiting on an object only a dead argument
+                // slot still holds would never run).
+                let end = if want == MULTI {
+                    self.rt.top
+                } else {
+                    func + want as usize
+                };
+                self.rt.stack.regs.truncate(end);
+                self.after_return()
             }
-            NativeReturn::CallThen {
-                f,
-                nargs,
-                k,
-                protected,
-            } => {
-                let regs = &mut self.rt.stack.regs;
-                let at = regs.len() - nargs;
-                regs.insert(at, f);
+            NativeReturn::CallThen { .. }
+            | NativeReturn::CallThenYieldable { .. }
+            | NativeReturn::CallHandled { .. } => {
+                let catch = |protected| if protected { Catch::Yes } else { Catch::No };
+                let (f, nargs, k, catch, yieldable) = match r {
+                    NativeReturn::CallThen {
+                        f,
+                        nargs,
+                        k,
+                        protected,
+                    } => (f, nargs, k, catch(protected), false),
+                    NativeReturn::CallThenYieldable {
+                        f,
+                        nargs,
+                        k,
+                        protected,
+                    } => (f, nargs, k, catch(protected), true),
+                    NativeReturn::CallHandled { f, nargs, k } => {
+                        (f, nargs, k, Catch::Handler, true)
+                    }
+                    _ => unreachable!(),
+                };
+                let at = self.rt.top - nargs;
+                self.rt.stack.insert(at, self.rt.top, f);
                 let kind = FrameKind::Native {
                     id,
                     k,
-                    protected,
+                    catch,
+                    yieldable,
                     call_at: at as u32,
                 };
                 match frame {
@@ -326,22 +458,36 @@ impl Vm {
                             // For native frames: how many arguments it had.
                             nvarargs: nargs as u32,
                             want,
+                            tail: false,
+                            extra: 0,
                         })
                     }
                 }
-                self.call_value(at, nargs, MULTI, stop)
+                self.call_value(at, nargs, MULTI)
             }
+            NativeReturn::Resume { co, nargs, k } => {
+                self.resume(co, nargs, k, frame, func, want, id)
+            }
+            NativeReturn::Yield { nvals } => self.yield_(nvals, frame, func, want, id),
+            NativeReturn::Exit => {
+                self.rt.xfer.clear();
+                self.co_finished(Ok(()))
+            }
+            NativeReturn::Close { co, k } => self.close_co(co, k, frame, func, want, id),
         }
     }
 
     /// Turn an instruction's error into a Lua error, adding the position of
     /// the running function and the operand's name.
-    pub(crate) fn make_error(&mut self, x: Exc, _stop: usize) -> LuaError {
+    pub(crate) fn make_error(&mut self, x: Exc) -> LuaError {
         match x {
             Exc::Lua(e) => e,
             Exc::Plain(m) => LuaError::new(self.new_str(m.as_bytes())),
+            Exc::Meta(_) | Exc::Index { .. } | Exc::NewIndex { .. } => {
+                unreachable!("metamethod requests are finished by `raise`")
+            }
             Exc::Rt(msg, operand) => {
-                let mut text = ops::where_(&self.heap, &self.rt, 1);
+                let mut text = self.rt.error_where(&self.heap, 1);
                 text.push_str(&msg);
                 if let Some(op) = operand
                     && let Some(f) = self.rt.stack.frames.last()
@@ -365,113 +511,303 @@ impl Vm {
                             Origin::Method(n) => ("method", n),
                             Origin::Constant(n) => ("constant", n),
                         };
-                        text.push_str(&format!(" ({kind} '{}')", String::from_utf8_lossy(name)));
+                        let described = format!(" ({kind} '{}')", String::from_utf8_lossy(name));
+                        // `number (local 'x') has no integer representation`: the name goes
+                        // after the subject, not at the end.
+                        match msg.strip_prefix("number ") {
+                            Some(rest) if msg == ops::NO_INTEGER_REP => {
+                                text.truncate(text.len() - msg.len());
+                                text.push_str("number");
+                                text.push_str(&described);
+                                text.push(' ');
+                                text.push_str(rest);
+                            }
+                            _ => text.push_str(&described),
+                        }
                     }
-                }
-                if msg == "attempt to index a string value" {
-                    text.push_str(" (string methods are not supported yet)");
                 }
                 LuaError::new(self.new_str(text.as_bytes()))
             }
         }
     }
 
-    /// Unwind to the nearest protected native frame above `stop` and resume
-    /// it with the error, or return the error if there is none.
-    pub(crate) fn unwind(&mut self, mut e: LuaError, stop: usize) -> Result<Flow, LuaError> {
+    /// Unwind to the nearest protected native frame and resume it with the
+    /// error, or, at the call's boundary, return the error. A catcher with a
+    /// message handler first runs the handler on top of the frames that
+    /// raised. To-be-closed variables above the catcher close (newest first,
+    /// each getting the error) before it is resumed. In a coroutine that
+    /// `coroutine.close` is closing, errors go straight to its base frame.
+    pub(crate) fn unwind(&mut self, mut e: LuaError) -> Result<Flow, LuaError> {
+        let mut errerr = false;
         loop {
+            errerr |= std::mem::take(&mut self.rt.errerr);
+            let handled = std::mem::take(&mut self.rt.handled);
+            let closing = crate::coro::closing(&self.heap, self.rt.current);
             let frames = &self.rt.stack.frames;
-            let found = frames
-                .iter()
-                .enumerate()
-                .skip(stop)
-                .rev()
-                .find(|(_, f)| {
-                    matches!(
-                        f.kind,
-                        FrameKind::Native {
-                            protected: true,
-                            ..
-                        }
-                    )
-                })
-                .map(|(i, _)| i);
-            let Some(idx) = found else {
-                if e.traceback.is_none() {
-                    e.traceback = Some(self.traceback(stop));
-                }
-                if let Some(f) = self.rt.stack.frames.get(stop) {
-                    self.rt.stack.cells.truncate(f.cell_base as usize);
-                }
-                self.rt.stack.frames.truncate(stop);
-                return Err(e);
+            let idx = if closing {
+                0
+            } else {
+                frames
+                    .iter()
+                    .rposition(|f| {
+                        matches!(
+                            f.kind,
+                            FrameKind::Native {
+                                catch: Catch::Yes | Catch::Handler,
+                                ..
+                            } | FrameKind::Boundary
+                                | FrameKind::CoBase
+                                | FrameKind::Hook
+                        )
+                    })
+                    .expect("a boundary below every running frame")
             };
-            if let Some(above) = self.rt.stack.frames.get(idx + 1) {
-                self.rt.stack.cells.truncate(above.cell_base as usize);
-            }
-            self.rt.stack.frames.truncate(idx + 1);
-            let f = self.rt.stack.frames[idx];
-            let FrameKind::Native { id, k, call_at, .. } = f.kind else {
-                unreachable!()
-            };
-            self.rt.stack.regs.truncate(call_at as usize);
-            let mut ctx = NativeCtx {
-                heap: &mut self.heap,
-                rt: &mut self.rt,
-                base: f.base as usize,
-                nargs: f.nvarargs as usize,
-                id,
-            };
-            match k(&mut ctx, CallOutcome::Err(e.value)) {
-                Err(e2) => {
-                    // The continuation itself failed: its frame is done.
-                    self.rt.stack.frames.truncate(idx);
-                    e = e2;
-                }
-                Ok(r) => {
-                    match self.native_returned(r, Some(f), f.func as usize, f.want, id, stop) {
+            let f = frames[idx];
+            if let FrameKind::Native {
+                catch: Catch::Handler,
+                ..
+            } = f.kind
+                && !errerr
+                && !handled
+            {
+                // An error inside the handler calls it again, up to a limit.
+                let nested = frames[idx..]
+                    .iter()
+                    .filter(|f| matches!(f.kind, FrameKind::Handler))
+                    .count();
+                if nested <= MAX_HANDLERS {
+                    let v = if nested == MAX_HANDLERS {
+                        self.new_str(b"C stack overflow")
+                    } else {
+                        e.value
+                    };
+                    match self.call_handler(f.base as usize, v) {
                         Ok(flow) => return Ok(flow),
-                        Err(x) => e = self.make_error(x, stop),
+                        Err(x) => {
+                            e = self.make_error(x);
+                            continue;
+                        }
+                    }
+                }
+                errerr = true;
+            }
+            if std::mem::take(&mut errerr) {
+                e = LuaError::new(self.new_str(b"error in error handling"));
+            }
+            // A coroutine that dies with an error keeps its variables open
+            // for `coroutine.close`, as the reference does.
+            let closes = !matches!(f.kind, FrameKind::CoBase) || closing;
+            let limit = self.rt.stack.frames.get(idx + 1).map(|g| g.func);
+            if closes
+                && let Some(&t) = self.rt.stack.tbc.last()
+                && limit.is_some_and(|l| t >= l)
+            {
+                if matches!(f.kind, FrameKind::Boundary | FrameKind::Hook)
+                    && e.traceback.is_none()
+                    && self.rt.unwind_traceback.is_none()
+                {
+                    self.rt.unwind_traceback = Some(self.rt.traceback(&self.heap, None, 1));
+                }
+                match self.start_close(e.value) {
+                    Ok(flow) => return Ok(flow),
+                    Err(x) => {
+                        e = self.make_error(x);
+                        continue;
                     }
                 }
             }
-        }
-    }
-
-    fn traceback(&self, stop: usize) -> String {
-        let mut s = String::from("stack traceback:");
-        for f in self.rt.stack.frames[stop..].iter().rev() {
             match f.kind {
-                FrameKind::Lua { closure, .. } => {
-                    let proto = self.heap.get(self.heap.get(closure).proto);
-                    let line = proto.debug.line(f.pc.saturating_sub(1));
-                    let what = match &proto.name {
-                        orbit_bytecode::FunctionName::Main => "in main chunk".to_string(),
-                        orbit_bytecode::FunctionName::Anonymous => {
-                            format!("in function <{}:{}>", proto.chunk, proto.line_defined)
-                        }
-                        orbit_bytecode::FunctionName::Global(n)
-                        | orbit_bytecode::FunctionName::Local(n)
-                        | orbit_bytecode::FunctionName::Field(n)
-                        | orbit_bytecode::FunctionName::Method(n) => {
-                            format!("in function '{}'", String::from_utf8_lossy(n))
-                        }
+                FrameKind::CoBase => {
+                    // The coroutine dies; its resumer (or closer) gets the
+                    // error. A close without errors ends with none.
+                    let outcome = if closing && e.value.is_nil() {
+                        self.rt.xfer.clear();
+                        Ok(())
+                    } else {
+                        Err(e.value)
                     };
-                    s.push_str(&format!("\n\t{}:{}: {}", proto.chunk, line, what));
+                    match self.co_finished(outcome) {
+                        Ok(flow) => return Ok(flow),
+                        Err(x) => e = self.make_error(x),
+                    }
                 }
-                FrameKind::Native { id, .. } => {
-                    let name = self.rt.natives[id.0 as usize].name;
-                    s.push_str(&format!("\n\t[C]: in function '{name}'"));
+                FrameKind::Boundary | FrameKind::Hook => {
+                    // The error leaves the VM (or the hook call, which raises
+                    // it again where the hook was called).
+                    let taken = self.rt.unwind_traceback.take();
+                    if e.traceback.is_none() {
+                        e.traceback =
+                            Some(taken.unwrap_or_else(|| self.rt.traceback(&self.heap, None, 1)));
+                    }
+                    self.rt.stack.cells.truncate(f.cell_base as usize);
+                    self.rt.stack.frames.truncate(idx);
+                    return Err(e);
                 }
+                _ => match self.catch(idx, e.value) {
+                    Ok(flow) => return Ok(flow),
+                    Err(x) => e = self.make_error(x),
+                },
             }
         }
-        s.push_str("\n\t[C]: in ?");
-        s
     }
 
-    /// The dispatch loop. Runs the top frame (a Lua frame) and everything it
-    /// calls until the frame stack is back to `stop` frames.
-    pub(crate) fn run(&mut self, stop: usize) -> Result<(), LuaError> {
+    /// Close the newest to-be-closed variable while error `err` unwinds:
+    /// pop the frames above the one that owns it, then call its `__close`
+    /// handler under an `Unwind` meta frame, which raises `err` again when
+    /// the handler returns.
+    fn start_close(&mut self, err: Value) -> Result<Flow, Exc> {
+        let t = self.rt.stack.tbc.pop().expect("a variable to close") as usize;
+        let s = &mut self.rt.stack;
+        let j = s
+            .frames
+            .iter()
+            .rposition(|f| matches!(f.kind, FrameKind::Lua { .. }) && f.base as usize <= t)
+            .expect("a Lua frame owns every to-be-closed variable");
+        if let Some(above) = s.frames.get(j + 1) {
+            s.cells.truncate(above.cell_base as usize);
+        }
+        s.frames.truncate(j + 1);
+        let owner = s.frames[j];
+        let FrameKind::Lua { closure, .. } = owner.kind else {
+            unreachable!("a Lua frame")
+        };
+        let at = owner.base as usize + self.heap.get(closure).code.nregs as usize;
+        let v = self.rt.stack.regs[t];
+        let h = self.rt.metamethod(&self.heap, v, Event::Close);
+        // The error waits in the meta frame's slot; the handler goes above.
+        let regs = &mut self.rt.stack.regs;
+        extend_nil(regs, at + 4);
+        regs[at] = err;
+        regs[at + 1] = h;
+        regs[at + 2] = v;
+        regs[at + 3] = err;
+        self.rt.stack.frames.push(Frame {
+            kind: FrameKind::Meta {
+                action: crate::meta::MetaAction::Unwind { handled: true },
+                event: Event::Close,
+            },
+            func: at as u32,
+            base: at as u32,
+            pc: 0,
+            cell_base: self.rt.stack.cells.len() as u32,
+            nvarargs: 0,
+            want: 0,
+            tail: false,
+            extra: 0,
+        });
+        self.call_close_handler(at + 1, h)
+    }
+
+    /// Call the `__close` handler `h` at `at` with its two arguments, after
+    /// checking it can be called.
+    pub(crate) fn call_close_handler(&mut self, at: usize, h: Value) -> Result<Flow, Exc> {
+        if !h.is_function() && self.rt.metamethod(&self.heap, h, Event::Call).is_nil() {
+            return Err(Exc::Rt(
+                format!(
+                    "attempt to call a {} value (metamethod 'close')",
+                    h.type_name()
+                ),
+                None,
+            ));
+        }
+        self.call_value(at, 2, 0)
+    }
+
+    /// Pop the frames above the native frame at `idx` and run its
+    /// continuation with error `v`.
+    fn catch(&mut self, idx: usize, v: Value) -> Result<Flow, Exc> {
+        let f = self.rt.stack.frames[idx];
+        let FrameKind::Native { id, k, call_at, .. } = f.kind else {
+            unreachable!("catchers are native frames")
+        };
+        if let Some(above) = self.rt.stack.frames.get(idx + 1) {
+            self.rt.stack.cells.truncate(above.cell_base as usize);
+        }
+        self.rt.stack.frames.truncate(idx + 1);
+        self.rt.top = call_at as usize;
+        let mut ctx = NativeCtx {
+            heap: &mut self.heap,
+            rt: &mut self.rt,
+            base: f.base as usize,
+            nargs: f.nvarargs as usize,
+            id,
+            upvals: None,
+        };
+        match k(&mut ctx, CallOutcome::Err(v)) {
+            Err(e) => {
+                // The continuation itself failed: its frame is done.
+                self.rt.stack.frames.truncate(idx);
+                Err(Exc::Lua(e))
+            }
+            Ok(r) => self.native_returned(r, Some(f), f.func as usize, f.want, id),
+        }
+    }
+
+    /// Call the message handler in window slot `slot` of the catching native
+    /// frame with error `v`, above every live frame.
+    fn call_handler(&mut self, slot: usize, v: Value) -> Result<Flow, Exc> {
+        let h = self.rt.stack.regs[slot];
+        let top = self.rt.stack.frames.last().expect("frame");
+        let end = match top.kind {
+            FrameKind::Lua { closure, .. } => {
+                top.base as usize + self.heap.get(closure).code.nregs as usize
+            }
+            _ => top.base as usize,
+        };
+        let at = end.max(self.rt.top);
+        extend_nil(&mut self.rt.stack.regs, at + 2);
+        self.rt.stack.regs[at] = h;
+        self.rt.stack.regs[at + 1] = v;
+        self.rt.stack.frames.push(Frame {
+            kind: FrameKind::Handler,
+            func: at as u32,
+            base: at as u32,
+            pc: 0,
+            cell_base: self.rt.stack.cells.len() as u32,
+            nvarargs: 0,
+            want: 1,
+            tail: false,
+            extra: 0,
+        });
+        self.call_value(at, 1, 1)
+    }
+
+    /// A message handler returned: raise its result again, as an error
+    /// that has been through its handler.
+    fn handler_returned(&mut self) -> Result<Flow, Exc> {
+        let f = self.rt.stack.frames.pop().expect("handler frame");
+        debug_assert!(matches!(f.kind, FrameKind::Handler));
+        // Raise the result again, past the handler: the variables to close
+        // between the error and the catcher get it.
+        let v = self.rt.stack.regs[f.func as usize];
+        self.rt.handled = true;
+        Err(Exc::Lua(LuaError::new(v)))
+    }
+
+    /// Run the top frame (a Lua frame) and everything it calls until it
+    /// returns into a boundary, in the plain or the hooked
+    /// dispatch loop as the stack's hook requires.
+    pub(crate) fn run(&mut self) -> Result<(), LuaError> {
+        loop {
+            #[cfg(feature = "hooks")]
+            let ran = if self.rt.stack.hook.armed() {
+                self.run_loop::<true>()?
+            } else {
+                self.run_loop::<false>()?
+            };
+            #[cfg(not(feature = "hooks"))]
+            let ran = self.run_loop::<false>()?;
+            match ran {
+                Ran::Done => return Ok(()),
+                Ran::Switch => {}
+            }
+        }
+    }
+
+    /// The dispatch loop. `HOOKED` adds a hook point before each
+    /// instruction ([`crate::hook`]); either loop returns
+    /// [`Ran::Switch`] when the hook's state no longer matches it.
+    fn run_loop<const HOOKED: bool>(&mut self) -> Result<Ran, LuaError> {
         // The running function's code, constants and caches. Returning to or
         // calling the same function (recursion) keeps the `Rc` instead of
         // cloning it again; holding it keeps the allocation alive, so pointer
@@ -483,6 +819,9 @@ impl Vm {
         'reload: loop {
             // The running frame's state. Lua-to-Lua calls and returns switch
             // it in place; everything else comes back through `'reload`.
+            if self.rt.stack.hook.armed() != HOOKED {
+                return Ok(Ran::Switch);
+            }
             let mut depth = self.rt.stack.frames.len();
             let frame = &self.rt.stack.frames[depth - 1];
             let FrameKind::Lua {
@@ -529,7 +868,7 @@ impl Vm {
                 () => {{
                     let regs = &mut self.rt.stack.regs;
                     if regs.len() < base + WINDOW {
-                        regs.resize(base + WINDOW, Value::Nil);
+                        extend_nil(regs, base + WINDOW);
                     }
                     <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW])
                         .expect("a full window")
@@ -569,10 +908,17 @@ impl Vm {
             macro_rules! throw {
                 ($x:expr) => {{
                     let x = $x;
-                    save_pc!();
-                    match self.raise(x, stop) {
-                        Ok(Flow::Reload) => continue 'reload,
-                        Ok(Flow::Done) => return Ok(()),
+                    // After a coroutine switch, the running stack isn't the
+                    // one this loop's frame state describes.
+                    if !std::mem::take(&mut self.rt.switched) {
+                        save_pc!();
+                    }
+                    match self.raise(x) {
+                        Ok(Flow::Reload | Flow::Switched) => {
+                            self.rt.switched = false;
+                            continue 'reload;
+                        }
+                        Ok(Flow::Done) => return Ok(Ran::Done),
                         Err(e) => return Err(e),
                     }
                 }};
@@ -589,7 +935,11 @@ impl Vm {
                 ($e:expr) => {
                     match $e {
                         Ok(Flow::Reload) => continue 'reload,
-                        Ok(Flow::Done) => return Ok(()),
+                        Ok(Flow::Switched) => {
+                            self.rt.switched = false;
+                            continue 'reload;
+                        }
+                        Ok(Flow::Done) => return Ok(Ran::Done),
                         Err(x) => throw!(x),
                     }
                 };
@@ -598,7 +948,14 @@ impl Vm {
                 () => {
                     if self.heap.should_step() {
                         save_pc!();
+                        // Nothing above this frame's window and the last
+                        // open results is live; don't let it keep garbage.
+                        let live = (base + WINDOW).max(self.rt.top);
+                        self.rt.stack.regs.truncate(live);
                         self.heap.step(&mut self.rt);
+                        if self.heap.pending_finalizers() > 0 {
+                            self.run_finalizers();
+                        }
                         w = window!();
                     }
                 };
@@ -625,13 +982,24 @@ impl Vm {
             }
             macro_rules! set_int_parts {
                 ($t:expr, $i:expr, $src:expr) => {
-                    by_parts!($src, |v| table::set_int(&mut self.heap, $t, $i, v))
+                    by_parts!($src, |v| table::store_int(&mut self.heap, $t, $i, v))
                 };
             }
             macro_rules! jump {
-                ($off:expr) => {
-                    pc = (pc as isize + $off as isize) as usize
-                };
+                ($off:expr) => {{
+                    pc = (pc as isize + $off as isize) as usize;
+                    #[cfg(feature = "hooks")]
+                    if !HOOKED
+                        && $off < 0
+                        && self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        // An interrupt was requested ([`crate::Interrupt`]): the
+                        // hooked loop raises it before the jump's target.
+                        self.rt.stack.frames[depth - 1].pc = pc as u32;
+                        self.rt.stack.hook.mask |= crate::hook::INTERRUPT;
+                        return Ok(Ran::Switch);
+                    }
+                }};
             }
             macro_rules! arith {
                 ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {{
@@ -664,7 +1032,21 @@ impl Vm {
                         }
                         _ => {
                             let (x, y) = (reg!($a), reg!($b));
-                            reg!($dst) = tri!(ops::arith_slow(&self.heap, $op, x, y))
+                            reg!($dst) =
+                                tri!(ops::arith_slow(&self.heap, &self.rt.metas, $op, x, y))
+                        }
+                    }
+                }};
+            }
+            macro_rules! bitwise {
+                ($dst:expr, $a:expr, $b:expr, $op:expr) => {{
+                    match (&reg!($a), &reg!($b)) {
+                        (&Value::Int(i), &Value::Int(j)) => {
+                            reg!($dst) = Value::Int($op.apply(i, j))
+                        }
+                        _ => {
+                            let (x, y) = (reg!($a), reg!($b));
+                            reg!($dst) = tri!(ops::bitwise_slow(&self.heap, $op, x, y))
                         }
                     }
                 }};
@@ -676,7 +1058,7 @@ impl Vm {
                         (&Value::Float($i), &Value::Float($j)) => $cmp,
                         _ => {
                             let (x, y) = (reg!($a), reg!($b));
-                            tri!($slow(&self.heap, x, y))
+                            tri!($slow(&self.heap, &self.rt.metas, x, y))
                         }
                     };
                     if c == $want {
@@ -700,7 +1082,7 @@ impl Vm {
                         }
                         v => {
                             let ($x, $k) = (v, Value::Int($imm as i64));
-                            tri!(ops::$slow(&self.heap, $s1, $s2))
+                            tri!(ops::$slow(&self.heap, &self.rt.metas, $s1, $s2))
                         }
                     };
                     if c == $want {
@@ -708,10 +1090,27 @@ impl Vm {
                     }
                 }};
             }
-            macro_rules! index_error {
-                ($v:expr) => {
-                    throw!(index_error($v))
-                };
+            // `R[dst] = obj[key]` through the metatable, when the inline
+            // path can't finish (a raw miss on a table with a metatable, or
+            // a value that isn't a table). `raise` finishes the instruction,
+            // so the dispatch loop carries no code for it.
+            macro_rules! get_slow {
+                ($dst:expr, $obj:expr, $key:expr) => {{
+                    let _ = $dst;
+                    throw!(Exc::Index {
+                        obj: $obj,
+                        key: $key
+                    })
+                }};
+            }
+            macro_rules! set_slow {
+                ($obj:expr, $key:expr, $v:expr) => {{
+                    throw!(Exc::NewIndex {
+                        obj: $obj,
+                        key: $key,
+                        v: $v
+                    })
+                }};
             }
             macro_rules! call {
                 ($f:expr, $nargs:expr, $want:expr) => {{
@@ -732,6 +1131,9 @@ impl Vm {
                                 self.callee_shape(c)
                             };
                             let e = tri!(enter_lua_frame(&mut self.rt, shape, c, fa, n, want));
+                            if HOOKED {
+                                self.rt.stack.hook.call_pending = Some(false);
+                            }
                             depth += 1;
                             closure = c;
                             base = e.base;
@@ -742,7 +1144,8 @@ impl Vm {
                         // A native's fast path, when it has one and takes
                         // these arguments: no window, no frame.
                         Value::Native(id)
-                            if (want <= 1 || want == MULTI)
+                            if !HOOKED
+                                && (want <= 1 || want == MULTI)
                                 && let Some(fast) = self.rt.natives[id.0 as usize].fast
                                 && let Some(v) = w.get(f + 1..f + 1 + n).and_then(fast) =>
                         {
@@ -751,8 +1154,12 @@ impl Vm {
                             }
                             self.rt.top = fa + want.min(1) as usize;
                         }
-                        _ => match self.call_value(fa, n, want, stop) {
+                        _ => match self.call_value(fa, n, want) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
+                                // The native may have set or cleared a hook.
+                                if self.rt.stack.hook.armed() != HOOKED {
+                                    return Ok(Ran::Switch);
+                                }
                                 w = window!();
                                 safepoint!();
                             }
@@ -765,6 +1172,19 @@ impl Vm {
             loop {
                 let op = code[pc];
                 pc += 1;
+                if HOOKED {
+                    self.rt.stack.frames[depth - 1].pc = pc as u32;
+                    if let Err(e) = self.hook_point(pc - 1, op) {
+                        throw!(Exc::Lua(e));
+                    }
+                    if !self.rt.stack.hook.armed() {
+                        // The hook was turned off: run this instruction in
+                        // the plain loop.
+                        self.rt.stack.frames[depth - 1].pc = pc as u32 - 1;
+                        return Ok(Ran::Switch);
+                    }
+                    w = window!();
+                }
                 match op {
                     // Numbers are copied by parts: the source was usually
                     // just written that way, and a whole 16-byte load would
@@ -813,23 +1233,26 @@ impl Vm {
                         let v = match self.heap.get(env_cell).value {
                             Value::Table(t) => {
                                 let cache = &cur.caches[ic as usize];
-                                match self
-                                    .heap
-                                    .get(t)
-                                    .cached_str(cache.slot.get() as usize, cache.key)
-                                {
-                                    Some(v) => v,
-                                    None => {
+                                let tab = self.heap.get(t);
+                                match tab.cached_str(cache.slot.get() as usize, cache.key) {
+                                    // A dead entry is a miss when `__index`
+                                    // could apply.
+                                    Some(v) if !v.is_nil() || tab.meta.is_none() => v,
+                                    _ => {
                                         let k = const_str(&cur.consts, name);
-                                        let v = self.get_str_miss(t, k, cache);
-                                        w = window!();
-                                        v
+                                        tri!(get_str_miss(&self.heap, &self.rt.metas, t, k, cache))
                                     }
                                 }
                             }
                             other => throw!(env_error(other)),
                         };
                         reg!(dst) = v;
+                    }
+                    Op::CheckUndefined { src, name } => {
+                        if !matches!(reg!(src), Value::Nil) {
+                            let k = const_str(&cur.consts, name);
+                            throw!(already_defined(self.heap.get(k).as_bytes()));
+                        }
                     }
                     Op::SetGlobal { src, name, ic } => {
                         let env_cell = self.heap.get(closure).captures[0];
@@ -838,13 +1261,22 @@ impl Vm {
                             Value::Table(t) => {
                                 let cache = &cur.caches[ic as usize];
                                 let slot = cache.slot.get() as usize;
-                                if self.heap.get(t).cached_str(slot, cache.key).is_some() {
+                                let tab = self.heap.get(t);
+                                if matches!(tab.cached_str(slot, cache.key),
+                                    Some(v) if tab.meta.is_none() || !v.is_nil())
+                                {
                                     self.heap.barrier_back(t);
                                     self.heap.get_mut(t).set_slot(slot, v);
                                 } else {
                                     let k = const_str(&cur.consts, name);
-                                    self.set_str_miss(t, k, v, cache);
-                                    w = window!();
+                                    tri!(set_str_miss(
+                                        &mut self.heap,
+                                        &self.rt.metas,
+                                        t,
+                                        k,
+                                        v,
+                                        cache
+                                    ));
                                     safepoint!();
                                 }
                             }
@@ -864,32 +1296,31 @@ impl Vm {
                     }
                     Op::GetField { dst, obj, key, ic } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            get_slow!(dst, reg!(obj), cur.consts[key as usize])
                         };
                         let cache = &cur.caches[ic as usize];
-                        match self
-                            .heap
-                            .get(t)
-                            .cached_str(cache.slot.get() as usize, cache.key)
-                        {
-                            Some(v) => reg!(dst) = v,
-                            None => {
+                        let tab = self.heap.get(t);
+                        match tab.cached_str(cache.slot.get() as usize, cache.key) {
+                            // A dead entry is a miss when `__index` could
+                            // apply.
+                            Some(v) if !v.is_nil() || tab.meta.is_none() => reg!(dst) = v,
+                            _ => {
                                 let k = const_str(&cur.consts, key);
-                                let v = self.get_str_miss(t, k, cache);
-                                w = window!();
-                                reg!(dst) = v;
+                                reg!(dst) =
+                                    tri!(get_str_miss(&self.heap, &self.rt.metas, t, k, cache));
                             }
                         }
                     }
                     Op::SetField { obj, key, src, ic } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            set_slow!(reg!(obj), cur.consts[key as usize], reg!(src))
                         };
                         let cache = &cur.caches[ic as usize];
                         let slot = cache.slot.get() as usize;
-                        if self.heap.get(t).cached_str(slot, cache.key).is_some() {
+                        let tab = self.heap.get(t);
+                        if matches!(tab.cached_str(slot, cache.key),
+                            Some(v) if tab.meta.is_none() || !v.is_nil())
+                        {
                             // The key is there: overwrite its value. No
                             // capacity changes, so no byte accounting.
                             self.heap.barrier_back(t);
@@ -898,37 +1329,51 @@ impl Vm {
                         } else {
                             let k = const_str(&cur.consts, key);
                             let v = reg!(src);
-                            self.set_str_miss(t, k, v, cache);
-                            w = window!();
+                            tri!(set_str_miss(&mut self.heap, &self.rt.metas, t, k, v, cache));
                             safepoint!();
                         }
                     }
                     Op::GetIndex { dst, obj, key } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            get_slow!(dst, reg!(obj), reg!(key))
                         };
                         let tab = self.heap.get(t);
+                        // A nil result in a table with a metatable may
+                        // come from `__index`. `dst` may be `obj` or `key`.
                         match reg!(key) {
-                            Value::Int(i) => tab.read_int(i, &mut reg!(dst)),
-                            k => reg!(dst) = tab.get(&self.heap, k),
+                            Value::Int(i) => {
+                                tab.read_int(i, &mut reg!(dst));
+                                if tab.meta.is_some() && reg!(dst).is_nil() {
+                                    get_slow!(dst, Value::Table(t), Value::Int(i))
+                                }
+                            }
+                            k => {
+                                reg!(dst) = tab.get(&self.heap, k);
+                                if tab.meta.is_some() && reg!(dst).is_nil() {
+                                    get_slow!(dst, Value::Table(t), k)
+                                }
+                            }
                         }
                     }
                     Op::SetIndex { obj, key, src } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            set_slow!(reg!(obj), reg!(key), reg!(src))
                         };
                         match reg!(key) {
                             // A store into the array part allocates
                             // nothing, so it needs no safe point.
-                            Value::Int(i) => {
-                                if !set_int_parts!(t, i, src) {
-                                    safepoint!();
+                            Value::Int(i) => match set_int_parts!(t, i, src) {
+                                IntStore::Array => {}
+                                IntStore::Other => safepoint!(),
+                                IntStore::Meta => {
+                                    set_slow!(reg!(obj), reg!(key), reg!(src))
                                 }
-                            }
+                            },
                             k => {
                                 let v = reg!(src);
+                                if self.heap.get(t).meta.is_some() {
+                                    set_slow!(reg!(obj), k, v)
+                                }
                                 if let Err(e) = table::set(&mut self.heap, t, k, v) {
                                     throw!(Exc::Rt(e.message().into(), None));
                                 }
@@ -938,18 +1383,24 @@ impl Vm {
                     }
                     Op::GetIndexInt { dst, obj, key } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            get_slow!(dst, reg!(obj), Value::Int(key as i64))
                         };
-                        self.heap.get(t).read_int(key as i64, &mut reg!(dst));
+                        let tab = self.heap.get(t);
+                        tab.read_int(key as i64, &mut reg!(dst));
+                        if tab.meta.is_some() && reg!(dst).is_nil() {
+                            get_slow!(dst, Value::Table(t), Value::Int(key as i64))
+                        }
                     }
                     Op::SetIndexInt { obj, key, src } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            let o = reg!(obj);
-                            index_error!(o)
+                            set_slow!(reg!(obj), Value::Int(key as i64), reg!(src))
                         };
-                        if !set_int_parts!(t, key as i64, src) {
-                            safepoint!();
+                        match set_int_parts!(t, key as i64, src) {
+                            IntStore::Array => {}
+                            IntStore::Other => safepoint!(),
+                            IntStore::Meta => {
+                                set_slow!(reg!(obj), Value::Int(key as i64), reg!(src))
+                            }
                         }
                     }
                     Op::SetList {
@@ -977,9 +1428,15 @@ impl Vm {
                         let Value::Str(k) = cur.consts[key as usize] else {
                             unreachable!("method names are strings")
                         };
-                        let Value::Table(t) = o else { index_error!(o) };
-                        let m = self.heap.get(t).get_str(&self.heap, k);
                         reg!(dst + 1) = o;
+                        let Value::Table(t) = o else {
+                            get_slow!(dst, o, Value::Str(k))
+                        };
+                        let tab = self.heap.get(t);
+                        let m = tab.get_str(&self.heap, k);
+                        if m.is_nil() && tab.meta.is_some() {
+                            get_slow!(dst, o, Value::Str(k))
+                        }
                         reg!(dst) = m;
                     }
 
@@ -997,10 +1454,23 @@ impl Vm {
                             let x = reg!(a);
                             reg!(dst) = tri!(ops::arith_slow(
                                 &self.heap,
+                                &self.rt.metas,
                                 Arith::Add,
                                 x,
                                 Value::Int(imm as i64)
                             ))
+                        }
+                    },
+                    Op::BAnd { dst, a, b } => bitwise!(dst, a, b, BitOp::And),
+                    Op::BOr { dst, a, b } => bitwise!(dst, a, b, BitOp::Or),
+                    Op::BXor { dst, a, b } => bitwise!(dst, a, b, BitOp::Xor),
+                    Op::Shl { dst, a, b } => bitwise!(dst, a, b, BitOp::Shl),
+                    Op::Shr { dst, a, b } => bitwise!(dst, a, b, BitOp::Shr),
+                    Op::BNot { dst, src } => match reg!(src) {
+                        Value::Int(i) => reg!(dst) = Value::Int(!i),
+                        _ => {
+                            let x = reg!(src);
+                            reg!(dst) = tri!(ops::bnot_slow(&self.heap, x))
                         }
                     },
                     Op::Neg { dst, src } => match reg!(src) {
@@ -1008,15 +1478,19 @@ impl Vm {
                         Value::Float(f) => reg!(dst) = Value::Float(-f),
                         _ => {
                             let x = reg!(src);
-                            reg!(dst) = tri!(ops::arith_slow(&self.heap, Arith::Neg, x, x))
+                            reg!(dst) = tri!(ops::arith_slow(
+                                &self.heap,
+                                &self.rt.metas,
+                                Arith::Neg,
+                                x,
+                                x
+                            ))
                         }
                     },
                     Op::Not { dst, src } => reg!(dst) = Value::Bool(reg!(src).is_falsy()),
                     Op::Len { dst, src } => {
                         let x = reg!(src);
-                        let v = tri!(self.op_len(x));
-                        w = window!();
-                        reg!(dst) = v;
+                        reg!(dst) = tri!(op_len(&self.heap, &self.rt.metas, x));
                     }
                     Op::Concat { dst, first, count } => {
                         let v = tri!(self.op_concat(base + first as usize, count as usize));
@@ -1050,13 +1524,13 @@ impl Vm {
                     }
                     Op::JumpEq { a, b, off } => {
                         let (x, y) = (reg!(a), reg!(b));
-                        if values_equal(&self.heap, x, y) {
+                        if tri!(values_equal(&self.heap, &self.rt.metas, x, y)) {
                             jump!(off);
                         }
                     }
                     Op::JumpNe { a, b, off } => {
                         let (x, y) = (reg!(a), reg!(b));
-                        if !values_equal(&self.heap, x, y) {
+                        if !tri!(values_equal(&self.heap, &self.rt.metas, x, y)) {
                             jump!(off);
                         }
                     }
@@ -1103,7 +1577,14 @@ impl Vm {
                         } else {
                             nargs as usize
                         };
-                        if let Value::Closure(c) = w[func as usize] {
+                        // A native closure in tail position is called like
+                        // a native, keeping this frame, as natives are.
+                        if let Value::Closure(c) = w[func as usize]
+                            && !matches!(
+                                self.heap.get(c).code.code.first(),
+                                Some(Op::NativeEntry { .. })
+                            )
+                        {
                             let f = self.rt.stack.frames.pop().expect("frame");
                             self.rt.stack.cells.truncate(f.cell_base as usize);
                             let dst = f.func as usize;
@@ -1111,6 +1592,10 @@ impl Vm {
                             if let Err(x) = self.push_lua_frame(c, dst, n, f.want) {
                                 self.rt.stack.frames.push(f);
                                 throw!(x);
+                            }
+                            self.rt.stack.frames.last_mut().expect("frame").tail = true;
+                            if HOOKED {
+                                self.rt.stack.hook.call_pending = Some(true);
                             }
                             continue 'reload;
                         }
@@ -1125,9 +1610,9 @@ impl Vm {
                         } else {
                             count as usize
                         };
-                        flow!(self.do_return(src, n, stop));
+                        flow!(self.do_return(src, n));
                     }
-                    Op::Return0 => flow!(self.do_return(base, 0, stop)),
+                    Op::Return0 => flow!(self.do_return(base, 0)),
                     Op::Return1 { src } => {
                         // The common case, one value back to a Lua caller
                         // that wants one, without the general return path.
@@ -1135,7 +1620,6 @@ impl Vm {
                         // stack is already long enough for it.
                         if let [.., caller, f] = &self.rt.stack.frames[..]
                             && f.want == 1
-                            && depth > stop + 1
                             && let FrameKind::Lua {
                                 closure: c,
                                 code_id,
@@ -1169,11 +1653,30 @@ impl Vm {
                             w = window_sized!();
                             continue;
                         }
-                        flow!(self.do_return(base + src as usize, 1, stop))
+                        flow!(self.do_return(base + src as usize, 1))
                     }
                     Op::Vararg { dst, count } => {
                         let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
                         self.op_vararg(base, nvarargs, dst as usize, count);
+                        w = window!();
+                    }
+                    Op::VarargTable { dst } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
+                        let t = self.op_vararg_table(base, nvarargs);
+                        w = window!();
+                        reg!(dst) = t;
+                        safepoint!();
+                    }
+                    Op::VarargGet { dst, key } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
+                        let k = reg!(key);
+                        let v = self.op_vararg_get(base, nvarargs, k);
+                        w = window!();
+                        reg!(dst) = v;
+                    }
+                    Op::VarargUnpack { dst, table, count } => {
+                        let t = reg!(table);
+                        tri!(self.op_vararg_unpack(base, t, dst as usize, count));
                         w = window!();
                     }
 
@@ -1245,11 +1748,32 @@ impl Vm {
                         }
                     }
 
+                    Op::NativeEntry { id } => {
+                        flow!(self.native_entry(closure, orbit_core::NativeId(id)))
+                    }
                     Op::Closure { dst, proto } => {
                         let c = self.op_closure(closure, cell_base!(), proto as usize);
                         w = window!();
                         reg!(dst) = c;
                         safepoint!();
+                    }
+                    Op::Tbc { reg } => {
+                        if !reg!(reg).is_falsy() {
+                            let r = self.op_tbc(base + reg as usize, pc - 1);
+                            w = window!();
+                            tri!(r);
+                        }
+                    }
+                    Op::Close { from } => {
+                        if self
+                            .rt
+                            .stack
+                            .tbc
+                            .last()
+                            .is_some_and(|&t| t as usize >= base + from as usize)
+                        {
+                            throw!(self.op_close());
+                        }
                     }
                 }
             }
@@ -1258,10 +1782,15 @@ impl Vm {
 }
 
 #[inline(always)]
-fn values_equal(heap: &orbit_core::LuaHeap, x: Value, y: Value) -> bool {
+fn values_equal(
+    heap: &orbit_core::LuaHeap,
+    rt: &crate::meta::Metas,
+    x: Value,
+    y: Value,
+) -> Result<bool, Exc> {
     match (x, y) {
-        (Value::Int(i), Value::Int(j)) => i == j,
-        (Value::Float(f), Value::Float(g)) => f == g,
-        _ => ops::equal(heap, x, y),
+        (Value::Int(i), Value::Int(j)) => Ok(i == j),
+        (Value::Float(f), Value::Float(g)) => Ok(f == g),
+        _ => ops::equal(heap, rt, x, y),
     }
 }

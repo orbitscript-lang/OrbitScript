@@ -4,7 +4,19 @@ use orbit_bytecode::{Op, Origin};
 use orbit_core::number::{self, float_to_int};
 use orbit_core::{Gc, LuaHeap, LuaStr, NativeId, Table, Value};
 
+use crate::meta::{self, Event};
+use crate::ops::Exc;
 use crate::{FrameKind, LuaError, Runtime, ops};
+
+/// The outcome of an operation that may need a metamethod: either the
+/// answer, or a function to call. For [`Meta::Call`] the arguments are
+/// already pushed on the window; return
+/// `NativeReturn::CallThen { f, nargs, k, .. }` and take the result in `k`.
+#[derive(Debug, Clone, Copy)]
+pub enum Meta<T> {
+    Done(T),
+    Call { f: Value, nargs: usize },
+}
 
 /// A native function.
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
@@ -38,13 +50,57 @@ pub enum NativeReturn {
     /// Call `f` with the last `nargs` values of the window, then run `k`
     /// with the outcome. The call's results replace its arguments at the end
     /// of the window. With `protected`, an error in the call goes to `k`
-    /// instead of propagating.
+    /// instead of propagating. Code the call runs can't yield across it
+    /// (`attempt to yield across a C-call boundary`), as for most lua5.5
+    /// library callbacks; see [`NativeReturn::CallThenYieldable`].
     CallThen {
         f: Value,
         nargs: usize,
         k: Continuation,
         protected: bool,
     },
+    /// [`NativeReturn::CallThen`], but code the call runs may yield across
+    /// it: for the few library functions lua5.5 lets callbacks yield
+    /// through (`pcall`, `pairs` calling `__pairs`, `dofile`).
+    CallThenYieldable {
+        f: Value,
+        nargs: usize,
+        k: Continuation,
+        protected: bool,
+    },
+    /// [`NativeReturn::CallThen`] with `protected`, yieldable (only the
+    /// call itself, not the handler), but an error first goes
+    /// to the message handler in the window's first slot, which runs on top
+    /// of the frames that raised (so it can see them); its result is the
+    /// error `k` gets (`xpcall`).
+    CallHandled {
+        f: Value,
+        nargs: usize,
+        k: Continuation,
+    },
+    /// Resume coroutine `co` with the last `nargs` values of the window,
+    /// then run `k` when it yields (`Ok` with the yielded values), returns
+    /// (`Ok` with its results) or fails (`Err`). A coroutine that isn't
+    /// suspended, or one nested too deeply, gets `k` an `Err` at once.
+    Resume {
+        co: Gc<orbit_core::Thread>,
+        nargs: usize,
+        k: Continuation,
+    },
+    /// Close coroutine `co` (suspended, or dead): run its pending `__close`
+    /// handlers on its stack, newest first, with its error (nil if it is
+    /// suspended), then run `k`: `Ok` with no values, or `Err` with the error
+    /// it died with or the last error a handler raised.
+    Close {
+        co: Gc<orbit_core::Thread>,
+        k: Continuation,
+    },
+    /// Yield the last `nvals` values of the window to the resumer. The
+    /// values the next resume passes become this native's results.
+    Yield { nvals: usize },
+    /// End the running coroutine as if its body had returned nothing
+    /// (`coroutine.close` of itself).
+    Exit,
 }
 
 /// A native function's view of the VM: its window of the stack (arguments,
@@ -56,6 +112,8 @@ pub struct NativeCtx<'a> {
     pub(crate) base: usize,
     pub(crate) nargs: usize,
     pub(crate) id: NativeId,
+    /// The native closure being called, for its upvalues.
+    pub(crate) upvals: Option<Gc<orbit_core::Closure>>,
 }
 
 impl NativeCtx<'_> {
@@ -68,7 +126,7 @@ impl NativeCtx<'_> {
     /// Values currently in the window.
     #[inline]
     pub fn len(&self) -> usize {
-        self.rt.stack.regs.len() - self.base
+        self.rt.top - self.base
     }
 
     #[inline]
@@ -79,43 +137,48 @@ impl NativeCtx<'_> {
     /// Window slot `i` (argument `i` until the native changes it), or nil.
     #[inline]
     pub fn arg(&self, i: usize) -> Value {
-        self.rt
-            .stack
-            .regs
-            .get(self.base + i)
-            .copied()
-            .unwrap_or(Value::Nil)
+        let at = self.base + i;
+        if at < self.rt.top {
+            self.rt.stack.regs[at]
+        } else {
+            Value::Nil
+        }
     }
 
     /// Overwrite window slot `i`, growing the window with nils if needed.
     pub fn set(&mut self, i: usize, v: Value) {
         let at = self.base + i;
+        let top = self.rt.top;
         let regs = &mut self.rt.stack.regs;
-        if at >= regs.len() {
-            regs.resize(at + 1, Value::Nil);
+        if at >= top {
+            crate::interp::extend_nil(regs, at + 1);
+            regs[top..at].fill(Value::Nil);
+            self.rt.top = at + 1;
         }
         regs[at] = v;
     }
 
     /// Insert `v` at window slot `i`, shifting the rest up.
     pub fn insert(&mut self, i: usize, v: Value) {
-        self.rt.stack.regs.insert(self.base + i, v);
+        let at = self.base + i;
+        self.rt.top = self.rt.stack.insert(at, self.rt.top, v);
     }
 
     /// Push a value onto the end of the window.
     #[inline]
     pub fn push(&mut self, v: Value) {
-        self.rt.stack.regs.push(v);
+        self.rt.stack.put(self.rt.top, v);
+        self.rt.top += 1;
     }
 
     /// Shrink the window to `len` values.
     pub fn truncate(&mut self, len: usize) {
-        self.rt.stack.regs.truncate(self.base + len);
+        self.rt.top = self.rt.top.min(self.base + len);
     }
 
     /// The window's values.
     pub fn window(&self) -> &[Value] {
-        &self.rt.stack.regs[self.base..]
+        &self.rt.stack.regs[self.base..self.rt.top]
     }
 
     /// Return one value.
@@ -151,6 +214,12 @@ impl NativeCtx<'_> {
         Value::Str(self.rt.strings.new_str_owned(self.heap, bytes))
     }
 
+    /// Link a compiled chunk, as [`Vm::load_with_env`](crate::Vm::load_with_env)
+    /// does. The function is unrooted until stored in the window.
+    pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
+        crate::link::link(self.heap, self.rt, chunk, env)
+    }
+
     /// A new table (unrooted until stored in the window).
     pub fn new_table(&mut self, t: Table) -> Gc<Table> {
         self.heap.alloc(t)
@@ -171,7 +240,16 @@ impl NativeCtx<'_> {
     /// `chunk:line: ` for the function at `level` (1 is the caller of this
     /// native), or empty if it isn't a Lua function.
     pub fn where_(&self, level: usize) -> String {
-        ops::where_(self.heap, self.rt, level)
+        self.rt
+            .where_(self.heap, Some(self.running_native()), level)
+    }
+
+    /// This native, as the debug walk sees it (level 0).
+    pub(crate) fn running_native(&self) -> crate::debug::Running {
+        crate::debug::Running {
+            id: self.id,
+            func: self.base - 1,
+        }
     }
 
     /// An error with a message, positioned at the caller (like
@@ -231,7 +309,10 @@ impl NativeCtx<'_> {
         let got = if i >= self.nargs {
             "no value"
         } else {
-            self.arg(i).type_name()
+            match self.arg(i) {
+                Value::LightUserData(_) => "light userdata",
+                v => v.type_name(),
+            }
         };
         self.arg_error(i, format!("{expected} expected, got {got}"))
     }
@@ -305,8 +386,121 @@ impl NativeCtx<'_> {
         }
     }
 
+    // ---- metatables ------------------------------------------------------
+
+    /// The metatable of `v`, if any.
+    pub fn metatable(&self, v: Value) -> Option<Gc<Table>> {
+        self.rt.metatable(self.heap, v)
+    }
+
+    /// Field `e` of `v`'s metatable (raw), or nil.
+    pub fn metamethod(&self, v: Value, e: Event) -> Value {
+        self.rt.metamethod(self.heap, v, e)
+    }
+
+    /// Turn a slow path's result into a [`Meta`]: a metamethod call gets
+    /// its arguments pushed, an error gets positioned at the caller.
+    fn meta_result<T>(&mut self, r: Result<T, Exc>) -> Result<Meta<T>, LuaError> {
+        match r {
+            Ok(v) => Ok(Meta::Done(v)),
+            Err(Exc::Meta(call)) => {
+                let n = call.nargs as usize;
+                for &a in &call.args[..n] {
+                    self.push(a);
+                }
+                Ok(Meta::Call {
+                    f: call.f,
+                    nargs: n,
+                })
+            }
+            Err(Exc::Rt(msg, _)) => Err(self.error(msg)),
+            Err(Exc::Plain(msg)) => Err(LuaError::new(self.new_str(msg.as_bytes()))),
+            Err(Exc::Lua(e)) => Err(e),
+            Err(Exc::Index { .. } | Exc::NewIndex { .. }) => {
+                unreachable!("only the dispatch loop defers indexing")
+            }
+        }
+    }
+
+    /// `obj[key]` with metamethods.
+    pub fn index(&mut self, obj: Value, key: Value) -> Result<Meta<Value>, LuaError> {
+        let r = match obj {
+            Value::Table(t) => {
+                let tab = self.heap.get(t);
+                let v = tab.get(self.heap, key);
+                if !v.is_nil() || tab.meta.is_none() {
+                    Ok(v)
+                } else {
+                    meta::index(self.heap, &self.rt.metas, obj, key)
+                }
+            }
+            _ => meta::index(self.heap, &self.rt.metas, obj, key),
+        };
+        self.meta_result(r)
+    }
+
+    /// `obj[key] = v` with metamethods.
+    pub fn set_index(&mut self, obj: Value, key: Value, v: Value) -> Result<Meta<()>, LuaError> {
+        let r = meta::new_index(self.heap, &self.rt.metas, obj, key, v);
+        self.meta_result(r)
+    }
+
+    /// `#v` with `__len`.
+    pub fn length(&mut self, v: Value) -> Result<Meta<Value>, LuaError> {
+        let r = crate::cold::op_len(self.heap, &self.rt.metas, v);
+        self.meta_result(r)
+    }
+
+    /// `a < b` with `__lt`.
+    pub fn less_than(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
+        let r = ops::less_than(self.heap, &self.rt.metas, a, b);
+        self.meta_result(r)
+    }
+
+    /// `a == b` with `__eq`.
+    pub fn equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
+        let r = ops::equal(self.heap, &self.rt.metas, a, b);
+        self.meta_result(r)
+    }
+
+    // ---- userdata --------------------------------------------------------
+
+    /// The host value of userdata `u`, if it is a `T`.
+    pub fn userdata_ref<T: std::any::Any>(&self, u: Gc<orbit_core::UserData>) -> Option<&T> {
+        self.heap.get(u).downcast_ref()
+    }
+
+    /// The host value of userdata `u`, mutably, if it is a `T`.
+    pub fn userdata_mut<T: std::any::Any>(
+        &mut self,
+        u: Gc<orbit_core::UserData>,
+    ) -> Option<&mut T> {
+        self.heap.get_mut(u).downcast_mut()
+    }
+
+    /// A userdata argument holding a `T`; `name` is the type the message
+    /// names (`FILE*`).
+    pub fn check_userdata<T: std::any::Any>(
+        &mut self,
+        i: usize,
+        name: &str,
+    ) -> Result<Gc<orbit_core::UserData>, LuaError> {
+        match self.arg(i) {
+            Value::UserData(u) if self.heap.get(u).is::<T>() => Ok(u),
+            _ => Err(self.type_error(i, name)),
+        }
+    }
+
+    /// A new userdata (unrooted until stored in the window).
+    pub fn new_userdata<T: std::any::Any>(&mut self, data: T) -> Gc<orbit_core::UserData> {
+        self.heap.alloc(orbit_core::UserData::new(data))
+    }
+
     /// Run a full collection (`collectgarbage("collect")`).
     pub fn full_collect(&mut self) {
+        // Values above the window are dead.
+        let top = self.rt.top;
+        self.rt.stack.regs.truncate(top);
         self.heap.full_collect(self.rt);
     }
 }

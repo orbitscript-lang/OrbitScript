@@ -246,34 +246,20 @@ fn first_light_programs_parse() {
     }
 }
 
-/// The whole official suite parses, except files using hexadecimal floats (outside the
-/// first-light subset).
+/// The whole official suite parses.
 #[test]
 fn official_suite_parses() {
     let root = repo_root();
     let suite = std::env::var_os("LUA_SUITE")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("tests/lua-5.5/suite"));
-    let hex_floats = [
-        "bitwise.lua",
-        "code.lua",
-        "files.lua",
-        "literals.lua",
-        "math.lua",
-    ];
     let mut parsed = 0;
     for path in lua_files(&suite) {
-        let name = path.file_name().unwrap().to_str().unwrap();
-        match parse_and_round_trip(&path) {
-            Ok(()) => parsed += 1,
-            Err(e) if hex_floats.contains(&name) => {
-                assert!(
-                    e.contains("hexadecimal floats are not supported yet"),
-                    "{name}: {e}"
-                )
-            }
-            Err(e) => panic!("{name}: {e}"),
+        let name = path.file_name().unwrap().to_str().unwrap().to_string();
+        if let Err(e) = parse_and_round_trip(&path) {
+            panic!("{name}: {e}");
         }
+        parsed += 1;
     }
-    assert!(parsed >= 25, "only {parsed} suite files parsed");
+    assert!(parsed >= 30, "only {parsed} suite files parsed");
 }

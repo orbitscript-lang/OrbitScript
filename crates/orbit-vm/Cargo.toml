@@ -16,6 +16,8 @@ orbit-gc = { path = "../orbit-gc" }
 [features]
 # Per-instruction type-feedback bytes on prototypes (docs/design/vm.md).
 type-feedback = ["orbit-core/type-feedback"]
+# Debug hooks (`debug.sethook`): a second, hooked copy of the dispatch loop.
+hooks = []
 
 [lints]
 workspace = true
