@@ -73,6 +73,9 @@ pub enum Op {
     GetGlobal { dst: Reg, name: Const, ic: Ic },
     /// `U[0].value[K[name]] = R[src]`
     SetGlobal { src: Reg, name: Const, ic: Ic },
+    /// Raises "global 'K[name]' already defined" unless `R[src]` is nil (Lua's
+    /// `global x = v`, before the store).
+    CheckUndefined { src: Reg, name: Const },
 
     // Tables.
     /// `R[dst] = {}` with room for `array_hint` array and `hash_hint` hash entries.
@@ -133,8 +136,22 @@ pub enum Op {
     /// `R[dst] = R[a] + imm`. Error messages treat `imm` as a constant
     /// operand (operand 1), as if it were `R[b]`.
     AddInt { dst: Reg, a: Reg, imm: i16 },
+    /// `R[dst] = R[a] & R[b]`. Integer fast path; floats with an integer
+    /// value convert, everything else goes to the VM's slow path.
+    BAnd { dst: Reg, a: Reg, b: Reg },
+    /// `R[dst] = R[a] | R[b]`
+    BOr { dst: Reg, a: Reg, b: Reg },
+    /// `R[dst] = R[a] ~ R[b]` (exclusive or)
+    BXor { dst: Reg, a: Reg, b: Reg },
+    /// `R[dst] = R[a] << R[b]` (logical; counts of 64 or more give 0, negative
+    /// counts shift right)
+    Shl { dst: Reg, a: Reg, b: Reg },
+    /// `R[dst] = R[a] >> R[b]` (logical, like `Shl` with the count negated)
+    Shr { dst: Reg, a: Reg, b: Reg },
     /// `R[dst] = -R[src]`
     Neg { dst: Reg, src: Reg },
+    /// `R[dst] = ~R[src]`
+    BNot { dst: Reg, src: Reg },
     /// `R[dst] = not R[src]`
     Not { dst: Reg, src: Reg },
     /// `R[dst] = #R[src]`
@@ -216,6 +233,16 @@ pub enum Op {
     /// `R[dst..dst+count] = ...` padded with nil (`count` [`MULTI`]: all of
     /// them, sets top).
     Vararg { dst: Reg, count: u8 },
+    /// `R[dst] = {n = count, ...}`, a new table of the extra arguments (a Lua 5.5 named
+    /// vararg).
+    VarargTable { dst: Reg },
+    /// `R[dst]` = what the vararg table would hold at `R[key]`, without building it: the
+    /// extra argument for an integer key `1..count`, the count for `"n"`, nil otherwise.
+    VarargGet { dst: Reg, key: Reg },
+    /// Like `Vararg`, but reads the vararg table `R[table]` raw: `R[table][1..n]` with
+    /// `n = R[table].n`, which must be an integer in `0..2^30` (error: "vararg table has no
+    /// proper 'n'").
+    VarargUnpack { dst: Reg, table: Reg, count: u8 },
 
     // Loops.
     /// Numeric `for` setup. On entry `R[base]` is the initial value,
@@ -243,6 +270,14 @@ pub enum Op {
     /// `R[dst] = closure of child prototype proto`, its captures built from
     /// the child's [`CaptureSource`] list.
     Closure { dst: Reg, proto: u16 },
+    /// Mark `R[reg]` (a `<close>` local, read-only from here on) to be
+    /// closed. `nil` and `false` are ignored; any other value must have a
+    /// `__close` metamethod. Operand 0's origin names the local.
+    Tbc { reg: Reg },
+    /// Close every marked register at or above `R[from]`, newest first,
+    /// calling `__close(value, nil)` on each. Leaves the other registers
+    /// and the open-ended results of a preceding call or `Vararg` intact.
+    Close { from: Reg },
     /// The whole body of a native closure's stub prototype (never emitted
     /// by a compiler): run native `id` with the frame's arguments, the
     /// closure's captures as its upvalues, in place of this frame.

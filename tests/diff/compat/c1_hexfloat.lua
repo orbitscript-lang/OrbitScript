@@ -1,0 +1,10 @@
+-- Hexadecimal float literals and tonumber on them.
+print(0x1p4, 0x.8, 0xA.8p1, 0x1P-1, 0x.1p4, 0x10p-4, 0xffp0, 0x1.8)
+print(0x1p-1074, 0x1p-1075, 0x1p1023, 0x1p1024, 0x.0p0, 0x0p99999)
+print(0x123456789abcdef123p0, 0x1.fffffffffffff8p0, 0x1.fffffffffffff7p0)
+print(0x1.00000000000008p0, 0x1.000000000000081p0, 0x1.00000000000018p0)
+print(math.type(0x1p4), math.type(0x10), 0x1p4 == 16, -0x1p1)
+print(tonumber("0x1p4"), tonumber("  0x.8  "), tonumber("-0x1.8p1"), tonumber("0x1p"))
+print(tonumber("0x1p-1074"), tonumber("0x1p-1075"), tonumber("0x1p1024"), tonumber("0x.p1"))
+print(tonumber("0x123456789abcdef123p0"), tonumber("0x1.00000000000008p0"))
+print(load("return 0x1p") , load("return 0x.p1"))

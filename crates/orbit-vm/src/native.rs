@@ -87,6 +87,14 @@ pub enum NativeReturn {
         nargs: usize,
         k: Continuation,
     },
+    /// Close coroutine `co` (suspended, or dead): run its pending `__close`
+    /// handlers on its stack, newest first, with its error (nil if it is
+    /// suspended), then run `k`: `Ok` with no values, or `Err` with the error
+    /// it died with or the last error a handler raised.
+    Close {
+        co: Gc<orbit_core::Thread>,
+        k: Continuation,
+    },
     /// Yield the last `nvals` values of the window to the resumer. The
     /// values the next resume passes become this native's results.
     Yield { nvals: usize },
@@ -204,6 +212,12 @@ impl NativeCtx<'_> {
     /// A string value from owned bytes.
     pub fn new_str_owned(&mut self, bytes: Vec<u8>) -> Value {
         Value::Str(self.rt.strings.new_str_owned(self.heap, bytes))
+    }
+
+    /// Link a compiled chunk, as [`Vm::load_with_env`](crate::Vm::load_with_env)
+    /// does. The function is unrooted until stored in the window.
+    pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
+        crate::link::link(self.heap, self.rt, chunk, env)
     }
 
     /// A new table (unrooted until stored in the window).

@@ -12,6 +12,7 @@
 //! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
 
 pub mod func;
+pub mod gc;
 pub mod number;
 pub mod string;
 pub mod table;

@@ -37,7 +37,13 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                         && ic < p.ncaches
                         && !p.captures.is_empty()
                 }
+                Op::CheckUndefined { src, name } => reg(src) && (name as usize) < p.consts.len(),
                 Op::NewTable { dst, .. } => reg(dst),
+                Op::VarargTable { dst } => p.is_vararg && reg(dst),
+                Op::VarargGet { dst, key } => p.is_vararg && reg(dst) && reg(key),
+                Op::VarargUnpack { dst, table, count } => {
+                    p.is_vararg && reg(table) && regs(dst, count)
+                }
                 Op::GetField { dst, obj, key, ic } => {
                     reg(dst) && reg(obj) && (key as usize) < p.consts.len() && ic < p.ncaches
                 }
@@ -63,11 +69,17 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 | Op::Div { dst, a, b }
                 | Op::IDiv { dst, a, b }
                 | Op::Mod { dst, a, b }
-                | Op::Pow { dst, a, b } => reg(dst) && reg(a) && reg(b),
+                | Op::Pow { dst, a, b }
+                | Op::BAnd { dst, a, b }
+                | Op::BOr { dst, a, b }
+                | Op::BXor { dst, a, b }
+                | Op::Shl { dst, a, b }
+                | Op::Shr { dst, a, b } => reg(dst) && reg(a) && reg(b),
                 Op::AddInt { dst, a, .. } => reg(dst) && reg(a),
-                Op::Neg { dst, src } | Op::Not { dst, src } | Op::Len { dst, src } => {
-                    reg(dst) && reg(src)
-                }
+                Op::Neg { dst, src }
+                | Op::BNot { dst, src }
+                | Op::Not { dst, src }
+                | Op::Len { dst, src } => reg(dst) && reg(src),
                 Op::Concat { dst, first, count } => reg(dst) && count >= 2 && regs(first, count),
                 Op::Jump { off } => target(off),
                 Op::JumpIfTrue { src, off } | Op::JumpIfFalse { src, off } => {
@@ -105,6 +117,8 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 }
                 Op::GenericLoop { base, back } => regs(base, 5) && target(back),
                 Op::Closure { dst, proto } => reg(dst) && (proto as usize) < p.children.len(),
+                Op::Tbc { reg: r } => reg(r),
+                Op::Close { from } => reg(from),
                 // Only the VM's native-closure stubs hold it.
                 Op::NativeEntry { .. } => false,
             };

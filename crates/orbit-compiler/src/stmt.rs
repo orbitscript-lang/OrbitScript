@@ -1,7 +1,7 @@
 //! Statements and blocks.
 
 use orbit_bytecode::{MULTI, Op};
-use orbit_hir::{BlockId, ExprId, ExprKind, ExprList, LocalId, Place, StmtId, StmtKind};
+use orbit_hir::{BlockId, ExprId, ExprKind, ExprList, LocalId, LocalKind, Place, StmtId, StmtKind};
 
 use crate::consts::ConstVal;
 use crate::expr::Want;
@@ -74,6 +74,7 @@ impl FuncState<'_> {
                 Ok(())
             }
             StmtKind::Assign { targets, values } => self.assign(targets, values),
+            StmtKind::Define { targets, values } => self.define(targets, values),
             &StmtKind::Eval(e) => {
                 if matches!(
                     self.f.expr(e).kind,
@@ -107,7 +108,7 @@ impl FuncState<'_> {
                 let top = self.here();
                 let exit = self.label();
                 self.cond(cond, false, exit)?;
-                self.loops.push(exit);
+                self.loops.push((exit, self.tbc.len()));
                 self.block(body)?;
                 self.loops.pop();
                 self.jump(Op::Jump { off: 0 }, top);
@@ -117,10 +118,19 @@ impl FuncState<'_> {
             &StmtKind::Repeat { body, until } => {
                 let top = self.here();
                 let exit = self.label();
-                self.loops.push(exit);
+                self.loops.push((exit, self.tbc.len()));
                 let mark = self.open_scope();
                 self.block_stmts(body)?;
-                self.cond(until, false, top)?;
+                if self.tbc.len() > mark.tbc() {
+                    // Going round again leaves the body's scope too, so close first.
+                    let done = self.label();
+                    self.cond(until, true, done)?;
+                    self.emit_close(mark.tbc());
+                    self.jump(Op::Jump { off: 0 }, top);
+                    self.place(done);
+                } else {
+                    self.cond(until, false, top)?;
+                }
                 self.close_scope(mark);
                 self.loops.pop();
                 self.place(exit);
@@ -139,10 +149,21 @@ impl FuncState<'_> {
                 hidden,
                 body,
             } => self.generic_for(vars, iter, *hidden, *body),
+            &StmtKind::Goto(l) => {
+                self.goto_close(l);
+                let label = self.goto_label(l);
+                self.jump(Op::Jump { off: 0 }, label);
+                Ok(())
+            }
+            &StmtKind::Label(l) => {
+                self.place_goto_label(l);
+                Ok(())
+            }
             StmtKind::Break => {
-                let Some(&exit) = self.loops.last() else {
+                let Some(&(exit, depth)) = self.loops.last() else {
                     return Err(self.error("internal error: break outside a loop"));
                 };
+                self.emit_close(depth);
                 self.jump(Op::Jump { off: 0 }, exit);
                 Ok(())
             }
@@ -157,6 +178,13 @@ impl FuncState<'_> {
         self.active = self.free;
         for (i, &l) in locals.iter().enumerate() {
             self.declare(l, (first + i) as u8)?;
+        }
+        for (i, &l) in locals.iter().enumerate() {
+            if self.f.local(l).kind == LocalKind::Close {
+                // A captured `<close>` local still has its value in the register: it is
+                // read-only, so the cell never changes.
+                self.mark_tbc(l, (first + i) as u8);
+            }
         }
         Ok(())
     }
@@ -199,6 +227,47 @@ impl FuncState<'_> {
         Ok(())
     }
 
+    /// `global x, y = ...`: like a multiple assignment, but each store (right to left) first
+    /// reads its target and fails unless it is nil.
+    fn define(&mut self, targets: &[Place], values: &ExprList) -> Result<()> {
+        let mut evaluated = Vec::with_capacity(targets.len());
+        for t in targets {
+            evaluated.push(self.target(t, &[])?);
+        }
+        let first = self.free;
+        self.expr_list(values, Want::Exact(targets.len()))?;
+        let check = self.alloc()?;
+        for (i, t) in evaluated.into_iter().enumerate().rev() {
+            let name = self.load_target(&t, check)?;
+            self.emit(Op::CheckUndefined { src: check, name });
+            self.store(t, (first + i) as u8)?;
+        }
+        Ok(())
+    }
+
+    /// Reads a global or table target into `dst` and returns its name's constant.
+    fn load_target(&mut self, target: &Target, dst: u8) -> Result<u16> {
+        Ok(match *target {
+            Target::Global(name) => {
+                let k = self.str_constant(name)?;
+                let ic = self.cache();
+                self.emit(Op::GetGlobal { dst, name: k, ic });
+                k
+            }
+            Target::Field {
+                obj,
+                key,
+                ref origin,
+            } => {
+                let ic = self.cache();
+                let pc = self.emit(Op::GetField { dst, obj, key, ic });
+                self.origin(pc, 0, origin.clone());
+                key
+            }
+            _ => return Err(self.error("internal error: definition of a non-global")),
+        })
+    }
+
     /// Evaluates a target's object and key. `protect` lists registers the statement assigns.
     fn target(&mut self, place: &Place, protect: &[u8]) -> Result<Target> {
         Ok(match *place {
@@ -213,6 +282,7 @@ impl FuncState<'_> {
             },
             Place::Capture(c) => Target::Capture(c.0 as u8),
             Place::Global(name) => Target::Global(name),
+            Place::Env => Target::Capture(0),
             Place::Outer { .. } => return Err(self.error("internal error: HIR not analysed")),
             Place::Index { obj, key } => {
                 let (mut o, origin) = self.expr_any(obj)?;
@@ -315,7 +385,7 @@ impl FuncState<'_> {
         let exit = self.label();
         self.jump(Op::ForPrep { base, exit: 0 }, exit);
         let top = self.here();
-        self.loops.push(exit);
+        self.loops.push((exit, self.tbc.len()));
         let body_mark = self.open_scope();
         self.declare(var, control)?;
         self.block_stmts(body)?;
@@ -331,17 +401,18 @@ impl FuncState<'_> {
         &mut self,
         vars: &[LocalId],
         iter: &ExprList,
-        hidden: [LocalId; 3],
+        hidden: [LocalId; 4],
         body: BlockId,
     ) -> Result<()> {
         let mark = self.open_scope();
         let base = self.free as u8;
-        self.expr_list(iter, Want::Exact(3))?;
-        self.alloc()?; // R[base+3]: the closing value, reserved.
+        self.expr_list(iter, Want::Exact(4))?;
         for (i, &h) in hidden.iter().enumerate() {
             self.slots[h.index()] = Slot::Reg(base + i as u8);
             self.push_scope(h, Slot::Reg(base + i as u8));
         }
+        // R[base+3]: the closing value, closed when the loop ends.
+        self.mark_tbc(hidden[3], base + 3);
         let Ok(nvars) = u8::try_from(vars.len()) else {
             return Err(self.error("function or expression needs too many registers"));
         };
@@ -355,7 +426,7 @@ impl FuncState<'_> {
         self.jump(Op::Jump { off: 0 }, call);
         let top = self.here();
         let exit = self.label();
-        self.loops.push(exit);
+        self.loops.push((exit, self.tbc.len()));
         let body_mark = self.open_scope();
         for (i, &v) in vars.iter().enumerate() {
             self.declare(v, base + 4 + i as u8)?;
@@ -372,8 +443,12 @@ impl FuncState<'_> {
     }
 
     fn return_(&mut self, values: &ExprList) -> Result<()> {
+        // With to-be-closed locals open, the values are computed, then the locals closed,
+        // then the function returns, so a call here is not a tail call.
+        let closing = !self.tbc.is_empty();
         match values.items.as_slice() {
             [] => {
+                self.emit_close(0);
                 self.emit(Op::Return0);
             }
             &[e] if matches!(
@@ -382,8 +457,9 @@ impl FuncState<'_> {
             ) =>
             {
                 let func = self.alloc()?;
-                self.call(e, func, MULTI, true)?;
+                self.call(e, func, MULTI, !closing)?;
                 // A native callee runs as an ordinary call; this passes its results on.
+                self.emit_close(0);
                 self.emit(Op::Return {
                     first: func,
                     count: MULTI,
@@ -391,6 +467,7 @@ impl FuncState<'_> {
             }
             &[e] if !self.f.expr(e).kind.is_multi() => {
                 let (src, _) = self.expr_any(e)?;
+                self.emit_close(0);
                 self.emit(Op::Return1 { src });
             }
             _ => {
@@ -404,6 +481,7 @@ impl FuncState<'_> {
                             self.error("function or expression needs too many registers")
                         })?,
                 };
+                self.emit_close(0);
                 self.emit(Op::Return { first, count });
             }
         }

@@ -90,7 +90,11 @@ impl Vm {
         let FrameKind::Lua { closure, .. } = f.kind else {
             unreachable!("metamethods are requested by Lua frames")
         };
-        let at = f.base as usize + self.heap.get(closure).code.nregs as usize;
+        let mut at = f.base as usize + self.heap.get(closure).code.nregs as usize;
+        if let MetaAction::Close { top } = action {
+            // Keep the open-ended results a `return` is about to pass on.
+            at = at.max(top as usize);
+        }
         let n = call.nargs as usize;
         let regs = &mut self.rt.stack.regs;
         if regs.len() < at + 1 + n {
@@ -156,6 +160,9 @@ impl Vm {
                 first,
                 left: aux,
             },
+            Op::Close { .. } => MetaAction::Close {
+                top: self.rt.top as u32,
+            },
             other => unreachable!("{other:?} doesn't call metamethods"),
         }
     }
@@ -168,6 +175,11 @@ impl Vm {
             unreachable!("meta frame")
         };
         let res = self.rt.stack.regs[m.func as usize];
+        if let MetaAction::Unwind { handled } = action {
+            // A `__close` handler ran while `res` unwound: carry on.
+            self.rt.handled = handled;
+            return Err(Exc::Lua(crate::LuaError::new(res)));
+        }
         let caller = self.rt.stack.frames.last_mut().expect("caller frame");
         let base = caller.base as usize;
         match action {
@@ -178,6 +190,12 @@ impl Vm {
                 }
             }
             MetaAction::Discard => {}
+            MetaAction::Close { top } => {
+                // Run `Close` again for the next variable.
+                self.rt.top = top as usize;
+                caller.pc -= 1;
+            }
+            MetaAction::Unwind { .. } => unreachable!("handled above"),
             MetaAction::Concat { dst, first, left } => {
                 let from = base + first as usize;
                 let left = left as usize;
@@ -190,6 +208,41 @@ impl Vm {
             }
         }
         Ok(Flow::Reload)
+    }
+
+    /// `Tbc`: mark register `r` (absolute) to be closed. Its value is not
+    /// `nil` or `false`. `pc` is the instruction's, for the local's name.
+    #[inline(never)]
+    pub(crate) fn op_tbc(&mut self, r: usize, pc: usize) -> Result<(), Exc> {
+        let v = self.rt.stack.regs[r];
+        if self.rt.metamethod(&self.heap, v, Event::Close).is_nil() {
+            let f = self.rt.stack.frames.last().expect("a frame");
+            let FrameKind::Lua { closure, .. } = f.kind else {
+                unreachable!("Tbc runs in a Lua frame")
+            };
+            let proto = self.heap.get(self.heap.get(closure).proto);
+            let name = match proto.debug.origin(pc as u32, 0) {
+                Some(orbit_bytecode::Origin::Local(n)) => String::from_utf8_lossy(n).into_owned(),
+                _ => "?".into(),
+            };
+            return Err(Exc::Rt(
+                format!("variable '{name}' got a non-closable value"),
+                None,
+            ));
+        }
+        self.rt.stack.tbc.push(r as u32);
+        Ok(())
+    }
+
+    /// `Close`, with a variable to close at or above register `from`
+    /// (absolute): call the newest one's `__close(value, nil)`. The meta
+    /// frame runs `Close` again when it returns.
+    #[inline(never)]
+    pub(crate) fn op_close(&mut self) -> Exc {
+        let t = self.rt.stack.tbc.pop().expect("a variable to close") as usize;
+        let v = self.rt.stack.regs[t];
+        let h = self.rt.metamethod(&self.heap, v, Event::Close);
+        Exc::Meta(MetaCall::new(h, Event::Close, &[v, Value::Nil]))
     }
 
     /// `NewTable`.
@@ -319,6 +372,83 @@ impl Vm {
         }
     }
 
+    /// `VarargTable`: `{n = count, ...}` of the frame's extra arguments.
+    #[inline(never)]
+    pub(crate) fn op_vararg_table(&mut self, base: usize, nvarargs: usize) -> Value {
+        let t = self.heap.alloc(Table::with_capacity(nvarargs, 1));
+        for i in 0..nvarargs {
+            let v = self.rt.stack.regs[base - nvarargs + i];
+            table::set_int(&mut self.heap, t, i as i64 + 1, v);
+        }
+        let n = self.rt.strings.new_str(&mut self.heap, b"n");
+        let key = Key::str(&self.heap, n);
+        table::set_key(&mut self.heap, t, &key, Value::Int(nvarargs as i64));
+        Value::Table(t)
+    }
+
+    /// `VarargGet`: what the vararg table would hold at `key`.
+    #[inline(never)]
+    pub(crate) fn op_vararg_get(&self, base: usize, nvarargs: usize, key: Value) -> Value {
+        let i = match key {
+            Value::Int(i) => i,
+            Value::Float(x) => match orbit_core::number::float_to_int(x) {
+                Some(i) => i,
+                None => return Value::Nil,
+            },
+            Value::Str(s) if self.heap.get(s).as_bytes() == b"n" => {
+                return Value::Int(nvarargs as i64);
+            }
+            _ => return Value::Nil,
+        };
+        if (1..=nvarargs as i64).contains(&i) {
+            self.rt.stack.regs[base - nvarargs + i as usize - 1]
+        } else {
+            Value::Nil
+        }
+    }
+
+    /// `VarargUnpack`: like `Vararg`, from the vararg table `table`.
+    #[inline(never)]
+    pub(crate) fn op_vararg_unpack(
+        &mut self,
+        base: usize,
+        table: Value,
+        dst: usize,
+        count: u8,
+    ) -> Result<(), Exc> {
+        let Value::Table(t) = table else {
+            unreachable!("the vararg table is a read-only local")
+        };
+        let key = self.rt.strings.new_str(&mut self.heap, b"n");
+        let n = match self.heap.get(t).get_str(&self.heap, key) {
+            Value::Int(n) if (0..1 << 30).contains(&n) => n as usize,
+            _ => return Err(Exc::Rt("vararg table has no proper 'n'".into(), None)),
+        };
+        let to = base + dst;
+        let count = if count == MULTI {
+            if to + n > self.rt.limits.max_stack {
+                return Err(Exc::Rt("stack overflow".into(), None));
+            }
+            let regs = &mut self.rt.stack.regs;
+            if regs.len() < to + n {
+                regs.resize(to + n, Value::Nil);
+            }
+            self.rt.top = to + n;
+            n
+        } else {
+            count as usize
+        };
+        let tab = self.heap.get(t);
+        for i in 0..count {
+            self.rt.stack.regs[to + i] = if i < n {
+                tab.get_int(i as i64 + 1)
+            } else {
+                Value::Nil
+            };
+        }
+        Ok(())
+    }
+
     /// `ForPrep` on the loop state at stack index `at`. Returns whether the
     /// loop runs at all.
     #[inline(never)]
@@ -445,6 +575,16 @@ pub(crate) fn set_str_miss(
         }
         Ok(())
     }
+}
+
+/// `global x = v` found `x` already set.
+#[cold]
+#[inline(never)]
+pub(crate) fn already_defined(name: &[u8]) -> Exc {
+    Exc::Rt(
+        format!("global '{}' already defined", String::from_utf8_lossy(name)),
+        None,
+    )
 }
 
 /// `_ENV` isn't a table.
