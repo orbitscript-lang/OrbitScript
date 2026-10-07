@@ -2,8 +2,8 @@
 //!
 //! One walk over the AST builds one `hir::Function` per function body. Names resolve to a local
 //! of the current function, a local of an enclosing function (`Outer`, which the HIR's capture
-//! analysis turns into captures), or a global. This is also the subset gate: constructs outside
-//! the first-light subset fail here with `<construct> is not supported yet`.
+//! analysis turns into captures), or a global, following Lua 5.5's `global` declarations and
+//! `_ENV`. Constructs not implemented yet fail here with `<construct> is not supported yet`.
 
 use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LocalId, LocalKind, Span, StrId};
@@ -41,8 +41,23 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
 struct FnCtx {
     id: FuncId,
     f: hir::Function,
-    /// Innermost last. Each scope lists the locals declared in it, in order.
-    scopes: Vec<Vec<(StrId, LocalId)>>,
+    /// Innermost last. Each scope lists the declarations made in it, in order.
+    scopes: Vec<Vec<Entry>>,
+}
+
+/// One declaration in a scope.
+#[derive(Clone, Copy)]
+enum Entry {
+    Local(StrId, LocalId),
+    /// `global x`, read-only with `<const>`.
+    Global {
+        name: StrId,
+        constant: bool,
+    },
+    /// `global *`: every name not declared otherwise is a global.
+    GlobalAll {
+        constant: bool,
+    },
 }
 
 struct Lowerer {
@@ -58,8 +73,25 @@ type LResult<T> = Result<T, Diagnostic>;
 /// Where a name refers to.
 enum Resolved {
     Local(LocalId),
-    Outer { func: FuncId, local: LocalId },
-    Global,
+    Outer {
+        func: FuncId,
+        local: LocalId,
+    },
+    Global {
+        constant: bool,
+    },
+    /// A `global` declaration is in scope, and none covers the name.
+    Undeclared,
+}
+
+/// Which `_ENV` a global access goes through.
+enum Env {
+    /// The chunk's own environment.
+    Chunk,
+    /// A local (or enclosing function's local) named `_ENV`.
+    Local(hir::ExprKind),
+    /// `global _ENV` is in scope.
+    Declared,
 }
 
 impl Lowerer {
@@ -112,14 +144,6 @@ impl Lowerer {
         String::from_utf8_lossy(self.chunk.strings.get(sym)).into_owned()
     }
 
-    /// Rejects `_ENV`, which first light doesn't give its Lua meaning.
-    fn check_name(&self, name: ast::Name) -> LResult<()> {
-        if name.sym == self.sym_env {
-            return Err(self.not_supported(name.span, "'_ENV' is"));
-        }
-        Ok(())
-    }
-
     fn open_scope(&mut self) {
         self.cur().scopes.push(Vec::new());
     }
@@ -138,30 +162,102 @@ impl Lowerer {
             .scopes
             .last_mut()
             .expect("scope")
-            .push((name, local));
+            .push(Entry::Local(name, local));
     }
 
+    fn declare(&mut self, entry: Entry) {
+        self.cur().scopes.last_mut().expect("scope").push(entry);
+    }
+
+    /// Resolves a name: the innermost local or `global` declaration of it wins; otherwise the
+    /// innermost `global *` makes it a global; otherwise it is undeclared if any `global`
+    /// declaration is in scope, and a global if none is. Scopes span function boundaries.
     fn resolve(&self, sym: StrId) -> Resolved {
+        let mut fallback = None;
+        let mut declared = false;
         for (depth, ctx) in self.funcs.iter().enumerate().rev() {
-            let found = ctx
-                .scopes
-                .iter()
-                .rev()
-                .flat_map(|scope| scope.iter().rev())
-                .find(|(s, _)| *s == sym)
-                .map(|&(_, l)| l);
-            if let Some(local) = found {
-                return if depth == self.funcs.len() - 1 {
-                    Resolved::Local(local)
-                } else {
-                    Resolved::Outer {
-                        func: ctx.id,
-                        local,
+            let entries = ctx.scopes.iter().rev().flat_map(|scope| scope.iter().rev());
+            for entry in entries {
+                match *entry {
+                    Entry::Local(s, local) if s == sym => {
+                        return if depth == self.funcs.len() - 1 {
+                            Resolved::Local(local)
+                        } else {
+                            Resolved::Outer {
+                                func: ctx.id,
+                                local,
+                            }
+                        };
                     }
-                };
+                    Entry::Global { name, constant } if name == sym => {
+                        return Resolved::Global { constant };
+                    }
+                    Entry::Global { .. } => declared = true,
+                    // `global *` never covers `_ENV`.
+                    Entry::GlobalAll { constant } if fallback.is_none() && sym != self.sym_env => {
+                        fallback = Some(constant)
+                    }
+                    _ => {}
+                }
             }
         }
-        Resolved::Global
+        match fallback {
+            Some(constant) => Resolved::Global { constant },
+            None if declared && sym != self.sym_env => Resolved::Undeclared,
+            None => Resolved::Global { constant: false },
+        }
+    }
+
+    /// The `_ENV` visible here: a local named `_ENV`, an explicit `global _ENV`, or the
+    /// chunk's environment.
+    fn env(&self) -> Env {
+        match self.resolve(self.sym_env) {
+            Resolved::Local(l) => Env::Local(hir::ExprKind::Local(l)),
+            Resolved::Outer { func, local } => Env::Local(hir::ExprKind::Outer { func, local }),
+            Resolved::Global { .. } | Resolved::Undeclared => {
+                let explicit = self.funcs.iter().any(|ctx| {
+                    ctx.scopes
+                        .iter()
+                        .flatten()
+                        .any(|e| matches!(*e, Entry::Global { name, .. } if name == self.sym_env))
+                });
+                if explicit { Env::Declared } else { Env::Chunk }
+            }
+        }
+    }
+
+    fn undeclared(&self, name: ast::Name) -> Diagnostic {
+        let message = format!("variable '{}' not declared", self.name_text(name.sym));
+        self.error(name.span, message)
+    }
+
+    fn env_is_global(&self, name: ast::Name) -> Diagnostic {
+        let message = format!(
+            "_ENV is global when accessing variable '{}'",
+            self.name_text(name.sym)
+        );
+        self.error(name.span, message)
+    }
+
+    fn assign_to_const(&self, name: ast::Name) -> Diagnostic {
+        let message = format!(
+            "attempt to assign to const variable '{}'",
+            self.name_text(name.sym)
+        );
+        self.error(name.span, message)
+    }
+
+    /// The global `name` as a place: `Global`, or a field of a user `_ENV`.
+    fn global_place(&mut self, name: ast::Name) -> LResult<hir::Place> {
+        match self.env() {
+            Env::Chunk => Ok(hir::Place::Global(name.sym)),
+            Env::Local(env) => {
+                let obj = self.add_expr(env, name.span);
+                let key = self.add_expr(hir::ExprKind::Str(name.sym), name.span);
+                Ok(hir::Place::Index { obj, key })
+            }
+            Env::Declared => Err(self.env_is_global(name)),
+        }
     }
 
     fn local_kind(&self, func: FuncId, local: LocalId) -> LocalKind {
@@ -175,7 +271,6 @@ impl Lowerer {
 
     /// The assignment target for a name, checking it isn't read-only.
     fn place_for_name(&mut self, name: ast::Name) -> LResult<hir::Place> {
-        self.check_name(name)?;
         let current = self.cur().id;
         let (place, kind) = match self.resolve(name.sym) {
             Resolved::Local(l) => (hir::Place::Local(l), self.local_kind(current, l)),
@@ -183,14 +278,18 @@ impl Lowerer {
                 hir::Place::Outer { func, local },
                 self.local_kind(func, local),
             ),
-            Resolved::Global => return Ok(hir::Place::Global(name.sym)),
+            Resolved::Undeclared => return Err(self.undeclared(name)),
+            Resolved::Global { constant: true } => return Err(self.assign_to_const(name)),
+            Resolved::Global { constant: false } if name.sym == self.sym_env => {
+                return match self.env() {
+                    Env::Declared => Err(self.env_is_global(name)),
+                    _ => Ok(hir::Place::Env),
+                };
+            }
+            Resolved::Global { constant: false } => return self.global_place(name),
         };
         if matches!(kind, LocalKind::Const | LocalKind::ForControl) {
-            let message = format!(
-                "attempt to assign to const variable '{}'",
-                self.name_text(name.sym)
-            );
-            return Err(self.error(name.span, message));
+            return Err(self.assign_to_const(name));
         }
         Ok(place)
     }
@@ -246,7 +345,6 @@ impl Lowerer {
                 let mut locals = Vec::with_capacity(names.len());
                 let mut bindings = Vec::with_capacity(names.len());
                 for n in names {
-                    self.check_name(n.name)?;
                     let kind = match n.attrib.or(*attrib) {
                         None => LocalKind::Normal,
                         Some(a) if a.kind == AttribKind::Const => LocalKind::Const,
@@ -322,7 +420,6 @@ impl Lowerer {
                     Some(e) => Some(self.expr(e)?),
                     None => None,
                 };
-                self.check_name(*var)?;
                 self.open_scope();
                 let local = self.new_local(Some(var.sym), var.span, LocalKind::ForControl);
                 self.bind(var.sym, local);
@@ -341,12 +438,7 @@ impl Lowerer {
                 let hidden = [(); 3].map(|_| self.new_local(None, s.span, LocalKind::Hidden));
                 self.open_scope();
                 let mut locals = Vec::with_capacity(vars.len());
-                let mut result = Ok(());
                 for (i, v) in vars.iter().enumerate() {
-                    if let Err(e) = self.check_name(*v) {
-                        result = Err(e);
-                        break;
-                    }
                     // Only the first variable is read-only (5.5).
                     let kind = if i == 0 {
                         LocalKind::ForControl
@@ -357,7 +449,7 @@ impl Lowerer {
                     self.bind(v.sym, local);
                     locals.push(local);
                 }
-                let body = result.and_then(|()| self.block(body));
+                let body = self.block(body);
                 self.close_scope();
                 hir::StmtKind::GenericFor {
                     vars: locals,
@@ -397,8 +489,10 @@ impl Lowerer {
                     _ => {
                         let place = self.place_for_name(path.base)?;
                         let name = match place {
-                            hir::Place::Global(_) => FunctionName::Global(path.base.sym),
-                            _ => FunctionName::Local(path.base.sym),
+                            hir::Place::Local(_) | hir::Place::Outer { .. } => {
+                                FunctionName::Local(path.base.sym)
+                            }
+                            _ => FunctionName::Global(path.base.sym),
                         };
                         (place, name)
                     }
@@ -411,7 +505,6 @@ impl Lowerer {
                 }
             }
             StmtKind::LocalFunction { name, func } => {
-                self.check_name(*name)?;
                 // In scope inside its own body, so it can recurse.
                 let local = self.new_local(Some(name.sym), name.span, LocalKind::Normal);
                 self.bind(name.sym, local);
@@ -421,14 +514,66 @@ impl Lowerer {
             StmtKind::Break => hir::StmtKind::Break,
             StmtKind::Goto(_) => return Err(self.not_supported(s.span, "'goto' is")),
             StmtKind::Label(_) => return Err(self.not_supported(s.span, "labels are")),
-            StmtKind::Global { .. }
-            | StmtKind::GlobalFunction { .. }
-            | StmtKind::GlobalAll { .. } => {
-                return Err(self.not_supported(s.span, "'global' declarations are"));
+            StmtKind::Global {
+                attrib,
+                names,
+                values,
+            } => {
+                let mut entries = Vec::with_capacity(names.len());
+                for n in names {
+                    let constant = self.global_attrib(n.attrib.or(*attrib))?;
+                    entries.push(Entry::Global {
+                        name: n.name.sym,
+                        constant,
+                    });
+                }
+                // Like `local`, the names come into scope after the whole statement.
+                let values = if values.is_empty() {
+                    None
+                } else {
+                    Some(self.expr_list(values)?)
+                };
+                entries.into_iter().for_each(|e| self.declare(e));
+                let Some(values) = values else {
+                    return Ok(());
+                };
+                let mut targets = Vec::with_capacity(names.len());
+                for n in names {
+                    targets.push(self.global_place(n.name)?);
+                }
+                hir::StmtKind::Define { targets, values }
+            }
+            StmtKind::GlobalFunction { name, func } => {
+                // `global f; global f = function ... end`: in scope inside its own body.
+                self.declare(Entry::Global {
+                    name: name.sym,
+                    constant: false,
+                });
+                let place = self.global_place(*name)?;
+                let func = self.function(func, FunctionName::Global(name.sym), false)?;
+                let value = self.add_expr(hir::ExprKind::Closure(func), s.span);
+                hir::StmtKind::Define {
+                    targets: vec![place],
+                    values: vec![value].into(),
+                }
+            }
+            StmtKind::GlobalAll { attrib } => {
+                let constant = self.global_attrib(*attrib)?;
+                self.declare(Entry::GlobalAll { constant });
+                return Ok(());
             }
         };
         self.add_stmt(stmts, kind, s.span);
         Ok(())
+    }
+
+    /// Whether a `global` declaration's attribute makes it read-only.
+    fn global_attrib(&self, attrib: Option<ast::Attrib>) -> LResult<bool> {
+        match attrib {
+            None => Ok(false),
+            Some(a) if a.kind == AttribKind::Const => Ok(true),
+            Some(a) => Err(self.error(a.span, "global variables cannot be to-be-closed")),
+        }
     }
 
     fn place(&mut self, target: &ast::Expr) -> LResult<hir::Place> {
@@ -467,7 +612,6 @@ impl Lowerer {
             self.bind(sym, local);
         }
         for p in &body.params {
-            self.check_name(*p)?;
             let local = self.f().add_param(Some(p.sym), p.span);
             self.bind(p.sym, local);
         }
@@ -493,11 +637,20 @@ impl Lowerer {
     }
 
     fn name_expr(&mut self, name: ast::Name) -> LResult<ExprId> {
-        self.check_name(name)?;
         let kind = match self.resolve(name.sym) {
             Resolved::Local(l) => hir::ExprKind::Local(l),
             Resolved::Outer { func, local } => hir::ExprKind::Outer { func, local },
-            Resolved::Global => hir::ExprKind::Global(name.sym),
+            Resolved::Undeclared => return Err(self.undeclared(name)),
+            Resolved::Global { .. } => match self.env() {
+                Env::Declared => return Err(self.env_is_global(name)),
+                Env::Chunk if name.sym == self.sym_env => hir::ExprKind::Env,
+                Env::Chunk => hir::ExprKind::Global(name.sym),
+                Env::Local(env) => {
+                    let obj = self.add_expr(env, name.span);
+                    let key = self.add_expr(hir::ExprKind::Str(name.sym), name.span);
+                    hir::ExprKind::Index { obj, key }
+                }
+            },
         };
         Ok(self.add_expr(kind, name.span))
     }

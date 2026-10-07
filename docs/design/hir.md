@@ -77,10 +77,11 @@ pub enum StmtKind {
     Repeat { body: BlockId, until: ExprId },          // `until` is evaluated inside body's scope
     NumericFor { var: LocalId, start: ExprId, limit: ExprId, step: Option<ExprId>, body: BlockId },
     GenericFor { vars: Vec<LocalId>, iter: ExprList, hidden: [LocalId; 3], body: BlockId },
+    Define { targets: Vec<Place>, values: ExprList }, // Assign that fails unless each target is nil
     Break,
     Return(ExprList),
-    // Reserved, not produced at first light:
-    // Goto(LabelId), Label(LabelId), Close(LocalId), DeclareGlobal { .. }
+    // Reserved, not produced yet:
+    // Goto(LabelId), Label(LabelId), Close(LocalId)
 }
 
 pub enum Place {
@@ -88,6 +89,7 @@ pub enum Place {
     Outer { func: FuncId, local: LocalId },   // front-end output, rewritten to Capture
     Capture(CaptureId),
     Global(StrId),
+    Env,                                      // the environment itself
     Index { obj: ExprId, key: ExprId },
 }
 ```
@@ -102,6 +104,7 @@ pub enum ExprKind {
     Outer { func: FuncId, local: LocalId },   // front-end output; capture analysis
     Capture(CaptureId),                       //   rewrites Outer into Capture
     Global(StrId),                            // _ENV[name]
+    Env,                                      // the chunk's _ENV itself
     Index { obj: ExprId, key: ExprId },
     Call { callee: ExprId, args: ExprList },
     MethodCall { obj: ExprId, name: StrId, args: ExprList },

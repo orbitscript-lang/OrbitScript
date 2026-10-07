@@ -235,6 +235,16 @@ pub(crate) fn index_error(v: Value) -> Exc {
     )
 }
 
+/// `global x = v` found `x` already set.
+#[cold]
+#[inline(never)]
+pub(crate) fn already_defined(name: &[u8]) -> Exc {
+    Exc::Rt(
+        format!("global '{}' already defined", String::from_utf8_lossy(name)),
+        None,
+    )
+}
+
 /// `_ENV` isn't a table.
 #[cold]
 #[inline(never)]

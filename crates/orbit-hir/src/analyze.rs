@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::{Capture, CaptureFrom, CaptureId, Chunk, ExprKind, FuncId, LocalId, Place, StmtKind};
+use crate::{Capture, CaptureFrom, CaptureId, Chunk, ExprKind, FuncId, LocalId, Place};
 
 /// A front end produced a reference the passes can't resolve. This is a front-end bug, not a
 /// user error.
@@ -82,12 +82,12 @@ fn uses_env(chunk: &Chunk, func: usize) -> bool {
     let f = &chunk.functions[func];
     f.exprs
         .iter()
-        .any(|e| matches!(e.kind, ExprKind::Global(_)))
-        || f.stmts.iter().any(|s| match &s.kind {
-            StmtKind::Assign { targets, .. } => {
-                targets.iter().any(|t| matches!(t, Place::Global(_)))
-            }
-            _ => false,
+        .any(|e| matches!(e.kind, ExprKind::Global(_) | ExprKind::Env))
+        || f.stmts.iter().any(|s| {
+            s.kind
+                .places()
+                .iter()
+                .any(|t| matches!(t, Place::Global(_) | Place::Env))
         })
 }
 
@@ -137,11 +137,9 @@ fn rewrite_outer(chunk: &mut Chunk) -> Result<(), AnalysisError> {
                 }
             }
             for (i, s) in f.stmts.iter().enumerate() {
-                if let StmtKind::Assign { targets, .. } = &s.kind {
-                    for (t, place) in targets.iter().enumerate() {
-                        if let Place::Outer { func, local } = *place {
-                            sites.push((Site::Place { stmt: i, target: t }, func, local));
-                        }
+                for (t, place) in s.kind.places().iter().enumerate() {
+                    if let Place::Outer { func, local } = *place {
+                        sites.push((Site::Place { stmt: i, target: t }, func, local));
                     }
                 }
             }
@@ -158,9 +156,7 @@ fn rewrite_outer(chunk: &mut Chunk) -> Result<(), AnalysisError> {
             match site {
                 Site::Expr(i) => f.exprs[i].kind = ExprKind::Capture(cap),
                 Site::Place { stmt, target } => {
-                    if let StmtKind::Assign { targets, .. } = &mut f.stmts[stmt].kind {
-                        targets[target] = Place::Capture(cap);
-                    }
+                    f.stmts[stmt].kind.places_mut()[target] = Place::Capture(cap);
                 }
             }
         }
@@ -216,11 +212,9 @@ fn mark_reassigned(chunk: &mut Chunk) {
     for f in &mut chunk.functions {
         let mut assigned = Vec::new();
         for s in &f.stmts {
-            if let StmtKind::Assign { targets, .. } = &s.kind {
-                for t in targets {
-                    if let Place::Local(l) = *t {
-                        assigned.push(l);
-                    }
+            for t in s.kind.places() {
+                if let Place::Local(l) = *t {
+                    assigned.push(l);
                 }
             }
         }

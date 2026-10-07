@@ -125,6 +125,7 @@ impl Printer<'_> {
             Place::Outer { func, local } => format!("outer(fn{}, l{})", func.0, local.0),
             Place::Capture(c) => format!("c{}", c.0),
             Place::Global(s) => format!("global {}", self.s(s)),
+            Place::Env => "env".into(),
             Place::Index { obj, key } => format!("{}[{}]", self.expr(obj), self.expr(key)),
         }
     }
@@ -147,6 +148,11 @@ impl Printer<'_> {
             StmtKind::Assign { targets, values } => {
                 let targets: Vec<_> = targets.iter().map(|t| self.place(t)).collect();
                 let text = format!("{} = {}", targets.join(", "), self.list(values));
+                self.line(depth, &text);
+            }
+            StmtKind::Define { targets, values } => {
+                let targets: Vec<_> = targets.iter().map(|t| self.place(t)).collect();
+                let text = format!("define {} = {}", targets.join(", "), self.list(values));
                 self.line(depth, &text);
             }
             StmtKind::Eval(e) => {
@@ -247,6 +253,7 @@ impl Printer<'_> {
             ExprKind::Outer { func, local } => format!("outer(fn{}, l{})", func.0, local.0),
             ExprKind::Capture(c) => format!("c{}", c.0),
             ExprKind::Global(s) => format!("global {}", self.s(*s)),
+            ExprKind::Env => "env".into(),
             ExprKind::Index { obj, key } => format!("{}[{}]", self.expr(*obj), self.expr(*key)),
             ExprKind::Call { callee, args } => {
                 format!("call {}({})", self.expr(*callee), self.list(args))

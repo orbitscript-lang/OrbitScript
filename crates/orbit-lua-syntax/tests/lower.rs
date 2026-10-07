@@ -84,18 +84,6 @@ fn out_of_subset_constructs_are_rejected() {
         ("goto done", "s.lua:1: 'goto' is not supported yet"),
         ("do end\n::done::", "s.lua:2: labels are not supported yet"),
         (
-            "global x",
-            "s.lua:1: 'global' declarations are not supported yet",
-        ),
-        (
-            "global function f() end",
-            "s.lua:1: 'global' declarations are not supported yet",
-        ),
-        (
-            "global <const> *",
-            "s.lua:1: 'global' declarations are not supported yet",
-        ),
-        (
             "local f <close> = nil",
             "s.lua:1: '<close>' variables are not supported yet",
         ),
@@ -103,8 +91,6 @@ fn out_of_subset_constructs_are_rejected() {
             "function f(...args) end",
             "s.lua:1: named varargs are not supported yet",
         ),
-        ("print(_ENV)", "s.lua:1: '_ENV' is not supported yet"),
-        ("local _ENV = {}", "s.lua:1: '_ENV' is not supported yet"),
     ];
     for (src, expected) in cases {
         assert_eq!(err(src), expected, "source: {src:?}");
@@ -211,4 +197,75 @@ fn lowered_hir_verifies_before_and_after_analysis() {
         orbit_hir::analyze(&mut chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
         orbit_hir::verify(&chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
+}
+
+/// `global` declarations and `_ENV`. Each message was checked against the reference.
+#[test]
+fn global_declarations_match_the_reference() {
+    let cases = [
+        ("global x; y = 1", "s.lua:1: variable 'y' not declared"),
+        (
+            "global y; global x = x",
+            "s.lua:1: variable 'x' not declared",
+        ),
+        (
+            "global x; local function f() global y; z = 1 end",
+            "s.lua:1: variable 'z' not declared",
+        ),
+        ("global _ENV; x = 1", "s.lua:1: variable 'x' not declared"),
+        (
+            "global _ENV, x; local function f() return x end",
+            "s.lua:1: _ENV is global when accessing variable 'x'",
+        ),
+        (
+            "global _ENV, x; _ENV = 1",
+            "s.lua:1: _ENV is global when accessing variable '_ENV'",
+        ),
+        (
+            "local _ENV = {}; global _ENV; global x; x = 1",
+            "s.lua:1: _ENV is global when accessing variable 'x'",
+        ),
+        (
+            "global <close> x",
+            "s.lua:1: global variables cannot be to-be-closed",
+        ),
+        (
+            "global x <close>",
+            "s.lua:1: global variables cannot be to-be-closed",
+        ),
+        (
+            "global <const> z = 1; z = 2",
+            "s.lua:1: attempt to assign to const variable 'z'",
+        ),
+        (
+            "global<const> *; x = 1",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+        (
+            "global x <const>; global *; x = 1",
+            "s.lua:1: attempt to assign to const variable 'x'",
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(err(src), expected, "source: {src:?}");
+    }
+    // `global *` covers every other name, `_ENV` is never undeclared, and locals shadow.
+    hir("global *; global x; y = 1");
+    hir("global x; local y = _ENV");
+    hir("global x; local y = 1; y = 2");
+    hir("global <const> x; global x = 3");
+    hir("global x <const>; global function x() end");
+    hir("global x; do local x = 1; x = 3 end");
+}
+
+#[test]
+fn env_lowers_to_the_environment_or_a_local() {
+    let text = dump("_ENV = {}; local e = _ENV; x = 1");
+    assert!(text.contains("env = "), "{text}");
+    assert!(text.contains("global \"x\" = 1"), "{text}");
+    let text = dump("local _ENV = {}; x = y");
+    assert!(text.contains("_ENV#l0[\"x\"] = _ENV#l0[\"y\"]"), "{text}");
+    let text = dump("global x = 1; global function f() end");
+    assert!(text.contains("define global \"x\" = 1"), "{text}");
+    assert!(text.contains("define global \"f\" = closure fn1"), "{text}");
 }
