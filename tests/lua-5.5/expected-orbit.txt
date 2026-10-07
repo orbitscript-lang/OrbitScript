@@ -8,6 +8,7 @@ constructs.lua
 gc.lua
 gengc.lua
 goto.lua
+literals.lua
 memerr.lua
 sort.lua
 tpack.lua
