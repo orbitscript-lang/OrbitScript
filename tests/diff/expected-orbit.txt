@@ -22,6 +22,7 @@ metatables.lua
 os.lua
 require.lua
 stdlib_math.lua
+stdlib_meta.lua
 stdlib_pack.lua
 stdlib_string.lua
 stdlib_table.lua

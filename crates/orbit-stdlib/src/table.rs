@@ -1,10 +1,10 @@
 //! The `table` library.
 //!
-//! Every function reads and writes raw table slots for now. Proxies with
-//! `__index`, `__newindex` and `__len` need the VM's metamethod hooks; when
-//! those land, each function gets a resumable slow path next to the raw
-//! loop (docs/design/stdlib-string-table-math.md#table).
+//! Each function has a raw loop for tables without a metatable, the common
+//! case, and a resumable slow path in [`slow`] that honours `__index`,
+//! `__newindex` and `__len` (docs/design/stdlib-string-table-math.md#table).
 
+mod slow;
 mod sort;
 
 use orbit_vm::orbit_core::table as tbl;
@@ -40,13 +40,23 @@ fn set(ctx: &mut NativeCtx<'_>, t: Gc<Table>, i: i64, v: Value) {
     tbl::set_int(ctx.heap, t, i, v);
 }
 
+/// Argument `i` as a table without a metatable: the raw loops apply.
+fn plain(ctx: &NativeCtx<'_>, i: usize) -> Option<Gc<Table>> {
+    match ctx.arg(i) {
+        Value::Table(t) if ctx.heap.get(t).meta.is_none() => Some(t),
+        _ => None,
+    }
+}
+
 /// `#t` for the table functions.
 fn length(ctx: &NativeCtx<'_>, t: Gc<Table>) -> i64 {
     ctx.heap.get(t).border()
 }
 
 fn insert(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
+    let Some(t) = plain(ctx, 0) else {
+        return slow::insert(ctx);
+    };
     let end = length(ctx, t).wrapping_add(1);
     match ctx.nargs() {
         2 => {
@@ -74,7 +84,9 @@ fn insert(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn remove(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
+    let Some(t) = plain(ctx, 0) else {
+        return slow::remove(ctx);
+    };
     let size = length(ctx, t);
     let mut pos = ctx.opt_int(1, size)?;
     // `pos - 1` as unsigned: 1..=size+1 is valid when a position is given.
@@ -92,7 +104,9 @@ fn remove(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn concat(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
+    let Some(t) = plain(ctx, 0) else {
+        return slow::concat(ctx);
+    };
     let sep = if ctx.arg(1).is_nil() {
         Vec::new()
     } else {
@@ -129,7 +143,9 @@ fn concat(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn unpack(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
+    let Some(t) = plain(ctx, 0) else {
+        return slow::unpack(ctx);
+    };
     let i = ctx.opt_int(1, 1)?;
     let j = if ctx.arg(2).is_nil() {
         length(ctx, t)
@@ -171,15 +187,16 @@ fn pack(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn move_(ctx: &mut NativeCtx<'_>) -> R {
-    let a1 = ctx.check_table(0)?;
+    let (Some(a1), true) = (
+        plain(ctx, 0),
+        ctx.arg(4).is_nil() || plain(ctx, 4).is_some(),
+    ) else {
+        return slow::move_(ctx);
+    };
     let f = ctx.check_int(1)?;
     let e = ctx.check_int(2)?;
     let t = ctx.check_int(3)?;
-    let a2 = if ctx.arg(4).is_nil() {
-        a1
-    } else {
-        ctx.check_table(4)?
-    };
+    let a2 = plain(ctx, 4).unwrap_or(a1);
     if e >= f {
         if !(f > 0 || e < i64::MAX.wrapping_add(f)) {
             return Err(ctx.arg_error(2, "too many elements to move"));

@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 
 use orbit_vm::orbit_core::Value;
-use orbit_vm::{LuaError, NativeCtx, NativeReturn};
+use orbit_vm::{CallOutcome, Event, LuaError, NativeCtx, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -86,13 +86,70 @@ fn parse_spec(body: &[u8], flags: &[u8], precision_ok: bool) -> Option<Spec> {
     (i == body.len()).then_some(spec)
 }
 
+/// Saved state while a `%s` argument's `__tostring` runs, in the slots
+/// after the arguments: where the conversion starts in the format, how many
+/// arguments were used before it, and the output so far. They are the last
+/// slots of the window, so the continuation finds the argument count from
+/// them.
+const S_POS: usize = 0;
+const S_ARG: usize = 1;
+const S_OUT: usize = 2;
+const STATE_SLOTS: usize = 3;
+
 pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
     let fmt = ctx.check_str(0)?;
+    let cap = ctx.bytes(fmt).len() + 16;
+    let nargs = ctx.nargs();
+    format_from(ctx, nargs, 0, 0, Vec::with_capacity(cap))
+}
+
+/// After `__tostring` returned: the result replaces the argument, and the
+/// conversion runs again from the start.
+fn format_after_tostring(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(got) = outcome else {
+        unreachable!("unprotected call")
+    };
+    let len = ctx.len();
+    let r = if got > 0 {
+        ctx.arg(len - got)
+    } else {
+        Value::Nil
+    };
+    ctx.truncate(len - got);
+    if !matches!(r, Value::Str(_) | Value::Int(_) | Value::Float(_)) {
+        let msg = ctx.new_str(b"'__tostring' must return a string");
+        return Err(ctx.error_value(msg));
+    }
+    let base = ctx.len() - STATE_SLOTS;
+    let int = |v: Value| match v {
+        Value::Int(n) => n as usize,
+        _ => 0,
+    };
+    let i = int(ctx.arg(base + S_POS));
+    let arg = int(ctx.arg(base + S_ARG));
+    let out = match ctx.arg(base + S_OUT) {
+        Value::Str(s) => ctx.bytes(s).to_vec(),
+        _ => Vec::new(),
+    };
+    ctx.set(arg + 1, r);
+    format_from(ctx, base, i, arg, out)
+}
+
+/// Format from byte `i` of the format with `arg` of the `nargs` arguments
+/// used so far.
+fn format_from(
+    ctx: &mut NativeCtx<'_>,
+    nargs: usize,
+    mut i: usize,
+    mut arg: usize,
+    mut out: Vec<u8>,
+) -> R {
+    let Value::Str(fmt) = ctx.arg(0) else {
+        unreachable!("checked by format")
+    };
     let fmt = ctx.bytes(fmt).to_vec();
-    let mut out = Vec::with_capacity(fmt.len() + 16);
-    let mut arg = 0usize;
-    let mut i = 0;
     while i < fmt.len() {
+        let conv_start = i;
         let c = fmt[i];
         i += 1;
         if c != b'%' {
@@ -105,7 +162,7 @@ pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
             continue;
         }
         arg += 1;
-        if arg >= ctx.nargs() {
+        if arg >= nargs {
             return Err(ctx.arg_error(arg, "no value"));
         }
         let start = i;
@@ -200,6 +257,12 @@ pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
             }
             b's' => {
                 let v = ctx.check_any(arg)?;
+                if !matches!(v, Value::Str(_)) {
+                    let h = ctx.metamethod(v, Event::ToString);
+                    if !h.is_nil() {
+                        return call_tostring(ctx, nargs, h, v, conv_start, arg - 1, out);
+                    }
+                }
                 let mut text = Vec::new();
                 ctx.display(v, &mut text);
                 if !body.is_empty() && text.contains(&0) {
@@ -215,6 +278,33 @@ pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
     }
     let r = ctx.new_str_owned(out);
     ctx.ret1(r)
+}
+
+/// Save the formatting state and call `__tostring` on a `%s` argument.
+fn call_tostring(
+    ctx: &mut NativeCtx<'_>,
+    base: usize,
+    h: Value,
+    v: Value,
+    pos: usize,
+    arg: usize,
+    out: Vec<u8>,
+) -> R {
+    let out = ctx.new_str_owned(out);
+    ctx.truncate(base);
+    for _ in 0..STATE_SLOTS {
+        ctx.push(Value::Nil);
+    }
+    ctx.set(base + S_POS, Value::Int(pos as i64));
+    ctx.set(base + S_ARG, Value::Int(arg as i64));
+    ctx.set(base + S_OUT, out);
+    ctx.push(v);
+    Ok(NativeReturn::CallThen {
+        f: h,
+        nargs: 1,
+        k: format_after_tostring,
+        protected: false,
+    })
 }
 
 /// Append `sign`/`prefix` and `body`, padded to the spec's width. `zero_ok`

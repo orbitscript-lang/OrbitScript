@@ -34,6 +34,27 @@ use orbit_vm::{NativeFn, Vm};
 #[cfg(feature = "load")]
 pub use load::{BINARY_SIGNATURE, chunk_id, read_chunk_file};
 
+/// The first result of a call a native requested with `CallThen` (nil if
+/// none); the call's results are dropped from the window.
+#[cfg(any(feature = "math", feature = "string", feature = "table"))]
+pub(crate) fn first_result(
+    ctx: &mut orbit_vm::NativeCtx<'_>,
+    out: orbit_vm::CallOutcome,
+) -> Result<orbit_vm::orbit_core::Value, orbit_vm::LuaError> {
+    let n = match out {
+        orbit_vm::CallOutcome::Ok(n) => n,
+        orbit_vm::CallOutcome::Err(v) => return Err(ctx.error_value(v)),
+    };
+    let len = ctx.len();
+    let v = if n > 0 {
+        ctx.arg(len - n)
+    } else {
+        orbit_vm::orbit_core::Value::Nil
+    };
+    ctx.truncate(len - n);
+    Ok(v)
+}
+
 /// Open every library this build has: base functions as globals, plus the
 /// library tables.
 pub fn open_libs(vm: &mut Vm) {

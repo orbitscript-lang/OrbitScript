@@ -8,5 +8,6 @@ gc.lua
 gengc.lua
 goto.lua
 memerr.lua
+sort.lua
 tpack.lua
 vararg.lua
