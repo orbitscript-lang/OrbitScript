@@ -6,12 +6,12 @@
 //! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
-#[cfg(feature = "io")]
-mod io;
 #[cfg(feature = "coroutine")]
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
+#[cfg(feature = "io")]
+mod io;
 #[cfg(feature = "load")]
 mod load;
 #[cfg(feature = "math")]
@@ -153,6 +153,21 @@ pub fn open_lib(
     mark_loaded(vm, name, orbit_vm::orbit_core::Value::Table(t));
     vm.unpin(orbit_vm::orbit_core::Value::Table(t));
     t
+}
+
+/// Register more `functions` in an open library table.
+#[allow(dead_code)]
+fn add_functions(
+    vm: &mut Vm,
+    t: orbit_vm::orbit_core::Gc<orbit_vm::orbit_core::Table>,
+    functions: &[(&'static str, NativeFn)],
+) {
+    for &(qualified, f) in functions {
+        let short = qualified.rsplit('.').next().unwrap_or(qualified);
+        let fv = vm.register_native(qualified, f);
+        let k = vm.new_str(short.as_bytes());
+        vm.table_set(t, k, fv);
+    }
 }
 
 /// A file name from Lua bytes. On Unix any bytes are a valid name; elsewhere
