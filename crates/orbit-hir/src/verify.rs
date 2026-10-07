@@ -90,6 +90,12 @@ impl<'a> Checker<'a> {
         for &p in &self.f.params {
             self.declare(p)?;
         }
+        if let Some(t) = self.f.vararg_table {
+            if !self.f.is_vararg {
+                return Err("vararg table in a function that isn't vararg".into());
+            }
+            self.declare(t)?;
+        }
         self.block(self.f.body)?;
         if let Some(i) = self.declared.iter().position(|d| !d) {
             return Err(format!("local {i} is never declared"));
@@ -379,7 +385,7 @@ impl<'a> Checker<'a> {
                 self.global()?;
             }
             ExprKind::Env => self.global()?,
-            ExprKind::Vararg if !f.is_vararg => {
+            ExprKind::Vararg | ExprKind::VarargIndex(_) if !f.is_vararg => {
                 return Err("'...' in a function that isn't vararg".into());
             }
             ExprKind::Local(l) => self.local(*l)?,

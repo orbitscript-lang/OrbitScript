@@ -47,13 +47,17 @@ impl Printer<'_> {
         if let Some(p) = f.parent {
             let _ = write!(self.out, " parent=fn{}", p.0);
         }
-        let params: Vec<_> = f.params.iter().map(|&p| self.local_name(p)).collect();
-        let _ = write!(
-            self.out,
-            " ({}{})",
-            params.join(", "),
-            if f.is_vararg { ", ..." } else { "" }
-        );
+        let mut params: Vec<_> = f.params.iter().map(|&p| self.local_name(p)).collect();
+        match (f.is_vararg, f.vararg_table) {
+            (false, _) => {}
+            (true, None) => params.push("...".into()),
+            (true, Some(t)) => params.push(format!(
+                "...{}{}",
+                self.local_name(t),
+                if f.vararg_table_elided { " elided" } else { "" }
+            )),
+        }
+        let _ = write!(self.out, " ({})", params.join(", "));
         let _ = writeln!(self.out, " @{}", self.chunk.source.line_of(f.span.start));
         for (i, l) in f.locals.iter().enumerate() {
             let kind = match l.kind {
@@ -249,6 +253,7 @@ impl Printer<'_> {
             ExprKind::Float(x) => format!("{x:?}"),
             ExprKind::Str(s) => self.s(*s),
             ExprKind::Vararg => "...".into(),
+            ExprKind::VarargIndex(key) => format!("...[{}]", self.expr(*key)),
             ExprKind::Local(l) => self.local_name(*l),
             ExprKind::Outer { func, local } => format!("outer(fn{}, l{})", func.0, local.0),
             ExprKind::Capture(c) => format!("c{}", c.0),
