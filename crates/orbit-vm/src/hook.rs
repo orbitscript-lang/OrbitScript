@@ -255,6 +255,7 @@ impl Vm {
         };
         let old_top = self.rt.top;
         let at = end.max(old_top);
+        let cdepth = self.rt.stack.deeper();
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Hook,
             func: at as u32,
@@ -265,6 +266,7 @@ impl Vm {
             want: 0,
             tail: false,
             extra: 0,
+            cdepth,
         });
         let line = line.map_or(Value::Nil, |l| Value::Int(l as i64));
         self.rt.top = self.rt.stack.write(at, &[h.func, ev, line]);
@@ -318,6 +320,7 @@ impl Vm {
         f: impl FnOnce(&mut Vm, usize) -> Result<(), LuaError>,
     ) -> Result<(), LuaError> {
         let fi = self.rt.stack.frames.len();
+        let cdepth = self.rt.stack.same_depth();
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::NativeCall { id },
             func: func as u32,
@@ -328,6 +331,7 @@ impl Vm {
             want: 0,
             tail: false,
             extra: 0,
+            cdepth,
         });
         let r = f(self, fi);
         self.rt.stack.frames.truncate(fi);

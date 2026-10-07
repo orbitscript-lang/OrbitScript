@@ -86,6 +86,7 @@ impl Vm {
         if !matches!(s.frames.last(), Some(f) if f.func as usize == func
             && matches!(f.kind, FrameKind::NativeCall { .. }))
         {
+            let cdepth = s.same_depth();
             s.frames.push(Frame {
                 kind: FrameKind::NativeCall { id },
                 func: func as u32,
@@ -96,6 +97,7 @@ impl Vm {
                 want: 0,
                 tail: false,
                 extra: 0,
+                cdepth,
             });
         }
         Exc::Lua(e)
@@ -132,6 +134,10 @@ impl Vm {
         }
         regs[at] = call.f;
         regs[at + 1..at + 1 + n].copy_from_slice(&call.args[..n]);
+        let cdepth = self.rt.stack.deeper();
+        if self.c_overflow(cdepth) {
+            return Err(Exc::Rt("C stack overflow".into(), None));
+        }
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Meta {
                 action,
@@ -145,6 +151,7 @@ impl Vm {
             want: 1,
             tail: false,
             extra: 0,
+            cdepth,
         });
         self.call_value(at, n, 1)
     }

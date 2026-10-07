@@ -302,6 +302,7 @@ fn enter_lua_frame(
         want,
         tail: false,
         extra: 0,
+        cdepth: 0,
     });
     Ok(Entered { base, code_id })
 }
@@ -446,9 +447,18 @@ impl Vm {
                     call_at: at as u32,
                 };
                 match frame {
-                    Some(_) => self.rt.stack.frames.last_mut().expect("frame").kind = kind,
+                    Some(_) => {
+                        // One deeper than the caller, however many calls the
+                        // native has already made from this frame.
+                        let s = &mut self.rt.stack;
+                        let mut top = s.frames.pop().expect("frame");
+                        top.kind = kind;
+                        top.cdepth = s.deeper();
+                        s.frames.push(top);
+                    }
                     None => {
                         let nargs = at - (func + 1);
+                        let cdepth = self.rt.stack.deeper();
                         self.rt.stack.frames.push(Frame {
                             kind,
                             func: func as u32,
@@ -460,8 +470,14 @@ impl Vm {
                             want,
                             tail: false,
                             extra: 0,
+                            cdepth,
                         })
                     }
+                }
+                // The native's own frame catches this, as in the reference.
+                let cdepth = self.rt.stack.frames.last().expect("frame").cdepth;
+                if self.c_overflow(cdepth) {
+                    return Err(Exc::Plain("C stack overflow".into()));
                 }
                 self.call_value(at, nargs, MULTI)
             }
@@ -469,10 +485,7 @@ impl Vm {
                 self.resume(co, nargs, k, frame, func, want, id)
             }
             NativeReturn::Yield { nvals } => self.yield_(nvals, frame, func, want, id),
-            NativeReturn::Exit => {
-                self.rt.xfer.clear();
-                self.co_finished(Ok(()))
-            }
+            NativeReturn::Exit => self.exit_co(),
             NativeReturn::Close { co, k } => self.close_co(co, k, frame, func, want, id),
         }
     }
@@ -536,7 +549,8 @@ impl Vm {
     /// message handler first runs the handler on top of the frames that
     /// raised. To-be-closed variables above the catcher close (newest first,
     /// each getting the error) before it is resumed. In a coroutine that
-    /// `coroutine.close` is closing, errors go straight to its base frame.
+    /// `coroutine.close` is closing (its frames already popped to the base),
+    /// the base frame closes its variables too.
     pub(crate) fn unwind(&mut self, mut e: LuaError) -> Result<Flow, LuaError> {
         let mut errerr = false;
         loop {
@@ -544,24 +558,20 @@ impl Vm {
             let handled = std::mem::take(&mut self.rt.handled);
             let closing = crate::coro::closing(&self.heap, self.rt.current);
             let frames = &self.rt.stack.frames;
-            let idx = if closing {
-                0
-            } else {
-                frames
-                    .iter()
-                    .rposition(|f| {
-                        matches!(
-                            f.kind,
-                            FrameKind::Native {
-                                catch: Catch::Yes | Catch::Handler,
-                                ..
-                            } | FrameKind::Boundary
-                                | FrameKind::CoBase
-                                | FrameKind::Hook
-                        )
-                    })
-                    .expect("a boundary below every running frame")
-            };
+            let idx = frames
+                .iter()
+                .rposition(|f| {
+                    matches!(
+                        f.kind,
+                        FrameKind::Native {
+                            catch: Catch::Yes | Catch::Handler,
+                            ..
+                        } | FrameKind::Boundary
+                            | FrameKind::CoBase
+                            | FrameKind::Hook
+                    )
+                })
+                .expect("a boundary below every running frame");
             let f = frames[idx];
             if let FrameKind::Native {
                 catch: Catch::Handler,
@@ -597,10 +607,15 @@ impl Vm {
             // A coroutine that dies with an error keeps its variables open
             // for `coroutine.close`, as the reference does.
             let closes = !matches!(f.kind, FrameKind::CoBase) || closing;
-            let limit = self.rt.stack.frames.get(idx + 1).map(|g| g.func);
+            // Where the catcher's callee sits: every variable at or above
+            // it belongs to a frame the error leaves.
+            let limit = match f.kind {
+                FrameKind::Native { call_at, .. } => call_at,
+                _ => f.func,
+            };
             if closes
                 && let Some(&t) = self.rt.stack.tbc.last()
-                && limit.is_some_and(|l| t >= l)
+                && t >= limit
             {
                 if matches!(f.kind, FrameKind::Boundary | FrameKind::Hook)
                     && e.traceback.is_none()
@@ -608,7 +623,7 @@ impl Vm {
                 {
                     self.rt.unwind_traceback = Some(self.rt.traceback(&self.heap, None, 1));
                 }
-                match self.start_close(e.value) {
+                match self.start_close(e.value, idx) {
                     Ok(flow) => return Ok(flow),
                     Err(x) => {
                         e = self.make_error(x);
@@ -651,27 +666,21 @@ impl Vm {
         }
     }
 
-    /// Close the newest to-be-closed variable while error `err` unwinds:
-    /// pop the frames above the one that owns it, then call its `__close`
-    /// handler under an `Unwind` meta frame, which raises `err` again when
+    /// Close the newest to-be-closed variable while error `err` unwinds to
+    /// the frame at `catcher`: pop the frames above the catcher, then call
+    /// the variable's `__close` handler under an `Unwind` meta frame, which raises `err` again when
     /// the handler returns.
-    fn start_close(&mut self, err: Value) -> Result<Flow, Exc> {
+    fn start_close(&mut self, err: Value, catcher: usize) -> Result<Flow, Exc> {
         let t = self.rt.stack.tbc.pop().expect("a variable to close") as usize;
+        // As in the reference, the handler runs once the error has left the
+        // frames above the one that catches it: it is called from there.
         let s = &mut self.rt.stack;
-        let j = s
-            .frames
-            .iter()
-            .rposition(|f| matches!(f.kind, FrameKind::Lua { .. }) && f.base as usize <= t)
-            .expect("a Lua frame owns every to-be-closed variable");
-        if let Some(above) = s.frames.get(j + 1) {
+        if let Some(above) = s.frames.get(catcher + 1) {
             s.cells.truncate(above.cell_base as usize);
         }
-        s.frames.truncate(j + 1);
-        let owner = s.frames[j];
-        let FrameKind::Lua { closure, .. } = owner.kind else {
-            unreachable!("a Lua frame")
-        };
-        let at = owner.base as usize + self.heap.get(closure).code.nregs as usize;
+        s.frames.truncate(catcher + 1);
+        // Above the variable, and so above every one still to close.
+        let at = t + 1;
         let v = self.rt.stack.regs[t];
         let h = self.rt.metamethod(&self.heap, v, Event::Close);
         // The error waits in the meta frame's slot; the handler goes above.
@@ -681,6 +690,7 @@ impl Vm {
         regs[at + 1] = h;
         regs[at + 2] = v;
         regs[at + 3] = err;
+        let cdepth = self.rt.stack.deeper();
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Meta {
                 action: crate::meta::MetaAction::Unwind { handled: true },
@@ -694,6 +704,7 @@ impl Vm {
             want: 0,
             tail: false,
             extra: 0,
+            cdepth,
         });
         self.call_close_handler(at + 1, h)
     }
@@ -758,6 +769,7 @@ impl Vm {
         extend_nil(&mut self.rt.stack.regs, at + 2);
         self.rt.stack.regs[at] = h;
         self.rt.stack.regs[at + 1] = v;
+        let cdepth = self.rt.stack.deeper();
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Handler,
             func: at as u32,
@@ -768,6 +780,7 @@ impl Vm {
             want: 1,
             tail: false,
             extra: 0,
+            cdepth,
         });
         self.call_value(at, 1, 1)
     }
