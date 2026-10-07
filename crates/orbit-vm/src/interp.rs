@@ -2,12 +2,13 @@
 
 use std::rc::Rc;
 
+use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{MULTI, Op, Origin};
 use orbit_core::number::{ArithOp, Number};
 use orbit_core::table::{self, IntStore};
 use orbit_core::{Closure, Gc, ProtoCode, Value};
 
-use crate::cold::{env_error, get_str_miss, op_len, set_str_miss};
+use crate::cold::{already_defined, env_error, get_str_miss, op_len, set_str_miss};
 use crate::meta::Event;
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
@@ -398,7 +399,19 @@ impl Vm {
                             Origin::Method(n) => ("method", n),
                             Origin::Constant(n) => ("constant", n),
                         };
-                        text.push_str(&format!(" ({kind} '{}')", String::from_utf8_lossy(name)));
+                        let described = format!(" ({kind} '{}')", String::from_utf8_lossy(name));
+                        // `number (local 'x') has no integer representation`: the name goes
+                        // after the subject, not at the end.
+                        match msg.strip_prefix("number ") {
+                            Some(rest) if msg == ops::NO_INTEGER_REP => {
+                                text.truncate(text.len() - msg.len());
+                                text.push_str("number");
+                                text.push_str(&described);
+                                text.push(' ');
+                                text.push_str(rest);
+                            }
+                            _ => text.push_str(&described),
+                        }
                     }
                 }
                 LuaError::new(self.new_str(text.as_bytes()))
@@ -725,6 +738,19 @@ impl Vm {
                     }
                 }};
             }
+            macro_rules! bitwise {
+                ($dst:expr, $a:expr, $b:expr, $op:expr) => {{
+                    match (&reg!($a), &reg!($b)) {
+                        (&Value::Int(i), &Value::Int(j)) => {
+                            reg!($dst) = Value::Int($op.apply(i, j))
+                        }
+                        _ => {
+                            let (x, y) = (reg!($a), reg!($b));
+                            reg!($dst) = tri!(ops::bitwise_slow(&self.heap, $op, x, y))
+                        }
+                    }
+                }};
+            }
             macro_rules! compare_jump {
                 ($a:expr, $b:expr, $off:expr, $want:expr, $slow:path, |$i:ident, $j:ident| $cmp:expr) => {{
                     let c = match (&reg!($a), &reg!($b)) {
@@ -900,6 +926,12 @@ impl Vm {
                             other => throw!(env_error(other)),
                         };
                         reg!(dst) = v;
+                    }
+                    Op::CheckUndefined { src, name } => {
+                        if !matches!(reg!(src), Value::Nil) {
+                            let k = const_str(&cur.consts, name);
+                            throw!(already_defined(self.heap.get(k).as_bytes()));
+                        }
                     }
                     Op::SetGlobal { src, name, ic } => {
                         let env_cell = self.heap.get(closure).captures[0];
@@ -1108,6 +1140,18 @@ impl Vm {
                             ))
                         }
                     },
+                    Op::BAnd { dst, a, b } => bitwise!(dst, a, b, BitOp::And),
+                    Op::BOr { dst, a, b } => bitwise!(dst, a, b, BitOp::Or),
+                    Op::BXor { dst, a, b } => bitwise!(dst, a, b, BitOp::Xor),
+                    Op::Shl { dst, a, b } => bitwise!(dst, a, b, BitOp::Shl),
+                    Op::Shr { dst, a, b } => bitwise!(dst, a, b, BitOp::Shr),
+                    Op::BNot { dst, src } => match reg!(src) {
+                        Value::Int(i) => reg!(dst) = Value::Int(!i),
+                        _ => {
+                            let x = reg!(src);
+                            reg!(dst) = tri!(ops::bnot_slow(&self.heap, x))
+                        }
+                    },
                     Op::Neg { dst, src } => match reg!(src) {
                         Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_neg()),
                         Value::Float(f) => reg!(dst) = Value::Float(-f),
@@ -1283,6 +1327,25 @@ impl Vm {
                     Op::Vararg { dst, count } => {
                         let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
                         self.op_vararg(base, nvarargs, dst as usize, count);
+                        w = window!();
+                    }
+                    Op::VarargTable { dst } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
+                        let t = self.op_vararg_table(base, nvarargs);
+                        w = window!();
+                        reg!(dst) = t;
+                        safepoint!();
+                    }
+                    Op::VarargGet { dst, key } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
+                        let k = reg!(key);
+                        let v = self.op_vararg_get(base, nvarargs, k);
+                        w = window!();
+                        reg!(dst) = v;
+                    }
+                    Op::VarargUnpack { dst, table, count } => {
+                        let t = reg!(table);
+                        tri!(self.op_vararg_unpack(base, t, dst as usize, count));
                         w = window!();
                     }
 

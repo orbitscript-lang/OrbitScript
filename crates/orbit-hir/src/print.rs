@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use crate::{
     BinOp, BlockId, CaptureFrom, Chunk, ExprId, ExprKind, ExprList, Function, FunctionName,
-    LocalId, LocalKind, Place, StmtId, StmtKind, TableEntry, UnOp,
+    LabelId, LocalId, LocalKind, Place, StmtId, StmtKind, TableEntry, UnOp,
 };
 
 /// Renders the chunk as indented text. The format is stable: changes to it are reviewed as
@@ -47,13 +47,17 @@ impl Printer<'_> {
         if let Some(p) = f.parent {
             let _ = write!(self.out, " parent=fn{}", p.0);
         }
-        let params: Vec<_> = f.params.iter().map(|&p| self.local_name(p)).collect();
-        let _ = write!(
-            self.out,
-            " ({}{})",
-            params.join(", "),
-            if f.is_vararg { ", ..." } else { "" }
-        );
+        let mut params: Vec<_> = f.params.iter().map(|&p| self.local_name(p)).collect();
+        match (f.is_vararg, f.vararg_table) {
+            (false, _) => {}
+            (true, None) => params.push("...".into()),
+            (true, Some(t)) => params.push(format!(
+                "...{}{}",
+                self.local_name(t),
+                if f.vararg_table_elided { " elided" } else { "" }
+            )),
+        }
+        let _ = write!(self.out, " ({})", params.join(", "));
         let _ = writeln!(self.out, " @{}", self.chunk.source.line_of(f.span.start));
         for (i, l) in f.locals.iter().enumerate() {
             let kind = match l.kind {
@@ -62,6 +66,7 @@ impl Printer<'_> {
                 LocalKind::Const => " const",
                 LocalKind::ForControl => " for",
                 LocalKind::Hidden => " hidden",
+                LocalKind::Close => " close",
             };
             let name = l.name.map(|n| self.s(n)).unwrap_or_else(|| "_".into());
             let _ = writeln!(
@@ -119,12 +124,20 @@ impl Printer<'_> {
             .join(", ")
     }
 
+    fn label_name(&self, l: LabelId) -> String {
+        match self.f.labels.get(l.index()) {
+            Some(label) => format!("{}#L{}", self.s(label.name), l.0),
+            None => format!("?#L{}", l.0),
+        }
+    }
+
     fn place(&self, p: &Place) -> String {
         match *p {
             Place::Local(l) => self.local_name(l),
             Place::Outer { func, local } => format!("outer(fn{}, l{})", func.0, local.0),
             Place::Capture(c) => format!("c{}", c.0),
             Place::Global(s) => format!("global {}", self.s(s)),
+            Place::Env => "env".into(),
             Place::Index { obj, key } => format!("{}[{}]", self.expr(obj), self.expr(key)),
         }
     }
@@ -149,8 +162,21 @@ impl Printer<'_> {
                 let text = format!("{} = {}", targets.join(", "), self.list(values));
                 self.line(depth, &text);
             }
+            StmtKind::Define { targets, values } => {
+                let targets: Vec<_> = targets.iter().map(|t| self.place(t)).collect();
+                let text = format!("define {} = {}", targets.join(", "), self.list(values));
+                self.line(depth, &text);
+            }
             StmtKind::Eval(e) => {
                 let text = self.expr(*e);
+                self.line(depth, &text);
+            }
+            StmtKind::Goto(l) => {
+                let text = format!("goto {}", self.label_name(*l));
+                self.line(depth, &text);
+            }
+            StmtKind::Label(l) => {
+                let text = format!("::{}::", self.label_name(*l));
                 self.line(depth, &text);
             }
             StmtKind::Block(b) => {
@@ -243,10 +269,12 @@ impl Printer<'_> {
             ExprKind::Float(x) => format!("{x:?}"),
             ExprKind::Str(s) => self.s(*s),
             ExprKind::Vararg => "...".into(),
+            ExprKind::VarargIndex(key) => format!("...[{}]", self.expr(*key)),
             ExprKind::Local(l) => self.local_name(*l),
             ExprKind::Outer { func, local } => format!("outer(fn{}, l{})", func.0, local.0),
             ExprKind::Capture(c) => format!("c{}", c.0),
             ExprKind::Global(s) => format!("global {}", self.s(*s)),
+            ExprKind::Env => "env".into(),
             ExprKind::Index { obj, key } => format!("{}[{}]", self.expr(*obj), self.expr(*key)),
             ExprKind::Call { callee, args } => {
                 format!("call {}({})", self.expr(*callee), self.list(args))
@@ -286,6 +314,11 @@ impl Printer<'_> {
                     BinOp::Le => "<=",
                     BinOp::Gt => ">",
                     BinOp::Ge => ">=",
+                    BinOp::BAnd => "&",
+                    BinOp::BOr => "|",
+                    BinOp::BXor => "~",
+                    BinOp::Shl => "<<",
+                    BinOp::Shr => ">>",
                 };
                 format!("({} {op} {})", self.expr(*lhs), self.expr(*rhs))
             }
@@ -294,6 +327,7 @@ impl Printer<'_> {
                     UnOp::Neg => "-",
                     UnOp::Not => "not ",
                     UnOp::Len => "#",
+                    UnOp::BNot => "~",
                 };
                 format!("({op}{})", self.expr(*expr))
             }
