@@ -461,8 +461,9 @@ fn assert(ctx: &mut NativeCtx<'_>) -> R {
         let msg = ctx.arg(1);
         return Err(ctx.error_value(msg));
     }
-    let msg = ctx.new_str(b"assertion failed!");
-    Err(ctx.error_value(msg))
+    // Like other library errors, the default message names the caller's
+    // position (none when called straight from a native such as `pcall`).
+    Err(ctx.error("assertion failed!"))
 }
 
 fn rawequal(ctx: &mut NativeCtx<'_>) -> R {

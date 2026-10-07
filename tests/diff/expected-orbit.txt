@@ -21,6 +21,7 @@ meta_ops.lua
 metatables.lua
 os.lua
 require.lua
+stdlib_base.lua
 stdlib_gmatch.lua
 stdlib_math.lua
 stdlib_meta.lua
