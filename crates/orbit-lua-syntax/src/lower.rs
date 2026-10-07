@@ -593,6 +593,17 @@ impl Lowerer {
     }
 
     fn stmt(&mut self, s: &ast::Stmt, stmts: &mut Vec<hir::StmtId>) -> LResult<()> {
+        // Like `Expr::at`: an assignment's stores and a declaration's checks report the
+        // statement's last line, a numeric `for` the line of `do`, and a generic `for` the
+        // line its iterator expressions start on.
+        let at = match &s.kind {
+            StmtKind::Local { .. } | StmtKind::Assign { .. } => last_offset(s.span),
+            StmtKind::NumericFor { do_at, .. } => *do_at,
+            StmtKind::GenericFor { exprs, .. } => {
+                exprs.first().map_or(s.span.start, |e| e.span.start)
+            }
+            _ => s.span.start,
+        };
         let kind = match &s.kind {
             StmtKind::Local {
                 attrib,
@@ -674,6 +685,7 @@ impl Lowerer {
                 limit,
                 step,
                 body,
+                ..
             } => {
                 let start = self.expr(start)?;
                 let limit = self.expr(limit)?;
@@ -827,7 +839,7 @@ impl Lowerer {
                 return Ok(());
             }
         };
-        self.add_stmt(stmts, kind, s.span);
+        stmts.push(self.f().add_stmt_at(kind, s.span, at));
         Ok(())
     }
 
@@ -926,6 +938,11 @@ impl Lowerer {
 
     fn expr(&mut self, e: &ast::Expr) -> LResult<ExprId> {
         let span = e.span;
+        // Where a runtime error from this expression's own operation is reported. lua5.5
+        // uses the line of the last token read when it emits the instruction, except that
+        // arithmetic, bitwise and concatenation use their operator token and calls the
+        // token opening their arguments.
+        let mut at = span.start;
         let kind = match &e.kind {
             ExprKind::Nil => hir::ExprKind::Nil,
             ExprKind::True => hir::ExprKind::Bool(true),
@@ -938,14 +955,26 @@ impl Lowerer {
             ExprKind::Index { obj, key } => {
                 let obj = self.expr(obj)?;
                 let key = self.expr(key)?;
+                at = last_offset(span);
                 hir::ExprKind::Index { obj, key }
             }
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call {
+                callee,
+                args,
+                args_at,
+            } => {
                 let callee = self.expr(callee)?;
                 let args = self.expr_list(args)?;
+                at = *args_at;
                 hir::ExprKind::Call { callee, args }
             }
-            ExprKind::Method { obj, name, args } => {
+            ExprKind::Method {
+                obj,
+                name,
+                args,
+                args_at,
+            } => {
+                at = *args_at;
                 let obj = self.expr(obj)?;
                 let args = self.expr_list(args)?;
                 hir::ExprKind::MethodCall {
@@ -974,7 +1003,12 @@ impl Lowerer {
                 }
                 hir::ExprKind::Table(entries)
             }
-            ExprKind::Binary { op, lhs, rhs } => {
+            ExprKind::Binary {
+                op,
+                op_at,
+                lhs,
+                rhs,
+            } => {
                 let lhs = self.expr(lhs)?;
                 let rhs = self.expr(rhs)?;
                 use ast::BinOp as A;
@@ -1002,6 +1036,10 @@ impl Lowerer {
                     A::Shl => H::Shl,
                     A::Shr => H::Shr,
                 };
+                at = match op {
+                    H::Eq | H::Ne | H::Lt | H::Le | H::Gt | H::Ge => last_offset(span),
+                    _ => *op_at,
+                };
                 hir::ExprKind::Binary { op, lhs, rhs }
             }
             ExprKind::Unary { op, expr } => {
@@ -1027,6 +1065,11 @@ impl Lowerer {
                 hir::ExprKind::First(inner)
             }
         };
-        Ok(self.add_expr(kind, span))
+        Ok(self.f().add_expr_at(kind, span, at))
     }
+}
+
+/// The offset of the last byte of `span`, which is on its last token's line.
+fn last_offset(span: Span) -> u32 {
+    span.end.saturating_sub(1).max(span.start)
 }

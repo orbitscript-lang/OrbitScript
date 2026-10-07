@@ -114,6 +114,7 @@ impl FuncState<'_> {
     /// allocated or which is a live local. Returns where the value came from, for messages.
     pub(crate) fn expr_to(&mut self, e: ExprId, dst: u8) -> Result<Option<Origin>> {
         let expr = self.f.expr(e);
+        let at = expr.at;
         self.at(expr.span);
         if (dst as usize) < self.active && self.writes_dst_early(e) {
             let mark = self.free;
@@ -187,7 +188,7 @@ impl FuncState<'_> {
                 self.emit(Op::GetGlobal { dst, name: k, ic });
                 Some(Origin::Global(self.name_bytes(name)))
             }
-            &ExprKind::Index { obj, key } => self.index(dst, obj, key)?,
+            &ExprKind::Index { obj, key } => self.index(dst, obj, key, at)?,
             ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
                 // Reuse `dst` as the call's base when it is the top temporary.
                 let func = if dst as usize + 1 == self.free && dst as usize >= self.active {
@@ -210,9 +211,10 @@ impl FuncState<'_> {
                 self.table(dst, entries)?;
                 None
             }
-            &ExprKind::Binary { op, lhs, rhs } => self.binary(dst, op, lhs, rhs)?,
+            &ExprKind::Binary { op, lhs, rhs } => self.binary(dst, op, lhs, rhs, at)?,
             &ExprKind::Unary { op, expr: inner } => {
                 let (src, origin) = self.operand(inner, dst)?;
+                self.at_offset(at);
                 let pc = match op {
                     UnOp::Neg => self.emit(Op::Neg { dst, src }),
                     UnOp::Not => self.emit(Op::Not { dst, src }),
@@ -256,7 +258,7 @@ impl FuncState<'_> {
     }
 
     /// `R[dst] = obj[key]`.
-    fn index(&mut self, dst: u8, obj: ExprId, key: ExprId) -> Result<Option<Origin>> {
+    fn index(&mut self, dst: u8, obj: ExprId, key: ExprId, at: u32) -> Result<Option<Origin>> {
         let vararg_table =
             matches!(self.f.expr(obj).kind, ExprKind::Local(l) if Some(l) == self.f.vararg_table);
         let (o, obj_origin) = self.operand(obj, dst)?;
@@ -264,6 +266,7 @@ impl FuncState<'_> {
         let (pc, origin) = if let Some(ConstVal::Str(s)) = key_const {
             let k = self.str_constant(s)?;
             let ic = self.cache();
+            self.at_offset(at);
             (
                 self.emit(Op::GetField {
                     dst,
@@ -281,6 +284,7 @@ impl FuncState<'_> {
             && let Ok(key) = u16::try_from(k)
         {
             let name: &[u8] = if vararg_table { b"?" } else { b"integer index" };
+            self.at_offset(at);
             (
                 self.emit(Op::GetIndexInt { dst, obj: o, key }),
                 Origin::Field(name.into()),
@@ -292,6 +296,7 @@ impl FuncState<'_> {
             } else {
                 b"?"
             };
+            self.at_offset(at);
             (
                 self.emit(Op::GetIndex {
                     dst,
@@ -305,17 +310,27 @@ impl FuncState<'_> {
         Ok(Some(origin))
     }
 
-    fn binary(&mut self, dst: u8, op: BinOp, lhs: ExprId, rhs: ExprId) -> Result<Option<Origin>> {
+    fn binary(
+        &mut self,
+        dst: u8,
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        at: u32,
+    ) -> Result<Option<Origin>> {
         match op {
             BinOp::Concat => {
                 let mut parts = vec![lhs];
                 let mut rest = rhs;
+                // A chain reports the position of its last operator.
+                let mut at = at;
                 while let ExprKind::Binary {
                     op: BinOp::Concat,
                     lhs,
                     rhs,
                 } = self.f.expr(rest).kind
                 {
+                    at = self.f.expr(rest).at;
                     parts.push(lhs);
                     rest = rhs;
                 }
@@ -329,6 +344,7 @@ impl FuncState<'_> {
                     let r = self.alloc()?;
                     origins.push(self.expr_to(part, r)?);
                 }
+                self.at_offset(at);
                 let pc = self.emit(Op::Concat { dst, first, count });
                 for (i, origin) in origins.into_iter().enumerate() {
                     self.origin(pc, i as u8, origin);
@@ -337,7 +353,7 @@ impl FuncState<'_> {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let is_false = self.label();
                 let end = self.label();
-                self.compare_jump(op, lhs, rhs, false, is_false)?;
+                self.compare_jump(op, lhs, rhs, at, false, is_false)?;
                 self.emit(Op::LoadBool { dst, value: true });
                 self.jump(Op::Jump { off: 0 }, end);
                 self.place(is_false);
@@ -356,11 +372,13 @@ impl FuncState<'_> {
                     _ => None,
                 };
                 if let Some(imm) = imm {
+                    self.at_offset(at);
                     let pc = self.emit(Op::AddInt { dst, a, imm });
                     self.origin(pc, 0, a_origin);
                     return Ok(None);
                 }
                 let (b, b_origin) = self.expr_any(rhs)?;
+                self.at_offset(at);
                 let pc = self.emit(match op {
                     BinOp::Add => Op::Add { dst, a, b },
                     BinOp::Sub => Op::Sub { dst, a, b },
@@ -522,7 +540,7 @@ impl FuncState<'_> {
                 self.alloc()?;
                 self.alloc()?;
                 let key = self.str_constant(name)?;
-                self.at(expr.span);
+                self.at_offset(expr.at);
                 let pc = self.emit(Op::SelfCall {
                     dst: func,
                     obj: o,
@@ -536,7 +554,7 @@ impl FuncState<'_> {
             }
             _ => unreachable!("not a call"),
         };
-        self.at(expr.span);
+        self.at_offset(expr.at);
         let pc = if tail {
             self.emit(Op::TailCall { func, nargs })
         } else {
@@ -669,7 +687,7 @@ impl FuncState<'_> {
                 op: op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
                 lhs,
                 rhs,
-            } => self.compare_jump(op, lhs, rhs, jump_if, target),
+            } => self.compare_jump(op, lhs, rhs, expr.at, jump_if, target),
             _ => {
                 let mark = self.free;
                 let (src, _) = self.expr_any(e)?;
@@ -692,6 +710,7 @@ impl FuncState<'_> {
         op: BinOp,
         lhs: ExprId,
         rhs: ExprId,
+        at: u32,
         jump_if: bool,
         target: Label,
     ) -> Result<()> {
@@ -719,6 +738,7 @@ impl FuncState<'_> {
                 }
             };
             let (a, _) = self.expr_any(x)?;
+            self.at_offset(at);
             let off = 0;
             let want = jump_if;
             let jump = match op {
@@ -741,6 +761,7 @@ impl FuncState<'_> {
         }
         let (x, _) = self.expr_any(lhs)?;
         let (y, _) = self.expr_any(rhs)?;
+        self.at_offset(at);
         let off = 0;
         let jump = match (op, jump_if) {
             (BinOp::Eq, true) | (BinOp::Ne, false) => Op::JumpEq { a: x, b: y, off },

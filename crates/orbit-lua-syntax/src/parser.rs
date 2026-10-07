@@ -482,6 +482,7 @@ impl Parser<'_> {
                 } else {
                     None
                 };
+                let do_at = self.tok.span.start;
                 self.expect_kw(Keyword::Do)?;
                 let body = self.loop_block()?;
                 StmtKind::NumericFor {
@@ -489,6 +490,7 @@ impl Parser<'_> {
                     start,
                     limit,
                     step,
+                    do_at,
                     body,
                 }
             }
@@ -726,11 +728,13 @@ impl Parser<'_> {
             if left <= limit {
                 break;
             }
+            let op_at = self.tok.span.start;
             self.advance()?;
             let rhs = self.subexpr(right)?;
             lhs = Expr {
                 kind: ExprKind::Binary {
                     op,
+                    op_at,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
                 },
@@ -826,18 +830,22 @@ impl Parser<'_> {
                 TokenKind::Punct(Punct::Colon) => {
                     self.advance()?;
                     let name = self.name()?;
+                    let args_at = self.tok.span.start;
                     let args = self.call_args()?;
                     ExprKind::Method {
                         obj: Box::new(e),
                         name,
                         args,
+                        args_at,
                     }
                 }
                 TokenKind::Punct(Punct::LParen | Punct::LBrace) | TokenKind::Str(_) => {
+                    let args_at = self.tok.span.start;
                     let args = self.call_args()?;
                     ExprKind::Call {
                         callee: Box::new(e),
                         args,
+                        args_at,
                     }
                 }
                 _ => return Ok(e),
