@@ -12,7 +12,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::process::{Child, Stdio};
 use std::rc::{Rc, Weak};
 
-use orbit_vm::op::{CaptureSource, FunctionName, Op, UnlinkedChunk, UnlinkedProto};
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::{Gc, Table, UserData, Value};
 use orbit_vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
@@ -101,6 +100,7 @@ thread_local! {
 }
 
 /// Flush every open stream's buffer, as the C library does at exit.
+#[cfg(feature = "os")]
 pub(crate) fn flush_all(out: &mut dyn Write) {
     OPEN.with(|open| {
         for s in open.borrow().iter().filter_map(Weak::upgrade) {
@@ -957,11 +957,9 @@ fn f_lines(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 /// A function that reads `file` with the formats in arguments `first..`,
-/// closing the file at the end when `close`.
-///
-/// Until the VM has native closures (thread 2's C3), the iterator is a
-/// tiny Lua function linked here that tail-calls [`lines_step`] with the
-/// file and a state table it captures.
+/// closing the file at the end when `close`: a native closure with
+/// upvalues 0 the file, 1 `close`, 2 the number of formats, then the
+/// formats.
 fn lines_iterator(
     ctx: &mut NativeCtx<'_>,
     file: Value,
@@ -972,76 +970,22 @@ fn lines_iterator(
     if n > MAX_LINE_FORMATS {
         return Err(ctx.arg_error(first + MAX_LINE_FORMATS, "too many arguments"));
     }
-    let mut state = Table::new();
-    state.set_int(1, Value::Bool(close));
-    state.set_int(2, Value::Int(n as i64));
-    for i in 0..n {
-        state.set_int(i as i64 + 3, ctx.arg(first + i));
-    }
-    let state = Value::Table(ctx.new_table(state));
-    // Root the state while linking allocates.
-    ctx.push(state);
-    let step = ctx.native("io.lines iterator", lines_step);
-    let f = ctx.link(&stub_chunk(), Value::Nil);
-    let Value::Closure(c) = f else {
-        unreachable!("link returns a closure")
-    };
-    let captures = ctx.heap.get(c).captures.clone();
-    for (cell, v) in captures[1..].iter().zip([step, file, state]) {
-        ctx.heap.update(*cell, |c| c.value = v);
-    }
-    ctx.truncate(ctx.len() - 1);
-    Ok(f)
-}
-
-/// `function() return step(file, state) end`, with `step`, `file` and
-/// `state` in captures 1 to 3.
-fn stub_chunk() -> UnlinkedChunk {
-    UnlinkedChunk {
-        name: "=[C]".into(),
-        protos: vec![UnlinkedProto {
-            name: FunctionName::Anonymous,
-            line_defined: 0,
-            last_line: 0,
-            nparams: 0,
-            is_vararg: false,
-            nregs: 3,
-            ncells: 0,
-            ncaches: 0,
-            code: vec![
-                Op::CapGet { dst: 0, cap: 1 },
-                Op::CapGet { dst: 1, cap: 2 },
-                Op::CapGet { dst: 2, cap: 3 },
-                Op::TailCall { func: 0, nargs: 2 },
-                Op::Return {
-                    first: 0,
-                    count: orbit_vm::op::MULTI,
-                },
-            ],
-            consts: vec![],
-            children: vec![],
-            captures: (0..4).map(CaptureSource::Capture).collect(),
-            debug: Default::default(),
-        }],
-    }
+    let mut ups = vec![file, Value::Bool(close), Value::Int(n as i64)];
+    ups.extend((0..n).map(|i| ctx.arg(first + i)));
+    Ok(ctx.new_closure("io.lines iterator", lines_step, &ups))
 }
 
 fn lines_step(ctx: &mut NativeCtx<'_>) -> R {
-    let file = ctx.arg(0);
-    let Value::Table(state) = ctx.arg(1) else {
-        unreachable!("lines state")
-    };
+    let file = ctx.upvalue(0);
     let s = stream_of(ctx, file).expect("lines file");
     if s.borrow().is_closed() {
         return Err(ctx.error("file is already closed"));
     }
-    let close = !tbl::get(ctx.heap, state, Value::Int(1)).is_falsy();
-    let Value::Int(n) = tbl::get(ctx.heap, state, Value::Int(2)) else {
+    let close = !ctx.upvalue(1).is_falsy();
+    let Value::Int(n) = ctx.upvalue(2) else {
         unreachable!("lines format count")
     };
-    let fmts: Vec<Value> = (0..n)
-        .map(|i| tbl::get(ctx.heap, state, Value::Int(i + 3)))
-        .collect();
+    let fmts: Vec<Value> = (0..n as usize).map(|i| ctx.upvalue(i + 3)).collect();
     let len = ctx.len();
     match read_values(ctx, &s, &fmts, 1)? {
         Ok(k) if !ctx.arg(len).is_falsy() => Ok(NativeReturn::Return(k)),

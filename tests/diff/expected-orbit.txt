@@ -5,6 +5,7 @@ close.lua
 closures.lua
 co_gc.lua
 co_yields.lua
+control.lua
 coroutines.lua
 debug_co_gc.lua
 debug_hooks.lua
@@ -29,6 +30,7 @@ stdlib_pack.lua
 stdlib_string.lua
 stdlib_table.lua
 stdlib_utf8.lua
+strings.lua
 tables.lua
 uncaught.lua
 xpcall.lua
