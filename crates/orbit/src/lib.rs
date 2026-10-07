@@ -12,6 +12,7 @@ use orbit_compiler::bytecode::UnlinkedChunk;
 use orbit_lua_syntax::ParseOptions;
 
 pub use orbit_core::Value;
+pub use orbit_stdlib::{chunk_id, read_chunk_file};
 pub use orbit_vm::{LuaError, Vm};
 
 /// The runtime version, taken from the workspace version.
@@ -53,6 +54,12 @@ pub fn compile(
     orbit_compiler::compile(&hir).map_err(|e| Error::Syntax(e.to_string()))
 }
 
+/// The compiler `load` and friends use: the Lua front end with default
+/// options ([`orbit_vm::CompileFn`]).
+fn compile_lua(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
+    compile(src, chunk_name, &ParseOptions::default()).map_err(|e| e.to_string())
+}
+
 /// A Lua state with the first-light libraries open.
 #[derive(Debug)]
 pub struct Lua {
@@ -68,6 +75,7 @@ impl Default for Lua {
 impl Lua {
     pub fn new() -> Self {
         let mut vm = Vm::new();
+        vm.rt.compile = Some(compile_lua);
         orbit_stdlib::open_libs(&mut vm);
         Lua { vm }
     }
@@ -121,6 +129,30 @@ mod tests {
             .unwrap();
         assert!(matches!(r[0], Value::Int(42)));
         assert_eq!(lua.vm().to_display(r[1]), b"x1");
+    }
+
+    #[test]
+    fn load_compiles_at_run_time() {
+        let mut lua = Lua::new();
+        let r = lua
+            .exec(
+                b"local f = load('return 1 + ...') \
+                  local g = load('x = = 1') \
+                  local env = {} \
+                  load('y = 5', 'c', 't', env)() \
+                  local parts = {'return ', '4', '2'} \
+                  local h = load(function() return table.remove(parts, 1) end) \
+                  return f(41), select(2, load('x = = 1')), env.y, h()",
+                "t",
+            )
+            .unwrap();
+        assert!(matches!(r[0], Value::Int(42)));
+        assert_eq!(
+            lua.vm().to_display(r[1]),
+            b"[string \"x = = 1\"]:1: unexpected symbol near '='"
+        );
+        assert!(matches!(r[2], Value::Int(5)));
+        assert!(matches!(r[3], Value::Int(42)));
     }
 
     #[test]

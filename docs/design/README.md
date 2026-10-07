@@ -79,3 +79,13 @@ cargo testkit bench --interp lua5.5=target/reference-lua/bin/lua5.5 \
 ```
 
 The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass once first light lands go into `tests/diff/expected-orbit.txt`.
+
+## Lua 5.5 compatibility
+
+| Document | Covers |
+|---|---|
+| [lua-5.5-front-end.md](lua-5.5-front-end.md) | Milestone C1: hexadecimal floats, `_ENV`, `global` declarations, named varargs, bitwise operators, `goto`, and `<close>` through the front end, HIR and bytecode |
+| [vm-semantics.md](vm-semantics.md) | Metatables and metamethods, userdata, coroutines, to-be-closed variables, `xpcall` (milestones C2, C3; ADR-3) |
+| [stdlib-string-table-math.md](stdlib-string-table-math.md) | The full `string`, `utf8`, `table` and `math` libraries (milestone C5a): patterns, `format`, `pack`, resumable table functions, `sort`, xoshiro256** seeding, differential fuzzers |
+| [chunks-io-os-cli.md](chunks-io-os-cli.md) | `load` and friends, `require`/`package`, binary chunks and their verifier, the `io` and `os` libraries, and the command line |
+| [debug.md](debug.md) | The `debug` library, function names and levels, tracebacks, and hooks (milestones C5d, C6) |
