@@ -21,6 +21,7 @@ fn proto(nregs: u8, code: Vec<Op>) -> UnlinkedProto {
         consts: Vec::new(),
         children: Vec::new(),
         captures: vec![CaptureSource::Env],
+        self_capture: None,
         debug: DebugInfo {
             lines: vec![(0, 1)],
             ..DebugInfo::default()
@@ -41,6 +42,7 @@ fn function(nparams: u8, nregs: u8, code: Vec<Op>) -> UnlinkedProto {
 fn run(vm: &mut Vm, protos: Vec<UnlinkedProto>) -> Result<Vec<Value>, LuaError> {
     let chunk = UnlinkedChunk {
         name: "t".into(),
+        source: Box::default(),
         protos,
     };
     let main = vm.load(&chunk);

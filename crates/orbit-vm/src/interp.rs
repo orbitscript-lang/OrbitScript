@@ -103,6 +103,9 @@ impl Vm {
         match self.rt.stack.regs[func] {
             Value::Closure(c) => {
                 self.push_lua_frame(c, func, nargs, want)?;
+                if chain > 0 {
+                    self.rt.stack.frames.last_mut().expect("frame").extra = chain as u8;
+                }
                 Ok(Flow::Reload)
             }
             Value::Native(id) => {
@@ -118,7 +121,10 @@ impl Vm {
                     id,
                     upvals: None,
                 };
-                let r = f(&mut ctx)?;
+                let r = match f(&mut ctx) {
+                    Ok(r) => r,
+                    Err(e) => return Err(self.native_raised(id, func, e)),
+                };
                 self.native_returned(r, None, func, want, id)
             }
             _ => unreachable!("a function"),
@@ -275,6 +281,8 @@ fn enter_lua_frame(
         cell_base: cell_base as u32,
         nvarargs: nvar as u32,
         want,
+        tail: false,
+        extra: 0,
     });
     Ok(Entered { base, code_id })
 }
@@ -331,6 +339,7 @@ impl Vm {
             FrameKind::Lua { .. } => Ok(Flow::Reload),
             FrameKind::Meta { .. } => self.meta_returned(),
             FrameKind::Handler => self.handler_returned(),
+            FrameKind::NativeCall { .. } => unreachable!("a running native returns itself"),
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
                 let mut ctx = NativeCtx {
@@ -420,6 +429,8 @@ impl Vm {
                             // For native frames: how many arguments it had.
                             nvarargs: nargs as u32,
                             want,
+                            tail: false,
+                            extra: 0,
                         })
                     }
                 }
@@ -447,7 +458,7 @@ impl Vm {
                 unreachable!("metamethod requests are finished by `raise`")
             }
             Exc::Rt(msg, operand) => {
-                let mut text = ops::where_(&self.heap, &self.rt, 1);
+                let mut text = self.rt.where_(&self.heap, None, 1);
                 text.push_str(&msg);
                 if let Some(op) = operand
                     && let Some(f) = self.rt.stack.frames.last()
@@ -565,7 +576,7 @@ impl Vm {
                     && e.traceback.is_none()
                     && self.rt.unwind_traceback.is_none()
                 {
-                    self.rt.unwind_traceback = Some(self.traceback());
+                    self.rt.unwind_traceback = Some(self.rt.traceback(&self.heap, None, 1));
                 }
                 match self.start_close(e.value) {
                     Ok(flow) => return Ok(flow),
@@ -594,7 +605,8 @@ impl Vm {
                     // The error leaves the VM.
                     let taken = self.rt.unwind_traceback.take();
                     if e.traceback.is_none() {
-                        e.traceback = Some(taken.unwrap_or_else(|| self.traceback()));
+                        e.traceback =
+                            Some(taken.unwrap_or_else(|| self.rt.traceback(&self.heap, None, 1)));
                     }
                     self.rt.stack.cells.truncate(f.cell_base as usize);
                     self.rt.stack.frames.truncate(idx);
@@ -649,6 +661,8 @@ impl Vm {
             cell_base: self.rt.stack.cells.len() as u32,
             nvarargs: 0,
             want: 0,
+            tail: false,
+            extra: 0,
         });
         self.call_close_handler(at + 1, h)
     }
@@ -721,6 +735,8 @@ impl Vm {
             cell_base: self.rt.stack.cells.len() as u32,
             nvarargs: 0,
             want: 1,
+            tail: false,
+            extra: 0,
         });
         self.call_value(at, 1, 1)
     }
@@ -735,67 +751,6 @@ impl Vm {
         let v = self.rt.stack.regs[f.func as usize];
         self.rt.handled = true;
         Err(Exc::Lua(LuaError::new(v)))
-    }
-
-    fn traceback(&self) -> String {
-        let mut s = String::from("stack traceback:");
-        let frames = &self.rt.stack.frames;
-        let from = frames
-            .iter()
-            .rposition(|f| matches!(f.kind, FrameKind::Boundary | FrameKind::CoBase))
-            .map_or(0, |i| i + 1);
-        let frames = &frames[from..];
-        for (i, f) in frames.iter().enumerate().rev() {
-            // A function called as a metamethod sits on a meta frame.
-            let as_meta = match i.checked_sub(1).map(|j| frames[j].kind) {
-                Some(FrameKind::Meta { event, .. }) => Some(event),
-                _ => None,
-            };
-            match f.kind {
-                FrameKind::Meta { .. }
-                | FrameKind::Handler
-                | FrameKind::Boundary
-                | FrameKind::CoBase => {}
-                FrameKind::Lua { .. } | FrameKind::Native { .. } if as_meta.is_some() => {
-                    let line = match f.kind {
-                        FrameKind::Lua { closure, .. } => {
-                            let proto = self.heap.get(self.heap.get(closure).proto);
-                            format!(
-                                "{}:{}",
-                                proto.chunk,
-                                proto.debug.line(f.pc.saturating_sub(1))
-                            )
-                        }
-                        _ => "[C]".into(),
-                    };
-                    let e = as_meta.expect("meta").short_name();
-                    s.push_str(&format!("\n\t{line}: in metamethod '{e}'"));
-                }
-                FrameKind::Lua { closure, .. } => {
-                    let proto = self.heap.get(self.heap.get(closure).proto);
-                    let line = proto.debug.line(f.pc.saturating_sub(1));
-                    let what = match &proto.name {
-                        orbit_bytecode::FunctionName::Main => "in main chunk".to_string(),
-                        orbit_bytecode::FunctionName::Anonymous => {
-                            format!("in function <{}:{}>", proto.chunk, proto.line_defined)
-                        }
-                        orbit_bytecode::FunctionName::Global(n)
-                        | orbit_bytecode::FunctionName::Local(n)
-                        | orbit_bytecode::FunctionName::Field(n)
-                        | orbit_bytecode::FunctionName::Method(n) => {
-                            format!("in function '{}'", String::from_utf8_lossy(n))
-                        }
-                    };
-                    s.push_str(&format!("\n\t{}:{}: {}", proto.chunk, line, what));
-                }
-                FrameKind::Native { id, .. } => {
-                    let name = self.rt.natives[id.0 as usize].name;
-                    s.push_str(&format!("\n\t[C]: in function '{name}'"));
-                }
-            }
-        }
-        s.push_str("\n\t[C]: in ?");
-        s
     }
 
     /// The dispatch loop. Runs the top frame (a Lua frame) and everything it
@@ -1551,6 +1506,7 @@ impl Vm {
                                 self.rt.stack.frames.push(f);
                                 throw!(x);
                             }
+                            self.rt.stack.frames.last_mut().expect("frame").tail = true;
                             continue 'reload;
                         }
                         // A native in tail position: an ordinary call whose

@@ -92,7 +92,8 @@ pub(crate) struct FuncState<'a> {
     origins: Vec<OperandOrigin>,
     debug_locals: Vec<LocalInfo>,
     /// Locals declared in the open scopes, with their `debug_locals` index.
-    scope: Vec<(LocalId, Option<usize>)>,
+    /// Hidden loop state has no `LocalId`.
+    scope: Vec<(Option<LocalId>, Option<usize>)>,
     /// The capture that always holds the running closure, if any (see [`self_capture`]).
     pub self_capture: Option<CaptureId>,
 }
@@ -228,10 +229,12 @@ impl<'a> FuncState<'a> {
             consts: self.consts,
             children: Vec::new(),
             captures: Vec::new(),
+            self_capture: self.self_capture.map(|c| c.index() as u8),
             debug: DebugInfo {
                 lines: self.lines,
                 locals: self.debug_locals,
                 capture_names: f.captures.iter().map(|c| bytes(c.name)).collect(),
+                env_debug_index: f.env_debug_index,
                 origins,
             },
         };
@@ -492,7 +495,9 @@ impl<'a> FuncState<'a> {
     fn close_scope_locals(&mut self, from: usize) {
         let end = self.code.len() as u32;
         for (l, debug) in self.scope.drain(from..) {
-            self.slots[l.index()] = Slot::Unset;
+            if let Some(l) = l {
+                self.slots[l.index()] = Slot::Unset;
+            }
             if let Some(i) = debug {
                 self.debug_locals[i].end_pc = end;
             }
@@ -546,7 +551,19 @@ impl<'a> FuncState<'a> {
             }
             _ => None,
         };
-        self.scope.push((l, debug));
+        self.scope.push((Some(l), debug));
+    }
+
+    /// Records register `r` as hidden loop state, which `debug.getlocal` reports as
+    /// `(for state)`, as the reference does.
+    pub fn push_loop_state(&mut self, r: u8) {
+        self.debug_locals.push(LocalInfo {
+            name: b"(for state)".as_slice().into(),
+            slot: LocalSlot::Reg(r),
+            start_pc: self.code.len() as u32,
+            end_pc: 0,
+        });
+        self.scope.push((None, Some(self.debug_locals.len() - 1)));
     }
 
     /// The compile-time value of capture `c` of this function, if it resolves to a `<const>`

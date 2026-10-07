@@ -141,10 +141,9 @@ fn wrapped_closed(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         CallOutcome::Err(e) => e,
         CallOutcome::Ok(_) => ctx.arg(1),
     };
-    // A string error gets the position of the wrapper's caller (level 2:
-    // this continuation's own frame is level 1).
+    // A string error gets the position of the wrapper's caller (level 1).
     if let Value::Str(s) = e {
-        let mut text = ctx.where_(2).into_bytes();
+        let mut text = ctx.where_(1).into_bytes();
         if !text.is_empty() {
             text.extend_from_slice(ctx.bytes(s));
             let msg = ctx.new_str_owned(text);

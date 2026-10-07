@@ -8,6 +8,8 @@
 mod base;
 #[cfg(feature = "coroutine")]
 mod coroutine;
+#[cfg(feature = "debug")]
+mod debug;
 #[cfg(feature = "load")]
 mod load;
 #[cfg(feature = "math")]
@@ -67,6 +69,11 @@ pub fn open_libs(vm: &mut Vm) {
     package::open(vm);
     #[cfg(feature = "coroutine")]
     open_lib(vm, "coroutine", coroutine::FUNCTIONS);
+    #[cfg(feature = "debug")]
+    {
+        open_lib(vm, "debug", debug::FUNCTIONS);
+        debug::open(vm);
+    }
     let g = vm.rt.globals;
     mark_loaded(vm, "_G", orbit_vm::orbit_core::Value::Table(g));
 }

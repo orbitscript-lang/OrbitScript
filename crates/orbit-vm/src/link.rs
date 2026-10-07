@@ -35,6 +35,13 @@ pub(crate) fn link(
 ) -> Value {
     {
         let name: Rc<str> = Rc::from(&*chunk.name);
+        let source: Rc<[u8]> = if chunk.source.is_empty() {
+            let mut s = b"@".to_vec();
+            s.extend_from_slice(chunk.name.as_bytes());
+            s.into()
+        } else {
+            Rc::from(&*chunk.source)
+        };
         let n = chunk.protos.len();
         // Children come after their parents, so link from the end and every
         // child is ready when its parent is built. Nothing collects here:
@@ -112,7 +119,10 @@ pub(crate) fn link(
                 captures: u.captures.as_slice().into(),
                 name: u.name.clone(),
                 line_defined: u.line_defined,
+                last_line: u.last_line,
                 chunk: name.clone(),
+                source: source.clone(),
+                self_capture: u.self_capture,
                 debug: Rc::new(u.debug.clone()),
             };
             linked[i] = Some(heap.alloc(proto));

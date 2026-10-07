@@ -1,7 +1,6 @@
 //! Slow paths: everything the interpreter's inline fast paths don't handle
 //! (mixed numbers, string coercion, errors). Metamethods will plug in here.
 
-use std::fmt::Write as _;
 use std::io::Write as _;
 
 use orbit_bytecode::number::BitOp;
@@ -9,8 +8,8 @@ use orbit_core::number::{self, ArithError, ArithOp, Number, float_to_int};
 use orbit_core::value::raw_eq;
 use orbit_core::{LuaHeap, Value};
 
+use crate::Runtime;
 use crate::meta::{self, Event, MetaCall, Metas};
-use crate::{FrameKind, Runtime};
 
 /// An error raised by an instruction, before the interpreter adds the
 /// position and the operand's name.
@@ -321,39 +320,6 @@ pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>)
             }
             let _ = write!(out, ": 0x{:012x}", v.identity().unwrap_or(0));
         }
-    }
-}
-
-/// `chunk:line: ` for the frame `level` levels down (1 = top frame), or
-/// empty for a native frame or beyond the stack.
-pub(crate) fn where_(heap: &LuaHeap, rt: &Runtime, level: usize) -> String {
-    // Meta frames aren't functions, so they don't count as levels.
-    let Some(f) = (level > 0)
-        .then(|| {
-            rt.stack
-                .frames
-                .iter()
-                .rev()
-                .filter(|f| !matches!(f.kind, FrameKind::Meta { .. } | FrameKind::Handler))
-                .nth(level - 1)
-        })
-        .flatten()
-    else {
-        return String::new();
-    };
-    match f.kind {
-        FrameKind::Lua { closure, .. } => {
-            let proto = heap.get(heap.get(closure).proto);
-            let line = proto.debug.line(f.pc.saturating_sub(1));
-            let mut s = String::new();
-            let _ = write!(s, "{}:{}: ", proto.chunk, line);
-            s
-        }
-        FrameKind::Native { .. }
-        | FrameKind::Meta { .. }
-        | FrameKind::Handler
-        | FrameKind::Boundary
-        | FrameKind::CoBase => String::new(),
     }
 }
 

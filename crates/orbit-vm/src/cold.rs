@@ -71,6 +71,36 @@ impl Vm {
         self.unwind(e)
     }
 
+    /// Native `id`, called at stack index `func`, raised `e`: give it a
+    /// frame, so tracebacks and message handlers see it as the reference
+    /// shows it (`[C]: in global 'error'`). Unwinding pops it.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn native_raised(
+        &mut self,
+        id: orbit_core::NativeId,
+        func: usize,
+        e: LuaError,
+    ) -> Exc {
+        let s = &mut self.rt.stack;
+        if !matches!(s.frames.last(), Some(f) if f.func as usize == func
+            && matches!(f.kind, FrameKind::NativeCall { .. }))
+        {
+            s.frames.push(Frame {
+                kind: FrameKind::NativeCall { id },
+                func: func as u32,
+                base: func as u32 + 1,
+                pc: 0,
+                cell_base: s.cells.len() as u32,
+                nvarargs: 0,
+                want: 0,
+                tail: false,
+                extra: 0,
+            });
+        }
+        Exc::Lua(e)
+    }
+
     /// Start metamethod call `call` for the instruction the top (Lua) frame
     /// is running: push a meta frame recording how to finish it, then call
     /// the handler above the frame's registers.
@@ -113,6 +143,8 @@ impl Vm {
             cell_base: self.rt.stack.cells.len() as u32,
             nvarargs: 0,
             want: 1,
+            tail: false,
+            extra: 0,
         });
         self.call_value(at, n, 1)
     }
