@@ -8,6 +8,7 @@ mod bench;
 mod conformance;
 mod diff;
 mod fuzz;
+mod libfuzz;
 mod process;
 mod ratchet;
 mod scoreboard;
@@ -24,6 +25,7 @@ commands:
   bench         time benchmarks and track peak RSS and binary size
   scoreboard    the whole Lua 5.5 compatibility picture in one report
   fuzz-syntax   compare compile errors on mutated programs with lua5.5
+  fuzz          compare random library calls with the reference lua5.5
 
 Run a command with --help for its options.";
 
@@ -40,6 +42,7 @@ fn main() -> ExitCode {
         "bench" => bench::main(rest),
         "scoreboard" => scoreboard::main(rest),
         "fuzz-syntax" => fuzz::main(rest),
+        "fuzz" => libfuzz::main(rest),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(true)

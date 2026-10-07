@@ -28,3 +28,13 @@ cargo testkit diff --reference target/reference-lua/bin/lua5.5 --interp target/r
 ```
 
 Add a file whenever a behavior is subtle enough that a unit test might encode the wrong expectation: the reference interpreter decides.
+
+## Differential fuzzing
+
+`cargo testkit fuzz` generates random library calls, runs each batch under both interpreters and stops at the first call whose results or error differ. The targets are `format` (`string.format` specs and arguments), `pattern` (`find`, `match` and `gsub`), `pack` (`string.pack`, `unpack` and `packsize`) and `utf8`, or `all` for every one. Generators favor edge cases: limits of widths and precisions, halfway floats, malformed patterns, odd integer sizes and alignments, and invalid UTF-8.
+
+```sh
+cargo testkit fuzz --reference target/reference-lua/bin/lua5.5 --interp target/release/orbit all
+```
+
+A mismatch prints the call, both outputs and the `--seed` that reproduces the batch, and keeps the batch script under `target/testkit/fuzz`. Without `--seed` each run uses a new seed. Turn a real mismatch into a line in a `tests/diff` program once it's fixed.
