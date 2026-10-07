@@ -28,7 +28,7 @@ package = ["load"]
 # The `coroutine` library.
 coroutine = []
 # The `debug` library.
-debug = []
+debug = ["orbit-vm/hooks"]
 
 [lints]
 workspace = true

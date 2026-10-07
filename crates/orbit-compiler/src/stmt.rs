@@ -57,7 +57,6 @@ impl FuncState<'_> {
             &StmtKind::LocalFunction { local, func } => {
                 let r = self.alloc()?;
                 self.active = self.free;
-                let proto = self.child(func)?;
                 if self.f.local(local).captured {
                     // The cell must exist before the closure, which captures it to recurse.
                     self.emit(Op::LoadNil { dst: r, count: 1 });
@@ -65,11 +64,11 @@ impl FuncState<'_> {
                     let Slot::Cell(cell) = self.slots[local.index()] else {
                         unreachable!()
                     };
-                    self.emit(Op::Closure { dst: r, proto });
+                    self.emit_closure(r, func)?;
                     self.emit(Op::CellSet { cell, src: r });
                 } else {
                     self.declare(local, r)?;
-                    self.emit(Op::Closure { dst: r, proto });
+                    self.emit_closure(r, func)?;
                 }
                 Ok(())
             }
@@ -366,6 +365,9 @@ impl FuncState<'_> {
         step: Option<ExprId>,
         body: BlockId,
     ) -> Result<()> {
+        // The loop instruction belongs to the `for` line, as in the
+        // reference (line hooks report it on every iteration).
+        let for_line = self.line;
         let mark = self.open_scope();
         let base = self.alloc()?;
         self.expr_to(start, base)?;
@@ -395,6 +397,7 @@ impl FuncState<'_> {
         self.block_stmts(body)?;
         self.close_scope(body_mark);
         self.loops.pop();
+        self.at_line(for_line);
         self.jump(Op::ForLoop { base, back: 0 }, top);
         self.place(exit);
         self.close_scope(mark);
@@ -408,6 +411,7 @@ impl FuncState<'_> {
         hidden: [LocalId; 4],
         body: BlockId,
     ) -> Result<()> {
+        let for_line = self.line;
         let mark = self.open_scope();
         let base = self.free as u8;
         // Iterator, state, control and closing value (R[base+3]).
@@ -444,6 +448,7 @@ impl FuncState<'_> {
         self.close_scope(body_mark);
         self.loops.pop();
         self.place(call);
+        self.at_line(for_line);
         self.emit(Op::GenericCall { base, nvars });
         self.jump(Op::GenericLoop { base, back: 0 }, top);
         self.place(exit);

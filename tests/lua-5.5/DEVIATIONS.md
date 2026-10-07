@@ -42,3 +42,10 @@ The collector is our own (ADR-2), so its tuning parameters, step sizes and memor
 - **Default `stepsize`.** `collectgarbage("param", "stepsize")` reads `16384` by default, where lua5.5 reads `9600`. It is our collector's real step size (`orbit_gc::Params::step_bytes`). The other defaults match lua5.5 (`pause` 250, `stepmul` 200, `minormul` 20, `majorminor` 50, `minormajor` 68).
 - **Generational mode is reported, not implemented.** `collectgarbage("generational")` switches the reported mode, and the CLI starts in it as lua5.5 does, but the incremental collector runs underneath in both modes. In generational mode `collectgarbage("step")` runs a whole cycle and returns `false`, where lua5.5 runs a minor collection and sometimes returns `true`. Only timing shows the difference. A real generational collector is performance work after parity.
 - **`collectgarbage("count")` counts heap objects only.** It is the bytes of heap objects and what they own (table parts, string bytes), not every allocation the VM makes, so it is lower than lua5.5's for the same program. The suite compares `count` only with itself.
+
+## Debug library
+
+Hooks follow docs/design/debug.md. Proposed in the debug hooks PR.
+
+- **Count hooks.** A count hook with interval N fires every N of OrbitScript's bytecode instructions. The bytecode is our own design (ADR-4), so the events land at different points in the source than lua5.5's, and a different number of them fire for the same code. Events still fire before the instruction, and the line event that follows a count event fires as in lua5.5.
+- **`ftransfer` for `debug.sethook`'s own return event.** When `debug.sethook` turns on return hooks, the return event for that same call reports `ftransfer` from the native's own argument window. lua5.5 reports a value that reflects its C stack (4 where we report 3). Other natives' return events match.

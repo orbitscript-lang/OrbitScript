@@ -5,8 +5,8 @@
 //!
 //! [debug design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/debug.md
 
-use orbit_vm::debug::Level;
-use orbit_vm::orbit_core::{LightUserData, Table, Value};
+use orbit_vm::debug::CallName;
+use orbit_vm::orbit_core::{Gc, LightUserData, Table, Thread, Value};
 use orbit_vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
@@ -25,6 +25,8 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("debug.setuservalue", setuservalue),
     ("debug.getregistry", getregistry),
     ("debug.traceback", traceback),
+    ("debug.sethook", sethook),
+    ("debug.gethook", gethook),
 ];
 
 /// Push `s` as a string.
@@ -40,26 +42,75 @@ fn set_field(ctx: &mut NativeCtx<'_>, t: Value, k: &str, v: Value) {
     let _ = orbit_vm::orbit_core::table::set(ctx.heap, t, k, v);
 }
 
-/// A level argument: an integer that names an activation.
-enum Target {
-    Level(Level),
-    Func(Value),
+/// An optional leading thread argument: the thread, and how far the
+/// other arguments shift.
+fn thread_arg(ctx: &NativeCtx<'_>) -> (Option<Gc<Thread>>, usize) {
+    match ctx.arg(0) {
+        Value::Thread(t) => (Some(t), 1),
+        _ => (None, 0),
+    }
+}
+
+/// Run `f` on thread `th`'s stack (the running one when `None`); `f` gets
+/// whether that stack is another coroutine's, whose levels start at 0.
+/// `f` must not push: the running native's stack is set aside meanwhile.
+fn with_thread<T>(
+    ctx: &mut NativeCtx<'_>,
+    th: Option<Gc<Thread>>,
+    f: impl FnOnce(&mut NativeCtx<'_>, bool) -> T,
+) -> T {
+    match th {
+        Some(t) => ctx.on_thread(t, |ctx, foreign| f(ctx, foreign)),
+        None => f(ctx, false),
+    }
+}
+
+/// What `getinfo` reports about an activation, read while its stack is in
+/// place.
+struct Activation {
+    func: Value,
+    line: i64,
+    name: Option<CallName>,
+    transfer: (u32, u32),
+    tail: bool,
+    extra: u8,
 }
 
 fn getinfo(ctx: &mut NativeCtx<'_>) -> R {
-    let options = match ctx.arg(1) {
+    let (th, a) = thread_arg(ctx);
+    let options = match ctx.arg(a + 1) {
         Value::Nil => b"flnSrtu".to_vec(),
         _ => {
-            let s = ctx.check_str(1)?;
+            let s = ctx.check_str(a + 1)?;
             ctx.bytes(s).to_vec()
         }
     };
-    let target = match ctx.arg(0) {
-        f @ (Value::Closure(_) | Value::Native(_)) => Target::Func(f),
+    let act = match ctx.arg(a) {
+        f @ (Value::Closure(_) | Value::Native(_)) => Activation {
+            func: f,
+            line: -1,
+            name: None,
+            transfer: (0, 0),
+            tail: false,
+            extra: 0,
+        },
         _ => {
-            let n = ctx.check_int(0)?;
-            match usize::try_from(n).ok().and_then(|n| ctx.level(n)) {
-                Some(l) => Target::Level(l),
+            let n = ctx.check_int(a)?;
+            let found = with_thread(ctx, th, |ctx, foreign| {
+                let l = usize::try_from(n)
+                    .ok()
+                    .and_then(|n| ctx.level_in(foreign, n))?;
+                Some(Activation {
+                    func: ctx.level_func(l),
+                    line: ctx.current_line(l),
+                    name: ctx.level_name(l),
+                    transfer: ctx.transfer(l),
+                    tail: ctx.is_tail_call(l),
+                    extra: ctx.extra_args(l),
+                })
+            });
+            match found {
+                Some(act) => act,
                 // Out of range: fail.
                 None => {
                     ctx.push(Value::Nil);
@@ -74,12 +125,9 @@ fn getinfo(ctx: &mut NativeCtx<'_>) -> R {
         } else {
             "invalid option".to_string()
         };
-        return Err(ctx.arg_error(1, msg));
+        return Err(ctx.arg_error(a + 1, msg));
     }
-    let func = match target {
-        Target::Func(f) => f,
-        Target::Level(l) => ctx.level_func(l),
-    };
+    let func = act.func;
     let t = Value::Table(ctx.new_table(Table::new()));
     ctx.push(t);
     let info = ctx.func_info(func);
@@ -96,44 +144,32 @@ fn getinfo(ctx: &mut NativeCtx<'_>) -> R {
                 set_field(ctx, t, "what", v);
             }
             b'l' => {
-                let line = match target {
-                    Target::Level(l) => ctx.current_line(l),
-                    Target::Func(_) => -1,
-                };
-                set_field(ctx, t, "currentline", Value::Int(line));
+                set_field(ctx, t, "currentline", Value::Int(act.line));
             }
             b'u' => {
                 set_field(ctx, t, "nups", Value::Int(info.nups as i64));
                 set_field(ctx, t, "nparams", Value::Int(info.nparams as i64));
                 set_field(ctx, t, "isvararg", Value::Bool(info.is_vararg));
             }
-            b'n' => {
-                let name = match target {
-                    Target::Level(l) => ctx.level_name(l),
-                    Target::Func(_) => None,
-                };
-                match name {
-                    Some(n) => {
-                        let v = ctx.new_str(&n.name);
-                        set_field(ctx, t, "name", v);
-                        let v = ctx.new_str(n.namewhat.as_bytes());
-                        set_field(ctx, t, "namewhat", v);
-                    }
-                    None => {
-                        let v = ctx.new_str(b"");
-                        set_field(ctx, t, "namewhat", v);
-                    }
+            b'n' => match &act.name {
+                Some(n) => {
+                    let v = ctx.new_str(&n.name);
+                    set_field(ctx, t, "name", v);
+                    let v = ctx.new_str(n.namewhat.as_bytes());
+                    set_field(ctx, t, "namewhat", v);
                 }
-            }
+                None => {
+                    let v = ctx.new_str(b"");
+                    set_field(ctx, t, "namewhat", v);
+                }
+            },
             b'r' => {
-                set_field(ctx, t, "ftransfer", Value::Int(0));
-                set_field(ctx, t, "ntransfer", Value::Int(0));
+                let (first, n) = act.transfer;
+                set_field(ctx, t, "ftransfer", Value::Int(first as i64));
+                set_field(ctx, t, "ntransfer", Value::Int(n as i64));
             }
             b't' => {
-                let (tail, extra) = match target {
-                    Target::Level(l) => (ctx.is_tail_call(l), ctx.extra_args(l)),
-                    Target::Func(_) => (false, 0),
-                };
+                let (tail, extra) = (act.tail, act.extra);
                 set_field(ctx, t, "istailcall", Value::Bool(tail));
                 set_field(ctx, t, "extraargs", Value::Int(extra as i64));
             }
@@ -159,39 +195,33 @@ fn getinfo(ctx: &mut NativeCtx<'_>) -> R {
     Ok(NativeReturn::Return(1))
 }
 
-/// The level in argument `i`, or `level out of range`.
-fn check_level(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Level, LuaError> {
-    let n = ctx.check_int(i)?;
-    match usize::try_from(n).ok().and_then(|n| ctx.level(n)) {
-        Some(l) => Ok(l),
-        None => Err(ctx.arg_error(i, "level out of range")),
-    }
-}
-
 fn getlocal(ctx: &mut NativeCtx<'_>) -> R {
-    if let f @ (Value::Closure(_) | Value::Native(_)) = ctx.arg(0) {
+    let (th, a) = thread_arg(ctx);
+    if let f @ (Value::Closure(_) | Value::Native(_)) = ctx.arg(a) {
         // Parameter names of a function.
-        let n = ctx.check_int(1)?;
-        return match ctx.param_name(f, n) {
-            Some(name) => {
-                push_str(ctx, &name);
-                Ok(NativeReturn::Return(1))
-            }
-            None => {
-                ctx.push(Value::Nil);
-                Ok(NativeReturn::Return(1))
-            }
-        };
+        let n = ctx.check_int(a + 1)?;
+        match ctx.param_name(f, n) {
+            Some(name) => push_str(ctx, &name),
+            None => ctx.push(Value::Nil),
+        }
+        return Ok(NativeReturn::Return(1));
     }
-    let l = check_level(ctx, 0)?;
-    let n = ctx.check_int(1)?;
-    match ctx.get_local(l, n) {
-        Some((name, v)) => {
+    let level = ctx.check_int(a)?;
+    let n = ctx.check_int(a + 1)?;
+    let found = with_thread(ctx, th, |ctx, foreign| {
+        let l = usize::try_from(level)
+            .ok()
+            .and_then(|level| ctx.level_in(foreign, level))?;
+        Some(ctx.get_local(l, n))
+    });
+    match found {
+        None => Err(ctx.arg_error(a, "level out of range")),
+        Some(Some((name, v))) => {
             push_str(ctx, &name);
             ctx.push(v);
             Ok(NativeReturn::Return(2))
         }
-        None => {
+        Some(None) => {
             ctx.push(Value::Nil);
             Ok(NativeReturn::Return(1))
         }
@@ -199,12 +229,20 @@ fn getlocal(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn setlocal(ctx: &mut NativeCtx<'_>) -> R {
-    let l = check_level(ctx, 0)?;
-    let n = ctx.check_int(1)?;
-    let v = ctx.check_any(2)?;
-    match ctx.set_local(l, n, v) {
-        Some(name) => push_str(ctx, &name),
-        None => ctx.push(Value::Nil),
+    let (th, a) = thread_arg(ctx);
+    let level = ctx.check_int(a)?;
+    let n = ctx.check_int(a + 1)?;
+    let v = ctx.check_any(a + 2)?;
+    let found = with_thread(ctx, th, |ctx, foreign| {
+        let l = usize::try_from(level)
+            .ok()
+            .and_then(|level| ctx.level_in(foreign, level))?;
+        Some(ctx.set_local(l, n, v))
+    });
+    match found {
+        None => return Err(ctx.arg_error(a, "level out of range")),
+        Some(Some(name)) => push_str(ctx, &name),
+        Some(None) => ctx.push(Value::Nil),
     }
     Ok(NativeReturn::Return(1))
 }
@@ -337,24 +375,33 @@ fn getregistry(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn traceback(ctx: &mut NativeCtx<'_>) -> R {
-    let msg = ctx.arg(0);
+    let (th, a) = thread_arg(ctx);
+    let msg = ctx.arg(a);
     // A message that is neither a string nor nil comes back untouched.
     let text = match msg {
         Value::Nil => None,
         Value::Str(s) => Some(ctx.bytes(s).to_vec()),
         Value::Int(_) | Value::Float(_) => {
-            let s = ctx.check_str(0)?;
+            let s = ctx.check_str(a)?;
             Some(ctx.bytes(s).to_vec())
         }
         v => return ctx.ret1(v),
     };
-    let level = ctx.opt_int(1, 1)?;
+    let level = match ctx.arg(a + 1) {
+        Value::Nil => None,
+        _ => Some(ctx.check_int(a + 1)?),
+    };
     let mut out = Vec::new();
     if let Some(t) = text {
         out.extend_from_slice(&t);
         out.push(b'\n');
     }
-    out.extend_from_slice(ctx.traceback(level.max(0) as usize).as_bytes());
+    let trace = with_thread(ctx, th, |ctx, foreign| {
+        // Another thread's trace starts at its top activation.
+        let level = level.unwrap_or(if foreign { 0 } else { 1 });
+        ctx.traceback_in(foreign, level.max(0) as usize)
+    });
+    out.extend_from_slice(trace.as_bytes());
     let s = ctx.new_str_owned(out);
     ctx.ret1(s)
 }
@@ -375,4 +422,49 @@ pub(crate) fn open(vm: &mut orbit_vm::Vm) {
     vm.table_set(reg, key, Value::Table(hooks));
     vm.unpin(Value::Table(mt));
     vm.unpin(Value::Table(hooks));
+}
+
+fn sethook(ctx: &mut NativeCtx<'_>) -> R {
+    use orbit_vm::hook::{CALL, LINE, RETURN};
+    let (th, a) = thread_arg(ctx);
+    if matches!(ctx.arg(a), Value::Nil) {
+        with_thread(ctx, th, |ctx, _| ctx.set_hook(Value::Nil, 0, 0));
+        return Ok(NativeReturn::Return(0));
+    }
+    let mask = ctx.check_str(a + 1)?;
+    let count = ctx.opt_int(a + 2, 0)?;
+    let f = check_function(ctx, a)?;
+    let mut bits = 0;
+    for &c in ctx.bytes(mask) {
+        bits |= match c {
+            b'c' => CALL,
+            b'r' => RETURN,
+            b'l' => LINE,
+            _ => 0,
+        };
+    }
+    with_thread(ctx, th, |ctx, _| ctx.set_hook(f, bits, count));
+    Ok(NativeReturn::Return(0))
+}
+
+fn gethook(ctx: &mut NativeCtx<'_>) -> R {
+    use orbit_vm::hook::{CALL, LINE, RETURN};
+    let (th, _) = thread_arg(ctx);
+    let (f, mask, count) = with_thread(ctx, th, |ctx, _| ctx.hook());
+    // A coroutine inherits its creator's mask and count but not the
+    // function: it reports a nil hook with them.
+    if f.is_nil() && mask == 0 && count == 0 {
+        ctx.push(Value::Nil);
+        return Ok(NativeReturn::Return(1));
+    }
+    let mut s = Vec::new();
+    for (bit, c) in [(CALL, b'c'), (RETURN, b'r'), (LINE, b'l')] {
+        if mask & bit != 0 {
+            s.push(c);
+        }
+    }
+    ctx.push(f);
+    push_str(ctx, &s);
+    ctx.push(Value::Int(count));
+    Ok(NativeReturn::Return(3))
 }

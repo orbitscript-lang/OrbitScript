@@ -6,6 +6,9 @@ closures.lua
 co_gc.lua
 co_yields.lua
 coroutines.lua
+debug_co_gc.lua
+debug_hooks.lua
+debug_hooks_co.lua
 debug_info.lua
 debug_locals.lua
 errors.lua

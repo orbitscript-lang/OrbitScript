@@ -201,6 +201,7 @@ impl Runtime {
         };
         match caller.kind {
             FrameKind::Meta { event, .. } => named("metamethod", event.short_name().as_bytes()),
+            FrameKind::Hook => named("hook", b"?"),
             FrameKind::Lua { closure, .. } if caller.pc > 0 => {
                 let proto = heap.get(heap.get(closure).proto);
                 let pc = caller.pc - 1;
@@ -225,9 +226,26 @@ impl Runtime {
     }
 
     /// `chunk:line: ` for activation `n` (as [`Runtime::level`] numbers
-    /// them), or empty if it isn't a Lua function: the prefix `error` and
-    /// runtime errors add.
+    /// them), or empty if it isn't a Lua function or its line is unknown (a
+    /// stripped chunk): the prefix `error` and natives' errors add.
     pub(crate) fn where_(&self, heap: &LuaHeap, running: Option<Running>, n: usize) -> String {
+        self.position(heap, running, n, false)
+    }
+
+    /// The prefix of a runtime error raised by an instruction: like
+    /// [`Runtime::where_`], but a stripped chunk gives `chunk:?: `, as in
+    /// the reference.
+    pub(crate) fn error_where(&self, heap: &LuaHeap, n: usize) -> String {
+        self.position(heap, None, n, true)
+    }
+
+    fn position(
+        &self,
+        heap: &LuaHeap,
+        running: Option<Running>,
+        n: usize,
+        unknown_line: bool,
+    ) -> String {
         let Some(l) = self.level(running, n) else {
             return String::new();
         };
@@ -239,8 +257,12 @@ impl Runtime {
             FrameKind::Lua { closure, .. } => {
                 let proto = heap.get(heap.get(closure).proto);
                 let line = pc_line(proto, f.pc.saturating_sub(1));
-                if line < 0 {
-                    format!("{}:?: ", proto.chunk)
+                if line <= 0 {
+                    if unknown_line {
+                        format!("{}:?: ", proto.chunk)
+                    } else {
+                        String::new()
+                    }
                 } else {
                     format!("{}:{}: ", proto.chunk, line)
                 }
@@ -281,7 +303,8 @@ impl Runtime {
                     FrameKind::Meta { .. }
                     | FrameKind::Handler
                     | FrameKind::Boundary
-                    | FrameKind::CoBase => return None,
+                    | FrameKind::CoBase
+                    | FrameKind::Hook => return None,
                 }
             }
         };
@@ -319,19 +342,8 @@ impl Runtime {
             }
             k -= 1;
         }
-        // Past the named locals: temporaries in use. Every local reserves a
-        // register from the bottom of the window, even one kept in a cell, so
-        // the first temporary is past both the highest named register and
-        // the count of locals in scope.
-        let mut count = 0;
-        let mut top = proto.code.nparams as usize;
-        for (_, slot) in active_locals(proto, pc) {
-            count += 1;
-            if let Some(LocalSlot::Reg(r)) = slot {
-                top = top.max(r as usize + 1);
-            }
-        }
-        let first_free = top.max(count);
+        // Past the named locals: temporaries in use.
+        let (_, first_free) = temporaries(proto, pc);
         let at = base + first_free + k - 1;
         (at < limit).then_some((LocalName::Temporary, Place::Reg(at)))
     }
@@ -379,7 +391,14 @@ impl Runtime {
             n += 1;
         }
         let mut s = String::from("stack traceback:");
-        let total = levels.len() + 1; // plus the host's call ("[C]: in ?")
+        // The main thread ends in the host's call (`[C]: in ?`); a
+        // coroutine ends in its body, and a finished one has no frames.
+        let host = self
+            .stack
+            .frames
+            .first()
+            .is_some_and(|f| !matches!(f.kind, FrameKind::CoBase));
+        let total = levels.len() + host as usize;
         let skip = if total > TRACE_FULL {
             Some((TRACE_HEAD, total - TRACE_HEAD - TRACE_TAIL))
         } else {
@@ -401,7 +420,9 @@ impl Runtime {
                 s.push_str("\n\t(...tail calls...)");
             }
         }
-        s.push_str("\n\t[C]: in ?");
+        if host {
+            s.push_str("\n\t[C]: in ?");
+        }
         s
     }
 
@@ -503,9 +524,11 @@ impl Runtime {
 fn is_activation(k: FrameKind) -> bool {
     match k {
         FrameKind::Lua { .. } | FrameKind::Native { .. } | FrameKind::NativeCall { .. } => true,
-        FrameKind::Meta { .. } | FrameKind::Handler | FrameKind::Boundary | FrameKind::CoBase => {
-            false
-        }
+        FrameKind::Meta { .. }
+        | FrameKind::Handler
+        | FrameKind::Boundary
+        | FrameKind::CoBase
+        | FrameKind::Hook => false,
     }
 }
 
@@ -515,9 +538,11 @@ fn frame_func(stack: &Stack, i: usize) -> Value {
     match f.kind {
         FrameKind::Lua { closure, .. } => Value::Closure(closure),
         FrameKind::Native { id, .. } | FrameKind::NativeCall { id } => Value::Native(id),
-        FrameKind::Meta { .. } | FrameKind::Handler | FrameKind::Boundary | FrameKind::CoBase => {
-            Value::Nil
-        }
+        FrameKind::Meta { .. }
+        | FrameKind::Handler
+        | FrameKind::Boundary
+        | FrameKind::CoBase
+        | FrameKind::Hook => Value::Nil,
     }
 }
 
@@ -533,6 +558,49 @@ fn pc_line(proto: &Proto, pc: u32) -> i64 {
 /// The named locals live at `pc`, in declaration order (parameters first),
 /// with their slots. A vararg function's hidden vararg table follows its
 /// parameters, as in the reference.
+/// For the locals in scope at `pc`: how many there are, and the register
+/// of the first temporary. Every local reserves a register from the bottom
+/// of the window, even one kept in a cell, so the first temporary is past
+/// both the highest named register and the count of locals with a slot
+/// (the synthesized vararg table has none).
+fn temporaries(proto: &Proto, pc: u32) -> (usize, usize) {
+    let mut count = 0;
+    let mut with_slot = 0;
+    let mut top = proto.code.nparams as usize;
+    for (_, slot) in active_locals(proto, pc) {
+        count += 1;
+        match slot {
+            Some(LocalSlot::Reg(r)) => {
+                with_slot += 1;
+                top = top.max(r as usize + 1);
+            }
+            Some(LocalSlot::Cell(_)) => with_slot += 1,
+            None => {}
+        }
+    }
+    (count, top.max(with_slot))
+}
+
+impl Runtime {
+    /// The `getlocal` index that reads register `reg` of Lua frame `fi`
+    /// (for `getinfo`'s `ftransfer`).
+    pub(crate) fn register_local(&self, heap: &LuaHeap, fi: usize, reg: usize) -> u32 {
+        let f = &self.stack.frames[fi];
+        let FrameKind::Lua { closure, .. } = f.kind else {
+            return reg as u32 + 1;
+        };
+        let proto = heap.get(heap.get(closure).proto);
+        let pc = f.pc.saturating_sub(1);
+        let (count, first_free) = temporaries(proto, pc);
+        if reg >= first_free {
+            return (count + reg - first_free + 1) as u32;
+        }
+        active_locals(proto, pc)
+            .position(|(_, s)| s == Some(LocalSlot::Reg(reg as u8)))
+            .map_or(reg as u32 + 1, |i| i as u32 + 1)
+    }
+}
+
 fn active_locals(
     proto: &Proto,
     pc: u32,
@@ -641,6 +709,51 @@ pub(crate) fn deopt_self(heap: &mut LuaHeap, f: Gc<Closure>, cap: u8) {
 
 /// The debug library's view of the VM.
 impl crate::NativeCtx<'_> {
+    /// Set this stack's hook: `mask` is [`crate::hook::CALL`] and friends,
+    /// `count` the count interval (count events only when positive). A nil
+    /// `f` or an empty mask with no count turns it off.
+    pub fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
+        self.rt.stack.hook.set(f, mask, count);
+    }
+
+    /// This stack's hook: function (nil when off), event mask without the
+    /// count bit, and count.
+    pub fn hook(&self) -> (Value, u8, i64) {
+        let h = &self.rt.stack.hook;
+        use crate::hook::{CALL, LINE, RETURN};
+        (h.func, h.mask & (CALL | RETURN | LINE), h.base_count)
+    }
+
+    /// `getinfo`'s `ftransfer` and `ntransfer` for `l`: the values a call or
+    /// return hook running for `l` transfers, else 0 and 0.
+    pub fn transfer(&self, l: Level) -> (u32, u32) {
+        match (l.0, self.rt.stack.hook.transfer) {
+            (LevelAt::Frame(i), Some((fi, first, n))) if i == fi => (first, n),
+            _ => (0, 0),
+        }
+    }
+
+    /// Activation `n` of a stack [`NativeCtx::on_thread`] put in place
+    /// (`foreign`), where level 0 is its top activation, or of the running
+    /// stack ([`NativeCtx::level`]).
+    pub fn level_in(&self, foreign: bool, n: usize) -> Option<Level> {
+        if foreign {
+            self.rt.level(None, n + 1)
+        } else {
+            self.level(n)
+        }
+    }
+
+    /// [`NativeCtx::traceback`] for a stack `on_thread` put in place
+    /// (`foreign`), whose levels start at 0 for its top activation.
+    pub fn traceback_in(&self, foreign: bool, from: usize) -> String {
+        if foreign {
+            self.rt.traceback(self.heap, None, from + 1)
+        } else {
+            self.traceback(from)
+        }
+    }
+
     /// Activation `n`: 0 is this native, 1 its caller, and so on.
     pub fn level(&self, n: usize) -> Option<Level> {
         self.rt.level(Some(self.running_native()), n)

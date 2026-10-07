@@ -38,6 +38,14 @@ struct Entered {
     code_id: usize,
 }
 
+/// How a run of one dispatch loop instantiation ended.
+pub(crate) enum Ran {
+    /// The frame stack is back at the level the run started from.
+    Done,
+    /// A hook was armed or disarmed: continue in the other loop.
+    Switch,
+}
+
 /// What the dispatch loop does next.
 pub(crate) enum Flow {
     /// The top frame changed (or its registers were touched by a call):
@@ -106,12 +114,18 @@ impl Vm {
                 if chain > 0 {
                     self.rt.stack.frames.last_mut().expect("frame").extra = chain as u8;
                 }
+                if self.rt.stack.hook.armed() {
+                    self.rt.stack.hook.call_pending = Some(false);
+                }
                 Ok(Flow::Reload)
             }
             Value::Native(id) => {
                 // The native's window ends at `top` (natives never shrink
                 // the stack, so returning to Lua needn't refill a window).
                 self.rt.top = func + 1 + nargs;
+                if self.rt.stack.hook.wants(crate::hook::CALL) {
+                    self.native_call_hook(func, nargs, id).map_err(Exc::Lua)?;
+                }
                 let f = self.rt.natives[id.0 as usize].f;
                 let mut ctx = NativeCtx {
                     heap: &mut self.heap,
@@ -125,6 +139,11 @@ impl Vm {
                     Ok(r) => r,
                     Err(e) => return Err(self.native_raised(id, func, e)),
                 };
+                if let NativeReturn::Return(n) = r
+                    && self.rt.stack.hook.wants(crate::hook::RETURN)
+                {
+                    self.native_return_hook(func, id, n).map_err(Exc::Lua)?;
+                }
                 self.native_returned(r, None, func, want, id)
             }
             _ => unreachable!("a function"),
@@ -340,6 +359,10 @@ impl Vm {
             FrameKind::Meta { .. } => self.meta_returned(),
             FrameKind::Handler => self.handler_returned(),
             FrameKind::NativeCall { .. } => unreachable!("a running native returns itself"),
+            FrameKind::Hook => {
+                self.rt.stack.frames.pop();
+                Ok(Flow::Done)
+            }
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
                 let mut ctx = NativeCtx {
@@ -369,6 +392,12 @@ impl Vm {
         match r {
             NativeReturn::Return(n) => {
                 if frame.is_some() {
+                    if self.rt.stack.hook.wants(crate::hook::RETURN) {
+                        let fi = self.rt.stack.frames.len() - 1;
+                        let first = self.rt.top - n - func;
+                        self.call_hook(b"return", None, Some((fi, first as u32, n as u32)))
+                            .map_err(Exc::Lua)?;
+                    }
                     self.rt.stack.frames.pop();
                 }
                 let src = self.rt.top - n;
@@ -458,7 +487,7 @@ impl Vm {
                 unreachable!("metamethod requests are finished by `raise`")
             }
             Exc::Rt(msg, operand) => {
-                let mut text = self.rt.where_(&self.heap, None, 1);
+                let mut text = self.rt.error_where(&self.heap, 1);
                 text.push_str(&msg);
                 if let Some(op) = operand
                     && let Some(f) = self.rt.stack.frames.last()
@@ -528,6 +557,7 @@ impl Vm {
                                 ..
                             } | FrameKind::Boundary
                                 | FrameKind::CoBase
+                                | FrameKind::Hook
                         )
                     })
                     .expect("a boundary below every running frame")
@@ -572,7 +602,7 @@ impl Vm {
                 && let Some(&t) = self.rt.stack.tbc.last()
                 && limit.is_some_and(|l| t >= l)
             {
-                if matches!(f.kind, FrameKind::Boundary)
+                if matches!(f.kind, FrameKind::Boundary | FrameKind::Hook)
                     && e.traceback.is_none()
                     && self.rt.unwind_traceback.is_none()
                 {
@@ -601,8 +631,9 @@ impl Vm {
                         Err(x) => e = self.make_error(x),
                     }
                 }
-                FrameKind::Boundary => {
-                    // The error leaves the VM.
+                FrameKind::Boundary | FrameKind::Hook => {
+                    // The error leaves the VM (or the hook call, which raises
+                    // it again where the hook was called).
                     let taken = self.rt.unwind_traceback.take();
                     if e.traceback.is_none() {
                         e.traceback =
@@ -753,9 +784,30 @@ impl Vm {
         Err(Exc::Lua(LuaError::new(v)))
     }
 
-    /// The dispatch loop. Runs the top frame (a Lua frame) and everything it
-    /// calls until the frame stack is back to `stop` frames.
+    /// Run the top frame (a Lua frame) and everything it calls until it
+    /// returns into a boundary, in the plain or the hooked
+    /// dispatch loop as the stack's hook requires.
     pub(crate) fn run(&mut self) -> Result<(), LuaError> {
+        loop {
+            #[cfg(feature = "hooks")]
+            let ran = if self.rt.stack.hook.armed() {
+                self.run_loop::<true>()?
+            } else {
+                self.run_loop::<false>()?
+            };
+            #[cfg(not(feature = "hooks"))]
+            let ran = self.run_loop::<false>()?;
+            match ran {
+                Ran::Done => return Ok(()),
+                Ran::Switch => {}
+            }
+        }
+    }
+
+    /// The dispatch loop. `HOOKED` adds a hook point before each
+    /// instruction ([`crate::hook`]); either loop returns
+    /// [`Ran::Switch`] when the hook's state no longer matches it.
+    fn run_loop<const HOOKED: bool>(&mut self) -> Result<Ran, LuaError> {
         // The running function's code, constants and caches. Returning to or
         // calling the same function (recursion) keeps the `Rc` instead of
         // cloning it again; holding it keeps the allocation alive, so pointer
@@ -767,6 +819,9 @@ impl Vm {
         'reload: loop {
             // The running frame's state. Lua-to-Lua calls and returns switch
             // it in place; everything else comes back through `'reload`.
+            if self.rt.stack.hook.armed() != HOOKED {
+                return Ok(Ran::Switch);
+            }
             let mut depth = self.rt.stack.frames.len();
             let frame = &self.rt.stack.frames[depth - 1];
             let FrameKind::Lua {
@@ -863,7 +918,7 @@ impl Vm {
                             self.rt.switched = false;
                             continue 'reload;
                         }
-                        Ok(Flow::Done) => return Ok(()),
+                        Ok(Flow::Done) => return Ok(Ran::Done),
                         Err(e) => return Err(e),
                     }
                 }};
@@ -884,7 +939,7 @@ impl Vm {
                             self.rt.switched = false;
                             continue 'reload;
                         }
-                        Ok(Flow::Done) => return Ok(()),
+                        Ok(Flow::Done) => return Ok(Ran::Done),
                         Err(x) => throw!(x),
                     }
                 };
@@ -931,9 +986,20 @@ impl Vm {
                 };
             }
             macro_rules! jump {
-                ($off:expr) => {
-                    pc = (pc as isize + $off as isize) as usize
-                };
+                ($off:expr) => {{
+                    pc = (pc as isize + $off as isize) as usize;
+                    #[cfg(feature = "hooks")]
+                    if !HOOKED
+                        && $off < 0
+                        && self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        // An interrupt was requested ([`crate::Interrupt`]): the
+                        // hooked loop raises it before the jump's target.
+                        self.rt.stack.frames[depth - 1].pc = pc as u32;
+                        self.rt.stack.hook.mask |= crate::hook::INTERRUPT;
+                        return Ok(Ran::Switch);
+                    }
+                }};
             }
             macro_rules! arith {
                 ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {{
@@ -1065,6 +1131,9 @@ impl Vm {
                                 self.callee_shape(c)
                             };
                             let e = tri!(enter_lua_frame(&mut self.rt, shape, c, fa, n, want));
+                            if HOOKED {
+                                self.rt.stack.hook.call_pending = Some(false);
+                            }
                             depth += 1;
                             closure = c;
                             base = e.base;
@@ -1075,7 +1144,8 @@ impl Vm {
                         // A native's fast path, when it has one and takes
                         // these arguments: no window, no frame.
                         Value::Native(id)
-                            if (want <= 1 || want == MULTI)
+                            if !HOOKED
+                                && (want <= 1 || want == MULTI)
                                 && let Some(fast) = self.rt.natives[id.0 as usize].fast
                                 && let Some(v) = w.get(f + 1..f + 1 + n).and_then(fast) =>
                         {
@@ -1086,6 +1156,10 @@ impl Vm {
                         }
                         _ => match self.call_value(fa, n, want) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
+                                // The native may have set or cleared a hook.
+                                if self.rt.stack.hook.armed() != HOOKED {
+                                    return Ok(Ran::Switch);
+                                }
                                 w = window!();
                                 safepoint!();
                             }
@@ -1098,6 +1172,19 @@ impl Vm {
             loop {
                 let op = code[pc];
                 pc += 1;
+                if HOOKED {
+                    self.rt.stack.frames[depth - 1].pc = pc as u32;
+                    if let Err(e) = self.hook_point(pc - 1, op) {
+                        throw!(Exc::Lua(e));
+                    }
+                    if !self.rt.stack.hook.armed() {
+                        // The hook was turned off: run this instruction in
+                        // the plain loop.
+                        self.rt.stack.frames[depth - 1].pc = pc as u32 - 1;
+                        return Ok(Ran::Switch);
+                    }
+                    w = window!();
+                }
                 match op {
                     // Numbers are copied by parts: the source was usually
                     // just written that way, and a whole 16-byte load would
@@ -1507,6 +1594,9 @@ impl Vm {
                                 throw!(x);
                             }
                             self.rt.stack.frames.last_mut().expect("frame").tail = true;
+                            if HOOKED {
+                                self.rt.stack.hook.call_pending = Some(true);
+                            }
                             continue 'reload;
                         }
                         // A native in tail position: an ordinary call whose
