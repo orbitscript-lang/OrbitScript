@@ -6,3 +6,8 @@ c1_global.lua
 c1_goto.lua
 c1_hexfloat.lua
 c1_vararg.lua
+c4_gc_close.lua
+c4_gc_close_error.lua
+c4_gc_collectgarbage.lua
+c4_gc_finalizers.lua
+c4_gc_weak.lua
