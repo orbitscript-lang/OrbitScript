@@ -46,6 +46,9 @@ pub struct Entry {
     /// Line ranges disabled when the C test libraries are absent
     /// (`needs-clibs=250-253`).
     pub needs_clibs: Vec<(usize, usize)>,
+    /// Line ranges that check a documented deviation (tests/lua-5.5/DEVIATIONS.md), always
+    /// disabled (`deviates=329`).
+    pub deviates: Vec<(usize, usize)>,
     pub timeout: Option<Duration>,
     /// Skipped under `--soft`, as all.lua does for big.lua (`not-soft`).
     pub not_soft: bool,
@@ -67,6 +70,7 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>> {
             set: Vec::new(),
             yields: Vec::new(),
             needs_clibs: Vec::new(),
+            deviates: Vec::new(),
             timeout: None,
             not_soft: false,
             skip: None,
@@ -83,10 +87,12 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>> {
                     e.timeout = Some(Duration::from_secs(s));
                 }
                 Some(("needs-clibs", v)) => {
-                    let (a, b) = v.split_once('-').unwrap_or((v, v));
-                    let range = a.parse().ok().zip(b.parse().ok());
-                    let (a, b) = range.ok_or_else(|| err(format!("bad line range {v:?}")))?;
-                    e.needs_clibs.push((a, b));
+                    e.needs_clibs
+                        .push(line_range(v).ok_or_else(|| err(format!("bad line range {v:?}")))?);
+                }
+                Some(("deviates", v)) => {
+                    e.deviates
+                        .push(line_range(v).ok_or_else(|| err(format!("bad line range {v:?}")))?);
                 }
                 _ => return Err(err(format!("unknown option {opt:?}"))),
             }
@@ -97,6 +103,12 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>> {
         entries.push(e);
     }
     Ok(entries)
+}
+
+/// `A-B` or a single line `A`.
+fn line_range(v: &str) -> Option<(usize, usize)> {
+    let (a, b) = v.split_once('-').unwrap_or((v, v));
+    a.parse().ok().zip(b.parse().ok())
 }
 
 /// Marker the driver prints after the suite file returns.
@@ -151,12 +163,12 @@ pub fn driver_source(entry: &Entry, flags: Flags) -> String {
 }
 
 /// Comments out 1-based inclusive line ranges, keeping line numbers intact.
-pub fn disable_lines(source: &str, ranges: &[(usize, usize)]) -> String {
+pub fn disable_lines(source: &str, ranges: &[(usize, usize)], why: &str) -> String {
     let mut out = String::with_capacity(source.len() + 64);
     for (i, line) in source.split_inclusive('\n').enumerate() {
         let n = i + 1;
         if ranges.iter().any(|&(a, b)| (a..=b).contains(&n)) {
-            out.push_str("-- [orbit-testkit: needs C library] ");
+            out.push_str(&format!("-- [orbit-testkit: {why}] "));
         }
         out.push_str(line);
     }
@@ -427,10 +439,15 @@ fn run_entry(e: &Entry, interp: &Path, suite_dir: &Path, opts: &Options) -> Resu
     if r.skipped.is_some() {
         return Ok(r);
     }
-    if opts.c_libs.is_none() && !e.needs_clibs.is_empty() {
+    let needs_clibs = opts.c_libs.is_none() && !e.needs_clibs.is_empty();
+    if needs_clibs || !e.deviates.is_empty() {
         let path = suite_dir.join(&e.file);
-        let src = fs::read_to_string(&path).map_err(io_err(path.display()))?;
-        fs::write(&path, disable_lines(&src, &e.needs_clibs)).map_err(io_err(path.display()))?;
+        let mut src = fs::read_to_string(&path).map_err(io_err(path.display()))?;
+        if needs_clibs {
+            src = disable_lines(&src, &e.needs_clibs, "needs C library");
+        }
+        src = disable_lines(&src, &e.deviates, "deviation");
+        fs::write(&path, src).map_err(io_err(path.display()))?;
     }
     let driver = format!("__testkit_{}", e.file);
     fs::write(suite_dir.join(&driver), driver_source(e, opts.flags)).map_err(io_err(&driver))?;
@@ -566,7 +583,7 @@ mod tests {
              gc.lua\n\
              big.lua  yields=b,a timeout=60 not-soft  # as all.lua runs it\n\
              all.lua  set=_U\n\
-             main.lua needs-clibs=250-253 needs-clibs=7\n\
+             main.lua needs-clibs=250-253 needs-clibs=7 deviates=9\n\
              heavy.lua skip  # needs gigabytes\n",
         )
         .unwrap();
@@ -576,6 +593,7 @@ mod tests {
         assert!(m[1].not_soft && !m[0].not_soft);
         assert_eq!(m[2].set, ["_U"]);
         assert_eq!(m[3].needs_clibs, [(250, 253), (7, 7)]);
+        assert_eq!(m[3].deviates, [(9, 9)]);
         assert_eq!(m[4].skip.as_deref(), Some("needs gigabytes"));
     }
 
@@ -584,6 +602,7 @@ mod tests {
         assert!(parse_manifest("x.lua frobnicate").is_err());
         assert!(parse_manifest("x.lua skip").is_err());
         assert!(parse_manifest("x.lua needs-clibs=a-b").is_err());
+        assert!(parse_manifest("x.lua deviates=1-").is_err());
     }
 
     #[test]
@@ -599,7 +618,7 @@ mod tests {
     #[test]
     fn disables_ranges_in_place() {
         let src = "a\nb\nc\nd";
-        let out = disable_lines(src, &[(2, 3)]);
+        let out = disable_lines(src, &[(2, 3)], "test");
         assert_eq!(out.lines().count(), 4);
         assert!(out.lines().nth(1).unwrap().starts_with("-- "));
         assert!(out.lines().nth(2).unwrap().ends_with("c"));

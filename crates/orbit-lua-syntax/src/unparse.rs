@@ -147,6 +147,7 @@ impl Printer<'_> {
                 limit,
                 step,
                 body,
+                ..
             } => {
                 self.w("for ");
                 self.name(var.sym);
@@ -281,13 +282,15 @@ impl Printer<'_> {
                 self.expr(key);
                 self.w("]");
             }
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call { callee, args, .. } => {
                 self.expr(callee);
                 self.w("(");
                 self.exprs(args);
                 self.w(")");
             }
-            ExprKind::Method { obj, name, args } => {
+            ExprKind::Method {
+                obj, name, args, ..
+            } => {
                 self.expr(obj);
                 self.w(":");
                 self.name(name.sym);
@@ -322,7 +325,7 @@ impl Printer<'_> {
                 }
                 self.w("}");
             }
-            ExprKind::Binary { op, lhs, rhs } => {
+            ExprKind::Binary { op, lhs, rhs, .. } => {
                 self.w("(");
                 self.expr(lhs);
                 self.w(" ");

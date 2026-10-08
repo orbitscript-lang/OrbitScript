@@ -212,7 +212,7 @@ fn parse_in_base(s: &[u8], base: u32) -> Option<i64> {
     let end = s.iter().rposition(|b| !is_space(b))? + 1;
     let mut s = &s[start..end];
     let neg = s.first() == Some(&b'-');
-    if neg {
+    if neg || s.first() == Some(&b'+') {
         s = &s[1..];
     }
     if s.is_empty() {
@@ -461,8 +461,9 @@ fn assert(ctx: &mut NativeCtx<'_>) -> R {
         let msg = ctx.arg(1);
         return Err(ctx.error_value(msg));
     }
-    let msg = ctx.new_str(b"assertion failed!");
-    Err(ctx.error_value(msg))
+    // Like other library errors, the default message names the caller's
+    // position (none when called straight from a native such as `pcall`).
+    Err(ctx.error("assertion failed!"))
 }
 
 fn rawequal(ctx: &mut NativeCtx<'_>) -> R {
