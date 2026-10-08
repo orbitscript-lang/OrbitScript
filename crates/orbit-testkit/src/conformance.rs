@@ -47,7 +47,7 @@ pub struct Entry {
     /// (`needs-clibs=250-253`).
     pub needs_clibs: Vec<(usize, usize)>,
     /// Line ranges that check a documented deviation (tests/lua-5.5/DEVIATIONS.md), always
-    /// disabled (`deviates=329`).
+    /// disabled (`deviates=331`).
     pub deviates: Vec<(usize, usize)>,
     pub timeout: Option<Duration>,
     /// Skipped under `--soft`, as all.lua does for big.lua (`not-soft`).

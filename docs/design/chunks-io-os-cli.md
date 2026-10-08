@@ -82,9 +82,12 @@ Decision 4 of the compatibility plan: our own format, and a verifier that runs o
 u8  format version    bumped whenever the encoding or the instruction set changes
 u8  flags             bit 0: stripped
 ... the UnlinkedChunk: chunk name, then each prototype in order
+u32 checksum          FNV-1a of every byte before it, little-endian
 ```
 
-Integers are LEB128 varints (zig-zag for signed), floats their IEEE bits, strings a length and bytes. Each `Op` is a tag byte and its operands. Encoding is little-endian and size-independent, so a chunk dumped on x86_64 loads on aarch64.
+Integers are LEB128 varints (zig-zag for signed), floats their IEEE bits, strings a length and bytes. A string constant equal to one already written in the chunk is a back-reference to it, so a long string that several functions share is stored once (the suite's `calls.lua` checks this). Each `Op` is a tag byte and its operands. Encoding is little-endian and size-independent, so a chunk dumped on x86_64 loads on aarch64.
+
+The checksum makes any single damaged byte fail to load (`bad binary format (malformed chunk: checksum mismatch)`), as lua5.5's header checks do for its header; `calls.lua` damages each header byte in turn. Version 2 added it, the string back-references and `LoadConstX`.
 
 `string.dump(f, strip)` rebuilds an `UnlinkedChunk` from the closure's linked `Proto` tree (code, constants with strings turned back into bytes, children, captures, debug info) and encodes it; `strip` drops lines, locals, capture names and operand origins. The dumped function becomes the main function, keeping its capture count. Natives can't be dumped: `unable to dump given function`.
 
