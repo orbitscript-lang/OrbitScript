@@ -45,10 +45,13 @@ pub fn set_level(vm: &mut Vm, level: Option<Level>) {
 
 /// The level `load` uses.
 #[cfg(feature = "verify")]
-pub(crate) fn level(ctx: &mut orbit_vm::NativeCtx<'_>) -> Option<Level> {
+pub(crate) fn level(
+    heap: &mut orbit_vm::orbit_core::LuaHeap,
+    rt: &mut orbit_vm::Runtime,
+) -> Option<Level> {
     use orbit_vm::orbit_core::table as tbl;
-    let k = ctx.new_str(KEY);
-    match tbl::get(ctx.heap, ctx.rt.registry, k) {
+    let k = Value::Str(rt.strings.new_str(heap, KEY));
+    match tbl::get(heap, rt.registry, k) {
         Value::Int(0) => None,
         Value::Int(1) => Some(Level::Structure),
         _ => strongest(),

@@ -40,7 +40,7 @@ mod utf8;
 use orbit_vm::{NativeFn, Vm};
 
 #[cfg(feature = "load")]
-pub use load::{BINARY_SIGNATURE, chunk_id, read_chunk_file};
+pub use load::{BINARY_SIGNATURE, chunk_id, load_buffer, read_chunk_file};
 
 /// The first result of a call a native requested with `CallThen` (nil if
 /// none); the call's results are dropped from the window.
@@ -63,9 +63,22 @@ pub(crate) fn first_result(
     Ok(v)
 }
 
+/// How [`open_libs_with`] sets the libraries up.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Options {
+    /// Ignore environment variables (`LUA_PATH`, `LUA_CPATH` and their
+    /// versioned forms, `ORBIT_VERIFY`), as `lua -E` does.
+    pub ignore_env: bool,
+}
+
+/// Open every library with default [`Options`].
+pub fn open_libs(vm: &mut Vm) {
+    open_libs_with(vm, Options::default());
+}
+
 /// Open every library this build has: base functions as globals, plus the
 /// library tables.
-pub fn open_libs(vm: &mut Vm) {
+pub fn open_libs_with(vm: &mut Vm, options: Options) {
     base::open(vm);
     #[cfg(feature = "load")]
     for &(name, f) in load::FUNCTIONS {
@@ -99,7 +112,7 @@ pub fn open_libs(vm: &mut Vm) {
     #[cfg(feature = "io")]
     io::open(vm);
     #[cfg(feature = "package")]
-    package::open(vm);
+    package::open(vm, options.ignore_env);
     #[cfg(feature = "coroutine")]
     open_lib(vm, "coroutine", coroutine::FUNCTIONS);
     #[cfg(feature = "debug")]
@@ -108,9 +121,25 @@ pub fn open_libs(vm: &mut Vm) {
         debug::open(vm);
     }
     #[cfg(feature = "dump")]
-    checks::set_level(vm, checks::from_env());
+    checks::set_level(
+        vm,
+        if options.ignore_env {
+            checks::strongest()
+        } else {
+            checks::from_env()
+        },
+    );
+    let _ = options;
     let g = vm.rt.globals;
     mark_loaded(vm, "_G", orbit_vm::orbit_core::Value::Table(g));
+}
+
+/// Flush every open file's buffer and `print`'s output, as closing the
+/// state does at exit.
+pub fn flush_files(vm: &mut Vm) {
+    #[cfg(feature = "io")]
+    io::flush_all(&mut *vm.rt.out);
+    let _ = vm.flush();
 }
 
 /// Registry key of the table `require` keeps loaded modules in

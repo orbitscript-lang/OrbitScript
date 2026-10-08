@@ -47,11 +47,15 @@ fn reg_get(ctx: &mut NativeCtx<'_>, key: &[u8]) -> Value {
 
 /// A search path from the environment (`LUA_PATH_5_5`, then `LUA_PATH`),
 /// with `;;` replaced by the default, or the default.
-fn env_path(versioned: &str, plain: &str, default: &str) -> String {
-    let Some(v) = std::env::var(versioned)
-        .ok()
-        .or_else(|| std::env::var(plain).ok())
-    else {
+fn env_path(versioned: &str, plain: &str, default: &str, ignore_env: bool) -> String {
+    let v = if ignore_env {
+        None
+    } else {
+        std::env::var(versioned)
+            .ok()
+            .or_else(|| std::env::var(plain).ok())
+    };
+    let Some(v) = v else {
         return default.to_string();
     };
     match v.find(";;") {
@@ -73,17 +77,17 @@ fn env_path(versioned: &str, plain: &str, default: &str) -> String {
 }
 
 /// Open `package` and the global `require`.
-pub(crate) fn open(vm: &mut Vm) {
+pub(crate) fn open(vm: &mut Vm, ignore_env: bool) {
     let pkg = crate::open_lib(vm, "package", FUNCTIONS);
     vm.pin(Value::Table(pkg));
     let set = |vm: &mut Vm, k: &str, v: Value| {
         let k = vm.new_str(k.as_bytes());
         vm.table_set(pkg, k, v);
     };
-    let path = env_path("LUA_PATH_5_5", "LUA_PATH", DEFAULT_PATH);
+    let path = env_path("LUA_PATH_5_5", "LUA_PATH", DEFAULT_PATH, ignore_env);
     let v = vm.new_str(path.as_bytes());
     set(vm, "path", v);
-    let cpath = env_path("LUA_CPATH_5_5", "LUA_CPATH", DEFAULT_CPATH);
+    let cpath = env_path("LUA_CPATH_5_5", "LUA_CPATH", DEFAULT_CPATH, ignore_env);
     let v = vm.new_str(cpath.as_bytes());
     set(vm, "cpath", v);
     let config = format!("{DIRSEP}\n;\n?\n!\n-\n");

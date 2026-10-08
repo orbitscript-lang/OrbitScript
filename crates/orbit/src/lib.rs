@@ -11,14 +11,18 @@ use std::fmt;
 use orbit_compiler::bytecode::UnlinkedChunk;
 use orbit_lua_syntax::ParseOptions;
 
+pub use orbit_core;
 pub use orbit_core::Value;
+pub use orbit_stdlib::Options;
 /// How much `load` checks binary chunks (features `verify`, `verify-flow`;
 /// `ORBIT_VERIFY`).
 #[cfg(feature = "dump")]
 pub use orbit_stdlib::checks;
 #[cfg(feature = "load")]
 pub use orbit_stdlib::{chunk_id, read_chunk_file};
-pub use orbit_vm::{GcMode, LuaError, Vm};
+#[cfg(feature = "debug")]
+pub use orbit_vm::Interrupt;
+pub use orbit_vm::{CallOutcome, Event, GcMode, LuaError, NativeCtx, NativeReturn, Vm};
 
 /// The runtime version, taken from the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -89,9 +93,14 @@ impl Default for Lua {
 
 impl Lua {
     pub fn new() -> Self {
+        Lua::with_options(Options::default())
+    }
+
+    /// [`Lua::new`] with library [`Options`].
+    pub fn with_options(options: Options) -> Self {
         let mut vm = Vm::new();
         vm.rt.compile = Some(compile_lua);
-        orbit_stdlib::open_libs(&mut vm);
+        orbit_stdlib::open_libs_with(&mut vm, options);
         Lua { vm }
     }
 
@@ -115,6 +124,19 @@ impl Lua {
     ) -> Result<Value, Error> {
         let chunk = compile(src, chunk_name, options)?;
         Ok(self.vm.load(&chunk))
+    }
+
+    #[cfg(feature = "load")]
+    /// Load `bytes`, source text or a binary chunk, as a chunk whose Lua
+    /// source name is `source` (`@file`, `=name`), as `loadfile` would. The
+    /// function is unrooted.
+    pub fn load_buffer(&mut self, bytes: &[u8], source: &[u8]) -> Result<Value, Error> {
+        orbit_stdlib::load_buffer(&mut self.vm, bytes, source).map_err(Error::Syntax)
+    }
+
+    /// Flush open files and `print` output, as closing the state does.
+    pub fn flush_files(&mut self) {
+        orbit_stdlib::flush_files(&mut self.vm);
     }
 
     /// Call a function.

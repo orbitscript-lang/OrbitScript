@@ -68,3 +68,19 @@ Suite: `db.lua` 603 expects a count hook with interval 1 to fire fewer than 1012
 Why: Rust's standard library can't seek its standard streams, and reopening the file behind them would need `unsafe` or platform paths such as `/dev/stdin`, which behave differently.
 
 Suite: `files.lua` seeks `io.stdin` only to check that a seek can fail.
+
+## `orbit -v` names OrbitScript
+
+The banner (`-v`, and interactive mode) reads `OrbitScript <version>  implements Lua 5.5.1, designed by Lua.org, PUC-Rio`, where lua5.5 prints `Lua 5.5.1  Copyright (C) 1994-2026 Lua.org, PUC-Rio`.
+
+Why: it's a different program; claiming Lua.org's copyright line for it would be wrong. The banner keeps the two things scripts look for: the `Lua 5.5.1` release and the line ending in `PUC-Rio`.
+
+Suite: `main.lua` reads the release with `"Lua (%d+%.%d+%.%d+)"` and checks that `PUC-Rio` ends the line; both hold.
+
+## No line editing in interactive mode
+
+Interactive mode reads plain lines from standard input: no history and no editing keys. `LUA_READLINELIB` always gets the warning lua5.5 gives for a library it can't load.
+
+Why: line editing would be the CLI's only dependency.
+
+Suite: `main.lua` checks the warning, which holds.
