@@ -8,11 +8,20 @@
 use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};
 
+use std::collections::HashSet;
+
 use crate::ast::{self, Ast, AttribKind, ExprKind, Field, StmtKind};
 use crate::diag::Diagnostic;
+use crate::lexer::Lexer;
+use crate::parser::near_token;
+
+/// Most upvalues one function may have, as in lua5.5 (`_ENV` counts when the function uses a
+/// global).
+const MAX_UPVALUES: usize = 255;
 
 /// Lowers a parsed chunk to HIR, before the HIR's shared analysis (`orbit_hir::analyze`).
-pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
+/// `src` is the chunk's source text, which error messages quote.
+pub fn lower(ast: Ast, src: &[u8]) -> Result<hir::Chunk, Diagnostic> {
     let Ast {
         chunk,
         strings,
@@ -25,6 +34,7 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
             functions: Vec::new(),
         },
         funcs: Vec::new(),
+        src,
         sym_self: StrId(0),
         sym_env: StrId(0),
     };
@@ -42,6 +52,8 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
 struct FnCtx {
     id: FuncId,
     f: hir::Function,
+    /// The enclosing functions' variables this one uses, as lua5.5 counts its upvalues.
+    upvalues: HashSet<Upvalue>,
     /// Innermost last. Each scope lists the declarations made in it, in order.
     scopes: Vec<Vec<Entry>>,
     /// `goto` bookkeeping for each block being lowered, innermost last.
@@ -85,6 +97,14 @@ struct PendingGoto {
     index: usize,
 }
 
+/// A variable a function reaches in an enclosing function.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Upvalue {
+    /// The chunk's `_ENV`, used for globals.
+    Env,
+    Local(FuncId, LocalId),
+}
+
 /// One declaration in a scope.
 #[derive(Clone, Copy)]
 enum Entry {
@@ -100,10 +120,11 @@ enum Entry {
     },
 }
 
-struct Lowerer {
+struct Lowerer<'a> {
     chunk: hir::Chunk,
     /// Functions being lowered, innermost last.
     funcs: Vec<FnCtx>,
+    src: &'a [u8],
     sym_self: StrId,
     sym_env: StrId,
 }
@@ -134,7 +155,7 @@ enum Env {
     Declared,
 }
 
-impl Lowerer {
+impl Lowerer<'_> {
     // ---- functions, scopes and names ----------------------------------------------------------
 
     fn cur(&mut self) -> &mut FnCtx {
@@ -157,6 +178,7 @@ impl Lowerer {
         self.funcs.push(FnCtx {
             id,
             f,
+            upvalues: HashSet::new(),
             scopes: vec![Vec::new()],
             blocks: Vec::new(),
         });
@@ -297,6 +319,57 @@ impl Lowerer {
         }
     }
 
+    /// Records the upvalues a use of `name` gives the current function and the ones between it
+    /// and the variable's function, failing as lua5.5 does past [`MAX_UPVALUES`].
+    fn count_upvalues(&mut self, name: ast::Name) -> LResult<()> {
+        let (upvalue, owner) = match self.resolve(name.sym) {
+            Resolved::Outer { func, local } => (Upvalue::Local(func, local), func),
+            Resolved::Global { .. } if name.sym != self.sym_env => match self.env() {
+                Env::Chunk => (Upvalue::Env, self.funcs[0].id),
+                Env::Local(hir::ExprKind::Outer { func, local }) => {
+                    (Upvalue::Local(func, local), func)
+                }
+                _ => return Ok(()),
+            },
+            Resolved::Global { .. } => (Upvalue::Env, self.funcs[0].id),
+            _ => return Ok(()),
+        };
+        let from = self
+            .funcs
+            .iter()
+            .position(|c| c.id == owner)
+            .expect("enclosing function")
+            + 1;
+        // Outermost first: that is the function lua5.5 reports.
+        for depth in from..self.funcs.len() {
+            let ctx = &mut self.funcs[depth];
+            if ctx.upvalues.insert(upvalue) && ctx.upvalues.len() > MAX_UPVALUES {
+                let line = self.chunk.source.line_of(ctx.f.span.start);
+                let message = format!(
+                    "too many upvalues (limit is {MAX_UPVALUES}) in function at line {line}"
+                );
+                return Err(self.error_after(name.span, message));
+            }
+        }
+        Ok(())
+    }
+
+    /// An error near the token after `span`, as lua5.5 reports errors found once it has read
+    /// past a name.
+    fn error_after(&self, span: Span, message: String) -> Diagnostic {
+        let mut lx = Lexer::new(self.src);
+        lx.seek(span.end);
+        match lx.next_token() {
+            Ok(tok) => Diagnostic::new(
+                tok.span,
+                self.chunk.source.line_of(tok.span.start),
+                message,
+                Some(near_token(&lx, tok)),
+            ),
+            Err(_) => self.error(span, message),
+        }
+    }
+
     fn local_kind(&self, func: FuncId, local: LocalId) -> LocalKind {
         let ctx = self
             .funcs
@@ -308,6 +381,7 @@ impl Lowerer {
 
     /// The assignment target for a name, checking it isn't read-only.
     fn place_for_name(&mut self, name: ast::Name) -> LResult<hir::Place> {
+        self.count_upvalues(name)?;
         let current = self.cur().id;
         let (place, kind) = match self.resolve(name.sym) {
             Resolved::Local(l) => (hir::Place::Local(l), self.local_kind(current, l)),
@@ -918,6 +992,7 @@ impl Lowerer {
     }
 
     fn name_expr(&mut self, name: ast::Name) -> LResult<ExprId> {
+        self.count_upvalues(name)?;
         let kind = match self.resolve(name.sym) {
             Resolved::Local(l) => hir::ExprKind::Local(l),
             Resolved::Outer { func, local } => hir::ExprKind::Outer { func, local },

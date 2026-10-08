@@ -244,7 +244,7 @@ fn lowered_hir_verifies_before_and_after_analysis() {
         let src = std::fs::read(&path).unwrap();
         let name = path.display().to_string();
         let ast = parse(&name, &src).unwrap_or_else(|d| panic!("{}", d.to_lua_message(&name)));
-        let mut chunk = lower(ast).unwrap_or_else(|d| panic!("{}", d.to_lua_message(&name)));
+        let mut chunk = lower(ast, &src).unwrap_or_else(|d| panic!("{}", d.to_lua_message(&name)));
         orbit_hir::verify_lowered(&chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
         orbit_hir::analyze(&mut chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
         orbit_hir::verify(&chunk).unwrap_or_else(|e| panic!("{name}: {e}"));

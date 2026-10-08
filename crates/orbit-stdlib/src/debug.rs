@@ -331,8 +331,11 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
         _ => return Err(ctx.type_error(1, "nil or table")),
     };
     match v {
-        Value::Table(t) => ctx.heap.update(t, |t| t.meta = mt),
-        Value::UserData(u) => ctx.heap.update(u, |u| u.meta = mt),
+        // Through the collector's hook, so a `__gc` field registers the
+        // object for finalization as `setmetatable` does.
+        Value::Table(_) | Value::UserData(_) => {
+            orbit_vm::orbit_core::gc::set_metatable(ctx.heap, v, mt);
+        }
         v => ctx.rt.set_type_meta(v.tag(), mt),
     }
     ctx.truncate(1);
