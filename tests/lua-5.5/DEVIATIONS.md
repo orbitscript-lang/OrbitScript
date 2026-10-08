@@ -68,3 +68,11 @@ Suite: `db.lua` 603 expects a count hook with interval 1 to fire fewer than 1012
 Why: Rust's standard library can't seek its standard streams, and reopening the file behind them would need `unsafe` or platform paths such as `/dev/stdin`, which behave differently.
 
 Suite: `files.lua` seeks `io.stdin` only to check that a seek can fail.
+
+## Binary chunk layout
+
+`string.dump` writes OrbitScript's own binary format (`crates/orbit-bytecode/src/format.rs`): the signature `\27Orbit`, a format version, flags, the chunk, and a checksum. lua5.5's header instead starts `\27Lua`, a version byte 0x55 and a fixed run of size and test values (`int`, instruction, `lua_Integer`, `lua_Number`). Code that reads a dump's header with `string.unpack` sees different bytes. Like lua5.5, `load` rejects a chunk with any damaged header byte (the checksum covers every byte, not only the header) and reports a cut-short chunk as `truncated`.
+
+Why: the bytecode is our own (ADR-4), so a lua5.5 header would describe an instruction set and sizes that aren't ours. The format doesn't depend on the host's word size or byte order, so it needs no size or test fields.
+
+Suite: `calls.lua` 539-542 unpack a dump's header and compare it with lua5.5's values; the manifest disables those lines (`deviates=539-542`, see SKIPS.md).

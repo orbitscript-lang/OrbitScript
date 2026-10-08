@@ -6,17 +6,22 @@
 //!               instruction set changes
 //! u8            flags; bit 0: debug information stripped
 //! ...           the chunk name, then each prototype in order
+//! u32           FNV-1a checksum of every byte before it, little-endian
 //! ```
 //!
 //! Unsigned integers are LEB128 varints, signed ones zig-zag varints, floats
 //! their IEEE bits in 8 little-endian bytes, byte strings a length and the
-//! bytes. Each [`Op`] is a tag byte and its operands. Nothing depends on the
-//! host's word size or byte order.
+//! bytes. Each [`Op`] is a tag byte and its operands. A string constant
+//! equal to one written earlier in the chunk refers back to it. Nothing
+//! depends on the host's word size or byte order.
 //!
-//! Decoding checks only that the bytes spell an [`UnlinkedChunk`]; whether
-//! that chunk is safe to run is [`crate::verify`]'s job.
+//! The checksum catches a damaged chunk (any single changed byte) before it
+//! is loaded. Decoding checks only that the bytes spell an
+//! [`UnlinkedChunk`]; whether that chunk is safe to run is
+//! [`crate::verify`]'s job.
 
 use core::fmt;
+use std::collections::HashMap;
 
 use crate::{
     CaptureSource, Constant, DebugInfo, FunctionName, LocalInfo, LocalSlot, Op, OperandOrigin,
@@ -27,7 +32,7 @@ use crate::{
 pub const SIGNATURE: &[u8] = b"\x1bOrbit";
 
 /// The format version this build reads and writes.
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 const FLAG_STRIPPED: u8 = 1;
 
@@ -42,7 +47,7 @@ pub enum FormatError {
     /// Another format version.
     VersionMismatch,
     /// Something no encoder writes: an unknown tag, an out-of-range number,
-    /// bytes after the end.
+    /// bytes after the end, a checksum that doesn't match.
     Malformed(&'static str),
 }
 
@@ -69,10 +74,21 @@ pub fn encode(chunk: &UnlinkedChunk, strip: bool) -> Vec<u8> {
     w.bytes(if strip { b"?" } else { chunk.name.as_bytes() });
     w.bytes(if strip { b"=?" } else { &chunk.source });
     w.uint(chunk.protos.len() as u64);
+    let mut strings = HashMap::new();
     for p in &chunk.protos {
-        proto(&mut w, p, strip);
+        proto(&mut w, p, strip, &mut strings);
     }
+    let sum = checksum(&w.0);
+    w.0.extend_from_slice(&sum.to_le_bytes());
     w.0
+}
+
+/// 32-bit FNV-1a. Each step is a bijection of the state, so changing any
+/// one byte changes the result.
+fn checksum(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5, |h: u32, &b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// Decode a chunk [`encode`] wrote.
@@ -88,6 +104,7 @@ pub fn decode(bytes: &[u8]) -> Result<UnlinkedChunk> {
     let mut r = Reader {
         bytes,
         at: SIGNATURE.len(),
+        strings: Vec::new(),
     };
     if r.byte()? != VERSION {
         return Err(FormatError::VersionMismatch);
@@ -100,8 +117,16 @@ pub fn decode(bytes: &[u8]) -> Result<UnlinkedChunk> {
         .into_boxed_str();
     let source = r.bytes()?;
     let protos = r.list(read_proto)?;
+    let end = r.at;
+    let mut sum = [0; 4];
+    for b in &mut sum {
+        *b = r.byte()?;
+    }
     if r.at != bytes.len() {
         return Err(FormatError::Malformed("bytes after the chunk"));
+    }
+    if u32::from_le_bytes(sum) != checksum(&bytes[..end]) {
+        return Err(FormatError::Malformed("checksum mismatch"));
     }
     Ok(UnlinkedChunk {
         name,
@@ -138,6 +163,8 @@ impl Writer {
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// The string constants read so far, for back-references.
+    strings: Vec<Box<[u8]>>,
 }
 
 impl Reader<'_> {
@@ -363,10 +390,21 @@ pub fn encode_op(op: Op) -> Vec<u8> {
 
 /// Decode one instruction from the start of `bytes` (for tests and fuzzing).
 pub fn decode_op(bytes: &[u8]) -> Result<Op> {
-    get_op(&mut Reader { bytes, at: 0 })
+    get_op(&mut Reader {
+        bytes,
+        at: 0,
+        strings: Vec::new(),
+    })
 }
 
-fn proto(w: &mut Writer, p: &UnlinkedProto, strip: bool) {
+/// `strings` maps each string constant written so far to its position in
+/// that sequence.
+fn proto<'a>(
+    w: &mut Writer,
+    p: &'a UnlinkedProto,
+    strip: bool,
+    strings: &mut HashMap<&'a [u8], u64>,
+) {
     match &p.name {
         FunctionName::Main => w.0.push(0),
         FunctionName::Anonymous => w.0.push(1),
@@ -394,7 +432,16 @@ fn proto(w: &mut Writer, p: &UnlinkedProto, strip: bool) {
                 w.0.push(1);
                 w.0.extend_from_slice(&f.to_bits().to_le_bytes());
             }
-            Constant::Str(s) => named(w, 2, s),
+            Constant::Str(s) => match strings.get(&**s) {
+                Some(&i) => {
+                    w.0.push(3);
+                    w.uint(i);
+                }
+                None => {
+                    strings.insert(s, strings.len() as u64);
+                    named(w, 2, s);
+                }
+            },
         }
     }
     w.uint(p.children.len() as u64);
@@ -495,7 +542,19 @@ fn read_proto(r: &mut Reader<'_>) -> Result<UnlinkedProto> {
                 }
                 Constant::Float(f64::from_bits(u64::from_le_bytes(b)))
             }
-            2 => Constant::Str(r.bytes()?),
+            2 => {
+                let s = r.bytes()?;
+                r.strings.push(s.clone());
+                Constant::Str(s)
+            }
+            3 => {
+                let i = r.uint()?;
+                let s = usize::try_from(i)
+                    .ok()
+                    .and_then(|i| r.strings.get(i))
+                    .ok_or(FormatError::Malformed("string reference"))?;
+                Constant::Str(s.clone())
+            }
             _ => return Err(FormatError::Malformed("constant")),
         })
     })?;
@@ -692,6 +751,38 @@ mod tests {
         let mut v = bytes.clone();
         v.push(0);
         assert!(matches!(decode(&v), Err(FormatError::Malformed(_))));
+    }
+
+    #[test]
+    fn any_changed_byte_is_an_error() {
+        let bytes = encode(&sample(), false);
+        for i in 0..bytes.len() {
+            let mut v = bytes.clone();
+            v[i] = v[i].wrapping_add(1);
+            assert!(decode(&v).is_err(), "byte {i}");
+        }
+    }
+
+    #[test]
+    fn repeated_strings_are_written_once() {
+        let mut c = sample();
+        let s: Box<[u8]> = b"a string written only once".as_slice().into();
+        let mut p = c.protos[0].clone();
+        p.consts.push(Constant::Str(s.clone()));
+        c.protos[0].consts.push(Constant::Str(s.clone()));
+        c.protos.push(p);
+        let bytes = encode(&c, true);
+        let count = bytes.windows(s.len()).filter(|w| *w == &*s).count();
+        assert_eq!(count, 1);
+        assert_eq!(decode(&bytes).unwrap().protos, encode_strip_round(&c));
+    }
+
+    fn encode_strip_round(c: &UnlinkedChunk) -> Vec<UnlinkedProto> {
+        let mut protos = c.protos.clone();
+        for p in &mut protos {
+            p.debug = DebugInfo::default();
+        }
+        protos
     }
 
     #[test]
