@@ -45,7 +45,7 @@ Where OrbitScript differs from lua5.5 on purpose (each case is in [DEVIATIONS.md
 
 | File | Lines | Deviation |
 |---|---|---|
-| `errors.lua` | 329 | Method calls are always named as methods: past 255 constants, `t:bbb()` is still `method 'bbb'` where lua5.5 says `field 'bbb'` |
+| `errors.lua` | 331 | Method calls are always named as methods: past 255 constants, `t:bbb()` is still `method 'bbb'` where lua5.5 says `field 'bbb'` |
 
 ## 4. Whole files not run
 

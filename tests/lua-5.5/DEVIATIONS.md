@@ -32,7 +32,7 @@ When `t:name()` fails because `t.name` is not callable, the message always calls
 
 Why: matching it would mean copying a limit of lua5.5's instruction encoding into ours, only to make a message less precise. Proposed in the PR that added the `deviates=` manifest option.
 
-Suite: `errors.lua` 329 checks for `field 'bbb'`; the manifest disables that line (`deviates=329`, see SKIPS.md).
+Suite: `errors.lua` 331 checks for `field 'bbb'`; the manifest disables that line (`deviates=331`, see SKIPS.md).
 
 ## table.sort
 

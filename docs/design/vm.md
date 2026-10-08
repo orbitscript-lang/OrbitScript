@@ -81,7 +81,7 @@ pub enum Op {
 const _: () = assert!(core::mem::size_of::<Op>() == 8);
 ```
 
-A Rust enum instead of hand-packed `u32`s: the compiler decodes fields for us, the `match` is exhaustive, and there's no bit-twiddling to get wrong. Register operands are `u8` (at most 250 registers per function), constant and child-prototype indices `u16`, jump offsets `i32` relative to the next instruction. ADR-4 left the instruction width open; 8 bytes is this design's proposal (S0 found 12-byte instructions cost time; 4-byte packing is a P5 experiment). Recording it in ADR-4 needs Tym's OK.
+A Rust enum instead of hand-packed `u32`s: the compiler decodes fields for us, the `match` is exhaustive, and there's no bit-twiddling to get wrong. Register operands are `u8` (at most 255 registers per function, as in lua5.5), constant and child-prototype indices `u16`, jump offsets `i32` relative to the next instruction. ADR-4 left the instruction width open; 8 bytes is this design's proposal (S0 found 12-byte instructions cost time; 4-byte packing is a P5 experiment). Recording it in ADR-4 needs Tym's OK.
 
 First-light instruction set (`R[x]` is a register, `K[x]` a constant, `C[x]` a frame cell slot, `U[x]` a capture of the current closure):
 
@@ -124,7 +124,7 @@ Kept beside the code (ADR-4), in `DebugInfo`:
 - **Constant folding** of arithmetic on numeric literals, only where the result can't raise an error (no folding `1 // 0`), and constant propagation of `Const` locals that are never reassigned.
 - **Tail calls**: `Return` of a single call becomes `TailCall`.
 - **Assignment order** follows the HIR's rule (targets' objects and keys, then values, then stores right to left).
-- **Limits** give Lua-style compile errors: more than 250 registers is `function or expression needs too many registers`, more than 255 captures is `too many upvalues`.
+- **Limits** give Lua-style compile errors: more than 255 registers is `function or expression needs too many registers`, more than 254 returned values is `too many returns (limit is 255)`, and more than 255 captures is `too many upvalues`.
 - A disassembler (`orbit --dump-bytecode`) prints instructions with operand names from the debug info, for golden tests.
 
 ## Interpreter (`orbit-vm`)

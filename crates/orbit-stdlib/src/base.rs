@@ -290,19 +290,21 @@ fn pairs(ctx: &mut NativeCtx<'_>) -> R {
     ctx.push(next_fn);
     ctx.push(t);
     ctx.push(Value::Nil);
-    Ok(NativeReturn::Return(3))
+    ctx.push(Value::Nil);
+    Ok(NativeReturn::Return(4))
 }
 
-/// `__pairs` returned: pass on exactly three of its results.
+/// `__pairs` returned: pass on exactly four of its results, the fourth
+/// being the loop's to-be-closed value.
 fn pairs_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     let CallOutcome::Ok(got) = outcome else {
         unreachable!("unprotected call")
     };
-    ctx.truncate(1 + got.min(3));
-    while ctx.len() < 4 {
+    ctx.truncate(1 + got.min(4));
+    while ctx.len() < 5 {
         ctx.push(Value::Nil);
     }
-    Ok(NativeReturn::Return(3))
+    Ok(NativeReturn::Return(4))
 }
 
 fn next(ctx: &mut NativeCtx<'_>) -> R {

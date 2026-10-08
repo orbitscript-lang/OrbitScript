@@ -281,14 +281,14 @@ impl Vm {
     }
 
     /// `Close`, with a variable to close at or above register `from`
-    /// (absolute): call the newest one's `__close(value, nil)`. The meta
+    /// (absolute): call the newest one's `__close(value)`. The meta
     /// frame runs `Close` again when it returns.
     #[inline(never)]
     pub(crate) fn op_close(&mut self) -> Exc {
         let t = self.rt.stack.tbc.pop().expect("a variable to close") as usize;
         let v = self.rt.stack.regs[t];
         let h = self.rt.metamethod(&self.heap, v, Event::Close);
-        Exc::Meta(MetaCall::new(h, Event::Close, &[v, Value::Nil]))
+        Exc::Meta(MetaCall::new(h, Event::Close, &[v]))
     }
 
     /// `NewTable`.
@@ -503,6 +503,14 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn op_for_prep(&mut self, at: usize) -> Result<bool, Exc> {
         let r = &mut self.rt.stack.regs[at..at + 4];
+        // Numeric strings convert, always to floats, as in the reference.
+        for v in &mut r[..3] {
+            if let Value::Str(s) = *v
+                && let Some(n) = orbit_core::number::str_to_number(self.heap.get(s).as_bytes())
+            {
+                *v = Value::Float(n.as_f64().expect("a number"));
+            }
+        }
         let (init, limit, step) = (r[0], r[1], r[2]);
         if let (Value::Int(i), Value::Int(s)) = (init, step) {
             if s == 0 {

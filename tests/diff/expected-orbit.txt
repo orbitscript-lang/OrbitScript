@@ -38,4 +38,5 @@ stdlib_utf8.lua
 strings.lua
 tables.lua
 uncaught.lua
+vm_edges.lua
 xpcall.lua

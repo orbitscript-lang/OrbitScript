@@ -612,6 +612,11 @@ impl Vm {
             if std::mem::take(&mut errerr) {
                 e = LuaError::new(self.new_str(b"error in error handling"));
             }
+            // Past the message handler, a `nil` error reads as a message
+            // (a close without errors is the exception: it has no error).
+            if e.value.is_nil() && !closing {
+                e.value = self.new_str(b"<no error object>");
+            }
             // A coroutine that dies with an error keeps its variables open
             // for `coroutine.close`, as the reference does.
             let closes = !matches!(f.kind, FrameKind::CoBase) || closing;
@@ -631,7 +636,7 @@ impl Vm {
                 {
                     self.rt.unwind_traceback = Some(self.rt.traceback(&self.heap, None, 1));
                 }
-                match self.start_close(e.value, idx) {
+                match self.start_close(e.value, idx, closing) {
                     Ok(flow) => return Ok(flow),
                     Err(x) => {
                         e = self.make_error(x);
@@ -678,7 +683,7 @@ impl Vm {
     /// the frame at `catcher`: pop the frames above the catcher, then call
     /// the variable's `__close` handler under an `Unwind` meta frame, which raises `err` again when
     /// the handler returns.
-    fn start_close(&mut self, err: Value, catcher: usize) -> Result<Flow, Exc> {
+    fn start_close(&mut self, err: Value, catcher: usize, closing: bool) -> Result<Flow, Exc> {
         let t = self.rt.stack.tbc.pop().expect("a variable to close") as usize;
         // As in the reference, the handler runs once the error has left the
         // frames above the one that catches it: it is called from there.
@@ -714,12 +719,19 @@ impl Vm {
             extra: 0,
             cdepth,
         });
-        self.call_close_handler(at + 1, h)
+        // A close without errors passes no error.
+        let nargs = if closing && err.is_nil() { 1 } else { 2 };
+        self.call_close_handler(at + 1, h, nargs)
     }
 
-    /// Call the `__close` handler `h` at `at` with its two arguments, after
-    /// checking it can be called.
-    pub(crate) fn call_close_handler(&mut self, at: usize, h: Value) -> Result<Flow, Exc> {
+    /// Call the `__close` handler `h` at `at` with its `nargs` arguments,
+    /// after checking it can be called.
+    pub(crate) fn call_close_handler(
+        &mut self,
+        at: usize,
+        h: Value,
+        nargs: usize,
+    ) -> Result<Flow, Exc> {
         if !h.is_function() && self.rt.metamethod(&self.heap, h, Event::Call).is_nil() {
             return Err(Exc::Rt(
                 format!(
@@ -729,7 +741,7 @@ impl Vm {
                 None,
             ));
         }
-        self.call_value(at, 2, 0)
+        self.call_value(at, nargs, 0)
     }
 
     /// Pop the frames above the native frame at `idx` and run its

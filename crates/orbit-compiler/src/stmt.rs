@@ -503,9 +503,7 @@ impl FuncState<'_> {
                     Some(n) => u8::try_from(n)
                         .ok()
                         .filter(|&n| n != MULTI)
-                        .ok_or_else(|| {
-                            self.error("function or expression needs too many registers")
-                        })?,
+                        .ok_or_else(|| self.error("too many returns (limit is 255)"))?,
                 };
                 self.emit_close(0);
                 self.emit(Op::Return { first, count });
