@@ -172,7 +172,18 @@ pub(crate) struct Frame {
     /// Callables a `__call` chain inserted as extra first arguments
     /// (`extraargs`).
     pub extra: u8,
+    /// How many calls back into the interpreter are open at and below this
+    /// frame: library callbacks, metamethods, handlers and hooks, the calls
+    /// the reference makes on the C stack. Capped by [`MAX_CCALLS`]. Lua
+    /// frames leave it 0, so a call costs nothing; [`Stack::cdepth`] reads
+    /// it from the newest other frame.
+    pub cdepth: u8,
 }
+
+/// The most calls back into the interpreter that may be open at once,
+/// counting the resumes below the running coroutine (more is "C stack
+/// overflow", at the depths the reference gives it).
+pub(crate) const MAX_CCALLS: usize = 200;
 
 /// The Lua stack: registers, frame cell slots and frames.
 #[derive(Debug, Default)]
@@ -183,6 +194,12 @@ pub(crate) struct Stack {
     /// The registers (absolute) of the open to-be-closed variables, oldest
     /// first.
     pub tbc: Vec<u32>,
+    /// Where frames other than Lua frames were pushed ([`Stack::deeper`],
+    /// [`Stack::same_depth`]), oldest first, to find the current `cdepth`
+    /// without walking Lua frames. Entries whose frame is gone are dropped
+    /// lazily: one that now holds a Lua frame is skipped, and any other
+    /// frame there has the right `cdepth` anyway.
+    pub depth_at: Vec<u32>,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
     /// switch to this code swaps it in instead of looking the closure up.
@@ -191,14 +208,55 @@ pub(crate) struct Stack {
     pub prev_code: Option<std::rc::Rc<orbit_core::ProtoCode>>,
     /// The last Lua function called from a frame other than itself, with
     /// what entering it needs, so calling it again skips looking it up.
-    /// A root: while cached, the handle can't be reused for another
-    /// closure.
+    /// Weak, as nothing a script can see may keep a function alive: it is
+    /// dropped when its closure dies (before the handle can be reused) and
+    /// when the stack is parked.
     pub callee: Option<(Gc<Closure>, crate::interp::Shape)>,
     /// The stack's debug hook (`debug.sethook`).
     pub hook: hook::Hook,
 }
 
 impl Stack {
+    /// How many calls back into the interpreter are open: the
+    /// [`Frame::cdepth`] of the newest frame that isn't a Lua frame.
+    pub(crate) fn cdepth(&mut self) -> u8 {
+        while let Some(&i) = self.depth_at.last() {
+            match self.frames.get(i as usize) {
+                Some(f) if !matches!(f.kind, FrameKind::Lua { .. }) => return f.cdepth,
+                _ => {
+                    self.depth_at.pop();
+                }
+            }
+        }
+        0
+    }
+
+    /// The `cdepth` of a frame about to be pushed at `frames.len()` for a
+    /// call back into the interpreter.
+    pub(crate) fn deeper(&mut self) -> u8 {
+        let d = self.cdepth().saturating_add(1);
+        self.depth_at.push(self.frames.len() as u32);
+        d
+    }
+
+    /// The `cdepth` of a frame about to be pushed at `frames.len()` that
+    /// isn't a Lua frame and doesn't go deeper.
+    pub(crate) fn same_depth(&mut self) -> u8 {
+        let d = self.cdepth();
+        self.depth_at.push(self.frames.len() as u32);
+        d
+    }
+
+    /// Pop every frame above a coroutine's base frame, keeping the
+    /// registers, so that closing its variables starts from the base: no
+    /// `pcall` it was running can catch what the handlers raise.
+    pub(crate) fn pop_to_base(&mut self) {
+        if let Some(above) = self.frames.get(1) {
+            self.cells.truncate(above.cell_base as usize);
+        }
+        self.frames.truncate(1);
+    }
+
     /// Mark everything the stack refers to, counting only the registers
     /// below `end` (the running stack is a root; a parked one is traced
     /// through its thread).
@@ -213,9 +271,6 @@ impl Stack {
             if let FrameKind::Lua { closure, .. } = f.kind {
                 m.mark(closure);
             }
-        }
-        if let Some((c, _)) = self.callee {
-            m.mark(c);
         }
         mark(m, self.hook.func);
     }
@@ -254,6 +309,7 @@ impl Stack {
             + self.cells.capacity() * std::mem::size_of::<Gc<Cell>>()
             + self.frames.capacity() * std::mem::size_of::<Frame>()
             + self.tbc.capacity() * std::mem::size_of::<u32>()
+            + self.depth_at.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -410,6 +466,9 @@ impl Roots<LuaSpace> for Runtime {
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
         self.strings.clear_dead(live);
         self.cooling.retain(|&(t, _)| live.is_live(t));
+        if self.stack.callee.is_some_and(|(c, _)| !live.is_live(c)) {
+            self.stack.callee = None;
+        }
         self.gc_cycles = self.gc_cycles.wrapping_add(1);
     }
 }
@@ -428,6 +487,13 @@ impl Default for Vm {
 }
 
 impl Vm {
+    /// Whether a call back into the interpreter at `cdepth` would be one
+    /// too many. As in the reference, a resume counts twice and the
+    /// outermost call once more, so the depths match lua5.5's.
+    pub(crate) fn c_overflow(&self, cdepth: u8) -> bool {
+        cdepth as usize + 2 * self.rt.resumers.len() + 1 >= MAX_CCALLS
+    }
+
     /// A VM with an empty global table and no libraries.
     pub fn new() -> Self {
         let mut heap = LuaHeap::new();
@@ -613,6 +679,7 @@ impl Vm {
     /// unrooted once returned: use or pin them before running more code.
     pub fn call(&mut self, f: Value, args: &[Value]) -> Result<Vec<Value>, LuaError> {
         let func = self.rt.stack.regs.len();
+        let cdepth = self.rt.stack.deeper();
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Boundary,
             func: func as u32,
@@ -623,6 +690,7 @@ impl Vm {
             want: op::MULTI,
             tail: false,
             extra: 0,
+            cdepth,
         });
         self.rt.stack.regs.push(f);
         self.rt.stack.regs.extend_from_slice(args);

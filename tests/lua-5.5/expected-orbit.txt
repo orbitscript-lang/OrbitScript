@@ -6,6 +6,7 @@ bitwise.lua
 closure.lua
 code.lua
 constructs.lua
+coroutine.lua
 cstack.lua
 gc.lua
 gengc.lua
