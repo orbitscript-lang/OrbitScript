@@ -1,8 +1,10 @@
 //! How objects and roots tell the collector what they point to.
 
 use crate::arena::{AnyGc, Gc, Gen, Store};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 
 pub(crate) const WHITE: u8 = 0;
@@ -316,6 +318,69 @@ impl KindMeta {
     }
 }
 
+/// The ephemeron values waiting for one key. Most keys have one, so it is
+/// stored inline; only a second value allocates.
+#[derive(Debug)]
+pub(crate) enum WaitList {
+    One(AnyGc),
+    Many(Vec<AnyGc>),
+}
+
+impl WaitList {
+    fn push(&mut self, v: AnyGc) {
+        match self {
+            WaitList::One(a) => *self = WaitList::Many(vec![*a, v]),
+            WaitList::Many(l) => l.push(v),
+        }
+    }
+
+    fn drain_into(self, todo: &mut Vec<AnyGc>) {
+        match self {
+            WaitList::One(a) => todo.push(a),
+            WaitList::Many(l) => todo.extend(l),
+        }
+    }
+}
+
+/// A multiply-rotate hasher for the wait map. Its keys are slot numbers the
+/// collector chose, so they need no protection against chosen collisions,
+/// and SipHash would cost half of marking an ephemeron table
+/// (`docs/design/gc-spike-ephemerons.md`).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct SlotHasher(u64);
+
+impl Hasher for SlotHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Ephemeron values by the slot of the unmarked key they wait on.
+pub(crate) type WaitMap = HashMap<(u8, u32), WaitList, BuildHasherDefault<SlotHasher>>;
+
 /// The collector state marking needs.
 #[derive(Debug)]
 pub(crate) struct Marks {
@@ -324,7 +389,9 @@ pub(crate) struct Marks {
     /// Ephemeron values by the unmarked key that keeps them alive. Marking a
     /// key marks its values, so ephemerons need no rescans; entries left at
     /// the end of marking belong to dead keys.
-    pub(crate) waiting: HashMap<(u8, u32), Vec<AnyGc>>,
+    pub(crate) waiting: WaitMap,
+    /// Reused work list for [`Marks::release`].
+    pub(crate) scratch: Vec<AnyGc>,
     /// Bytes of the objects marked so far in this cycle: at the end of
     /// marking, the reachable heap.
     pub(crate) marked_bytes: usize,
@@ -361,9 +428,11 @@ impl Marks {
     /// chain of ephemerons can't overflow the stack.
     #[cold]
     fn release(&mut self, kind: u8, index: u32) {
-        let Some(mut todo) = self.waiting.remove(&(kind, index)) else {
+        let Some(first) = self.waiting.remove(&(kind, index)) else {
             return;
         };
+        let mut todo = std::mem::take(&mut self.scratch);
+        first.drain_into(&mut todo);
         while let Some(v) = todo.pop() {
             let c = &mut self.meta[v.kind as usize].color[v.index as usize];
             debug_assert!(*c != FREE, "orbit-gc: marking a stale handle");
@@ -374,9 +443,10 @@ impl Marks {
             *c = (*c & !(COLOR | WAIT)) | GRAY;
             self.gray.push(v);
             if waited && let Some(more) = self.waiting.remove(&(v.kind, v.index)) {
-                todo.extend(more);
+                more.drain_into(&mut todo);
             }
         }
+        self.scratch = todo;
     }
 
     /// Keep `value` alive if `key` is, now or once it is marked.
@@ -385,10 +455,12 @@ impl Marks {
             self.mark_raw(value.kind, value.index, false);
         } else if !self.is_marked(value.kind, value.index) {
             self.meta[key.kind as usize].color[key.index as usize] |= WAIT;
-            self.waiting
-                .entry((key.kind, key.index))
-                .or_default()
-                .push(value);
+            match self.waiting.entry((key.kind, key.index)) {
+                Entry::Vacant(e) => {
+                    e.insert(WaitList::One(value));
+                }
+                Entry::Occupied(mut e) => e.get_mut().push(value),
+            }
         }
     }
 

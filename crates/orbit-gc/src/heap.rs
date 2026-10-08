@@ -3,9 +3,9 @@
 use crate::arena::{AnyGc, Gc, Gen, Store, page_shift};
 use crate::trace::{
     BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, Roots, Space, Trace,
-    WAIT, WHITE, WeakMode,
+    WAIT, WHITE, WaitMap, WeakMode,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -171,7 +171,8 @@ impl<S: Space + Default> Heap<S> {
             marks: Marks {
                 meta,
                 gray: Vec::new(),
-                waiting: HashMap::new(),
+                waiting: WaitMap::default(),
+                scratch: Vec::new(),
                 marked_bytes: 0,
             },
             retrace: Vec::new(),
