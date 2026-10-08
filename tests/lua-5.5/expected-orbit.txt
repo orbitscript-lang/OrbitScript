@@ -20,6 +20,7 @@ gengc.lua
 goto.lua
 literals.lua
 locals.lua
+main.lua
 math.lua
 memerr.lua
 nextvar.lua

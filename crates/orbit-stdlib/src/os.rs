@@ -4,7 +4,7 @@ use std::io::Write;
 
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::{Gc, Table, Value};
-use orbit_vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn};
+use orbit_vm::{CallOutcome, Event, LuaError, NativeCtx, NativeFn, NativeReturn};
 
 use crate::sys::{exit_status, file_error, shell};
 use crate::time::{self, Tm};
@@ -112,13 +112,67 @@ fn exit(ctx: &mut NativeCtx<'_>) -> R {
         _ => ctx.check_int(0)?,
     };
     if !ctx.arg(1).is_falsy() {
-        // Close the VM first, as Lua closes the state: every pending
-        // finalizer runs, even when this is called from one.
+        // Close the VM first, as Lua closes the state: the main thread's
+        // variables still to close, newest first, then every pending
+        // finalizer, even when this is called from one. The window is
+        // [code, failed, error, count, values to close...].
+        let pending = ctx.main_pending_closes();
         ctx.truncate(0);
         ctx.push(Value::Int(code));
-        return orbit_vm::close_then(ctx, exit_closed);
+        ctx.push(Value::Bool(false));
+        ctx.push(Value::Nil);
+        ctx.push(Value::Int(pending.len() as i64));
+        for v in pending {
+            ctx.push(v);
+        }
+        return close_next(ctx);
     }
     exit_now(ctx, code)
+}
+
+/// Window slots of `os.exit`'s closing state.
+const FAILED: usize = 1;
+const ERROR: usize = 2;
+const COUNT: usize = 3;
+
+/// Call the newest variable's `__close` with no error, or, once a handler
+/// has failed, with that error (the last error is dropped, as in lua5.5),
+/// then the next; with none left, close the VM.
+fn close_next(ctx: &mut NativeCtx<'_>) -> R {
+    let Value::Int(n) = ctx.arg(COUNT) else {
+        unreachable!("exit pushed the count")
+    };
+    if n == 0 {
+        return orbit_vm::close_then(ctx, exit_closed);
+    }
+    let v = ctx.arg(COUNT + n as usize);
+    ctx.set(COUNT, Value::Int(n - 1));
+    ctx.truncate(COUNT + n as usize);
+    let h = ctx.metamethod(v, Event::Close);
+    ctx.push(v);
+    let failed = matches!(ctx.arg(FAILED), Value::Bool(true));
+    if failed {
+        let e = ctx.arg(ERROR);
+        ctx.push(e);
+    }
+    Ok(NativeReturn::CallThen {
+        f: h,
+        nargs: 1 + failed as usize,
+        k: closed_one,
+        protected: true,
+    })
+}
+
+fn closed_one(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> R {
+    if let CallOutcome::Err(e) = out {
+        ctx.set(FAILED, Value::Bool(true));
+        ctx.set(ERROR, e);
+    }
+    let Value::Int(n) = ctx.arg(COUNT) else {
+        unreachable!("exit pushed the count")
+    };
+    ctx.truncate(COUNT + 1 + n as usize);
+    close_next(ctx)
 }
 
 fn exit_closed(ctx: &mut NativeCtx<'_>, _: CallOutcome) -> R {

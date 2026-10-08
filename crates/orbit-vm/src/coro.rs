@@ -625,6 +625,18 @@ impl NativeCtx<'_> {
         (self.rt.current, self.rt.current == self.rt.main_thread)
     }
 
+    /// The values of the main thread's variables still to close, oldest
+    /// first, for `os.exit(code, true)`, which closes them as lua5.5 does
+    /// when it closes the state.
+    pub fn main_pending_closes(&self) -> Vec<Value> {
+        let s = if self.rt.current == self.rt.main_thread {
+            &self.rt.stack
+        } else {
+            &co(self.heap, self.rt.main_thread).stack
+        };
+        s.tbc.iter().map(|&r| s.regs[r as usize]).collect()
+    }
+
     // ---- native closures -------------------------------------------------
 
     /// A function value that runs native `f` (registered as `name`) with
