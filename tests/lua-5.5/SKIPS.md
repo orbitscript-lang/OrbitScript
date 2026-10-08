@@ -41,7 +41,7 @@ The reference `lua5.5` in CI runs with `--c-libs`, so these lines are still chec
 
 ## 3. Lines that check a deliberate deviation
 
-Where OrbitScript differs from lua5.5 on purpose (each case is in [DEVIATIONS.md](DEVIATIONS.md)), the manifest's `deviates=A-B` option comments the checking lines out in the scratch copy, keeping line numbers. Unlike `needs-clibs`, these lines are disabled for every interpreter, the reference included.
+Where OrbitScript differs from lua5.5 on purpose (each case is in [DEVIATIONS.md](DEVIATIONS.md)), the manifest's `deviates=A-B` option comments the checking lines out in the scratch copy, keeping line numbers. Unlike `needs-clibs`, these lines are disabled for every interpreter, the reference included. Both kinds are disabled in every file before anything runs, so `all.lua`, which runs the other files itself, sees the same copies.
 
 | File | Lines | Deviation |
 |---|---|---|
