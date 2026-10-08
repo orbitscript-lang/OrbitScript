@@ -1,9 +1,11 @@
 //! Linking: turning the compiler's plain-data output into heap objects.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use orbit_bytecode::{CaptureSource, Constant, Op, UnlinkedChunk};
-use orbit_core::{Cell, Closure, FieldCache, Gc, LuaHeap, Proto, ProtoCode, Value};
+use orbit_core::string::MAX_SHORT;
+use orbit_core::{Cell, Closure, FieldCache, Gc, LuaHeap, LuaStr, Proto, ProtoCode, Value};
 
 use crate::{Runtime, Vm};
 
@@ -47,6 +49,9 @@ pub(crate) fn link(
         // child is ready when its parent is built. Nothing collects here:
         // allocation never runs the collector.
         let mut linked: Vec<Option<Gc<Proto>>> = vec![None; n];
+        // Equal long-string constants share one string across the chunk's functions, as in
+        // lua5.5 (`string.format("%p")` shows it). Short strings are interned anyway.
+        let mut long_strs: HashMap<&[u8], Gc<LuaStr>> = HashMap::new();
         for i in (0..n).rev() {
             let u = &chunk.protos[i];
             let consts: Vec<Value> = u
@@ -55,7 +60,14 @@ pub(crate) fn link(
                 .map(|k| match k {
                     Constant::Int(i) => Value::Int(*i),
                     Constant::Float(f) => Value::Float(*f),
-                    Constant::Str(b) => Value::Str(rt.strings.new_str(heap, b)),
+                    Constant::Str(b) if b.len() <= MAX_SHORT => {
+                        Value::Str(rt.strings.intern(heap, b))
+                    }
+                    Constant::Str(b) => Value::Str(
+                        *long_strs
+                            .entry(b)
+                            .or_insert_with(|| rt.strings.new_str(heap, b)),
+                    ),
                 })
                 .collect();
             // Each cache gets its instruction's key. Indexes saturate in a
