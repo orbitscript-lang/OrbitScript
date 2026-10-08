@@ -70,7 +70,7 @@ enum Closing {
 #[derive(Debug)]
 pub(crate) struct Coroutine {
     /// The thread's stack while it isn't running (empty while it is).
-    stack: Stack,
+    pub(crate) stack: Stack,
     /// Its `rt.top` while parked.
     top: usize,
     status: CoStatus,
@@ -165,7 +165,7 @@ impl ThreadState for Coroutine {
     }
 }
 
-fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
+pub(crate) fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
     heap.get(t)
         .state
         .as_any()

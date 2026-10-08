@@ -90,6 +90,15 @@ pub struct GcState {
     closed: bool,
     /// What [`close_then`] runs once the last finalizer has.
     close_k: Option<Continuation>,
+    /// The main thread's open to-be-closed variables that [`close_then`]
+    /// has still to close, newest last, and the error the next one gets.
+    /// They stay rooted where they are: the stacks are left as they were,
+    /// and the collector is stopped.
+    close_vars: Vec<Value>,
+    close_err: Value,
+    /// [`close_then`] has closed the variables but not yet queued every
+    /// object for finalization.
+    close_queue: bool,
 }
 
 impl GcState {
@@ -110,6 +119,9 @@ impl GcState {
             was_stopped: false,
             closed: false,
             close_k: None,
+            close_vars: Vec::new(),
+            close_err: Value::Nil,
+            close_queue: false,
         }
     }
 
@@ -306,25 +318,70 @@ fn after_finalizer(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeRe
     next_finalizer(ctx)
 }
 
-/// From a native: close the VM as [`Vm::close`] does, then run `k` (with
-/// `CallOutcome::Ok(0)`) on the window's first slot. This works inside a
-/// finalizer too, as `os.exit(code, true)` needs: the other finalizers
-/// still run. The VM stays closed: the collector stays stopped,
-/// `collectgarbage` does nothing, and objects registered from here on are
+/// From a native: close the VM as Lua closes a state, then run `k` (with
+/// `CallOutcome::Ok(0)`) on the window's first slot. First the main
+/// thread's open to-be-closed variables are closed, newest first, with a
+/// nil error (an error one raises goes to the next instead, and is then
+/// dropped); then every object still registered is finalized, as in
+/// [`Vm::close`]. This works inside a finalizer too, as
+/// `os.exit(code, true)` needs: the other finalizers still run. The VM
+/// stays closed: the collector stays stopped, `collectgarbage` does
+/// nothing, and objects registered after the variables are closed are
 /// never finalized, so the caller ends the process (or drops the VM) next.
 /// Called while the VM is already closing (from a finalizer [`Vm::close`]
 /// runs), it runs the finalizers still waiting.
 pub fn close_then(ctx: &mut NativeCtx<'_>, k: Continuation) -> Result<NativeReturn, LuaError> {
     ctx.truncate(1);
-    let gc = &mut ctx.rt.gc;
-    if !gc.closed {
+    if !ctx.rt.gc.closed {
+        let main = ctx.rt.main_thread;
+        let stack = if ctx.rt.current == main {
+            &ctx.rt.stack
+        } else {
+            &crate::coro::co(ctx.heap, main).stack
+        };
+        let vars = stack.tbc.iter().map(|&t| stack.regs[t as usize]).collect();
+        let gc = &mut ctx.rt.gc;
         gc.closed = true;
-        ctx.heap.finalize_all();
+        gc.close_vars = vars;
+        gc.close_err = Value::Nil;
+        gc.close_queue = true;
     }
+    let gc = &mut ctx.rt.gc;
     gc.finalizing = true;
     gc.close_k = Some(k);
     ctx.heap.stop();
+    next_close_var(ctx)
+}
+
+fn next_close_var(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
+    while let Some(v) = ctx.rt.gc.close_vars.pop() {
+        let h = ctx.rt.metamethod(ctx.heap, v, crate::Event::Close);
+        if h.is_nil() {
+            continue;
+        }
+        let err = ctx.rt.gc.close_err;
+        ctx.truncate(1);
+        ctx.push(v);
+        ctx.push(err);
+        return Ok(NativeReturn::CallThen {
+            f: h,
+            nargs: 2,
+            k: after_close_var,
+            protected: true,
+        });
+    }
+    if std::mem::take(&mut ctx.rt.gc.close_queue) {
+        ctx.heap.finalize_all();
+    }
     next_close_finalizer(ctx)
+}
+
+fn after_close_var(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeReturn, LuaError> {
+    if let CallOutcome::Err(e) = out {
+        ctx.rt.gc.close_err = e;
+    }
+    ctx.truncate(1);
+    next_close_var(ctx)
 }
 
 fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
