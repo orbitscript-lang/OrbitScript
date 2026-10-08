@@ -14,6 +14,8 @@ mod coroutine;
 mod debug;
 #[cfg(feature = "dump")]
 mod dump;
+#[cfg(feature = "io")]
+mod io;
 #[cfg(feature = "load")]
 mod load;
 #[cfg(feature = "math")]
@@ -24,6 +26,8 @@ mod os;
 mod package;
 #[cfg(feature = "string")]
 mod string;
+#[cfg(any(feature = "os", feature = "io"))]
+mod sys;
 #[cfg(feature = "table")]
 mod table;
 #[cfg(feature = "os")]
@@ -92,6 +96,8 @@ pub fn open_libs(vm: &mut Vm) {
     }
     #[cfg(feature = "os")]
     open_lib(vm, "os", os::FUNCTIONS);
+    #[cfg(feature = "io")]
+    io::open(vm);
     #[cfg(feature = "package")]
     package::open(vm);
     #[cfg(feature = "coroutine")]
