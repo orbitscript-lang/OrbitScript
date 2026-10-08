@@ -20,7 +20,6 @@
 use orbit_core::gc::finalizer;
 use orbit_core::{LuaHeap, Value};
 
-use crate::hook::Hook;
 use crate::{CallOutcome, Continuation, LuaError, NativeCtx, NativeReturn, Runtime, Vm};
 
 /// The collector mode `collectgarbage` reports. The incremental collector
@@ -88,10 +87,6 @@ pub struct GcState {
     /// Whether the collector was stopped when the running finalizer
     /// started.
     was_stopped: bool,
-    /// Whether hooks were already off then. Finalizers run with hooks off,
-    /// as in lua5.5: a collection inside hooked code fires no events for
-    /// the finalizers it runs.
-    hooks_were_off: bool,
     closed: bool,
     /// What [`close_then`] runs once the last finalizer has.
     close_k: Option<Continuation>,
@@ -113,7 +108,6 @@ impl GcState {
             ],
             finalizing: false,
             was_stopped: false,
-            hooks_were_off: false,
             closed: false,
             close_k: None,
         }
@@ -144,20 +138,18 @@ impl GcState {
     }
 
     /// Suspend automatic collection while a finalizer runs.
-    fn enter(&mut self, heap: &mut LuaHeap, hook: &mut Hook) {
+    fn enter(&mut self, heap: &mut LuaHeap) {
         debug_assert!(!self.finalizing);
         self.finalizing = true;
         self.was_stopped = heap.is_stopped();
         heap.stop();
-        self.hooks_were_off = std::mem::replace(&mut hook.active, true);
     }
 
-    fn exit(&mut self, heap: &mut LuaHeap, hook: &mut Hook) {
+    fn exit(&mut self, heap: &mut LuaHeap) {
         self.finalizing = false;
         if !self.was_stopped {
             heap.restart();
         }
-        hook.active = self.hooks_were_off;
     }
 }
 
@@ -227,12 +219,12 @@ impl Vm {
                 self.rt.warn_gc_error_text(&msg);
                 continue;
             }
-            self.rt.gc.enter(&mut self.heap, &mut self.rt.stack.hook);
+            self.rt.gc.enter(&mut self.heap);
             let at = self.rt.stack.frames.len() as u32;
             self.rt.stack.finalizer_at = Some(at);
             let r = self.call(f, &[o]);
             self.rt.stack.finalizer_at = None;
-            self.rt.gc.exit(&mut self.heap, &mut self.rt.stack.hook);
+            self.rt.gc.exit(&mut self.heap);
             if let Err(LuaError { value, .. }) = r {
                 self.rt.warn_gc_error(&self.heap, value);
             }
@@ -291,7 +283,7 @@ fn next_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
         }
         ctx.truncate(1);
         ctx.push(o);
-        ctx.rt.gc.enter(ctx.heap, &mut ctx.rt.stack.hook);
+        ctx.rt.gc.enter(ctx.heap);
         // The native's frame, which `CallThen` pushes next.
         ctx.rt.stack.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
         return Ok(NativeReturn::CallThen {
@@ -305,7 +297,7 @@ fn next_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
 }
 
 fn after_finalizer(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeReturn, LuaError> {
-    ctx.rt.gc.exit(ctx.heap, &mut ctx.rt.stack.hook);
+    ctx.rt.gc.exit(ctx.heap);
     ctx.rt.stack.finalizer_at = None;
     if let CallOutcome::Err(e) = out {
         ctx.rt.warn_gc_error(ctx.heap, e);
@@ -349,8 +341,6 @@ fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaErro
         ctx.truncate(1);
         ctx.push(o);
         ctx.rt.stack.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
-        // Hooks stay off: the VM is closing.
-        ctx.rt.stack.hook.active = true;
         return Ok(NativeReturn::CallThen {
             f,
             nargs: 1,

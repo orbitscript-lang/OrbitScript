@@ -20,7 +20,6 @@ errors.lua
 exit_close.lua
 floats.lua
 gc.lua
-gc_hooks_off.lua
 io.lua
 load.lua
 lua55.lua
