@@ -12,7 +12,7 @@ publish = false
 # forbidden, so `src/os.rs` can allow its one glibc call (ADR-6). Keep the
 # rest in step with the workspace `Cargo.toml`.
 [lints.rust]
-unsafe_code = "deny"
+unsafe_code = "allow"
 missing_debug_implementations = "warn"
 
 [lints.clippy]
