@@ -133,28 +133,58 @@ impl Runtime {
         } else if n == 0 {
             return None;
         }
+        self.find_activation(top, n)
+            .map(|i| Level(LevelAt::Frame(i)))
+    }
+
+    /// Activations `from`, `from + 1`, and so on, in one pass over the
+    /// frames (asking `level` for each would be quadratic in the depth).
+    pub(crate) fn levels(&self, running: Option<Running>, from: usize) -> Vec<Level> {
+        let mut out = Vec::new();
+        let mut next = self.level(running, from);
+        if let Some(l @ Level(LevelAt::Running { .. })) = next {
+            out.push(l);
+            next = self.level(running, from + 1);
+        }
+        while let Some(l @ Level(LevelAt::Frame(i))) = next {
+            out.push(l);
+            next = self
+                .find_activation(self.scan_on(i), 1)
+                .map(|i| Level(LevelAt::Frame(i)));
+        }
+        out
+    }
+
+    /// The `left`th activation below frame `top`, as a frame index.
+    fn find_activation(&self, top: usize, mut left: usize) -> Option<usize> {
         let mut i = top;
-        let mut left = n;
         while i > 0 {
             i -= 1;
-            let k = frames[i].kind;
-            if is_activation(k) {
+            if is_activation(self.stack.frames[i].kind) {
                 left -= 1;
                 if left == 0 {
-                    return Some(Level(LevelAt::Frame(i)));
+                    return Some(i);
                 }
             }
-            if unwinding_close(k) {
-                // The frames the error left are gone in the reference by the
-                // time a `__close` handler runs: its caller is the frame that
-                // catches the error.
-                i = frames[..i]
-                    .iter()
-                    .rposition(|f| catches(f.kind))
-                    .map_or(0, |c| c + 1);
-            }
+            i = self.scan_on(i);
         }
         None
+    }
+
+    /// Where a scan down the frames continues after frame `i`.
+    fn scan_on(&self, i: usize) -> usize {
+        let frames = &self.stack.frames;
+        if unwinding_close(frames[i].kind) {
+            // The frames the error left are gone in the reference by the
+            // time a `__close` handler runs: its caller is the frame that
+            // catches the error.
+            frames[..i]
+                .iter()
+                .rposition(|f| catches(f.kind))
+                .map_or(0, |c| c + 1)
+        } else {
+            i
+        }
     }
 
     /// Index of the frame below activation `l` that called it, if any.
@@ -404,12 +434,7 @@ impl Runtime {
         running: Option<Running>,
         from: usize,
     ) -> String {
-        let mut levels = Vec::new();
-        let mut n = from;
-        while let Some(l) = self.level(running, n) {
-            levels.push(l);
-            n += 1;
-        }
+        let levels = self.levels(running, from);
         let mut s = String::from("stack traceback:");
         // The main thread ends in the host's call (`[C]: in ?`); a
         // coroutine ends in its body, and a finished one has no frames.

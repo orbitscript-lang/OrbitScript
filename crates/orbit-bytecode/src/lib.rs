@@ -25,7 +25,7 @@ pub mod verify;
 pub const MULTI: u8 = 255;
 
 /// The most registers one function may use.
-pub const MAX_REGS: usize = 250;
+pub const MAX_REGS: usize = 255;
 
 /// The most captures one function may have.
 pub const MAX_CAPTURES: usize = 255;

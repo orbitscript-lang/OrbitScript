@@ -36,7 +36,7 @@ vararg.lua
 closure.lua
 coroutine.lua
 goto.lua
-errors.lua      deviates=329          # names the method in t:bbb() past 255 constants
+errors.lua      deviates=331          # names the method in t:bbb() past 255 constants
 math.lua
 sort.lua
 bitwise.lua
