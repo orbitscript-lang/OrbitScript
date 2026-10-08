@@ -92,3 +92,11 @@ Interactive mode reads plain lines from standard input: no history and no editin
 Why: line editing would be the CLI's only dependency.
 
 Suite: `main.lua` checks the warning, which holds.
+
+## `os.exit(code, true)` from a coroutine
+
+`os.exit(code, true)` closes the main thread's variables still to close before it runs the finalizers, as lua5.5 does. When it is called from a coroutine, their `__close` handlers run on that coroutine: `coroutine.running()` inside one returns the coroutine (and `false`), where lua5.5 returns the main thread (and `true`). Called from the main thread, they match.
+
+Why: the handlers run as calls from `os.exit`'s own native frame. Running them on the main thread would mean switching stacks out from under a coroutine that never resumes, for a process that exits right after.
+
+Suite: none. `tests/diff/exit_close_tbc.lua` covers the rest of the behavior from a coroutine without asking which thread runs.
