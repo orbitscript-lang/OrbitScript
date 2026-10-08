@@ -1,6 +1,6 @@
 # What the conformance run skips, and why
 
-Milestone 1 is "the official Lua 5.5 test suite passes, minus the C API and internal (`T`) parts, each skip documented". This file is that documentation. Every skip below comes from one of three sources, and none of them edits a vendored file on disk: the harness works on a scratch copy.
+Milestone 1 is "the official Lua 5.5 test suite passes, minus the C API and internal (`T`) parts, each skip documented". This file is that documentation. Every skip below comes from one of four sources, and none of them edits a vendored file on disk: the harness works on a scratch copy.
 
 Line numbers refer to the vendored files in `suite/` (Lua 5.5.1).
 
@@ -39,7 +39,15 @@ PUC Lua can be built with `ltests.c`, which adds a global `T` exposing internals
 
 The reference `lua5.5` in CI runs with `--c-libs`, so these lines are still checked against real Lua.
 
-## 3. Whole files not run
+## 3. Lines that check a deliberate deviation
+
+Where OrbitScript differs from lua5.5 on purpose (each case is in [DEVIATIONS.md](DEVIATIONS.md)), the manifest's `deviates=A-B` option comments the checking lines out in the scratch copy, keeping line numbers. Unlike `needs-clibs`, these lines are disabled for every interpreter, the reference included.
+
+| File | Lines | Deviation |
+|---|---|---|
+| `errors.lua` | 329 | Method calls are always named as methods: past 255 constants, `t:bbb()` is still `method 'bbb'` where lua5.5 says `field 'bbb'` |
+
+## 4. Whole files not run
 
 | File | Why |
 |---|---|
