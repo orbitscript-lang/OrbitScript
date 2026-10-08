@@ -18,6 +18,7 @@ debug_setmetatable_gc.lua
 dump.lua
 errors.lua
 exit_close.lua
+exit_close_vars.lua
 floats.lua
 gc.lua
 io.lua
