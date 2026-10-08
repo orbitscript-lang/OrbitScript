@@ -31,7 +31,7 @@ use orbit_core::{
 use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::CoStatus;
-pub use gc::{GcMode, GcParam, GcState, finalize_then_return};
+pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 pub use meta::Event;
 pub use native::{CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).

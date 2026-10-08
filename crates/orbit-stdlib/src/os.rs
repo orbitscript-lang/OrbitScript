@@ -4,7 +4,7 @@ use std::io::Write;
 
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::{Gc, Table, Value};
-use orbit_vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
+use orbit_vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn};
 
 use crate::sys::{exit_status, file_error, shell};
 use crate::time::{self, Tm};
@@ -109,15 +109,32 @@ fn exit(ctx: &mut NativeCtx<'_>) -> R {
     let code = match ctx.arg(0) {
         Value::Nil | Value::Bool(true) => 0,
         Value::Bool(false) => 1,
-        _ => ctx.check_int(0)? as i32,
+        _ => ctx.check_int(0)?,
     };
-    // With `close` Lua closes the state first; everything that matters on
-    // the way out (buffered output, open files) is flushed either way, as
-    // the C library's `exit` does.
+    if !ctx.arg(1).is_falsy() {
+        // Close the VM first, as Lua closes the state: every pending
+        // finalizer runs, even when this is called from one.
+        ctx.truncate(0);
+        ctx.push(Value::Int(code));
+        return orbit_vm::close_then(ctx, exit_closed);
+    }
+    exit_now(ctx, code)
+}
+
+fn exit_closed(ctx: &mut NativeCtx<'_>, _: CallOutcome) -> R {
+    let Value::Int(code) = ctx.arg(0) else {
+        unreachable!("exit pushed the code")
+    };
+    exit_now(ctx, code)
+}
+
+/// Everything that matters on the way out (buffered output, open files) is
+/// flushed, closed or not, as the C library's `exit` does.
+fn exit_now(ctx: &mut NativeCtx<'_>, code: i64) -> R {
     #[cfg(feature = "io")]
     crate::io::flush_all(&mut *ctx.rt.out);
     flush_output(ctx);
-    std::process::exit(code)
+    std::process::exit(code as i32)
 }
 
 fn difftime(ctx: &mut NativeCtx<'_>) -> R {
