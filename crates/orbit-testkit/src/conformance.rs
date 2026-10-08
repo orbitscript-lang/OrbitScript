@@ -47,7 +47,7 @@ pub struct Entry {
     /// (`needs-clibs=250-253`).
     pub needs_clibs: Vec<(usize, usize)>,
     /// Line ranges that check a documented deviation (tests/lua-5.5/DEVIATIONS.md), always
-    /// disabled (`deviates=329`).
+    /// disabled (`deviates=331`).
     pub deviates: Vec<(usize, usize)>,
     pub timeout: Option<Duration>,
     /// Address-space limit in KiB (`ulimit -v`) the file runs under
@@ -263,6 +263,11 @@ pub fn run_suite(opts: &Options, mut report: impl FnMut(&FileResult)) -> Result<
     if let Some(dir) = &opts.c_libs {
         copy_c_libs(dir, &suite_dir.join("libs"))?;
     }
+    // Disable lines in every file up front, not only in the entries being run: all.lua runs
+    // the other files itself and must see the same copies.
+    for e in &entries {
+        disable_entry_lines(e, &suite_dir, opts)?;
+    }
     let mut results = Vec::new();
     for e in entries
         .iter()
@@ -438,6 +443,22 @@ fn copy_c_libs(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Comments out `e`'s `deviates` lines, and its `needs-clibs` lines unless the C libraries
+/// were given, in the scratch copy of its file.
+fn disable_entry_lines(e: &Entry, suite_dir: &Path, opts: &Options) -> Result<()> {
+    let needs_clibs = opts.c_libs.is_none() && !e.needs_clibs.is_empty();
+    if needs_clibs || !e.deviates.is_empty() {
+        let path = suite_dir.join(&e.file);
+        let mut src = fs::read_to_string(&path).map_err(io_err(path.display()))?;
+        if needs_clibs {
+            src = disable_lines(&src, &e.needs_clibs, "needs C library");
+        }
+        src = disable_lines(&src, &e.deviates, "deviation");
+        fs::write(&path, src).map_err(io_err(path.display()))?;
+    }
+    Ok(())
+}
+
 fn run_entry(e: &Entry, interp: &Path, suite_dir: &Path, opts: &Options) -> Result<FileResult> {
     let mut r = FileResult {
         file: e.file.clone(),
@@ -458,16 +479,6 @@ fn run_entry(e: &Entry, interp: &Path, suite_dir: &Path, opts: &Options) -> Resu
     }
     if r.skipped.is_some() {
         return Ok(r);
-    }
-    let needs_clibs = opts.c_libs.is_none() && !e.needs_clibs.is_empty();
-    if needs_clibs || !e.deviates.is_empty() {
-        let path = suite_dir.join(&e.file);
-        let mut src = fs::read_to_string(&path).map_err(io_err(path.display()))?;
-        if needs_clibs {
-            src = disable_lines(&src, &e.needs_clibs, "needs C library");
-        }
-        src = disable_lines(&src, &e.deviates, "deviation");
-        fs::write(&path, src).map_err(io_err(path.display()))?;
     }
     let driver = format!("__testkit_{}", e.file);
     fs::write(suite_dir.join(&driver), driver_source(e, opts.flags)).map_err(io_err(&driver))?;

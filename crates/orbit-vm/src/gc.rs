@@ -12,14 +12,15 @@
 //! Finalizers run at three points: after an automatic collection step in
 //! the interpreter (a nested call), at the end of `collectgarbage("collect")`
 //! and `collectgarbage("step")` (through [`NativeReturn::CallThen`], see
-//! [`finalize_then_return`]), and when the VM closes ([`Vm::close`]).
+//! [`finalize_then_return`]), and when the VM closes ([`Vm::close`], or
+//! [`close_then`] from a native, for `os.exit(code, true)`).
 //!
 //! [GC semantics design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/gc-semantics.md
 
 use orbit_core::gc::finalizer;
 use orbit_core::{LuaHeap, Value};
 
-use crate::{CallOutcome, LuaError, NativeCtx, NativeReturn, Runtime, Vm};
+use crate::{CallOutcome, Continuation, LuaError, NativeCtx, NativeReturn, Runtime, Vm};
 
 /// The collector mode `collectgarbage` reports. The incremental collector
 /// runs underneath in both; generational changes only what `"step"` does.
@@ -87,6 +88,8 @@ pub struct GcState {
     /// started.
     was_stopped: bool,
     closed: bool,
+    /// What [`close_then`] runs once the last finalizer has.
+    close_k: Option<Continuation>,
 }
 
 impl GcState {
@@ -106,6 +109,7 @@ impl GcState {
             finalizing: false,
             was_stopped: false,
             closed: false,
+            close_k: None,
         }
     }
 
@@ -150,11 +154,19 @@ impl GcState {
 }
 
 impl Runtime {
-    /// Emit a warning (Lua's `warn`). Warnings are off by default, and
-    /// `warn("@on")` arrives with the `warn` function (C3); until then they
-    /// are dropped.
+    /// Emit a warning (Lua's `warn`) on stderr, as `Lua warning: msg`, if
+    /// warnings are on ([`Runtime::warnings`]; off by default).
     pub fn warn(&mut self, msg: &[u8]) {
-        let _ = msg;
+        use std::io::Write;
+        if !self.warnings {
+            return;
+        }
+        let mut text = b"Lua warning: ".to_vec();
+        text.extend_from_slice(msg);
+        text.push(b'\n');
+        // Keep the order of output already printed.
+        let _ = self.out.flush();
+        let _ = std::io::stderr().write_all(&text);
     }
 
     /// Warn about an error raised by a finalizer.
@@ -292,4 +304,62 @@ fn after_finalizer(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeRe
     }
     ctx.truncate(1);
     next_finalizer(ctx)
+}
+
+/// From a native: close the VM as [`Vm::close`] does, then run `k` (with
+/// `CallOutcome::Ok(0)`) on the window's first slot. This works inside a
+/// finalizer too, as `os.exit(code, true)` needs: the other finalizers
+/// still run. The VM stays closed: the collector stays stopped,
+/// `collectgarbage` does nothing, and objects registered from here on are
+/// never finalized, so the caller ends the process (or drops the VM) next.
+/// Called while the VM is already closing (from a finalizer [`Vm::close`]
+/// runs), it runs the finalizers still waiting.
+pub fn close_then(ctx: &mut NativeCtx<'_>, k: Continuation) -> Result<NativeReturn, LuaError> {
+    ctx.truncate(1);
+    let gc = &mut ctx.rt.gc;
+    if !gc.closed {
+        gc.closed = true;
+        ctx.heap.finalize_all();
+    }
+    gc.finalizing = true;
+    gc.close_k = Some(k);
+    ctx.heap.stop();
+    next_close_finalizer(ctx)
+}
+
+fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
+    while let Some(obj) = ctx.heap.take_finalizable() {
+        let (o, f) = finalizer(ctx.heap, obj);
+        if f.is_nil() {
+            continue;
+        }
+        if !callable(f) {
+            let msg = not_callable_message(f);
+            ctx.rt.warn_gc_error_text(&msg);
+            continue;
+        }
+        ctx.truncate(1);
+        ctx.push(o);
+        ctx.rt.stack.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
+        return Ok(NativeReturn::CallThen {
+            f,
+            nargs: 1,
+            k: after_close_finalizer,
+            protected: true,
+        });
+    }
+    ctx.rt.stack.finalizer_at = None;
+    let k = ctx.rt.gc.close_k.take().expect("close_then set it");
+    k(ctx, CallOutcome::Ok(0))
+}
+
+fn after_close_finalizer(
+    ctx: &mut NativeCtx<'_>,
+    out: CallOutcome,
+) -> Result<NativeReturn, LuaError> {
+    if let CallOutcome::Err(e) = out {
+        ctx.rt.warn_gc_error(ctx.heap, e);
+    }
+    ctx.truncate(1);
+    next_close_finalizer(ctx)
 }

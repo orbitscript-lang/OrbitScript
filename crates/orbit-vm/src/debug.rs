@@ -441,13 +441,18 @@ impl Runtime {
     ) -> String {
         let levels = self.levels(running, from);
         let mut s = String::from("stack traceback:");
-        // The main thread ends in the host's call (`[C]: in ?`); a
-        // coroutine ends in its body, and a finished one has no frames.
+        // The main thread ends in the host's call (`[C]: in ?`), unless its
+        // outermost level is already a native the host called (as `lua`'s
+        // own driver is); a coroutine ends in its body, and a finished one
+        // has no frames.
         let host = self
             .stack
             .frames
             .first()
-            .is_some_and(|f| !matches!(f.kind, FrameKind::CoBase));
+            .is_some_and(|f| !matches!(f.kind, FrameKind::CoBase))
+            && !levels
+                .last()
+                .is_some_and(|&l| func_info(heap, self, self.level_func(heap, l)).what == "C");
         let total = levels.len() + host as usize;
         let skip = if total > TRACE_FULL {
             Some((TRACE_HEAD, total - TRACE_HEAD - TRACE_TAIL))

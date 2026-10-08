@@ -18,11 +18,11 @@
 main.lua        needs-clibs=250-253   # the lua command line; one check loads a C module
 gc.lua
 db.lua          deviates=434-436 deviates=603   # io files have a user value; count hooks count our instructions
-calls.lua
+calls.lua       deviates=539-542      # compares a dump's header with lua5.5's layout
 strings.lua
 literals.lua
 tpack.lua
-attrib.lua                            # without C loading, package.loadlib must report "absent"
+attrib.lua      needs-clibs=335-352   # without C loading, package.loadlib must report "absent"; 335-352 load lib2-v2
 gengc.lua
 locals.lua
 constructs.lua

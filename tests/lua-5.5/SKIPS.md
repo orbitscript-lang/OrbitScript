@@ -34,19 +34,20 @@ PUC Lua can be built with `ltests.c`, which adds a global `T` exposing internals
 
 `attrib.lua` and `main.lua` load small C libraries from `suite/libs/` (built from `lib1.c`, `lib11.c`, `lib2.c`, `lib21.c`, `lib22.c`). OrbitScript can't load C modules, so:
 
-- **`attrib.lua` needs no skip.** Its C-library block (262 to 356) first calls `package.loadlib`, and when that returns `nil, msg, "absent"` it prints "cannot load dynamic library" and moves on (270). That is the Lua-defined result for a build without dynamic-library support, so OrbitScript's `package.loadlib` must return it.
+- **`attrib.lua` 335 to 352 are disabled** (`needs-clibs=335-352`). The rest of its C-library block (262 to 356) first calls `package.loadlib`, and when that returns `nil, msg, "absent"` it prints "cannot load dynamic library" and moves on (270). That is the Lua-defined result for a build without dynamic-library support, so OrbitScript's `package.loadlib` must return it. The "testing external strings" block (335 to 352) has no such fallback: it requires the C module `lib2-v2` directly.
 - **`main.lua` 250 to 253 are disabled** (`needs-clibs=250-253` in `manifest.txt`): they run `lua -l lib2-v2` and have no fallback. The harness comments these lines out in its scratch copy, keeping line numbers, unless it's given `--c-libs DIR`.
 
 The reference `lua5.5` in CI runs with `--c-libs`, so these lines are still checked against real Lua.
 
 ## 3. Lines that check a deliberate deviation
 
-Where OrbitScript differs from lua5.5 on purpose (each case is in [DEVIATIONS.md](DEVIATIONS.md)), the manifest's `deviates=A-B` option comments the checking lines out in the scratch copy, keeping line numbers. Unlike `needs-clibs`, these lines are disabled for every interpreter, the reference included.
+Where OrbitScript differs from lua5.5 on purpose (each case is in [DEVIATIONS.md](DEVIATIONS.md)), the manifest's `deviates=A-B` option comments the checking lines out in the scratch copy, keeping line numbers. Unlike `needs-clibs`, these lines are disabled for every interpreter, the reference included. Both kinds are disabled in every file before anything runs, so `all.lua`, which runs the other files itself, sees the same copies.
 
 | File | Lines | Deviation |
 |---|---|---|
 | `db.lua` | 434-436 | Every full userdata has one user value, `io.stdin` included |
 | `db.lua` | 603 | Count hooks count OrbitScript's instructions: 1015 events where the check allows at most 1011 |
+| `calls.lua` | 539-542 | Binary chunk layout: a dump's header is OrbitScript's, not lua5.5's `\27Lua` header with its size and test values |
 | `errors.lua` | 331 | Method calls are always named as methods: past 255 constants, `t:bbb()` is still `method 'bbb'` where lua5.5 says `field 'bbb'` |
 
 ## 4. Whole files not run

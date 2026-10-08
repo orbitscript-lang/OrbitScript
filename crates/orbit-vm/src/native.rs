@@ -281,6 +281,12 @@ impl NativeCtx<'_> {
             let pc = f.pc - 1;
             if matches!(
                 proto.code.code.get(pc as usize),
+                Some(Op::GenericCall { .. })
+            ) {
+                return ("for iterator".to_owned(), false);
+            }
+            if matches!(
+                proto.code.code.get(pc as usize),
                 Some(Op::Call { .. } | Op::TailCall { .. })
             ) && let Some(origin) = proto.debug.origin(pc, 0)
             {

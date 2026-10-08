@@ -31,7 +31,7 @@ use orbit_core::{
 use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::CoStatus;
-pub use gc::{GcMode, GcParam, GcState, finalize_then_return};
+pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 pub use meta::Event;
 pub use native::{CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
@@ -684,7 +684,14 @@ impl Vm {
     /// unrooted once returned: use or pin them before running more code.
     pub fn call(&mut self, f: Value, args: &[Value]) -> Result<Vec<Value>, LuaError> {
         let func = self.rt.stack.regs.len();
-        let cdepth = self.rt.stack.deeper();
+        // The host's outermost call is the one `c_overflow` already counts,
+        // so a host that calls through one native of its own first (as the
+        // `orbit` command does, like lua5.5's) keeps lua5.5's depths.
+        let cdepth = if self.rt.stack.frames.is_empty() {
+            self.rt.stack.same_depth()
+        } else {
+            self.rt.stack.deeper()
+        };
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Boundary,
             func: func as u32,
