@@ -317,7 +317,11 @@ fn next(ctx: &mut NativeCtx<'_>) -> R {
             Ok(NativeReturn::Return(2))
         }
         Ok(None) => ctx.ret1(Value::Nil),
-        Err(_) => Err(ctx.error("invalid key to 'next'")),
+        // Raised by the table itself, so like lua5.5 it carries no position.
+        Err(_) => {
+            let msg = ctx.new_str(b"invalid key to 'next'");
+            Err(ctx.error_value(msg))
+        }
     }
 }
 
