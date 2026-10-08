@@ -1219,7 +1219,8 @@ impl Vm {
             }
 
             loop {
-                let op = code[pc];
+                // SPIKE ONLY: measures the bounds-check cost.
+                let op = unsafe { *code.get_unchecked(pc) };
                 pc += 1;
                 if HOOKED {
                     self.rt.stack.frames[depth - 1].pc = pc as u32;

@@ -194,18 +194,19 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
     #[inline(always)]
     #[track_caller]
     pub(crate) fn get_slot(&self, i: u32) -> &T {
-        match self.slots.get(i as usize) {
-            Some(Some(v)) => v,
-            _ => stale(i),
+        // SPIKE ONLY: measures the cost of checked slot access.
+        match unsafe { self.slots.get_unchecked(i as usize) } {
+            Some(v) => v,
+            None => unsafe { std::hint::unreachable_unchecked() },
         }
     }
 
     #[inline(always)]
     #[track_caller]
     pub(crate) fn get_slot_mut(&mut self, i: u32) -> &mut T {
-        match self.slots.get_mut(i as usize) {
-            Some(Some(v)) => v,
-            _ => stale(i),
+        match unsafe { self.slots.get_unchecked_mut(i as usize) } {
+            Some(v) => v,
+            None => unsafe { std::hint::unreachable_unchecked() },
         }
     }
 
