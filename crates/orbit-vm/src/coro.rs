@@ -55,6 +55,17 @@ impl CoStatus {
     }
 }
 
+/// Who is closing a coroutine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closing {
+    No,
+    /// `coroutine.close(co)` from another thread, which gets the outcome.
+    Closer,
+    /// `coroutine.close()` in the coroutine itself, which then ends as if
+    /// with an error (or returning nothing, if no handler fails).
+    Itself,
+}
+
 /// What the VM keeps in a [`Thread`].
 #[derive(Debug)]
 pub(crate) struct Coroutine {
@@ -70,9 +81,9 @@ pub(crate) struct Coroutine {
     /// How many times it has been parked suspended, to tell whether an
     /// entry in `rt.cooling` is still its latest park.
     parks: u32,
-    /// `coroutine.close` is running its `__close` handlers: errors unwind
-    /// straight to the base frame.
-    pub(crate) closing: bool,
+    /// Whether `coroutine.close` is running its `__close` handlers: errors
+    /// then unwind straight to the base frame, and nothing may yield.
+    closing: Closing,
     /// `rt.gc_cycles` when it was parked.
     cycle: u32,
 }
@@ -103,6 +114,7 @@ impl Coroutine {
             want: MULTI,
             tail: false,
             extra: 0,
+            cdepth: 0,
         });
         Coroutine {
             bytes: stack.bytes(),
@@ -111,7 +123,7 @@ impl Coroutine {
             status: CoStatus::Suspended,
             error: None,
             parks: 0,
-            closing: false,
+            closing: Closing::No,
             cycle: 0,
         }
     }
@@ -124,7 +136,7 @@ impl Coroutine {
             error: None,
             bytes: 0,
             parks: 0,
-            closing: false,
+            closing: Closing::No,
             cycle: 0,
         }
     }
@@ -184,7 +196,9 @@ impl Vm {
     /// run thread `to`'s.
     fn switch_to(&mut self, to: Gc<Thread>, from_status: CoStatus) {
         let from = self.rt.current;
-        let stack = std::mem::take(&mut self.rt.stack);
+        let mut stack = std::mem::take(&mut self.rt.stack);
+        // The callee cache is weak, which only the running stack's can be.
+        stack.callee = None;
         let top = self.rt.top;
         // A parked stack is traced through its thread, which the collector
         // may already have scanned.
@@ -279,6 +293,7 @@ impl Vm {
             Some(_) => self.rt.stack.frames.last_mut().expect("frame").kind = kind,
             None => {
                 let nargs = at - (func + 1);
+                let cdepth = self.rt.stack.same_depth();
                 self.rt.stack.frames.push(Frame {
                     kind,
                     func: func as u32,
@@ -289,6 +304,7 @@ impl Vm {
                     want,
                     tail: false,
                     extra: 0,
+                    cdepth,
                 });
             }
         }
@@ -397,7 +413,7 @@ impl Vm {
                 "attempt to yield from outside a coroutine".into(),
             ));
         };
-        if !yieldable(&self.rt.stack) {
+        if !yieldable(&self.rt.stack) || closing(&self.heap, self.rt.current) {
             return Err(Exc::Plain(
                 "attempt to yield across a C-call boundary".into(),
             ));
@@ -416,9 +432,9 @@ impl Vm {
         let resumer = self.rt.resumers.pop().expect("a coroutine has a resumer");
         let co = self.rt.current;
         // A coroutine being closed has reported its error to the closer.
-        let closing = std::mem::take(&mut co_mut(&mut self.heap, co).closing);
+        let closing = std::mem::replace(&mut co_mut(&mut self.heap, co).closing, Closing::No);
         if let Err(e) = outcome
-            && !closing
+            && closing != Closing::Closer
         {
             self.heap.barrier_back(co);
             co_mut(&mut self.heap, co).error = Some(e);
@@ -458,11 +474,25 @@ impl Vm {
         }
         // Run the handlers on the coroutine's own stack, as an error
         // unwinding to its base frame would.
-        c.closing = true;
+        c.closing = Closing::Closer;
         self.rt.resumers.push(self.rt.current);
         self.switch_to(co, CoStatus::Normal);
+        self.rt.stack.pop_to_base();
         let e = LuaError::new(error.unwrap_or(Value::Nil));
         switched(self.unwind(e).map_err(Exc::Lua))
+    }
+
+    /// `NativeReturn::Exit`: the running coroutine closes itself. Its
+    /// variables still to close are closed as an error unwinding to its
+    /// base would close them, then it ends.
+    pub(crate) fn exit_co(&mut self) -> Result<Flow, Exc> {
+        if self.rt.stack.tbc.is_empty() {
+            self.rt.xfer.clear();
+            return self.co_finished(Ok(()));
+        }
+        co_mut(&mut self.heap, self.rt.current).closing = Closing::Itself;
+        self.rt.stack.pop_to_base();
+        Err(Exc::Lua(LuaError::new(Value::Nil)))
     }
 
     /// The body returned into the coroutine's base frame: its results are
@@ -511,14 +541,14 @@ fn switched(flow: Result<Flow, Exc>) -> Result<Flow, Exc> {
 
 /// Whether the running coroutine is being closed by `coroutine.close`.
 pub(crate) fn closing(heap: &LuaHeap, t: Gc<Thread>) -> bool {
-    co(heap, t).closing
+    co(heap, t).closing != Closing::No
 }
 
 impl NativeCtx<'_> {
     /// Whether thread `t` could yield where it is: it isn't the main thread
     /// and no frame on its stack refuses (`coroutine.isyieldable`).
     pub fn thread_yieldable(&self, t: Gc<Thread>) -> bool {
-        if t == self.rt.main_thread {
+        if t == self.rt.main_thread || closing(self.heap, t) {
             return false;
         }
         if t == self.rt.current {

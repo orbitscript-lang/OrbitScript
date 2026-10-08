@@ -166,7 +166,11 @@ fn close_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
 }
 
 fn close(ctx: &mut NativeCtx<'_>) -> R {
-    let co = check_thread(ctx, 0)?;
+    // With no argument, the running coroutine closes itself.
+    let co = match ctx.arg(0) {
+        Value::Nil if ctx.nargs() == 0 => ctx.running().0,
+        _ => check_thread(ctx, 0)?,
+    };
     match ctx.thread_status(co) {
         CoStatus::Suspended | CoStatus::Dead => Ok(NativeReturn::Close { co, k: close_done }),
         CoStatus::Running if co == ctx.running_main_thread() => {
