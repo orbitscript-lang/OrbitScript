@@ -12,6 +12,11 @@ use orbit_compiler::bytecode::UnlinkedChunk;
 use orbit_lua_syntax::ParseOptions;
 
 pub use orbit_core::Value;
+/// How much `load` checks binary chunks (features `verify`, `verify-flow`;
+/// `ORBIT_VERIFY`).
+#[cfg(feature = "dump")]
+pub use orbit_stdlib::checks;
+#[cfg(feature = "load")]
 pub use orbit_stdlib::{chunk_id, read_chunk_file};
 pub use orbit_vm::{GcMode, LuaError, Vm};
 
@@ -51,7 +56,17 @@ pub fn compile(
 ) -> Result<UnlinkedChunk, Error> {
     let hir = orbit_lua_syntax::to_hir(chunk_name, src, options)
         .map_err(|d| Error::Syntax(d.to_lua_message(chunk_name)))?;
-    orbit_compiler::compile(&hir).map_err(|e| Error::Syntax(e.to_string()))
+    let chunk = orbit_compiler::compile(&hir).map_err(|e| Error::Syntax(e.to_string()))?;
+    // Debug builds check the compiler against the binary-chunk verifier, so
+    // every test that compiles Lua keeps the two in agreement.
+    #[cfg(debug_assertions)]
+    if let Err(e) = orbit_compiler::bytecode::verify::verify(
+        &chunk,
+        orbit_compiler::bytecode::verify::Level::STRONGEST,
+    ) {
+        panic!("compiler output fails verification: {e}");
+    }
+    Ok(chunk)
 }
 
 /// The compiler `load` and friends use: the Lua front end with default

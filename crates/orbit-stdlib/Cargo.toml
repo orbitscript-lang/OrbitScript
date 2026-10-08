@@ -9,11 +9,12 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-core = { path = "../orbit-core" }
 orbit-vm = { path = "../orbit-vm" }
 
 [features]
-default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine", "debug"]
+default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine", "debug", "dump", "verify", "verify-flow"]
 string = []
 utf8 = []
 table = []
@@ -21,6 +22,15 @@ math = []
 # `load`, `loadfile` and `dofile` (source chunks need the host to install a
 # compiler in `Runtime::compile`).
 load = []
+# `string.dump`, and loading the binary chunks it writes.
+dump = ["load", "string"]
+# Check binary chunks before `load` links them: layer 1 of the verifier
+# (structure). Without it binary chunks run unchecked, and a malformed one
+# can make the VM panic. `ORBIT_VERIFY` can lower the level at run time.
+verify = ["dump"]
+# Layer 2 of the verifier (data flow) as well: with both layers no binary
+# chunk can make the VM panic.
+verify-flow = ["verify", "orbit-bytecode/verify-flow"]
 # The `os` library (without it, no `os` table at all).
 os = []
 # `require` and the `package` library.

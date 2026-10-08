@@ -87,10 +87,30 @@ pub(crate) fn load_chunk(
 ) -> Result<Value, String> {
     let binary = bytes.first() == Some(&BINARY_SIGNATURE);
     mode.check(binary)?;
-    let name = chunk_id(source);
     if binary {
-        return Err(format!("{name}: bad binary format (not a binary chunk)"));
+        // Messages name a chunk whose source is itself binary this way.
+        let name = if source.first() == Some(&BINARY_SIGNATURE) {
+            "binary string".to_string()
+        } else {
+            chunk_id(source)
+        };
+        let bad = |e: &dyn std::fmt::Display| format!("{name}: bad binary format ({e})");
+        #[cfg(feature = "dump")]
+        {
+            use orbit_vm::op::format;
+            #[cfg(feature = "verify")]
+            use orbit_vm::op::verify;
+            let chunk = format::decode(bytes).map_err(|e| bad(&e))?;
+            #[cfg(feature = "verify")]
+            if let Some(level) = crate::checks::level(ctx) {
+                verify::verify(&chunk, level).map_err(|e| bad(&e))?;
+            }
+            return Ok(ctx.link(&chunk, env));
+        }
+        #[cfg(not(feature = "dump"))]
+        return Err(bad(&"binary chunks not enabled"));
     }
+    let name = chunk_id(source);
     let Some(compile) = ctx.rt.compile else {
         return Err(format!("{name}: no compiler for source chunks"));
     };
