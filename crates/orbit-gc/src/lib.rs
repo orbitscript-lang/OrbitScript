@@ -38,7 +38,8 @@
 //!   so marking never rescans ephemeron tables.
 //! - **Finalization with resurrection.** [`Heap::register_finalizer`] and
 //!   [`Heap::take_finalizable`] implement Lua's `__gc` semantics and order.
-//! - **Stress mode.** [`Heap::set_stress`] collects at nearly every safe point.
+//! - **Stress mode.** [`Heap::set_stress`] collects at nearly every safe point
+//!   that follows an allocation.
 //!
 //! # Rooting
 //!

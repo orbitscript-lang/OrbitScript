@@ -71,6 +71,9 @@ pub(crate) struct FuncState<'a> {
     child_index: HashMap<FuncId, u16>,
     pub slots: Vec<Slot>,
     cell_of: Vec<Option<u8>>,
+    /// A captured local's home: the register its initial value was computed in, which
+    /// stays reserved for it while it is in scope.
+    pub home: Vec<Option<u8>>,
     /// Next free register.
     pub free: usize,
     /// Registers below this belong to live locals (or loop state); above are temporaries.
@@ -145,6 +148,7 @@ impl<'a> FuncState<'a> {
             child_index: HashMap::new(),
             slots: vec![Slot::Unset; f.locals.len()],
             cell_of: vec![None; f.locals.len()],
+            home: vec![None; f.locals.len()],
             free: 0,
             active: 0,
             nregs: 0,
@@ -638,6 +642,7 @@ impl<'a> FuncState<'a> {
             self.ncells = self.ncells.max(self.free_cell);
             let cell = cell as u8;
             self.cell_of[l.index()] = Some(cell);
+            self.home[l.index()] = Some(r);
             self.emit(Op::CellNew { cell, src: r });
             Slot::Cell(cell)
         } else {
