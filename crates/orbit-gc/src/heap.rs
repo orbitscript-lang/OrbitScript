@@ -527,15 +527,19 @@ impl<S: Space> Heap<S> {
         self.stopped
     }
 
-    /// Stress mode: a step is due on every check, each step does a little
-    /// work, and a new cycle starts as soon as one ends. Slow, but it
-    /// collects at nearly every safe point, which flushes out missing roots
-    /// and barriers.
+    /// Stress mode: a step is due on every check, each step after an
+    /// allocation does a little work, and a new cycle starts as soon as one
+    /// ends. Slow, but it collects at nearly every safe point that follows
+    /// an allocation, which flushes out missing roots and barriers. A step
+    /// with nothing allocated since the last one does nothing, as in normal
+    /// mode, so a program that allocates nothing sees `bytes` stay put.
     pub fn set_stress(&mut self, on: bool) {
         self.stress = on;
-        if !on {
-            self.debt = self.bytes as isize - self.threshold as isize;
-        }
+        self.debt = if on {
+            0
+        } else {
+            self.bytes as isize - self.threshold as isize
+        };
     }
 
     pub fn is_stress(&self) -> bool {
@@ -548,6 +552,11 @@ impl<S: Space> Heap<S> {
     /// debt. Returns true if this step finished a cycle.
     pub fn step<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) -> bool {
         let work = if self.stress {
+            // `should_step` stays true in stress mode (testing the flag
+            // there keeps the owner's hot check unchanged), so skip here.
+            if self.debt <= 0 {
+                return false;
+            }
             STRESS_WORK
         } else {
             let debt = self.debt.max(self.params.step_bytes as isize) as usize;

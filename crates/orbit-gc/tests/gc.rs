@@ -769,3 +769,28 @@ fn limit_is_reported_not_enforced() {
     h.set_limit(None);
     assert!(!h.over_limit());
 }
+
+#[test]
+fn stress_mode_steps_only_after_allocating() {
+    let mut h = TestHeap::new();
+    h.set_stress(true);
+    let root = obj(&mut h, 1);
+    let _garbage = obj(&mut h, 2);
+    let mut roots = Stack(vec![Ref::Obj(root)]);
+    // The allocations above pay for one step. Nothing is allocated after
+    // it, so the steps that follow do no work: cycles don't keep starting
+    // and the heap stays put.
+    h.step(&mut roots);
+    let bytes = h.bytes();
+    for _ in 0..1000 {
+        h.step(&mut roots);
+    }
+    assert!(h.cycles() <= 1);
+    assert_eq!(h.bytes(), bytes);
+    obj(&mut h, 3);
+    for _ in 0..1000 {
+        h.step(&mut roots);
+        obj(&mut h, 4);
+    }
+    assert!(h.cycles() > 1);
+}

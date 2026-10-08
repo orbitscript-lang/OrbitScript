@@ -9,9 +9,9 @@
 //!
 //! `--dump-ast`, `--dump-hir` and `--dump-bytecode` print a compiler stage
 //! of the script instead of running it. `ORBIT_GC_STRESS=1` collects at
-//! nearly every safe point. `ORBIT_MEMORY_LIMIT=64M` (bytes, or with a `K`,
-//! `M` or `G` suffix) caps the Lua heap: past it, scripts get the error
-//! `not enough memory`.
+//! nearly every safe point after an allocation. `ORBIT_MEMORY_LIMIT=64M`
+//! (bytes, or with a `K`, `M` or `G` suffix) caps the Lua heap: past it,
+//! scripts get the error `not enough memory`.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
