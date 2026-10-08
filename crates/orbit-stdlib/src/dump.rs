@@ -40,8 +40,7 @@ pub(crate) fn unlink(heap: &LuaHeap, root: Gc<Proto>) -> UnlinkedChunk {
         protos.push(UnlinkedProto {
             name: p.name.clone(),
             line_defined: p.line_defined,
-            // Linked prototypes don't keep it yet.
-            last_line: 0,
+            last_line: p.last_line,
             nparams: code.nparams,
             is_vararg: code.is_vararg,
             nregs: code.nregs,

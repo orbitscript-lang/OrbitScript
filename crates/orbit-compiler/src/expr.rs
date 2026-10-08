@@ -321,6 +321,7 @@ impl FuncState<'_> {
         match op {
             BinOp::Concat => {
                 let mut parts = vec![lhs];
+                let mut ops = vec![at];
                 let mut rest = rhs;
                 // A chain reports the position of its last operator.
                 let mut at = at;
@@ -332,6 +333,7 @@ impl FuncState<'_> {
                 {
                     at = self.f.expr(rest).at;
                     parts.push(lhs);
+                    ops.push(at);
                     rest = rhs;
                 }
                 parts.push(rest);
@@ -340,9 +342,13 @@ impl FuncState<'_> {
                 };
                 let first = self.free as u8;
                 let mut origins = Vec::with_capacity(parts.len());
-                for part in parts {
+                for (i, part) in parts.into_iter().enumerate() {
                     let r = self.alloc()?;
+                    let from = self.next_pc();
                     origins.push(self.expr_to(part, r)?);
+                    if let Some(&op_at) = ops.get(i) {
+                        self.consumed_at(part, from, op_at);
+                    }
                 }
                 self.at_offset(at);
                 let pc = self.emit(Op::Concat { dst, first, count });
@@ -361,7 +367,9 @@ impl FuncState<'_> {
                 self.place(end);
             }
             _ => {
+                let from = self.next_pc();
                 let (a, a_origin) = self.operand(lhs, dst)?;
+                self.consumed_at(lhs, from, at);
                 // `x + k` and `x - k` with a small integer literal use the immediate forms.
                 let imm = match (op, self.const_of(rhs)) {
                     (BinOp::Add | BinOp::Sub, Some(ConstVal::Int(k))) => i16::try_from(k).ok(),

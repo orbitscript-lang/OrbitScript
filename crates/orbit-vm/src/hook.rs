@@ -171,27 +171,28 @@ impl Vm {
         if h.mask & LINE != 0 {
             let proto = self.heap.get(self.heap.get(closure).proto);
             let lines = &proto.debug;
-            if !lines.lines.is_empty() {
-                let old = if h.old_depth != depth as u32 {
-                    // Back from a call (or the call that set the hook):
-                    // the last instruction seen is that call.
-                    pc.checked_sub(1)
-                } else if h.old_pc == FRESH {
-                    None
-                } else {
-                    Some(h.old_pc as usize)
+            let old = if h.old_depth != depth as u32 {
+                // Back from a call (or the call that set the hook): the
+                // last instruction seen is that call.
+                pc.checked_sub(1)
+            } else if h.old_pc == FRESH {
+                None
+            } else {
+                Some(h.old_pc as usize)
+            };
+            // A stripped function has no lines: its events report none and
+            // fire only on entry and backward jumps, as in the reference.
+            let stripped = lines.lines.is_empty();
+            let line = (!stripped).then(|| lines.line(pc as u32));
+            let fire = counted
+                || match old {
+                    None => true,
+                    Some(o) => pc <= o || (!stripped && line != Some(lines.line(o as u32))),
                 };
-                let line = lines.line(pc as u32);
-                let fire = counted
-                    || match old {
-                        None => true,
-                        Some(o) => pc <= o || line != lines.line(o as u32),
-                    };
-                h.old_pc = pc as u32;
-                h.old_depth = depth as u32;
-                if fire {
-                    self.call_hook(b"line", Some(line), None)?;
-                }
+            h.old_pc = pc as u32;
+            h.old_depth = depth as u32;
+            if fire {
+                self.call_hook(b"line", line, None)?;
             }
         }
         if self.rt.stack.hook.mask & RETURN != 0 {

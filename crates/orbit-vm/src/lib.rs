@@ -214,6 +214,9 @@ pub(crate) struct Stack {
     pub callee: Option<(Gc<Closure>, crate::interp::Shape)>,
     /// The stack's debug hook (`debug.sethook`).
     pub hook: hook::Hook,
+    /// The index of the boundary frame below a running finalizer, which
+    /// the debug library names `__gc`.
+    pub(crate) finalizer_at: Option<u32>,
 }
 
 impl Stack {
