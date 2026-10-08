@@ -5,7 +5,11 @@ c1_env.lua
 c1_global.lua
 c1_goto.lua
 c1_hexfloat.lua
+<<<<<<< HEAD
 c1_long_strings.lua
+=======
+c1_limits.lua
+>>>>>>> origin/main
 c1_vararg.lua
 c3_close.lua
 c4_gc_close.lua
@@ -13,3 +17,7 @@ c4_gc_close_error.lua
 c4_gc_collectgarbage.lua
 c4_gc_finalizers.lua
 c4_gc_weak.lua
+c6_active_lines.lua
+c6_call_chain.lua
+c6_close_frames.lua
+c6_names.lua

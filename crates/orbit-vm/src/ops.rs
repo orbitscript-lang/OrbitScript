@@ -148,8 +148,8 @@ pub(crate) fn arith_slow(
             format!(
                 "attempt to {} a '{}' with a '{}'",
                 op.name(),
-                a.type_name(),
-                b.type_name()
+                rt.type_name(heap, a),
+                rt.type_name(heap, b)
             ),
             None,
         ));
@@ -158,7 +158,7 @@ pub(crate) fn arith_slow(
     Err(Exc::Rt(
         format!(
             "attempt to perform arithmetic on a {} value",
-            bad.type_name()
+            rt.type_name(heap, bad)
         ),
         Some(which),
     ))
@@ -180,30 +180,36 @@ fn bit_operand(v: Value) -> Option<Option<i64>> {
 /// A bitwise operator for everything the integer fast path doesn't cover: floats with integer
 /// values convert, other numbers and non-numbers are errors. Strings are not coerced (Lua 5.5
 /// leaves that to string metamethods). Metamethods (`__band` .. `__shr`) plug in here.
-pub(crate) fn bitwise_slow(_heap: &LuaHeap, op: BitOp, a: Value, b: Value) -> Result<Value, Exc> {
+pub(crate) fn bitwise_slow(
+    heap: &LuaHeap,
+    rt: &Metas,
+    op: BitOp,
+    a: Value,
+    b: Value,
+) -> Result<Value, Exc> {
     match (bit_operand(a), bit_operand(b)) {
         (Some(Some(x)), Some(Some(y))) => Ok(Value::Int(op.apply(x, y))),
         (Some(None), Some(_)) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(0))),
         (Some(_), Some(None)) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(1))),
-        (Some(_), None) => Err(bitwise_type_error(b, 1)),
-        (None, _) => Err(bitwise_type_error(a, 0)),
+        (Some(_), None) => Err(bitwise_type_error(heap, rt, b, 1)),
+        (None, _) => Err(bitwise_type_error(heap, rt, a, 0)),
     }
 }
 
 /// `~a` for everything but an integer. Metamethods (`__bnot`) plug in here.
-pub(crate) fn bnot_slow(_heap: &LuaHeap, a: Value) -> Result<Value, Exc> {
+pub(crate) fn bnot_slow(heap: &LuaHeap, rt: &Metas, a: Value) -> Result<Value, Exc> {
     match bit_operand(a) {
         Some(Some(x)) => Ok(Value::Int(!x)),
         Some(None) => Err(Exc::Rt(NO_INTEGER_REP.into(), Some(0))),
-        None => Err(bitwise_type_error(a, 0)),
+        None => Err(bitwise_type_error(heap, rt, a, 0)),
     }
 }
 
-fn bitwise_type_error(v: Value, operand: u8) -> Exc {
+fn bitwise_type_error(heap: &LuaHeap, rt: &Metas, v: Value, operand: u8) -> Exc {
     Exc::Rt(
         format!(
             "attempt to perform bitwise operation on a {} value",
-            v.type_name()
+            rt.type_name(heap, v)
         ),
         Some(operand),
     )
@@ -240,14 +246,14 @@ pub(crate) fn less_equal(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Resu
 fn compare_meta(heap: &LuaHeap, rt: &Metas, e: Event, a: Value, b: Value) -> Exc {
     let h = meta::binary_handler(heap, rt, e, a, b);
     if h.is_nil() {
-        compare_error(a, b)
+        compare_error(heap, rt, a, b)
     } else {
         Exc::Meta(MetaCall::new(h, e, &[a, b]))
     }
 }
 
-fn compare_error(a: Value, b: Value) -> Exc {
-    let (x, y) = (a.type_name(), b.type_name());
+fn compare_error(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Exc {
+    let (x, y) = (rt.type_name(heap, a), rt.type_name(heap, b));
     let msg = if x == y {
         format!("attempt to compare two {x} values")
     } else {

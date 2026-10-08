@@ -56,6 +56,8 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
         funcs: vec![FuncState {
             vararg: true,
             loops: 0,
+            active: 0,
+            line: None,
         }],
         sym_global: global,
     };
@@ -77,10 +79,19 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
     })
 }
 
+/// Most local variables one function may have in scope at once, as in lua5.5.
+const MAX_LOCALS: u32 = 200;
+
 struct FuncState {
     vararg: bool,
     /// Loops enclosing the current position, within this function.
     loops: u32,
+    /// Local variables in scope, counted as lua5.5 counts them against [`MAX_LOCALS`]: a
+    /// `for` loop's hidden state and a vararg function's `...` take places, a `<const>` local
+    /// whose value is a constant does not.
+    active: u32,
+    /// The line the function is defined on; `None` for the main function.
+    line: Option<u32>,
 }
 
 struct Parser<'a> {
@@ -149,30 +160,7 @@ impl Parser<'_> {
     // ---- errors -------------------------------------------------------------------------------
 
     fn near(&self, tok: Token) -> Near {
-        match tok.kind {
-            TokenKind::Eof => Near::Eof,
-            TokenKind::Keyword(k) => Near::Text(k.as_str().as_bytes().to_vec()),
-            TokenKind::Punct(p) => Near::Text(p.as_str().as_bytes().to_vec()),
-            TokenKind::Other(c) if c.is_ascii_graphic() => Near::Text(vec![c]),
-            TokenKind::Other(c) => Near::Text(format!("<\\{c}>").into_bytes()),
-            // The reference shows a string as its delimiters around the decoded contents.
-            TokenKind::Str(id) => {
-                let raw = self.lx.text(tok.span);
-                let contents = self.lx.strings().get(id);
-                let open = if raw[0] == b'[' {
-                    1 + raw[1..].iter().take_while(|&&c| c == b'=').count() + 1
-                } else {
-                    1
-                };
-                let mut text = raw[..open].to_vec();
-                text.extend_from_slice(contents);
-                text.extend_from_slice(&raw[raw.len() - open..]);
-                Near::Text(text)
-            }
-            TokenKind::Name(_) | TokenKind::Int(_) | TokenKind::Float(_) => {
-                Near::Text(self.lx.text(tok.span).to_vec())
-            }
-        }
+        near_token(&self.lx, tok)
     }
 
     /// `message near '<current token>'`.
@@ -258,6 +246,22 @@ impl Parser<'_> {
         self.funcs.last_mut().expect("function state")
     }
 
+    /// Brings `n` more locals into scope, failing near the current token past the limit.
+    fn add_locals(&mut self, n: u32) -> PResult<()> {
+        let f = self.func();
+        f.active += n;
+        if f.active <= MAX_LOCALS {
+            return Ok(());
+        }
+        let place = match f.line {
+            None => "main function".to_string(),
+            Some(line) => format!("function at line {line}"),
+        };
+        Err(self.error_here(format!(
+            "too many local variables (limit is {MAX_LOCALS}) in {place}"
+        )))
+    }
+
     // ---- blocks and statements ----------------------------------------------------------------
 
     fn block_follows(&self) -> bool {
@@ -272,6 +276,7 @@ impl Parser<'_> {
 
     fn block(&mut self) -> PResult<Block> {
         self.enter()?;
+        let active = self.func().active;
         let start = self.tok.span.start;
         let mut stmts = Vec::new();
         let mut ret = None;
@@ -285,6 +290,7 @@ impl Parser<'_> {
             }
         }
         self.leave();
+        self.func().active = active;
         Ok(Block {
             stmts,
             ret,
@@ -359,7 +365,7 @@ impl Parser<'_> {
                 } else {
                     None
                 };
-                let func = self.func_body(start, line)?;
+                let func = self.func_body(start, line, method.is_some())?;
                 StmtKind::Function {
                     path: FuncPath {
                         base,
@@ -374,11 +380,20 @@ impl Parser<'_> {
                 if self.is_kw(Keyword::Function) {
                     self.advance()?;
                     let name = self.name()?;
-                    let func = self.func_body(start, line)?;
+                    self.add_locals(1)?;
+                    let func = self.func_body(start, line, false)?;
                     StmtKind::LocalFunction { name, func }
                 } else {
                     let attrib = self.opt_attrib()?;
                     let (names, values) = self.att_names_and_values(attrib, true)?;
+                    let folded = match (names.as_slice(), values.as_slice()) {
+                        ([name], [value]) => {
+                            name.attrib.or(attrib).map(|a| a.kind) == Some(AttribKind::Const)
+                                && is_constant(value)
+                        }
+                        _ => false,
+                    };
+                    self.add_locals(names.len() as u32 - u32::from(folded))?;
                     StmtKind::Local {
                         attrib,
                         names,
@@ -428,7 +443,7 @@ impl Parser<'_> {
         if self.is_kw(Keyword::Function) {
             self.advance()?;
             let name = self.name()?;
-            let func = self.func_body(start, line)?;
+            let func = self.func_body(start, line, false)?;
             return Ok(StmtKind::GlobalFunction { name, func });
         }
         let attrib = self.opt_attrib()?;
@@ -469,6 +484,7 @@ impl Parser<'_> {
     }
 
     fn for_stat(&mut self, line: u32) -> PResult<StmtKind> {
+        let active = self.func().active;
         self.advance()?;
         let first = self.name()?;
         let kind = match self.tok.kind {
@@ -482,7 +498,10 @@ impl Parser<'_> {
                 } else {
                     None
                 };
+                // Two hidden places for the loop state, then the control variable.
+                self.add_locals(2)?;
                 self.expect_kw(Keyword::Do)?;
+                self.add_locals(1)?;
                 let body = self.loop_block()?;
                 StmtKind::NumericFor {
                     var: first,
@@ -499,13 +518,17 @@ impl Parser<'_> {
                 }
                 self.expect_kw(Keyword::In)?;
                 let exprs = self.expr_list()?;
+                // Three hidden places for the iterator state, then the variables.
+                self.add_locals(3)?;
                 self.expect_kw(Keyword::Do)?;
+                self.add_locals(vars.len() as u32)?;
                 let body = self.loop_block()?;
                 StmtKind::GenericFor { vars, exprs, body }
             }
             _ => return Err(self.error_expected("'=' or 'in'")),
         };
         self.expect_match(TokenKind::Keyword(Keyword::End), "for", line)?;
+        self.func().active = active;
         Ok(kind)
     }
 
@@ -604,9 +627,21 @@ impl Parser<'_> {
     }
 
     /// `'(' [parlist] ')' block end`. `start` and `line` are those of the `function` keyword
-    /// (or `local`/`global` before it).
-    fn func_body(&mut self, start: u32, line: u32) -> PResult<FuncBody> {
+    /// (or `local`/`global` before it); a method has the implicit `self` parameter.
+    fn func_body(&mut self, start: u32, line: u32, method: bool) -> PResult<FuncBody> {
         self.expect_punct(Punct::LParen)?;
+        self.funcs.push(FuncState {
+            vararg: false,
+            loops: 0,
+            active: 0,
+            line: Some(line),
+        });
+        let body = self.func_contents(start, line, method);
+        self.funcs.pop();
+        body
+    }
+
+    fn func_contents(&mut self, start: u32, line: u32, method: bool) -> PResult<FuncBody> {
         let mut params = Vec::new();
         let mut vararg = None;
         if !self.is_punct(Punct::RParen) {
@@ -633,14 +668,12 @@ impl Parser<'_> {
                 }
             }
         }
+        // `...` takes a place, named or not.
+        let n = u32::from(method) + params.len() as u32 + u32::from(vararg.is_some());
+        self.add_locals(n)?;
         self.expect_punct(Punct::RParen)?;
-        self.funcs.push(FuncState {
-            vararg: vararg.is_some(),
-            loops: 0,
-        });
-        let body = self.block();
-        self.funcs.pop();
-        let body = body?;
+        self.func().vararg = vararg.is_some();
+        let body = self.block()?;
         self.expect_match(TokenKind::Keyword(Keyword::End), "function", line)?;
         Ok(FuncBody {
             params,
@@ -760,7 +793,7 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::Function) => {
                 let line = self.cur_line();
                 self.advance()?;
-                let body = self.func_body(span.start, line)?;
+                let body = self.func_body(span.start, line, false)?;
                 let span = body.span;
                 return Ok(Expr {
                     kind: ExprKind::Function(Box::new(body)),
@@ -910,6 +943,78 @@ impl Parser<'_> {
                 Ok(Field::Keyed(key, self.expr()?))
             }
             _ => Ok(Field::Positional(self.expr()?)),
+        }
+    }
+}
+
+/// Whether a `<const>` local initialized with `e` is a compile-time constant, which lua5.5
+/// gives no place among the function's locals: a literal, or arithmetic folded from them.
+fn is_constant(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Nil
+        | ExprKind::True
+        | ExprKind::False
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_) => true,
+        ExprKind::Paren(e) => is_constant(e),
+        ExprKind::Unary {
+            op: UnOp::Neg,
+            expr,
+        } => is_number(expr),
+        ExprKind::Binary {
+            op: BinOp::Add | BinOp::Sub | BinOp::Mul,
+            lhs,
+            rhs,
+            ..
+        } => is_number(lhs) && is_number(rhs),
+        _ => false,
+    }
+}
+
+/// Whether `e` folds to a number constant.
+fn is_number(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) => true,
+        ExprKind::Paren(e) => is_number(e),
+        ExprKind::Unary {
+            op: UnOp::Neg,
+            expr,
+        } => is_number(expr),
+        ExprKind::Binary {
+            op: BinOp::Add | BinOp::Sub | BinOp::Mul,
+            lhs,
+            rhs,
+            ..
+        } => is_number(lhs) && is_number(rhs),
+        _ => false,
+    }
+}
+
+/// How an error message shows `tok`, lexed by `lx`.
+pub(crate) fn near_token(lx: &Lexer<'_>, tok: Token) -> Near {
+    match tok.kind {
+        TokenKind::Eof => Near::Eof,
+        TokenKind::Keyword(k) => Near::Text(k.as_str().as_bytes().to_vec()),
+        TokenKind::Punct(p) => Near::Text(p.as_str().as_bytes().to_vec()),
+        TokenKind::Other(c) if c.is_ascii_graphic() => Near::Text(vec![c]),
+        TokenKind::Other(c) => Near::Text(format!("<\\{c}>").into_bytes()),
+        // The reference shows a string as its delimiters around the decoded contents.
+        TokenKind::Str(id) => {
+            let raw = lx.text(tok.span);
+            let contents = lx.strings().get(id);
+            let open = if raw[0] == b'[' {
+                1 + raw[1..].iter().take_while(|&&c| c == b'=').count() + 1
+            } else {
+                1
+            };
+            let mut text = raw[..open].to_vec();
+            text.extend_from_slice(contents);
+            text.extend_from_slice(&raw[raw.len() - open..]);
+            Near::Text(text)
+        }
+        TokenKind::Name(_) | TokenKind::Int(_) | TokenKind::Float(_) => {
+            Near::Text(lx.text(tok.span).to_vec())
         }
     }
 }

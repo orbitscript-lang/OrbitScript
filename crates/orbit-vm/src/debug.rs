@@ -133,11 +133,28 @@ impl Runtime {
         } else if n == 0 {
             return None;
         }
-        (0..top)
-            .rev()
-            .filter(|&i| is_activation(frames[i].kind))
-            .nth(n - 1)
-            .map(|i| Level(LevelAt::Frame(i)))
+        let mut i = top;
+        let mut left = n;
+        while i > 0 {
+            i -= 1;
+            let k = frames[i].kind;
+            if is_activation(k) {
+                left -= 1;
+                if left == 0 {
+                    return Some(Level(LevelAt::Frame(i)));
+                }
+            }
+            if unwinding_close(k) {
+                // The frames the error left are gone in the reference by the
+                // time a `__close` handler runs: its caller is the frame that
+                // catches the error.
+                i = frames[..i]
+                    .iter()
+                    .rposition(|f| catches(f.kind))
+                    .map_or(0, |c| c + 1);
+            }
+        }
+        None
     }
 
     /// Index of the frame below activation `l` that called it, if any.
@@ -200,6 +217,9 @@ impl Runtime {
             })
         };
         match caller.kind {
+            // A `__close` handler run by an error is called like a plain
+            // function.
+            k if unwinding_close(k) => None,
             FrameKind::Meta { event, .. } => named("metamethod", event.short_name().as_bytes()),
             FrameKind::Hook => named("hook", b"?"),
             FrameKind::Lua { closure, .. } if caller.pc > 0 => {
@@ -521,6 +541,30 @@ impl Runtime {
 }
 
 /// Whether a frame of this kind is a level of its own.
+/// A meta frame below a `__close` handler that an unwinding error runs.
+fn unwinding_close(k: FrameKind) -> bool {
+    matches!(
+        k,
+        FrameKind::Meta {
+            action: crate::meta::MetaAction::Unwind { .. },
+            ..
+        }
+    )
+}
+
+/// A frame an unwinding error stops at.
+fn catches(k: FrameKind) -> bool {
+    matches!(
+        k,
+        FrameKind::Native {
+            catch: crate::Catch::Yes | crate::Catch::Handler,
+            ..
+        } | FrameKind::Boundary
+            | FrameKind::CoBase
+            | FrameKind::Hook
+    )
+}
+
 fn is_activation(k: FrameKind) -> bool {
     match k {
         FrameKind::Lua { .. } | FrameKind::Native { .. } | FrameKind::NativeCall { .. } => true,

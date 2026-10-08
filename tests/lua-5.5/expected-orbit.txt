@@ -9,7 +9,9 @@ gc.lua
 gengc.lua
 goto.lua
 literals.lua
+math.lua
 memerr.lua
+pm.lua
 sort.lua
 tpack.lua
 utf8.lua
