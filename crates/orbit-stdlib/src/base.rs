@@ -442,14 +442,11 @@ fn warn(ctx: &mut NativeCtx<'_>) -> R {
         return Ok(NativeReturn::Return(0));
     }
     if ctx.rt.warnings {
-        let mut text = b"Lua warning: ".to_vec();
+        let mut text = Vec::new();
         for &s in &parts {
             text.extend_from_slice(ctx.bytes(s));
         }
-        text.push(b'\n');
-        // Keep the order of output already printed.
-        let _ = ctx.rt.out.flush();
-        let _ = std::io::stderr().write_all(&text);
+        ctx.rt.warn(&text);
     }
     Ok(NativeReturn::Return(0))
 }

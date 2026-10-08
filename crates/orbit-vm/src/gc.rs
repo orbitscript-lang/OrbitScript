@@ -150,11 +150,19 @@ impl GcState {
 }
 
 impl Runtime {
-    /// Emit a warning (Lua's `warn`). Warnings are off by default, and
-    /// `warn("@on")` arrives with the `warn` function (C3); until then they
-    /// are dropped.
+    /// Emit a warning (Lua's `warn`) on stderr, as `Lua warning: msg`, if
+    /// warnings are on ([`Runtime::warnings`]; off by default).
     pub fn warn(&mut self, msg: &[u8]) {
-        let _ = msg;
+        use std::io::Write;
+        if !self.warnings {
+            return;
+        }
+        let mut text = b"Lua warning: ".to_vec();
+        text.extend_from_slice(msg);
+        text.push(b'\n');
+        // Keep the order of output already printed.
+        let _ = self.out.flush();
+        let _ = std::io::stderr().write_all(&text);
     }
 
     /// Warn about an error raised by a finalizer.

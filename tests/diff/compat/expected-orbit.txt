@@ -24,3 +24,4 @@ c6_line_events.lua
 c6_names.lua
 c6_names2.lua
 c6_stripped_hooks.lua
+c6_warn.lua
