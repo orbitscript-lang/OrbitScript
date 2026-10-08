@@ -22,6 +22,7 @@ gc.lua
 io.lua
 load.lua
 lua55.lua
+many_constants.lua
 meta_index.lua
 meta_ops.lua
 metatables.lua

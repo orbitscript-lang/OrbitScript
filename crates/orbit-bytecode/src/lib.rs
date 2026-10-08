@@ -30,6 +30,10 @@ pub const MAX_REGS: usize = 255;
 /// The most captures one function may have.
 pub const MAX_CAPTURES: usize = 255;
 
+/// The most constants one function may have. Instructions other than
+/// `LoadConstX` reach only the first `Const::MAX + 1`.
+pub const MAX_CONSTS: usize = 1 << 25;
+
 /// Register index.
 pub type Reg = u8;
 /// Constant-pool index.
@@ -53,6 +57,8 @@ pub enum Op {
     LoadInt { dst: Reg, value: i32 },
     /// `R[dst] = K[k]`
     LoadConst { dst: Reg, k: Const },
+    /// `R[dst] = K[k]`, for constants past [`Const`]'s range.
+    LoadConstX { dst: Reg, k: u32 },
 
     // Cells and captures.
     /// `C[cell] = new cell holding R[src]`

@@ -351,6 +351,7 @@ op_table! {
     70 Tbc { reg };
     71 Close { from };
     72 SubInt { dst, a, imm };
+    73 LoadConstX { dst, k };
 }
 
 /// One instruction's encoding (for tests and fuzzing).

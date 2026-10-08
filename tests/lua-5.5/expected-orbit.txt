@@ -24,3 +24,4 @@ strings.lua
 tpack.lua
 utf8.lua
 vararg.lua
+verybig.lua

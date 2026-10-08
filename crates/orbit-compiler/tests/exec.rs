@@ -114,7 +114,8 @@ fn s(x: &str) -> V {
 }
 
 impl Interp {
-    fn konst(&self, proto: usize, k: u16) -> V {
+    fn konst(&self, proto: usize, k: impl Into<u32>) -> V {
+        let k = k.into();
         match &self.chunk.protos[proto].consts[k as usize] {
             Constant::Int(i) => V::Int(*i),
             Constant::Float(x) => V::Float(*x),
@@ -263,6 +264,7 @@ impl Interp {
                 Op::LoadBool { dst, value } => r[dst as usize] = V::Bool(value),
                 Op::LoadInt { dst, value } => r[dst as usize] = V::Int(value as i64),
                 Op::LoadConst { dst, k } => r[dst as usize] = self.konst(pi, k),
+                Op::LoadConstX { dst, k } => r[dst as usize] = self.konst(pi, k),
                 Op::CellNew { cell, src } => {
                     cells[cell as usize] = Rc::new(RefCell::new(r[src as usize].clone()))
                 }

@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use orbit_bytecode::{
-    Constant, DebugInfo, FunctionName, LocalInfo, LocalSlot, MAX_CAPTURES, MAX_REGS, Offset, Op,
-    OperandOrigin, Origin, UnlinkedProto,
+    Const, Constant, DebugInfo, FunctionName, LocalInfo, LocalSlot, MAX_CAPTURES, MAX_CONSTS,
+    MAX_REGS, Offset, Op, OperandOrigin, Origin, UnlinkedProto,
 };
 use orbit_hir::{CaptureFrom, CaptureId, Chunk, FuncId, Function, LocalId, Span, StmtKind, StrId};
 
@@ -61,7 +61,7 @@ pub(crate) struct FuncState<'a> {
     lines: Vec<(u32, u32)>,
     pub(crate) line: u32,
     consts: Vec<Constant>,
-    const_map: HashMap<ConstKey, u16>,
+    const_map: HashMap<ConstKey, u32>,
     ncaches: u32,
     pub children: Vec<FuncId>,
     /// Each child's index in `children`.
@@ -454,7 +454,9 @@ impl<'a> FuncState<'a> {
 
     // ---- constants and caches ----
 
-    pub fn constant(&mut self, c: Constant) -> Result<u16> {
+    /// Constant `c`'s index. Only `LoadConstX` reaches one past `Const`'s
+    /// range; [`Self::short_constant`] is for the other instructions.
+    pub fn constant(&mut self, c: Constant) -> Result<u32> {
         let key = match &c {
             Constant::Int(i) => ConstKey::Int(*i),
             Constant::Float(x) => ConstKey::Float(x.to_bits()),
@@ -463,17 +465,41 @@ impl<'a> FuncState<'a> {
         if let Some(&k) = self.const_map.get(&key) {
             return Ok(k);
         }
-        let Ok(k) = u16::try_from(self.consts.len()) else {
+        if self.consts.len() >= MAX_CONSTS {
             return Err(self.error("too many constants"));
-        };
+        }
+        let k = self.consts.len() as u32;
         self.consts.push(c);
         self.const_map.insert(key, k);
         Ok(k)
     }
 
-    pub fn str_constant(&mut self, s: StrId) -> Result<u16> {
+    /// Constant `c`'s index if an instruction's `Const` operand can hold
+    /// it, else `None` (the caller loads it with `LoadConstX` instead).
+    pub fn short_constant(&mut self, c: Constant) -> Result<Option<Const>> {
+        Ok(Const::try_from(self.constant(c)?).ok())
+    }
+
+    /// The string constant `s` as a `Const` operand, if it fits.
+    pub fn str_key(&mut self, s: StrId) -> Result<Option<Const>> {
         let bytes = self.chunk.strings.get(s).into();
-        self.constant(Constant::Str(bytes))
+        self.short_constant(Constant::Str(bytes))
+    }
+
+    /// `R[dst] = c`, with whichever load instruction reaches its index.
+    pub fn load_constant(&mut self, dst: u8, c: Constant) -> Result<()> {
+        let k = self.constant(c)?;
+        match Const::try_from(k) {
+            Ok(k) => self.emit(Op::LoadConst { dst, k }),
+            Err(_) => self.emit(Op::LoadConstX { dst, k }),
+        };
+        Ok(())
+    }
+
+    /// `R[dst] = s`, the string constant.
+    pub fn load_str(&mut self, dst: u8, s: StrId) -> Result<()> {
+        let bytes = self.chunk.strings.get(s).into();
+        self.load_constant(dst, Constant::Str(bytes))
     }
 
     /// A fresh inline-cache slot. Past `u16::MAX` slots, the last one is shared (a cache miss
