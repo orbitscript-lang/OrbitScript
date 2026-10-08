@@ -22,7 +22,9 @@ pub use orbit_stdlib::checks;
 pub use orbit_stdlib::{chunk_id, read_chunk_file};
 #[cfg(feature = "debug")]
 pub use orbit_vm::Interrupt;
-pub use orbit_vm::{CallOutcome, Event, GcMode, LuaError, NativeCtx, NativeReturn, Vm};
+pub use orbit_vm::{
+    CallOutcome, Event, GcMode, LIMIT_GRACE, LuaError, NativeCtx, NativeReturn, Vm,
+};
 
 /// The runtime version, taken from the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -107,6 +109,15 @@ impl Lua {
     /// The underlying VM, for registering natives and building values.
     pub fn vm(&mut self) -> &mut Vm {
         &mut self.vm
+    }
+
+    /// Cap the Lua heap at `bytes` (`None`, the default: no cap). A script
+    /// that needs more, even after a full collection, gets the catchable
+    /// error `not enough memory`. The count is `collectgarbage("count")`'s:
+    /// Lua objects and what they own, not the VM's other allocations. See
+    /// [`Vm::set_memory_limit`].
+    pub fn set_memory_limit(&mut self, bytes: Option<usize>) {
+        self.vm.set_memory_limit(bytes);
     }
 
     /// Compile `src` and link it, returning the main function. The function

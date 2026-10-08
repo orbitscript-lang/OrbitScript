@@ -243,9 +243,11 @@ fn create(ctx: &mut NativeCtx<'_>) -> R {
     if m > MAX_HASH {
         return Err(ctx.error("table overflow"));
     }
-    let Ok(t) =
-        Table::try_with_capacity((n as usize).min(MAX_RESERVE), (m as usize).min(MAX_RESERVE))
-    else {
+    let (n, m) = ((n as usize).min(MAX_RESERVE), (m as usize).min(MAX_RESERVE));
+    // About what the parts take: 9 bytes an array slot, a hash entry plus
+    // load-factor slack.
+    ctx.reserve(n.saturating_mul(9).saturating_add(m.saturating_mul(32)))?;
+    let Ok(t) = Table::try_with_capacity(n, m) else {
         return Err(ctx.no_memory());
     };
     let t = ctx.new_table(t);

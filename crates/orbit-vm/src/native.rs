@@ -427,6 +427,7 @@ impl NativeCtx<'_> {
             }
             Err(Exc::Rt(msg, _)) => Err(self.error(msg)),
             Err(Exc::Plain(msg)) => Err(LuaError::new(self.new_str(msg.as_bytes()))),
+            Err(Exc::NoMemory) => Err(self.no_memory()),
             Err(Exc::Lua(e)) => Err(e),
             Err(Exc::Index { .. } | Exc::NewIndex { .. }) => {
                 unreachable!("only the dispatch loop defers indexing")
@@ -506,6 +507,23 @@ impl NativeCtx<'_> {
     /// A new userdata (unrooted until stored in the window).
     pub fn new_userdata<T: std::any::Any>(&mut self, data: T) -> Gc<orbit_core::UserData> {
         self.heap.alloc(orbit_core::UserData::new(data))
+    }
+
+    /// Room for `bytes` more under the heap's limit
+    /// ([`Vm::set_memory_limit`](crate::Vm::set_memory_limit)), collecting
+    /// in full first if needed; `not enough memory` if there still isn't.
+    /// Call it before a large allocation, with every live value in the
+    /// window.
+    pub fn reserve(&mut self, bytes: usize) -> Result<(), LuaError> {
+        if self.heap.would_exceed(bytes) {
+            if !self.rt.gc.finalizing() {
+                self.full_collect();
+            }
+            if self.heap.would_exceed(bytes) {
+                return Err(self.no_memory());
+            }
+        }
+        Ok(())
     }
 
     /// Run a full collection (`collectgarbage("collect")`).

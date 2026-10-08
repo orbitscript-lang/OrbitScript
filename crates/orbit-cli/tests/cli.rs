@@ -191,3 +191,22 @@ fn print_output_reaches_a_pipe_at_once() {
     let _ = child.wait();
     assert_eq!(line.as_deref(), Ok("ready\n"));
 }
+
+#[test]
+fn memory_limit_from_the_environment() {
+    let script = "local t = {} \
+                  print(pcall(function () for i = 1, math.huge do t[i] = {} end end)) \
+                  print(collectgarbage('count') < 1100)";
+    for limit in ["1M", "1m", "1048576"] {
+        let o = orbit(&["-"], script, &[("ORBIT_MEMORY_LIMIT", limit)]);
+        assert_eq!(
+            out(&o),
+            "false\tnot enough memory\ntrue\n",
+            "{limit}: {}",
+            err(&o)
+        );
+    }
+    let o = orbit(&["-"], "", &[("ORBIT_MEMORY_LIMIT", "lots")]);
+    assert!(!o.status.success());
+    assert!(err(&o).contains("ORBIT_MEMORY_LIMIT"), "{}", err(&o));
+}

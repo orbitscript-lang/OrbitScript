@@ -48,7 +48,14 @@ impl Vm {
                 }
             }
             Exc::NewIndex { obj, key, v } => {
-                match crate::meta::new_index(&mut self.heap, &self.rt.metas, obj, key, v) {
+                let mut r = crate::meta::new_index(&mut self.heap, &self.rt.metas, obj, key, v);
+                if matches!(r, Err(Exc::NoMemory)) && !self.rt.gc.finalizing() {
+                    // Like lua5.5's emergency collection: collect, then try
+                    // once more. The operands are still in registers.
+                    self.heap.full_collect(&mut self.rt);
+                    r = crate::meta::new_index(&mut self.heap, &self.rt.metas, obj, key, v);
+                }
+                match r {
                     Ok(()) => {
                         if self.heap.should_step() {
                             let base = self.rt.stack.frames.last().expect("a frame").base as usize;
@@ -333,6 +340,24 @@ impl Vm {
         }))
     }
 
+    /// A safe point's collector work: one step, then the finalizers it made
+    /// due. Returns true if the heap is over its limit even after a full
+    /// collection, so the caller raises `not enough memory`.
+    #[inline(never)]
+    pub(crate) fn gc_safepoint(&mut self, live: usize) -> bool {
+        self.rt.stack.regs.truncate(live);
+        self.heap.step(&mut self.rt);
+        if self.heap.pending_finalizers() > 0 {
+            self.run_finalizers();
+        }
+        if !self.heap.over_limit() {
+            self.rt.limit_grace = false;
+            return false;
+        }
+        self.rt.no_memory = self.over_limit_after_collecting();
+        self.rt.no_memory
+    }
+
     /// `Concat` of the `n` values at stack index `from`. Strings and numbers
     /// are joined in one go; with any other value the list is reduced from
     /// the right, a pair at a time, through `__concat`. Partial results are
@@ -360,6 +385,8 @@ impl Vm {
                         _ => NUM,
                     })
                     .fold(0usize, usize::saturating_add);
+                self.reserve(len)?;
+                let regs = &self.rt.stack.regs;
                 let mut buf = Vec::new();
                 buf.try_reserve_exact(len).map_err(NoMemory::from)?;
                 for &v in &regs[at..from + left] {
@@ -648,8 +675,17 @@ pub(crate) fn set_str_miss(
             return meta::new_index(heap, metas, Value::Table(t), Value::Str(k), v);
         }
         let key = Key::str(heap, k);
-        if let Some(slot) = table::set_key(heap, t, &key, v)? {
-            cache.fill(slot);
+        match table::set_key(heap, t, &key, v) {
+            Ok(Some(slot)) => cache.fill(slot),
+            Ok(None) => {}
+            // The slow path collects and retries.
+            Err(_) => {
+                return Err(Exc::NewIndex {
+                    obj: Value::Table(t),
+                    key: Value::Str(k),
+                    v,
+                });
+            }
         }
         Ok(())
     }

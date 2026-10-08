@@ -92,3 +92,29 @@ Approved by Tym on 2026-10-07 for milestone C4 (GC semantics design, `docs/desig
 - **The collector never calls user code.** `orbit-gc` only queues; the embedder runs finalizers outside collection (in Lua's case `orbit-vm`, with automatic collection stopped while one runs). This is what keeps resurrection safe: a finalizer sees a fully marked, swept heap, and an object it stores somewhere is simply reachable next cycle. boa_gc's resurrection use-after-free cannot happen, because liveness is a mark bit, not a reference count, and freeing happens only in the sweep.
 - **Explicit steps.** `Heap::step_with(roots, bytes)` does the work of `bytes` allocated bytes (`collectgarbage("step", n)`), and `Params::step_bytes == 0` makes every step finish its cycle (stop-the-world pacing).
 - **Generational mode is reported, not implemented**, until P5: `orbit-vm` keeps the mode and the generational parameters for `collectgarbage`, and the incremental collector runs underneath.
+
+## Amendment: an optional heap limit (Proposed)
+
+Proposed for Tym's decision on 2026-10-08. Tym picked "growth + heap limit" for scripts that run out of memory: fallible growth turns a failed large allocation into Lua's catchable `not enough memory` (PR #108), and this adds an optional cap that raises the same error, so an embedded host can bound a script's heap.
+
+- **Off by default.** `Heap::set_limit(Option<usize>)` caps `Heap::bytes`, which is what `collectgarbage("count")` reports: arena slots plus what objects own. It is not every allocation the process makes. The embedding API is `Lua::set_memory_limit` (and `Vm::set_memory_limit`). The CLI reads `ORBIT_MEMORY_LIMIT` (bytes, or `K`, `M`, `G`).
+- **`orbit-gc` reports and never refuses.** Allocation stays infallible, and the crate still depends on nothing.
+  - It answers `over_limit()` and `would_exceed(bytes)`.
+  - It makes a step come due once `bytes` passes the cap: the threshold for starting a cycle is clamped to the limit.
+  - Deciding what fails is the owner's job, because only the owner can collect with its roots.
+- **`orbit-vm` turns that into Lua's error, after an emergency collection as lua5.5 does.**
+  - *Large allocations are checked before they happen:* table array and hash growth (in `orbit-core`'s `set_key`), `..`, `string.rep` and `table.create`. A refused table store goes to the existing slow path, which collects in full and retries once before raising. The others collect and re-check.
+  - *Everything else is checked after the fact,* at the next safe point that steps the collector: if the heap is over, the VM collects in full, and if it is still over, it raises `not enough memory` there.
+  - *Grace margin.* The allocation that crossed the limit has already happened, so after the error the script may use up to an eighth more (`LIMIT_GRACE`) to handle it. Past that, every such safe point raises again until the heap is back under the cap. Without the margin, a handler that allocates anything at all would fail immediately.
+- **Real allocation failures share the retry.** A table store whose `try_reserve` fails also collects and retries once, so heavy.lua-style growth gets lua5.5's emergency collection too.
+- **Hot paths are unchanged.**
+  - `should_step` keeps its shape, and the interpreter's safe point calls one out-of-line function, as before.
+  - The limit costs a compare only where a table grows and where the collector steps.
+  - Callgrind instruction counts on the five benchmarks are within noise of #108.
+- **Limits of the cap.**
+  - It is approximate: the heap can pass it by one small allocation plus a collector step's worth (`Params::step_bytes`), and by the grace margin after an error.
+  - While the collector is stopped (`collectgarbage("stop")`), only the up-front checks apply, because safe points don't step.
+  - Memory outside `Heap::bytes`, such as the VM's register stack and the compiler's working memory, isn't capped.
+- **Not chosen:**
+  - *A fallible `Heap::try_alloc`.* Every allocation site in `orbit-core`, `orbit-vm` and the library would have had to handle an error, and still nothing could collect without the owner's roots.
+  - *A custom global allocator.* It would need `unsafe`, would count every allocation in the process rather than the Lua heap, and would contradict ADR-6's choice of the system allocator.

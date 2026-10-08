@@ -9,7 +9,9 @@
 //!
 //! `--dump-ast`, `--dump-hir` and `--dump-bytecode` print a compiler stage
 //! of the script instead of running it. `ORBIT_GC_STRESS=1` collects at
-//! nearly every safe point.
+//! nearly every safe point. `ORBIT_MEMORY_LIMIT=64M` (bytes, or with a `K`,
+//! `M` or `G` suffix) caps the Lua heap: past it, scripts get the error
+//! `not enough memory`.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
@@ -122,6 +124,18 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
     Ok(cli)
 }
 
+/// `ORBIT_MEMORY_LIMIT`'s value: bytes, optionally with a binary `K`, `M`
+/// or `G` suffix.
+fn parse_size(s: &str) -> Option<usize> {
+    let (digits, shift) = match s.as_bytes().last()? {
+        b'K' | b'k' => (&s[..s.len() - 1], 10),
+        b'M' | b'm' => (&s[..s.len() - 1], 20),
+        b'G' | b'g' => (&s[..s.len() - 1], 30),
+        _ => (s, 0),
+    };
+    digits.parse::<usize>().ok()?.checked_mul(1 << shift)
+}
+
 fn usage(prog: &str, e: ParseError) -> ExitCode {
     match e {
         ParseError::Unrecognized(o) => eprintln!("{prog}: unrecognized option '{o}'"),
@@ -168,6 +182,15 @@ fn main() -> ExitCode {
     catch_interrupts(lua.vm().interrupt_handle());
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         lua.vm().heap.set_stress(true);
+    }
+    if let Some(limit) = std::env::var_os("ORBIT_MEMORY_LIMIT") {
+        match limit.to_str().and_then(parse_size) {
+            Some(bytes) => lua.set_memory_limit(Some(bytes)),
+            None => {
+                eprintln!("{prog}: ORBIT_MEMORY_LIMIT: expected a size such as 512K, 64M or 1G");
+                return ExitCode::FAILURE;
+            }
+        }
     }
     let mut run = Runner::new(lua, prog);
     let ok = run.main(&cli, &args);
