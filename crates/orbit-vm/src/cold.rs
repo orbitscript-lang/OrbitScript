@@ -12,7 +12,7 @@
 
 use orbit_bytecode::{CaptureSource, MULTI, Op};
 use orbit_core::table::{self, Key};
-use orbit_core::{Cell, Closure, FieldCache, Gc, LuaHeap, LuaStr, Table, Value};
+use orbit_core::{Cell, Closure, FieldCache, Gc, LuaHeap, LuaStr, NoMemory, Table, Value};
 
 use crate::interp::Flow;
 use crate::meta::{self, Event, MetaAction, MetaCall, Metas};
@@ -351,7 +351,17 @@ impl Vm {
                 .count();
             if run >= 2 || (run == left && left == 1) {
                 let at = from + left - run;
+                // Numbers take at most this many bytes.
+                const NUM: usize = 64;
+                let len = regs[at..from + left]
+                    .iter()
+                    .map(|&v| match v {
+                        Value::Str(s) => self.heap.get(s).as_bytes().len(),
+                        _ => NUM,
+                    })
+                    .fold(0usize, usize::saturating_add);
                 let mut buf = Vec::new();
+                buf.try_reserve_exact(len).map_err(NoMemory::from)?;
                 for &v in &regs[at..from + left] {
                     ops::concat_piece(&self.heap, v, &mut buf);
                 }
@@ -388,13 +398,20 @@ impl Vm {
     /// `SetList`: store the `n` values at stack index `from` into `t`,
     /// starting at index `start`.
     #[inline(never)]
-    pub(crate) fn op_set_list(&mut self, t: Gc<Table>, from: usize, n: usize, start: i64) {
+    pub(crate) fn op_set_list(
+        &mut self,
+        t: Gc<Table>,
+        from: usize,
+        n: usize,
+        start: i64,
+    ) -> Result<(), NoMemory> {
         let regs = &self.rt.stack.regs;
         self.heap.update(t, |tab| {
             for (i, &v) in regs[from..from + n].iter().enumerate() {
-                tab.set_int(start + i as i64, v);
+                tab.set_int(start + i as i64, v)?;
             }
-        });
+            Ok(())
+        })
     }
 
     /// `Vararg`: copy the frame's extra arguments (the `nvarargs` values
@@ -425,13 +442,14 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn op_vararg_table(&mut self, base: usize, nvarargs: usize) -> Value {
         let t = self.heap.alloc(Table::with_capacity(nvarargs, 1));
+        // The table is presized, so these stores allocate nothing.
         for i in 0..nvarargs {
             let v = self.rt.stack.regs[base - nvarargs + i];
-            table::set_int(&mut self.heap, t, i as i64 + 1, v);
+            let _ = table::set_int(&mut self.heap, t, i as i64 + 1, v);
         }
         let n = self.rt.strings.new_str(&mut self.heap, b"n");
         let key = Key::str(&self.heap, n);
-        table::set_key(&mut self.heap, t, &key, Value::Int(nvarargs as i64));
+        let _ = table::set_key(&mut self.heap, t, &key, Value::Int(nvarargs as i64));
         Value::Table(t)
     }
 
@@ -630,7 +648,7 @@ pub(crate) fn set_str_miss(
             return meta::new_index(heap, metas, Value::Table(t), Value::Str(k), v);
         }
         let key = Key::str(heap, k);
-        if let Some(slot) = table::set_key(heap, t, &key, v) {
+        if let Some(slot) = table::set_key(heap, t, &key, v)? {
             cache.fill(slot);
         }
         Ok(())

@@ -51,6 +51,15 @@ The collector is our own (ADR-2), so its tuning parameters, step sizes and memor
 - **Generational mode is reported, not implemented.** `collectgarbage("generational")` switches the reported mode, and the CLI starts in it as lua5.5 does, but the incremental collector runs underneath in both modes. In generational mode `collectgarbage("step")` runs a whole cycle and returns `false`, where lua5.5 runs a minor collection and sometimes returns `true`. Only timing shows the difference. A real generational collector is performance work after parity.
 - **`collectgarbage("count")` counts heap objects only.** It is the bytes of heap objects and what they own (table parts, string bytes), not every allocation the VM makes, so it is lower than lua5.5's for the same program. The suite compares `count` only with itself.
 
+## Running out of memory
+
+When an allocation that grows with what a program stores fails, OrbitScript raises lua5.5's `not enough memory` error, which `pcall` catches. Those allocations are a table's array and hash parts, `..`, `string.rep`, `table.concat`, `table.create` and `io.read` buffers. Two things differ from lua5.5. Proposed in the fallible allocation PR.
+
+- **Other allocations abort.** Small fixed-size allocations (a new table or closure, a short string, a call frame) still end the process when they fail, as allocations do in Rust. lua5.5 turns every failed allocation into the error. A program that has just caught `not enough memory` usually has room for these again, because the failed request was the large one.
+- **No emergency collection.** lua5.5 runs a full collection and retries before it raises the error. OrbitScript raises it at once, so a program holding a lot of garbage when it hits the limit can get the error where lua5.5 would recover. Retrying after a collection needs the allocation sites to reach the collector, which table and string code can't do today.
+
+Suite: `heavy.lua` checks the error (one table grows until allocation fails) and passes under a 2 GB address-space limit. `memerr.lua` checks allocation failure through the internal `T` library, which OrbitScript doesn't have (SKIPS.md).
+
 ## Debug library
 
 Hooks follow docs/design/debug.md. Proposed in the debug hooks PR.

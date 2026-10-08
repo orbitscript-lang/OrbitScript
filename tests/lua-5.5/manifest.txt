@@ -9,7 +9,10 @@
 #   deviates=A-B     lines that check a deliberate difference listed in
 #                    DEVIATIONS.md; always commented out
 #   not-soft         skipped under --soft, as all.lua does
+#   not-stress       skipped when ORBIT_GC_STRESS is set (too slow there)
 #   timeout=SECS     per-file timeout override
+#   vmem-kb=KB       run under this address-space limit (ulimit -v); Unix
+#                    only, skipped elsewhere
 #   skip             never run; the # comment gives the reason
 
 main.lua        needs-clibs=250-253   # the lua command line; one check loads a C module
@@ -47,4 +50,4 @@ files.lua
 # round-trips every file through string.dump and load.
 all.lua         set=_U  timeout=600
 
-heavy.lua       skip                  # not part of all.lua: builds multi-gigabyte strings and tables
+heavy.lua       vmem-kb=2000000 not-stress  # not part of all.lua: grows a table until allocation fails

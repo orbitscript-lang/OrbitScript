@@ -93,20 +93,23 @@ fn rep(ctx: &mut NativeCtx<'_>) -> R {
         let e = ctx.new_str(b"");
         return ctx.ret1(e);
     }
-    let body = ctx.bytes(s).to_vec();
-    let sep = sep.map(|g| ctx.bytes(g).to_vec()).unwrap_or_default();
+    let body = ctx.bytes(s);
+    let sep = sep.map_or(&b""[..], |g| ctx.bytes(g));
     let total = (body.len() + sep.len())
         .checked_mul(n as usize)
         .filter(|&t| t <= MAX_STR);
     let Some(total) = total else {
         return Err(ctx.error("resulting string too large"));
     };
-    let mut out = Vec::with_capacity(total);
+    let mut out = Vec::new();
+    if out.try_reserve_exact(total).is_err() {
+        return Err(ctx.no_memory());
+    }
     for k in 0..n {
         if k > 0 {
-            out.extend_from_slice(&sep);
+            out.extend_from_slice(sep);
         }
-        out.extend_from_slice(&body);
+        out.extend_from_slice(body);
     }
     let r = ctx.new_str_owned(out);
     ctx.ret1(r)

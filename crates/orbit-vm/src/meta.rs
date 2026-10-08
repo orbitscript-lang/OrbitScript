@@ -303,8 +303,7 @@ pub(crate) fn new_index(
                     _ => Value::Nil,
                 };
                 if h.is_nil() {
-                    return table::set(heap, t, key, v)
-                        .map_err(|e| Exc::Rt(e.message().into(), None));
+                    return table::set(heap, t, key, v).map_err(Exc::from);
                 }
                 h
             }

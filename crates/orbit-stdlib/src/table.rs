@@ -36,8 +36,9 @@ fn get(ctx: &NativeCtx<'_>, t: Gc<Table>, i: i64) -> Value {
     ctx.heap.get(t).get_int(i)
 }
 
-fn set(ctx: &mut NativeCtx<'_>, t: Gc<Table>, i: i64, v: Value) {
-    tbl::set_int(ctx.heap, t, i, v);
+fn set(ctx: &mut NativeCtx<'_>, t: Gc<Table>, i: i64, v: Value) -> Result<(), LuaError> {
+    tbl::set_int(ctx.heap, t, i, v).map_err(|_| ctx.no_memory())?;
+    Ok(())
 }
 
 /// Argument `i` as a table without a metatable: the raw loops apply.
@@ -61,7 +62,7 @@ fn insert(ctx: &mut NativeCtx<'_>) -> R {
     match ctx.nargs() {
         2 => {
             let v = ctx.arg(1);
-            set(ctx, t, end, v);
+            set(ctx, t, end, v)?;
         }
         3 => {
             let pos = ctx.check_int(1)?;
@@ -72,11 +73,11 @@ fn insert(ctx: &mut NativeCtx<'_>) -> R {
             let mut i = end;
             while i > pos {
                 let v = get(ctx, t, i - 1);
-                set(ctx, t, i, v);
+                set(ctx, t, i, v)?;
                 i -= 1;
             }
             let v = ctx.arg(2);
-            set(ctx, t, pos, v);
+            set(ctx, t, pos, v)?;
         }
         _ => return Err(ctx.error("wrong number of arguments to 'insert'")),
     }
@@ -96,10 +97,10 @@ fn remove(ctx: &mut NativeCtx<'_>) -> R {
     let v = get(ctx, t, pos);
     while pos < size {
         let next = get(ctx, t, pos + 1);
-        set(ctx, t, pos, next);
+        set(ctx, t, pos, next)?;
         pos += 1;
     }
-    set(ctx, t, pos, Value::Nil);
+    set(ctx, t, pos, Value::Nil)?;
     ctx.ret1(v)
 }
 
@@ -123,6 +124,15 @@ fn concat(ctx: &mut NativeCtx<'_>) -> R {
     let mut k = i;
     while k <= j {
         let v = get(ctx, t, k);
+        // Long pieces grow the buffer by a lot: reserve first, so running
+        // out of memory is an error rather than an abort.
+        let piece = match v {
+            Value::Str(s) => ctx.bytes(s).len(),
+            _ => 0,
+        };
+        if out.try_reserve(piece + sep.len()).is_err() {
+            return Err(ctx.no_memory());
+        }
         match v {
             Value::Str(_) | Value::Int(_) | Value::Float(_) => ctx.display(v, &mut out),
             _ => {
@@ -179,7 +189,7 @@ fn pack(ctx: &mut NativeCtx<'_>) -> R {
     ctx.push(Value::Table(t));
     for i in 0..n {
         let v = ctx.arg(i);
-        set(ctx, t, i as i64 + 1, v);
+        set(ctx, t, i as i64 + 1, v)?;
     }
     let k = ctx.new_str(b"n");
     let _ = tbl::set(ctx.heap, t, k, Value::Int(n as i64));
@@ -209,12 +219,12 @@ fn move_(ctx: &mut NativeCtx<'_>) -> R {
         if overlapping {
             for i in (0..=n).rev() {
                 let v = get(ctx, a1, f + i);
-                set(ctx, a2, t + i, v);
+                set(ctx, a2, t + i, v)?;
             }
         } else {
             for i in 0..=n {
                 let v = get(ctx, a1, f + i);
-                set(ctx, a2, t + i, v);
+                set(ctx, a2, t + i, v)?;
             }
         }
     }
@@ -233,7 +243,11 @@ fn create(ctx: &mut NativeCtx<'_>) -> R {
     if m > MAX_HASH {
         return Err(ctx.error("table overflow"));
     }
-    let t = Table::with_capacity((n as usize).min(MAX_RESERVE), (m as usize).min(MAX_RESERVE));
+    let Ok(t) =
+        Table::try_with_capacity((n as usize).min(MAX_RESERVE), (m as usize).min(MAX_RESERVE))
+    else {
+        return Err(ctx.no_memory());
+    };
     let t = ctx.new_table(t);
     ctx.ret1(Value::Table(t))
 }

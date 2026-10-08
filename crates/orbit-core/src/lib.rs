@@ -13,6 +13,7 @@
 
 pub mod func;
 pub mod gc;
+pub mod mem;
 pub mod number;
 pub mod string;
 pub mod table;
@@ -21,6 +22,7 @@ pub mod userdata;
 pub mod value;
 
 pub use func::{Cell, Closure, FieldCache, Proto, ProtoCode};
+pub use mem::NoMemory;
 pub use orbit_gc::{Gc, Heap};
 pub use string::{Interner, LuaStr, OrbitStr, OrbitString};
 pub use table::Table;

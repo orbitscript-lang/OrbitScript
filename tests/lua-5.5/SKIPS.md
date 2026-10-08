@@ -54,9 +54,10 @@ Where OrbitScript differs from lua5.5 on purpose (each case is in [DEVIATIONS.md
 
 | File | Why |
 |---|---|
-| `heavy.lua` | Not part of `all.lua`. As shipped it runs one test: it grows a table until allocation fails and expects a catchable `not enough memory` error. That needs gigabytes, and the outcome depends on the machine's memory. With a 2 GB address-space limit (`ulimit -v 2000000`), lua5.5 raises the error after 128 Mi entries and finishes. OrbitScript aborts the process instead, because Rust's allocator aborts on failure and nothing in the VM allocates fallibly yet. Until that is decided and built, the file stays skipped. |
 | `bwcoercion.lua`, `tracegc.lua` | Helper modules `require`d by other files, not tests. |
 | `libs/`, `packtests` | C sources and the Lua team's release packaging script. |
+
+`heavy.lua` is not part of `all.lua`, but it runs. As shipped it grows a table until allocation fails and expects a catchable `not enough memory` error, so the manifest runs it under a 2 GB address-space limit (`vmem-kb=2000000`, `ulimit -v`). That limit works only on Unix; elsewhere the file is skipped. It is also skipped under `ORBIT_GC_STRESS=1` (`not-stress`): collecting at every safe point while a table grows to 128 Mi entries never finishes.
 
 ## Modes that skip more
 
