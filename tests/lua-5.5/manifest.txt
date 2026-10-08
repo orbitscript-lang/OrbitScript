@@ -6,6 +6,8 @@
 #   yields=V[,V]     run the file as a coroutine that must yield V in order
 #   needs-clibs=A-B  lines that load the suite's C test libraries; they are
 #                    commented out unless --c-libs is given
+#   deviates=A-B     lines that check a deliberate difference listed in
+#                    DEVIATIONS.md; always commented out
 #   not-soft         skipped under --soft, as all.lua does
 #   timeout=SECS     per-file timeout override
 #   skip             never run; the # comment gives the reason
@@ -34,7 +36,7 @@ vararg.lua
 closure.lua
 coroutine.lua
 goto.lua
-errors.lua
+errors.lua      deviates=329          # names the method in t:bbb() past 255 constants
 math.lua
 sort.lua
 bitwise.lua

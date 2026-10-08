@@ -254,7 +254,8 @@ fn gmatch(ctx: &mut NativeCtx<'_>) -> R {
     let s = ctx.check_str(0)?;
     let p = ctx.check_str(1)?;
     let len = ctx.bytes(s).len();
-    let pos = (start_pos(ctx.opt_int(2, 1)?, len) - 1).min(len);
+    // A start past the end leaves nothing to match, not even an empty string.
+    let pos = (start_pos(ctx.opt_int(2, 1)?, len) - 1).min(len + 1);
     let it = ctx.new_closure(
         "string.gmatch()",
         gmatch_step,
@@ -322,14 +323,16 @@ fn gmatch_step(ctx: &mut NativeCtx<'_>) -> R {
 //
 //   0 subject, 1 pattern, 2 replacement, 3 max replacements (Int),
 //   4 position, 5 end of the last match (or nil), 6 count,
-//   7 start of the pending match, 8 its end, then output pieces (strings).
+//   7 start of the pending match, 8 its end, 9 whether any match was
+//   replaced (Bool), then output pieces (strings).
 
 const G_POS: usize = 4;
 const G_LAST: usize = 5;
 const G_COUNT: usize = 6;
 const G_MSTART: usize = 7;
 const G_MEND: usize = 8;
-const G_PIECES: usize = 9;
+const G_CHANGED: usize = 9;
+const G_PIECES: usize = 10;
 
 fn gsub(ctx: &mut NativeCtx<'_>) -> R {
     let s = ctx.check_str(0)?;
@@ -355,6 +358,7 @@ fn gsub(ctx: &mut NativeCtx<'_>) -> R {
     ctx.push(Value::Int(0));
     ctx.push(Value::Int(0));
     ctx.push(Value::Int(0));
+    ctx.push(Value::Bool(false));
     gsub_loop(ctx)
 }
 
@@ -474,6 +478,7 @@ fn add_value(
             let out = expand_replacement(ctx, s, r, f)?;
             let v = ctx.new_str_owned(out);
             ctx.push(v);
+            ctx.set(G_CHANGED, Value::Bool(true));
             Ok(None)
         }
         Value::Table(_) => {
@@ -548,12 +553,16 @@ fn replacement_result(
 ) -> Result<(), LuaError> {
     match v {
         Value::Nil | Value::Bool(false) => push_gap(ctx, s, f.start, f.end),
-        Value::Str(_) => ctx.push(v),
+        Value::Str(_) => {
+            ctx.push(v);
+            ctx.set(G_CHANGED, Value::Bool(true));
+        }
         Value::Int(_) | Value::Float(_) => {
             let mut out = Vec::new();
             ctx.display(v, &mut out);
             let v = ctx.new_str_owned(out);
             ctx.push(v);
+            ctx.set(G_CHANGED, Value::Bool(true));
         }
         _ => {
             return Err(ctx.error(format!("invalid replacement value (a {})", v.type_name())));
@@ -608,6 +617,14 @@ fn expand_replacement(
 }
 
 fn finish_gsub(ctx: &mut NativeCtx<'_>, count: i64) -> R {
+    // Nothing was replaced: return the subject itself, as lua5.5 does
+    // (`string.format("%p")` shows it is the same string).
+    if !matches!(ctx.arg(G_CHANGED), Value::Bool(true)) {
+        let s = ctx.arg(0);
+        ctx.push(s);
+        ctx.push(Value::Int(count));
+        return Ok(NativeReturn::Return(2));
+    }
     let mut out = Vec::new();
     for i in G_PIECES..ctx.len() {
         if let Value::Str(piece) = ctx.arg(i) {

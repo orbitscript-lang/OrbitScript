@@ -14,6 +14,11 @@ use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
 use crate::{Catch, Frame, FrameKind, LuaError, Vm};
 
+/// The most `__call` handlers one call goes through (observed from lua5.5:
+/// a chain of 15 works, 16 is "too long"). `getinfo`'s `extraargs` counts
+/// them.
+const MAX_CALL_CHAIN: usize = 15;
+
 /// Registers a frame can address: register numbers are `u8`.
 const WINDOW: usize = 256;
 
@@ -95,12 +100,15 @@ impl Vm {
                     let h = self.rt.metamethod(&self.heap, v, Event::Call);
                     if h.is_nil() {
                         return Err(Exc::Rt(
-                            format!("attempt to call a {} value", v.type_name()),
+                            format!(
+                                "attempt to call a {} value",
+                                self.rt.metas.type_name(&self.heap, v)
+                            ),
                             Some(0),
                         ));
                     }
-                    if chain == crate::meta::MAX_CHAIN {
-                        return Err(Exc::Plain("'__call' chain too long".into()));
+                    if chain == MAX_CALL_CHAIN {
+                        return Err(Exc::Rt("'__call' chain too long".into(), None));
                     }
                     self.rt.stack.insert(func, func + 1 + nargs, h);
                     nargs += 1;
@@ -1258,7 +1266,7 @@ impl Vm {
                                     }
                                 }
                             }
-                            other => throw!(env_error(other)),
+                            other => throw!(env_error(&self.heap, &self.rt.metas, other)),
                         };
                         reg!(dst) = v;
                     }
@@ -1294,7 +1302,7 @@ impl Vm {
                                     safepoint!();
                                 }
                             }
-                            other => throw!(env_error(other)),
+                            other => throw!(env_error(&self.heap, &self.rt.metas, other)),
                         }
                     }
 

@@ -99,6 +99,8 @@ pub enum StmtKind {
         start: Expr,
         limit: Expr,
         step: Option<Expr>,
+        /// Where `do` starts: the loop's checks report errors at its line.
+        do_at: u32,
         body: Block,
     },
     GenericFor {
@@ -179,19 +181,25 @@ pub enum ExprKind {
         obj: Box<Expr>,
         key: Box<Expr>,
     },
+    /// `args_at` is where the arguments start (`(`, `{` or a string): the call reports
+    /// errors at its line.
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        args_at: u32,
     },
     Method {
         obj: Box<Expr>,
         name: Name,
         args: Vec<Expr>,
+        args_at: u32,
     },
     Function(Box<FuncBody>),
     Table(Vec<Field>),
+    /// `op_at` is where the operator token starts.
     Binary {
         op: BinOp,
+        op_at: u32,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },

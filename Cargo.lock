@@ -42,6 +42,7 @@ dependencies = [
 name = "orbit"
 version = "0.0.0"
 dependencies = [
+ "orbit-bytecode",
  "orbit-compiler",
  "orbit-core",
  "orbit-hir",
@@ -101,6 +102,7 @@ dependencies = [
 name = "orbit-stdlib"
 version = "0.0.0"
 dependencies = [
+ "orbit-bytecode",
  "orbit-core",
  "orbit-vm",
 ]

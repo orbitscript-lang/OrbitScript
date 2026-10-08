@@ -135,14 +135,24 @@ impl Function {
     }
 
     pub fn add_expr(&mut self, kind: ExprKind, span: Span) -> ExprId {
+        self.add_expr_at(kind, span, span.start)
+    }
+
+    /// [`Function::add_expr`] with an explicit [`Expr::at`].
+    pub fn add_expr_at(&mut self, kind: ExprKind, span: Span, at: u32) -> ExprId {
         let id = ExprId::from_index(self.exprs.len());
-        self.exprs.push(Expr { kind, span });
+        self.exprs.push(Expr { kind, span, at });
         id
     }
 
     pub fn add_stmt(&mut self, kind: StmtKind, span: Span) -> StmtId {
+        self.add_stmt_at(kind, span, span.start)
+    }
+
+    /// [`Function::add_stmt`] with an explicit [`Stmt::at`].
+    pub fn add_stmt_at(&mut self, kind: StmtKind, span: Span, at: u32) -> StmtId {
         let id = StmtId::from_index(self.stmts.len());
-        self.stmts.push(Stmt { kind, span });
+        self.stmts.push(Stmt { kind, span, at });
         id
     }
 
@@ -274,6 +284,9 @@ pub struct Block {
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
+    /// Like [`Expr::at`], for the statement's own operations: an assignment's stores, a
+    /// numeric `for`'s checks, a generic `for`'s iterator call. Defaults to `span.start`.
+    pub at: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +399,11 @@ pub enum Place {
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+    /// The source offset whose line a runtime error raised by this expression's own
+    /// operation reports (not its operands'). Front ends choose it; it defaults to
+    /// `span.start`. Lua uses the operator token for arithmetic, the end of a comparison
+    /// or an index, and the token opening a call's arguments.
+    pub at: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]

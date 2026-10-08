@@ -74,3 +74,12 @@ print(pcall(string.gsub, "ab", "(a)(b", "%2"))
 print(pcall(string.find, "ab", "(a)(b", 1, true))
 print(pcall(string.find, "ab", "a(b"))
 end
+
+-- gsub returns the subject itself when nothing was replaced.
+do
+  local s = string.rep("a", 100)
+  local same = function(r) return string.format("%p", s) == string.format("%p", r) end
+  print("gsub reuse", same((string.gsub(s, "b", "c"))), same((string.gsub(s, ".", {x = "y"}))),
+        same((string.gsub(s, ".", function() return nil end))),
+        same((string.gsub(s, ".", function(x) return x end))), same((string.gsub(s, "a", "%0"))))
+end

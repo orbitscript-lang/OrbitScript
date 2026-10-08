@@ -87,6 +87,12 @@ impl<'a> Lexer<'a> {
         &self.src[span.start as usize..span.end as usize]
     }
 
+    /// Continues lexing at byte `pos`, which must be where a token or the space between tokens
+    /// starts. Lines seen before it are not recorded, so [`Lexer::line_of`] is not exact.
+    pub fn seek(&mut self, pos: u32) {
+        self.pos = pos as usize;
+    }
+
     pub fn source(&self) -> &'a [u8] {
         self.src
     }

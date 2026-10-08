@@ -112,7 +112,7 @@ impl Vm {
             return Err(Exc::Rt(
                 format!(
                     "attempt to call a {} value (metamethod '{}')",
-                    call.f.type_name(),
+                    self.rt.metas.type_name(&self.heap, call.f),
                     call.event.short_name()
                 ),
                 None,
@@ -372,7 +372,10 @@ impl Vm {
                 let j = if strnum(x) { left - 1 } else { left - 2 };
                 let v = regs[from + j];
                 return Err(Exc::Rt(
-                    format!("attempt to concatenate a {} value", v.type_name()),
+                    format!(
+                        "attempt to concatenate a {} value",
+                        self.rt.metas.type_name(&self.heap, v)
+                    ),
                     Some(j as u8),
                 ));
             }
@@ -506,7 +509,7 @@ impl Vm {
                 return Err(Exc::Rt("'for' step is zero".into(), None));
             }
             return match ops::for_limit(i, limit, s) {
-                Err(_) => Err(for_error("limit", limit)),
+                Err(_) => Err(for_error(&self.heap, &self.rt.metas, "limit", limit)),
                 Ok(None) => Ok(false),
                 Ok(Some(lim)) => {
                     // The number of iterations left replaces the limit.
@@ -522,13 +525,13 @@ impl Vm {
             };
         }
         let Some(lim) = limit.as_f64() else {
-            return Err(for_error("limit", limit));
+            return Err(for_error(&self.heap, &self.rt.metas, "limit", limit));
         };
         let Some(st) = step.as_f64() else {
-            return Err(for_error("step", step));
+            return Err(for_error(&self.heap, &self.rt.metas, "step", step));
         };
         let Some(start) = init.as_f64() else {
-            return Err(for_error("initial", init));
+            return Err(for_error(&self.heap, &self.rt.metas, "initial", init));
         };
         if st == 0.0 {
             return Err(Exc::Rt("'for' step is zero".into(), None));
@@ -564,7 +567,10 @@ pub(crate) fn op_len(heap: &LuaHeap, metas: &Metas, v: Value) -> Result<Value, E
         };
         if h.is_nil() {
             return Err(Exc::Rt(
-                format!("attempt to get length of a {} value", v.type_name()),
+                format!(
+                    "attempt to get length of a {} value",
+                    metas.type_name(heap, v)
+                ),
                 Some(0),
             ));
         }
@@ -636,25 +642,28 @@ pub(crate) fn already_defined(name: &[u8]) -> Exc {
 /// `_ENV` isn't a table.
 #[cold]
 #[inline(never)]
-pub(crate) fn env_error(v: Value) -> Exc {
+pub(crate) fn env_error(heap: &LuaHeap, rt: &Metas, v: Value) -> Exc {
     Exc::Rt(
         format!(
             "attempt to index a {} value (upvalue '_ENV')",
-            v.type_name()
+            rt.type_name(heap, v)
         ),
         None,
     )
 }
 
 #[cold]
-fn for_error(what: &str, v: Value) -> Exc {
+fn for_error(heap: &LuaHeap, rt: &Metas, what: &str, v: Value) -> Exc {
     let what = if what == "initial" {
         "initial value"
     } else {
         what
     };
     Exc::Rt(
-        format!("bad 'for' {what} (number expected, got {})", v.type_name()),
+        format!(
+            "bad 'for' {what} (number expected, got {})",
+            rt.type_name(heap, v)
+        ),
         None,
     )
 }

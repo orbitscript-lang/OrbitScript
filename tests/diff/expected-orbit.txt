@@ -6,6 +6,7 @@ close_unwind.lua
 closures.lua
 co_gc.lua
 co_yields.lua
+control.lua
 coroutines.lua
 cstack_depth.lua
 debug_co_gc.lua
@@ -13,9 +14,12 @@ debug_hooks.lua
 debug_hooks_co.lua
 debug_info.lua
 debug_locals.lua
+debug_setmetatable_gc.lua
+dump.lua
 errors.lua
 floats.lua
 gc.lua
+io.lua
 load.lua
 lua55.lua
 meta_index.lua
@@ -23,6 +27,7 @@ meta_ops.lua
 metatables.lua
 os.lua
 require.lua
+stdlib_base.lua
 stdlib_gmatch.lua
 stdlib_math.lua
 stdlib_meta.lua
@@ -30,6 +35,7 @@ stdlib_pack.lua
 stdlib_string.lua
 stdlib_table.lua
 stdlib_utf8.lua
+strings.lua
 tables.lua
 uncaught.lua
 xpcall.lua
