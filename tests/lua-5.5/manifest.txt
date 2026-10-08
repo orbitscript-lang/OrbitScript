@@ -19,7 +19,7 @@ calls.lua       deviates=539-542      # compares a dump's header with lua5.5's l
 strings.lua
 literals.lua
 tpack.lua
-attrib.lua                            # without C loading, package.loadlib must report "absent"
+attrib.lua      needs-clibs=335-352   # without C loading, package.loadlib must report "absent"; 335-352 load lib2-v2
 gengc.lua
 locals.lua
 constructs.lua

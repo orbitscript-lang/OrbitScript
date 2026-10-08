@@ -8,8 +8,9 @@
 
 use std::io::Read;
 
-use orbit_vm::orbit_core::Value;
-use orbit_vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn};
+use orbit_vm::op::UnlinkedChunk;
+use orbit_vm::orbit_core::{LuaHeap, Value};
+use orbit_vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn, Runtime, Vm};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -85,6 +86,26 @@ pub(crate) fn load_chunk(
     mode: &Mode<'_>,
     env: Value,
 ) -> Result<Value, String> {
+    let chunk = unlinked(ctx.heap, ctx.rt, bytes, source, mode)?;
+    Ok(ctx.link(&chunk, env))
+}
+
+/// [`load_chunk`] for a host: load `bytes`, source text or a binary chunk,
+/// as a chunk named `source`, with the global table as its `_ENV`, as the
+/// standalone interpreter loads scripts. The function is unrooted.
+pub fn load_buffer(vm: &mut Vm, bytes: &[u8], source: &[u8]) -> Result<Value, String> {
+    let chunk = unlinked(&mut vm.heap, &mut vm.rt, bytes, source, &Mode(b"bt"))?;
+    Ok(vm.load(&chunk))
+}
+
+/// Decode (and check) or compile `bytes`.
+fn unlinked(
+    #[allow(unused_variables)] heap: &mut LuaHeap,
+    rt: &mut Runtime,
+    bytes: &[u8],
+    source: &[u8],
+    mode: &Mode<'_>,
+) -> Result<UnlinkedChunk, String> {
     let binary = bytes.first() == Some(&BINARY_SIGNATURE);
     mode.check(binary)?;
     if binary {
@@ -102,22 +123,22 @@ pub(crate) fn load_chunk(
             use orbit_vm::op::verify;
             let chunk = format::decode(bytes).map_err(|e| bad(&e))?;
             #[cfg(feature = "verify")]
-            if let Some(level) = crate::checks::level(ctx) {
+            if let Some(level) = crate::checks::level(heap, rt) {
                 verify::verify(&chunk, level).map_err(|e| bad(&e))?;
             }
-            return Ok(ctx.link(&chunk, env));
+            return Ok(chunk);
         }
         #[cfg(not(feature = "dump"))]
         return Err(bad(&"binary chunks not enabled"));
     }
     let name = chunk_id(source);
-    let Some(compile) = ctx.rt.compile else {
+    let Some(compile) = rt.compile else {
         return Err(format!("{name}: no compiler for source chunks"));
     };
     let mut chunk = compile(bytes, &name)?;
     // `debug.getinfo`'s `source` is the name as given, not its short form.
     chunk.source = source.into();
-    Ok(ctx.link(&chunk, env))
+    Ok(chunk)
 }
 
 /// Return the function, or nil and the message.

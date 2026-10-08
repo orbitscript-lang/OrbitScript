@@ -189,6 +189,31 @@ fn ephemeron_chain_across_tables() {
 }
 
 #[test]
+fn one_key_releases_every_value_waiting_on_it() {
+    // The same key in several ephemeron tables: its values wait together
+    // and all come back when the key is marked, through a value marked late.
+    let mut h = TestHeap::new();
+    let tabs: Vec<_> = (0..4).map(|_| weak_obj(&mut h, WeakMode::KEYS)).collect();
+    let (k, holder) = (obj(&mut h, 0), obj(&mut h, 1));
+    let vals: Vec<_> = (0..4).map(|i| obj(&mut h, 10 + i)).collect();
+    for (&t, &v) in tabs.iter().zip(&vals) {
+        put(&mut h, t, Ref::Obj(k), Ref::Obj(v));
+    }
+    link(&mut h, holder, Ref::Obj(k));
+    // The tables are traced before `holder`, so every value waits on `k`.
+    let mut roots: Vec<_> = tabs.iter().map(|&t| Ref::Obj(t)).collect();
+    roots.insert(0, Ref::Obj(holder));
+    let mut roots = Stack(roots);
+    h.full_collect(&mut roots);
+    assert!(vals.iter().all(|&v| h.is_live(v)));
+    // Without `holder`, the key and every value die.
+    roots.0.remove(0);
+    h.full_collect(&mut roots);
+    assert!(tabs.iter().all(|&t| h.get(t).map.is_empty()));
+    assert_eq!(h.count::<Obj>(), tabs.len());
+}
+
+#[test]
 fn long_ephemeron_chain_is_marked_without_recursion() {
     // eph[k_i] = k_{i+1}, inserted far end first: each key is released only
     // by the value before it, one link at a time.

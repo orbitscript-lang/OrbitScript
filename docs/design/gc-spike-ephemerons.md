@@ -51,6 +51,6 @@ Wait-map memory at 1M waiting entries: 92.6 MB for E1, 60.6 MB tuned, none for E
 ## Findings
 
 - **E2 is much faster on caches and catastrophic on chains.** Its rescans are quadratic in chain length: 9.5 s for 100,000 links, where E1 takes 15 ms. A program can build such a chain by accident (memoizing on objects whose results reference other memoized objects), and for long-running embedded processes a bounded worst case matters more than the best case. **Keep E1.**
-- **E1 tuned** roughly halves E1's time and cuts the wait map by a third on the workloads that wait, at no cost elsewhere (a1 and d are within noise). No dependency is added. **Adopt it** in a follow-up PR once the amendment is approved.
+- **E1 tuned** roughly halves E1's time and cuts the wait map by a third on the workloads that wait, at no cost elsewhere (a1 and d are within noise). No dependency is added. **Adopted** after the amendment was approved: `orbit-gc` uses it since the "faster ephemeron wait map" PR.
 - **F3 saves memory only when many objects are registered**, and pays for every heap object each cycle even when few are (9 times F1's pause with 1,000 registered), and more under churn. Lua programs register few objects. **Keep F1.**
 - Neither alternative changes the API embedders see, so the ADR-2 amendment fixes the semantics and leaves these as implementation choices.

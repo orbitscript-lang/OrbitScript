@@ -20,7 +20,9 @@ c6_active_lines.lua
 c6_call_chain.lua
 c6_close_frames.lua
 c6_coroutines.lua
+c6_for_iterator.lua
 c6_line_events.lua
 c6_names.lua
 c6_names2.lua
 c6_stripped_hooks.lua
+c6_warn.lua

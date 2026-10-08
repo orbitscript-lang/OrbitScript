@@ -100,7 +100,7 @@ thread_local! {
 }
 
 /// Flush every open stream's buffer, as the C library does at exit.
-#[cfg(feature = "os")]
+/// Used by `os.exit` and the host's `flush_files`.
 pub(crate) fn flush_all(out: &mut dyn Write) {
     OPEN.with(|open| {
         for s in open.borrow().iter().filter_map(Weak::upgrade) {

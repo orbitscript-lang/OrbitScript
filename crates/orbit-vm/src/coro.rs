@@ -217,8 +217,14 @@ impl Vm {
             c.stack.hook = stack.hook;
         } else {
             c.bytes = stack.bytes();
+            // An errored stack's frames stop mid-body, so their locals can
+            // sit above `top`: keep every register (all traced while running).
+            c.top = if from_status == CoStatus::Dead && c.error.is_some() {
+                stack.regs.len()
+            } else {
+                top
+            };
             c.stack = stack;
-            c.top = top;
             c.cycle = self.rt.gc_cycles;
         }
         let delta = c.bytes as isize - old as isize;

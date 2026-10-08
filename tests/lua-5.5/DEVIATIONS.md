@@ -76,3 +76,19 @@ Suite: `files.lua` seeks `io.stdin` only to check that a seek can fail.
 Why: the bytecode is our own (ADR-4), so a lua5.5 header would describe an instruction set and sizes that aren't ours. The format doesn't depend on the host's word size or byte order, so it needs no size or test fields.
 
 Suite: `calls.lua` 539-542 unpack a dump's header and compare it with lua5.5's values; the manifest disables those lines (`deviates=539-542`, see SKIPS.md).
+
+## `orbit -v` names OrbitScript
+
+The banner (`-v`, and interactive mode) reads `OrbitScript <version>  implements Lua 5.5.1, designed by Lua.org, PUC-Rio`, where lua5.5 prints `Lua 5.5.1  Copyright (C) 1994-2026 Lua.org, PUC-Rio`.
+
+Why: it's a different program; claiming Lua.org's copyright line for it would be wrong. The banner keeps the two things scripts look for: the `Lua 5.5.1` release and the line ending in `PUC-Rio`.
+
+Suite: `main.lua` reads the release with `"Lua (%d+%.%d+%.%d+)"` and checks that `PUC-Rio` ends the line; both hold.
+
+## No line editing in interactive mode
+
+Interactive mode reads plain lines from standard input: no history and no editing keys. `LUA_READLINELIB` always gets the warning lua5.5 gives for a library it can't load.
+
+Why: line editing would be the CLI's only dependency.
+
+Suite: `main.lua` checks the warning, which holds.
