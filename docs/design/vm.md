@@ -81,13 +81,13 @@ pub enum Op {
 const _: () = assert!(core::mem::size_of::<Op>() == 8);
 ```
 
-A Rust enum instead of hand-packed `u32`s: the compiler decodes fields for us, the `match` is exhaustive, and there's no bit-twiddling to get wrong. Register operands are `u8` (at most 255 registers per function, as in lua5.5), constant and child-prototype indices `u16`, jump offsets `i32` relative to the next instruction. ADR-4 left the instruction width open; 8 bytes is this design's proposal (S0 found 12-byte instructions cost time; 4-byte packing is a P5 experiment). Recording it in ADR-4 needs Tym's OK.
+A Rust enum instead of hand-packed `u32`s: the compiler decodes fields for us, the `match` is exhaustive, and there's no bit-twiddling to get wrong. Register operands are `u8` (at most 255 registers per function, as in lua5.5), constant and child-prototype indices `u16` (a function may hold up to 2^25 constants: past the first 65,536 the compiler loads them with `LoadConstX{dst,k:u32}` and indexes with them through registers), jump offsets `i32` relative to the next instruction. ADR-4 left the instruction width open; 8 bytes is this design's proposal (S0 found 12-byte instructions cost time; 4-byte packing is a P5 experiment). Recording it in ADR-4 needs Tym's OK.
 
 First-light instruction set (`R[x]` is a register, `K[x]` a constant, `C[x]` a frame cell slot, `U[x]` a capture of the current closure):
 
 | Group | Instructions |
 |---|---|
-| Loads | `Move{dst,src}`, `LoadNil{dst,count}`, `LoadBool{dst,value}`, `LoadInt{dst,value:i32}`, `LoadConst{dst,k}` |
+| Loads | `Move{dst,src}`, `LoadNil{dst,count}`, `LoadBool{dst,value}`, `LoadInt{dst,value:i32}`, `LoadConst{dst,k}`, `LoadConstX{dst,k:u32}` |
 | Cells and captures | `CellNew{cell,src}` (fresh cell holding `R[src]`), `CellGet{dst,cell}`, `CellSet{cell,src}`, `CapGet{dst,cap}`, `CapSet{cap,src}`, `CapSelf{dst}` (the running closure, for a `local function` that refers to itself and is never reassigned) |
 | Globals | `GetGlobal{dst,name:k,ic}`, `SetGlobal{src,name:k,ic}` (through `U[0]`, the `_ENV` cell) |
 | Tables | `NewTable{dst,array_hint,hash_hint}`, `GetField{dst,obj,key:k,ic}`, `SetField{obj,key:k,src,ic}`, `GetIndex{dst,obj,key}`, `SetIndex{obj,key,src}`, `GetIndexInt{dst,obj,key:u16}` and `SetIndexInt{obj,key:u16,src}` (integer constant keys), `SetList{table,first,count,start}`, `SelfCall{dst,obj,key:k}` (method lookup: `R[dst+1]=R[obj]; R[dst]=R[obj][K[key]]`) |

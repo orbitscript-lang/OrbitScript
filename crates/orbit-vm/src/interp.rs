@@ -1233,6 +1233,7 @@ impl Vm {
                     Op::LoadBool { dst, value } => reg!(dst) = Value::Bool(value),
                     Op::LoadInt { dst, value } => reg!(dst) = Value::Int(value as i64),
                     Op::LoadConst { dst, k } => reg!(dst) = cur.consts[k as usize],
+                    Op::LoadConstX { dst, k } => reg!(dst) = cur.consts[k as usize],
 
                     Op::CellNew { cell, src } => {
                         let v = reg!(src);

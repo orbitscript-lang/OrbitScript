@@ -24,6 +24,7 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 Op::LoadNil { dst, count } => regs(dst, count),
                 Op::LoadBool { dst, .. } | Op::LoadInt { dst, .. } => reg(dst),
                 Op::LoadConst { dst, k } => reg(dst) && (k as usize) < p.consts.len(),
+                Op::LoadConstX { dst, k } => reg(dst) && (k as usize) < p.consts.len(),
                 Op::CellNew { cell, src } | Op::CellSet { cell, src } => {
                     cell < p.ncells && reg(src)
                 }

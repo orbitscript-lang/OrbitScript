@@ -92,18 +92,11 @@ impl FuncState<'_> {
                 Ok(value) => {
                     self.emit(Op::LoadInt { dst, value });
                 }
-                Err(_) => {
-                    let k = self.constant(Constant::Int(i))?;
-                    self.emit(Op::LoadConst { dst, k });
-                }
+                Err(_) => self.load_constant(dst, Constant::Int(i))?,
             },
-            ConstVal::Float(x) => {
-                let k = self.constant(Constant::Float(x))?;
-                self.emit(Op::LoadConst { dst, k });
-            }
+            ConstVal::Float(x) => self.load_constant(dst, Constant::Float(x))?,
             ConstVal::Str(s) => {
-                let k = self.str_constant(s)?;
-                self.emit(Op::LoadConst { dst, k });
+                self.load_str(dst, s)?;
                 return Ok(Some(Origin::Constant(self.name_bytes(s))));
             }
         }
@@ -183,9 +176,19 @@ impl FuncState<'_> {
                 Some(Origin::Upvalue(b"_ENV".as_slice().into()))
             }
             &ExprKind::Global(name) => {
-                let k = self.str_constant(name)?;
-                let ic = self.cache();
-                self.emit(Op::GetGlobal { dst, name: k, ic });
+                if let Some(k) = self.str_key(name)? {
+                    let ic = self.cache();
+                    self.emit(Op::GetGlobal { dst, name: k, ic });
+                } else {
+                    // `_ENV` is capture 0 wherever a global is read.
+                    self.emit(Op::CapGet { dst, cap: 0 });
+                    let mark = self.free;
+                    let key = self.alloc()?;
+                    self.load_str(key, name)?;
+                    let pc = self.emit(Op::GetIndex { dst, obj: dst, key });
+                    self.origin(pc, 0, Some(Origin::Upvalue(b"_ENV".as_slice().into())));
+                    self.free = mark;
+                }
                 Some(Origin::Global(self.name_bytes(name)))
             }
             &ExprKind::Index { obj, key } => self.index(dst, obj, key, at)?,
@@ -263,8 +266,11 @@ impl FuncState<'_> {
             matches!(self.f.expr(obj).kind, ExprKind::Local(l) if Some(l) == self.f.vararg_table);
         let (o, obj_origin) = self.operand(obj, dst)?;
         let key_const = self.const_of(key);
-        let (pc, origin) = if let Some(ConstVal::Str(s)) = key_const {
-            let k = self.str_constant(s)?;
+        let short_key = match key_const {
+            Some(ConstVal::Str(s)) => self.str_key(s)?.map(|k| (s, k)),
+            _ => None,
+        };
+        let (pc, origin) = if let Some((s, k)) = short_key {
             let ic = self.cache();
             self.at_offset(at);
             (
@@ -291,10 +297,16 @@ impl FuncState<'_> {
             )
         } else {
             let (k, _) = self.expr_any(key)?;
-            let name: &[u8] = if !vararg_table && matches!(key_const, Some(ConstVal::Int(_))) {
-                b"integer index"
-            } else {
-                b"?"
+            let origin = match key_const {
+                // A string key past the `Const` operands' range.
+                Some(ConstVal::Str(s)) if self.is_env_variable(obj) => {
+                    Origin::Global(self.name_bytes(s))
+                }
+                Some(ConstVal::Str(s)) => Origin::Field(self.name_bytes(s)),
+                Some(ConstVal::Int(_)) if !vararg_table => {
+                    Origin::Field(b"integer index".as_slice().into())
+                }
+                _ => Origin::Field(b"?".as_slice().into()),
             };
             self.at_offset(at);
             (
@@ -303,7 +315,7 @@ impl FuncState<'_> {
                     obj: o,
                     key: k,
                 }),
-                Origin::Field(name.into()),
+                origin,
             )
         };
         self.origin(pc, 0, obj_origin);
@@ -450,8 +462,11 @@ impl FuncState<'_> {
                 }
                 TableEntry::Keyed(k, v) => {
                     let mark = self.free;
-                    if let Some(ConstVal::Str(s)) = self.const_of(k) {
-                        let key = self.str_constant(s)?;
+                    let short_key = match self.const_of(k) {
+                        Some(ConstVal::Str(s)) => self.str_key(s)?,
+                        _ => None,
+                    };
+                    if let Some(key) = short_key {
                         let (src, _) = self.expr_any(v)?;
                         let ic = self.cache();
                         self.emit(Op::SetField {
@@ -547,13 +562,28 @@ impl FuncState<'_> {
                 self.free = func as usize;
                 self.alloc()?;
                 self.alloc()?;
-                let key = self.str_constant(name)?;
-                self.at_offset(expr.at);
-                let pc = self.emit(Op::SelfCall {
-                    dst: func,
-                    obj: o,
-                    key,
-                });
+                let pc = if let Some(key) = self.str_key(name)? {
+                    self.at_offset(expr.at);
+                    self.emit(Op::SelfCall {
+                        dst: func,
+                        obj: o,
+                        key,
+                    })
+                } else {
+                    // A name past the `Const` operands' range: `SelfCall`'s
+                    // two steps, the method name going through `func`.
+                    self.emit(Op::Move {
+                        dst: func + 1,
+                        src: o,
+                    });
+                    self.load_str(func, name)?;
+                    self.at_offset(expr.at);
+                    self.emit(Op::GetIndex {
+                        dst: func,
+                        obj: func + 1,
+                        key: func,
+                    })
+                };
                 self.origin(pc, 0, obj_origin);
                 (
                     self.args(args, 1)?,

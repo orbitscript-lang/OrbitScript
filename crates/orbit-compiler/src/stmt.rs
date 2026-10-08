@@ -253,11 +253,15 @@ impl FuncState<'_> {
     fn load_target(&mut self, target: &Target, dst: u8) -> Result<u16> {
         Ok(match *target {
             Target::Global(name) => {
-                let k = self.str_constant(name)?;
+                let Some(k) = self.str_key(name)? else {
+                    unreachable!("a global target's name fits a `Const`")
+                };
                 let ic = self.cache();
                 self.emit(Op::GetGlobal { dst, name: k, ic });
                 k
             }
+            // `CheckUndefined` names the global with a `Const`.
+            Target::Index { .. } => return Err(self.error("too many constants")),
             Target::Field {
                 obj,
                 key,
@@ -285,7 +289,23 @@ impl FuncState<'_> {
                 }
             },
             Place::Capture(c) => Target::Capture(c.0 as u8),
-            Place::Global(name) => Target::Global(name),
+            Place::Global(name) => {
+                if self.str_key(name)?.is_some() {
+                    Target::Global(name)
+                } else {
+                    // A name past the `Const` operands' range: `_ENV[name]`
+                    // (`_ENV` is capture 0 wherever a global is assigned).
+                    let obj = self.alloc()?;
+                    self.emit(Op::CapGet { dst: obj, cap: 0 });
+                    let key = self.alloc()?;
+                    self.load_str(key, name)?;
+                    Target::Index {
+                        obj,
+                        key,
+                        origin: Some(orbit_bytecode::Origin::Upvalue(b"_ENV".as_slice().into())),
+                    }
+                }
+            }
             Place::Env => Target::Capture(0),
             Place::Outer { .. } => return Err(self.error("internal error: HIR not analysed")),
             Place::Index { obj, key } => {
@@ -295,8 +315,11 @@ impl FuncState<'_> {
                     self.emit(Op::Move { dst: t, src: o });
                     o = t;
                 }
-                if let Some(ConstVal::Str(s)) = self.const_of(key) {
-                    let key = self.str_constant(s)?;
+                let short_key = match self.const_of(key) {
+                    Some(ConstVal::Str(s)) => self.str_key(s)?,
+                    _ => None,
+                };
+                if let Some(key) = short_key {
                     Target::Field {
                         obj: o,
                         key,
@@ -341,7 +364,9 @@ impl FuncState<'_> {
                 self.emit(Op::CapSet { cap, src });
             }
             Target::Global(name) => {
-                let k = self.str_constant(name)?;
+                let Some(k) = self.str_key(name)? else {
+                    unreachable!("a global target's name fits a `Const`")
+                };
                 let ic = self.cache();
                 self.emit(Op::SetGlobal { src, name: k, ic });
             }

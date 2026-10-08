@@ -71,6 +71,7 @@ impl Function<'_> {
             | Op::LoadBool { dst, .. }
             | Op::LoadInt { dst, .. }
             | Op::LoadConst { dst, .. }
+            | Op::LoadConstX { dst, .. }
             | Op::CellGet { dst, .. }
             | Op::CapGet { dst, .. }
             | Op::CapSelf { dst }

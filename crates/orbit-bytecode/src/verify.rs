@@ -219,7 +219,7 @@ impl Function<'_> {
                 self.fail(at, "register out of range")
             }
         };
-        let konst = |k: u16| {
+        let konst = |k: u32| {
             if (k as usize) < p.consts.len() {
                 Ok(())
             } else {
@@ -269,6 +269,10 @@ impl Function<'_> {
             }
             Op::LoadBool { dst, .. } | Op::LoadInt { dst, .. } | Op::CapSelf { dst } => reg(dst),
             Op::LoadConst { dst, k } => {
+                reg(dst)?;
+                konst(k.into())
+            }
+            Op::LoadConstX { dst, k } => {
                 reg(dst)?;
                 konst(k)
             }
