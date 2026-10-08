@@ -1400,7 +1400,7 @@ impl Vm {
                             Value::Int(i) => match set_int_parts!(t, i, src) {
                                 IntStore::Array => {}
                                 IntStore::Other => safepoint!(),
-                                IntStore::Meta => {
+                                IntStore::Slow => {
                                     set_slow!(reg!(obj), reg!(key), reg!(src))
                                 }
                             },
@@ -1410,7 +1410,7 @@ impl Vm {
                                     set_slow!(reg!(obj), k, v)
                                 }
                                 if let Err(e) = table::set(&mut self.heap, t, k, v) {
-                                    throw!(Exc::Rt(e.message().into(), None));
+                                    throw!(e.into());
                                 }
                                 safepoint!();
                             }
@@ -1433,7 +1433,7 @@ impl Vm {
                         match set_int_parts!(t, key as i64, src) {
                             IntStore::Array => {}
                             IntStore::Other => safepoint!(),
-                            IntStore::Meta => {
+                            IntStore::Slow => {
                                 set_slow!(reg!(obj), Value::Int(key as i64), reg!(src))
                             }
                         }
@@ -1454,8 +1454,11 @@ impl Vm {
                             count as usize
                         };
                         // Open-ended results can run past the window.
-                        self.op_set_list(t, from, n, start as i64);
+                        let stored = self.op_set_list(t, from, n, start as i64);
                         w = window!();
+                        if let Err(e) = stored {
+                            throw!(e.into());
+                        }
                         safepoint!();
                     }
                     Op::SelfCall { dst, obj, key } => {

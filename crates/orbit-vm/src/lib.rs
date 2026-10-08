@@ -502,7 +502,8 @@ impl Vm {
         let mut heap = LuaHeap::new();
         let globals = heap.alloc(Table::new());
         let mut reg = Table::new();
-        reg.set_int(2, Value::Table(globals));
+        reg.set_int(2, Value::Table(globals))
+            .expect("a new table has room for one key");
         let registry = heap.alloc(reg);
         let dead_cell = heap.alloc(Cell::default());
         let mut strings = Interner::new();
@@ -590,7 +591,8 @@ impl Vm {
         self.heap.alloc(Table::new())
     }
 
-    /// `t[k] = v` (raw). Panics on a nil or NaN key.
+    /// `t[k] = v` (raw). Panics on a nil or NaN key, or if the table can't
+    /// grow.
     pub fn table_set(&mut self, t: Gc<Table>, k: Value, v: Value) {
         if let Err(e) = table::set(&mut self.heap, t, k, v) {
             panic!("table_set: {}", e.message());

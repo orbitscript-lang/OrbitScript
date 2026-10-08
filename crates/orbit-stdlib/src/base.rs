@@ -486,8 +486,10 @@ fn rawset(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_table(0)?;
     let k = ctx.check_any(1)?;
     let v = ctx.check_any(2)?;
-    if let Err(e) = tbl::set(ctx.heap, t, k, v) {
-        return Err(ctx.error(e.message()));
+    match tbl::set(ctx.heap, t, k, v) {
+        Ok(()) => {}
+        Err(tbl::StoreError::NoMemory) => return Err(ctx.no_memory()),
+        Err(e) => return Err(ctx.error(e.message())),
     }
     ctx.ret1(Value::Table(t))
 }

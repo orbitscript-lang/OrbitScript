@@ -202,10 +202,10 @@ mod tests {
         let kept = heap.alloc(Table::new());
         h.roots.push(Value::Table(kept));
         let str_v = s(&mut heap, &mut h, b"a string value");
-        tbl::set_int(&mut heap, t, 1, str_v);
+        tbl::set_int(&mut heap, t, 1, str_v).unwrap();
         let dead = Value::Table(heap.alloc(Table::new()));
-        tbl::set_int(&mut heap, t, 2, dead);
-        tbl::set_int(&mut heap, t, 3, Value::Table(kept));
+        tbl::set_int(&mut heap, t, 2, dead).unwrap();
+        tbl::set_int(&mut heap, t, 3, Value::Table(kept)).unwrap();
         let key = s(&mut heap, &mut h, b"key");
         let dead2 = Value::Table(heap.alloc(Table::new()));
         tbl::set(&mut heap, t, key, dead2).unwrap();
@@ -230,7 +230,7 @@ mod tests {
         // A value that refers back to its own key: collected with it.
         let k2 = heap.alloc(Table::new());
         let v2 = heap.alloc(Table::new());
-        tbl::set_int(&mut heap, v2, 1, Value::Table(k2));
+        tbl::set_int(&mut heap, v2, 1, Value::Table(k2)).unwrap();
         tbl::set(&mut heap, t, Value::Table(k2), Value::Table(v2)).unwrap();
         // Two keys holding each other through their values.
         let (a, b) = (heap.alloc(Table::new()), heap.alloc(Table::new()));

@@ -50,8 +50,15 @@ pub struct Entry {
     /// disabled (`deviates=329`).
     pub deviates: Vec<(usize, usize)>,
     pub timeout: Option<Duration>,
+    /// Address-space limit in KiB (`ulimit -v`) the file runs under
+    /// (`vmem-kb=2000000`), for files that run out of memory on purpose.
+    /// Unix only: elsewhere the entry is skipped.
+    pub vmem_kb: Option<u64>,
     /// Skipped under `--soft`, as all.lua does for big.lua (`not-soft`).
     pub not_soft: bool,
+    /// Skipped when `ORBIT_GC_STRESS` is set, for files that stress mode
+    /// would make quadratic (`not-stress`).
+    pub not_stress: bool,
     /// Reason, when the entry is skipped entirely.
     pub skip: Option<String>,
     pub note: String,
@@ -72,7 +79,9 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>> {
             needs_clibs: Vec::new(),
             deviates: Vec::new(),
             timeout: None,
+            vmem_kb: None,
             not_soft: false,
+            not_stress: false,
             skip: None,
             note: comment.to_string(),
         };
@@ -80,11 +89,16 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>> {
             match opt.split_once('=') {
                 None if *opt == "skip" => e.skip = Some(comment.to_string()),
                 None if *opt == "not-soft" => e.not_soft = true,
+                None if *opt == "not-stress" => e.not_stress = true,
                 Some(("set", v)) => e.set.extend(v.split(',').map(str::to_string)),
                 Some(("yields", v)) => e.yields = v.split(',').map(str::to_string).collect(),
                 Some(("timeout", v)) => {
                     let s: u64 = v.parse().map_err(|_| err(format!("bad timeout {v:?}")))?;
                     e.timeout = Some(Duration::from_secs(s));
+                }
+                Some(("vmem-kb", v)) => {
+                    let kb: u64 = v.parse().map_err(|_| err(format!("bad vmem-kb {v:?}")))?;
+                    e.vmem_kb = Some(kb);
                 }
                 Some(("needs-clibs", v)) => {
                     e.needs_clibs
@@ -436,6 +450,12 @@ fn run_entry(e: &Entry, interp: &Path, suite_dir: &Path, opts: &Options) -> Resu
     if e.not_soft && opts.flags.soft {
         r.skipped = Some("all.lua skips it under _soft".to_string());
     }
+    if e.not_stress && std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
+        r.skipped = Some("too slow when collecting at every safe point".to_string());
+    }
+    if e.vmem_kb.is_some() && !cfg!(unix) {
+        r.skipped = Some("needs an address-space limit (ulimit -v), Unix only".to_string());
+    }
     if r.skipped.is_some() {
         return Ok(r);
     }
@@ -452,10 +472,24 @@ fn run_entry(e: &Entry, interp: &Path, suite_dir: &Path, opts: &Options) -> Resu
     let driver = format!("__testkit_{}", e.file);
     fs::write(suite_dir.join(&driver), driver_source(e, opts.flags)).map_err(io_err(&driver))?;
     let timeout = e.timeout.unwrap_or(opts.timeout);
+    let (program, prefix) = match e.vmem_kb {
+        None => (interp.to_path_buf(), Vec::new()),
+        // The shell sets the limit, then becomes the interpreter.
+        Some(kb) => (
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                format!("ulimit -v {kb} && exec \"$0\" \"$@\"").into(),
+                interp.into(),
+            ],
+        ),
+    };
     let run = |script: &str| {
+        let mut args: Vec<std::ffi::OsString> = prefix.clone();
+        args.push(script.into());
         process::run(&Spec {
-            program: interp.to_path_buf(),
-            args: vec![script.into()],
+            program: program.clone(),
+            args,
             cwd: suite_dir.to_path_buf(),
             timeout,
             measure_rss: false,
@@ -584,10 +618,11 @@ mod tests {
              big.lua  yields=b,a timeout=60 not-soft  # as all.lua runs it\n\
              all.lua  set=_U\n\
              main.lua needs-clibs=250-253 needs-clibs=7 deviates=9\n\
-             heavy.lua skip  # needs gigabytes\n",
+             heavy.lua skip  # needs gigabytes\n\
+             heavy.lua vmem-kb=2000000 not-stress\n",
         )
         .unwrap();
-        assert_eq!(m.len(), 5);
+        assert_eq!(m.len(), 6);
         assert_eq!(m[1].yields, ["b", "a"]);
         assert_eq!(m[1].timeout, Some(Duration::from_secs(60)));
         assert!(m[1].not_soft && !m[0].not_soft);
@@ -595,6 +630,8 @@ mod tests {
         assert_eq!(m[3].needs_clibs, [(250, 253), (7, 7)]);
         assert_eq!(m[3].deviates, [(9, 9)]);
         assert_eq!(m[4].skip.as_deref(), Some("needs gigabytes"));
+        assert_eq!(m[5].vmem_kb, Some(2_000_000));
+        assert!(m[5].not_stress && !m[0].not_stress);
     }
 
     #[test]

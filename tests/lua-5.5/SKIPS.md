@@ -53,9 +53,10 @@ Where OrbitScript differs from lua5.5 on purpose (each case is in [DEVIATIONS.md
 
 | File | Why |
 |---|---|
-| `heavy.lua` | Not part of `all.lua`. It builds strings and tables of several GiB to hit size limits. Worth running by hand once OrbitScript's limits are in place (`cargo testkit conformance ... heavy.lua` after removing `skip`). |
 | `bwcoercion.lua`, `tracegc.lua` | Helper modules `require`d by other files, not tests. |
 | `libs/`, `packtests` | C sources and the Lua team's release packaging script. |
+
+`heavy.lua` is not part of `all.lua`, but it runs. As shipped it grows a table until allocation fails and expects a catchable `not enough memory` error, so the manifest runs it under a 2 GB address-space limit (`vmem-kb=2000000`, `ulimit -v`). That limit works only on Unix; elsewhere the file is skipped. It is also skipped under `ORBIT_GC_STRESS=1` (`not-stress`): collecting at every safe point while a table grows to 128 Mi entries never finishes.
 
 ## Modes that skip more
 

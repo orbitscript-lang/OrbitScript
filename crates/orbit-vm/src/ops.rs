@@ -5,8 +5,9 @@ use std::io::Write as _;
 
 use orbit_bytecode::number::BitOp;
 use orbit_core::number::{self, ArithError, ArithOp, Number, float_to_int};
+use orbit_core::table::StoreError;
 use orbit_core::value::raw_eq;
-use orbit_core::{LuaHeap, Value};
+use orbit_core::{LuaHeap, NoMemory, Value};
 
 use crate::Runtime;
 use crate::meta::{self, Event, MetaCall, Metas};
@@ -35,6 +36,23 @@ pub(crate) enum Exc {
 impl From<crate::LuaError> for Exc {
     fn from(e: crate::LuaError) -> Self {
         Exc::Lua(e)
+    }
+}
+
+impl From<NoMemory> for Exc {
+    #[cold]
+    fn from(e: NoMemory) -> Self {
+        Exc::Plain(e.message().into())
+    }
+}
+
+impl From<StoreError> for Exc {
+    #[cold]
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::Key(k) => Exc::Rt(k.message().into(), None),
+            StoreError::NoMemory => NoMemory.into(),
+        }
     }
 }
 

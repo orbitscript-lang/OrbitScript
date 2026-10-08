@@ -272,7 +272,7 @@ impl Stream {
         while n > 0 && self.fill(out)? {
             let avail = &self.rbuf[self.rpos..];
             let k = avail.len().min(n);
-            into.extend_from_slice(&avail[..k]);
+            append(into, &avail[..k])?;
             self.rpos += k;
             n -= k;
         }
@@ -293,12 +293,12 @@ impl Stream {
             let avail = &self.rbuf[self.rpos..];
             match avail.iter().position(|&b| b == b'\n') {
                 Some(i) => {
-                    into.extend_from_slice(&avail[..if keep { i + 1 } else { i }]);
+                    append(into, &avail[..if keep { i + 1 } else { i }])?;
                     self.rpos += i + 1;
                     return Ok(true);
                 }
                 None => {
-                    into.extend_from_slice(avail);
+                    append(into, avail)?;
                     self.rpos = self.rbuf.len();
                 }
             }
@@ -308,7 +308,7 @@ impl Stream {
 
     fn read_all(&mut self, into: &mut Vec<u8>, out: &mut dyn Write) -> io::Result<()> {
         while self.fill(out)? {
-            into.extend_from_slice(&self.rbuf[self.rpos..]);
+            append(into, &self.rbuf[self.rpos..])?;
             self.rpos = self.rbuf.len();
         }
         Ok(())
@@ -850,6 +850,16 @@ fn format(ctx: &mut NativeCtx<'_>, v: Value, arg: usize) -> Result<Format, LuaEr
     }
 }
 
+/// Append `bytes` to a read buffer. A buffer that can't grow fails with
+/// [`io::ErrorKind::OutOfMemory`], which `read` raises as Lua's
+/// "not enough memory".
+fn append(into: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
+    into.try_reserve(bytes.len())
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    into.extend_from_slice(bytes);
+    Ok(())
+}
+
 /// Read with formats `fmts` (none: one line) from `s`, pushing one value
 /// per format and stopping after the first that fails (nil). `arg` is the
 /// window index of the first format, for messages. On an I/O error nothing
@@ -878,6 +888,10 @@ fn read_values(
                 if failed {
                     break;
                 }
+            }
+            Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
+                ctx.truncate(len);
+                return Err(ctx.no_memory());
             }
             Err(e) => {
                 ctx.truncate(len);

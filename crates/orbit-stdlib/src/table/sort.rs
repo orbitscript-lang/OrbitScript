@@ -436,7 +436,9 @@ fn write_back(ctx: &mut NativeCtx<'_>, st: &mut State) -> Option<R> {
     };
     for x in 0..st.n {
         let v = ctx.arg(st.src_at(x));
-        set(ctx, t, x as i64 + 1, v);
+        if let Err(e) = set(ctx, t, x as i64 + 1, v) {
+            return Some(Err(e));
+        }
     }
     Some(Ok(NativeReturn::Return(0)))
 }

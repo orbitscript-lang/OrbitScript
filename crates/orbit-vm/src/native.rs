@@ -259,6 +259,12 @@ impl NativeCtx<'_> {
         LuaError::new(self.new_str(text.as_bytes()))
     }
 
+    /// Lua's "not enough memory" error, which has no position.
+    #[cold]
+    pub fn no_memory(&mut self) -> LuaError {
+        LuaError::new(self.new_str(orbit_core::NoMemory::MESSAGE.as_bytes()))
+    }
+
     /// An error whose value is `v`, unchanged.
     pub fn error_value(&self, v: Value) -> LuaError {
         LuaError::new(v)

@@ -14,7 +14,7 @@ fn record(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
         unreachable!()
     };
     let len = ctx.heap.get(log).border();
-    orbit_vm::orbit_core::table::set_int(ctx.heap, log, len + 1, n);
+    orbit_vm::orbit_core::table::set_int(ctx.heap, log, len + 1, n).unwrap();
     Ok(NativeReturn::Return(0))
 }
 

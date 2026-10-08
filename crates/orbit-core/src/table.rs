@@ -11,7 +11,7 @@ use orbit_gc::{Gc, Liveness, Marker, Trace, WeakMode};
 
 use crate::string::hash_word;
 use crate::value::{Payload, Tag, str_eq};
-use crate::{LuaHeap, LuaSpace, LuaStr, Value, gc, number};
+use crate::{LuaHeap, LuaSpace, LuaStr, NoMemory, Value, gc, number};
 
 /// Why a value can't be a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +28,35 @@ impl KeyError {
             KeyError::Nil => "table index is nil",
             KeyError::NaN => "table index is NaN",
         }
+    }
+}
+
+/// Why a [`set`] stored nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreError {
+    Key(KeyError),
+    /// Growing the table failed.
+    NoMemory,
+}
+
+impl StoreError {
+    pub fn message(self) -> &'static str {
+        match self {
+            StoreError::Key(e) => e.message(),
+            StoreError::NoMemory => NoMemory::MESSAGE,
+        }
+    }
+}
+
+impl From<KeyError> for StoreError {
+    fn from(e: KeyError) -> StoreError {
+        StoreError::Key(e)
+    }
+}
+
+impl From<NoMemory> for StoreError {
+    fn from(_: NoMemory) -> StoreError {
+        StoreError::NoMemory
     }
 }
 
@@ -166,12 +195,20 @@ struct ArrayPart {
 }
 
 impl ArrayPart {
-    fn with_capacity(cap: usize) -> ArrayPart {
-        let mut a = ArrayPart::default();
-        if cap > 0 {
-            a.realloc(cap);
+    fn with_capacity(cap: usize) -> Result<ArrayPart, NoMemory> {
+        if cap == 0 {
+            return Ok(ArrayPart::default());
         }
-        a
+        assert!(cap <= u32::MAX as usize, "table overflow");
+        let total = cap + cap.div_ceil(8);
+        let mut words = Vec::new();
+        words.try_reserve_exact(total)?;
+        words.resize(total, [0; 8]);
+        Ok(ArrayPart {
+            words: words.into_boxed_slice(),
+            len: 0,
+            cap: cap as u32,
+        })
     }
 
     #[inline(always)]
@@ -205,30 +242,53 @@ impl ArrayPart {
         self.words[self.cap as usize + i / 8][i % 8] = t as u8;
     }
 
-    fn push(&mut self, v: Value) {
+    #[inline(always)]
+    fn push(&mut self, v: Value) -> Result<(), NoMemory> {
         if self.len == self.cap {
-            self.realloc((self.cap as usize * 2).max(4));
+            self.grow_one()?;
         }
         self.len += 1;
         self.set(self.len() - 1, v);
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow_one(&mut self) -> Result<(), NoMemory> {
+        self.realloc(self.grown(self.len() + 1))
+    }
+
+    /// The capacity pushing up to `n` slots grows to: doubling, from 4.
+    fn grown(&self, n: usize) -> usize {
+        let mut cap = self.cap as usize;
+        while cap < n {
+            cap = (cap * 2).max(4);
+        }
+        cap
     }
 
     /// Grow to room for `cap` slots (more than now). The allocation is
     /// resized in place where the allocator can, then the tag words move up
-    /// past the new payload words.
-    fn realloc(&mut self, cap: usize) {
+    /// past the new payload words. On failure nothing changes.
+    fn realloc(&mut self, cap: usize) -> Result<(), NoMemory> {
         assert!(cap <= u32::MAX as usize, "table overflow");
         let old_cap = self.cap as usize;
         let tag_words = self.len().div_ceil(8);
         let mut v = std::mem::take(&mut self.words).into_vec();
         let total = cap + cap.div_ceil(8);
-        v.reserve_exact(total - v.len());
+        if v.try_reserve_exact(total - v.len()).is_err() {
+            // A boxed slice's vector is exactly full, so this gives the
+            // same allocation back.
+            self.words = v.into_boxed_slice();
+            return Err(NoMemory);
+        }
         v.resize(total, [0; 8]);
         // Only slots below `len` are ever read, so whatever the moved-over
         // words leave behind is never seen.
         v.copy_within(old_cap..old_cap + tag_words, cap);
         self.words = v.into_boxed_slice();
         self.cap = cap as u32;
+        Ok(())
     }
 
     fn bytes(&self) -> usize {
@@ -423,15 +483,27 @@ impl Table {
     }
 
     /// A table with room for `array` array slots and `hash` hash entries.
+    /// For sizes a program controls, use [`Table::try_with_capacity`].
     pub fn with_capacity(array: usize, hash: usize) -> Self {
+        Table::try_with_capacity(array, hash).unwrap_or_else(|_| {
+            crate::mem::abort(
+                array
+                    .saturating_mul(9)
+                    .saturating_add(hash.saturating_mul(24)),
+            )
+        })
+    }
+
+    /// [`Table::with_capacity`], or [`NoMemory`].
+    pub fn try_with_capacity(array: usize, hash: usize) -> Result<Self, NoMemory> {
         let mut t = Table {
-            array: ArrayPart::with_capacity(array),
+            array: ArrayPart::with_capacity(array)?,
             ..Table::default()
         };
         if hash > 0 {
-            t.entries = vec![Entry::default(); hash_capacity(hash)].into_boxed_slice();
+            t.entries = new_entries(hash_capacity(hash))?;
         }
-        t
+        Ok(t)
     }
 
     /// Length of the array part.
@@ -624,12 +696,14 @@ impl Table {
     }
 
     /// Phase two of a store. Use through
-    /// [`Heap::update`](orbit_gc::Heap::update).
-    pub fn write(&mut self, slot: Slot, key: &Key, v: Value) {
+    /// [`Heap::update`](orbit_gc::Heap::update). Only [`Slot::Push`] and
+    /// [`Slot::Grow`] allocate; when that fails the key is not stored and
+    /// the table is otherwise unchanged (a rebuild may have happened).
+    pub fn write(&mut self, slot: Slot, key: &Key, v: Value) -> Result<(), NoMemory> {
         match slot {
             Slot::Array(i) => self.array.set(i, v),
             Slot::Push => {
-                self.array.push(v);
+                self.array.push(v)?;
                 self.migrate_to_array();
             }
             Slot::Existing(i) => self.entries[i].set_value(v),
@@ -641,7 +715,7 @@ impl Table {
                 *e = Entry::new(key.value, key.hash, v);
             }
             Slot::Grow => {
-                self.rebuild(1);
+                self.rebuild(1)?;
                 if let Value::Int(i) = key.value
                     && i as u64 == self.array.len() as u64 + 1
                 {
@@ -651,22 +725,25 @@ impl Table {
                     Err(Some(slot)) => slot,
                     _ => unreachable!("rebuilt table has room and lacks the key"),
                 };
-                self.write(Slot::New(slot), key, v);
+                return self.write(Slot::New(slot), key, v);
             }
             Slot::None => {}
         }
+        Ok(())
     }
 
     /// After the array part grew, move the integer keys that now continue it
-    /// out of the hash part, leaving dead entries behind.
+    /// out of the hash part, leaving dead entries behind. Stops early if the
+    /// array part can't grow: the rest stay in the hash part, which is fine.
     fn migrate_to_array(&mut self) {
         while self.used > 0 {
             let key = Key::int(self.array.len() as i64 + 1);
             match self.probe(&key, |_, _| false) {
                 Ok(slot) if !self.entries[slot].value_is_nil() => {
-                    let v = self.entries[slot].value();
+                    if self.array.push(self.entries[slot].value()).is_err() {
+                        break;
+                    }
                     self.entries[slot].set_value(Value::Nil);
-                    self.array.push(v);
                 }
                 _ => break,
             }
@@ -674,49 +751,60 @@ impl Table {
     }
 
     /// Rebuild the hash part with room for `extra` more keys, dropping dead
-    /// entries and moving integer keys that extend the array into it.
-    fn rebuild(&mut self, extra: usize) {
-        let old = std::mem::take(&mut self.entries);
-        self.used = 0;
-        let live: Vec<Entry> = old.into_iter().filter(|e| !e.value_is_nil()).collect();
+    /// entries and moving integer keys that extend the array into it. Every
+    /// allocation happens before anything moves, so on failure the table is
+    /// unchanged.
+    fn rebuild(&mut self, extra: usize) -> Result<(), NoMemory> {
+        let n = self.array.len() as i64;
+        let int_after_array = |e: &Entry| match e.key() {
+            Value::Int(i) if i > n && !e.value_is_nil() => Some(i),
+            _ => None,
+        };
+        let live = self.entries.iter().filter(|e| !e.value_is_nil()).count();
         // Integer keys that continue the array part move into it.
-        let mut moved = vec![false; live.len()];
-        let mut ints: Vec<(i64, usize)> = live
-            .iter()
-            .enumerate()
-            .filter_map(|(j, e)| match e.key() {
-                Value::Int(i) if i > self.array.len() as i64 => Some((i, j)),
-                _ => None,
-            })
-            .collect();
+        let mut ints: Vec<(i64, usize)> = Vec::new();
+        ints.try_reserve_exact(self.entries.iter().filter_map(int_after_array).count())?;
+        ints.extend(
+            self.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(j, e)| int_after_array(e).map(|i| (i, j))),
+        );
         ints.sort_unstable();
-        for (i, j) in ints {
-            if i != self.array.len() as i64 + 1 {
-                break;
-            }
-            moved[j] = true;
-            self.array.push(live[j].value());
+        let run = ints
+            .iter()
+            .zip(n + 1..)
+            .take_while(|&(&(i, _), want)| i == want)
+            .count();
+        let mut entries = new_entries(hash_capacity(live - run + extra))?;
+        let len = self.array.len() + run;
+        if len > self.array.cap as usize {
+            self.array.realloc(self.array.grown(len))?;
         }
-        let remaining = live.len() - moved.iter().filter(|&&m| m).count();
-        let need = remaining + extra;
-        self.entries = vec![Entry::default(); hash_capacity(need)].into_boxed_slice();
+        // Commit.
+        for &(_, j) in &ints[..run] {
+            let e = &mut self.entries[j];
+            self.array.len += 1;
+            self.array.set(self.array.len() - 1, e.value());
+            e.set_value(Value::Nil);
+        }
+        std::mem::swap(&mut self.entries, &mut entries);
+        self.used = 0;
         let mask = self.entries.len() - 1;
-        for (e, m) in live.into_iter().zip(moved) {
-            if m {
-                continue;
-            }
+        for e in entries.iter().filter(|e| !e.value_is_nil()) {
             let mut i = e.hash as usize & mask;
             while !self.entries[i].is_empty() {
                 i = (i + 1) & mask;
             }
-            self.entries[i] = e;
+            self.entries[i] = *e;
             self.used += 1;
         }
+        Ok(())
     }
 
     /// Append `v` at `array_len() + 1` or store at an integer key, for
     /// constructors and `table.insert`. Integer keys need no heap.
-    pub fn set_int(&mut self, i: i64, v: Value) {
+    pub fn set_int(&mut self, i: i64, v: Value) -> Result<(), NoMemory> {
         let key = Key::int(i);
         let idx = (i as u64).wrapping_sub(1);
         let slot = if idx < self.array.len() as u64 {
@@ -732,7 +820,7 @@ impl Table {
                 Err(_) => Slot::Grow,
             }
         };
-        self.write(slot, &key, v);
+        self.write(slot, &key, v)
     }
 
     /// A border of the table (`#t`, raw).
@@ -825,6 +913,14 @@ fn max_used(cap: usize) -> usize {
     if cap <= 8 { cap } else { cap / 4 * 3 }
 }
 
+/// An empty hash part of `cap` slots.
+fn new_entries(cap: usize) -> Result<Box<[Entry]>, NoMemory> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(cap)?;
+    v.resize(cap, Entry::default());
+    Ok(v.into_boxed_slice())
+}
+
 /// The smallest hash part with room for `n` keys.
 fn hash_capacity(n: usize) -> usize {
     let mut cap = n.next_power_of_two().max(1);
@@ -844,13 +940,13 @@ fn same_key(a: Value, b: Value, long_eq: &impl Fn(Gc<LuaStr>, Gc<LuaStr>) -> boo
 
 /// `t[k] = v` (raw), both phases.
 #[inline]
-pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), KeyError> {
+pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), StoreError> {
     if let Value::Int(i) = k {
-        set_int(heap, t, i, v);
+        set_int(heap, t, i, v)?;
         return Ok(());
     }
     let key = Key::new(heap, k)?;
-    set_key(heap, t, &key, v);
+    set_key(heap, t, &key, v)?;
     Ok(())
 }
 
@@ -860,17 +956,17 @@ pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), K
 /// Returns whether the store went into the array part, which allocates
 /// nothing.
 #[inline(always)]
-pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> bool {
+pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<bool, NoMemory> {
     let idx = (i as u64).wrapping_sub(1);
     // Every store path barriers, so do it first and look the table up once.
     heap.barrier_back(t);
     let tab = heap.get_mut(t);
     if idx < tab.array.len() as u64 {
         tab.array.set(idx as usize, v);
-        return true;
+        return Ok(true);
     }
-    set_key(heap, t, &Key::int(i), v);
-    false
+    set_key(heap, t, &Key::int(i), v)?;
+    Ok(false)
 }
 
 /// What [`store_int`] did.
@@ -880,9 +976,10 @@ pub enum IntStore {
     Array,
     /// Stored through the hash part or by growing (may have allocated).
     Other,
-    /// Nothing stored: the table has a metatable and the key is absent, so
-    /// `__newindex` may apply.
-    Meta,
+    /// Nothing stored: finish through the slow path. Either the table has
+    /// a metatable and the key is absent, so `__newindex` may apply, or the
+    /// table could not grow and the slow path's retry raises the error.
+    Slow,
 }
 
 /// `t[i] = v` for the interpreter: like [`set_int`], but leaves the store
@@ -896,31 +993,38 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
         let idx = idx as usize;
         // Metatables are rare: test for one before reading the tag.
         if tab.meta.is_some() && tab.array.tag(idx) == Tag::Nil {
-            return IntStore::Meta;
+            return IntStore::Slow;
         }
         tab.array.set(idx, v);
         return IntStore::Array;
     }
     if tab.meta.is_some() {
-        return IntStore::Meta;
+        return IntStore::Slow;
     }
-    set_key(heap, t, &Key::int(i), v);
-    IntStore::Other
+    match set_key(heap, t, &Key::int(i), v) {
+        Ok(_) => IntStore::Other,
+        Err(NoMemory) => IntStore::Slow,
+    }
 }
 
 /// `t[key] = v` (raw) for a normalised key. Returns the hash slot that now
 /// holds the key, when the store found or claimed one without rebuilding
 /// (for inline caches).
 #[inline]
-pub fn set_key(heap: &mut LuaHeap, t: Gc<Table>, key: &Key, v: Value) -> Option<usize> {
+pub fn set_key(
+    heap: &mut LuaHeap,
+    t: Gc<Table>,
+    key: &Key,
+    v: Value,
+) -> Result<Option<usize>, NoMemory> {
     let slot = heap.get(t).find_slot(heap, key, v.is_nil());
     if slot != Slot::None {
-        heap.update(t, |tab| tab.write(slot, key, v));
+        heap.update(t, |tab| tab.write(slot, key, v))?;
     }
-    match slot {
+    Ok(match slot {
         Slot::Existing(i) | Slot::New(i) => Some(i),
         _ => None,
-    }
+    })
 }
 
 /// `t[k]` (raw).
@@ -957,11 +1061,11 @@ mod tests {
         assert_eq!(heap.get(t).border(), 10);
         assert_eq!(
             set(&mut heap, t, Value::Nil, Value::Int(1)),
-            Err(KeyError::Nil)
+            Err(StoreError::Key(KeyError::Nil))
         );
         assert_eq!(
             set(&mut heap, t, Value::Float(f64::NAN), Value::Int(1)),
-            Err(KeyError::NaN)
+            Err(StoreError::Key(KeyError::NaN))
         );
     }
 
