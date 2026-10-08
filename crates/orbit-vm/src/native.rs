@@ -307,11 +307,11 @@ impl NativeCtx<'_> {
     /// `bad argument` for a wrong type.
     pub fn type_error(&mut self, i: usize, expected: &str) -> LuaError {
         let got = if i >= self.nargs {
-            "no value"
+            "no value".into()
         } else {
             match self.arg(i) {
-                Value::LightUserData(_) => "light userdata",
-                v => v.type_name(),
+                Value::LightUserData(_) => "light userdata".into(),
+                v => self.rt.metas.type_name(self.heap, v),
             }
         };
         self.arg_error(i, format!("{expected} expected, got {got}"))

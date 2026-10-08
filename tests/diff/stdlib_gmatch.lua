@@ -20,3 +20,10 @@ print(pcall(string.gmatch, {}, "a"))
 local it = string.gmatch("a1b2", "%a(%d)") print(type(it), it(), it(), it(), it())
 print(pcall(string.gmatch, "ab", "a", "x"))
 do local t = {} for k in ("x y"):gmatch("%S") do t[#t + 1] = k end print(table.concat(t, ";")) end
+
+-- A start past the end matches nothing, not even an empty string.
+for _, init in ipairs{3, 4, 5, 10} do
+  local n = 0
+  for _ in string.gmatch("abc", "%w*", init) do n = n + 1 end
+  print("gmatch init", init, n)
+end

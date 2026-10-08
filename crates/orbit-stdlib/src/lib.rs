@@ -6,10 +6,14 @@
 //! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
+#[cfg(feature = "dump")]
+pub mod checks;
 #[cfg(feature = "coroutine")]
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
+#[cfg(feature = "dump")]
+mod dump;
 #[cfg(feature = "io")]
 mod io;
 #[cfg(feature = "load")]
@@ -72,6 +76,8 @@ pub fn open_libs(vm: &mut Vm) {
     {
         let st = open_lib(vm, "string", string::FUNCTIONS);
         string::set_metatable_index(vm, st);
+        #[cfg(feature = "dump")]
+        add_functions(vm, st, dump::FUNCTIONS);
     }
     #[cfg(feature = "utf8")]
     {
@@ -101,6 +107,8 @@ pub fn open_libs(vm: &mut Vm) {
         open_lib(vm, "debug", debug::FUNCTIONS);
         debug::open(vm);
     }
+    #[cfg(feature = "dump")]
+    checks::set_level(vm, checks::from_env());
     let g = vm.rt.globals;
     mark_loaded(vm, "_G", orbit_vm::orbit_core::Value::Table(g));
 }

@@ -12,6 +12,8 @@ debug_hooks.lua
 debug_hooks_co.lua
 debug_info.lua
 debug_locals.lua
+debug_setmetatable_gc.lua
+dump.lua
 errors.lua
 floats.lua
 gc.lua
@@ -23,6 +25,7 @@ meta_ops.lua
 metatables.lua
 os.lua
 require.lua
+stdlib_base.lua
 stdlib_gmatch.lua
 stdlib_math.lua
 stdlib_meta.lua

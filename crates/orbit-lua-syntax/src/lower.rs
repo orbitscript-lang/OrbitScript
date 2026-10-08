@@ -8,11 +8,20 @@
 use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};
 
+use std::collections::HashSet;
+
 use crate::ast::{self, Ast, AttribKind, ExprKind, Field, StmtKind};
 use crate::diag::Diagnostic;
+use crate::lexer::Lexer;
+use crate::parser::near_token;
+
+/// Most upvalues one function may have, as in lua5.5 (`_ENV` counts when the function uses a
+/// global).
+const MAX_UPVALUES: usize = 255;
 
 /// Lowers a parsed chunk to HIR, before the HIR's shared analysis (`orbit_hir::analyze`).
-pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
+/// `src` is the chunk's source text, which error messages quote.
+pub fn lower(ast: Ast, src: &[u8]) -> Result<hir::Chunk, Diagnostic> {
     let Ast {
         chunk,
         strings,
@@ -25,6 +34,7 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
             functions: Vec::new(),
         },
         funcs: Vec::new(),
+        src,
         sym_self: StrId(0),
         sym_env: StrId(0),
     };
@@ -42,6 +52,8 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
 struct FnCtx {
     id: FuncId,
     f: hir::Function,
+    /// The enclosing functions' variables this one uses, as lua5.5 counts its upvalues.
+    upvalues: HashSet<Upvalue>,
     /// Innermost last. Each scope lists the declarations made in it, in order.
     scopes: Vec<Vec<Entry>>,
     /// `goto` bookkeeping for each block being lowered, innermost last.
@@ -85,6 +97,14 @@ struct PendingGoto {
     index: usize,
 }
 
+/// A variable a function reaches in an enclosing function.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Upvalue {
+    /// The chunk's `_ENV`, used for globals.
+    Env,
+    Local(FuncId, LocalId),
+}
+
 /// One declaration in a scope.
 #[derive(Clone, Copy)]
 enum Entry {
@@ -100,10 +120,11 @@ enum Entry {
     },
 }
 
-struct Lowerer {
+struct Lowerer<'a> {
     chunk: hir::Chunk,
     /// Functions being lowered, innermost last.
     funcs: Vec<FnCtx>,
+    src: &'a [u8],
     sym_self: StrId,
     sym_env: StrId,
 }
@@ -134,7 +155,7 @@ enum Env {
     Declared,
 }
 
-impl Lowerer {
+impl Lowerer<'_> {
     // ---- functions, scopes and names ----------------------------------------------------------
 
     fn cur(&mut self) -> &mut FnCtx {
@@ -157,6 +178,7 @@ impl Lowerer {
         self.funcs.push(FnCtx {
             id,
             f,
+            upvalues: HashSet::new(),
             scopes: vec![Vec::new()],
             blocks: Vec::new(),
         });
@@ -297,6 +319,57 @@ impl Lowerer {
         }
     }
 
+    /// Records the upvalues a use of `name` gives the current function and the ones between it
+    /// and the variable's function, failing as lua5.5 does past [`MAX_UPVALUES`].
+    fn count_upvalues(&mut self, name: ast::Name) -> LResult<()> {
+        let (upvalue, owner) = match self.resolve(name.sym) {
+            Resolved::Outer { func, local } => (Upvalue::Local(func, local), func),
+            Resolved::Global { .. } if name.sym != self.sym_env => match self.env() {
+                Env::Chunk => (Upvalue::Env, self.funcs[0].id),
+                Env::Local(hir::ExprKind::Outer { func, local }) => {
+                    (Upvalue::Local(func, local), func)
+                }
+                _ => return Ok(()),
+            },
+            Resolved::Global { .. } => (Upvalue::Env, self.funcs[0].id),
+            _ => return Ok(()),
+        };
+        let from = self
+            .funcs
+            .iter()
+            .position(|c| c.id == owner)
+            .expect("enclosing function")
+            + 1;
+        // Outermost first: that is the function lua5.5 reports.
+        for depth in from..self.funcs.len() {
+            let ctx = &mut self.funcs[depth];
+            if ctx.upvalues.insert(upvalue) && ctx.upvalues.len() > MAX_UPVALUES {
+                let line = self.chunk.source.line_of(ctx.f.span.start);
+                let message = format!(
+                    "too many upvalues (limit is {MAX_UPVALUES}) in function at line {line}"
+                );
+                return Err(self.error_after(name.span, message));
+            }
+        }
+        Ok(())
+    }
+
+    /// An error near the token after `span`, as lua5.5 reports errors found once it has read
+    /// past a name.
+    fn error_after(&self, span: Span, message: String) -> Diagnostic {
+        let mut lx = Lexer::new(self.src);
+        lx.seek(span.end);
+        match lx.next_token() {
+            Ok(tok) => Diagnostic::new(
+                tok.span,
+                self.chunk.source.line_of(tok.span.start),
+                message,
+                Some(near_token(&lx, tok)),
+            ),
+            Err(_) => self.error(span, message),
+        }
+    }
+
     fn local_kind(&self, func: FuncId, local: LocalId) -> LocalKind {
         let ctx = self
             .funcs
@@ -308,6 +381,7 @@ impl Lowerer {
 
     /// The assignment target for a name, checking it isn't read-only.
     fn place_for_name(&mut self, name: ast::Name) -> LResult<hir::Place> {
+        self.count_upvalues(name)?;
         let current = self.cur().id;
         let (place, kind) = match self.resolve(name.sym) {
             Resolved::Local(l) => (hir::Place::Local(l), self.local_kind(current, l)),
@@ -593,6 +667,17 @@ impl Lowerer {
     }
 
     fn stmt(&mut self, s: &ast::Stmt, stmts: &mut Vec<hir::StmtId>) -> LResult<()> {
+        // Like `Expr::at`: an assignment's stores and a declaration's checks report the
+        // statement's last line, a numeric `for` the line of `do`, and a generic `for` the
+        // line its iterator expressions start on.
+        let at = match &s.kind {
+            StmtKind::Local { .. } | StmtKind::Assign { .. } => last_offset(s.span),
+            StmtKind::NumericFor { do_at, .. } => *do_at,
+            StmtKind::GenericFor { exprs, .. } => {
+                exprs.first().map_or(s.span.start, |e| e.span.start)
+            }
+            _ => s.span.start,
+        };
         let kind = match &s.kind {
             StmtKind::Local {
                 attrib,
@@ -674,6 +759,7 @@ impl Lowerer {
                 limit,
                 step,
                 body,
+                ..
             } => {
                 let start = self.expr(start)?;
                 let limit = self.expr(limit)?;
@@ -827,7 +913,7 @@ impl Lowerer {
                 return Ok(());
             }
         };
-        self.add_stmt(stmts, kind, s.span);
+        stmts.push(self.f().add_stmt_at(kind, s.span, at));
         Ok(())
     }
 
@@ -906,6 +992,7 @@ impl Lowerer {
     }
 
     fn name_expr(&mut self, name: ast::Name) -> LResult<ExprId> {
+        self.count_upvalues(name)?;
         let kind = match self.resolve(name.sym) {
             Resolved::Local(l) => hir::ExprKind::Local(l),
             Resolved::Outer { func, local } => hir::ExprKind::Outer { func, local },
@@ -926,6 +1013,11 @@ impl Lowerer {
 
     fn expr(&mut self, e: &ast::Expr) -> LResult<ExprId> {
         let span = e.span;
+        // Where a runtime error from this expression's own operation is reported. lua5.5
+        // uses the line of the last token read when it emits the instruction, except that
+        // arithmetic, bitwise and concatenation use their operator token and calls the
+        // token opening their arguments.
+        let mut at = span.start;
         let kind = match &e.kind {
             ExprKind::Nil => hir::ExprKind::Nil,
             ExprKind::True => hir::ExprKind::Bool(true),
@@ -938,14 +1030,26 @@ impl Lowerer {
             ExprKind::Index { obj, key } => {
                 let obj = self.expr(obj)?;
                 let key = self.expr(key)?;
+                at = last_offset(span);
                 hir::ExprKind::Index { obj, key }
             }
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call {
+                callee,
+                args,
+                args_at,
+            } => {
                 let callee = self.expr(callee)?;
                 let args = self.expr_list(args)?;
+                at = *args_at;
                 hir::ExprKind::Call { callee, args }
             }
-            ExprKind::Method { obj, name, args } => {
+            ExprKind::Method {
+                obj,
+                name,
+                args,
+                args_at,
+            } => {
+                at = *args_at;
                 let obj = self.expr(obj)?;
                 let args = self.expr_list(args)?;
                 hir::ExprKind::MethodCall {
@@ -974,7 +1078,12 @@ impl Lowerer {
                 }
                 hir::ExprKind::Table(entries)
             }
-            ExprKind::Binary { op, lhs, rhs } => {
+            ExprKind::Binary {
+                op,
+                op_at,
+                lhs,
+                rhs,
+            } => {
                 let lhs = self.expr(lhs)?;
                 let rhs = self.expr(rhs)?;
                 use ast::BinOp as A;
@@ -1002,6 +1111,10 @@ impl Lowerer {
                     A::Shl => H::Shl,
                     A::Shr => H::Shr,
                 };
+                at = match op {
+                    H::Eq | H::Ne | H::Lt | H::Le | H::Gt | H::Ge => last_offset(span),
+                    _ => *op_at,
+                };
                 hir::ExprKind::Binary { op, lhs, rhs }
             }
             ExprKind::Unary { op, expr } => {
@@ -1027,6 +1140,11 @@ impl Lowerer {
                 hir::ExprKind::First(inner)
             }
         };
-        Ok(self.add_expr(kind, span))
+        Ok(self.f().add_expr_at(kind, span, at))
     }
+}
+
+/// The offset of the last byte of `span`, which is on its last token's line.
+fn last_offset(span: Span) -> u32 {
+    span.end.saturating_sub(1).max(span.start)
 }
