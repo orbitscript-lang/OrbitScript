@@ -19,6 +19,7 @@ dump.lua
 errors.lua
 exit_close.lua
 exit_close_tbc.lua
+finalizer_hooks.lua
 floats.lua
 gc.lua
 io.lua
