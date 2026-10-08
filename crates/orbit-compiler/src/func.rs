@@ -299,6 +299,11 @@ impl<'a> FuncState<'a> {
         self.line = self.chunk.source.line_of(span.start);
     }
 
+    /// Instructions emitted from now on are attributed to the line of source offset `off`.
+    pub fn at_offset(&mut self, off: u32) {
+        self.line = self.chunk.source.line_of(off);
+    }
+
     pub fn at_line(&mut self, line: u32) {
         self.line = line;
     }

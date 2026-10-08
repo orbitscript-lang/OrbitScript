@@ -53,7 +53,7 @@ impl FuncState<'_> {
         let stmt = self.f.stmt(s);
         self.at(stmt.span);
         match &stmt.kind {
-            StmtKind::Let { locals, values } => self.let_(locals, values),
+            StmtKind::Let { locals, values } => self.let_(locals, values, stmt.at),
             &StmtKind::LocalFunction { local, func } => {
                 let r = self.alloc()?;
                 self.active = self.free;
@@ -72,7 +72,7 @@ impl FuncState<'_> {
                 }
                 Ok(())
             }
-            StmtKind::Assign { targets, values } => self.assign(targets, values),
+            StmtKind::Assign { targets, values } => self.assign(targets, values, stmt.at),
             StmtKind::Define { targets, values } => self.define(targets, values),
             &StmtKind::Eval(e) => {
                 if matches!(
@@ -141,13 +141,13 @@ impl FuncState<'_> {
                 limit,
                 step,
                 body,
-            } => self.numeric_for(var, start, limit, step, body),
+            } => self.numeric_for(var, start, limit, step, body, stmt.at),
             StmtKind::GenericFor {
                 vars,
                 iter,
                 hidden,
                 body,
-            } => self.generic_for(vars, iter, *hidden, *body),
+            } => self.generic_for(vars, iter, *hidden, *body, stmt.at),
             &StmtKind::Goto(l) => {
                 self.goto_close(l);
                 let label = self.goto_label(l);
@@ -170,7 +170,8 @@ impl FuncState<'_> {
         }
     }
 
-    fn let_(&mut self, locals: &[LocalId], values: &ExprList) -> Result<()> {
+    /// `at` is the offset of the statement's last token, where the `<close>` checks belong.
+    fn let_(&mut self, locals: &[LocalId], values: &ExprList, at: u32) -> Result<()> {
         let first = self.free;
         self.expr_list(values, Want::Exact(locals.len()))?;
         // The new locals come into scope only after the whole statement.
@@ -182,13 +183,15 @@ impl FuncState<'_> {
             if self.f.local(l).kind == LocalKind::Close {
                 // A captured `<close>` local still has its value in the register: it is
                 // read-only, so the cell never changes.
+                self.at_offset(at);
                 self.mark_tbc(l, (first + i) as u8);
             }
         }
         Ok(())
     }
 
-    fn assign(&mut self, targets: &[Place], values: &ExprList) -> Result<()> {
+    /// `at` is the offset of the statement's last token: the stores belong to its line.
+    fn assign(&mut self, targets: &[Place], values: &ExprList, at: u32) -> Result<()> {
         if let ([target], [value]) = (targets, values.items.as_slice()) {
             // One target: evaluate straight into a local's register where possible.
             if let Place::Local(l) = *target
@@ -199,6 +202,7 @@ impl FuncState<'_> {
             }
             let t = self.target(target, &[])?;
             let (src, _) = self.expr_any(*value)?;
+            self.at_offset(at);
             return self.store(t, src);
         }
         // Several targets: objects and keys first (left to right), then the values, then the
@@ -220,6 +224,7 @@ impl FuncState<'_> {
         }
         let first = self.free;
         self.expr_list(values, Want::Exact(targets.len()))?;
+        self.at_offset(at);
         for (i, t) in evaluated.into_iter().enumerate().rev() {
             self.store(t, (first + i) as u8)?;
         }
@@ -364,9 +369,11 @@ impl FuncState<'_> {
         limit: ExprId,
         step: Option<ExprId>,
         body: BlockId,
+        do_at: u32,
     ) -> Result<()> {
         // The loop instruction belongs to the `for` line, as in the
-        // reference (line hooks report it on every iteration).
+        // reference (line hooks report it on every iteration). The
+        // preparation, which checks the operands, belongs to the `do` line.
         let for_line = self.line;
         let mark = self.open_scope();
         let base = self.alloc()?;
@@ -385,6 +392,7 @@ impl FuncState<'_> {
         let control = self.alloc()?;
         self.active = self.free;
         let exit = self.label();
+        self.at_offset(do_at);
         self.jump(Op::ForPrep { base, exit: 0 }, exit);
         // The iteration count and the step, which is what the reference's
         // two hidden locals hold.
@@ -410,6 +418,7 @@ impl FuncState<'_> {
         iter: &ExprList,
         hidden: [LocalId; 4],
         body: BlockId,
+        call_at: u32,
     ) -> Result<()> {
         let for_line = self.line;
         let mark = self.open_scope();
@@ -448,8 +457,11 @@ impl FuncState<'_> {
         self.close_scope(body_mark);
         self.loops.pop();
         self.place(call);
-        self.at_line(for_line);
+        // The iterator call belongs to the line of the first iterator expression, the loop
+        // back to the `for` line.
+        self.at_offset(call_at);
         self.emit(Op::GenericCall { base, nvars });
+        self.at_line(for_line);
         self.jump(Op::GenericLoop { base, back: 0 }, top);
         self.place(exit);
         self.close_scope(mark);
