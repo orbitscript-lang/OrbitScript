@@ -9,7 +9,7 @@
 //!
 //! `--dump-ast`, `--dump-hir` and `--dump-bytecode` print a compiler stage
 //! of the script instead of running it. `ORBIT_GC_STRESS=1` collects at
-//! nearly every safe point.
+//! nearly every safe point after an allocation.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
