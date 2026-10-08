@@ -45,6 +45,7 @@ pub type Offset = i32;
 
 /// One instruction. Always 8 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(align(16))]
 pub enum Op {
     // Loads.
     /// `R[dst] = R[src]`
@@ -296,7 +297,7 @@ pub enum Op {
     NativeEntry { id: u32 },
 }
 
-const _: () = assert!(core::mem::size_of::<Op>() == 8);
+const _: () = assert!(core::mem::size_of::<Op>() == 16);
 
 /// A constant-pool entry.
 #[derive(Debug, Clone, PartialEq)]
