@@ -13,6 +13,7 @@ name = "orbit"
 path = "src/main.rs"
 
 [dependencies]
+ctrlc = "3.5.2"
 orbit = { path = "../orbit" }
 orbit-compiler = { path = "../orbit-compiler" }
 orbit-hir = { path = "../orbit-hir" }

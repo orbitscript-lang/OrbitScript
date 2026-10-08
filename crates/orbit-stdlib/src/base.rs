@@ -91,6 +91,8 @@ fn print_from(ctx: &mut NativeCtx<'_>, n: usize, start: usize) -> R {
     }
     line.push(b'\n');
     let _ = ctx.rt.out.write_all(&line);
+    // lua flushes after every `print`, so output reaches a pipe at once.
+    let _ = ctx.rt.out.flush();
     Ok(NativeReturn::Return(0))
 }
 
