@@ -200,6 +200,18 @@ impl FuncState<'_> {
                 self.expr_to(*value, r)?;
                 return Ok(());
             }
+            // A captured local's new value goes through its home register too, so the
+            // register stops holding the old one (which would keep it alive) and
+            // `debug.getlocal` on stripped code reads the current value.
+            if let Place::Local(l) = *target
+                && let Slot::Cell(cell) = self.slots[l.index()]
+                && let Some(r) = self.home[l.index()]
+            {
+                self.expr_to(*value, r)?;
+                self.at_offset(at);
+                self.emit(Op::CellSet { cell, src: r });
+                return Ok(());
+            }
             let t = self.target(target, &[])?;
             let (src, _) = self.expr_any(*value)?;
             self.at_offset(at);
