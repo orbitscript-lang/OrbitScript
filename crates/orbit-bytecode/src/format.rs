@@ -1,17 +1,24 @@
 //! The binary chunk format `string.dump` writes and `load` reads.
 //!
 //! ```text
-//! "\x1bOrbit"   signature (its first byte is how `load` tells binary from text)
-//! u8            format version, bumped whenever the encoding or the
+//! [`HEADER`]    lua5.5's header: "\x1bLua", version 0x55, format 0, a check
+//!               string, and the sizes and check values of an int, an
+//!               instruction, an integer and a float (its first byte is how
+//!               `load` tells binary from text)
+//! u8            our format version, bumped whenever the encoding or the
 //!               instruction set changes
 //! u8            flags; bit 0: debug information stripped
 //! ...           the chunk name, then each prototype in order
 //! ```
 //!
-//! Unsigned integers are LEB128 varints, signed ones zig-zag varints, floats
-//! their IEEE bits in 8 little-endian bytes, byte strings a length and the
-//! bytes. Each [`Op`] is a tag byte and its operands. Nothing depends on the
-//! host's word size or byte order.
+//! The header is the part of a chunk the reference's own tests look at
+//! (`calls.lua` unpacks it and corrupts each byte); everything after it is
+//! our own encoding. Unsigned integers are LEB128 varints, signed ones
+//! zig-zag varints, floats their IEEE bits in 8 little-endian bytes. Byte
+//! strings are stored once per chunk: the first use is `0`, a length and the
+//! bytes, and each later use is the string's number (from 1) among the
+//! strings stored so far. Each [`Op`] is a tag byte and its operands. Nothing
+//! after the header depends on the host's word size or byte order.
 //!
 //! Decoding checks only that the bytes spell an [`UnlinkedChunk`]; whether
 //! that chunk is safe to run is [`crate::verify`]'s job.
@@ -24,10 +31,47 @@ use crate::{
 };
 
 /// The first bytes of every binary chunk.
-pub const SIGNATURE: &[u8] = b"\x1bOrbit";
+pub const SIGNATURE: &[u8] = b"\x1bLua";
+
+/// The whole header every chunk starts with, as `string.pack` would write
+/// `"c4BBc6BiBI4BjBn"` on a little-endian 64-bit host with lua5.5's check
+/// values.
+pub const HEADER: &[u8] = &header();
+
+const fn header() -> [u8; 4 + 2 + 6 + 1 + 4 + 1 + 4 + 1 + 8 + 1 + 8] {
+    let mut h = [0u8; 40];
+    let mut at = 0;
+    macro_rules! put {
+        ($bytes:expr) => {{
+            let b = $bytes;
+            let mut i = 0;
+            while i < b.len() {
+                h[at] = b[i];
+                at += 1;
+                i += 1;
+            }
+        }};
+    }
+    put!(SIGNATURE);
+    put!([0x55, 0]);
+    put!(b"\x19\x93\r\n\x1a\n");
+    put!([4]);
+    put!((-0x5678i32).to_le_bytes());
+    put!([4]);
+    put!(0x1234_5678u32.to_le_bytes());
+    put!([8]);
+    put!((-0x5678i64).to_le_bytes());
+    put!([8]);
+    put!((-370.5f64).to_bits().to_le_bytes());
+    let _ = at;
+    h
+}
+
+/// Where lua5.5's version byte sits in [`HEADER`].
+const VERSION_AT: usize = SIGNATURE.len();
 
 /// The format version this build reads and writes.
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 const FLAG_STRIPPED: u8 = 1;
 
@@ -41,6 +85,9 @@ pub enum FormatError {
     Truncated,
     /// Another format version.
     VersionMismatch,
+    /// Another header: a different format, or sizes or check values that
+    /// don't match.
+    BadHeader,
     /// Something no encoder writes: an unknown tag, an out-of-range number,
     /// bytes after the end.
     Malformed(&'static str),
@@ -52,6 +99,7 @@ impl fmt::Display for FormatError {
             FormatError::NotBinary => f.write_str("not a binary chunk"),
             FormatError::Truncated => f.write_str("truncated chunk"),
             FormatError::VersionMismatch => f.write_str("version mismatch"),
+            FormatError::BadHeader => f.write_str("corrupted header"),
             FormatError::Malformed(what) => write!(f, "malformed chunk: {what}"),
         }
     }
@@ -62,8 +110,8 @@ type Result<T> = core::result::Result<T, FormatError>;
 /// Encode `chunk`. With `strip`, debug information is left out and the
 /// chunk is named `?`, as the reference names a stripped chunk.
 pub fn encode(chunk: &UnlinkedChunk, strip: bool) -> Vec<u8> {
-    let mut w = Writer(Vec::new());
-    w.0.extend_from_slice(SIGNATURE);
+    let mut w = Writer::default();
+    w.0.extend_from_slice(HEADER);
     w.0.push(VERSION);
     w.0.push(if strip { FLAG_STRIPPED } else { 0 });
     w.bytes(if strip { b"?" } else { chunk.name.as_bytes() });
@@ -77,18 +125,25 @@ pub fn encode(chunk: &UnlinkedChunk, strip: bool) -> Vec<u8> {
 
 /// Decode a chunk [`encode`] wrote.
 pub fn decode(bytes: &[u8]) -> Result<UnlinkedChunk> {
-    // Too short to hold the signature is a truncated chunk, as in the
-    // reference; a different signature isn't one of ours.
-    if bytes.len() < SIGNATURE.len() {
-        return Err(FormatError::Truncated);
-    }
-    if !bytes.starts_with(SIGNATURE) {
-        return Err(FormatError::NotBinary);
+    // The first header byte that differs decides the error; a prefix of the
+    // header is a truncated chunk, as in the reference.
+    for (i, (&b, &want)) in bytes.iter().zip(HEADER).enumerate() {
+        if b != want {
+            return Err(match i {
+                _ if i < SIGNATURE.len() => FormatError::NotBinary,
+                VERSION_AT => FormatError::VersionMismatch,
+                _ => FormatError::BadHeader,
+            });
+        }
     }
     let mut r = Reader {
         bytes,
-        at: SIGNATURE.len(),
+        at: HEADER.len(),
+        strings: Vec::new(),
     };
+    if bytes.len() < HEADER.len() {
+        return Err(FormatError::Truncated);
+    }
     if r.byte()? != VERSION {
         return Err(FormatError::VersionMismatch);
     }
@@ -110,7 +165,10 @@ pub fn decode(bytes: &[u8]) -> Result<UnlinkedChunk> {
     })
 }
 
-struct Writer(Vec<u8>);
+/// The bytes written so far, and the strings among them with their
+/// numbers.
+#[derive(Default)]
+struct Writer(Vec<u8>, std::collections::HashMap<Box<[u8]>, u64>);
 
 impl Writer {
     fn uint(&mut self, mut v: u64) {
@@ -130,6 +188,13 @@ impl Writer {
     }
 
     fn bytes(&mut self, b: &[u8]) {
+        if let Some(&n) = self.1.get(b) {
+            self.uint(n);
+            return;
+        }
+        let n = self.1.len() as u64 + 1;
+        self.1.insert(b.into(), n);
+        self.uint(0);
         self.uint(b.len() as u64);
         self.0.extend_from_slice(b);
     }
@@ -138,6 +203,8 @@ impl Writer {
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// The strings read so far, in order.
+    strings: Vec<Box<[u8]>>,
 }
 
 impl Reader<'_> {
@@ -180,10 +247,19 @@ impl Reader<'_> {
     }
 
     fn bytes(&mut self) -> Result<Box<[u8]>> {
+        let n = self.uint()?;
+        if n > 0 {
+            return usize::try_from(n - 1)
+                .ok()
+                .and_then(|i| self.strings.get(i))
+                .cloned()
+                .ok_or(FormatError::Malformed("string reference"));
+        }
         let n = self.count()?;
-        let b = &self.bytes[self.at..self.at + n];
+        let b: Box<[u8]> = self.bytes[self.at..self.at + n].into();
         self.at += n;
-        Ok(b.into())
+        self.strings.push(b.clone());
+        Ok(b)
     }
 
     fn list<T>(&mut self, mut item: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
@@ -356,14 +432,18 @@ op_table! {
 
 /// One instruction's encoding (for tests and fuzzing).
 pub fn encode_op(op: Op) -> Vec<u8> {
-    let mut w = Writer(Vec::new());
+    let mut w = Writer::default();
     put_op(&mut w, op);
     w.0
 }
 
 /// Decode one instruction from the start of `bytes` (for tests and fuzzing).
 pub fn decode_op(bytes: &[u8]) -> Result<Op> {
-    get_op(&mut Reader { bytes, at: 0 })
+    get_op(&mut Reader {
+        bytes,
+        at: 0,
+        strings: Vec::new(),
+    })
 }
 
 fn proto(w: &mut Writer, p: &UnlinkedProto, strip: bool) {
@@ -679,14 +759,25 @@ mod tests {
     fn errors() {
         let bytes = encode(&sample(), false);
         assert_eq!(decode(b""), Err(FormatError::Truncated));
-        assert_eq!(decode(b"\x1bOr"), Err(FormatError::Truncated));
-        assert_eq!(decode(b"\x1bLua"), Err(FormatError::Truncated));
-        assert_eq!(decode(b"\x1bLua\x55\0"), Err(FormatError::NotBinary));
+        assert_eq!(decode(b"\x1bLu"), Err(FormatError::Truncated));
+        assert_eq!(decode(b"\x1bOrbit"), Err(FormatError::NotBinary));
         assert_eq!(decode(b"return 1"), Err(FormatError::NotBinary));
+        // Every header byte counts, and any prefix is a truncated chunk.
+        for i in 0..HEADER.len() {
+            let mut v = bytes.clone();
+            v[i] = v[i].wrapping_add(1);
+            assert!(decode(&v).is_err(), "{i}");
+        }
         let mut v = bytes.clone();
-        v[SIGNATURE.len()] = VERSION + 1;
+        v[VERSION_AT] = 0x54;
         assert_eq!(decode(&v), Err(FormatError::VersionMismatch));
-        for n in SIGNATURE.len()..bytes.len() {
+        v[VERSION_AT] = 0x55;
+        v[VERSION_AT + 1] = 1;
+        assert_eq!(decode(&v), Err(FormatError::BadHeader));
+        let mut v = bytes.clone();
+        v[HEADER.len()] = VERSION + 1;
+        assert_eq!(decode(&v), Err(FormatError::VersionMismatch));
+        for n in 0..bytes.len() {
             assert_eq!(decode(&bytes[..n]), Err(FormatError::Truncated), "{n}");
         }
         let mut v = bytes.clone();
@@ -696,10 +787,12 @@ mod tests {
 
     #[test]
     fn huge_counts_are_truncation() {
-        let mut w = Writer(Vec::new());
-        w.0.extend_from_slice(SIGNATURE);
+        let mut w = Writer::default();
+        w.0.extend_from_slice(HEADER);
         w.0.extend_from_slice(&[VERSION, 0]);
         w.bytes(b"x");
+        // A new string whose length runs past the end.
+        w.uint(0);
         w.uint(u64::MAX);
         assert_eq!(decode(&w.0), Err(FormatError::Truncated));
     }

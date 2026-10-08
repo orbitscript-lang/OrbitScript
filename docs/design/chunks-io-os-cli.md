@@ -78,17 +78,19 @@ Decision 4 of the compatibility plan: our own format, and a verifier that runs o
 ### Format
 
 ```
-"\27Orbit"            signature (the first byte is how load detects binary)
-u8  format version    bumped whenever the encoding or the instruction set changes
+"\27Lua" 0x55 0 ...  lua5.5's 40-byte header (see below)
+u8  format version    ours, bumped whenever the encoding or the instruction set changes
 u8  flags             bit 0: stripped
 ... the UnlinkedChunk: chunk name, then each prototype in order
 ```
 
-Integers are LEB128 varints (zig-zag for signed), floats their IEEE bits, strings a length and bytes. Each `Op` is a tag byte and its operands. Encoding is little-endian and size-independent, so a chunk dumped on x86_64 loads on aarch64.
+The header is the one `calls.lua` checks by unpacking a dump with `string.unpack("c4BBc6BiBI4BjBn", ...)`: the signature `"\27Lua"`, version `0x55`, format `0`, the check string `"\x19\x93\r\n\x1a\n"`, then the size and a check value of an int (4, `-0x5678`), an instruction (4, `0x12345678`), an integer (8, `-0x5678`) and a float (8, `-370.5`), little-endian. `load` compares every header byte, so a changed byte rejects the chunk and any prefix is `truncated`. Proposed 2026-10-08, waiting on Tym (it replaces a `"\27Orbit"` signature); everything after the header is our own encoding.
+
+Integers are LEB128 varints (zig-zag for signed), floats their IEEE bits, and each `Op` a tag byte and its operands. Byte strings are stored once per chunk: the first use writes `0`, a length and the bytes, a later use the string's number among those stored so far (`calls.lua` checks that a constant shared by three functions appears once). The encoding after the header is size-independent, so a chunk dumped on x86_64 loads on aarch64.
 
 `string.dump(f, strip)` rebuilds an `UnlinkedChunk` from the closure's linked `Proto` tree (code, constants with strings turned back into bytes, children, captures, debug info) and encodes it; `strip` drops lines, locals, capture names and operand origins. The dumped function becomes the main function, keeping its capture count. Natives can't be dumped: `unable to dump given function`.
 
-A chunk from a different format version fails with `bad binary format (version mismatch)`, a truncated one with `truncated chunk`, and PUC Lua's own binary chunks with `not a binary chunk`. Those are the reference's phrases (the suite matches `truncated`); the reasons inside them are our own.
+A chunk from another lua5.5 version byte or another format version fails with `bad binary format (version mismatch)`, another header with `corrupted header`, a truncated one with `truncated chunk`, and anything without the signature with `not a binary chunk`. PUC Lua's own chunks pass the header and then fail on what follows it. Those are the reference's phrases (the suite matches `truncated`); the reasons inside them are our own.
 
 ### The verifier
 
