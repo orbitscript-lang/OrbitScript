@@ -1486,9 +1486,14 @@ impl Vm {
                             get_slow!(dst, o, Value::Str(k))
                         };
                         let tab = self.heap.get(t);
-                        let m = tab.get_str(&self.heap, k);
+                        let mut m = tab.get_str(&self.heap, k);
                         if m.is_nil() && tab.meta.is_some() {
-                            get_slow!(dst, o, Value::Str(k))
+                            // Spike: walk an `__index` table chain here
+                            // instead of raising into the slow path.
+                            match crate::meta::index(&self.heap, &self.rt.metas, o, Value::Str(k)) {
+                                Ok(v) => m = v,
+                                Err(_) => get_slow!(dst, o, Value::Str(k)),
+                            }
                         }
                         reg!(dst) = m;
                     }
