@@ -22,7 +22,7 @@ pub use orbit_stdlib::checks;
 pub use orbit_stdlib::{chunk_id, read_chunk_file};
 #[cfg(feature = "debug")]
 pub use orbit_vm::Interrupt;
-pub use orbit_vm::{Event, GcMode, LuaError, Vm};
+pub use orbit_vm::{CallOutcome, Event, GcMode, LuaError, NativeCtx, NativeReturn, Vm};
 
 /// The runtime version, taken from the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

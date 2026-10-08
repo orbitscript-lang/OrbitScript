@@ -15,7 +15,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use orbit::{Error, Event, Lua, LuaError, Options, Value};
+use orbit::{CallOutcome, Error, Event, Lua, LuaError, NativeCtx, NativeReturn, Options, Value};
 use orbit_lua_syntax::ParseOptions;
 
 /// The chunk names `lua` gives command-line code and standard input.
@@ -169,7 +169,7 @@ fn main() -> ExitCode {
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         lua.vm().heap.set_stress(true);
     }
-    let mut run = Runner { lua, prog };
+    let mut run = Runner::new(lua, prog);
     let ok = run.main(&cli, &args);
     run.lua.flush_files();
     // Like lua5.5, close the state on the way out, even after an error:
@@ -186,9 +186,49 @@ fn main() -> ExitCode {
 struct Runner {
     lua: Lua,
     prog: String,
+    /// `xpcall` and [`msghandler`], pinned: every chunk runs under them,
+    /// so an error's message is made while its stack is still there.
+    xpcall: Value,
+    handler: Value,
 }
 
 impl Runner {
+    fn new(mut lua: Lua, prog: String) -> Runner {
+        let vm = lua.vm();
+        let xpcall = vm.register_native("docall", docall);
+        let handler = vm.register_native("msghandler", msghandler);
+        vm.pin(xpcall);
+        vm.pin(handler);
+        Runner {
+            lua,
+            prog,
+            xpcall,
+            handler,
+        }
+    }
+
+    /// Call `f` as `lua` does: under a message handler, so the error is the
+    /// text to print (the message and a traceback, or an error object's
+    /// `__tostring`).
+    fn docall(&mut self, f: Value, args: &[Value]) -> Result<Vec<Value>, String> {
+        let (xpcall, handler) = (self.xpcall, self.handler);
+        let vm = self.lua.vm();
+        let mut call = Vec::with_capacity(args.len() + 2);
+        call.extend([f, handler]);
+        call.extend_from_slice(args);
+        match vm.call(xpcall, &call) {
+            Ok(mut r) if matches!(r.first(), Some(Value::Bool(true))) => {
+                r.remove(0);
+                Ok(r)
+            }
+            Ok(r) => {
+                let e = r.get(1).copied().unwrap_or(Value::Nil);
+                Err(String::from_utf8_lossy(&vm.to_display(e)).into_owned())
+            }
+            Err(e) => Err(self.error_text(&e)),
+        }
+    }
+
     /// Run everything the command line asks for, in `lua`'s order; false
     /// after an error, which has been reported.
     fn main(&mut self, cli: &Cli, args: &[String]) -> bool {
@@ -270,14 +310,17 @@ impl Runner {
         let vm = self.lua.vm();
         let require = vm.global("require");
         let m = vm.new_str(module.as_bytes());
-        match vm.call(require, &[m]) {
+        vm.pin(m);
+        let r = self.docall(require, &[m]);
+        self.lua.vm().unpin(m);
+        match r {
             Ok(r) => {
                 let v = r.first().copied().unwrap_or(Value::Nil);
-                vm.set_global(global, v);
+                self.lua.vm().set_global(global, v);
                 true
             }
-            Err(e) => {
-                self.report_error(&e);
+            Err(text) => {
+                self.report(&format!("{}: {text}", self.prog));
                 false
             }
         }
@@ -327,10 +370,10 @@ impl Runner {
         }
         let f = self.lua.load_buffer(bytes, source);
         let ok = match f {
-            Ok(f) => match self.lua.vm().call(f, args) {
+            Ok(f) => match self.docall(f, args) {
                 Ok(_) => true,
-                Err(e) => {
-                    self.report_error(&e);
+                Err(text) => {
+                    self.report(&format!("{}: {text}", self.prog));
                     false
                 }
             },
@@ -343,14 +386,6 @@ impl Runner {
             self.lua.vm().unpin(a);
         }
         ok
-    }
-
-    /// Print an uncaught error as `lua` does: `prog: message` and a
-    /// traceback, or just the `__tostring` text of an error object that has
-    /// one.
-    fn report_error(&mut self, e: &LuaError) {
-        let text = self.error_text(e);
-        self.report(&format!("{}: {text}", self.prog));
     }
 
     fn error_text(&mut self, e: &LuaError) -> String {
@@ -489,8 +524,11 @@ impl Runner {
     }
 
     fn call_and_print(&mut self, f: Value) {
+        self.lua.vm().pin(f);
+        let r = self.docall(f, &[]);
+        self.lua.vm().unpin(f);
         let vm = self.lua.vm();
-        match vm.call(f, &[]) {
+        match r {
             Ok(results) if results.is_empty() => {}
             Ok(results) => {
                 for &v in &results {
@@ -506,11 +544,73 @@ impl Runner {
                     self.report(&format!("error calling 'print' ({msg})"));
                 }
             }
-            Err(e) => {
-                let text = self.error_text(&e);
-                self.report(&text);
-            }
+            Err(text) => self.report(&text),
         }
+    }
+}
+
+/// `docall(f, handler, args...)`: `f(args...)` under `handler`, as
+/// `xpcall` does, from a native the traceback names only as `[C]: in ?`.
+fn docall(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
+    let (f, h) = (ctx.arg(0), ctx.arg(1));
+    ctx.set(0, h);
+    ctx.set(1, Value::Bool(true));
+    Ok(NativeReturn::CallHandled {
+        f,
+        nargs: ctx.nargs() - 2,
+        k: docall_done,
+    })
+}
+
+fn docall_done(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeReturn, LuaError> {
+    match out {
+        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
+        CallOutcome::Err(e) => {
+            ctx.truncate(0);
+            ctx.push(Value::Bool(false));
+            ctx.push(e);
+            Ok(NativeReturn::Return(2))
+        }
+    }
+}
+
+/// `lua`'s message handler: an error object with `__tostring` becomes that
+/// text; anything else becomes its message plus a traceback.
+fn msghandler(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
+    let e = ctx.arg(0);
+    let text = match e {
+        Value::Str(_) | Value::Int(_) | Value::Float(_) => {
+            let mut b = Vec::new();
+            ctx.display(e, &mut b);
+            String::from_utf8_lossy(&b).into_owned()
+        }
+        _ => {
+            let mm = ctx.rt.metamethod(ctx.heap, e, Event::ToString);
+            if !matches!(mm, Value::Nil) {
+                ctx.push(e);
+                return Ok(NativeReturn::CallThen {
+                    f: mm,
+                    nargs: 1,
+                    k: tostring_done,
+                    protected: false,
+                });
+            }
+            format!("(error object is a {} value)", e.type_name())
+        }
+    };
+    let text = format!("{text}\n{}", ctx.traceback(1));
+    let s = ctx.new_str(text.as_bytes());
+    ctx.ret1(s)
+}
+
+fn tostring_done(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeReturn, LuaError> {
+    let n = match out {
+        CallOutcome::Ok(n) => n,
+        CallOutcome::Err(v) => return Err(ctx.error_value(v)),
+    };
+    match (n > 0).then(|| ctx.arg(ctx.len() - n)) {
+        Some(s @ Value::Str(_)) => ctx.ret1(s),
+        _ => Err(ctx.error("'__tostring' must return a string")),
     }
 }
 
