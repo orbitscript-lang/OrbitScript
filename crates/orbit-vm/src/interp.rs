@@ -420,7 +420,14 @@ impl Vm {
                 } else {
                     func + want as usize
                 };
-                self.rt.stack.regs.truncate(end);
+                // Clear rather than truncate: the frame's window stays
+                // allocated, so returning into Lua needn't refill it.
+                let regs = &mut self.rt.stack.regs;
+                let stop = regs.len().min(end.max(func) + WINDOW);
+                if end < stop {
+                    regs[end..stop].fill(Value::Nil);
+                }
+                regs.truncate(stop.max(end));
                 self.after_return()
             }
             NativeReturn::CallThen { .. }
