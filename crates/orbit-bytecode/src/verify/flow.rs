@@ -86,6 +86,7 @@ impl Function<'_> {
             | Op::Mod { dst, .. }
             | Op::Pow { dst, .. }
             | Op::AddInt { dst, .. }
+            | Op::SubInt { dst, .. }
             | Op::Neg { dst, .. }
             | Op::Not { dst, .. }
             | Op::Len { dst, .. }

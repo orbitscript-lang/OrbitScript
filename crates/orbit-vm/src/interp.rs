@@ -1470,6 +1470,21 @@ impl Vm {
                             ))
                         }
                     },
+                    Op::SubInt { dst, a, imm } => match reg!(a) {
+                        Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_sub(imm as i64)),
+                        // Adding the negated integer, as lua5.5 does: `-0.0 - 0` is `0.0` there.
+                        Value::Float(f) => reg!(dst) = Value::Float(f + (-(imm as i64)) as f64),
+                        _ => {
+                            let x = reg!(a);
+                            reg!(dst) = tri!(ops::arith_slow(
+                                &self.heap,
+                                &self.rt.metas,
+                                Arith::Sub,
+                                x,
+                                Value::Int(imm as i64)
+                            ))
+                        }
+                    },
                     Op::BAnd { dst, a, b } => bitwise!(dst, a, b, BitOp::And),
                     Op::BOr { dst, a, b } => bitwise!(dst, a, b, BitOp::Or),
                     Op::BXor { dst, a, b } => bitwise!(dst, a, b, BitOp::Xor),

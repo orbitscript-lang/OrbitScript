@@ -350,6 +350,7 @@ op_table! {
     69 NativeEntry { id };
     70 Tbc { reg };
     71 Close { from };
+    72 SubInt { dst, a, imm };
 }
 
 /// One instruction's encoding (for tests and fuzzing).

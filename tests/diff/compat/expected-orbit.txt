@@ -9,6 +9,7 @@ c1_limits.lua
 c1_lines.lua
 c1_long_strings.lua
 c1_vararg.lua
+c2_bitwise_sub_metamethods.lua
 c3_close.lua
 c4_gc_close.lua
 c4_gc_close_error.lua

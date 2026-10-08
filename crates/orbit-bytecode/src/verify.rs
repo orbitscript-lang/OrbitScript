@@ -362,6 +362,7 @@ impl Function<'_> {
             Op::GetIndexInt { dst: a, obj: b, .. }
             | Op::SetIndexInt { obj: b, src: a, .. }
             | Op::AddInt { dst: a, a: b, .. }
+            | Op::SubInt { dst: a, a: b, .. }
             | Op::Neg { dst: a, src: b }
             | Op::BNot { dst: a, src: b }
             | Op::Not { dst: a, src: b }

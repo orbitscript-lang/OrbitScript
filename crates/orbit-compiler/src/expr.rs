@@ -362,18 +362,18 @@ impl FuncState<'_> {
             }
             _ => {
                 let (a, a_origin) = self.operand(lhs, dst)?;
-                // `x + k` and `x - k` with a small integer literal use the immediate form.
-                // `x - 0` doesn't: `-0.0 - 0` is `-0.0` but `-0.0 + 0` is `0.0`.
+                // `x + k` and `x - k` with a small integer literal use the immediate forms.
                 let imm = match (op, self.const_of(rhs)) {
-                    (BinOp::Add, Some(ConstVal::Int(k))) => i16::try_from(k).ok(),
-                    (BinOp::Sub, Some(ConstVal::Int(k))) if k != 0 => {
-                        k.checked_neg().and_then(|k| i16::try_from(k).ok())
-                    }
+                    (BinOp::Add | BinOp::Sub, Some(ConstVal::Int(k))) => i16::try_from(k).ok(),
                     _ => None,
                 };
                 if let Some(imm) = imm {
                     self.at_offset(at);
-                    let pc = self.emit(Op::AddInt { dst, a, imm });
+                    let pc = self.emit(if op == BinOp::Add {
+                        Op::AddInt { dst, a, imm }
+                    } else {
+                        Op::SubInt { dst, a, imm }
+                    });
                     self.origin(pc, 0, a_origin);
                     return Ok(None);
                 }

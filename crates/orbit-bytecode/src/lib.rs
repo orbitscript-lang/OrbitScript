@@ -138,6 +138,10 @@ pub enum Op {
     /// `R[dst] = R[a] + imm`. Error messages treat `imm` as a constant
     /// operand (operand 1), as if it were `R[b]`.
     AddInt { dst: Reg, a: Reg, imm: i16 },
+    /// `R[dst] = R[a] - imm`, with `imm` treated as `AddInt` treats it. On a float it adds
+    /// the negated integer, as lua5.5 does (`-0.0 - 0` is `0.0`). A separate instruction
+    /// rather than `AddInt` with `-imm`, so `__sub` sees the operand as written.
+    SubInt { dst: Reg, a: Reg, imm: i16 },
     /// `R[dst] = R[a] & R[b]`. Integer fast path; floats with an integer
     /// value convert, everything else goes to the VM's slow path.
     BAnd { dst: Reg, a: Reg, b: Reg },

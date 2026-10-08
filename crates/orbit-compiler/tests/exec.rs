@@ -157,7 +157,7 @@ impl Interp {
             let (x, y) = (*x, *y);
             return Ok(match op {
                 Op::Add { .. } | Op::AddInt { .. } => V::Int(x.wrapping_add(y)),
-                Op::Sub { .. } => V::Int(x.wrapping_sub(y)),
+                Op::Sub { .. } | Op::SubInt { .. } => V::Int(x.wrapping_sub(y)),
                 Op::Mul { .. } => V::Int(x.wrapping_mul(y)),
                 Op::IDiv { .. } => {
                     if y == 0 {
@@ -186,7 +186,7 @@ impl Interp {
         };
         Ok(V::Float(match op {
             Op::Add { .. } | Op::AddInt { .. } => x + y,
-            Op::Sub { .. } => x - y,
+            Op::Sub { .. } | Op::SubInt { .. } => x - y,
             Op::Mul { .. } => x * y,
             Op::Div { .. } => x / y,
             Op::IDiv { .. } => (x / y).floor(),
@@ -346,7 +346,7 @@ impl Interp {
                 | Op::Pow { dst, a, b } => {
                     r[dst as usize] = self.arith(&op, &r[a as usize], &r[b as usize])?
                 }
-                Op::AddInt { dst, a, imm } => {
+                Op::AddInt { dst, a, imm } | Op::SubInt { dst, a, imm } => {
                     r[dst as usize] = self.arith(&op, &r[a as usize], &V::Int(imm as i64))?
                 }
                 Op::Neg { dst, src } => {

@@ -75,7 +75,7 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 | Op::BXor { dst, a, b }
                 | Op::Shl { dst, a, b }
                 | Op::Shr { dst, a, b } => reg(dst) && reg(a) && reg(b),
-                Op::AddInt { dst, a, .. } => reg(dst) && reg(a),
+                Op::AddInt { dst, a, .. } | Op::SubInt { dst, a, .. } => reg(dst) && reg(a),
                 Op::Neg { dst, src }
                 | Op::BNot { dst, src }
                 | Op::Not { dst, src }
