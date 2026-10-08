@@ -9,6 +9,8 @@
 //!
 //! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#metamethods
 
+use std::borrow::Cow;
+
 use orbit_core::table;
 use orbit_core::{Gc, Interner, LuaHeap, LuaStr, Table, Tag, Value};
 
@@ -138,6 +140,19 @@ impl Metas {
             None => Value::Nil,
         }
     }
+
+    /// The type name error messages report for `v`: a table's or full
+    /// userdata's `__name`, when that is a string, else its type name.
+    /// (lua5.5 ignores `__name` in the shared metatables of other types.)
+    #[cold]
+    pub(crate) fn type_name(&self, heap: &LuaHeap, v: Value) -> Cow<'static, str> {
+        if let Value::Table(_) | Value::UserData(_) = v
+            && let Value::Str(s) = self.metamethod(heap, v, Event::Name)
+        {
+            return Cow::Owned(String::from_utf8_lossy(heap.get(s).as_bytes()).into_owned());
+        }
+        Cow::Borrowed(v.type_name())
+    }
 }
 
 /// A metamethod call a slow path needs before its instruction can finish.
@@ -247,7 +262,7 @@ pub(crate) fn index(heap: &LuaHeap, rt: &Metas, obj: Value, key: Value) -> Resul
             _ => {
                 let h = rt.metamethod(heap, o, Event::Index);
                 if h.is_nil() {
-                    return Err(index_type_error(o, o.same(obj)));
+                    return Err(index_type_error(heap, rt, o, o.same(obj)));
                 }
                 h
             }
@@ -296,7 +311,7 @@ pub(crate) fn new_index(
             _ => {
                 let h = rt.metamethod(heap, o, Event::NewIndex);
                 if h.is_nil() {
-                    return Err(index_type_error(o, o.same(obj)));
+                    return Err(index_type_error(heap, rt, o, o.same(obj)));
                 }
                 h
             }
@@ -314,9 +329,9 @@ pub(crate) fn new_index(
 
 /// Indexing a value that can't be indexed. Only the instruction's own
 /// operand has a name to report.
-pub(crate) fn index_type_error(v: Value, is_operand: bool) -> Exc {
+pub(crate) fn index_type_error(heap: &LuaHeap, rt: &Metas, v: Value, is_operand: bool) -> Exc {
     Exc::Rt(
-        format!("attempt to index a {} value", v.type_name()),
+        format!("attempt to index a {} value", rt.type_name(heap, v)),
         is_operand.then_some(0),
     )
 }

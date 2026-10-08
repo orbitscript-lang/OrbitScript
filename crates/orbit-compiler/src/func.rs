@@ -181,7 +181,9 @@ impl<'a> FuncState<'a> {
             self.active = self.free;
             self.declare(t, r)?;
         }
+        let prologue = self.code.len();
         self.block_stmts(f.body)?;
+        self.prologue_lines(prologue);
         let body = f.block(f.body);
         let ends_in_return = body
             .stmts
@@ -245,6 +247,25 @@ impl<'a> FuncState<'a> {
         })
     }
 
+    /// The instructions before `end` set up parameters (their cells, the
+    /// vararg table). They belong to the first line of the body, so the
+    /// header line is neither an active line nor a line event unless the
+    /// body starts on it, as in the reference.
+    fn prologue_lines(&mut self, end: usize) {
+        if end == 0 || end >= self.code.len() {
+            return;
+        }
+        let first_body = self
+            .lines
+            .iter()
+            .rev()
+            .find(|&&(pc, _)| pc as usize <= end)
+            .map(|&(_, line)| line);
+        let Some(line) = first_body else { return };
+        self.lines.retain(|&(pc, _)| pc as usize > end);
+        self.lines.insert(0, (0, line));
+    }
+
     fn last_line(&self) -> u32 {
         end_line(self.chunk, self.f)
     }
@@ -276,6 +297,11 @@ impl<'a> FuncState<'a> {
     /// Instructions emitted from now on are attributed to the line of `span`.
     pub fn at(&mut self, span: Span) {
         self.line = self.chunk.source.line_of(span.start);
+    }
+
+    /// Instructions emitted from now on are attributed to the line of source offset `off`.
+    pub fn at_offset(&mut self, off: u32) {
+        self.line = self.chunk.source.line_of(off);
     }
 
     pub fn at_line(&mut self, line: u32) {

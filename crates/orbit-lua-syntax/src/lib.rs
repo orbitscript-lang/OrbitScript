@@ -28,7 +28,7 @@ pub fn to_hir(
     options: &ParseOptions,
 ) -> Result<orbit_hir::Chunk, Diagnostic> {
     let ast = parse_with(chunk_name, src, options)?;
-    let mut chunk = lower(ast)?;
+    let mut chunk = lower(ast, src)?;
     // Lowering always produces what the analysis expects; a failure here is a front-end bug.
     orbit_hir::analyze(&mut chunk).expect("lowered HIR passes analysis");
     Ok(chunk)

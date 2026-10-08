@@ -26,6 +26,14 @@ Suite: none depends on it (the suite runs on Unix).
 |---|---|---|---|
 | Which compile error wins | Compiles in one pass, so a scoping error (`variable 'x' not declared`, `attempt to assign to const variable 'x'`, a `goto` error) is reported if it comes before a syntax error later in the chunk | Parses the whole chunk before resolving names, so a later syntax error is reported instead | The front end keeps parsing and lowering as separate passes so a second front end can share the HIR. Only a chunk with two errors is affected; `cargo testkit fuzz-syntax` lists the cases it finds (`tests/fuzz/syntax-mismatches.txt`) |
 
+## Method calls are always named as methods
+
+When `t:name()` fails because `t.name` is not callable, the message always calls it `method 'name'`. lua5.5 does the same, except in a function with more than 255 constants (strings, numbers): there it says `field 'name'`. The bytecode is our own (ADR-4), and our method-call instruction has no constant-index limit, so it doesn't fall back to a plain field read the way lua5.5's does.
+
+Why: matching it would mean copying a limit of lua5.5's instruction encoding into ours, only to make a message less precise. Proposed in the PR that added the `deviates=` manifest option.
+
+Suite: `errors.lua` 329 checks for `field 'bbb'`; the manifest disables that line (`deviates=329`, see SKIPS.md).
+
 ## table.sort
 
 `table.sort` is a stable bottom-up merge sort that copies the array into the native's stack window, sorts it there, and then writes it back (docs/design/stdlib-string-table-math.md). lua5.5 sorts in place with a different algorithm. The manual says the sort is not stable, that the comparator must define a strict order, and that otherwise the result is unspecified. Proposed in the C5a library PR.
@@ -49,3 +57,11 @@ Hooks follow docs/design/debug.md. Proposed in the debug hooks PR.
 
 - **Count hooks.** A count hook with interval N fires every N of OrbitScript's bytecode instructions. The bytecode is our own design (ADR-4), so the events land at different points in the source than lua5.5's, and a different number of them fire for the same code. Events still fire before the instruction, and the line event that follows a count event fires as in lua5.5.
 - **`ftransfer` for `debug.sethook`'s own return event.** When `debug.sethook` turns on return hooks, the return event for that same call reports `ftransfer` from the native's own argument window. lua5.5 reports a value that reflects its C stack (4 where we report 3). Other natives' return events match.
+
+## Standard streams don't seek
+
+`io.stdin:seek()`, `io.stdout:seek()` and `io.stderr:seek()` always fail with `Illegal seek`. lua5.5 can seek a standard stream when it is redirected to a regular file (`lua script.lua < data.txt`).
+
+Why: Rust's standard library can't seek its standard streams, and reopening the file behind them would need `unsafe` or platform paths such as `/dev/stdin`, which behave differently.
+
+Suite: `files.lua` seeks `io.stdin` only to check that a seek can fail.

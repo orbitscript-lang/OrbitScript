@@ -10,3 +10,8 @@ publish = false
 
 [lints]
 workspace = true
+
+[features]
+# Layer 2 of the bytecode verifier (data flow). Off by default: whoever loads
+# binary chunks turns it on (`orbit-stdlib`'s `verify-flow`).
+verify-flow = []

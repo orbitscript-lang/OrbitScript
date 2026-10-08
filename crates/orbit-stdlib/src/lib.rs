@@ -6,10 +6,16 @@
 //! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
+#[cfg(feature = "dump")]
+pub mod checks;
 #[cfg(feature = "coroutine")]
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
+#[cfg(feature = "dump")]
+mod dump;
+#[cfg(feature = "io")]
+mod io;
 #[cfg(feature = "load")]
 mod load;
 #[cfg(feature = "math")]
@@ -20,6 +26,8 @@ mod os;
 mod package;
 #[cfg(feature = "string")]
 mod string;
+#[cfg(any(feature = "os", feature = "io"))]
+mod sys;
 #[cfg(feature = "table")]
 mod table;
 #[cfg(feature = "os")]
@@ -68,6 +76,8 @@ pub fn open_libs(vm: &mut Vm) {
     {
         let st = open_lib(vm, "string", string::FUNCTIONS);
         string::set_metatable_index(vm, st);
+        #[cfg(feature = "dump")]
+        add_functions(vm, st, dump::FUNCTIONS);
     }
     #[cfg(feature = "utf8")]
     {
@@ -86,6 +96,8 @@ pub fn open_libs(vm: &mut Vm) {
     }
     #[cfg(feature = "os")]
     open_lib(vm, "os", os::FUNCTIONS);
+    #[cfg(feature = "io")]
+    io::open(vm);
     #[cfg(feature = "package")]
     package::open(vm);
     #[cfg(feature = "coroutine")]
@@ -95,6 +107,8 @@ pub fn open_libs(vm: &mut Vm) {
         open_lib(vm, "debug", debug::FUNCTIONS);
         debug::open(vm);
     }
+    #[cfg(feature = "dump")]
+    checks::set_level(vm, checks::from_env());
     let g = vm.rt.globals;
     mark_loaded(vm, "_G", orbit_vm::orbit_core::Value::Table(g));
 }
@@ -147,6 +161,21 @@ pub fn open_lib(
     mark_loaded(vm, name, orbit_vm::orbit_core::Value::Table(t));
     vm.unpin(orbit_vm::orbit_core::Value::Table(t));
     t
+}
+
+/// Register more `functions` in an open library table.
+#[allow(dead_code)]
+fn add_functions(
+    vm: &mut Vm,
+    t: orbit_vm::orbit_core::Gc<orbit_vm::orbit_core::Table>,
+    functions: &[(&'static str, NativeFn)],
+) {
+    for &(qualified, f) in functions {
+        let short = qualified.rsplit('.').next().unwrap_or(qualified);
+        let fv = vm.register_native(qualified, f);
+        let k = vm.new_str(short.as_bytes());
+        vm.table_set(t, k, fv);
+    }
 }
 
 /// A file name from Lua bytes. On Unix any bytes are a valid name; elsewhere

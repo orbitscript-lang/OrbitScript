@@ -92,12 +92,14 @@ pub fn str_to_number(s: &[u8]) -> Option<Value> {
         return hex_number(neg, &body[2..]);
     }
     if !body.is_empty() && body.iter().all(u8::is_ascii_digit) {
-        let mut n: i64 = 0;
+        // Accumulate the magnitude unsigned so `-9223372036854775808`
+        // (whose magnitude is one past `i64::MAX`) still reads as an integer.
+        let mut n: u64 = 0;
         let mut overflow = false;
         for &d in body {
             match n
                 .checked_mul(10)
-                .and_then(|n| n.checked_add((d - b'0') as i64))
+                .and_then(|n| n.checked_add((d - b'0') as u64))
             {
                 Some(v) => n = v,
                 None => {
@@ -106,8 +108,17 @@ pub fn str_to_number(s: &[u8]) -> Option<Value> {
                 }
             }
         }
-        if !overflow {
-            return Some(Value::Int(if neg { n.wrapping_neg() } else { n }));
+        let limit = if neg {
+            i64::MIN.unsigned_abs()
+        } else {
+            i64::MAX as u64
+        };
+        if !overflow && n <= limit {
+            return Some(Value::Int((n as i64).wrapping_mul(if neg {
+                -1
+            } else {
+                1
+            })));
         }
         // Too big for an integer: read it as a float below.
     }
@@ -450,6 +461,8 @@ mod tests {
             ("- 5", "nil"),
             ("-0x10", "-16 integer"),
             ("9223372036854775808", "9.2233720368547758e+18 float"),
+            ("-9223372036854775808", "-9223372036854775808 integer"),
+            ("-9223372036854775809", "-9.2233720368547758e+18 float"),
             ("0xffffffffffffffffff", "-1 integer"),
             ("1e", "nil"),
             (" -.5e-3 ", "-0.0005 float"),
