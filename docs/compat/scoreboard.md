@@ -19,8 +19,84 @@ For each suite file the scoreboard says whether `orbit` compiles it, whether it 
 | 2026-10-05 | C1 stack through #67 (hex floats, bitwise, `_ENV`, `global`, named varargs, `goto`) | 0 of 31 | 24 of 31 | 2 of 12 | 6 of 6 | 2 of 7 | Linux x86_64 cloud container |
 | 2026-10-06 | C1 stack through #68 (adds `<close>` in the HIR), on main with `load`/`dofile` (#55) and `os` (#57) | 1 of 31 (api) | 24 of 31 | 4 of 14 | 6 of 6 | 6 of 7 | Linux x86_64 cloud container |
 | 2026-10-07 | 094878b (all compat PRs merged; C1 exit met) | 13 of 31 | 31 of 31 | 31 of 33 | 6 of 6 | 12 of 12 | Linux x86_64 cloud container |
+| 2026-10-08 | 5f67c4d (PRs #79-#91 merged: io, binary chunks, bitwise metamethods, coroutine.lua, error lines and limits) | 21 of 31 | 31 of 31 | 39 of 39 | 6 of 6 | 20 of 20 | Linux x86_64 cloud container |
 
-The seven suite files that still don't compile stop at `<close>`, the last C1 gate. Every file still stops at the conformance driver's `dofile` (thread 4).
+Every suite file compiles. GC stress mode (`ORBIT_GC_STRESS=1`) gives the same results as the plain run.
+
+## Current, 2026-10-08 (main 5f67c4d)
+
+Suite: **21 of 31** files pass, 31 of 31 compile.
+
+| File | Compiles | Result | Reached | Stopped at |
+|---|---|---|---|---|
+| `main.lua` | yes | FAIL | line 67 | cannot open -: No such file or directory |
+| `gc.lua` | yes | pass | - |  |
+| `db.lua` | yes | FAIL | line 25 | wrong trace!! |
+| `calls.lua` | yes | FAIL | line 541 | calls.lua:541: assertion failed! |
+| `strings.lua` | yes | pass | - |  |
+| `literals.lua` | yes | pass | - |  |
+| `tpack.lua` | yes | pass | - |  |
+| `attrib.lua` | yes | FAIL | line 337 | attrib.lua:337: module 'lib2-v2' not found: |
+| `gengc.lua` | yes | pass | - |  |
+| `locals.lua` | yes | FAIL | line 314 | locals.lua:314: assertion failed! |
+| `constructs.lua` | yes | pass | - |  |
+| `code.lua` | yes | pass | - |  |
+| `big.lua` | yes | pass | - |  |
+| `cstack.lua` | yes | pass | - |  |
+| `nextvar.lua` | yes | FAIL | line 746 | nextvar.lua:746: bad 'for' limit (number expected, got string) |
+| `pm.lua` | yes | pass | - |  |
+| `utf8.lua` | yes | pass | - |  |
+| `api.lua` | yes | pass | - |  |
+| `memerr.lua` | yes | pass | - |  |
+| `events.lua` | yes | pass | - |  |
+| `vararg.lua` | yes | pass | - |  |
+| `closure.lua` | yes | pass | - |  |
+| `coroutine.lua` | yes | pass | - |  |
+| `goto.lua` | yes | pass | - |  |
+| `errors.lua` | yes | FAIL | line 30 | errors.lua:30: assertion failed! |
+| `math.lua` | yes | pass | - |  |
+| `sort.lua` | yes | pass | - |  |
+| `bitwise.lua` | yes | pass | - |  |
+| `verybig.lua` | yes | FAIL | line 148 | /tmp/orbit_cg1EtO:32772: too many constants |
+| `files.lua` | yes | FAIL | line 812 | /bin/sh: 1: not-to-be-found-command: not found |
+| `all.lua` | yes | FAIL | line 167 | ........................................................................................................................... |
+| `heavy.lua` | ? | skip | - | not part of all.lua: builds multi-gigabyte strings and tables |
+
+| Corpus | Same as reference |
+|---|---|
+| `tests/diff` | 39 of 39 |
+| `tests/first-light` | 6 of 6 |
+| `tests/diff/compat` | 20 of 20 |
+
+Of the ten failing files, `main.lua` stops where it pipes a script through `-`, which the unmerged `compat/cli` branch adds, and `attrib.lua` stops at a C module (`lib2-v2`); the rest are listed with their stopping point above. `all.lua` runs the whole suite, so it stops at the first failing file.
+
+### Benchmarks against lua5.5
+
+Linux x86_64 cloud container (4 cores), 3 runs each, full inputs. Wall-clock times here vary by several percent between runs, so treat small ratios as noise. `coroutines.lua` is new since the last run.
+
+| Benchmark | lua5.5 time | lua5.5 peak RSS | orbit time | orbit peak RSS |
+|---|---:|---:|---:|---:|
+| startup.lua | 0.002s | 2.7 MiB | 0.002s | 3.8 MiB |
+| fib.lua | 0.675s | 2.7 MiB | 0.721s | 3.7 MiB |
+| binary_trees.lua | 2.683s | 66.6 MiB | 2.899s | 54.5 MiB |
+| nbody.lua | 1.982s | 2.7 MiB | 2.149s | 3.9 MiB |
+| spectral_norm.lua | 0.468s | 2.7 MiB | 0.589s | 3.8 MiB |
+| fannkuch.lua | 1.709s | 2.7 MiB | 2.001s | 3.8 MiB |
+| strings.lua | 0.658s | 49.4 MiB | 0.886s | 109.1 MiB |
+| tables.lua | 0.368s | 38.8 MiB | 0.644s | 95.2 MiB |
+| oop.lua | 0.676s | 2.6 MiB | 1.737s | 3.7 MiB |
+| coroutines.lua | 0.781s | 2.7 MiB | 2.393s | 3.7 MiB |
+
+| Interpreter | Binary size |
+|---|---:|
+| lua5.5 | 348 KiB |
+| orbit | 1505 KiB |
+
+```
+orbit vs lua5.5: time 1.42x, peak RSS 1.48x, binary size 4.32x, 10 of 10 benchmarks ran
+```
+
+Since 094878b the binary grew from 1390 KiB to 1505 KiB (the io library and binary chunks with both verifier layers).
 
 ## Baseline, 2026-10-04 (main 4aea612)
 
