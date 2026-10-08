@@ -691,6 +691,19 @@ impl Table {
         }
     }
 
+    /// About how many bytes a [`Table::write`] to `slot` adds, for checking
+    /// a heap limit first: a full array part doubles, a full hash part is
+    /// rebuilt at about twice its size, other stores add nothing.
+    pub fn growth(&self, slot: Slot) -> usize {
+        match slot {
+            Slot::Push if self.array.len == self.array.cap => {
+                (self.array.grown(self.array.len() + 1) - self.array.cap as usize) * 9
+            }
+            Slot::Grow => (self.entries.len().max(1) * size_of::<Entry>()) * 2,
+            _ => 0,
+        }
+    }
+
     fn hash_has(&self, key: &Key) -> bool {
         self.used > 0 && self.probe(key, |_, _| false).is_ok()
     }
@@ -1018,6 +1031,14 @@ pub fn set_key(
     v: Value,
 ) -> Result<Option<usize>, NoMemory> {
     let slot = heap.get(t).find_slot(heap, key, v.is_nil());
+    // Growing past the heap's limit fails like a failed allocation. The
+    // owner collects and retries (the VM does).
+    if matches!(slot, Slot::Push | Slot::Grow)
+        && heap.limit().is_some()
+        && heap.would_exceed(heap.get(t).growth(slot))
+    {
+        return Err(NoMemory);
+    }
     if slot != Slot::None {
         heap.update(t, |tab| tab.write(slot, key, v))?;
     }

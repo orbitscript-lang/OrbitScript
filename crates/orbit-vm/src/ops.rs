@@ -22,6 +22,10 @@ pub(crate) enum Exc {
     Plain(String),
     /// A finished error.
     Lua(crate::LuaError),
+    /// An allocation failed, or would pass the heap's limit: Lua's
+    /// `not enough memory`, which has no position. A store that fails this
+    /// way is retried once after a full collection.
+    NoMemory,
     /// Not an error: the instruction needs this metamethod call to finish
     /// (see `meta`).
     Meta(MetaCall),
@@ -41,8 +45,8 @@ impl From<crate::LuaError> for Exc {
 
 impl From<NoMemory> for Exc {
     #[cold]
-    fn from(e: NoMemory) -> Self {
-        Exc::Plain(e.message().into())
+    fn from(_: NoMemory) -> Self {
+        Exc::NoMemory
     }
 }
 
@@ -53,6 +57,26 @@ impl From<StoreError> for Exc {
             StoreError::Key(k) => Exc::Rt(k.message().into(), None),
             StoreError::NoMemory => NoMemory.into(),
         }
+    }
+}
+
+/// What a failed raw store `t[k] = v` raises: a bad key is an error; a
+/// table that couldn't grow goes through [`Exc::NewIndex`], whose slow path
+/// collects and retries before raising `not enough memory`.
+#[cold]
+pub(crate) fn store_failed(
+    e: StoreError,
+    t: orbit_core::Gc<orbit_core::Table>,
+    k: Value,
+    v: Value,
+) -> Exc {
+    match e {
+        StoreError::Key(_) => e.into(),
+        StoreError::NoMemory => Exc::NewIndex {
+            obj: Value::Table(t),
+            key: k,
+            v,
+        },
     }
 }
 

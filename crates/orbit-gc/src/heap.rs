@@ -122,6 +122,8 @@ pub struct Heap<S: Space> {
     live_peak: usize,
     stress: bool,
     stopped: bool,
+    /// The most [`Heap::bytes`] the owner wants in use, or `usize::MAX`.
+    limit: usize,
 }
 
 impl<S: Space> fmt::Debug for Heap<S> {
@@ -190,6 +192,7 @@ impl<S: Space + Default> Heap<S> {
             live_peak: 0,
             stress: false,
             stopped: false,
+            limit: usize::MAX,
         }
     }
 }
@@ -475,6 +478,39 @@ impl<S: Space> Heap<S> {
         &mut self.params
     }
 
+    /// Cap [`Heap::bytes`] at `limit` (`None`: no cap, the default). The
+    /// heap never refuses an allocation itself: it reports. Once `bytes`
+    /// passes the limit, [`Heap::should_step`] comes due at the next
+    /// allocation and [`Heap::over_limit`] turns true; the owner then
+    /// collects in full with its roots and, if the heap is still over,
+    /// fails whatever was being done. Before a large allocation the owner
+    /// asks [`Heap::would_exceed`]. Lowering the limit below `bytes` takes
+    /// effect at the next allocation.
+    pub fn set_limit(&mut self, limit: Option<usize>) {
+        self.limit = limit.unwrap_or(usize::MAX);
+        if self.threshold > self.limit {
+            self.threshold = self.limit;
+            self.debt = self.debt.max(self.bytes as isize - self.threshold as isize);
+        }
+    }
+
+    /// The cap set by [`Heap::set_limit`].
+    pub fn limit(&self) -> Option<usize> {
+        (self.limit != usize::MAX).then_some(self.limit)
+    }
+
+    /// Whether [`Heap::bytes`] is past the limit.
+    #[inline]
+    pub fn over_limit(&self) -> bool {
+        self.bytes > self.limit
+    }
+
+    /// Whether allocating `bytes` more would pass the limit.
+    #[inline]
+    pub fn would_exceed(&self, bytes: usize) -> bool {
+        self.bytes.saturating_add(bytes) > self.limit
+    }
+
     /// Stop automatic collection: [`Heap::should_step`] stays false. Explicit
     /// [`Heap::step`] and [`Heap::full_collect`] still work. Lua's
     /// `collectgarbage("stop")`.
@@ -630,9 +666,13 @@ impl<S: Space> Heap<S> {
         self.cycles += 1;
         let live = self.marks.marked_bytes;
         self.release_to_os(live);
+        // Never let the heap grow past the limit unchecked: the next cycle
+        // starts there at the latest, which is also when the owner sees
+        // `over_limit`.
         self.threshold = live
             .saturating_add(live.saturating_mul(self.params.growth as usize) / 100)
-            .max(self.params.min_threshold);
+            .max(self.params.min_threshold)
+            .min(self.limit);
         // If the heap is already past the next threshold, start the next
         // cycle at once, but in ordinary steps: carrying the whole overshoot
         // as debt would make its first step a long pause.

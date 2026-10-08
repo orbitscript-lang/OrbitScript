@@ -744,6 +744,33 @@ fn stale_handle_survives_page_reuse_as_stale() {
 }
 
 #[test]
+fn limit_is_reported_not_enforced() {
+    let mut h = TestHeap::new();
+    assert_eq!(h.limit(), None);
+    assert!(!h.would_exceed(usize::MAX / 2));
+    let root = obj(&mut h, 1);
+    let mut roots = Stack(vec![Ref::Obj(root)]);
+    h.full_collect(&mut roots);
+    let base = h.bytes();
+    h.set_limit(Some(base + 4096));
+    assert_eq!(h.limit(), Some(base + 4096));
+    assert!(h.would_exceed(4097) && !h.would_exceed(4096));
+    // Allocation never fails: passing the limit is reported, and a step
+    // comes due so the owner notices.
+    let garbage: Vec<_> = (0..200).map(|i| obj(&mut h, i)).collect();
+    assert!(h.over_limit());
+    assert!(h.should_step());
+    h.full_collect(&mut roots);
+    assert!(!h.over_limit());
+    assert!(garbage.iter().all(|&g| !h.is_live(g)));
+    // Lowering the limit below what is in use makes a step due at once.
+    h.set_limit(Some(1));
+    assert!(h.over_limit() && h.should_step());
+    h.set_limit(None);
+    assert!(!h.over_limit());
+}
+
+#[test]
 fn stress_mode_steps_only_after_allocating() {
     let mut h = TestHeap::new();
     h.set_stress(true);

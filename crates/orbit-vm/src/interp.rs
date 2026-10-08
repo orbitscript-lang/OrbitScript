@@ -6,7 +6,7 @@ use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{MULTI, Op, Origin};
 use orbit_core::number::{ArithOp, Number};
 use orbit_core::table::{self, IntStore};
-use orbit_core::{Closure, Gc, ProtoCode, Value};
+use orbit_core::{Closure, Gc, NoMemory, ProtoCode, Value};
 
 use crate::cold::{already_defined, env_error, get_str_miss, op_len, set_str_miss};
 use crate::meta::Event;
@@ -504,6 +504,7 @@ impl Vm {
         match x {
             Exc::Lua(e) => e,
             Exc::Plain(m) => LuaError::new(self.new_str(m.as_bytes())),
+            Exc::NoMemory => LuaError::new(self.new_str(NoMemory::MESSAGE.as_bytes())),
             Exc::Meta(_) | Exc::Index { .. } | Exc::NewIndex { .. } => {
                 unreachable!("metamethod requests are finished by `raise`")
             }
@@ -832,6 +833,14 @@ impl Vm {
             let ran = self.run_loop::<false>()?;
             match ran {
                 Ran::Done => return Ok(()),
+                Ran::Switch if std::mem::take(&mut self.rt.no_memory) => {
+                    // A safe point found the heap over its limit; the frame's
+                    // pc is saved.
+                    match self.raise(orbit_core::NoMemory.into())? {
+                        Flow::Done => return Ok(()),
+                        Flow::Reload | Flow::Switched => self.rt.switched = false,
+                    }
+                }
                 Ran::Switch => {}
             }
         }
@@ -984,10 +993,9 @@ impl Vm {
                         // Nothing above this frame's window and the last
                         // open results is live; don't let it keep garbage.
                         let live = (base + WINDOW).max(self.rt.top);
-                        self.rt.stack.regs.truncate(live);
-                        self.heap.step(&mut self.rt);
-                        if self.heap.pending_finalizers() > 0 {
-                            self.run_finalizers();
+                        if self.gc_safepoint(live) {
+                            // Over the memory limit: `run` raises the error.
+                            return Ok(Ran::Switch);
                         }
                         w = window!();
                     }
@@ -1410,7 +1418,7 @@ impl Vm {
                                     set_slow!(reg!(obj), k, v)
                                 }
                                 if let Err(e) = table::set(&mut self.heap, t, k, v) {
-                                    throw!(e.into());
+                                    throw!(ops::store_failed(e, t, k, v));
                                 }
                                 safepoint!();
                             }

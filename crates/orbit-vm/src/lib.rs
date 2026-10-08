@@ -363,6 +363,14 @@ pub struct Runtime {
     /// Set by a stack switch, so the dispatch loop doesn't save its pc into
     /// the other stack's frames; cleared when the loop reloads.
     pub(crate) switched: bool,
+    /// A safe point found the heap over its limit ([`Vm::set_memory_limit`])
+    /// even after a full collection: the dispatch loop returned so `run`
+    /// can raise `not enough memory` there.
+    pub(crate) no_memory: bool,
+    /// `not enough memory` was raised for passing the limit and the heap
+    /// hasn't been back under it since: the script may use up to
+    /// [`LIMIT_GRACE`] more to handle the error.
+    pub(crate) limit_grace: bool,
     /// The error being raised is an error in error handling: it skips
     /// message handlers and becomes `error in error handling`.
     pub(crate) errerr: bool,
@@ -476,6 +484,10 @@ impl Roots<LuaSpace> for Runtime {
     }
 }
 
+/// After the heap passes its limit and the script gets `not enough memory`,
+/// it may use up to `limit / LIMIT_GRACE` more to handle the error.
+pub const LIMIT_GRACE: usize = 8;
+
 /// A Lua virtual machine.
 #[derive(Debug)]
 pub struct Vm {
@@ -538,6 +550,8 @@ impl Vm {
                 resumers: Vec::new(),
                 xfer: Vec::new(),
                 switched: false,
+                no_memory: false,
+                limit_grace: false,
                 errerr: false,
                 handled: false,
                 unwind_traceback: None,
@@ -678,6 +692,65 @@ impl Vm {
     /// Run a full collection cycle.
     pub fn full_collect(&mut self) {
         self.heap.full_collect(&mut self.rt);
+    }
+
+    /// Cap the heap at `limit` bytes (`None`: no cap, the default), as
+    /// counted by [`Heap::bytes`](orbit_core::Heap::bytes) and
+    /// `collectgarbage("count")`. Past the cap the VM collects in full and,
+    /// if the heap is still over, raises Lua's catchable `not enough memory`
+    /// error. Large allocations (`..`, `string.rep`, `table.create`) are
+    /// checked before they happen; everything else at the next safe point
+    /// after it, so the heap can pass the cap by about one allocation.
+    pub fn set_memory_limit(&mut self, limit: Option<usize>) {
+        self.heap.set_limit(limit);
+    }
+
+    /// The cap set by [`Vm::set_memory_limit`].
+    pub fn memory_limit(&self) -> Option<usize> {
+        self.heap.limit()
+    }
+
+    /// At a safe point that stepped the collector, with the heap over its
+    /// limit: collect in full, and say whether to raise `not enough memory`.
+    /// The allocation that passed the limit has already happened, so once
+    /// the error is raised the script may use up to [`LIMIT_GRACE`] more,
+    /// to handle it, before every safe point raises it again; the grace
+    /// ends when the heap is back under the limit. Finalizers stay queued,
+    /// as in an emergency collection of lua5.5's.
+    #[cold]
+    pub(crate) fn over_limit_after_collecting(&mut self) -> bool {
+        let hard = self
+            .heap
+            .limit()
+            .map_or(usize::MAX, |l| l.saturating_add(l / LIMIT_GRACE));
+        // Inside the grace, collecting at every safe point would thrash.
+        if self.rt.gc.finalizing() || self.rt.limit_grace && self.heap.bytes() <= hard {
+            return false;
+        }
+        self.heap.full_collect(&mut self.rt);
+        if !self.heap.over_limit() {
+            self.rt.limit_grace = false;
+            return false;
+        }
+        if !self.rt.limit_grace {
+            self.rt.limit_grace = true;
+            return true;
+        }
+        self.heap.bytes() > hard
+    }
+
+    /// Room for `bytes` more under the heap's limit, collecting in full
+    /// first if needed. Every live value must be reachable from the roots.
+    pub(crate) fn reserve(&mut self, bytes: usize) -> Result<(), orbit_core::NoMemory> {
+        if self.heap.would_exceed(bytes) {
+            if !self.rt.gc.finalizing() {
+                self.heap.full_collect(&mut self.rt);
+            }
+            if self.heap.would_exceed(bytes) {
+                return Err(orbit_core::NoMemory);
+            }
+        }
+        Ok(())
     }
 
     /// Call `f` with `args`, returning all its results. The results are
