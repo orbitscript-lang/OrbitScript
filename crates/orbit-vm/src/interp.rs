@@ -420,14 +420,14 @@ impl Vm {
                 } else {
                     func + want as usize
                 };
-                // Clear rather than truncate: the frame's window stays
-                // allocated, so returning into Lua needn't refill it.
+                // Spike: clear what the native wrote rather than truncate,
+                // so returning into Lua needn't refill the window.
                 let regs = &mut self.rt.stack.regs;
-                let stop = regs.len().min(end.max(func) + WINDOW);
+                let stop = regs.len().min(self.rt.stack.hw.max(self.rt.top));
                 if end < stop {
                     regs[end..stop].fill(Value::Nil);
                 }
-                regs.truncate(stop.max(end));
+                self.rt.stack.hw = 0;
                 self.after_return()
             }
             NativeReturn::CallThen { .. }

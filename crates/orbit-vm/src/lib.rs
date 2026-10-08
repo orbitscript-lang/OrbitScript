@@ -217,6 +217,8 @@ pub(crate) struct Stack {
     /// The index of the boundary frame below a running finalizer, which
     /// the debug library names `__gc`.
     pub(crate) finalizer_at: Option<u32>,
+    /// Spike: highest register a native wrote since its call.
+    pub(crate) hw: usize,
 }
 
 impl Stack {
@@ -281,6 +283,7 @@ impl Stack {
     /// `regs[at] = v`, growing the stack if needed.
     #[inline]
     pub(crate) fn put(&mut self, at: usize, v: Value) {
+        self.hw = self.hw.max(at + 1);
         if at < self.regs.len() {
             self.regs[at] = v;
         } else {
@@ -292,6 +295,7 @@ impl Stack {
     /// Insert `v` at `at` in the values that end at `top`, shifting them up;
     /// returns the new end.
     pub(crate) fn insert(&mut self, at: usize, top: usize, v: Value) -> usize {
+        self.hw = self.hw.max(top + 1);
         crate::interp::extend_nil(&mut self.regs, top + 1);
         self.regs.copy_within(at..top, at + 1);
         self.regs[at] = v;
@@ -301,6 +305,7 @@ impl Stack {
     /// Write `vals` at `at`, growing the stack if needed; returns their end.
     pub(crate) fn write(&mut self, at: usize, vals: &[Value]) -> usize {
         let end = at + vals.len();
+        self.hw = self.hw.max(end);
         crate::interp::extend_nil(&mut self.regs, end);
         self.regs[at..end].copy_from_slice(vals);
         end
