@@ -56,7 +56,10 @@ The collector is our own (ADR-2), so its tuning parameters, step sizes and memor
 Hooks follow docs/design/debug.md. Proposed in the debug hooks PR.
 
 - **Count hooks.** A count hook with interval N fires every N of OrbitScript's bytecode instructions. The bytecode is our own design (ADR-4), so the events land at different points in the source than lua5.5's, and a different number of them fire for the same code. Events still fire before the instruction, and the line event that follows a count event fires as in lua5.5.
+- **Every full userdata has one user value.** `debug.getuservalue(u, 1)` and `debug.setuservalue(u, v, 1)` work on any full userdata, including the `io` library's files. In lua5.5 the number of user values is fixed when the userdata is created, and its files have none, so `debug.setuservalue(io.stdin, 10)` fails there and succeeds here. Other indexes fail as in lua5.5. Embedders get the one slot (`UserData::user_value`) for every userdata they create.
 - **`ftransfer` for `debug.sethook`'s own return event.** When `debug.sethook` turns on return hooks, the return event for that same call reports `ftransfer` from the native's own argument window. lua5.5 reports a value that reflects its C stack (4 where we report 3). Other natives' return events match.
+
+Suite: `db.lua` 603 expects a count hook with interval 1 to fire fewer than 1012 times over a 1000-iteration loop and its `assert`; lua5.5 fires 1011 times and we fire 1015. `db.lua` 434-436 check that `io.stdin` has no user value. The manifest disables these lines (see SKIPS.md).
 
 ## Standard streams don't seek
 

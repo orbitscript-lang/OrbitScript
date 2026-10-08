@@ -252,6 +252,11 @@ impl Runtime {
             k if unwinding_close(k) => None,
             FrameKind::Meta { event, .. } => named("metamethod", event.short_name().as_bytes()),
             FrameKind::Hook => named("hook", b"?"),
+            FrameKind::Boundary | FrameKind::Native { .. }
+                if self.stack.finalizer_at == Some(ci as u32) =>
+            {
+                named("metamethod", b"__gc")
+            }
             FrameKind::Lua { closure, .. } if caller.pc > 0 => {
                 let proto = heap.get(heap.get(closure).proto);
                 let pc = caller.pc - 1;
@@ -908,6 +913,8 @@ impl crate::NativeCtx<'_> {
         let i = p.debug.capture_of_upvalue(n);
         let cell = c.captures[i];
         let name = match p.debug.capture_names.get(i) {
+            // A native closure's upvalues have no names.
+            _ if matches!(p.code.code.first(), Some(Op::NativeEntry { .. })) => Vec::new(),
             Some(name) if !p.debug.lines.is_empty() => name.to_vec(),
             _ => b"(no name)".to_vec(),
         };

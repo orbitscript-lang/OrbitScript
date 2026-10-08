@@ -209,10 +209,12 @@ impl Vm {
         // only when the stack's capacity does.
         let old = c.bytes;
         // A coroutine that died with variables still to close keeps its
-        // stack for `coroutine.close`.
-        if from_status == CoStatus::Dead && stack.tbc.is_empty() {
+        // stack for `coroutine.close`, and one that died with an error keeps
+        // it for the debug library (its traceback, locals) until closed.
+        if from_status == CoStatus::Dead && stack.tbc.is_empty() && c.error.is_none() {
             c.bytes = 0;
-            drop(stack);
+            // `debug.gethook` still reports a dead coroutine's hook.
+            c.stack.hook = stack.hook;
         } else {
             c.bytes = stack.bytes();
             c.stack = stack;
@@ -467,7 +469,9 @@ impl Vm {
         let error = c.error.take();
         if c.stack.tbc.is_empty() {
             c.status = CoStatus::Dead;
+            let hook = std::mem::take(&mut c.stack.hook);
             c.stack = Stack::default();
+            c.stack.hook = hook;
             let freed = std::mem::take(&mut c.bytes);
             self.heap.adjust_bytes(-(freed as isize));
             return self.deliver(error.map_or(Ok(()), Err));

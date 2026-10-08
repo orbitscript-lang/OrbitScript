@@ -14,7 +14,7 @@
 
 main.lua        needs-clibs=250-253   # the lua command line; one check loads a C module
 gc.lua
-db.lua
+db.lua          deviates=434-436 deviates=603   # io files have a user value; count hooks count our instructions
 calls.lua
 strings.lua
 literals.lua

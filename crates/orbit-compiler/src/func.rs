@@ -7,7 +7,10 @@ use orbit_bytecode::{
     Constant, DebugInfo, FunctionName, LocalInfo, LocalSlot, MAX_CAPTURES, MAX_REGS, Offset, Op,
     OperandOrigin, Origin, UnlinkedProto,
 };
-use orbit_hir::{CaptureFrom, CaptureId, Chunk, FuncId, Function, LocalId, Span, StmtKind, StrId};
+use orbit_hir::{
+    CaptureFrom, CaptureId, Chunk, ExprId, ExprKind, FuncId, Function, LocalId, Span, StmtKind,
+    StrId,
+};
 
 use crate::CompileError;
 use crate::consts::ConstVal;
@@ -190,7 +193,20 @@ impl<'a> FuncState<'a> {
             .last()
             .is_some_and(|&s| matches!(f.stmt(s).kind, StmtKind::Return(_)));
         if !ends_in_return {
-            self.at_line(self.last_line());
+            // A function's final return belongs to its `end`. A main chunk
+            // has none: the reference reports its last statement's last line
+            // (trailing blank lines and comments don't count), or line 1.
+            let line = if f.parent.is_none() {
+                body.stmts.last().map_or(1, |&s| {
+                    let span = f.stmt(s).span;
+                    self.chunk
+                        .source
+                        .line_of(span.end.saturating_sub(1).max(span.start))
+                })
+            } else {
+                self.last_line()
+            };
+            self.at_line(line);
             self.emit_close(0);
             self.emit(Op::Return0);
         }
@@ -306,6 +322,43 @@ impl<'a> FuncState<'a> {
 
     pub fn at_line(&mut self, line: u32) {
         self.line = line;
+    }
+
+    /// The pc of the next instruction.
+    pub fn next_pc(&self) -> usize {
+        self.code.len()
+    }
+
+    /// `e`, compiled from `from` on, is the left operand of an operator at
+    /// source offset `at`. When `e` reads a global, an upvalue or a field,
+    /// the instruction that reads it belongs to the operator's line: the
+    /// reference reports it there in line hooks and active lines, as if
+    /// the read waited for the operator.
+    pub fn consumed_at(&mut self, e: ExprId, from: usize, at: u32) {
+        let deferred = matches!(
+            self.f.expr(e).kind,
+            ExprKind::Global(_)
+                | ExprKind::Capture(_)
+                | ExprKind::Index { .. }
+                | ExprKind::VarargIndex(_)
+        );
+        let Some(pc) = self.code.len().checked_sub(1) else {
+            return;
+        };
+        if !deferred || pc < from {
+            return;
+        }
+        let line = self.chunk.source.line_of(at);
+        match self.lines.last_mut() {
+            Some((start, l)) if *start as usize == pc => *l = line,
+            Some(&mut (_, l)) if l == line => return,
+            _ => self.lines.push((pc as u32, line)),
+        }
+        // Merge with the run before when the lines now agree.
+        let n = self.lines.len();
+        if n >= 2 && self.lines[n - 2].1 == self.lines[n - 1].1 {
+            self.lines.pop();
+        }
     }
 
     // ---- emission ----

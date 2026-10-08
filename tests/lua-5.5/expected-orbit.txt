@@ -8,6 +8,7 @@ code.lua
 constructs.lua
 coroutine.lua
 cstack.lua
+db.lua
 errors.lua
 events.lua
 gc.lua
