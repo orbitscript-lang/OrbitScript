@@ -319,7 +319,11 @@ fn next(ctx: &mut NativeCtx<'_>) -> R {
             Ok(NativeReturn::Return(2))
         }
         Ok(None) => ctx.ret1(Value::Nil),
-        Err(_) => Err(ctx.error("invalid key to 'next'")),
+        // Raised by the table itself, so like lua5.5 it carries no position.
+        Err(_) => {
+            let msg = ctx.new_str(b"invalid key to 'next'");
+            Err(ctx.error_value(msg))
+        }
     }
 }
 
@@ -444,14 +448,11 @@ fn warn(ctx: &mut NativeCtx<'_>) -> R {
         return Ok(NativeReturn::Return(0));
     }
     if ctx.rt.warnings {
-        let mut text = b"Lua warning: ".to_vec();
+        let mut text = Vec::new();
         for &s in &parts {
             text.extend_from_slice(ctx.bytes(s));
         }
-        text.push(b'\n');
-        // Keep the order of output already printed.
-        let _ = ctx.rt.out.flush();
-        let _ = std::io::stderr().write_all(&text);
+        ctx.rt.warn(&text);
     }
     Ok(NativeReturn::Return(0))
 }

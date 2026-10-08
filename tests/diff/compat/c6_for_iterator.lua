@@ -1,0 +1,8 @@
+print(pcall(function() for k in next, 1 do end end))
+print(pcall(function() local f = next; for k in f, 1 do end end))
+print(pcall(function() for k in pairs(1) do end end))
+print(pcall(function() for k,v in string.gmatch, 1 do end end))
+print(pcall(function() for k in next, {}, 5 do end end))
+local t = setmetatable({}, {__call = function() error("x") end})
+print(pcall(function() for k in t do end end))
+print(pcall(next, {}, 5)) print(pcall(function() return next({}, 5) end))
