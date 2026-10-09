@@ -119,12 +119,6 @@ impl Vm {
         match self.rt.stack.regs[func] {
             Value::Closure(c) => {
                 self.push_lua_frame(c, func, nargs, want)?;
-                // Entered from outside the dispatch loop (a native, a
-                // metamethod, a hook): the frame's window is the native's to
-                // clear when it returns.
-                let s = &mut self.rt.stack;
-                let end = s.frames.last().expect("frame").base as usize + WINDOW;
-                s.dirty_to = s.dirty_to.max(end);
                 if chain > 0 {
                     self.rt.stack.frames.last_mut().expect("frame").extra = chain as u8;
                 }
@@ -287,6 +281,9 @@ fn enter_lua_frame(
     {
         return Err(x);
     }
+    // The frame writes only its own registers, so the next native to
+    // return clears at most up to here.
+    rt.stack.dirty_to = rt.stack.dirty_to.max(end);
     let regs = &mut rt.stack.regs;
     if regs.len() < base + WINDOW {
         extend_nil(regs, base + WINDOW);
@@ -1213,6 +1210,73 @@ impl Vm {
                                 w[f] = v;
                             }
                             self.rt.top = fa + want.min(1) as usize;
+                        }
+                        // Any other native, called in place: no frame, and a
+                        // plain return goes straight back to this loop.
+                        Value::Native(id) if !HOOKED => {
+                            self.rt.top = fa + 1 + n;
+                            let nf = self.rt.natives[id.0 as usize].f;
+                            let mut ctx = NativeCtx {
+                                heap: &mut self.heap,
+                                rt: &mut self.rt,
+                                base: fa + 1,
+                                nargs: n,
+                                id,
+                                upvals: None,
+                            };
+                            match nf(&mut ctx) {
+                                // Unless the native set a hook, which its
+                                // return must already report.
+                                Ok(NativeReturn::Return(k)) if !self.rt.stack.hook.armed() => {
+                                    let top = self.rt.top;
+                                    let src = top - k;
+                                    let s = &mut self.rt.stack;
+                                    let end = if want == 1 && k >= 1 {
+                                        s.regs[fa] = s.regs[src];
+                                        fa + 1
+                                    } else if want == MULTI {
+                                        s.regs.copy_within(src..top, fa);
+                                        fa + k
+                                    } else {
+                                        // The caller's window covers its
+                                        // results.
+                                        let want = want as usize;
+                                        let m = k.min(want);
+                                        s.regs.copy_within(src..src + m, fa);
+                                        s.regs[fa + m..fa + want].fill(Value::Nil);
+                                        fa + want
+                                    };
+                                    self.rt.top = end;
+                                    // Clear the arguments and pushes, as
+                                    // `native_returned` does.
+                                    let stop = s.dirty_to.max(top).min(s.regs.len());
+                                    if end < stop {
+                                        s.regs[end..stop].fill(Value::Nil);
+                                    }
+                                    s.dirty_to = end;
+                                    w = window!();
+                                    safepoint!();
+                                }
+                                Ok(r) => {
+                                    if let NativeReturn::Return(k) = r
+                                        && self.rt.stack.hook.wants(crate::hook::RETURN)
+                                        && let Err(e) = self.native_return_hook(fa, id, k)
+                                    {
+                                        throw!(Exc::Lua(e));
+                                    }
+                                    match self.native_returned(r, None, fa, want, id) {
+                                        Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
+                                            if self.rt.stack.hook.armed() {
+                                                return Ok(Ran::Switch);
+                                            }
+                                            w = window!();
+                                            safepoint!();
+                                        }
+                                        other => flow!(other),
+                                    }
+                                }
+                                Err(e) => throw!(self.native_raised(id, fa, e)),
+                            }
                         }
                         _ => match self.call_value(fa, n, want) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
