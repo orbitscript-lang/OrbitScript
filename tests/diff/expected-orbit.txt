@@ -30,6 +30,7 @@ many_constants.lua
 meta_index.lua
 meta_ops.lua
 metatables.lua
+multi_assign.lua
 os.lua
 require.lua
 stdlib_base.lua
