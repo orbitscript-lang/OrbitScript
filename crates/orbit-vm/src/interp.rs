@@ -143,7 +143,14 @@ impl Vm {
                     id,
                     upvals: None,
                 };
-                let r = match f(&mut ctx) {
+                let r = f(&mut ctx);
+                // `coroutine.yield`: switch at once, from the count alone (a
+                // copy of the whole result the native just stored field by
+                // field stalls on store forwarding).
+                if let Ok(NativeReturn::Yield { nvals }) = r {
+                    return self.yield_(nvals, None, func, want, id);
+                }
+                let r = match r {
                     Ok(r) => r,
                     Err(e) => return Err(self.native_raised(id, func, e)),
                 };
@@ -186,7 +193,7 @@ impl Vm {
     /// The shape of Lua closure `c`, from the one-entry callee cache.
     #[inline(always)]
     fn callee_shape(&mut self, c: Gc<Closure>) -> Shape {
-        match self.rt.stack.callee {
+        match self.rt.callee {
             // The cache roots its closure, so an equal handle is the same
             // closure.
             Some((cached, shape)) if cached == c => shape,
@@ -198,7 +205,7 @@ impl Vm {
     #[inline(never)]
     fn callee_miss(&mut self, c: Gc<Closure>) -> Shape {
         let shape = Shape::of(&self.heap.get(c).code);
-        self.rt.stack.callee = Some((c, shape));
+        self.rt.callee = Some((c, shape));
         shape
     }
 }
@@ -565,7 +572,7 @@ impl Vm {
         loop {
             errerr |= std::mem::take(&mut self.rt.errerr);
             let handled = std::mem::take(&mut self.rt.handled);
-            let closing = crate::coro::closing(&self.heap, self.rt.current);
+            let closing = crate::coro::closing(&self.rt);
             let frames = &self.rt.stack.frames;
             let idx = frames
                 .iter()
@@ -628,7 +635,7 @@ impl Vm {
                 _ => f.func,
             };
             if closes
-                && let Some(&t) = self.rt.stack.tbc.last()
+                && let Some(&t) = self.rt.stack.aux.tbc.last()
                 && t >= limit
             {
                 if matches!(f.kind, FrameKind::Boundary | FrameKind::Hook)
@@ -685,7 +692,7 @@ impl Vm {
     /// the variable's `__close` handler under an `Unwind` meta frame, which raises `err` again when
     /// the handler returns.
     fn start_close(&mut self, err: Value, catcher: usize, closing: bool) -> Result<Flow, Exc> {
-        let t = self.rt.stack.tbc.pop().expect("a variable to close") as usize;
+        let t = self.rt.stack.aux.tbc.pop().expect("a variable to close") as usize;
         // As in the reference, the handler runs once the error has left the
         // frames above the one that catches it: it is called from there.
         let s = &mut self.rt.stack;
@@ -885,7 +892,7 @@ impl Vm {
                 ($closure:expr, $code_id:expr) => {
                     // A recursive call or its return keeps the same code.
                     if $code_id != Rc::as_ptr(&cur) as usize {
-                        match &mut self.rt.stack.prev_code {
+                        match &mut self.rt.prev_code {
                             // `prev_code` keeps its code alive, so an equal
                             // address is the same code.
                             Some(p) if Rc::as_ptr(p) as usize == $code_id => {
@@ -893,7 +900,7 @@ impl Vm {
                             }
                             _ => {
                                 let new = self.heap.get($closure).code.clone();
-                                self.rt.stack.prev_code = Some(std::mem::replace(&mut cur, new));
+                                self.rt.prev_code = Some(std::mem::replace(&mut cur, new));
                             }
                         }
                         code = &cur.code[..];
@@ -1829,6 +1836,7 @@ impl Vm {
                         if self
                             .rt
                             .stack
+                            .aux
                             .tbc
                             .last()
                             .is_some_and(|&t| t as usize >= base + from as usize)

@@ -185,12 +185,23 @@ pub(crate) struct Frame {
 /// overflow", at the depths the reference gives it).
 pub(crate) const MAX_CCALLS: usize = 200;
 
-/// The Lua stack: registers, frame cell slots and frames.
+/// The Lua stack: registers, frame cell slots and frames, which the
+/// dispatch loop uses all the time, and the rest of a thread's execution
+/// state in a box. Each thread owns one; a coroutine switch exchanges the
+/// running one with a parked one ([`Stack::swap`]), so it is kept small.
 #[derive(Debug, Default)]
 pub(crate) struct Stack {
     pub regs: Vec<Value>,
     pub cells: Vec<Gc<Cell>>,
     pub frames: Vec<Frame>,
+    pub aux: Box<StackAux>,
+    /// The stack's debug hook (`debug.sethook`).
+    pub hook: hook::Hook,
+}
+
+/// The parts of a [`Stack`] the dispatch loop seldom touches.
+#[derive(Debug, Default)]
+pub(crate) struct StackAux {
     /// The registers (absolute) of the open to-be-closed variables, oldest
     /// first.
     pub tbc: Vec<u32>,
@@ -200,34 +211,77 @@ pub(crate) struct Stack {
     /// lazily: one that now holds a Lua frame is skipped, and any other
     /// frame there has the right `cdepth` anyway.
     pub depth_at: Vec<u32>,
-    /// The code the dispatch loop ran before its last switch. A call and
-    /// its return usually go back and forth between two functions, so a
-    /// switch to this code swaps it in instead of looking the closure up.
-    /// Kept here rather than in a local, where it would cost the loop a
-    /// machine register.
-    pub prev_code: Option<std::rc::Rc<orbit_core::ProtoCode>>,
-    /// The last Lua function called from a frame other than itself, with
-    /// what entering it needs, so calling it again skips looking it up.
-    /// Weak, as nothing a script can see may keep a function alive: it is
-    /// dropped when its closure dies (before the handle can be reused) and
-    /// when the stack is parked.
-    pub callee: Option<(Gc<Closure>, crate::interp::Shape)>,
-    /// The stack's debug hook (`debug.sethook`).
-    pub hook: hook::Hook,
     /// The index of the boundary frame below a running finalizer, which
     /// the debug library names `__gc`.
     pub(crate) finalizer_at: Option<u32>,
+    /// Whether `coroutine.close` is running this coroutine's `__close`
+    /// handlers: errors then unwind straight to the base frame, and
+    /// nothing may yield.
+    pub(crate) closing: coro::Closing,
 }
 
 impl Stack {
+    /// Exchange everything but the hooks with `other`, field by field
+    /// (swapping the whole struct is an out-of-line copy loop).
+    #[inline(always)]
+    fn swap_parts(&mut self, other: &mut Stack) {
+        let Stack {
+            regs,
+            cells,
+            frames,
+            aux,
+            hook: _,
+        } = self;
+        std::mem::swap(regs, &mut other.regs);
+        std::mem::swap(cells, &mut other.cells);
+        std::mem::swap(frames, &mut other.frames);
+        std::mem::swap(aux, &mut other.aux);
+    }
+
+    /// Exchange two stacks.
+    pub(crate) fn swap(&mut self, other: &mut Stack) {
+        self.swap_parts(other);
+        std::mem::swap(&mut self.hook, &mut other.hook);
+    }
+
+    /// Park this stack (the running one) in `slot`, the running thread's
+    /// own, which holds an empty stack: that comes back in its place. The
+    /// hook is copied, not swapped; [`Stack::unpark`] overwrites this one.
+    #[inline(always)]
+    pub(crate) fn park(&mut self, slot: &mut Stack) {
+        self.swap_parts(slot);
+        slot.hook = self.hook;
+    }
+
+    /// Run the stack parked in `slot` in place of this one, which is empty
+    /// (just parked) and goes to the slot.
+    #[inline(always)]
+    pub(crate) fn unpark(&mut self, slot: &mut Stack) {
+        self.swap_parts(slot);
+        self.hook = slot.hook;
+        // The slot's hook is now a stale copy, which mustn't keep the hook
+        // function alive.
+        slot.hook.func = Value::Nil;
+    }
+
+    /// Free everything the stack holds, keeping its box, and give it
+    /// `hook`.
+    pub(crate) fn clear(&mut self, hook: hook::Hook) {
+        self.regs = Vec::new();
+        self.cells = Vec::new();
+        self.frames = Vec::new();
+        *self.aux = StackAux::default();
+        self.hook = hook;
+    }
+
     /// How many calls back into the interpreter are open: the
     /// [`Frame::cdepth`] of the newest frame that isn't a Lua frame.
     pub(crate) fn cdepth(&mut self) -> u8 {
-        while let Some(&i) = self.depth_at.last() {
+        while let Some(&i) = self.aux.depth_at.last() {
             match self.frames.get(i as usize) {
                 Some(f) if !matches!(f.kind, FrameKind::Lua { .. }) => return f.cdepth,
                 _ => {
-                    self.depth_at.pop();
+                    self.aux.depth_at.pop();
                 }
             }
         }
@@ -238,7 +292,7 @@ impl Stack {
     /// call back into the interpreter.
     pub(crate) fn deeper(&mut self) -> u8 {
         let d = self.cdepth().saturating_add(1);
-        self.depth_at.push(self.frames.len() as u32);
+        self.aux.depth_at.push(self.frames.len() as u32);
         d
     }
 
@@ -246,7 +300,7 @@ impl Stack {
     /// isn't a Lua frame and doesn't go deeper.
     pub(crate) fn same_depth(&mut self) -> u8 {
         let d = self.cdepth();
-        self.depth_at.push(self.frames.len() as u32);
+        self.aux.depth_at.push(self.frames.len() as u32);
         d
     }
 
@@ -311,8 +365,8 @@ impl Stack {
         self.regs.capacity() * std::mem::size_of::<Value>()
             + self.cells.capacity() * std::mem::size_of::<Gc<Cell>>()
             + self.frames.capacity() * std::mem::size_of::<Frame>()
-            + self.tbc.capacity() * std::mem::size_of::<u32>()
-            + self.depth_at.capacity() * std::mem::size_of::<u32>()
+            + self.aux.tbc.capacity() * std::mem::size_of::<u32>()
+            + self.aux.depth_at.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -341,6 +395,19 @@ pub struct Runtime {
     pub(crate) natives: Vec<Native>,
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId>,
     pub(crate) stack: Stack,
+    /// The code the dispatch loop ran before its last switch. A call and
+    /// its return usually go back and forth between two functions, so a
+    /// switch to this code swaps it in instead of looking the closure up.
+    /// Kept here rather than in a local, where it would cost the loop a
+    /// machine register. A cache, not part of any thread's stack, so it
+    /// stays across coroutine switches.
+    pub(crate) prev_code: Option<std::rc::Rc<orbit_core::ProtoCode>>,
+    /// The last Lua function called from a frame other than itself, with
+    /// what entering it needs, so calling it again skips looking it up.
+    /// Weak, as nothing a script can see may keep a function alive: it is
+    /// dropped when its closure dies, before the handle can be reused. Like
+    /// `prev_code`, it belongs to no thread and stays across switches.
+    pub(crate) callee: Option<(Gc<Closure>, crate::interp::Shape)>,
     /// Placeholder for cell slots not yet initialised by `CellNew`.
     pub(crate) dead_cell: Gc<Cell>,
     /// Extra roots: values the embedder or loader holds.
@@ -477,8 +544,8 @@ impl Roots<LuaSpace> for Runtime {
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
         self.strings.clear_dead(live);
         self.cooling.retain(|&(t, _)| live.is_live(t));
-        if self.stack.callee.is_some_and(|(c, _)| !live.is_live(c)) {
-            self.stack.callee = None;
+        if self.callee.is_some_and(|(c, _)| !live.is_live(c)) {
+            self.callee = None;
         }
         self.gc_cycles = self.gc_cycles.wrapping_add(1);
     }
@@ -537,6 +604,8 @@ impl Vm {
                 natives: Vec::new(),
                 native_ids: Default::default(),
                 stack: Stack::default(),
+                prev_code: None,
+                callee: None,
                 dead_cell,
                 pinned: Vec::new(),
                 top: 0,
