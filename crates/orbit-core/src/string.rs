@@ -14,29 +14,79 @@ use crate::{LuaHeap, LuaSpace};
 /// the same handle.
 pub const MAX_SHORT: usize = 40;
 
+/// Strings up to this many bytes are stored inside the heap slot, with no
+/// separate allocation. The size keeps [`Bytes`] at 24 bytes.
+pub const MAX_INLINE: usize = 22;
+
 /// A string object. Short strings are hashed when interned; long strings the
 /// first time they are used as a table key.
 #[derive(Debug)]
 pub struct LuaStr {
     hash: StdCell<u32>,
     short: bool,
-    bytes: Box<[u8]>,
+    bytes: Bytes,
+}
+
+/// A string's bytes: inline when they fit, else in their own allocation.
+#[derive(Debug)]
+enum Bytes {
+    Inline { len: u8, buf: [u8; MAX_INLINE] },
+    Heap(Box<[u8]>),
+}
+
+impl Bytes {
+    fn new(b: &[u8]) -> Bytes {
+        if b.len() <= MAX_INLINE {
+            let mut buf = [0; MAX_INLINE];
+            buf[..b.len()].copy_from_slice(b);
+            Bytes::Inline {
+                len: b.len() as u8,
+                buf,
+            }
+        } else {
+            Bytes::Heap(b.into())
+        }
+    }
+
+    fn from_vec(b: Vec<u8>) -> Bytes {
+        if b.len() <= MAX_INLINE {
+            Bytes::new(&b)
+        } else {
+            Bytes::Heap(b.into_boxed_slice())
+        }
+    }
+
+    #[inline(always)]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Bytes::Inline { len, buf } => &buf[..*len as usize],
+            Bytes::Heap(b) => b,
+        }
+    }
+
+    /// Bytes owned outside the heap slot.
+    fn outside(&self) -> usize {
+        match self {
+            Bytes::Inline { .. } => 0,
+            Bytes::Heap(b) => b.len(),
+        }
+    }
 }
 
 impl LuaStr {
     #[inline(always)]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_slice()
     }
 
     #[inline(always)]
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        self.as_bytes().len()
     }
 
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.as_bytes().is_empty()
     }
 
     /// Whether the string is interned (at most [`MAX_SHORT`] bytes).
@@ -52,13 +102,13 @@ impl LuaStr {
         if h != 0 {
             return h;
         }
-        let h = hash_bytes(&self.bytes);
+        let h = hash_bytes(self.as_bytes());
         self.hash.set(h);
         h
     }
 
     pub fn as_orbit_str(&self) -> OrbitStr<'_> {
-        OrbitStr(&self.bytes)
+        OrbitStr(self.as_bytes())
     }
 }
 
@@ -68,7 +118,7 @@ impl Trace<LuaSpace> for LuaStr {
     fn trace(&self, _: &mut Marker<'_, LuaSpace>) {}
 
     fn extra_bytes(&self) -> usize {
-        self.bytes.len()
+        self.bytes.outside()
     }
 }
 
@@ -151,7 +201,7 @@ impl Interner {
             heap.alloc(LuaStr {
                 hash: StdCell::new(0),
                 short: false,
-                bytes: bytes.into(),
+                bytes: Bytes::new(bytes),
             })
         }
     }
@@ -164,7 +214,7 @@ impl Interner {
             heap.alloc(LuaStr {
                 hash: StdCell::new(0),
                 short: false,
-                bytes: bytes.into_boxed_slice(),
+                bytes: Bytes::from_vec(bytes),
             })
         }
     }
@@ -187,7 +237,7 @@ impl Interner {
         let gc = heap.alloc(LuaStr {
             hash: StdCell::new(hash),
             short: true,
-            bytes: bytes.into(),
+            bytes: Bytes::new(bytes),
         });
         self.slots[i] = Some((hash, gc));
         self.len += 1;
