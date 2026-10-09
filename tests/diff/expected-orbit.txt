@@ -42,6 +42,7 @@ stdlib_string.lua
 stdlib_table.lua
 stdlib_utf8.lua
 strings.lua
+table_rehash.lua
 tables.lua
 uncaught.lua
 vm_edges.lua

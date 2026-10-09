@@ -7,6 +7,8 @@
 //! [`set`] writes through [`Heap::update`](orbit_gc::Heap::update), which
 //! runs the write barrier.
 
+use std::cell::Cell;
+
 use orbit_gc::{Gc, Liveness, Marker, Trace, WeakMode};
 
 use crate::string::hash_word;
@@ -76,15 +78,12 @@ impl Key {
     /// hash it.
     #[inline]
     pub fn new(heap: &LuaHeap, v: Value) -> Result<Key, KeyError> {
-        let value = match v {
-            Value::Nil => return Err(KeyError::Nil),
-            Value::Float(f) => match number::float_to_int(f) {
-                Some(i) => Value::Int(i),
-                None if f.is_nan() => return Err(KeyError::NaN),
-                None => v,
-            },
-            _ => v,
-        };
+        Ok(Key::hashed(heap, normalise(v)?))
+    }
+
+    /// The key for an already normalised value.
+    #[inline]
+    fn hashed(heap: &LuaHeap, value: Value) -> Key {
         let hash = match value {
             Value::Str(s) => heap.get(s).hash(),
             other => {
@@ -92,7 +91,7 @@ impl Key {
                 hash_word(payload.bits() ^ ((tag as u64) << 56))
             }
         };
-        Ok(Key { value, hash })
+        Key { value, hash }
     }
 
     /// The key for a string, without the float normalisation step.
@@ -123,6 +122,20 @@ impl Key {
 
     pub fn value(&self) -> Value {
         self.value
+    }
+}
+
+/// `v` as a key: a float with an integer value becomes an integer.
+#[inline]
+fn normalise(v: Value) -> Result<Value, KeyError> {
+    match v {
+        Value::Nil => Err(KeyError::Nil),
+        Value::Float(f) => match number::float_to_int(f) {
+            Some(i) => Ok(Value::Int(i)),
+            None if f.is_nan() => Err(KeyError::NaN),
+            None => Ok(v),
+        },
+        _ => Ok(v),
     }
 }
 
@@ -169,6 +182,14 @@ impl Entry {
         self.key_tag == Tag::Nil
     }
 
+    /// Whether the key is exactly `key` (a normalised key; the same object
+    /// for a string), without hashing or comparing string contents. A
+    /// tombstone holds no key, though its key slot reads `false`.
+    #[inline(always)]
+    fn holds(&self, key: Value) -> bool {
+        self.hash != 0 && (self.key_tag, self.key_payload) == key.pack()
+    }
+
     /// What a weak table leaves where an entry's key was collected: a dead
     /// entry whose key is `false` with hash 0. No real key hashes to 0, so
     /// no lookup matches it; probes pass through it and stores reuse it,
@@ -192,7 +213,8 @@ impl Entry {
 }
 
 /// The array part in one allocation (ADR-1): `cap` payload words followed
-/// by the tag bytes packed eight to a word, 9 bytes per slot. The words are
+/// by the tag bytes packed eight to a word, 9 bytes per slot. Slots below
+/// `len` may hold nil (holes); slots from `len` up are never read. The words are
 /// plain `u64`s because one allocation can hold only one element type; they
 /// never leave this type, whose API takes and returns `Value`s, and tag
 /// bytes are only ever written from a [`Tag`].
@@ -300,8 +322,31 @@ impl ArrayPart {
         Ok(())
     }
 
+    /// How many of slots `lo..hi` (all below `len`) are non-nil.
+    fn count_present(&self, lo: usize, hi: usize) -> usize {
+        let tags = self.words[self.cap as usize..].as_flattened();
+        tags[lo..hi]
+            .iter()
+            .filter(|&&t| t != Tag::Nil as u8)
+            .count()
+    }
+
+    /// Lengthen to `len` slots (within the capacity), the new ones nil.
+    fn extend_nil(&mut self, len: usize) {
+        debug_assert!(len <= self.cap as usize);
+        for i in self.len()..len {
+            self.set(i, Value::Nil);
+        }
+        self.len = len as u32;
+    }
+
     fn bytes(&self) -> usize {
         self.words.len() * 8
+    }
+
+    /// The bytes an array part of capacity `cap` takes.
+    fn bytes_for(cap: usize) -> usize {
+        (cap + cap.div_ceil(8)) * 8
     }
 }
 
@@ -329,6 +374,10 @@ pub struct Table {
     entries: Box<[Entry]>,
     /// Hash slots in use, dead entries included.
     used: u32,
+    /// The hash slot of the key [`Table::next`] last returned, so the next
+    /// call usually resumes there without hashing and probing for the key.
+    /// Only a hint: it is checked against the key it is given.
+    next_hint: Cell<u32>,
     /// The metatable. A string `__mode` in it makes the table weak.
     pub meta: Option<Gc<Table>>,
 }
@@ -710,15 +759,22 @@ impl Table {
         }
     }
 
-    /// About how many bytes a [`Table::write`] to `slot` adds, for checking
-    /// a heap limit first: a full array part doubles, a full hash part is
-    /// rebuilt at about twice its size, other stores add nothing.
-    pub fn growth(&self, slot: Slot) -> usize {
+    /// About how many bytes a [`Table::write`] of `key` to `slot` adds, for
+    /// checking a heap limit first: a full array part doubles, a rebuild
+    /// allocates its new hash part and any array growth (the old hash part
+    /// is freed only after the new one exists), other stores add nothing.
+    pub fn growth(&self, slot: Slot, key: &Key) -> usize {
         match slot {
             Slot::Push if self.array.len == self.array.cap => {
-                (self.array.grown(self.array.len() + 1) - self.array.cap as usize) * 9
+                ArrayPart::bytes_for(self.array.grown(self.array.len() + 1)) - self.array.bytes()
             }
-            Slot::Grow => (self.entries.len().max(1) * size_of::<Entry>()) * 2,
+            Slot::Grow => {
+                let plan = self.plan(key);
+                let array = plan
+                    .array_cap
+                    .map_or(0, |cap| ArrayPart::bytes_for(cap) - self.array.bytes());
+                plan.hash_cap * size_of::<Entry>() + array
+            }
             _ => 0,
         }
     }
@@ -747,11 +803,16 @@ impl Table {
                 *e = Entry::new(key.value, key.hash, v);
             }
             Slot::Grow => {
-                self.rebuild(1)?;
-                if let Value::Int(i) = key.value
-                    && i as u64 == self.array.len() as u64 + 1
-                {
-                    return self.write(Slot::Push, key, v);
+                self.rebuild(key)?;
+                if let Value::Int(i) = key.value {
+                    let idx = (i as u64).wrapping_sub(1);
+                    if idx < self.array.len() as u64 {
+                        self.array.set(idx as usize, v);
+                        return Ok(());
+                    }
+                    if idx == self.array.len() as u64 {
+                        return self.write(Slot::Push, key, v);
+                    }
                 }
                 let slot = match self.probe(key, |_, _| false) {
                     Err(Some(slot)) => slot,
@@ -782,48 +843,120 @@ impl Table {
         }
     }
 
-    /// Rebuild the hash part with room for `extra` more keys, dropping dead
-    /// entries and moving integer keys that extend the array into it. Every
-    /// allocation happens before anything moves, so on failure the table is
-    /// unchanged.
-    fn rebuild(&mut self, extra: usize) -> Result<(), NoMemory> {
-        let n = self.array.len() as i64;
-        let int_after_array = |e: &Entry| match e.key() {
-            Value::Int(i) if i > n && !e.value_is_nil() => Some(i),
-            _ => None,
+    /// Work out a rebuild that makes room for `key` (absent from the table)
+    /// without changing anything.
+    ///
+    /// The array part takes the largest power-of-two size `n` for which
+    /// more than half of the keys `1..=n` would be present, counting the
+    /// array part, the integer keys in the hash part and `key`. Keys are
+    /// counted per power-of-two range, so nothing is sorted. The array part
+    /// never shrinks; when it grows, its length becomes the largest key
+    /// present up to `n`, and the hash part's integer keys up to it move
+    /// into it, leaving nil holes where keys are missing.
+    fn plan(&self, key: &Key) -> Plan {
+        let old = self.array.len();
+        let candidate = |k: Value| matches!(k, Value::Int(k) if array_bucket(k).is_some());
+        let mut live = 0;
+        let mut any = candidate(key.value);
+        for e in self.entries.iter().filter(|e| !e.value_is_nil()) {
+            live += 1;
+            any |= e.key_tag == Tag::Int && candidate(e.key());
+        }
+        let unchanged = Plan {
+            array_len: old,
+            array_cap: None,
+            hash_cap: hash_capacity(live + 1),
         };
-        let live = self.entries.iter().filter(|e| !e.value_is_nil()).count();
-        // Integer keys that continue the array part move into it.
-        let mut ints: Vec<(i64, usize)> = Vec::new();
-        ints.try_reserve_exact(self.entries.iter().filter_map(int_after_array).count())?;
-        ints.extend(
-            self.entries
-                .iter()
-                .enumerate()
-                .filter_map(|(j, e)| int_after_array(e).map(|i| (i, j))),
-        );
-        ints.sort_unstable();
-        let run = ints
-            .iter()
-            .zip(n + 1..)
-            .take_while(|&(&(i, _), want)| i == want)
-            .count();
-        let mut entries = new_entries(hash_capacity(live - run + extra))?;
-        let len = self.array.len() + run;
-        if len > self.array.cap as usize {
-            self.array.realloc(self.array.grown(len))?;
+        if !any {
+            // Nothing could lengthen the array part.
+            return unchanged;
+        }
+        // ints[b]: live integer keys of the hash part in bucket b (see
+        // `array_bucket`), all above the array part; top[b]: the largest.
+        let mut ints = [0usize; ARRAY_LOG_MAX + 1];
+        let mut top = [0usize; ARRAY_LOG_MAX + 1];
+        let count = |k: i64, ints: &mut [usize], top: &mut [usize]| {
+            if let Some(b) = array_bucket(k) {
+                ints[b] += 1;
+                top[b] = top[b].max(k as usize);
+            }
+        };
+        for e in self.entries.iter().filter(|e| !e.value_is_nil()) {
+            if let Value::Int(k) = e.key() {
+                debug_assert!(k < 1 || k as u64 > old as u64, "array key in hash part");
+                count(k, &mut ints, &mut top);
+            }
+        }
+        let mut nums = ints;
+        if let Value::Int(k) = key.value {
+            debug_assert!(k < 1 || k as u64 > old as u64, "array key is never new");
+            count(k, &mut nums, &mut top);
+        }
+        let mut total: usize = nums.iter().sum();
+        for (b, n) in nums.iter_mut().enumerate() {
+            let lo = if b == 0 { 0 } else { 1 << (b - 1) };
+            if lo >= old {
+                break;
+            }
+            let present = self.array.count_present(lo, old.min(1 << b));
+            *n += present;
+            total += present;
+        }
+        // The largest power of two that would be more than half full.
+        let mut best = None;
+        let mut sum = 0;
+        for (b, &n) in nums.iter().enumerate() {
+            let size = 1usize << b;
+            if size / 2 >= total {
+                break;
+            }
+            sum += n;
+            if sum > size / 2 {
+                best = Some(b);
+            }
+        }
+        let Some(best) = best else {
+            return unchanged;
+        };
+        let len = top[..=best].iter().copied().fold(old, usize::max);
+        if len == old {
+            return unchanged;
+        }
+        let moved: usize = ints[..=best].iter().sum();
+        let key_moves =
+            matches!(key.value, Value::Int(k) if k > old as i64 && k as u64 <= len as u64);
+        let cap = self.array.cap as usize;
+        Plan {
+            array_len: len,
+            array_cap: (len > cap).then_some((1usize << best).max(len)),
+            hash_cap: hash_capacity(live - moved + usize::from(!key_moves)),
+        }
+    }
+
+    /// Rebuild the hash part with room for `key` (absent from the table),
+    /// dropping dead entries and lengthening the array part as
+    /// [`Table::plan`] decides. Every allocation happens before anything
+    /// moves, so on failure the table is unchanged.
+    fn rebuild(&mut self, key: &Key) -> Result<(), NoMemory> {
+        let plan = self.plan(key);
+        let mut entries = new_entries(plan.hash_cap)?;
+        if let Some(cap) = plan.array_cap {
+            self.array.realloc(cap)?;
         }
         // Commit.
-        for &(_, j) in &ints[..run] {
-            let e = &mut self.entries[j];
-            self.array.len += 1;
-            self.array.set(self.array.len() - 1, e.value());
-            e.set_value(Value::Nil);
-        }
+        let (old, len) = (self.array.len() as i64, plan.array_len as i64);
+        self.array.extend_nil(plan.array_len);
         std::mem::swap(&mut self.entries, &mut entries);
         self.used = 0;
         let mask = self.entries.len() - 1;
         for e in entries.iter().filter(|e| !e.value_is_nil()) {
+            if let Value::Int(k) = e.key()
+                && k > old
+                && k <= len
+            {
+                self.array.set(k as usize - 1, e.value());
+                continue;
+            }
             let mut i = e.hash as usize & mask;
             while !self.entries[i].is_empty() {
                 i = (i + 1) & mask;
@@ -913,13 +1046,10 @@ impl Table {
         let mut pos = match k {
             Value::Nil => 0,
             _ => {
-                let key = Key::new(heap, k).map_err(|_| InvalidKey)?;
-                match key.value {
+                let key = normalise(k).map_err(|_| InvalidKey)?;
+                match key {
                     Value::Int(i) if i >= 1 && (i as u64) <= n as u64 => i as usize,
-                    _ => match self.probe(&key, |a, b| str_eq(heap, a, b)) {
-                        Ok(slot) => n + slot + 1,
-                        Err(_) => return Err(InvalidKey),
-                    },
+                    _ => n + self.hash_slot_for_next(heap, key)? + 1,
                 }
             }
         };
@@ -929,13 +1059,55 @@ impl Table {
             }
             pos += 1;
         }
-        for e in self.entries.iter().skip(pos - n) {
-            if !e.is_empty() && !e.value_is_nil() {
+        let from = pos - n;
+        for (j, e) in self.entries.iter().enumerate().skip(from) {
+            if !e.value_is_nil() {
+                self.next_hint.set(j as u32);
                 return Ok(Some((e.key(), e.value())));
             }
         }
         Ok(None)
     }
+
+    /// The hash slot holding `key` (normalised), for [`Table::next`]: the
+    /// slot `next` last returned when it holds exactly that key, else a
+    /// probe for it.
+    #[inline]
+    fn hash_slot_for_next(&self, heap: &LuaHeap, key: Value) -> Result<usize, InvalidKey> {
+        let hint = self.next_hint.get() as usize;
+        if let Some(e) = self.entries.get(hint)
+            && e.holds(key)
+        {
+            return Ok(hint);
+        }
+        self.probe(&Key::hashed(heap, key), |a, b| str_eq(heap, a, b))
+            .map_err(|_| InvalidKey)
+    }
+}
+
+/// Array parts sized by density hold at most `2^ARRAY_LOG_MAX` slots.
+const ARRAY_LOG_MAX: usize = 30;
+
+/// Which power-of-two range `(2^(b-1), 2^b]` (for `b` = 0, just 1) integer
+/// key `k` falls in, if it could be in an array part.
+#[inline]
+fn array_bucket(k: i64) -> Option<usize> {
+    if !(1..=1 << ARRAY_LOG_MAX).contains(&k) {
+        return None;
+    }
+    Some((u64::BITS - (k as u64 - 1).leading_zeros()) as usize)
+}
+
+/// What a rebuild allocates and how it resizes the array part, decided
+/// before anything moves (see [`Table::plan`]).
+#[derive(Debug, Clone, Copy)]
+struct Plan {
+    /// The array part's new length, at least its current one.
+    array_len: usize,
+    /// The array part's new capacity, if it must grow.
+    array_cap: Option<usize>,
+    /// The new hash part's slot count.
+    hash_cap: usize,
 }
 
 /// Keys a hash part of `cap` slots may hold, dead entries included. Small
@@ -1054,7 +1226,7 @@ pub fn set_key(
     // owner collects and retries (the VM does).
     if matches!(slot, Slot::Push | Slot::Grow)
         && heap.limit().is_some()
-        && heap.would_exceed(heap.get(t).growth(slot))
+        && heap.would_exceed(heap.get(t).growth(slot, key))
     {
         return Err(NoMemory);
     }
@@ -1250,6 +1422,122 @@ mod tests {
         }
         set(&mut heap, t, Value::Int(100), Value::Nil).unwrap();
         assert_eq!(heap.get(t).border(), 99);
+    }
+
+    fn is_border(t: &Table, n: i64) -> bool {
+        (n == 0 || !t.get_int(n).is_nil()) && t.get_int(n + 1).is_nil()
+    }
+
+    #[test]
+    fn permuted_integer_keys_move_to_the_array_by_density() {
+        let (mut heap, _, t) = setup();
+        let n = 5000;
+        for i in 1..=n {
+            let k = (i * 7919) % n;
+            set(&mut heap, t, Value::Int(k), Value::Int(i)).unwrap();
+            let tab = heap.get(t);
+            // The array part is always more than half full.
+            if tab.array_len() > 0 {
+                let present = tab.array.count_present(0, tab.array_len());
+                assert!(present * 2 > tab.array_len());
+            }
+        }
+        let tab = heap.get(t);
+        assert_eq!(tab.array_len(), n as usize - 1);
+        assert_eq!(tab.used, 1, "only key 0 stays in the hash part");
+        for i in 1..=n {
+            assert!(matches!(tab.get_int((i * 7919) % n), Value::Int(j) if j == i));
+        }
+        assert_eq!(tab.border(), n - 1);
+        // Holes: every other key deleted.
+        for k in (1..n).step_by(2) {
+            set(&mut heap, t, Value::Int(k), Value::Nil).unwrap();
+        }
+        let tab = heap.get(t);
+        assert!(is_border(tab, tab.border()));
+        let mut k = Value::Nil;
+        let mut count = 0;
+        while let Some((key, _)) = tab.next(&heap, k).unwrap() {
+            assert!(matches!(key, Value::Int(i) if i % 2 == 0));
+            count += 1;
+            k = key;
+        }
+        assert_eq!(count, n / 2);
+    }
+
+    #[test]
+    fn sparse_integer_keys_stay_in_the_hash_part() {
+        let (mut heap, _, t) = setup();
+        for i in 1..=100 {
+            set(&mut heap, t, Value::Int(i * 1000), Value::Int(i)).unwrap();
+        }
+        set(&mut heap, t, Value::Int(1), Value::Int(1)).unwrap();
+        set(&mut heap, t, Value::Int(3), Value::Int(3)).unwrap();
+        let tab = heap.get(t);
+        assert!(tab.array_len() <= 3);
+        assert!(tab.array.cap <= 4);
+        assert!(is_border(tab, tab.border()));
+        assert!(matches!(tab.get_int(3), Value::Int(3)));
+        assert!(tab.get_int(2).is_nil());
+    }
+
+    #[test]
+    fn growth_covers_what_a_rebuild_allocates() {
+        let (mut heap, mut s, t) = setup();
+        for i in 0..3000i64 {
+            let k = match i % 3 {
+                0 => Value::Int((i * 7919) % 3000 + 1),
+                1 => Value::Int(-i),
+                _ => Value::Str(s.new_str(&mut heap, format!("g{i}").as_bytes())),
+            };
+            let key = Key::new(&heap, k).unwrap();
+            let tab = heap.get(t);
+            let slot = tab.find_slot(&heap, &key, false);
+            let estimate = tab.growth(slot, &key);
+            let array_before = tab.array.bytes();
+            set_key(&mut heap, t, &key, Value::Int(i)).unwrap();
+            let tab = heap.get(t);
+            if slot == Slot::Grow {
+                // The old hash part is freed afterwards, so the estimate is
+                // the new allocations, not the net change.
+                let allocated =
+                    tab.entries.len() * size_of::<Entry>() + tab.array.bytes() - array_before;
+                assert_eq!(estimate, allocated, "store {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn interleaved_traversals() {
+        let (mut heap, mut s, t) = setup();
+        for i in 0..200 {
+            let k = s.new_str(&mut heap, format!("k{i}").as_bytes());
+            set(&mut heap, t, Value::Str(k), Value::Int(i)).unwrap();
+            set(&mut heap, t, Value::Int(-i), Value::Int(i)).unwrap();
+        }
+        let tab = heap.get(t);
+        // The traversal order, then the end (nil).
+        let mut order = vec![];
+        let mut k = Value::Nil;
+        while let Some((key, _)) = tab.next(&heap, k).unwrap() {
+            order.push(key);
+            k = key;
+        }
+        assert_eq!(order.len(), 400);
+        order.push(Value::Nil);
+        // Walk `a` once while `b` goes round at twice the speed, so the
+        // hint mostly belongs to the other walk.
+        let (mut a, mut b) = (Value::Nil, Value::Nil);
+        let mut bi = 0;
+        for want in &order {
+            a = tab.next(&heap, a).unwrap().map_or(Value::Nil, |(k, _)| k);
+            assert!(a.same(*want));
+            for _ in 0..2 {
+                b = tab.next(&heap, b).unwrap().map_or(Value::Nil, |(k, _)| k);
+                assert!(b.same(order[bi % order.len()]));
+                bi += 1;
+            }
+        }
     }
 
     #[test]
