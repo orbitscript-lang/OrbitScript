@@ -234,13 +234,67 @@ impl FuncState<'_> {
         for t in targets {
             evaluated.push(self.target(t, &assigned)?);
         }
-        let first = self.free;
-        self.expr_list(values, Want::Exact(targets.len()))?;
+        let items = values.items.as_slice();
+        if items.len() != targets.len() {
+            // Values to adjust (missing ones, a call's extra results, discarded extras): the
+            // values go to consecutive temporaries.
+            let first = self.free;
+            self.expr_list(values, Want::Exact(targets.len()))?;
+            self.at_offset(at);
+            for (i, t) in evaluated.into_iter().enumerate().rev() {
+                self.store(t, (first + i) as u8)?;
+            }
+            return Ok(());
+        }
+        // One value per target, each truncated to one value. A value goes:
+        // - straight into its target's register when the target is an uncaptured local that
+        //   no later value reads and that the statement assigns only once (the write cannot
+        //   change any value still to be computed, and earlier values sit in temporaries or
+        //   in registers the statement does not assign);
+        // - nowhere, when it is an uncaptured local the statement does not assign: the store
+        //   reads that local's register, which nothing in the statement changes;
+        // - otherwise into a new temporary, stored once every value is computed.
+        let mut srcs: Vec<Option<u8>> = Vec::with_capacity(items.len());
+        for (i, (&value, t)) in items.iter().zip(&evaluated).enumerate() {
+            if let (Target::Reg(r), Place::Local(l)) = (t, &targets[i])
+                && assigned.iter().filter(|&&a| a == *r).count() == 1
+                && !items[i + 1..]
+                    .iter()
+                    .any(|&later| self.reads_local(later, *l))
+            {
+                self.expr_to(value, *r)?;
+                srcs.push(None);
+                continue;
+            }
+            if let ExprKind::Local(src) = self.f.expr(value).kind
+                && let Slot::Reg(r) = self.slots[src.index()]
+                && !assigned.contains(&r)
+            {
+                srcs.push(Some(r));
+                continue;
+            }
+            let r = self.alloc()?;
+            self.expr_to(value, r)?;
+            srcs.push(Some(r));
+        }
         self.at_offset(at);
-        for (i, t) in evaluated.into_iter().enumerate().rev() {
-            self.store(t, (first + i) as u8)?;
+        for (t, src) in evaluated.into_iter().zip(srcs).rev() {
+            if let Some(src) = src {
+                self.store(t, src)?;
+            }
         }
         Ok(())
+    }
+
+    /// Whether `e` reads local `l` anywhere.
+    fn reads_local(&self, e: ExprId, l: LocalId) -> bool {
+        let kind = &self.f.expr(e).kind;
+        if let ExprKind::Local(x) = *kind {
+            return x == l;
+        }
+        let mut found = false;
+        kind.for_each_child(|c| found = found || self.reads_local(c, l));
+        found
     }
 
     /// `global x, y = ...`: like a multiple assignment, but each store (right to left) first

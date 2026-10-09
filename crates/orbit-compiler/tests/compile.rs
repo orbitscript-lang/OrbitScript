@@ -254,9 +254,10 @@ fn swap_reads_before_writing() {
     assert_eq!(
         code(&chunk, 0)[2..],
         [
+            // `a` goes to a temporary because `b`'s value reads it; `b`'s value goes
+            // straight into `b`.
             Op::Move { dst: 2, src: 1 },
-            Op::Move { dst: 3, src: 0 },
-            Op::Move { dst: 1, src: 3 },
+            Op::Move { dst: 1, src: 0 },
             Op::Move { dst: 0, src: 2 },
             Op::Return0,
         ]
@@ -287,25 +288,31 @@ fn index_key_is_read_before_assignment() {
     });
     let chunk = b.finish();
     let c = code(&chunk, 0);
-    // The key `i` is copied to a temporary before `i` is reassigned.
-    assert!(c.contains(&Op::Move { dst: 2, src: 0 }), "{c:?}");
+    // The key `i` is copied to a temporary before `i` is reassigned, and `i + 1` (which
+    // no later value reads) goes straight into `i`.
+    let copy_key = c
+        .iter()
+        .position(|op| *op == Op::Move { dst: 2, src: 0 })
+        .unwrap();
+    let set_i = c
+        .iter()
+        .position(|op| {
+            *op == Op::AddInt {
+                dst: 0,
+                a: 0,
+                imm: 1,
+            }
+        })
+        .unwrap();
+    assert!(copy_key < set_i, "{c:?}");
     assert!(
         c.contains(&Op::SetIndex {
             obj: 1,
             key: 2,
-            src: 4
+            src: 3
         }),
         "{c:?}"
     );
-    let set_i = c
-        .iter()
-        .position(|op| *op == Op::Move { dst: 0, src: 3 })
-        .unwrap();
-    let set_t = c
-        .iter()
-        .position(|op| matches!(op, Op::SetIndex { .. }))
-        .unwrap();
-    assert!(set_t < set_i, "stores run right to left: {c:?}");
 }
 
 #[test]
