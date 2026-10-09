@@ -334,7 +334,7 @@ impl Interp {
                         self.set(&r[table as usize], &V::Int(start as i64 + i as i64), v)?;
                     }
                 }
-                Op::SelfCall { dst, obj, key } => {
+                Op::SelfCall { dst, obj, key, .. } => {
                     let o = r[obj as usize].clone();
                     r[dst as usize + 1] = o.clone();
                     r[dst as usize] = self.index(&o, &self.konst(pi, key))?;

@@ -8,7 +8,7 @@ use orbit_core::number::{ArithOp, Number};
 use orbit_core::table::{self, IntStore};
 use orbit_core::{Closure, Gc, NoMemory, ProtoCode, Value};
 
-use crate::cold::{already_defined, env_error, get_str_miss, op_len, set_str_miss};
+use crate::cold::{already_defined, env_error, get_str_miss, method_miss, op_len, set_str_miss};
 use crate::meta::Event;
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
@@ -1523,7 +1523,7 @@ impl Vm {
                         }
                         safepoint!();
                     }
-                    Op::SelfCall { dst, obj, key } => {
+                    Op::SelfCall { dst, obj, key, ic } => {
                         let o = reg!(obj);
                         let Value::Str(k) = cur.consts[key as usize] else {
                             unreachable!("method names are strings")
@@ -1533,9 +1533,35 @@ impl Vm {
                             get_slow!(dst, o, Value::Str(k))
                         };
                         let tab = self.heap.get(t);
-                        let m = tab.get_str(&self.heap, k);
-                        if m.is_nil() && tab.meta.is_some() {
-                            get_slow!(dst, o, Value::Str(k))
+                        let mut m = tab.get_str(&self.heap, k);
+                        if m.is_nil()
+                            && let Some(mt) = tab.meta
+                        {
+                            // The usual class layout: the metatable's
+                            // `__index` is a table holding the method.
+                            let (cm, ci) = (&cur.caches[ic as usize], &cur.caches[ic as usize + 1]);
+                            let hit = match self
+                                .heap
+                                .get(mt)
+                                .cached_str(ci.slot.get() as usize, ci.key)
+                            {
+                                Some(Value::Table(c)) => self
+                                    .heap
+                                    .get(c)
+                                    .cached_str(cm.slot.get() as usize, cm.key)
+                                    .filter(|v| !v.is_nil()),
+                                _ => None,
+                            };
+                            m = match hit {
+                                Some(v) => v,
+                                None => {
+                                    match method_miss(&self.heap, &self.rt.metas, o, mt, k, cm, ci)
+                                    {
+                                        Ok(v) => v,
+                                        Err(_) => get_slow!(dst, o, Value::Str(k)),
+                                    }
+                                }
+                            };
                         }
                         reg!(dst) = m;
                     }

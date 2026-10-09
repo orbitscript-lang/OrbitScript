@@ -32,7 +32,7 @@ use crate::{
 pub const SIGNATURE: &[u8] = b"\x1bOrbit";
 
 /// The format version this build reads and writes.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 
 const FLAG_STRIPPED: u8 = 1;
 
@@ -326,7 +326,7 @@ op_table! {
     18 GetIndexInt { dst, obj, key };
     19 SetIndexInt { obj, key, src };
     20 SetList { table, first, count, start };
-    21 SelfCall { dst, obj, key };
+    21 SelfCall { dst, obj, key, ic };
     22 Add { dst, a, b };
     23 Sub { dst, a, b };
     24 Mul { dst, a, b };
