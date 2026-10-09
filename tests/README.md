@@ -38,3 +38,15 @@ cargo testkit fuzz --reference target/reference-lua/bin/lua5.5 --interp target/r
 ```
 
 A mismatch prints the call, both outputs and the `--seed` that reproduces the batch, and keeps the batch script under `target/testkit/fuzz`. Without `--seed` each run uses a new seed. Turn a real mismatch into a line in a `tests/diff` program once it's fixed.
+
+## Profile-guided builds
+
+`cargo testkit pgo` builds `target/pgo/orbit`, a release build optimized with a profile of how `orbit` actually runs. It uses rustc's stable flags in three steps:
+
+1. It builds an instrumented `orbit` with `-Cprofile-generate` in the `pgo-gen` Cargo profile (`target/pgo-gen/orbit`). Only this throwaway binary carries the counters.
+2. It runs that binary over the training set: the benchmarks at their quick inputs, `tests/diff`, `tests/diff/compat` and `tests/first-light`. Then it merges the raw profiles with `llvm-profdata`.
+3. It builds `orbit` again with `-Cprofile-use` in the `pgo` profile. This is an ordinary release build. Its inlining and code layout follow the profile, and it has no instrumentation.
+
+Both profiles inherit `release`, so `target/release/orbit` and its build cache stay as they are. `llvm-profdata` must come from the same LLVM as rustc: run `rustup component add llvm-tools`, or point `LLVM_PROFDATA` at a matching copy.
+
+To time a benchmark the profile has never seen, leave it out of training with `--exclude fib.lua`. Two runs don't give byte-identical binaries, because counts from GC- and clock-dependent programs vary a little.

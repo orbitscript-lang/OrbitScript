@@ -116,7 +116,7 @@ fn run_measured(spec: &Spec) -> std::io::Result<Outcome> {
 
 static REPORTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn spawn_and_wait(
+pub fn spawn_and_wait(
     mut cmd: Command,
     timeout: Duration,
 ) -> std::io::Result<(Exit, Duration, Vec<u8>, Vec<u8>)> {
