@@ -25,3 +25,13 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Profile-guided optimization, built by `cargo testkit pgo` (tests/README.md).
+# `pgo-gen` is the instrumented build that records the training profile and is
+# never shipped; `pgo` is the release build optimized with that profile. Both
+# exist so the rustflags each one needs don't touch `target/release`.
+[profile.pgo-gen]
+inherits = "release"
+
+[profile.pgo]
+inherits = "release"
