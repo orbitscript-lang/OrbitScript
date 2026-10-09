@@ -294,7 +294,7 @@ impl Vm {
                 None,
             ));
         }
-        self.rt.stack.tbc.push(r as u32);
+        self.rt.stack.aux.tbc.push(r as u32);
         Ok(())
     }
 
@@ -303,7 +303,7 @@ impl Vm {
     /// frame runs `Close` again when it returns.
     #[inline(never)]
     pub(crate) fn op_close(&mut self) -> Exc {
-        let t = self.rt.stack.tbc.pop().expect("a variable to close") as usize;
+        let t = self.rt.stack.aux.tbc.pop().expect("a variable to close") as usize;
         let v = self.rt.stack.regs[t];
         let h = self.rt.metamethod(&self.heap, v, Event::Close);
         Exc::Meta(MetaCall::new(h, Event::Close, &[v]))

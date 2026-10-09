@@ -253,7 +253,7 @@ impl Runtime {
             FrameKind::Meta { event, .. } => named("metamethod", event.short_name().as_bytes()),
             FrameKind::Hook => named("hook", b"?"),
             FrameKind::Boundary | FrameKind::Native { .. }
-                if self.stack.finalizer_at == Some(ci as u32) =>
+                if self.stack.aux.finalizer_at == Some(ci as u32) =>
             {
                 named("metamethod", b"__gc")
             }

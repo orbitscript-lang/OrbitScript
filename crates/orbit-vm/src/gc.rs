@@ -238,9 +238,9 @@ impl Vm {
             }
             self.rt.gc.enter(&mut self.heap, &mut self.rt.stack.hook);
             let at = self.rt.stack.frames.len() as u32;
-            self.rt.stack.finalizer_at = Some(at);
+            self.rt.stack.aux.finalizer_at = Some(at);
             let r = self.call(f, &[o]);
-            self.rt.stack.finalizer_at = None;
+            self.rt.stack.aux.finalizer_at = None;
             self.rt.gc.exit(&mut self.heap, &mut self.rt.stack.hook);
             if let Err(LuaError { value, .. }) = r {
                 self.rt.warn_gc_error(&self.heap, value);
@@ -302,7 +302,7 @@ fn next_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
         ctx.push(o);
         ctx.rt.gc.enter(ctx.heap, &mut ctx.rt.stack.hook);
         // The native's frame, which `CallThen` pushes next.
-        ctx.rt.stack.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
+        ctx.rt.stack.aux.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
         return Ok(NativeReturn::CallThen {
             f,
             nargs: 1,
@@ -315,7 +315,7 @@ fn next_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
 
 fn after_finalizer(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeReturn, LuaError> {
     ctx.rt.gc.exit(ctx.heap, &mut ctx.rt.stack.hook);
-    ctx.rt.stack.finalizer_at = None;
+    ctx.rt.stack.aux.finalizer_at = None;
     if let CallOutcome::Err(e) = out {
         ctx.rt.warn_gc_error(ctx.heap, e);
     }
@@ -357,7 +357,7 @@ fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaErro
         }
         ctx.truncate(1);
         ctx.push(o);
-        ctx.rt.stack.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
+        ctx.rt.stack.aux.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
         ctx.rt.gc.hooks_off(&mut ctx.rt.stack.hook);
         return Ok(NativeReturn::CallThen {
             f,
@@ -366,7 +366,7 @@ fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaErro
             protected: true,
         });
     }
-    ctx.rt.stack.finalizer_at = None;
+    ctx.rt.stack.aux.finalizer_at = None;
     let k = ctx.rt.gc.close_k.take().expect("close_then set it");
     k(ctx, CallOutcome::Ok(0))
 }

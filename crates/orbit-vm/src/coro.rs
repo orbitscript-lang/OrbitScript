@@ -56,8 +56,9 @@ impl CoStatus {
 }
 
 /// Who is closing a coroutine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Closing {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Closing {
+    #[default]
     No,
     /// `coroutine.close(co)` from another thread, which gets the outcome.
     Closer,
@@ -81,9 +82,6 @@ pub(crate) struct Coroutine {
     /// How many times it has been parked suspended, to tell whether an
     /// entry in `rt.cooling` is still its latest park.
     parks: u32,
-    /// Whether `coroutine.close` is running its `__close` handlers: errors
-    /// then unwind straight to the base frame, and nothing may yield.
-    closing: Closing,
     /// `rt.gc_cycles` when it was parked.
     cycle: u32,
 }
@@ -93,10 +91,7 @@ impl Coroutine {
     /// last variable still to close (a dead coroutine kept for
     /// `coroutine.close`).
     fn live(&self) -> usize {
-        self.stack
-            .tbc
-            .last()
-            .map_or(self.top, |&r| self.top.max(r as usize + 1))
+        live_end(&self.stack, self.top)
     }
 
     /// A suspended coroutine that will call `f`: `f` sits above the base
@@ -123,7 +118,6 @@ impl Coroutine {
             status: CoStatus::Suspended,
             error: None,
             parks: 0,
-            closing: Closing::No,
             cycle: 0,
         }
     }
@@ -136,7 +130,6 @@ impl Coroutine {
             error: None,
             bytes: 0,
             parks: 0,
-            closing: Closing::No,
             cycle: 0,
         }
     }
@@ -163,6 +156,12 @@ impl ThreadState for Coroutine {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+/// Where the live registers of parked stack `s`, whose top is `top`, end:
+/// [`Coroutine::live`].
+fn live_end(s: &Stack, top: usize) -> usize {
+    s.aux.tbc.last().map_or(top, |&r| top.max(r as usize + 1))
 }
 
 fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
@@ -194,12 +193,15 @@ impl Vm {
     /// Park the running stack in the current thread, which becomes
     /// `from_status` (or drop the stack, for a coroutine that finished), and
     /// run thread `to`'s.
+    ///
+    /// The running thread's own `stack` slot holds an empty stack (and a
+    /// stale copy of its hook), so a switch swaps the running stack with
+    /// that empty one, then the empty one with `to`'s: nothing is built or
+    /// dropped on the way ([`Stack::park`], [`Stack::unpark`]).
     fn switch_to(&mut self, to: Gc<Thread>, from_status: CoStatus) {
         let from = self.rt.current;
-        let mut stack = std::mem::take(&mut self.rt.stack);
-        // The callee cache is weak, which only the running stack's can be.
-        stack.callee = None;
         let top = self.rt.top;
+        let gc_cycles = self.rt.gc_cycles;
         // A parked stack is traced through its thread, which the collector
         // may already have scanned.
         self.heap.barrier_back(from);
@@ -211,45 +213,53 @@ impl Vm {
         // A coroutine that died with variables still to close keeps its
         // stack for `coroutine.close`, and one that died with an error keeps
         // it for the debug library (its traceback, locals) until closed.
-        if from_status == CoStatus::Dead && stack.tbc.is_empty() && c.error.is_none() {
+        let finished =
+            from_status == CoStatus::Dead && self.rt.stack.aux.tbc.is_empty() && c.error.is_none();
+        if finished {
             c.bytes = 0;
             // `debug.gethook` still reports a dead coroutine's hook.
-            c.stack.hook = stack.hook;
+            c.stack.hook = self.rt.stack.hook;
         } else {
-            c.bytes = stack.bytes();
+            c.bytes = self.rt.stack.bytes();
             // An errored stack's frames stop mid-body, so their locals can
             // sit above `top`: keep every register (all traced while running).
             c.top = if from_status == CoStatus::Dead && c.error.is_some() {
-                stack.regs.len()
+                self.rt.stack.regs.len()
             } else {
                 top
             };
-            c.stack = stack;
-            c.cycle = self.rt.gc_cycles;
+            self.rt.stack.park(&mut c.stack);
+            c.cycle = gc_cycles;
         }
         let delta = c.bytes as isize - old as isize;
-        c.parks = c
-            .parks
-            .wrapping_add((from_status == CoStatus::Suspended) as u32);
+        let suspended = from_status == CoStatus::Suspended;
+        c.parks = c.parks.wrapping_add(suspended as u32);
         let stamp = c.parks;
         if delta != 0 {
             self.heap.adjust_bytes(delta);
         }
-        if from_status == CoStatus::Suspended {
+        if suspended {
             self.rt.cooling.push_back((from, stamp));
             if self.rt.cooling.len() > HOT_STACKS {
                 let (cold, stamp) = self.rt.cooling.pop_front().expect("a parked thread");
-                self.shrink_parked(cold, stamp);
+                // An older entry of the thread parking now is stale.
+                if cold != from {
+                    self.shrink_parked(cold, stamp);
+                }
             }
         }
         let c = co_mut(&mut self.heap, to);
         c.status = CoStatus::Running;
-        self.rt.stack = std::mem::take(&mut c.stack);
+        self.rt.stack.unpark(&mut c.stack);
+        if finished {
+            // The finished stack goes, leaving `to`'s slot empty.
+            c.stack.clear(Default::default());
+        }
         self.rt.top = c.top;
         // If a collection swept while it was parked, the dead slots above
         // its top (which aren't traced) may refer to freed objects.
-        if c.cycle != self.rt.gc_cycles {
-            let live = c.live();
+        if c.cycle != gc_cycles {
+            let live = live_end(&self.rt.stack, c.top);
             self.rt.stack.regs.truncate(live);
         }
         self.rt.current = to;
@@ -272,7 +282,7 @@ impl Vm {
         s.regs = s.regs[..c.top].to_vec();
         s.cells = s.cells.to_vec();
         s.frames = s.frames.to_vec();
-        s.tbc = s.tbc.to_vec();
+        s.aux.tbc = s.aux.tbc.to_vec();
         c.bytes = s.bytes();
         let delta = c.bytes as isize - before as isize;
         self.heap.adjust_bytes(delta);
@@ -337,8 +347,9 @@ impl Vm {
         };
         let o = match outcome {
             Ok(()) => {
+                let n = self.rt.xfer.len();
                 self.rt.top = self.rt.stack.write(call_at as usize, &self.rt.xfer);
-                CallOutcome::Ok(self.rt.xfer.len())
+                CallOutcome::Ok(n)
             }
             Err(v) => {
                 self.rt.top = call_at as usize;
@@ -354,8 +365,20 @@ impl Vm {
             id,
             upvals: None,
         };
-        let r = k(&mut ctx, o)?;
-        self.native_returned(r, Some(f), f.func as usize, f.want, id)
+        let r = k(&mut ctx, o);
+        // The usual result is rebuilt from its count rather than moved
+        // whole: copying what the continuation just stored field by field
+        // as one wide value stalls on store forwarding, on every switch.
+        if let Ok(NativeReturn::Return(n)) = r {
+            return self.native_returned(
+                NativeReturn::Return(n),
+                Some(f),
+                f.func as usize,
+                f.want,
+                id,
+            );
+        }
+        self.native_returned(r?, Some(f), f.func as usize, f.want, id)
     }
 
     /// `NativeReturn::Resume`: native `id` resumes `co` with the last `nargs`
@@ -374,8 +397,9 @@ impl Vm {
         let at = self.rt.top - nargs;
         self.wait_frame(frame, func, want, id, k, at);
         self.take_values(nargs);
-        let refuse = if self.co_status(co) != CoStatus::Suspended {
-            Some(if self.co_status(co) == CoStatus::Dead {
+        let status = self.co_status(co);
+        let refuse = if status != CoStatus::Suspended {
+            Some(if status == CoStatus::Dead {
                 "cannot resume dead coroutine"
             } else {
                 "cannot resume non-suspended coroutine"
@@ -421,7 +445,7 @@ impl Vm {
                 "attempt to yield from outside a coroutine".into(),
             ));
         };
-        if !yieldable(&self.rt.stack) || closing(&self.heap, self.rt.current) {
+        if !yieldable(&self.rt.stack) || self.rt.stack.aux.closing != Closing::No {
             return Err(Exc::Plain(
                 "attempt to yield across a C-call boundary".into(),
             ));
@@ -440,7 +464,7 @@ impl Vm {
         let resumer = self.rt.resumers.pop().expect("a coroutine has a resumer");
         let co = self.rt.current;
         // A coroutine being closed has reported its error to the closer.
-        let closing = std::mem::replace(&mut co_mut(&mut self.heap, co).closing, Closing::No);
+        let closing = std::mem::replace(&mut self.rt.stack.aux.closing, Closing::No);
         if let Err(e) = outcome
             && closing != Closing::Closer
         {
@@ -473,18 +497,17 @@ impl Vm {
         }
         let c = co_mut(&mut self.heap, co);
         let error = c.error.take();
-        if c.stack.tbc.is_empty() {
+        if c.stack.aux.tbc.is_empty() {
             c.status = CoStatus::Dead;
-            let hook = std::mem::take(&mut c.stack.hook);
-            c.stack = Stack::default();
-            c.stack.hook = hook;
+            let hook = c.stack.hook;
+            c.stack.clear(hook);
             let freed = std::mem::take(&mut c.bytes);
             self.heap.adjust_bytes(-(freed as isize));
             return self.deliver(error.map_or(Ok(()), Err));
         }
         // Run the handlers on the coroutine's own stack, as an error
         // unwinding to its base frame would.
-        c.closing = Closing::Closer;
+        c.stack.aux.closing = Closing::Closer;
         self.rt.resumers.push(self.rt.current);
         self.switch_to(co, CoStatus::Normal);
         self.rt.stack.pop_to_base();
@@ -496,11 +519,11 @@ impl Vm {
     /// variables still to close are closed as an error unwinding to its
     /// base would close them, then it ends.
     pub(crate) fn exit_co(&mut self) -> Result<Flow, Exc> {
-        if self.rt.stack.tbc.is_empty() {
+        if self.rt.stack.aux.tbc.is_empty() {
             self.rt.xfer.clear();
             return self.co_finished(Ok(()));
         }
-        co_mut(&mut self.heap, self.rt.current).closing = Closing::Itself;
+        self.rt.stack.aux.closing = Closing::Itself;
         self.rt.stack.pop_to_base();
         Err(Exc::Lua(LuaError::new(Value::Nil)))
     }
@@ -550,22 +573,23 @@ fn switched(flow: Result<Flow, Exc>) -> Result<Flow, Exc> {
 }
 
 /// Whether the running coroutine is being closed by `coroutine.close`.
-pub(crate) fn closing(heap: &LuaHeap, t: Gc<Thread>) -> bool {
-    co(heap, t).closing != Closing::No
+pub(crate) fn closing(rt: &crate::Runtime) -> bool {
+    rt.stack.aux.closing != Closing::No
 }
 
 impl NativeCtx<'_> {
     /// Whether thread `t` could yield where it is: it isn't the main thread
     /// and no frame on its stack refuses (`coroutine.isyieldable`).
     pub fn thread_yieldable(&self, t: Gc<Thread>) -> bool {
-        if t == self.rt.main_thread || closing(self.heap, t) {
+        if t == self.rt.main_thread {
             return false;
         }
-        if t == self.rt.current {
-            yieldable(&self.rt.stack)
+        let s = if t == self.rt.current {
+            &self.rt.stack
         } else {
-            yieldable(&co(self.heap, t).stack)
-        }
+            &co(self.heap, t).stack
+        };
+        s.aux.closing == Closing::No && yieldable(s)
     }
 
     /// A new suspended coroutine running `f`.
@@ -593,15 +617,14 @@ impl NativeCtx<'_> {
         if c.cycle != gc_cycles {
             c.stack.regs.truncate(c.top);
         }
-        let stack = std::mem::take(&mut c.stack);
-        let top = c.top;
-        let saved = std::mem::replace(&mut self.rt.stack, stack);
-        let saved_top = std::mem::replace(&mut self.rt.top, top);
+        // The running stack waits in `t`'s slot.
+        c.stack.swap(&mut self.rt.stack);
+        let saved_top = std::mem::replace(&mut self.rt.top, c.top);
         let r = f(self, true);
         // `f` may have stored values into the parked stack.
         self.heap.barrier_back(t);
         let c = co_mut(self.heap, t);
-        c.stack = std::mem::replace(&mut self.rt.stack, saved);
+        c.stack.swap(&mut self.rt.stack);
         c.top = std::mem::replace(&mut self.rt.top, saved_top);
         r
     }
@@ -634,7 +657,7 @@ impl NativeCtx<'_> {
         } else {
             &co(self.heap, self.rt.main_thread).stack
         };
-        s.tbc.iter().map(|&r| s.regs[r as usize]).collect()
+        s.aux.tbc.iter().map(|&r| s.regs[r as usize]).collect()
     }
 
     // ---- native closures -------------------------------------------------
@@ -740,7 +763,12 @@ impl Vm {
             id,
             upvals: Some(c),
         };
-        let r = nf(&mut ctx)?;
-        self.native_returned(r, None, func, f.want, id)
+        let r = nf(&mut ctx);
+        // A wrapped coroutine's function resumes it: switch at once, from
+        // the fields alone (see `deliver`).
+        if let Ok(NativeReturn::Resume { co, nargs, k }) = r {
+            return self.resume(co, nargs, k, None, func, f.want, id);
+        }
+        self.native_returned(r?, None, func, f.want, id)
     }
 }
