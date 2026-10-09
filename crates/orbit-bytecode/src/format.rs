@@ -32,7 +32,7 @@ use crate::{
 pub const SIGNATURE: &[u8] = b"\x1bOrbit";
 
 /// The format version this build reads and writes.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 4;
 
 const FLAG_STRIPPED: u8 = 1;
 
@@ -326,7 +326,7 @@ op_table! {
     18 GetIndexInt { dst, obj, key };
     19 SetIndexInt { obj, key, src };
     20 SetList { table, first, count, start };
-    21 SelfCall { dst, obj, key };
+    21 SelfCall { dst, obj, key, ic };
     22 Add { dst, a, b };
     23 Sub { dst, a, b };
     24 Mul { dst, a, b };
@@ -379,6 +379,17 @@ op_table! {
     71 Close { from };
     72 SubInt { dst, a, imm };
     73 LoadConstX { dst, k };
+    74 AddK { dst, a, k };
+    75 SubK { dst, a, k };
+    76 MulK { dst, a, k };
+    77 DivK { dst, a, k };
+    78 IDivK { dst, a, k };
+    79 ModK { dst, a, k };
+    80 PowK { dst, a, k };
+    81 KAdd { dst, k, b };
+    82 KSub { dst, k, b };
+    83 KMul { dst, k, b };
+    84 KDiv { dst, k, b };
 }
 
 /// One instruction's encoding (for tests and fuzzing).

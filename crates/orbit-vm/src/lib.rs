@@ -197,6 +197,13 @@ pub(crate) struct Stack {
     pub aux: Box<StackAux>,
     /// The stack's debug hook (`debug.sethook`).
     pub hook: hook::Hook,
+    /// Registers below this index may hold values written since the last
+    /// native returned: a native's pushes and stores, and the registers of
+    /// Lua frames entered outside the dispatch loop. When a native returns,
+    /// [`Vm::native_returned`] clears from its results up to here, so stale
+    /// copies don't keep objects alive, without shrinking the stack (which
+    /// would make returning into Lua refill a whole register window).
+    pub(crate) dirty_to: usize,
 }
 
 /// The parts of a [`Stack`] the dispatch loop seldom touches.
@@ -231,11 +238,13 @@ impl Stack {
             frames,
             aux,
             hook: _,
+            dirty_to,
         } = self;
         std::mem::swap(regs, &mut other.regs);
         std::mem::swap(cells, &mut other.cells);
         std::mem::swap(frames, &mut other.frames);
         std::mem::swap(aux, &mut other.aux);
+        std::mem::swap(dirty_to, &mut other.dirty_to);
     }
 
     /// Exchange two stacks.
@@ -272,6 +281,7 @@ impl Stack {
         self.frames = Vec::new();
         *self.aux = StackAux::default();
         self.hook = hook;
+        self.dirty_to = 0;
     }
 
     /// How many calls back into the interpreter are open: the
@@ -335,6 +345,7 @@ impl Stack {
     /// `regs[at] = v`, growing the stack if needed.
     #[inline]
     pub(crate) fn put(&mut self, at: usize, v: Value) {
+        self.dirty_to = self.dirty_to.max(at + 1);
         if at < self.regs.len() {
             self.regs[at] = v;
         } else {
@@ -346,6 +357,7 @@ impl Stack {
     /// Insert `v` at `at` in the values that end at `top`, shifting them up;
     /// returns the new end.
     pub(crate) fn insert(&mut self, at: usize, top: usize, v: Value) -> usize {
+        self.dirty_to = self.dirty_to.max(top + 1);
         crate::interp::extend_nil(&mut self.regs, top + 1);
         self.regs.copy_within(at..top, at + 1);
         self.regs[at] = v;
@@ -355,6 +367,7 @@ impl Stack {
     /// Write `vals` at `at`, growing the stack if needed; returns their end.
     pub(crate) fn write(&mut self, at: usize, vals: &[Value]) -> usize {
         let end = at + vals.len();
+        self.dirty_to = self.dirty_to.max(end);
         crate::interp::extend_nil(&mut self.regs, end);
         self.regs[at..end].copy_from_slice(vals);
         end

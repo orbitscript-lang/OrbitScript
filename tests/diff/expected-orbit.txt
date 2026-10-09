@@ -7,6 +7,7 @@ close_unwind.lua
 closures.lua
 co_gc.lua
 co_yields.lua
+const_operands.lua
 control.lua
 coroutines.lua
 cstack_depth.lua
@@ -30,6 +31,7 @@ many_constants.lua
 meta_index.lua
 meta_ops.lua
 metatables.lua
+multi_assign.lua
 os.lua
 require.lua
 stdlib_base.lua
@@ -41,6 +43,7 @@ stdlib_string.lua
 stdlib_table.lua
 stdlib_utf8.lua
 strings.lua
+table_rehash.lua
 tables.lua
 uncaught.lua
 vm_edges.lua

@@ -562,8 +562,15 @@ impl<'a> FuncState<'a> {
     /// A fresh inline-cache slot. Past `u16::MAX` slots, the last one is shared (a cache miss
     /// is only slower, never wrong).
     pub fn cache(&mut self) -> u16 {
-        let ic = self.ncaches.min(u16::MAX as u32 - 1) as u16;
-        self.ncaches += 1;
+        self.caches(1)
+    }
+
+    /// `n` consecutive inline-cache slots; past the operand range, the last
+    /// `n` (shared, so they never fill).
+    pub fn caches(&mut self, n: u16) -> u16 {
+        let last = u16::MAX - n;
+        let ic = self.ncaches.min(last as u32) as u16;
+        self.ncaches += n as u32;
         ic
     }
 

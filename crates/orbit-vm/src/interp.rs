@@ -8,7 +8,7 @@ use orbit_core::number::{ArithOp, Number};
 use orbit_core::table::{self, IntStore};
 use orbit_core::{Closure, Gc, NoMemory, ProtoCode, Value};
 
-use crate::cold::{already_defined, env_error, get_str_miss, op_len, set_str_miss};
+use crate::cold::{already_defined, env_error, get_str_miss, method_miss, op_len, set_str_miss};
 use crate::meta::Event;
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
@@ -118,7 +118,16 @@ impl Vm {
         }
         match self.rt.stack.regs[func] {
             Value::Closure(c) => {
-                self.push_lua_frame(c, func, nargs, want)?;
+                let e = self.push_lua_frame(c, func, nargs, want)?;
+                // Entered from outside the dispatch loop (a native, a
+                // metamethod, a hook): the frame's registers are the
+                // native's to clear when it returns. What the frame's own
+                // callees leave above them is like any Lua return's
+                // leftovers: overwritten later, or cut off at the next
+                // collection step.
+                let s = &mut self.rt.stack;
+                let nregs = self.heap.get(c).code.nregs as usize;
+                s.dirty_to = s.dirty_to.max(e.base + nregs);
                 if chain > 0 {
                     self.rt.stack.frames.last_mut().expect("frame").extra = chain as u8;
                 }
@@ -418,16 +427,22 @@ impl Vm {
                 }
                 let src = self.rt.top - n;
                 self.place_results(src, n, func, want);
-                // Drop the native's arguments and pushes along with any
+                // Clear the native's arguments and pushes along with any
                 // extra results, so stale copies don't keep objects alive
                 // (a finalizer waiting on an object only a dead argument
-                // slot still holds would never run).
+                // slot still holds would never run). Clearing rather than
+                // truncating keeps the caller's register window allocated.
                 let end = if want == MULTI {
                     self.rt.top
                 } else {
                     func + want as usize
                 };
-                self.rt.stack.regs.truncate(end);
+                let s = &mut self.rt.stack;
+                let stop = s.dirty_to.max(self.rt.top).min(s.regs.len());
+                if end < stop {
+                    s.regs[end..stop].fill(Value::Nil);
+                }
+                s.dirty_to = end;
                 self.after_return()
             }
             NativeReturn::CallThen { .. }
@@ -1050,7 +1065,13 @@ impl Vm {
                 }};
             }
             macro_rules! arith {
-                ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {{
+                ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {
+                    arith_v!($dst, reg!($a), reg!($b), $op, $nop)
+                };
+            }
+            // `arith!` over two operand places, registers or constants.
+            macro_rules! arith_v {
+                ($dst:expr, $x:expr, $y:expr, $op:expr, $nop:expr) => {{
                     // `Number::arith` owns the integer/float rules; with a
                     // constant operator it inlines to the one case. Each arm
                     // stores its own result, so the common cases write a
@@ -1067,7 +1088,7 @@ impl Vm {
                     }
                     // One arm per operand pair, so each inlines with both
                     // subtypes known.
-                    match (&reg!($a), &reg!($b)) {
+                    match (&$x, &$y) {
                         (&Value::Int(i), &Value::Int(j)) => store!(Number::Int(i), Number::Int(j)),
                         (&Value::Float(f), &Value::Float(g)) => {
                             store!(Number::Float(f), Number::Float(g))
@@ -1079,7 +1100,7 @@ impl Vm {
                             store!(Number::Float(f), Number::Int(j))
                         }
                         _ => {
-                            let (x, y) = (reg!($a), reg!($b));
+                            let (x, y) = ($x, $y);
                             reg!($dst) =
                                 tri!(ops::arith_slow(&self.heap, &self.rt.metas, $op, x, y))
                         }
@@ -1203,6 +1224,73 @@ impl Vm {
                             }
                             self.rt.top = fa + want.min(1) as usize;
                         }
+                        // Any other native, called in place: no frame, and a
+                        // plain return goes straight back to this loop.
+                        Value::Native(id) if !HOOKED => {
+                            self.rt.top = fa + 1 + n;
+                            let nf = self.rt.natives[id.0 as usize].f;
+                            let mut ctx = NativeCtx {
+                                heap: &mut self.heap,
+                                rt: &mut self.rt,
+                                base: fa + 1,
+                                nargs: n,
+                                id,
+                                upvals: None,
+                            };
+                            match nf(&mut ctx) {
+                                // Unless the native set a hook, which its
+                                // return must already report.
+                                Ok(NativeReturn::Return(k)) if !self.rt.stack.hook.armed() => {
+                                    let top = self.rt.top;
+                                    let src = top - k;
+                                    let s = &mut self.rt.stack;
+                                    let end = if want == 1 && k >= 1 {
+                                        s.regs[fa] = s.regs[src];
+                                        fa + 1
+                                    } else if want == MULTI {
+                                        s.regs.copy_within(src..top, fa);
+                                        fa + k
+                                    } else {
+                                        // The caller's window covers its
+                                        // results.
+                                        let want = want as usize;
+                                        let m = k.min(want);
+                                        s.regs.copy_within(src..src + m, fa);
+                                        s.regs[fa + m..fa + want].fill(Value::Nil);
+                                        fa + want
+                                    };
+                                    self.rt.top = end;
+                                    // Clear the arguments and pushes, as
+                                    // `native_returned` does.
+                                    let stop = s.dirty_to.max(top).min(s.regs.len());
+                                    if end < stop {
+                                        s.regs[end..stop].fill(Value::Nil);
+                                    }
+                                    s.dirty_to = end;
+                                    w = window!();
+                                    safepoint!();
+                                }
+                                Ok(r) => {
+                                    if let NativeReturn::Return(k) = r
+                                        && self.rt.stack.hook.wants(crate::hook::RETURN)
+                                        && let Err(e) = self.native_return_hook(fa, id, k)
+                                    {
+                                        throw!(Exc::Lua(e));
+                                    }
+                                    match self.native_returned(r, None, fa, want, id) {
+                                        Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
+                                            if self.rt.stack.hook.armed() {
+                                                return Ok(Ran::Switch);
+                                            }
+                                            w = window!();
+                                            safepoint!();
+                                        }
+                                        other => flow!(other),
+                                    }
+                                }
+                                Err(e) => throw!(self.native_raised(id, fa, e)),
+                            }
+                        }
                         _ => match self.call_value(fa, n, want) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
                                 // The native may have set or cleared a hook.
@@ -1215,6 +1303,48 @@ impl Vm {
                             other => flow!(other),
                         },
                     }
+                }};
+            }
+
+            // Return `n` values from absolute register `src`. Back into a
+            // Lua caller this skips the general return path: the caller's
+            // window lies below this frame's, so the stack is already long
+            // enough for its results and its window.
+            macro_rules! lua_return {
+                ($src:expr, $n:expr) => {{
+                    let (src, n): (usize, usize) = ($src, $n);
+                    if let [.., caller, f] = &self.rt.stack.frames[..]
+                        && let FrameKind::Lua {
+                            closure: c,
+                            code_id,
+                        } = caller.kind
+                    {
+                        let (func, own_cells, want) =
+                            (f.func as usize, f.cell_base as usize, f.want);
+                        base = caller.base as usize;
+                        pc = caller.pc as usize;
+                        self.rt.stack.frames.pop();
+                        if self.rt.stack.cells.len() > own_cells {
+                            self.rt.stack.cells.truncate(own_cells);
+                        }
+                        let regs = &mut self.rt.stack.regs;
+                        if want == MULTI {
+                            regs.copy_within(src..src + n, func);
+                            self.rt.top = func + n;
+                        } else {
+                            let want = want as usize;
+                            let k = n.min(want);
+                            regs.copy_within(src..src + k, func);
+                            regs[func + k..func + want].fill(Value::Nil);
+                            self.rt.top = func + want;
+                        }
+                        depth -= 1;
+                        closure = c;
+                        switch_code!(c, code_id);
+                        w = window_sized!();
+                        continue;
+                    }
+                    flow!(self.do_return(src, n))
                 }};
             }
 
@@ -1476,7 +1606,7 @@ impl Vm {
                         }
                         safepoint!();
                     }
-                    Op::SelfCall { dst, obj, key } => {
+                    Op::SelfCall { dst, obj, key, ic } => {
                         let o = reg!(obj);
                         let Value::Str(k) = cur.consts[key as usize] else {
                             unreachable!("method names are strings")
@@ -1486,9 +1616,39 @@ impl Vm {
                             get_slow!(dst, o, Value::Str(k))
                         };
                         let tab = self.heap.get(t);
-                        let m = tab.get_str(&self.heap, k);
-                        if m.is_nil() && tab.meta.is_some() {
-                            get_slow!(dst, o, Value::Str(k))
+                        let cm = &cur.caches[ic as usize];
+                        let mut m = match tab.find_str_key(&self.heap, &cm.key_for(&self.heap, k)) {
+                            Some(slot) => tab.slot_value(slot),
+                            None => Value::Nil,
+                        };
+                        if m.is_nil()
+                            && let Some(mt) = tab.meta
+                        {
+                            // The usual class layout: the metatable's
+                            // `__index` is a table holding the method.
+                            let ci = &cur.caches[ic as usize + 1];
+                            let hit = match self
+                                .heap
+                                .get(mt)
+                                .cached_str(ci.slot.get() as usize, ci.key)
+                            {
+                                Some(Value::Table(c)) => self
+                                    .heap
+                                    .get(c)
+                                    .cached_str(cm.slot.get() as usize, cm.key)
+                                    .filter(|v| !v.is_nil()),
+                                _ => None,
+                            };
+                            m = match hit {
+                                Some(v) => v,
+                                None => {
+                                    match method_miss(&self.heap, &self.rt.metas, o, mt, k, cm, ci)
+                                    {
+                                        Ok(v) => v,
+                                        Err(_) => get_slow!(dst, o, Value::Str(k)),
+                                    }
+                                }
+                            };
                         }
                         reg!(dst) = m;
                     }
@@ -1500,6 +1660,105 @@ impl Vm {
                     Op::Pow { dst, a, b } => arith!(dst, a, b, Arith::Pow, ArithOp::Pow),
                     Op::IDiv { dst, a, b } => arith!(dst, a, b, Arith::IDiv, ArithOp::IDiv),
                     Op::Mod { dst, a, b } => arith!(dst, a, b, Arith::Mod, ArithOp::Mod),
+                    Op::AddK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Add,
+                            ArithOp::Add
+                        )
+                    }
+                    Op::SubK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Sub,
+                            ArithOp::Sub
+                        )
+                    }
+                    Op::MulK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Mul,
+                            ArithOp::Mul
+                        )
+                    }
+                    Op::DivK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Div,
+                            ArithOp::Div
+                        )
+                    }
+                    Op::IDivK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::IDiv,
+                            ArithOp::IDiv
+                        )
+                    }
+                    Op::ModK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Mod,
+                            ArithOp::Mod
+                        )
+                    }
+                    Op::PowK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Pow,
+                            ArithOp::Pow
+                        )
+                    }
+                    Op::KAdd { dst, k, b } => {
+                        arith_v!(
+                            dst,
+                            cur.consts[k as usize],
+                            reg!(b),
+                            Arith::Add,
+                            ArithOp::Add
+                        )
+                    }
+                    Op::KSub { dst, k, b } => {
+                        arith_v!(
+                            dst,
+                            cur.consts[k as usize],
+                            reg!(b),
+                            Arith::Sub,
+                            ArithOp::Sub
+                        )
+                    }
+                    Op::KMul { dst, k, b } => {
+                        arith_v!(
+                            dst,
+                            cur.consts[k as usize],
+                            reg!(b),
+                            Arith::Mul,
+                            ArithOp::Mul
+                        )
+                    }
+                    Op::KDiv { dst, k, b } => {
+                        arith_v!(
+                            dst,
+                            cur.consts[k as usize],
+                            reg!(b),
+                            Arith::Div,
+                            ArithOp::Div
+                        )
+                    }
                     Op::AddInt { dst, a, imm } => match reg!(a) {
                         Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_add(imm as i64)),
                         Value::Float(f) => reg!(dst) = Value::Float(f + imm as f64),
@@ -1678,9 +1937,9 @@ impl Vm {
                         } else {
                             count as usize
                         };
-                        flow!(self.do_return(src, n));
+                        lua_return!(src, n);
                     }
-                    Op::Return0 => flow!(self.do_return(base, 0)),
+                    Op::Return0 => lua_return!(base, 0),
                     Op::Return1 { src } => {
                         // The common case, one value back to a Lua caller
                         // that wants one, without the general return path.
@@ -1721,7 +1980,7 @@ impl Vm {
                             w = window_sized!();
                             continue;
                         }
-                        flow!(self.do_return(base + src as usize, 1))
+                        lua_return!(base + src as usize, 1)
                     }
                     Op::Vararg { dst, count } => {
                         let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
