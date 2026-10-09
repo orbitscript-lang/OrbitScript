@@ -92,7 +92,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     cargo_build(
         &root,
         "pgo-gen",
-        &format!("-Cprofile-generate={}", raw.display()),
+        &[&format!("-Cprofile-generate={}", raw.display())],
     )?;
     let instrumented = target.join("pgo-gen").join(exe("orbit"));
 
@@ -121,6 +121,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     }
 
     println!("== merging profiles");
+    remove_old_profiles(&data)?;
     let merged = data.join("merged.profdata");
     let status = Command::new(&profdata_tool)
         .arg("merge")
@@ -146,7 +147,18 @@ pub fn main(args: &[String]) -> Result<bool> {
     cargo_build(
         &root,
         "pgo",
-        &format!("-Cprofile-use={}", profile.display()),
+        &[
+            &format!("-Cprofile-use={}", profile.display()),
+            // With a profile, LLVM's loop vectorizer treats a loop whose
+            // measured trip count is under 16 as tiny and vectorizes it with
+            // masked lanes instead of a scalar remainder. Without masked
+            // stores (x86-64 before AVX-512) each lane becomes a compare and
+            // a branch: clearing a few registers after a native returns
+            // (`fill(Value::Nil)`) grew to about 280 instructions and made
+            // coroutines 12% slower than the plain release build. A minimum
+            // of 1 keeps the usual vector loop with a scalar remainder.
+            "-Cllvm-args=-vectorizer-min-trip-count=1",
+        ],
     )?;
     let out = target.join("pgo").join(exe("orbit"));
     println!("\n{}", out.display());
@@ -189,14 +201,14 @@ fn training_set(root: &Path, with_bench: bool, exclude: &[String]) -> Result<Vec
     Ok(jobs)
 }
 
-/// Builds the `orbit` binary in `profile` with one extra rustc flag on top of
+/// Builds the `orbit` binary in `profile` with extra rustc flags on top of
 /// whatever flags the environment already sets.
-fn cargo_build(root: &Path, profile: &str, flag: &str) -> Result<()> {
+fn cargo_build(root: &Path, profile: &str, extra: &[&str]) -> Result<()> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let flags = encoded_rustflags(
         std::env::var("CARGO_ENCODED_RUSTFLAGS").ok().as_deref(),
         std::env::var("RUSTFLAGS").ok().as_deref(),
-        flag,
+        extra,
     );
     let status = Command::new(&cargo)
         .args([
@@ -223,16 +235,16 @@ fn cargo_build(root: &Path, profile: &str, flag: &str) -> Result<()> {
     }
 }
 
-/// `CARGO_ENCODED_RUSTFLAGS` (flags separated by 0x1f) with `flag` appended.
+/// `CARGO_ENCODED_RUSTFLAGS` (flags separated by 0x1f) with `extra` appended.
 /// Cargo prefers the encoded form over `RUSTFLAGS`, so existing flags come
 /// from it when set, otherwise from `RUSTFLAGS` split on whitespace.
-fn encoded_rustflags(encoded: Option<&str>, plain: Option<&str>, flag: &str) -> OsString {
+fn encoded_rustflags(encoded: Option<&str>, plain: Option<&str>, extra: &[&str]) -> OsString {
     let mut flags: Vec<&str> = match (encoded, plain) {
         (Some(e), _) if !e.is_empty() => e.split('\x1f').collect(),
         (_, Some(p)) => p.split_whitespace().collect(),
         _ => Vec::new(),
     };
-    flags.push(flag);
+    flags.extend_from_slice(extra);
     flags.join("\x1f").into()
 }
 
@@ -266,6 +278,18 @@ fn find_profdata() -> Result<PathBuf> {
     Ok(PathBuf::from(exe("llvm-profdata")))
 }
 
+/// Deletes the merged profiles of earlier runs, which are named by content
+/// and would otherwise pile up.
+fn remove_old_profiles(data: &Path) -> Result<()> {
+    for entry in fs::read_dir(data).map_err(io_err(data.display()))? {
+        let path = entry.map_err(io_err(data.display()))?.path();
+        if path.extension().is_some_and(|e| e == "profdata") {
+            fs::remove_file(&path).map_err(io_err(path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
@@ -282,7 +306,7 @@ mod tests {
 
     #[test]
     fn rustflags_keep_existing_flags() {
-        let f = |e, p| encoded_rustflags(e, p, "-Cprofile-use=/a b/x.profdata");
+        let f = |e, p| encoded_rustflags(e, p, &["-Cprofile-use=/a b/x.profdata"]);
         assert_eq!(f(None, None), "-Cprofile-use=/a b/x.profdata");
         assert_eq!(
             f(None, Some(" -Ctarget-cpu=native  -g ")),
@@ -295,6 +319,10 @@ mod tests {
         assert_eq!(
             f(Some(""), Some("-g")),
             "-g\x1f-Cprofile-use=/a b/x.profdata"
+        );
+        assert_eq!(
+            encoded_rustflags(Some("-g"), None, &["-a", "-b"]),
+            "-g\x1f-a\x1f-b"
         );
     }
 

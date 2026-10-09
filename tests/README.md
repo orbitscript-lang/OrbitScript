@@ -49,4 +49,8 @@ A mismatch prints the call, both outputs and the `--seed` that reproduces the ba
 
 Both profiles inherit `release`, so `target/release/orbit` and its build cache stay as they are. `llvm-profdata` must come from the same LLVM as rustc: run `rustup component add llvm-tools`, or point `LLVM_PROFDATA` at a matching copy.
 
+The optimized build also passes `-Cllvm-args=-vectorizer-min-trip-count=1`. When a profile shows that a loop runs fewer than 16 times, LLVM otherwise vectorizes the loop with masked lanes. On x86-64 without AVX-512, a few register clears then cost hundreds of instructions, which made coroutines 12% slower than the plain release build (`crates/orbit-testkit/src/pgo.rs` has the details).
+
+A profile only applies to code built with the same settings. Symbol names include a hash of the profile's options, so a function whose name changed gets no profile, and Cargo gives no warning. To change a setting for a PGO build (debug info for `perf`, say), set it for both profiles, for example `CARGO_PROFILE_PGO_GEN_DEBUG` and `CARGO_PROFILE_PGO_DEBUG`.
+
 To time a benchmark the profile has never seen, leave it out of training with `--exclude fib.lua`. Two runs don't give byte-identical binaries, because counts from GC- and clock-dependent programs vary a little.
