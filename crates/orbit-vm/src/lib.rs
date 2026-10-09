@@ -14,6 +14,7 @@ pub mod debug;
 mod gc;
 pub mod hook;
 mod interp;
+pub mod opmix;
 mod link;
 mod meta;
 mod native;

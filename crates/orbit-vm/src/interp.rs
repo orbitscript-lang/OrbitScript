@@ -1214,6 +1214,7 @@ impl Vm {
             loop {
                 let op = code[pc];
                 pc += 1;
+                crate::opmix::count(&op);
                 if HOOKED {
                     self.rt.stack.frames[depth - 1].pc = pc as u32;
                     if let Err(e) = self.hook_point(pc - 1, op) {
