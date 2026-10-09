@@ -118,7 +118,16 @@ impl Vm {
         }
         match self.rt.stack.regs[func] {
             Value::Closure(c) => {
-                self.push_lua_frame(c, func, nargs, want)?;
+                let e = self.push_lua_frame(c, func, nargs, want)?;
+                // Entered from outside the dispatch loop (a native, a
+                // metamethod, a hook): the frame's registers are the
+                // native's to clear when it returns. What the frame's own
+                // callees leave above them is like any Lua return's
+                // leftovers: overwritten later, or cut off at the next
+                // collection step.
+                let s = &mut self.rt.stack;
+                let nregs = self.heap.get(c).code.nregs as usize;
+                s.dirty_to = s.dirty_to.max(e.base + nregs);
                 if chain > 0 {
                     self.rt.stack.frames.last_mut().expect("frame").extra = chain as u8;
                 }
@@ -281,9 +290,6 @@ fn enter_lua_frame(
     {
         return Err(x);
     }
-    // The frame writes only its own registers, so the next native to
-    // return clears at most up to here.
-    rt.stack.dirty_to = rt.stack.dirty_to.max(end);
     let regs = &mut rt.stack.regs;
     if regs.len() < base + WINDOW {
         extend_nil(regs, base + WINDOW);

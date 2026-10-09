@@ -219,7 +219,7 @@ pub(crate) struct Stack {
     pub(crate) finalizer_at: Option<u32>,
     /// Registers below this index may hold values written since the last
     /// native returned: a native's pushes and stores, and the registers of
-    /// every Lua frame entered since. When a native returns,
+    /// Lua frames entered outside the dispatch loop. When a native returns,
     /// [`Vm::native_returned`] clears from its results up to here, so stale
     /// copies don't keep objects alive, without shrinking the stack (which
     /// would make returning into Lua refill a whole register window).
