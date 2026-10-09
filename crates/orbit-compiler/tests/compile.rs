@@ -758,7 +758,7 @@ fn error_origins() {
     );
     assert!(d.contains("; 0: field \"integer index\""), "{d}");
     assert!(
-        d.contains("SelfCall { dst: 3, obj: 0, key: 3 } ; 0: local \"t\""),
+        d.contains("SelfCall { dst: 3, obj: 0, key: 3, ic: 3 } ; 0: local \"t\""),
         "{d}"
     );
     assert!(d.contains("; 0: method \"m\""), "{d}");
