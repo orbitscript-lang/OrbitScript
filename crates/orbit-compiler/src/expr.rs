@@ -564,10 +564,12 @@ impl FuncState<'_> {
                 self.alloc()?;
                 let pc = if let Some(key) = self.str_key(name)? {
                     self.at_offset(expr.at);
+                    let ic = self.caches(2);
                     self.emit(Op::SelfCall {
                         dst: func,
                         obj: o,
                         key,
+                        ic,
                     })
                 } else {
                     // A name past the `Const` operands' range: `SelfCall`'s

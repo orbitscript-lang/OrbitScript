@@ -61,7 +61,7 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                     count,
                     ..
                 } => reg(table) && regs(first, count),
-                Op::SelfCall { dst, obj, key } => {
+                Op::SelfCall { dst, obj, key, .. } => {
                     regs(dst, 2) && reg(obj) && (key as usize) < p.consts.len()
                 }
                 Op::Add { dst, a, b }

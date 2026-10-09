@@ -658,6 +658,36 @@ pub(crate) fn get_str_miss(
     }
 }
 
+/// Method `k` of table `obj`, which lacks it and has metatable `mt`, when
+/// `SelfCall`'s caches missed: refills them when `__index` is a table that
+/// holds the method, else follows the whole `__index` chain. An error
+/// (including an `__index` function to call) is left to the slow path.
+#[inline(never)]
+pub(crate) fn method_miss(
+    heap: &LuaHeap,
+    metas: &Metas,
+    obj: Value,
+    mt: Gc<Table>,
+    k: Gc<LuaStr>,
+    method: &FieldCache,
+    index: &FieldCache,
+) -> Result<Value, Exc> {
+    let mtab = heap.get(mt);
+    if let Some(slot) = mtab.find_str(heap, metas.events.name(Event::Index)) {
+        index.fill(slot);
+        if let Value::Table(c) = mtab.slot_value(slot)
+            && let Some(slot) = heap.get(c).find_str(heap, k)
+        {
+            method.fill(slot);
+            let v = heap.get(c).slot_value(slot);
+            if !v.is_nil() {
+                return Ok(v);
+            }
+        }
+    }
+    meta::index(heap, metas, obj, Value::Str(k))
+}
+
 /// `t[k] = v` for string key `k` when the inline cache missed; refills
 /// the cache. A table with a metatable whose key is absent goes through
 /// `__newindex`.

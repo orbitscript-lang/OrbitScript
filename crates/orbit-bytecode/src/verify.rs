@@ -387,10 +387,17 @@ impl Function<'_> {
                     span(first, c as usize)
                 }
             }
-            Op::SelfCall { dst, obj, key: k } => {
+            Op::SelfCall {
+                dst,
+                obj,
+                key: k,
+                ic: c,
+            } => {
                 span(dst, 2)?;
                 reg(obj)?;
-                key(k)
+                key(k)?;
+                ic(c)?;
+                ic(c + 1)
             }
             Op::Concat { dst, first, count } => {
                 reg(dst)?;

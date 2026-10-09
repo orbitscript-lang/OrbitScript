@@ -122,8 +122,15 @@ pub enum Op {
         count: u8,
         start: u32,
     },
-    /// Method lookup: `R[dst+1] = R[obj]; R[dst] = R[obj][K[key]]`.
-    SelfCall { dst: Reg, obj: Reg, key: Const },
+    /// Method lookup: `R[dst+1] = R[obj]; R[dst] = R[obj][K[key]]`. Caches
+    /// `ic` and `ic + 1` remember where the method and `__index` were found
+    /// when the method comes from the metatable's `__index` table.
+    SelfCall {
+        dst: Reg,
+        obj: Reg,
+        key: Const,
+        ic: Ic,
+    },
 
     // Arithmetic. Integer and float fast paths; everything else (mixed
     // numbers, string coercion, errors) goes to the VM's slow path.
