@@ -334,7 +334,7 @@ impl Interp {
                         self.set(&r[table as usize], &V::Int(start as i64 + i as i64), v)?;
                     }
                 }
-                Op::SelfCall { dst, obj, key } => {
+                Op::SelfCall { dst, obj, key, .. } => {
                     let o = r[obj as usize].clone();
                     r[dst as usize + 1] = o.clone();
                     r[dst as usize] = self.index(&o, &self.konst(pi, key))?;
@@ -347,6 +347,23 @@ impl Interp {
                 | Op::Mod { dst, a, b }
                 | Op::Pow { dst, a, b } => {
                     r[dst as usize] = self.arith(&op, &r[a as usize], &r[b as usize])?
+                }
+                Op::AddK { dst, a, k }
+                | Op::SubK { dst, a, k }
+                | Op::MulK { dst, a, k }
+                | Op::DivK { dst, a, k }
+                | Op::IDivK { dst, a, k }
+                | Op::ModK { dst, a, k }
+                | Op::PowK { dst, a, k } => {
+                    let x = r[a as usize].clone();
+                    r[dst as usize] = self.arith(&base_op(op), &x, &self.konst(pi, k))?
+                }
+                Op::KAdd { dst, k, b }
+                | Op::KSub { dst, k, b }
+                | Op::KMul { dst, k, b }
+                | Op::KDiv { dst, k, b } => {
+                    let y = r[b as usize].clone();
+                    r[dst as usize] = self.arith(&base_op(op), &self.konst(pi, k), &y)?
                 }
                 Op::AddInt { dst, a, imm } | Op::SubInt { dst, a, imm } => {
                     r[dst as usize] = self.arith(&op, &r[a as usize], &V::Int(imm as i64))?
@@ -839,4 +856,19 @@ fn tail_calls_run_in_constant_space_for_the_compiler() {
     let main = &chunk.protos[0].code;
     assert!(matches!(main[main.len() - 2], Op::TailCall { .. }));
     assert!(matches!(main.last(), Some(Op::Return { count: MULTI, .. })));
+}
+
+/// The register-register arithmetic op a constant-operand op performs.
+fn base_op(op: Op) -> Op {
+    let (dst, a, b) = (0, 0, 0);
+    match op {
+        Op::AddK { .. } | Op::KAdd { .. } => Op::Add { dst, a, b },
+        Op::SubK { .. } | Op::KSub { .. } => Op::Sub { dst, a, b },
+        Op::MulK { .. } | Op::KMul { .. } => Op::Mul { dst, a, b },
+        Op::DivK { .. } | Op::KDiv { .. } => Op::Div { dst, a, b },
+        Op::IDivK { .. } => Op::IDiv { dst, a, b },
+        Op::ModK { .. } => Op::Mod { dst, a, b },
+        Op::PowK { .. } => Op::Pow { dst, a, b },
+        _ => unreachable!("{op:?} has no constant operand"),
+    }
 }

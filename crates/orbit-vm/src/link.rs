@@ -74,21 +74,29 @@ pub(crate) fn link(
             // function with more sites than fit an operand; a cache whose
             // sites disagree on the key is marked shared and never fills.
             let mut caches: Vec<Option<FieldCache>> = (0..u.ncaches).map(|_| None).collect();
+            let index_key = rt.event_name(crate::meta::Event::Index);
+            let mut claim = |ic: u16, key| match &mut caches[ic as usize] {
+                slot @ None => *slot = Some(FieldCache::new(heap, key)),
+                Some(c) if c.key != key => c.shared = true,
+                Some(_) => {}
+            };
             for op in &u.code {
                 let (Op::GetGlobal { name: k, ic, .. }
                 | Op::SetGlobal { name: k, ic, .. }
                 | Op::GetField { key: k, ic, .. }
-                | Op::SetField { key: k, ic, .. }) = *op
+                | Op::SetField { key: k, ic, .. }
+                | Op::SelfCall { key: k, ic, .. }) = *op
                 else {
                     continue;
                 };
                 let Value::Str(key) = consts[k as usize] else {
                     unreachable!("field keys are strings")
                 };
-                match &mut caches[ic as usize] {
-                    slot @ None => *slot = Some(FieldCache::new(key)),
-                    Some(c) if c.key != key => c.shared = true,
-                    Some(_) => {}
+                claim(ic, key);
+                // A method site's second cache finds `__index` in the
+                // object's metatable.
+                if let Op::SelfCall { .. } = op {
+                    claim(ic + 1, index_key);
                 }
             }
             // A cache no instruction uses never fills, so it never hits and
@@ -104,7 +112,7 @@ pub(crate) fn link(
                     .map(|c| {
                         c.unwrap_or(FieldCache {
                             shared: true,
-                            ..FieldCache::new(key)
+                            ..FieldCache::new(heap, key)
                         })
                     })
                     .collect(),

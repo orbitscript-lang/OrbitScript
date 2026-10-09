@@ -122,8 +122,15 @@ pub enum Op {
         count: u8,
         start: u32,
     },
-    /// Method lookup: `R[dst+1] = R[obj]; R[dst] = R[obj][K[key]]`.
-    SelfCall { dst: Reg, obj: Reg, key: Const },
+    /// Method lookup: `R[dst+1] = R[obj]; R[dst] = R[obj][K[key]]`. Caches
+    /// `ic` and `ic + 1` remember where the method and `__index` were found
+    /// when the method comes from the metatable's `__index` table.
+    SelfCall {
+        dst: Reg,
+        obj: Reg,
+        key: Const,
+        ic: Ic,
+    },
 
     // Arithmetic. Integer and float fast paths; everything else (mixed
     // numbers, string coercion, errors) goes to the VM's slow path.
@@ -148,6 +155,31 @@ pub enum Op {
     /// the negated integer, as lua5.5 does (`-0.0 - 0` is `0.0`). A separate instruction
     /// rather than `AddInt` with `-imm`, so `__sub` sees the operand as written.
     SubInt { dst: Reg, a: Reg, imm: i16 },
+    /// `R[dst] = R[a] + K[k]` for a number constant `K[k]`. The arithmetic
+    /// ops with a `K` operand take the constant in the instruction instead
+    /// of a register, so a literal costs no load; metamethods and error
+    /// messages see the operands in source order.
+    AddK { dst: Reg, a: Reg, k: Const },
+    /// `R[dst] = R[a] - K[k]`
+    SubK { dst: Reg, a: Reg, k: Const },
+    /// `R[dst] = R[a] * K[k]`
+    MulK { dst: Reg, a: Reg, k: Const },
+    /// `R[dst] = R[a] / K[k]`
+    DivK { dst: Reg, a: Reg, k: Const },
+    /// `R[dst] = R[a] // K[k]`
+    IDivK { dst: Reg, a: Reg, k: Const },
+    /// `R[dst] = R[a] % K[k]`
+    ModK { dst: Reg, a: Reg, k: Const },
+    /// `R[dst] = R[a] ^ K[k]`
+    PowK { dst: Reg, a: Reg, k: Const },
+    /// `R[dst] = K[k] + R[b]` (the constant is operand 0)
+    KAdd { dst: Reg, k: Const, b: Reg },
+    /// `R[dst] = K[k] - R[b]`
+    KSub { dst: Reg, k: Const, b: Reg },
+    /// `R[dst] = K[k] * R[b]`
+    KMul { dst: Reg, k: Const, b: Reg },
+    /// `R[dst] = K[k] / R[b]`
+    KDiv { dst: Reg, k: Const, b: Reg },
     /// `R[dst] = R[a] & R[b]`. Integer fast path; floats with an integer
     /// value convert, everything else goes to the VM's slow path.
     BAnd { dst: Reg, a: Reg, b: Reg },

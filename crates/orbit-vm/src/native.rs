@@ -149,6 +149,7 @@ impl NativeCtx<'_> {
     pub fn set(&mut self, i: usize, v: Value) {
         let at = self.base + i;
         let top = self.rt.top;
+        self.rt.stack.dirty_to = self.rt.stack.dirty_to.max(at + 1);
         let regs = &mut self.rt.stack.regs;
         if at >= top {
             crate::interp::extend_nil(regs, at + 1);

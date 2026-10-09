@@ -100,6 +100,8 @@ impl ProtoCode {
 pub struct FieldCache {
     /// Kept alive by the prototype's constants, which hold the same string.
     pub key: Gc<LuaStr>,
+    /// `key`'s hash, so a miss can probe without reading the string.
+    pub hash: u32,
     /// The hash slot, `u32::MAX` before the first fill.
     pub slot: StdCell<u32>,
     /// Several instructions share this cache (a function with more sites
@@ -109,11 +111,23 @@ pub struct FieldCache {
 }
 
 impl FieldCache {
-    pub fn new(key: Gc<LuaStr>) -> FieldCache {
+    pub fn new(heap: &crate::LuaHeap, key: Gc<LuaStr>) -> FieldCache {
         FieldCache {
             key,
+            hash: heap.get(key).hash(),
             slot: StdCell::new(u32::MAX),
             shared: false,
+        }
+    }
+
+    /// The table key for string `k`, the instruction's own key: from the
+    /// cache when the cache is the instruction's alone (no string read).
+    #[inline]
+    pub fn key_for(&self, heap: &crate::LuaHeap, k: Gc<LuaStr>) -> crate::table::Key {
+        if self.shared {
+            crate::table::Key::str(heap, k)
+        } else {
+            crate::table::Key::str_hashed(self.key, self.hash)
         }
     }
 
