@@ -1,6 +1,6 @@
 //! Expressions: values into registers, multiple results, calls and conditions.
 
-use orbit_bytecode::{Constant, MULTI, Op, Origin};
+use orbit_bytecode::{Const, Constant, MULTI, Op, Origin};
 use orbit_hir::{BinOp, ExprId, ExprKind, ExprList, TableEntry, UnOp};
 
 use crate::consts::{self, ConstVal};
@@ -322,6 +322,16 @@ impl FuncState<'_> {
         Ok(Some(origin))
     }
 
+    /// `e`'s value as a constant operand, when it is a number known at compile time and its
+    /// index fits a `Const`.
+    fn number_operand(&mut self, e: ExprId) -> Result<Option<Const>> {
+        match self.const_of(e) {
+            Some(ConstVal::Int(i)) => self.short_constant(Constant::Int(i)),
+            Some(ConstVal::Float(x)) => self.short_constant(Constant::Float(x)),
+            _ => Ok(None),
+        }
+    }
+
     fn binary(
         &mut self,
         dst: u8,
@@ -379,6 +389,21 @@ impl FuncState<'_> {
                 self.place(end);
             }
             _ => {
+                // `k op x` with a numeric literal on the left reads it from the constant table.
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+                    && let Some(k) = self.number_operand(lhs)?
+                {
+                    let (b, b_origin) = self.expr_any(rhs)?;
+                    self.at_offset(at);
+                    let pc = self.emit(match op {
+                        BinOp::Add => Op::KAdd { dst, k, b },
+                        BinOp::Sub => Op::KSub { dst, k, b },
+                        BinOp::Mul => Op::KMul { dst, k, b },
+                        _ => Op::KDiv { dst, k, b },
+                    });
+                    self.origin(pc, 1, b_origin);
+                    return Ok(None);
+                }
                 let from = self.next_pc();
                 let (a, a_origin) = self.operand(lhs, dst)?;
                 self.consumed_at(lhs, from, at);
@@ -393,6 +418,31 @@ impl FuncState<'_> {
                         Op::AddInt { dst, a, imm }
                     } else {
                         Op::SubInt { dst, a, imm }
+                    });
+                    self.origin(pc, 0, a_origin);
+                    return Ok(None);
+                }
+                // `x op k` with any other numeric literal reads it from the constant table.
+                if matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::IDiv
+                        | BinOp::Mod
+                        | BinOp::Pow
+                ) && let Some(k) = self.number_operand(rhs)?
+                {
+                    self.at_offset(at);
+                    let pc = self.emit(match op {
+                        BinOp::Add => Op::AddK { dst, a, k },
+                        BinOp::Sub => Op::SubK { dst, a, k },
+                        BinOp::Mul => Op::MulK { dst, a, k },
+                        BinOp::Div => Op::DivK { dst, a, k },
+                        BinOp::IDiv => Op::IDivK { dst, a, k },
+                        BinOp::Mod => Op::ModK { dst, a, k },
+                        _ => Op::PowK { dst, a, k },
                     });
                     self.origin(pc, 0, a_origin);
                     return Ok(None);

@@ -1055,7 +1055,13 @@ impl Vm {
                 }};
             }
             macro_rules! arith {
-                ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {{
+                ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {
+                    arith_v!($dst, reg!($a), reg!($b), $op, $nop)
+                };
+            }
+            // `arith!` over two operand places, registers or constants.
+            macro_rules! arith_v {
+                ($dst:expr, $x:expr, $y:expr, $op:expr, $nop:expr) => {{
                     // `Number::arith` owns the integer/float rules; with a
                     // constant operator it inlines to the one case. Each arm
                     // stores its own result, so the common cases write a
@@ -1072,7 +1078,7 @@ impl Vm {
                     }
                     // One arm per operand pair, so each inlines with both
                     // subtypes known.
-                    match (&reg!($a), &reg!($b)) {
+                    match (&$x, &$y) {
                         (&Value::Int(i), &Value::Int(j)) => store!(Number::Int(i), Number::Int(j)),
                         (&Value::Float(f), &Value::Float(g)) => {
                             store!(Number::Float(f), Number::Float(g))
@@ -1084,7 +1090,7 @@ impl Vm {
                             store!(Number::Float(f), Number::Int(j))
                         }
                         _ => {
-                            let (x, y) = (reg!($a), reg!($b));
+                            let (x, y) = ($x, $y);
                             reg!($dst) =
                                 tri!(ops::arith_slow(&self.heap, &self.rt.metas, $op, x, y))
                         }
@@ -1577,6 +1583,105 @@ impl Vm {
                     Op::Pow { dst, a, b } => arith!(dst, a, b, Arith::Pow, ArithOp::Pow),
                     Op::IDiv { dst, a, b } => arith!(dst, a, b, Arith::IDiv, ArithOp::IDiv),
                     Op::Mod { dst, a, b } => arith!(dst, a, b, Arith::Mod, ArithOp::Mod),
+                    Op::AddK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Add,
+                            ArithOp::Add
+                        )
+                    }
+                    Op::SubK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Sub,
+                            ArithOp::Sub
+                        )
+                    }
+                    Op::MulK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Mul,
+                            ArithOp::Mul
+                        )
+                    }
+                    Op::DivK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Div,
+                            ArithOp::Div
+                        )
+                    }
+                    Op::IDivK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::IDiv,
+                            ArithOp::IDiv
+                        )
+                    }
+                    Op::ModK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Mod,
+                            ArithOp::Mod
+                        )
+                    }
+                    Op::PowK { dst, a, k } => {
+                        arith_v!(
+                            dst,
+                            reg!(a),
+                            cur.consts[k as usize],
+                            Arith::Pow,
+                            ArithOp::Pow
+                        )
+                    }
+                    Op::KAdd { dst, k, b } => {
+                        arith_v!(
+                            dst,
+                            cur.consts[k as usize],
+                            reg!(b),
+                            Arith::Add,
+                            ArithOp::Add
+                        )
+                    }
+                    Op::KSub { dst, k, b } => {
+                        arith_v!(
+                            dst,
+                            cur.consts[k as usize],
+                            reg!(b),
+                            Arith::Sub,
+                            ArithOp::Sub
+                        )
+                    }
+                    Op::KMul { dst, k, b } => {
+                        arith_v!(
+                            dst,
+                            cur.consts[k as usize],
+                            reg!(b),
+                            Arith::Mul,
+                            ArithOp::Mul
+                        )
+                    }
+                    Op::KDiv { dst, k, b } => {
+                        arith_v!(
+                            dst,
+                            cur.consts[k as usize],
+                            reg!(b),
+                            Arith::Div,
+                            ArithOp::Div
+                        )
+                    }
                     Op::AddInt { dst, a, imm } => match reg!(a) {
                         Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_add(imm as i64)),
                         Value::Float(f) => reg!(dst) = Value::Float(f + imm as f64),

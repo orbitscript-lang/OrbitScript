@@ -64,6 +64,17 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 Op::SelfCall { dst, obj, key, .. } => {
                     regs(dst, 2) && reg(obj) && (key as usize) < p.consts.len()
                 }
+                Op::AddK { dst, a, k }
+                | Op::SubK { dst, a, k }
+                | Op::MulK { dst, a, k }
+                | Op::DivK { dst, a, k }
+                | Op::IDivK { dst, a, k }
+                | Op::ModK { dst, a, k }
+                | Op::PowK { dst, a, k }
+                | Op::KAdd { dst, k, b: a }
+                | Op::KSub { dst, k, b: a }
+                | Op::KMul { dst, k, b: a }
+                | Op::KDiv { dst, k, b: a } => reg(dst) && reg(a) && (k as usize) < p.consts.len(),
                 Op::Add { dst, a, b }
                 | Op::Sub { dst, a, b }
                 | Op::Mul { dst, a, b }

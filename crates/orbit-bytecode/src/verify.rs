@@ -226,6 +226,11 @@ impl Function<'_> {
                 self.fail(at, "constant out of range")
             }
         };
+        let number = |k: u16| match p.consts.get(k as usize) {
+            Some(Constant::Int(_) | Constant::Float(_)) => Ok(()),
+            Some(_) => self.fail(at, "arithmetic constant is not a number"),
+            None => self.fail(at, "constant out of range"),
+        };
         let key = |k: u16| match p.consts.get(k as usize) {
             Some(Constant::Str(_)) => Ok(()),
             Some(_) => self.fail(at, "field key is not a string"),
@@ -362,6 +367,21 @@ impl Function<'_> {
                 reg(a)?;
                 reg(b)?;
                 reg(c)
+            }
+            Op::AddK { dst: a, a: b, k }
+            | Op::SubK { dst: a, a: b, k }
+            | Op::MulK { dst: a, a: b, k }
+            | Op::DivK { dst: a, a: b, k }
+            | Op::IDivK { dst: a, a: b, k }
+            | Op::ModK { dst: a, a: b, k }
+            | Op::PowK { dst: a, a: b, k }
+            | Op::KAdd { dst: a, k, b }
+            | Op::KSub { dst: a, k, b }
+            | Op::KMul { dst: a, k, b }
+            | Op::KDiv { dst: a, k, b } => {
+                reg(a)?;
+                reg(b)?;
+                number(k)
             }
             Op::GetIndexInt { dst: a, obj: b, .. }
             | Op::SetIndexInt { obj: b, src: a, .. }
