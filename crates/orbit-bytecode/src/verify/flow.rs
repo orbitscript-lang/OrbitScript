@@ -87,6 +87,17 @@ impl Function<'_> {
             | Op::Mod { dst, .. }
             | Op::Pow { dst, .. }
             | Op::AddInt { dst, .. }
+            | Op::AddK { dst, .. }
+            | Op::SubK { dst, .. }
+            | Op::MulK { dst, .. }
+            | Op::DivK { dst, .. }
+            | Op::IDivK { dst, .. }
+            | Op::ModK { dst, .. }
+            | Op::PowK { dst, .. }
+            | Op::KAdd { dst, .. }
+            | Op::KSub { dst, .. }
+            | Op::KMul { dst, .. }
+            | Op::KDiv { dst, .. }
             | Op::SubInt { dst, .. }
             | Op::Neg { dst, .. }
             | Op::Not { dst, .. }

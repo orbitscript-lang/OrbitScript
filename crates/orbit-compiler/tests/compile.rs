@@ -225,7 +225,7 @@ fn constant_folding_and_const_locals() {
     assert_eq!(c[0], Op::LoadInt { dst: 0, value: 6 }, "{c:?}");
     assert_eq!(c[1], Op::LoadInt { dst: 1, value: 7 }, "k + 1 folds");
     // 1 // 0 is a run-time error, so it is not folded.
-    assert!(c.iter().any(|op| matches!(op, Op::IDiv { .. })), "{c:?}");
+    assert!(c.iter().any(|op| matches!(op, Op::IDivK { .. })), "{c:?}");
     assert!(
         c.iter().any(|op| matches!(op, Op::Concat { count: 2, .. })),
         "{c:?}"
