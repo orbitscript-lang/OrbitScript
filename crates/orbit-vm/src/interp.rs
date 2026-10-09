@@ -1533,13 +1533,17 @@ impl Vm {
                             get_slow!(dst, o, Value::Str(k))
                         };
                         let tab = self.heap.get(t);
-                        let mut m = tab.get_str(&self.heap, k);
+                        let cm = &cur.caches[ic as usize];
+                        let mut m = match tab.find_str_key(&self.heap, &cm.key_for(&self.heap, k)) {
+                            Some(slot) => tab.slot_value(slot),
+                            None => Value::Nil,
+                        };
                         if m.is_nil()
                             && let Some(mt) = tab.meta
                         {
                             // The usual class layout: the metatable's
                             // `__index` is a table holding the method.
-                            let (cm, ci) = (&cur.caches[ic as usize], &cur.caches[ic as usize + 1]);
+                            let ci = &cur.caches[ic as usize + 1];
                             let hit = match self
                                 .heap
                                 .get(mt)

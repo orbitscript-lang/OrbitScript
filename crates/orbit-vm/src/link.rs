@@ -76,7 +76,7 @@ pub(crate) fn link(
             let mut caches: Vec<Option<FieldCache>> = (0..u.ncaches).map(|_| None).collect();
             let index_key = rt.event_name(crate::meta::Event::Index);
             let mut claim = |ic: u16, key| match &mut caches[ic as usize] {
-                slot @ None => *slot = Some(FieldCache::new(key)),
+                slot @ None => *slot = Some(FieldCache::new(heap, key)),
                 Some(c) if c.key != key => c.shared = true,
                 Some(_) => {}
             };
@@ -112,7 +112,7 @@ pub(crate) fn link(
                     .map(|c| {
                         c.unwrap_or(FieldCache {
                             shared: true,
-                            ..FieldCache::new(key)
+                            ..FieldCache::new(heap, key)
                         })
                     })
                     .collect(),

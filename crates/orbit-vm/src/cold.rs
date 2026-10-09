@@ -644,7 +644,7 @@ pub(crate) fn get_str_miss(
 ) -> Result<Value, Exc> {
     {
         let tab = heap.get(t);
-        let v = match tab.find_str(heap, k) {
+        let v = match tab.find_str_key(heap, &cache.key_for(heap, k)) {
             Some(slot) => {
                 cache.fill(slot);
                 tab.slot_value(slot)
@@ -672,17 +672,40 @@ pub(crate) fn method_miss(
     method: &FieldCache,
     index: &FieldCache,
 ) -> Result<Value, Exc> {
-    let mtab = heap.get(mt);
-    if let Some(slot) = mtab.find_str(heap, metas.events.name(Event::Index)) {
-        index.fill(slot);
-        if let Value::Table(c) = mtab.slot_value(slot)
-            && let Some(slot) = heap.get(c).find_str(heap, k)
-        {
-            method.fill(slot);
-            let v = heap.get(c).slot_value(slot);
+    let index_key = index.key_for(heap, metas.events.name(Event::Index));
+    let method_key = method.key_for(heap, k);
+    let mut meta = mt;
+    // Walk `__index` tables with the hashed keys; anything else (a function,
+    // a userdata) goes through the general path from the start.
+    for depth in 0..meta::MAX_CHAIN {
+        let mtab = heap.get(meta);
+        let Some(slot) = mtab.find_str_key(heap, &index_key) else {
+            return Ok(Value::Nil);
+        };
+        if depth == 0 {
+            index.fill(slot);
+        }
+        let h = mtab.slot_value(slot);
+        let Value::Table(c) = h else {
+            return if h.is_nil() {
+                Ok(Value::Nil)
+            } else {
+                meta::index(heap, metas, obj, Value::Str(k))
+            };
+        };
+        let ctab = heap.get(c);
+        if let Some(slot) = ctab.find_str_key(heap, &method_key) {
+            if depth == 0 {
+                method.fill(slot);
+            }
+            let v = ctab.slot_value(slot);
             if !v.is_nil() {
                 return Ok(v);
             }
+        }
+        match ctab.meta {
+            Some(next) => meta = next,
+            None => return Ok(Value::Nil),
         }
     }
     meta::index(heap, metas, obj, Value::Str(k))
@@ -704,7 +727,7 @@ pub(crate) fn set_str_miss(
         if heap.get(t).meta.is_some() {
             return meta::new_index(heap, metas, Value::Table(t), Value::Str(k), v);
         }
-        let key = Key::str(heap, k);
+        let key = cache.key_for(heap, k);
         match table::set_key(heap, t, &key, v) {
             Ok(Some(slot)) => cache.fill(slot),
             Ok(None) => {}

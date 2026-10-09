@@ -104,6 +104,15 @@ impl Key {
         }
     }
 
+    /// The key for a string whose hash is already known.
+    #[inline]
+    pub fn str_hashed(s: Gc<LuaStr>, hash: u32) -> Key {
+        Key {
+            value: Value::Str(s),
+            hash,
+        }
+    }
+
     #[inline]
     pub fn int(i: i64) -> Key {
         Key {
@@ -563,6 +572,16 @@ impl Table {
             Some(slot) => self.entries[slot].value(),
             None => Value::Nil,
         }
+    }
+
+    /// The hash slot holding string key `key`, if present (for inline
+    /// caches that already know the key's hash).
+    #[inline]
+    pub fn find_str_key(&self, heap: &LuaHeap, key: &Key) -> Option<usize> {
+        if self.used == 0 {
+            return None;
+        }
+        self.probe(key, |a, b| str_eq(heap, a, b)).ok()
     }
 
     /// The hash slot holding string key `s`, if present (for inline caches).
