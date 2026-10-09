@@ -119,6 +119,12 @@ impl Vm {
         match self.rt.stack.regs[func] {
             Value::Closure(c) => {
                 self.push_lua_frame(c, func, nargs, want)?;
+                // Entered from outside the dispatch loop (a native, a
+                // metamethod, a hook): the frame's window is the native's to
+                // clear when it returns.
+                let s = &mut self.rt.stack;
+                let end = s.frames.last().expect("frame").base as usize + WINDOW;
+                s.dirty_to = s.dirty_to.max(end);
                 if chain > 0 {
                     self.rt.stack.frames.last_mut().expect("frame").extra = chain as u8;
                 }
@@ -411,16 +417,22 @@ impl Vm {
                 }
                 let src = self.rt.top - n;
                 self.place_results(src, n, func, want);
-                // Drop the native's arguments and pushes along with any
+                // Clear the native's arguments and pushes along with any
                 // extra results, so stale copies don't keep objects alive
                 // (a finalizer waiting on an object only a dead argument
-                // slot still holds would never run).
+                // slot still holds would never run). Clearing rather than
+                // truncating keeps the caller's register window allocated.
                 let end = if want == MULTI {
                     self.rt.top
                 } else {
                     func + want as usize
                 };
-                self.rt.stack.regs.truncate(end);
+                let s = &mut self.rt.stack;
+                let stop = s.dirty_to.max(self.rt.top).min(s.regs.len());
+                if end < stop {
+                    s.regs[end..stop].fill(Value::Nil);
+                }
+                s.dirty_to = end;
                 self.after_return()
             }
             NativeReturn::CallThen { .. }
@@ -1211,6 +1223,48 @@ impl Vm {
                 }};
             }
 
+            // Return `n` values from absolute register `src`. Back into a
+            // Lua caller this skips the general return path: the caller's
+            // window lies below this frame's, so the stack is already long
+            // enough for its results and its window.
+            macro_rules! lua_return {
+                ($src:expr, $n:expr) => {{
+                    let (src, n): (usize, usize) = ($src, $n);
+                    if let [.., caller, f] = &self.rt.stack.frames[..]
+                        && let FrameKind::Lua {
+                            closure: c,
+                            code_id,
+                        } = caller.kind
+                    {
+                        let (func, own_cells, want) =
+                            (f.func as usize, f.cell_base as usize, f.want);
+                        base = caller.base as usize;
+                        pc = caller.pc as usize;
+                        self.rt.stack.frames.pop();
+                        if self.rt.stack.cells.len() > own_cells {
+                            self.rt.stack.cells.truncate(own_cells);
+                        }
+                        let regs = &mut self.rt.stack.regs;
+                        if want == MULTI {
+                            regs.copy_within(src..src + n, func);
+                            self.rt.top = func + n;
+                        } else {
+                            let want = want as usize;
+                            let k = n.min(want);
+                            regs.copy_within(src..src + k, func);
+                            regs[func + k..func + want].fill(Value::Nil);
+                            self.rt.top = func + want;
+                        }
+                        depth -= 1;
+                        closure = c;
+                        switch_code!(c, code_id);
+                        w = window_sized!();
+                        continue;
+                    }
+                    flow!(self.do_return(src, n))
+                }};
+            }
+
             loop {
                 let op = code[pc];
                 pc += 1;
@@ -1671,9 +1725,9 @@ impl Vm {
                         } else {
                             count as usize
                         };
-                        flow!(self.do_return(src, n));
+                        lua_return!(src, n);
                     }
-                    Op::Return0 => flow!(self.do_return(base, 0)),
+                    Op::Return0 => lua_return!(base, 0),
                     Op::Return1 { src } => {
                         // The common case, one value back to a Lua caller
                         // that wants one, without the general return path.
@@ -1714,7 +1768,7 @@ impl Vm {
                             w = window_sized!();
                             continue;
                         }
-                        flow!(self.do_return(base + src as usize, 1))
+                        lua_return!(base + src as usize, 1)
                     }
                     Op::Vararg { dst, count } => {
                         let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
