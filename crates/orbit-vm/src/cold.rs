@@ -185,6 +185,17 @@ impl Vm {
             | Op::Mod { dst, .. }
             | Op::Pow { dst, .. }
             | Op::AddInt { dst, .. }
+            | Op::AddK { dst, .. }
+            | Op::SubK { dst, .. }
+            | Op::MulK { dst, .. }
+            | Op::DivK { dst, .. }
+            | Op::IDivK { dst, .. }
+            | Op::ModK { dst, .. }
+            | Op::PowK { dst, .. }
+            | Op::KAdd { dst, .. }
+            | Op::KSub { dst, .. }
+            | Op::KMul { dst, .. }
+            | Op::KDiv { dst, .. }
             | Op::SubInt { dst, .. }
             | Op::Neg { dst, .. }
             | Op::BAnd { dst, .. }
@@ -644,7 +655,7 @@ pub(crate) fn get_str_miss(
 ) -> Result<Value, Exc> {
     {
         let tab = heap.get(t);
-        let v = match tab.find_str(heap, k) {
+        let v = match tab.find_str_key(heap, &cache.key_for(heap, k)) {
             Some(slot) => {
                 cache.fill(slot);
                 tab.slot_value(slot)
@@ -656,6 +667,59 @@ pub(crate) fn get_str_miss(
         }
         Ok(v)
     }
+}
+
+/// Method `k` of table `obj`, which lacks it and has metatable `mt`, when
+/// `SelfCall`'s caches missed: refills them when `__index` is a table that
+/// holds the method, else follows the whole `__index` chain. An error
+/// (including an `__index` function to call) is left to the slow path.
+#[inline(never)]
+pub(crate) fn method_miss(
+    heap: &LuaHeap,
+    metas: &Metas,
+    obj: Value,
+    mt: Gc<Table>,
+    k: Gc<LuaStr>,
+    method: &FieldCache,
+    index: &FieldCache,
+) -> Result<Value, Exc> {
+    let index_key = index.key_for(heap, metas.events.name(Event::Index));
+    let method_key = method.key_for(heap, k);
+    let mut meta = mt;
+    // Walk `__index` tables with the hashed keys; anything else (a function,
+    // a userdata) goes through the general path from the start.
+    for depth in 0..meta::MAX_CHAIN {
+        let mtab = heap.get(meta);
+        let Some(slot) = mtab.find_str_key(heap, &index_key) else {
+            return Ok(Value::Nil);
+        };
+        if depth == 0 {
+            index.fill(slot);
+        }
+        let h = mtab.slot_value(slot);
+        let Value::Table(c) = h else {
+            return if h.is_nil() {
+                Ok(Value::Nil)
+            } else {
+                meta::index(heap, metas, obj, Value::Str(k))
+            };
+        };
+        let ctab = heap.get(c);
+        if let Some(slot) = ctab.find_str_key(heap, &method_key) {
+            if depth == 0 {
+                method.fill(slot);
+            }
+            let v = ctab.slot_value(slot);
+            if !v.is_nil() {
+                return Ok(v);
+            }
+        }
+        match ctab.meta {
+            Some(next) => meta = next,
+            None => return Ok(Value::Nil),
+        }
+    }
+    meta::index(heap, metas, obj, Value::Str(k))
 }
 
 /// `t[k] = v` for string key `k` when the inline cache missed; refills
@@ -674,7 +738,7 @@ pub(crate) fn set_str_miss(
         if heap.get(t).meta.is_some() {
             return meta::new_index(heap, metas, Value::Table(t), Value::Str(k), v);
         }
-        let key = Key::str(heap, k);
+        let key = cache.key_for(heap, k);
         match table::set_key(heap, t, &key, v) {
             Ok(Some(slot)) => cache.fill(slot),
             Ok(None) => {}
