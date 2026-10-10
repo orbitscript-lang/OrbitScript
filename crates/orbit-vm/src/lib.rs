@@ -365,6 +365,15 @@ impl Stack {
     }
 
     /// Write `vals` at `at`, growing the stack if needed; returns their end.
+    /// [`Stack::write`] of one value.
+    #[inline]
+    pub(crate) fn write1(&mut self, at: usize, v: Value) -> usize {
+        self.dirty_to = self.dirty_to.max(at + 1);
+        crate::interp::extend_nil(&mut self.regs, at + 1);
+        self.regs[at] = v;
+        at + 1
+    }
+
     pub(crate) fn write(&mut self, at: usize, vals: &[Value]) -> usize {
         let end = at + vals.len();
         self.dirty_to = self.dirty_to.max(end);

@@ -630,7 +630,31 @@ impl Table {
         if self.used == 0 {
             return None;
         }
-        self.probe(key, |a, b| str_eq(heap, a, b)).ok()
+        let Value::Str(s) = key.value else {
+            return self.probe(key, |a, b| str_eq(heap, a, b)).ok();
+        };
+        // A lookup-only probe: no reusable-slot tracking, and a string key
+        // matches on its handle (short strings are interned), comparing
+        // contents only for a long string with the same hash.
+        let payload = key.value.pack().1;
+        let entries = &self.entries[..];
+        let mask = entries.len().wrapping_sub(1);
+        let mut i = key.hash as usize & mask;
+        for _ in 0..entries.len() {
+            let e = entries.get(i)?;
+            if e.is_empty() {
+                return None;
+            }
+            if e.hash == key.hash
+                && e.key_tag == Tag::Str
+                && (e.key_payload == payload
+                    || matches!(e.key(), Value::Str(x) if str_eq(heap, x, s)))
+            {
+                return Some(i);
+            }
+            i = (i + 1) & mask;
+        }
+        None
     }
 
     /// The hash slot holding string key `s`, if present (for inline caches).
@@ -641,6 +665,28 @@ impl Table {
         }
         let key = Key::str(heap, s);
         self.probe(&key, |a, b| str_eq(heap, a, b)).ok()
+    }
+
+    /// Insert string key `key` (absent: its home slot is empty, so no probe
+    /// can find it elsewhere) with value `v` at its home slot, if the hash
+    /// part has room. A fresh table's `{x = .., y = ..}` stores take this
+    /// path. Returns the slot. Use through
+    /// [`Heap::update`](orbit_gc::Heap::update) or after a barrier: it changes
+    /// no capacity.
+    #[inline]
+    pub fn insert_str_home(&mut self, key: &Key, v: Value) -> Option<usize> {
+        let len = self.entries.len();
+        if v.is_nil() || (self.used as usize) >= max_used(len) {
+            return None;
+        }
+        let i = key.hash as usize & len.wrapping_sub(1);
+        let e = self.entries.get_mut(i)?;
+        if !e.is_empty() {
+            return None;
+        }
+        *e = Entry::new(key.value, key.hash, v);
+        self.used += 1;
+        Some(i)
     }
 
     /// The value in hash slot `slot` if that slot holds exactly key `s` (an

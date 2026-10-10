@@ -332,9 +332,13 @@ impl Vm {
     fn take_values(&mut self, n: usize) {
         let at = self.rt.top - n;
         self.rt.xfer.clear();
-        self.rt
-            .xfer
-            .extend_from_slice(&self.rt.stack.regs[at..self.rt.top]);
+        if n == 1 {
+            self.rt.xfer.push(self.rt.stack.regs[at]);
+        } else {
+            self.rt
+                .xfer
+                .extend_from_slice(&self.rt.stack.regs[at..self.rt.top]);
+        }
         self.rt.top = at;
     }
 
@@ -348,7 +352,23 @@ impl Vm {
         let o = match outcome {
             Ok(()) => {
                 let n = self.rt.xfer.len();
-                self.rt.top = self.rt.stack.write(call_at as usize, &self.rt.xfer);
+                self.rt.top = if let [v] = self.rt.xfer[..] {
+                    self.rt.stack.write1(call_at as usize, v)
+                } else {
+                    self.rt.stack.write(call_at as usize, &self.rt.xfer)
+                };
+                // `yield`'s continuation returns what the resume passed:
+                // place it without calling through the continuation.
+                if std::ptr::fn_addr_eq(k, yield_k as Continuation) {
+                    self.rt.xfer.clear();
+                    return self.native_returned(
+                        NativeReturn::Return(n),
+                        Some(f),
+                        f.func as usize,
+                        f.want,
+                        id,
+                    );
+                }
                 CallOutcome::Ok(n)
             }
             Err(v) => {
