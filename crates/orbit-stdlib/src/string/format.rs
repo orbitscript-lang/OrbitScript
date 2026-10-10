@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use orbit_vm::orbit_core::Value;
+use orbit_vm::orbit_core::{Gc, LuaStr, Value};
 use orbit_vm::{CallOutcome, Event, LuaError, NativeCtx, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
@@ -97,10 +97,10 @@ const S_OUT: usize = 2;
 const STATE_SLOTS: usize = 3;
 
 pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
-    let fmt = ctx.check_str(0)?;
-    let cap = ctx.bytes(fmt).len() + 16;
+    ctx.check_str(0)?;
     let nargs = ctx.nargs();
-    format_from(ctx, nargs, 0, 0, Vec::with_capacity(cap))
+    let out = ctx.take_buf();
+    format_from(ctx, nargs, 0, 0, out)
 }
 
 /// After `__tostring` returned: the result replaces the argument, and the
@@ -127,12 +127,17 @@ fn format_after_tostring(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     };
     let i = int(ctx.arg(base + S_POS));
     let arg = int(ctx.arg(base + S_ARG));
-    let out = match ctx.arg(base + S_OUT) {
-        Value::Str(s) => ctx.bytes(s).to_vec(),
-        _ => Vec::new(),
-    };
+    let mut out = ctx.take_buf();
+    if let Value::Str(s) = ctx.arg(base + S_OUT) {
+        out.extend_from_slice(ctx.bytes(s));
+    }
     ctx.set(arg + 1, r);
     format_from(ctx, base, i, arg, out)
+}
+
+/// The text of the conversion at `fmt[start..end]`, for error messages.
+fn spec_text(ctx: &NativeCtx<'_>, fmt: Gc<LuaStr>, start: usize, end: usize) -> String {
+    String::from_utf8_lossy(&ctx.bytes(fmt)[start..end]).into_owned()
 }
 
 /// Format from byte `i` of the format with `arg` of the `nargs` arguments
@@ -147,40 +152,54 @@ fn format_from(
     let Value::Str(fmt) = ctx.arg(0) else {
         unreachable!("checked by format")
     };
-    let fmt = ctx.bytes(fmt).to_vec();
-    while i < fmt.len() {
-        let conv_start = i;
-        let c = fmt[i];
-        i += 1;
-        if c != b'%' {
-            out.push(c);
-            continue;
+    let fmt_len = ctx.bytes(fmt).len();
+    // The format is read again after every call that could move its bytes;
+    // what a conversion needs of it is copied here.
+    let mut body_buf = [0u8; MAX_SPEC];
+    while i < fmt_len {
+        let f = ctx.bytes(fmt);
+        let plain = f[i..]
+            .iter()
+            .position(|&c| c == b'%')
+            .unwrap_or(fmt_len - i);
+        out.extend_from_slice(&f[i..i + plain]);
+        i += plain;
+        if i == fmt_len {
+            break;
         }
-        if fmt.get(i) == Some(&b'%') {
+        let conv_start = i;
+        i += 1;
+        if f.get(i) == Some(&b'%') {
             out.push(b'%');
             i += 1;
             continue;
+        }
+        let start = i;
+        while f.get(i).is_some_and(|c| b"-+ #0123456789.".contains(c)) {
+            i += 1;
+        }
+        let conv = f.get(i).copied();
+        let blen = i - start;
+        if blen <= MAX_SPEC {
+            body_buf[..blen].copy_from_slice(&f[start..i]);
         }
         arg += 1;
         if arg >= nargs {
             return Err(ctx.arg_error(arg, "no value"));
         }
-        let start = i;
-        while fmt.get(i).is_some_and(|c| b"-+ #0123456789.".contains(c)) {
-            i += 1;
-        }
-        if i - start > MAX_SPEC {
+        if blen > MAX_SPEC {
             return Err(ctx.error("invalid format (too long)"));
         }
-        let whole = |end: usize| String::from_utf8_lossy(&fmt[start - 1..end]).into_owned();
-        let Some(&conv) = fmt.get(i) else {
-            return Err(ctx.error(format!("invalid conversion '{}' to 'format'", whole(i))));
+        let Some(conv) = conv else {
+            let text = spec_text(ctx, fmt, conv_start, i);
+            return Err(ctx.error(format!("invalid conversion '{text}' to 'format'")));
         };
         i += 1;
         let Some((flags, precision_ok)) = grammar(conv) else {
-            return Err(ctx.error(format!("invalid conversion '{}' to 'format'", whole(i))));
+            let text = spec_text(ctx, fmt, conv_start, i);
+            return Err(ctx.error(format!("invalid conversion '{text}' to 'format'")));
         };
-        let body = &fmt[start..i - 1];
+        let body = &body_buf[..blen];
         if conv == b'q' {
             if !body.is_empty() {
                 return Err(ctx.error("specifier '%q' cannot have modifiers"));
@@ -190,58 +209,64 @@ fn format_from(
         }
         // Most numeric conversions check their argument before their spec
         // (`%a` checks its spec first).
-        match conv {
-            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => {
-                ctx.check_int(arg)?;
-            }
+        let int_arg = match conv {
+            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => ctx.check_int(arg)?,
             b'e' | b'E' | b'f' | b'g' | b'G' => {
                 ctx.check_f64(arg)?;
+                0
             }
-            _ => {}
-        }
+            _ => 0,
+        };
         let Some(spec) = parse_spec(body, flags, precision_ok) else {
-            return Err(ctx.error(format!("invalid conversion specification: '{}'", whole(i))));
+            let text = spec_text(ctx, fmt, conv_start, i);
+            return Err(ctx.error(format!("invalid conversion specification: '{text}'")));
         };
         match conv {
             b'd' | b'i' => {
-                let n = ctx.check_int(arg)?;
-                fmt_int(&mut out, &spec, n < 0, n.unsigned_abs(), 10, "");
-            }
-            b'u' => {
-                let n = ctx.check_int(arg)? as u64;
-                fmt_int(&mut out, &spec, false, n, 10, "");
-            }
-            b'o' | b'x' | b'X' => {
-                let n = ctx.check_int(arg)? as u64;
-                let (base, prefix) = match conv {
-                    b'o' => (8, "0"),
-                    b'x' => (16, "0x"),
-                    _ => (16, "0X"),
-                };
-                let mut digits = fmt_radix(n, base, conv == b'X');
-                if let Some(p) = spec.precision {
-                    pad_front(&mut digits, p);
-                    if p == 0 && n == 0 {
-                        digits.clear();
-                    }
-                }
-                let prefix = match (spec.alt, conv) {
-                    // `#o` makes the first digit a zero.
-                    (true, b'o') if !digits.starts_with('0') => prefix,
-                    (true, b'x' | b'X') if n != 0 => prefix,
-                    _ => "",
-                };
-                pad(
+                let n = int_arg;
+                let mut buf = [0u8; DIGITS];
+                let digits = radix_digits(&mut buf, n.unsigned_abs(), 10, false);
+                fmt_int(
                     &mut out,
                     &spec,
-                    prefix,
-                    digits.as_bytes(),
-                    spec.precision.is_none(),
+                    sign(&spec, n < 0).as_bytes(),
+                    digits,
+                    false,
                 );
+            }
+            b'u' => {
+                let n = int_arg as u64;
+                let mut buf = [0u8; DIGITS];
+                let digits = radix_digits(&mut buf, n, 10, false);
+                fmt_int(
+                    &mut out,
+                    &spec,
+                    sign(&spec, false).as_bytes(),
+                    digits,
+                    false,
+                );
+            }
+            b'o' | b'x' | b'X' => {
+                let n = int_arg as u64;
+                let (base, prefix): (u64, &[u8]) = match conv {
+                    b'o' => (8, b"0"),
+                    b'x' => (16, b"0x"),
+                    _ => (16, b"0X"),
+                };
+                let mut buf = [0u8; DIGITS];
+                let digits = radix_digits(&mut buf, n, base, conv == b'X');
+                // `#o` makes the first digit a zero; `#x` prefixes non-zero
+                // values.
+                let prefix = match (spec.alt, conv) {
+                    (true, b'o') => prefix,
+                    (true, b'x' | b'X') if n != 0 => prefix,
+                    _ => b"",
+                };
+                fmt_int(&mut out, &spec, prefix, digits, conv == b'o');
             }
             b'c' => {
                 let n = ctx.check_int(arg)?;
-                pad(&mut out, &spec, "", &[n as u8], false);
+                pad(&mut out, &spec, b"", &[n as u8], false);
             }
             b'a' | b'A' | b'e' | b'E' | b'f' | b'g' | b'G' => {
                 let x = ctx.check_f64(arg)?;
@@ -253,7 +278,7 @@ fn format_from(
                     Some(id) => format!("0x{id:x}"),
                     None => "(null)".to_owned(),
                 };
-                pad(&mut out, &spec, "", text.as_bytes(), false);
+                pad(&mut out, &spec, b"", text.as_bytes(), false);
             }
             b's' => {
                 let v = ctx.check_any(arg)?;
@@ -263,20 +288,24 @@ fn format_from(
                         return call_tostring(ctx, nargs, h, v, conv_start, arg - 1, out);
                     }
                 }
+                if body.is_empty() {
+                    ctx.display(v, &mut out);
+                    continue;
+                }
                 let mut text = Vec::new();
                 ctx.display(v, &mut text);
-                if !body.is_empty() && text.contains(&0) {
+                if text.contains(&0) {
                     return Err(ctx.arg_error(arg, "string contains zeros"));
                 }
                 if let Some(p) = spec.precision {
                     text.truncate(p);
                 }
-                pad(&mut out, &spec, "", &text, false);
+                pad(&mut out, &spec, b"", &text, false);
             }
             _ => unreachable!("grammar() accepted '{}'", conv as char),
         }
     }
-    let r = ctx.new_str_owned(out);
+    let r = ctx.new_str_buf(out);
     ctx.ret1(r)
 }
 
@@ -290,7 +319,7 @@ fn call_tostring(
     arg: usize,
     out: Vec<u8>,
 ) -> R {
-    let out = ctx.new_str_owned(out);
+    let out = ctx.new_str_buf(out);
     ctx.truncate(base);
     for _ in 0..STATE_SLOTS {
         ctx.push(Value::Nil);
@@ -309,21 +338,34 @@ fn call_tostring(
 
 /// Append `sign`/`prefix` and `body`, padded to the spec's width. `zero_ok`
 /// says whether the `0` flag pads with zeros (numbers without precision).
-fn pad(out: &mut Vec<u8>, spec: &Spec, prefix: &str, body: &[u8], zero_ok: bool) {
-    let fill = spec.width.saturating_sub(prefix.len() + body.len());
-    if spec.left {
-        out.extend_from_slice(prefix.as_bytes());
-        out.extend_from_slice(body);
-        out.resize(out.len() + fill, b' ');
+fn pad(out: &mut Vec<u8>, spec: &Spec, prefix: &[u8], body: &[u8], zero_ok: bool) {
+    pad_zeros(out, spec, prefix, 0, body, zero_ok);
+}
+
+/// [`pad`] with a body of `zeros` zeros and then `digits`.
+fn pad_zeros(
+    out: &mut Vec<u8>,
+    spec: &Spec,
+    prefix: &[u8],
+    zeros: usize,
+    digits: &[u8],
+    zero_ok: bool,
+) {
+    let fill = spec
+        .width
+        .saturating_sub(prefix.len() + zeros + digits.len());
+    let (left, zero_fill, right) = if spec.left {
+        (0, 0, fill)
     } else if spec.zero && zero_ok {
-        out.extend_from_slice(prefix.as_bytes());
-        out.resize(out.len() + fill, b'0');
-        out.extend_from_slice(body);
+        (0, fill, 0)
     } else {
-        out.resize(out.len() + fill, b' ');
-        out.extend_from_slice(prefix.as_bytes());
-        out.extend_from_slice(body);
-    }
+        (fill, 0, 0)
+    };
+    out.resize(out.len() + left, b' ');
+    out.extend_from_slice(prefix);
+    out.resize(out.len() + zero_fill + zeros, b'0');
+    out.extend_from_slice(digits);
+    out.resize(out.len() + right, b' ');
 }
 
 fn sign(spec: &Spec, negative: bool) -> &'static str {
@@ -338,33 +380,45 @@ fn sign(spec: &Spec, negative: bool) -> &'static str {
     }
 }
 
-fn pad_front(digits: &mut String, min: usize) {
-    if digits.len() < min {
-        digits.insert_str(0, &"0".repeat(min - digits.len()));
-    }
-}
+/// Room for the digits of any `u64` in base 8 or more.
+const DIGITS: usize = 22;
 
-fn fmt_radix(n: u64, base: u32, upper: bool) -> String {
-    match (base, upper) {
-        (8, _) => format!("{n:o}"),
-        (16, false) => format!("{n:x}"),
-        (16, true) => format!("{n:X}"),
-        _ => n.to_string(),
-    }
-}
-
-fn fmt_int(out: &mut Vec<u8>, spec: &Spec, negative: bool, mag: u64, base: u32, prefix: &str) {
-    let mut digits = fmt_radix(mag, base, false);
-    if let Some(p) = spec.precision {
-        pad_front(&mut digits, p);
-        if p == 0 && mag == 0 {
-            digits.clear();
+/// The digits of `n` in `base` (8, 10 or 16), written to the end of `buf`.
+fn radix_digits(buf: &mut [u8; DIGITS], mut n: u64, base: u64, upper: bool) -> &[u8] {
+    let set: &[u8; 16] = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+    let mut at = DIGITS;
+    loop {
+        at -= 1;
+        buf[at] = set[(n % base) as usize];
+        n /= base;
+        if n == 0 {
+            break;
         }
     }
-    let s = format!("{}{prefix}", sign(spec, negative));
-    pad(out, spec, &s, digits.as_bytes(), spec.precision.is_none());
+    &buf[at..]
 }
 
+/// An integer conversion: `prefix` (sign or radix prefix) and `digits`,
+/// zero-extended to the precision and padded to the width. A precision of
+/// 0 prints no digits for 0. With `octal_alt`, `prefix` is the `#o` zero,
+/// which is left out when the digits already start with one.
+fn fmt_int(out: &mut Vec<u8>, spec: &Spec, prefix: &[u8], digits: &[u8], octal_alt: bool) {
+    let (zeros, digits) = match spec.precision {
+        Some(0) if digits == b"0" => (0, &b""[..]),
+        Some(p) => (p.saturating_sub(digits.len()), digits),
+        None => (0, digits),
+    };
+    let prefix = if octal_alt && (zeros > 0 || digits.first() == Some(&b'0')) {
+        &b""[..]
+    } else {
+        prefix
+    };
+    pad_zeros(out, spec, prefix, zeros, digits, spec.precision.is_none());
+}
 /// `%a %e %f %g` and their upper-case forms.
 pub(crate) fn fmt_float(out: &mut Vec<u8>, spec: &Spec, conv: u8, x: f64) {
     let upper = conv.is_ascii_uppercase();
@@ -376,7 +430,7 @@ pub(crate) fn fmt_float(out: &mut Vec<u8>, spec: &Spec, conv: u8, x: f64) {
             (false, false) => "inf",
             (false, true) => "INF",
         };
-        pad(out, spec, s, body.as_bytes(), false);
+        pad(out, spec, s.as_bytes(), body.as_bytes(), false);
         return;
     }
     let x = x.abs();
@@ -392,14 +446,14 @@ pub(crate) fn fmt_float(out: &mut Vec<u8>, spec: &Spec, conv: u8, x: f64) {
             } else {
                 (prefix, body)
             };
-            pad(out, spec, &prefix, body.as_bytes(), true);
+            pad(out, spec, prefix.as_bytes(), body.as_bytes(), true);
             return;
         }
     };
     if upper {
         body.make_ascii_uppercase();
     }
-    pad(out, spec, s, body.as_bytes(), true);
+    pad(out, spec, s.as_bytes(), body.as_bytes(), true);
 }
 
 fn fixed(x: f64, p: usize, alt: bool) -> String {

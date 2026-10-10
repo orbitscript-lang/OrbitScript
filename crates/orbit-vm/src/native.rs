@@ -103,6 +103,9 @@ pub enum NativeReturn {
     Exit,
 }
 
+/// Largest scratch buffer ([`NativeCtx::take_buf`]) kept between calls.
+const SCRATCH_KEEP: usize = 64 * 1024;
+
 /// A native function's view of the VM: its window of the stack (arguments,
 /// then whatever it pushes), the heap and the runtime.
 #[derive(Debug)]
@@ -213,6 +216,43 @@ impl NativeCtx<'_> {
     /// A string value from owned bytes.
     pub fn new_str_owned(&mut self, bytes: Vec<u8>) -> Value {
         Value::Str(self.rt.strings.new_str_owned(self.heap, bytes))
+    }
+
+    /// A string value with bytes `a..b` of `s`, copied straight from it.
+    pub fn new_substr(&mut self, s: Gc<LuaStr>, a: usize, b: usize) -> Value {
+        Value::Str(self.rt.strings.new_substr(self.heap, s, a, b))
+    }
+
+    /// An empty byte buffer to build a result in. It reuses the VM's scratch
+    /// buffer, so hand it back with [`NativeCtx::new_str_buf`] or
+    /// [`NativeCtx::give_buf`]; one that is dropped instead (on an error,
+    /// or by a nested native that took it first) only costs an allocation.
+    #[inline]
+    pub fn take_buf(&mut self) -> Vec<u8> {
+        let mut b = std::mem::take(&mut self.rt.scratch);
+        b.clear();
+        b
+    }
+
+    /// Give a buffer from [`NativeCtx::take_buf`] back for reuse. Very
+    /// large buffers are freed instead, so one huge result doesn't stay
+    /// allocated.
+    #[inline]
+    pub fn give_buf(&mut self, b: Vec<u8>) {
+        if b.capacity() <= SCRATCH_KEEP && b.capacity() >= self.rt.scratch.capacity() {
+            self.rt.scratch = b;
+        }
+    }
+
+    /// A string value from a buffer taken with [`NativeCtx::take_buf`],
+    /// which goes back for reuse (or, if large, becomes the string's bytes).
+    pub fn new_str_buf(&mut self, b: Vec<u8>) -> Value {
+        if b.len() > SCRATCH_KEEP {
+            return self.new_str_owned(b);
+        }
+        let v = self.new_str(&b);
+        self.give_buf(b);
+        v
     }
 
     /// Link a compiled chunk, as [`Vm::load_with_env`](crate::Vm::load_with_env)

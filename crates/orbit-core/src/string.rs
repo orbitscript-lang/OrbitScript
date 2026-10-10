@@ -243,6 +243,32 @@ impl Interner {
         }
     }
 
+    /// A string with bytes `a..b` of `s`, without copying them into a
+    /// temporary first: short results are interned from a stack copy.
+    pub fn new_substr(
+        &mut self,
+        heap: &mut LuaHeap,
+        s: Gc<LuaStr>,
+        a: usize,
+        b: usize,
+    ) -> Gc<LuaStr> {
+        let len = b - a;
+        if len <= MAX_SHORT {
+            // The bytes may move when the heap grows, so copy them out
+            // before interning (which may allocate).
+            let mut buf = [0u8; MAX_SHORT];
+            buf[..len].copy_from_slice(&heap.get(s).as_bytes()[a..b]);
+            self.intern(heap, &buf[..len])
+        } else {
+            let bytes: Box<[u8]> = heap.get(s).as_bytes()[a..b].into();
+            heap.alloc(LuaStr {
+                hash: StdCell::new(0),
+                short: false,
+                bytes: Bytes::Heap(bytes),
+            })
+        }
+    }
+
     /// The interned short string with these bytes (at most [`MAX_SHORT`]).
     pub fn intern(&mut self, heap: &mut LuaHeap, bytes: &[u8]) -> Gc<LuaStr> {
         debug_assert!(bytes.len() <= MAX_SHORT);
@@ -451,6 +477,13 @@ mod tests {
         let d = i.new_str(&mut heap, &long);
         assert_ne!(c, d);
         assert_eq!(heap.get(c).hash(), heap.get(d).hash());
+        assert_eq!(
+            i.new_substr(&mut heap, c, 1, 6),
+            i.new_str(&mut heap, b"xxxxx")
+        );
+        let e = i.new_substr(&mut heap, c, 2, 47);
+        assert_eq!(heap.get(e).as_bytes(), &long[..45]);
+        assert!(!heap.get(e).is_short());
         for n in 0..2000 {
             i.new_str(&mut heap, format!("s{n}").as_bytes());
         }

@@ -440,6 +440,10 @@ pub struct Runtime {
     pub(crate) resumers: Vec<Gc<Thread>>,
     /// Values moving between two stacks during a switch.
     pub(crate) xfer: Vec<Value>,
+    /// A byte buffer natives build results in, kept between calls so
+    /// building a string needs no allocation of its own
+    /// ([`NativeCtx::take_buf`](crate::NativeCtx::take_buf)).
+    pub(crate) scratch: Vec<u8>,
     /// Set by a stack switch, so the dispatch loop doesn't save its pc into
     /// the other stack's frames; cleared when the loop reloads.
     pub(crate) switched: bool,
@@ -631,6 +635,7 @@ impl Vm {
                 main_thread,
                 resumers: Vec::new(),
                 xfer: Vec::new(),
+                scratch: Vec::new(),
                 switched: false,
                 no_memory: false,
                 limit_grace: false,
