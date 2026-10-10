@@ -41,6 +41,8 @@ use orbit_vm::{NativeFn, Vm};
 
 #[cfg(feature = "load")]
 pub use load::{BINARY_SIGNATURE, chunk_id, load_buffer, read_chunk_file};
+#[cfg(feature = "package")]
+pub use package::{DynLoader, LoadFn};
 
 /// The first result of a call a native requested with `CallThen` (nil if
 /// none); the call's results are dropped from the window.

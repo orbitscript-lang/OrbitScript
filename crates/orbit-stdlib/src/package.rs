@@ -4,8 +4,9 @@
 //! `package.loaded` and `package.preload` are also kept in the registry
 //! (`_LOADED`, `_PRELOAD`), and the `package` table itself (`_PACKAGE`), so
 //! `require` keeps working when scripts replace those fields, as in Lua.
-//! `orbit` has no dynamic loading: `package.loadlib` reports it as
-//! `"absent"` and the C searchers only search.
+//! Dynamic loading comes from a [`DynLoader`] a host installs (the
+//! `orbit-capi` crate, behind the `c-modules` feature). Without one,
+//! `package.loadlib` reports `"absent"` and the C searchers only search.
 
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::{Gc, Table, Value};
@@ -15,6 +16,23 @@ use crate::load::{Mode, load_chunk, read_chunk_file};
 use crate::{LOADED, registry_table};
 
 type R = Result<NativeReturn, LuaError>;
+
+/// Loads `sym` from the C library at `path`: the function, or `true` when
+/// `sym` is `"*"` (link the library's symbols globally only). On failure,
+/// the message and where it failed (`"open"` or `"init"`).
+pub type LoadFn =
+    fn(&mut NativeCtx<'_>, path: &[u8], sym: &[u8]) -> Result<Value, (String, &'static str)>;
+
+/// The dynamic loader `package.loadlib` and the C searchers use, kept in
+/// [`orbit_vm::Runtime::ext`]. `None` (the default): no dynamic loading.
+#[derive(Debug, Default)]
+pub struct DynLoader {
+    pub load: Option<LoadFn>,
+}
+
+fn dyn_loader(ctx: &mut NativeCtx<'_>) -> Option<LoadFn> {
+    ctx.rt.ext.get_or_insert_with(DynLoader::default).load
+}
 
 /// The defaults the reference `lua5.5` build uses, so scripts see the same
 /// strings.
@@ -112,8 +130,22 @@ pub(crate) fn open(vm: &mut Vm, ignore_env: bool) {
 }
 
 fn loadlib(ctx: &mut NativeCtx<'_>) -> R {
-    ctx.check_str(0)?;
-    ctx.check_str(1)?;
+    let path = ctx.check_str(0)?;
+    let sym = ctx.check_str(1)?;
+    if let Some(load) = dyn_loader(ctx) {
+        let (path, sym) = (ctx.bytes(path).to_vec(), ctx.bytes(sym).to_vec());
+        return match load(ctx, &path, &sym) {
+            Ok(f) => ctx.ret1(f),
+            Err((msg, when)) => {
+                let msg = ctx.new_str(msg.as_bytes());
+                let when = ctx.new_str(when.as_bytes());
+                ctx.push(Value::Nil);
+                ctx.push(msg);
+                ctx.push(when);
+                Ok(NativeReturn::Return(3))
+            }
+        };
+    }
     let msg = ctx.new_str(b"dynamic libraries not enabled; check your Lua installation");
     let when = ctx.new_str(b"absent");
     ctx.push(Value::Nil);
@@ -278,24 +310,51 @@ fn search_lua(ctx: &mut NativeCtx<'_>) -> R {
     }
 }
 
-/// The C searchers: search `cpath` like `lua`, but a library that's found
-/// can't be loaded.
-fn search_c_for(ctx: &mut NativeCtx<'_>, name: &[u8], file_name: &[u8]) -> R {
+/// The C searchers: search `cpath` like `lua`, then load the library's
+/// `luaopen_` function through the [`DynLoader`]. Without one, a library
+/// that's found can't be loaded. `croot` is the all-in-one searcher: a
+/// library without the function only adds a message.
+fn search_c_for(ctx: &mut NativeCtx<'_>, name: &[u8], file_name: &[u8], croot: bool) -> R {
     let cpath = path_field(ctx, "cpath")?;
-    match search_path(file_name, &cpath, b".", DIRSEP.as_bytes()) {
-        Ok(file) => Err(load_error(
+    let file = match search_path(file_name, &cpath, b".", DIRSEP.as_bytes()) {
+        Ok(file) => file,
+        Err(msg) => return ret_msg(ctx, msg),
+    };
+    let Some(load) = dyn_loader(ctx) else {
+        return Err(load_error(
             ctx,
             name,
             &file,
             "dynamic libraries not enabled; check your Lua installation",
-        )),
-        Err(msg) => ret_msg(ctx, msg),
+        ));
+    };
+    // `luaopen_` and the name with dots as underscores, without any suffix
+    // from a hyphen on (`a.b-v2` opens `luaopen_a_b`).
+    let base = name.split(|&b| b == b'-').next().unwrap_or(name);
+    let mut sym = b"luaopen_".to_vec();
+    sym.extend(base.iter().map(|&b| if b == b'.' { b'_' } else { b }));
+    match load(ctx, &file, &sym) {
+        Ok(f) => {
+            ctx.push(f);
+            let data = ctx.new_str_owned(file);
+            ctx.push(data);
+            Ok(NativeReturn::Return(2))
+        }
+        Err((_, "init")) if croot => {
+            let mut msg = b"no module '".to_vec();
+            msg.extend_from_slice(name);
+            msg.extend_from_slice(b"' in file '");
+            msg.extend_from_slice(&file);
+            msg.push(b'\'');
+            ret_msg(ctx, msg)
+        }
+        Err((why, _)) => Err(load_error(ctx, name, &file, &why)),
     }
 }
 
 fn search_c(ctx: &mut NativeCtx<'_>) -> R {
     let name = str_arg(ctx, 0)?;
-    search_c_for(ctx, &name, &name)
+    search_c_for(ctx, &name, &name, false)
 }
 
 fn search_croot(ctx: &mut NativeCtx<'_>) -> R {
@@ -304,7 +363,7 @@ fn search_croot(ctx: &mut NativeCtx<'_>) -> R {
         return Ok(NativeReturn::Return(0));
     };
     let root = name[..dot].to_vec();
-    search_c_for(ctx, &name, &root)
+    search_c_for(ctx, &name, &root, true)
 }
 
 // `require`'s window while it runs searchers and the loader: the name, the

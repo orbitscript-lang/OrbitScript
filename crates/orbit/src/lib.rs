@@ -103,6 +103,8 @@ impl Lua {
         let mut vm = Vm::new();
         vm.rt.compile = Some(compile_lua);
         orbit_stdlib::open_libs_with(&mut vm, options);
+        #[cfg(feature = "c-modules")]
+        orbit_capi::install(&mut vm);
         Lua { vm }
     }
 

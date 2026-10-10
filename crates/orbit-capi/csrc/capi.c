@@ -1,0 +1,724 @@
+/*
+ * The C half of OrbitScript's Lua C API (spike).
+ *
+ * Every lua_* entry point calls a Rust function (orbit_r_*) that does the
+ * work and returns normally. If that function raised a Lua error it sets
+ * L->status, and only then, back in C, does the entry point longjmp to the
+ * trampoline that called the module's function. A longjmp therefore only
+ * ever crosses C frames: the module's own and this file's.
+ *
+ * The auxiliary library (luaL_*) is written here on top of the lua_* API,
+ * from the reference manual's description of each function.
+ */
+#include <errno.h>
+#include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "lauxlib.h"
+#include "lua.h"
+#include "lualib.h"
+
+struct lua_State {
+  void *rs;      /* the Rust bridge */
+  jmp_buf *jb;   /* the innermost trampoline's jump target */
+  int status;    /* set by Rust when an error is pending */
+};
+
+/* ------------------------------------------------------------------------
+ * States and the trampoline
+ * --------------------------------------------------------------------- */
+
+/* A state with LUA_EXTRASPACE bytes in front of it, as lua_getextraspace
+   expects. */
+lua_State *orbit_capi_newstate(void *rs) {
+  char *block = calloc(1, LUA_EXTRASPACE + sizeof(struct lua_State));
+  lua_State *L;
+  if (block == NULL) return NULL;
+  L = (lua_State *)(block + LUA_EXTRASPACE);
+  L->rs = rs;
+  return L;
+}
+
+void orbit_capi_freestate(lua_State *L) {
+  if (L != NULL) free((char *)L - LUA_EXTRASPACE);
+}
+
+/* Call f(L). Returns its result count, or -1 if it raised an error (the
+   error value is pending on the Rust side). */
+int orbit_capi_trampoline(lua_State *L, lua_CFunction f) {
+  jmp_buf jb;
+  jmp_buf *volatile old = L->jb;
+  volatile int n = -1;
+  L->jb = &jb;
+  if (setjmp(jb) == 0) n = f(L);
+  L->jb = old;
+  return n;
+}
+
+static void orbit_throw(lua_State *L) {
+  L->status = 0;
+  if (L->jb == NULL) {
+    fputs("OrbitScript: Lua error raised outside a C function call\n", stderr);
+    abort();
+  }
+  longjmp(*L->jb, 1);
+}
+
+#define CHECK(L)                                \
+  do {                                          \
+    if (luai_unlikely((L)->status)) orbit_throw(L); \
+  } while (0)
+
+/* An entry point returning a value, and one returning nothing. */
+#define API(ret, name, params, args)                  \
+  extern ret orbit_r_##name params;                   \
+  LUA_API ret lua_##name params {                     \
+    ret r_ = orbit_r_##name args;                     \
+    CHECK(L);                                         \
+    return r_;                                        \
+  }
+#define APIV(name, params, args)                      \
+  extern void orbit_r_##name params;                  \
+  LUA_API void lua_##name params {                    \
+    orbit_r_##name args;                              \
+    CHECK(L);                                         \
+  }
+
+/* ------------------------------------------------------------------------
+ * The core API, implemented in Rust
+ * --------------------------------------------------------------------- */
+
+API(lua_Number, version, (lua_State *L), (L))
+API(int, absindex, (lua_State *L, int idx), (L, idx))
+API(int, gettop, (lua_State *L), (L))
+APIV(settop, (lua_State *L, int idx), (L, idx))
+APIV(pushvalue, (lua_State *L, int idx), (L, idx))
+APIV(rotate, (lua_State *L, int idx, int n), (L, idx, n))
+APIV(copy, (lua_State *L, int fromidx, int toidx), (L, fromidx, toidx))
+API(int, checkstack, (lua_State *L, int n), (L, n))
+
+API(int, isnumber, (lua_State *L, int idx), (L, idx))
+API(int, isstring, (lua_State *L, int idx), (L, idx))
+API(int, iscfunction, (lua_State *L, int idx), (L, idx))
+API(int, isinteger, (lua_State *L, int idx), (L, idx))
+API(int, isuserdata, (lua_State *L, int idx), (L, idx))
+API(int, type, (lua_State *L, int idx), (L, idx))
+API(lua_Number, tonumberx, (lua_State *L, int idx, int *isnum), (L, idx, isnum))
+API(lua_Integer, tointegerx, (lua_State *L, int idx, int *isnum), (L, idx, isnum))
+API(int, toboolean, (lua_State *L, int idx), (L, idx))
+API(const char *, tolstring, (lua_State *L, int idx, size_t *len), (L, idx, len))
+API(lua_Unsigned, rawlen, (lua_State *L, int idx), (L, idx))
+API(lua_CFunction, tocfunction, (lua_State *L, int idx), (L, idx))
+API(void *, touserdata, (lua_State *L, int idx), (L, idx))
+API(const void *, topointer, (lua_State *L, int idx), (L, idx))
+
+API(int, rawequal, (lua_State *L, int a, int b), (L, a, b))
+API(int, compare, (lua_State *L, int a, int b, int op), (L, a, b, op))
+
+APIV(pushnil, (lua_State *L), (L))
+APIV(pushnumber, (lua_State *L, lua_Number n), (L, n))
+APIV(pushinteger, (lua_State *L, lua_Integer n), (L, n))
+API(const char *, pushlstring, (lua_State *L, const char *s, size_t len), (L, s, len))
+APIV(pushcclosure, (lua_State *L, lua_CFunction fn, int n), (L, fn, n))
+APIV(pushboolean, (lua_State *L, int b), (L, b))
+APIV(pushlightuserdata, (lua_State *L, void *p), (L, p))
+
+API(int, getglobal, (lua_State *L, const char *name), (L, name))
+API(int, gettable, (lua_State *L, int idx), (L, idx))
+API(int, getfield, (lua_State *L, int idx, const char *k), (L, idx, k))
+API(int, geti, (lua_State *L, int idx, lua_Integer n), (L, idx, n))
+API(int, rawget, (lua_State *L, int idx), (L, idx))
+API(int, rawgeti, (lua_State *L, int idx, lua_Integer n), (L, idx, n))
+API(int, rawgetp, (lua_State *L, int idx, const void *p), (L, idx, p))
+APIV(createtable, (lua_State *L, int narr, int nrec), (L, narr, nrec))
+API(void *, newuserdatauv, (lua_State *L, size_t sz, int nuvalue), (L, sz, nuvalue))
+API(int, getmetatable, (lua_State *L, int idx), (L, idx))
+API(int, getiuservalue, (lua_State *L, int idx, int n), (L, idx, n))
+
+APIV(setglobal, (lua_State *L, const char *name), (L, name))
+APIV(settable, (lua_State *L, int idx), (L, idx))
+APIV(setfield, (lua_State *L, int idx, const char *k), (L, idx, k))
+APIV(seti, (lua_State *L, int idx, lua_Integer n), (L, idx, n))
+APIV(rawset, (lua_State *L, int idx), (L, idx))
+APIV(rawseti, (lua_State *L, int idx, lua_Integer n), (L, idx, n))
+APIV(rawsetp, (lua_State *L, int idx, const void *p), (L, idx, p))
+API(int, setmetatable, (lua_State *L, int idx), (L, idx))
+API(int, setiuservalue, (lua_State *L, int idx, int n), (L, idx, n))
+
+APIV(callk, (lua_State *L, int nargs, int nresults, lua_KContext ctx, lua_KFunction k),
+     (L, nargs, nresults, ctx, k))
+API(int, pcallk,
+    (lua_State *L, int nargs, int nresults, int errfunc, lua_KContext ctx, lua_KFunction k),
+    (L, nargs, nresults, errfunc, ctx, k))
+
+API(int, error, (lua_State *L), (L))
+API(int, next, (lua_State *L, int idx), (L, idx))
+APIV(concat, (lua_State *L, int n), (L, n))
+APIV(len, (lua_State *L, int idx), (L, idx))
+API(size_t, stringtonumber, (lua_State *L, const char *s), (L, s))
+
+extern int orbit_r_gc(lua_State *L, int what, int arg);
+LUA_API int lua_gc(lua_State *L, int what, ...) {
+  va_list ap;
+  int arg = 0, r;
+  va_start(ap, what);
+  if (what == LUA_GCSTEP) arg = va_arg(ap, int);
+  va_end(ap);
+  r = orbit_r_gc(L, what, arg);
+  CHECK(L);
+  return r;
+}
+
+LUA_API const char *lua_typename(lua_State *L, int t) {
+  static const char *const names[] = {"no value", "nil",   "boolean",  "userdata", "number",
+                                      "string",   "table", "function", "userdata", "thread"};
+  (void)L;
+  if (t < LUA_TNONE || t >= LUA_NUMTYPES) return "?";
+  return names[t + 1];
+}
+
+LUA_API const char *lua_pushstring(lua_State *L, const char *s) {
+  if (s == NULL) {
+    lua_pushnil(L);
+    return NULL;
+  }
+  return lua_pushlstring(L, s, strlen(s));
+}
+
+/* The string is copied, so the caller's buffer is released at once. */
+LUA_API const char *lua_pushexternalstring(lua_State *L, const char *s, size_t len,
+                                           lua_Alloc falloc, void *ud) {
+  const char *r = lua_pushlstring(L, s, len);
+  if (falloc != NULL) falloc(ud, (void *)s, len + 1, 0);
+  return r;
+}
+
+static void *orbit_default_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
+  (void)ud;
+  (void)osize;
+  if (nsize == 0) {
+    free(ptr);
+    return NULL;
+  }
+  return realloc(ptr, nsize);
+}
+
+LUA_API lua_Alloc lua_getallocf(lua_State *L, void **ud) {
+  (void)L;
+  if (ud != NULL) *ud = NULL;
+  return orbit_default_alloc;
+}
+
+LUALIB_API void *luaL_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
+  return orbit_default_alloc(ud, ptr, osize, nsize);
+}
+
+LUA_API lua_CFunction lua_atpanic(lua_State *L, lua_CFunction panicf) {
+  (void)L;
+  (void)panicf;
+  return NULL;
+}
+
+LUA_API void lua_warning(lua_State *L, const char *msg, int tocont) {
+  (void)L;
+  fputs(msg, stderr);
+  if (!tocont) fputc('\n', stderr);
+}
+
+/* ------------------------------------------------------------------------
+ * lua_pushfstring: the manual's directives, %% %s %f %I %p %d %c %U
+ * --------------------------------------------------------------------- */
+
+typedef struct {
+  char *p;
+  size_t n, cap;
+} FBuf;
+
+static void fb_add(FBuf *b, const char *s, size_t l) {
+  if (b->n + l > b->cap) {
+    size_t cap = b->cap ? b->cap * 2 : 128;
+    char *p;
+    while (cap < b->n + l) cap *= 2;
+    p = realloc(b->p, cap);
+    if (p == NULL) abort();
+    b->p = p;
+    b->cap = cap;
+  }
+  memcpy(b->p + b->n, s, l);
+  b->n += l;
+}
+
+static size_t utf8_encode(char *out, unsigned long x) {
+  if (x < 0x80) {
+    out[0] = (char)x;
+    return 1;
+  } else {
+    char tmp[8];
+    size_t n = 0, i;
+    unsigned long limit = 0x3f;
+    do {
+      tmp[n++] = (char)(0x80 | (x & 0x3f));
+      x >>= 6;
+      limit >>= 1;
+    } while (x > limit);
+    tmp[n++] = (char)((~limit << 1) | x);
+    for (i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    return n;
+  }
+}
+
+LUA_API const char *lua_pushvfstring(lua_State *L, const char *fmt, va_list argp) {
+  FBuf b = {NULL, 0, 0};
+  const char *r;
+  const char *e;
+  char tmp[64];
+  while ((e = strchr(fmt, '%')) != NULL) {
+    fb_add(&b, fmt, (size_t)(e - fmt));
+    switch (e[1]) {
+      case 's': {
+        const char *s = va_arg(argp, const char *);
+        if (s == NULL) s = "(null)";
+        fb_add(&b, s, strlen(s));
+        break;
+      }
+      case 'c': {
+        char c = (char)va_arg(argp, int);
+        fb_add(&b, &c, 1);
+        break;
+      }
+      case 'd': {
+        int l = snprintf(tmp, sizeof tmp, "%d", va_arg(argp, int));
+        fb_add(&b, tmp, (size_t)l);
+        break;
+      }
+      case 'I': {
+        int l = snprintf(tmp, sizeof tmp, "%lld", (long long)va_arg(argp, lua_Integer));
+        fb_add(&b, tmp, (size_t)l);
+        break;
+      }
+      case 'f': {
+        /* Format through the VM so floats print as Lua prints them. */
+        size_t l;
+        const char *s;
+        lua_pushnumber(L, (lua_Number)va_arg(argp, double));
+        s = lua_tolstring(L, -1, &l);
+        fb_add(&b, s, l);
+        lua_settop(L, -2);
+        break;
+      }
+      case 'p': {
+        void *p = va_arg(argp, void *);
+        int l = p == NULL ? snprintf(tmp, sizeof tmp, "(null)") : snprintf(tmp, sizeof tmp, "%p", p);
+        fb_add(&b, tmp, (size_t)l);
+        break;
+      }
+      case 'U': {
+        size_t l = utf8_encode(tmp, (unsigned long)va_arg(argp, long));
+        fb_add(&b, tmp, l);
+        break;
+      }
+      case '%':
+        fb_add(&b, "%", 1);
+        break;
+      default:
+        free(b.p);
+        luaL_error(L, "invalid option '%%%c' to 'lua_pushfstring'", e[1]);
+    }
+    fmt = e + 2;
+  }
+  fb_add(&b, fmt, strlen(fmt));
+  r = lua_pushlstring(L, b.p, b.n);
+  free(b.p);
+  return r;
+}
+
+LUA_API const char *lua_pushfstring(lua_State *L, const char *fmt, ...) {
+  const char *r;
+  va_list ap;
+  va_start(ap, fmt);
+  r = lua_pushvfstring(L, fmt, ap);
+  va_end(ap);
+  return r;
+}
+
+/* ------------------------------------------------------------------------
+ * Auxiliary library
+ * --------------------------------------------------------------------- */
+
+extern void orbit_r_argerror(lua_State *L, int arg, const char *extramsg);
+extern void orbit_r_typeerror(lua_State *L, int arg, const char *tname);
+extern void orbit_r_where(lua_State *L, int lvl);
+extern const char *orbit_r_tolstringmeta(lua_State *L, int idx, size_t *len);
+
+LUALIB_API int luaL_argerror(lua_State *L, int arg, const char *extramsg) {
+  orbit_r_argerror(L, arg, extramsg);
+  CHECK(L);
+  return 0;
+}
+
+LUALIB_API int luaL_typeerror(lua_State *L, int arg, const char *tname) {
+  orbit_r_typeerror(L, arg, tname);
+  CHECK(L);
+  return 0;
+}
+
+LUALIB_API void luaL_where(lua_State *L, int lvl) {
+  orbit_r_where(L, lvl);
+  CHECK(L);
+}
+
+LUALIB_API int luaL_error(lua_State *L, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  luaL_where(L, 1);
+  lua_pushvfstring(L, fmt, ap);
+  va_end(ap);
+  lua_concat(L, 2);
+  return lua_error(L);
+}
+
+LUALIB_API void luaL_checkversion_(lua_State *L, lua_Number ver, size_t sz) {
+  if (sz != LUAL_NUMSIZES)
+    luaL_error(L, "core and library have incompatible numeric types");
+  else if (ver != LUA_VERSION_NUM)
+    luaL_error(L, "version mismatch: app. needs %f, Lua core provides %f", (double)ver,
+               (double)LUA_VERSION_NUM);
+}
+
+LUALIB_API int luaL_getmetafield(lua_State *L, int obj, const char *e) {
+  int t;
+  if (!lua_getmetatable(L, obj)) return LUA_TNIL;
+  lua_pushstring(L, e);
+  t = lua_rawget(L, -2);
+  if (t == LUA_TNIL)
+    lua_settop(L, -3);
+  else
+    lua_rotate(L, -2, -1), lua_settop(L, -2);
+  return t;
+}
+
+LUALIB_API int luaL_callmeta(lua_State *L, int obj, const char *e) {
+  obj = lua_absindex(L, obj);
+  if (luaL_getmetafield(L, obj, e) == LUA_TNIL) return 0;
+  lua_pushvalue(L, obj);
+  lua_call(L, 1, 1);
+  return 1;
+}
+
+LUALIB_API const char *luaL_tolstring(lua_State *L, int idx, size_t *len) {
+  const char *r = orbit_r_tolstringmeta(L, idx, len);
+  CHECK(L);
+  return r;
+}
+
+static void tag_error(lua_State *L, int arg, int tag) {
+  luaL_typeerror(L, arg, lua_typename(L, tag));
+}
+
+LUALIB_API const char *luaL_checklstring(lua_State *L, int arg, size_t *len) {
+  const char *s = lua_tolstring(L, arg, len);
+  if (s == NULL) tag_error(L, arg, LUA_TSTRING);
+  return s;
+}
+
+LUALIB_API const char *luaL_optlstring(lua_State *L, int arg, const char *def, size_t *len) {
+  if (lua_isnoneornil(L, arg)) {
+    if (len != NULL) *len = def ? strlen(def) : 0;
+    return def;
+  }
+  return luaL_checklstring(L, arg, len);
+}
+
+LUALIB_API lua_Number luaL_checknumber(lua_State *L, int arg) {
+  int ok;
+  lua_Number d = lua_tonumberx(L, arg, &ok);
+  if (!ok) tag_error(L, arg, LUA_TNUMBER);
+  return d;
+}
+
+LUALIB_API lua_Number luaL_optnumber(lua_State *L, int arg, lua_Number def) {
+  return luaL_opt(L, luaL_checknumber, arg, def);
+}
+
+LUALIB_API lua_Integer luaL_checkinteger(lua_State *L, int arg) {
+  int ok;
+  lua_Integer d = lua_tointegerx(L, arg, &ok);
+  if (!ok) {
+    if (lua_isnumber(L, arg))
+      luaL_argerror(L, arg, "number has no integer representation");
+    else
+      tag_error(L, arg, LUA_TNUMBER);
+  }
+  return d;
+}
+
+LUALIB_API lua_Integer luaL_optinteger(lua_State *L, int arg, lua_Integer def) {
+  return luaL_opt(L, luaL_checkinteger, arg, def);
+}
+
+LUALIB_API void luaL_checkstack(lua_State *L, int sz, const char *msg) {
+  if (!lua_checkstack(L, sz)) {
+    if (msg)
+      luaL_error(L, "stack overflow (%s)", msg);
+    else
+      luaL_error(L, "stack overflow");
+  }
+}
+
+LUALIB_API void luaL_checktype(lua_State *L, int arg, int t) {
+  if (lua_type(L, arg) != t) tag_error(L, arg, t);
+}
+
+LUALIB_API void luaL_checkany(lua_State *L, int arg) {
+  if (lua_type(L, arg) == LUA_TNONE) luaL_argerror(L, arg, "value expected");
+}
+
+LUALIB_API int luaL_newmetatable(lua_State *L, const char *tname) {
+  if (luaL_getmetatable(L, tname) != LUA_TNIL) return 0;
+  lua_settop(L, -2);
+  lua_createtable(L, 0, 2);
+  lua_pushstring(L, tname);
+  lua_setfield(L, -2, "__name");
+  lua_pushvalue(L, -1);
+  lua_setfield(L, LUA_REGISTRYINDEX, tname);
+  return 1;
+}
+
+LUALIB_API void luaL_setmetatable(lua_State *L, const char *tname) {
+  luaL_getmetatable(L, tname);
+  lua_setmetatable(L, -2);
+}
+
+LUALIB_API void *luaL_testudata(lua_State *L, int ud, const char *tname) {
+  void *p = lua_touserdata(L, ud);
+  int same;
+  if (p == NULL || !lua_getmetatable(L, ud)) return NULL;
+  luaL_getmetatable(L, tname);
+  same = lua_rawequal(L, -1, -2);
+  lua_settop(L, -3);
+  return same ? p : NULL;
+}
+
+LUALIB_API void *luaL_checkudata(lua_State *L, int ud, const char *tname) {
+  void *p = luaL_testudata(L, ud, tname);
+  if (p == NULL) luaL_typeerror(L, ud, tname);
+  return p;
+}
+
+LUALIB_API int luaL_checkoption(lua_State *L, int arg, const char *def,
+                                const char *const lst[]) {
+  const char *name = def ? luaL_optstring(L, arg, def) : luaL_checkstring(L, arg);
+  int i;
+  for (i = 0; lst[i]; i++)
+    if (strcmp(lst[i], name) == 0) return i;
+  return luaL_argerror(L, arg, lua_pushfstring(L, "invalid option '%s'", name));
+}
+
+LUALIB_API int luaL_fileresult(lua_State *L, int stat, const char *fname) {
+  int en = errno;
+  if (stat) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  luaL_pushfail(L);
+  if (fname)
+    lua_pushfstring(L, "%s: %s", fname, strerror(en));
+  else
+    lua_pushstring(L, strerror(en));
+  lua_pushinteger(L, en);
+  return 3;
+}
+
+LUALIB_API int luaL_execresult(lua_State *L, int stat) {
+  if (stat != 0 && errno != 0) return luaL_fileresult(L, 0, NULL);
+  if (stat == 0)
+    lua_pushboolean(L, 1);
+  else
+    luaL_pushfail(L);
+  lua_pushstring(L, "exit");
+  lua_pushinteger(L, stat);
+  return 3;
+}
+
+/* References: the free list's head lives under a key only this file can
+   make, a light userdata for a static address. */
+static const char freelist_key = 0;
+
+LUALIB_API int luaL_ref(lua_State *L, int t) {
+  lua_Integer ref;
+  if (lua_isnil(L, -1)) {
+    lua_settop(L, -2);
+    return LUA_REFNIL;
+  }
+  t = lua_absindex(L, t);
+  if (lua_rawgetp(L, t, &freelist_key) == LUA_TNUMBER && lua_tointeger(L, -1) != 0) {
+    ref = lua_tointeger(L, -1);
+    lua_settop(L, -2);
+    lua_rawgeti(L, t, ref);
+    lua_rawsetp(L, t, &freelist_key);
+  } else {
+    lua_settop(L, -2);
+    ref = (lua_Integer)lua_rawlen(L, t) + 1;
+  }
+  lua_rawseti(L, t, ref);
+  return (int)ref;
+}
+
+LUALIB_API void luaL_unref(lua_State *L, int t, int ref) {
+  if (ref < 0) return;
+  t = lua_absindex(L, t);
+  lua_rawgetp(L, t, &freelist_key);
+  if (lua_isnil(L, -1)) {
+    lua_settop(L, -2);
+    lua_pushinteger(L, 0);
+  }
+  lua_rawseti(L, t, ref);
+  lua_pushinteger(L, ref);
+  lua_rawsetp(L, t, &freelist_key);
+}
+
+LUALIB_API lua_Integer luaL_len(lua_State *L, int idx) {
+  int ok;
+  lua_Integer l;
+  lua_len(L, idx);
+  l = lua_tointegerx(L, -1, &ok);
+  if (!ok) luaL_error(L, "object length is not an integer");
+  lua_settop(L, -2);
+  return l;
+}
+
+LUALIB_API void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
+  luaL_checkstack(L, nup, "too many upvalues");
+  for (; l->name != NULL; l++) {
+    if (l->func == NULL) {
+      lua_pushboolean(L, 0);
+    } else {
+      int i;
+      for (i = 0; i < nup; i++) lua_pushvalue(L, -nup);
+      lua_pushcclosure(L, l->func, nup);
+    }
+    lua_setfield(L, -(nup + 2), l->name);
+  }
+  lua_settop(L, -nup - 1);
+}
+
+LUALIB_API int luaL_getsubtable(lua_State *L, int idx, const char *fname) {
+  if (lua_getfield(L, idx, fname) == LUA_TTABLE) return 1;
+  lua_settop(L, -2);
+  idx = lua_absindex(L, idx);
+  lua_createtable(L, 0, 0);
+  lua_pushvalue(L, -1);
+  lua_setfield(L, idx, fname);
+  return 0;
+}
+
+LUALIB_API void luaL_requiref(lua_State *L, const char *modname, lua_CFunction openf,
+                              int glb) {
+  luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+  lua_getfield(L, -1, modname);
+  if (!lua_toboolean(L, -1)) {
+    lua_settop(L, -2);
+    lua_pushcclosure(L, openf, 0);
+    lua_pushstring(L, modname);
+    lua_call(L, 1, 1);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -3, modname);
+  }
+  lua_rotate(L, -2, -1);
+  lua_settop(L, -2);
+  if (glb) {
+    lua_pushvalue(L, -1);
+    lua_setglobal(L, modname);
+  }
+}
+
+LUALIB_API const char *luaL_gsub(lua_State *L, const char *s, const char *p, const char *r) {
+  luaL_Buffer b;
+  luaL_buffinit(L, &b);
+  luaL_addgsub(&b, s, p, r);
+  luaL_pushresult(&b);
+  return lua_tostring(L, -1);
+}
+
+LUALIB_API void luaL_addgsub(luaL_Buffer *b, const char *s, const char *p, const char *r) {
+  const char *wild;
+  size_t l = strlen(p);
+  while ((wild = strstr(s, p)) != NULL) {
+    luaL_addlstring(b, s, (size_t)(wild - s));
+    luaL_addstring(b, r);
+    s = wild + l;
+  }
+  luaL_addstring(b, s);
+}
+
+/* Buffers. While a buffer is in use, its stack slot is the top one (the one
+   below the top in luaL_addvalue). It holds nil until the buffer outgrows
+   its inline storage, then a userdata box with the contents. */
+
+static char *buff_grow(luaL_Buffer *B, size_t extra, int slot) {
+  lua_State *L = B->L;
+  size_t need = B->n + extra, cap = B->size * 2;
+  char *box;
+  if (need < B->n) luaL_error(L, "buffer too large");
+  if (cap < need) cap = need;
+  box = (char *)lua_newuserdatauv(L, cap, 0);
+  memcpy(box, B->b, B->n);
+  lua_copy(L, -1, slot);
+  lua_settop(L, -2);
+  B->b = box;
+  B->size = cap;
+  return box;
+}
+
+LUALIB_API void luaL_buffinit(lua_State *L, luaL_Buffer *B) {
+  B->L = L;
+  B->b = B->init.b;
+  B->n = 0;
+  B->size = LUAL_BUFFERSIZE;
+  lua_pushnil(L);
+}
+
+LUALIB_API char *luaL_prepbuffsize(luaL_Buffer *B, size_t sz) {
+  if (B->size - B->n < sz) buff_grow(B, sz, lua_absindex(B->L, -1));
+  return B->b + B->n;
+}
+
+LUALIB_API void luaL_addlstring(luaL_Buffer *B, const char *s, size_t l) {
+  if (l > 0) {
+    memcpy(luaL_prepbuffsize(B, l), s, l);
+    B->n += l;
+  }
+}
+
+LUALIB_API void luaL_addstring(luaL_Buffer *B, const char *s) {
+  luaL_addlstring(B, s, strlen(s));
+}
+
+LUALIB_API void luaL_addvalue(luaL_Buffer *B) {
+  lua_State *L = B->L;
+  size_t l;
+  const char *s = lua_tolstring(L, -1, &l);
+  if (B->size - B->n < l) buff_grow(B, l, lua_absindex(L, -2));
+  memcpy(B->b + B->n, s, l);
+  B->n += l;
+  lua_settop(L, -2);
+}
+
+LUALIB_API void luaL_pushresult(luaL_Buffer *B) {
+  lua_State *L = B->L;
+  lua_pushlstring(L, B->b, B->n);
+  lua_rotate(L, -2, -1);
+  lua_settop(L, -2);
+}
+
+LUALIB_API void luaL_pushresultsize(luaL_Buffer *B, size_t sz) {
+  B->n += sz;
+  luaL_pushresult(B);
+}
+
+LUALIB_API char *luaL_buffinitsize(lua_State *L, luaL_Buffer *B, size_t sz) {
+  luaL_buffinit(L, B);
+  return luaL_prepbuffsize(B, sz);
+}

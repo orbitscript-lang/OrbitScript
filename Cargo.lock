@@ -18,6 +18,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50a649af8a827553c29fb0cb4bd4a6f1a0dd695bd3232b9bc98bd9c8a3ffbb8b"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -51,6 +61,12 @@ dependencies = [
  "libc",
  "objc2",
 ]
+
+[[package]]
+name = "find-msvc-tools"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "libc"
@@ -90,6 +106,7 @@ name = "orbit"
 version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
+ "orbit-capi",
  "orbit-compiler",
  "orbit-core",
  "orbit-hir",
@@ -101,6 +118,15 @@ dependencies = [
 [[package]]
 name = "orbit-bytecode"
 version = "0.0.0"
+
+[[package]]
+name = "orbit-capi"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "orbit-stdlib",
+ "orbit-vm",
+]
 
 [[package]]
 name = "orbit-cli"
@@ -170,6 +196,12 @@ dependencies = [
  "orbit-core",
  "orbit-gc",
 ]
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "windows-link"

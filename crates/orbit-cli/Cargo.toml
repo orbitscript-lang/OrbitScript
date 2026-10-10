@@ -24,5 +24,10 @@ orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 orbit-gc = { path = "../orbit-gc", features = ["malloc-trim"] }
 
+[features]
+default = ["c-modules"]
+# Load C modules (on by default in the CLI, Tym 2026-10-09).
+c-modules = ["orbit/c-modules"]
+
 [lints]
 workspace = true
