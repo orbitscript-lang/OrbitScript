@@ -847,7 +847,7 @@ impl Table {
     /// without changing anything.
     ///
     /// The array part takes the largest power-of-two size `n` for which
-    /// more than half of the keys `1..=n` would be present, counting the
+    /// enough of the keys `1..=n` would be present (see [`dense_enough`]), counting the
     /// array part, the integer keys in the hash part and `key`. Keys are
     /// counted per power-of-two range, so nothing is sorted. The array part
     /// never shrinks; when it grows, its length becomes the largest key
@@ -902,16 +902,16 @@ impl Table {
             *n += present;
             total += present;
         }
-        // The largest power of two that would be more than half full.
+        // The largest power of two that would be dense enough.
         let mut best = None;
         let mut sum = 0;
         for (b, &n) in nums.iter().enumerate() {
             let size = 1usize << b;
-            if size / 2 >= total {
+            if !dense_enough(total, size) {
                 break;
             }
             sum += n;
-            if sum > size / 2 {
+            if dense_enough(sum, size) {
                 best = Some(b);
             }
         }
@@ -1096,6 +1096,28 @@ fn array_bucket(k: i64) -> Option<usize> {
         return None;
     }
     Some((u64::BITS - (k as u64 - 1).leading_zeros()) as usize)
+}
+
+/// Array parts of at least this many slots need only be more than a third
+/// full; smaller ones more than half.
+const THIRD_FULL_FROM: usize = 1 << 12;
+
+/// Whether `present` keys out of `1..=size` make an array part worth having.
+/// More than half, as Lua does, for small parts. From [`THIRD_FULL_FROM`]
+/// slots, more than a third: an array slot takes 9 bytes and a key in the
+/// hash part at least 32 (a 24-byte entry, at most 3/4 full), so the array
+/// part is already the smaller there, and a large table filled in no
+/// particular order moves to it before its hash part doubles once more.
+/// Small parts keep Lua's rule, so `#` finds the same borders on them.
+/// Raising `size` never makes a count that fails pass (twice the size
+/// needs more than two thirds of it, which is more than half the old size).
+#[inline]
+fn dense_enough(present: usize, size: usize) -> bool {
+    if size >= THIRD_FULL_FROM {
+        present * 3 > size
+    } else {
+        present * 2 > size
+    }
 }
 
 /// What a rebuild allocates and how it resizes the array part, decided
@@ -1429,6 +1451,27 @@ mod tests {
     }
 
     #[test]
+    fn large_tables_take_an_array_part_from_a_third_full() {
+        let (mut heap, _, t) = setup();
+        let n = 100_000;
+        let mut largest_hash = 0;
+        for i in 1..=n {
+            let k = (i * 7919) % n;
+            set(&mut heap, t, Value::Int(k), Value::Int(i)).unwrap();
+            largest_hash = largest_hash.max(heap.get(t).entries.len());
+        }
+        // 49,152 keys fill 2^16 hash slots to 3/4, and are more than a
+        // third of 1..=2^17: they move to the array part instead of the
+        // hash part doubling.
+        assert_eq!(largest_hash, 1 << 16);
+        let tab = heap.get(t);
+        assert_eq!(tab.array_len(), n as usize - 1);
+        for i in 1..=n {
+            assert!(matches!(tab.get_int((i * 7919) % n), Value::Int(j) if j == i));
+        }
+    }
+
+    #[test]
     fn permuted_integer_keys_move_to_the_array_by_density() {
         let (mut heap, _, t) = setup();
         let n = 5000;
@@ -1436,7 +1479,7 @@ mod tests {
             let k = (i * 7919) % n;
             set(&mut heap, t, Value::Int(k), Value::Int(i)).unwrap();
             let tab = heap.get(t);
-            // The array part is always more than half full.
+            // The array part is always more than half full (it is small).
             if tab.array_len() > 0 {
                 let present = tab.array.count_present(0, tab.array_len());
                 assert!(present * 2 > tab.array_len());
