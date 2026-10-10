@@ -616,7 +616,7 @@ fn msghandler(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
             String::from_utf8_lossy(&b).into_owned()
         }
         _ => {
-            let mm = ctx.rt.metamethod(ctx.heap, e, Event::ToString);
+            let mm = ctx.vm.rt.metamethod(&ctx.vm.heap, e, Event::ToString);
             if !matches!(mm, Value::Nil) {
                 ctx.push(e);
                 return Ok(NativeReturn::CallThen {

@@ -434,15 +434,15 @@ impl Drop for Stream {
 // ---- handles ---------------------------------------------------------------
 
 fn registry_get(ctx: &mut NativeCtx<'_>, key: &[u8]) -> Value {
-    let reg = ctx.rt.registry;
+    let reg = ctx.vm.rt.registry;
     let k = ctx.new_str(key);
-    tbl::get(ctx.heap, reg, k)
+    tbl::get(&ctx.vm.heap, reg, k)
 }
 
 fn registry_set(ctx: &mut NativeCtx<'_>, key: &[u8], v: Value) {
-    let reg = ctx.rt.registry;
+    let reg = ctx.vm.rt.registry;
     let k = ctx.new_str(key);
-    let _ = tbl::set(ctx.heap, reg, k, v);
+    let _ = tbl::set(&mut ctx.vm.heap, reg, k, v);
 }
 
 /// A new `FILE*` userdata for `stream`.
@@ -458,7 +458,7 @@ fn new_file(ctx: &mut NativeCtx<'_>, stream: Stream) -> Value {
         Value::Table(t) => Some(t),
         _ => None,
     };
-    ctx.heap.update(u, |u: &mut UserData| u.meta = meta);
+    ctx.vm.heap.update(u, |u: &mut UserData| u.meta = meta);
     Value::UserData(u)
 }
 
@@ -572,7 +572,7 @@ fn io_popen(ctx: &mut NativeCtx<'_>) -> R {
         _ => return Err(ctx.arg_error(1, "invalid mode")),
     };
     // The child writes to the same terminal; keep our output first.
-    let _ = ctx.rt.out.flush();
+    let _ = ctx.vm.rt.out.flush();
     let mut c = shell(crate::os_path(&cmd).as_os_str());
     if reading {
         c.stdout(Stdio::piped());
@@ -678,7 +678,7 @@ fn f_close(ctx: &mut NativeCtx<'_>) -> R {
         ctx.push(m);
         return Ok(NativeReturn::Return(2));
     }
-    let r = s.borrow_mut().close(&mut *ctx.rt.out);
+    let r = s.borrow_mut().close(&mut *ctx.vm.rt.out);
     match r {
         Ok(Some(status)) => exit_status(ctx, status),
         Ok(None) => ctx.ret1(Value::Bool(true)),
@@ -698,7 +698,7 @@ fn f_flush(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn flush_result(ctx: &mut NativeCtx<'_>, s: &Rc<RefCell<Stream>>, file: Value) -> R {
-    let r = s.borrow_mut().flush(&mut *ctx.rt.out);
+    let r = s.borrow_mut().flush(&mut *ctx.vm.rt.out);
     match r {
         Ok(()) => ctx.ret1(file),
         Err(e) => file_error(ctx, &e, None),
@@ -730,7 +730,7 @@ fn write(ctx: &mut NativeCtx<'_>, s: &Rc<RefCell<Stream>>, file: Value, first: u
             }
             _ => return Err(ctx.type_error(i, "string")),
         };
-        let r = s.borrow_mut().write(&bytes, &mut *ctx.rt.out);
+        let r = s.borrow_mut().write(&bytes, &mut *ctx.vm.rt.out);
         if let Err(e) = r {
             file_error(ctx, &e, None)?;
             ctx.push(Value::Int(written as i64));
@@ -764,7 +764,7 @@ fn f_seek(ctx: &mut NativeCtx<'_>) -> R {
             return Err(ctx.arg_error(1, msg));
         }
     };
-    let r = s.borrow_mut().seek(from, &mut *ctx.rt.out);
+    let r = s.borrow_mut().seek(from, &mut *ctx.vm.rt.out);
     match r {
         Ok(p) => ctx.ret1(Value::Int(p as i64)),
         Err(e) => file_error(ctx, &e, None),
@@ -787,7 +787,7 @@ fn f_setvbuf(ctx: &mut NativeCtx<'_>) -> R {
     };
     let r = {
         let mut st = s.borrow_mut();
-        let r = st.flush(&mut *ctx.rt.out);
+        let r = st.flush(&mut *ctx.vm.rt.out);
         st.buffering = b;
         r
     };
@@ -907,7 +907,7 @@ fn read_one(ctx: &mut NativeCtx<'_>, s: &Rc<RefCell<Stream>>, fmt: Format) -> io
     let mut buf = Vec::new();
     let ok = {
         let mut st = s.borrow_mut();
-        let out: &mut dyn Write = &mut *ctx.rt.out;
+        let out: &mut dyn Write = &mut *ctx.vm.rt.out;
         match fmt {
             Format::Count(0) => st.fill(out)?,
             Format::Count(n) => {
@@ -1006,7 +1006,7 @@ fn lines_step(ctx: &mut NativeCtx<'_>) -> R {
         Ok(_) => {
             // The end: no values, and the file closes if `lines` opened it.
             if close {
-                let _ = s.borrow_mut().close(&mut *ctx.rt.out);
+                let _ = s.borrow_mut().close(&mut *ctx.vm.rt.out);
             }
             Ok(NativeReturn::Return(0))
         }
@@ -1032,7 +1032,7 @@ fn f_gc(ctx: &mut NativeCtx<'_>) -> R {
     let s = stream_arg(ctx, 0)?;
     let open = { !s.borrow().is_closed() && !s.borrow().is_std() };
     if open {
-        let _ = s.borrow_mut().close(&mut *ctx.rt.out);
+        let _ = s.borrow_mut().close(&mut *ctx.vm.rt.out);
     }
     Ok(NativeReturn::Return(0))
 }

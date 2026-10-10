@@ -33,25 +33,25 @@ const MAX_HASH: i64 = 1 << 30;
 const MAX_RESERVE: usize = 1 << 24;
 
 fn get(ctx: &NativeCtx<'_>, t: Gc<Table>, i: i64) -> Value {
-    ctx.heap.get(t).get_int(i)
+    ctx.vm.heap.get(t).get_int(i)
 }
 
 fn set(ctx: &mut NativeCtx<'_>, t: Gc<Table>, i: i64, v: Value) -> Result<(), LuaError> {
-    tbl::set_int(ctx.heap, t, i, v).map_err(|_| ctx.no_memory())?;
+    tbl::set_int(&mut ctx.vm.heap, t, i, v).map_err(|_| ctx.no_memory())?;
     Ok(())
 }
 
 /// Argument `i` as a table without a metatable: the raw loops apply.
 fn plain(ctx: &NativeCtx<'_>, i: usize) -> Option<Gc<Table>> {
     match ctx.arg(i) {
-        Value::Table(t) if ctx.heap.get(t).meta.is_none() => Some(t),
+        Value::Table(t) if ctx.vm.heap.get(t).meta.is_none() => Some(t),
         _ => None,
     }
 }
 
 /// `#t` for the table functions.
 fn length(ctx: &NativeCtx<'_>, t: Gc<Table>) -> i64 {
-    ctx.heap.get(t).border()
+    ctx.vm.heap.get(t).border()
 }
 
 fn insert(ctx: &mut NativeCtx<'_>) -> R {
@@ -166,7 +166,7 @@ fn unpack(ctx: &mut NativeCtx<'_>) -> R {
         return Ok(NativeReturn::Return(0));
     }
     let n = (j as i128 - i as i128 + 1) as u128;
-    let room = ctx.rt.limits.max_stack.saturating_sub(ctx.len()) as u128;
+    let room = ctx.vm.rt.limits.max_stack.saturating_sub(ctx.len()) as u128;
     if n >= MAX_INT as u128 || n >= room {
         return Err(ctx.error("too many results to unpack"));
     }
@@ -192,7 +192,7 @@ fn pack(ctx: &mut NativeCtx<'_>) -> R {
         set(ctx, t, i as i64 + 1, v)?;
     }
     let k = ctx.new_str(b"n");
-    let _ = tbl::set(ctx.heap, t, k, Value::Int(n as i64));
+    let _ = tbl::set(&mut ctx.vm.heap, t, k, Value::Int(n as i64));
     Ok(NativeReturn::Return(1))
 }
 

@@ -90,9 +90,9 @@ fn print_from(ctx: &mut NativeCtx<'_>, n: usize, start: usize) -> R {
         ctx.display(ctx.arg(i), &mut line);
     }
     line.push(b'\n');
-    let _ = ctx.rt.out.write_all(&line);
+    let _ = ctx.vm.rt.out.write_all(&line);
     // lua flushes after every `print`, so output reaches a pipe at once.
-    let _ = ctx.rt.out.flush();
+    let _ = ctx.vm.rt.out.flush();
     Ok(NativeReturn::Return(0))
 }
 
@@ -182,7 +182,7 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
     if !ctx.metamethod(Value::Table(t), Event::Metatable).is_nil() {
         return Err(ctx.error("cannot change a protected metatable"));
     }
-    orbit_vm::orbit_core::gc::set_metatable(ctx.heap, Value::Table(t), mt);
+    orbit_vm::orbit_core::gc::set_metatable(&mut ctx.vm.heap, Value::Table(t), mt);
     ctx.ret1(Value::Table(t))
 }
 
@@ -312,7 +312,7 @@ fn pairs_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
 fn next(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_table(0)?;
     let k = ctx.arg(1);
-    match ctx.heap.get(t).next(ctx.heap, k) {
+    match ctx.vm.heap.get(t).next(&ctx.vm.heap, k) {
         Ok(Some((k, v))) => {
             ctx.push(k);
             ctx.push(v);
@@ -441,18 +441,18 @@ fn warn(ctx: &mut NativeCtx<'_>) -> R {
         && let [b'@', control @ ..] = ctx.bytes(msg)
     {
         match control {
-            b"on" => ctx.rt.warnings = true,
-            b"off" => ctx.rt.warnings = false,
+            b"on" => ctx.vm.rt.warnings = true,
+            b"off" => ctx.vm.rt.warnings = false,
             _ => {}
         }
         return Ok(NativeReturn::Return(0));
     }
-    if ctx.rt.warnings {
+    if ctx.vm.rt.warnings {
         let mut text = Vec::new();
         for &s in &parts {
             text.extend_from_slice(ctx.bytes(s));
         }
-        ctx.rt.warn(&text);
+        ctx.vm.rt.warn(&text);
     }
     Ok(NativeReturn::Return(0))
 }
@@ -474,14 +474,14 @@ fn assert(ctx: &mut NativeCtx<'_>) -> R {
 fn rawequal(ctx: &mut NativeCtx<'_>) -> R {
     let a = ctx.check_any(0)?;
     let b = ctx.check_any(1)?;
-    let eq = raw_eq(ctx.heap, a, b);
+    let eq = raw_eq(&ctx.vm.heap, a, b);
     ctx.ret1(Value::Bool(eq))
 }
 
 fn rawget(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_table(0)?;
     let k = ctx.check_any(1)?;
-    let v = tbl::get(ctx.heap, t, k);
+    let v = tbl::get(&ctx.vm.heap, t, k);
     ctx.ret1(v)
 }
 
@@ -489,7 +489,7 @@ fn rawset(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_table(0)?;
     let k = ctx.check_any(1)?;
     let v = ctx.check_any(2)?;
-    match tbl::set(ctx.heap, t, k, v) {
+    match tbl::set(&mut ctx.vm.heap, t, k, v) {
         Ok(()) => {}
         Err(tbl::StoreError::NoMemory) => return Err(ctx.no_memory()),
         Err(e) => return Err(ctx.error(e.message())),
@@ -499,7 +499,7 @@ fn rawset(ctx: &mut NativeCtx<'_>) -> R {
 
 fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
     let n = match ctx.arg(0) {
-        Value::Table(t) => ctx.heap.get(t).border(),
+        Value::Table(t) => ctx.vm.heap.get(t).border(),
         Value::Str(s) => ctx.bytes(s).len() as i64,
         _ => return Err(ctx.type_error(0, "table or string")),
     };
@@ -534,7 +534,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         let msg = format!("invalid option '{}'", String::from_utf8_lossy(&opt));
         return Err(ctx.arg_error(0, msg));
     }
-    if ctx.rt.gc.finalizing() {
+    if ctx.vm.rt.gc.finalizing() {
         let v = if &opt[..] == b"param" {
             Value::Int(-1)
         } else {
@@ -548,12 +548,12 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             finalize_then_return(ctx, Value::Int(0))
         }
         b"count" => {
-            let kb = ctx.heap.bytes() as f64 / 1024.0;
+            let kb = ctx.vm.heap.bytes() as f64 / 1024.0;
             ctx.ret1(Value::Float(kb))
         }
         b"step" => {
             let kb = ctx.opt_int(1, 0)?;
-            let done = match ctx.rt.gc.mode {
+            let done = match ctx.vm.rt.gc.mode {
                 // A minor collection collects all young garbage; ours
                 // collects all garbage.
                 GcMode::Generational => {
@@ -562,21 +562,21 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
                 }
                 GcMode::Incremental => {
                     let bytes = usize::try_from(kb).unwrap_or(0).saturating_mul(1024);
-                    ctx.heap.step_with(ctx.rt, bytes)
+                    ctx.vm.heap.step_with(&mut ctx.vm.rt, bytes)
                 }
             };
             finalize_then_return(ctx, Value::Bool(done))
         }
         b"stop" => {
-            ctx.heap.stop();
+            ctx.vm.heap.stop();
             ctx.ret1(Value::Int(0))
         }
         b"restart" => {
-            ctx.heap.restart();
+            ctx.vm.heap.restart();
             ctx.ret1(Value::Int(0))
         }
         b"isrunning" => {
-            let running = !ctx.heap.is_stopped();
+            let running = !ctx.vm.heap.is_stopped();
             ctx.ret1(Value::Bool(running))
         }
         b"incremental" | b"generational" => {
@@ -585,7 +585,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             } else {
                 GcMode::Generational
             };
-            let old = std::mem::replace(&mut ctx.rt.gc.mode, mode);
+            let old = std::mem::replace(&mut ctx.vm.rt.gc.mode, mode);
             let v = ctx.new_str(old.name().as_bytes());
             ctx.ret1(v)
         }
@@ -600,9 +600,9 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             };
             let v = ctx.opt_int(2, -1)?;
             let old = if v >= 0 {
-                ctx.rt.gc.set_param(ctx.heap, p, v)
+                ctx.vm.rt.gc.set_param(&mut ctx.vm.heap, p, v)
             } else {
-                ctx.rt.gc.param(p)
+                ctx.vm.rt.gc.param(p)
             };
             ctx.ret1(Value::Int(old))
         }

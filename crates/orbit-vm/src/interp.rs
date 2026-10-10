@@ -145,8 +145,7 @@ impl Vm {
                 }
                 let f = self.rt.natives[id.0 as usize].f;
                 let mut ctx = NativeCtx {
-                    heap: &mut self.heap,
-                    rt: &mut self.rt,
+                    vm: self,
                     base: func + 1,
                     nargs,
                     id,
@@ -371,8 +370,7 @@ impl Vm {
                 let top = self.rt.top;
                 let upvals = self.rt.stack.closure_at(f.func as usize);
                 let mut ctx = NativeCtx {
-                    heap: &mut self.heap,
-                    rt: &mut self.rt,
+                    vm: self,
                     base: f.base as usize,
                     nargs: f.nvarargs as usize,
                     id,
@@ -782,8 +780,7 @@ impl Vm {
         self.rt.top = call_at as usize;
         let upvals = self.rt.stack.closure_at(f.func as usize);
         let mut ctx = NativeCtx {
-            heap: &mut self.heap,
-            rt: &mut self.rt,
+            vm: self,
             base: f.base as usize,
             nargs: f.nvarargs as usize,
             id,
@@ -1250,8 +1247,7 @@ impl Vm {
                             self.rt.top = fa + 1 + n;
                             let nf = self.rt.natives[id.0 as usize].f;
                             let mut ctx = NativeCtx {
-                                heap: &mut self.heap,
-                                rt: &mut self.rt,
+                                vm: self,
                                 base: fa + 1,
                                 nargs: n,
                                 id,

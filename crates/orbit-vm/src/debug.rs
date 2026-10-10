@@ -792,14 +792,14 @@ impl crate::NativeCtx<'_> {
     /// `count` the count interval (count events only when positive). A nil
     /// `f` or an empty mask with no count turns it off.
     pub fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
-        self.rt.hooks_touched = true;
-        self.rt.stack.hook.set(f, mask, count);
+        self.vm.rt.hooks_touched = true;
+        self.vm.rt.stack.hook.set(f, mask, count);
     }
 
     /// This stack's hook: function (nil when off), event mask without the
     /// count bit, and count.
     pub fn hook(&self) -> (Value, u8, i64) {
-        let h = &self.rt.stack.hook;
+        let h = &self.vm.rt.stack.hook;
         use crate::hook::{CALL, LINE, RETURN};
         (h.func, h.mask & (CALL | RETURN | LINE), h.base_count)
     }
@@ -807,7 +807,7 @@ impl crate::NativeCtx<'_> {
     /// `getinfo`'s `ftransfer` and `ntransfer` for `l`: the values a call or
     /// return hook running for `l` transfers, else 0 and 0.
     pub fn transfer(&self, l: Level) -> (u32, u32) {
-        match (l.0, self.rt.stack.hook.transfer) {
+        match (l.0, self.vm.rt.stack.hook.transfer) {
             (LevelAt::Frame(i), Some((fi, first, n))) if i == fi => (first, n),
             _ => (0, 0),
         }
@@ -818,7 +818,7 @@ impl crate::NativeCtx<'_> {
     /// stack ([`NativeCtx::level`]).
     pub fn level_in(&self, foreign: bool, n: usize) -> Option<Level> {
         if foreign {
-            self.rt.level(None, n + 1)
+            self.vm.rt.level(None, n + 1)
         } else {
             self.level(n)
         }
@@ -828,7 +828,7 @@ impl crate::NativeCtx<'_> {
     /// (`foreign`), whose levels start at 0 for its top activation.
     pub fn traceback_in(&self, foreign: bool, from: usize) -> String {
         if foreign {
-            self.rt.traceback(self.heap, None, from + 1)
+            self.vm.rt.traceback(&self.vm.heap, None, from + 1)
         } else {
             self.traceback(from)
         }
@@ -836,68 +836,68 @@ impl crate::NativeCtx<'_> {
 
     /// Activation `n`: 0 is this native, 1 its caller, and so on.
     pub fn level(&self, n: usize) -> Option<Level> {
-        self.rt.level(Some(self.running_native()), n)
+        self.vm.rt.level(Some(self.running_native()), n)
     }
 
     /// The function running at `l`.
     pub fn level_func(&self, l: Level) -> Value {
-        self.rt.level_func(self.heap, l)
+        self.vm.rt.level_func(&self.vm.heap, l)
     }
 
     /// The current line of `l` (-1 for natives).
     pub fn current_line(&self, l: Level) -> i64 {
-        self.rt.current_line(self.heap, l)
+        self.vm.rt.current_line(&self.vm.heap, l)
     }
 
     /// How `l` was called (`getinfo`'s `name` and `namewhat`).
     pub fn level_name(&self, l: Level) -> Option<CallName> {
-        self.rt.call_name(self.heap, l)
+        self.vm.rt.call_name(&self.vm.heap, l)
     }
 
     /// Whether `l` was entered by a tail call.
     pub fn is_tail_call(&self, l: Level) -> bool {
-        self.rt.is_tail_call(l)
+        self.vm.rt.is_tail_call(l)
     }
 
     /// Extra arguments a `__call` chain inserted for `l`.
     pub fn extra_args(&self, l: Level) -> u8 {
-        self.rt.extra_args(l)
+        self.vm.rt.extra_args(l)
     }
 
     /// Static facts about function `f` (a closure or native).
     pub fn func_info(&self, f: Value) -> FuncInfo {
-        func_info(self.heap, self.rt, f)
+        func_info(&self.vm.heap, &self.vm.rt, f)
     }
 
     /// Lines of `f` that have code, or `None` for a native.
     pub fn active_lines(&self, f: Value) -> Option<Vec<u32>> {
         match f {
-            Value::Closure(c) => Some(active_lines(self.heap, c)),
+            Value::Closure(c) => Some(active_lines(&self.vm.heap, c)),
             _ => None,
         }
     }
 
     /// Name and value of local `n` of `l` (negative: varargs).
     pub fn get_local(&self, l: Level, n: i64) -> Option<(Vec<u8>, Value)> {
-        let (name, place) = self.rt.local_at(self.heap, l, n)?;
+        let (name, place) = self.vm.rt.local_at(&self.vm.heap, l, n)?;
         Some((
             name.as_bytes().to_vec(),
-            self.rt.read_place(self.heap, place),
+            self.vm.rt.read_place(&self.vm.heap, place),
         ))
     }
 
     /// Set local `n` of `l`, returning its name.
     pub fn set_local(&mut self, l: Level, n: i64, v: Value) -> Option<Vec<u8>> {
-        let (name, place) = self.rt.local_at(self.heap, l, n)?;
+        let (name, place) = self.vm.rt.local_at(&self.vm.heap, l, n)?;
         let name = name.as_bytes().to_vec();
-        self.rt.write_place(self.heap, place, v);
+        self.vm.rt.write_place(&mut self.vm.heap, place, v);
         Some(name)
     }
 
     /// Name of parameter `n` (1-based) of Lua function `f`.
     pub fn param_name(&self, f: Value, n: i64) -> Option<Vec<u8>> {
         let Value::Closure(c) = f else { return None };
-        let p = self.heap.get(self.heap.get(c).proto);
+        let p = self.vm.heap.get(self.vm.heap.get(c).proto);
         if n < 1 || n > p.code.nparams as i64 {
             return None;
         }
@@ -910,12 +910,12 @@ impl crate::NativeCtx<'_> {
     /// its name.
     pub fn upvalue_cell(&self, f: Value, n: i64) -> Option<(Vec<u8>, Gc<Cell>)> {
         let Value::Closure(c) = f else { return None };
-        let c = self.heap.get(c);
+        let c = self.vm.heap.get(c);
         let n = usize::try_from(n).ok()?.checked_sub(1)?;
         if n >= c.captures.len() {
             return None;
         }
-        let p = self.heap.get(c.proto);
+        let p = self.vm.heap.get(c.proto);
         let i = p.debug.capture_of_upvalue(n);
         let cell = c.captures[i];
         let name = match p.debug.capture_names.get(i) {
@@ -930,34 +930,37 @@ impl crate::NativeCtx<'_> {
     /// Name and value of upvalue `n` of `f`.
     pub fn upvalue_of(&self, f: Value, n: i64) -> Option<(Vec<u8>, Value)> {
         let (name, cell) = self.upvalue_cell(f, n)?;
-        Some((name, self.heap.get(cell).value))
+        Some((name, self.vm.heap.get(cell).value))
     }
 
     /// Set upvalue `n` of `f`, returning its name.
     pub fn set_upvalue_of(&mut self, f: Value, n: i64, v: Value) -> Option<Vec<u8>> {
         let (name, cell) = self.upvalue_cell(f, n)?;
-        self.rt.write_place(self.heap, Place::Cell(cell), v);
+        self.vm
+            .rt
+            .write_place(&mut self.vm.heap, Place::Cell(cell), v);
         Some(name)
     }
 
     /// Make upvalue `n1` of `f1` refer to upvalue `n2` of `f2`. Both must
     /// exist (the caller checks).
     pub fn join_upvalues(&mut self, f1: Gc<Closure>, n1: usize, f2: Gc<Closure>, n2: usize) {
-        let p2 = self.heap.get(f2).proto;
-        let i2 = self.heap.get(p2).debug.capture_of_upvalue(n2 - 1);
-        let cell = self.heap.get(f2).captures[i2];
-        let proto = self.heap.get(f1).proto;
-        let i = self.heap.get(proto).debug.capture_of_upvalue(n1 - 1);
-        if self.heap.get(proto).self_capture == Some(i as u8) {
-            deopt_self(self.heap, f1, i as u8);
+        let p2 = self.vm.heap.get(f2).proto;
+        let i2 = self.vm.heap.get(p2).debug.capture_of_upvalue(n2 - 1);
+        let cell = self.vm.heap.get(f2).captures[i2];
+        let proto = self.vm.heap.get(f1).proto;
+        let i = self.vm.heap.get(proto).debug.capture_of_upvalue(n1 - 1);
+        if self.vm.heap.get(proto).self_capture == Some(i as u8) {
+            deopt_self(&mut self.vm.heap, f1, i as u8);
         }
-        self.heap.barrier_back(f1);
-        self.heap.get_mut(f1).captures[i] = cell;
+        self.vm.heap.barrier_back(f1);
+        self.vm.heap.get_mut(f1).captures[i] = cell;
     }
 
     /// `stack traceback:` and the levels from `from` down.
     pub fn traceback(&self, from: usize) -> String {
-        self.rt
-            .traceback(self.heap, Some(self.running_native()), from)
+        self.vm
+            .rt
+            .traceback(&self.vm.heap, Some(self.running_native()), from)
     }
 }

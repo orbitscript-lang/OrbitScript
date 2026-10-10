@@ -42,7 +42,7 @@ const SEARCHERS: &[(&str, NativeFn)] = &[
 
 fn reg_get(ctx: &mut NativeCtx<'_>, key: &[u8]) -> Value {
     let k = ctx.new_str(key);
-    tbl::get(ctx.heap, ctx.rt.registry, k)
+    tbl::get(&ctx.vm.heap, ctx.vm.rt.registry, k)
 }
 
 /// A search path from the environment (`LUA_PATH_5_5`, then `LUA_PATH`),
@@ -200,7 +200,7 @@ fn package_field(ctx: &mut NativeCtx<'_>, field: &[u8]) -> Value {
     match reg_get(ctx, PACKAGE) {
         Value::Table(p) => {
             let k = ctx.new_str(field);
-            tbl::get(ctx.heap, p, k)
+            tbl::get(&ctx.vm.heap, p, k)
         }
         _ => Value::Nil,
     }
@@ -231,7 +231,7 @@ fn search_preload(ctx: &mut NativeCtx<'_>) -> R {
     let f = match reg_get(ctx, PRELOAD) {
         Value::Table(t) => {
             let k = ctx.new_str(&name);
-            tbl::get(ctx.heap, t, k)
+            tbl::get(&ctx.vm.heap, t, k)
         }
         _ => return Err(ctx.error("'package.preload' must be a table")),
     };
@@ -264,7 +264,7 @@ fn search_lua(ctx: &mut NativeCtx<'_>) -> R {
         Ok(f) => f,
         Err(msg) => return ret_msg(ctx, msg),
     };
-    let globals = Value::Table(ctx.rt.globals);
+    let globals = Value::Table(ctx.vm.rt.globals);
     let loaded = read_chunk_file(Some(&file))
         .and_then(|(bytes, source)| load_chunk(ctx, &bytes, &source, &Mode(b"bt"), globals));
     match loaded {
@@ -326,7 +326,7 @@ fn loaded_table(ctx: &mut NativeCtx<'_>) -> Result<Gc<Table>, LuaError> {
 fn require(ctx: &mut NativeCtx<'_>) -> R {
     let s = ctx.check_str(0)?;
     let loaded = loaded_table(ctx)?;
-    let v = tbl::get(ctx.heap, loaded, Value::Str(s));
+    let v = tbl::get(&ctx.vm.heap, loaded, Value::Str(s));
     if !v.is_falsy() {
         return ctx.ret1(v);
     }
@@ -346,7 +346,7 @@ fn next_searcher(ctx: &mut NativeCtx<'_>) -> R {
     let (Value::Table(searchers), Value::Int(i)) = (ctx.arg(SEARCHERS_AT), ctx.arg(NEXT)) else {
         unreachable!("require's window")
     };
-    let f = tbl::get(ctx.heap, searchers, Value::Int(i));
+    let f = tbl::get(&ctx.vm.heap, searchers, Value::Int(i));
     if f.is_nil() {
         let Value::Str(name) = ctx.arg(NAME) else {
             unreachable!("require's window")
@@ -423,12 +423,12 @@ fn loader_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     let name = ctx.arg(NAME);
     let loaded = loaded_table(ctx)?;
     if !result.is_nil() {
-        tbl::set(ctx.heap, loaded, name, result).expect("string keys are valid");
+        tbl::set(&mut ctx.vm.heap, loaded, name, result).expect("string keys are valid");
     }
-    let mut v = tbl::get(ctx.heap, loaded, name);
+    let mut v = tbl::get(&ctx.vm.heap, loaded, name);
     if v.is_nil() {
         v = Value::Bool(true);
-        tbl::set(ctx.heap, loaded, name, v).expect("string keys are valid");
+        tbl::set(&mut ctx.vm.heap, loaded, name, v).expect("string keys are valid");
     }
     let extra = ctx.arg(EXTRA);
     ctx.truncate(0);
