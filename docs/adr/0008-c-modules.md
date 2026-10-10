@@ -16,7 +16,7 @@ Lua code expects `require` to load C modules (LuaFileSystem, lua-cjson, LPeg and
 
 ### Containment
 - **`unsafe` (ADR-6 exception):** `orbit-capi` denies `unsafe_code` and allows it only in `src/ffi.rs`: the `extern "C"` entry points, raw pointers handed to C, and `dlopen`. Everything else in the crate, including index checks and conversions, is safe Rust. Every other crate keeps `forbid`.
-- **`package.cpath`** can be changed by scripts as in Lua. Embedders can lock it (`CModules { cpath, script_cpath: Allow | Locked }`) and the CLI gets a flag (`--lock-cpath`). When locked, the C searchers use the host's cpath, and `package.loadlib` only accepts files that the locked cpath's templates could produce, since a script could otherwise call it directly or from its own searcher.
+- **`package.cpath`** can be changed by scripts as in Lua. Embedders can lock it (`orbit_stdlib::lock_cpath(vm, cpath)`, or `Options::lock_cpath` to lock the path `package.cpath` starts with) and the CLI does the same with `--lock-cpath`. When locked, the C searchers use the locked cpath whatever scripts set, and `package.loadlib` only accepts a path one of its templates produces with `?` replaced by text holding no `.`, since a script could otherwise call it directly or from its own searcher. The searchers turn a module name's dots into directory separators, so that rule admits every file they could open and none outside the templates' directories.
 - **C never gets a pointer to Rust data.** `lua_touserdata` on a userdata Rust created (an `io` file) returns `NULL`, and `luaL_checkudata(L, i, "FILE*")` raises "FILE* expected". How C modules get real `FILE*` handles is decided later.
 - **What C code can trust is out of scripts' reach.** A C function is a native closure whose function pointer sits in a hidden upvalue (`NativeCtx::new_closure_hidden`) that `debug.getupvalue`/`setupvalue` never show, so no script can turn a light userdata into a call target. The closure's ordinary upvalues are its C upvalues and stay visible to the debug library, as in Lua.
 - Once a C module is loaded, the process is only as memory-safe as that module. That is inherent to native code and why the feature and the cpath lock exist.
@@ -44,7 +44,7 @@ ADR-1's light userdata (tag 10) is accepted (Tym, 2026-10-10). C pointers pushed
 - **Not planned:** creating states from C (`lua_newstate`, `luaL_newstate`, `lua_close`). Embedding stays Rust-only.
 
 ## Consequences
-- Release `orbit` grows by about 91 KB with the feature (spike, Linux x86_64).
+- Release `orbit` grows by about 97 KiB (6%) with the feature (1,643,464 to 1,742,184 bytes, Linux x86_64, 2026-10-12).
 - A call into C costs 4x to 6x lua5.5's in the spike, mostly the VM's general native call path; real modules (lua-cjson) run about 2x lua5.5. Faster native calls help C functions too.
 - Any future change to how natives are called, including a JIT, must keep `NativeCtx::call` working.
 - Conformance: the C-library parts of `attrib.lua` and `main.lua` run when the reference test libraries are available, instead of being skipped.

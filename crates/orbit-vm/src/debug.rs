@@ -721,7 +721,12 @@ fn active_locals(
 /// Static facts about function `f`.
 pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
     match f {
-        Value::Closure(c) => {
+        Value::Closure(c)
+            if !matches!(
+                heap.get(heap.get(c).proto).code.code.first(),
+                Some(Op::NativeEntry { .. })
+            ) =>
+        {
             let c = heap.get(c);
             let p = heap.get(c.proto);
             let is_main = matches!(p.name, orbit_bytecode::FunctionName::Main);
@@ -735,7 +740,7 @@ pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
                 what: if is_main { "main" } else { "Lua" },
                 line_defined: p.line_defined as i64,
                 last_line: p.last_line as i64,
-                nups: c.captures.len() - rt.hidden_upvalues(heap, c),
+                nups: c.captures.len(),
                 nparams: p.code.nparams,
                 is_vararg: p.code.is_vararg,
             }
@@ -746,7 +751,14 @@ pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
             what: "C",
             line_defined: -1,
             last_line: -1,
-            nups: 0,
+            // A native closure's upvalues, less the hidden ones.
+            nups: match f {
+                Value::Closure(c) => {
+                    let c = heap.get(c);
+                    c.captures.len() - rt.hidden_upvalues(heap, c)
+                }
+                _ => 0,
+            },
             nparams: 0,
             is_vararg: true,
         },

@@ -90,6 +90,18 @@ pub(crate) fn load_chunk(
     Ok(ctx.link(&chunk, env))
 }
 
+/// [`load_chunk`] for other libraries (the C API's `lua_load`): `mode` is
+/// `load`'s mode string (`b"bt"` for both kinds of chunk).
+pub fn load_chunk_in(
+    ctx: &mut NativeCtx<'_>,
+    bytes: &[u8],
+    source: &[u8],
+    mode: &[u8],
+    env: Value,
+) -> Result<Value, String> {
+    load_chunk(ctx, bytes, source, &Mode(mode), env)
+}
+
 /// [`load_chunk`] for a host: load `bytes`, source text or a binary chunk,
 /// as a chunk named `source`, with the global table as its `_ENV`, as the
 /// standalone interpreter loads scripts. The function is unrooted.
