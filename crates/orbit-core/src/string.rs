@@ -165,19 +165,43 @@ pub fn hash_word(w: u64) -> u32 {
     (h as u32 ^ (h >> 32) as u32).max(1)
 }
 
-/// The weak set of interned short strings. The VM prunes it in
+/// One slot of the [`Interner`]: a string and its hash, or empty (hash 0,
+/// which [`hash_bytes`] never returns). 8 bytes with unchecked handles.
+#[derive(Debug, Clone, Copy)]
+struct Interned {
+    hash: u32,
+    str: Gc<LuaStr>,
+}
+
+impl Interned {
+    const EMPTY: Interned = Interned {
+        hash: 0,
+        str: Gc::from_index(0),
+    };
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.hash == 0
+    }
+}
+
+/// Slots in a new or shrunk [`Interner`].
+const INTERNER_MIN: usize = 256;
+
+/// The weak set of interned short strings: open addressing with linear
+/// probing, at most 3/4 full. The VM prunes it in
 /// [`Roots::clear_weak`](orbit_gc::Roots::clear_weak) through
 /// [`Interner::clear_dead`].
 #[derive(Debug, Default)]
 pub struct Interner {
-    slots: Vec<Option<(u32, Gc<LuaStr>)>>,
+    slots: Vec<Interned>,
     len: usize,
 }
 
 impl Interner {
     pub fn new() -> Self {
         Interner {
-            slots: vec![None; 256],
+            slots: vec![Interned::EMPTY; INTERNER_MIN],
             len: 0,
         }
     }
@@ -223,14 +247,18 @@ impl Interner {
     pub fn intern(&mut self, heap: &mut LuaHeap, bytes: &[u8]) -> Gc<LuaStr> {
         debug_assert!(bytes.len() <= MAX_SHORT);
         if self.slots.is_empty() {
-            self.slots = vec![None; 256];
+            self.slots = vec![Interned::EMPTY; INTERNER_MIN];
         }
         let hash = hash_bytes(bytes);
         let mask = self.slots.len() - 1;
         let mut i = hash as usize & mask;
-        while let Some((h, gc)) = self.slots[i] {
-            if h == hash && heap.get(gc).as_bytes() == bytes {
-                return gc;
+        loop {
+            let e = self.slots[i];
+            if e.is_empty() {
+                break;
+            }
+            if e.hash == hash && heap.get(e.str).as_bytes() == bytes {
+                return e.str;
             }
             i = (i + 1) & mask;
         }
@@ -239,7 +267,7 @@ impl Interner {
             short: true,
             bytes: Bytes::new(bytes),
         });
-        self.slots[i] = Some((hash, gc));
+        self.slots[i] = Interned { hash, str: gc };
         self.len += 1;
         if self.len * 4 > self.slots.len() * 3 {
             self.resize(self.slots.len() * 2);
@@ -247,43 +275,70 @@ impl Interner {
         gc
     }
 
+    /// Move every string into a new set of `cap` slots.
     fn resize(&mut self, cap: usize) {
-        let old = std::mem::replace(&mut self.slots, vec![None; cap]);
-        let mask = cap - 1;
-        for (h, gc) in old.into_iter().flatten() {
-            let mut i = h as usize & mask;
-            while self.slots[i].is_some() {
-                i = (i + 1) & mask;
+        let old = std::mem::replace(&mut self.slots, vec![Interned::EMPTY; cap]);
+        for e in old {
+            if !e.is_empty() {
+                self.place(e);
             }
-            self.slots[i] = Some((h, gc));
         }
+    }
+
+    /// Put `e` in the first empty slot from its home slot.
+    #[inline]
+    fn place(&mut self, e: Interned) {
+        let mask = self.slots.len() - 1;
+        let mut i = e.hash as usize & mask;
+        while !self.slots[i].is_empty() {
+            i = (i + 1) & mask;
+        }
+        self.slots[i] = e;
     }
 
     /// Drop the strings the collector found dead. Call from the VM's
     /// `Roots::clear_weak`.
+    ///
+    /// The set is rehashed in place, so pruning a large set allocates
+    /// nothing; it only moves to a smaller allocation when at most an
+    /// quarter of what it would take stays in use.
     pub fn clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
-        let mut kept: Vec<(u32, Gc<LuaStr>)> = Vec::with_capacity(self.len);
-        kept.extend(
-            self.slots
-                .iter()
-                .flatten()
-                .filter(|(_, gc)| live.is_live(*gc))
-                .copied(),
-        );
-        self.len = kept.len();
-        let mut cap = 256;
-        while kept.len() * 2 > cap {
-            cap *= 2;
+        let cap = self.slots.len();
+        if cap == 0 {
+            return;
         }
-        self.slots.clear();
-        self.slots.resize(cap, None);
-        let mask = cap - 1;
-        for (h, gc) in kept {
-            let mut i = h as usize & mask;
-            while self.slots[i].is_some() {
-                i = (i + 1) & mask;
+        // A slot empty before any entry is removed: no probe sequence runs
+        // through it, so rehashing in slot order from just after it never
+        // moves an entry across a slot that an earlier one's probe needs.
+        let start = self.slots.iter().position(Interned::is_empty);
+        let mut kept = 0;
+        for e in &mut self.slots {
+            if !e.is_empty() {
+                if live.is_live(e.str) {
+                    kept += 1;
+                } else {
+                    *e = Interned::EMPTY;
+                }
             }
-            self.slots[i] = Some((h, gc));
+        }
+        self.len = kept;
+        let mut target = INTERNER_MIN;
+        while kept * 2 > target {
+            target *= 2;
+        }
+        let Some(start) = start.filter(|_| target * 4 > cap) else {
+            // Much smaller now (or, never, full): move to a new set.
+            self.resize(target.min(cap));
+            return;
+        };
+        let mask = cap - 1;
+        for k in 1..=cap {
+            let i = (start + k) & mask;
+            let e = self.slots[i];
+            if !e.is_empty() {
+                self.slots[i] = Interned::EMPTY;
+                self.place(e);
+            }
         }
     }
 }
@@ -423,6 +478,44 @@ mod tests {
         heap.full_collect(&mut R(&mut i, keep));
         assert_eq!(i.len(), 1);
         assert_eq!(i.new_str(&mut heap, b"keep"), keep);
+    }
+
+    #[test]
+    fn interner_rehashes_in_place_and_shrinks() {
+        struct R<'a>(&'a mut Interner, Vec<Gc<LuaStr>>);
+        impl orbit_gc::Roots<LuaSpace> for R<'_> {
+            fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
+                for &s in &self.1 {
+                    m.mark(s);
+                }
+            }
+            fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
+                self.0.clear_dead(live);
+            }
+        }
+        let mut heap = LuaHeap::new();
+        let mut i = Interner::new();
+        let all: Vec<_> = (0..20_000)
+            .map(|n| i.new_str(&mut heap, format!("s{n}").as_bytes()))
+            .collect();
+        let cap = i.slots.len();
+        // Keep a third: the set is pruned in place.
+        let keep: Vec<_> = all.iter().copied().step_by(3).collect();
+        heap.full_collect(&mut R(&mut i, keep.clone()));
+        assert_eq!(i.len(), keep.len());
+        assert_eq!(i.slots.len(), cap);
+        for (n, &s) in all.iter().enumerate().step_by(3) {
+            assert_eq!(i.new_str(&mut heap, format!("s{n}").as_bytes()), s);
+        }
+        assert_eq!(i.len(), keep.len());
+        // Keep a few: the set moves to a smaller one.
+        let few: Vec<_> = keep.iter().copied().step_by(100).collect();
+        heap.full_collect(&mut R(&mut i, few.clone()));
+        assert_eq!(i.len(), few.len());
+        assert!(i.slots.len() < cap);
+        for (n, &s) in all.iter().enumerate().step_by(300) {
+            assert_eq!(i.new_str(&mut heap, format!("s{n}").as_bytes()), s);
+        }
     }
 
     #[test]

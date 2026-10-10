@@ -351,13 +351,27 @@ impl Vm {
         }))
     }
 
+    /// At the end of a collection cycle, give back register space that a
+    /// deep moment left behind (a native that pushed a large table's
+    /// elements, say, or deep recursion): when at most a quarter of a
+    /// large register vector is in use, keep twice what is.
+    fn shrink_stack(&mut self) {
+        const SMALL: usize = 1 << 16;
+        let regs = &mut self.rt.stack.regs;
+        if regs.capacity() > SMALL && regs.len() * 4 <= regs.capacity() {
+            regs.shrink_to((regs.len() * 2).max(SMALL));
+        }
+    }
+
     /// A safe point's collector work: one step, then the finalizers it made
     /// due. Returns true if the heap is over its limit even after a full
     /// collection, so the caller raises `not enough memory`.
     #[inline(never)]
     pub(crate) fn gc_safepoint(&mut self, live: usize) -> bool {
         self.rt.stack.regs.truncate(live);
-        self.heap.step(&mut self.rt);
+        if self.heap.step(&mut self.rt) {
+            self.shrink_stack();
+        }
         if self.heap.pending_finalizers() > 0 {
             self.run_finalizers();
         }
