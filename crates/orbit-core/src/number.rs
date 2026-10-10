@@ -372,6 +372,26 @@ pub fn float_to_string(x: f64) -> String {
     s
 }
 
+/// Append an integer in decimal, as `tostring` shows it, without going
+/// through `fmt`.
+pub fn push_int(out: &mut Vec<u8>, i: i64) {
+    let mut buf = [0u8; 20];
+    let mut at = buf.len();
+    let mut n = i.unsigned_abs();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    if i < 0 {
+        out.push(b'-');
+    }
+    out.extend_from_slice(&buf[at..]);
+}
+
 /// Append a number as `tostring` shows it; `None` for non-numbers.
 pub fn fmt_number(out: &mut String, v: Value) -> Option<()> {
     use std::fmt::Write;
@@ -388,6 +408,26 @@ pub fn fmt_number(out: &mut String, v: Value) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_int_matches_display() {
+        for i in [
+            0,
+            1,
+            -1,
+            9,
+            10,
+            -10,
+            1234567,
+            i64::MAX,
+            i64::MIN,
+            i64::MIN + 1,
+        ] {
+            let mut out = Vec::new();
+            push_int(&mut out, i);
+            assert_eq!(out, i.to_string().as_bytes());
+        }
+    }
 
     /// The same vectors as the Lua lexer's `hex_floats` test, from the reference `lua5.5`.
     #[test]

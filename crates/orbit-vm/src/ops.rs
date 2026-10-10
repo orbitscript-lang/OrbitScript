@@ -363,9 +363,7 @@ fn equal_meta(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Ex
 pub(crate) fn concat_piece(heap: &LuaHeap, v: Value, out: &mut Vec<u8>) -> bool {
     match v {
         Value::Str(s) => out.extend_from_slice(heap.get(s).as_bytes()),
-        Value::Int(i) => {
-            let _ = write!(out, "{i}");
-        }
+        Value::Int(i) => number::push_int(out, i),
         Value::Float(f) => {
             let mut s = String::new();
             number::fmt_float(&mut s, f);
