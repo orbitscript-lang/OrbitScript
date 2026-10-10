@@ -147,3 +147,41 @@ fn argument_errors_name_the_function_by_its_module() {
         "bad argument #1 to 'mymod.check' (table expected, got number)"
     );
 }
+
+/// Returns its visible upvalue, its hidden one and how many it shows.
+fn peek(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
+    let (a, b, n) = (ctx.upvalue(0), ctx.hidden_upvalue(0), ctx.upvalue_count());
+    ctx.push(a);
+    ctx.push(b);
+    ctx.push(Value::Int(n as i64));
+    Ok(NativeReturn::Return(3))
+}
+
+fn make_peek(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
+    let f = ctx.new_closure_hidden("peek", peek, &[Value::Int(1)], &[Value::Int(2)]);
+    ctx.ret1(f)
+}
+
+#[test]
+fn hidden_upvalues_are_out_of_scripts_reach() {
+    let mut lua = Lua::new();
+    let vm = lua.vm();
+    let f = vm.register_native("make_peek", make_peek);
+    vm.set_global("make_peek", f);
+    let out = lua
+        .exec(
+            b"local f = make_peek()
+              local a, b, n = f()
+              local name, v = debug.getupvalue(f, 1)
+              return a, b, n, v, debug.getupvalue(f, 2), debug.setupvalue(f, 2, 99),
+                     debug.getinfo(f, 'u').nups, select(2, f())",
+            "t",
+        )
+        .unwrap();
+    let vm = lua.vm();
+    let text: Vec<String> = out
+        .iter()
+        .map(|&v| String::from_utf8_lossy(&vm.to_display(v)).into_owned())
+        .collect();
+    assert_eq!(text, ["1", "2", "1", "1", "nil", "nil", "1", "2", "1"]);
+}

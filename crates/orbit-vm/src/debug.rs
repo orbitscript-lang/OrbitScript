@@ -106,6 +106,14 @@ pub struct FuncInfo {
 }
 
 impl Runtime {
+    /// How many hidden upvalues closure `c` has (see [`crate::Native::hidden`]).
+    pub(crate) fn hidden_upvalues(&self, heap: &LuaHeap, c: &Closure) -> usize {
+        match heap.get(c.proto).code.code.first() {
+            Some(Op::NativeEntry { id }) => self.natives[*id as usize].hidden as usize,
+            _ => 0,
+        }
+    }
+
     /// Activation `n`. With a running native, level 0 is that native and
     /// level 1 its caller; without one, level 1 is the top frame.
     pub(crate) fn level(&self, running: Option<Running>, n: usize) -> Option<Level> {
@@ -712,7 +720,6 @@ fn active_locals(
 
 /// Static facts about function `f`.
 pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
-    let _ = rt;
     match f {
         Value::Closure(c) => {
             let c = heap.get(c);
@@ -728,7 +735,7 @@ pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
                 what: if is_main { "main" } else { "Lua" },
                 line_defined: p.line_defined as i64,
                 last_line: p.last_line as i64,
-                nups: c.captures.len(),
+                nups: c.captures.len() - rt.hidden_upvalues(heap, c),
                 nparams: p.code.nparams,
                 is_vararg: p.code.is_vararg,
             }
@@ -912,7 +919,7 @@ impl crate::NativeCtx<'_> {
         let Value::Closure(c) = f else { return None };
         let c = self.vm.heap.get(c);
         let n = usize::try_from(n).ok()?.checked_sub(1)?;
-        if n >= c.captures.len() {
+        if n >= c.captures.len() - self.vm.rt.hidden_upvalues(&self.vm.heap, c) {
             return None;
         }
         let p = self.vm.heap.get(c.proto);

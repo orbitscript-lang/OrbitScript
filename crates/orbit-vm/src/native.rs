@@ -293,6 +293,7 @@ impl NativeCtx<'_> {
             name,
             f,
             fast: None,
+            hidden: 0,
         });
         self.vm.rt.native_ids.insert(name, id);
         Value::Native(id)

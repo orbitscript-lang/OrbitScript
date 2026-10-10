@@ -90,6 +90,9 @@ pub(crate) struct Native {
     pub name: &'static str,
     pub f: NativeFn,
     pub fast: Option<FastFn>,
+    /// Upvalues at the end of each of its closures that scripts can't
+    /// see or change (`debug.getupvalue` and friends skip them).
+    pub hidden: u8,
 }
 
 impl fmt::Debug for Native {
@@ -559,24 +562,44 @@ impl Interrupt {
 /// GC values (it is not traced).
 #[derive(Default)]
 pub struct Extensions {
-    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
+    /// A handful of entries, so a scan beats hashing: the C API looks its
+    /// state up on every call into C.
+    entries: Vec<(std::any::TypeId, Box<dyn std::any::Any>)>,
 }
 
 impl Extensions {
     /// The value of type `T`, created with `init` on first use.
+    #[inline]
     pub fn get_or_insert_with<T: 'static>(&mut self, init: impl FnOnce() -> T) -> &mut T {
-        self.map
-            .entry(std::any::TypeId::of::<T>())
-            .or_insert_with(|| Box::new(init()))
+        let id = std::any::TypeId::of::<T>();
+        let i = match self.entries.iter().position(|(k, _)| *k == id) {
+            Some(i) => i,
+            None => {
+                self.entries.push((id, Box::new(init())));
+                self.entries.len() - 1
+            }
+        };
+        self.entries[i]
+            .1
             .downcast_mut::<T>()
             .expect("extension stored under its own TypeId")
+    }
+
+    /// The value of type `T`, if there is one.
+    #[inline]
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        let id = std::any::TypeId::of::<T>();
+        self.entries
+            .iter()
+            .find(|(k, _)| *k == id)
+            .and_then(|(_, v)| v.downcast_ref::<T>())
     }
 }
 
 impl fmt::Debug for Extensions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Extensions")
-            .field("len", &self.map.len())
+            .field("len", &self.entries.len())
             .finish()
     }
 }
@@ -725,6 +748,7 @@ impl Vm {
             name,
             f,
             fast: None,
+            hidden: 0,
         });
         self.rt.native_ids.insert(name, id);
         Value::Native(id)

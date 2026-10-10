@@ -766,9 +766,30 @@ impl NativeCtx<'_> {
         f: crate::NativeFn,
         upvals: &[Value],
     ) -> Value {
+        self.new_closure_hidden(name, f, upvals, &[])
+    }
+
+    /// [`NativeCtx::new_closure`], plus `hidden` upvalues that scripts can't
+    /// see or change through the debug library, for state a native must be
+    /// able to trust ([`NativeCtx::hidden_upvalue`]). Every closure of `f`
+    /// has the same number of hidden upvalues.
+    pub fn new_closure_hidden(
+        &mut self,
+        name: &'static str,
+        f: crate::NativeFn,
+        upvals: &[Value],
+        hidden: &[Value],
+    ) -> Value {
         let Value::Native(id) = self.native(name, f) else {
             unreachable!("natives are registered as natives")
         };
+        let n = u8::try_from(hidden.len()).expect("few hidden upvalues");
+        let native = &mut self.vm.rt.natives[id.0 as usize];
+        debug_assert!(
+            native.hidden == n || !self.vm.rt.native_protos.contains_key(&id),
+            "every closure of a native has the same hidden upvalues"
+        );
+        native.hidden = n;
         let proto = match self.vm.rt.native_protos.get(&id) {
             Some(&p) => p,
             None => {
@@ -777,8 +798,10 @@ impl NativeCtx<'_> {
                 p
             }
         };
+        // Hidden upvalues go last, so visible ones keep their indices.
         let captures: Box<[Gc<Cell>]> = upvals
             .iter()
+            .chain(hidden)
             .map(|&value| self.vm.heap.alloc(Cell { value }))
             .collect();
         let code = self.vm.heap.get(proto).code.clone();
@@ -787,6 +810,32 @@ impl NativeCtx<'_> {
             code,
             captures,
         }))
+    }
+
+    /// Hidden upvalue `i` of the native closure being called (nil outside
+    /// one); see [`NativeCtx::new_closure_hidden`].
+    #[inline]
+    pub fn hidden_upvalue(&self, i: usize) -> Value {
+        let Some(c) = self.upvals else {
+            return Value::Nil;
+        };
+        let caps = &self.vm.heap.get(c).captures;
+        let hidden = self.vm.rt.natives[self.id.0 as usize].hidden as usize;
+        match (i < hidden).then(|| caps[caps.len() - hidden + i]) {
+            Some(cell) => self.vm.heap.get(cell).value,
+            None => Value::Nil,
+        }
+    }
+
+    /// How many visible upvalues the native closure being called has.
+    pub fn upvalue_count(&self) -> usize {
+        match self.upvals {
+            Some(c) => {
+                self.vm.heap.get(c).captures.len()
+                    - self.vm.rt.natives[self.id.0 as usize].hidden as usize
+            }
+            None => 0,
+        }
     }
 
     /// Upvalue `i` of the native closure being called, or whose
