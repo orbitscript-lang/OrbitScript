@@ -26,7 +26,7 @@ fi
 
 case "$(uname -s)" in
     Linux)  sysdef=-DLUA_USE_LINUX;  syslibs="-lm -ldl"; export_flag=-Wl,-E; shared="-shared -fPIC" ;;
-    Darwin) sysdef=-DLUA_USE_MACOSX; syslibs="-lm";      export_flag="";     shared="-bundle -undefined dynamic_lookup -fPIC" ;;
+    Darwin) sysdef=-DLUA_USE_MACOSX; syslibs="-lm -lreadline"; export_flag=""; shared="-bundle -undefined dynamic_lookup -fPIC" ;;
     *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
 
