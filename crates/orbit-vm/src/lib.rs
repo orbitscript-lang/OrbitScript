@@ -132,9 +132,18 @@ pub(crate) enum FrameKind {
     /// raised: its result is raised again as the error, past the handler.
     /// Nothing may yield across it.
     Handler,
-    /// The bottom of a [`Vm::call`]: returning into it ends the call, and
-    /// an error unwinding to it is returned to the embedder.
-    Boundary,
+    /// The bottom of a [`Vm::call`] or a [`NativeCtx::call`]: returning
+    /// into it ends the call, and an error unwinding to it is returned to
+    /// the embedder or the native.
+    Boundary {
+        /// Opened by a native ([`NativeCtx::call`]): an error leaving it
+        /// takes no traceback, since the native handles it.
+        native: bool,
+        /// An error first goes to the message handler at the frame's
+        /// `base`, which runs on top of the frames that raised (the C API's
+        /// `lua_pcall` with a handler).
+        handler: bool,
+    },
     /// The bottom of every coroutine's stack: the body returning into it
     /// finishes the coroutine, and an error reaching it kills it.
     CoBase,
@@ -905,7 +914,10 @@ impl Vm {
             self.rt.stack.deeper()
         };
         self.rt.stack.frames.push(Frame {
-            kind: FrameKind::Boundary,
+            kind: FrameKind::Boundary {
+                native: false,
+                handler: false,
+            },
             func: func as u32,
             base: func as u32,
             pc: 0,

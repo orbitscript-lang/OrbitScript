@@ -202,6 +202,79 @@ impl NativeCtx<'_> {
         &self.vm.rt.stack.regs[self.base..self.vm.rt.top]
     }
 
+    /// Call the value below the last `nargs` values of the window with
+    /// them and run it to the end now. Its results replace it and its
+    /// arguments at the end of the window; returns how many there are. On
+    /// error the function and arguments are gone and the error is returned.
+    /// With `handler`, an error first goes to the message handler in window
+    /// slot `handler`, which runs on top of the frames that raised; its
+    /// result is the error returned.
+    ///
+    /// For natives that can't be written in continuation style (the C API's
+    /// `lua_call` and `lua_pcall`); prefer [`NativeReturn::CallThen`]. This
+    /// nests the interpreter on the native stack, and code the call runs
+    /// can't yield across it. While the call runs the native has a frame,
+    /// so tracebacks, `debug.getinfo` and error positions see it.
+    pub fn call(&mut self, nargs: usize, handler: Option<usize>) -> Result<usize, LuaError> {
+        debug_assert!(self.len() > nargs, "a function below the arguments");
+        let func = self.vm.rt.top - nargs - 1;
+        let me = self.base - 1;
+        let s = &mut self.vm.rt.stack;
+        // With hooks on, the native already has its frame.
+        let own = !matches!(s.frames.last(), Some(f) if f.func as usize == me
+            && matches!(f.kind, FrameKind::NativeCall { .. }));
+        if own {
+            let cdepth = s.same_depth();
+            s.frames.push(crate::Frame {
+                kind: FrameKind::NativeCall { id: self.id },
+                func: me as u32,
+                base: self.base as u32,
+                pc: 0,
+                cell_base: s.cells.len() as u32,
+                nvarargs: 0,
+                want: 0,
+                tail: false,
+                extra: 0,
+                cdepth,
+            });
+        }
+        let below = s.frames.len();
+        let cdepth = s.deeper();
+        let r = if self.vm.c_overflow(cdepth) {
+            Err(self.error("C stack overflow"))
+        } else {
+            let s = &mut self.vm.rt.stack;
+            s.frames.push(crate::Frame {
+                kind: FrameKind::Boundary {
+                    native: true,
+                    handler: handler.is_some(),
+                },
+                func: func as u32,
+                base: handler.map_or(func, |h| self.base + h) as u32,
+                pc: 0,
+                cell_base: s.cells.len() as u32,
+                nvarargs: 0,
+                want: crate::op::MULTI,
+                tail: false,
+                extra: 0,
+                cdepth,
+            });
+            self.vm.call_at(func, nargs)
+        };
+        let s = &mut self.vm.rt.stack;
+        debug_assert_eq!(s.frames.len(), below, "the boundary is gone");
+        if own {
+            s.frames.truncate(below - 1);
+        }
+        match r {
+            Ok(()) => Ok(self.vm.rt.top - func),
+            Err(e) => {
+                self.vm.rt.top = func;
+                Err(e)
+            }
+        }
+    }
+
     /// Return one value.
     pub fn ret1(&mut self, v: Value) -> Result<NativeReturn, LuaError> {
         self.push(v);
@@ -330,7 +403,8 @@ impl NativeCtx<'_> {
     }
 
     /// How the call site names this function, and whether it was a method
-    /// call. Falls back to the registered name.
+    /// call. Falls back to the name a loaded module gives it, then to the
+    /// registered name.
     pub fn call_name(&self) -> (String, bool) {
         if let Some(f) = self.vm.rt.stack.frames.last()
             && let FrameKind::Lua { closure, .. } = f.kind
@@ -359,6 +433,15 @@ impl NativeCtx<'_> {
                 };
                 return (String::from_utf8_lossy(name).into_owned(), method);
             }
+        }
+        // As the reference does, a function with no name at its call site is
+        // named by where a loaded module keeps it.
+        let me = match self.upvals {
+            Some(c) => Value::Closure(c),
+            None => Value::Native(self.id),
+        };
+        if let Some(name) = self.vm.rt.global_name(&self.vm.heap, me) {
+            return (String::from_utf8_lossy(&name).into_owned(), false);
         }
         (
             self.vm.rt.natives[self.id.0 as usize].name.to_owned(),

@@ -252,7 +252,7 @@ impl Runtime {
             k if unwinding_close(k) => None,
             FrameKind::Meta { event, .. } => named("metamethod", event.short_name().as_bytes()),
             FrameKind::Hook => named("hook", b"?"),
-            FrameKind::Boundary | FrameKind::Native { .. }
+            FrameKind::Boundary { .. } | FrameKind::Native { .. }
                 if self.stack.aux.finalizer_at == Some(ci as u32) =>
             {
                 named("metamethod", b"__gc")
@@ -357,7 +357,7 @@ impl Runtime {
                     }
                     FrameKind::Meta { .. }
                     | FrameKind::Handler
-                    | FrameKind::Boundary
+                    | FrameKind::Boundary { .. }
                     | FrameKind::CoBase
                     | FrameKind::Hook => return None,
                 }
@@ -594,7 +594,7 @@ fn catches(k: FrameKind) -> bool {
         FrameKind::Native {
             catch: crate::Catch::Yes | crate::Catch::Handler,
             ..
-        } | FrameKind::Boundary
+        } | FrameKind::Boundary { .. }
             | FrameKind::CoBase
             | FrameKind::Hook
     )
@@ -605,7 +605,7 @@ fn is_activation(k: FrameKind) -> bool {
         FrameKind::Lua { .. } | FrameKind::Native { .. } | FrameKind::NativeCall { .. } => true,
         FrameKind::Meta { .. }
         | FrameKind::Handler
-        | FrameKind::Boundary
+        | FrameKind::Boundary { .. }
         | FrameKind::CoBase
         | FrameKind::Hook => false,
     }
@@ -619,7 +619,7 @@ fn frame_func(stack: &Stack, i: usize) -> Value {
         FrameKind::Native { id, .. } | FrameKind::NativeCall { id } => Value::Native(id),
         FrameKind::Meta { .. }
         | FrameKind::Handler
-        | FrameKind::Boundary
+        | FrameKind::Boundary { .. }
         | FrameKind::CoBase
         | FrameKind::Hook => Value::Nil,
     }
