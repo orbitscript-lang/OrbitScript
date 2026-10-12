@@ -126,7 +126,7 @@ Kept beside the code (ADR-4), in `DebugInfo`:
 - **Tail calls**: `Return` of a single call becomes `TailCall`.
 - **Assignment order** follows the HIR's rule (targets' objects and keys, then values, then stores right to left).
 - **Limits** give Lua-style compile errors: more than 255 registers is `function or expression needs too many registers`, more than 254 returned values is `too many returns (limit is 255)`, and more than 255 captures is `too many upvalues`.
-- A disassembler (`orbit --dump-bytecode`) prints instructions with operand names from the debug info, for golden tests.
+- A disassembler (`orbitc -l`) prints instructions with operand names from the debug info, for golden tests.
 
 ## Interpreter (`orbit-vm`)
 
@@ -268,7 +268,7 @@ let f = lua.load(source, "script.lua")?;  // parse → lower → analyse → com
 lua.call(f, &[])?;
 ```
 
-`orbit-cli`: `orbit script.lua [args...]` sets the global `arg` table (`arg[0]` is the script), runs it, and on an uncaught error prints `<program>: <message>` and a traceback to stderr with exit status 1, the shape the diff runner expects. `--dump-ast`, `--dump-hir` and `--dump-bytecode` print the intermediate forms.
+`orbit-cli`: `orbit script.lua [args...]` sets the global `arg` table (`arg[0]` is the script), runs it, and on an uncaught error prints `<program>: <message>` and a traceback to stderr with exit status 1, the shape the diff runner expects. The separate `orbitc` compiler (after `luac`) prints the intermediate forms (`--ast`, `--hir`, `-l`) and writes binary chunks.
 
 ## JIT readiness
 

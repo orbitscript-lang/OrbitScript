@@ -28,8 +28,9 @@ options:
   --markdown FILE      also write the scoreboard as a Markdown table
   --json FILE          also write it as JSON
   --timeout SECS       per-file timeout (default 60)
-  --no-compile-check   skip the compile check (it needs orbit's
-                       --dump-bytecode flag)
+  --compiler PATH      compiler for the compile check, run as
+                       `orbitc -p FILE` (default: orbitc next to --interp)
+  --no-compile-check   skip the compile check
 
 GC stress mode: run as ORBIT_GC_STRESS=1 cargo testkit scoreboard.";
 
@@ -50,6 +51,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     let mut json: Option<PathBuf> = None;
     let mut timeout = Duration::from_secs(60);
     let mut compile_check = true;
+    let mut compiler = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -60,6 +62,7 @@ pub fn main(args: &[String]) -> Result<bool> {
         };
         match a.as_str() {
             "--interp" => interp = PathBuf::from(val()?),
+            "--compiler" => compiler = Some(PathBuf::from(val()?)),
             "--reference" => reference = PathBuf::from(val()?),
             "--markdown" => markdown = Some(PathBuf::from(val()?)),
             "--json" => json = Some(PathBuf::from(val()?)),
@@ -82,7 +85,8 @@ pub fn main(args: &[String]) -> Result<bool> {
 
     eprintln!("compile check...");
     let compiles = if compile_check {
-        Some(compile_check_suite(&interp, timeout)?)
+        let compiler = compiler.unwrap_or_else(|| util::compiler_next_to(&interp));
+        Some(compile_check_suite(&compiler, timeout)?)
     } else {
         None
     };
@@ -130,9 +134,12 @@ pub fn main(args: &[String]) -> Result<bool> {
     Ok(true)
 }
 
-/// For each manifest file, whether the interpreter compiles it (`--dump-bytecode` succeeds),
-/// and the compile error if it doesn't.
-fn compile_check_suite(interp: &Path, timeout: Duration) -> Result<Vec<(String, Option<String>)>> {
+/// For each manifest file, whether `compiler` compiles it (`orbitc -p`
+/// succeeds), and the compile error if it doesn't.
+fn compile_check_suite(
+    compiler: &Path,
+    timeout: Duration,
+) -> Result<Vec<(String, Option<String>)>> {
     let suite = util::repo_root().join("tests/lua-5.5/suite");
     let mut out = Vec::new();
     for e in conformance::load_manifest()? {
@@ -140,16 +147,16 @@ fn compile_check_suite(interp: &Path, timeout: Duration) -> Result<Vec<(String, 
             continue;
         }
         let o = process::run(&Spec {
-            program: interp.to_path_buf(),
-            args: vec!["--dump-bytecode".into(), e.file.as_str().into()],
+            program: compiler.to_path_buf(),
+            args: vec!["-p".into(), e.file.as_str().into()],
             cwd: suite.clone(),
             timeout,
             measure_rss: false,
         })
-        .map_err(io_err(format!("running {}", interp.display())))?;
+        .map_err(io_err(format!("running {}", compiler.display())))?;
         let err = (o.exit != Exit::Code(0)).then(|| {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            let program = interp.to_string_lossy();
+            let program = compiler.to_string_lossy();
             stderr
                 .lines()
                 .next()

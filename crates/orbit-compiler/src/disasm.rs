@@ -1,4 +1,4 @@
-//! A text listing of compiled bytecode, for golden tests and `--dump-bytecode`.
+//! A text listing of compiled bytecode, for golden tests and `orbitc -l`.
 
 use std::fmt::Write;
 

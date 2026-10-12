@@ -18,7 +18,7 @@
 | `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) | C |
 | `orbit-stdlib` | Lua standard library | D |
 | `orbit` | Rust embedding API | shared |
-| `orbit-cli` | `orbit` binary | shared |
+| `orbit-cli` | `orbit` interpreter and `orbitc` compiler binaries | shared |
 | `orbit-testkit` | Conformance, differential and benchmark harness (dev tool, never shipped) | E |
 
 Design records live in `docs/adr/`. A **Proposed** ADR can be edited freely by its stream. An **Accepted** ADR changes only with Tym's approval, because other streams build on it.
