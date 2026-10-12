@@ -49,14 +49,16 @@ Limits:
 - A `RUSTC_WRAPPER` in the environment (sccache, say) replaces this one, and the build is then not profile-guided.
 - Cargo reads `.cargo/config.toml` only for builds inside this repository. Crates that depend on `orbit`, and `cargo install`, get a plain release build.
 
-`cargo testkit pgo` builds the same profile-guided binary as `target/pgo/orbit` without the wrapper; `--profile FILE` uses another profile.
+`cargo testkit pgo` builds the same profile-guided binary as `target/pgo/orbit` without the wrapper; `--profile FILE` uses another profile (`pgo check` takes it too).
 
 `cargo testkit pgo train` records a new profile with rustc's stable flags, writes it to `pgo/<target>.profdata`, then builds as above:
 
 1. It builds an instrumented `orbit` with `-Cprofile-generate` in the `pgo-gen` Cargo profile (`target/pgo-gen/orbit`). Only this throwaway binary carries the counters.
 2. It runs that binary over the training set: the benchmarks at their quick inputs, `tests/diff`, `tests/diff/compat` and `tests/first-light`. Then it merges the raw profiles with `llvm-profdata`.
 
-Retrain and commit the new profile when hot code changes a lot, and before a release. A stale profile never produces wrong code: LLVM drops the counts of functions whose code changed, so those functions are just optimized as in a plain release build. A profile written by one LLVM version can be read by the same or a newer one, so retrain after moving the minimum toolchain past the one that wrote it. Profiles for other targets (aarch64 Linux, macOS, Windows) have to be trained on those machines.
+A stale profile never produces wrong code, but it can make the release build much slower than one without a profile. LLVM drops the counts of a function whose code changed and finds none for a function that is new (a move or rename gives it a new symbol), and in a profile-guided build it compiles such a function as if it never ran. When #126 moved the interpreter loop, the profile trained before it made the release build 1.1-1.5x slower than a plain one on most benchmarks until it was retrained.
+
+`cargo testkit pgo check` builds with the committed profile in `target/pgo-check` and lists every function of our crates that the profile no longer covers, and fails if there is one. Run it before pushing a change to the VM, `orbit-core`, `orbit-gc`, the compiler or the standard library, and when it fails, run `cargo testkit pgo train` and commit the new profile with the change. A freshly trained profile covers every function, including the ones training never ran, so the check passes right after training. Retrain before a release too. A profile written by one LLVM version can be read by the same or a newer one, so retrain after moving the minimum toolchain past the one that wrote it. Profiles for other targets (aarch64 Linux, macOS, Windows) have to be trained on those machines.
 
 Both profiles inherit `release`, so `target/release/orbit` and its build cache stay as they are. `llvm-profdata` must come from the same LLVM as rustc: run `rustup component add llvm-tools`, or point `LLVM_PROFDATA` at a matching copy.
 

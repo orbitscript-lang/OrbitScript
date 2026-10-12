@@ -16,6 +16,12 @@
 //! build whose code layout and inlining follow the profile; it has no
 //! instrumentation and no runtime cost.
 //!
+//! `pgo check` tells whether the committed profile still matches the code.
+//! LLVM discards the counts of a function whose control flow changed since
+//! training and finds none for a function that is new; either way the
+//! function is compiled as if it never ran, which is far worse than no
+//! profile at all when it is the interpreter loop.
+//!
 //! Both profiles inherit `release`, so `target/release/orbit` and its cache
 //! are left alone. The flags go through `CARGO_ENCODED_RUSTFLAGS` because
 //! per-profile rustflags are not stable Cargo.
@@ -33,12 +39,19 @@ use crate::util::{self, Result, io_err};
 
 const USAGE: &str = "\
 usage: orbit-testkit pgo [build] [--profile FILE]
+       orbit-testkit pgo check [--profile FILE]
        orbit-testkit pgo train [options]
 
 build (the default): builds target/pgo/orbit, the release build of orbit
 optimized with the committed profile pgo/<target>.profdata (<target> is the
 host triple, e.g. x86_64-unknown-linux-gnu). Needs only rustc.
   --profile FILE   use FILE instead of the committed profile
+
+check: builds as above in target/pgo-check and lists the functions of our
+crates that the profile no longer covers (their code changed since training,
+or they are new, as after a move or rename). Fails if there are any:
+retrain then. A freshly trained profile covers every function, even those
+the training never ran.
 
 train: records a new profile with an instrumented build
 (target/pgo-gen/orbit) running the training set, writes it to
@@ -64,10 +77,11 @@ struct Job {
 }
 
 pub fn main(args: &[String]) -> Result<bool> {
-    let (training, args) = match args.first().map(String::as_str) {
-        Some("train") => (true, &args[1..]),
-        Some("build") => (false, &args[1..]),
-        _ => (false, args),
+    let (training, checking, args) = match args.first().map(String::as_str) {
+        Some("train") => (true, false, &args[1..]),
+        Some("check") => (false, true, &args[1..]),
+        Some("build") => (false, false, &args[1..]),
+        _ => (false, false, args),
     };
     let mut exclude: Vec<String> = Vec::new();
     let mut with_bench = true;
@@ -128,6 +142,9 @@ pub fn main(args: &[String]) -> Result<bool> {
         }
         p
     };
+    if checking {
+        return check(&target, &root, &profile);
+    }
     build(&target, &root, &profile)?;
     Ok(true)
 }
@@ -204,39 +221,141 @@ fn train(
 
 /// Builds `target/pgo/orbit` optimized with `profile`.
 fn build(target: &Path, root: &Path, profile: &Path) -> Result<()> {
-    // Cargo doesn't track the profile's contents, only the flags, so use a
-    // copy named after its contents: a new profile means new flags and a
-    // rebuild.
+    let copy = profile_copy(target, profile)?;
+    println!(
+        "== building the optimized orbit (profile pgo) with {}",
+        profile.display()
+    );
+    let flags = use_flags(&copy);
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    cargo_build(root, "pgo", &flags)?;
+    let out = target.join("pgo").join(exe("orbit"));
+    println!("\n{}", out.display());
+    Ok(())
+}
+
+/// Builds with `profile` in its own target directory and reports the
+/// functions of our crates the profile doesn't cover. Returns false (the
+/// check fails) if there are any. A new function matters as much as a
+/// changed one: moving the interpreter loop to another module gives it a
+/// new symbol, and the loop compiled as never-run made the benchmarks
+/// 1.1-1.5x slower than a build without a profile.
+fn check(target: &Path, root: &Path, profile: &Path) -> Result<bool> {
+    let copy = profile_copy(target, profile)?;
+    let mut flags = use_flags(&copy);
+    // Off by default: also name the functions the profile has no record of.
+    flags.push("-Cllvm-args=-pgo-warn-missing-function".to_string());
+    println!("== checking {} against the code", profile.display());
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let out = Command::new(&cargo)
+        .args([
+            "build",
+            "--profile",
+            "pgo",
+            "-p",
+            "orbit-cli",
+            "--bin",
+            "orbit",
+        ])
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", target.join("pgo-check"))
+        .env("CARGO_BUILD_RUSTC_WRAPPER", "")
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", rustflags_with(&flags))
+        .output()
+        .map_err(io_err(format!(
+            "running {}",
+            PathBuf::from(&cargo).display()
+        )))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        print!("{stderr}");
+        return Err("cargo build --profile pgo failed".to_string());
+    }
+    let report = ProfileReport::parse(&stderr);
+    for (name, count) in &report.changed {
+        println!("  changed  {name} (up to {count} counts discarded)");
+    }
+    for name in &report.missing {
+        println!("  new      {name}");
+    }
+    println!(
+        "{} changed, {} new or renamed",
+        report.changed.len(),
+        report.missing.len()
+    );
+    if report.changed.is_empty() && report.missing.is_empty() {
+        println!("the profile matches the code");
+        Ok(true)
+    } else {
+        println!("the profile is stale: retrain with `cargo testkit pgo train`");
+        Ok(false)
+    }
+}
+
+/// What LLVM said about the profile while compiling our crates.
+#[derive(Debug, Default, PartialEq)]
+struct ProfileReport {
+    /// Functions whose code changed since training, with the largest count
+    /// LLVM discarded.
+    changed: Vec<(String, u64)>,
+    /// Functions the profile has no record of.
+    missing: Vec<String>,
+}
+
+impl ProfileReport {
+    fn parse(stderr: &str) -> ProfileReport {
+        let mut r = ProfileReport::default();
+        for line in stderr.lines() {
+            // Only our crates: dependencies are compiled without the profile.
+            let Some(rest) = line.strip_prefix("warning: orbit") else {
+                continue;
+            };
+            if let Some((_, tail)) = rest.split_once("(hash mismatch) ") {
+                let name = tail.split(' ').next().unwrap_or(tail).to_string();
+                let count = tail
+                    .split_once("up to ")
+                    .and_then(|(_, c)| c.split(' ').next()?.parse().ok())
+                    .unwrap_or(0);
+                r.changed.push((name, count));
+            } else if let Some((_, tail)) =
+                rest.split_once("no profile data available for function ")
+            {
+                let name = tail.split(' ').next().unwrap_or(tail).to_string();
+                r.missing.push(name);
+            }
+        }
+        r
+    }
+}
+
+/// A copy of `profile` named after its contents. Cargo doesn't track the
+/// profile's contents, only the flags, so a new profile then means new flags
+/// and a rebuild.
+fn profile_copy(target: &Path, profile: &Path) -> Result<PathBuf> {
     let data = target.join("pgo-data");
     fs::create_dir_all(&data).map_err(io_err(data.display()))?;
     remove_old_profiles(&data)?;
     let bytes = fs::read(profile).map_err(io_err(profile.display()))?;
     let copy = data.join(format!("orbit-{:016x}.profdata", content_hash(&bytes)));
     fs::write(&copy, &bytes).map_err(io_err(copy.display()))?;
+    Ok(copy)
+}
 
-    println!(
-        "== building the optimized orbit (profile pgo) with {}",
-        profile.display()
-    );
-    cargo_build(
-        root,
-        "pgo",
-        &[
-            &format!("-Cprofile-use={}", copy.display()),
-            // With a profile, LLVM's loop vectorizer treats a loop whose
-            // measured trip count is under 16 as tiny and vectorizes it with
-            // masked lanes instead of a scalar remainder. Without masked
-            // stores (x86-64 before AVX-512) each lane becomes a compare and
-            // a branch: clearing a few registers after a native returns
-            // (`fill(Value::Nil)`) grew to about 280 instructions and made
-            // coroutines 12% slower than the plain release build. A minimum
-            // of 1 keeps the usual vector loop with a scalar remainder.
-            "-Cllvm-args=-vectorizer-min-trip-count=1",
-        ],
-    )?;
-    let out = target.join("pgo").join(exe("orbit"));
-    println!("\n{}", out.display());
-    Ok(())
+/// The rustc flags of a build optimized with the profile at `copy`.
+fn use_flags(copy: &Path) -> Vec<String> {
+    vec![
+        format!("-Cprofile-use={}", copy.display()),
+        // With a profile, LLVM's loop vectorizer treats a loop whose
+        // measured trip count is under 16 as tiny and vectorizes it with
+        // masked lanes instead of a scalar remainder. Without masked
+        // stores (x86-64 before AVX-512) each lane becomes a compare and
+        // a branch: clearing a few registers after a native returns
+        // (`fill(Value::Nil)`) grew to about 280 instructions and made
+        // coroutines 12% slower than the plain release build. A minimum
+        // of 1 keeps the usual vector loop with a scalar remainder.
+        "-Cllvm-args=-vectorizer-min-trip-count=1".to_string(),
+    ]
 }
 
 /// The training programs, as argument lists for `orbit` and the directory to
@@ -279,11 +398,7 @@ fn training_set(root: &Path, with_bench: bool, exclude: &[String]) -> Result<Vec
 /// whatever flags the environment already sets.
 fn cargo_build(root: &Path, profile: &str, extra: &[&str]) -> Result<()> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let flags = encoded_rustflags(
-        std::env::var("CARGO_ENCODED_RUSTFLAGS").ok().as_deref(),
-        std::env::var("RUSTFLAGS").ok().as_deref(),
-        extra,
-    );
+    let flags = rustflags_with(extra);
     let status = Command::new(&cargo)
         .args([
             "build",
@@ -307,6 +422,17 @@ fn cargo_build(root: &Path, profile: &str, extra: &[&str]) -> Result<()> {
     } else {
         Err(format!("cargo build --profile {profile} failed"))
     }
+}
+
+/// The environment's rustflags with `extra` appended, encoded for
+/// `CARGO_ENCODED_RUSTFLAGS`.
+fn rustflags_with<S: AsRef<str>>(extra: &[S]) -> OsString {
+    let extra: Vec<&str> = extra.iter().map(AsRef::as_ref).collect();
+    encoded_rustflags(
+        std::env::var("CARGO_ENCODED_RUSTFLAGS").ok().as_deref(),
+        std::env::var("RUSTFLAGS").ok().as_deref(),
+        &extra,
+    )
 }
 
 /// `CARGO_ENCODED_RUSTFLAGS` (flags separated by 0x1f) with `extra` appended.
@@ -402,6 +528,24 @@ mod tests {
         assert_eq!(
             encoded_rustflags(Some("-g"), None, &["-a", "-b"]),
             "-g\x1f-a\x1f-b"
+        );
+    }
+
+    #[test]
+    fn report_reads_llvm_warnings() {
+        let stderr = "\
+warning: orbit_vm.1bf3-cgu.0: function control flow change detected (hash mismatch) _RNvNtCs2o_8orbit_vm4link4link Hash = 959604228506135346 up to 2282537 count discarded
+
+warning: orbit_vm.1bf3-cgu.0: no profile data available for function _RNvNtCs2o_8orbit_vm6interp8run_loop Hash = 1124680653842163584 up to 0 count discarded
+warning: libc.77aa-cgu.0: no profile data available for function f Hash = 1 up to 0 count discarded
+warning: `orbit-vm` (lib) generated 2 warnings
+";
+        assert_eq!(
+            ProfileReport::parse(stderr),
+            ProfileReport {
+                changed: vec![("_RNvNtCs2o_8orbit_vm4link4link".to_string(), 2282537)],
+                missing: vec!["_RNvNtCs2o_8orbit_vm6interp8run_loop".to_string()],
+            }
         );
     }
 
