@@ -118,3 +118,16 @@ Proposed for Tym's decision on 2026-10-08. Tym picked "growth + heap limit" for 
 - **Not chosen:**
   - *A fallible `Heap::try_alloc`.* Every allocation site in `orbit-core`, `orbit-vm` and the library would have had to handle an error, and still nothing could collect without the owner's roots.
   - *A custom global allocator.* It would need `unsafe`, would count every allocation in the process rather than the Lua heap, and would contradict ADR-6's choice of the system allocator.
+
+## Amendment: virtual memory buffer for arena slots (Tym, 2026-10-11)
+
+Approved by Tym on 2026-10-11 to eliminate peak RSS overhead from geometric vector capacity reallocation spikes without regressing CPU performance.
+
+- **An arena's slots are backed by a virtual memory buffer (`VmBuffer<Option<T>>`).** Replaces `Vec<Option<T>>` in `Arena<T, SLOTS>`.
+- **Address space reservation:** Upfront reservation of 16M slots (~940 MiB virtual address space for tables) with zero physical RAM or swap commitment (`PROT_NONE` on Unix, `PAGE_NOACCESS` on Windows).
+- **On-demand physical page commitment:** As the collector allocates pages, physical backing memory is committed on demand via `mprotect(PROT_READ | PROT_WRITE)` on Unix and `VirtualAlloc(MEM_COMMIT)` on Windows.
+- **Fixed base address:** Because address space is pre-reserved, an arena never reallocates or copies live slots on growth. This completely eliminates the temporary capacity duplication and geometric vector doubling spikes (e.g. `binary_trees.lua` peak RSS dropped from 92.8 MiB to 55.7 MiB on macOS).
+- **Immediate decommit on release:** When trailing arena pages are released, `Arena::release_page` immediately invokes `shrink_to_fit()`, which decommits trailing physical pages directly back to the OS via `mmap(..., MAP_FIXED | PROT_NONE)` on Unix and `VirtualFree(..., MEM_DECOMMIT)` on Windows without waiting for half the capacity to be empty.
+- **Isolated unsafe logic in `orbit-virtmem`:** All `unsafe` OS virtual memory logic is encapsulated in a dedicated crate `orbit-virtmem`, keeping `orbit-gc` and other runtime crates free of low-level virtual memory pointer arithmetic (ADR-6).
+- **Retention of `memory-trimming`:** `malloc_trim` / `malloc_zone_pressure_relief` remains active and necessary: `VmBuffer` manages arena slot headers, while variable-sized object payloads (`Table.entries`, `ArrayPart.words`, long strings) continue to allocate through libc `malloc`.
+
