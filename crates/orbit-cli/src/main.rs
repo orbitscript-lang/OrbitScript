@@ -32,12 +32,20 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// catch, as in `lua`. A second one before the VM reaches a check (inside a
 /// long library call, say) ends the process, as it does `lua`.
 fn catch_interrupts(interrupt: orbit::Interrupt) {
-    let _ = ctrlc::set_handler(move || {
-        if !RUNNING.load(Ordering::Relaxed) || interrupt.pending() {
-            std::process::exit(130);
-        }
-        interrupt.request();
-    });
+    let mut signals = match signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT]) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = std::thread::Builder::new()
+        .name("interrupt".into())
+        .spawn(move || {
+            for _ in signals.forever() {
+                if !RUNNING.load(Ordering::Relaxed) || interrupt.pending() {
+                    std::process::exit(130);
+                }
+                interrupt.request();
+            }
+        });
 }
 
 /// A `-e` or `-l` option, run in command-line order.
