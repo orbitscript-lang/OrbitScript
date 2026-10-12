@@ -923,7 +923,7 @@ impl Vm {
             }
             macro_rules! code_of {
                 () => {
-                    if hooked {
+                    if false {
                         if traps.len() < cur.code.len() {
                             traps = self.grow_hook_traps(cur.code.len());
                         }
@@ -1382,7 +1382,8 @@ impl Vm {
             loop {
                 let mut op = code[pc];
                 pc += 1;
-                if let Op::Hook = op {
+                if self.rt.stack.hook.mask != 0 {
+                    std::hint::cold_path();
                     self.rt.stack.frames[depth - 1].pc = pc as u32;
                     match self.hook_trap(pc - 1) {
                         Ok(Some(real)) => {
