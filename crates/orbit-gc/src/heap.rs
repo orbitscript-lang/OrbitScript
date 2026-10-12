@@ -35,13 +35,13 @@ pub struct Params {
     /// collect less often. 0 by default: with a floor, a small heap can't
     /// shrink back toward its live size.
     pub min_threshold: usize,
-    /// With the `malloc-trim` feature: hand freed memory back to the OS
+    /// With the `memory-trimming` feature: hand freed memory back to the OS
     /// once a cycle finds the reachable heap at or below this percentage of
     /// its peak since the last trim, and pages were released. 50 by default.
     /// Higher trims sooner after a smaller drop; trimming after every cycle
     /// costs time, because memory handed back is soon taken again.
     pub trim_percent: u32,
-    /// With the `malloc-trim` feature: the least the reachable heap must
+    /// With the `memory-trimming` feature: the least the reachable heap must
     /// have fallen from its peak, in bytes, before memory is handed back.
     /// 1 MiB by default, so small heaps are left alone.
     pub trim_min_bytes: usize,

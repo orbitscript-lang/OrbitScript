@@ -26,11 +26,11 @@
 //!   the sweep leaves the pages at the end of an arena empty, the arena is
 //!   cut back, so memory taken during a spike is given back when the spike
 //!   ends. A live object at the end of an arena keeps the empty slots below
-//!   it until it dies, though the memory those objects owned is freed. glibc keeps freed memory in the
-//!   process unless asked; the `malloc-trim` feature asks, once a cycle finds
-//!   the reachable heap has shrunk well below its peak
-//!   ([`Params::trim_percent`]). Support for other allocators and systems
-//!   belongs in this crate too, not in its hosts.
+//!   it until it dies, though the memory those objects owned is freed. The
+//!   system allocator may keep freed memory in the process unless asked; the
+//!   `memory-trimming` feature asks, once a cycle finds the reachable heap has
+//!   shrunk well below its peak ([`Params::trim_percent`]). Support for other
+//!   allocators and systems belongs in this crate too, not in its hosts.
 //! - **Weak references and ephemerons.** An object declares its weak mode
 //!   while being traced ([`Marker::weak`]) and drops dead entries in
 //!   [`Trace::clear_weak`]. Ephemeron entries are reported with

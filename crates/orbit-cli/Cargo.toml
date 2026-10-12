@@ -19,10 +19,5 @@ orbit-compiler = { path = "../orbit-compiler" }
 orbit-hir = { path = "../orbit-hir" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 
-# Give memory freed after an allocation spike back to the OS (docs/design/vm.md,
-# "Garbage collection"; ADR-2). Only glibc needs it.
-[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
-orbit-gc = { path = "../orbit-gc", features = ["malloc-trim"] }
-
 [lints]
 workspace = true

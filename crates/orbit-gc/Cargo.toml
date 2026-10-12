@@ -20,12 +20,13 @@ dbg_macro = "warn"
 todo = "warn"
 
 [features]
+default = ["memory-trimming"]
 # Check a generation on every handle access so a stale handle always panics
 # (8-byte `Gc`). Always on in debug builds; this turns it on in release too.
 # It costs about 8% in interpreter speed (measured on the Milestone 1 build).
 checked-handles = []
-# On glibc, call `malloc_trim(0)` after a collection finds the reachable
-# heap has shrunk to half its peak or less and pages were released, so the
-# process gives the memory back to the OS (glibc keeps it otherwise). Does
-# nothing on other targets.
-malloc-trim = []
+# On supported platforms (glibc via `malloc_trim(0)`, macOS via
+# `malloc_zone_pressure_relief(NULL, 0)`), ask the allocator to return freed
+# memory to the OS after a collection finds the reachable heap has shrunk to
+# half its peak or less and pages were released. Does nothing on other targets.
+memory-trimming = []
