@@ -23,7 +23,7 @@ pub use orbit_stdlib::{chunk_id, read_chunk_file};
 #[cfg(feature = "debug")]
 pub use orbit_vm::Interrupt;
 pub use orbit_vm::{
-    CallOutcome, Event, GcMode, LIMIT_GRACE, LuaError, NativeCtx, NativeReturn, Vm,
+    CallOutcome, Event, GcMode, LIMIT_GRACE, LuaError, NativeCtx, NativeReturn, ResumeOk, Vm,
 };
 
 /// The runtime version, taken from the workspace version.

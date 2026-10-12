@@ -42,6 +42,21 @@ pub enum CallOutcome {
     Err(Value),
 }
 
+/// What a [`NativeReturn::Resume`] does when the coroutine yields or
+/// returns values. Anything but [`ResumeOk::Continue`] promises that `k`
+/// would do exactly that with `Ok`, so the VM may skip calling it (it still
+/// does when a return hook needs the native's frame).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeOk {
+    /// Run the continuation.
+    Continue,
+    /// The values are the native's results (`coroutine.wrap`).
+    Return,
+    /// `true`, then the values, are the native's results
+    /// (`coroutine.resume`).
+    ReturnTrue,
+}
+
 /// What a native function returns.
 #[derive(Debug, Clone, Copy)]
 pub enum NativeReturn {
@@ -82,10 +97,12 @@ pub enum NativeReturn {
     /// then run `k` when it yields (`Ok` with the yielded values), returns
     /// (`Ok` with its results) or fails (`Err`). A coroutine that isn't
     /// suspended, or one nested too deeply, gets `k` an `Err` at once.
+    /// `ok` lets the VM finish the `Ok` case itself, without calling `k`.
     Resume {
         co: Gc<orbit_core::Thread>,
         nargs: usize,
         k: Continuation,
+        ok: ResumeOk,
     },
     /// Close coroutine `co` (suspended, or dead): run its pending `__close`
     /// handlers on its stack, newest first, with its error (nil if it is
