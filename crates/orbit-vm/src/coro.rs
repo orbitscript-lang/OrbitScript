@@ -21,7 +21,8 @@ use orbit_core::{
 use orbit_gc::Marker;
 
 use crate::interp::Flow;
-use crate::native::{CallOutcome, Continuation, NativeCtx, NativeReturn};
+use crate::interp::extend_nil;
+use crate::native::{CallOutcome, Continuation, NativeCtx, NativeReturn, ResumeOk};
 use crate::ops::Exc;
 use crate::{Catch, Frame, FrameKind, LuaError, Stack, Vm};
 
@@ -32,7 +33,7 @@ pub(crate) const MAX_RESUMES: usize = 196;
 /// How many suspended stacks stay at full size (ADR-3): a stack parked
 /// longer ago than the last `HOT_STACKS` parks, and not resumed since, is
 /// shrunk to its live values.
-const HOT_STACKS: usize = 16;
+pub(crate) const HOT_STACKS: usize = 16;
 
 /// A thread's status, as `coroutine.status` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,20 +165,16 @@ fn live_end(s: &Stack, top: usize) -> usize {
     s.aux.tbc.last().map_or(top, |&r| top.max(r as usize + 1))
 }
 
+// Upcasting to `dyn Any` reads its vtable from the thread's, which saves
+// the indirect call `as_any` would make on every switch.
 fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
-    heap.get(t)
-        .state
-        .as_any()
-        .downcast_ref()
-        .expect("threads hold VM coroutines")
+    let state: &dyn Any = &*heap.get(t).state;
+    state.downcast_ref().expect("threads hold VM coroutines")
 }
 
 fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
-    heap.get_mut(t)
-        .state
-        .as_any_mut()
-        .downcast_mut()
-        .expect("threads hold VM coroutines")
+    let state: &mut dyn Any = &mut *heap.get_mut(t).state;
+    state.downcast_mut().expect("threads hold VM coroutines")
 }
 
 /// The continuation a yielding coroutine waits in: the values the next
@@ -202,6 +199,7 @@ impl Vm {
         let from = self.rt.current;
         let top = self.rt.top;
         let gc_cycles = self.rt.gc_cycles;
+        let hooks = self.rt.hooks_touched;
         // A parked stack is traced through its thread, which the collector
         // may already have scanned.
         self.heap.barrier_back(from);
@@ -228,7 +226,7 @@ impl Vm {
             } else {
                 top
             };
-            self.rt.stack.park(&mut c.stack);
+            self.rt.stack.park(&mut c.stack, hooks);
             c.cycle = gc_cycles;
         }
         let delta = c.bytes as isize - old as isize;
@@ -239,18 +237,19 @@ impl Vm {
             self.heap.adjust_bytes(delta);
         }
         if suspended {
-            self.rt.cooling.push_back((from, stamp));
-            if self.rt.cooling.len() > HOT_STACKS {
-                let (cold, stamp) = self.rt.cooling.pop_front().expect("a parked thread");
-                // An older entry of the thread parking now is stale.
-                if cold != from {
-                    self.shrink_parked(cold, stamp);
-                }
+            let at = self.rt.cooling_at;
+            self.rt.cooling_at = (at + 1) % HOT_STACKS;
+            let out = self.rt.cooling[at].replace((from, stamp));
+            // An older entry of the thread parking now is stale.
+            if let Some((cold, stamp)) = out
+                && cold != from
+            {
+                self.shrink_parked(cold, stamp);
             }
         }
         let c = co_mut(&mut self.heap, to);
         c.status = CoStatus::Running;
-        self.rt.stack.unpark(&mut c.stack);
+        self.rt.stack.unpark(&mut c.stack, hooks);
         if finished {
             // The finished stack goes, leaving `to`'s slot empty.
             c.stack.clear(Default::default());
@@ -291,6 +290,8 @@ impl Vm {
     /// Push (or reuse) the continuation frame of native `id`, which waits
     /// for something that isn't a call on this stack (a resume or a
     /// yield); `at` is where the values it gets back will go.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     fn wait_frame(
         &mut self,
         frame: Option<Frame>,
@@ -298,6 +299,7 @@ impl Vm {
         want: u8,
         id: NativeId,
         k: Continuation,
+        ok: ResumeOk,
         at: usize,
     ) {
         let kind = FrameKind::Native {
@@ -306,12 +308,15 @@ impl Vm {
             catch: Catch::No,
             yieldable: true,
             call_at: at as u32,
+            ok,
         };
         match frame {
             Some(_) => self.rt.stack.frames.last_mut().expect("frame").kind = kind,
             None => {
                 let nargs = at - (func + 1);
-                let cdepth = self.rt.stack.same_depth();
+                // Not recorded in `depth_at`: until it is popped, the frame
+                // recorded before it gives the same depth.
+                let cdepth = self.rt.stack.cdepth();
                 self.rt.stack.frames.push(Frame {
                     kind,
                     func: func as u32,
@@ -329,6 +334,7 @@ impl Vm {
     }
 
     /// Move the last `n` values of the running stack to `xfer`.
+    #[inline(always)]
     fn take_values(&mut self, n: usize) {
         let at = self.rt.top - n;
         self.rt.xfer.clear();
@@ -344,8 +350,28 @@ impl Vm {
 
     /// Run the continuation on top of the running stack with an outcome:
     /// `Ok` delivers the values in `xfer`.
+    #[inline(always)]
     fn deliver(&mut self, outcome: Result<(), Value>) -> Result<Flow, Exc> {
-        let f = *self.rt.stack.frames.last().expect("a waiting frame");
+        // The frame's fields are read one by one: a copy of the whole frame
+        // costs more than the fast path uses.
+        let f = self.rt.stack.frames.last().expect("a waiting frame");
+        // The usual case: the values are the waiting native's results,
+        // which a return hook (when one is set) must see in its frame.
+        if outcome.is_ok()
+            && let FrameKind::Native { call_at, ok, .. } = f.kind
+            && ok != ResumeOk::Continue
+            && !self.rt.stack.hook.wants(crate::hook::RETURN)
+        {
+            let (func, want) = (f.func as usize, f.want);
+            return self.deliver_values(func, want, call_at as usize, ok == ResumeOk::ReturnTrue);
+        }
+        let f = *f;
+        self.deliver_k(f, outcome)
+    }
+
+    /// [`Vm::deliver`] through the continuation.
+    #[inline(never)]
+    fn deliver_k(&mut self, f: Frame, outcome: Result<(), Value>) -> Result<Flow, Exc> {
         let FrameKind::Native { id, k, call_at, .. } = f.kind else {
             unreachable!("a native waits for every switch")
         };
@@ -357,18 +383,6 @@ impl Vm {
                 } else {
                     self.rt.stack.write(call_at as usize, &self.rt.xfer)
                 };
-                // `yield`'s continuation returns what the resume passed:
-                // place it without calling through the continuation.
-                if std::ptr::fn_addr_eq(k, yield_k as Continuation) {
-                    self.rt.xfer.clear();
-                    return self.native_returned(
-                        NativeReturn::Return(n),
-                        Some(f),
-                        f.func as usize,
-                        f.want,
-                        id,
-                    );
-                }
                 CallOutcome::Ok(n)
             }
             Err(v) => {
@@ -377,13 +391,14 @@ impl Vm {
             }
         };
         self.rt.xfer.clear();
+        let upvals = self.rt.stack.closure_at(f.func as usize);
         let mut ctx = NativeCtx {
             heap: &mut self.heap,
             rt: &mut self.rt,
             base: f.base as usize,
             nargs: f.nvarargs as usize,
             id,
-            upvals: None,
+            upvals,
         };
         let r = k(&mut ctx, o);
         // The usual result is rebuilt from its count rather than moved
@@ -401,6 +416,62 @@ impl Vm {
         self.native_returned(r?, Some(f), f.func as usize, f.want, id)
     }
 
+    /// [`Vm::deliver`]'s success path for the waiting frame on top, at
+    /// `func` and wanting `want` results, whose native returns the values in
+    /// `xfer` (after `true`, with `with_true`), as [`ResumeOk`] promises: pop
+    /// the frame and place them as its results straight from `xfer`, as its
+    /// continuation and [`Vm::native_returned`] would.
+    #[inline(always)]
+    fn deliver_values(
+        &mut self,
+        func: usize,
+        want: u8,
+        call_at: usize,
+        with_true: bool,
+    ) -> Result<Flow, Exc> {
+        let s = &mut self.rt.stack;
+        let xfer = &self.rt.xfer;
+        let depth = s.frames.len() - 1;
+        s.frames.truncate(depth);
+        let pre = with_true as usize;
+        let n = xfer.len() + pre;
+        let end = func + if want == MULTI { n } else { want as usize };
+        // What the native left in its window: its arguments and pushes,
+        // and where the continuation would have got the values.
+        let stop = s.dirty_to.max(call_at + xfer.len());
+        extend_nil(&mut s.regs, end);
+        let out = &mut s.regs[func..end];
+        let m = n.min(out.len());
+        if m > 0 {
+            if with_true {
+                out[0] = Value::Bool(true);
+            }
+            if m - pre == 1 {
+                out[pre] = xfer[0];
+            } else {
+                out[pre..m].copy_from_slice(&xfer[..m - pre]);
+            }
+        }
+        out[m..].fill(Value::Nil);
+        // As `native_returned` does: stale copies mustn't keep objects
+        // alive.
+        let stop = stop.min(s.regs.len());
+        if end < stop {
+            s.regs[end..stop].fill(Value::Nil);
+        }
+        s.dirty_to = end;
+        self.rt.top = end;
+        self.rt.xfer.clear();
+        if matches!(
+            self.rt.stack.frames.last().map(|f| &f.kind),
+            Some(FrameKind::Lua { .. })
+        ) {
+            Ok(Flow::Reload)
+        } else {
+            self.after_return()
+        }
+    }
+
     /// `NativeReturn::Resume`: native `id` resumes `co` with the last `nargs`
     /// values of its window and waits in `k`.
     #[allow(clippy::too_many_arguments)]
@@ -409,13 +480,14 @@ impl Vm {
         co: Gc<Thread>,
         nargs: usize,
         k: Continuation,
+        ok: ResumeOk,
         frame: Option<Frame>,
         func: usize,
         want: u8,
         id: NativeId,
     ) -> Result<Flow, Exc> {
         let at = self.rt.top - nargs;
-        self.wait_frame(frame, func, want, id, k, at);
+        self.wait_frame(frame, func, want, id, k, ok, at);
         self.take_values(nargs);
         let status = self.co_status(co);
         let refuse = if status != CoStatus::Suspended {
@@ -436,7 +508,7 @@ impl Vm {
         self.rt.resumers.push(self.rt.current);
         self.switch_to(co, CoStatus::Normal);
         let flow = if matches!(
-            self.rt.stack.frames.last().map(|f| f.kind),
+            self.rt.stack.frames.last().map(|f| &f.kind),
             Some(FrameKind::CoBase)
         ) {
             // A fresh coroutine: call its body above the base frame.
@@ -471,7 +543,7 @@ impl Vm {
             ));
         }
         let at = self.rt.top - n;
-        self.wait_frame(frame, func, want, id, yield_k, at);
+        self.wait_frame(frame, func, want, id, yield_k, ResumeOk::Return, at);
         self.take_values(n);
         self.rt.resumers.pop();
         self.switch_to(resumer, CoStatus::Suspended);
@@ -507,7 +579,7 @@ impl Vm {
         id: NativeId,
     ) -> Result<Flow, Exc> {
         let at = self.rt.top;
-        self.wait_frame(frame, func, want, id, k, at);
+        self.wait_frame(frame, func, want, id, k, ResumeOk::Continue, at);
         self.rt.xfer.clear();
         if self.rt.resumers.len() >= MAX_RESUMES {
             // Closing runs on the coroutine's stack, so it nests like a
@@ -715,8 +787,8 @@ impl NativeCtx<'_> {
         }))
     }
 
-    /// Upvalue `i` of the native closure being called (nil outside one, and
-    /// in continuations).
+    /// Upvalue `i` of the native closure being called, or whose
+    /// continuation is running (nil outside one).
     pub fn upvalue(&self, i: usize) -> Value {
         match self.upvals {
             Some(c) => match self.heap.get(c).captures.get(i) {
@@ -770,9 +842,11 @@ impl Vm {
     /// and run the native in its place, with the frame's arguments.
     #[inline(never)]
     pub(crate) fn native_entry(&mut self, c: Gc<Closure>, id: NativeId) -> Result<Flow, Exc> {
-        let f = self.rt.stack.frames.pop().expect("the stub's frame");
-        let func = f.func as usize;
-        let nargs = f.nvarargs as usize;
+        // Its fields one by one, as in `deliver`.
+        let f = self.rt.stack.frames.last().expect("the stub's frame");
+        let (func, nargs, want) = (f.func as usize, f.nvarargs as usize, f.want);
+        let depth = self.rt.stack.frames.len() - 1;
+        self.rt.stack.frames.truncate(depth);
         self.rt.top = func + 1 + nargs;
         let nf = self.rt.natives[id.0 as usize].f;
         let mut ctx = NativeCtx {
@@ -786,9 +860,9 @@ impl Vm {
         let r = nf(&mut ctx);
         // A wrapped coroutine's function resumes it: switch at once, from
         // the fields alone (see `deliver`).
-        if let Ok(NativeReturn::Resume { co, nargs, k }) = r {
-            return self.resume(co, nargs, k, None, func, f.want, id);
+        if let Ok(NativeReturn::Resume { co, nargs, k, ok }) = r {
+            return self.resume(co, nargs, k, ok, None, func, want, id);
         }
-        self.native_returned(r?, None, func, f.want, id)
+        self.native_returned(r?, None, func, want, id)
     }
 }

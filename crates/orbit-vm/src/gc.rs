@@ -236,6 +236,7 @@ impl Vm {
                 self.rt.warn_gc_error_text(&msg);
                 continue;
             }
+            self.rt.hooks_touched = true;
             self.rt.gc.enter(&mut self.heap, &mut self.rt.stack.hook);
             let at = self.rt.stack.frames.len() as u32;
             self.rt.stack.aux.finalizer_at = Some(at);
@@ -300,6 +301,7 @@ fn next_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
         }
         ctx.truncate(1);
         ctx.push(o);
+        ctx.rt.hooks_touched = true;
         ctx.rt.gc.enter(ctx.heap, &mut ctx.rt.stack.hook);
         // The native's frame, which `CallThen` pushes next.
         ctx.rt.stack.aux.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
@@ -358,6 +360,7 @@ fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaErro
         ctx.truncate(1);
         ctx.push(o);
         ctx.rt.stack.aux.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
+        ctx.rt.hooks_touched = true;
         ctx.rt.gc.hooks_off(&mut ctx.rt.stack.hook);
         return Ok(NativeReturn::CallThen {
             f,

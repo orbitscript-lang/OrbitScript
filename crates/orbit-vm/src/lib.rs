@@ -33,7 +33,9 @@ use orbit_gc::{Liveness, Marker, Roots};
 pub use coro::CoStatus;
 pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 pub use meta::Event;
-pub use native::{CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn};
+pub use native::{
+    CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn, ResumeOk,
+};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
 pub use orbit_bytecode as op;
 pub use orbit_core;
@@ -116,6 +118,9 @@ pub(crate) enum FrameKind {
         yieldable: bool,
         /// Where the requested call's function sits.
         call_at: u32,
+        /// How a resume or yield waiting here takes values back
+        /// ([`ResumeOk::Continue`] for everything else).
+        ok: ResumeOk,
     },
     /// Below a metamethod call: how to finish the instruction that needed
     /// it once the call returns (its result is at the frame's `func`).
@@ -256,21 +261,27 @@ impl Stack {
     /// Park this stack (the running one) in `slot`, the running thread's
     /// own, which holds an empty stack: that comes back in its place. The
     /// hook is copied, not swapped; [`Stack::unpark`] overwrites this one.
+    /// With `hooks` false every hook is the default one, so it isn't
+    /// copied.
     #[inline(always)]
-    pub(crate) fn park(&mut self, slot: &mut Stack) {
+    pub(crate) fn park(&mut self, slot: &mut Stack, hooks: bool) {
         self.swap_parts(slot);
-        slot.hook = self.hook;
+        if hooks {
+            slot.hook = self.hook;
+        }
     }
 
     /// Run the stack parked in `slot` in place of this one, which is empty
-    /// (just parked) and goes to the slot.
+    /// (just parked) and goes to the slot. `hooks` as for [`Stack::park`].
     #[inline(always)]
-    pub(crate) fn unpark(&mut self, slot: &mut Stack) {
+    pub(crate) fn unpark(&mut self, slot: &mut Stack, hooks: bool) {
         self.swap_parts(slot);
-        self.hook = slot.hook;
-        // The slot's hook is now a stale copy, which mustn't keep the hook
-        // function alive.
-        slot.hook.func = Value::Nil;
+        if hooks {
+            self.hook = slot.hook;
+            // The slot's hook is now a stale copy, which mustn't keep the
+            // hook function alive.
+            slot.hook.func = Value::Nil;
+        }
     }
 
     /// Free everything the stack holds, keeping its box, and give it
@@ -342,6 +353,17 @@ impl Stack {
         mark(m, self.hook.func);
     }
 
+    /// The native closure a native frame whose function sits at `func`
+    /// runs, for its continuations' upvalues: the function slot keeps it
+    /// until the native returns.
+    #[inline]
+    pub(crate) fn closure_at(&self, func: usize) -> Option<Gc<Closure>> {
+        match self.regs.get(func) {
+            Some(&Value::Closure(c)) => Some(c),
+            _ => None,
+        }
+    }
+
     /// `regs[at] = v`, growing the stack if needed.
     #[inline]
     pub(crate) fn put(&mut self, at: usize, v: Value) {
@@ -359,7 +381,15 @@ impl Stack {
     pub(crate) fn insert(&mut self, at: usize, top: usize, v: Value) -> usize {
         self.dirty_to = self.dirty_to.max(top + 1);
         crate::interp::extend_nil(&mut self.regs, top + 1);
-        self.regs.copy_within(at..top, at + 1);
+        // Usually below the few arguments of a call (`coroutine.wrap`'s
+        // functions, `__call`): shift them without calling `memmove`.
+        if top - at <= 2 {
+            for i in (at..top).rev() {
+                self.regs[i + 1] = self.regs[i];
+            }
+        } else {
+            self.regs.copy_within(at..top, at + 1);
+        }
         self.regs[at] = v;
         top + 1
     }
@@ -456,6 +486,11 @@ pub struct Runtime {
     /// Set by a stack switch, so the dispatch loop doesn't save its pc into
     /// the other stack's frames; cleared when the loop reloads.
     pub(crate) switched: bool,
+    /// Whether any stack's hook may differ from [`hook::Hook::default`]:
+    /// set (for good) by `debug.sethook`, an interrupt, or a finalizer
+    /// turning hooks off. Until then a coroutine switch skips copying the
+    /// hooks, which are all equal.
+    pub(crate) hooks_touched: bool,
     /// A safe point found the heap over its limit ([`Vm::set_memory_limit`])
     /// even after a full collection: the dispatch loop returned so `run`
     /// can raise `not enough memory` there.
@@ -477,8 +512,10 @@ pub struct Runtime {
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
     /// The threads parked suspended most recently, with their park count
     /// then (ADR-3): one that leaves this list without being resumed has its
-    /// stack shrunk. Weak: an entry dies with its thread.
-    pub(crate) cooling: std::collections::VecDeque<(Gc<Thread>, u32)>,
+    /// stack shrunk. A ring: `cooling_at` is the oldest entry, which the
+    /// next park replaces. Weak: an entry dies with its thread.
+    pub(crate) cooling: [Option<(Gc<Thread>, u32)>; coro::HOT_STACKS],
+    pub(crate) cooling_at: usize,
     /// Collections that reached their sweep, to tell whether a parked
     /// stack's dead slots may now refer to freed objects.
     pub(crate) gc_cycles: u32,
@@ -569,7 +606,11 @@ impl Roots<LuaSpace> for Runtime {
 
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
         self.strings.clear_dead(live);
-        self.cooling.retain(|&(t, _)| live.is_live(t));
+        for e in &mut self.cooling {
+            if e.is_some_and(|(t, _)| !live.is_live(t)) {
+                *e = None;
+            }
+        }
         if self.callee.is_some_and(|(c, _)| !live.is_live(c)) {
             self.callee = None;
         }
@@ -646,13 +687,15 @@ impl Vm {
                 xfer: Vec::new(),
                 scratch: Vec::new(),
                 switched: false,
+                hooks_touched: false,
                 no_memory: false,
                 limit_grace: false,
                 errerr: false,
                 handled: false,
                 unwind_traceback: None,
                 native_protos: Default::default(),
-                cooling: Default::default(),
+                cooling: [None; coro::HOT_STACKS],
+                cooling_at: 0,
                 gc_cycles: 0,
                 interrupt: Default::default(),
             },

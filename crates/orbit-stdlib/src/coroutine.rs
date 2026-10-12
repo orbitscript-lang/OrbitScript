@@ -4,7 +4,7 @@
 //! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use orbit_vm::orbit_core::{Gc, Thread, Value};
-use orbit_vm::{CallOutcome, CoStatus, LuaError, NativeCtx, NativeFn, NativeReturn};
+use orbit_vm::{CallOutcome, CoStatus, LuaError, NativeCtx, NativeFn, NativeReturn, ResumeOk};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -47,6 +47,7 @@ fn resume(ctx: &mut NativeCtx<'_>) -> R {
         co,
         nargs: ctx.nargs() - 1,
         k: resume_done,
+        ok: ResumeOk::ReturnTrue,
     })
 }
 
@@ -105,13 +106,11 @@ fn wrapped(ctx: &mut NativeCtx<'_>) -> R {
     let Value::Thread(co) = ctx.upvalue(0) else {
         unreachable!("wrap's upvalue is its coroutine")
     };
-    // The window keeps `co` below the arguments, for `wrapped_done`.
-    let n = ctx.nargs();
-    ctx.insert(0, Value::Thread(co));
     Ok(NativeReturn::Resume {
         co,
-        nargs: n,
+        nargs: ctx.nargs(),
         k: wrapped_done,
+        ok: ResumeOk::Return,
     })
 }
 
@@ -123,10 +122,10 @@ fn wrapped_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             // then raise the error (or theirs). The window keeps the error:
             // a resume refused at once (say, nested too deeply) leaves the
             // coroutine without one.
-            let Value::Thread(co) = ctx.arg(0) else {
-                unreachable!("wrapped keeps its coroutine in the window")
+            let Value::Thread(co) = ctx.upvalue(0) else {
+                unreachable!("wrap's upvalue is its coroutine")
             };
-            ctx.truncate(1);
+            ctx.truncate(0);
             ctx.push(e);
             Ok(NativeReturn::Close {
                 co,
@@ -139,7 +138,7 @@ fn wrapped_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
 fn wrapped_closed(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     let e = match outcome {
         CallOutcome::Err(e) => e,
-        CallOutcome::Ok(_) => ctx.arg(1),
+        CallOutcome::Ok(_) => ctx.arg(0),
     };
     // A string error gets the position of the wrapper's caller (level 1).
     if let Value::Str(s) = e {

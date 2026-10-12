@@ -792,6 +792,7 @@ impl crate::NativeCtx<'_> {
     /// `count` the count interval (count events only when positive). A nil
     /// `f` or an empty mask with no count turns it off.
     pub fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
+        self.rt.hooks_touched = true;
         self.rt.stack.hook.set(f, mask, count);
     }
 

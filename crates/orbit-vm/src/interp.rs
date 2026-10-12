@@ -349,7 +349,7 @@ impl Vm {
     }
 
     /// Results have been placed for the frame now on top: resume it.
-    fn after_return(&mut self) -> Result<Flow, Exc> {
+    pub(crate) fn after_return(&mut self) -> Result<Flow, Exc> {
         let f = *self.rt.stack.frames.last().expect("frame");
         match f.kind {
             FrameKind::Boundary => {
@@ -369,13 +369,14 @@ impl Vm {
             }
             FrameKind::Native { id, k, call_at, .. } => {
                 let top = self.rt.top;
+                let upvals = self.rt.stack.closure_at(f.func as usize);
                 let mut ctx = NativeCtx {
                     heap: &mut self.heap,
                     rt: &mut self.rt,
                     base: f.base as usize,
                     nargs: f.nvarargs as usize,
                     id,
-                    upvals: None,
+                    upvals,
                 };
                 let r = k(&mut ctx, CallOutcome::Ok(top - call_at as usize))?;
                 self.native_returned(r, Some(f), f.func as usize, f.want, id)
@@ -454,6 +455,7 @@ impl Vm {
                     catch,
                     yieldable,
                     call_at: at as u32,
+                    ok: crate::ResumeOk::Continue,
                 };
                 match frame {
                     Some(_) => {
@@ -490,8 +492,8 @@ impl Vm {
                 }
                 self.call_value(at, nargs, MULTI)
             }
-            NativeReturn::Resume { co, nargs, k } => {
-                self.resume(co, nargs, k, frame, func, want, id)
+            NativeReturn::Resume { co, nargs, k, ok } => {
+                self.resume(co, nargs, k, ok, frame, func, want, id)
             }
             NativeReturn::Yield { nvals } => self.yield_(nvals, frame, func, want, id),
             NativeReturn::Exit => self.exit_co(),
@@ -758,13 +760,14 @@ impl Vm {
         }
         self.rt.stack.frames.truncate(idx + 1);
         self.rt.top = call_at as usize;
+        let upvals = self.rt.stack.closure_at(f.func as usize);
         let mut ctx = NativeCtx {
             heap: &mut self.heap,
             rt: &mut self.rt,
             base: f.base as usize,
             nargs: f.nvarargs as usize,
             id,
-            upvals: None,
+            upvals,
         };
         match k(&mut ctx, CallOutcome::Err(v)) {
             Err(e) => {
@@ -1038,6 +1041,7 @@ impl Vm {
                         // An interrupt was requested ([`crate::Interrupt`]): the
                         // hooked loop raises it before the jump's target.
                         self.rt.stack.frames[depth - 1].pc = pc as u32;
+                        self.rt.hooks_touched = true;
                         self.rt.stack.hook.mask |= crate::hook::INTERRUPT;
                         return Ok(Ran::Switch);
                     }
