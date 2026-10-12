@@ -1,14 +1,20 @@
 //! `pgo`: a profile-guided optimized build of the `orbit` binary.
 //!
-//! Three steps, all with stable rustc flags:
+//! The profile is trained once and committed under `pgo/`, one file per
+//! target triple, so a release build only needs rustc and the committed
+//! profile: no instrumented build, no training run, no `llvm-profdata`.
+//!
+//! `pgo train` records a new profile, all with stable rustc flags:
 //! 1. Build an instrumented `orbit` in the `pgo-gen` Cargo profile with
 //!    `-Cprofile-generate`. Only this throwaway binary carries the counters.
 //! 2. Run it over a training set (the benchmarks at their quick inputs and
 //!    the `tests/diff` and `tests/first-light` programs), then merge the raw
-//!    profiles with `llvm-profdata`.
-//! 3. Build `orbit` again in the `pgo` profile with `-Cprofile-use`. That is
-//!    an ordinary release build whose code layout and inlining follow the
-//!    profile; it has no instrumentation and no runtime cost.
+//!    profiles with `llvm-profdata` into `pgo/<target>.profdata`.
+//!
+//! `pgo build` (the default) builds `orbit` in the `pgo` profile with
+//! `-Cprofile-use` and the committed profile. That is an ordinary release
+//! build whose code layout and inlining follow the profile; it has no
+//! instrumentation and no runtime cost.
 //!
 //! Both profiles inherit `release`, so `target/release/orbit` and its cache
 //! are left alone. The flags go through `CARGO_ENCODED_RUSTFLAGS` because
@@ -26,17 +32,26 @@ use crate::process::{self, Exit};
 use crate::util::{self, Result, io_err};
 
 const USAGE: &str = "\
-usage: orbit-testkit pgo [options]
+usage: orbit-testkit pgo [build] [--profile FILE]
+       orbit-testkit pgo train [options]
 
-Builds target/pgo/orbit: the release build of orbit, optimized with a profile
-recorded by an instrumented build (target/pgo-gen/orbit) running the training
-set. Needs llvm-profdata from the same LLVM as rustc:
-`rustup component add llvm-tools`, or set LLVM_PROFDATA.
+build (the default): builds target/pgo/orbit, the release build of orbit
+optimized with the committed profile pgo/<target>.profdata (<target> is the
+host triple, e.g. x86_64-unknown-linux-gnu). Needs only rustc.
+  --profile FILE   use FILE instead of the committed profile
+
+train: records a new profile with an instrumented build
+(target/pgo-gen/orbit) running the training set, writes it to
+pgo/<target>.profdata for committing, then builds as above. Needs
+llvm-profdata from the same LLVM as rustc: `rustup component add
+llvm-tools`, or set LLVM_PROFDATA.
 
 Training set: bench/ at quick inputs, tests/diff, tests/diff/compat and
 tests/first-light.
 
-options:
+train options:
+  --out FILE       write the profile to FILE instead of pgo/<target>.profdata,
+                   e.g. for an experiment that shouldn't be committed
   --exclude BENCH  leave a benchmark out of training (repeatable), e.g. to
                    time a benchmark the profile has never seen
   --no-bench       train without the benchmarks
@@ -49,9 +64,16 @@ struct Job {
 }
 
 pub fn main(args: &[String]) -> Result<bool> {
+    let (training, args) = match args.first().map(String::as_str) {
+        Some("train") => (true, &args[1..]),
+        Some("build") => (false, &args[1..]),
+        _ => (false, args),
+    };
     let mut exclude: Vec<String> = Vec::new();
     let mut with_bench = true;
     let mut timeout = Duration::from_secs(120);
+    let mut profile_arg: Option<PathBuf> = None;
+    let mut out_arg: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || {
@@ -60,13 +82,15 @@ pub fn main(args: &[String]) -> Result<bool> {
                 .ok_or_else(|| format!("{a} needs a value\n\n{USAGE}"))
         };
         match a.as_str() {
-            "--exclude" => exclude.push(val()?),
-            "--no-bench" => with_bench = false,
-            "--timeout" => {
+            "--exclude" if training => exclude.push(val()?),
+            "--no-bench" if training => with_bench = false,
+            "--timeout" if training => {
                 let v = val()?;
                 timeout =
                     Duration::from_secs(v.parse().map_err(|_| format!("bad --timeout {v:?}"))?);
             }
+            "--out" if training => out_arg = Some(PathBuf::from(val()?)),
+            "--profile" if !training => profile_arg = Some(PathBuf::from(val()?)),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -79,18 +103,55 @@ pub fn main(args: &[String]) -> Result<bool> {
     let target =
         std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
     let target = util::absolute(&target)?;
-    let profdata_tool = find_profdata()?;
-    let data = target.join("pgo-data");
-    let raw = data.join("raw");
+    let committed = || -> Result<PathBuf> {
+        let host = host_triple().ok_or("can't read the host triple from `rustc -vV`")?;
+        Ok(root.join("pgo").join(format!("{host}.profdata")))
+    };
 
-    let jobs = training_set(&root, with_bench, &exclude)?;
+    let profile = if training {
+        let out = match out_arg {
+            Some(p) => util::absolute(&p)?,
+            None => committed()?,
+        };
+        train(&root, &target, with_bench, &exclude, timeout, &out)?;
+        out
+    } else {
+        let p = match profile_arg {
+            Some(p) => util::absolute(&p)?,
+            None => committed()?,
+        };
+        if !p.exists() {
+            return Err(format!(
+                "no profile at {}: record one with `cargo testkit pgo train`",
+                p.display()
+            ));
+        }
+        p
+    };
+    build(&target, &root, &profile)?;
+    Ok(true)
+}
+
+/// Records a profile with the instrumented build and writes it to `out`.
+fn train(
+    root: &Path,
+    target: &Path,
+    with_bench: bool,
+    exclude: &[String],
+    timeout: Duration,
+    out: &Path,
+) -> Result<()> {
+    let profdata_tool = find_profdata()?;
+    let raw = target.join("pgo-data").join("raw");
+
+    let jobs = training_set(root, with_bench, exclude)?;
     if jobs.is_empty() {
         return Err("the training set is empty".to_string());
     }
 
     println!("== building the instrumented orbit (profile pgo-gen)");
     cargo_build(
-        &root,
+        root,
         "pgo-gen",
         &[&format!("-Cprofile-generate={}", raw.display())],
     )?;
@@ -120,13 +181,14 @@ pub fn main(args: &[String]) -> Result<bool> {
         println!("  ({failed} programs exited with an error; their counts are kept)");
     }
 
-    println!("== merging profiles");
-    remove_old_profiles(&data)?;
-    let merged = data.join("merged.profdata");
+    println!("== merging profiles into {}", out.display());
+    if let Some(dir) = out.parent() {
+        fs::create_dir_all(dir).map_err(io_err(dir.display()))?;
+    }
     let status = Command::new(&profdata_tool)
         .arg("merge")
         .arg("-o")
-        .arg(&merged)
+        .arg(out)
         .arg(&raw)
         .status()
         .map_err(io_err(profdata_tool.display()))?;
@@ -137,18 +199,30 @@ pub fn main(args: &[String]) -> Result<bool> {
             profdata_tool.display()
         ));
     }
-    // Cargo doesn't track the profile's contents, only the flags, so name the
-    // file after its contents: a new profile means new flags and a rebuild.
-    let bytes = fs::read(&merged).map_err(io_err(merged.display()))?;
-    let profile = data.join(format!("orbit-{:016x}.profdata", content_hash(&bytes)));
-    fs::rename(&merged, &profile).map_err(io_err(profile.display()))?;
+    Ok(())
+}
 
-    println!("== building the optimized orbit (profile pgo)");
+/// Builds `target/pgo/orbit` optimized with `profile`.
+fn build(target: &Path, root: &Path, profile: &Path) -> Result<()> {
+    // Cargo doesn't track the profile's contents, only the flags, so use a
+    // copy named after its contents: a new profile means new flags and a
+    // rebuild.
+    let data = target.join("pgo-data");
+    fs::create_dir_all(&data).map_err(io_err(data.display()))?;
+    remove_old_profiles(&data)?;
+    let bytes = fs::read(profile).map_err(io_err(profile.display()))?;
+    let copy = data.join(format!("orbit-{:016x}.profdata", content_hash(&bytes)));
+    fs::write(&copy, &bytes).map_err(io_err(copy.display()))?;
+
+    println!(
+        "== building the optimized orbit (profile pgo) with {}",
+        profile.display()
+    );
     cargo_build(
-        &root,
+        root,
         "pgo",
         &[
-            &format!("-Cprofile-use={}", profile.display()),
+            &format!("-Cprofile-use={}", copy.display()),
             // With a profile, LLVM's loop vectorizer treats a loop whose
             // measured trip count is under 16 as tiny and vectorizes it with
             // masked lanes instead of a scalar remainder. Without masked
@@ -162,7 +236,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     )?;
     let out = target.join("pgo").join(exe("orbit"));
     println!("\n{}", out.display());
-    Ok(true)
+    Ok(())
 }
 
 /// The training programs, as argument lists for `orbit` and the directory to
@@ -248,24 +322,29 @@ fn encoded_rustflags(encoded: Option<&str>, plain: Option<&str>, extra: &[&str])
     flags.join("\x1f").into()
 }
 
+/// The output of `rustc ARG`, if it runs and succeeds.
+fn rustc(arg: &str) -> Option<String> {
+    let out = Command::new("rustc").arg(arg).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The host target triple, from `rustc -vV`.
+fn host_triple() -> Option<String> {
+    rustc("-vV").and_then(|v| {
+        v.lines()
+            .find_map(|l| l.strip_prefix("host: ").map(str::to_string))
+    })
+}
+
 /// `llvm-profdata`: `LLVM_PROFDATA`, else the copy rustup's `llvm-tools`
 /// component installs next to rustc, else the one on `PATH`.
 fn find_profdata() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("LLVM_PROFDATA") {
         return Ok(PathBuf::from(p));
     }
-    let rustc = |arg: &str| -> Option<String> {
-        let out = Command::new("rustc").arg(arg).output().ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-    };
-    let sysroot = rustc("--print=sysroot");
-    let host = rustc("-vV").and_then(|v| {
-        v.lines()
-            .find_map(|l| l.strip_prefix("host: ").map(str::to_string))
-    });
-    if let (Some(sysroot), Some(host)) = (sysroot, host) {
+    if let (Some(sysroot), Some(host)) = (rustc("--print=sysroot"), host_triple()) {
         let p = Path::new(sysroot.trim())
             .join("lib/rustlib")
             .join(host)
@@ -278,7 +357,7 @@ fn find_profdata() -> Result<PathBuf> {
     Ok(PathBuf::from(exe("llvm-profdata")))
 }
 
-/// Deletes the merged profiles of earlier runs, which are named by content
+/// Deletes the profile copies of earlier builds, which are named by content
 /// and would otherwise pile up.
 fn remove_old_profiles(data: &Path) -> Result<()> {
     for entry in fs::read_dir(data).map_err(io_err(data.display()))? {

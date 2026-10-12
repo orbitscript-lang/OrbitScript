@@ -27,7 +27,7 @@ commands:
   scoreboard    the whole Lua 5.5 compatibility picture in one report
   fuzz-syntax   compare compile errors on mutated programs with lua5.5
   fuzz          compare random library calls with the reference lua5.5
-  pgo           build a profile-guided optimized orbit
+  pgo           build orbit with the committed profile (pgo train: record one)
 
 Run a command with --help for its options.";
 
