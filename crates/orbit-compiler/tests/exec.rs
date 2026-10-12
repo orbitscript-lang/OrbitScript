@@ -625,6 +625,7 @@ impl Interp {
                 }
                 Op::Close { .. } => {}
                 Op::NativeEntry { .. } => unreachable!("compilers never emit NativeEntry"),
+                Op::Hook => unreachable!("compilers never emit Hook"),
             }
         }
     }

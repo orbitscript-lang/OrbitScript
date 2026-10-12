@@ -390,6 +390,7 @@ op_table! {
     82 KSub { dst, k, b };
     83 KMul { dst, k, b };
     84 KDiv { dst, k, b };
+    85 Hook;
 }
 
 /// One instruction's encoding (for tests and fuzzing).

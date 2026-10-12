@@ -54,7 +54,7 @@ impl Function<'_> {
         }
         match self.p.code[pc] {
             // Layer 1 rejects it.
-            Op::NativeEntry { .. } => return Ok((None, None)),
+            Op::NativeEntry { .. } | Op::Hook => return Ok((None, None)),
             Op::Tbc { reg } => {
                 // `Close` closes the newest first, down to its register.
                 if s.tbc.any_from(reg) {

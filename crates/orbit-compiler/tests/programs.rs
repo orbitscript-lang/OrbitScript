@@ -132,7 +132,7 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 Op::Tbc { reg: r } => reg(r),
                 Op::Close { from } => reg(from),
                 // Only the VM's native-closure stubs hold it.
-                Op::NativeEntry { .. } => false,
+                Op::NativeEntry { .. } | Op::Hook => false,
             };
             if !ok {
                 return err(pc, "operand out of range");

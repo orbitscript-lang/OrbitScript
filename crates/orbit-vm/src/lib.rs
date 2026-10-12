@@ -415,6 +415,9 @@ pub struct Runtime {
     /// machine register. A cache, not part of any thread's stack, so it
     /// stays across coroutine switches.
     pub(crate) prev_code: Option<std::rc::Rc<orbit_core::ProtoCode>>,
+    /// The code a hooked stack runs: `Op::Hook` traps, at least as many as
+    /// the longest prototype run hooked so far ([`crate::hook`]).
+    pub(crate) hook_traps: std::rc::Rc<[orbit_bytecode::Op]>,
     /// The last Lua function called from a frame other than itself, with
     /// what entering it needs, so calling it again skips looking it up.
     /// Weak, as nothing a script can see may keep a function alive: it is
@@ -622,6 +625,7 @@ impl Vm {
                 native_ids: Default::default(),
                 stack: Stack::default(),
                 prev_code: None,
+                hook_traps: std::rc::Rc::from([]),
                 callee: None,
                 dead_cell,
                 pinned: Vec::new(),

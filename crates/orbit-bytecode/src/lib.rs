@@ -326,6 +326,10 @@ pub enum Op {
     /// by a compiler): run native `id` with the frame's arguments, the
     /// closure's captures as its upvalues, in place of this frame.
     NativeEntry { id: u32 },
+    /// A hook trap (never emitted by a compiler, never in a prototype): the
+    /// interpreter runs a hooked stack's code through a slice of these,
+    /// calls the hook, then runs the real instruction at the same pc.
+    Hook,
 }
 
 const _: () = assert!(core::mem::size_of::<Op>() == 8);

@@ -261,6 +261,7 @@ impl Function<'_> {
         match p.code[pc] {
             // Only native closures' stubs, which the VM builds itself.
             Op::NativeEntry { .. } => self.fail(Some(pc), "native entry in a Lua function"),
+            Op::Hook => self.fail(Some(pc), "hook trap in a Lua function"),
             Op::Tbc { reg: r } => reg(r),
             // Compares `from` with the marked registers, never reads it.
             Op::Close { .. } => Ok(()),
