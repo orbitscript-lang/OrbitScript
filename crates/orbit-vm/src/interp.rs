@@ -49,6 +49,8 @@ pub(crate) enum Ran {
     Done,
     /// A hook was armed or disarmed: continue in the other loop.
     Switch,
+    /// A hook point is due before the top frame's instruction at its pc.
+    Hook,
 }
 
 /// What the dispatch loop does next.
@@ -857,6 +859,11 @@ impl Vm {
                     }
                 }
                 Ran::Switch => {}
+                Ran::Hook => {
+                    if self.run_hook_point()? {
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -882,6 +889,32 @@ impl Vm {
         self.rt.hook_traps.clone()
     }
 
+    /// The hook point before the top frame's instruction at its pc, then
+    /// run that instruction without stopping again. True when an error the
+    /// hook raised ended the run.
+    #[cold]
+    #[inline(never)]
+    fn run_hook_point(&mut self) -> Result<bool, LuaError> {
+        let f = self.rt.stack.frames.last_mut().expect("frame");
+        let FrameKind::Lua { closure, .. } = f.kind else {
+            unreachable!("hook points are in Lua frames")
+        };
+        let pc = f.pc as usize;
+        f.pc += 1;
+        let op = self.heap.get(closure).code.code[pc];
+        match self.hook_point(pc, op) {
+            Ok(()) => {
+                self.rt.stack.frames.last_mut().expect("frame").pc = pc as u32;
+                self.rt.stack.hook.stepping = self.rt.stack.hook.armed();
+            }
+            Err(e) => match self.raise(Exc::Lua(e))? {
+                Flow::Done => return Ok(true),
+                Flow::Reload | Flow::Switched => self.rt.switched = false,
+            },
+        }
+        Ok(false)
+    }
+
     /// The dispatch loop. `hooked` adds a hook point before each
     /// instruction ([`crate::hook`]); either loop returns
     /// [`Ran::Switch`] when the hook's state no longer matches it.
@@ -889,8 +922,6 @@ impl Vm {
         // A hooked stack runs the same loop over a slice of `Op::Hook` traps
         // instead of its code: each trap calls the hook and then runs the
         // real instruction, so the plain path pays nothing per instruction.
-        let hooked = self.rt.stack.hook.armed();
-        let mut traps = self.rt.hook_traps.clone();
         // The running function's code, constants and caches. Returning to or
         // calling the same function (recursion) keeps the `Rc` instead of
         // cloning it again; holding it keeps the allocation alive, so pointer
@@ -902,9 +933,6 @@ impl Vm {
         'reload: loop {
             // The running frame's state. Lua-to-Lua calls and returns switch
             // it in place; everything else comes back through `'reload`.
-            if self.rt.stack.hook.armed() != hooked {
-                return Ok(Ran::Switch);
-            }
             let mut depth = self.rt.stack.frames.len();
             let frame = &self.rt.stack.frames[depth - 1];
             let FrameKind::Lua {
@@ -921,19 +949,7 @@ impl Vm {
             if code_id != Rc::as_ptr(&cur) as usize {
                 cur = self.heap.get(closure).code.clone();
             }
-            macro_rules! code_of {
-                () => {
-                    if false {
-                        if traps.len() < cur.code.len() {
-                            traps = self.grow_hook_traps(cur.code.len());
-                        }
-                        &traps[..cur.code.len()]
-                    } else {
-                        &cur.code[..]
-                    }
-                };
-            }
-            let mut code = code_of!();
+            let mut code = &cur.code[..];
             macro_rules! switch_code {
                 ($closure:expr, $code_id:expr) => {
                     // A recursive call or its return keeps the same code.
@@ -949,7 +965,7 @@ impl Vm {
                                 self.rt.prev_code = Some(std::mem::replace(&mut cur, new));
                             }
                         }
-                        code = code_of!();
+                        code = &cur.code[..];
                     }
                 };
             }
@@ -1083,15 +1099,8 @@ impl Vm {
                 ($off:expr) => {{
                     pc = (pc as isize + $off as isize) as usize;
                     #[cfg(feature = "hooks")]
-                    if !hooked
-                        && $off < 0
-                        && self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        // An interrupt was requested ([`crate::Interrupt`]): the
-                        // hooked loop raises it before the jump's target.
-                        self.rt.stack.frames[depth - 1].pc = pc as u32;
+                    if $off < 0 && self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed) {
                         self.rt.stack.hook.mask |= crate::hook::INTERRUPT;
-                        return Ok(Ran::Switch);
                     }
                 }};
             }
@@ -1232,7 +1241,7 @@ impl Vm {
                                 self.callee_shape(c)
                             };
                             let e = tri!(enter_lua_frame(&mut self.rt, shape, c, fa, n, want));
-                            if hooked {
+                            if self.rt.stack.hook.armed() {
                                 self.rt.stack.hook.call_pending = Some(false);
                             }
                             depth += 1;
@@ -1245,7 +1254,7 @@ impl Vm {
                         // A native's fast path, when it has one and takes
                         // these arguments: no window, no frame.
                         Value::Native(id)
-                            if !hooked
+                            if !self.rt.stack.hook.armed()
                                 && (want <= 1 || want == MULTI)
                                 && let Some(fast) = self.rt.natives[id.0 as usize].fast
                                 && let Some(v) = w.get(f + 1..f + 1 + n).and_then(fast) =>
@@ -1257,7 +1266,7 @@ impl Vm {
                         }
                         // Any other native, called in place: no frame, and a
                         // plain return goes straight back to this loop.
-                        Value::Native(id) if !hooked => {
+                        Value::Native(id) if !self.rt.stack.hook.armed() => {
                             self.rt.top = fa + 1 + n;
                             let nf = self.rt.natives[id.0 as usize].f;
                             let mut ctx = NativeCtx {
@@ -1325,9 +1334,6 @@ impl Vm {
                         _ => match self.call_value(fa, n, want) {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
                                 // The native may have set or cleared a hook.
-                                if self.rt.stack.hook.armed() != hooked {
-                                    return Ok(Ran::Switch);
-                                }
                                 w = window!();
                                 safepoint!();
                             }
@@ -1380,24 +1386,13 @@ impl Vm {
             }
 
             loop {
-                let mut op = code[pc];
+                let op = code[pc];
                 pc += 1;
-                if self.rt.stack.hook.mask != 0 {
-                    std::hint::cold_path();
-                    self.rt.stack.frames[depth - 1].pc = pc as u32;
-                    match self.hook_trap(pc - 1) {
-                        Ok(Some(real)) => {
-                            op = real;
-                            w = window!();
-                        }
-                        Ok(None) => {
-                            // The hook was turned off: run this instruction
-                            // over the plain code.
-                            self.rt.stack.frames[depth - 1].pc = pc as u32 - 1;
-                            return Ok(Ran::Switch);
-                        }
-                        Err(e) => throw!(Exc::Lua(e)),
-                    }
+                if self.rt.stack.hook.armed() && !std::mem::take(&mut self.rt.stack.hook.stepping) {
+                    // Leave the loop for the hook point, so nothing here is
+                    // live across a call; `run` comes back to this pc.
+                    self.rt.stack.frames[depth - 1].pc = pc as u32 - 1;
+                    return Ok(Ran::Hook);
                 }
                 match op {
                     // Numbers are copied by parts: the source was usually
@@ -1956,7 +1951,7 @@ impl Vm {
                                 throw!(x);
                             }
                             self.rt.stack.frames.last_mut().expect("frame").tail = true;
-                            if hooked {
+                            if self.rt.stack.hook.armed() {
                                 self.rt.stack.hook.call_pending = Some(true);
                             }
                             continue 'reload;

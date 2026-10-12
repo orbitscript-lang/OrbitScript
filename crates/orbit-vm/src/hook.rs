@@ -57,6 +57,9 @@ pub(crate) struct Hook {
     /// While a call or return hook runs: the frame index it is for and the
     /// values it transfers (`ftransfer`, `ntransfer`).
     pub transfer: Option<(usize, u32, u32)>,
+    /// The hook point for the instruction at the frame's pc has run: the
+    /// dispatch loop runs that instruction without stopping again.
+    pub stepping: bool,
 }
 
 impl Default for Hook {
@@ -71,6 +74,7 @@ impl Default for Hook {
             old_depth: 0,
             call_pending: None,
             transfer: None,
+            stepping: false,
         }
     }
 }
