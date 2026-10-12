@@ -198,27 +198,6 @@ fn const_str(consts: &[Value], k: u16) -> Gc<orbit_core::LuaStr> {
     }
 }
 
-impl Vm {
-    /// The shape of Lua closure `c`, from the one-entry callee cache.
-    #[inline(always)]
-    fn callee_shape(&mut self, c: Gc<Closure>) -> Shape {
-        match self.rt.callee {
-            // The cache roots its closure, so an equal handle is the same
-            // closure.
-            Some((cached, shape)) if cached == c => shape,
-            _ => self.callee_miss(c),
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn callee_miss(&mut self, c: Gc<Closure>) -> Shape {
-        let shape = Shape::of(&self.heap.get(c).code);
-        self.rt.callee = Some((c, shape));
-        shape
-    }
-}
-
 /// What entering a frame needs from its code, copied out so a cache can
 /// hold it without borrowing the code.
 #[derive(Debug, Clone, Copy)]
@@ -1136,6 +1115,23 @@ impl Vm {
                     }
                 }};
             }
+            // `R[a] == R[b]`, reading the operands by parts: a register
+            // `LoadNil` just wrote holds only its tag, and a whole 16-byte
+            // load of it would stall on store forwarding.
+            macro_rules! eq_parts {
+                ($a:expr, $b:expr) => {
+                    match (&reg!($a), &reg!($b)) {
+                        (&Value::Int(i), &Value::Int(j)) => i == j,
+                        (&Value::Float(f), &Value::Float(g)) => f == g,
+                        (&Value::Nil, &Value::Nil) => true,
+                        (&Value::Nil, _) | (_, &Value::Nil) => false,
+                        _ => {
+                            let (x, y) = (reg!($a), reg!($b));
+                            tri!(values_equal(&self.heap, &self.rt.metas, x, y))
+                        }
+                    }
+                };
+            }
             macro_rules! compare_int_jump {
                 // `$slow` names an `ops` comparison and its operand order,
                 // with `x` the register and `k` the immediate as values.
@@ -1198,7 +1194,7 @@ impl Vm {
                             let shape = if c == closure {
                                 Shape::of(&cur)
                             } else {
-                                self.callee_shape(c)
+                                Shape::of(&self.heap.get(c).code)
                             };
                             let e = tri!(enter_lua_frame(&mut self.rt, shape, c, fa, n, want));
                             if HOOKED {
@@ -1269,6 +1265,9 @@ impl Vm {
                                     s.dirty_to = end;
                                     w = window!();
                                     safepoint!();
+                                }
+                                Ok(NativeReturn::Yield { nvals }) => {
+                                    flow!(self.yield_(nvals, None, fa, want, id))
                                 }
                                 Ok(r) => {
                                     if let NativeReturn::Return(k) = r
@@ -1471,7 +1470,7 @@ impl Vm {
                     } => {
                         let t = self.op_new_table(array_hint as usize, hash_hint as usize);
                         w = window!();
-                        reg!(dst) = t;
+                        reg!(dst) = Value::Table(t);
                         safepoint!();
                     }
                     Op::GetField { dst, obj, key, ic } => {
@@ -1607,14 +1606,19 @@ impl Vm {
                         safepoint!();
                     }
                     Op::SelfCall { dst, obj, key, ic } => {
-                        let o = reg!(obj);
                         let Value::Str(k) = cur.consts[key as usize] else {
                             unreachable!("method names are strings")
                         };
-                        reg!(dst + 1) = o;
-                        let Value::Table(t) = o else {
-                            get_slow!(dst, o, Value::Str(k))
+                        // Copied by parts: a whole-value copy also moves the
+                        // padding bytes, through overlapping stack slots.
+                        let (o, t) = match reg!(obj) {
+                            Value::Table(t) => (Value::Table(t), t),
+                            o => {
+                                reg!(dst + 1) = o;
+                                get_slow!(dst, o, Value::Str(k))
+                            }
                         };
+                        reg!(dst + 1) = Value::Table(t);
                         let tab = self.heap.get(t);
                         let cm = &cur.caches[ic as usize];
                         let mut m = match tab.find_str_key(&self.heap, &cm.key_for(&self.heap, k)) {
@@ -1632,25 +1636,80 @@ impl Vm {
                                 .get(mt)
                                 .cached_str(ci.slot.get() as usize, ci.key)
                             {
-                                Some(Value::Table(c)) => self
-                                    .heap
-                                    .get(c)
-                                    .cached_str(cm.slot.get() as usize, cm.key)
-                                    .filter(|v| !v.is_nil()),
+                                Some(Value::Table(c)) => {
+                                    let ctab = self.heap.get(c);
+                                    match ctab
+                                        .cached_str(cm.slot.get() as usize, cm.key)
+                                        .filter(|v| !v.is_nil())
+                                    {
+                                        Some(v) => Some(v),
+                                        // One level up: the class lacks the
+                                        // method and its metatable's
+                                        // `__index` table holds it.
+                                        None => match (
+                                            cur.caches.get(ic as usize + 2),
+                                            cur.caches.get(ic as usize + 3),
+                                            ctab.meta,
+                                        ) {
+                                            (Some(ci2), Some(cm2), Some(mt2))
+                                                if ctab
+                                                    .find_str_key(
+                                                        &self.heap,
+                                                        &cm.key_for(&self.heap, k),
+                                                    )
+                                                    .is_none_or(|s| {
+                                                        ctab.slot_value(s).is_nil()
+                                                    }) =>
+                                            {
+                                                match self
+                                                    .heap
+                                                    .get(mt2)
+                                                    .cached_str(ci2.slot.get() as usize, ci2.key)
+                                                {
+                                                    Some(Value::Table(p)) => self
+                                                        .heap
+                                                        .get(p)
+                                                        .cached_str(
+                                                            cm2.slot.get() as usize,
+                                                            cm2.key,
+                                                        )
+                                                        .filter(|v| !v.is_nil()),
+                                                    _ => None,
+                                                }
+                                            }
+                                            _ => None,
+                                        },
+                                    }
+                                }
                                 _ => None,
                             };
                             m = match hit {
                                 Some(v) => v,
                                 None => {
-                                    match method_miss(&self.heap, &self.rt.metas, o, mt, k, cm, ci)
-                                    {
+                                    let up = cur
+                                        .caches
+                                        .get(ic as usize + 2)
+                                        .zip(cur.caches.get(ic as usize + 3));
+                                    match method_miss(
+                                        &self.heap,
+                                        &self.rt.metas,
+                                        o,
+                                        mt,
+                                        k,
+                                        cm,
+                                        ci,
+                                        up,
+                                    ) {
                                         Ok(v) => v,
                                         Err(_) => get_slow!(dst, o, Value::Str(k)),
                                     }
                                 }
                             };
                         }
-                        reg!(dst) = m;
+                        match m {
+                            Value::Closure(c) => reg!(dst) = Value::Closure(c),
+                            m => reg!(dst) = m,
+                        }
                     }
 
                     Op::Add { dst, a, b } => arith!(dst, a, b, Arith::Add, ArithOp::Add),
@@ -1850,14 +1909,12 @@ impl Vm {
                         compare_jump!(a, b, off, false, ops::less_equal, |x, y| x <= y)
                     }
                     Op::JumpEq { a, b, off } => {
-                        let (x, y) = (reg!(a), reg!(b));
-                        if tri!(values_equal(&self.heap, &self.rt.metas, x, y)) {
+                        if eq_parts!(a, b) {
                             jump!(off);
                         }
                     }
                     Op::JumpNe { a, b, off } => {
-                        let (x, y) = (reg!(a), reg!(b));
-                        if !tri!(values_equal(&self.heap, &self.rt.metas, x, y)) {
+                        if !eq_parts!(a, b) {
                             jump!(off);
                         }
                     }

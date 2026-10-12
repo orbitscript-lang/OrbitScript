@@ -311,8 +311,8 @@ impl Vm {
 
     /// `NewTable`.
     #[inline(never)]
-    pub(crate) fn op_new_table(&mut self, array_hint: usize, hash_hint: usize) -> Value {
-        Value::Table(self.heap.alloc(Table::with_capacity(array_hint, hash_hint)))
+    pub(crate) fn op_new_table(&mut self, array_hint: usize, hash_hint: usize) -> Gc<Table> {
+        self.heap.alloc(Table::with_capacity(array_hint, hash_hint))
     }
 
     /// `CellNew`: a fresh cell holding `v` in cell slot `slot`.
@@ -688,6 +688,7 @@ pub(crate) fn get_str_miss(
 /// holds the method, else follows the whole `__index` chain. An error
 /// (including an `__index` function to call) is left to the slow path.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn method_miss(
     heap: &LuaHeap,
     metas: &Metas,
@@ -696,6 +697,7 @@ pub(crate) fn method_miss(
     k: Gc<LuaStr>,
     method: &FieldCache,
     index: &FieldCache,
+    up: Option<(&FieldCache, &FieldCache)>,
 ) -> Result<Value, Exc> {
     let index_key = index.key_for(heap, metas.events.name(Event::Index));
     let method_key = method.key_for(heap, k);
@@ -709,6 +711,11 @@ pub(crate) fn method_miss(
         };
         if depth == 0 {
             index.fill(slot);
+        } else if depth == 1
+            && let Some((index2, _)) = up
+            && index2.key == index.key
+        {
+            index2.fill(slot);
         }
         let h = mtab.slot_value(slot);
         let Value::Table(c) = h else {
@@ -722,6 +729,11 @@ pub(crate) fn method_miss(
         if let Some(slot) = ctab.find_str_key(heap, &method_key) {
             if depth == 0 {
                 method.fill(slot);
+            } else if depth == 1
+                && let Some((_, method2)) = up
+                && method2.key == method.key
+            {
+                method2.fill(slot);
             }
             let v = ctab.slot_value(slot);
             if !v.is_nil() {
@@ -749,10 +761,27 @@ pub(crate) fn set_str_miss(
     cache: &FieldCache,
 ) -> Result<(), Exc> {
     {
+        let key = cache.key_for(heap, k);
         if heap.get(t).meta.is_some() {
+            // A key that is present with a value takes a raw store, as
+            // `__newindex` only applies to absent keys: fill the cache so
+            // the next store hits inline.
+            let tab = heap.get(t);
+            if let Some(slot) = tab.find_str_key(heap, &key)
+                && !tab.slot_value(slot).is_nil()
+            {
+                cache.fill(slot);
+                heap.barrier_back(t);
+                heap.get_mut(t).set_slot(slot, v);
+                return Ok(());
+            }
             return meta::new_index(heap, metas, Value::Table(t), Value::Str(k), v);
         }
-        let key = cache.key_for(heap, k);
+        heap.barrier_back(t);
+        if let Some(slot) = heap.get_mut(t).insert_str_home(&key, v) {
+            cache.fill(slot);
+            return Ok(());
+        }
         match table::set_key(heap, t, &key, v) {
             Ok(Some(slot)) => cache.fill(slot),
             Ok(None) => {}

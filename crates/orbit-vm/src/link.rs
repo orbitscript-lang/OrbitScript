@@ -97,6 +97,11 @@ pub(crate) fn link(
                 // object's metatable.
                 if let Op::SelfCall { .. } = op {
                     claim(ic + 1, index_key);
+                    // And one level up the `__index` chain.
+                    if (ic as u32 + 3) < u.ncaches as u32 {
+                        claim(ic + 2, index_key);
+                        claim(ic + 3, key);
+                    }
                 }
             }
             // A cache no instruction uses never fills, so it never hits and
