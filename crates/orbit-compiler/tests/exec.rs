@@ -274,6 +274,8 @@ impl Interp {
                 Op::CellSet { cell, src } => {
                     *cells[cell as usize].borrow_mut() = r[src as usize].clone()
                 }
+                Op::CellClear { from, count } => (from..from + count)
+                    .for_each(|i| cells[i as usize] = Rc::new(RefCell::new(V::Nil))),
                 Op::CapGet { dst, cap } => r[dst as usize] = c.caps[cap as usize].borrow().clone(),
                 Op::CapSelf { dst } => r[dst as usize] = V::Func(c.clone()),
                 Op::CapSet { cap, src } => {

@@ -285,6 +285,13 @@ impl Function<'_> {
                 cell(c)?;
                 reg(src)
             }
+            Op::CellClear { from, count } => {
+                if from as usize + count as usize <= p.ncells as usize {
+                    Ok(())
+                } else {
+                    self.fail(at, "cell out of range")
+                }
+            }
             Op::CellGet { dst, cell: c } => {
                 cell(c)?;
                 reg(dst)

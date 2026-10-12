@@ -197,6 +197,7 @@ fn rewrite_outer(chunk: &mut Chunk) -> Result<(), AnalysisError> {
         owner_local.captured = true;
         if matches!(site, Site::Place { .. }) {
             owner_local.reassigned = true;
+            owner_local.assigned_in_closure = true;
         }
         let f = &mut chunk.functions[g];
         match site {

@@ -81,6 +81,10 @@ pub(crate) struct FuncState<'a> {
     nregs: usize,
     free_cell: usize,
     ncells: usize,
+    /// The most cell slots in use at once since the innermost open scope started.
+    cell_hw: usize,
+    /// A `CellClear` whose line is still to be set to the next instruction's.
+    clear_pending: Option<usize>,
     labels: Vec<LabelState>,
     /// The compiler label for each HIR `goto` label, made on first use.
     goto_labels: Vec<Option<Label>>,
@@ -120,6 +124,7 @@ pub(crate) struct ScopeMark {
     free: usize,
     active: usize,
     free_cell: usize,
+    cell_hw: usize,
     tbc: usize,
 }
 
@@ -154,6 +159,8 @@ impl<'a> FuncState<'a> {
             nregs: 0,
             free_cell: 0,
             ncells: 0,
+            cell_hw: 0,
+            clear_pending: None,
             labels: Vec::new(),
             goto_labels: vec![None; f.labels.len()],
             loops: Vec::new(),
@@ -179,6 +186,11 @@ impl<'a> FuncState<'a> {
             let r = self.alloc()?;
             self.active = self.free;
             self.declare(p, r)?;
+            let local = f.local(p);
+            if local.captured && local.assigned_in_closure {
+                // An inner function's assignments change only the cell (see `let_`).
+                self.emit(Op::LoadNil { dst: r, count: 1 });
+            }
         }
         if let Some(t) = f.vararg_table
             && !f.vararg_table_elided
@@ -369,8 +381,9 @@ impl<'a> FuncState<'a> {
 
     pub fn emit(&mut self, op: Op) -> usize {
         let pc = self.code.len();
+        let start = self.clear_pending.take().unwrap_or(pc);
         if self.lines.last().is_none_or(|&(_, line)| line != self.line) {
-            self.lines.push((pc as u32, self.line));
+            self.lines.push((start as u32, self.line));
         }
         self.code.push(op);
         pc
@@ -599,14 +612,17 @@ impl<'a> FuncState<'a> {
             .map(|n| Origin::Local(self.name_bytes(n)))
     }
 
-    pub fn open_scope(&self) -> ScopeMark {
-        ScopeMark {
+    pub fn open_scope(&mut self) -> ScopeMark {
+        let mark = ScopeMark {
             scope: self.scope.len(),
             free: self.free,
             active: self.active,
             free_cell: self.free_cell,
+            cell_hw: self.cell_hw,
             tbc: self.tbc.len(),
-        }
+        };
+        self.cell_hw = self.free_cell;
+        mark
     }
 
     /// Ends a scope opened by [`open_scope`](Self::open_scope), closing its to-be-closed
@@ -618,6 +634,26 @@ impl<'a> FuncState<'a> {
         self.free = mark.free;
         self.active = mark.active;
         self.free_cell = mark.free_cell;
+        let used = self.cell_hw;
+        self.cell_hw = mark.cell_hw.max(used);
+        // The scope's cell slots would keep their cells, and the values in them, alive
+        // until the frame ends or a later local reuses the slot. Drop them, but only
+        // outside loops, where this runs once per run of the scope: a loop body's slots
+        // are reused by the next iteration, and the outermost loop's exit drops them
+        // (every loop statement is a scope of its own).
+        if self.loops.is_empty() && used > mark.free_cell {
+            // (Past 255 slots the last one keeps its cell.)
+            let count = (used - mark.free_cell).min(u8::MAX as usize);
+            self.emit_cell_clear(mark.free_cell as u8, count as u8);
+        }
+    }
+
+    /// Emits a `CellClear`. It takes the line of the instruction after it, so it never
+    /// starts a line of its own (no line event, no active line, as if it weren't there).
+    fn emit_cell_clear(&mut self, from: u8, count: u8) {
+        let pc = self.code.len();
+        self.code.push(Op::CellClear { from, count });
+        self.clear_pending.get_or_insert(pc);
     }
 
     fn close_scope_locals(&mut self, from: usize) {
@@ -646,6 +682,7 @@ impl<'a> FuncState<'a> {
             if self.free_cell > u8::MAX as usize + 1 {
                 return Err(self.error("too many captured local variables"));
             }
+            self.cell_hw = self.cell_hw.max(self.free_cell);
             self.ncells = self.ncells.max(self.free_cell);
             let cell = cell as u8;
             self.cell_of[l.index()] = Some(cell);

@@ -10,7 +10,8 @@ use crate::func::{FuncState, Result, Slot};
 /// An assignment target with its object and key already evaluated.
 enum Target {
     Reg(u8),
-    Cell(u8),
+    /// A captured local's cell, and its home register, which follows the cell's value.
+    Cell(u8, Option<u8>),
     Capture(u8),
     Global(orbit_hir::StrId),
     Field {
@@ -104,6 +105,8 @@ impl FuncState<'_> {
                 Ok(())
             }
             &StmtKind::While { cond, body } => {
+                // The loop is a scope of its own, for its exit to drop the body's cells.
+                let outer = self.open_scope();
                 let top = self.here();
                 let exit = self.label();
                 self.cond(cond, false, exit)?;
@@ -112,9 +115,11 @@ impl FuncState<'_> {
                 self.loops.pop();
                 self.jump(Op::Jump { off: 0 }, top);
                 self.place(exit);
+                self.close_scope(outer);
                 Ok(())
             }
             &StmtKind::Repeat { body, until } => {
+                let outer = self.open_scope();
                 let top = self.here();
                 let exit = self.label();
                 self.loops.push((exit, self.tbc.len()));
@@ -133,6 +138,7 @@ impl FuncState<'_> {
                 self.close_scope(mark);
                 self.loops.pop();
                 self.place(exit);
+                self.close_scope(outer);
                 Ok(())
             }
             &StmtKind::NumericFor {
@@ -187,7 +193,57 @@ impl FuncState<'_> {
                 self.mark_tbc(l, (first + i) as u8);
             }
         }
+        // An inner function's assignments to a captured local change only its cell, so the
+        // home register would keep the initial value alive until the scope ends: clear it,
+        // unless that value can't be garbage.
+        let items = values.items.as_slice();
+        let mut run: Option<(u8, u8)> = None;
+        for (i, &l) in locals.iter().enumerate() {
+            let local = self.f.local(l);
+            let maybe_garbage = match items.get(i) {
+                Some(&e) => !self.never_garbage(e),
+                // One of the extra values of a call or `...` at the end.
+                None => items
+                    .last()
+                    .is_some_and(|&e| self.f.expr(e).kind.is_multi()),
+            };
+            let clear = local.captured
+                && local.assigned_in_closure
+                && local.kind != LocalKind::Close
+                && maybe_garbage;
+            let r = (first + i) as u8;
+            run = match run {
+                Some((dst, count)) if clear && dst + count == r => Some((dst, count + 1)),
+                Some((dst, count)) => {
+                    self.emit(Op::LoadNil { dst, count });
+                    clear.then_some((r, 1))
+                }
+                None => clear.then_some((r, 1)),
+            };
+        }
+        if let Some((dst, count)) = run {
+            self.emit(Op::LoadNil { dst, count });
+        }
         Ok(())
+    }
+
+    /// The home register that follows captured local `l`'s value, if any. A local an inner
+    /// function assigns has none: those assignments change only the cell, so the register is
+    /// cleared at the declaration and left alone after it.
+    fn cell_home(&self, l: LocalId) -> Option<u8> {
+        if self.f.local(l).assigned_in_closure {
+            None
+        } else {
+            self.home[l.index()]
+        }
+    }
+
+    /// Whether `e` is a single value that is never a collectable object.
+    fn never_garbage(&self, e: ExprId) -> bool {
+        matches!(
+            self.f.expr(e).kind,
+            ExprKind::Nil | ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_)
+        ) || self.const_of(e).is_some()
     }
 
     /// `at` is the offset of the statement's last token: the stores belong to its line.
@@ -205,7 +261,7 @@ impl FuncState<'_> {
             // `debug.getlocal` on stripped code reads the current value.
             if let Place::Local(l) = *target
                 && let Slot::Cell(cell) = self.slots[l.index()]
-                && let Some(r) = self.home[l.index()]
+                && let Some(r) = self.cell_home(l)
             {
                 self.expr_to(*value, r)?;
                 self.at_offset(at);
@@ -264,6 +320,19 @@ impl FuncState<'_> {
             {
                 self.expr_to(value, *r)?;
                 srcs.push(None);
+                continue;
+            }
+            // A captured local assigned once: its value goes straight into its home register
+            // (values read the local through its cell, which changes only at the store).
+            if let (Target::Cell(_, Some(h)), Place::Local(l)) = (t, &targets[i])
+                && targets
+                    .iter()
+                    .filter(|&t| matches!(t, Place::Local(x) if x == l))
+                    .count()
+                    == 1
+            {
+                self.expr_to(value, *h)?;
+                srcs.push(Some(*h));
                 continue;
             }
             if let ExprKind::Local(src) = self.f.expr(value).kind
@@ -347,7 +416,7 @@ impl FuncState<'_> {
         Ok(match *place {
             Place::Local(l) => match self.slots[l.index()] {
                 Slot::Reg(r) => Target::Reg(r),
-                Slot::Cell(c) => Target::Cell(c),
+                Slot::Cell(c) => Target::Cell(c, self.cell_home(l)),
                 _ => {
                     return Err(
                         self.error("internal error: assignment to a constant or dead local")
@@ -423,7 +492,13 @@ impl FuncState<'_> {
                     self.emit(Op::Move { dst, src });
                 }
             }
-            Target::Cell(cell) => {
+            Target::Cell(cell, home) => {
+                // Keep the home register from holding the old value alive.
+                if let Some(h) = home
+                    && h != src
+                {
+                    self.emit(Op::Move { dst: h, src });
+                }
                 self.emit(Op::CellSet { cell, src });
             }
             Target::Capture(cap) => {
