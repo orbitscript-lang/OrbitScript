@@ -41,7 +41,15 @@ A mismatch prints the call, both outputs and the `--seed` that reproduces the ba
 
 ## Profile-guided builds
 
-`cargo testkit pgo` builds `target/pgo/orbit`, the release binary we ship: an ordinary release build optimized with a profile of how `orbit` actually runs, with no instrumentation. The profile is trained once and committed as `pgo/<target>.profdata`, one per target triple (for example `pgo/x86_64-unknown-linux-gnu.profdata`), so this build needs only rustc. It passes `-Cprofile-use` with the committed profile in the `pgo` Cargo profile. `--profile FILE` uses another profile.
+A plain `cargo build --release` is the profile-guided build. The profile is trained once and committed as `pgo/<target>.profdata`, one per target triple (for example `pgo/x86_64-unknown-linux-gnu.profdata`), and `tools/pgo-rustc`, set as Cargo's `build.rustc-wrapper` in `.cargo/config.toml`, adds `-Cprofile-use` with that file to every optimized compile. Cargo can't do this by itself on stable: profile `rustflags` are unstable, and a repo-wide `rustflags` entry also reaches dependency crates, which rustc compiles from their own directories, where a relative profile path doesn't resolve. The wrapper passes an absolute path. It leaves unoptimized compiles (dev builds, build scripts), targets with no committed profile, and compiles that already carry `-Cprofile-generate` or `-Cprofile-use` alone.
+
+Limits:
+
+- The wrapper is a POSIX shell script. On Windows, set `CARGO_BUILD_RUSTC_WRAPPER` to an empty value and build with `cargo testkit pgo` instead.
+- A `RUSTC_WRAPPER` in the environment (sccache, say) replaces this one, and the build is then not profile-guided.
+- Cargo reads `.cargo/config.toml` only for builds inside this repository. Crates that depend on `orbit`, and `cargo install`, get a plain release build.
+
+`cargo testkit pgo` builds the same profile-guided binary as `target/pgo/orbit` without the wrapper; `--profile FILE` uses another profile.
 
 `cargo testkit pgo train` records a new profile with rustc's stable flags, writes it to `pgo/<target>.profdata`, then builds as above:
 
