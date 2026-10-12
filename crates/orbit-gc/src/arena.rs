@@ -120,8 +120,10 @@ const MAX_PAGE_SLOTS: usize = 1 << 16;
 ///
 /// Slots live in one flat vector, so turning a handle into an object is a
 /// single bounds check and one load from the vector's base (ADR-2). The
-/// vector is still cut into pages of `SLOTS` slots, a power of two fixed at
-/// compile time by the [`space!`](crate::space): the collector keeps its
+/// vector only grows as slots are first used, so its length can end partway
+/// through the last page and a new page's unused slots never touch their
+/// memory. It is still cut into pages of `SLOTS` slots, a power of two fixed
+/// at compile time by the [`space!`](crate::space): the collector keeps its
 /// free lists and counts per page and fills the lowest pages first. When
 /// the pages at the end have all been released, the vector is cut back and
 /// its memory returned to the allocator. A released page in the middle
@@ -220,6 +222,15 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
         }
     }
 
+    /// Add empty slots up to `len`. A new page's slots are added as they are
+    /// first used (the collector hands them out in order), so its memory is
+    /// only touched as far as it is used. Out of line to keep `put` small.
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self, len: usize) {
+        self.slots.resize_with(len, || None);
+    }
+
     /// Mark page `p` released; once every page from some point to the end is
     /// released, give their memory back to the allocator. Every slot of the
     /// page must be free.
@@ -227,8 +238,10 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
     pub fn release_page(&mut self, p: u32) {
         let p = p as usize;
         debug_assert!(
-            self.slots[p * SLOTS..(p + 1) * SLOTS]
+            self.slots
                 .iter()
+                .skip(p * SLOTS)
+                .take(SLOTS)
                 .all(Option::is_none)
         );
         self.live[p] = false;
@@ -299,10 +312,12 @@ impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
         if self.live.get(p) != Some(&true) {
             if p >= self.live.len() {
                 self.live.resize(p + 1, false);
-                self.slots.resize_with((p + 1) * SLOTS, || None);
             }
             self.live[p] = true;
             self.gens.on_new_page(p, SLOTS);
+        }
+        if i as usize >= self.slots.len() {
+            self.grow(i as usize + 1);
         }
         self.slots[i as usize] = Some(v);
         self.handle_at(i)
@@ -432,5 +447,26 @@ impl AnyGc {
     /// The slot index within its arena.
     pub fn index(self) -> u32 {
         self.index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_grows_as_its_slots_are_used() {
+        let mut a: Arena<u64, 16> = Arena::default();
+        a.put(0, 10);
+        a.put(1, 11);
+        assert_eq!(a.slots.len(), 2);
+        // A new page starts after every slot below it.
+        a.put(16, 12);
+        assert_eq!(a.slots.len(), 17);
+        assert_eq!(*a.get(a.handle_at(16)), 12);
+        assert!(a.slots[2..16].iter().all(Option::is_none));
+        a.take(16);
+        a.release_page(1);
+        assert_eq!(a.slots.len(), 16);
     }
 }
