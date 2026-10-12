@@ -1,3 +1,11 @@
 [alias]
 # `cargo testkit conformance --interp target/release/orbit`, see tests/README.md
 testkit = "run --quiet --release -p orbit-testkit --"
+
+[build]
+# Optimized builds use the committed PGO profile in pgo/, so a plain
+# `cargo build --release` is the profile-guided build (tests/README.md,
+# "Profile-guided builds"). The wrapper is a POSIX shell script: on Windows
+# set CARGO_BUILD_RUSTC_WRAPPER to an empty value and use `cargo testkit pgo`.
+# A RUSTC_WRAPPER in the environment (sccache, say) replaces this one.
+rustc-wrapper = "tools/pgo-rustc"

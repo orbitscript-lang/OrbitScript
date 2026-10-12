@@ -41,11 +41,22 @@ A mismatch prints the call, both outputs and the `--seed` that reproduces the ba
 
 ## Profile-guided builds
 
-`cargo testkit pgo` builds `target/pgo/orbit`, a release build optimized with a profile of how `orbit` actually runs. It uses rustc's stable flags in three steps:
+A plain `cargo build --release` is the profile-guided build. The profile is trained once and committed as `pgo/<target>.profdata`, one per target triple (for example `pgo/x86_64-unknown-linux-gnu.profdata`), and `tools/pgo-rustc`, set as Cargo's `build.rustc-wrapper` in `.cargo/config.toml`, adds `-Cprofile-use` with that file to every optimized compile. Cargo can't do this by itself on stable: profile `rustflags` are unstable, and a repo-wide `rustflags` entry also reaches dependency crates, which rustc compiles from their own directories, where a relative profile path doesn't resolve. The wrapper passes an absolute path. It leaves unoptimized compiles (dev builds, build scripts), targets with no committed profile, and compiles that already carry `-Cprofile-generate` or `-Cprofile-use` alone.
+
+Limits:
+
+- The wrapper is a POSIX shell script. On Windows, set `CARGO_BUILD_RUSTC_WRAPPER` to an empty value and build with `cargo testkit pgo` instead.
+- A `RUSTC_WRAPPER` in the environment (sccache, say) replaces this one, and the build is then not profile-guided.
+- Cargo reads `.cargo/config.toml` only for builds inside this repository. Crates that depend on `orbit`, and `cargo install`, get a plain release build.
+
+`cargo testkit pgo` builds the same profile-guided binary as `target/pgo/orbit` without the wrapper; `--profile FILE` uses another profile.
+
+`cargo testkit pgo train` records a new profile with rustc's stable flags, writes it to `pgo/<target>.profdata`, then builds as above:
 
 1. It builds an instrumented `orbit` with `-Cprofile-generate` in the `pgo-gen` Cargo profile (`target/pgo-gen/orbit`). Only this throwaway binary carries the counters.
 2. It runs that binary over the training set: the benchmarks at their quick inputs, `tests/diff`, `tests/diff/compat` and `tests/first-light`. Then it merges the raw profiles with `llvm-profdata`.
-3. It builds `orbit` again with `-Cprofile-use` in the `pgo` profile. This is an ordinary release build. Its inlining and code layout follow the profile, and it has no instrumentation.
+
+Retrain and commit the new profile when hot code changes a lot, and before a release. A stale profile never produces wrong code: LLVM drops the counts of functions whose code changed, so those functions are just optimized as in a plain release build. A profile written by one LLVM version can be read by the same or a newer one, so retrain after moving the minimum toolchain past the one that wrote it. Profiles for other targets (aarch64 Linux, macOS, Windows) have to be trained on those machines.
 
 Both profiles inherit `release`, so `target/release/orbit` and its build cache stay as they are. `llvm-profdata` must come from the same LLVM as rustc: run `rustup component add llvm-tools`, or point `LLVM_PROFDATA` at a matching copy.
 
@@ -53,4 +64,4 @@ The optimized build also passes `-Cllvm-args=-vectorizer-min-trip-count=1`. When
 
 A profile only applies to code built with the same settings. Symbol names include a hash of the profile's options, so a function whose name changed gets no profile, and Cargo gives no warning. To change a setting for a PGO build (debug info for `perf`, say), set it for both profiles, for example `CARGO_PROFILE_PGO_GEN_DEBUG` and `CARGO_PROFILE_PGO_DEBUG`.
 
-To time a benchmark the profile has never seen, leave it out of training with `--exclude fib.lua`. Two runs don't give byte-identical binaries, because counts from GC- and clock-dependent programs vary a little.
+To time a benchmark the profile has never seen, leave it out of training with `cargo testkit pgo train --exclude fib.lua --out target/no-fib.profdata`, which keeps the committed profile as it is. Two runs don't give byte-identical binaries, because counts from GC- and clock-dependent programs vary a little.

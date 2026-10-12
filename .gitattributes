@@ -1,3 +1,6 @@
 # The vendored Lua test suite is checked byte for byte (see
 # tests/lua-5.5/SHA256SUMS), and some tests read their own source.
 tests/lua-5.5/suite/** -text linguist-vendored
+
+# Trained PGO profiles (tests/README.md, "Profile-guided builds").
+pgo/*.profdata binary
