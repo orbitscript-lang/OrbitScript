@@ -576,6 +576,8 @@ fn numeric_for_with_captured_control_variable() {
                 src: 6
             },
             Op::ForLoop { base: 1, back: -5 },
+            // The loop's exit drops the control variable's cell.
+            Op::CellClear { from: 0, count: 1 },
             Op::Return0,
         ]
     );

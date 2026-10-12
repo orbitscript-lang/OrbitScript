@@ -124,6 +124,7 @@ impl Function<'_> {
             }
             Op::CellNew { .. }
             | Op::CellSet { .. }
+            | Op::CellClear { .. }
             | Op::CapSet { .. }
             | Op::SetGlobal { .. }
             | Op::SetField { .. }

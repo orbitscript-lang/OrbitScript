@@ -32,7 +32,7 @@ use crate::{
 pub const SIGNATURE: &[u8] = b"\x1bOrbit";
 
 /// The format version this build reads and writes.
-pub const VERSION: u8 = 4;
+pub const VERSION: u8 = 5;
 
 const FLAG_STRIPPED: u8 = 1;
 
@@ -390,6 +390,7 @@ op_table! {
     82 KSub { dst, k, b };
     83 KMul { dst, k, b };
     84 KDiv { dst, k, b };
+    85 CellClear { from, count };
 }
 
 /// One instruction's encoding (for tests and fuzzing).

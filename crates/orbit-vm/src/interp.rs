@@ -683,6 +683,24 @@ impl Vm {
         }
     }
 
+    /// The frames from `from` up are about to be unwound: their registers are
+    /// dead. Count them as dirty, so the catching native's return clears
+    /// them (see [`Stack::dirty_to`](crate::Stack)) and they don't keep
+    /// garbage alive until something overwrites them.
+    fn unwound(&mut self, from: usize) {
+        let s = &self.rt.stack;
+        let mut end = s.dirty_to.max(self.rt.top);
+        for f in s.frames.get(from..).unwrap_or_default() {
+            end = end.max(match f.kind {
+                FrameKind::Lua { closure, .. } => {
+                    f.base as usize + self.heap.get(closure).code.nregs as usize
+                }
+                _ => f.base as usize,
+            });
+        }
+        self.rt.stack.dirty_to = end;
+    }
+
     /// Close the newest to-be-closed variable while error `err` unwinds to
     /// the frame at `catcher`: pop the frames above the catcher, then call
     /// the variable's `__close` handler under an `Unwind` meta frame, which raises `err` again when
@@ -691,6 +709,7 @@ impl Vm {
         let t = self.rt.stack.aux.tbc.pop().expect("a variable to close") as usize;
         // As in the reference, the handler runs once the error has left the
         // frames above the one that catches it: it is called from there.
+        self.unwound(catcher + 1);
         let s = &mut self.rt.stack;
         if let Some(above) = s.frames.get(catcher + 1) {
             s.cells.truncate(above.cell_base as usize);
@@ -755,6 +774,7 @@ impl Vm {
         let FrameKind::Native { id, k, call_at, .. } = f.kind else {
             unreachable!("catchers are native frames")
         };
+        self.unwound(idx + 1);
         if let Some(above) = self.rt.stack.frames.get(idx + 1) {
             self.rt.stack.cells.truncate(above.cell_base as usize);
         }
@@ -1398,6 +1418,11 @@ impl Vm {
                         self.heap.barrier_back(c);
                         let cell = self.heap.get_mut(c);
                         by_parts!(src, |v| cell.value = v);
+                    }
+                    Op::CellClear { from, count } => {
+                        let at = cell_base!() + from as usize;
+                        let dead = self.rt.dead_cell;
+                        self.rt.stack.cells[at..at + count as usize].fill(dead);
                     }
                     Op::CapGet { dst, cap } => {
                         let c = self.heap.get(closure).captures[cap as usize];

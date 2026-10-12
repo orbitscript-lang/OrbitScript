@@ -215,6 +215,8 @@ pub struct Local {
     pub captured: bool,
     /// Set by assignment analysis: assigned somewhere after its declaration.
     pub reassigned: bool,
+    /// Set by capture analysis: an inner function assigns this local.
+    pub assigned_in_closure: bool,
     pub ty: Option<TypeId>,
 }
 
@@ -226,6 +228,7 @@ impl Local {
             kind,
             captured: false,
             reassigned: false,
+            assigned_in_closure: false,
             ty: None,
         }
     }

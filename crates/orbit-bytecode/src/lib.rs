@@ -67,6 +67,9 @@ pub enum Op {
     CellGet { dst: Reg, cell: u8 },
     /// `C[cell].value = R[src]`
     CellSet { cell: u8, src: Reg },
+    /// `C[from..from+count]` drop their cells: the locals they held are out of scope, and
+    /// the slots mustn't keep the cells (and their values) alive.
+    CellClear { from: u8, count: u8 },
     /// `R[dst] = U[cap].value`
     CapGet { dst: Reg, cap: u8 },
     /// `U[cap].value = R[src]`

@@ -34,6 +34,7 @@ metatables.lua
 multi_assign.lua
 os.lua
 require.lua
+retention.lua
 stdlib_base.lua
 stdlib_gmatch.lua
 stdlib_math.lua

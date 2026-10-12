@@ -60,7 +60,7 @@ impl Vm {
                         if self.heap.should_step() {
                             let base = self.rt.stack.frames.last().expect("a frame").base as usize;
                             let live = (base + 256).max(self.rt.top);
-                            self.rt.stack.regs.truncate(live);
+                            self.trim_dead_regs(live);
                             self.heap.step(&mut self.rt);
                         }
                         return Ok(Flow::Reload);
@@ -363,12 +363,31 @@ impl Vm {
         }
     }
 
+    /// Before a collection step from the dispatch loop: drop the registers at
+    /// and above `live`, and clear those between the newest Lua frame's
+    /// registers (and the last open results) and `live`. They are dead, but
+    /// may still hold what returned callees or frames an error unwound left
+    /// there, which would otherwise stay alive until overwritten.
+    fn trim_dead_regs(&mut self, live: usize) {
+        let s = &mut self.rt.stack;
+        s.regs.truncate(live);
+        if let Some(f) = s.frames.last()
+            && let FrameKind::Lua { closure, .. } = f.kind
+        {
+            let end =
+                (f.base as usize + self.heap.get(closure).code.nregs as usize).max(self.rt.top);
+            if end < s.regs.len() {
+                s.regs[end..].fill(Value::Nil);
+            }
+        }
+    }
+
     /// A safe point's collector work: one step, then the finalizers it made
     /// due. Returns true if the heap is over its limit even after a full
     /// collection, so the caller raises `not enough memory`.
     #[inline(never)]
     pub(crate) fn gc_safepoint(&mut self, live: usize) -> bool {
-        self.rt.stack.regs.truncate(live);
+        self.trim_dead_regs(live);
         if self.heap.step(&mut self.rt) {
             self.shrink_stack();
         }
