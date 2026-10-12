@@ -65,3 +65,14 @@ fn buffer_drops_elements_on_truncate_and_drop() {
     // Remaining 6 elements dropped when buf is dropped
     assert_eq!(counter.load(Ordering::SeqCst), 10);
 }
+
+#[test]
+fn oversized_reservation_falls_back_to_what_fits() {
+    // 2^46 u64 slots is 512 TiB, more address space than a 64-bit process
+    // has, so the first request fails and the buffer halves it until one fits.
+    let mut buf: VmBuffer<u64> = VmBuffer::with_capacity(1 << 46);
+    assert!(buf.capacity() < 1 << 46);
+    assert!(buf.capacity() > 0);
+    buf.resize_with(1000, || 7);
+    assert_eq!(buf[999], 7);
+}
