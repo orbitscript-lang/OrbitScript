@@ -5,6 +5,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
+use orbit_virtmem::VmBuffer;
+
 /// Whether handles carry a generation that is checked on every access, so a
 /// handle to a collected object panics even after its slot is reused. On in
 /// debug builds and with the `checked-handles` feature; off otherwise, where
@@ -130,7 +132,7 @@ const MAX_PAGE_SLOTS: usize = 1 << 16;
 /// Arenas are created by [`space!`](crate::space) and only reached through a
 /// [`Heap`](crate::Heap).
 pub struct Arena<T, const SLOTS: usize = DEFAULT_PAGE_SLOTS> {
-    slots: Vec<Option<T>>,
+    slots: VmBuffer<Option<T>>,
     /// Whether each page below `slots.len() / SLOTS` is allocated.
     live: Vec<bool>,
     gens: Gens,
@@ -139,7 +141,7 @@ pub struct Arena<T, const SLOTS: usize = DEFAULT_PAGE_SLOTS> {
 impl<T, const SLOTS: usize> Default for Arena<T, SLOTS> {
     fn default() -> Self {
         Arena {
-            slots: Vec::new(),
+            slots: VmBuffer::new(),
             live: Vec::new(),
             gens: Gens::default(),
         }
@@ -235,11 +237,9 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
         if keep < self.live.len() {
             self.live.truncate(keep);
             self.slots.truncate(keep * SLOTS);
-            // Shrinking moves the live slots, so only do it when at least
-            // half the vector would go.
-            if self.slots.len() <= self.slots.capacity() / 2 {
-                self.slots.shrink_to_fit();
-            }
+            // Decommit trailing virtual memory pages back to the OS.
+            // Unlike Vec, shrinking VmBuffer never moves live slots or reallocates.
+            self.slots.shrink_to_fit();
         }
     }
 }

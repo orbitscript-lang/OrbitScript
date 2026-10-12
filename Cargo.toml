@@ -12,7 +12,7 @@ license = "MIT"
 repository = "https://github.com/tymlipari/OrbitScript"
 
 [workspace.lints.rust]
-# Policy (ADR-6): no unsafe code outside the future `orbit-jit` crate.
+# Policy (ADR-6): no unsafe code outside the future `orbit-jit` crate, `orbit-virtmem`, and `orbit-gc`'s memory-trimming.
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 

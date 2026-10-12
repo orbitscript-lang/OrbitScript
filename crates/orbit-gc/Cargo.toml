@@ -17,7 +17,8 @@ missing_debug_implementations = "warn"
 
 [lints.clippy]
 dbg_macro = "warn"
-todo = "warn"
+[dependencies]
+orbit-virtmem = { path = "../orbit-virtmem" }
 
 [features]
 default = ["memory-trimming"]
