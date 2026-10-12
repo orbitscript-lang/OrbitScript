@@ -16,6 +16,10 @@ use std::ptr::NonNull;
 /// space, consuming 0 bytes of physical memory until pages are committed.
 pub const DEFAULT_MAX_SLOTS: usize = 1 << 24;
 
+/// Under a process address-space limit, one buffer reserves at most this
+/// fraction of it, so several buffers and the malloc heap all fit.
+pub const LIMIT_SHARE: usize = 16;
+
 /// A contiguous buffer of `T` backed by on-demand committed virtual memory.
 pub struct VmBuffer<T> {
     base: NonNull<T>,
@@ -33,9 +37,15 @@ impl<T> VmBuffer<T> {
 
     /// Creates a new buffer reserving address space for up to `max_slots` elements.
     ///
+    /// The reservation is smaller than `max_slots` when address space is
+    /// scarce: under a process address-space limit (`ulimit -v`) it is
+    /// capped at 1/[`LIMIT_SHARE`] of the limit, and if the operating system
+    /// still refuses, the request is halved until it succeeds. Check
+    /// [`capacity`](Self::capacity) for what was actually reserved.
+    ///
     /// # Panics
-    /// Panics if `T` is a zero-sized type, if `max_slots` is 0, or if reserving
-    /// address space fails.
+    /// Panics if `T` is a zero-sized type, if `max_slots` is 0, or if not even
+    /// one page of address space can be reserved.
     #[must_use]
     pub fn with_capacity(max_slots: usize) -> Self {
         let size = std::mem::size_of::<T>();
@@ -48,16 +58,29 @@ impl<T> VmBuffer<T> {
             "orbit-virtmem: max_slots must be greater than 0"
         );
 
-        let bytes = max_slots
-            .checked_mul(size)
-            .expect("orbit-virtmem: address space reservation size overflow");
-        let base_u8 = os::reserve_address_space(bytes);
-
-        VmBuffer {
-            base: base_u8.cast(),
-            reserved_slots: max_slots,
-            committed_slots: 0,
-            len: 0,
+        let min_slots = (os::page_size() / size).max(1);
+        let mut slots = max_slots;
+        if let Some(limit) = os::address_space_limit() {
+            slots = slots
+                .min(limit / LIMIT_SHARE / size)
+                .max(min_slots.min(max_slots));
+        }
+        loop {
+            let bytes = slots
+                .checked_mul(size)
+                .expect("orbit-virtmem: address space reservation size overflow");
+            if let Some(base_u8) = os::try_reserve_address_space(bytes) {
+                return VmBuffer {
+                    base: base_u8.cast(),
+                    reserved_slots: slots,
+                    committed_slots: 0,
+                    len: 0,
+                };
+            }
+            if slots <= min_slots {
+                panic!("orbit-virtmem: failed to reserve {bytes} bytes of virtual address space");
+            }
+            slots = (slots / 2).max(min_slots);
         }
     }
 

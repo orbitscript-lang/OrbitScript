@@ -41,8 +41,24 @@ pub fn align_down(val: usize, align: usize) -> usize {
 
 /// Reserves `bytes` of contiguous virtual address space with no access permissions.
 /// Consumes 0 bytes of physical memory or swap.
+///
+/// # Panics
+/// Panics if the operating system refuses the reservation; see
+/// [`try_reserve_address_space`] for a version that reports it instead.
 #[must_use]
 pub fn reserve_address_space(bytes: usize) -> NonNull<u8> {
+    match try_reserve_address_space(bytes) {
+        Some(ptr) => ptr,
+        None => panic!("orbit-virtmem: failed to reserve {bytes} bytes of virtual address space"),
+    }
+}
+
+/// Reserves `bytes` of contiguous virtual address space with no access
+/// permissions, or returns `None` if the operating system refuses, for
+/// example because a process address-space limit (`ulimit -v`) would be
+/// exceeded.
+#[must_use]
+pub fn try_reserve_address_space(bytes: usize) -> Option<NonNull<u8>> {
     assert!(bytes > 0, "cannot reserve 0 bytes");
     let bytes = align_up(bytes, page_size());
 
@@ -59,10 +75,10 @@ pub fn reserve_address_space(bytes: usize) -> NonNull<u8> {
                 0,
             )
         };
-        if ptr == libc::MAP_FAILED || ptr.is_null() {
-            panic!("orbit-virtmem: failed to reserve {bytes} bytes of virtual address space");
+        if ptr == libc::MAP_FAILED {
+            return None;
         }
-        NonNull::new(ptr as *mut u8).expect("non-null pointer from mmap")
+        NonNull::new(ptr.cast::<u8>())
     }
 
     #[cfg(windows)]
@@ -73,10 +89,32 @@ pub fn reserve_address_space(bytes: usize) -> NonNull<u8> {
             reason = "VirtualAlloc to reserve address space with PAGE_NOACCESS"
         )]
         let ptr = unsafe { VirtualAlloc(std::ptr::null_mut(), bytes, MEM_RESERVE, PAGE_NOACCESS) };
-        if ptr.is_null() {
-            panic!("orbit-virtmem: failed to reserve {bytes} bytes of virtual address space");
+        NonNull::new(ptr.cast::<u8>())
+    }
+}
+
+/// The process's address-space limit in bytes (`RLIMIT_AS`, set by
+/// `ulimit -v`), or `None` when there is none. Reserved but uncommitted
+/// address space counts against this limit, unlike against physical memory.
+#[must_use]
+pub fn address_space_limit() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        #[allow(unsafe_code, reason = "getrlimit FFI to read the address-space limit")]
+        let res = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut lim) };
+        if res != 0 || lim.rlim_cur == libc::RLIM_INFINITY {
+            return None;
         }
-        NonNull::new(ptr as *mut u8).expect("non-null pointer from VirtualAlloc")
+        Some(usize::try_from(lim.rlim_cur).unwrap_or(usize::MAX))
+    }
+
+    #[cfg(windows)]
+    {
+        None
     }
 }
 
