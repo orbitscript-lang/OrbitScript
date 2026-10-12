@@ -109,7 +109,6 @@ dependencies = [
  "ctrlc",
  "orbit",
  "orbit-compiler",
- "orbit-gc",
  "orbit-hir",
  "orbit-lua-syntax",
 ]

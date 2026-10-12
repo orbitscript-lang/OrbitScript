@@ -1,8 +1,8 @@
-//! With `malloc-trim` on glibc, memory freed by a collection leaves the
+//! With `memory-trimming` on glibc, memory freed by a collection leaves the
 //! process once the heap has shrunk enough. Its own test binary, so no other
 //! test's allocations move RSS.
 
-#![cfg(all(feature = "malloc-trim", target_os = "linux", target_env = "gnu"))]
+#![cfg(all(feature = "memory-trimming", target_os = "linux", target_env = "gnu"))]
 
 mod common;
 
