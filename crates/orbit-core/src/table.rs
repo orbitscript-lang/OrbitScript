@@ -13,7 +13,7 @@ use orbit_gc::{Gc, Liveness, Marker, Trace, WeakMode};
 
 use crate::string::hash_word;
 use crate::value::{Payload, Tag, str_eq};
-use crate::{LuaHeap, LuaSpace, LuaStr, NoMemory, Value, gc, number};
+use crate::{Event, LuaHeap, LuaSpace, LuaStr, NoMemory, Value, gc, number};
 
 /// Why a value can't be a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +154,10 @@ struct Entry {
 }
 
 const _: () = assert!(std::mem::size_of::<Entry>() == 24);
+// Tables fill an arena slot each, so their header stays at 56 bytes in
+// release builds (debug builds' checked handles are larger).
+#[cfg(not(debug_assertions))]
+const _: () = assert!(std::mem::size_of::<Table>() == 56);
 
 impl Entry {
     #[inline(always)]
@@ -376,8 +380,16 @@ pub struct Table {
     used: u32,
     /// The hash slot of the key [`Table::next`] last returned, so the next
     /// call usually resumes there without hashing and probing for the key.
-    /// Only a hint: it is checked against the key it is given.
-    next_hint: Cell<u32>,
+    /// Only a hint: it is checked against the key it is given. 16 bits, so
+    /// it fits beside `absent`; a slot past `u16::MAX` isn't remembered.
+    next_hint: Cell<u16>,
+    /// Metatable fields ([`Event`]s, one bit each) this table is known to
+    /// lack: a lookup through [`Table::meta_field`] that finds nil sets the
+    /// bit, so the next one is a bit test instead of a probe. Every store
+    /// into the hash part clears the whole set (see
+    /// [`Table::forget_absent`]); a set bit therefore always means the raw
+    /// value of that field is nil.
+    absent: Cell<u16>,
     /// The metatable. A string `__mode` in it makes the table weak.
     pub meta: Option<Gc<Table>>,
 }
@@ -519,6 +531,49 @@ impl Table {
             i = (i + 1) & mask;
         }
         Value::Nil
+    }
+
+    /// `t[e.field()]` (raw), where `name` is that field name's interned
+    /// string, remembering a nil result (see the `absent` field). Metatable
+    /// lookups go through here.
+    #[inline]
+    pub fn meta_field(&self, heap: &LuaHeap, e: Event, name: Gc<LuaStr>) -> Value {
+        debug_assert_eq!(heap.get(name).as_bytes(), e.field().as_bytes());
+        let absent = self.absent.get();
+        if absent & e.bit() != 0 {
+            return Value::Nil;
+        }
+        let v = self.get_str(heap, name);
+        if v.is_nil() {
+            self.absent.set(absent | e.bit());
+        }
+        v
+    }
+
+    /// [`Table::meta_field`] without the interner, reading key strings
+    /// through `str_of`, so the collector can use it while tracing.
+    pub fn meta_field_by_bytes<'a>(
+        &self,
+        e: Event,
+        str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
+    ) -> Value {
+        let absent = self.absent.get();
+        if absent & e.bit() != 0 {
+            return Value::Nil;
+        }
+        let name = e.field().as_bytes();
+        let v = self.get_by_bytes(name, crate::string::hash_bytes(name), str_of);
+        if v.is_nil() {
+            self.absent.set(absent | e.bit());
+        }
+        v
+    }
+
+    /// Forget which metatable fields are absent. Every store into the hash
+    /// part calls this, before it can make a key present.
+    #[inline(always)]
+    fn forget_absent(&mut self) {
+        *self.absent.get_mut() = 0;
     }
 }
 
@@ -680,11 +735,12 @@ impl Table {
             return None;
         }
         let i = key.hash as usize & len.wrapping_sub(1);
-        let e = self.entries.get_mut(i)?;
+        let e = self.entries.get(i)?;
         if !e.is_empty() {
             return None;
         }
-        *e = Entry::new(key.value, key.hash, v);
+        self.forget_absent();
+        self.entries[i] = Entry::new(key.value, key.hash, v);
         self.used += 1;
         Some(i)
     }
@@ -713,6 +769,7 @@ impl Table {
     /// entry. Use through [`Heap::update`](orbit_gc::Heap::update).
     #[inline(always)]
     pub fn set_slot(&mut self, slot: usize, v: Value) {
+        self.forget_absent();
         self.entries[slot].set_value(v);
     }
 
@@ -840,8 +897,12 @@ impl Table {
                 self.array.push(v)?;
                 self.migrate_to_array();
             }
-            Slot::Existing(i) => self.entries[i].set_value(v),
+            Slot::Existing(i) => {
+                self.forget_absent();
+                self.entries[i].set_value(v);
+            }
             Slot::New(i) => {
+                self.forget_absent();
                 let e = &mut self.entries[i];
                 if e.is_empty() {
                     self.used += 1;
@@ -1108,7 +1169,7 @@ impl Table {
         let from = pos - n;
         for (j, e) in self.entries.iter().enumerate().skip(from) {
             if !e.value_is_nil() {
-                self.next_hint.set(j as u32);
+                self.next_hint.set(u16::try_from(j).unwrap_or(u16::MAX));
                 return Ok(Some((e.key(), e.value())));
             }
         }
@@ -1627,6 +1688,82 @@ mod tests {
                 bi += 1;
             }
         }
+    }
+
+    /// Every way a key can become present must forget that it was absent.
+    #[test]
+    fn absent_fields_are_forgotten_on_every_store() {
+        let (mut heap, mut s, t) = setup();
+        let names: Vec<_> = Event::ALL
+            .iter()
+            .map(|e| s.new_str(&mut heap, e.field().as_bytes()))
+            .collect();
+        let name = |e: Event| names[e as usize];
+        let lookup = |heap: &LuaHeap, t: Gc<Table>, e: Event| {
+            let tab = heap.get(t);
+            let v = tab.meta_field(heap, e, name(e));
+            // The collector's lookup by bytes agrees.
+            assert!(v.same(tab.meta_field_by_bytes(e, |s| heap.get(s))));
+            v
+        };
+        // Empty: every field absent, and asking twice gives the same.
+        for &e in Event::ALL {
+            assert!(lookup(&heap, t, e).is_nil());
+            assert!(lookup(&heap, t, e).is_nil());
+        }
+        // A new key through `set` (claims a fresh slot, or rebuilds).
+        set(&mut heap, t, Value::Str(name(Event::Index)), Value::Int(1)).unwrap();
+        assert!(matches!(lookup(&heap, t, Event::Index), Value::Int(1)));
+        for &e in Event::ALL {
+            lookup(&heap, t, e);
+        }
+        set(&mut heap, t, Value::Str(name(Event::Gc)), Value::Int(2)).unwrap();
+        assert!(matches!(lookup(&heap, t, Event::Gc), Value::Int(2)));
+        // Removing a key, then storing it again into its dead entry.
+        set(&mut heap, t, Value::Str(name(Event::Gc)), Value::Nil).unwrap();
+        assert!(lookup(&heap, t, Event::Gc).is_nil());
+        set(&mut heap, t, Value::Str(name(Event::Gc)), Value::Int(3)).unwrap();
+        assert!(matches!(lookup(&heap, t, Event::Gc), Value::Int(3)));
+        // `set_slot` reviving a dead entry (an inline cache hit).
+        let slot = heap.get(t).find_str(&heap, name(Event::Gc)).unwrap();
+        heap.get_mut(t).set_slot(slot, Value::Nil);
+        assert!(lookup(&heap, t, Event::Gc).is_nil());
+        heap.get_mut(t).set_slot(slot, Value::Int(4));
+        assert!(matches!(lookup(&heap, t, Event::Gc), Value::Int(4)));
+        // `insert_str_home` on a table with room.
+        let h = heap.alloc(Table::with_capacity(0, 64));
+        assert!(lookup(&heap, h, Event::Mode).is_nil());
+        let key = Key::str(&heap, name(Event::Mode));
+        assert!(
+            heap.get_mut(h)
+                .insert_str_home(&key, Value::Int(5))
+                .is_some()
+        );
+        assert!(matches!(lookup(&heap, h, Event::Mode), Value::Int(5)));
+        // `write` with a slot found earlier, and growth through rebuilds:
+        // every cached field, stored one at a time after a failed lookup.
+        let g = heap.alloc(Table::new());
+        for (i, &e) in Event::ALL.iter().enumerate() {
+            for &f in Event::ALL {
+                lookup(&heap, g, f);
+            }
+            let key = Key::str(&heap, name(e));
+            let slot = heap.get(g).find_slot(&heap, &key, false);
+            heap.get_mut(g)
+                .write(slot, &key, Value::Int(i as i64))
+                .unwrap();
+            for (j, &f) in Event::ALL.iter().enumerate() {
+                let v = lookup(&heap, g, f);
+                if j <= i {
+                    assert!(matches!(v, Value::Int(k) if k == j as i64), "{e:?} {f:?}");
+                } else {
+                    assert!(v.is_nil());
+                }
+            }
+        }
+        // Integer keys and traversal leave the set alone.
+        set(&mut heap, g, Value::Int(1), Value::Int(1)).unwrap();
+        assert!(matches!(lookup(&heap, g, Event::Index), Value::Int(0)));
     }
 
     #[test]

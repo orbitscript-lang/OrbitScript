@@ -5,8 +5,7 @@
 
 use orbit_gc::{AnyGc, Gc, Liveness, Marker, WeakMode};
 
-use crate::string::hash_bytes;
-use crate::{LuaHeap, LuaSpace, LuaStr, Table, UserData, Value};
+use crate::{Event, LuaHeap, LuaSpace, LuaStr, Table, UserData, Value};
 
 /// Whether a weak table may drop an entry because of `v`: tables, Lua
 /// functions, userdata and threads. Strings, numbers, booleans and
@@ -46,16 +45,16 @@ pub fn is_live(live: &Liveness<'_, LuaSpace>, v: Value) -> bool {
     }
 }
 
-/// `mt[name]` (raw) for a string `name`, reading strings through `str_of`.
-/// Works without the interner, so the collector can call it while tracing.
-pub fn field<'a>(mt: &Table, name: &[u8], str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> Value {
-    mt.get_by_bytes(name, hash_bytes(name), str_of)
+/// `mt[e.field()]` (raw), reading strings through `str_of`. Works without
+/// the interner, so the collector can call it while tracing.
+pub fn field<'a>(mt: &Table, e: Event, str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> Value {
+    mt.meta_field_by_bytes(e, str_of)
 }
 
 /// The weak mode a metatable gives its tables: a string `__mode`
 /// containing `k` makes keys weak, `v` values. Anything else is strong.
 pub fn weak_mode<'a>(mt: &Table, str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> Option<WeakMode> {
-    let Value::Str(s) = field(mt, b"__mode", &str_of) else {
+    let Value::Str(s) = field(mt, Event::Mode, &str_of) else {
         return None;
     };
     let bytes = str_of(s).as_bytes();
@@ -91,7 +90,7 @@ pub fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>) -> boo
 }
 
 fn has_gc(heap: &LuaHeap, mt: Option<Gc<Table>>) -> bool {
-    mt.is_some_and(|mt| !field(heap.get(mt), b"__gc", |s| heap.get(s)).is_nil())
+    mt.is_some_and(|mt| !field(heap.get(mt), Event::Gc, |s| heap.get(s)).is_nil())
 }
 
 /// `obj` as a value and its `__gc` metamethod (raw), read when its
@@ -105,7 +104,7 @@ pub fn finalizer(heap: &LuaHeap, obj: AnyGc) -> (Value, Value) {
         return (Value::Nil, Value::Nil);
     };
     match meta {
-        Some(mt) => (v, field(heap.get(mt), b"__gc", |s| heap.get(s))),
+        Some(mt) => (v, field(heap.get(mt), Event::Gc, |s| heap.get(s))),
         None => (v, Value::Nil),
     }
 }
