@@ -32,9 +32,9 @@ PUC Lua can be built with `ltests.c`, which adds a global `T` exposing internals
 
 ## 2. The suite's C modules
 
-`attrib.lua` and `main.lua` load small C libraries from `suite/libs/` (built from `lib1.c`, `lib11.c`, `lib2.c`, `lib21.c`, `lib22.c`). OrbitScript can't load C modules, so:
+`attrib.lua` and `main.lua` load small C libraries from `suite/libs/` (built from `lib1.c`, `lib11.c`, `lib2.c`, `lib21.c`, `lib22.c`). The `orbit` command loads C modules (the `c-modules` feature, on by default in `orbit-cli`; ADR-8), and with `--c-libs DIR` both files pass in full, these lines included. Without `--c-libs` there are no libraries to load, so:
 
-- **`attrib.lua` 335 to 352 are disabled** (`needs-clibs=335-352`). The rest of its C-library block (262 to 356) first calls `package.loadlib`, and when that returns `nil, msg, "absent"` it prints "cannot load dynamic library" and moves on (270). That is the Lua-defined result for a build without dynamic-library support, so OrbitScript's `package.loadlib` must return it. The "testing external strings" block (335 to 352) has no such fallback: it requires the C module `lib2-v2` directly.
+- **`attrib.lua` 266 to 355 are disabled** (`needs-clibs=266-355`): the body of its C-library block, which loads `lib1`, `lib11`, `lib2-v2` and friends. When `package.loadlib` returns `nil, msg, "absent"` the block prints "cannot load dynamic library" and moves on (270), but `orbit` can load libraries, so like `lua5.5` it tries and fails on the missing files. An `orbit` built without `c-modules` must still return `"absent"`; `orbit-cli`'s `loadlib_is_absent_without_c_modules` test checks that.
 - **`main.lua` 250 to 253 are disabled** (`needs-clibs=250-253` in `manifest.txt`): they run `lua -l lib2-v2` and have no fallback. The harness comments these lines out in its scratch copy, keeping line numbers, unless it's given `--c-libs DIR`.
 
 The reference `lua5.5` in CI runs with `--c-libs`, so these lines are still checked against real Lua.

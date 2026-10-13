@@ -16,8 +16,8 @@ fn dump(ctx: &mut NativeCtx<'_>) -> R {
         return Err(ctx.arg_error(0, "Lua function expected"));
     };
     let strip = !ctx.arg(1).is_falsy();
-    let root = ctx.heap.get(c).proto;
-    let chunk = unlink(ctx.heap, root);
+    let root = ctx.vm.heap.get(c).proto;
+    let chunk = unlink(&ctx.vm.heap, root);
     let bytes = format::encode(&chunk, strip);
     let s = ctx.new_str_owned(bytes);
     ctx.ret1(s)

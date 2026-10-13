@@ -286,25 +286,28 @@ pub fn finalize_then_return(
 }
 
 fn next_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    if ctx.rt.gc.finalizing {
+    if ctx.vm.rt.gc.finalizing {
         return Ok(NativeReturn::Return(1));
     }
-    while let Some(obj) = ctx.heap.take_finalizable() {
-        let (o, f) = finalizer(ctx.heap, obj);
+    while let Some(obj) = ctx.vm.heap.take_finalizable() {
+        let (o, f) = finalizer(&ctx.vm.heap, obj);
         if f.is_nil() {
             continue;
         }
         if !callable(f) {
             let msg = not_callable_message(f);
-            ctx.rt.warn_gc_error_text(&msg);
+            ctx.vm.rt.warn_gc_error_text(&msg);
             continue;
         }
         ctx.truncate(1);
         ctx.push(o);
-        ctx.rt.hooks_touched = true;
-        ctx.rt.gc.enter(ctx.heap, &mut ctx.rt.stack.hook);
+        ctx.vm.rt.hooks_touched = true;
+        ctx.vm
+            .rt
+            .gc
+            .enter(&mut ctx.vm.heap, &mut ctx.vm.rt.stack.hook);
         // The native's frame, which `CallThen` pushes next.
-        ctx.rt.stack.aux.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
+        ctx.vm.rt.stack.aux.finalizer_at = Some(ctx.vm.rt.stack.frames.len() as u32);
         return Ok(NativeReturn::CallThen {
             f,
             nargs: 1,
@@ -316,10 +319,13 @@ fn next_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
 }
 
 fn after_finalizer(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeReturn, LuaError> {
-    ctx.rt.gc.exit(ctx.heap, &mut ctx.rt.stack.hook);
-    ctx.rt.stack.aux.finalizer_at = None;
+    ctx.vm
+        .rt
+        .gc
+        .exit(&mut ctx.vm.heap, &mut ctx.vm.rt.stack.hook);
+    ctx.vm.rt.stack.aux.finalizer_at = None;
     if let CallOutcome::Err(e) = out {
-        ctx.rt.warn_gc_error(ctx.heap, e);
+        ctx.vm.rt.warn_gc_error(&ctx.vm.heap, e);
     }
     ctx.truncate(1);
     next_finalizer(ctx)
@@ -335,33 +341,33 @@ fn after_finalizer(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeRe
 /// runs), it runs the finalizers still waiting.
 pub fn close_then(ctx: &mut NativeCtx<'_>, k: Continuation) -> Result<NativeReturn, LuaError> {
     ctx.truncate(1);
-    let gc = &mut ctx.rt.gc;
+    let gc = &mut ctx.vm.rt.gc;
     if !gc.closed {
         gc.closed = true;
-        ctx.heap.finalize_all();
+        ctx.vm.heap.finalize_all();
     }
     gc.finalizing = true;
     gc.close_k = Some(k);
-    ctx.heap.stop();
+    ctx.vm.heap.stop();
     next_close_finalizer(ctx)
 }
 
 fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    while let Some(obj) = ctx.heap.take_finalizable() {
-        let (o, f) = finalizer(ctx.heap, obj);
+    while let Some(obj) = ctx.vm.heap.take_finalizable() {
+        let (o, f) = finalizer(&ctx.vm.heap, obj);
         if f.is_nil() {
             continue;
         }
         if !callable(f) {
             let msg = not_callable_message(f);
-            ctx.rt.warn_gc_error_text(&msg);
+            ctx.vm.rt.warn_gc_error_text(&msg);
             continue;
         }
         ctx.truncate(1);
         ctx.push(o);
-        ctx.rt.stack.aux.finalizer_at = Some(ctx.rt.stack.frames.len() as u32);
-        ctx.rt.hooks_touched = true;
-        ctx.rt.gc.hooks_off(&mut ctx.rt.stack.hook);
+        ctx.vm.rt.stack.aux.finalizer_at = Some(ctx.vm.rt.stack.frames.len() as u32);
+        ctx.vm.rt.hooks_touched = true;
+        ctx.vm.rt.gc.hooks_off(&mut ctx.vm.rt.stack.hook);
         return Ok(NativeReturn::CallThen {
             f,
             nargs: 1,
@@ -369,8 +375,8 @@ fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaErro
             protected: true,
         });
     }
-    ctx.rt.stack.aux.finalizer_at = None;
-    let k = ctx.rt.gc.close_k.take().expect("close_then set it");
+    ctx.vm.rt.stack.aux.finalizer_at = None;
+    let k = ctx.vm.rt.gc.close_k.take().expect("close_then set it");
     k(ctx, CallOutcome::Ok(0))
 }
 
@@ -378,9 +384,9 @@ fn after_close_finalizer(
     ctx: &mut NativeCtx<'_>,
     out: CallOutcome,
 ) -> Result<NativeReturn, LuaError> {
-    ctx.rt.gc.hooks_back(&mut ctx.rt.stack.hook);
+    ctx.vm.rt.gc.hooks_back(&mut ctx.vm.rt.stack.hook);
     if let CallOutcome::Err(e) = out {
-        ctx.rt.warn_gc_error(ctx.heap, e);
+        ctx.vm.rt.warn_gc_error(&ctx.vm.heap, e);
     }
     ctx.truncate(1);
     next_close_finalizer(ctx)

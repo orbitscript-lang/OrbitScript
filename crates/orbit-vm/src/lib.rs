@@ -34,7 +34,7 @@ pub use coro::CoStatus;
 pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 pub use meta::Event;
 pub use native::{
-    CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn, ResumeOk,
+    CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn, Operator, ResumeOk,
 };
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
 pub use orbit_bytecode as op;
@@ -90,6 +90,9 @@ pub(crate) struct Native {
     pub name: &'static str,
     pub f: NativeFn,
     pub fast: Option<FastFn>,
+    /// Upvalues at the end of each of its closures that scripts can't
+    /// see or change (`debug.getupvalue` and friends skip them).
+    pub hidden: u8,
 }
 
 impl fmt::Debug for Native {
@@ -132,9 +135,18 @@ pub(crate) enum FrameKind {
     /// raised: its result is raised again as the error, past the handler.
     /// Nothing may yield across it.
     Handler,
-    /// The bottom of a [`Vm::call`]: returning into it ends the call, and
-    /// an error unwinding to it is returned to the embedder.
-    Boundary,
+    /// The bottom of a [`Vm::call`] or a [`NativeCtx::call`]: returning
+    /// into it ends the call, and an error unwinding to it is returned to
+    /// the embedder or the native.
+    Boundary {
+        /// Opened by a native ([`NativeCtx::call`]): an error leaving it
+        /// takes no traceback, since the native handles it.
+        native: bool,
+        /// An error first goes to the message handler at the frame's
+        /// `base`, which runs on top of the frames that raised (the C API's
+        /// `lua_pcall` with a handler).
+        handler: bool,
+    },
     /// The bottom of every coroutine's stack: the body returning into it
     /// finishes the coroutine, and an error reaching it kills it.
     CoBase,
@@ -550,24 +562,44 @@ impl Interrupt {
 /// GC values (it is not traced).
 #[derive(Default)]
 pub struct Extensions {
-    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
+    /// A handful of entries, so a scan beats hashing: the C API looks its
+    /// state up on every call into C.
+    entries: Vec<(std::any::TypeId, Box<dyn std::any::Any>)>,
 }
 
 impl Extensions {
     /// The value of type `T`, created with `init` on first use.
+    #[inline]
     pub fn get_or_insert_with<T: 'static>(&mut self, init: impl FnOnce() -> T) -> &mut T {
-        self.map
-            .entry(std::any::TypeId::of::<T>())
-            .or_insert_with(|| Box::new(init()))
+        let id = std::any::TypeId::of::<T>();
+        let i = match self.entries.iter().position(|(k, _)| *k == id) {
+            Some(i) => i,
+            None => {
+                self.entries.push((id, Box::new(init())));
+                self.entries.len() - 1
+            }
+        };
+        self.entries[i]
+            .1
             .downcast_mut::<T>()
             .expect("extension stored under its own TypeId")
+    }
+
+    /// The value of type `T`, if there is one.
+    #[inline]
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        let id = std::any::TypeId::of::<T>();
+        self.entries
+            .iter()
+            .find(|(k, _)| *k == id)
+            .and_then(|(_, v)| v.downcast_ref::<T>())
     }
 }
 
 impl fmt::Debug for Extensions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Extensions")
-            .field("len", &self.map.len())
+            .field("len", &self.entries.len())
             .finish()
     }
 }
@@ -643,6 +675,11 @@ impl Vm {
         cdepth as usize + 2 * self.rt.resumers.len() + 1 >= MAX_CCALLS
     }
 
+    /// The main thread (`coroutine.running()` outside any coroutine).
+    pub fn main_thread(&self) -> Gc<orbit_core::Thread> {
+        self.rt.main_thread
+    }
+
     /// A VM with an empty global table and no libraries.
     pub fn new() -> Self {
         let mut heap = LuaHeap::new();
@@ -716,6 +753,7 @@ impl Vm {
             name,
             f,
             fast: None,
+            hidden: 0,
         });
         self.rt.native_ids.insert(name, id);
         Value::Native(id)
@@ -905,7 +943,10 @@ impl Vm {
             self.rt.stack.deeper()
         };
         self.rt.stack.frames.push(Frame {
-            kind: FrameKind::Boundary,
+            kind: FrameKind::Boundary {
+                native: false,
+                handler: false,
+            },
             func: func as u32,
             base: func as u32,
             pc: 0,

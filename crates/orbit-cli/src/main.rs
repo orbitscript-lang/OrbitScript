@@ -2,7 +2,9 @@
 //!
 //! `orbit [options] [script [args]]` takes the reference `lua`'s options
 //! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#the-command-line)):
-//! `-e stat`, `-l mod`, `-l g=mod`, `-i`, `-v`, `-E`, `-W`, `--` and `-`.
+//! `-e stat`, `-l mod`, `-l g=mod`, `-i`, `-v`, `-E`, `-W`, `--` and `-`,
+//! plus `--lock-cpath`, which keeps C modules to the search path `orbit`
+//! starts with (ADR-8).
 //! `arg` holds the script at 0, the interpreter and options below it and
 //! the arguments from 1; `...` holds the arguments. An uncaught error prints
 //! `<program>: <message>` plus a traceback to stderr with exit status 1.
@@ -60,6 +62,7 @@ struct Cli {
     interactive: bool,
     version: bool,
     ignore_env: bool,
+    lock_cpath: bool,
     warnings: bool,
     /// Index of the script in the arguments (`-` for standard input).
     script: Option<usize>,
@@ -90,6 +93,7 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
             "-v" => cli.version = true,
             "-E" => cli.ignore_env = true,
             "-W" => cli.warnings = true,
+            "--lock-cpath" => cli.lock_cpath = true,
             _ if a.starts_with("-e") || a.starts_with("-l") => {
                 let opt = if a.starts_with("-e") { "-e" } else { "-l" };
                 // The value is glued on (`-eprint(1)`) or the next argument,
@@ -156,6 +160,7 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          -v        show version information\n  \
          -E        ignore environment variables\n  \
          -W        turn warnings on\n  \
+         --lock-cpath  load C modules only from the starting 'package.cpath'\n  \
          --        stop handling options\n  \
          -         stop handling options and execute stdin\n"
     );
@@ -171,6 +176,7 @@ fn main() -> ExitCode {
     };
     let mut lua = Lua::with_options(Options {
         ignore_env: cli.ignore_env,
+        lock_cpath: cli.lock_cpath,
     });
     // The standalone lua5.5 reports generational mode from the start. The
     // incremental collector runs underneath either way.
@@ -604,7 +610,7 @@ fn msghandler(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
             String::from_utf8_lossy(&b).into_owned()
         }
         _ => {
-            let mm = ctx.rt.metamethod(ctx.heap, e, Event::ToString);
+            let mm = ctx.vm.rt.metamethod(&ctx.vm.heap, e, Event::ToString);
             if !matches!(mm, Value::Nil) {
                 ctx.push(e);
                 return Ok(NativeReturn::CallThen {

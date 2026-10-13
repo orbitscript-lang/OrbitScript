@@ -471,7 +471,7 @@ mod unpack {
                         return Ok(NativeReturn::Return(0));
                     }
                     let n = (j as i128 - i as i128 + 1) as u128;
-                    let room = ctx.rt.limits.max_stack.saturating_sub(ctx.len()) as u128;
+                    let room = ctx.vm.rt.limits.max_stack.saturating_sub(ctx.len()) as u128;
                     if n >= MAX_INT as u128 || n >= room {
                         return Err(ctx.error("too many results to unpack"));
                     }

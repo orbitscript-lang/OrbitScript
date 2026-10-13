@@ -393,8 +393,7 @@ impl Vm {
         self.rt.xfer.clear();
         let upvals = self.rt.stack.closure_at(f.func as usize);
         let mut ctx = NativeCtx {
-            heap: &mut self.heap,
-            rt: &mut self.rt,
+            vm: self,
             base: f.base as usize,
             nargs: f.nvarargs as usize,
             id,
@@ -648,7 +647,7 @@ pub(crate) fn yieldable(stack: &Stack) -> bool {
                 yieldable: false,
                 ..
             } | FrameKind::Handler
-                | FrameKind::Boundary
+                | FrameKind::Boundary { .. }
                 // A hook is a nested call, as a Lua hook is in the reference.
                 | FrameKind::Hook
         )
@@ -673,13 +672,13 @@ impl NativeCtx<'_> {
     /// Whether thread `t` could yield where it is: it isn't the main thread
     /// and no frame on its stack refuses (`coroutine.isyieldable`).
     pub fn thread_yieldable(&self, t: Gc<Thread>) -> bool {
-        if t == self.rt.main_thread {
+        if t == self.vm.rt.main_thread {
             return false;
         }
-        let s = if t == self.rt.current {
-            &self.rt.stack
+        let s = if t == self.vm.rt.current {
+            &self.vm.rt.stack
         } else {
-            &co(self.heap, t).stack
+            &co(&self.vm.heap, t).stack
         };
         s.aux.closing == Closing::No && yieldable(s)
     }
@@ -690,8 +689,8 @@ impl NativeCtx<'_> {
         // A new thread gets its creator's hook mask and count, but not its
         // function (observed from lua5.5: `gethook(co)` is `nil, mask,
         // count` and no events reach a hook).
-        c.stack.hook = self.rt.stack.hook.inherited();
-        self.heap.alloc(Thread::new(c))
+        c.stack.hook = self.vm.rt.stack.hook.inherited();
+        self.vm.heap.alloc(Thread::new(c))
     }
 
     /// Run `f` with thread `t`'s stack in place of the running one, for
@@ -699,55 +698,58 @@ impl NativeCtx<'_> {
     /// that stack's frames and registers, but must not touch this native's
     /// window or run Lua code. The running thread runs `f` directly.
     pub fn on_thread<R>(&mut self, t: Gc<Thread>, f: impl FnOnce(&mut Self, bool) -> R) -> R {
-        if t == self.rt.current {
+        if t == self.vm.rt.current {
             return f(self, false);
         }
-        let gc_cycles = self.rt.gc_cycles;
-        let c = co_mut(self.heap, t);
+        let gc_cycles = self.vm.rt.gc_cycles;
+        let c = co_mut(&mut self.vm.heap, t);
         // As when resuming it: after a sweep, the untraced slots above the
         // parked top may refer to freed objects.
         if c.cycle != gc_cycles {
             c.stack.regs.truncate(c.top);
         }
         // The running stack waits in `t`'s slot.
-        c.stack.swap(&mut self.rt.stack);
-        let saved_top = std::mem::replace(&mut self.rt.top, c.top);
+        c.stack.swap(&mut self.vm.rt.stack);
+        let saved_top = std::mem::replace(&mut self.vm.rt.top, c.top);
         let r = f(self, true);
         // `f` may have stored values into the parked stack.
-        self.heap.barrier_back(t);
-        let c = co_mut(self.heap, t);
-        c.stack.swap(&mut self.rt.stack);
-        c.top = std::mem::replace(&mut self.rt.top, saved_top);
+        self.vm.heap.barrier_back(t);
+        let c = co_mut(&mut self.vm.heap, t);
+        c.stack.swap(&mut self.vm.rt.stack);
+        c.top = std::mem::replace(&mut self.vm.rt.top, saved_top);
         r
     }
 
     /// The status of thread `t`.
     pub fn thread_status(&self, t: Gc<Thread>) -> CoStatus {
-        if t == self.rt.current {
+        if t == self.vm.rt.current {
             CoStatus::Running
         } else {
-            co(self.heap, t).status
+            co(&self.vm.heap, t).status
         }
     }
 
     /// The main thread.
     pub fn running_main_thread(&self) -> Gc<Thread> {
-        self.rt.main_thread
+        self.vm.rt.main_thread
     }
 
     /// The running thread, and whether it is the main thread.
     pub fn running(&self) -> (Gc<Thread>, bool) {
-        (self.rt.current, self.rt.current == self.rt.main_thread)
+        (
+            self.vm.rt.current,
+            self.vm.rt.current == self.vm.rt.main_thread,
+        )
     }
 
     /// The values of the main thread's variables still to close, oldest
     /// first, for `os.exit(code, true)`, which closes them as lua5.5 does
     /// when it closes the state.
     pub fn main_pending_closes(&self) -> Vec<Value> {
-        let s = if self.rt.current == self.rt.main_thread {
-            &self.rt.stack
+        let s = if self.vm.rt.current == self.vm.rt.main_thread {
+            &self.vm.rt.stack
         } else {
-            &co(self.heap, self.rt.main_thread).stack
+            &co(&self.vm.heap, self.vm.rt.main_thread).stack
         };
         s.aux.tbc.iter().map(|&r| s.regs[r as usize]).collect()
     }
@@ -764,35 +766,114 @@ impl NativeCtx<'_> {
         f: crate::NativeFn,
         upvals: &[Value],
     ) -> Value {
+        self.new_closure_hidden(name, f, upvals, &[])
+    }
+
+    /// [`NativeCtx::new_closure`], plus `hidden` upvalues that scripts can't
+    /// see or change through the debug library, for state a native must be
+    /// able to trust ([`NativeCtx::hidden_upvalue`]). Every closure of `f`
+    /// has the same number of hidden upvalues.
+    pub fn new_closure_hidden(
+        &mut self,
+        name: &'static str,
+        f: crate::NativeFn,
+        upvals: &[Value],
+        hidden: &[Value],
+    ) -> Value {
         let Value::Native(id) = self.native(name, f) else {
             unreachable!("natives are registered as natives")
         };
-        let proto = match self.rt.native_protos.get(&id) {
+        let n = u8::try_from(hidden.len()).expect("few hidden upvalues");
+        let native = &mut self.vm.rt.natives[id.0 as usize];
+        debug_assert!(
+            native.hidden == n || !self.vm.rt.native_protos.contains_key(&id),
+            "every closure of a native has the same hidden upvalues"
+        );
+        native.hidden = n;
+        let proto = match self.vm.rt.native_protos.get(&id) {
             Some(&p) => p,
             None => {
-                let p = self.heap.alloc(stub_proto(id));
-                self.rt.native_protos.insert(id, p);
+                let p = self.vm.heap.alloc(stub_proto(id));
+                self.vm.rt.native_protos.insert(id, p);
                 p
             }
         };
+        // Hidden upvalues go last, so visible ones keep their indices.
         let captures: Box<[Gc<Cell>]> = upvals
             .iter()
-            .map(|&value| self.heap.alloc(Cell { value }))
+            .chain(hidden)
+            .map(|&value| self.vm.heap.alloc(Cell { value }))
             .collect();
-        let code = self.heap.get(proto).code.clone();
-        Value::Closure(self.heap.alloc(Closure {
+        let code = self.vm.heap.get(proto).code.clone();
+        Value::Closure(self.vm.heap.alloc(Closure {
             proto,
             code,
             captures,
         }))
     }
 
+    /// Hidden upvalue `i` of the native closure being called (nil outside
+    /// one); see [`NativeCtx::new_closure_hidden`].
+    #[inline]
+    pub fn hidden_upvalue(&self, i: usize) -> Value {
+        let Some(c) = self.upvals else {
+            return Value::Nil;
+        };
+        let caps = &self.vm.heap.get(c).captures;
+        let hidden = self.vm.rt.natives[self.id.0 as usize].hidden as usize;
+        match (i < hidden).then(|| caps[caps.len() - hidden + i]) {
+            Some(cell) => self.vm.heap.get(cell).value,
+            None => Value::Nil,
+        }
+    }
+
+    /// The native behind function `f`: `f` itself, or the native a native
+    /// closure runs. `None` for Lua functions and other values.
+    pub fn native_of(&self, f: Value) -> Option<NativeId> {
+        match f {
+            Value::Native(id) => Some(id),
+            Value::Closure(c) => {
+                let p = self.vm.heap.get(self.vm.heap.get(c).proto);
+                match p.code.code.first() {
+                    Some(Op::NativeEntry { id }) => Some(NativeId(*id)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Hidden upvalue `i` of native closure `f` (nil if it has none).
+    pub fn hidden_upvalue_of(&self, f: Value, i: usize) -> Value {
+        let Value::Closure(c) = f else {
+            return Value::Nil;
+        };
+        let closure = self.vm.heap.get(c);
+        let hidden = self.vm.rt.hidden_upvalues(&self.vm.heap, closure);
+        let caps = &closure.captures;
+        match (i < hidden).then(|| caps[caps.len() - hidden + i]) {
+            Some(cell) => self.vm.heap.get(cell).value,
+            None => Value::Nil,
+        }
+    }
+
+    /// How many visible upvalues the native closure being called has.
+    pub fn upvalue_count(&self) -> usize {
+        match self.upvals {
+            Some(c) => {
+                self.vm.heap.get(c).captures.len()
+                    - self.vm.rt.natives[self.id.0 as usize].hidden as usize
+            }
+            None => 0,
+        }
+    }
+
     /// Upvalue `i` of the native closure being called, or whose
     /// continuation is running (nil outside one).
     pub fn upvalue(&self, i: usize) -> Value {
         match self.upvals {
-            Some(c) => match self.heap.get(c).captures.get(i) {
-                Some(&cell) => self.heap.get(cell).value,
+            Some(c) => match self.vm.heap.get(c).captures.get(i) {
+                Some(&cell) => self.vm.heap.get(cell).value,
                 None => Value::Nil,
             },
             None => Value::Nil,
@@ -802,9 +883,9 @@ impl NativeCtx<'_> {
     /// Set upvalue `i` of the native closure being called.
     pub fn set_upvalue(&mut self, i: usize, v: Value) {
         if let Some(c) = self.upvals
-            && let Some(&cell) = self.heap.get(c).captures.get(i)
+            && let Some(&cell) = self.vm.heap.get(c).captures.get(i)
         {
-            self.heap.update(cell, |cell| cell.value = v);
+            self.vm.heap.update(cell, |cell| cell.value = v);
         }
     }
 }
@@ -850,8 +931,7 @@ impl Vm {
         self.rt.top = func + 1 + nargs;
         let nf = self.rt.natives[id.0 as usize].f;
         let mut ctx = NativeCtx {
-            heap: &mut self.heap,
-            rt: &mut self.rt,
+            vm: self,
             base: func + 1,
             nargs,
             id,

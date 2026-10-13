@@ -29,7 +29,7 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
 fn clock(ctx: &mut NativeCtx<'_>) -> R {
     // Wall time since the VM started, not CPU time: std has no CPU clock and
     // ADR-7 adds no dependency for one (tests/lua-5.5/DEVIATIONS.md).
-    let t = ctx.rt.start.elapsed().as_secs_f64();
+    let t = ctx.vm.rt.start.elapsed().as_secs_f64();
     ctx.ret1(Value::Float(t))
 }
 
@@ -87,7 +87,7 @@ fn tmpname(ctx: &mut NativeCtx<'_>) -> R {
 /// Flush the output `print` and `io.write` share, so a child process or
 /// the exit doesn't overtake it.
 fn flush_output(ctx: &mut NativeCtx<'_>) {
-    let _ = ctx.rt.out.flush();
+    let _ = ctx.vm.rt.out.flush();
 }
 
 fn execute(ctx: &mut NativeCtx<'_>) -> R {
@@ -186,7 +186,7 @@ fn exit_closed(ctx: &mut NativeCtx<'_>, _: CallOutcome) -> R {
 /// flushed, closed or not, as the C library's `exit` does.
 fn exit_now(ctx: &mut NativeCtx<'_>, code: i64) -> R {
     #[cfg(feature = "io")]
-    crate::io::flush_all(&mut *ctx.rt.out);
+    crate::io::flush_all(&mut *ctx.vm.rt.out);
     flush_output(ctx);
     std::process::exit(code as i32)
 }
@@ -292,7 +292,7 @@ fn date(ctx: &mut NativeCtx<'_>) -> R {
 
 fn set_field(ctx: &mut NativeCtx<'_>, t: Gc<Table>, name: &str, v: Value) {
     let k = ctx.new_str(name.as_bytes());
-    tbl::set(ctx.heap, t, k, v).expect("string keys are valid");
+    tbl::set(&mut ctx.vm.heap, t, k, v).expect("string keys are valid");
 }
 
 /// Fill a date table (`os.date("*t")`, and `os.time` normalizing its
@@ -320,7 +320,7 @@ fn get_field(
     delta: i64,
 ) -> Result<i64, LuaError> {
     let k = ctx.new_str(name.as_bytes());
-    let v = tbl::get(ctx.heap, t, k);
+    let v = tbl::get(&ctx.vm.heap, t, k);
     let n = match v {
         Value::Nil => match default {
             Some(d) => return Ok(d),
@@ -359,7 +359,7 @@ fn time_(ctx: &mut NativeCtx<'_>) -> R {
     let min = get_field(ctx, t, "min", Some(0), 0)?;
     let sec = get_field(ctx, t, "sec", Some(0), 0)?;
     let k = ctx.new_str(b"isdst");
-    let isdst = match tbl::get(ctx.heap, t, k) {
+    let isdst = match tbl::get(&ctx.vm.heap, t, k) {
         Value::Nil => None,
         v => Some(!v.is_falsy()),
     };

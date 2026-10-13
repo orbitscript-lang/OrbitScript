@@ -9,5 +9,6 @@
 | [0005](0005-strings.md) | Strings | Accepted |
 | [0006](0006-safety-toolchain-size.md) | Safety, toolchain and size | Accepted |
 | [0007](0007-dependencies.md) | Dependency policy | Accepted |
+| [0008](0008-c-modules.md) | Loading C modules | Proposed |
 
 Statuses: **Proposed** (open for edits), **Accepted** (changes need Tym's approval), **Superseded**.
