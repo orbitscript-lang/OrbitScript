@@ -19,17 +19,17 @@ use crate::value::{Payload, Tag};
 use crate::{NoMemory, Value};
 
 /// Slots per group.
-const GROUP: usize = 8;
+const GROUP: usize = 1;
 
 /// Eight slots: their payloads, then their tag bytes (ADR-1).
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 struct Group {
-    payloads: [u64; GROUP],
+    payloads: [[u8; 8]; GROUP],
     tags: [u8; GROUP],
 }
 
-const _: () = assert!(std::mem::size_of::<Group>() == 72);
+const _: () = assert!(std::mem::size_of::<Group>() == 9 * GROUP);
 
 /// Groups for capacity `cap` (rounded up to whole groups).
 fn groups_for(cap: usize) -> usize {
@@ -80,7 +80,7 @@ impl ArrayPart {
         if byte == Tag::Nil as u8 {
             return None;
         }
-        Some((byte, Payload::from_bits(g.payloads[k])))
+        Some((byte, Payload::from_bits(u64::from_ne_bytes(g.payloads[k]))))
     }
 
     #[inline(always)]
@@ -96,14 +96,17 @@ impl ArrayPart {
     pub(super) fn get(&self, i: usize) -> Value {
         let g = &self.groups[i / GROUP];
         let tag = Tag::from_u8(g.tags[i % GROUP]).unwrap_or(Tag::Nil);
-        Value::unpack(tag, Payload::from_bits(g.payloads[i % GROUP]))
+        Value::unpack(
+            tag,
+            Payload::from_bits(u64::from_ne_bytes(g.payloads[i % GROUP])),
+        )
     }
 
     #[inline(always)]
     pub(super) fn set(&mut self, i: usize, v: Value) {
         let (t, p) = v.pack();
         let g = &mut self.groups[i / GROUP];
-        g.payloads[i % GROUP] = p.bits();
+        g.payloads[i % GROUP] = p.bits().to_ne_bytes();
         g.tags[i % GROUP] = t as u8;
     }
 
@@ -128,7 +131,7 @@ impl ArrayPart {
     pub(super) fn grown(&self, n: usize) -> usize {
         let mut cap = self.cap();
         while cap < n {
-            cap = (cap * 2).max(GROUP);
+            cap = (cap * 2).max(GROUP.max(4));
         }
         cap
     }
@@ -223,7 +226,7 @@ mod tests {
     #[test]
     fn sizes_are_whole_groups() {
         for cap in 0..100 {
-            assert_eq!(ArrayPart::bytes_for(cap), cap.div_ceil(8) * 72);
+            assert_eq!(ArrayPart::bytes_for(cap), cap.div_ceil(GROUP) * 9 * GROUP);
         }
     }
 
