@@ -258,7 +258,7 @@ impl Runtime {
             // A `__close` handler run by an error is called like a plain
             // function.
             k if unwinding_close(k) => None,
-            FrameKind::Meta { event, .. } => named("metamethod", event.short_name().as_bytes()),
+            FrameKind::Meta { field, .. } => named("metamethod", field.short_name().as_bytes()),
             FrameKind::Hook => named("hook", b"?"),
             FrameKind::Boundary { .. } | FrameKind::Native { .. }
                 if self.stack.aux.finalizer_at == Some(ci as u32) =>

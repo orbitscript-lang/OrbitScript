@@ -15,7 +15,7 @@ use orbit_core::table::{self, Key};
 use orbit_core::{Cell, Closure, FieldCache, Gc, LuaHeap, LuaStr, NoMemory, Table, Value};
 
 use crate::interp::Flow;
-use crate::meta::{self, Event, MetaAction, MetaCall, Metas};
+use crate::meta::{self, MetaAction, MetaCall, MetaField, Metas};
 use crate::ops::{self, Exc};
 use crate::{Frame, FrameKind, LuaError, Vm};
 
@@ -115,12 +115,17 @@ impl Vm {
     /// the handler above the frame's registers.
     pub(crate) fn call_meta(&mut self, call: MetaCall) -> Result<Flow, Exc> {
         let action = self.pending_action(call.aux);
-        if !call.f.is_function() && self.rt.metamethod(&self.heap, call.f, Event::Call).is_nil() {
+        if !call.f.is_function()
+            && self
+                .rt
+                .metamethod(&self.heap, call.f, MetaField::Call)
+                .is_nil()
+        {
             return Err(Exc::Rt(
                 format!(
                     "attempt to call a {} value (metamethod '{}')",
                     self.rt.metas.type_name(&self.heap, call.f),
-                    call.event.short_name()
+                    call.field.short_name()
                 ),
                 None,
             ));
@@ -148,7 +153,7 @@ impl Vm {
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Meta {
                 action,
-                event: call.event,
+                field: call.field,
             },
             func: at as u32,
             base: at as u32,
@@ -279,7 +284,7 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn op_tbc(&mut self, r: usize, pc: usize) -> Result<(), Exc> {
         let v = self.rt.stack.regs[r];
-        if self.rt.metamethod(&self.heap, v, Event::Close).is_nil() {
+        if self.rt.metamethod(&self.heap, v, MetaField::Close).is_nil() {
             let f = self.rt.stack.frames.last().expect("a frame");
             let FrameKind::Lua { closure, .. } = f.kind else {
                 unreachable!("Tbc runs in a Lua frame")
@@ -305,8 +310,8 @@ impl Vm {
     pub(crate) fn op_close(&mut self) -> Exc {
         let t = self.rt.stack.aux.tbc.pop().expect("a variable to close") as usize;
         let v = self.rt.stack.regs[t];
-        let h = self.rt.metamethod(&self.heap, v, Event::Close);
-        Exc::Meta(MetaCall::new(h, Event::Close, &[v]))
+        let h = self.rt.metamethod(&self.heap, v, MetaField::Close);
+        Exc::Meta(MetaCall::new(h, MetaField::Close, &[v]))
     }
 
     /// `NewTable`.
@@ -448,7 +453,7 @@ impl Vm {
                 return Ok(regs[from]);
             }
             let (x, y) = (regs[from + left - 2], regs[from + left - 1]);
-            let h = meta::binary_handler(&self.heap, &self.rt.metas, Event::Concat, x, y);
+            let h = meta::binary_handler(&self.heap, &self.rt.metas, MetaField::Concat, x, y);
             if h.is_nil() {
                 let j = if strnum(x) { left - 1 } else { left - 2 };
                 let v = regs[from + j];
@@ -460,7 +465,7 @@ impl Vm {
                     Some(j as u8),
                 ));
             }
-            let mut call = MetaCall::new(h, Event::Concat, &[x, y]);
+            let mut call = MetaCall::new(h, MetaField::Concat, &[x, y]);
             call.aux = left as u8;
             return Err(Exc::Meta(call));
         }
@@ -654,13 +659,13 @@ pub(crate) fn op_len(heap: &LuaHeap, metas: &Metas, v: Value) -> Result<Value, E
                 let tab = heap.get(t);
                 match tab.meta {
                     None => return Ok(Value::Int(tab.border())),
-                    Some(_) => match metas.metamethod(heap, v, Event::Len) {
+                    Some(_) => match metas.metamethod(heap, v, MetaField::Len) {
                         Value::Nil => return Ok(Value::Int(tab.border())),
                         h => h,
                     },
                 }
             }
-            _ => metas.metamethod(heap, v, Event::Len),
+            _ => metas.metamethod(heap, v, MetaField::Len),
         };
         if h.is_nil() {
             return Err(Exc::Rt(
@@ -671,7 +676,7 @@ pub(crate) fn op_len(heap: &LuaHeap, metas: &Metas, v: Value) -> Result<Value, E
                 Some(0),
             ));
         }
-        Err(Exc::Meta(MetaCall::new(h, Event::Len, &[v, v])))
+        Err(Exc::Meta(MetaCall::new(h, MetaField::Len, &[v, v])))
     }
 }
 
@@ -718,7 +723,7 @@ pub(crate) fn method_miss(
     index: &FieldCache,
     up: Option<(&FieldCache, &FieldCache)>,
 ) -> Result<Value, Exc> {
-    let index_key = index.key_for(heap, metas.events.name(Event::Index));
+    let index_key = index.key_for(heap, metas.field_names.name(MetaField::Index));
     let method_key = method.key_for(heap, k);
     let mut meta = mt;
     // Walk `__index` tables with the hashed keys; anything else (a function,

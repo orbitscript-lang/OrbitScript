@@ -21,19 +21,19 @@ use crate::ops::Exc;
 /// (the reference's limit).
 pub(crate) const MAX_CHAIN: usize = 2000;
 
-pub use orbit_core::Event;
+pub use orbit_core::MetaField;
 
-/// The interned event names, rooted by the runtime, so a metatable lookup
+/// The interned metatable field names, rooted by the runtime, so a metatable lookup
 /// is a handle-keyed probe.
 #[derive(Debug)]
-pub(crate) struct Events {
+pub(crate) struct MetaFieldNames {
     names: Box<[Gc<LuaStr>]>,
 }
 
-impl Events {
-    pub(crate) fn new(heap: &mut LuaHeap, strings: &mut Interner) -> Events {
-        Events {
-            names: Event::ALL
+impl MetaFieldNames {
+    pub(crate) fn new(heap: &mut LuaHeap, strings: &mut Interner) -> MetaFieldNames {
+        MetaFieldNames {
+            names: MetaField::ALL
                 .iter()
                 .map(|e| strings.new_str(heap, e.field().as_bytes()))
                 .collect(),
@@ -41,7 +41,7 @@ impl Events {
     }
 
     #[inline]
-    pub(crate) fn name(&self, e: Event) -> Gc<LuaStr> {
+    pub(crate) fn name(&self, e: MetaField) -> Gc<LuaStr> {
         self.names[e as usize]
     }
 
@@ -50,13 +50,13 @@ impl Events {
     }
 }
 
-/// What metamethod lookups need: the event names and the metatables of
+/// What metamethod lookups need: the field names and the metatables of
 /// the types whose values don't carry their own (one slot per tag). Kept
 /// apart from the stack so slow paths can borrow it while the dispatch
 /// loop holds the register window.
 #[derive(Debug)]
 pub(crate) struct Metas {
-    pub(crate) events: Events,
+    pub(crate) field_names: MetaFieldNames,
     pub(crate) type_meta: [Option<Gc<Table>>; 11],
 }
 
@@ -73,9 +73,9 @@ impl Metas {
 
     /// Field `e` of `v`'s metatable (raw), or nil.
     #[inline]
-    pub(crate) fn metamethod(&self, heap: &LuaHeap, v: Value, e: Event) -> Value {
+    pub(crate) fn metamethod(&self, heap: &LuaHeap, v: Value, e: MetaField) -> Value {
         match self.metatable(heap, v) {
-            Some(mt) => heap.get(mt).meta_field(heap, e, self.events.name(e)),
+            Some(mt) => heap.get(mt).meta_field(heap, e, self.field_names.name(e)),
             None => Value::Nil,
         }
     }
@@ -86,7 +86,7 @@ impl Metas {
     #[cold]
     pub(crate) fn type_name(&self, heap: &LuaHeap, v: Value) -> Cow<'static, str> {
         if let Value::Table(_) | Value::UserData(_) = v
-            && let Value::Str(s) = self.metamethod(heap, v, Event::Name)
+            && let Value::Str(s) = self.metamethod(heap, v, MetaField::Name)
         {
             return Cow::Owned(String::from_utf8_lossy(heap.get(s).as_bytes()).into_owned());
         }
@@ -100,20 +100,20 @@ pub(crate) struct MetaCall {
     pub f: Value,
     pub args: [Value; 3],
     pub nargs: u8,
-    pub event: Event,
+    pub field: MetaField,
     /// Instruction-specific state: for `Concat`, how many values are left.
     pub aux: u8,
 }
 
 impl MetaCall {
-    pub(crate) fn new(f: Value, event: Event, args: &[Value]) -> MetaCall {
+    pub(crate) fn new(f: Value, field: MetaField, args: &[Value]) -> MetaCall {
         let mut a = [Value::Nil; 3];
         a[..args.len()].copy_from_slice(args);
         MetaCall {
             f,
             args: a,
             nargs: args.len() as u8,
-            event,
+            field,
             aux: 0,
         }
     }
@@ -149,7 +149,7 @@ impl Runtime {
 
     /// Field `e` of `v`'s metatable (raw), or nil.
     #[inline]
-    pub fn metamethod(&self, heap: &LuaHeap, v: Value, e: Event) -> Value {
+    pub fn metamethod(&self, heap: &LuaHeap, v: Value, e: MetaField) -> Value {
         self.metas.metamethod(heap, v, e)
     }
 
@@ -173,9 +173,9 @@ impl Runtime {
         }
     }
 
-    /// The interned name of event `e`.
-    pub fn event_name(&self, e: Event) -> Gc<LuaStr> {
-        self.metas.events.name(e)
+    /// The interned name of metatable field `e`.
+    pub fn field_name(&self, e: MetaField) -> Gc<LuaStr> {
+        self.metas.field_names.name(e)
     }
 }
 
@@ -194,15 +194,16 @@ pub(crate) fn index(heap: &LuaHeap, rt: &Metas, obj: Value, key: Value) -> Resul
                     return Ok(v);
                 }
                 match tab.meta {
-                    Some(mt) => {
-                        heap.get(mt)
-                            .meta_field(heap, Event::Index, rt.events.name(Event::Index))
-                    }
+                    Some(mt) => heap.get(mt).meta_field(
+                        heap,
+                        MetaField::Index,
+                        rt.field_names.name(MetaField::Index),
+                    ),
                     None => return Ok(Value::Nil),
                 }
             }
             _ => {
-                let h = rt.metamethod(heap, o, Event::Index);
+                let h = rt.metamethod(heap, o, MetaField::Index);
                 if h.is_nil() {
                     return Err(index_type_error(heap, rt, o, o.same(obj)));
                 }
@@ -213,7 +214,7 @@ pub(crate) fn index(heap: &LuaHeap, rt: &Metas, obj: Value, key: Value) -> Resul
             return Ok(Value::Nil);
         }
         if h.is_function() {
-            return Err(Exc::Meta(MetaCall::new(h, Event::Index, &[o, key])));
+            return Err(Exc::Meta(MetaCall::new(h, MetaField::Index, &[o, key])));
         }
         o = h;
     }
@@ -240,8 +241,8 @@ pub(crate) fn new_index(
                 let tab = heap.get(t);
                 let h = match tab.meta {
                     Some(mt) if tab.get(heap, key).is_nil() => {
-                        let e = Event::NewIndex;
-                        heap.get(mt).meta_field(heap, e, rt.events.name(e))
+                        let e = MetaField::NewIndex;
+                        heap.get(mt).meta_field(heap, e, rt.field_names.name(e))
                     }
                     _ => Value::Nil,
                 };
@@ -251,7 +252,7 @@ pub(crate) fn new_index(
                 h
             }
             _ => {
-                let h = rt.metamethod(heap, o, Event::NewIndex);
+                let h = rt.metamethod(heap, o, MetaField::NewIndex);
                 if h.is_nil() {
                     return Err(index_type_error(heap, rt, o, o.same(obj)));
                 }
@@ -259,7 +260,11 @@ pub(crate) fn new_index(
             }
         };
         if h.is_function() {
-            return Err(Exc::Meta(MetaCall::new(h, Event::NewIndex, &[o, key, v])));
+            return Err(Exc::Meta(MetaCall::new(
+                h,
+                MetaField::NewIndex,
+                &[o, key, v],
+            )));
         }
         o = h;
     }
@@ -278,9 +283,15 @@ pub(crate) fn index_type_error(heap: &LuaHeap, rt: &Metas, v: Value, is_operand:
     )
 }
 
-/// The handler for binary event `e` on `a` and `b`: `a`'s, else `b`'s.
+/// The handler for binary operator field `e` on `a` and `b`: `a`'s, else `b`'s.
 #[inline]
-pub(crate) fn binary_handler(heap: &LuaHeap, rt: &Metas, e: Event, a: Value, b: Value) -> Value {
+pub(crate) fn binary_handler(
+    heap: &LuaHeap,
+    rt: &Metas,
+    e: MetaField,
+    a: Value,
+    b: Value,
+) -> Value {
     let h = rt.metamethod(heap, a, e);
     if h.is_nil() {
         rt.metamethod(heap, b, e)

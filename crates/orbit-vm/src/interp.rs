@@ -9,7 +9,7 @@ use orbit_core::table::{self, IntStore};
 use orbit_core::{Closure, Gc, NoMemory, ProtoCode, Value};
 
 use crate::cold::{already_defined, env_error, get_str_miss, method_miss, op_len, set_str_miss};
-use crate::meta::Event;
+use crate::meta::MetaField;
 use crate::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::ops::{self, Arith, Exc};
 use crate::{Catch, Frame, FrameKind, LuaError, Vm};
@@ -97,7 +97,7 @@ impl Vm {
                 Value::Closure(_) | Value::Native(_) => break,
                 v => {
                     // `__call`: the handler is called with the value first.
-                    let h = self.rt.metamethod(&self.heap, v, Event::Call);
+                    let h = self.rt.metamethod(&self.heap, v, MetaField::Call);
                     if h.is_nil() {
                         return Err(Exc::Rt(
                             format!(
@@ -722,7 +722,7 @@ impl Vm {
         // Above the variable, and so above every one still to close.
         let at = t + 1;
         let v = self.rt.stack.regs[t];
-        let h = self.rt.metamethod(&self.heap, v, Event::Close);
+        let h = self.rt.metamethod(&self.heap, v, MetaField::Close);
         // The error waits in the meta frame's slot; the handler goes above.
         let regs = &mut self.rt.stack.regs;
         extend_nil(regs, at + 4);
@@ -734,7 +734,7 @@ impl Vm {
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Meta {
                 action: crate::meta::MetaAction::Unwind { handled: true },
-                event: Event::Close,
+                field: MetaField::Close,
             },
             func: at as u32,
             base: at as u32,
@@ -759,7 +759,7 @@ impl Vm {
         h: Value,
         nargs: usize,
     ) -> Result<Flow, Exc> {
-        if !h.is_function() && self.rt.metamethod(&self.heap, h, Event::Call).is_nil() {
+        if !h.is_function() && self.rt.metamethod(&self.heap, h, MetaField::Call).is_nil() {
             return Err(Exc::Rt(
                 format!(
                     "attempt to call a {} value (metamethod 'close')",

@@ -8,7 +8,7 @@ This extends the [VM design](vm.md). It keeps that document's two structural rul
 
 | Area | Design |
 |---|---|
-| Metatables | `Table.meta` and `UserData.meta`; one metatable per other type in the runtime. Event names are interned once, so a lookup is a handle-keyed hash probe |
+| Metatables | `Table.meta` and `UserData.meta`; one metatable per other type in the runtime. Metatable field names are interned once, so a lookup is a handle-keyed hash probe |
 | Metamethod calls | A slow path that needs a metamethod returns `Exc::Meta(call)`. The cold error path pushes a **meta frame** that records how to finish the instruction, then calls the handler like any function. When it returns, the meta frame stores the result, takes the branch, or re-runs the instruction |
 | Fast paths | Unchanged except for one tag compare where a raw miss can now mean "ask the metatable": an inline cache hit on a `nil` value, or an integer read or store that finds `nil`, checks `meta` |
 | Userdata | `Value::UserData` (tag 8), a GC object holding any `'static` Rust value (`Box<dyn Any>`), a metatable and one user value. No `Send` requirement |
@@ -37,7 +37,7 @@ pub struct UserData {
 - `Tag` gains `UserData = 8` and `Thread = 9`, so table array parts and hash keys store them like any other value.
 - **Userdata payloads are opaque to the collector.** A host that wants a userdata to keep Lua values alive puts them in `user_value` (usually a table). That keeps `Trace` out of the embedding API and needs no `unsafe`. `Box<dyn Any>` has no `Send` bound, per the threading decision.
 - **Per-type metatables** live in the runtime: `type_meta: [Option<Gc<Table>>; 10]`, indexed by tag (`Int` and `Float` share the `number` slot). Strings get theirs from the string library (`__index = string`); `debug.setmetatable` (thread 6) writes the others.
-- **Event names** (`__index`, `__newindex`, `__add` … `__close`, `__gc`, `__mode`, `__name`, `__metatable`, `__pairs`) are interned when the VM starts and held in `Runtime::events`, rooted. `Runtime::metamethod(heap, v, Event) -> Value` is the one lookup everyone uses, the GC thread's `__gc`/`__mode` included.
+- **Metatable field names** (`MetaField`, fixed IDs) (`__index`, `__newindex`, `__add` … `__close`, `__gc`, `__mode`, `__name`, `__metatable`, `__pairs`) are interned when the VM starts and held in the runtime (`metas.field_names`), rooted. `Runtime::metamethod(heap, v, MetaField) -> Value` is the one lookup everyone uses, the GC thread's `__gc`/`__mode` included.
 
 ### Embedding API
 
@@ -56,7 +56,7 @@ let h: Option<&mut MyHandle> = vm.userdata_mut::<MyHandle>(ud);
 
 Every metamethod is reached from a path that already exists and is already cold:
 
-| Event | Reached from |
+| Metatable field | Reached from |
 |---|---|
 | `__index` | A field or global cache miss (`get_str_miss`), an integer or general read that found `nil` in a table with a metatable, indexing a non-table (`index_error`), `SelfCall` on a non-table |
 | `__newindex` | `set_str_miss`, an integer store that would fill a `nil` slot of a table with a metatable, a general store on a table with a metatable, storing into a non-table |
@@ -126,7 +126,7 @@ Natives can't use `Exc::Meta`; they reach metamethods through `CallThen`, which 
 ```rust
 pub enum Meta { Value(Value), Call { f: Value, nargs: usize } }   // args already pushed
 ctx.index(obj, key)? ; ctx.set_index(obj, key, v)? ; ctx.len(v)? ; ctx.less_than(a, b)? ; ctx.tostring(v)?
-ctx.metamethod(v, Event::Name) -> Value; ctx.metatable(v) -> Option<Gc<Table>>
+ctx.metamethod(v, MetaField::Name) -> Value; ctx.metatable(v) -> Option<Gc<Table>>
 ```
 
 A native returns `CallThen { f, nargs, k, .. }` for `Meta::Call` and picks the result up in `k`. The table and string libraries (thread 3) use these for `table.insert`, `sort` comparisons and `gsub` with a table replacement.

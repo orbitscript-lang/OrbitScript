@@ -6,7 +6,7 @@ mod pack;
 pub(crate) mod pattern;
 
 use orbit_vm::orbit_core::{Gc, LuaStr, Table, Tag, Value, number};
-use orbit_vm::{CallOutcome, Event, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_vm::{CallOutcome, LuaError, Meta, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
 
 use pattern::{Capture, Captures, Matcher, PatternError};
 
@@ -622,7 +622,7 @@ fn finish_gsub(ctx: &mut NativeCtx<'_>, count: i64, out: Vec<u8>) -> R {
 /// add its arithmetic metamethods.
 pub(crate) fn set_metatable_index(vm: &mut Vm, string: Gc<Table>) {
     if let Some(mt) = vm.rt.type_meta(Tag::Str) {
-        let k = Value::Str(vm.rt.event_name(Event::Index));
+        let k = Value::Str(vm.rt.field_name(MetaField::Index));
         vm.table_set(mt, k, Value::Table(string));
         arith::install(vm, mt);
     }

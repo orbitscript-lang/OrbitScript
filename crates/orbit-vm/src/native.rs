@@ -4,7 +4,7 @@ use orbit_bytecode::{Op, Origin};
 use orbit_core::number::{self, float_to_int};
 use orbit_core::{Gc, LuaStr, NativeId, Table, Value};
 
-use crate::meta::{self, Event};
+use crate::meta::{self, MetaField};
 use crate::ops::Exc;
 use crate::{FrameKind, LuaError, ops};
 
@@ -576,7 +576,7 @@ impl NativeCtx<'_> {
     }
 
     /// Field `e` of `v`'s metatable (raw), or nil.
-    pub fn metamethod(&self, v: Value, e: Event) -> Value {
+    pub fn metamethod(&self, v: Value, e: MetaField) -> Value {
         self.vm.rt.metamethod(&self.vm.heap, v, e)
     }
 
@@ -683,7 +683,7 @@ impl NativeCtx<'_> {
         if ops::concat_piece(heap, a, &mut out) && ops::concat_piece(heap, b, &mut out) {
             return Ok(Meta::Done(self.new_str_owned(out)));
         }
-        let h = meta::binary_handler(heap, &self.vm.rt.metas, Event::Concat, a, b);
+        let h = meta::binary_handler(heap, &self.vm.rt.metas, MetaField::Concat, a, b);
         if h.is_nil() {
             let bad = if ops::concat_piece(heap, a, &mut Vec::new()) {
                 b
@@ -698,7 +698,7 @@ impl NativeCtx<'_> {
         }
         self.meta_result(Err(Exc::Meta(meta::MetaCall::new(
             h,
-            Event::Concat,
+            MetaField::Concat,
             &[a, b],
         ))))
     }

@@ -74,7 +74,7 @@ pub(crate) fn link(
             // function with more sites than fit an operand; a cache whose
             // sites disagree on the key is marked shared and never fills.
             let mut caches: Vec<Option<FieldCache>> = (0..u.ncaches).map(|_| None).collect();
-            let index_key = rt.event_name(crate::meta::Event::Index);
+            let index_key = rt.field_name(crate::meta::MetaField::Index);
             let mut claim = |ic: u16, key| match &mut caches[ic as usize] {
                 slot @ None => *slot = Some(FieldCache::new(heap, key)),
                 Some(c) if c.key != key => c.shared = true,

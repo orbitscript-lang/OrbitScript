@@ -8,7 +8,7 @@ use orbit_vm::orbit_core::number::str_to_number;
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::value::raw_eq;
 use orbit_vm::{
-    CallOutcome, Event, GcMode, GcParam, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm,
+    CallOutcome, GcMode, GcParam, LuaError, Meta, MetaField, NativeCtx, NativeFn, NativeReturn, Vm,
     finalize_then_return,
 };
 
@@ -67,7 +67,7 @@ fn print(ctx: &mut NativeCtx<'_>) -> R {
 fn print_from(ctx: &mut NativeCtx<'_>, n: usize, start: usize) -> R {
     for i in start..n {
         let v = ctx.arg(i);
-        let h = ctx.metamethod(v, Event::ToString);
+        let h = ctx.metamethod(v, MetaField::ToString);
         if !h.is_nil() {
             // Window: args, then the index being converted, then the
             // call's argument (replaced by its results).
@@ -135,7 +135,7 @@ fn tostring(ctx: &mut NativeCtx<'_>) -> R {
     if matches!(v, Value::Str(_)) {
         return ctx.ret1(v);
     }
-    let h = ctx.metamethod(v, Event::ToString);
+    let h = ctx.metamethod(v, MetaField::ToString);
     if !h.is_nil() {
         ctx.truncate(1);
         ctx.push(v);
@@ -165,7 +165,7 @@ fn getmetatable(ctx: &mut NativeCtx<'_>) -> R {
     let Some(mt) = ctx.metatable(v) else {
         return ctx.ret1(Value::Nil);
     };
-    let protected = ctx.metamethod(v, Event::Metatable);
+    let protected = ctx.metamethod(v, MetaField::Metatable);
     if !protected.is_nil() {
         return ctx.ret1(protected);
     }
@@ -179,7 +179,10 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
         Value::Table(m) => Some(m),
         _ => return Err(ctx.type_error(1, "nil or table")),
     };
-    if !ctx.metamethod(Value::Table(t), Event::Metatable).is_nil() {
+    if !ctx
+        .metamethod(Value::Table(t), MetaField::Metatable)
+        .is_nil()
+    {
         return Err(ctx.error("cannot change a protected metatable"));
     }
     orbit_vm::orbit_core::gc::set_metatable(&mut ctx.vm.heap, Value::Table(t), mt);
@@ -276,7 +279,7 @@ fn ipairs_step(ctx: &mut NativeCtx<'_>, i: i64, v: Value) -> R {
 
 fn pairs(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_any(0)?;
-    let h = ctx.metamethod(t, Event::Pairs);
+    let h = ctx.metamethod(t, MetaField::Pairs);
     if !h.is_nil() {
         ctx.truncate(1);
         ctx.push(t);

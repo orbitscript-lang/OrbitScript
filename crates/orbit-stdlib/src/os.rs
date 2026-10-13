@@ -4,7 +4,7 @@ use std::io::Write;
 
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::{Gc, Table, Value};
-use orbit_vm::{CallOutcome, Event, LuaError, NativeCtx, NativeFn, NativeReturn};
+use orbit_vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeFn, NativeReturn};
 
 use crate::sys::{exit_status, file_error, shell};
 use crate::time::{self, Tm};
@@ -148,7 +148,7 @@ fn close_next(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.arg(COUNT + n as usize);
     ctx.set(COUNT, Value::Int(n - 1));
     ctx.truncate(COUNT + n as usize);
-    let h = ctx.metamethod(v, Event::Close);
+    let h = ctx.metamethod(v, MetaField::Close);
     ctx.push(v);
     let failed = matches!(ctx.arg(FAILED), Value::Bool(true));
     if failed {
