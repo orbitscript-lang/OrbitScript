@@ -270,12 +270,20 @@ impl Vm {
     /// least one 256-register window while it may be resumed soon; one that
     /// has gone cold costs only what it holds. The copy frees the big
     /// buffer whole, which a shrink in place would leave fragmented.
-    #[cold]
+    #[inline]
     fn shrink_parked(&mut self, t: Gc<Thread>, stamp: u32) {
-        let c = co_mut(&mut self.heap, t);
-        if c.status != CoStatus::Suspended || c.parks != stamp {
-            return;
+        // Usually `t` has been resumed since: nothing to do.
+        let c = co(&self.heap, t);
+        if c.status == CoStatus::Suspended && c.parks == stamp {
+            self.shrink_parked_stack(t);
         }
+    }
+
+    /// [`Vm::shrink_parked`]'s copy, for a thread that has gone cold.
+    #[cold]
+    #[inline(never)]
+    fn shrink_parked_stack(&mut self, t: Gc<Thread>) {
+        let c = co_mut(&mut self.heap, t);
         let before = c.bytes;
         let s = &mut c.stack;
         s.regs = s.regs[..c.top].to_vec();

@@ -202,6 +202,7 @@ fn merge_state(ctx: &NativeCtx<'_>, n: usize) -> State {
 
 /// Compare `a < b`, consuming the answer of a finished call if there is
 /// one (the state hasn't moved since the call was requested).
+#[inline]
 fn less(ctx: &mut NativeCtx<'_>, st: &mut State, a: Value, b: Value) -> Result<Less, LuaError> {
     let pending = ctx.arg(PENDING);
     if let Value::Bool(r) = pending {

@@ -383,9 +383,16 @@ impl Stack {
         if at < self.regs.len() {
             self.regs[at] = v;
         } else {
-            crate::interp::extend_nil(&mut self.regs, at);
-            self.regs.push(v);
+            self.put_grow(at, v);
         }
+    }
+
+    /// [`Stack::put`] past the end of the registers.
+    #[cold]
+    #[inline(never)]
+    fn put_grow(&mut self, at: usize, v: Value) {
+        crate::interp::extend_nil(&mut self.regs, at);
+        self.regs.push(v);
     }
 
     /// Insert `v` at `at` in the values that end at `top`, shifting them up;

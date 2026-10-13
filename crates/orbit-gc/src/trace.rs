@@ -214,7 +214,34 @@ impl KindMeta {
     }
 
     /// Pick a slot for a new object. Returns its index.
+    #[inline]
     pub(crate) fn take_slot(&mut self) -> u32 {
+        // The usual case: the current page has a free or fresh slot.
+        if let Some(p) = self.cur {
+            let n = self.page_slots();
+            let page = &mut self.pages[p as usize];
+            let offset = match page.free.pop() {
+                Some(o) => Some(u32::from(o)),
+                None if page.fresh < n => {
+                    page.fresh += 1;
+                    Some(page.fresh - 1)
+                }
+                None => None,
+            };
+            if let Some(o) = offset {
+                page.live += 1;
+                self.live += 1;
+                return (p << self.shift) | o;
+            }
+        }
+        self.take_slot_slow()
+    }
+
+    /// [`KindMeta::take_slot`] when the current page is full or there is
+    /// none: move on to the next open page, or open one.
+    #[cold]
+    #[inline(never)]
+    fn take_slot_slow(&mut self) -> u32 {
         let n = self.page_slots();
         while let Some(p) = self.cur {
             let page = &mut self.pages[p as usize];
@@ -270,6 +297,7 @@ impl KindMeta {
     }
 
     /// Return slot `i` to its page's free list.
+    #[inline]
     pub(crate) fn free_slot(&mut self, i: u32) {
         self.color[i as usize] = FREE;
         let (p, o) = self.split(i);
@@ -278,11 +306,19 @@ impl KindMeta {
         page.live -= 1;
         self.live -= 1;
         if !page.open {
-            page.open = true;
-            self.open.insert(p as u32);
-            if self.cur.is_none_or(|c| (p as u32) < c) {
-                self.cur = Some(p as u32);
-            }
+            self.reopen(p);
+        }
+    }
+
+    /// Offer page `p` again: [`KindMeta::free_slot`] freed a slot in it
+    /// after it had filled up.
+    #[cold]
+    #[inline(never)]
+    fn reopen(&mut self, p: usize) {
+        self.pages[p].open = true;
+        self.open.insert(p as u32);
+        if self.cur.is_none_or(|c| (p as u32) < c) {
+            self.cur = Some(p as u32);
         }
     }
 
