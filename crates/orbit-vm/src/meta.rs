@@ -21,68 +21,7 @@ use crate::ops::Exc;
 /// (the reference's limit).
 pub(crate) const MAX_CHAIN: usize = 2000;
 
-macro_rules! events {
-    ($($variant:ident = $name:literal,)*) => {
-        /// A metamethod event (or another metatable field the runtime reads).
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        #[repr(u8)]
-        pub enum Event {
-            $($variant,)*
-        }
-
-        impl Event {
-            /// Every event, in declaration order.
-            pub const ALL: &'static [Event] = &[$(Event::$variant,)*];
-
-            /// The metatable field name, such as `__index`.
-            pub fn field(self) -> &'static str {
-                match self {
-                    $(Event::$variant => $name,)*
-                }
-            }
-        }
-    };
-}
-
-events! {
-    Index = "__index",
-    NewIndex = "__newindex",
-    Gc = "__gc",
-    Mode = "__mode",
-    Len = "__len",
-    Eq = "__eq",
-    Add = "__add",
-    Sub = "__sub",
-    Mul = "__mul",
-    Mod = "__mod",
-    Pow = "__pow",
-    Div = "__div",
-    IDiv = "__idiv",
-    BAnd = "__band",
-    BOr = "__bor",
-    BXor = "__bxor",
-    Shl = "__shl",
-    Shr = "__shr",
-    Unm = "__unm",
-    BNot = "__bnot",
-    Lt = "__lt",
-    Le = "__le",
-    Concat = "__concat",
-    Call = "__call",
-    Close = "__close",
-    ToString = "__tostring",
-    Name = "__name",
-    Metatable = "__metatable",
-    Pairs = "__pairs",
-}
-
-impl Event {
-    /// The name without the underscores, as messages and tracebacks print
-    /// it (`metamethod 'index'`).
-    pub fn short_name(self) -> &'static str {
-        &self.field()[2..]
-    }
-}
+pub use orbit_core::Event;
 
 /// The interned event names, rooted by the runtime, so a metatable lookup
 /// is a handle-keyed probe.
@@ -136,7 +75,7 @@ impl Metas {
     #[inline]
     pub(crate) fn metamethod(&self, heap: &LuaHeap, v: Value, e: Event) -> Value {
         match self.metatable(heap, v) {
-            Some(mt) => heap.get(mt).get_str(heap, self.events.name(e)),
+            Some(mt) => heap.get(mt).meta_field(heap, e, self.events.name(e)),
             None => Value::Nil,
         }
     }
@@ -255,7 +194,10 @@ pub(crate) fn index(heap: &LuaHeap, rt: &Metas, obj: Value, key: Value) -> Resul
                     return Ok(v);
                 }
                 match tab.meta {
-                    Some(mt) => heap.get(mt).get_str(heap, rt.events.name(Event::Index)),
+                    Some(mt) => {
+                        heap.get(mt)
+                            .meta_field(heap, Event::Index, rt.events.name(Event::Index))
+                    }
                     None => return Ok(Value::Nil),
                 }
             }
@@ -298,7 +240,8 @@ pub(crate) fn new_index(
                 let tab = heap.get(t);
                 let h = match tab.meta {
                     Some(mt) if tab.get(heap, key).is_nil() => {
-                        heap.get(mt).get_str(heap, rt.events.name(Event::NewIndex))
+                        let e = Event::NewIndex;
+                        heap.get(mt).meta_field(heap, e, rt.events.name(e))
                     }
                     _ => Value::Nil,
                 };
