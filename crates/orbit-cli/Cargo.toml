@@ -26,9 +26,15 @@ orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 signal-hook = "0.4.5"
 
 [features]
-default = ["c-modules"]
+default = ["c-modules", "line-editing"]
 # Load C modules (on by default in the CLI, Tym 2026-10-09).
 c-modules = ["orbit/c-modules"]
+# Interactive mode (`-i`, or no script on a terminal), reading plain lines.
+# Without it, `-i` is an unrecognized option and a terminal on standard
+# input is read as a script, as a pipe is.
+repl = []
+# Line editing, history and Tab completion in interactive mode.
+line-editing = ["repl"]
 
 [lints]
 workspace = true
