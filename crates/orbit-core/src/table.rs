@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn presized_array_part_grows_with_its_tags() {
-        // Tag words move when the single allocation grows; check every slot
+        // The single allocation grows by reallocation; check every slot
         // across several growths from an odd starting size.
         let (mut heap, _, _) = setup();
         let t = heap.alloc(Table::with_capacity(3, 0));
@@ -1646,7 +1646,7 @@ mod tests {
         set(&mut heap, t, Value::Int(3), Value::Int(3)).unwrap();
         let tab = heap.get(t);
         assert!(tab.array_len() <= 3);
-        assert!(tab.array.cap() <= 8);
+        assert!(tab.array.cap() <= 4);
         assert!(is_border(tab, tab.border()));
         assert!(matches!(tab.get_int(3), Value::Int(3)));
         assert!(tab.get_int(2).is_nil());

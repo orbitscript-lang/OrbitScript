@@ -1,13 +1,11 @@
-//! The array part's storage. The raw words and their layout stay in this
-//! module; its API takes and returns `Value`s, typed `Tag`s and opaque
-//! `Payload`s.
+//! The array part's storage (ADR-1). The raw bytes and their layout stay
+//! in this module; its API takes and returns `Value`s, typed `Tag`s and
+//! opaque `Payload`s.
 //!
-//! Layout (ADR-1, grouped): one allocation of [`Group`]s, each [`GROUP`]
-//! payload words followed by those slots' tag bytes, 72 bytes for 8 slots
-//! (9 bytes per slot). Slot `i` is entry `i % 8` of group `i / 8`, so one
-//! bounds check on the group covers its payload and its tag. The capacity
-//! is always a whole number of groups, and growing appends zeroed groups,
-//! so no group ever moves.
+//! Layout: one allocation of [`Slot`]s, 9 bytes each: the 8-byte payload,
+//! then the tag byte. Slot `i` starts at byte `9 * i`, so one bounds check
+//! on the slot covers its payload and its tag, and no capacity has to be
+//! loaded to find the tags. Growing appends zeroed slots; no slot moves.
 //!
 //! Slots below `len` may hold nil (holes). The tag bytes of slots from
 //! `len` up are always nil, so a slot whose tag is not nil is below `len`:
@@ -18,27 +16,28 @@
 use crate::value::{Payload, Tag};
 use crate::{NoMemory, Value};
 
-/// Slots per group.
-const GROUP: usize = 1;
-
-/// Eight slots: their payloads, then their tag bytes (ADR-1).
+/// One array slot. The payload is a byte array so a slot is 9 bytes, not
+/// 16: payloads are read and written unaligned, which x86-64 and aarch64
+/// do in one instruction.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
-struct Group {
-    payloads: [[u8; 8]; GROUP],
-    tags: [u8; GROUP],
+struct Slot {
+    payload: [u8; 8],
+    tag: u8,
 }
 
-const _: () = assert!(std::mem::size_of::<Group>() == 9 * GROUP);
+const _: () = assert!(std::mem::size_of::<Slot>() == 9);
 
-/// Groups for capacity `cap` (rounded up to whole groups).
-fn groups_for(cap: usize) -> usize {
-    cap.div_ceil(GROUP)
+impl Slot {
+    #[inline(always)]
+    fn payload(&self) -> Payload {
+        Payload::from_bits(u64::from_ne_bytes(self.payload))
+    }
 }
 
 #[derive(Debug, Default)]
 pub(super) struct ArrayPart {
-    groups: Box<[Group]>,
+    slots: Box<[Slot]>,
     len: u32,
 }
 
@@ -48,12 +47,11 @@ impl ArrayPart {
             return Ok(ArrayPart::default());
         }
         assert!(cap <= u32::MAX as usize, "table overflow");
-        let n = groups_for(cap);
-        let mut groups = Vec::new();
-        groups.try_reserve_exact(n)?;
-        groups.resize(n, Group::default());
+        let mut slots = Vec::new();
+        slots.try_reserve_exact(cap)?;
+        slots.resize(cap, Slot::default());
         Ok(ArrayPart {
-            groups: groups.into_boxed_slice(),
+            slots: slots.into_boxed_slice(),
             len: 0,
         })
     }
@@ -65,49 +63,43 @@ impl ArrayPart {
 
     #[inline(always)]
     pub(super) fn cap(&self) -> usize {
-        self.groups.len() * GROUP
+        self.slots.len()
     }
 
     /// The tag byte and payload of slot `idx` when it holds a value (its
     /// tag is not nil); `None` for a nil slot or one past the array part.
     /// A non-nil tag means `idx < len` (see the module's invariant), so
-    /// the one bounds check on the group is all this needs.
+    /// the slot's one bounds check is all this needs.
     #[inline(always)]
     pub(super) fn live(&self, idx: u64) -> Option<(u8, Payload)> {
-        let g = self.groups.get(usize::try_from(idx / GROUP as u64).ok()?)?;
-        let k = (idx % GROUP as u64) as usize;
-        let byte = g.tags[k];
-        if byte == Tag::Nil as u8 {
+        let s = self.slots.get(usize::try_from(idx).ok()?)?;
+        if s.tag == Tag::Nil as u8 {
             return None;
         }
-        Some((byte, Payload::from_bits(u64::from_ne_bytes(g.payloads[k]))))
+        Some((s.tag, s.payload()))
     }
 
     #[inline(always)]
     pub(super) fn tag(&self, i: usize) -> Tag {
-        let byte = self.groups[i / GROUP].tags[i % GROUP];
         // Every tag byte was written from a `Tag`, so the fallback never
         // happens; it folds into `unpack`'s match where `expect` would add
         // a branch to every array read.
-        Tag::from_u8(byte).unwrap_or(Tag::Nil)
+        Tag::from_u8(self.slots[i].tag).unwrap_or(Tag::Nil)
     }
 
     #[inline(always)]
     pub(super) fn get(&self, i: usize) -> Value {
-        let g = &self.groups[i / GROUP];
-        let tag = Tag::from_u8(g.tags[i % GROUP]).unwrap_or(Tag::Nil);
-        Value::unpack(
-            tag,
-            Payload::from_bits(u64::from_ne_bytes(g.payloads[i % GROUP])),
-        )
+        let s = &self.slots[i];
+        Value::unpack(Tag::from_u8(s.tag).unwrap_or(Tag::Nil), s.payload())
     }
 
     #[inline(always)]
     pub(super) fn set(&mut self, i: usize, v: Value) {
         let (t, p) = v.pack();
-        let g = &mut self.groups[i / GROUP];
-        g.payloads[i % GROUP] = p.bits().to_ne_bytes();
-        g.tags[i % GROUP] = t as u8;
+        self.slots[i] = Slot {
+            payload: p.bits().to_ne_bytes(),
+            tag: t as u8,
+        };
     }
 
     #[inline(always)]
@@ -126,39 +118,38 @@ impl ArrayPart {
         self.realloc(self.grown(self.len() + 1))
     }
 
-    /// The capacity pushing up to `n` slots grows to: doubling, from one
-    /// group.
+    /// The capacity pushing up to `n` slots grows to: doubling, from 4.
     pub(super) fn grown(&self, n: usize) -> usize {
         let mut cap = self.cap();
         while cap < n {
-            cap = (cap * 2).max(GROUP.max(4));
+            cap = (cap * 2).max(4);
         }
         cap
     }
 
-    /// Grow to room for `cap` slots (more than now), rounded up to whole
-    /// groups. The allocation is resized in place where the allocator can;
-    /// no group moves, and the new groups start zeroed, so every new tag
-    /// byte reads nil. On failure nothing changes.
+    /// Grow to room for `cap` slots (more than now). The allocation is
+    /// resized in place where the allocator can; no slot moves, and the
+    /// new slots start zeroed, so every new tag byte reads nil. On failure
+    /// nothing changes.
     pub(super) fn realloc(&mut self, cap: usize) -> Result<(), NoMemory> {
         assert!(cap <= u32::MAX as usize, "table overflow");
-        let mut v = std::mem::take(&mut self.groups).into_vec();
-        let total = groups_for(cap);
-        if v.try_reserve_exact(total - v.len()).is_err() {
+        let mut v = std::mem::take(&mut self.slots).into_vec();
+        if v.try_reserve_exact(cap - v.len()).is_err() {
             // A boxed slice's vector is exactly full, so this gives the
             // same allocation back.
-            self.groups = v.into_boxed_slice();
+            self.slots = v.into_boxed_slice();
             return Err(NoMemory);
         }
-        v.resize(total, Group::default());
-        self.groups = v.into_boxed_slice();
+        v.resize(cap, Slot::default());
+        self.slots = v.into_boxed_slice();
         Ok(())
     }
 
     /// How many of slots `lo..hi` (all below `len`) are non-nil.
     pub(super) fn count_present(&self, lo: usize, hi: usize) -> usize {
-        (lo..hi)
-            .filter(|&i| self.groups[i / GROUP].tags[i % GROUP] != Tag::Nil as u8)
+        self.slots[lo..hi]
+            .iter()
+            .filter(|s| s.tag != Tag::Nil as u8)
             .count()
     }
 
@@ -171,20 +162,26 @@ impl ArrayPart {
         self.len = len as u32;
     }
 
+    /// The bytes this array part takes, for the collector's accounting.
     pub(super) fn bytes(&self) -> usize {
-        self.groups.len() * std::mem::size_of::<Group>()
+        Self::bytes_for(self.cap())
     }
 
-    /// The bytes an array part of capacity `cap` takes.
+    /// The bytes an array part of capacity `cap` takes, rounded up to the
+    /// allocator's 8-byte granularity (the GC paces on this; counting a
+    /// 2-slot part as 18 bytes when malloc spends 24 or more on it let
+    /// binary_trees' heap grow 4% further between collections).
     pub(super) fn bytes_for(cap: usize) -> usize {
-        groups_for(cap) * std::mem::size_of::<Group>()
+        (cap * std::mem::size_of::<Slot>()).next_multiple_of(8)
     }
 
     /// The invariant [`ArrayPart::live`] relies on: every tag byte from
     /// `len` up is nil.
     #[cfg(test)]
     pub(super) fn tags_past_len_are_nil(&self) -> bool {
-        (self.len()..self.cap()).all(|i| self.groups[i / GROUP].tags[i % GROUP] == Tag::Nil as u8)
+        self.slots[self.len()..]
+            .iter()
+            .all(|s| s.tag == Tag::Nil as u8)
     }
 }
 
@@ -194,7 +191,7 @@ mod tests {
 
     fn val(i: usize) -> Value {
         match i % 4 {
-            0 => Value::Bool(i % 8 == 0),
+            0 => Value::Bool(i.is_multiple_of(8)),
             1 => Value::Int(i as i64),
             2 => Value::Float(i as f64 + 0.5),
             _ => Value::Nil,
@@ -215,7 +212,7 @@ mod tests {
                 );
             }
         }
-        for i in a.len()..a.cap() + 2 * GROUP {
+        for i in a.len()..a.cap() + 16 {
             assert!(a.live(i as u64).is_none(), "{what}: slot {i}");
         }
         for idx in [u32::MAX as u64, u32::MAX as u64 + 1, u64::MAX] {
@@ -224,14 +221,19 @@ mod tests {
     }
 
     #[test]
-    fn sizes_are_whole_groups() {
+    fn sizes_are_no_more_than_payloads_then_tags() {
         for cap in 0..100 {
-            assert_eq!(ArrayPart::bytes_for(cap), cap.div_ceil(GROUP) * 9 * GROUP);
+            // 9 bytes a slot, never more than the layout before slots.
+            assert!(ArrayPart::bytes_for(cap) >= cap * 9);
+            assert!(ArrayPart::bytes_for(cap) <= cap * 8 + cap.div_ceil(8) * 8);
         }
+        assert_eq!(ArrayPart::bytes_for(2), 24);
+        assert_eq!(ArrayPart::bytes_for(4), 40);
+        assert_eq!(ArrayPart::bytes_for(8), 72);
     }
 
     #[test]
-    fn pushes_across_group_boundaries() {
+    fn pushes_keep_every_slot() {
         for presize in [0, 1, 3, 4, 7, 8, 9, 15, 16, 17] {
             let mut a = ArrayPart::with_capacity(presize).unwrap();
             check(&a, "new");
@@ -243,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn realloc_and_extend_across_group_boundaries() {
+    fn realloc_and_extend_keep_every_slot() {
         for (from, to) in [(1, 3), (3, 8), (4, 9), (5, 17), (8, 16), (9, 24), (12, 100)] {
             let mut a = ArrayPart::with_capacity(from).unwrap();
             for i in 0..from {
