@@ -5,7 +5,7 @@
 
 use orbit_vm::orbit_core::number::{self, ArithOp, Number};
 use orbit_vm::orbit_core::{Gc, Table, Value};
-use orbit_vm::{CallOutcome, Event, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -13,40 +13,40 @@ type R = Result<NativeReturn, LuaError>;
 /// negation.
 #[derive(Debug, Clone, Copy)]
 struct Op {
-    event: Event,
+    field: MetaField,
     arith: Option<ArithOp>,
 }
 
 const ADD: Op = Op {
-    event: Event::Add,
+    field: MetaField::Add,
     arith: Some(ArithOp::Add),
 };
 const SUB: Op = Op {
-    event: Event::Sub,
+    field: MetaField::Sub,
     arith: Some(ArithOp::Sub),
 };
 const MUL: Op = Op {
-    event: Event::Mul,
+    field: MetaField::Mul,
     arith: Some(ArithOp::Mul),
 };
 const MOD: Op = Op {
-    event: Event::Mod,
+    field: MetaField::Mod,
     arith: Some(ArithOp::Mod),
 };
 const POW: Op = Op {
-    event: Event::Pow,
+    field: MetaField::Pow,
     arith: Some(ArithOp::Pow),
 };
 const DIV: Op = Op {
-    event: Event::Div,
+    field: MetaField::Div,
     arith: Some(ArithOp::Div),
 };
 const IDIV: Op = Op {
-    event: Event::IDiv,
+    field: MetaField::IDiv,
     arith: Some(ArithOp::IDiv),
 };
 const UNM: Op = Op {
-    event: Event::Unm,
+    field: MetaField::Unm,
     arith: None,
 };
 
@@ -75,21 +75,21 @@ fn unm(ctx: &mut NativeCtx<'_>) -> R {
     arith(ctx, UNM)
 }
 
-const METAMETHODS: &[(&str, Event, NativeFn)] = &[
-    ("string.__add", Event::Add, add),
-    ("string.__sub", Event::Sub, sub),
-    ("string.__mul", Event::Mul, mul),
-    ("string.__mod", Event::Mod, mod_),
-    ("string.__pow", Event::Pow, pow),
-    ("string.__div", Event::Div, div),
-    ("string.__idiv", Event::IDiv, idiv),
-    ("string.__unm", Event::Unm, unm),
+const METAMETHODS: &[(&str, MetaField, NativeFn)] = &[
+    ("string.__add", MetaField::Add, add),
+    ("string.__sub", MetaField::Sub, sub),
+    ("string.__mul", MetaField::Mul, mul),
+    ("string.__mod", MetaField::Mod, mod_),
+    ("string.__pow", MetaField::Pow, pow),
+    ("string.__div", MetaField::Div, div),
+    ("string.__idiv", MetaField::IDiv, idiv),
+    ("string.__unm", MetaField::Unm, unm),
 ];
 
 /// Put the arithmetic metamethods in the string metatable.
 pub(crate) fn install(vm: &mut Vm, mt: Gc<Table>) {
-    for &(name, event, f) in METAMETHODS {
-        let k = Value::Str(vm.rt.event_name(event));
+    for &(name, field, f) in METAMETHODS {
+        let k = Value::Str(vm.rt.field_name(field));
         let v = vm.register_native(name, f);
         vm.table_set(mt, k, v);
     }
@@ -120,12 +120,12 @@ fn arith(ctx: &mut NativeCtx<'_>, op: Op) -> R {
     let h = if matches!(b, Value::Str(_)) {
         Value::Nil
     } else {
-        ctx.metamethod(b, op.event)
+        ctx.metamethod(b, op.field)
     };
     if h.is_nil() {
         return Err(ctx.error(format!(
             "attempt to {} a '{}' with a '{}'",
-            op.event.short_name(),
+            op.field.short_name(),
             a.type_name(),
             b.type_name()
         )));

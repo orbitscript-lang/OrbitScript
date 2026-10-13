@@ -32,7 +32,7 @@ use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::CoStatus;
 pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
-pub use meta::Event;
+pub use meta::MetaField;
 pub use native::{
     CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn, Operator, ResumeOk,
 };
@@ -129,7 +129,7 @@ pub(crate) enum FrameKind {
     /// it once the call returns (its result is at the frame's `func`).
     Meta {
         action: meta::MetaAction,
-        event: Event,
+        field: MetaField,
     },
     /// Below an `xpcall` message handler running on top of the frames that
     /// raised: its result is raised again as the error, past the handler.
@@ -485,7 +485,7 @@ pub struct Runtime {
     pub(crate) pinned: Vec<Value>,
     /// End of the values of the last open-ended call or `Vararg`.
     pub(crate) top: usize,
-    /// Event names and per-type metatables.
+    /// MetaField names and per-type metatables.
     pub(crate) metas: meta::Metas,
     /// Collector mode and parameters as `collectgarbage` sees them, and
     /// finalizer bookkeeping.
@@ -635,7 +635,7 @@ impl Roots<LuaSpace> for Runtime {
         for &v in &self.pinned {
             mark(m, v);
         }
-        for &s in self.metas.events.all() {
+        for &s in self.metas.field_names.all() {
             m.mark(s);
         }
         for t in self.metas.type_meta.iter().flatten() {
@@ -697,7 +697,7 @@ impl Vm {
         let registry = heap.alloc(reg);
         let dead_cell = heap.alloc(Cell::default());
         let mut strings = Interner::new();
-        let events = meta::Events::new(&mut heap, &mut strings);
+        let field_names = meta::MetaFieldNames::new(&mut heap, &mut strings);
         let gc = GcState::new(&heap);
         let main_thread = heap.alloc(Thread::new(coro::Coroutine::main()));
         Vm {
@@ -721,7 +721,7 @@ impl Vm {
                 pinned: Vec::new(),
                 top: 0,
                 metas: meta::Metas {
-                    events,
+                    field_names,
                     type_meta: Default::default(),
                 },
                 gc,

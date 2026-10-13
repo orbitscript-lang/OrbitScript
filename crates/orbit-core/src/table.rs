@@ -13,7 +13,7 @@ use orbit_gc::{Gc, Liveness, Marker, Trace, WeakMode};
 
 use crate::string::hash_word;
 use crate::value::{Payload, Tag, str_eq};
-use crate::{LuaHeap, LuaSpace, LuaStr, NoMemory, Value, gc, number};
+use crate::{LuaHeap, LuaSpace, LuaStr, MetaField, NoMemory, Value, gc, number};
 
 /// Why a value can't be a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +142,7 @@ fn normalise(v: Value) -> Result<Value, KeyError> {
 /// A hash slot. Key and value are each stored split into tag and payload
 /// (like the array part), with the two tag bytes side by side, which makes
 /// an entry 24 bytes instead of 40.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 struct Entry {
     value_payload: Payload,
     key_payload: Payload,
@@ -151,9 +151,30 @@ struct Entry {
     /// `Tag::Nil` for an empty slot. A key whose value is `nil` is a dead
     /// entry: it stays so `next` keeps working while a loop clears the table.
     key_tag: Tag,
+    /// Not part of this entry: two positions of the table's metamethod
+    /// slot hints (see [`Table::meta_field`]), in what would otherwise be
+    /// padding. They belong to the slot's position, so moving an entry
+    /// doesn't move them.
+    meta_hints: Cell<[u8; 2]>,
 }
 
 const _: () = assert!(std::mem::size_of::<Entry>() == 24);
+// Tables fill an arena slot each, so their header stays at 56 bytes in
+// release builds (debug builds' checked handles are larger).
+#[cfg(not(debug_assertions))]
+const _: () = assert!(std::mem::size_of::<Table>() == 56);
+
+impl Default for Entry {
+    #[inline(always)]
+    fn default() -> Entry {
+        Entry::new(Value::Nil, 0, Value::Nil)
+    }
+}
+
+/// An empty metamethod hint position. Any value is safe (hints are checked
+/// against the key); this one is out of range of the parts that have hints
+/// below 256 slots.
+const NO_HINT: [u8; 2] = [u8::MAX; 2];
 
 impl Entry {
     #[inline(always)]
@@ -208,7 +229,37 @@ impl Entry {
             hash,
             value_tag,
             key_tag,
+            meta_hints: Cell::new(NO_HINT),
         }
+    }
+
+    /// Replace the key and value, keeping this position's metamethod hints.
+    #[inline(always)]
+    fn fill(&mut self, key: Value, hash: u32, value: Value) {
+        (self.key_tag, self.key_payload) = key.pack();
+        (self.value_tag, self.value_payload) = value.pack();
+        self.hash = hash;
+    }
+
+    /// A copy of this entry's key and value for another position (a
+    /// rebuild), without this position's hints.
+    #[inline(always)]
+    fn moved(&self) -> Entry {
+        Entry {
+            value_payload: self.value_payload,
+            key_payload: self.key_payload,
+            hash: self.hash,
+            value_tag: self.value_tag,
+            key_tag: self.key_tag,
+            meta_hints: Cell::new(NO_HINT),
+        }
+    }
+
+    /// Whether this entry's key is string `s` (by handle: metatable field
+    /// names are short, so interned).
+    #[inline(always)]
+    fn holds_str(&self, s: Gc<LuaStr>) -> bool {
+        self.key_tag == Tag::Str && self.key_payload == Value::Str(s).pack().1
     }
 }
 
@@ -404,8 +455,16 @@ pub struct Table {
     used: u32,
     /// The hash slot of the key [`Table::next`] last returned, so the next
     /// call usually resumes there without hashing and probing for the key.
-    /// Only a hint: it is checked against the key it is given.
-    next_hint: Cell<u32>,
+    /// Only a hint: it is checked against the key it is given. 16 bits, so
+    /// it fits beside `absent_meta`; a slot past `u16::MAX` isn't remembered.
+    next_hint: Cell<u16>,
+    /// Metatable fields ([`MetaField`]s, one bit each) this table is known to
+    /// lack: a lookup through [`Table::meta_field`] that finds nil sets the
+    /// bit, so the next one is a bit test instead of a probe. Every store
+    /// into the hash part clears the whole set (see
+    /// [`Table::forget_absent_meta`]); a set bit therefore always means the raw
+    /// value of that field is nil.
+    absent_meta: Cell<u16>,
     /// The metatable. A string `__mode` in it makes the table weak.
     pub meta: Option<Gc<Table>>,
 }
@@ -547,6 +606,94 @@ impl Table {
             i = (i + 1) & mask;
         }
         Value::Nil
+    }
+
+    /// `t[e.field()]` (raw), where `name` is that field name's interned
+    /// string, remembering a nil result (see the `absent_meta` field). Metatable
+    /// lookups go through here.
+    ///
+    /// A field that is present is found through its slot hint: the hash
+    /// slot where a lookup last found it, kept in the hash part's entry
+    /// padding at a position fixed by the field (two positions per slot,
+    /// see [`Table::meta_hint_pos`]). A hint is only a guess, checked against
+    /// the key like an inline cache, so stores, removals and rebuilds need
+    /// not maintain it: a stale one costs a probe, which refills it.
+    #[inline]
+    pub fn meta_field(&self, heap: &LuaHeap, e: MetaField, name: Gc<LuaStr>) -> Value {
+        debug_assert_eq!(heap.get(name).as_bytes(), e.field().as_bytes());
+        if self.absent_meta.get() & e.bit() != 0 {
+            return Value::Nil;
+        }
+        if let Some((pos, i)) = self.meta_hint_pos(e) {
+            let slot = self.entries[pos].meta_hints.get()[i] as usize;
+            if let Some(entry) = self.entries.get(slot)
+                && entry.holds_str(name)
+            {
+                return entry.value();
+            }
+        }
+        self.meta_field_probe(heap, e, name)
+    }
+
+    /// Where field `e`'s slot hint lives: entry index and byte. Hash parts
+    /// of up to 256 slots (whose slot numbers fit a byte) have two
+    /// positions per slot; fields beyond that share positions (and evict
+    /// each other's hints). Larger parts have no hints.
+    #[inline(always)]
+    fn meta_hint_pos(&self, e: MetaField) -> Option<(usize, usize)> {
+        let n = self.entries.len();
+        if n.wrapping_sub(1) >= META_HINT_MAX_SLOTS {
+            return None;
+        }
+        let p = e as usize & (2 * n - 1);
+        Some((p / 2, p % 2))
+    }
+
+    /// [`Table::meta_field`] when the hint missed: probe, remember the slot
+    /// or that the field is absent.
+    #[inline(never)]
+    fn meta_field_probe(&self, heap: &LuaHeap, e: MetaField, name: Gc<LuaStr>) -> Value {
+        let Some(slot) = self.find_str(heap, name) else {
+            self.absent_meta.set(self.absent_meta.get() | e.bit());
+            return Value::Nil;
+        };
+        if let Some((pos, i)) = self.meta_hint_pos(e) {
+            let cell = &self.entries[pos].meta_hints;
+            let mut hints = cell.get();
+            hints[i] = slot as u8;
+            cell.set(hints);
+        }
+        let v = self.entries[slot].value();
+        if v.is_nil() {
+            self.absent_meta.set(self.absent_meta.get() | e.bit());
+        }
+        v
+    }
+
+    /// [`Table::meta_field`] without the interner, reading key strings
+    /// through `str_of`, so the collector can use it while tracing.
+    pub fn meta_field_by_bytes<'a>(
+        &self,
+        e: MetaField,
+        str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
+    ) -> Value {
+        let absent = self.absent_meta.get();
+        if absent & e.bit() != 0 {
+            return Value::Nil;
+        }
+        let name = e.field().as_bytes();
+        let v = self.get_by_bytes(name, crate::string::hash_bytes(name), str_of);
+        if v.is_nil() {
+            self.absent_meta.set(absent | e.bit());
+        }
+        v
+    }
+
+    /// Forget which metatable fields are absent. Every store into the hash
+    /// part calls this, before it can make a key present.
+    #[inline(always)]
+    fn forget_absent_meta(&mut self) {
+        *self.absent_meta.get_mut() = 0;
     }
 }
 
@@ -713,11 +860,12 @@ impl Table {
             return None;
         }
         let i = key.hash as usize & len.wrapping_sub(1);
-        let e = self.entries.get_mut(i)?;
+        let e = self.entries.get(i)?;
         if !e.is_empty() {
             return None;
         }
-        *e = Entry::new(key.value, key.hash, v);
+        self.forget_absent_meta();
+        self.entries[i].fill(key.value, key.hash, v);
         self.used += 1;
         Some(i)
     }
@@ -746,6 +894,7 @@ impl Table {
     /// entry. Use through [`Heap::update`](orbit_gc::Heap::update).
     #[inline(always)]
     pub fn set_slot(&mut self, slot: usize, v: Value) {
+        self.forget_absent_meta();
         self.entries[slot].set_value(v);
     }
 
@@ -874,13 +1023,17 @@ impl Table {
                 self.array.push(v)?;
                 self.migrate_to_array();
             }
-            Slot::Existing(i) => self.entries[i].set_value(v),
+            Slot::Existing(i) => {
+                self.forget_absent_meta();
+                self.entries[i].set_value(v);
+            }
             Slot::New(i) => {
+                self.forget_absent_meta();
                 let e = &mut self.entries[i];
                 if e.is_empty() {
                     self.used += 1;
                 }
-                *e = Entry::new(key.value, key.hash, v);
+                e.fill(key.value, key.hash, v);
             }
             Slot::Grow => {
                 self.rebuild(key)?;
@@ -1041,7 +1194,8 @@ impl Table {
             while !self.entries[i].is_empty() {
                 i = (i + 1) & mask;
             }
-            self.entries[i] = *e;
+            // The new part's hints start empty; lookups refill them.
+            self.entries[i] = e.moved();
             self.used += 1;
         }
         Ok(())
@@ -1143,7 +1297,7 @@ impl Table {
         let from = pos - n;
         for (j, e) in self.entries.iter().enumerate().skip(from) {
             if !e.value_is_nil() {
-                self.next_hint.set(j as u32);
+                self.next_hint.set(u16::try_from(j).unwrap_or(u16::MAX));
                 return Ok(Some((e.key(), e.value())));
             }
         }
@@ -1165,6 +1319,10 @@ impl Table {
             .map_err(|_| InvalidKey)
     }
 }
+
+/// Hash parts of at most this many slots keep metamethod slot hints (a
+/// slot number must fit a byte).
+const META_HINT_MAX_SLOTS: usize = 256;
 
 /// Array parts sized by density hold at most `2^ARRAY_LOG_MAX` slots.
 const ARRAY_LOG_MAX: usize = 30;
@@ -1713,6 +1871,234 @@ mod tests {
                 bi += 1;
             }
         }
+    }
+
+    /// Every way a key can become present must forget that it was absent.
+    #[test]
+    fn absent_fields_are_forgotten_on_every_store() {
+        let (mut heap, mut s, t) = setup();
+        let names: Vec<_> = MetaField::ALL
+            .iter()
+            .map(|e| s.new_str(&mut heap, e.field().as_bytes()))
+            .collect();
+        let name = |e: MetaField| names[e as usize];
+        let lookup = |heap: &LuaHeap, t: Gc<Table>, e: MetaField| {
+            let tab = heap.get(t);
+            let v = tab.meta_field(heap, e, name(e));
+            // The collector's lookup by bytes agrees.
+            assert!(v.same(tab.meta_field_by_bytes(e, |s| heap.get(s))));
+            v
+        };
+        // Empty: every field absent, and asking twice gives the same.
+        for &e in MetaField::ALL {
+            assert!(lookup(&heap, t, e).is_nil());
+            assert!(lookup(&heap, t, e).is_nil());
+        }
+        // A new key through `set` (claims a fresh slot, or rebuilds).
+        set(
+            &mut heap,
+            t,
+            Value::Str(name(MetaField::Index)),
+            Value::Int(1),
+        )
+        .unwrap();
+        assert!(matches!(lookup(&heap, t, MetaField::Index), Value::Int(1)));
+        for &e in MetaField::ALL {
+            lookup(&heap, t, e);
+        }
+        set(&mut heap, t, Value::Str(name(MetaField::Gc)), Value::Int(2)).unwrap();
+        assert!(matches!(lookup(&heap, t, MetaField::Gc), Value::Int(2)));
+        // Removing a key, then storing it again into its dead entry.
+        set(&mut heap, t, Value::Str(name(MetaField::Gc)), Value::Nil).unwrap();
+        assert!(lookup(&heap, t, MetaField::Gc).is_nil());
+        set(&mut heap, t, Value::Str(name(MetaField::Gc)), Value::Int(3)).unwrap();
+        assert!(matches!(lookup(&heap, t, MetaField::Gc), Value::Int(3)));
+        // `set_slot` reviving a dead entry (an inline cache hit).
+        let slot = heap.get(t).find_str(&heap, name(MetaField::Gc)).unwrap();
+        heap.get_mut(t).set_slot(slot, Value::Nil);
+        assert!(lookup(&heap, t, MetaField::Gc).is_nil());
+        heap.get_mut(t).set_slot(slot, Value::Int(4));
+        assert!(matches!(lookup(&heap, t, MetaField::Gc), Value::Int(4)));
+        // `insert_str_home` on a table with room.
+        let h = heap.alloc(Table::with_capacity(0, 64));
+        assert!(lookup(&heap, h, MetaField::Mode).is_nil());
+        let key = Key::str(&heap, name(MetaField::Mode));
+        assert!(
+            heap.get_mut(h)
+                .insert_str_home(&key, Value::Int(5))
+                .is_some()
+        );
+        assert!(matches!(lookup(&heap, h, MetaField::Mode), Value::Int(5)));
+        // `write` with a slot found earlier, and growth through rebuilds:
+        // every cached field, stored one at a time after a failed lookup.
+        let g = heap.alloc(Table::new());
+        for (i, &e) in MetaField::ALL.iter().enumerate() {
+            for &f in MetaField::ALL {
+                lookup(&heap, g, f);
+            }
+            let key = Key::str(&heap, name(e));
+            let slot = heap.get(g).find_slot(&heap, &key, false);
+            heap.get_mut(g)
+                .write(slot, &key, Value::Int(i as i64))
+                .unwrap();
+            for (j, &f) in MetaField::ALL.iter().enumerate() {
+                let v = lookup(&heap, g, f);
+                if j <= i {
+                    assert!(matches!(v, Value::Int(k) if k == j as i64), "{e:?} {f:?}");
+                } else {
+                    assert!(v.is_nil());
+                }
+            }
+        }
+        // Integer keys and traversal leave the set alone.
+        set(&mut heap, g, Value::Int(1), Value::Int(1)).unwrap();
+        assert!(matches!(lookup(&heap, g, MetaField::Index), Value::Int(0)));
+    }
+
+    /// Metamethod slot hints: after every kind of store, removal, rebuild
+    /// and weak clearing, `meta_field` agrees with a raw lookup, whatever the
+    /// hints held, and a present field is found through its hint again once
+    /// looked up.
+    #[test]
+    fn meta_hints_follow_every_write_path() {
+        let (mut heap, mut s, t) = setup();
+        let names: Vec<_> = MetaField::ALL
+            .iter()
+            .map(|e| s.new_str(&mut heap, e.field().as_bytes()))
+            .collect();
+        let name = |e: MetaField| names[e as usize];
+        let hinted = |heap: &LuaHeap, t: Gc<Table>, e: MetaField| {
+            let tab = heap.get(t);
+            tab.meta_hint_pos(e).is_some_and(|(pos, i)| {
+                let slot = tab.entries[pos].meta_hints.get()[i] as usize;
+                tab.entries.get(slot).is_some_and(|x| x.holds_str(name(e)))
+            })
+        };
+        // Look every field up twice (the second through the hint, when the
+        // field is present and no other field shares its position) and
+        // compare with the raw value.
+        let check = |heap: &LuaHeap, t: Gc<Table>, what: &str| {
+            for _ in 0..2 {
+                for &e in MetaField::ALL {
+                    let tab = heap.get(t);
+                    let raw = tab.get_str(heap, name(e));
+                    let v = tab.meta_field(heap, e, name(e));
+                    assert!(v.same(raw), "{what}: {e:?} gave {v:?}, raw {raw:?}");
+                }
+            }
+        };
+        let k = |s: &mut Interner, heap: &mut LuaHeap, i: usize| {
+            Value::Str(s.new_str(heap, format!("k{i}").as_bytes()))
+        };
+
+        check(&heap, t, "empty");
+        // New keys through `set`, through several rebuilds; a few other
+        // keys in between so slots move.
+        for (i, &e) in MetaField::ALL.iter().enumerate() {
+            set(&mut heap, t, Value::Str(name(e)), Value::Int(i as i64)).unwrap();
+            let key = k(&mut s, &mut heap, i);
+            set(&mut heap, t, key, Value::Int(-1)).unwrap();
+            check(&heap, t, "grow");
+        }
+        // Every present field is hinted now (64 slots: no sharing).
+        assert!(heap.get(t).entries.len() >= MetaField::ALL.len());
+        for &e in MetaField::ALL {
+            heap.get(t).meta_field(&heap, e, name(e));
+            assert!(hinted(&heap, t, e), "{e:?}");
+        }
+        // Replacing values in place keeps hints valid.
+        for (i, &e) in MetaField::ALL.iter().enumerate() {
+            set(
+                &mut heap,
+                t,
+                Value::Str(name(e)),
+                Value::Int(100 + i as i64),
+            )
+            .unwrap();
+        }
+        check(&heap, t, "replace");
+        for &e in MetaField::ALL {
+            assert!(hinted(&heap, t, e), "{e:?} after replace");
+        }
+        // Removal: the hinted slot holds a dead entry, read as nil.
+        for &e in MetaField::ALL.iter().step_by(2) {
+            set(&mut heap, t, Value::Str(name(e)), Value::Nil).unwrap();
+        }
+        check(&heap, t, "remove");
+        // Dead entries reused by other keys (`write` with `Slot::New` over a
+        // hinted slot): the hint now points at a different key.
+        for i in 100..140 {
+            let key = k(&mut s, &mut heap, i);
+            set(&mut heap, t, key, Value::Int(1)).unwrap();
+            check(&heap, t, "reuse");
+        }
+        // Revival through `set_slot`, at the slot a probe finds.
+        for &e in MetaField::ALL.iter().step_by(2) {
+            if let Some(slot) = heap.get(t).find_str(&heap, name(e)) {
+                heap.get_mut(t).set_slot(slot, Value::Bool(true));
+            } else {
+                set(&mut heap, t, Value::Str(name(e)), Value::Bool(true)).unwrap();
+            }
+        }
+        check(&heap, t, "revive");
+        // Clearing everything with a traversal, then filling again.
+        let mut key = Value::Nil;
+        while let Some((k2, _)) = heap.get(t).next(&heap, key).unwrap() {
+            set(&mut heap, t, k2, Value::Nil).unwrap();
+            key = k2;
+        }
+        check(&heap, t, "cleared");
+        for (i, &e) in MetaField::ALL.iter().enumerate().rev() {
+            set(&mut heap, t, Value::Str(name(e)), Value::Int(i as i64)).unwrap();
+            check(&heap, t, "refill");
+        }
+
+        // Small parts, where fields share hint positions and slots move on
+        // every rebuild; `insert_str_home` and `write` with a found slot.
+        for n in [1usize, 2, 4, 8] {
+            let h = heap.alloc(Table::with_capacity(0, n));
+            for (i, &e) in MetaField::ALL.iter().enumerate() {
+                let key = Key::str(&heap, name(e));
+                if heap
+                    .get_mut(h)
+                    .insert_str_home(&key, Value::Int(i as i64))
+                    .is_none()
+                {
+                    let slot = heap.get(h).find_slot(&heap, &key, false);
+                    heap.get_mut(h)
+                        .write(slot, &key, Value::Int(i as i64))
+                        .unwrap();
+                }
+                check(&heap, h, "small");
+                // Alternate two fields that may share a position.
+                for _ in 0..3 {
+                    for f in [MetaField::Index, MetaField::Add] {
+                        let tab = heap.get(h);
+                        assert!(
+                            tab.meta_field(&heap, f, name(f))
+                                .same(tab.get_str(&heap, name(f)))
+                        );
+                    }
+                }
+            }
+        }
+
+        // A hash part too large for byte-sized hints still answers.
+        let big = heap.alloc(Table::new());
+        for i in 0..400 {
+            let key = k(&mut s, &mut heap, i);
+            set(&mut heap, big, key, Value::Int(i as i64)).unwrap();
+        }
+        set(
+            &mut heap,
+            big,
+            Value::Str(name(MetaField::Eq)),
+            Value::Int(7),
+        )
+        .unwrap();
+        assert!(heap.get(big).entries.len() > META_HINT_MAX_SLOTS);
+        check(&heap, big, "big");
+        assert!(!hinted(&heap, big, MetaField::Eq));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use orbit::{CallOutcome, Event, Lua, LuaError, NativeCtx, NativeReturn, Options, Value};
+use orbit::{CallOutcome, Lua, LuaError, MetaField, NativeCtx, NativeReturn, Options, Value};
 
 /// The chunk names `lua` gives command-line code and standard input.
 const COMMAND_LINE: &[u8] = b"=(command line)";
@@ -416,7 +416,7 @@ impl Runner {
     fn error_text(&mut self, e: &LuaError) -> String {
         let vm = self.lua.vm();
         if !matches!(e.value, Value::Str(_) | Value::Int(_) | Value::Float(_)) {
-            let mm = vm.rt.metamethod(&vm.heap, e.value, Event::ToString);
+            let mm = vm.rt.metamethod(&vm.heap, e.value, MetaField::ToString);
             if !matches!(mm, Value::Nil) {
                 vm.pin(e.value);
                 let r = vm.call(mm, &[e.value]);
@@ -459,7 +459,7 @@ impl Runner {
         if let Value::Str(s) = v {
             return vm.str_bytes(s).to_vec();
         }
-        let mm = vm.rt.metamethod(&vm.heap, v, Event::ToString);
+        let mm = vm.rt.metamethod(&vm.heap, v, MetaField::ToString);
         if !matches!(mm, Value::Nil)
             && let Ok(r) = vm.call(mm, &[v])
             && let Some(&Value::Str(s)) = r.first()
@@ -610,7 +610,7 @@ fn msghandler(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
             String::from_utf8_lossy(&b).into_owned()
         }
         _ => {
-            let mm = ctx.vm.rt.metamethod(&ctx.vm.heap, e, Event::ToString);
+            let mm = ctx.vm.rt.metamethod(&ctx.vm.heap, e, MetaField::ToString);
             if !matches!(mm, Value::Nil) {
                 ctx.push(e);
                 return Ok(NativeReturn::CallThen {

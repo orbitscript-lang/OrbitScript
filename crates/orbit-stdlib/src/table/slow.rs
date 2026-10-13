@@ -9,7 +9,7 @@
 //! stopped.
 
 use orbit_vm::orbit_core::{Value, number};
-use orbit_vm::{CallOutcome, Continuation, Event, LuaError, Meta, NativeCtx, NativeReturn};
+use orbit_vm::{CallOutcome, Continuation, LuaError, Meta, MetaField, NativeCtx, NativeReturn};
 
 pub(super) use crate::first_result;
 
@@ -108,8 +108,8 @@ pub(super) fn check_tab(
         return Ok(v);
     }
     let ok = ctx.metatable(v).is_some()
-        && (!needs.read || !ctx.metamethod(v, Event::Index).is_nil())
-        && (!needs.write || !ctx.metamethod(v, Event::NewIndex).is_nil());
+        && (!needs.read || !ctx.metamethod(v, MetaField::Index).is_nil())
+        && (!needs.write || !ctx.metamethod(v, MetaField::NewIndex).is_nil());
     if ok {
         Ok(v)
     } else {

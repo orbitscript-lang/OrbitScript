@@ -10,7 +10,7 @@ use orbit_core::value::raw_eq;
 use orbit_core::{LuaHeap, NoMemory, Value};
 
 use crate::Runtime;
-use crate::meta::{self, Event, MetaCall, Metas};
+use crate::meta::{self, MetaCall, MetaField, Metas};
 
 /// An error raised by an instruction, before the interpreter adds the
 /// position and the operand's name.
@@ -93,16 +93,16 @@ pub(crate) enum Arith {
 }
 
 impl Arith {
-    fn event(self) -> Event {
+    fn meta_field(self) -> MetaField {
         match self {
-            Arith::Add => Event::Add,
-            Arith::Sub => Event::Sub,
-            Arith::Mul => Event::Mul,
-            Arith::Div => Event::Div,
-            Arith::IDiv => Event::IDiv,
-            Arith::Mod => Event::Mod,
-            Arith::Pow => Event::Pow,
-            Arith::Neg => Event::Unm,
+            Arith::Add => MetaField::Add,
+            Arith::Sub => MetaField::Sub,
+            Arith::Mul => MetaField::Mul,
+            Arith::Div => MetaField::Div,
+            Arith::IDiv => MetaField::IDiv,
+            Arith::Mod => MetaField::Mod,
+            Arith::Pow => MetaField::Pow,
+            Arith::Neg => MetaField::Unm,
         }
     }
 
@@ -181,9 +181,9 @@ pub(crate) fn arith_slow(
             return arith_num(op, x, y).map_err(|m| Exc::Plain(m.into()));
         }
     }
-    let h = meta::binary_handler(heap, rt, op.event(), a, b);
+    let h = meta::binary_handler(heap, rt, op.meta_field(), a, b);
     if !h.is_nil() {
-        return Err(Exc::Meta(MetaCall::new(h, op.event(), &[a, b])));
+        return Err(Exc::Meta(MetaCall::new(h, op.meta_field(), &[a, b])));
     }
     if strings {
         return Err(Exc::Rt(
@@ -219,13 +219,13 @@ fn bit_operand(v: Value) -> Option<Option<i64>> {
     }
 }
 
-fn bit_event(op: BitOp) -> Event {
+fn bit_event(op: BitOp) -> MetaField {
     match op {
-        BitOp::And => Event::BAnd,
-        BitOp::Or => Event::BOr,
-        BitOp::Xor => Event::BXor,
-        BitOp::Shl => Event::Shl,
-        BitOp::Shr => Event::Shr,
+        BitOp::And => MetaField::BAnd,
+        BitOp::Or => MetaField::BOr,
+        BitOp::Xor => MetaField::BXor,
+        BitOp::Shl => MetaField::Shl,
+        BitOp::Shr => MetaField::Shr,
     }
 }
 
@@ -265,9 +265,9 @@ pub(crate) fn bnot_slow(heap: &LuaHeap, rt: &Metas, a: Value) -> Result<Value, E
     if let Some(Some(x)) = x {
         return Ok(Value::Int(!x));
     }
-    let h = rt.metamethod(heap, a, Event::BNot);
+    let h = rt.metamethod(heap, a, MetaField::BNot);
     if !h.is_nil() {
-        return Err(Exc::Meta(MetaCall::new(h, Event::BNot, &[a, a])));
+        return Err(Exc::Meta(MetaCall::new(h, MetaField::BNot, &[a, a])));
     }
     match x {
         Some(Some(_)) => unreachable!("handled above"),
@@ -295,7 +295,7 @@ pub(crate) fn less_than(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Resul
         (Int(x), Float(y)) => Ok(number::int_lt_float(x, y)),
         (Float(x), Int(y)) => Ok(number::float_lt_int(x, y)),
         (Str(x), Str(y)) => Ok(heap.get(x).as_bytes() < heap.get(y).as_bytes()),
-        _ => Err(compare_meta(heap, rt, Event::Lt, a, b)),
+        _ => Err(compare_meta(heap, rt, MetaField::Lt, a, b)),
     }
 }
 
@@ -308,13 +308,13 @@ pub(crate) fn less_equal(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Resu
         (Int(x), Float(y)) => Ok(number::int_le_float(x, y)),
         (Float(x), Int(y)) => Ok(number::float_le_int(x, y)),
         (Str(x), Str(y)) => Ok(heap.get(x).as_bytes() <= heap.get(y).as_bytes()),
-        _ => Err(compare_meta(heap, rt, Event::Le, a, b)),
+        _ => Err(compare_meta(heap, rt, MetaField::Le, a, b)),
     }
 }
 
 /// `__lt` or `__le` for operands that aren't two numbers or two strings.
 #[cold]
-fn compare_meta(heap: &LuaHeap, rt: &Metas, e: Event, a: Value, b: Value) -> Exc {
+fn compare_meta(heap: &LuaHeap, rt: &Metas, e: MetaField, a: Value, b: Value) -> Exc {
     let h = meta::binary_handler(heap, rt, e, a, b);
     if h.is_nil() {
         compare_error(heap, rt, a, b)
@@ -351,11 +351,11 @@ pub(crate) fn equal(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bo
 #[cold]
 #[inline(never)]
 fn equal_meta(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Exc> {
-    let h = meta::binary_handler(heap, rt, Event::Eq, a, b);
+    let h = meta::binary_handler(heap, rt, MetaField::Eq, a, b);
     if h.is_nil() {
         Ok(false)
     } else {
-        Err(Exc::Meta(MetaCall::new(h, Event::Eq, &[a, b])))
+        Err(Exc::Meta(MetaCall::new(h, MetaField::Eq, &[a, b])))
     }
 }
 
@@ -395,7 +395,7 @@ pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>)
         | Value::Thread(_)
         | Value::LightUserData(_) => {
             // `__name` (a string) replaces the type name.
-            match rt.metamethod(heap, v, Event::Name) {
+            match rt.metamethod(heap, v, MetaField::Name) {
                 Value::Str(s) => out.extend_from_slice(heap.get(s).as_bytes()),
                 _ => out.extend_from_slice(v.type_name().as_bytes()),
             }

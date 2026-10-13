@@ -11,7 +11,7 @@ use orbit_vm::orbit_core::number::{float_to_int, fmt_number, str_to_number};
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::value::raw_eq;
 use orbit_vm::orbit_core::{Gc, LightUserData, LuaStr, Table, Value, gc};
-use orbit_vm::{Event, LuaError, Meta, NativeCtx, Operator};
+use orbit_vm::{LuaError, Meta, MetaField, NativeCtx, Operator};
 
 use crate::CBlock;
 
@@ -988,7 +988,7 @@ pub(crate) fn traceback(c: &mut NativeCtx<'_>, msg: Option<&[u8]>, level: i32) {
 /// `__name`). Pushes the result.
 pub(crate) fn tolstring_meta(c: &mut NativeCtx<'_>, idx: i32) -> Res<Gc<LuaStr>> {
     let v = get(c, idx);
-    let mm = c.metamethod(v, Event::ToString);
+    let mm = c.metamethod(v, MetaField::ToString);
     if !mm.is_nil() {
         c.push(mm);
         c.push(v);

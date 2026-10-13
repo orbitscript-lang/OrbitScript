@@ -515,7 +515,7 @@ fn debug_ran(ctx: &mut NativeCtx<'_>, out: orbit_vm::CallOutcome) -> R {
         return debug(ctx);
     };
     // The message as `tostring` would give it.
-    let h = ctx.metamethod(e, orbit_vm::Event::ToString);
+    let h = ctx.metamethod(e, orbit_vm::MetaField::ToString);
     if !h.is_nil() {
         ctx.truncate(0);
         ctx.push(e);

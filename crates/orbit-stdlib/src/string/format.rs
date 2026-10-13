@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 
 use orbit_vm::orbit_core::{Gc, LuaStr, Value};
-use orbit_vm::{CallOutcome, Event, LuaError, NativeCtx, NativeReturn};
+use orbit_vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -283,7 +283,7 @@ fn format_from(
             b's' => {
                 let v = ctx.check_any(arg)?;
                 if !matches!(v, Value::Str(_)) {
-                    let h = ctx.metamethod(v, Event::ToString);
+                    let h = ctx.metamethod(v, MetaField::ToString);
                     if !h.is_nil() {
                         return call_tostring(ctx, nargs, h, v, conv_start, arg - 1, out);
                     }
