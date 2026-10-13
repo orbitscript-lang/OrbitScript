@@ -201,6 +201,10 @@ impl<S: Space> Heap<S> {
     // ---- objects --------------------------------------------------------
 
     /// Move `v` into the heap. Never collects.
+    // Inlined so the object is built in its slot rather than passed by
+    // pointer and copied: without a profile LLVM keeps it out of line, and
+    // `NewTable` paid ~35 instructions a table for the call.
+    #[inline(always)]
     pub fn alloc<T: Trace<S>>(&mut self, v: T) -> Gc<T>
     where
         S: Holds<T>,

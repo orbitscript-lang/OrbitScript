@@ -222,6 +222,17 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
         }
     }
 
+    /// Mark page `p` live for [`Store::put`]: it is new or was released.
+    #[cold]
+    #[inline(never)]
+    fn open_page(&mut self, p: usize) {
+        if p >= self.live.len() {
+            self.live.resize(p + 1, false);
+        }
+        self.live[p] = true;
+        self.gens.on_new_page(p, SLOTS);
+    }
+
     /// Add empty slots up to `len`. A new page's slots are added as they are
     /// first used (the collector hands them out in order), so its memory is
     /// only touched as far as it is used. Out of line to keep `put` small.
@@ -307,14 +318,11 @@ impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
             && matches!(self.slots.get(gc.index as usize), Some(Some(_)))
     }
 
+    #[inline]
     fn put(&mut self, i: u32, v: T) -> Gc<T> {
         let (p, _) = Self::split(i);
         if self.live.get(p) != Some(&true) {
-            if p >= self.live.len() {
-                self.live.resize(p + 1, false);
-            }
-            self.live[p] = true;
-            self.gens.on_new_page(p, SLOTS);
+            self.open_page(p);
         }
         if i as usize >= self.slots.len() {
             self.grow(i as usize + 1);

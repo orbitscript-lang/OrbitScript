@@ -222,6 +222,7 @@ macro_rules! space {
                     ::core::unreachable!()
                 }
 
+                #[inline]
                 fn free_slot(&mut self, kind: u8, index: u32) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
@@ -306,6 +307,7 @@ pub mod __private {
         a.get_slot_mut(index).clear_weak(mode, live)
     }
 
+    #[inline]
     pub fn free<S: Space, T: Trace<S>, const N: usize>(a: &mut Arena<T, N>, index: u32) -> usize {
         let obj = a.take(index);
         slot_size::<T>() + obj.extra_bytes()

@@ -360,18 +360,24 @@ fn equal_meta(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Ex
 }
 
 /// Append `v` for `..`, or return false if it isn't a string or number.
+#[inline]
 pub(crate) fn concat_piece(heap: &LuaHeap, v: Value, out: &mut Vec<u8>) -> bool {
     match v {
         Value::Str(s) => out.extend_from_slice(heap.get(s).as_bytes()),
         Value::Int(i) => number::push_int(out, i),
-        Value::Float(f) => {
-            let mut s = String::new();
-            number::fmt_float(&mut s, f);
-            out.extend_from_slice(s.as_bytes());
-        }
+        Value::Float(f) => push_float(out, f),
         _ => return false,
     }
     true
+}
+
+/// [`concat_piece`] of a float, out of line: rarer than strings and
+/// integers, and it needs a buffer.
+#[inline(never)]
+fn push_float(out: &mut Vec<u8>, f: f64) {
+    let mut s = String::new();
+    number::fmt_float(&mut s, f);
+    out.extend_from_slice(s.as_bytes());
 }
 
 /// `tostring` without metamethods.

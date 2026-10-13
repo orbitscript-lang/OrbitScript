@@ -186,17 +186,25 @@ impl NativeCtx<'_> {
     }
 
     /// Overwrite window slot `i`, growing the window with nils if needed.
+    #[inline]
     pub fn set(&mut self, i: usize, v: Value) {
         let at = self.base + i;
-        let top = self.vm.rt.top;
         self.vm.rt.stack.dirty_to = self.vm.rt.stack.dirty_to.max(at + 1);
-        let regs = &mut self.vm.rt.stack.regs;
-        if at >= top {
-            crate::interp::extend_nil(regs, at + 1);
-            regs[top..at].fill(Value::Nil);
-            self.vm.rt.top = at + 1;
+        if at >= self.vm.rt.top {
+            self.grow_to(at);
         }
-        regs[at] = v;
+        self.vm.rt.stack.regs[at] = v;
+    }
+
+    /// Grow the window with nils up to absolute register `at`, inclusive.
+    #[cold]
+    #[inline(never)]
+    fn grow_to(&mut self, at: usize) {
+        let top = self.vm.rt.top;
+        let regs = &mut self.vm.rt.stack.regs;
+        crate::interp::extend_nil(regs, at + 1);
+        regs[top..at].fill(Value::Nil);
+        self.vm.rt.top = at + 1;
     }
 
     /// Insert `v` at window slot `i`, shifting the rest up.
@@ -296,6 +304,7 @@ impl NativeCtx<'_> {
     }
 
     /// Return one value.
+    #[inline]
     pub fn ret1(&mut self, v: Value) -> Result<NativeReturn, LuaError> {
         self.push(v);
         Ok(NativeReturn::Return(1))

@@ -858,6 +858,7 @@ impl Table {
         }
     }
 
+    #[inline]
     fn hash_has(&self, key: &Key) -> bool {
         self.used > 0 && self.probe(key, |_, _| false).is_ok()
     }
@@ -1048,6 +1049,7 @@ impl Table {
 
     /// Append `v` at `array_len() + 1` or store at an integer key, for
     /// constructors and `table.insert`. Integer keys need no heap.
+    #[inline]
     pub fn set_int(&mut self, i: i64, v: Value) -> Result<(), NoMemory> {
         let key = Key::int(i);
         let idx = (i as u64).wrapping_sub(1);
