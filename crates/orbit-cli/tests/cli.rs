@@ -135,6 +135,7 @@ fn error_objects() {
 }
 
 #[test]
+#[cfg(feature = "repl")]
 fn interactive() {
     let prompts = "_PROMPT='' _PROMPT2=''";
     let o = orbit(&["-e", prompts, "-i"], "(6*2-6)\na =\n10\nprint(a)\na", &[]);
@@ -222,4 +223,18 @@ fn loadlib_is_absent_without_c_modules() {
         &[],
     );
     assert_eq!(out(&o), "absent\n");
+}
+
+/// Without the `repl` feature, `-i` is an unknown option.
+#[test]
+#[cfg(not(feature = "repl"))]
+fn no_interactive_mode() {
+    let out = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg("-i")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unrecognized option '-i'"), "{err}");
+    assert!(!err.contains("interactive"), "{err}");
 }

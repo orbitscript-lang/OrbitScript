@@ -15,9 +15,11 @@
 //! (bytes, or with a `K`, `M` or `G` suffix) caps the Lua heap: past it,
 //! scripts get the error `not enough memory`.
 
-use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "repl")]
+mod repl;
 
 use orbit::{CallOutcome, Lua, LuaError, MetaField, NativeCtx, NativeReturn, Options, Value};
 
@@ -89,6 +91,7 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
                 }
                 break;
             }
+            #[cfg(feature = "repl")]
             "-i" => cli.interactive = true,
             "-v" => cli.version = true,
             "-E" => cli.ignore_env = true,
@@ -153,9 +156,12 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
     eprint!(
         "usage: {prog} [options] [script [args]]\n\
          Available options are:\n  \
-         -e stat   execute string 'stat'\n  \
-         -i        enter interactive mode after executing 'script'\n  \
-         -l mod    require library 'mod' into global 'mod'\n  \
+         -e stat   execute string 'stat'\n"
+    );
+    #[cfg(feature = "repl")]
+    eprintln!("  -i        enter interactive mode after executing 'script'");
+    eprint!(
+        "  -l mod    require library 'mod' into global 'mod'\n  \
          -l g=mod  require library 'mod' into global 'g'\n  \
          -v        show version information\n  \
          -E        ignore environment variables\n  \
@@ -215,6 +221,9 @@ struct Runner {
     /// so an error's message is made while its stack is still there.
     xpcall: Value,
     handler: Value,
+    #[cfg(feature = "repl")]
+    #[cfg_attr(not(feature = "line-editing"), allow(dead_code))]
+    repl: repl::State,
 }
 
 impl Runner {
@@ -229,6 +238,8 @@ impl Runner {
             prog,
             xpcall,
             handler,
+            #[cfg(feature = "repl")]
+            repl: repl::State::default(),
         }
     }
 
@@ -281,21 +292,25 @@ impl Runner {
         {
             return false;
         }
+        #[cfg(feature = "repl")]
         if cli.interactive {
             self.repl(cli.ignore_env);
-        } else if cli.script.is_none()
+            return true;
+        }
+        if cli.script.is_none()
             && !cli.version
             && cli
                 .actions
                 .iter()
                 .all(|a| matches!(a, Action::Require { .. }))
         {
-            if std::io::stdin().is_terminal() {
+            #[cfg(feature = "repl")]
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                 print_version();
                 self.repl(cli.ignore_env);
-            } else {
-                return self.run_file(None, &[]);
+                return true;
             }
+            return self.run_file(None, &[]);
         }
         true
     }
@@ -442,136 +457,6 @@ impl Runner {
         self.lua.flush_files();
         eprintln!("{msg}");
     }
-
-    /// Call the global `warn`, if there is one.
-    fn warn(&mut self, msg: &str) {
-        let vm = self.lua.vm();
-        let warn = vm.global("warn");
-        if matches!(warn, Value::Native(_) | Value::Closure(_)) {
-            let m = vm.new_str(msg.as_bytes());
-            let _ = vm.call(warn, &[m]);
-        }
-    }
-
-    /// `v` as `tostring` shows it: through `__tostring` if it has one.
-    fn display_text(&mut self, v: Value) -> Vec<u8> {
-        let vm = self.lua.vm();
-        if let Value::Str(s) = v {
-            return vm.str_bytes(s).to_vec();
-        }
-        let mm = vm.rt.metamethod(&vm.heap, v, MetaField::ToString);
-        if !matches!(mm, Value::Nil)
-            && let Ok(r) = vm.call(mm, &[v])
-            && let Some(&Value::Str(s)) = r.first()
-        {
-            return vm.str_bytes(s).to_vec();
-        }
-        vm.to_display(v)
-    }
-
-    /// Print `_PROMPT` (or `_PROMPT2`) and read a line without its newline;
-    /// `None` at end of input.
-    fn read_line(&mut self, continuation: bool) -> Option<Vec<u8>> {
-        let (name, default) = if continuation {
-            ("_PROMPT2", ">> ")
-        } else {
-            ("_PROMPT", "> ")
-        };
-        let p = self.lua.vm().global(name);
-        let prompt = match p {
-            Value::Nil => default.as_bytes().to_vec(),
-            v => self.display_text(v),
-        };
-        let _ = self.lua.vm().flush();
-        let mut out = std::io::stdout();
-        let _ = out.write_all(&prompt);
-        let _ = out.flush();
-        let mut line = Vec::new();
-        RUNNING.store(false, Ordering::Relaxed);
-        let read = std::io::stdin().lock().read_until(b'\n', &mut line);
-        RUNNING.store(true, Ordering::Relaxed);
-        match read {
-            Ok(0) | Err(_) => None,
-            Ok(_) => {
-                if line.last() == Some(&b'\n') {
-                    line.pop();
-                }
-                Some(line)
-            }
-        }
-    }
-
-    /// Interactive mode: read statements or expressions and print their
-    /// values. There's no line editing, so `LUA_READLINELIB` names a library
-    /// that can't be loaded.
-    fn repl(&mut self, ignore_env: bool) {
-        if !ignore_env && let Ok(lib) = std::env::var("LUA_READLINELIB") {
-            self.warn(&format!("unable to load readline library '{lib}'"));
-        }
-        while let Some(line) = self.read_line(false) {
-            if starts_with_local(&line) {
-                self.report("warning: locals do not survive across lines in interactive mode");
-            }
-            let mut ret = b"return ".to_vec();
-            ret.extend_from_slice(&line);
-            let f = match self.lua.load_buffer(&ret, STDIN) {
-                Ok(f) => Some(f),
-                Err(_) => self.read_statement(line),
-            };
-            if let Some(f) = f {
-                self.call_and_print(f);
-            }
-        }
-        let _ = self.lua.vm().flush();
-        println!();
-    }
-
-    /// Compile `line` as statements, reading more lines while the chunk is
-    /// incomplete. `None` after reporting a syntax error.
-    fn read_statement(&mut self, mut buf: Vec<u8>) -> Option<Value> {
-        loop {
-            match self.lua.load_buffer(&buf, STDIN) {
-                Ok(f) => return Some(f),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.ends_with("<eof>")
-                        && let Some(more) = self.read_line(true)
-                    {
-                        buf.push(b'\n');
-                        buf.extend_from_slice(&more);
-                        continue;
-                    }
-                    self.report(&msg);
-                    return None;
-                }
-            }
-        }
-    }
-
-    fn call_and_print(&mut self, f: Value) {
-        self.lua.vm().pin(f);
-        let r = self.docall(f, &[]);
-        self.lua.vm().unpin(f);
-        let vm = self.lua.vm();
-        match r {
-            Ok(results) if results.is_empty() => {}
-            Ok(results) => {
-                for &v in &results {
-                    vm.pin(v);
-                }
-                let print = vm.global("print");
-                let r = vm.call(print, &results);
-                for &v in &results {
-                    vm.unpin(v);
-                }
-                if let Err(e) = r {
-                    let msg = self.lua.vm().error_message(&e);
-                    self.report(&format!("error calling 'print' ({msg})"));
-                }
-            }
-            Err(text) => self.report(&text),
-        }
-    }
 }
 
 /// `docall(f, handler, args...)`: `f(args...)` under `handler`, as
@@ -637,16 +522,6 @@ fn tostring_done(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeRetu
         Some(s @ Value::Str(_)) => ctx.ret1(s),
         _ => Err(ctx.error("'__tostring' must return a string")),
     }
-}
-
-/// Whether an interactive line declares a local, which the next line can't
-/// see.
-fn starts_with_local(line: &[u8]) -> bool {
-    let rest = line.trim_ascii_start();
-    rest.strip_prefix(b"local").is_some_and(|r| {
-        !r.first()
-            .is_some_and(|&c| c == b'_' || c.is_ascii_alphanumeric())
-    })
 }
 
 /// The banner. It names the Lua release we implement, as `lua -v` does.

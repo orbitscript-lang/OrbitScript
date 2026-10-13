@@ -95,11 +95,13 @@ Why: it's a different program; claiming Lua.org's copyright line for it would be
 
 Suite: `main.lua` reads the release with `"Lua (%d+%.%d+%.%d+)"` and checks that `PUC-Rio` ends the line; both hold.
 
-## No line editing in interactive mode
+## Interactive mode's own line editor
 
-Interactive mode reads plain lines from standard input: no history and no editing keys. `LUA_READLINELIB` always gets the warning lua5.5 gives for a library it can't load.
+On a terminal, interactive mode edits lines with its own editor instead of GNU readline: the usual Emacs keys, Up and Down through history (a statement typed over several lines is one entry, as in lua5.5), Ctrl-R reverse search, and Ctrl-Z. Tab completes Lua names (keywords, globals and fields such as `string.fo`, including methods reached through `__index` tables) where readline completes file names. History lasts for the session, as in lua5.5. It never loads a readline library, so `LUA_READLINELIB` always gets the warning lua5.5 gives for a library it can't load. Without a terminal, or with `TERM=dumb`, it reads plain lines, as before. On Windows it reads plain lines too; the console provides its own editing and history for those.
 
-Why: line editing would be the CLI's only dependency.
+Both are Cargo features of `orbit-cli`, on by default: `line-editing` (the editor) and `repl` (interactive mode itself, which `line-editing` turns on). A build without `line-editing` reads plain lines; one without `repl` has no `-i` (it's an unrecognized option) and runs a terminal on standard input as a script, as it does a pipe.
+
+Why: readline would be the CLI's first C library dependency. Ours is written in safe Rust with no new crates and switches the terminal mode through `stty`, since the workspace forbids `unsafe`.
 
 Suite: `main.lua` checks the warning, which holds.
 
