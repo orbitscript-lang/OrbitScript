@@ -1,6 +1,6 @@
 # ADR-8: Loading C modules (the Lua C API shim)
 
-Status: Proposed (2026-10-10). Scope, binary compatibility, the `unsafe` exception, the `cc` build dependency, light userdata and the `io` handle behavior were each decided by Tym on 2026-10-09 and 2026-10-10; this record writes them down with the design the spike (`spike/c-modules`, never merged) measured.
+Status: Accepted (Tym, 2026-10-13; proposed 2026-10-10, implemented in #124 and #125). Scope, binary compatibility, the `unsafe` exception, the `cc` build dependency, light userdata and the `io` handle behavior were each decided by Tym on 2026-10-09 and 2026-10-10; this record writes them down with the design the spike (`spike/c-modules`, never merged) measured.
 
 ## Context
 
