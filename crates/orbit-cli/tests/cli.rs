@@ -210,3 +210,16 @@ fn memory_limit_from_the_environment() {
     assert!(!o.status.success());
     assert!(err(&o).contains("ORBIT_MEMORY_LIMIT"), "{}", err(&o));
 }
+
+/// Without the `c-modules` feature, `package.loadlib` gives Lua's result for
+/// a build without dynamic libraries.
+#[test]
+#[cfg(not(feature = "c-modules"))]
+fn loadlib_is_absent_without_c_modules() {
+    let o = orbit(
+        &["-e", "print(select(3, package.loadlib('x.so', 'f')))"],
+        "",
+        &[],
+    );
+    assert_eq!(out(&o), "absent\n");
+}

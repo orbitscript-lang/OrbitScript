@@ -34,7 +34,7 @@ pub use coro::CoStatus;
 pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 pub use meta::Event;
 pub use native::{
-    CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn, ResumeOk,
+    CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn, Operator, ResumeOk,
 };
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
 pub use orbit_bytecode as op;
@@ -673,6 +673,11 @@ impl Vm {
     /// outermost call once more, so the depths match lua5.5's.
     pub(crate) fn c_overflow(&self, cdepth: u8) -> bool {
         cdepth as usize + 2 * self.rt.resumers.len() + 1 >= MAX_CCALLS
+    }
+
+    /// The main thread (`coroutine.running()` outside any coroutine).
+    pub fn main_thread(&self) -> Gc<orbit_core::Thread> {
+        self.rt.main_thread
     }
 
     /// A VM with an empty global table and no libraries.

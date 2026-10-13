@@ -4,8 +4,9 @@
 //! `package.loaded` and `package.preload` are also kept in the registry
 //! (`_LOADED`, `_PRELOAD`), and the `package` table itself (`_PACKAGE`), so
 //! `require` keeps working when scripts replace those fields, as in Lua.
-//! `orbit` has no dynamic loading: `package.loadlib` reports it as
-//! `"absent"` and the C searchers only search.
+//! Dynamic loading comes from a [`DynLoader`] a host installs (the
+//! `orbit-capi` crate, behind the `c-modules` feature). Without one,
+//! `package.loadlib` reports `"absent"` and the C searchers only search.
 
 use orbit_vm::orbit_core::table as tbl;
 use orbit_vm::orbit_core::{Gc, Table, Value};
@@ -15,6 +16,80 @@ use crate::load::{Mode, load_chunk, read_chunk_file};
 use crate::{LOADED, registry_table};
 
 type R = Result<NativeReturn, LuaError>;
+
+/// Loads `sym` from the C library at `path`: the function, or `true` when
+/// `sym` is `"*"` (link the library's symbols globally only). On failure,
+/// the message and where it failed (`"open"` or `"init"`).
+pub type LoadFn =
+    fn(&mut NativeCtx<'_>, path: &[u8], sym: &[u8]) -> Result<Value, (String, &'static str)>;
+
+/// The dynamic loader `package.loadlib` and the C searchers use, kept in
+/// [`orbit_vm::Runtime::ext`]. `None` (the default): no dynamic loading.
+#[derive(Debug, Default)]
+pub struct DynLoader {
+    pub load: Option<LoadFn>,
+    /// The C module search path when the host has locked it ([`lock_cpath`]).
+    locked_cpath: Option<Vec<u8>>,
+}
+
+fn dyn_loader(ctx: &mut NativeCtx<'_>) -> Option<LoadFn> {
+    ctx.vm.rt.ext.get_or_insert_with(DynLoader::default).load
+}
+
+/// Lock the C module search path to `cpath` (ADR-8). The C searchers then
+/// search `cpath` whatever scripts set `package.cpath` to, and
+/// `package.loadlib` only opens files those searchers could open: a path
+/// one of `cpath`'s templates produces with `?` replaced by a module name.
+/// Module names reach the templates with `.` turned into the directory
+/// separator, so the text in place of `?` holds no `.`, and a path can't
+/// climb out of a template's directory with `..`.
+pub fn lock_cpath(vm: &mut Vm, cpath: &[u8]) {
+    vm.rt
+        .ext
+        .get_or_insert_with(DynLoader::default)
+        .locked_cpath = Some(cpath.to_vec());
+}
+
+/// The locked C module search path, if any.
+fn locked_cpath(ctx: &mut NativeCtx<'_>) -> Option<Vec<u8>> {
+    ctx.vm
+        .rt
+        .ext
+        .get::<DynLoader>()
+        .and_then(|d| d.locked_cpath.clone())
+}
+
+/// Whether some template in `cpath` gives `file` with each `?` replaced by
+/// the same non-empty text holding no `.`.
+fn cpath_allows(cpath: &[u8], file: &[u8]) -> bool {
+    cpath.split(|&b| b == b';').any(|template| {
+        let marks = template.iter().filter(|&&b| b == b'?').count();
+        if marks == 0 {
+            return !template.is_empty() && template == file;
+        }
+        let fixed = template.len() - marks;
+        let Some(rest) = file.len().checked_sub(fixed) else {
+            return false;
+        };
+        if rest == 0 || rest % marks != 0 {
+            return false;
+        }
+        let first = template.iter().position(|&b| b == b'?').unwrap_or(0);
+        let name = &file[first..first + rest / marks];
+        if name.contains(&b'.') {
+            return false;
+        }
+        let mut built = Vec::with_capacity(file.len());
+        for &b in template {
+            if b == b'?' {
+                built.extend_from_slice(name);
+            } else {
+                built.push(b);
+            }
+        }
+        built == file
+    })
+}
 
 /// The defaults the reference `lua5.5` build uses, so scripts see the same
 /// strings.
@@ -77,7 +152,7 @@ fn env_path(versioned: &str, plain: &str, default: &str, ignore_env: bool) -> St
 }
 
 /// Open `package` and the global `require`.
-pub(crate) fn open(vm: &mut Vm, ignore_env: bool) {
+pub(crate) fn open(vm: &mut Vm, ignore_env: bool, lock: bool) {
     let pkg = crate::open_lib(vm, "package", FUNCTIONS);
     vm.pin(Value::Table(pkg));
     let set = |vm: &mut Vm, k: &str, v: Value| {
@@ -88,6 +163,9 @@ pub(crate) fn open(vm: &mut Vm, ignore_env: bool) {
     let v = vm.new_str(path.as_bytes());
     set(vm, "path", v);
     let cpath = env_path("LUA_CPATH_5_5", "LUA_CPATH", DEFAULT_CPATH, ignore_env);
+    if lock {
+        lock_cpath(vm, cpath.as_bytes());
+    }
     let v = vm.new_str(cpath.as_bytes());
     set(vm, "cpath", v);
     let config = format!("{DIRSEP}\n;\n?\n!\n-\n");
@@ -112,8 +190,32 @@ pub(crate) fn open(vm: &mut Vm, ignore_env: bool) {
 }
 
 fn loadlib(ctx: &mut NativeCtx<'_>) -> R {
-    ctx.check_str(0)?;
-    ctx.check_str(1)?;
+    let path = ctx.check_str(0)?;
+    let sym = ctx.check_str(1)?;
+    if let Some(load) = dyn_loader(ctx) {
+        let (path, sym) = (ctx.bytes(path).to_vec(), ctx.bytes(sym).to_vec());
+        if let Some(cpath) = locked_cpath(ctx)
+            && !cpath_allows(&cpath, &path)
+        {
+            let msg = ctx.new_str(b"library path not allowed: the C module path is locked");
+            let when = ctx.new_str(b"open");
+            ctx.push(Value::Nil);
+            ctx.push(msg);
+            ctx.push(when);
+            return Ok(NativeReturn::Return(3));
+        }
+        return match load(ctx, &path, &sym) {
+            Ok(f) => ctx.ret1(f),
+            Err((msg, when)) => {
+                let msg = ctx.new_str(msg.as_bytes());
+                let when = ctx.new_str(when.as_bytes());
+                ctx.push(Value::Nil);
+                ctx.push(msg);
+                ctx.push(when);
+                Ok(NativeReturn::Return(3))
+            }
+        };
+    }
     let msg = ctx.new_str(b"dynamic libraries not enabled; check your Lua installation");
     let when = ctx.new_str(b"absent");
     ctx.push(Value::Nil);
@@ -278,24 +380,54 @@ fn search_lua(ctx: &mut NativeCtx<'_>) -> R {
     }
 }
 
-/// The C searchers: search `cpath` like `lua`, but a library that's found
-/// can't be loaded.
-fn search_c_for(ctx: &mut NativeCtx<'_>, name: &[u8], file_name: &[u8]) -> R {
-    let cpath = path_field(ctx, "cpath")?;
-    match search_path(file_name, &cpath, b".", DIRSEP.as_bytes()) {
-        Ok(file) => Err(load_error(
+/// The C searchers: search `cpath` like `lua`, then load the library's
+/// `luaopen_` function through the [`DynLoader`]. Without one, a library
+/// that's found can't be loaded. `croot` is the all-in-one searcher: a
+/// library without the function only adds a message.
+fn search_c_for(ctx: &mut NativeCtx<'_>, name: &[u8], file_name: &[u8], croot: bool) -> R {
+    let cpath = match locked_cpath(ctx) {
+        Some(cpath) => cpath,
+        None => path_field(ctx, "cpath")?,
+    };
+    let file = match search_path(file_name, &cpath, b".", DIRSEP.as_bytes()) {
+        Ok(file) => file,
+        Err(msg) => return ret_msg(ctx, msg),
+    };
+    let Some(load) = dyn_loader(ctx) else {
+        return Err(load_error(
             ctx,
             name,
             &file,
             "dynamic libraries not enabled; check your Lua installation",
-        )),
-        Err(msg) => ret_msg(ctx, msg),
+        ));
+    };
+    // `luaopen_` and the name with dots as underscores, without any suffix
+    // from a hyphen on (`a.b-v2` opens `luaopen_a_b`).
+    let base = name.split(|&b| b == b'-').next().unwrap_or(name);
+    let mut sym = b"luaopen_".to_vec();
+    sym.extend(base.iter().map(|&b| if b == b'.' { b'_' } else { b }));
+    match load(ctx, &file, &sym) {
+        Ok(f) => {
+            ctx.push(f);
+            let data = ctx.new_str_owned(file);
+            ctx.push(data);
+            Ok(NativeReturn::Return(2))
+        }
+        Err((_, "init")) if croot => {
+            let mut msg = b"no module '".to_vec();
+            msg.extend_from_slice(name);
+            msg.extend_from_slice(b"' in file '");
+            msg.extend_from_slice(&file);
+            msg.push(b'\'');
+            ret_msg(ctx, msg)
+        }
+        Err((why, _)) => Err(load_error(ctx, name, &file, &why)),
     }
 }
 
 fn search_c(ctx: &mut NativeCtx<'_>) -> R {
     let name = str_arg(ctx, 0)?;
-    search_c_for(ctx, &name, &name)
+    search_c_for(ctx, &name, &name, false)
 }
 
 fn search_croot(ctx: &mut NativeCtx<'_>) -> R {
@@ -304,7 +436,7 @@ fn search_croot(ctx: &mut NativeCtx<'_>) -> R {
         return Ok(NativeReturn::Return(0));
     };
     let root = name[..dot].to_vec();
-    search_c_for(ctx, &name, &root)
+    search_c_for(ctx, &name, &root, true)
 }
 
 // `require`'s window while it runs searchers and the loader: the name, the
@@ -435,4 +567,34 @@ fn loader_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     ctx.push(v);
     ctx.push(extra);
     Ok(NativeReturn::Return(2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cpath_allows;
+
+    const CPATH: &[u8] = b"/usr/lib/lua/?.so;/opt/?/core.so;./?.so;/fixed/all.so";
+
+    #[test]
+    fn locked_cpath_allows_what_the_searchers_could_open() {
+        assert!(cpath_allows(CPATH, b"/usr/lib/lua/lfs.so"));
+        assert!(cpath_allows(CPATH, b"/usr/lib/lua/socket/core.so"));
+        assert!(cpath_allows(CPATH, b"/opt/x/core.so"));
+        assert!(cpath_allows(CPATH, b"./cjson.so"));
+        assert!(cpath_allows(CPATH, b"/fixed/all.so"));
+    }
+
+    #[test]
+    fn locked_cpath_refuses_other_files() {
+        assert!(!cpath_allows(CPATH, b"/usr/lib/lua/../../libc.so"));
+        assert!(!cpath_allows(CPATH, b"/usr/lib/lua/.so"));
+        assert!(!cpath_allows(CPATH, b"/usr/lib/lua/lfs.so.6"));
+        assert!(!cpath_allows(CPATH, b"/opt/a/b.so"));
+        assert!(!cpath_allows(CPATH, b"/lib/libc.so.6"));
+        assert!(!cpath_allows(CPATH, b"/fixed/all.so2"));
+        assert!(!cpath_allows(b"", b""));
+        // Every `?` takes the same text.
+        assert!(cpath_allows(b"/m/?/?.so", b"/m/a/a.so"));
+        assert!(!cpath_allows(b"/m/?/?.so", b"/m/a/b.so"));
+    }
 }

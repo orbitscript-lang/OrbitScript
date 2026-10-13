@@ -18,6 +18,26 @@ pub enum Meta<T> {
     Call { f: Value, nargs: usize },
 }
 
+/// An operator for [`NativeCtx::arith`], in the C API's order
+/// (`LUA_OPADD` is 0 .. `LUA_OPBNOT` is 13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operator {
+    Add,
+    Sub,
+    Mul,
+    Mod,
+    Pow,
+    Div,
+    IDiv,
+    BAnd,
+    BOr,
+    BXor,
+    Shl,
+    Shr,
+    Unm,
+    BNot,
+}
+
 /// A native function.
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 
@@ -624,6 +644,63 @@ impl NativeCtx<'_> {
     pub fn equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
         let r = ops::equal(&self.vm.heap, &self.vm.rt.metas, a, b);
         self.meta_result(r)
+    }
+
+    /// `a <= b` with `__le`.
+    pub fn less_equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
+        let r = ops::less_equal(&self.vm.heap, &self.vm.rt.metas, a, b);
+        self.meta_result(r)
+    }
+
+    /// `a op b` (for the unary operators, `a` alone) with metamethods, as
+    /// the C API's `lua_arith` does it.
+    pub fn arith(&mut self, op: Operator, a: Value, b: Value) -> Result<Meta<Value>, LuaError> {
+        use orbit_bytecode::number::BitOp;
+        let (heap, metas) = (&self.vm.heap, &self.vm.rt.metas);
+        let r = match op {
+            Operator::Add => ops::arith_slow(heap, metas, ops::Arith::Add, a, b),
+            Operator::Sub => ops::arith_slow(heap, metas, ops::Arith::Sub, a, b),
+            Operator::Mul => ops::arith_slow(heap, metas, ops::Arith::Mul, a, b),
+            Operator::Mod => ops::arith_slow(heap, metas, ops::Arith::Mod, a, b),
+            Operator::Pow => ops::arith_slow(heap, metas, ops::Arith::Pow, a, b),
+            Operator::Div => ops::arith_slow(heap, metas, ops::Arith::Div, a, b),
+            Operator::IDiv => ops::arith_slow(heap, metas, ops::Arith::IDiv, a, b),
+            Operator::Unm => ops::arith_slow(heap, metas, ops::Arith::Neg, a, a),
+            Operator::BAnd => ops::bitwise_slow(heap, metas, BitOp::And, a, b),
+            Operator::BOr => ops::bitwise_slow(heap, metas, BitOp::Or, a, b),
+            Operator::BXor => ops::bitwise_slow(heap, metas, BitOp::Xor, a, b),
+            Operator::Shl => ops::bitwise_slow(heap, metas, BitOp::Shl, a, b),
+            Operator::Shr => ops::bitwise_slow(heap, metas, BitOp::Shr, a, b),
+            Operator::BNot => ops::bnot_slow(heap, metas, a),
+        };
+        self.meta_result(r)
+    }
+
+    /// `a .. b` with `__concat`.
+    pub fn concat(&mut self, a: Value, b: Value) -> Result<Meta<Value>, LuaError> {
+        let mut out = Vec::new();
+        let heap = &self.vm.heap;
+        if ops::concat_piece(heap, a, &mut out) && ops::concat_piece(heap, b, &mut out) {
+            return Ok(Meta::Done(self.new_str_owned(out)));
+        }
+        let h = meta::binary_handler(heap, &self.vm.rt.metas, Event::Concat, a, b);
+        if h.is_nil() {
+            let bad = if ops::concat_piece(heap, a, &mut Vec::new()) {
+                b
+            } else {
+                a
+            };
+            let msg = format!(
+                "attempt to concatenate a {} value",
+                self.vm.rt.metas.type_name(heap, bad)
+            );
+            return Err(self.error(msg));
+        }
+        self.meta_result(Err(Exc::Meta(meta::MetaCall::new(
+            h,
+            Event::Concat,
+            &[a, b],
+        ))))
     }
 
     // ---- userdata --------------------------------------------------------

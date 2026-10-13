@@ -40,7 +40,9 @@ mod utf8;
 use orbit_vm::{NativeFn, Vm};
 
 #[cfg(feature = "load")]
-pub use load::{BINARY_SIGNATURE, chunk_id, load_buffer, read_chunk_file};
+pub use load::{BINARY_SIGNATURE, chunk_id, load_buffer, load_chunk_in, read_chunk_file};
+#[cfg(feature = "package")]
+pub use package::{DynLoader, LoadFn, lock_cpath};
 
 /// The first result of a call a native requested with `CallThen` (nil if
 /// none); the call's results are dropped from the window.
@@ -69,6 +71,9 @@ pub struct Options {
     /// Ignore environment variables (`LUA_PATH`, `LUA_CPATH` and their
     /// versioned forms, `ORBIT_VERIFY`), as `lua -E` does.
     pub ignore_env: bool,
+    /// Lock the C module search path to the one `package.cpath` starts
+    /// with (from `LUA_CPATH` or the default): see [`lock_cpath`].
+    pub lock_cpath: bool,
 }
 
 /// Open every library with default [`Options`].
@@ -112,7 +117,7 @@ pub fn open_libs_with(vm: &mut Vm, options: Options) {
     #[cfg(feature = "io")]
     io::open(vm);
     #[cfg(feature = "package")]
-    package::open(vm, options.ignore_env);
+    package::open(vm, options.ignore_env, options.lock_cpath);
     #[cfg(feature = "coroutine")]
     open_lib(vm, "coroutine", coroutine::FUNCTIONS);
     #[cfg(feature = "debug")]

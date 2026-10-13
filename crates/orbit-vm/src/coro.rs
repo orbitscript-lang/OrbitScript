@@ -827,6 +827,36 @@ impl NativeCtx<'_> {
         }
     }
 
+    /// The native behind function `f`: `f` itself, or the native a native
+    /// closure runs. `None` for Lua functions and other values.
+    pub fn native_of(&self, f: Value) -> Option<NativeId> {
+        match f {
+            Value::Native(id) => Some(id),
+            Value::Closure(c) => {
+                let p = self.vm.heap.get(self.vm.heap.get(c).proto);
+                match p.code.code.first() {
+                    Some(Op::NativeEntry { id }) => Some(NativeId(*id)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Hidden upvalue `i` of native closure `f` (nil if it has none).
+    pub fn hidden_upvalue_of(&self, f: Value, i: usize) -> Value {
+        let Value::Closure(c) = f else {
+            return Value::Nil;
+        };
+        let closure = self.vm.heap.get(c);
+        let hidden = self.vm.rt.hidden_upvalues(&self.vm.heap, closure);
+        let caps = &closure.captures;
+        match (i < hidden).then(|| caps[caps.len() - hidden + i]) {
+            Some(cell) => self.vm.heap.get(cell).value,
+            None => Value::Nil,
+        }
+    }
+
     /// How many visible upvalues the native closure being called has.
     pub fn upvalue_count(&self) -> usize {
         match self.upvals {
