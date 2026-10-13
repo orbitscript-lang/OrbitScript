@@ -11,6 +11,7 @@
 | Crate | Purpose | Stream |
 |---|---|---|
 | `orbit-lua-syntax` | Lua 5.5 lexer, parser, AST | A |
+| `orbit-orb-syntax` | OrbitScript lexer, parser, AST (lowering to HIR in progress) | F |
 | `orbit-virtmem` | Low-level OS virtual address reservation and page commit buffer (`VmBuffer`) | B |
 | `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates | B |
 | `orbit-core` | Value, strings, tables, built on `orbit-gc` | B |

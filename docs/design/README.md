@@ -16,7 +16,7 @@ The first goal after the Phase 0 foundations is "first light": a small but real 
 ```mermaid
 flowchart LR
     lua[".lua source"] --> luasyn["orbit-lua-syntax<br/>lexer, parser, AST, lowering"]
-    orb[".orb source"] -.-> orbsyn["OrbitScript front end<br/>(later)"]
+    orb[".orb source"] -.-> orbsyn["orbit-orb-syntax<br/>(in progress)"]
     luasyn --> hir["orbit-hir<br/>resolved IR, captures"]
     orbsyn -.-> hir
     hir --> comp["orbit-compiler<br/>registers, bytecode, debug info"]
@@ -89,3 +89,10 @@ The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass
 | [stdlib-string-table-math.md](stdlib-string-table-math.md) | The full `string`, `utf8`, `table` and `math` libraries (milestone C5a): patterns, `format`, `pack`, resumable table functions, `sort`, xoshiro256** seeding, differential fuzzers |
 | [chunks-io-os-cli.md](chunks-io-os-cli.md) | `load` and friends, `require`/`package`, binary chunks and their verifier, the `io` and `os` libraries, and the command line |
 | [debug.md](debug.md) | The `debug` library, function names and levels, tracebacks, and hooks (milestones C5d, C6) |
+
+## OrbitScript
+
+| Document | Covers |
+|---|---|
+| [orbitscript-syntax/proposal.md](orbitscript-syntax/proposal.md) | The OrbitScript syntax, as decided by Tym (2026-10-13), with [indexing-report.md](orbitscript-syntax/indexing-report.md) behind its 1-based indexing decision |
+| [orbitscript-front-end.md](orbitscript-front-end.md) | `orbit-orb-syntax`: lexer, parser, AST and lowering to HIR, and the rules it follows where the proposal is silent |
