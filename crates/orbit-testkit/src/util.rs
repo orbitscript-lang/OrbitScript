@@ -23,6 +23,12 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// The `orbitc` compiler next to interpreter `interp` (the CLI crate builds
+/// both), for the checks that only compile.
+pub fn compiler_next_to(interp: &Path) -> PathBuf {
+    interp.with_file_name(format!("orbitc{}", std::env::consts::EXE_SUFFIX))
+}
+
 /// Makes `path` absolute against the current directory without touching the
 /// filesystem, because subprocesses run with a different working directory.
 pub fn absolute(path: &Path) -> Result<PathBuf> {

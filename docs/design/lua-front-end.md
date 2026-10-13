@@ -160,6 +160,6 @@ Parsing and compiling are on the start-up path. First-light targets: no per-toke
 ## Testing
 
 - Unit tests per lexer rule and grammar production.
-- Golden tests: a directory of small `.lua` files with their AST and HIR dumps (`orbit-cli --dump-ast`, `--dump-hir`), reviewed as text.
+- Golden tests: a directory of small `.lua` files with their AST and HIR dumps (`orbitc --ast`, `orbitc --hir`), reviewed as text.
 - Differential syntax tests against the reference: for a corpus of valid and invalid snippets, `load` must agree on success and, on failure, on the message. `orbit-testkit` gets a small random program generator (stable Rust, no fuzzing toolchain) that produces subset programs and mutations of them.
 - Every file in `tests/first-light/` parses and lowers without "not supported yet".

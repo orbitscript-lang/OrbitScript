@@ -9,8 +9,8 @@
 //! the arguments from 1; `...` holds the arguments. An uncaught error prints
 //! `<program>: <message>` plus a traceback to stderr with exit status 1.
 //!
-//! `--dump-ast`, `--dump-hir` and `--dump-bytecode` print a compiler stage
-//! of the script instead of running it. `ORBIT_GC_STRESS=1` collects at
+//! Compiling, listing bytecode and printing front-end stages are `orbitc`'s
+//! job (`orbitc.rs`). `ORBIT_GC_STRESS=1` collects at
 //! nearly every safe point after an allocation. `ORBIT_MEMORY_LIMIT=64M`
 //! (bytes, or with a `K`, `M` or `G` suffix) caps the Lua heap: past it,
 //! scripts get the error `not enough memory`.
@@ -19,8 +19,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use orbit::{CallOutcome, Error, Event, Lua, LuaError, NativeCtx, NativeReturn, Options, Value};
-use orbit_lua_syntax::ParseOptions;
+use orbit::{CallOutcome, Event, Lua, LuaError, NativeCtx, NativeReturn, Options, Value};
 
 /// The chunk names `lua` gives command-line code and standard input.
 const COMMAND_LINE: &[u8] = b"=(command line)";
@@ -65,7 +64,6 @@ struct Cli {
     ignore_env: bool,
     lock_cpath: bool,
     warnings: bool,
-    dump: Option<String>,
     /// Index of the script in the arguments (`-` for standard input).
     script: Option<usize>,
 }
@@ -96,7 +94,6 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
             "-E" => cli.ignore_env = true,
             "-W" => cli.warnings = true,
             "--lock-cpath" => cli.lock_cpath = true,
-            "--dump-ast" | "--dump-hir" | "--dump-bytecode" => cli.dump = Some(a.to_string()),
             _ if a.starts_with("-e") || a.starts_with("-l") => {
                 let opt = if a.starts_with("-e") { "-e" } else { "-l" };
                 // The value is glued on (`-eprint(1)`) or the next argument,
@@ -165,9 +162,7 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          -W        turn warnings on\n  \
          --lock-cpath  load C modules only from the starting 'package.cpath'\n  \
          --        stop handling options\n  \
-         -         stop handling options and execute stdin\n  \
-         --dump-ast, --dump-hir, --dump-bytecode\n            \
-         print a compiler stage of 'script' instead of running it\n"
+         -         stop handling options and execute stdin\n"
     );
     ExitCode::FAILURE
 }
@@ -179,13 +174,6 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return usage(&prog, e),
     };
-    if let Some(what) = &cli.dump {
-        let Some(script) = cli.script.map(|i| &args[i]) else {
-            eprintln!("{prog}: {what} needs a script");
-            return ExitCode::FAILURE;
-        };
-        return dump_stage(&prog, what, script);
-    }
     let mut lua = Lua::with_options(Options {
         ignore_env: cli.ignore_env,
         lock_cpath: cli.lock_cpath,
@@ -667,40 +655,4 @@ fn print_version() {
         "OrbitScript {}  implements Lua 5.5.1, designed by Lua.org, PUC-Rio",
         orbit::VERSION
     );
-}
-
-fn dump_stage(prog: &str, what: &str, script: &str) -> ExitCode {
-    let src = match std::fs::read(script) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("{prog}: cannot open {script}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let options = ParseOptions {
-        skip_comment_line: true,
-        ..ParseOptions::default()
-    };
-    let name = script;
-    let out: Result<Vec<u8>, String> = match what {
-        "--dump-ast" => orbit_lua_syntax::parse_with(name, &src, &options)
-            .map(|ast| orbit_lua_syntax::unparse(&ast))
-            .map_err(|d| d.to_lua_message(name)),
-        "--dump-hir" => orbit_lua_syntax::to_hir(name, &src, &options)
-            .map(|h| orbit_hir::print(&h).into_bytes())
-            .map_err(|d| d.to_lua_message(name)),
-        _ => orbit::compile(&src, name, &options)
-            .map(|c| orbit_compiler::disassemble(&c).into_bytes())
-            .map_err(|e: Error| e.to_string()),
-    };
-    match out {
-        Ok(bytes) => {
-            let _ = std::io::stdout().write_all(&bytes);
-            ExitCode::SUCCESS
-        }
-        Err(m) => {
-            eprintln!("{prog}: {m}");
-            ExitCode::FAILURE
-        }
-    }
 }

@@ -3,8 +3,8 @@
 //! Each corpus file gets a fixed number of mutants: a line deleted,
 //! duplicated or swapped, a token deleted, a token inserted from a list
 //! that favours Lua 5.5 syntax, or the file cut short. Both interpreters
-//! only compile each mutant (`loadfile` in the reference, `--dump-bytecode`
-//! in the candidate) and must agree on success and, on failure, on the
+//! only compile each mutant (`loadfile` in the reference, `orbitc -p` for
+//! the candidate) and must agree on success and, on failure, on the
 //! message. The mutants come from a seeded generator, so a run is
 //! reproducible. Known mismatches live in an expected list; the command
 //! fails only on new ones.
@@ -26,6 +26,8 @@ the compile errors.
 
 options:
   --interp PATH        candidate (default target/release/orbit)
+  --compiler PATH      candidate's compiler, run as `orbitc -p FILE`
+                       (default: orbitc next to --interp)
   --reference PATH     reference (default target/reference-lua/bin/lua5.5)
   --corpus DIR         a corpus directory; repeatable (default: the official
                        suite, tests/diff/compat and tests/first-light)
@@ -196,7 +198,7 @@ end
 fn candidate(program: &Path, work: &Path, name: &str) -> Result<String> {
     let out = process::run(&Spec {
         program: program.to_path_buf(),
-        args: vec!["--dump-bytecode".into(), name.into()],
+        args: vec!["-p".into(), name.into()],
         cwd: work.to_path_buf(),
         timeout: Duration::from_secs(30),
         measure_rss: false,
@@ -259,6 +261,7 @@ fn lua_files(dir: &Path) -> Result<Vec<PathBuf>> {
 pub fn main(args: &[String]) -> Result<bool> {
     let root = util::repo_root();
     let mut interp = root.join("target/release/orbit");
+    let mut compiler = None;
     let mut refpath = root.join("target/reference-lua/bin/lua5.5");
     let mut corpora = Vec::new();
     let mut mutants = 20usize;
@@ -277,6 +280,7 @@ pub fn main(args: &[String]) -> Result<bool> {
         let number = |v: String| v.parse::<u64>().map_err(|_| format!("bad {a} {v:?}"));
         match a.as_str() {
             "--interp" => interp = util::absolute(Path::new(&val()?))?,
+            "--compiler" => compiler = Some(util::absolute(Path::new(&val()?))?),
             "--reference" => refpath = util::absolute(Path::new(&val()?))?,
             "--corpus" => corpora.push(util::absolute(Path::new(&val()?))?),
             "--mutants" => mutants = number(val()?)? as usize,
@@ -291,6 +295,7 @@ pub fn main(args: &[String]) -> Result<bool> {
             s => return Err(format!("unknown option {s}\n\n{USAGE}")),
         }
     }
+    let compiler = compiler.unwrap_or_else(|| util::compiler_next_to(&interp));
     if corpora.is_empty() {
         let suite = std::env::var_os("LUA_SUITE")
             .map(PathBuf::from)
@@ -333,7 +338,7 @@ pub fn main(args: &[String]) -> Result<bool> {
         let want = expected
             .get(name)
             .ok_or_else(|| format!("the reference gave no verdict on {name}"))?;
-        let got = candidate(&interp, &work, name)?;
+        let got = candidate(&compiler, &work, name)?;
         if &got == want {
             agreed_errors += usize::from(got != "ok");
         } else {

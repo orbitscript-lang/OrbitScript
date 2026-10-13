@@ -172,7 +172,7 @@ Both are dependency decisions under ADR-7. **Decided (Tym, 2026-10-05):** our ow
 
 Interactive mode prints `_PROMPT` and `_PROMPT2` (defaults `> ` and `>> `), tries a line as `return line` first so expressions print their values, and keeps reading while the error says the chunk ended early (`<eof>`). There's no line editing, so no readline dependency. Exit status is 0 on success and 1 after an uncaught error, with `lua`'s message format (`orbit: msg` plus a traceback on standard error).
 
-The existing `--dump-ast`, `--dump-hir` and `--dump-bytecode` stay as long options; `lua` has no long options, so they can't clash. Argument parsing is hand-written, since `lua`'s rules (options glued to their values, `-` as a script name, stopping at the first non-option) are short and specific, and a parser crate would be the CLI's only dependency.
+The compiler stages (`--ast`, `--hir` and the `-l` listing) live in a separate `orbitc` binary, after `luac`, which also writes binary chunks (`-o`, `-s`, `-p`); keeping them out of `orbit` keeps the printers and the disassembler out of the interpreter. Argument parsing is hand-written, since `lua`'s rules (options glued to their values, `-` as a script name, stopping at the first non-option) are short and specific, and a parser crate would be the CLI's only dependency.
 
 ## Cargo features and size
 

@@ -12,6 +12,12 @@ publish = false
 name = "orbit"
 path = "src/main.rs"
 
+# The compiler, after `luac`: compiling, listing bytecode and the front-end
+# printers live here, out of the interpreter.
+[[bin]]
+name = "orbitc"
+path = "src/orbitc.rs"
+
 [dependencies]
 orbit = { path = "../orbit" }
 orbit-compiler = { path = "../orbit-compiler" }

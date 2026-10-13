@@ -156,7 +156,7 @@ The `Env` capture, when a function has one, is always capture 0 (the VM's global
 ## Supporting pieces
 
 - **Verifier** (`hir::verify(&Chunk)`): ids in range, `Break` only inside loops, no `Outer` after analysis, params are locals of their function, each local declared exactly once. Run in debug builds and tests.
-- **Printer**: a stable text dump (`orbit --dump-hir file.lua`) used by golden tests and for reviewing lowering.
+- **Printer**: a stable text dump (`orbitc --hir file.lua`) used by golden tests and for reviewing lowering.
 - **Function names** for messages: `FunctionName::{Main, Global(StrId), Local(StrId), Field(StrId), Method(StrId), Anonymous}`, chosen by the front end from how the function was declared.
 
 ## How OrbitScript will lower to it (illustration only)

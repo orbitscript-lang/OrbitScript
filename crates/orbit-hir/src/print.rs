@@ -1,4 +1,4 @@
-//! A stable text dump of a chunk, for golden tests and `--dump-hir`.
+//! A stable text dump of a chunk, for golden tests and `orbitc --hir`.
 
 use std::fmt::Write;
 
