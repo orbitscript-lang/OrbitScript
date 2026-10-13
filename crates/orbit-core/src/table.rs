@@ -214,7 +214,10 @@ impl Entry {
 
 /// The array part in one allocation (ADR-1): `cap` payload words followed
 /// by the tag bytes packed eight to a word, 9 bytes per slot. Slots below
-/// `len` may hold nil (holes); slots from `len` up are never read. The words are
+/// `len` may hold nil (holes). The tag bytes of slots from `len` up, and the
+/// padding bytes of the last tag word, are always nil, so a slot whose tag
+/// is not nil is below `len`: [`ArrayPart::live`] relies on that to skip
+/// the length check. Their payload words are never read. The words are
 /// plain `u64`s because one allocation can hold only one element type; they
 /// never leave this type, whose API takes and returns `Value`s, and tag
 /// bytes are only ever written from a [`Tag`].
@@ -245,6 +248,21 @@ impl ArrayPart {
     #[inline(always)]
     fn len(&self) -> usize {
         self.len as usize
+    }
+
+    /// The tag byte and payload of slot `idx` when it holds a value (its
+    /// tag is not nil); `None` for a nil slot or one past the array part.
+    /// A non-nil tag means `idx < len` (see the type's invariant), so this
+    /// needs only the two slice bounds checks, not a length check too.
+    #[inline(always)]
+    fn live(&self, idx: u64) -> Option<(u8, Payload)> {
+        let idx = usize::try_from(idx).ok()?;
+        let byte = self.words.get((self.cap as usize).wrapping_add(idx / 8))?[idx % 8];
+        if byte == Tag::Nil as u8 {
+            return None;
+        }
+        let p = Payload::from_bits(u64::from_ne_bytes(*self.words.get(idx)?));
+        Some((byte, p))
     }
 
     #[inline(always)]
@@ -315,8 +333,10 @@ impl ArrayPart {
         }
         v.resize(total, [0; 8]);
         // Only slots below `len` are ever read, so whatever the moved-over
-        // words leave behind is never seen.
+        // words leave behind in the payload words is never seen. The tag
+        // bytes past the moved ones must read nil.
         v.copy_within(old_cap..old_cap + tag_words, cap);
+        v[cap + tag_words..].fill([0; 8]);
         self.words = v.into_boxed_slice();
         self.cap = cap as u32;
         Ok(())
@@ -342,6 +362,14 @@ impl ArrayPart {
 
     fn bytes(&self) -> usize {
         self.words.len() * 8
+    }
+
+    /// The invariant [`ArrayPart::live`] relies on: every tag byte from
+    /// `len` up is nil.
+    #[cfg(test)]
+    fn tags_past_len_are_nil(&self) -> bool {
+        let tags = self.words[self.cap as usize..].as_flattened();
+        tags[self.len()..].iter().all(|&b| b == Tag::Nil as u8)
     }
 
     /// The bytes an array part of capacity `cap` takes.
@@ -592,23 +620,28 @@ impl Table {
         }
     }
 
-    /// `*out = t[i]` for an integer key (see [`Value::write_unpacked`]).
+    /// `*out = t[i]` when `i` is in the array part and that slot holds a
+    /// value; otherwise returns false and leaves `out` alone, so a caller
+    /// whose `out` aliases its operands still has them for the slow path.
     #[inline(always)]
-    pub fn read_int(&self, i: i64, out: &mut Value) {
+    pub fn read_int_present(&self, i: i64, out: &mut Value) -> bool {
         let idx = (i as u64).wrapping_sub(1);
-        if idx < self.array.len() as u64 {
-            let idx = idx as usize;
-            let p = self.array.payload(idx);
-            // Numbers first, with plain compares: a jump table over every
-            // tag costs an indirect branch on each read.
-            match self.array.tag(idx) {
-                Tag::Int => *out = Value::Int(p.bits() as i64),
-                Tag::Float => *out = Value::Float(f64::from_bits(p.bits())),
-                t => Value::write_unpacked(out, t, p),
-            }
+        let Some((b, p)) = self.array.live(idx) else {
+            return false;
+        };
+        // Numbers first, with plain compares on the tag byte: a jump table
+        // over every tag costs an indirect branch on each read.
+        if b == Tag::Int as u8 {
+            *out = Value::Int(p.bits() as i64);
+        } else if b == Tag::Float as u8 {
+            *out = Value::Float(f64::from_bits(p.bits()));
         } else {
-            *out = self.get_int(i);
+            // Re-reading the tag keeps this a separate test, where
+            // deciding on `b` would merge the number tests into one jump
+            // table.
+            Value::write_unpacked(out, self.array.tag(idx as usize), p);
         }
+        true
     }
 
     /// `t[s]` for a string key.
@@ -1259,7 +1292,17 @@ pub enum IntStore {
 #[inline(always)]
 pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore {
     let idx = (i as u64).wrapping_sub(1);
-    heap.barrier_back(t);
+    // Storing a value that refers to no object can't make a traced table
+    // point at an untraced one, so only those stores barrier; the hash
+    // path below barriers through `Heap::update`. With the value's
+    // variant known (the interpreter stores numbers by parts) the test
+    // folds away.
+    if !matches!(
+        v,
+        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+    ) {
+        heap.barrier_back(t);
+    }
     let tab = heap.get_mut(t);
     if idx < tab.array.len() as u64 {
         let idx = idx as usize;
@@ -1490,6 +1533,47 @@ mod tests {
         }
         set(&mut heap, t, Value::Int(100), Value::Nil).unwrap();
         assert_eq!(heap.get(t).border(), 99);
+    }
+
+    #[test]
+    fn only_slots_below_the_length_read_as_present() {
+        // `read_int_present` skips the length check, relying on the tag
+        // bytes past the length staying nil through every kind of growth:
+        // appends, presized parts, rebuilds that leave holes, and stores
+        // of nil.
+        let check = |heap: &LuaHeap, t: Gc<Table>, what: &str| {
+            let tab = heap.get(t);
+            assert!(tab.array.tags_past_len_are_nil(), "{what}");
+            for i in -2..=tab.array.cap as i64 + 9 {
+                let mut out = Value::Nil;
+                let present = tab.read_int_present(i, &mut out);
+                let v = tab.get_int(i);
+                let in_array = i >= 1 && i <= tab.array_len() as i64;
+                assert_eq!(present, in_array && !v.is_nil(), "{what}: key {i}");
+                if present {
+                    assert!(out.same(v), "{what}: key {i}");
+                }
+            }
+        };
+        let (mut heap, _, _) = setup();
+        for presize in [0, 3, 9] {
+            let t = heap.alloc(Table::with_capacity(presize, 0));
+            check(&heap, t, "new");
+            for i in 1..=40 {
+                set(&mut heap, t, Value::Int(i), Value::Int(i)).unwrap();
+                check(&heap, t, &format!("append {i}"));
+            }
+            for i in [38, 40, 1] {
+                set(&mut heap, t, Value::Int(i), Value::Nil).unwrap();
+                check(&heap, t, &format!("clear {i}"));
+            }
+            // Keys past the end go to the hash part, then join the array
+            // part with holes when a rebuild finds them dense enough.
+            for i in (45..=120).step_by(2) {
+                set(&mut heap, t, Value::Int(i), Value::Float(i as f64)).unwrap();
+                check(&heap, t, &format!("sparse {i}"));
+            }
+        }
     }
 
     fn is_border(t: &Table, n: i64) -> bool {

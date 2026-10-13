@@ -1552,9 +1552,12 @@ impl Vm {
                         // come from `__index`. `dst` may be `obj` or `key`.
                         match reg!(key) {
                             Value::Int(i) => {
-                                tab.read_int(i, &mut reg!(dst));
-                                if tab.meta.is_some() && reg!(dst).is_nil() {
-                                    get_slow!(dst, Value::Table(t), Value::Int(i))
+                                if !tab.read_int_present(i, &mut reg!(dst)) {
+                                    let v = tab.get_int(i);
+                                    if v.is_nil() && tab.meta.is_some() {
+                                        get_slow!(dst, Value::Table(t), Value::Int(i))
+                                    }
+                                    reg!(dst) = v;
                                 }
                             }
                             k => {
@@ -1596,9 +1599,12 @@ impl Vm {
                             get_slow!(dst, reg!(obj), Value::Int(key as i64))
                         };
                         let tab = self.heap.get(t);
-                        tab.read_int(key as i64, &mut reg!(dst));
-                        if tab.meta.is_some() && reg!(dst).is_nil() {
-                            get_slow!(dst, Value::Table(t), Value::Int(key as i64))
+                        if !tab.read_int_present(key as i64, &mut reg!(dst)) {
+                            let v = tab.get_int(key as i64);
+                            if v.is_nil() && tab.meta.is_some() {
+                                get_slow!(dst, Value::Table(t), Value::Int(key as i64))
+                            }
+                            reg!(dst) = v;
                         }
                     }
                     Op::SetIndexInt { obj, key, src } => {
@@ -2118,38 +2124,32 @@ impl Vm {
                             }
                         }
                     }
-                    Op::ForLoop { base: b, back } => match reg!(b + 1) {
-                        Value::Int(_) => {
-                            // Update the counters' payloads in place: their
-                            // tags are already right, so only the payloads
-                            // need stores.
-                            let at = b as usize;
-                            let [Value::Int(cur), Value::Int(count), Value::Int(s), var] =
-                                &mut w[at..at + 4]
-                            else {
-                                unreachable!("integer loop state")
-                            };
-                            if *count > 0 {
-                                *count -= 1;
-                                *cur = cur.wrapping_add(*s);
-                                *var = Value::Int(*cur);
-                                jump!(back);
+                    Op::ForLoop { base: b, back } => {
+                        // One match over the four loop registers: the
+                        // integer arm tests each tag once. Update the
+                        // counters' payloads in place: their tags are
+                        // already right, so only the payloads need stores.
+                        let at = b as usize;
+                        match &mut w[at..at + 4] {
+                            [Value::Int(cur), Value::Int(count), Value::Int(s), var] => {
+                                if *count > 0 {
+                                    *count -= 1;
+                                    *cur = cur.wrapping_add(*s);
+                                    *var = Value::Int(*cur);
+                                    jump!(back);
+                                }
                             }
-                        }
-                        Value::Float(lim) => {
-                            let (&Value::Float(cur), &Value::Float(s)) = (&reg!(b), &reg!(b + 2))
-                            else {
-                                unreachable!("float loop state")
-                            };
-                            let next = cur + s;
-                            if if s > 0.0 { next <= lim } else { lim <= next } {
-                                reg!(b) = Value::Float(next);
-                                reg!(b + 3) = Value::Float(next);
-                                jump!(back);
+                            [Value::Float(cur), Value::Float(lim), Value::Float(s), var] => {
+                                let next = *cur + *s;
+                                if if *s > 0.0 { next <= *lim } else { *lim <= next } {
+                                    *cur = next;
+                                    *var = Value::Float(next);
+                                    jump!(back);
+                                }
                             }
+                            _ => unreachable!("loop state"),
                         }
-                        _ => unreachable!("loop state"),
-                    },
+                    }
                     Op::GenericCall { base: b, nvars } => {
                         let at = b as usize;
                         w.copy_within(at..at + 3, at + 4);
