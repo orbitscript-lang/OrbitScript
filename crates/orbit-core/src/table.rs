@@ -11,6 +11,10 @@ use std::cell::Cell;
 
 use orbit_gc::{Gc, Liveness, Marker, Trace, WeakMode};
 
+mod array;
+
+use array::ArrayPart;
+
 use crate::string::hash_word;
 use crate::value::{Payload, Tag, str_eq};
 use crate::{LuaHeap, LuaSpace, LuaStr, MetaField, NoMemory, Value, gc, number};
@@ -260,172 +264,6 @@ impl Entry {
     #[inline(always)]
     fn holds_str(&self, s: Gc<LuaStr>) -> bool {
         self.key_tag == Tag::Str && self.key_payload == Value::Str(s).pack().1
-    }
-}
-
-/// The array part in one allocation (ADR-1): `cap` payload words followed
-/// by the tag bytes packed eight to a word, 9 bytes per slot. Slots below
-/// `len` may hold nil (holes). The tag bytes of slots from `len` up, and the
-/// padding bytes of the last tag word, are always nil, so a slot whose tag
-/// is not nil is below `len`: [`ArrayPart::live`] relies on that to skip
-/// the length check. Their payload words are never read. The words are
-/// plain `u64`s because one allocation can hold only one element type; they
-/// never leave this type, whose API takes and returns `Value`s, and tag
-/// bytes are only ever written from a [`Tag`].
-#[derive(Debug, Default)]
-struct ArrayPart {
-    words: Box<[[u8; 8]]>,
-    len: u32,
-    cap: u32,
-}
-
-impl ArrayPart {
-    fn with_capacity(cap: usize) -> Result<ArrayPart, NoMemory> {
-        if cap == 0 {
-            return Ok(ArrayPart::default());
-        }
-        assert!(cap <= u32::MAX as usize, "table overflow");
-        let total = cap + cap.div_ceil(8);
-        let mut words = Vec::new();
-        words.try_reserve_exact(total)?;
-        words.resize(total, [0; 8]);
-        Ok(ArrayPart {
-            words: words.into_boxed_slice(),
-            len: 0,
-            cap: cap as u32,
-        })
-    }
-
-    #[inline(always)]
-    fn len(&self) -> usize {
-        self.len as usize
-    }
-
-    /// The tag byte and payload of slot `idx` when it holds a value (its
-    /// tag is not nil); `None` for a nil slot or one past the array part.
-    /// A non-nil tag means `idx < len` (see the type's invariant), so this
-    /// needs only the two slice bounds checks, not a length check too.
-    #[inline(always)]
-    fn live(&self, idx: u64) -> Option<(u8, Payload)> {
-        let idx = usize::try_from(idx).ok()?;
-        let byte = self.words.get((self.cap as usize).wrapping_add(idx / 8))?[idx % 8];
-        if byte == Tag::Nil as u8 {
-            return None;
-        }
-        let p = Payload::from_bits(u64::from_ne_bytes(*self.words.get(idx)?));
-        Some((byte, p))
-    }
-
-    #[inline(always)]
-    fn tag(&self, i: usize) -> Tag {
-        let byte = self.words[self.cap as usize + i / 8][i % 8];
-        // Every tag byte was written from a `Tag`, so the fallback never
-        // happens; it folds into `unpack`'s match where `expect` would add
-        // a branch to every array read.
-        Tag::from_u8(byte).unwrap_or(Tag::Nil)
-    }
-
-    #[inline(always)]
-    fn payload(&self, i: usize) -> Payload {
-        Payload::from_bits(u64::from_ne_bytes(self.words[i]))
-    }
-
-    #[inline(always)]
-    fn get(&self, i: usize) -> Value {
-        Value::unpack(self.tag(i), self.payload(i))
-    }
-
-    #[inline(always)]
-    fn set(&mut self, i: usize, v: Value) {
-        let (t, p) = v.pack();
-        self.words[i] = p.bits().to_ne_bytes();
-        self.words[self.cap as usize + i / 8][i % 8] = t as u8;
-    }
-
-    #[inline(always)]
-    fn push(&mut self, v: Value) -> Result<(), NoMemory> {
-        if self.len == self.cap {
-            self.grow_one()?;
-        }
-        self.len += 1;
-        self.set(self.len() - 1, v);
-        Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn grow_one(&mut self) -> Result<(), NoMemory> {
-        self.realloc(self.grown(self.len() + 1))
-    }
-
-    /// The capacity pushing up to `n` slots grows to: doubling, from 4.
-    fn grown(&self, n: usize) -> usize {
-        let mut cap = self.cap as usize;
-        while cap < n {
-            cap = (cap * 2).max(4);
-        }
-        cap
-    }
-
-    /// Grow to room for `cap` slots (more than now). The allocation is
-    /// resized in place where the allocator can, then the tag words move up
-    /// past the new payload words. On failure nothing changes.
-    fn realloc(&mut self, cap: usize) -> Result<(), NoMemory> {
-        assert!(cap <= u32::MAX as usize, "table overflow");
-        let old_cap = self.cap as usize;
-        let tag_words = self.len().div_ceil(8);
-        let mut v = std::mem::take(&mut self.words).into_vec();
-        let total = cap + cap.div_ceil(8);
-        if v.try_reserve_exact(total - v.len()).is_err() {
-            // A boxed slice's vector is exactly full, so this gives the
-            // same allocation back.
-            self.words = v.into_boxed_slice();
-            return Err(NoMemory);
-        }
-        v.resize(total, [0; 8]);
-        // Only slots below `len` are ever read, so whatever the moved-over
-        // words leave behind in the payload words is never seen. The tag
-        // bytes past the moved ones must read nil.
-        v.copy_within(old_cap..old_cap + tag_words, cap);
-        v[cap + tag_words..].fill([0; 8]);
-        self.words = v.into_boxed_slice();
-        self.cap = cap as u32;
-        Ok(())
-    }
-
-    /// How many of slots `lo..hi` (all below `len`) are non-nil.
-    fn count_present(&self, lo: usize, hi: usize) -> usize {
-        let tags = self.words[self.cap as usize..].as_flattened();
-        tags[lo..hi]
-            .iter()
-            .filter(|&&t| t != Tag::Nil as u8)
-            .count()
-    }
-
-    /// Lengthen to `len` slots (within the capacity), the new ones nil.
-    fn extend_nil(&mut self, len: usize) {
-        debug_assert!(len <= self.cap as usize);
-        for i in self.len()..len {
-            self.set(i, Value::Nil);
-        }
-        self.len = len as u32;
-    }
-
-    fn bytes(&self) -> usize {
-        self.words.len() * 8
-    }
-
-    /// The invariant [`ArrayPart::live`] relies on: every tag byte from
-    /// `len` up is nil.
-    #[cfg(test)]
-    fn tags_past_len_are_nil(&self) -> bool {
-        let tags = self.words[self.cap as usize..].as_flattened();
-        tags[self.len()..].iter().all(|&b| b == Tag::Nil as u8)
-    }
-
-    /// The bytes an array part of capacity `cap` takes.
-    fn bytes_for(cap: usize) -> usize {
-        (cap + cap.div_ceil(8)) * 8
     }
 }
 
@@ -993,7 +831,7 @@ impl Table {
     /// is freed only after the new one exists), other stores add nothing.
     pub fn growth(&self, slot: Slot, key: &Key) -> usize {
         match slot {
-            Slot::Push if self.array.len == self.array.cap => {
+            Slot::Push if self.array.len() == self.array.cap() => {
                 ArrayPart::bytes_for(self.array.grown(self.array.len() + 1)) - self.array.bytes()
             }
             Slot::Grow => {
@@ -1158,7 +996,7 @@ impl Table {
         let moved: usize = ints[..=best].iter().sum();
         let key_moves =
             matches!(key.value, Value::Int(k) if k > old as i64 && k as u64 <= len as u64);
-        let cap = self.array.cap as usize;
+        let cap = self.array.cap();
         Plan {
             array_len: len,
             array_cap: (len > cap).then_some((1usize << best).max(len)),
@@ -1704,7 +1542,7 @@ mod tests {
         let check = |heap: &LuaHeap, t: Gc<Table>, what: &str| {
             let tab = heap.get(t);
             assert!(tab.array.tags_past_len_are_nil(), "{what}");
-            for i in -2..=tab.array.cap as i64 + 9 {
+            for i in -2..=tab.array.cap() as i64 + 9 {
                 let mut out = Value::Nil;
                 let present = tab.read_int_present(i, &mut out);
                 let v = tab.get_int(i);
@@ -1808,7 +1646,7 @@ mod tests {
         set(&mut heap, t, Value::Int(3), Value::Int(3)).unwrap();
         let tab = heap.get(t);
         assert!(tab.array_len() <= 3);
-        assert!(tab.array.cap <= 4);
+        assert!(tab.array.cap() <= 4);
         assert!(is_border(tab, tab.border()));
         assert!(matches!(tab.get_int(3), Value::Int(3)));
         assert!(tab.get_int(2).is_nil());
