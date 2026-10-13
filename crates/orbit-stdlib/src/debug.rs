@@ -41,7 +41,7 @@ fn push_str(ctx: &mut NativeCtx<'_>, s: &[u8]) {
 fn set_field(ctx: &mut NativeCtx<'_>, t: Value, k: &str, v: Value) {
     let Value::Table(t) = t else { return };
     let k = ctx.new_str(k.as_bytes());
-    let _ = orbit_vm::orbit_core::table::set(ctx.heap, t, k, v);
+    let _ = orbit_vm::orbit_core::table::set(&mut ctx.vm.heap, t, k, v);
 }
 
 /// An optional leading thread argument: the thread, and how far the
@@ -182,7 +182,7 @@ fn getinfo(ctx: &mut NativeCtx<'_>) -> R {
                     let Value::Table(lt) = lt else { unreachable!() };
                     for line in lines {
                         let _ = orbit_vm::orbit_core::table::set(
-                            ctx.heap,
+                            &mut ctx.vm.heap,
                             lt,
                             Value::Int(line as i64),
                             Value::Bool(true),
@@ -336,9 +336,9 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
         // Through the collector's hook, so a `__gc` field registers the
         // object for finalization as `setmetatable` does.
         Value::Table(_) | Value::UserData(_) => {
-            orbit_vm::orbit_core::gc::set_metatable(ctx.heap, v, mt);
+            orbit_vm::orbit_core::gc::set_metatable(&mut ctx.vm.heap, v, mt);
         }
-        v => ctx.rt.set_type_meta(v.tag(), mt),
+        v => ctx.vm.rt.set_type_meta(v.tag(), mt),
     }
     ctx.truncate(1);
     Ok(NativeReturn::Return(1))
@@ -354,7 +354,7 @@ fn getuservalue(ctx: &mut NativeCtx<'_>) -> R {
         ctx.push(Value::Bool(false));
         return Ok(NativeReturn::Return(2));
     }
-    let v = ctx.heap.get(u).user_value;
+    let v = ctx.vm.heap.get(u).user_value;
     ctx.push(v);
     ctx.push(Value::Bool(true));
     Ok(NativeReturn::Return(2))
@@ -369,13 +369,13 @@ fn setuservalue(ctx: &mut NativeCtx<'_>) -> R {
     if n != 1 {
         return ctx.ret1(Value::Nil);
     }
-    ctx.heap.update(u, |u| u.user_value = v);
+    ctx.vm.heap.update(u, |u| u.user_value = v);
     ctx.truncate(1);
     Ok(NativeReturn::Return(1))
 }
 
 fn getregistry(ctx: &mut NativeCtx<'_>) -> R {
-    let r = ctx.rt.registry;
+    let r = ctx.vm.rt.registry;
     ctx.ret1(Value::Table(r))
 }
 
@@ -482,7 +482,7 @@ fn debug(ctx: &mut NativeCtx<'_>) -> R {
     use std::io::{BufRead, Write};
     ctx.truncate(0);
     loop {
-        let _ = ctx.rt.out.flush();
+        let _ = ctx.vm.rt.out.flush();
         let _ = std::io::stderr().write_all(b"lua_debug> ");
         let mut line = Vec::new();
         match std::io::stdin().lock().read_until(b'\n', &mut line) {
@@ -492,7 +492,7 @@ fn debug(ctx: &mut NativeCtx<'_>) -> R {
         if line == b"cont\n" || line == b"cont" {
             return Ok(NativeReturn::Return(0));
         }
-        let env = Value::Table(ctx.rt.globals);
+        let env = Value::Table(ctx.vm.rt.globals);
         let mode = crate::load::Mode(b"bt");
         match crate::load::load_chunk(ctx, &line, b"=(debug command)", &mode, env) {
             Ok(f) => {

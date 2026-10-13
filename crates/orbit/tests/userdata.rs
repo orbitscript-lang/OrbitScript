@@ -16,7 +16,7 @@ fn counter_new(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
     let Value::Table(mt) = ctx.arg(1) else {
         return Err(ctx.type_error(1, "table"));
     };
-    ctx.heap.update(u, |u| u.meta = Some(mt));
+    ctx.vm.heap.update(u, |u| u.meta = Some(mt));
     ctx.ret1(Value::UserData(u))
 }
 

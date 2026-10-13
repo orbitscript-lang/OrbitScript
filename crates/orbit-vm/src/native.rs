@@ -2,11 +2,11 @@
 
 use orbit_bytecode::{Op, Origin};
 use orbit_core::number::{self, float_to_int};
-use orbit_core::{Gc, LuaHeap, LuaStr, NativeId, Table, Value};
+use orbit_core::{Gc, LuaStr, NativeId, Table, Value};
 
 use crate::meta::{self, Event};
 use crate::ops::Exc;
-use crate::{FrameKind, LuaError, Runtime, ops};
+use crate::{FrameKind, LuaError, ops};
 
 /// The outcome of an operation that may need a metamethod: either the
 /// answer, or a function to call. For [`Meta::Call`] the arguments are
@@ -127,8 +127,8 @@ const SCRATCH_KEEP: usize = 64 * 1024;
 /// then whatever it pushes), the heap and the runtime.
 #[derive(Debug)]
 pub struct NativeCtx<'a> {
-    pub heap: &'a mut LuaHeap,
-    pub rt: &'a mut Runtime,
+    /// The VM: its heap and runtime.
+    pub vm: &'a mut crate::Vm,
     pub(crate) base: usize,
     pub(crate) nargs: usize,
     pub(crate) id: NativeId,
@@ -146,7 +146,7 @@ impl NativeCtx<'_> {
     /// Values currently in the window.
     #[inline]
     pub fn len(&self) -> usize {
-        self.rt.top - self.base
+        self.vm.rt.top - self.base
     }
 
     #[inline]
@@ -158,8 +158,8 @@ impl NativeCtx<'_> {
     #[inline]
     pub fn arg(&self, i: usize) -> Value {
         let at = self.base + i;
-        if at < self.rt.top {
-            self.rt.stack.regs[at]
+        if at < self.vm.rt.top {
+            self.vm.rt.stack.regs[at]
         } else {
             Value::Nil
         }
@@ -168,13 +168,13 @@ impl NativeCtx<'_> {
     /// Overwrite window slot `i`, growing the window with nils if needed.
     pub fn set(&mut self, i: usize, v: Value) {
         let at = self.base + i;
-        let top = self.rt.top;
-        self.rt.stack.dirty_to = self.rt.stack.dirty_to.max(at + 1);
-        let regs = &mut self.rt.stack.regs;
+        let top = self.vm.rt.top;
+        self.vm.rt.stack.dirty_to = self.vm.rt.stack.dirty_to.max(at + 1);
+        let regs = &mut self.vm.rt.stack.regs;
         if at >= top {
             crate::interp::extend_nil(regs, at + 1);
             regs[top..at].fill(Value::Nil);
-            self.rt.top = at + 1;
+            self.vm.rt.top = at + 1;
         }
         regs[at] = v;
     }
@@ -182,24 +182,97 @@ impl NativeCtx<'_> {
     /// Insert `v` at window slot `i`, shifting the rest up.
     pub fn insert(&mut self, i: usize, v: Value) {
         let at = self.base + i;
-        self.rt.top = self.rt.stack.insert(at, self.rt.top, v);
+        self.vm.rt.top = self.vm.rt.stack.insert(at, self.vm.rt.top, v);
     }
 
     /// Push a value onto the end of the window.
     #[inline]
     pub fn push(&mut self, v: Value) {
-        self.rt.stack.put(self.rt.top, v);
-        self.rt.top += 1;
+        self.vm.rt.stack.put(self.vm.rt.top, v);
+        self.vm.rt.top += 1;
     }
 
     /// Shrink the window to `len` values.
     pub fn truncate(&mut self, len: usize) {
-        self.rt.top = self.rt.top.min(self.base + len);
+        self.vm.rt.top = self.vm.rt.top.min(self.base + len);
     }
 
     /// The window's values.
     pub fn window(&self) -> &[Value] {
-        &self.rt.stack.regs[self.base..self.rt.top]
+        &self.vm.rt.stack.regs[self.base..self.vm.rt.top]
+    }
+
+    /// Call the value below the last `nargs` values of the window with
+    /// them and run it to the end now. Its results replace it and its
+    /// arguments at the end of the window; returns how many there are. On
+    /// error the function and arguments are gone and the error is returned.
+    /// With `handler`, an error first goes to the message handler in window
+    /// slot `handler`, which runs on top of the frames that raised; its
+    /// result is the error returned.
+    ///
+    /// For natives that can't be written in continuation style (the C API's
+    /// `lua_call` and `lua_pcall`); prefer [`NativeReturn::CallThen`]. This
+    /// nests the interpreter on the native stack, and code the call runs
+    /// can't yield across it. While the call runs the native has a frame,
+    /// so tracebacks, `debug.getinfo` and error positions see it.
+    pub fn call(&mut self, nargs: usize, handler: Option<usize>) -> Result<usize, LuaError> {
+        debug_assert!(self.len() > nargs, "a function below the arguments");
+        let func = self.vm.rt.top - nargs - 1;
+        let me = self.base - 1;
+        let s = &mut self.vm.rt.stack;
+        // With hooks on, the native already has its frame.
+        let own = !matches!(s.frames.last(), Some(f) if f.func as usize == me
+            && matches!(f.kind, FrameKind::NativeCall { .. }));
+        if own {
+            let cdepth = s.same_depth();
+            s.frames.push(crate::Frame {
+                kind: FrameKind::NativeCall { id: self.id },
+                func: me as u32,
+                base: self.base as u32,
+                pc: 0,
+                cell_base: s.cells.len() as u32,
+                nvarargs: 0,
+                want: 0,
+                tail: false,
+                extra: 0,
+                cdepth,
+            });
+        }
+        let below = s.frames.len();
+        let cdepth = s.deeper();
+        let r = if self.vm.c_overflow(cdepth) {
+            Err(self.error("C stack overflow"))
+        } else {
+            let s = &mut self.vm.rt.stack;
+            s.frames.push(crate::Frame {
+                kind: FrameKind::Boundary {
+                    native: true,
+                    handler: handler.is_some(),
+                },
+                func: func as u32,
+                base: handler.map_or(func, |h| self.base + h) as u32,
+                pc: 0,
+                cell_base: s.cells.len() as u32,
+                nvarargs: 0,
+                want: crate::op::MULTI,
+                tail: false,
+                extra: 0,
+                cdepth,
+            });
+            self.vm.call_at(func, nargs)
+        };
+        let s = &mut self.vm.rt.stack;
+        debug_assert_eq!(s.frames.len(), below, "the boundary is gone");
+        if own {
+            s.frames.truncate(below - 1);
+        }
+        match r {
+            Ok(()) => Ok(self.vm.rt.top - func),
+            Err(e) => {
+                self.vm.rt.top = func;
+                Err(e)
+            }
+        }
     }
 
     /// Return one value.
@@ -212,32 +285,33 @@ impl NativeCtx<'_> {
     /// `f` under that name the first time. For natives that return other
     /// natives (`pairs` returns `next`).
     pub fn native(&mut self, name: &'static str, f: NativeFn) -> Value {
-        if let Some(&id) = self.rt.native_ids.get(name) {
+        if let Some(&id) = self.vm.rt.native_ids.get(name) {
             return Value::Native(id);
         }
-        let id = NativeId(self.rt.natives.len() as u32);
-        self.rt.natives.push(crate::Native {
+        let id = NativeId(self.vm.rt.natives.len() as u32);
+        self.vm.rt.natives.push(crate::Native {
             name,
             f,
             fast: None,
+            hidden: 0,
         });
-        self.rt.native_ids.insert(name, id);
+        self.vm.rt.native_ids.insert(name, id);
         Value::Native(id)
     }
 
     /// A string value (allocated, unrooted until stored in the window).
     pub fn new_str(&mut self, bytes: &[u8]) -> Value {
-        Value::Str(self.rt.strings.new_str(self.heap, bytes))
+        Value::Str(self.vm.rt.strings.new_str(&mut self.vm.heap, bytes))
     }
 
     /// A string value from owned bytes.
     pub fn new_str_owned(&mut self, bytes: Vec<u8>) -> Value {
-        Value::Str(self.rt.strings.new_str_owned(self.heap, bytes))
+        Value::Str(self.vm.rt.strings.new_str_owned(&mut self.vm.heap, bytes))
     }
 
     /// A string value with bytes `a..b` of `s`, copied straight from it.
     pub fn new_substr(&mut self, s: Gc<LuaStr>, a: usize, b: usize) -> Value {
-        Value::Str(self.rt.strings.new_substr(self.heap, s, a, b))
+        Value::Str(self.vm.rt.strings.new_substr(&mut self.vm.heap, s, a, b))
     }
 
     /// An empty byte buffer to build a result in. It reuses the VM's scratch
@@ -246,7 +320,7 @@ impl NativeCtx<'_> {
     /// or by a nested native that took it first) only costs an allocation.
     #[inline]
     pub fn take_buf(&mut self) -> Vec<u8> {
-        let mut b = std::mem::take(&mut self.rt.scratch);
+        let mut b = std::mem::take(&mut self.vm.rt.scratch);
         b.clear();
         b
     }
@@ -256,8 +330,8 @@ impl NativeCtx<'_> {
     /// allocated.
     #[inline]
     pub fn give_buf(&mut self, b: Vec<u8>) {
-        if b.capacity() <= SCRATCH_KEEP && b.capacity() >= self.rt.scratch.capacity() {
-            self.rt.scratch = b;
+        if b.capacity() <= SCRATCH_KEEP && b.capacity() >= self.vm.rt.scratch.capacity() {
+            self.vm.rt.scratch = b;
         }
     }
 
@@ -275,22 +349,22 @@ impl NativeCtx<'_> {
     /// Link a compiled chunk, as [`Vm::load_with_env`](crate::Vm::load_with_env)
     /// does. The function is unrooted until stored in the window.
     pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
-        crate::link::link(self.heap, self.rt, chunk, env)
+        crate::link::link(&mut self.vm.heap, &mut self.vm.rt, chunk, env)
     }
 
     /// A new table (unrooted until stored in the window).
     pub fn new_table(&mut self, t: Table) -> Gc<Table> {
-        self.heap.alloc(t)
+        self.vm.heap.alloc(t)
     }
 
     /// Bytes of a string.
     pub fn bytes(&self, s: Gc<LuaStr>) -> &[u8] {
-        self.heap.get(s).as_bytes()
+        self.vm.heap.get(s).as_bytes()
     }
 
     /// `tostring` without metamethods, appended to `out`.
     pub fn display(&self, v: Value, out: &mut Vec<u8>) {
-        ops::display(self.heap, self.rt, v, out);
+        ops::display(&self.vm.heap, &self.vm.rt, v, out);
     }
 
     // ---- errors ---------------------------------------------------------
@@ -298,8 +372,9 @@ impl NativeCtx<'_> {
     /// `chunk:line: ` for the function at `level` (1 is the caller of this
     /// native), or empty if it isn't a Lua function.
     pub fn where_(&self, level: usize) -> String {
-        self.rt
-            .where_(self.heap, Some(self.running_native()), level)
+        self.vm
+            .rt
+            .where_(&self.vm.heap, Some(self.running_native()), level)
     }
 
     /// This native, as the debug walk sees it (level 0).
@@ -329,13 +404,14 @@ impl NativeCtx<'_> {
     }
 
     /// How the call site names this function, and whether it was a method
-    /// call. Falls back to the registered name.
+    /// call. Falls back to the name a loaded module gives it, then to the
+    /// registered name.
     pub fn call_name(&self) -> (String, bool) {
-        if let Some(f) = self.rt.stack.frames.last()
+        if let Some(f) = self.vm.rt.stack.frames.last()
             && let FrameKind::Lua { closure, .. } = f.kind
             && f.pc > 0
         {
-            let proto = self.heap.get(self.heap.get(closure).proto);
+            let proto = self.vm.heap.get(self.vm.heap.get(closure).proto);
             let pc = f.pc - 1;
             if matches!(
                 proto.code.code.get(pc as usize),
@@ -359,7 +435,19 @@ impl NativeCtx<'_> {
                 return (String::from_utf8_lossy(name).into_owned(), method);
             }
         }
-        (self.rt.natives[self.id.0 as usize].name.to_owned(), false)
+        // As the reference does, a function with no name at its call site is
+        // named by where a loaded module keeps it.
+        let me = match self.upvals {
+            Some(c) => Value::Closure(c),
+            None => Value::Native(self.id),
+        };
+        if let Some(name) = self.vm.rt.global_name(&self.vm.heap, me) {
+            return (String::from_utf8_lossy(&name).into_owned(), false);
+        }
+        (
+            self.vm.rt.natives[self.id.0 as usize].name.to_owned(),
+            false,
+        )
     }
 
     /// `bad argument #i to 'name' (msg)`, for 0-based argument `i`.
@@ -381,7 +469,7 @@ impl NativeCtx<'_> {
         } else {
             match self.arg(i) {
                 Value::LightUserData(_) => "light userdata".into(),
-                v => self.rt.metas.type_name(self.heap, v),
+                v => self.vm.rt.metas.type_name(&self.vm.heap, v),
             }
         };
         self.arg_error(i, format!("{expected} expected, got {got}"))
@@ -402,7 +490,11 @@ impl NativeCtx<'_> {
             v @ (Value::Int(_) | Value::Float(_)) if i < self.nargs => {
                 let mut text = String::new();
                 number::fmt_number(&mut text, v);
-                let s = self.rt.strings.new_str(self.heap, text.as_bytes());
+                let s = self
+                    .vm
+                    .rt
+                    .strings
+                    .new_str(&mut self.vm.heap, text.as_bytes());
                 self.set(i, Value::Str(s));
                 Ok(s)
             }
@@ -414,7 +506,7 @@ impl NativeCtx<'_> {
     pub fn check_number(&mut self, i: usize) -> Result<Value, LuaError> {
         match self.arg(i) {
             v @ (Value::Int(_) | Value::Float(_)) => Ok(v),
-            Value::Str(s) => match number::str_to_number(self.heap.get(s).as_bytes()) {
+            Value::Str(s) => match number::str_to_number(self.vm.heap.get(s).as_bytes()) {
                 Some(v) => Ok(v),
                 None => Err(self.type_error(i, "number")),
             },
@@ -460,12 +552,12 @@ impl NativeCtx<'_> {
 
     /// The metatable of `v`, if any.
     pub fn metatable(&self, v: Value) -> Option<Gc<Table>> {
-        self.rt.metatable(self.heap, v)
+        self.vm.rt.metatable(&self.vm.heap, v)
     }
 
     /// Field `e` of `v`'s metatable (raw), or nil.
     pub fn metamethod(&self, v: Value, e: Event) -> Value {
-        self.rt.metamethod(self.heap, v, e)
+        self.vm.rt.metamethod(&self.vm.heap, v, e)
     }
 
     /// Turn a slow path's result into a [`Meta`]: a metamethod call gets
@@ -497,40 +589,40 @@ impl NativeCtx<'_> {
     pub fn index(&mut self, obj: Value, key: Value) -> Result<Meta<Value>, LuaError> {
         let r = match obj {
             Value::Table(t) => {
-                let tab = self.heap.get(t);
-                let v = tab.get(self.heap, key);
+                let tab = self.vm.heap.get(t);
+                let v = tab.get(&self.vm.heap, key);
                 if !v.is_nil() || tab.meta.is_none() {
                     Ok(v)
                 } else {
-                    meta::index(self.heap, &self.rt.metas, obj, key)
+                    meta::index(&self.vm.heap, &self.vm.rt.metas, obj, key)
                 }
             }
-            _ => meta::index(self.heap, &self.rt.metas, obj, key),
+            _ => meta::index(&self.vm.heap, &self.vm.rt.metas, obj, key),
         };
         self.meta_result(r)
     }
 
     /// `obj[key] = v` with metamethods.
     pub fn set_index(&mut self, obj: Value, key: Value, v: Value) -> Result<Meta<()>, LuaError> {
-        let r = meta::new_index(self.heap, &self.rt.metas, obj, key, v);
+        let r = meta::new_index(&mut self.vm.heap, &self.vm.rt.metas, obj, key, v);
         self.meta_result(r)
     }
 
     /// `#v` with `__len`.
     pub fn length(&mut self, v: Value) -> Result<Meta<Value>, LuaError> {
-        let r = crate::cold::op_len(self.heap, &self.rt.metas, v);
+        let r = crate::cold::op_len(&self.vm.heap, &self.vm.rt.metas, v);
         self.meta_result(r)
     }
 
     /// `a < b` with `__lt`.
     pub fn less_than(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
-        let r = ops::less_than(self.heap, &self.rt.metas, a, b);
+        let r = ops::less_than(&self.vm.heap, &self.vm.rt.metas, a, b);
         self.meta_result(r)
     }
 
     /// `a == b` with `__eq`.
     pub fn equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
-        let r = ops::equal(self.heap, &self.rt.metas, a, b);
+        let r = ops::equal(&self.vm.heap, &self.vm.rt.metas, a, b);
         self.meta_result(r)
     }
 
@@ -538,7 +630,7 @@ impl NativeCtx<'_> {
 
     /// The host value of userdata `u`, if it is a `T`.
     pub fn userdata_ref<T: std::any::Any>(&self, u: Gc<orbit_core::UserData>) -> Option<&T> {
-        self.heap.get(u).downcast_ref()
+        self.vm.heap.get(u).downcast_ref()
     }
 
     /// The host value of userdata `u`, mutably, if it is a `T`.
@@ -546,7 +638,7 @@ impl NativeCtx<'_> {
         &mut self,
         u: Gc<orbit_core::UserData>,
     ) -> Option<&mut T> {
-        self.heap.get_mut(u).downcast_mut()
+        self.vm.heap.get_mut(u).downcast_mut()
     }
 
     /// A userdata argument holding a `T`; `name` is the type the message
@@ -557,14 +649,14 @@ impl NativeCtx<'_> {
         name: &str,
     ) -> Result<Gc<orbit_core::UserData>, LuaError> {
         match self.arg(i) {
-            Value::UserData(u) if self.heap.get(u).is::<T>() => Ok(u),
+            Value::UserData(u) if self.vm.heap.get(u).is::<T>() => Ok(u),
             _ => Err(self.type_error(i, name)),
         }
     }
 
     /// A new userdata (unrooted until stored in the window).
     pub fn new_userdata<T: std::any::Any>(&mut self, data: T) -> Gc<orbit_core::UserData> {
-        self.heap.alloc(orbit_core::UserData::new(data))
+        self.vm.heap.alloc(orbit_core::UserData::new(data))
     }
 
     /// Room for `bytes` more under the heap's limit
@@ -573,11 +665,11 @@ impl NativeCtx<'_> {
     /// Call it before a large allocation, with every live value in the
     /// window.
     pub fn reserve(&mut self, bytes: usize) -> Result<(), LuaError> {
-        if self.heap.would_exceed(bytes) {
-            if !self.rt.gc.finalizing() {
+        if self.vm.heap.would_exceed(bytes) {
+            if !self.vm.rt.gc.finalizing() {
                 self.full_collect();
             }
-            if self.heap.would_exceed(bytes) {
+            if self.vm.heap.would_exceed(bytes) {
                 return Err(self.no_memory());
             }
         }
@@ -587,8 +679,8 @@ impl NativeCtx<'_> {
     /// Run a full collection (`collectgarbage("collect")`).
     pub fn full_collect(&mut self) {
         // Values above the window are dead.
-        let top = self.rt.top;
-        self.rt.stack.regs.truncate(top);
-        self.heap.full_collect(self.rt);
+        let top = self.vm.rt.top;
+        self.vm.rt.stack.regs.truncate(top);
+        self.vm.heap.full_collect(&mut self.vm.rt);
     }
 }

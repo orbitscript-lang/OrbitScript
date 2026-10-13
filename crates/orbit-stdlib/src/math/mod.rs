@@ -414,7 +414,10 @@ fn min(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn rng<'a>(ctx: &'a mut NativeCtx<'_>) -> &'a mut Xoshiro {
-    ctx.rt.ext.get_or_insert_with(|| Xoshiro::from_entropy().0)
+    ctx.vm
+        .rt
+        .ext
+        .get_or_insert_with(|| Xoshiro::from_entropy().0)
 }
 
 fn random(ctx: &mut NativeCtx<'_>) -> R {

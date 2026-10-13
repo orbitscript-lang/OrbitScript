@@ -7,14 +7,14 @@ use orbit_vm::{LuaError, NativeCtx, NativeReturn, Vm};
 fn record(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
     let obj = ctx.check_table(0)?;
     let n_key = ctx.new_str(b"n");
-    let n = ctx.heap.get(obj).get(ctx.heap, n_key);
+    let n = ctx.vm.heap.get(obj).get(&ctx.vm.heap, n_key);
     let log_name = ctx.new_str(b"log");
-    let globals = ctx.rt.globals;
-    let Value::Table(log) = ctx.heap.get(globals).get(ctx.heap, log_name) else {
+    let globals = ctx.vm.rt.globals;
+    let Value::Table(log) = ctx.vm.heap.get(globals).get(&ctx.vm.heap, log_name) else {
         unreachable!()
     };
-    let len = ctx.heap.get(log).border();
-    orbit_vm::orbit_core::table::set_int(ctx.heap, log, len + 1, n).unwrap();
+    let len = ctx.vm.heap.get(log).border();
+    orbit_vm::orbit_core::table::set_int(&mut ctx.vm.heap, log, len + 1, n).unwrap();
     Ok(NativeReturn::Return(0))
 }
 

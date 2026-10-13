@@ -86,7 +86,7 @@ pub(crate) fn load_chunk(
     mode: &Mode<'_>,
     env: Value,
 ) -> Result<Value, String> {
-    let chunk = unlinked(ctx.heap, ctx.rt, bytes, source, mode)?;
+    let chunk = unlinked(&mut ctx.vm.heap, &mut ctx.vm.rt, bytes, source, mode)?;
     Ok(ctx.link(&chunk, env))
 }
 
@@ -182,7 +182,7 @@ fn load(ctx: &mut NativeCtx<'_>) -> R {
     let env = if ctx.nargs() >= 4 {
         ctx.arg(3)
     } else {
-        Value::Table(ctx.rt.globals)
+        Value::Table(ctx.vm.rt.globals)
     };
     match ctx.arg(0) {
         Value::Str(_) | Value::Int(_) | Value::Float(_) => {
@@ -267,7 +267,7 @@ fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     let source = opt_bytes(ctx, 1, b"=(load)")?;
     let mode = opt_bytes(ctx, 2, b"bt")?;
     let env = if ctx.arg(ENV_GIVEN).is_falsy() {
-        Value::Table(ctx.rt.globals)
+        Value::Table(ctx.vm.rt.globals)
     } else {
         ctx.arg(3)
     };
@@ -342,14 +342,14 @@ fn loadfile(ctx: &mut NativeCtx<'_>) -> R {
     let env = if ctx.nargs() >= 3 {
         ctx.arg(2)
     } else {
-        Value::Table(ctx.rt.globals)
+        Value::Table(ctx.vm.rt.globals)
     };
     let r = load_file_arg(ctx, &mode, env)?;
     ret_loaded(ctx, r)
 }
 
 fn dofile(ctx: &mut NativeCtx<'_>) -> R {
-    let env = Value::Table(ctx.rt.globals);
+    let env = Value::Table(ctx.vm.rt.globals);
     match load_file_arg(ctx, b"bt", env)? {
         Ok(f) => {
             ctx.truncate(0);

@@ -145,8 +145,7 @@ impl Vm {
                 }
                 let f = self.rt.natives[id.0 as usize].f;
                 let mut ctx = NativeCtx {
-                    heap: &mut self.heap,
-                    rt: &mut self.rt,
+                    vm: self,
                     base: func + 1,
                     nargs,
                     id,
@@ -352,7 +351,7 @@ impl Vm {
     pub(crate) fn after_return(&mut self) -> Result<Flow, Exc> {
         let f = *self.rt.stack.frames.last().expect("frame");
         match f.kind {
-            FrameKind::Boundary => {
+            FrameKind::Boundary { .. } => {
                 self.rt.stack.frames.pop();
                 Ok(Flow::Done)
             }
@@ -371,8 +370,7 @@ impl Vm {
                 let top = self.rt.top;
                 let upvals = self.rt.stack.closure_at(f.func as usize);
                 let mut ctx = NativeCtx {
-                    heap: &mut self.heap,
-                    rt: &mut self.rt,
+                    vm: self,
                     base: f.base as usize,
                     nargs: f.nvarargs as usize,
                     id,
@@ -578,18 +576,20 @@ impl Vm {
                         FrameKind::Native {
                             catch: Catch::Yes | Catch::Handler,
                             ..
-                        } | FrameKind::Boundary
+                        } | FrameKind::Boundary { .. }
                             | FrameKind::CoBase
                             | FrameKind::Hook
                     )
                 })
                 .expect("a boundary below every running frame");
             let f = frames[idx];
-            if let FrameKind::Native {
-                catch: Catch::Handler,
-                ..
-            } = f.kind
-                && !errerr
+            if matches!(
+                f.kind,
+                FrameKind::Native {
+                    catch: Catch::Handler,
+                    ..
+                } | FrameKind::Boundary { handler: true, .. }
+            ) && !errerr
                 && !handled
             {
                 // An error inside the handler calls it again, up to a limit.
@@ -634,8 +634,10 @@ impl Vm {
                 && let Some(&t) = self.rt.stack.aux.tbc.last()
                 && t >= limit
             {
-                if matches!(f.kind, FrameKind::Boundary | FrameKind::Hook)
-                    && e.traceback.is_none()
+                if matches!(
+                    f.kind,
+                    FrameKind::Boundary { native: false, .. } | FrameKind::Hook
+                ) && e.traceback.is_none()
                     && self.rt.unwind_traceback.is_none()
                 {
                     self.rt.unwind_traceback = Some(self.rt.traceback(&self.heap, None, 1));
@@ -663,11 +665,13 @@ impl Vm {
                         Err(x) => e = self.make_error(x),
                     }
                 }
-                FrameKind::Boundary | FrameKind::Hook => {
+                FrameKind::Boundary { .. } | FrameKind::Hook => {
                     // The error leaves the VM (or the hook call, which raises
-                    // it again where the hook was called).
+                    // it again where the hook was called, or the native's
+                    // call, which hands it to the native).
+                    let native = matches!(f.kind, FrameKind::Boundary { native: true, .. });
                     let taken = self.rt.unwind_traceback.take();
-                    if e.traceback.is_none() {
+                    if e.traceback.is_none() && !native {
                         e.traceback =
                             Some(taken.unwrap_or_else(|| self.rt.traceback(&self.heap, None, 1)));
                     }
@@ -782,8 +786,7 @@ impl Vm {
         self.rt.top = call_at as usize;
         let upvals = self.rt.stack.closure_at(f.func as usize);
         let mut ctx = NativeCtx {
-            heap: &mut self.heap,
-            rt: &mut self.rt,
+            vm: self,
             base: f.base as usize,
             nargs: f.nvarargs as usize,
             id,
@@ -1250,8 +1253,7 @@ impl Vm {
                             self.rt.top = fa + 1 + n;
                             let nf = self.rt.natives[id.0 as usize].f;
                             let mut ctx = NativeCtx {
-                                heap: &mut self.heap,
-                                rt: &mut self.rt,
+                                vm: self,
                                 base: fa + 1,
                                 nargs: n,
                                 id,

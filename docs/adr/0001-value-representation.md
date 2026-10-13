@@ -1,6 +1,6 @@
 # ADR-1: Value representation
 
-Status: Accepted (Tym, 2026-09-28); amended 2026-09-30 to pin the layout for a JIT (Tym); amended 2026-10-03 to put a table's array part in one allocation (Tym); amendment proposed 2026-10-05 to add light userdata (tag 10), pending Tym's review
+Status: Accepted (Tym, 2026-09-28); amended 2026-09-30 to pin the layout for a JIT (Tym); amended 2026-10-03 to put a table's array part in one allocation (Tym); amended 2026-10-05 to add light userdata (tag 10), accepted by Tym 2026-10-10 (ADR-8)
 
 ## Context
 Lua values are nil, booleans, 64-bit integers, 64-bit floats, strings, tables, functions, userdata and coroutines. The representation drives RAM use, interpreter speed and what a JIT can do. The code must be safe Rust on 64-bit targets.
@@ -15,7 +15,7 @@ Lua values are nil, booleans, 64-bit integers, 64-bit floats, strings, tables, f
 - **NaN-boxing (8-byte values):** can't hold a full `i64` without boxing large integers, and relies on bit tricks that fight the safe-Rust goal.
 - **Boxed trait objects:** pointer chasing and allocation per value.
 
-- **Light userdata** (proposed 2026-10-05): `LightUserData(LightUserData)`, tag 10, an opaque 8-byte token (`LightUserData::new(u64)` / `get()`) with identity semantics and no GC object behind it. `type` reports `userdata`, argument errors say `light userdata`, and all light userdata share one per-type metatable, as in the reference. `debug.upvalueid` needs it: it must return a value that is equal for the same upvalue cell and different otherwise, and `errors.lua:264` checks its type name ([debug design](../design/debug.md#upvalueid-and-light-userdata)). Embedders also get an allocation-free token to use as a table key. Size and layout are unchanged; no hot-path `match` gains an arm.
+- **Light userdata** (amended 2026-10-05, accepted by Tym 2026-10-10): `LightUserData(LightUserData)`, tag 10, an opaque 8-byte token (`LightUserData::new(u64)` / `get()`) with identity semantics and no GC object behind it. `type` reports `userdata`, argument errors say `light userdata`, and all light userdata share one per-type metatable, as in the reference. `debug.upvalueid` needs it: it must return a value that is equal for the same upvalue cell and different otherwise, and `errors.lua:264` checks its type name ([debug design](../design/debug.md#upvalueid-and-light-userdata)). Embedders also get an allocation-free token to use as a table key. Size and layout are unchanged; no hot-path `match` gains an arm.
 
 ## Open
 - Light C functions: answered at first light by `Native(NativeId)` (a registry index, no allocation).
