@@ -8,6 +8,7 @@ fn main() {
         .include("csrc/include")
         .define("ORBIT_CAPI_BUILD", None)
         .flag_if_supported("-fvisibility=default")
+        .flag_if_supported("-fno-function-sections")
         .warnings(true)
         .compile("orbit_capi_c");
     println!(
