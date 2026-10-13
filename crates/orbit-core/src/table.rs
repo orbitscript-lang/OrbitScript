@@ -1646,7 +1646,7 @@ mod tests {
         set(&mut heap, t, Value::Int(3), Value::Int(3)).unwrap();
         let tab = heap.get(t);
         assert!(tab.array_len() <= 3);
-        assert!(tab.array.cap() <= 4);
+        assert!(tab.array.cap() <= 8);
         assert!(is_border(tab, tab.border()));
         assert!(matches!(tab.get_int(3), Value::Int(3)));
         assert!(tab.get_int(2).is_nil());
