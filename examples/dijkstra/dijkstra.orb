@@ -1,0 +1,103 @@
+// dijkstra: shortest routes on a small road map.
+//
+// Shows a struct holding nested tables, edges read with `gmatch` captures, `nil` as
+// "no route yet", `loop` with `break value`, and a path rebuilt by walking back.
+//
+// Usage: orbit dijkstra.orb [rounds]   (rounds > 1 repeats the search, for benchmarking)
+
+extern arg;
+
+let roads = r#"
+Ashford  Brook     7
+Ashford  Cliffe    9
+Ashford  Fenwick  14
+Brook    Cliffe   10
+Brook    Dunmore  15
+Cliffe   Dunmore  11
+Cliffe   Fenwick   2
+Dunmore  Eastgate  6
+Eastgate Fenwick   9
+Gorse    Hollow    3
+"#;
+
+struct Graph { names, edges }
+
+impl Graph {
+    pub fn parse(text) -> Graph {
+        let g = Graph { names: [], edges: #{} };
+        for (a, b, km) in text.gmatch("(%a+)%s+(%a+)%s+(%d+)") {
+            let km = tonumber(km);
+            g.add(a, b, km);
+            g.add(b, a, km);
+        }
+        table::sort(g.names);
+        g
+    }
+
+    fn add(self, from, to, km) {
+        if self.edges[from] == nil {
+            self.edges[from] = #{};
+            self.names[#self.names + 1] = from;
+        }
+        self.edges[from][to] = km;
+    }
+
+    /// Distances from `source` to every town, and the previous town on each best route.
+    pub fn shortest(self, source) {
+        let dist = #{ [source]: 0 };
+        let prev = #{};
+        let done = #{};
+        loop {
+            // The closest town not finished yet; ties go to the first name, so the result
+            // doesn't depend on table order.
+            let here = loop {
+                let mut best = nil;
+                for (_, name) in ipairs(self.names) {
+                    if !done[name] && dist[name] != nil && (best == nil || dist[name] < dist[best]) {
+                        best = name;
+                    }
+                }
+                break best;
+            };
+            if here == nil {
+                break;
+            }
+            done[here] = true;
+            for (next, km) in pairs(self.edges[here]) {
+                let d = dist[here] + km;
+                if dist[next] == nil || d < dist[next] {
+                    dist[next] = d;
+                    prev[next] = here;
+                }
+            }
+        }
+        (dist, prev)
+    }
+}
+
+fn route(prev, to) {
+    let stops = [];
+    let mut at = to;
+    while at != nil {
+        table::insert(stops, 1, at);
+        at = prev[at];
+    }
+    table::concat(stops, " -> ")
+}
+
+let map = Graph::parse(roads);
+let rounds = tonumber(arg[1]) || 1;
+let mut dist = nil;
+let mut prev = nil;
+for _ in 1..=rounds {
+    (dist, prev) = map.shortest("Ashford");
+}
+
+for (_, town) in ipairs(map.names) {
+    let line = match dist[town] {
+        nil => "unreachable",
+        0 => "start",
+        km => f"{km:>3} km  {route(prev, town)}",
+    };
+    print(f"{town:<9}{line}");
+}

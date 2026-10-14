@@ -1,0 +1,17 @@
+# Example programs. Each line: the example's directory, its entry file, and train=ARGS,
+# the arguments `cargo testkit pgo train` runs it with (each example takes a repeat count
+# or size as arg[1]; about 0.1 s each in a release build on cloud x86_64).
+#
+# With no arguments, an example must print exactly its NAME.expected file. A NAME.lua
+# next to an entry NAME.orb is its Lua twin, which must print the same, under `orbit`
+# and under the reference lua5.5. See README.md.
+calc       calc.orb       train=500     # enum AST, match, `?` through a recursive evaluator
+ledger     ledger.orb     train=2000    # `let scope` transaction guards, `scope` actions
+sim        sim.orb        train=100     # coroutines, a heap module loaded with `use`, `__lt`
+dijkstra   dijkstra.orb   train=5000    # shortest paths, gmatch captures, `break` with a value
+wordfreq   wordfreq.orb   train=4000    # map tables, string methods, sort with a closure
+vectors    vectors.orb    train=20000   # operator metamethods on structs
+life       life.orb       train=800     # nested arrays, exclusive ranges, `match` on pairs
+config     config.orb     train=1000    # files, `?` on io::open, `scope f.close();`
+interop    interop.lua    train=50000   # Lua using an OrbitScript module that uses a Lua module
+fizzbuzz   fizzbuzz.orb   train=20000   # the one-screen hello

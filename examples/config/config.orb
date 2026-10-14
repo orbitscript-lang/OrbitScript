@@ -1,0 +1,107 @@
+// config: read INI-style settings files, with errors carried by `?`.
+//
+// `io::open(path)?` returns early with `nil, message` when the file can't be opened,
+// and `scope f.close();` closes it on every way out of the function. Run it from this
+// directory, since it reads the .ini files next to it.
+//
+// Usage: orbit config.orb [rounds]   (rounds > 1 repeats the work, for benchmarking)
+
+extern arg;
+
+/// Parses one line: a `[section]` header, a `key = value` pair, or nothing.
+fn parse_line(line) {
+    let line = line.match("^%s*(.-)%s*$");
+    if line == "" || line.sub(1, 1) == ";" {
+        return "blank";
+    }
+    let section = line.match("^%[([%w_]+)%]$");
+    if section != nil {
+        return ("section", section);
+    }
+    let (key, value) = string::match(line, "^([%w_]+)%s*=%s*(.-)$");
+    if key == nil {
+        return (nil, f"cannot read '{line}'");
+    }
+    ("pair", key, value)
+}
+
+/// Converts a value written in the file to a number or boolean where it looks like one.
+fn convert(text) {
+    match text {
+        "yes" | "true" | "on" => true,
+        "no" | "false" | "off" => false,
+        _ => tonumber(text) || text,
+    }
+}
+
+/// Reads `path` into `#{ section: #{ key: value } }`; keys before any header go in "".
+fn read_config(path) {
+    let f = io::open(path)?;
+    scope f.close();
+    let settings = #{ "": #{} };
+    let mut current = "";
+    let mut n = 0;
+    for line in f.lines() {
+        n += 1;
+        let (kind, a, b) = parse_line(line);
+        match kind {
+            "section" => {
+                current = a;
+                settings[current] = settings[current] || #{};
+            }
+            "pair" => {
+                settings[current][a] = convert(b);
+            }
+            "blank" => {}
+            nil => return (nil, f"{path}:{n}: {a}"),
+        }
+    }
+    settings
+}
+
+/// Checks the settings the program needs; returns the port or nil and a message.
+fn server_port(settings) {
+    let server = settings.server;
+    if server == nil {
+        return (nil, "no [server] section");
+    }
+    let port = server.port;
+    if math::type(port) != "integer" || port < 1 || port > 65535 {
+        return (nil, f"bad port {port:?}");
+    }
+    port
+}
+
+fn describe(path) {
+    let settings = read_config(path)?;
+    let port = server_port(settings)?;
+    let mut lines = [f"{path}: {settings[""].name || "(unnamed)"} on {settings.server.host}:{port}"];
+    let sections = [];
+    for name in pairs(settings) {
+        sections[#sections + 1] = name;
+    }
+    table::sort(sections);
+    for (_, name) in ipairs(sections) {
+        let keys = [];
+        for key in pairs(settings[name]) {
+            keys[#keys + 1] = key;
+        }
+        table::sort(keys);
+        for (_, key) in ipairs(keys) {
+            let value = settings[name][key];
+            let prefix = if name == "" { "" } else { name ~ "." };
+            lines[#lines + 1] = f"  {prefix}{key} = {value} ({type(value)})";
+        }
+    }
+    table::concat(lines, "\n")
+}
+
+let rounds = tonumber(arg[1]) || 1;
+for round in 1..=rounds {
+    for (_, path) in ipairs(["server.ini", "bad-port.ini", "bad-line.ini", "missing.ini"]) {
+        let (text, err) = describe(path);
+        if round == rounds {
+            print(text || f"error: {err}");
+        }
+    }
+}

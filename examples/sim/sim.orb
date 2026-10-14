@@ -1,0 +1,155 @@
+// sim: a discrete-event simulation of a coffee shop.
+//
+// Each customer is a coroutine that yields requests to the scheduler (wait for a
+// barista, take some time, hand the barista back). Pending events sit in a binary heap
+// (heap.orb, loaded with `use`) ordered by the events' `__lt`. Random numbers come from
+// a small generator of our own, so the run is the same everywhere.
+//
+// Usage: orbit sim.orb [rounds]   (rounds > 1 repeats the simulation, for benchmarking)
+
+use heap::{Heap};
+
+extern arg;
+
+const BARISTAS = 2;
+const OPEN_MINUTES = 120;
+const LOG_LINES = 12;
+
+/// A linear congruential generator (the classic C library constants).
+struct Random { state }
+
+impl Random {
+    pub fn new(seed) -> Random {
+        Random { state: seed }
+    }
+
+    /// An integer from `lo` to `hi`, inclusive.
+    pub fn between(self, lo, hi) -> int {
+        self.state = (self.state * 1103515245 + 12345) & 0x7fff_ffff;
+        lo + (self.state >> 8) % (hi - lo + 1)
+    }
+}
+
+/// What a process asks the scheduler for when it yields.
+enum Request {
+    Sleep { minutes },
+    Barista,
+    Release,
+}
+
+struct Event { time, seq, process }
+
+impl Event {
+    // Earlier events first; events at the same minute in the order they were scheduled.
+    fn __lt(a, b) {
+        if a.time != b.time { a.time < b.time } else { a.seq < b.seq }
+    }
+}
+
+struct Shop { now, seq, events, free, queue, served, total_wait, max_wait, log }
+
+impl Shop {
+    pub fn new(verbose) -> Shop {
+        Shop {
+            now: 0,
+            seq: 0,
+            events: Heap::new(),
+            free: BARISTAS,
+            queue: [],
+            served: 0,
+            total_wait: 0,
+            max_wait: 0,
+            log: if verbose { LOG_LINES } else { 0 },
+        }
+    }
+
+    fn say(self, text) {
+        if self.log > 0 {
+            self.log -= 1;
+            print(f"{self.now:>4}  {text}");
+        }
+    }
+
+    fn schedule(self, minutes, process) {
+        self.seq += 1;
+        self.events.push(Event { time: self.now + minutes, seq: self.seq, process });
+    }
+
+    /// Runs `process` until it yields its next request, and acts on the request.
+    fn resume(self, process) {
+        match process() {
+            Request::Sleep { minutes } => self.schedule(minutes, process),
+            Request::Barista => {
+                if self.free > 0 {
+                    self.free -= 1;
+                    self.schedule(0, process);
+                } else {
+                    self.queue[#self.queue + 1] = process;
+                }
+            }
+            Request::Release => {
+                self.free += 1;
+                if #self.queue > 0 {
+                    self.free -= 1;
+                    self.schedule(0, table::remove(self.queue, 1));
+                }
+                self.schedule(0, process);
+            }
+            nil => {}
+        }
+    }
+
+    pub fn run(self) {
+        loop {
+            let event = self.events.pop();
+            if event == nil {
+                break;
+            }
+            self.now = event.time;
+            self.resume(event.process);
+        }
+    }
+
+    fn customer(self, id, rng) {
+        coroutine::wrap(|| {
+            let arrived = self.now;
+            self.say(f"customer {id} arrives ({#self.queue} waiting)");
+            coroutine::yield(Request::Barista);
+            let waited = self.now - arrived;
+            self.say(f"customer {id} is served after {waited} min");
+            coroutine::yield(Request::Sleep { minutes: rng.between(2, 6) });
+            coroutine::yield(Request::Release);
+            self.say(f"customer {id} leaves");
+            self.served += 1;
+            self.total_wait += waited;
+            self.max_wait = math::max(self.max_wait, waited);
+        })
+    }
+
+    /// The process that lets customers in until closing time.
+    fn door(self, rng) {
+        coroutine::wrap(|| {
+            let mut id = 0;
+            loop {
+                coroutine::yield(Request::Sleep { minutes: rng.between(0, 4) });
+                if self.now >= OPEN_MINUTES {
+                    break;
+                }
+                id += 1;
+                self.schedule(0, self.customer(id, rng));
+            }
+        })
+    }
+}
+
+let rounds = tonumber(arg[1]) || 1;
+for round in 1..=rounds {
+    let shop = Shop::new(round == rounds);
+    shop.schedule(0, shop.door(Random::new(2026)));
+    shop.run();
+    if round == rounds {
+        print("   ...");
+        print(f"closed at minute {shop.now}: {shop.served} customers served by {BARISTAS} baristas");
+        print(f"average wait {shop.total_wait / shop.served:.2} min, longest {shop.max_wait} min");
+    }
+}

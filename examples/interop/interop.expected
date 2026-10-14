@@ -1,0 +1,7 @@
+circle r=1           area   3.142  perimeter   6.283
+rect 3x4             area  12.000  perimeter  14.000
+polygon of 3 points  area   6.000  perimeter  12.000
+total area 21.142
+is a Rect:	true	false
+variant name:	Shape::Polygon
+Lua sees only the pub items:	true	true

@@ -1,0 +1,89 @@
+// vectors: 2D vectors and matrices with operator metamethods.
+//
+// `impl` functions named `__add`, `__mul`, `__eq` and so on go on the metatable, so
+// `a + b`, `m * v` and `a == b` work on these structs exactly as on Lua objects.
+//
+// Usage: orbit vectors.orb [rounds]   (rounds > 1 repeats the work, for benchmarking)
+
+extern arg;
+
+pub struct Vec2 { x: number, y: number }
+
+impl Vec2 {
+    pub fn new(x, y) -> Vec2 { Vec2 { x, y } }
+
+    pub fn dot(self, other: Vec2) -> number { self.x * other.x + self.y * other.y }
+
+    pub fn len(self) -> float { math::sqrt(self.dot(self)) }
+
+    fn __add(a, b) { Vec2::new(a.x + b.x, a.y + b.y) }
+    fn __sub(a, b) { Vec2::new(a.x - b.x, a.y - b.y) }
+    fn __unm(a) { Vec2::new(-a.x, -a.y) }
+    fn __eq(a, b) { a.x == b.x && a.y == b.y }
+
+    // `k * v` and `v * k` both scale; Lua passes the operands in source order.
+    fn __mul(a, b) {
+        if type(a) == "number" { Vec2::new(a * b.x, a * b.y) } else { Vec2::new(a.x * b, a.y * b) }
+    }
+
+    fn __tostring(self) { f"({self.x}, {self.y})" }
+}
+
+/// A 2x2 matrix [a b; c d].
+pub struct Mat2 { a, b, c, d }
+
+impl Mat2 {
+    pub fn new(a, b, c, d) -> Mat2 { Mat2 { a, b, c, d } }
+    pub fn identity() -> Mat2 { Mat2::new(1, 0, 0, 1) }
+    pub fn rotate90() -> Mat2 { Mat2::new(0, -1, 1, 0) }
+    pub fn scale(k) -> Mat2 { Mat2::new(k, 0, 0, k) }
+
+    pub fn det(self) { self.a * self.d - self.b * self.c }
+
+    // Matrix times matrix, or matrix times vector.
+    fn __mul(m, x) {
+        match x {
+            Mat2 { a, b, c, d } => Mat2::new(
+                m.a * a + m.b * c, m.a * b + m.b * d,
+                m.c * a + m.d * c, m.c * b + m.d * d,
+            ),
+            Vec2 { x, y } => Vec2::new(m.a * x + m.b * y, m.c * x + m.d * y),
+        }
+    }
+
+    fn __eq(m, n) { m.a == n.a && m.b == n.b && m.c == n.c && m.d == n.d }
+
+    fn __tostring(self) { f"[{self.a} {self.b}; {self.c} {self.d}]" }
+}
+
+let square = [Vec2::new(0, 0), Vec2::new(2, 0), Vec2::new(2, 2), Vec2::new(0, 2)];
+let turn = Mat2::rotate90();
+let transform = Mat2::scale(3) * turn;
+
+fn perimeter(points) {
+    let mut sum = 0.0;
+    for i in 1..=#points {
+        let next = points[i % #points + 1];
+        sum += (next - points[i]).len();
+    }
+    sum
+}
+
+let rounds = tonumber(arg[1]) || 1;
+let mut moved = [];
+for _ in 1..=rounds {
+    moved = [];
+    for (i, p) in ipairs(square) {
+        moved[i] = transform * p + Vec2::new(1, 1);
+    }
+}
+
+let shown = [];
+for (i, p) in ipairs(moved) {
+    shown[i] = tostring(p);
+}
+print(f"transform = {transform}, det = {transform.det()}");
+print(f"moved square: {table::concat(shown, " ")}");
+print(f"perimeter {perimeter(square)} -> {perimeter(moved)}");
+print(f"four quarter turns are the identity: {turn * turn * turn * turn == Mat2::identity()}");
+print(f"-v == (-1) * v: {-Vec2::new(3, 4) == -1 * Vec2::new(3, 4)}, |(3, 4)| = {Vec2::new(3, 4).len()}");

@@ -18,6 +18,10 @@ cargo build --release
 
 Requires stable Rust at or above the `rust-version` in `Cargo.toml`.
 
+## Examples
+
+[`examples/`](examples/) has OrbitScript programs, some with the same program in Lua beside them for comparison. They double as tests.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

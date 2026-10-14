@@ -1,0 +1,21 @@
+// fizzbuzz: `match` on a pair of values.
+//
+// Usage: orbit fizzbuzz.orb [n]
+
+extern arg;
+
+fn fizzbuzz(n) {
+    match (n % 3, n % 5) {
+        (0, 0) => "FizzBuzz",
+        (0, _) => "Fizz",
+        (_, 0) => "Buzz",
+        _ => tostring(n),
+    }
+}
+
+let n = tonumber(arg[1]) || 15;
+let words = [];
+for i in 1..=n {
+    words[i] = fizzbuzz(i);
+}
+print(table::concat(words, " "));

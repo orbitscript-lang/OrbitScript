@@ -1,0 +1,60 @@
+// wordfreq: count words in a text and print the most common ones as a bar chart.
+//
+// Shows map tables (`#{}`), string methods (`s.gmatch`, `s.lower()`), `string::match`,
+// sorting with a closure and f-string alignment.
+//
+// Usage: orbit wordfreq.orb [rounds]   (rounds > 1 repeats the counting, for benchmarking)
+
+extern arg;
+
+let text = r#"Title: The Orbit
+The moon goes round the earth, and the earth goes round the sun.
+A comet comes and goes; the moon stays. Round and round the planets go,
+and every orbit is a promise the sun keeps. The sun, the moon, the earth:
+round, round, round.
+"#;
+
+// Words that are too common to be interesting.
+let stop_words = #{ the: true, and: true, a: true, is: true };
+
+fn count_words(body) {
+    let counts = #{};
+    let mut total = 0;
+    for word in body.gmatch("%a+") {
+        let w = word.lower();
+        total += 1;
+        if !stop_words[w] {
+            counts[w] = (counts[w] || 0) + 1;
+        }
+    }
+    (counts, total)
+}
+
+fn top(counts, n) {
+    let entries = [];
+    for (word, count) in pairs(counts) {
+        entries[#entries + 1] = #{ word: word, count: count };
+    }
+    // Most frequent first; ties in alphabetical order, so the output is stable.
+    table::sort(entries, |a, b| {
+        if a.count != b.count { a.count > b.count } else { a.word < b.word }
+    });
+    let best = [];
+    for i in 1..=math::min(n, #entries) {
+        best[i] = entries[i];
+    }
+    best
+}
+
+let (title, body) = string::match(text, "^Title: ([^\n]*)\n(.*)$");
+let rounds = tonumber(arg[1]) || 1;
+let mut counts = nil;
+let mut total = 0;
+for _ in 1..=rounds {
+    (counts, total) = count_words(body);
+}
+
+print(f"{title}: {total} words");
+for (rank, e) in ipairs(top(counts, 6)) {
+    print(f"{rank}. {e.word:<8}{e.count:>3} {string::rep("#", e.count)}");
+}

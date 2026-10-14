@@ -7,6 +7,7 @@
 mod bench;
 mod conformance;
 mod diff;
+mod examples;
 mod fuzz;
 mod libfuzz;
 mod pgo;
@@ -24,6 +25,7 @@ commands:
   conformance   run the official Lua 5.5 test suite against an interpreter
   diff          compare an interpreter's behavior with the reference lua5.5
   bench         time benchmarks and track peak RSS and binary size
+  examples      run examples/ and check their output (and Lua twins)
   scoreboard    the whole Lua 5.5 compatibility picture in one report
   fuzz-syntax   compare compile errors on mutated programs with lua5.5
   fuzz          compare random library calls with the reference lua5.5
@@ -42,6 +44,7 @@ fn main() -> ExitCode {
         "conformance" => conformance::main(rest),
         "diff" => diff::main(rest),
         "bench" => bench::main(rest),
+        "examples" => examples::main(rest),
         "scoreboard" => scoreboard::main(rest),
         "fuzz-syntax" => fuzz::main(rest),
         "fuzz" => libfuzz::main(rest),
