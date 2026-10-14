@@ -112,9 +112,9 @@ flowchart LR
 
 ## Binary size
 
-The front ends call a few small helpers from hundreds of places: the HIR's `Function::add_*` builders, the lowering's node builders (`add_expr`, `push`, `field`, `call_global`, ...) and the parsers' token helpers (`advance`, `eat`, `expect`, ...). With LTO these were inlined at every call site. They are now `#[inline(never)]`.
+A few small helpers are called from hundreds of places: the HIR's `Function::add_*` builders, the OrbitScript lowering's node builders (`add_expr`, `push`, `field`, `call_global`, ...), both parsers' token helpers (`advance`, `eat`, `expect`, ...), the compiler's `emit`, `jump`, `label`, `constant` and similar, and the bytecode format's varint readers and writers. With LTO these were inlined at every call site. They are now `#[inline(never)]`.
 
-Measured on cloud x86_64 (Ubuntu 24.04, release without PGO, stripped `orbit`): the `orbitscript` feature's cost fell from 279 KiB to 209 KiB, and the Lua front end lost 15 KiB, 85 KiB in all. Compiling costs 1.8% more instructions (valgrind), which is within the noise of wall time. The bytecode produced is unchanged, so scripts run at the same speed.
+Measured on cloud x86_64 (Ubuntu 24.04, release without PGO, stripped `orbit`): 107 KiB smaller in all. The Lua-only build is 37 KiB smaller, and the `orbitscript` feature's cost fell from 279 KiB to 209 KiB. Compiling costs about 3% more instructions (valgrind: 2.9% for 200 loads of the suite's `strings.lua`, 2.6% for `bench/orb/compile.lua`), which is within the noise of wall time. The bytecode produced is unchanged, so scripts run at the same speed.
 
 Sharing more code between the two front ends would save little (about 5 to 10 KiB, estimated): they share the HIR and everything after it already, and OrbitScript's extra size is its desugaring, which Lua doesn't need.
 
