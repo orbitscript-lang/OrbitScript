@@ -138,6 +138,7 @@ pub fn decode(bytes: &[u8]) -> Result<UnlinkedChunk> {
 struct Writer(Vec<u8>);
 
 impl Writer {
+    #[inline(never)]
     fn uint(&mut self, mut v: u64) {
         loop {
             let b = (v & 0x7f) as u8;
@@ -150,6 +151,7 @@ impl Writer {
         }
     }
 
+    #[inline(never)]
     fn int(&mut self, v: i64) {
         self.uint(((v << 1) ^ (v >> 63)) as u64);
     }
@@ -168,12 +170,14 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    #[inline(never)]
     fn byte(&mut self) -> Result<u8> {
         let b = *self.bytes.get(self.at).ok_or(FormatError::Truncated)?;
         self.at += 1;
         Ok(b)
     }
 
+    #[inline(never)]
     fn uint(&mut self) -> Result<u64> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
@@ -190,6 +194,7 @@ impl Reader<'_> {
         Err(FormatError::Malformed("varint overflow"))
     }
 
+    #[inline(never)]
     fn int(&mut self) -> Result<i64> {
         let u = self.uint()?;
         Ok((u >> 1) as i64 ^ -((u & 1) as i64))
@@ -198,6 +203,7 @@ impl Reader<'_> {
     /// An element count. Every element takes at least one byte, so a count
     /// past the end of the input is a truncated chunk; this also keeps a
     /// corrupt count from reserving a huge allocation.
+    #[inline(never)]
     fn count(&mut self) -> Result<usize> {
         let n = self.uint()?;
         if n > (self.bytes.len() - self.at) as u64 {
@@ -206,6 +212,7 @@ impl Reader<'_> {
         Ok(n as usize)
     }
 
+    #[inline(never)]
     fn bytes(&mut self) -> Result<Box<[u8]>> {
         let n = self.count()?;
         let b = &self.bytes[self.at..self.at + n];
@@ -257,6 +264,7 @@ macro_rules! unsigned_field {
             fn put(self, w: &mut Writer) {
                 w.uint(self.into());
             }
+            #[inline(never)]
             fn get(r: &mut Reader<'_>) -> Result<Self> {
                 <$t>::try_from(r.uint()?).map_err(|_| FormatError::Malformed("operand out of range"))
             }
@@ -270,6 +278,7 @@ macro_rules! signed_field {
             fn put(self, w: &mut Writer) {
                 w.int(self.into());
             }
+            #[inline(never)]
             fn get(r: &mut Reader<'_>) -> Result<Self> {
                 <$t>::try_from(r.int()?).map_err(|_| FormatError::Malformed("operand out of range"))
             }

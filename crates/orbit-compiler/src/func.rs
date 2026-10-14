@@ -232,9 +232,25 @@ impl<'a> FuncState<'a> {
             "unplaced label"
         );
 
-        let mut origins = std::mem::take(&mut self.origins);
-        origins.sort_by_key(|o| (o.pc, o.operand));
-        origins.dedup_by_key(|o| (o.pc, o.operand));
+        // Ordered by (pc, operand), keeping the first origin recorded for each. Sorting packed
+        // keys, with the push index last, shares one small `u128` sort with `orbit_hir::analyze`
+        // instead of instantiating a stable sort for `OperandOrigin`.
+        let mut order: Vec<u128> = self
+            .origins
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.pc as u128) << 64 | (o.operand as u128) << 32 | i as u128)
+            .collect();
+        order.sort_unstable();
+        order.dedup_by_key(|k| *k >> 32);
+        let mut recorded: Vec<_> = std::mem::take(&mut self.origins)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let origins: Vec<OperandOrigin> = order
+            .iter()
+            .map(|&k| recorded[k as u32 as usize].take().expect("origin"))
+            .collect();
         let names = &self.chunk.strings;
         let bytes = |s: StrId| -> Box<[u8]> { names.get(s).into() };
         let name = match f.name {
@@ -318,6 +334,7 @@ impl<'a> FuncState<'a> {
 
     // ---- errors and lines ----
 
+    #[inline(never)]
     pub fn error(&self, message: &str) -> CompileError {
         CompileError {
             chunk: self.chunk.source.name.clone(),
@@ -379,6 +396,7 @@ impl<'a> FuncState<'a> {
 
     // ---- emission ----
 
+    #[inline(never)]
     pub fn emit(&mut self, op: Op) -> usize {
         let pc = self.code.len();
         let start = self.clear_pending.take().unwrap_or(pc);
@@ -390,6 +408,7 @@ impl<'a> FuncState<'a> {
     }
 
     /// Records where operand `operand` of the instruction at `pc` came from.
+    #[inline(never)]
     pub fn origin(&mut self, pc: usize, operand: u8, origin: Option<Origin>) {
         if let Some(origin) = origin {
             self.origins.push(OperandOrigin {
@@ -402,6 +421,7 @@ impl<'a> FuncState<'a> {
 
     // ---- labels and jumps ----
 
+    #[inline(never)]
     pub fn label(&mut self) -> Label {
         self.labels.push(LabelState::default());
         Label(self.labels.len() - 1)
@@ -430,6 +450,7 @@ impl<'a> FuncState<'a> {
 
     /// Emits a `Close` for the to-be-closed locals past the first `depth`, if any (for an
     /// exit from their scopes).
+    #[inline(never)]
     pub fn emit_close(&mut self, depth: usize) {
         if let Some(&(_, from)) = self.tbc.get(depth) {
             self.emit(Op::Close { from });
@@ -473,12 +494,14 @@ impl<'a> FuncState<'a> {
     }
 
     /// A label placed at the current position (a backward jump target).
+    #[inline(never)]
     pub fn here(&mut self) -> Label {
         let l = self.label();
         self.place(l);
         l
     }
 
+    #[inline(never)]
     pub fn place(&mut self, label: Label) {
         let pos = self.code.len();
         let state = &mut self.labels[label.0];
@@ -491,6 +514,7 @@ impl<'a> FuncState<'a> {
     }
 
     /// Emits a jump instruction (built with a placeholder offset) aimed at `label`.
+    #[inline(never)]
     pub fn jump(&mut self, op: Op, label: Label) -> usize {
         let pc = self.emit(op);
         match self.labels[label.0].pos {
@@ -502,6 +526,7 @@ impl<'a> FuncState<'a> {
 
     // ---- registers ----
 
+    #[inline(never)]
     pub fn alloc(&mut self) -> Result<u8> {
         let r = self.free;
         self.free += 1;
@@ -514,6 +539,7 @@ impl<'a> FuncState<'a> {
 
     /// Makes sure the frame has room for registers up to (not including) `top`, for
     /// instructions that write beyond the allocated registers.
+    #[inline(never)]
     pub fn reserve_to(&mut self, top: usize) -> Result<()> {
         if top > MAX_REGS {
             return Err(self.error("function or expression needs too many registers"));
@@ -526,6 +552,7 @@ impl<'a> FuncState<'a> {
 
     /// Constant `c`'s index. Only `LoadConstX` reaches one past `Const`'s
     /// range; [`Self::short_constant`] is for the other instructions.
+    #[inline(never)]
     pub fn constant(&mut self, c: Constant) -> Result<u32> {
         let key = match &c {
             Constant::Int(i) => ConstKey::Int(*i),
@@ -546,17 +573,20 @@ impl<'a> FuncState<'a> {
 
     /// Constant `c`'s index if an instruction's `Const` operand can hold
     /// it, else `None` (the caller loads it with `LoadConstX` instead).
+    #[inline(never)]
     pub fn short_constant(&mut self, c: Constant) -> Result<Option<Const>> {
         Ok(Const::try_from(self.constant(c)?).ok())
     }
 
     /// The string constant `s` as a `Const` operand, if it fits.
+    #[inline(never)]
     pub fn str_key(&mut self, s: StrId) -> Result<Option<Const>> {
         let bytes = self.chunk.strings.get(s).into();
         self.short_constant(Constant::Str(bytes))
     }
 
     /// `R[dst] = c`, with whichever load instruction reaches its index.
+    #[inline(never)]
     pub fn load_constant(&mut self, dst: u8, c: Constant) -> Result<()> {
         let k = self.constant(c)?;
         match Const::try_from(k) {
@@ -567,6 +597,7 @@ impl<'a> FuncState<'a> {
     }
 
     /// `R[dst] = s`, the string constant.
+    #[inline(never)]
     pub fn load_str(&mut self, dst: u8, s: StrId) -> Result<()> {
         let bytes = self.chunk.strings.get(s).into();
         self.load_constant(dst, Constant::Str(bytes))
@@ -574,6 +605,7 @@ impl<'a> FuncState<'a> {
 
     /// A fresh inline-cache slot. Past `u16::MAX` slots, the last one is shared (a cache miss
     /// is only slower, never wrong).
+    #[inline(never)]
     pub fn cache(&mut self) -> u16 {
         self.caches(1)
     }
@@ -601,10 +633,12 @@ impl<'a> FuncState<'a> {
 
     // ---- locals and scopes ----
 
+    #[inline(never)]
     pub fn name_bytes(&self, s: StrId) -> Box<[u8]> {
         self.chunk.strings.get(s).into()
     }
 
+    #[inline(never)]
     pub fn local_origin(&self, l: LocalId) -> Option<Origin> {
         self.f
             .local(l)
