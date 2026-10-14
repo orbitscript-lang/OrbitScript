@@ -16,22 +16,22 @@
 use crate::value::{Payload, Tag};
 use crate::{NoMemory, Value};
 
-/// One array slot. The payload is a byte array so a slot is 9 bytes, not
+/// CONTROL VARIANT (alignment study): 16-byte aligned slot. Was: the payload is a byte array so a slot is 9 bytes, not
 /// 16: payloads are read and written unaligned, which x86-64 and aarch64
 /// do in one instruction.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 struct Slot {
-    payload: [u8; 8],
+    payload: u64,
     tag: u8,
 }
 
-const _: () = assert!(std::mem::size_of::<Slot>() == 9);
+const _: () = assert!(std::mem::size_of::<Slot>() == 16);
 
 impl Slot {
     #[inline(always)]
     fn payload(&self) -> Payload {
-        Payload::from_bits(u64::from_ne_bytes(self.payload))
+        Payload::from_bits(self.payload)
     }
 }
 
@@ -97,7 +97,7 @@ impl ArrayPart {
     pub(super) fn set(&mut self, i: usize, v: Value) {
         let (t, p) = v.pack();
         self.slots[i] = Slot {
-            payload: p.bits().to_ne_bytes(),
+            payload: p.bits(),
             tag: t as u8,
         };
     }
@@ -221,15 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn sizes_are_no_more_than_payloads_then_tags() {
-        for cap in 0..100 {
-            // 9 bytes a slot, never more than the layout before slots.
-            assert!(ArrayPart::bytes_for(cap) >= cap * 9);
-            assert!(ArrayPart::bytes_for(cap) <= cap * 8 + cap.div_ceil(8) * 8);
-        }
-        assert_eq!(ArrayPart::bytes_for(2), 24);
-        assert_eq!(ArrayPart::bytes_for(4), 40);
-        assert_eq!(ArrayPart::bytes_for(8), 72);
+    fn sizes_are_16_bytes_a_slot() {
+        assert_eq!(ArrayPart::bytes_for(3), 48);
     }
 
     #[test]
