@@ -110,6 +110,16 @@ flowchart LR
 - `orbit-cli` has an `orbitscript` feature, on by default. With it, `orbit script.orb` runs a script, and `orbitc` compiles and lists `.orb` files and prints their HIR with `--hir`. `--ast` is Lua-only for now.
 - **Size** (cloud x86_64, Ubuntu 24.04, release build with the committed PGO profile, stripped): `orbit` is 1,928,592 bytes without the feature and 2,238,000 with it (+302 KiB). `orbitc` grows by the same amount. In an unstripped build, `orbit-orb-syntax`'s own symbols come to 258,560 bytes, against 114,911 for the Lua front end. The largest functions are the lowering of statements and expressions and the parser's `primary` and `item`. Shrinking them is follow-up work.
 
+## Binary size
+
+The front ends call a few small helpers from hundreds of places: the HIR's `Function::add_*` builders, the lowering's node builders (`add_expr`, `push`, `field`, `call_global`, ...) and the parsers' token helpers (`advance`, `eat`, `expect`, ...). With LTO these were inlined at every call site. They are now `#[inline(never)]`.
+
+Measured on cloud x86_64 (Ubuntu 24.04, release without PGO, stripped `orbit`): the `orbitscript` feature's cost fell from 279 KiB to 209 KiB, and the Lua front end lost 15 KiB, 85 KiB in all. Compiling costs 1.8% more instructions (valgrind), which is within the noise of wall time. The bytecode produced is unchanged, so scripts run at the same speed.
+
+Sharing more code between the two front ends would save little (about 5 to 10 KiB, estimated): they share the HIR and everything after it already, and OrbitScript's extra size is its desugaring, which Lua doesn't need.
+
+`bench/orb/desugar.orb` exercises every desugaring path and prints a checksum (`orbit bench/orb/desugar.orb [rounds]`). `bench/orb/compile.lua` times compiling it (`orbit bench/orb/compile.lua [times] [file.orb]`).
+
 ## Testing
 
 `tests/parse.rs` checks tree shapes as S-expressions, every example in the proposal (`tests/programs/proposal.orb`), error messages, and a deterministic mutation run that must never panic.

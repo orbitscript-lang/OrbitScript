@@ -121,6 +121,9 @@ impl Function {
         }
     }
 
+    // The `add_*` builders are kept out of line: front ends call them from hundreds of
+    // places, and inlined they cost binary size for no measurable compile speed
+    // (docs/design/orbitscript-front-end.md, "Binary size").
     #[inline(never)]
     pub fn add_local(&mut self, local: Local) -> LocalId {
         let id = LocalId::from_index(self.locals.len());
