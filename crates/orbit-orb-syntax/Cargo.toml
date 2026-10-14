@@ -1,0 +1,15 @@
+[package]
+name = "orbit-orb-syntax"
+description = "OrbitScript front end: lexer, parser, AST and lowering to the HIR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-hir = { path = "../orbit-hir" }
+
+[lints]
+workspace = true

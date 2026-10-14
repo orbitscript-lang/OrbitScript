@@ -138,6 +138,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit-orb-syntax"
+version = "0.0.0"
+dependencies = [
+ "orbit-hir",
+]
+
+[[package]]
 name = "orbit-stdlib"
 version = "0.0.0"
 dependencies = [
