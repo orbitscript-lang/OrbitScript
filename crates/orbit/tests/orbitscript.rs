@@ -61,7 +61,7 @@ fn require_finds_orb_modules() {
              return app.run(), #package.searchers, package.loaded['geo.vec'].Vec2.__name"
         ),
     );
-    assert_eq!(out, ["5.0 42", "5", "Vec2"]);
+    assert_eq!(out, ["5.0 42", "4", "Vec2"]);
 }
 
 #[test]
