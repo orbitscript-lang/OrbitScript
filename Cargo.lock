@@ -141,6 +141,8 @@ dependencies = [
 name = "orbit-orb-syntax"
 version = "0.0.0"
 dependencies = [
+ "orbit",
+ "orbit-compiler",
  "orbit-hir",
 ]
 
