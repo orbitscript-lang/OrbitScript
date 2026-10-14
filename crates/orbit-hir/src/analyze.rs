@@ -174,9 +174,21 @@ fn rewrite_outer(chunk: &mut Chunk) -> Result<(), AnalysisError> {
             }
         }
     }
-    sites.sort_by_key(|&(pos, tie, g, ..)| (pos, tie, g));
+    // Sort packed keys, with each site's index last so equal keys keep their order: a sort of
+    // `u128`s is one small routine shared with the compiler, where a stable sort of these
+    // tuples would be a large one of its own.
+    let mut order: Vec<u128> = sites
+        .iter()
+        .enumerate()
+        .map(|(i, &(pos, tie, g, ..))| {
+            (pos as u128) << 96 | (tie as u128) << 64 | (g as u128) << 32 | i as u128
+        })
+        .collect();
+    order.sort_unstable();
+    let mut sites: Vec<_> = sites.into_iter().map(Some).collect();
     let mut env_seen = vec![false; chunk.functions.len()];
-    for (_, _, g, site, outer) in sites {
+    for key in order {
+        let (_, _, g, site, outer) = sites[key as u32 as usize].take().expect("site");
         let gid = FuncId::from_index(g);
         let Some((owner, local)) = outer else {
             // The first use of the environment in `g` or any function it

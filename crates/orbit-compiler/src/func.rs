@@ -232,9 +232,25 @@ impl<'a> FuncState<'a> {
             "unplaced label"
         );
 
-        let mut origins = std::mem::take(&mut self.origins);
-        origins.sort_by_key(|o| (o.pc, o.operand));
-        origins.dedup_by_key(|o| (o.pc, o.operand));
+        // Ordered by (pc, operand), keeping the first origin recorded for each. Sorting packed
+        // keys, with the push index last, shares one small `u128` sort with `orbit_hir::analyze`
+        // instead of instantiating a stable sort for `OperandOrigin`.
+        let mut order: Vec<u128> = self
+            .origins
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.pc as u128) << 64 | (o.operand as u128) << 32 | i as u128)
+            .collect();
+        order.sort_unstable();
+        order.dedup_by_key(|k| *k >> 32);
+        let mut recorded: Vec<_> = std::mem::take(&mut self.origins)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let origins: Vec<OperandOrigin> = order
+            .iter()
+            .map(|&k| recorded[k as u32 as usize].take().expect("origin"))
+            .collect();
         let names = &self.chunk.strings;
         let bytes = |s: StrId| -> Box<[u8]> { names.get(s).into() };
         let name = match f.name {
