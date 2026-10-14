@@ -308,6 +308,10 @@ impl Lowerer {
         self.chunk.functions[id.index()] = ctx.f;
     }
 
+    // The small node builders and helpers below are kept out of line: lowering calls them
+    // from hundreds of places, and inlined they cost binary size for no measurable compile
+    // speed (see the design doc, "Binary size").
+    #[inline(never)]
     fn error(&self, span: Span, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(span, self.chunk.source.line_of(span.start), message)
     }
@@ -322,28 +326,34 @@ impl Lowerer {
 
     // ---- nodes --------------------------------------------------------------------------------
 
+    #[inline(never)]
     fn add_expr(&mut self, kind: hir::ExprKind, span: Span) -> ExprId {
         self.f().add_expr(kind, span)
     }
 
+    #[inline(never)]
     fn add_expr_at(&mut self, kind: hir::ExprKind, span: Span, at: u32) -> ExprId {
         self.f().add_expr_at(kind, span, at)
     }
 
+    #[inline(never)]
     fn push(&mut self, out: &mut Vec<hir::StmtId>, kind: hir::StmtKind, span: Span) {
         let id = self.f().add_stmt(kind, span);
         out.push(id);
     }
 
+    #[inline(never)]
     fn new_block(&mut self, stmts: Vec<hir::StmtId>, span: Span) -> BlockId {
         self.f().add_block(hir::Block { stmts, span })
     }
 
+    #[inline(never)]
     fn new_local(&mut self, name: Option<StrId>, span: Span, kind: LocalKind) -> LocalId {
         self.f().add_local(hir::Local::new(name, span, kind))
     }
 
     /// A compiler temporary declared (as nil, or with `value`) at the end of `out`.
+    #[inline(never)]
     fn temp(&mut self, value: Option<ExprId>, span: Span, out: &mut Vec<hir::StmtId>) -> LocalId {
         let local = self.new_local(None, span, LocalKind::Hidden);
         let values = value.map_or_else(hir::ExprList::default, |v| vec![v].into());
@@ -358,19 +368,23 @@ impl Lowerer {
         local
     }
 
+    #[inline(never)]
     fn local_expr(&mut self, local: LocalId, span: Span) -> ExprId {
         self.add_expr(hir::ExprKind::Local(local), span)
     }
 
+    #[inline(never)]
     fn str_expr(&mut self, sym: StrId, span: Span) -> ExprId {
         self.add_expr(hir::ExprKind::Str(sym), span)
     }
 
+    #[inline(never)]
     fn global_expr(&mut self, sym: StrId, span: Span) -> ExprId {
         self.add_expr(hir::ExprKind::Global(sym), span)
     }
 
     /// `obj.name`.
+    #[inline(never)]
     fn field(&mut self, obj: ExprId, name: StrId, span: Span) -> ExprId {
         let key = self.str_expr(name, span);
         self.add_expr(hir::ExprKind::Index { obj, key }, span)
@@ -378,6 +392,7 @@ impl Lowerer {
 
     /// `name(args)` for a standard global (read through `_ENV`, so a local of the same name
     /// doesn't change it).
+    #[inline(never)]
     fn call_global(&mut self, name: StrId, args: Vec<ExprId>, span: Span) -> ExprId {
         let callee = self.global_expr(name, span);
         self.add_expr(
@@ -390,6 +405,7 @@ impl Lowerer {
     }
 
     /// A reference to a local of `funcs[depth]` from the current function.
+    #[inline(never)]
     fn local_ref(&mut self, depth: usize, local: LocalId, span: Span) -> ExprId {
         if depth == self.funcs.len() - 1 {
             self.local_expr(local, span)

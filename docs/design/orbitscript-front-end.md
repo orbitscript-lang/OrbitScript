@@ -110,6 +110,18 @@ flowchart LR
 - `orbit-cli` has an `orbitscript` feature, on by default. With it, `orbit script.orb` runs a script, and `orbitc` compiles and lists `.orb` files and prints their HIR with `--hir`. `--ast` is Lua-only for now.
 - **Size** (cloud x86_64, Ubuntu 24.04, release build with the committed PGO profile, stripped): `orbit` is 1,928,592 bytes without the feature and 2,238,000 with it (+302 KiB). `orbitc` grows by the same amount. In an unstripped build, `orbit-orb-syntax`'s own symbols come to 258,560 bytes, against 114,911 for the Lua front end. The largest functions are the lowering of statements and expressions and the parser's `primary` and `item`. Shrinking them is follow-up work.
 
+## Binary size
+
+A few small helpers are called from hundreds of places: the HIR's `Function::add_*` builders, the OrbitScript lowering's node builders (`add_expr`, `push`, `field`, `call_global`, ...), both parsers' token helpers (`advance`, `eat`, `expect`, ...), the compiler's `emit`, `jump`, `label`, `constant` and similar, and the bytecode format's varint readers and writers. With LTO these were inlined at every call site. They are now `#[inline(never)]`.
+
+The HIR's capture analysis and the compiler's operand-origin table also sort packed `u128` keys with one shared `sort_unstable`, instead of instantiating a stable sort for each element type.
+
+Measured on cloud x86_64 (Ubuntu 24.04, release without PGO, stripped `orbit`): 113 KiB smaller in all. The Lua-only build is 43 KiB smaller, and the `orbitscript` feature's cost fell from 279 KiB to 208 KiB. Compiling costs about 3 to 4% more instructions (valgrind: 3.9% for 200 loads of the suite's `strings.lua`, 3.0% for `bench/orb/compile.lua`), which is within the noise of wall time. The bytecode produced is unchanged, so scripts run at the same speed.
+
+Sharing more code between the two front ends would save little (about 5 to 10 KiB, estimated): they share the HIR and everything after it already, and OrbitScript's extra size is its desugaring, which Lua doesn't need.
+
+`bench/orb/desugar.orb` exercises every desugaring path and prints a checksum (`orbit bench/orb/desugar.orb [rounds]`). `bench/orb/compile.lua` times compiling it (`orbit bench/orb/compile.lua [times] [file.orb]`).
+
 ## Testing
 
 `tests/parse.rs` checks tree shapes as S-expressions, every example in the proposal (`tests/programs/proposal.orb`), error messages, and a deterministic mutation run that must never panic.

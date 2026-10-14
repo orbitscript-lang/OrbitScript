@@ -1,0 +1,224 @@
+// Exercises every OrbitScript desugaring path the front end has, so it serves two
+// purposes: `compile.lua` times how fast the front end compiles it, and running it
+// (`orbit bench/orb/desugar.orb [N]`) times the code the lowering produces. It prints one
+// checksum line, so a change in lowering that alters behaviour shows up.
+
+extern arg;
+const ROUNDS = 20000;
+global calls = 0;
+
+// ---- structs, impl, metamethods -------------------------------------------------------
+
+struct Vec2 { x: float, y: float }
+
+impl Vec2 {
+    pub fn new(x, y) -> Vec2 { Vec2 { x, y } }
+    pub fn dot(self, o) -> float { self.x * o.x + self.y * o.y }
+    pub fn scale(self, k) { self.x *= k; self.y *= k; }
+    fn __add(self, o) { Vec2::new(self.x + o.x, self.y + o.y) }
+    fn __sub(self, o) { Vec2 { x: self.x - o.x, y: self.y - o.y } }
+    fn __eq(self, o) { self.x == o.x && self.y == o.y }
+    fn __lt(self, o) { self.dot(self) < o.dot(o) }
+    fn __len(self) { 2 }
+    fn __tostring(self) { f"({self.x}, {self.y})" }
+}
+
+struct Counter { n: int }
+
+impl Counter {
+    pub fn new() -> Counter { Counter { n: 0 } }
+    pub fn bump(self, by) -> int { self.n += by; self.n }
+    fn __index(self, key) { if key == "double" { self.n * 2 } else { nil } }
+    fn __call(self, v) { self.bump(v) }
+}
+
+// ---- enums and match ------------------------------------------------------------------
+
+enum Shape {
+    Circle { r: float },
+    Rect { w: float, h: float },
+    Tri { a: float, b: float, c: float },
+    Empty,
+}
+
+impl Shape {
+    pub fn area(self) -> float {
+        match self {
+            Shape::Circle { r } => 3 * r * r,
+            Shape::Rect { w, h: height } if w > 0 => w * height,
+            Shape::Rect { .. } => 0,
+            Shape::Tri { a, b, c } => {
+                let s = (a + b + c) / 2;
+                math::sqrt(s * (s - a) * (s - b) * (s - c))
+            }
+            Shape::Empty => 0,
+        }
+    }
+    pub fn kind(self) -> string {
+        match self {
+            Shape::Circle { .. } | Shape::Tri { .. } => "round-ish",
+            Shape::Rect { .. } => "boxy",
+            Shape::Empty => "none",
+        }
+    }
+}
+
+enum Token {
+    Num { v: float },
+    Op { c: string },
+    End,
+}
+
+fn classify(n) {
+    match n {
+        0 => "zero",
+        1 | 2 | 3 => "small",
+        4..=99 => "medium",
+        x if type(x) == "number" && x < 0 => f"negative {x}",
+        "s" => "string",
+        nil => "nil",
+        _ => "large",
+    }
+}
+
+fn pair_kind(a, b) {
+    match (a, b) {
+        (0, 0) => 0,
+        (0, _) | (_, 0) => 1,
+        (x, y) if x == y => 2,
+        _ => 3,
+    }
+}
+
+// ---- `?`, tuples and spreads ----------------------------------------------------------
+
+fn lookup(t, k) { if t[k] == nil { (nil, f"missing {k}") } else { t[k] } }
+
+fn sum3(t) {
+    let a = lookup(t, "a")?;
+    let b = lookup(t, "b")?;
+    let c = lookup(t, "c")?;
+    a + b + c
+}
+
+fn divmod(a: int, b: int) -> (int, int) { (a \ b, a % b) }
+fn count(...rest) { select("#", ...rest) }
+fn first_of(...rest) { rest[1] }
+fn spread_all(t) { count(...table::unpack(t)) }
+
+// ---- templates and concatenation ------------------------------------------------------
+
+fn render(i, v) {
+    let name = "item";
+    f"{name}#{i:>4}|{v:.2}|{i:04x}|{name:<6}|{"q":?}" ~ "/" ~ i ~ "/" ~ 2 ** 3
+}
+
+// ---- hoisting: block, if, match and loop expressions as values ------------------------
+
+fn note(log, v) { log[#log + 1] = v; v }
+
+fn hoisted(i) {
+    let log = [];
+    let a = note(log, 1) + { let t = note(log, 2); t * 10 } + note(log, 3);
+    let b = if i % 2 == 0 { note(log, 4) } else { note(log, 5) } * 2;
+    let c = match i % 3 { 0 => "a", 1 => "b", _ => "c" } ~ note(log, "x");
+    let mut j = 0;
+    let d = loop { j += 1; if j > 3 { break j * 2; } };
+    let e = i > 2 && { let z = i * 2; z > 5 } || false;
+    a + b + #c + d + #log + if e { 1 } else { 0 }
+}
+
+// ---- loops ----------------------------------------------------------------------------
+
+fn loops(n) {
+    let mut acc = 0;
+    for i in 1..=n { acc += i; }
+    for i in 0..n { acc += i; }
+    for i in (1..=n).rev() { acc -= i; }
+    for i in (0..n).rev() { acc -= i; }
+    for i in (0..=n).step_by(3) { acc += i; }
+    for (k, v) in ipairs([10, 20, 30]) { acc += k * v; }
+    for (k, v) in pairs(#{ a: 1 }) { acc += v; }
+    let mut w = 0;
+    while w < n { w += 1; if w % 2 == 0 { continue; } acc += 1; }
+    'outer: for a in 1..=4 {
+        for b in 1..=4 {
+            if b == 3 { continue 'outer; }
+            if a == 4 { break 'outer; }
+            acc += a * b;
+        }
+    }
+    acc
+}
+
+// ---- closures, scoped cleanup and forward references ----------------------------------
+
+struct Guard { log }
+impl Guard {
+    fn __close(self, err) { self.log[#self.log + 1] = "closed"; }
+}
+
+fn cleanup(i) {
+    let log = [];
+    {
+        let scope g = Guard { log };
+        scope log[#log + 1] = "action";
+        scope {
+            log[#log + 1] = "block";
+        }
+        if i % 2 == 0 {
+            let make = |k| |x| x * k + i;
+            let f = make(3);
+            log[#log + 1] = f(2);
+        }
+    }
+    #log
+}
+
+fn is_even(n) { if n == 0 { true } else { is_odd(n - 1) } }
+fn is_odd(n) { if n == 0 { false } else { is_even(n - 1) } }
+
+// ---- maps, arrays, compound assignment, operators -------------------------------------
+
+fn tables(i) {
+    let mut m = #{ name: "orbit", "two words": true, [i]: 5, 7 };
+    let mut a = [1, 2, 3, ...table::unpack([4, 5])];
+    m.name = m.name ~ "!";
+    a[1] += 10;
+    a[2] -= 1;
+    a[3] *= 2;
+    a[4] /= 2;
+    a[5] %= 3;
+    a[5] |= 8;
+    let bits = (i & 7) | (i ^ 3) | (i << 1) | (i >> 1) | ~i;
+    #m.name + a[1] + a[2] + a[3] + a[4] + a[5] + bits % 7 + #a
+}
+
+// ---- main -----------------------------------------------------------------------------
+
+fn round(i) {
+    calls += 1;
+    let p = Vec2::new(i, 2) + Vec2 { x: 1, y: 1 } - Vec2::new(0.5, 0.5);
+    p.scale(2);
+    let c = Counter::new();
+    c(i);
+    c.bump(1);
+    let shapes = [Shape::Circle { r: i % 5 }, Shape::Rect { w: i % 3, h: 2 },
+                  Shape::Tri { a: 3, b: 4, c: 5 }, Shape::Empty];
+    let mut area = 0;
+    for (_, s) in ipairs(shapes) { area += s.area(); if s.kind() == "boxy" { area += 1; } }
+    let (q, r) = divmod(i + 7, 3);
+    let missing = sum3(#{ a: 1, b: 2 }) == nil;
+    let s = sum3(#{ a: i, b: 1, c: 2 });
+    let text = render(i, i / 7);
+    p.dot(p) + c.double + area + q + r + s + #text + hoisted(i) + loops(i % 10 + 1)
+        + cleanup(i) + tables(i) + #classify(i % 120 - 10) + pair_kind(i % 3, i % 2)
+        + count(...table::unpack([1, 2, i])) + first_of(i, 2) + spread_all([1, 2, 3])
+        + if missing { 1 } else { 0 } + if is_even(i % 20) { 1 } else { 0 }
+        + if p < Vec2::new(100, 100) { 1 } else { 0 } + #p
+}
+
+let n = if arg != nil && arg[1] != nil { math::tointeger(arg[1]) } else { ROUNDS };
+let mut total = 0;
+for i in 1..=n { total += round(i); }
+print(f"desugar: {n} rounds, checksum {total:.6}, calls {calls}");
