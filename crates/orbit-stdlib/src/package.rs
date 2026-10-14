@@ -108,6 +108,11 @@ const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("package.searchpath", searchpath),
 ];
 
+/// Where `require` looks for OrbitScript modules, when the host installed
+/// the OrbitScript compiler (`ORBIT_PATH` overrides it, with `;;` for this).
+const DEFAULT_ORBPATH: &str = "/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;\
+./?.orb;./?/init.orb";
+
 const SEARCHERS: &[(&str, NativeFn)] = &[
     ("package.searchers[1]", search_preload),
     ("package.searchers[2]", search_lua),
@@ -180,6 +185,15 @@ pub(crate) fn open(vm: &mut Vm, ignore_env: bool, lock: bool) {
     for (i, &(name, f)) in SEARCHERS.iter().enumerate() {
         let fv = vm.register_native(name, f);
         vm.table_set(searchers, Value::Int(i as i64 + 1), fv);
+    }
+    // OrbitScript modules come last, so Lua's four searchers keep their
+    // places and a Lua program sees `package` as it would in `lua`.
+    if vm.rt.compile_orbitscript.is_some() {
+        let orbpath = env_path("ORBIT_PATH", "ORBIT_PATH", DEFAULT_ORBPATH, ignore_env);
+        let v = vm.new_str(orbpath.as_bytes());
+        set(vm, "orbpath", v);
+        let fv = vm.register_native("package.searchers[5]", search_orb);
+        vm.table_set(searchers, Value::Int(SEARCHERS.len() as i64 + 1), fv);
     }
     let k = vm.new_str(PACKAGE);
     let reg = vm.rt.registry;
@@ -360,8 +374,19 @@ fn load_error(ctx: &mut NativeCtx<'_>, name: &[u8], file: &[u8], why: &str) -> L
 }
 
 fn search_lua(ctx: &mut NativeCtx<'_>) -> R {
+    search_source(ctx, "path")
+}
+
+/// OrbitScript modules: `package.orbpath`, searched and loaded as
+/// `package.path` is (the loader picks the compiler by the `.orb` name).
+fn search_orb(ctx: &mut NativeCtx<'_>) -> R {
+    search_source(ctx, "orbpath")
+}
+
+/// Search a path of source files and load the module found.
+fn search_source(ctx: &mut NativeCtx<'_>, field: &str) -> R {
     let name = str_arg(ctx, 0)?;
-    let path = path_field(ctx, "path")?;
+    let path = path_field(ctx, field)?;
     let file = match search_path(&name, &path, b".", DIRSEP.as_bytes()) {
         Ok(f) => f,
         Err(msg) => return ret_msg(ctx, msg),

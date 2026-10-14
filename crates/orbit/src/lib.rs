@@ -19,7 +19,7 @@ pub use orbit_stdlib::Options;
 #[cfg(feature = "dump")]
 pub use orbit_stdlib::checks;
 #[cfg(feature = "load")]
-pub use orbit_stdlib::{chunk_id, read_chunk_file};
+pub use orbit_stdlib::{chunk_id, is_orbitscript_file, read_chunk_file};
 #[cfg(feature = "debug")]
 pub use orbit_vm::Interrupt;
 pub use orbit_vm::{
@@ -62,7 +62,25 @@ pub fn compile(
 ) -> Result<UnlinkedChunk, Error> {
     let hir = orbit_lua_syntax::to_hir(chunk_name, src, options)
         .map_err(|d| Error::Syntax(d.to_lua_message(chunk_name)))?;
-    let chunk = orbit_compiler::compile(&hir).map_err(|e| Error::Syntax(e.to_string()))?;
+    compile_hir(&hir)
+}
+
+/// Parse, lower, analyse and compile OrbitScript source into plain data, as
+/// [`compile`] does for Lua.
+#[cfg(feature = "orbitscript")]
+pub fn compile_orbitscript(
+    src: &[u8],
+    chunk_name: &str,
+    options: &orbit_orb_syntax::ParseOptions,
+) -> Result<UnlinkedChunk, Error> {
+    let hir = orbit_orb_syntax::to_hir(chunk_name, src, options)
+        .map_err(|d| Error::Syntax(d.to_message(chunk_name)))?;
+    compile_hir(&hir)
+}
+
+/// Compile analysed HIR from either front end.
+fn compile_hir(hir: &orbit_hir::Chunk) -> Result<UnlinkedChunk, Error> {
+    let chunk = orbit_compiler::compile(hir).map_err(|e| Error::Syntax(e.to_string()))?;
     // Debug builds check the compiler against the binary-chunk verifier, so
     // every test that compiles Lua keeps the two in agreement.
     #[cfg(debug_assertions)]
@@ -79,6 +97,13 @@ pub fn compile(
 /// options ([`orbit_vm::CompileFn`]).
 fn compile_lua(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
     compile(src, chunk_name, &ParseOptions::default()).map_err(|e| e.to_string())
+}
+
+/// The compiler `.orb` files use ([`orbit_vm::Runtime::compile_orbitscript`]).
+#[cfg(feature = "orbitscript")]
+fn compile_orb(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
+    compile_orbitscript(src, chunk_name, &orbit_orb_syntax::ParseOptions::default())
+        .map_err(|e| e.to_string())
 }
 
 /// A Lua state with the first-light libraries open.
@@ -102,6 +127,10 @@ impl Lua {
     pub fn with_options(options: Options) -> Self {
         let mut vm = Vm::new();
         vm.rt.compile = Some(compile_lua);
+        #[cfg(feature = "orbitscript")]
+        {
+            vm.rt.compile_orbitscript = Some(compile_orb);
+        }
         orbit_stdlib::open_libs_with(&mut vm, options);
         #[cfg(feature = "c-modules")]
         orbit_capi::install(&mut vm);
@@ -136,6 +165,14 @@ impl Lua {
         options: &ParseOptions,
     ) -> Result<Value, Error> {
         let chunk = compile(src, chunk_name, options)?;
+        Ok(self.vm.load(&chunk))
+    }
+
+    /// [`Lua::load`] for OrbitScript source.
+    #[cfg(feature = "orbitscript")]
+    pub fn load_orbitscript(&mut self, src: &[u8], chunk_name: &str) -> Result<Value, Error> {
+        let chunk =
+            compile_orbitscript(src, chunk_name, &orbit_orb_syntax::ParseOptions::default())?;
         Ok(self.vm.load(&chunk))
     }
 
