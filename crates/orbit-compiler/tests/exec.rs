@@ -520,6 +520,8 @@ impl Interp {
                         r[dst as usize + i] = x;
                     }
                 }
+                // Only OrbitScript's `a..b` emits it; this interpreter runs Lua.
+                Op::ForPrepExclusive { .. } => return Err("exclusive for loop".into()),
                 Op::ForPrep { base, exit } => {
                     let b = base as usize;
                     match (&r[b], &r[b + 1], &r[b + 2]) {

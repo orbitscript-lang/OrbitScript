@@ -777,6 +777,7 @@ impl Lowerer<'_> {
                     start,
                     limit,
                     step,
+                    exclusive: false,
                     body: body?,
                 }
             }

@@ -327,11 +327,14 @@ pub enum StmtKind {
         body: BlockId,
         until: ExprId,
     },
+    /// `exclusive`: the loop stops before reaching `limit` (OrbitScript's `a..b`) instead of
+    /// running when the control value equals it (Lua's `for`, OrbitScript's `a..=b`).
     NumericFor {
         var: LocalId,
         start: ExprId,
         limit: ExprId,
         step: Option<ExprId>,
+        exclusive: bool,
         body: BlockId,
     },
     /// `hidden` holds the iterator function, state, control value and closing value, in that

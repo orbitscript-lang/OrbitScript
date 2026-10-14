@@ -80,6 +80,7 @@ pub fn disassemble(chunk: &UnlinkedChunk) -> String {
                 | Op::JumpGtInt { off, .. }
                 | Op::JumpGeInt { off, .. }
                 | Op::ForPrep { exit: off, .. }
+                | Op::ForPrepExclusive { exit: off, .. }
                 | Op::ForLoop { back: off, .. }
                 | Op::GenericLoop { back: off, .. } => Some(pc as i64 + 1 + off as i64),
                 _ => None,

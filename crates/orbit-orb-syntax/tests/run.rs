@@ -470,7 +470,6 @@ fn compile_errors() {
         ("pub fn f() {} return 1;", "test:1:"),
         ("print = 1;", "test:1:"),
         ("break;", "test:1:"),
-        ("for i in 0..3 {}", "test:1:"),
         ("struct P { x } let p = P { y: 1 };", "test:1:"),
         (
             "enum E { A } let e = match 1 { E::B => 1, _ => 2 };",
@@ -575,5 +574,55 @@ print(d);
 2
 origin\taxis\tdiagonal\tplane
 one and two",
+    );
+}
+
+#[test]
+fn exclusive_ranges() {
+    check(
+        r##"
+fn collect(f) { let mut t = []; f(|v| { t[#t + 1] = v; }); f"[{table::concat(t, " ")}]" }
+print(collect(|push| { for i in 0..4 { push(i); } }));
+print(collect(|push| { for i in 3..3 { push(i); } }));
+print(collect(|push| { for i in (0..4).rev() { push(i); } }));
+print(collect(|push| { for i in (0..10).step_by(3) { push(i); } }));
+print(collect(|push| { for i in (0..9).step_by(3) { push(i); } }));
+print(collect(|push| { for i in (10..0).step_by(-4) { push(i); } }));
+print(collect(|push| { for i in (0..10).rev().step_by(4) { push(i); } }));
+print(collect(|push| { for x in 0..2.5 { push(x); } }));
+print(collect(|push| { for x in 0..3.0 { push(x); } }));
+print(collect(|push| { for x in 0.5..2.5 { push(x); } }));
+print(collect(|push| { for x in (0.0..1.0).step_by(0.25) { push(x); } }));
+print(collect(|push| { for x in (1.0..0.0).step_by(-0.5) { push(x); } }));
+let max = math::maxinteger;
+let min = math::mininteger;
+print(collect(|push| { for i in (max - 2)..max { push(i - max); } }));
+print(collect(|push| { for i in min..min { push(i); } }));
+print(collect(|push| { for i in ((min + 2)..min).step_by(-1) { push(i - min); } }));
+print(collect(|push| { for i in 0..1e300 { if i > 2 { break; } push(i); } }));
+print(collect(|push| { for i in 0..-1e300 { push(i); } }));
+print(collect(|push| { for i in 0..(0.0 / 0.0) { push(i); } }));
+print(...pcall(|| { for i in 0..10 { if i > 1 { break; } } for i in (0..1).step_by(0) {} }));
+"##,
+        r#"
+[0 1 2 3]
+[]
+[3 2 1 0]
+[0 3 6 9]
+[0 3 6]
+[10 6 2]
+[9 5 1]
+[0 1 2]
+[0 1 2]
+[0.5 1.5]
+[0.0 0.25 0.5 0.75]
+[1.0 0.5]
+[-2 -1]
+[]
+[2 1]
+[0 1 2]
+[]
+[]
+false	test:23: 'for' step is zero"#,
     );
 }

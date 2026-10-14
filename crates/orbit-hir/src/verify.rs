@@ -348,6 +348,7 @@ impl<'a> Checker<'a> {
                 limit,
                 step,
                 body,
+                ..
             } => {
                 self.expr(*start)?;
                 self.expr(*limit)?;
