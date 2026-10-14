@@ -129,6 +129,8 @@ Single quotes are not strings: they are taken by loop labels, as in Rust. There 
 
 Keywords: `fn let mut const pub use struct enum impl for in while loop if else match break continue return self Self nil true false as`, plus `scope` as a contextual keyword (so `scope` stays usable as a variable name). `global` and `extern` are reserved (see [Names and globals](#names-and-globals)).
 
+Keywords are still names where nothing else could be meant: after `.` and `::` (`string::match(s, p)`, `t.loop`), as field names in struct definitions, struct literals, struct patterns and `#{ key: value }`, as variant names, and as the names of functions and constants in `impl`. Anywhere a keyword-named local would be bound or read (`let`, parameters, shorthand fields such as `P { match }`, the last segment of `use`), it is written as a raw name, `r#match`, as in Rust. `r#name` is always a name, so it can also be used just to be explicit, including `r#scope`; `r#_`, `r#self` and `r#Self` are errors. (Tym, 2026-10-14.)
+
 ## Bindings and mutability
 
 ```lua
@@ -716,3 +718,4 @@ Same safety and toolchain rules as the Lua front end: safe Rust, no new dependen
 | Q19 | New ops | Add one when it measurably improves performance |
 | Q20 | Crate name | `orbit-orb-syntax` (matches the file extension) |
 | Q21 | Scoped bindings | `let scope f = ...` and `scope stmt;` for actions (not attributes; attributes get a language-wide design later) |
+| Q22 | Keywords as names (2026-10-14) | Allowed where unambiguous (after `.` and `::`, field and member names); `r#name` elsewhere, or to be explicit |

@@ -562,6 +562,31 @@ scope {
 }
 
 #[test]
+fn keywords_as_names() {
+    check(
+        r##"
+let (k, v) = string::match("key=val", "(%w+)=(%w+)");
+print(k, v, "abc".match("b"));
+let r#match = 7;
+let r#scope = 1;
+print(r#match + r#scope, f"{r#match}");
+let t = #{ loop: 1, if: 2, true: 3 };
+print(t.loop, t["if"], t["true"]);
+struct P { loop, pub: bool, pub r#fn }
+impl P {
+    pub fn match(self, x) { self.loop ~ x }
+}
+let p = P { loop: "m", pub: true, fn: 1 };
+print(p.match("!"), p.pub, p.r#fn);
+match p { P { loop: l, .. } => print(l) }
+use string::{match as m};
+print(m("ab", "b"));
+"##,
+        "key\tval\tb\n8\t7\n1\t2\t3\nm!\ttrue\t1\nm\nb",
+    );
+}
+
+#[test]
 fn compile_errors() {
     let cases = [
         (
