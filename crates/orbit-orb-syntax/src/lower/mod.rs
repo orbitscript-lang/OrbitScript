@@ -308,6 +308,9 @@ impl Lowerer {
         self.chunk.functions[id.index()] = ctx.f;
     }
 
+    // The small node builders and helpers below are kept out of line: lowering calls them
+    // from hundreds of places, and inlined they cost binary size for no measurable compile
+    // speed (see the design doc, "Binary size").
     #[inline(never)]
     fn error(&self, span: Span, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(span, self.chunk.source.line_of(span.start), message)

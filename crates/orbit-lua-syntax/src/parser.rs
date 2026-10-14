@@ -115,6 +115,9 @@ fn span_from(start: u32, end: u32) -> Span {
 impl Parser<'_> {
     // ---- tokens -------------------------------------------------------------------------------
 
+    // Token helpers are kept out of line: they are called from hundreds of places, and
+    // inlined they cost binary size for no measurable parse speed
+    // (docs/design/orbitscript-front-end.md, "Binary size").
     #[inline(never)]
     fn advance(&mut self) -> PResult<()> {
         self.prev_end = self.tok.span.end;
