@@ -93,8 +93,13 @@ fn cpath_allows(cpath: &[u8], file: &[u8]) -> bool {
 
 /// The defaults the reference `lua5.5` build uses, so scripts see the same
 /// strings.
-const DEFAULT_PATH: &str = "/usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;\
-/usr/local/lib/lua/5.5/?.lua;/usr/local/lib/lua/5.5/?/init.lua;./?.lua;./?/init.lua";
+macro_rules! default_lua_path {
+    () => {
+        "/usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;\
+/usr/local/lib/lua/5.5/?.lua;/usr/local/lib/lua/5.5/?/init.lua;./?.lua;./?/init.lua"
+    };
+}
+const DEFAULT_PATH: &str = default_lua_path!();
 const DEFAULT_CPATH: &str = "/usr/local/lib/lua/5.5/?.so;/usr/local/lib/lua/5.5/loadall.so;./?.so";
 
 const DIRSEP: &str = if cfg!(windows) { "\\" } else { "/" };
@@ -108,10 +113,13 @@ const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("package.searchpath", searchpath),
 ];
 
-/// Where `require` looks for OrbitScript modules, when the host installed
-/// the OrbitScript compiler (`ORBIT_PATH` overrides it, with `;;` for this).
-const DEFAULT_ORBPATH: &str = "/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;\
-./?.orb;./?/init.orb";
+/// `DEFAULT_PATH` with OrbitScript modules too, when the host installed the
+/// OrbitScript compiler: the Lua searcher loads whatever file `package.path`
+/// finds, picking the compiler by the `.orb` name.
+const DEFAULT_PATH_WITH_ORB: &str = concat!(
+    default_lua_path!(),
+    ";/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb"
+);
 
 const SEARCHERS: &[(&str, NativeFn)] = &[
     ("package.searchers[1]", search_preload),
@@ -164,7 +172,12 @@ pub(crate) fn open(vm: &mut Vm, ignore_env: bool, lock: bool) {
         let k = vm.new_str(k.as_bytes());
         vm.table_set(pkg, k, v);
     };
-    let path = env_path("LUA_PATH_5_5", "LUA_PATH", DEFAULT_PATH, ignore_env);
+    let default_path = if vm.rt.compile_orbitscript.is_some() {
+        DEFAULT_PATH_WITH_ORB
+    } else {
+        DEFAULT_PATH
+    };
+    let path = env_path("LUA_PATH_5_5", "LUA_PATH", default_path, ignore_env);
     let v = vm.new_str(path.as_bytes());
     set(vm, "path", v);
     let cpath = env_path("LUA_CPATH_5_5", "LUA_CPATH", DEFAULT_CPATH, ignore_env);
@@ -185,12 +198,6 @@ pub(crate) fn open(vm: &mut Vm, ignore_env: bool, lock: bool) {
     for (i, &(name, f)) in SEARCHERS.iter().enumerate() {
         let fv = vm.register_native(name, f);
         vm.table_set(searchers, Value::Int(i as i64 + 1), fv);
-    }
-    // The Lua searcher also looks for OrbitScript modules (`search_lua`).
-    if vm.rt.compile_orbitscript.is_some() {
-        let orbpath = env_path("ORBIT_PATH", "ORBIT_PATH", DEFAULT_ORBPATH, ignore_env);
-        let v = vm.new_str(orbpath.as_bytes());
-        set(vm, "orbpath", v);
     }
     let k = vm.new_str(PACKAGE);
     let reg = vm.rt.registry;
@@ -370,21 +377,15 @@ fn load_error(ctx: &mut NativeCtx<'_>, name: &[u8], file: &[u8], why: &str) -> L
     ctx.error(msg)
 }
 
-/// The Lua searcher: `package.path`, then (with OrbitScript installed)
-/// `package.orbpath`, loaded the same way (the loader picks the compiler by
-/// the `.orb` name). OrbitScript shares this searcher rather than adding a
-/// fifth, so `package.searchers` is `lua`'s four. When neither path has the
-/// module, the message lists only `package.path`'s files, exactly as `lua`'s
-/// does; `package.searchpath(name, package.orbpath)` lists the `.orb` ones.
+/// The Lua searcher. With OrbitScript installed it also finds `.orb`
+/// modules: they are on `package.path` (`DEFAULT_PATH_WITH_ORB`), and the
+/// loader picks the compiler by the file name.
 fn search_lua(ctx: &mut NativeCtx<'_>) -> R {
     let name = str_arg(ctx, 0)?;
     let path = path_field(ctx, "path")?;
     let file = match search_path(&name, &path, b".", DIRSEP.as_bytes()) {
         Ok(f) => f,
-        Err(msg) => match search_orbpath(ctx, &name) {
-            Some(f) => f,
-            None => return ret_msg(ctx, msg),
-        },
+        Err(msg) => return ret_msg(ctx, msg),
     };
     let globals = Value::Table(ctx.vm.rt.globals);
     let loaded = read_chunk_file(Some(&file))
@@ -398,17 +399,6 @@ fn search_lua(ctx: &mut NativeCtx<'_>) -> R {
         }
         Err(why) => Err(load_error(ctx, &name, &file, &why)),
     }
-}
-
-/// The `.orb` file for module `name` on `package.orbpath`, when OrbitScript
-/// is installed and `orbpath` is a string.
-fn search_orbpath(ctx: &mut NativeCtx<'_>, name: &[u8]) -> Option<Vec<u8>> {
-    ctx.vm.rt.compile_orbitscript?;
-    let Value::Str(s) = package_field(ctx, b"orbpath") else {
-        return None;
-    };
-    let orbpath = ctx.bytes(s).to_vec();
-    search_path(name, &orbpath, b".", DIRSEP.as_bytes()).ok()
 }
 
 /// The C searchers: search `cpath` like `lua`, then load the library's

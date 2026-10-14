@@ -56,7 +56,7 @@ fn require_finds_orb_modules() {
     let out = exec_str(
         &mut lua,
         &format!(
-            "package.orbpath = '{d}/?.orb' package.path = '{d}/?.lua'
+            "package.path = '{d}/?.lua;{d}/?.orb'
              local app = require('app')
              return app.run(), #package.searchers, package.loaded['geo.vec'].Vec2.__name"
         ),
@@ -65,20 +65,21 @@ fn require_finds_orb_modules() {
 }
 
 #[test]
-fn missing_module_error_is_luas() {
+fn orb_modules_are_on_package_path() {
     let mut lua = Lua::new();
     let out = exec_str(
         &mut lua,
-        "package.path = './?.lua' package.cpath = './?.so' package.orbpath = './?.orb'
+        "local default = package.path:find('./?.orb', 1, true) ~= nil
+         package.path = './?.lua;./?.orb' package.cpath = './?.so'
          local ok, msg = pcall(require, 'nope')
-         return msg, select(2, package.searchpath('nope', package.orbpath))",
+         return default, msg",
     );
     assert_eq!(
         out,
         [
+            "true",
             "module 'nope' not found:\n\tno field package.preload['nope']\n\t\
-             no file './nope.lua'\n\tno file './nope.so'",
-            "no file './nope.orb'"
+             no file './nope.lua'\n\tno file './nope.orb'\n\tno file './nope.so'"
         ]
     );
 }
