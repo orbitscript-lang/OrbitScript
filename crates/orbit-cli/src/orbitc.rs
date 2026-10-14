@@ -11,6 +11,8 @@
 //! information), `-v` (version), `--` and `-` (standard input). Our own:
 //! `--ast` and `--hir` print the syntax tree or the HIR instead of
 //! compiling. Unlike `luac`, writing a chunk takes exactly one input file.
+//! With the `orbitscript` feature, files named `*.orb` are OrbitScript
+//! (`--hir`, listing and writing; `--ast` is Lua-only for now).
 //! An error prints `<program>: <message>` to stderr with exit status 1.
 
 use std::io::Write;
@@ -147,6 +149,10 @@ fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
     let name = orbit::chunk_id(source);
     let options = ParseOptions::default();
     let mut stdout = std::io::stdout();
+    #[cfg(feature = "orbitscript")]
+    if orbit::is_orbitscript_file(source) && bytes.first() != format::SIGNATURE.first() {
+        return run_orbitscript(cli, bytes, source, &name);
+    }
     match cli.stage {
         Stage::Ast => {
             let ast = orbit_lua_syntax::parse_with(&name, bytes, &options)
@@ -163,12 +169,18 @@ fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
         Stage::Bytecode => {}
     }
     let chunk = load(bytes, source, &name, &options)?;
+    output(cli, &chunk)
+}
+
+/// List and write a compiled chunk, as the options ask.
+fn output(cli: &Cli, chunk: &UnlinkedChunk) -> Result<(), String> {
+    let mut stdout = std::io::stdout();
     if cli.list {
-        let _ = stdout.write_all(orbit_compiler::disassemble(&chunk).as_bytes());
+        let _ = stdout.write_all(orbit_compiler::disassemble(chunk).as_bytes());
     }
     if !cli.parse_only {
         let out = cli.output.as_deref().unwrap_or(DEFAULT_OUTPUT);
-        let encoded = format::encode(&chunk, cli.strip);
+        let encoded = format::encode(chunk, cli.strip);
         let written = if out == "-" {
             stdout.write_all(&encoded)
         } else {
@@ -177,6 +189,29 @@ fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
         written.map_err(|e| format!("cannot write {out}: {e}"))?;
     }
     Ok(())
+}
+
+/// [`run`] for an OrbitScript file: the HIR, or a compiled chunk.
+#[cfg(feature = "orbitscript")]
+fn run_orbitscript(cli: &Cli, bytes: &[u8], source: &[u8], name: &str) -> Result<(), String> {
+    let options = orbit_orb_syntax::ParseOptions::default();
+    match cli.stage {
+        Stage::Ast => Err(format!(
+            "{name}: --ast is not available for OrbitScript yet"
+        )),
+        Stage::Hir => {
+            let hir =
+                orbit_orb_syntax::to_hir(name, bytes, &options).map_err(|d| d.to_message(name))?;
+            let _ = std::io::stdout().write_all(orbit_hir::print(&hir).as_bytes());
+            Ok(())
+        }
+        Stage::Bytecode => {
+            let mut chunk =
+                orbit::compile_orbitscript(bytes, name, &options).map_err(|e| e.to_string())?;
+            chunk.source = source.into();
+            output(cli, &chunk)
+        }
+    }
 }
 
 /// Compile source, or decode and check a binary chunk (for listing it, or

@@ -52,7 +52,7 @@ pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, S
 // Runtime::compile: Option<CompileFn>
 ```
 
-`orbit::Lua::new()` installs the Lua front end. **OrbitScript:** a second front end becomes a second hook keyed by language; `require`'s searchers pick it by file extension (`.orb`), and `load` keeps Lua as its default. That change is additive and waits for the OrbitScript front end.
+`orbit::Lua::new()` installs the Lua front end. **OrbitScript** has a second hook, `Runtime::compile_orbitscript`, which `orbit::Lua` installs with its `orbitscript` feature (on in the CLI, off for embedders). A source chunk named `@path.orb` (from `loadfile`, `dofile`, `require` or the CLI's script) uses it; everything else, including `load` of a string, `-e`, standard input and interactive mode, stays Lua. With the hook installed, `package` also gets `orbpath` (default `/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb`, overridden by `ORBIT_PATH` with `;;` for the default, ignored under `-E`) and a fifth searcher for it. It comes after Lua's four, so they keep their places, and when it finds no file it says nothing (it returns nil), so a missing module's error is exactly `lua`'s (`attrib.lua` checks it). `package.searchpath(name, package.orbpath)` shows which `.orb` files were tried.
 
 ### Environments and captures
 

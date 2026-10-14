@@ -74,6 +74,7 @@ dependencies = [
  "orbit-core",
  "orbit-hir",
  "orbit-lua-syntax",
+ "orbit-orb-syntax",
  "orbit-stdlib",
  "orbit-vm",
 ]
@@ -99,6 +100,7 @@ dependencies = [
  "orbit-compiler",
  "orbit-hir",
  "orbit-lua-syntax",
+ "orbit-orb-syntax",
  "signal-hook",
 ]
 
