@@ -217,6 +217,7 @@ impl Printer<'_> {
                 start,
                 limit,
                 step,
+                exclusive,
                 body,
             } => {
                 let mut text = format!(
@@ -227,6 +228,9 @@ impl Printer<'_> {
                 );
                 if let Some(step) = step {
                     let _ = write!(text, ", {}", self.expr(*step));
+                }
+                if *exclusive {
+                    text.push_str(" exclusive");
                 }
                 text.push_str(" do");
                 self.line(depth, &text);

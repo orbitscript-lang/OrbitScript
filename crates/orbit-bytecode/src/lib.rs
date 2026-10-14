@@ -300,6 +300,10 @@ pub enum Op {
     /// loop state in a VM-defined format (integer loops keep an iteration
     /// count; float loops keep the limit).
     ForPrep { base: Reg, exit: Offset },
+    /// [`Op::ForPrep`] for a loop that stops before the limit (OrbitScript's
+    /// `a..b`): the control value never equals it. It sets up the same loop
+    /// state, so [`Op::ForLoop`] runs it.
+    ForPrepExclusive { base: Reg, exit: Offset },
     /// Numeric `for` step: advances the loop state in `R[base..base+3]`; if
     /// another iteration runs, sets `R[base+3]` and jumps by `back`.
     ForLoop { base: Reg, back: Offset },

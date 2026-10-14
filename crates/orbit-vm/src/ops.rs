@@ -404,18 +404,53 @@ pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>)
     }
 }
 
-/// Integer value of a `for` operand, if it is an integer or integral
-/// float (used for the limit).
-pub(crate) fn for_limit(init: i64, limit: Value, step: i64) -> Result<Option<i64>, &'static str> {
+/// The last integer an integer `for` loop may reach: the limit itself, or
+/// for an `exclusive` loop the integer just short of it, with float limits
+/// rounded towards the start and clipped to the integer range.
+pub(crate) fn for_limit(
+    init: i64,
+    limit: Value,
+    step: i64,
+    exclusive: bool,
+) -> Result<Option<i64>, &'static str> {
     // Ok(None): the loop runs zero times.
     let lim = match limit {
+        Value::Int(i) if exclusive => {
+            let last = if step < 0 {
+                i.checked_add(1)
+            } else {
+                i.checked_sub(1)
+            };
+            match last {
+                Some(l) => l,
+                None => return Ok(None),
+            }
+        }
         Value::Int(i) => i,
         Value::Float(f) => {
             if f.is_nan() {
                 return Ok(None);
             }
-            let r = if step < 0 { f.ceil() } else { f.floor() };
+            // Inclusive: the integers up to `f`, rounded towards the start.
+            // Exclusive: those strictly short of `f`, one step further in.
+            let r = match (step < 0, exclusive) {
+                (false, false) => f.floor(),
+                (true, false) => f.ceil(),
+                (false, true) => f.ceil(),
+                (true, true) => f.floor(),
+            };
             match float_to_int(r) {
+                Some(i) if exclusive => {
+                    let last = if step < 0 {
+                        i.checked_add(1)
+                    } else {
+                        i.checked_sub(1)
+                    };
+                    match last {
+                        Some(l) => l,
+                        None => return Ok(None),
+                    }
+                }
                 Some(i) => i,
                 None if f > 0.0 => {
                     if step < 0 {

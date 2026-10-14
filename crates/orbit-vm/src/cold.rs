@@ -592,10 +592,10 @@ impl Vm {
         Ok(())
     }
 
-    /// `ForPrep` on the loop state at stack index `at`. Returns whether the
-    /// loop runs at all.
+    /// `ForPrep` (or with `exclusive`, `ForPrepExclusive`) on the loop state
+    /// at stack index `at`. Returns whether the loop runs at all.
     #[inline(never)]
-    pub(crate) fn op_for_prep(&mut self, at: usize) -> Result<bool, Exc> {
+    pub(crate) fn op_for_prep(&mut self, at: usize, exclusive: bool) -> Result<bool, Exc> {
         let r = &mut self.rt.stack.regs[at..at + 4];
         // Numeric strings convert, always to floats, as in the reference.
         for v in &mut r[..3] {
@@ -610,7 +610,7 @@ impl Vm {
             if s == 0 {
                 return Err(Exc::Rt("'for' step is zero".into(), None));
             }
-            return match ops::for_limit(i, limit, s) {
+            return match ops::for_limit(i, limit, s, exclusive) {
                 Err(_) => Err(for_error(&self.heap, &self.rt.metas, "limit", limit)),
                 Ok(None) => Ok(false),
                 Ok(Some(lim)) => {
@@ -638,6 +638,13 @@ impl Vm {
         if st == 0.0 {
             return Err(Exc::Rt("'for' step is zero".into(), None));
         }
+        // A float loop that stops short of the limit is the inclusive loop to
+        // the nearest float inside it: no float lies between the two.
+        let lim = match (exclusive, st > 0.0) {
+            (false, _) => lim,
+            (true, true) => lim.next_down(),
+            (true, false) => lim.next_up(),
+        };
         let runs = if st > 0.0 { start <= lim } else { lim <= start };
         if runs {
             r[0] = Value::Float(start);

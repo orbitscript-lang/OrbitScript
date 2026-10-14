@@ -202,7 +202,7 @@ impl Function<'_> {
                     s.kill(dst, count as usize);
                 }
             }
-            Op::ForPrep { base, exit } => {
+            Op::ForPrep { base, exit } | Op::ForPrepExclusive { base, exit } => {
                 s.kill(base, 4);
                 // The loop state is set up only when the loop runs.
                 jump = Some((self.target(pc, exit)?, s));

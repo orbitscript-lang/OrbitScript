@@ -391,6 +391,7 @@ op_table! {
     83 KMul { dst, k, b };
     84 KDiv { dst, k, b };
     85 CellClear { from, count };
+    86 ForPrepExclusive { base, exit };
 }
 
 /// One instruction's encoding (for tests and fuzzing).

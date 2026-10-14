@@ -2117,11 +2117,19 @@ impl Vm {
                                 jump!(exit);
                             }
                         } else {
-                            let runs = tri!(self.op_for_prep(base + b as usize));
+                            let runs = tri!(self.op_for_prep(base + b as usize, false));
                             w = window!();
                             if !runs {
                                 jump!(exit);
                             }
+                        }
+                    }
+                    Op::ForPrepExclusive { base: b, exit } => {
+                        // Rarer than `ForPrep` (OrbitScript only): no fast path.
+                        let runs = tri!(self.op_for_prep(base + b as usize, true));
+                        w = window!();
+                        if !runs {
+                            jump!(exit);
                         }
                     }
                     Op::ForLoop { base: b, back } => {

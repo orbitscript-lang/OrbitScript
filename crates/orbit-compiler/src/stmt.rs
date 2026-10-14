@@ -141,13 +141,7 @@ impl FuncState<'_> {
                 self.close_scope(outer);
                 Ok(())
             }
-            &StmtKind::NumericFor {
-                var,
-                start,
-                limit,
-                step,
-                body,
-            } => self.numeric_for(var, start, limit, step, body, stmt.at),
+            StmtKind::NumericFor { .. } => self.numeric_for(s),
             StmtKind::GenericFor {
                 vars,
                 iter,
@@ -528,15 +522,20 @@ impl FuncState<'_> {
         Ok(())
     }
 
-    fn numeric_for(
-        &mut self,
-        var: LocalId,
-        start: ExprId,
-        limit: ExprId,
-        step: Option<ExprId>,
-        body: BlockId,
-        do_at: u32,
-    ) -> Result<()> {
+    fn numeric_for(&mut self, s: StmtId) -> Result<()> {
+        let stmt = self.f.stmt(s);
+        let &StmtKind::NumericFor {
+            var,
+            start,
+            limit,
+            step,
+            exclusive,
+            body,
+        } = &stmt.kind
+        else {
+            unreachable!("a numeric for")
+        };
+        let do_at = stmt.at;
         // The loop instruction belongs to the `for` line, as in the
         // reference (line hooks report it on every iteration). The
         // preparation, which checks the operands, belongs to the `do` line.
@@ -559,7 +558,12 @@ impl FuncState<'_> {
         self.active = self.free;
         let exit = self.label();
         self.at_offset(do_at);
-        self.jump(Op::ForPrep { base, exit: 0 }, exit);
+        let prep = if exclusive {
+            Op::ForPrepExclusive { base, exit: 0 }
+        } else {
+            Op::ForPrep { base, exit: 0 }
+        };
+        self.jump(prep, exit);
         // The iteration count and the step, which is what the reference's
         // two hidden locals hold.
         self.push_loop_state(base + 1);
