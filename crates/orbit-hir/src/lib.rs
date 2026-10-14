@@ -121,6 +121,7 @@ impl Function {
         }
     }
 
+    #[inline(never)]
     pub fn add_local(&mut self, local: Local) -> LocalId {
         let id = LocalId::from_index(self.locals.len());
         self.locals.push(local);
@@ -139,6 +140,7 @@ impl Function {
     }
 
     /// [`Function::add_expr`] with an explicit [`Expr::at`].
+    #[inline(never)]
     pub fn add_expr_at(&mut self, kind: ExprKind, span: Span, at: u32) -> ExprId {
         let id = ExprId::from_index(self.exprs.len());
         self.exprs.push(Expr { kind, span, at });
@@ -150,18 +152,21 @@ impl Function {
     }
 
     /// [`Function::add_stmt`] with an explicit [`Stmt::at`].
+    #[inline(never)]
     pub fn add_stmt_at(&mut self, kind: StmtKind, span: Span, at: u32) -> StmtId {
         let id = StmtId::from_index(self.stmts.len());
         self.stmts.push(Stmt { kind, span, at });
         id
     }
 
+    #[inline(never)]
     pub fn add_block(&mut self, block: Block) -> BlockId {
         let id = BlockId::from_index(self.blocks.len());
         self.blocks.push(block);
         id
     }
 
+    #[inline(never)]
     pub fn add_label(&mut self, label: Label) -> LabelId {
         let id = LabelId::from_index(self.labels.len());
         self.labels.push(label);

@@ -115,6 +115,7 @@ fn span_from(start: u32, end: u32) -> Span {
 impl Parser<'_> {
     // ---- tokens -------------------------------------------------------------------------------
 
+    #[inline(never)]
     fn advance(&mut self) -> PResult<()> {
         self.prev_end = self.tok.span.end;
         self.tok = match self.ahead.take() {
@@ -124,6 +125,7 @@ impl Parser<'_> {
         Ok(())
     }
 
+    #[inline(never)]
     fn peek(&mut self) -> PResult<TokenKind> {
         if self.ahead.is_none() {
             self.ahead = Some(self.lx.next_token()?);
@@ -139,6 +141,7 @@ impl Parser<'_> {
         self.tok.kind == TokenKind::Keyword(k)
     }
 
+    #[inline(never)]
     fn test_punct(&mut self, p: Punct) -> PResult<bool> {
         if self.is_punct(p) {
             self.advance()?;
@@ -164,6 +167,7 @@ impl Parser<'_> {
     }
 
     /// `message near '<current token>'`.
+    #[inline(never)]
     fn error_here(&self, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
             self.tok.span,
@@ -174,15 +178,18 @@ impl Parser<'_> {
     }
 
     /// `<what> expected near '<current token>'`; `what` is already quoted where Lua quotes it.
+    #[inline(never)]
     fn error_expected(&self, what: &str) -> Diagnostic {
         self.error_here(format!("{what} expected"))
     }
 
     /// An error with no `near` part, reported at `span`'s line.
+    #[inline(never)]
     fn error_at(&self, span: Span, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(span, self.line_of(span.start), message, None)
     }
 
+    #[inline(never)]
     fn expect_punct(&mut self, p: Punct) -> PResult<()> {
         if !self.test_punct(p)? {
             return Err(self.error_expected(&format!("'{}'", p.as_str())));
@@ -190,6 +197,7 @@ impl Parser<'_> {
         Ok(())
     }
 
+    #[inline(never)]
     fn expect_kw(&mut self, k: Keyword) -> PResult<()> {
         if !self.is_kw(k) {
             return Err(self.error_expected(&format!("'{}'", k.as_str())));
@@ -198,6 +206,7 @@ impl Parser<'_> {
     }
 
     /// Expects the token closing a construct opened by `who` at `open_line`.
+    #[inline(never)]
     fn expect_match(&mut self, what: TokenKind, who: &str, open_line: u32) -> PResult<()> {
         if self.tok.kind == what {
             return self.advance();
@@ -216,6 +225,7 @@ impl Parser<'_> {
         }
     }
 
+    #[inline(never)]
     fn name(&mut self) -> PResult<Name> {
         match self.tok.kind {
             TokenKind::Name(sym) => {
@@ -230,6 +240,7 @@ impl Parser<'_> {
         }
     }
 
+    #[inline(never)]
     fn enter(&mut self) -> PResult<()> {
         self.depth += 1;
         if self.depth > self.max_depth {

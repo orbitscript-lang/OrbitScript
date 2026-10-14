@@ -91,6 +91,7 @@ type PResult<T> = Result<T, Diagnostic>;
 impl Parser<'_> {
     // ---- tokens -------------------------------------------------------------------------------
 
+    #[inline(never)]
     fn advance(&mut self) -> PResult<()> {
         self.prev_end = self.tok.span.end;
         self.tok = match self.ahead.take() {
@@ -100,6 +101,7 @@ impl Parser<'_> {
         Ok(())
     }
 
+    #[inline(never)]
     fn peek(&mut self) -> PResult<TokenKind> {
         if self.ahead.is_none() {
             self.ahead = Some(self.lx.next_token()?);
@@ -115,6 +117,7 @@ impl Parser<'_> {
         self.tok.kind == TokenKind::Keyword(k)
     }
 
+    #[inline(never)]
     fn eat(&mut self, p: Punct) -> PResult<bool> {
         if self.is(p) {
             self.advance()?;
@@ -124,6 +127,7 @@ impl Parser<'_> {
         }
     }
 
+    #[inline(never)]
     fn eat_kw(&mut self, k: Keyword) -> PResult<bool> {
         if self.is_kw(k) {
             self.advance()?;
@@ -133,6 +137,7 @@ impl Parser<'_> {
         }
     }
 
+    #[inline(never)]
     fn expect(&mut self, p: Punct) -> PResult<Span> {
         if self.is(p) {
             let span = self.tok.span;
@@ -145,6 +150,7 @@ impl Parser<'_> {
 
     /// Expects `>`, splitting a `>>` (as in `Map<K, Vec<V>>`): the second `>` stays as the
     /// current token.
+    #[inline(never)]
     fn expect_gt(&mut self) -> PResult<()> {
         if self.is(Punct::Shr) {
             self.tok.kind = TokenKind::Punct(Punct::Gt);
@@ -167,10 +173,12 @@ impl Parser<'_> {
         }
     }
 
+    #[inline(never)]
     fn error(&self, span: Span, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(span, self.lx.line_of(span.start), message)
     }
 
+    #[inline(never)]
     fn expected(&self, what: &str) -> Diagnostic {
         self.error(
             self.tok.span,
@@ -182,6 +190,7 @@ impl Parser<'_> {
         Span::new(start, self.prev_end.max(start))
     }
 
+    #[inline(never)]
     fn enter(&mut self) -> PResult<()> {
         self.depth += 1;
         if self.depth > self.max_depth {
@@ -194,6 +203,7 @@ impl Parser<'_> {
         self.depth -= 1;
     }
 
+    #[inline(never)]
     fn name(&mut self) -> PResult<Name> {
         match self.tok.kind {
             TokenKind::Ident(sym) => {
