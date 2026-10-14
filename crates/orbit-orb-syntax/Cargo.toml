@@ -11,5 +11,10 @@ publish = false
 [dependencies]
 orbit-hir = { path = "../orbit-hir" }
 
+[dev-dependencies]
+# The run tests compile lowered programs and execute them on the VM.
+orbit = { path = "../orbit" }
+orbit-compiler = { path = "../orbit-compiler" }
+
 [lints]
 workspace = true
