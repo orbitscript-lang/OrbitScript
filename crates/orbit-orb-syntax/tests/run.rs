@@ -733,3 +733,43 @@ print(...pcall(|| { for i in 0..10 { if i > 1 { break; } } for i in (0..1).step_
 false	test:23: 'for' step is zero"#,
     );
 }
+
+#[test]
+fn match_arm_assignments() {
+    check(
+        r##"
+let mut stack = [1, 2, 3];
+let mut n = 0;
+for (_, k) in ipairs(["end", "add", "x"]) {
+    let r = match k {
+        "end" => stack[#stack] = nil,
+        "add" => n += 10,
+        _ => {}
+    };
+    print(k, r);
+}
+print(#stack, n);
+"##,
+        "end\tnil\nadd\tnil\nx\tnil\n2\t10",
+    );
+    assert_eq!(
+        compile_error("match 1 { _ => 1 + 2 = 3 }"),
+        "test:1: invalid left-hand side of assignment"
+    );
+}
+
+#[test]
+fn map_literal_bare_names_are_rejected() {
+    assert_eq!(
+        compile_error("let word = 1;\nlet t = #{ word, n: 2 };"),
+        "test:2: a bare name in `#{ }` is ambiguous: write `word: word` for a field, `(word)` for an array entry, or use `[...]` for an array"
+    );
+    check(
+        r##"
+let word = "w";
+let t = #{ (word), word: word, word ~ "!", n: 2 };
+print(t[1], t[2], t.word, t.n);
+"##,
+        "w\tw!\tw\t2",
+    );
+}

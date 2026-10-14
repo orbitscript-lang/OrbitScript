@@ -46,6 +46,8 @@ Rust rules the parser follows where the proposal doesn't say otherwise:
 - **A block-like expression** (`if`, `match`, `loop`, `while`, `for`, `{ }`) at the start of a statement ends the statement, so it needs no `;`; it is the block's value only when it's the last thing in the block.
 - **Comparisons don't chain**: `a < b < c` is an error.
 - `return`, `break` and `continue` are expressions, so `_ => return 0,` works in a `match` arm.
+- **A `match` arm body may be an assignment** (`"end" => stack[#stack] = nil,`, or `+=` and the other compound forms), as in Rust, where assignment is a unit expression. It runs the assignment and the arm's value is nil, the same as `"end" => { stack[#stack] = nil; }`. Assignment is still a statement everywhere else.
+- **A bare name as a positional `#{ }` entry is an error.** Struct literals read `P { x, y }` as `x: x, y: y`, so `#{ word, count }` looks like the same shorthand but would build `[1] = word, [2] = count`. The message offers both spellings: `word: word` for a field, `(word)` (any other expression stays positional) or `[...]` for an array entry.
 - `scope` is a keyword at the start of a statement only when followed by a name, a keyword, a literal or `{`; `let scope` only when followed by a name. Everywhere else `scope` is an ordinary name.
 - Generic parameters (`fn first<T>`) and every type annotation are parsed and kept only as spans: the compiler ignores them, and `orbit-check` will define their structure.
 - Not in v1, each with a specific message: tuple structs and tuple variants, traits (`impl X for Y`), `as` casts, `()` as a value, `if let`/`while let`.
