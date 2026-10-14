@@ -773,3 +773,30 @@ print(t[1], t[2], t.word, t.n);
         "w\tw!\tw\t2",
     );
 }
+
+#[test]
+fn methods_are_reachable_through_the_type() {
+    check(
+        r##"
+struct Acc { n }
+impl Acc {
+    fn new() { Acc { n: 0 } }
+    fn add(self, k) { self.n += k; self.n }
+}
+enum Shape { Sq { s }, Empty }
+impl Shape {
+    fn area(self) { match self { Shape::Sq { s } => s * s, Shape::Empty => 0 } }
+}
+let a = Acc::new();
+print(Acc::add(a, 2), a.add(3));
+let (ok, v) = pcall(Acc::add, a, 5);
+print(ok, v, a.new, getmetatable(a) == Acc);
+print(Shape::area(Shape::Sq { s: 3 }), Shape::area(Shape::Empty), Shape::Empty.area());
+"##,
+        "2\t5\ntrue\t10\tnil\ttrue\n9\t0\t0",
+    );
+    assert_eq!(
+        compile_error("struct P {}\nimpl P { fn f() {} }\nimpl P {\n  fn f(self) {}\n}"),
+        "test:4: `f` is already defined for this type"
+    );
+}

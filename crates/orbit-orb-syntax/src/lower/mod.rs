@@ -194,6 +194,9 @@ struct TypeInfo {
     variants: Option<Vec<(StrId, Option<Vec<StrId>>)>>,
     /// The hidden local holding the methods table, once the type is defined.
     methods: Option<(FuncId, LocalId)>,
+    /// Names its `impl` blocks defined (methods, associated functions and
+    /// constants), which share the type table.
+    members: Vec<StrId>,
 }
 
 /// Where a block's final expression (and every branch of it) puts its value.
@@ -485,6 +488,7 @@ impl Lowerer {
                         fields: Some(fields),
                         variants: None,
                         methods: None,
+                        members: Vec::new(),
                     });
                     (st.name.sym, ItemTag::Type(idx))
                 }
@@ -506,6 +510,7 @@ impl Lowerer {
                         fields: None,
                         variants: Some(variants),
                         methods: None,
+                        members: Vec::new(),
                     });
                     (en.name.sym, ItemTag::Type(idx))
                 }
