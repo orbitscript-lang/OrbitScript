@@ -621,10 +621,7 @@ impl Table {
         } else if b == Tag::Float as u8 {
             *out = Value::Float(f64::from_bits(p.bits()));
         } else {
-            // Re-reading the tag keeps this a separate test, where
-            // deciding on `b` would merge the number tests into one jump
-            // table.
-            Value::write_unpacked(out, self.array.tag(idx as usize), p);
+            write_other(out, b, p);
         }
         true
     }
@@ -1251,6 +1248,13 @@ pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), S
     let key = Key::new(heap, k)?;
     set_key(heap, t, &key, v)?;
     Ok(())
+}
+
+/// The non-number case of [`Table::read_int_present`], out of line: its
+/// jump table over the tags stays out of the interpreter loop.
+#[inline(never)]
+fn write_other(out: &mut Value, b: u8, p: Payload) {
+    Value::write_unpacked(out, Tag::from_u8(b).unwrap_or(Tag::Nil), p);
 }
 
 /// `t[i] = v` (raw) for an integer key. A store into the array part skips
