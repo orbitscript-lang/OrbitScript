@@ -1,6 +1,5 @@
-//! OrbitScript files through `loadfile`, `dofile` and `require` (feature
-//! `orbitscript`), next to Lua code in the same VM.
-#![cfg(feature = "orbitscript")]
+//! OrbitScript files through `loadfile`, `dofile` and `require`, next to Lua
+//! code in the same VM.
 
 use std::path::PathBuf;
 

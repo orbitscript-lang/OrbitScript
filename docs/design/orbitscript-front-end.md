@@ -105,10 +105,10 @@ flowchart LR
 
 ## Running OrbitScript (step 3)
 
-- `orbit` (the crate) has an `orbitscript` feature, off by default for embedders. It adds `compile_orbitscript` and `Lua::load_orbitscript`, and installs the VM's second compiler hook, `Runtime::compile_orbitscript`. Source chunks named `@path.orb` use it, so `loadfile`, `dofile` and the CLI's script pick the language by file name. `load` of a string, `-e`, standard input and interactive mode stay Lua.
-- `require` finds `.orb` modules on `package.path`: with OrbitScript installed, the default path has `/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb` after `lua`'s entries, and the Lua searcher picks the compiler by the file name. There is no `package.orbpath` and no extra searcher, so `package.searchers` keeps `lua`'s four entries. `use a::b;` becomes `require("a.b")`, so an `.orb` module can load a Lua module and the other way round.
-- `orbit-cli` has an `orbitscript` feature, on by default. With it, `orbit script.orb` runs a script, and `orbitc` compiles and lists `.orb` files and prints their HIR with `--hir`. `--ast` is Lua-only for now.
-- **Size** (cloud x86_64, Ubuntu 24.04, release build with the committed PGO profile, stripped): `orbit` is 1,928,592 bytes without the feature and 2,238,000 with it (+302 KiB). `orbitc` grows by the same amount. In an unstripped build, `orbit-orb-syntax`'s own symbols come to 258,560 bytes, against 114,911 for the Lua front end. The largest functions are the lowering of statements and expressions and the parser's `primary` and `item`. Shrinking them is follow-up work.
+- OrbitScript is always built in: it is the runtime's own language, so there is no Cargo feature or runtime switch that leaves it out (Tym, 2026-10-14). `orbit` (the crate) has `compile_orbitscript` and `Lua::load_orbitscript`, and `orbit::Lua` installs the VM's second compiler hook, `Runtime::compile_orbitscript`. Source chunks named `@path.orb` use it, so `loadfile`, `dofile` and the CLI's script pick the language by file name. `load` of a string, `-e`, standard input and interactive mode stay Lua.
+- `require` finds `.orb` modules on `package.path`: the default path has `/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb` after `lua`'s entries, and the Lua searcher picks the compiler by the file name. There is no `package.orbpath` and no extra searcher, so `package.searchers` keeps `lua`'s four entries. `use a::b;` becomes `require("a.b")`, so an `.orb` module can load a Lua module and the other way round.
+- `orbit script.orb` runs a script, and `orbitc` compiles and lists `.orb` files and prints their HIR with `--hir`. `--ast` is Lua-only for now.
+- **Size** (cloud x86_64, Ubuntu 24.04, release build with the committed PGO profile, stripped): `orbit` was 1,928,592 bytes without OrbitScript and 2,238,000 with it (+302 KiB), measured while it was still an optional feature. `orbitc` grows by the same amount. In an unstripped build, `orbit-orb-syntax`'s own symbols come to 258,560 bytes, against 114,911 for the Lua front end. The largest functions are the lowering of statements and expressions and the parser's `primary` and `item`. Shrinking them is follow-up work.
 
 ## Binary size
 
@@ -116,7 +116,7 @@ A few small helpers are called from hundreds of places: the HIR's `Function::add
 
 The HIR's capture analysis and the compiler's operand-origin table also sort packed `u128` keys with one shared `sort_unstable`, instead of instantiating a stable sort for each element type.
 
-Measured on cloud x86_64 (Ubuntu 24.04, release without PGO, stripped `orbit`): 113 KiB smaller in all. The Lua-only build is 43 KiB smaller, and the `orbitscript` feature's cost fell from 279 KiB to 208 KiB. Compiling costs about 3 to 4% more instructions (valgrind: 3.9% for 200 loads of the suite's `strings.lua`, 3.0% for `bench/orb/compile.lua`), which is within the noise of wall time. The bytecode produced is unchanged, so scripts run at the same speed.
+Measured on cloud x86_64 (Ubuntu 24.04, release without PGO, stripped `orbit`): 113 KiB smaller in all. The Lua-only build (OrbitScript was then optional) was 43 KiB smaller, and OrbitScript's cost fell from 279 KiB to 208 KiB. Compiling costs about 3 to 4% more instructions (valgrind: 3.9% for 200 loads of the suite's `strings.lua`, 3.0% for `bench/orb/compile.lua`), which is within the noise of wall time. The bytecode produced is unchanged, so scripts run at the same speed.
 
 Sharing more code between the two front ends would save little (about 5 to 10 KiB, estimated): they share the HIR and everything after it already, and OrbitScript's extra size is its desugaring, which Lua doesn't need.
 

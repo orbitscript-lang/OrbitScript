@@ -111,7 +111,6 @@ fn usage_errors() {
     assert!(text(&bad.stderr).contains("unrecognized option '-x'"));
 }
 
-#[cfg(feature = "orbitscript")]
 #[test]
 fn orbitscript_files_run_compile_and_print_hir() {
     let dir = dir_with("orb", "");
