@@ -598,7 +598,15 @@ impl Lowerer {
     }
 
     fn find_loop(&self, label: Option<ast::Name>, span: Span, what: &str) -> LResult<usize> {
-        let loops = &self.funcs.last().expect("function").loops;
+        let ctx = self.funcs.last().expect("function");
+        let loops = &ctx.loops;
+        let found = match label {
+            None => loops.len().checked_sub(1),
+            Some(l) => loops.iter().rposition(|c| c.label == Some(l.sym)),
+        };
+        if found.is_none() && ctx.scope_action {
+            return Err(self.error(span, format!("`{what}` can't leave a `scope` action")));
+        }
         match label {
             None => loops
                 .len()

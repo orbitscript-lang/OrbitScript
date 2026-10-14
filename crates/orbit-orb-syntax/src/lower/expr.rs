@@ -519,6 +519,7 @@ impl Lowerer {
 
     /// `e?`: if `e`'s first value is nil, the function returns `nil, <second value>`.
     fn try_(&mut self, inner: &ast::Expr, span: Span, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+        self.check_not_scope_action(span, "?")?;
         let values = self.values(inner, out)?;
         let value = self.new_local(None, span, LocalKind::Hidden);
         let err = self.new_local(None, span, LocalKind::Hidden);
