@@ -44,6 +44,8 @@ A mismatch prints the call, both outputs and the `--seed` that reproduces the ba
 
 A plain `cargo build --release` is the profile-guided build. The profile is trained once and committed as `pgo/<target>.profdata`, one per target triple (for example `pgo/x86_64-unknown-linux-gnu.profdata`), and `tools/pgo-rustc`, set as Cargo's `build.rustc-wrapper` in `.cargo/config.toml`, adds `-Cprofile-use` with that file to every optimized compile. Cargo can't do this by itself on stable: profile `rustflags` are unstable, and a repo-wide `rustflags` entry also reaches dependency crates, which rustc compiles from their own directories, where a relative profile path doesn't resolve. The wrapper passes an absolute path. It leaves unoptimized compiles (dev builds, build scripts), targets with no committed profile, and compiles that already carry `-Cprofile-generate` or `-Cprofile-use` alone.
 
+The profile only fits the crates as `-p orbit-cli` builds them, which is what `default-members` in the root `Cargo.toml` selects. A release build of the whole workspace (`--workspace`, or `--bins` at the root) also builds `orbit-stdlib` with its own default features. That changes its symbol names, so the profile misses its functions, LLVM compiles them as cold code, and the benchmarks run about 40% slower.
+
 Limits:
 
 - The wrapper is a POSIX shell script. On Windows, set `CARGO_BUILD_RUSTC_WRAPPER` to an empty value and build with `cargo testkit pgo` instead.
