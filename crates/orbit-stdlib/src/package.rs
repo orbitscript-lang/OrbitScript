@@ -374,22 +374,27 @@ fn load_error(ctx: &mut NativeCtx<'_>, name: &[u8], file: &[u8], why: &str) -> L
 }
 
 fn search_lua(ctx: &mut NativeCtx<'_>) -> R {
-    search_source(ctx, "path")
+    search_source(ctx, "path", true)
 }
 
 /// OrbitScript modules: `package.orbpath`, searched and loaded as
 /// `package.path` is (the loader picks the compiler by the `.orb` name).
+/// When no file exists it has nothing to say (nil), so a missing module's
+/// error is exactly `lua`'s; `package.searchpath(name, package.orbpath)`
+/// lists the files it tried.
 fn search_orb(ctx: &mut NativeCtx<'_>) -> R {
-    search_source(ctx, "orbpath")
+    search_source(ctx, "orbpath", false)
 }
 
-/// Search a path of source files and load the module found.
-fn search_source(ctx: &mut NativeCtx<'_>, field: &str) -> R {
+/// Search a path of source files and load the module found. `explain`:
+/// return the files tried when there is none.
+fn search_source(ctx: &mut NativeCtx<'_>, field: &str, explain: bool) -> R {
     let name = str_arg(ctx, 0)?;
     let path = path_field(ctx, field)?;
     let file = match search_path(&name, &path, b".", DIRSEP.as_bytes()) {
         Ok(f) => f,
-        Err(msg) => return ret_msg(ctx, msg),
+        Err(msg) if explain => return ret_msg(ctx, msg),
+        Err(_) => return Ok(NativeReturn::Return(0)),
     };
     let globals = Value::Table(ctx.vm.rt.globals);
     let loaded = read_chunk_file(Some(&file))

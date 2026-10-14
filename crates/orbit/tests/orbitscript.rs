@@ -65,18 +65,21 @@ fn require_finds_orb_modules() {
 }
 
 #[test]
-fn missing_module_lists_orb_paths_last() {
+fn missing_module_error_is_luas() {
     let mut lua = Lua::new();
     let out = exec_str(
         &mut lua,
         "package.path = './?.lua' package.cpath = './?.so' package.orbpath = './?.orb'
          local ok, msg = pcall(require, 'nope')
-         return msg",
+         return msg, select(2, package.searchpath('nope', package.orbpath))",
     );
-    assert!(
-        out[0].ends_with("no file './nope.lua'\n\tno file './nope.so'\n\tno file './nope.orb'"),
-        "{}",
-        out[0]
+    assert_eq!(
+        out,
+        [
+            "module 'nope' not found:\n\tno field package.preload['nope']\n\t\
+             no file './nope.lua'\n\tno file './nope.so'",
+            "no file './nope.orb'"
+        ]
     );
 }
 
