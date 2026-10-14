@@ -176,7 +176,7 @@ fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
 fn output(cli: &Cli, chunk: &UnlinkedChunk) -> Result<(), String> {
     let mut stdout = std::io::stdout();
     if cli.list {
-        let _ = stdout.write_all(orbit_compiler::disassemble(&chunk).as_bytes());
+        let _ = stdout.write_all(orbit_compiler::disassemble(chunk).as_bytes());
     }
     if !cli.parse_only {
         let out = cli.output.as_deref().unwrap_or(DEFAULT_OUTPUT);
