@@ -44,6 +44,7 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
         exports: None,
         last_break_label: None,
         pending_fn_local: None,
+        scope_meta: None,
     };
     let span = body.span;
     let main = lx.begin_function(FunctionName::Main, span);
@@ -225,6 +226,9 @@ struct FnCtx {
     loops: Vec<LoopCtx>,
     /// The rest parameter (`...name`), which `...name` spreads.
     rest: Option<LocalId>,
+    /// The function is the body of a `scope` action, which `return`, `?`, `break` and
+    /// `continue` may not leave.
+    scope_action: bool,
 }
 
 /// An `impl` block being lowered, for `Self`.
@@ -245,6 +249,9 @@ struct Lowerer {
     last_break_label: Option<LabelId>,
     /// The local a function item is being defined into (see `define_item`).
     pending_fn_local: Option<LocalId>,
+    /// The main function's hidden local holding the metatable `scope` actions share, once one
+    /// needs it.
+    scope_meta: Option<LocalId>,
 }
 
 type LResult<T> = Result<T, Diagnostic>;
@@ -290,6 +297,7 @@ impl Lowerer {
             scopes: vec![Scope::default()],
             loops: Vec::new(),
             rest: None,
+            scope_action: false,
         });
         id
     }
@@ -700,6 +708,17 @@ impl Lowerer {
             }
             (None, None) => {}
         }
+        if let Some(meta) = self.scope_meta {
+            let value = self.scope_meta_table(body.span);
+            let id = self.f().add_stmt(
+                hir::StmtKind::Let {
+                    locals: vec![meta],
+                    values: vec![value].into(),
+                },
+                body.span,
+            );
+            stmts.insert(0, id);
+        }
         self.close_scope(&mut stmts, body.span);
         let block = self.new_block(stmts, body.span);
         self.f().body = block;
@@ -750,11 +769,7 @@ impl Lowerer {
                 scope, pat, value, ..
             } => self.let_stmt(*scope, pat, value.as_ref(), s.span, out),
             ast::StmtKind::Item(item) => self.item(item, out),
-            ast::StmtKind::Scope(inner) => Err(self.error(
-                inner.span,
-                "`scope` actions are not supported yet (they need the HIR's `Defer` statement); \
-                 `let scope name = value;` works",
-            )),
+            ast::StmtKind::Scope(inner) => self.scope_action(inner, s.span, out),
             _ => {
                 // Statements a hoisted operand added stay in a block of their own, so their
                 // temporaries end with the statement.
@@ -1098,11 +1113,100 @@ impl Lowerer {
         span: Span,
         out: &mut Vec<hir::StmtId>,
     ) -> LResult<()> {
+        self.check_not_scope_action(span, "return")?;
         let values = match value {
             Some(v) => self.values(v, out)?,
             None => hir::ExprList::default(),
         };
         self.push(out, hir::StmtKind::Return(values), span);
         Ok(())
+    }
+
+    /// An error if code in a `scope` action would leave it with `what`.
+    fn check_not_scope_action(&self, span: Span, what: &str) -> LResult<()> {
+        if self.funcs.last().expect("function").scope_action {
+            return Err(self.error(span, format!("`{what}` can't leave a `scope` action")));
+        }
+        Ok(())
+    }
+
+    /// `scope stmt;`: the action becomes a closure, boxed in a table whose metatable's
+    /// `__close` calls it, and the box is held in a `<close>` local. So the action runs on
+    /// every exit from the block, in reverse order with `let scope` bindings, through Lua's own
+    /// to-be-closed machinery: `local _ <close> = setmetatable({function() stmt end}, meta)`.
+    fn scope_action(
+        &mut self,
+        inner: &ast::Stmt,
+        span: Span,
+        out: &mut Vec<hir::StmtId>,
+    ) -> LResult<()> {
+        let func = self.begin_function(FunctionName::Anonymous, inner.span);
+        self.cur().scope_action = true;
+        let mut stmts = Vec::new();
+        let result = self.stmt(inner, &mut stmts);
+        self.close_scope(&mut stmts, inner.span);
+        let block = self.new_block(stmts, inner.span);
+        self.f().body = block;
+        self.end_function(func);
+        result?;
+
+        let closure = self.add_expr(hir::ExprKind::Closure(func), inner.span);
+        let boxed = self.add_expr(
+            hir::ExprKind::Table(vec![hir::TableEntry::Positional(closure)]),
+            span,
+        );
+        let main = self.funcs[0].id;
+        let meta = match self.scope_meta {
+            Some(l) => l,
+            None => {
+                let l = self.funcs[0]
+                    .f
+                    .add_local(hir::Local::new(None, span, LocalKind::Hidden));
+                self.scope_meta = Some(l);
+                l
+            }
+        };
+        let meta = self.func_local_ref(main, meta, span);
+        let value = self.call_global(self.syms.setmetatable, vec![boxed, meta], span);
+        let local = self.new_local(None, span, LocalKind::Close);
+        self.push(
+            out,
+            hir::StmtKind::Let {
+                locals: vec![local],
+                values: vec![value].into(),
+            },
+            span,
+        );
+        Ok(())
+    }
+
+    /// `{__close = function(box) box[1]() end}`, the metatable `scope` actions share (built in
+    /// the main function).
+    fn scope_meta_table(&mut self, span: Span) -> ExprId {
+        let close = self.intern(b"__close");
+        let func = self.begin_function(FunctionName::Field(close), span);
+        let boxed = self.f().add_param(None, span);
+        let obj = self.local_expr(boxed, span);
+        let key = self.add_expr(hir::ExprKind::Int(1), span);
+        let action = self.add_expr(hir::ExprKind::Index { obj, key }, span);
+        let call = self.add_expr(
+            hir::ExprKind::Call {
+                callee: action,
+                args: hir::ExprList::default(),
+            },
+            span,
+        );
+        let mut stmts = Vec::new();
+        self.push(&mut stmts, hir::StmtKind::Eval(call), span);
+        let block = self.new_block(stmts, span);
+        self.f().body = block;
+        self.end_function(func);
+
+        let key = self.str_expr(close, span);
+        let value = self.add_expr(hir::ExprKind::Closure(func), span);
+        self.add_expr(
+            hir::ExprKind::Table(vec![hir::TableEntry::Keyed(key, value)]),
+            span,
+        )
     }
 }

@@ -455,6 +455,113 @@ work();
 }
 
 #[test]
+fn scoped_actions() {
+    // Actions and bindings run in reverse order, and an action sees the current values.
+    check(
+        r##"
+struct Lock { name }
+impl Lock {
+    fn __close(self, err) { print("release", self.name); }
+}
+fn work() {
+    let mut n = 1;
+    let scope a = Lock { name: "a" };
+    scope print("action 1, n is", n);
+    let scope b = Lock { name: "b" };
+    scope {
+        print("action 2");
+        print("block form");
+    }
+    n = 2;
+    print("working");
+}
+work();
+scope print("main done");
+print("main");
+"##,
+        "working\naction 2\nblock form\nrelease\tb\naction 1, n is\t2\nrelease\ta\nmain\nmain done",
+    );
+    // Every way out of the block runs them.
+    check(
+        r##"
+fn early(x) {
+    scope print("left", x);
+    if x { return "returned"; }
+    "fell through"
+}
+print(early(true));
+print(early(false));
+for i in 1..=3 {
+    scope print("end of", i);
+    if i == 2 { continue; }
+    if i == 3 { break; }
+    print("body", i);
+}
+fn boom() {
+    scope print("cleanup");
+    error("bad");
+}
+print(...pcall(boom));
+let nested = || {
+    let inner = || { scope print("inner"); 1 };
+    scope print("outer");
+    inner()
+};
+print(nested());
+"##,
+        "left\ttrue\nreturned\nleft\tfalse\nfell through\nbody\t1\nend of\t1\nend of\t2\nend of\t3\n\
+         cleanup\nfalse\ttest:17: bad\ninner\nouter\n1",
+    );
+    // Closing a suspended coroutine runs them too.
+    check(
+        r##"
+let co = coroutine::create(|| {
+    scope print("closed");
+    coroutine::yield(1);
+    print("never");
+});
+coroutine::resume(co);
+print("suspended");
+coroutine::close(co);
+"##,
+        "suspended\nclosed",
+    );
+    // Loops and closures inside an action may use their own `break` and `return`.
+    check(
+        r##"
+scope {
+    for i in 1..10 { if i == 2 { break; } print("loop", i); }
+    let f = || { return "closure"; };
+    print(f());
+}
+"##,
+        "loop\t1\nclosure",
+    );
+    let cases = [
+        (
+            "fn f() { scope return 1; }",
+            "test:1: `return` can't leave a `scope` action",
+        ),
+        (
+            "fn f(t) { scope t?; }",
+            "test:1: `?` can't leave a `scope` action",
+        ),
+        (
+            "for i in 1..3 { scope break; }",
+            "test:1: `break` can't leave a `scope` action",
+        ),
+        (
+            "for i in 1..3 { scope { continue; } }",
+            "test:1: `continue` can't leave a `scope` action",
+        ),
+    ];
+    for (src, want) in cases {
+        let got = compile_error(src);
+        assert!(got.starts_with(want), "{src}\n  got: {got}\n want: {want}");
+    }
+}
+
+#[test]
 fn compile_errors() {
     let cases = [
         (

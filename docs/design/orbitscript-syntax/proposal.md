@@ -529,7 +529,7 @@ fn copy(src, dst) {
 
 `scope stmt;` (or `scope { ... }`) runs when the enclosing block exits by any route: fall-through, `return`, `break`, `continue`, or an error. Several run in reverse order, interleaved with scoped bindings. A scoped action can read locals in scope where it is written; `return`, `break` and `continue` inside it are compile errors.
 
-**[HIR]** Decided (Q13): a `Defer { body: BlockId }` HIR statement (the HIR name can stay `Defer`; only the surface keyword changed). The compiler turns it into a to-be-closed slot that points at inline code instead of at a value with `__close`, so it allocates nothing. The VM side extends the `<close>` machinery from ADR-3; the op shape goes into the HIR and VM design docs as an amendment for Tym when the front end is built.
+**[HIR]** Decided (Q13, changed by Tym on 2026-10-14): lowered in the front end, with no new HIR or bytecode. The action becomes a closure boxed in a table whose shared metatable's `__close` calls it, held in a `<close>` local, so it reuses Lua's to-be-closed machinery as is. It costs a closure and a table per run. The earlier plan, a `Defer { body: BlockId }` HIR statement compiled to inline code, turned out to need new unwinder states (see planning/orbitscript-syntax/scope-defer-design.md) and can still come later without changing any program.
 
 ### Scoped bindings: `let scope name = expr;`
 
@@ -670,7 +670,7 @@ Everything not listed here lowers onto existing HIR nodes and bytecode.
 |---|---|---|---|
 | Expression `if`/`match`/blocks | Front-end hoisting into hidden locals | `ExprKind::Block` | HIR node (not recommended now) |
 | Exclusive range `0..n` | Ints only via `n - 1` | `NumericFor { exclusive }` (decided, Q15) | HIR field + for-prep op variant |
-| `scope stmt;` | Closure + wrapper table per run | `StmtKind::Defer` (decided, Q13) | HIR node + VM `<close>` support (ADR-3 amendment) |
+| `scope stmt;` | Closure + wrapper table per run | none: a boxed closure in a `Close` local (Q13, 2026-10-14) | none |
 | `let scope` | Already `LocalKind::Close` | none | none |
 | Struct literal | `setmetatable` native call | `NewObject` op | One bytecode op, if it measurably helps (Q19) |
 | Enum `match` | `getmetatable` native call per arm | `TestMeta` op | One bytecode op; tag-field alternative to be measured (Q9) |
@@ -707,7 +707,7 @@ Same safety and toolchain rules as the Lua front end: safe Rust, no new dependen
 | Q10 | Operator overloading | Raw metamethod names (`fn __add`) only, no trait names |
 | Q11 | Globals | No implicit globals |
 | Q12 | `?` operator | On `nil, err` returns as proposed; revisit later how to support `pcall`-style errors |
-| Q13 | Scoped actions | Yes, with a `StmtKind::Defer` HIR node and the VM support it needs; keyword `scope` (round 3) instead of `defer` |
+| Q13 | Scoped actions | Yes, keyword `scope` (round 3) instead of `defer`. Lowered in the front end to a closure boxed in a `<close>` local, with no new HIR or VM support (changed 2026-10-14) |
 | Q14 | Interpolation | `f"..."` as described in [Interpolation](#interpolation-f-q14) |
 | Q15 | Exclusive ranges | `exclusive` flag on `NumericFor` |
 | Q16 | File extension | `.orb` |
