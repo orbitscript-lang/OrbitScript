@@ -770,7 +770,7 @@ fn set_offset(op: &mut Op, new: Offset) {
         | Op::JumpLeInt { off, .. }
         | Op::JumpGtInt { off, .. }
         | Op::JumpGeInt { off, .. } => *off = new,
-        Op::ForPrep { exit, .. } => *exit = new,
+        Op::ForPrep { exit, .. } | Op::ForPrepExclusive { exit, .. } => *exit = new,
         Op::ForLoop { back, .. } | Op::GenericLoop { back, .. } => *back = new,
         _ => unreachable!("not a jump: {op:?}"),
     }

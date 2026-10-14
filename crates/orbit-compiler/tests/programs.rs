@@ -125,7 +125,9 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 Op::Return0 => true,
                 Op::Return1 { src } => reg(src),
                 Op::Vararg { dst, count } => p.is_vararg && (count == MULTI || regs(dst, count)),
-                Op::ForPrep { base, exit } => regs(base, 4) && target(exit),
+                Op::ForPrep { base, exit } | Op::ForPrepExclusive { base, exit } => {
+                    regs(base, 4) && target(exit)
+                }
                 Op::ForLoop { base, back } => regs(base, 4) && target(back),
                 Op::GenericCall { base, nvars } => {
                     base as usize + 4 + (nvars as usize).max(3) <= nregs

@@ -489,7 +489,9 @@ impl Function<'_> {
                     span(dst, count as usize)
                 }
             }
-            Op::ForPrep { base, exit: off } | Op::ForLoop { base, back: off } => {
+            Op::ForPrep { base, exit: off }
+            | Op::ForPrepExclusive { base, exit: off }
+            | Op::ForLoop { base, back: off } => {
                 span(base, 4)?;
                 self.target(pc, off).map(drop)
             }

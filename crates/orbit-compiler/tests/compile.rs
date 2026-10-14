@@ -551,6 +551,7 @@ fn numeric_for_with_captured_control_variable() {
         start,
         limit,
         step: None,
+        exclusive: false,
         body,
     });
     let chunk = b.finish();

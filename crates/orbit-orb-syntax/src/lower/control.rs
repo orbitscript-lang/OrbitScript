@@ -433,13 +433,6 @@ impl Lowerer {
 
         let kind = match header {
             Some(h) => {
-                if !h.inclusive {
-                    return Err(self.error(
-                        h.span,
-                        "exclusive ranges `a..b` are not supported yet (they need the HIR's \
-                         `exclusive` flag); use `a..=b - 1`",
-                    ));
-                }
                 let mut parts = vec![Part::Expr(h.start), Part::Expr(h.end)];
                 if let Some(s) = h.step {
                     parts.push(Part::Expr(s));
@@ -448,7 +441,21 @@ impl Lowerer {
                 let (start, limit) = if h.rev {
                     // Counting down from the end: the start is evaluated first, as written.
                     let first = self.stable(ids[0], out);
-                    (ids[1], first)
+                    let end = if h.inclusive {
+                        ids[1]
+                    } else {
+                        // `(a..b).rev()` counts down from `b - 1`, as Rust's does.
+                        let one = self.add_expr(hir::ExprKind::Int(1), h.span);
+                        self.add_expr(
+                            hir::ExprKind::Binary {
+                                op: hir::BinOp::Sub,
+                                lhs: ids[1],
+                                rhs: one,
+                            },
+                            h.span,
+                        )
+                    };
+                    (end, first)
                 } else {
                     (ids[0], ids[1])
                 };
@@ -481,6 +488,7 @@ impl Lowerer {
                     start,
                     limit,
                     step,
+                    exclusive: !h.inclusive && !h.rev,
                     body: body?,
                 }
             }
