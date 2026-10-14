@@ -110,3 +110,46 @@ fn usage_errors() {
     let bad = orbitc(&["-x"], &dir);
     assert!(text(&bad.stderr).contains("unrecognized option '-x'"));
 }
+
+#[cfg(feature = "orbitscript")]
+#[test]
+fn orbitscript_files_run_compile_and_print_hir() {
+    let dir = dir_with("orb", "");
+    std::fs::write(
+        dir.join("t.orb"),
+        "use lib;\nfn main() { print(f\"{lib::answer()} from {arg[0]}\"); }\nmain();\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("lib.orb"), "pub fn answer() { 6 * 7 }\n").unwrap();
+    std::fs::write(dir.join("bad.orb"), "let x = 1;\nx = 2;\n").unwrap();
+
+    let run = orbit(&["t.orb"], &dir);
+    assert_eq!(
+        text(&run.stdout),
+        "42 from t.orb\n",
+        "{}",
+        text(&run.stderr)
+    );
+
+    let o = orbitc(&["-o", "t.out", "t.orb"], &dir);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert_eq!(text(&orbit(&["t.out"], &dir).stdout), "42 from t.out\n");
+
+    let o = orbitc(&["--hir", "lib.orb"], &dir);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(text(&o.stdout).contains("answer"), "{}", text(&o.stdout));
+
+    let o = orbitc(&["-p", "bad.orb"], &dir);
+    assert!(
+        text(&o.stderr).contains("bad.orb:2: cannot assign twice to immutable variable `x`"),
+        "{}",
+        text(&o.stderr)
+    );
+    let run = orbit(&["bad.orb"], &dir);
+    assert_eq!(run.status.code(), Some(1));
+    assert!(
+        text(&run.stderr).contains("bad.orb:2:"),
+        "{}",
+        text(&run.stderr)
+    );
+}

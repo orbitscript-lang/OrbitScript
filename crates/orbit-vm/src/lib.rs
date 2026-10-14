@@ -463,6 +463,10 @@ pub struct Runtime {
     pub ext: Extensions,
     /// The source compiler, if the host installed one.
     pub compile: Option<CompileFn>,
+    /// The OrbitScript compiler, if the host installed one. Source files
+    /// whose name ends in `.orb` use it; everything else uses
+    /// [`Runtime::compile`].
+    pub compile_orbitscript: Option<CompileFn>,
     pub(crate) natives: Vec<Native>,
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId>,
     pub(crate) stack: Stack,
@@ -712,6 +716,7 @@ impl Vm {
                 start: Instant::now(),
                 ext: Extensions::default(),
                 compile: None,
+                compile_orbitscript: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
                 stack: Stack::default(),

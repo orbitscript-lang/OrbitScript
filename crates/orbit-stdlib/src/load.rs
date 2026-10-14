@@ -110,6 +110,11 @@ pub fn load_buffer(vm: &mut Vm, bytes: &[u8], source: &[u8]) -> Result<Value, St
     Ok(vm.load(&chunk))
 }
 
+/// Whether a chunk's source names an OrbitScript file (`@path.orb`).
+pub fn is_orbitscript_file(source: &[u8]) -> bool {
+    source.first() == Some(&b'@') && source.ends_with(b".orb")
+}
+
 /// Decode (and check) or compile `bytes`.
 fn unlinked(
     #[allow(unused_variables)] heap: &mut LuaHeap,
@@ -144,7 +149,11 @@ fn unlinked(
         return Err(bad(&"binary chunks not enabled"));
     }
     let name = chunk_id(source);
-    let Some(compile) = rt.compile else {
+    let compile = match rt.compile_orbitscript {
+        Some(orb) if is_orbitscript_file(source) => Some(orb),
+        _ => rt.compile,
+    };
+    let Some(compile) = compile else {
         return Err(format!("{name}: no compiler for source chunks"));
     };
     let mut chunk = compile(bytes, &name)?;

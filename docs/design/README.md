@@ -16,9 +16,9 @@ The first goal after the Phase 0 foundations is "first light": a small but real 
 ```mermaid
 flowchart LR
     lua[".lua source"] --> luasyn["orbit-lua-syntax<br/>lexer, parser, AST, lowering"]
-    orb[".orb source"] -.-> orbsyn["orbit-orb-syntax<br/>(in progress)"]
+    orb[".orb source"] --> orbsyn["orbit-orb-syntax<br/>lexer, parser, AST, lowering"]
     luasyn --> hir["orbit-hir<br/>resolved IR, captures"]
-    orbsyn -.-> hir
+    orbsyn --> hir
     hir --> comp["orbit-compiler<br/>registers, bytecode, debug info"]
     comp --> unlinked["UnlinkedProto<br/>(plain data)"]
     unlinked -- "link: intern, allocate" --> vm["orbit-vm<br/>interpreter"]

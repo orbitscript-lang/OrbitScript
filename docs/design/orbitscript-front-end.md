@@ -18,8 +18,8 @@ flowchart LR
 | Step | Contents | State |
 |---|---|---|
 | 1 | Lexer, parser, AST, tests | Done (#145) |
-| 2 | Lowering to HIR: resolution, items, structs, enums, `match`, `?`, hoisting, templates | This PR |
-| 3 | `.orb` in the CLI, `require`'s searcher, `orbitc --hir`, behind a Cargo feature | After 2 |
+| 2 | Lowering to HIR: resolution, items, structs, enums, `match`, `?`, hoisting, templates | #146 |
+| 3 | `.orb` in the CLI, `require`'s searcher, `orbitc --hir`, behind a Cargo feature | This PR |
 | 4 | HIR and VM additions the proposal decided: `NumericFor { exclusive }` (Q15) and `StmtKind::Defer` for `scope stmt;` (Q13) | After 2 |
 
 Until step 4, lowering reports exclusive ranges and `scope stmt;` as "not supported yet".
