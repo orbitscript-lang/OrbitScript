@@ -310,6 +310,29 @@ impl NativeCtx<'_> {
         Ok(NativeReturn::Return(1))
     }
 
+    /// SPIKE: a new native value running `f` with `data`, which it reads
+    /// with [`NativeCtx::native_data`]. Every call registers another native
+    /// (they are never freed), and it is a plain native value: no closure,
+    /// so calls take the direct native path.
+    pub fn native_with_data(&mut self, name: &'static str, f: NativeFn, data: [u64; 2]) -> Value {
+        let id = NativeId(self.vm.rt.natives.len() as u32);
+        self.vm.rt.natives.push(crate::Native {
+            name,
+            f,
+            fast: None,
+            hidden: 0,
+            data,
+        });
+        Value::Native(id)
+    }
+
+    /// SPIKE: the data of the native being called (see
+    /// [`NativeCtx::native_with_data`]).
+    #[inline]
+    pub fn native_data(&self) -> [u64; 2] {
+        self.vm.rt.natives[self.id.0 as usize].data
+    }
+
     /// The function value of a native registered under `name`, registering
     /// `f` under that name the first time. For natives that return other
     /// natives (`pairs` returns `next`).
@@ -323,6 +346,7 @@ impl NativeCtx<'_> {
             f,
             fast: None,
             hidden: 0,
+            data: [0; 2],
         });
         self.vm.rt.native_ids.insert(name, id);
         Value::Native(id)

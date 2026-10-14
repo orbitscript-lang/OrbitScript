@@ -72,6 +72,7 @@ dependencies = [
  "orbit-capi",
  "orbit-compiler",
  "orbit-core",
+ "orbit-ffi",
  "orbit-hir",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
@@ -119,6 +120,13 @@ version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
  "orbit-gc",
+]
+
+[[package]]
+name = "orbit-ffi"
+version = "0.0.0"
+dependencies = [
+ "orbit-vm",
 ]
 
 [[package]]

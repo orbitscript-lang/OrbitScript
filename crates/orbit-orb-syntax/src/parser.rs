@@ -487,6 +487,11 @@ impl Parser<'_> {
     fn item(&mut self) -> PResult<Item> {
         let start = self.tok.span.start;
         let is_pub = self.eat_kw(Keyword::Pub)?;
+        let ffi_next = self.is_kw(Keyword::Extern)
+            && matches!(
+                self.peek()?,
+                TokenKind::Str(_) | TokenKind::Keyword(Keyword::Fn)
+            );
         let kind = match self.tok.kind {
             TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl()?),
             TokenKind::Keyword(Keyword::Struct) => ItemKind::Struct(self.struct_decl()?),
@@ -514,6 +519,7 @@ impl Parser<'_> {
                 self.expect(Punct::Semi)?;
                 ItemKind::Global { name, value }
             }
+            TokenKind::Keyword(Keyword::Extern) if ffi_next => self.extern_fn()?,
             TokenKind::Keyword(Keyword::Extern) if !is_pub => {
                 self.advance()?;
                 let mut names = vec![self.name()?];
@@ -533,6 +539,82 @@ impl Parser<'_> {
             kind,
             span: self.span_from(start),
         })
+    }
+
+    /// SPIKE: `extern ["lib"] fn name(a: T, ...) [-> R];`, after the `pub`. Builds the
+    /// `ffi::fn(ffi::open(["lib"]), "name", "R", "T", ...)` call that binds it.
+    fn extern_fn(&mut self) -> PResult<ItemKind> {
+        let start = self.tok.span.start;
+        self.advance()?; // extern
+        let lib = match self.tok.kind {
+            TokenKind::Str(s) => {
+                self.advance()?;
+                Some(s)
+            }
+            _ => None,
+        };
+        if !self.eat_kw(Keyword::Fn)? {
+            return Err(self.expected("`fn`"));
+        }
+        let name = self.name()?;
+        self.expect(Punct::LParen)?;
+        let mut tys = Vec::new();
+        while !self.is(Punct::RParen) {
+            self.name()?;
+            self.expect(Punct::Colon)?;
+            tys.push(self.ffi_type()?);
+            if !self.eat(Punct::Comma)? {
+                break;
+            }
+        }
+        self.expect(Punct::RParen)?;
+        let ret = if self.eat(Punct::Arrow)? {
+            self.ffi_type()?
+        } else {
+            self.lx.strings_mut().intern(b"void")
+        };
+        self.expect(Punct::Semi)?;
+        let span = self.span_from(start);
+        let e = |kind| Expr { kind, span };
+        let ffi = self.lx.strings_mut().intern(b"ffi");
+        let path = |sym: StrId| {
+            e(ExprKind::Path {
+                base: Box::new(e(ExprKind::Name(ffi))),
+                name: Name { sym, span },
+            })
+        };
+        let open_sym = self.lx.strings_mut().intern(b"open");
+        let fn_sym = self.lx.strings_mut().intern(b"fn");
+        let open = e(ExprKind::Call {
+            callee: Box::new(path(open_sym)),
+            args: lib.map(|l| e(ExprKind::Str(l))).into_iter().collect(),
+            args_at: span.start,
+        });
+        let mut args = vec![open, e(ExprKind::Str(name.sym)), e(ExprKind::Str(ret))];
+        args.extend(tys.into_iter().map(|t| e(ExprKind::Str(t))));
+        let value = e(ExprKind::Call {
+            callee: Box::new(path(fn_sym)),
+            args,
+            args_at: span.start,
+        });
+        Ok(ItemKind::ExternFn { name, value })
+    }
+
+    /// An FFI type: a name, or a path whose last segment names it (`ffi::c_str`).
+    fn ffi_type(&mut self) -> PResult<StrId> {
+        let mut n = self.name()?;
+        while self.eat(Punct::ColonColon)? {
+            n = self.name()?;
+        }
+        let text = self.lx.strings().get(n.sym).to_vec();
+        let canon: &[u8] = match &text[..] {
+            b"c_str" | b"str" => b"cstr",
+            b"c_int" => b"int",
+            b"handle" => b"ptr",
+            b"usize" => b"size",
+            other => other,
+        };
+        Ok(self.lx.strings_mut().intern(canon))
     }
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {

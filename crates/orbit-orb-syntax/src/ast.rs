@@ -101,6 +101,12 @@ pub enum ItemKind {
     },
     /// `extern A, B;`: names globals the module reads and writes.
     Extern(Vec<Name>),
+    /// SPIKE: `extern ["lib"] fn name(a: T, ...) -> R;`, a C function. `value` is the
+    /// `ffi::fn(ffi::open("lib"), "name", "R", "T", ...)` call the parser built for it.
+    ExternFn {
+        name: Name,
+        value: Expr,
+    },
 }
 
 #[derive(Debug)]

@@ -1,0 +1,13 @@
+extern "libc.so.6" fn fopen(path: cstr, mode: cstr) -> ptr;
+extern "libc.so.6" fn fgets(buf: ptr, n: int, f: ptr) -> ptr;
+extern "libc.so.6" fn fclose(f: ptr) -> int;
+let t0 = os::clock();
+let h = fopen(arg[1], "r");
+let buf = ffi::buffer(4096);
+let mut n = 0;
+while fgets(buf, 4096, h) {
+    let l = ffi::string(buf);
+    n += #l - 1;
+}
+fclose(h);
+print(f"ffi fgets {n} {(os::clock() - t0) * 1000} ms");

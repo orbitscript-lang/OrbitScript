@@ -1,0 +1,22 @@
+[package]
+name = "orbit-ffi"
+description = "SPIKE: calling C functions in dynamic libraries from scripts, without libffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-vm = { path = "../orbit-vm" }
+
+# Not the workspace lints: unsafe is denied rather than forbidden, and
+# allowed only in src/sys.rs (spike; would need an ADR-6 exception).
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"

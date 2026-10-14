@@ -1,0 +1,33 @@
+// Tym's sketch, in the spike's bikeshed syntax.
+extern "libc.so.6" fn fopen(path: ffi::c_str, mode: ffi::c_str) -> ffi::handle;
+extern "libc.so.6" fn fclose(f: ffi::handle) -> int;
+extern "libc.so.6" fn fgets(buf: ffi::handle, n: int, f: ffi::handle) -> ffi::handle;
+extern "libc.so.6" fn strerror(errnum: int) -> ffi::c_str;
+extern fn getpid() -> int;   // no library: symbols already in the process
+
+pub struct File { handle, buf }
+
+impl File {
+    pub fn read_line(self) {
+        if !fgets(self.buf, 4096, self.handle) { nil } else { ffi::string(self.buf) }
+    }
+    pub fn close(self) { fclose(self.handle); }
+}
+
+pub fn open(filename, mode) {
+    let mode = if mode { mode } else { "r" };
+    let handle = fopen(filename, mode);
+    if !handle {
+        let e = ffi::errno();
+        (nil, f"{filename}: {strerror(e)}", e)
+    } else {
+        File { handle, buf: ffi::buffer(4096) }
+    }
+}
+
+print(...open("/nonexistent"));
+let f = open("/etc/os-release");
+print(f.read_line());
+print(f.read_line());
+f.close();
+print(type(getpid()));

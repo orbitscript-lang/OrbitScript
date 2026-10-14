@@ -68,6 +68,11 @@ impl Lowerer {
                 self.export(item, *name, local, out);
                 Ok(())
             }
+            ast::ItemKind::ExternFn { name, value } => {
+                let local = self.define_value_item(*name, ItemTag::Const, value, out)?;
+                self.export(item, *name, local, out);
+                Ok(())
+            }
             ast::ItemKind::Struct(s) => {
                 let local = self.struct_def(s, item.span, out)?;
                 self.export(item, s.name, local, out);

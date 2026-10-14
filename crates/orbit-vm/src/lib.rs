@@ -93,6 +93,9 @@ pub(crate) struct Native {
     /// Upvalues at the end of each of its closures that scripts can't
     /// see or change (`debug.getupvalue` and friends skip them).
     pub hidden: u8,
+    /// SPIKE: data a native registered with [`NativeCtx::native_with_data`]
+    /// reads on every call (an FFI function's address and signature).
+    pub data: [u64; 2],
 }
 
 impl fmt::Debug for Native {
@@ -766,6 +769,7 @@ impl Vm {
             f,
             fast: None,
             hidden: 0,
+            data: [0; 2],
         });
         self.rt.native_ids.insert(name, id);
         Value::Native(id)

@@ -79,6 +79,11 @@ impl Dump<'_> {
             self.out.push_str("pub ");
         }
         match &item.kind {
+            ItemKind::ExternFn { name, value } => {
+                self.out.push_str(&format!("(extern-fn {} ", self.s(name.sym)));
+                self.expr(value);
+                self.out.push(')');
+            }
             ItemKind::Fn(f) => {
                 self.out.push_str(&format!("(fn {} ", self.s(f.name.sym)));
                 self.sig(&f.sig);

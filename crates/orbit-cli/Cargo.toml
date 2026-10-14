@@ -27,7 +27,9 @@ orbit-orb-syntax = { path = "../orbit-orb-syntax", optional = true }
 signal-hook = "0.4.5"
 
 [features]
-default = ["c-modules", "line-editing", "orbitscript"]
+default = ["c-modules", "line-editing", "orbitscript", "ffi"]
+# SPIKE: the `ffi` table.
+ffi = ["orbit/ffi"]
 # Load C modules (on by default in the CLI, Tym 2026-10-09).
 c-modules = ["orbit/c-modules"]
 # Interactive mode (`-i`, or no script on a terminal), reading plain lines.

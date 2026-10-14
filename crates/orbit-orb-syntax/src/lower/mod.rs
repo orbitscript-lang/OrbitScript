@@ -117,6 +117,8 @@ const PRELUDE: &[&[u8]] = &[
     b"pairs",
     b"pcall",
     b"print",
+    // SPIKE: the FFI table.
+    b"ffi",
     b"rawequal",
     b"rawget",
     b"rawlen",
@@ -477,6 +479,7 @@ impl Lowerer {
             let (sym, tag) = match &item.kind {
                 ast::ItemKind::Fn(f) => (f.name.sym, ItemTag::Fn),
                 ast::ItemKind::Const { name, .. } => (name.sym, ItemTag::Const),
+                ast::ItemKind::ExternFn { name, .. } => (name.sym, ItemTag::Const),
                 ast::ItemKind::Struct(st) => {
                     let fields = st.fields.iter().map(|f| f.name.sym).collect();
                     let idx = self.types.len();

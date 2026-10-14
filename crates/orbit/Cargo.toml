@@ -16,6 +16,7 @@ orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 orbit-stdlib = { path = "../orbit-stdlib", default-features = false }
 orbit-vm = { path = "../orbit-vm" }
 orbit-capi = { path = "../orbit-capi", optional = true }
+orbit-ffi = { path = "../orbit-ffi", optional = true }
 orbit-orb-syntax = { path = "../orbit-orb-syntax", optional = true }
 
 [dev-dependencies]
@@ -40,6 +41,8 @@ verify = ["orbit-stdlib/verify"]
 verify-flow = ["orbit-stdlib/verify-flow"]
 # Load C modules through the Lua C API (off by default for embedders).
 c-modules = ["dep:orbit-capi", "package"]
+# SPIKE: the `ffi` table (calling C functions in dynamic libraries).
+ffi = ["dep:orbit-ffi"]
 # The OrbitScript front end: `.orb` files in `loadfile`, `dofile` and
 # `require`, and `compile_orbitscript` (off by default for embedders).
 orbitscript = ["dep:orbit-orb-syntax"]

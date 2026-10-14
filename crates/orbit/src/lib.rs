@@ -134,6 +134,8 @@ impl Lua {
         orbit_stdlib::open_libs_with(&mut vm, options);
         #[cfg(feature = "c-modules")]
         orbit_capi::install(&mut vm);
+        #[cfg(feature = "ffi")]
+        orbit_ffi::install(&mut vm);
         Lua { vm }
     }
 
