@@ -238,3 +238,30 @@ fn no_interactive_mode() {
     assert!(err.contains("unrecognized option '-i'"), "{err}");
     assert!(!err.contains("interactive"), "{err}");
 }
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_is_on_unless_no_ffi() {
+    let o = orbit(
+        &["-e", "print(type(ffi), package.loaded.ffi == ffi)"],
+        "",
+        &[],
+    );
+    assert_eq!(out(&o), "table\ttrue\n");
+    let o = orbit(
+        &["--no-ffi", "-e", "print(ffi, package.loaded.ffi)"],
+        "",
+        &[],
+    );
+    assert_eq!(out(&o), "nil\tnil\n");
+}
+
+#[test]
+fn usage_lists_no_ffi() {
+    let o = orbit(&["-h"], "", &[]);
+    assert!(
+        err(&o).contains("--no-ffi  leave out the 'ffi' library"),
+        "{}",
+        err(&o)
+    );
+}

@@ -4,7 +4,8 @@
 //! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#the-command-line)):
 //! `-e stat`, `-l mod`, `-l g=mod`, `-i`, `-v`, `-E`, `-W`, `--` and `-`,
 //! plus `--lock-cpath`, which keeps C modules to the search path `orbit`
-//! starts with (ADR-8).
+//! starts with (ADR-8), and `--no-ffi`, which leaves out the `ffi` library
+//! (ADR-9).
 //! `arg` holds the script at 0, the interpreter and options below it and
 //! the arguments from 1; `...` holds the arguments. An uncaught error prints
 //! `<program>: <message>` plus a traceback to stderr with exit status 1.
@@ -65,6 +66,7 @@ struct Cli {
     version: bool,
     ignore_env: bool,
     lock_cpath: bool,
+    no_ffi: bool,
     warnings: bool,
     /// Index of the script in the arguments (`-` for standard input).
     script: Option<usize>,
@@ -97,6 +99,7 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
             "-E" => cli.ignore_env = true,
             "-W" => cli.warnings = true,
             "--lock-cpath" => cli.lock_cpath = true,
+            "--no-ffi" => cli.no_ffi = true,
             _ if a.starts_with("-e") || a.starts_with("-l") => {
                 let opt = if a.starts_with("-e") { "-e" } else { "-l" };
                 // The value is glued on (`-eprint(1)`) or the next argument,
@@ -167,6 +170,7 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          -E        ignore environment variables\n  \
          -W        turn warnings on\n  \
          --lock-cpath  load C modules only from the starting 'package.cpath'\n  \
+         --no-ffi  leave out the 'ffi' library\n  \
          --        stop handling options\n  \
          -         stop handling options and execute stdin\n"
     );
@@ -184,6 +188,12 @@ fn main() -> ExitCode {
         ignore_env: cli.ignore_env,
         lock_cpath: cli.lock_cpath,
     });
+    #[cfg(feature = "ffi")]
+    if !cli.no_ffi {
+        lua.enable_ffi();
+    }
+    #[cfg(not(feature = "ffi"))]
+    let _ = cli.no_ffi;
     // The standalone lua5.5 reports generational mode from the start. The
     // incremental collector runs underneath either way.
     lua.vm().rt.gc.mode = orbit::GcMode::Generational;

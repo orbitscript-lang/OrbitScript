@@ -96,3 +96,9 @@ The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass
 |---|---|
 | [orbitscript-syntax/proposal.md](orbitscript-syntax/proposal.md) | The OrbitScript syntax, as decided by Tym (2026-10-13), with [indexing-report.md](orbitscript-syntax/indexing-report.md) behind its 1-based indexing decision |
 | [orbitscript-front-end.md](orbitscript-front-end.md) | `orbit-orb-syntax`: lexer, parser, AST and lowering to HIR, and the rules it follows where the proposal is silent |
+
+## Native code
+
+| Document | Covers |
+|---|---|
+| [ffi.md](ffi.md) | The `ffi` library (`orbit-ffi`, ADR-9): binding C functions in shared libraries from Lua and OrbitScript, its types, buffers and raw memory, how calls are made, limits and costs |

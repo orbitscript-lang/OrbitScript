@@ -2,7 +2,7 @@
 
 ## Non-negotiables
 - **Stable Rust only.** No nightly or beta features, no `#![feature]`, no `-Z` flags.
-- **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The exceptions are the future `orbit-jit` crate, `orbit-virtmem` (virtual memory buffer for arena slots, approved by Tym on 2026-10-11), and `orbit-gc`'s memory-trimming calls (glibc `malloc_trim` and macOS `malloc_zone_pressure_relief`) behind its `memory-trimming` feature (ADR-2, ADR-6). Anything else needs Tym's sign-off in an ADR.
+- **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The exceptions are the future `orbit-jit` crate, `orbit-virtmem` (virtual memory buffer for arena slots, approved by Tym on 2026-10-11), `orbit-gc`'s memory-trimming calls (glibc `malloc_trim` and macOS `malloc_zone_pressure_relief`) behind its `memory-trimming` feature (ADR-2, ADR-6), `orbit-capi/src/ffi.rs` (C modules, ADR-8), and `orbit-ffi/src/sys.rs` (the `ffi` library, ADR-9). Anything else needs Tym's sign-off in an ADR.
 - **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-gc`, `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies without an ADR.
 - **Greenfield, never ported.** Learn from PUC Lua's observable behavior (the reference `lua5.5` binary, the official suite, the manual), never from its source code. Don't read, translate or mirror PUC Lua's C sources unless Tym explicitly asks for it for a specific purpose. Design for multiple front ends (Lua and OrbitScript) throughout.
 - **Lua 5.5 compatibility is judged by behavior.** When unsure, compare against the reference `lua5.5` interpreter and the official test suite, not memory of older Lua versions.
@@ -18,6 +18,8 @@
 | `orbit-hir`, `orbit-compiler`, `orbit-vm` | HIR, bytecode compiler, interpreter | C |
 | `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) | C |
 | `orbit-stdlib` | Lua standard library | D |
+| `orbit-capi` | Lua C API shim for loading C modules (`orbit` feature `c-modules`) | shared |
+| `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit` feature `ffi`) | shared |
 | `orbit` | Rust embedding API | shared |
 | `orbit-cli` | `orbit` interpreter and `orbitc` compiler binaries | shared |
 | `orbit-testkit` | Conformance, differential and benchmark harness (dev tool, never shipped) | E |

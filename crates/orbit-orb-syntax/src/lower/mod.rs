@@ -134,6 +134,8 @@ const PRELUDE: &[&[u8]] = &[
     b"arg",
     b"coroutine",
     b"debug",
+    // Present only when the host enables it (ADR-9).
+    b"ffi",
     b"io",
     b"math",
     b"os",
