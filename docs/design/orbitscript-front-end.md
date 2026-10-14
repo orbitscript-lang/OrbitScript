@@ -20,10 +20,8 @@ flowchart LR
 | 1 | Lexer, parser, AST, tests | Done (#145) |
 | 2 | Lowering to HIR: resolution, items, structs, enums, `match`, `?`, hoisting, templates | #146 |
 | 3 | `.orb` in the CLI, `require`'s searcher, `orbitc --hir`, behind a Cargo feature | #147 |
-| 4a | `NumericFor { exclusive }` (Q15) and the `ForPrepExclusive` op | This PR |
-| 4b | `StmtKind::Defer` for `scope stmt;` (Q13), with its VM support | Next |
-
-Until step 4b, lowering reports `scope stmt;` as "not supported yet".
+| 4a | `NumericFor { exclusive }` (Q15) and the `ForPrepExclusive` op | #148 |
+| 4b | `scope stmt;` (Q13), lowered in the front end to a closure in a `<close>` local | This PR |
 
 ## Lexer
 
@@ -89,6 +87,14 @@ flowchart LR
 - `loop`, `while` and `for` become `While`/`NumericFor`/`GenericFor`. `continue` jumps to a label at the end of the body; a labelled `break` from an inner loop jumps to a label after the outer loop; `break value` assigns the loop's hidden result first. `(a..=b).rev()` and `.step_by(n)` set the step of a `NumericFor`. `a..b` sets its `exclusive` flag; `(a..b).rev()` counts down from `b - 1` to `a` inclusive, as Rust's does (for an integer range; on a float range it counts down from `b - 1` in steps of 1).
 - **`match`** evaluates its scrutinee into hidden locals (one per tuple item for `match (a, b)`). Without guards it is an `if` chain whose first catch-all arm becomes the `else`. With guards, each arm's body ends with a `Goto` to a label after the `match`, so a failed guard falls through to the next arm. When no arm matches, the `match` raises `no match arm for value of type T` (the value's `__name`, or its `type`).
 - Pattern tests: literals compare with `==`; a range also checks `type(v)` is `"number"` or `"string"` (so other values don't raise a comparison error); a struct or data-variant pattern compares `getmetatable(v)` with the type's table, then tests its fields; a unit variant compares identity with `rawequal`. `|` alternatives may not bind names yet. Field names in struct patterns and literals, and variant names in patterns, are checked against the definition when it is in the same module.
+
+- **`scope stmt;`** (and `scope { ... }`) lowers to a closure in a box with a `<close>` local holding it, so Lua's to-be-closed machinery runs it on every exit, in reverse order with `let scope` bindings, with no HIR or VM support of its own (Tym, 2026-10-14):
+
+  ```lua
+  local _ <close> = setmetatable({ function() stmt end }, scope_meta)
+  ```
+
+  `scope_meta` is `{ __close = function(box) box[1]() end }`, built once per chunk in a hidden local of the main function. The action reads the current values of the locals it names (they become upvalues). `return`, `?`, and a `break` or `continue` that would leave the action are compile errors; loops and closures inside it keep their own. Each run costs a closure and a table; a `StmtKind::Defer` compiled to inline code could remove that later without changing any `.orb` program.
 
 ### Items
 
