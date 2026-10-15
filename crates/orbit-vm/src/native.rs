@@ -157,6 +157,13 @@ pub struct NativeCtx<'a> {
 }
 
 impl NativeCtx<'_> {
+    /// The data the running native was registered with
+    /// ([`Vm::register_native_with_data`](crate::Vm::register_native_with_data)).
+    #[inline]
+    pub fn native_data(&self) -> [u64; 2] {
+        self.vm.rt.natives[self.id.0 as usize].data
+    }
+
     /// Number of arguments the native was called with.
     #[inline]
     pub fn nargs(&self) -> usize {
@@ -323,6 +330,7 @@ impl NativeCtx<'_> {
             f,
             fast: None,
             hidden: 0,
+            data: [0; 2],
         });
         self.vm.rt.native_ids.insert(name, id);
         Value::Native(id)

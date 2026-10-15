@@ -1,0 +1,32 @@
+[package]
+name = "orbit-ffi"
+description = "Calling C functions in shared libraries from Lua and OrbitScript (the `ffi` library)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-vm = { path = "../orbit-vm" }
+orbit-stdlib = { path = "../orbit-stdlib", default-features = false }
+# Makes the calls (ADR-9). By default it builds libffi from its bundled
+# sources and links it statically, which needs a C compiler, `sh` and `make`
+# (MSVC targets use only the C compiler).
+libffi-sys = { version = "4.2", default-features = false }
+
+[features]
+# Link the system's shared libffi instead of building the bundled copy
+# (ignored on MSVC targets, which always build it).
+system-libffi = ["libffi-sys/system"]
+
+# Not the workspace lints: unsafe is denied rather than forbidden, and
+# allowed only in src/sys.rs (ADR-6 exception, ADR-9).
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"

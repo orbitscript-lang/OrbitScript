@@ -16,6 +16,7 @@ orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 orbit-stdlib = { path = "../orbit-stdlib", default-features = false }
 orbit-vm = { path = "../orbit-vm" }
 orbit-capi = { path = "../orbit-capi", optional = true }
+orbit-ffi = { path = "../orbit-ffi", optional = true }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 
 [dev-dependencies]
@@ -40,6 +41,12 @@ verify = ["orbit-stdlib/verify"]
 verify-flow = ["orbit-stdlib/verify-flow"]
 # Load C modules through the Lua C API (off by default for embedders).
 c-modules = ["dep:orbit-capi", "package"]
+# The `ffi` library: calling C functions in shared libraries (off by
+# default for embedders; a host still opts in with `Lua::enable_ffi`).
+ffi = ["dep:orbit-ffi"]
+# With `ffi`: link the system's shared libffi rather than a static copy built
+# from bundled sources.
+ffi-system-libffi = ["ffi", "orbit-ffi/system-libffi"]
 
 [lints]
 workspace = true

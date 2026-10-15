@@ -53,6 +53,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libffi-sys"
+version = "4.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eab801a4ae9065bfea87f37204a7940523e752056e4a090eaaaab9b47fc826b5"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -72,6 +81,7 @@ dependencies = [
  "orbit-capi",
  "orbit-compiler",
  "orbit-core",
+ "orbit-ffi",
  "orbit-hir",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
@@ -119,6 +129,15 @@ version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
  "orbit-gc",
+]
+
+[[package]]
+name = "orbit-ffi"
+version = "0.0.0"
+dependencies = [
+ "libffi-sys",
+ "orbit-stdlib",
+ "orbit-vm",
 ]
 
 [[package]]

@@ -134,6 +134,16 @@ impl Lua {
         Lua { vm }
     }
 
+    /// Give scripts the `ffi` library (the `ffi` global and
+    /// `package.loaded.ffi`): calling C functions in any shared library the
+    /// process can load, and reading and writing memory through pointers.
+    /// That is as much power as a C module has, so a host enables it only
+    /// for scripts it trusts that far (ADR-9). Calling it again does nothing.
+    #[cfg(feature = "ffi")]
+    pub fn enable_ffi(&mut self) {
+        orbit_ffi::install(&mut self.vm);
+    }
+
     /// The underlying VM, for registering natives and building values.
     pub fn vm(&mut self) -> &mut Vm {
         &mut self.vm

@@ -93,6 +93,11 @@ pub(crate) struct Native {
     /// Upvalues at the end of each of its closures that scripts can't
     /// see or change (`debug.getupvalue` and friends skip them).
     pub hidden: u8,
+    /// Two words the native reads on every call
+    /// ([`NativeCtx::native_data`]): for natives that are many functions
+    /// at once, such as an FFI binding's address and signature. Zero for
+    /// natives registered by name.
+    pub data: [u64; 2],
 }
 
 impl fmt::Debug for Native {
@@ -767,8 +772,32 @@ impl Vm {
             f,
             fast: None,
             hidden: 0,
+            data: [0; 2],
         });
         self.rt.native_ids.insert(name, id);
+        Value::Native(id)
+    }
+
+    /// Register another native running `f` that reads `data` on every call
+    /// ([`NativeCtx::native_data`]). Unlike [`Vm::register_native`] each
+    /// call adds a native, not looked up by `name` (which messages still
+    /// use), and it lives as long as the VM: callers keep one per distinct
+    /// `data`. The value is a plain native, so calling it takes the direct
+    /// native path, without the frame a native closure costs.
+    pub fn register_native_with_data(
+        &mut self,
+        name: &'static str,
+        f: NativeFn,
+        data: [u64; 2],
+    ) -> Value {
+        let id = NativeId(self.rt.natives.len() as u32);
+        self.rt.natives.push(Native {
+            name,
+            f,
+            fast: None,
+            hidden: 0,
+            data,
+        });
         Value::Native(id)
     }
 
