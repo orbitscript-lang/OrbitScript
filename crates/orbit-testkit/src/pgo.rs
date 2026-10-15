@@ -582,8 +582,8 @@ warning: `orbit-vm` (lib) generated 2 warnings
         let no_bench = training_set(&root, false, &[]).unwrap();
         assert!(no_bench.iter().all(|j| !j.cwd.ends_with("bench")));
         // An example trains with its Lua twin; excluding it by name drops both.
-        assert!(all.iter().any(|j| j.args == ["calc.orb", "500"]));
-        assert!(all.iter().any(|j| j.args == ["calc.lua", "500"]));
+        assert!(all.iter().any(|j| j.args == ["calc.orb", "10"]));
+        assert!(all.iter().any(|j| j.args == ["calc.lua", "10"]));
         let no_calc = training_set(&root, true, &["calc".to_string()]).unwrap();
         assert_eq!(no_calc.len() + 2, all.len());
     }

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# A plain `cargo build --release` at the root builds the CLI (`orbit` and
+# `orbitc`) the way `cargo testkit pgo train` does. Building every member
+# turns on orbit-stdlib's default features, which changes its symbol names, so
+# the committed profile would miss its functions and LLVM would compile them
+# as cold code. `--workspace` still builds and tests everything.
+default-members = ["crates/orbit-cli"]
 # spike/ is its own throwaway workspace (stream S0).
 exclude = ["spike"]
 
