@@ -34,10 +34,9 @@ Once enabled, the library is the `ffi` global and `package.loaded.ffi`. It is al
 
 | Call | Result |
 |---|---|
-| `ffi.open([name])` | Opens a shared library by file name or path (`"libm.so.6"`, `"/usr/lib/libz.so"`). With no name it gives the symbols already in the process (libc on Linux, plus anything the host linked). Raises `cannot open library '<name>': <reason>` on failure. Libraries are never closed. |
+| `ffi.open([name])` | Opens a shared library by file name or path (`"libm.so.6"`, `"/usr/lib/libz.so"`, `"user32.dll"`). With no name it gives the symbols already in the process on Unix (libc, plus anything the host linked), and the program's own module on Windows. Raises `cannot open library '<name>': <reason>` on failure. Libraries are never closed. |
 | `lib:bind(name, result, args...)` or `ffi.bind(lib, name, result, args...)` | The C function `name` in `lib`, as a function value. Raises `cannot find C function '<name>': <reason>` if the symbol is missing. Binding the same function with the same signature again returns the same value. |
 | `ffi.errno()` | `errno` as the most recent FFI call left it. It is read right after the call, before the VM does anything that could change it. |
-| `ffi.supported` | `false` on platforms where calls aren't implemented (see Limits), where `ffi.open` raises an error. |
 
 ### Types
 
@@ -53,7 +52,7 @@ Type names are strings. Aliases are listed after the main name.
 | `cstr` | A string, copied with a NUL added; the copy lasts only for the call; a string containing a NUL byte is an error | The NUL-terminated string at the pointer, copied; `nil` for NULL |
 | `bytes` | A string's own bytes, without a copy or a NUL, for C to read during the call (pair it with a length) | not allowed |
 
-`long` is 64 bits because every supported target is LP64.
+`long` is always 64 bits here, as on 64-bit Unix; on Windows, where C's `long` is 32 bits, declare it as `i32`.
 
 ### Memory
 
@@ -90,26 +89,26 @@ if not fopen("/missing", "r") then print(strerror(ffi.errno())) end
 
 ```mermaid
 flowchart LR
-    bind["lib:bind(name, result, args...)"] --> parse["parse types, pack signature,<br/>pick call shape"]
-    parse --> dlsym["dlsym(name)"]
+    bind["lib:bind(name, result, args...)"] --> parse["parse types"]
+    parse --> sig{"signature<br/>seen before?"}
+    sig -- no --> cif["libffi prepares<br/>a call description"]
+    sig -- yes --> dlsym
+    cif --> dlsym["dlsym(name)"]
     dlsym --> intern{"same address and<br/>signature bound before?"}
     intern -- yes --> same["same function value"]
-    intern -- no --> native["new native with data<br/>[address, signature]"]
-    call["call f(...)"] --> conv["convert arguments<br/>into register arrays"]
+    intern -- no --> native["new native with data<br/>[address, signature index]"]
+    call["call f(...)"] --> conv["convert arguments<br/>into 64-bit slots"]
     conv --> strs["string pointers:<br/>copies or bytes"]
-    strs --> tramp["trampoline for the shape"]
-    tramp --> errno["save errno"]
+    strs --> ffi_call["ffi_call"]
+    ffi_call --> errno["save errno"]
     errno --> res["convert the result"]
 ```
 
-- **Function values are plain natives.** `Vm::register_native_with_data` registers a native with two data words: the C address and the packed signature (`NativeCtx::native_data`). A call takes the VM's direct native path.
+- **Function values are plain natives.** `Vm::register_native_with_data` registers a native with two data words: the C address and the index of its signature in the library's per-VM state (`NativeCtx::native_data`). A call takes the VM's direct native path.
   - The C module shim's functions are native closures. Their call goes through a stub Lua frame, which costs 15-20 ns per call (measured in the spike, `planning/ffi/prototype.md` in the project files).
   - Natives are never freed, so bindings are interned per (address, signature). The count is bounded by the distinct functions scripts bind.
-- **Signature.** Bits 0-3 hold the result type, 4-7 the argument count, then 4 bits per argument (at most 12), then the call shape and a flag for string arguments.
-- **Call shapes** (`orbit-ffi/src/sys.rs`):
-  - Integer and pointer arguments with an integer result call through a function type of exactly that arity.
-  - Up to three `double` arguments call through an exact `double` type.
-  - Everything else calls through one type with six integer and eight `double` parameters. This relies on the System V x86_64 and AAPCS64 conventions giving the two classes separate registers.
+- **libffi makes the call** (`orbit-ffi/src/sys.rs`). Each distinct signature gets one call description (`ffi_cif`), prepared by `ffi_prep_cif` when it is first bound. A call fills one 64-bit slot per argument, passes libffi a pointer to each, and reads the result from a 64-bit slot.
+- **Linking libffi.** By default the `libffi-sys` crate builds libffi from its bundled sources and links it statically (needs a C compiler, `sh` and `make` at build time). The `ffi-system-libffi` feature of `orbit` and `orbit-cli` (`system-libffi` on `orbit-ffi`) links the system's shared `libffi` instead.
 - **Strings.**
   - Conversions that can allocate run before any string pointer is taken, because allocating can move short strings, which live inline in the heap (ADR-5).
   - `cstr` copies go into a 256-byte stack buffer while they fit, and into their own allocations after that.
@@ -118,23 +117,24 @@ flowchart LR
 
 ## Limits
 
-- **Platforms:** 64-bit Unix on x86_64 and aarch64 (Linux, macOS). Windows x64 assigns argument registers by position rather than by class; it needs per-position call shapes, which is later work. Until then `ffi.supported` is false there.
+- **Platforms:** 64-bit targets libffi supports. Linux x86_64 is tested; macOS, Windows and aarch64 Linux are checked to compile only.
 - **Signatures:**
-  - At most six integer or pointer arguments and eight floating-point arguments, and 12 in all: nothing passed on the stack.
-  - No variadic functions (`printf`), because on some platforms their arguments go elsewhere.
+  - No variadic functions (`printf`) yet.
   - No structs or unions by value.
   - No callbacks (C calling a Lua function).
 - **Not freed:** library handles are never closed, and bindings live as long as the VM.
 
 ## Costs
 
-Measured on the cloud container (x86_64 Ubuntu 24.04), plain release without PGO, with a 5M-call loop. Each figure is the best of 5 runs, in ns per iteration including the loop. Runs vary by about ±20%.
+Measured on the cloud container (x86_64 Ubuntu 24.04), plain release without PGO, with a 5M-call loop. Each figure is the best of 5 runs, in ns per iteration including the loop. Runs vary by about ±20%. The trampolines column is the first version of this library, before it moved to libffi.
 
-| Call | `ffi` | C module (orbit-capi) | Rust native | lua5.5 C module |
-|---|---|---|---|---|
-| `labs(-5)` | 21.3 | 49.7 | 11.4 (`math.abs`) | 16.0 |
-| `sqrt(2.0)` | 19.7 | 45.2 | 13.6 (`math.sqrt`) | 12.1 |
-| `strlen(20 chars)` | 34.2 | 53.7 | 15.0 (`string.len`) | 15.5 |
-| 3-int `add3` | 33.3 | 60.9 | | 20.8 |
+| Call | `ffi` (libffi) | `ffi` (own trampolines) | C module (orbit-capi) | Rust native | lua5.5 C module |
+|---|---|---|---|---|---|
+| `labs(-5)` | 43.7 | 22.0 | 45.4 | 11.0 (`math.abs`) | 16.1 |
+| `sqrt(2.0)` | 43.3 | 23.5 | 51.0 | 15.3 (`math.sqrt`) | 14.9 |
+| `strlen(20 chars)` | 59.6 | 40.3 | 68.3 | 17.4 (`string.len`) | 17.8 |
+| 3-int `add3` | 70.0 | 36.8 | 59.0 | | 25.0 |
 
-Size: the feature adds about 35 KiB to the release `orbit` binary (1,909,488 to 1,945,744 bytes, no PGO, x86_64). The VM's data words cost nothing measurable without the feature.
+Most of the difference is libffi's `ffi_call` itself: a C program calling `add3` through it takes about 40 ns per call on the same machine, against 1.3 ns for a direct call.
+
+Size: the feature adds about 55 KiB to the release `orbit` binary with libffi built in (1,909,488 to 1,965,320 bytes), or about 37 KiB when linking the system's libffi (1,946,736 bytes), no PGO, x86_64. The VM's data words cost nothing measurable without the feature.

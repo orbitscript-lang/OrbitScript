@@ -2,8 +2,7 @@
 //! test process already has, converting arguments and results, buffers and
 //! raw memory, and the errors scripts get.
 
-#![cfg(all(feature = "ffi", unix, target_pointer_width = "64"))]
-#![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#![cfg(all(feature = "ffi", unix))]
 
 use orbit::Lua;
 
@@ -49,11 +48,8 @@ fn absent_until_the_host_enables_it() {
     lua.enable_ffi();
     lua.enable_ffi();
     assert_eq!(
-        run_in(
-            &mut lua,
-            "return type(ffi), package.loaded.ffi == ffi, ffi.supported"
-        ),
-        "table\ttrue\ttrue"
+        run_in(&mut lua, "return type(ffi), package.loaded.ffi == ffi"),
+        "table\ttrue"
     );
 }
 
@@ -253,12 +249,6 @@ fn binding_errors() {
     );
     assert!(
         error(&format!(
-            "{LIBC} libc:bind('abs', 'int', 'int', 'int', 'int', 'int', 'int', 'int', 'int')"
-        ))
-        .contains("too many arguments")
-    );
-    assert!(
-        error(&format!(
             "{LIBC} libc:bind('orbit_ffi_no_such_function', 'int')"
         ))
         .starts_with("t:1: cannot find C function 'orbit_ffi_no_such_function': ")
@@ -273,7 +263,6 @@ fn binding_errors() {
     );
 }
 
-#[cfg(feature = "orbitscript")]
 #[test]
 fn from_orbitscript() {
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ffi-orbitscript");
@@ -288,4 +277,52 @@ fn from_orbitscript() {
     .unwrap();
     let src = format!("return dofile({:?})", path.to_str().unwrap());
     assert_eq!(run(&src), "5");
+}
+
+/// Signatures the C library has no function for: more arguments than there
+/// are registers, and integers mixed with `float`s and `double`s. The
+/// functions come from a small C file built with the system's `cc`; the
+/// test is skipped without one.
+#[test]
+fn many_and_mixed_arguments() {
+    let dir = std::env::temp_dir().join(format!("orbit-ffi-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("many.c");
+    let lib = dir.join("libmany.so");
+    std::fs::write(
+        &src,
+        "long sum10(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j) {
+             return a + 2*b + 3*c + 4*d + 5*e + 6*f + 7*g + 8*h + 9*i + 10*j;
+         }
+         double mix(int a, double b, float c, long d, double e, float f, short g, double h,
+                    double i, double j, double k, double l, double m, unsigned char n) {
+             return a + b + c + d + e + f + g + h + i + j + k + l + m + n;
+         }
+         float half(float x) { return x / 2; }
+         signed char neg(signed char x) { return -x; }",
+    )
+    .unwrap();
+    let built = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&lib)
+        .arg(&src)
+        .status();
+    if !built.is_ok_and(|s| s.success()) {
+        eprintln!("skipped: no C compiler");
+        return;
+    }
+    let out = run(&format!(
+        "local lib = ffi.open('{}')
+         local sum10 = lib:bind('sum10', 'long', {})
+         local mix = lib:bind('mix', 'double', 'int', 'double', 'float', 'long', 'double',
+             'float', 'short', 'double', 'double', 'double', 'double', 'double', 'double', 'uchar')
+         local half = lib:bind('half', 'float', 'float')
+         local neg = lib:bind('neg', 'i8', 'i8')
+         return sum10(1, 1, 1, 1, 1, 1, 1, 1, 1, 1), sum10(0, 0, 0, 0, 0, 0, 0, 0, 0, -1),
+             mix(1, 0.5, 0.25, 2, 1, 0.75, -3, 1, 1, 1, 1, 1, 1, 255), half(3), neg(-128)",
+        lib.display(),
+        ["'long'"; 10].join(", ")
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out, "55\t-10\t263.5\t1.5\t-128");
 }

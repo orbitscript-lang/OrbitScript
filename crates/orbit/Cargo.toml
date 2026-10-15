@@ -44,6 +44,9 @@ c-modules = ["dep:orbit-capi", "package"]
 # The `ffi` library: calling C functions in shared libraries (off by
 # default for embedders; a host still opts in with `Lua::enable_ffi`).
 ffi = ["dep:orbit-ffi"]
+# With `ffi`: link the system's shared libffi rather than a static copy built
+# from bundled sources.
+ffi-system-libffi = ["ffi", "orbit-ffi/system-libffi"]
 
 [lints]
 workspace = true

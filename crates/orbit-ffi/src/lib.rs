@@ -10,8 +10,7 @@
 //!
 //! An FFI function is a plain native whose data words
 //! ([`orbit_vm::Vm::register_native_with_data`]) hold the C function's
-//! address and its packed signature, so a call costs about what a Rust
-//! native's does. The host decides whether scripts get the library at all
+//! address and which of the VM's signatures it has; libffi makes the call. The host decides whether scripts get the library at all
 //! ([`install`]); once they have it they can call any C function and read
 //! and write any memory, as a C module could. All `unsafe` code is in
 //! [`sys`].
@@ -19,6 +18,7 @@
 mod sys;
 
 use std::cell::Cell;
+use std::rc::Rc;
 
 use orbit_vm::orbit_core::{Gc, LightUserData, Table, UserData, Value};
 use orbit_vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
@@ -47,23 +47,6 @@ enum Ty {
     Float,
 }
 
-const TYPES: [Ty; 14] = [
-    Ty::Void,
-    Ty::I8,
-    Ty::U8,
-    Ty::I16,
-    Ty::U16,
-    Ty::I32,
-    Ty::U32,
-    Ty::I64,
-    Ty::U64,
-    Ty::Ptr,
-    Ty::CStr,
-    Ty::Bytes,
-    Ty::Double,
-    Ty::Float,
-];
-
 impl Ty {
     fn parse(name: &[u8]) -> Option<Ty> {
         Some(match name {
@@ -85,12 +68,23 @@ impl Ty {
         })
     }
 
-    fn from_bits(b: u64) -> Ty {
-        TYPES[(b & 15) as usize % TYPES.len()]
-    }
-
-    fn is_float(self) -> bool {
-        matches!(self, Ty::Double | Ty::Float)
+    /// How the value travels: strings as pointers.
+    fn ctype(self) -> sys::CType {
+        use sys::CType as C;
+        match self {
+            Ty::Void => C::Void,
+            Ty::I8 => C::I8,
+            Ty::U8 => C::U8,
+            Ty::I16 => C::I16,
+            Ty::U16 => C::U16,
+            Ty::I32 => C::I32,
+            Ty::U32 => C::U32,
+            Ty::I64 => C::I64,
+            Ty::U64 => C::U64,
+            Ty::Ptr | Ty::CStr | Ty::Bytes => C::Pointer,
+            Ty::Double => C::Double,
+            Ty::Float => C::Float,
+        }
     }
 
     /// Bytes in memory (`ffi.sizeof`, `ffi.get`, `ffi.set`); `None` for
@@ -106,46 +100,15 @@ impl Ty {
     }
 }
 
-/// The most arguments a signature takes.
-const MAX_ARGS: usize = 12;
-
-/// How a signature is called (see [`sys`]).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Shape {
-    Ints = 0,
-    Floats = 1,
-    Mixed = 2,
-}
-
-/// A packed signature, an FFI function's second data word: bits 0-3 the
-/// result type, 4-7 the argument count, four bits per argument from bit 8,
-/// the [`Shape`] from bit 56, and [`HAS_STRINGS`].
-#[derive(Clone, Copy)]
-struct Sig(u64);
-
-/// Set in a [`Sig`] with `cstr` or `bytes` arguments.
-const HAS_STRINGS: u64 = 1 << 58;
-
-impl Sig {
-    fn ret(self) -> Ty {
-        Ty::from_bits(self.0)
-    }
-    fn nargs(self) -> usize {
-        ((self.0 >> 4) & 15) as usize
-    }
-    fn arg(self, k: usize) -> Ty {
-        Ty::from_bits(self.0 >> (8 + 4 * k))
-    }
-    fn has_strings(self) -> bool {
-        self.0 & HAS_STRINGS != 0
-    }
-    fn shape(self) -> Shape {
-        match (self.0 >> 56) & 3 {
-            0 => Shape::Ints,
-            1 => Shape::Floats,
-            _ => Shape::Mixed,
-        }
-    }
+/// A C function signature and libffi's call description for it, shared by
+/// every function bound with it.
+#[derive(Debug)]
+struct Signature {
+    ret: Ty,
+    args: Box<[Ty]>,
+    /// Some argument is a `cstr` or `bytes`.
+    has_strings: bool,
+    cif: sys::Cif,
 }
 
 /// An open shared library (`ffi.open`).
@@ -165,13 +128,17 @@ impl Buffer {
     }
 }
 
-/// Per-VM state: one function value per distinct address and signature,
-/// so binding the same function twice gives the same value and the
-/// natives stay bounded by what scripts declare. Binding is rare next to
-/// calling, so a list does.
+/// Per-VM state. Natives are never freed, so there is one function value
+/// per distinct address and signature: binding the same function twice
+/// gives the same value, and the natives stay bounded by what scripts
+/// declare. Binding is rare next to calling, so lists do.
 #[derive(Default)]
 struct State {
     installed: bool,
+    /// Every distinct signature bound; an FFI function's second data word
+    /// is its index here.
+    signatures: Vec<Rc<Signature>>,
+    /// Function values by their data words, [address, signature index].
     functions: Vec<([u64; 2], Value)>,
 }
 
@@ -206,8 +173,6 @@ pub fn install(vm: &mut Vm) {
     }
     let ffi = orbit_stdlib::open_lib(vm, "ffi", FUNCTIONS);
     vm.pin(Value::Table(ffi));
-    let supported = Value::Bool(sys::SUPPORTED);
-    set(vm, ffi, "supported", supported);
     let k = vm.new_str(b"bind");
     let bind = orbit_vm::orbit_core::table::get(&vm.heap, ffi, k);
     let (_, methods) = new_meta(vm, LIBRARY_META, "ffi.library.__tostring", library_tostring);
@@ -277,9 +242,6 @@ fn type_arg(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Ty, LuaError> {
 /// `ffi.open([name])`: a shared library by file name or path, or with no
 /// name the symbols already in the process.
 fn ffi_open(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    if !sys::SUPPORTED {
-        return Err(ctx.error("ffi: not supported on this platform"));
-    }
     let name = match ctx.arg(0) {
         Value::Nil => None,
         _ => {
@@ -310,40 +272,14 @@ fn ffi_bind(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
         return Err(ctx.arg_error(2, "'bytes' is an argument type only"));
     }
     let nargs = ctx.nargs().saturating_sub(3);
-    if nargs > MAX_ARGS {
-        return Err(ctx.error(format!("too many arguments (at most {MAX_ARGS})")));
-    }
-    let mut bits = ret as u64 | (nargs as u64) << 4;
-    let (mut ints, mut doubles, mut floats) = (0, 0, 0);
+    let mut args = Vec::with_capacity(nargs);
     for k in 0..nargs {
         let t = type_arg(ctx, 3 + k)?;
-        match t {
-            Ty::Void => return Err(ctx.arg_error(3 + k, "'void' is a result type only")),
-            Ty::Double => doubles += 1,
-            Ty::Float => floats += 1,
-            Ty::CStr | Ty::Bytes => {
-                ints += 1;
-                bits |= HAS_STRINGS;
-            }
-            _ => ints += 1,
+        if t == Ty::Void {
+            return Err(ctx.arg_error(3 + k, "'void' is a result type only"));
         }
-        bits |= (t as u64) << (8 + 4 * k);
+        args.push(t);
     }
-    if ints > sys::INT_REGS || doubles + floats > sys::FLOAT_REGS {
-        return Err(ctx.error(format!(
-            "too many arguments: at most {} integer or pointer and {} floating-point",
-            sys::INT_REGS,
-            sys::FLOAT_REGS
-        )));
-    }
-    let shape = if doubles + floats == 0 && !ret.is_float() {
-        Shape::Ints
-    } else if ints == 0 && floats == 0 && doubles <= sys::EXACT_FLOATS {
-        Shape::Floats
-    } else {
-        Shape::Mixed
-    };
-    bits |= (shape as u64) << 56;
     let name = ctx.bytes(name).to_vec();
     let addr = match sys::symbol(handle, &name) {
         Ok(a) => a,
@@ -352,7 +288,11 @@ fn ffi_bind(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
             return Err(ctx.error(format!("cannot find C function '{name}': {e}")));
         }
     };
-    let data = [addr, bits];
+    let index = match signature(ctx.vm, ret, &args) {
+        Ok(i) => i,
+        Err(e) => return Err(ctx.error(e)),
+    };
+    let data = [addr, index as u64];
     let state = ctx.vm.rt.ext.get_or_insert_with(State::default);
     let v = match state.functions.iter().find(|(d, _)| *d == data) {
         Some(&(_, v)) => v,
@@ -366,9 +306,30 @@ fn ffi_bind(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
     ctx.ret1(v)
 }
 
+/// The index in [`State::signatures`] of `ret` and `args`, prepared on
+/// first use.
+fn signature(vm: &mut Vm, ret: Ty, args: &[Ty]) -> Result<usize, String> {
+    let state = vm.rt.ext.get_or_insert_with(State::default);
+    if let Some(i) = state
+        .signatures
+        .iter()
+        .position(|s| s.ret == ret && *s.args == *args)
+    {
+        return Ok(i);
+    }
+    let ctypes: Vec<sys::CType> = args.iter().map(|t| t.ctype()).collect();
+    let cif = sys::Cif::new(ret.ctype(), &ctypes)?;
+    state.signatures.push(Rc::new(Signature {
+        ret,
+        args: args.into(),
+        has_strings: args.iter().any(|t| matches!(t, Ty::CStr | Ty::Bytes)),
+        cif,
+    }));
+    Ok(state.signatures.len() - 1)
+}
+
 /// An integer argument for a C integer of type `t`: any value either the
-/// signed or the unsigned type of that width can hold, widened to 64 bits
-/// as the calling conventions expect.
+/// signed or the unsigned type of that width can hold, in the low bits.
 #[inline]
 fn int_arg(ctx: &mut NativeCtx<'_>, k: usize, t: Ty) -> Result<u64, LuaError> {
     let n = match ctx.arg(k) {
@@ -446,17 +407,28 @@ fn to_value(ctx: &mut NativeCtx<'_>, t: Ty, bits: u64) -> Value {
 
 /// The native behind every FFI function.
 fn call(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let [addr, sig] = ctx.native_data();
-    let sig = Sig(sig);
-    if sig.has_strings() {
-        return call_with_strings(ctx, addr, sig);
+    let [addr, index] = ctx.native_data();
+    let sig = match ctx.vm.rt.ext.get::<State>() {
+        Some(state) => Rc::clone(&state.signatures[index as usize]),
+        None => unreachable!("bound through the library"),
+    };
+    let n = sig.args.len();
+    let mut stack = [0u64; 8];
+    let mut heap = Vec::new();
+    let slots: &mut [u64] = if n <= stack.len() {
+        &mut stack[..n]
+    } else {
+        heap.resize(n, 0);
+        &mut heap
+    };
+    if sig.has_strings {
+        return call_with_strings(ctx, addr, &sig, slots);
     }
-    let mut regs = Regs::default();
-    for k in 0..sig.nargs() {
-        regs.arg(ctx, k, sig.arg(k))?;
+    for (k, (slot, &t)) in slots.iter_mut().zip(&sig.args).enumerate() {
+        *slot = arg(ctx, k, t)?;
     }
-    let r = regs.call(addr, sig);
-    finish(ctx, sig.ret(), r)
+    let r = sig.cif.call(addr, slots);
+    finish(ctx, sig.ret, r)
 }
 
 /// [`call`] for signatures with `cstr` or `bytes` arguments.
@@ -464,26 +436,22 @@ fn call(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
 fn call_with_strings(
     ctx: &mut NativeCtx<'_>,
     addr: u64,
-    sig: Sig,
+    sig: &Signature,
+    slots: &mut [u64],
 ) -> Result<NativeReturn, LuaError> {
-    let mut regs = Regs::default();
     // First every check and conversion, which may allocate (a number
     // passed as a string becomes one) and so move short strings; then,
     // with nothing left to allocate in the heap, the string pointers.
-    let mut strs = [(0usize, Ty::Void, None); sys::INT_REGS];
-    let mut ns = 0;
-    for k in 0..sig.nargs() {
-        let t = sig.arg(k);
+    let mut strs = Vec::new();
+    for (k, &t) in sig.args.iter().enumerate() {
         if let Ty::CStr | Ty::Bytes = t {
             let s = ctx.check_str(k)?;
             if t == Ty::CStr && ctx.bytes(s).contains(&0) {
                 return Err(ctx.arg_error(k, "string contains a NUL byte"));
             }
-            strs[ns] = (regs.ni, t, Some(s));
-            ns += 1;
-            regs.ni += 1;
+            strs.push((k, t, s));
         } else {
-            regs.arg(ctx, k, t)?;
+            slots[k] = arg(ctx, k, t)?;
         }
     }
     // C strings: copied with a NUL, into this stack buffer while they fit
@@ -492,9 +460,9 @@ fn call_with_strings(
     let mut stack = [0u8; 256];
     let mut used = 0;
     let mut long: Vec<Vec<u8>> = Vec::new();
-    for &(slot, t, s) in &strs[..ns] {
-        let bytes = ctx.bytes(s.expect("recorded"));
-        regs.ints[slot] = if t == Ty::Bytes {
+    for &(k, t, s) in &strs {
+        let bytes = ctx.bytes(s);
+        slots[k] = if t == Ty::Bytes {
             bytes.as_ptr() as u64
         } else if used + bytes.len() < stack.len() {
             let at = used;
@@ -511,59 +479,25 @@ fn call_with_strings(
             p
         };
     }
-    let r = regs.call(addr, sig);
+    let r = sig.cif.call(addr, slots);
     drop(long);
-    finish(ctx, sig.ret(), r)
+    finish(ctx, sig.ret, r)
 }
 
-/// Argument registers being filled for a call.
-#[derive(Default)]
-struct Regs {
-    ints: [u64; sys::INT_REGS],
-    floats: [f64; sys::FLOAT_REGS],
-    ni: usize,
-    nf: usize,
-}
-
-impl Regs {
-    /// Convert argument `k` (not a string) for type `t`.
-    #[inline(always)]
-    fn arg(&mut self, ctx: &mut NativeCtx<'_>, k: usize, t: Ty) -> Result<(), LuaError> {
-        match t {
-            Ty::Ptr => {
-                self.ints[self.ni] = ptr_arg(ctx, k)?;
-                self.ni += 1;
-            }
-            Ty::Double => {
-                self.floats[self.nf] = match ctx.arg(k) {
-                    Value::Float(x) => x,
-                    _ => ctx.check_f64(k)?,
-                };
-                self.nf += 1;
-            }
-            Ty::Float => {
-                // In the low half of its register (see `sys`).
-                let x = ctx.check_f64(k)? as f32;
-                self.floats[self.nf] = f64::from_bits(u64::from(x.to_bits()));
-                self.nf += 1;
-            }
-            Ty::Void | Ty::CStr | Ty::Bytes => unreachable!("handled by the caller"),
-            _ => {
-                self.ints[self.ni] = int_arg(ctx, k, t)?;
-                self.ni += 1;
-            }
+/// Argument `k` (not a string) as a value of type `t`, in the low bits.
+#[inline(always)]
+fn arg(ctx: &mut NativeCtx<'_>, k: usize, t: Ty) -> Result<u64, LuaError> {
+    Ok(match t {
+        Ty::Ptr => ptr_arg(ctx, k)?,
+        Ty::Double => match ctx.arg(k) {
+            Value::Float(x) => x,
+            _ => ctx.check_f64(k)?,
         }
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn call(&self, addr: u64, sig: Sig) -> u64 {
-        match sig.shape() {
-            Shape::Ints => sys::call_ints(addr, &self.ints[..self.ni]),
-            Shape::Floats => sys::call_floats(addr, &self.floats[..self.nf], sig.ret().is_float()),
-            Shape::Mixed => sys::call_mixed(addr, &self.ints, &self.floats, sig.ret().is_float()),
-        }
-    }
+        .to_bits(),
+        Ty::Float => u64::from((ctx.check_f64(k)? as f32).to_bits()),
+        Ty::Void | Ty::CStr | Ty::Bytes => unreachable!("handled by the caller"),
+        _ => int_arg(ctx, k, t)?,
+    })
 }
 
 /// Record `errno` and return result register `r` as `ret`.
