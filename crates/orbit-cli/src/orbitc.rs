@@ -11,8 +11,7 @@
 //! information), `-v` (version), `--` and `-` (standard input). Our own:
 //! `--ast` and `--hir` print the syntax tree or the HIR instead of
 //! compiling. Unlike `luac`, writing a chunk takes exactly one input file.
-//! With the `orbitscript` feature, files named `*.orb` are OrbitScript
-//! (`--hir`, listing and writing; `--ast` is Lua-only for now).
+//! Files named `*.orb` are OrbitScript (`--hir`, listing and writing; `--ast` is Lua-only for now).
 //! An error prints `<program>: <message>` to stderr with exit status 1.
 
 use std::io::Write;
@@ -149,7 +148,6 @@ fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
     let name = orbit::chunk_id(source);
     let options = ParseOptions::default();
     let mut stdout = std::io::stdout();
-    #[cfg(feature = "orbitscript")]
     if orbit::is_orbitscript_file(source) && bytes.first() != format::SIGNATURE.first() {
         return run_orbitscript(cli, bytes, source, &name);
     }
@@ -192,7 +190,6 @@ fn output(cli: &Cli, chunk: &UnlinkedChunk) -> Result<(), String> {
 }
 
 /// [`run`] for an OrbitScript file: the HIR, or a compiled chunk.
-#[cfg(feature = "orbitscript")]
 fn run_orbitscript(cli: &Cli, bytes: &[u8], source: &[u8], name: &str) -> Result<(), String> {
     let options = orbit_orb_syntax::ParseOptions::default();
     match cli.stage {

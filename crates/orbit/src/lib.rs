@@ -67,7 +67,6 @@ pub fn compile(
 
 /// Parse, lower, analyse and compile OrbitScript source into plain data, as
 /// [`compile`] does for Lua.
-#[cfg(feature = "orbitscript")]
 pub fn compile_orbitscript(
     src: &[u8],
     chunk_name: &str,
@@ -100,7 +99,6 @@ fn compile_lua(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
 }
 
 /// The compiler `.orb` files use ([`orbit_vm::Runtime::compile_orbitscript`]).
-#[cfg(feature = "orbitscript")]
 fn compile_orb(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
     compile_orbitscript(src, chunk_name, &orbit_orb_syntax::ParseOptions::default())
         .map_err(|e| e.to_string())
@@ -127,7 +125,6 @@ impl Lua {
     pub fn with_options(options: Options) -> Self {
         let mut vm = Vm::new();
         vm.rt.compile = Some(compile_lua);
-        #[cfg(feature = "orbitscript")]
         {
             vm.rt.compile_orbitscript = Some(compile_orb);
         }
@@ -169,7 +166,6 @@ impl Lua {
     }
 
     /// [`Lua::load`] for OrbitScript source.
-    #[cfg(feature = "orbitscript")]
     pub fn load_orbitscript(&mut self, src: &[u8], chunk_name: &str) -> Result<Value, Error> {
         let chunk =
             compile_orbitscript(src, chunk_name, &orbit_orb_syntax::ParseOptions::default())?;

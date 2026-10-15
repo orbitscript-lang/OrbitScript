@@ -149,9 +149,10 @@ fn unlinked(
         return Err(bad(&"binary chunks not enabled"));
     }
     let name = chunk_id(source);
-    let compile = match rt.compile_orbitscript {
-        Some(orb) if is_orbitscript_file(source) => Some(orb),
-        _ => rt.compile,
+    let compile = if is_orbitscript_file(source) {
+        rt.compile_orbitscript
+    } else {
+        rt.compile
     };
     let Some(compile) = compile else {
         return Err(format!("{name}: no compiler for source chunks"));

@@ -461,10 +461,11 @@ pub struct Runtime {
     /// Per-VM state of host libraries, one value per type (the `math`
     /// library's random generator, for example).
     pub ext: Extensions,
-    /// The source compiler, if the host installed one.
+    /// The Lua compiler. A hook rather than a dependency, so the VM stays
+    /// free of the front ends; `orbit::Lua` installs it.
     pub compile: Option<CompileFn>,
-    /// The OrbitScript compiler, if the host installed one. Source files
-    /// whose name ends in `.orb` use it; everything else uses
+    /// The OrbitScript compiler, installed with [`Runtime::compile`]. Source
+    /// files whose name ends in `.orb` use it; everything else uses
     /// [`Runtime::compile`].
     pub compile_orbitscript: Option<CompileFn>,
     pub(crate) natives: Vec<Native>,
