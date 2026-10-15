@@ -1,0 +1,36 @@
+> 1 + 2 * 3
+7
+> x = 4
+x = 4
+> (x + 1) * -2
+-10
+> y = x ^ 2 / 8
+y = 2.0
+> 2 ^ 3 ^ 2
+512.0
+> -2 ^ 2
+-4.0
+> 17 % 5 - 7 % -3
+4
+> max(x, y, 10 % 4)
+4
+> sqrt(y * 8) + abs(-pi)
+7.1415926535897931
+> y - z
+error: unknown variable 'z'
+> 1 / (x - 4)
+error: division by zero
+> 2 +
+error: unexpected end of input
+> 3 $ 4
+error: unexpected character '$' at column 3
+> (1 + 2
+error: expected ')', found end of input
+> foo(1)
+error: unknown function 'foo'
+> max()
+error: max needs at least one argument
+> x = = 1
+error: unexpected '='
+> x 1
+error: unexpected number 1 after the expression

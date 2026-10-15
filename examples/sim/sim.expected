@@ -1,0 +1,15 @@
+   3  customer 1 arrives (0 waiting)
+   3  customer 1 is served after 0 min
+   6  customer 2 arrives (0 waiting)
+   6  customer 2 is served after 0 min
+   7  customer 3 arrives (0 waiting)
+   7  customer 4 arrives (1 waiting)
+   9  customer 3 is served after 2 min
+   9  customer 1 leaves
+  10  customer 4 is served after 3 min
+  10  customer 2 leaves
+  10  customer 5 arrives (0 waiting)
+  11  customer 5 is served after 1 min
+   ...
+closed at minute 146: 68 customers served by 2 baristas
+average wait 8.87 min, longest 25 min

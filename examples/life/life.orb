@@ -1,0 +1,103 @@
+// life: Conway's Game of Life on a small torus (the edges wrap around).
+//
+// Shows nested arrays, exclusive ranges (`0..n`), `%` for wrapping, `continue`, and a
+// `match` on a pair whose arms share a result through `|`.
+//
+// Usage: orbit life.orb [generations]
+
+extern arg;
+
+struct Grid { rows, cols, cells }
+
+impl Grid {
+    pub fn parse(picture) -> Grid {
+        let cells = [];
+        for line in picture.gmatch("[^\n]+") {
+            let row = [];
+            for c in 1..=#line {
+                row[c] = line.sub(c, c) == "#";
+            }
+            cells[#cells + 1] = row;
+        }
+        Grid { rows: #cells, cols: #cells[1], cells }
+    }
+
+    /// The cell at row `r`, column `c`, counted from 0 and wrapping at the edges.
+    pub fn alive(self, r, c) -> bool {
+        self.cells[r % self.rows + 1][c % self.cols + 1]
+    }
+
+    fn neighbours(self, r, c) -> int {
+        let mut n = 0;
+        for dr in -1..=1 {
+            for dc in -1..=1 {
+                if dr == 0 && dc == 0 {
+                    continue;
+                }
+                if self.alive(r + dr, c + dc) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    pub fn step(self) -> Grid {
+        let cells = [];
+        for r in 0..self.rows {
+            let row = [];
+            for c in 0..self.cols {
+                row[c + 1] = match (self.alive(r, c), self.neighbours(r, c)) {
+                    (true, 2) | (_, 3) => true,
+                    _ => false,
+                };
+            }
+            cells[r + 1] = row;
+        }
+        Grid { rows: self.rows, cols: self.cols, cells }
+    }
+
+    pub fn population(self) -> int {
+        let mut n = 0;
+        for (_, row) in ipairs(self.cells) {
+            for (_, alive) in ipairs(row) {
+                if alive {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn __tostring(self) {
+        let lines = [];
+        for (r, row) in ipairs(self.cells) {
+            let mut line = "";
+            for (_, alive) in ipairs(row) {
+                line = line ~ if alive { "#" } else { "." };
+            }
+            lines[r] = line;
+        }
+        table::concat(lines, "\n")
+    }
+}
+
+let mut grid = Grid::parse(r#"
+.#......
+..#.....
+###.....
+........
+........
+.....##.
+.....##.
+........
+"#);
+
+let generations = tonumber(arg[1]) || 8;
+for gen in 0..=generations {
+    if gen % 4 == 0 {
+        print(f"generation {gen}, population {grid.population()}:");
+        print(grid);
+    }
+    grid = grid.step();
+}

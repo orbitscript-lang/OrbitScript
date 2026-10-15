@@ -1,0 +1,259 @@
+// calc: a small calculator language, written in OrbitScript.
+//
+// A tokenizer, a Pratt parser, an enum AST and an evaluator. Errors are Lua-style
+// `nil, message` results, and `?` carries them up through the recursion. Compare
+// calc.lua, the same program in plain Lua.
+//
+// Usage: orbit calc.orb [rounds]   (rounds > 1 repeats the work, for benchmarking)
+
+extern arg;
+
+enum Token {
+    Num { value },
+    Ident { name },
+    Op { op },
+    Open,
+    Close,
+    Comma,
+    Assign,
+    End,
+}
+
+enum Expr {
+    Num { value },
+    Var { name },
+    Neg { inner },
+    Bin { op, lhs, rhs },
+    Call { name, args },
+}
+
+enum Stmt {
+    Assign { name, value },
+    Show { value },
+}
+
+fn describe(t) {
+    match t {
+        Token::Num { value } => f"number {value}",
+        Token::Ident { name } => f"name '{name}'",
+        Token::Op { op } => f"'{op}'",
+        Token::Open => "'('",
+        Token::Close => "')'",
+        Token::Comma => "','",
+        Token::Assign => "'='",
+        Token::End => "end of input",
+    }
+}
+
+fn tokenize(src) {
+    let tokens = [];
+    let mut pos = 1;
+    loop {
+        let (_, blank_end) = src.find("^%s*", pos);
+        pos = blank_end + 1;
+        if pos > #src {
+            break;
+        }
+        let number = src.match("^%d+%.?%d*", pos);
+        let word = src.match("^[%a_][%w_]*", pos);
+        let token = if number != nil {
+            pos += #number;
+            Token::Num { value: tonumber(number) }
+        } else if word != nil {
+            pos += #word;
+            Token::Ident { name: word }
+        } else {
+            let c = src.sub(pos, pos);
+            pos += 1;
+            match c {
+                "(" => Token::Open,
+                ")" => Token::Close,
+                "," => Token::Comma,
+                "=" => Token::Assign,
+                "+" | "-" | "*" | "/" | "%" | "^" => Token::Op { op: c },
+                _ => return (nil, f"unexpected character '{c}' at column {pos - 1}"),
+            }
+        };
+        tokens[#tokens + 1] = token;
+    }
+    tokens[#tokens + 1] = Token::End;
+    tokens
+}
+
+// How tightly each infix operator binds. Unary minus binds at 25: tighter than `*`,
+// looser than `^`, so `-2 ^ 2` is -4.
+let binding_power = #{ "+": 10, "-": 10, "*": 20, "/": 20, "%": 20, "^": 30 };
+const NEG_POWER = 25;
+
+struct Parser { tokens, pos }
+
+impl Parser {
+    fn peek(self) { self.tokens[self.pos] }
+
+    fn advance(self) {
+        let t = self.tokens[self.pos];
+        self.pos += 1;
+        t
+    }
+
+    fn expect(self, want, what) {
+        let got = self.advance();
+        if got != want {
+            return (nil, f"expected {what}, found {describe(got)}");
+        }
+        true
+    }
+
+    // Parses a prefix, then folds in the operators that bind tighter than `min`.
+    fn expr(self, min) {
+        let mut lhs = self.prefix()?;
+        loop {
+            let op = match self.peek() {
+                Token::Op { op } => op,
+                _ => break,
+            };
+            let power = binding_power[op];
+            if power <= min {
+                break;
+            }
+            self.advance();
+            // `^` is right-associative: its right side may hold another `^`.
+            let rhs = self.expr(if op == "^" { power - 1 } else { power })?;
+            lhs = Expr::Bin { op, lhs, rhs };
+        }
+        lhs
+    }
+
+    fn prefix(self) {
+        match self.advance() {
+            Token::Num { value } => Expr::Num { value },
+            Token::Ident { name } => {
+                if self.peek() != Token::Open {
+                    return Expr::Var { name };
+                }
+                self.advance();
+                let args = [];
+                if self.peek() != Token::Close {
+                    loop {
+                        args[#args + 1] = self.expr(0)?;
+                        if self.peek() != Token::Comma {
+                            break;
+                        }
+                        self.advance();
+                    }
+                }
+                self.expect(Token::Close, "')'")?;
+                Expr::Call { name, args }
+            }
+            Token::Op { op: "-" } => Expr::Neg { inner: self.expr(NEG_POWER)? },
+            Token::Open => {
+                let inner = self.expr(0)?;
+                self.expect(Token::Close, "')'")?;
+                inner
+            }
+            t => (nil, f"unexpected {describe(t)}"),
+        }
+    }
+}
+
+fn parse_line(line) {
+    let p = Parser { tokens: tokenize(line)?, pos: 1 };
+    let stmt = match (p.tokens[1], p.tokens[2]) {
+        (Token::Ident { name }, Token::Assign) => {
+            p.pos = 3;
+            Stmt::Assign { name, value: p.expr(0)? }
+        }
+        _ => Stmt::Show { value: p.expr(0)? },
+    };
+    match p.peek() {
+        Token::End => stmt,
+        t => (nil, f"unexpected {describe(t)} after the expression"),
+    }
+}
+
+let functions = #{ max: math::max, min: math::min, sqrt: math::sqrt, abs: math::abs };
+
+fn eval(e, env) {
+    match e {
+        Expr::Num { value } => value,
+        Expr::Var { name } => {
+            let v = env[name];
+            if v == nil {
+                return (nil, f"unknown variable '{name}'");
+            }
+            v
+        }
+        Expr::Neg { inner } => -eval(inner, env)?,
+        Expr::Call { name, args } => {
+            let f = functions[name];
+            if f == nil {
+                return (nil, f"unknown function '{name}'");
+            }
+            if #args == 0 {
+                return (nil, f"{name} needs at least one argument");
+            }
+            let values = [];
+            for (i, a) in ipairs(args) {
+                values[i] = eval(a, env)?;
+            }
+            f(...table::unpack(values))
+        }
+        Expr::Bin { op, lhs, rhs } => {
+            let a = eval(lhs, env)?;
+            let b = eval(rhs, env)?;
+            match op {
+                "+" => a + b,
+                "-" => a - b,
+                "*" => a * b,
+                "/" | "%" if b == 0 => (nil, "division by zero"),
+                "/" => a / b,
+                "%" => a % b,
+                "^" => a ** b,
+            }
+        }
+    }
+}
+
+fn run_line(line, env) {
+    match parse_line(line)? {
+        Stmt::Assign { name, value } => {
+            let v = eval(value, env)?;
+            env[name] = v;
+            f"{name} = {v}"
+        }
+        Stmt::Show { value } => tostring(eval(value, env)?),
+    }
+}
+
+let program = [
+    "1 + 2 * 3",
+    "x = 4",
+    "(x + 1) * -2",
+    "y = x ^ 2 / 8",
+    "2 ^ 3 ^ 2",
+    "-2 ^ 2",
+    "17 % 5 - 7 % -3",
+    "max(x, y, 10 % 4)",
+    "sqrt(y * 8) + abs(-pi)",
+    "y - z",
+    "1 / (x - 4)",
+    "2 +",
+    "3 $ 4",
+    "(1 + 2",
+    "foo(1)",
+    "max()",
+    "x = = 1",
+    "x 1",
+];
+
+let rounds = tonumber(arg[1]) || 1;
+for round in 1..=rounds {
+    let env = #{ pi: math::pi };
+    for (_, line) in ipairs(program) {
+        let (result, err) = run_line(line, env);
+        if round == rounds {
+            print(f"> {line}");
+            print(if result != nil { result } else { f"error: {err}" });
+        }
+    }
+}

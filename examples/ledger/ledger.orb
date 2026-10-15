@@ -1,0 +1,227 @@
+// ledger: bank accounts with transactions that roll back on failure.
+//
+// Every command runs inside a transaction guard (`let scope tx = Tx::begin(...)`). If the
+// command returns early with an error (through `?` or `return`) or raises one, the guard's
+// `__close` restores the balances; only `tx.commit()` keeps the changes. `batch { ... }`
+// nests a transaction around several commands. Compare ledger.lua, the same program in
+// plain Lua.
+//
+// Usage: orbit ledger.orb [rounds]   (rounds > 1 repeats the work, for benchmarking)
+
+extern arg;
+
+let script = r#"
+# A tiny bank. Amounts may be integers or decimals.
+open alice 100
+open bob 20
+open carol 5
+deposit carol 15.5
+transfer alice bob 30
+transfer bob alice 500
+transfer alice dave 5
+open bob 1
+withdraw carol 2.25
+
+# A batch commits all of its commands or none of them.
+batch
+  transfer alice carol 10
+  transfer carol bob 100
+end
+batch
+  transfer alice carol 10
+  deposit bob 5
+  batch
+    withdraw bob 1
+    explode now
+  end
+end
+deposit alice ten
+report
+"#;
+
+enum Command {
+    Batch { body },
+    Simple { line, words },
+}
+
+struct Ledger { balances, verbose, depth }
+
+/// A transaction guard: it snapshots the balances and puts them back when it goes out of
+/// scope without `commit()`.
+struct Tx { ledger, saved, label, done }
+
+impl Tx {
+    pub fn begin(ledger, label) -> Tx {
+        let saved = #{};
+        for (name, balance) in pairs(ledger.balances) {
+            saved[name] = balance;
+        }
+        Tx { ledger, saved, label, done: false }
+    }
+
+    pub fn commit(self) {
+        self.done = true;
+    }
+
+    fn __close(self, err) {
+        if self.done {
+            return;
+        }
+        self.ledger.balances = self.saved;
+        if self.label != nil {
+            let why = if err != nil { f" after error: {err}" } else { "" };
+            self.ledger.say(f"rolled back {self.label}{why}");
+        }
+    }
+}
+
+fn amount(text) {
+    let n = tonumber(text);
+    if n == nil || n <= 0 {
+        return (nil, f"bad amount '{text}'");
+    }
+    n
+}
+
+impl Ledger {
+    pub fn new(verbose) -> Ledger {
+        Ledger { balances: #{}, verbose, depth: 0 }
+    }
+
+    pub fn say(self, text) {
+        if self.verbose {
+            print(string::rep("  ", self.depth) ~ text);
+        }
+    }
+
+    fn account(self, name) {
+        if self.balances[name] == nil {
+            return (nil, f"no account '{name}'");
+        }
+        name
+    }
+
+    fn take(self, name, n) {
+        let name = self.account(name)?;
+        self.balances[name] -= n;
+        if self.balances[name] < 0 {
+            return (nil, f"{name} would go negative");
+        }
+        true
+    }
+
+    /// Applies one command. Returns true, or nil and a message; the caller's transaction
+    /// undoes a half-applied command.
+    fn apply(self, words) {
+        match words[1] {
+            "open" => {
+                let name = words[2];
+                if self.balances[name] != nil {
+                    return (nil, f"account '{name}' already exists");
+                }
+                self.balances[name] = amount(words[3])?;
+            }
+            "deposit" => {
+                let name = self.account(words[2])?;
+                self.balances[name] += amount(words[3])?;
+            }
+            "withdraw" => {
+                self.take(words[2], amount(words[3])?)?;
+            }
+            "transfer" => {
+                let n = amount(words[4])?;
+                self.take(words[2], n)?;
+                let to = self.account(words[3])?;
+                self.balances[to] += n;
+            }
+            "report" => self.report(),
+            "explode" => panic(f"boom ({words[2]})", 0),
+            other => return (nil, f"unknown command '{other}'"),
+        }
+        true
+    }
+
+    pub fn run(self, cmd) {
+        match cmd {
+            Command::Simple { line, words } => {
+                self.say(line);
+                let scope tx = Tx::begin(self, nil);
+                self.apply(words)?;
+                tx.commit();
+            }
+            Command::Batch { body } => {
+                self.say("batch {");
+                self.depth += 1;
+                scope {
+                    self.depth -= 1;
+                    self.say("}");
+                }
+                let scope tx = Tx::begin(self, "batch");
+                for (_, c) in ipairs(body) {
+                    self.run(c)?;
+                }
+                tx.commit();
+            }
+        }
+        true
+    }
+
+    pub fn report(self) {
+        let names = [];
+        for name in pairs(self.balances) {
+            names[#names + 1] = name;
+        }
+        table::sort(names);
+        let mut total = 0;
+        for (_, name) in ipairs(names) {
+            let balance = self.balances[name];
+            total += balance;
+            self.say(f"  {name:<8}{balance:>9.2}");
+        }
+        self.say(f"  {"total":<8}{total:>9.2}");
+    }
+}
+
+/// Splits the script into commands; `batch` ... `end` nest.
+fn parse(text) {
+    let top = [];
+    let open_blocks = [top];
+    for line in text.gmatch("[^\n]+") {
+        let words = [];
+        for w in line.gmatch("%S+") {
+            words[#words + 1] = w;
+        }
+        if #words == 0 || words[1].sub(1, 1) == "#" {
+            continue;
+        }
+        let block = open_blocks[#open_blocks];
+        match words[1] {
+            "batch" => {
+                let body = [];
+                block[#block + 1] = Command::Batch { body };
+                open_blocks[#open_blocks + 1] = body;
+            }
+            "end" => {
+                open_blocks[#open_blocks] = nil;
+            }
+            _ => {
+                block[#block + 1] = Command::Simple { line: line.match("^%s*(.-)%s*$"), words };
+            }
+        }
+    }
+    top
+}
+
+let commands = parse(script);
+let rounds = tonumber(arg[1]) || 1;
+for round in 1..=rounds {
+    let ledger = Ledger::new(round == rounds);
+    for (_, cmd) in ipairs(commands) {
+        let (ok, result, err) = pcall(|| ledger.run(cmd));
+        if !ok {
+            ledger.say(f"error: {result}");
+        } else if result == nil {
+            ledger.say(f"error: {err}");
+        }
+    }
+}

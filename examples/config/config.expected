@@ -1,0 +1,11 @@
+server.ini: orbit demo on 127.0.0.1:8080
+  name = orbit demo (string)
+  logging.color = true (boolean)
+  logging.file = /var/log/orbit.log (string)
+  logging.level = debug (string)
+  server.host = 127.0.0.1 (string)
+  server.port = 8080 (number)
+  server.workers = 4 (number)
+error: bad port "eighty"
+error: bad-line.ini:3: cannot read 'this line has no equals sign'
+error: missing.ini: No such file or directory

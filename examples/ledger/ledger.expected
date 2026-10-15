@@ -1,0 +1,36 @@
+open alice 100
+open bob 20
+open carol 5
+deposit carol 15.5
+transfer alice bob 30
+transfer bob alice 500
+error: bob would go negative
+transfer alice dave 5
+error: no account 'dave'
+open bob 1
+error: account 'bob' already exists
+withdraw carol 2.25
+batch {
+  transfer alice carol 10
+  transfer carol bob 100
+  rolled back batch
+}
+error: carol would go negative
+batch {
+  transfer alice carol 10
+  deposit bob 5
+  batch {
+    withdraw bob 1
+    explode now
+    rolled back batch after error: boom (now)
+  }
+  rolled back batch after error: boom (now)
+}
+error: boom (now)
+deposit alice ten
+error: bad amount 'ten'
+report
+  alice       70.00
+  bob         50.00
+  carol       18.25
+  total      138.25

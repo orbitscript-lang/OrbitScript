@@ -6,6 +6,7 @@
 | `diff/` | Small programs whose output must match the reference `lua5.5` exactly | `cargo testkit diff` |
 | `../bench/` | Benchmarks: time, peak RSS, binary size | `cargo testkit bench` |
 | `diff/compat/` | Lua 5.5 feature programs for the compatibility plan, diffed like `diff/` | `cargo testkit diff --corpus tests/diff/compat` |
+| `../examples/` | Example programs with expected output; Lua twins also run under `lua5.5` | `cargo testkit examples` (and `cargo test -p orbit-cli --test examples`) |
 
 `cargo testkit fuzz-syntax` compiles seeded mutants of the suite and the corpora with both interpreters and compares the compile errors. It fails only on mismatches missing from [`fuzz/syntax-mismatches.txt`](fuzz/syntax-mismatches.txt); refresh that list with `--update-expected` when a change fixes some.
 
@@ -54,7 +55,7 @@ Limits:
 `cargo testkit pgo train` records a new profile with rustc's stable flags, writes it to `pgo/<target>.profdata`, then builds as above:
 
 1. It builds an instrumented `orbit` with `-Cprofile-generate` in the `pgo-gen` Cargo profile (`target/pgo-gen/orbit`). Only this throwaway binary carries the counters.
-2. It runs that binary over the training set: the benchmarks at their quick inputs, `tests/diff`, `tests/diff/compat` and `tests/first-light`. Then it merges the raw profiles with `llvm-profdata`.
+2. It runs that binary over the training set: the benchmarks at their quick inputs, the examples at their `train=` inputs (see `examples/manifest.txt`), `tests/diff`, `tests/diff/compat` and `tests/first-light`. Then it merges the raw profiles with `llvm-profdata`.
 
 A stale profile never produces wrong code, but it can make the release build much slower than one without a profile. LLVM drops the counts of a function whose code changed and finds none for a function that is new (a move or rename gives it a new symbol), and in a profile-guided build it compiles such a function as if it never ran. When #126 moved the interpreter loop, the profile trained before it made the release build 1.1-1.5x slower than a plain one on most benchmarks until it was retrained.
 

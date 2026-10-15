@@ -1,0 +1,8 @@
+Ashford  start
+Brook      7 km  Ashford -> Brook
+Cliffe     9 km  Ashford -> Cliffe
+Dunmore   20 km  Ashford -> Cliffe -> Dunmore
+Eastgate  20 km  Ashford -> Cliffe -> Fenwick -> Eastgate
+Fenwick   11 km  Ashford -> Cliffe -> Fenwick
+Gorse    unreachable
+Hollow   unreachable

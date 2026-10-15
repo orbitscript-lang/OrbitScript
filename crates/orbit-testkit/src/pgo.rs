@@ -7,8 +7,9 @@
 //! `pgo train` records a new profile, all with stable rustc flags:
 //! 1. Build an instrumented `orbit` in the `pgo-gen` Cargo profile with
 //!    `-Cprofile-generate`. Only this throwaway binary carries the counters.
-//! 2. Run it over a training set (the benchmarks at their quick inputs and
-//!    the `tests/diff` and `tests/first-light` programs), then merge the raw
+//! 2. Run it over a training set (the benchmarks at their quick inputs, the
+//!    examples at their training inputs, and the `tests/diff` and
+//!    `tests/first-light` programs), then merge the raw
 //!    profiles with `llvm-profdata` into `pgo/<target>.profdata`.
 //!
 //! `pgo build` (the default) builds `orbit` in the `pgo` profile with
@@ -34,6 +35,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::bench::parse_manifest;
+use crate::examples;
 use crate::process::{self, Exit};
 use crate::util::{self, Result, io_err};
 
@@ -59,14 +61,16 @@ pgo/<target>.profdata for committing, then builds as above. Needs
 llvm-profdata from the same LLVM as rustc: `rustup component add
 llvm-tools`, or set LLVM_PROFDATA.
 
-Training set: bench/ at quick inputs, tests/diff, tests/diff/compat and
+Training set: bench/ at quick inputs, examples/ at their train= inputs
+(OrbitScript entries and their Lua twins), tests/diff, tests/diff/compat and
 tests/first-light.
 
 train options:
   --out FILE       write the profile to FILE instead of pgo/<target>.profdata,
                    e.g. for an experiment that shouldn't be committed
-  --exclude BENCH  leave a benchmark out of training (repeatable), e.g. to
-                   time a benchmark the profile has never seen
+  --exclude NAME   leave a benchmark (fib.lua) or an example (calc) out of
+                   training (repeatable), e.g. to time a program the profile
+                   has never seen
   --no-bench       train without the benchmarks
   --timeout SECS   per-program timeout while training (default 120)";
 
@@ -378,6 +382,24 @@ fn training_set(root: &Path, with_bench: bool, exclude: &[String]) -> Result<Vec
             });
         }
     }
+    // The examples train the OrbitScript front end and the code its desugaring produces,
+    // which the Lua-only corpora never reach.
+    let examples_dir = root.join("examples");
+    for e in examples::load(root)?
+        .into_iter()
+        .filter(|e| !exclude.contains(&e.dir))
+    {
+        let dir = examples_dir.join(&e.dir);
+        let twin = e.twin(&examples_dir);
+        for file in std::iter::once(e.entry.clone()).chain(twin) {
+            let mut args = vec![file];
+            args.extend(e.train.iter().cloned());
+            jobs.push(Job {
+                cwd: dir.clone(),
+                args,
+            });
+        }
+    }
     for corpus in ["tests/diff", "tests/diff/compat", "tests/first-light"] {
         let dir = root.join(corpus);
         let mut files: Vec<String> = fs::read_dir(&dir)
@@ -559,5 +581,10 @@ warning: `orbit-vm` (lib) generated 2 warnings
         assert!(some.iter().all(|j| j.args[0] != "fib.lua"));
         let no_bench = training_set(&root, false, &[]).unwrap();
         assert!(no_bench.iter().all(|j| !j.cwd.ends_with("bench")));
+        // An example trains with its Lua twin; excluding it by name drops both.
+        assert!(all.iter().any(|j| j.args == ["calc.orb", "500"]));
+        assert!(all.iter().any(|j| j.args == ["calc.lua", "500"]));
+        let no_calc = training_set(&root, true, &["calc".to_string()]).unwrap();
+        assert_eq!(no_calc.len() + 2, all.len());
     }
 }

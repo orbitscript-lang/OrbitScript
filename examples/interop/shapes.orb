@@ -1,0 +1,58 @@
+// shapes: an OrbitScript module that uses a Lua module and is used by Lua code.
+//
+// interop.lua loads it with `require("shapes")`; it loads geometry.lua with `use`.
+// `pub` items make up the table that `require` returns.
+
+use geometry;
+
+pub enum Shape {
+    Circle { r },
+    Rect { w, h },
+    Polygon { points },
+}
+
+impl Shape {
+    pub fn area(self) -> float {
+        match self {
+            Shape::Circle { r } => geometry::TAU / 2 * r * r,
+            Shape::Rect { w, h } => w * h,
+            Shape::Polygon { points } => geometry::polygon_area(points),
+        }
+    }
+
+    pub fn perimeter(self) -> float {
+        match self {
+            Shape::Circle { r } => geometry::TAU * r,
+            Shape::Rect { w, h } => 2 * (w + h),
+            Shape::Polygon { points } => {
+                let mut sum = 0.0;
+                for i in 1..=#points {
+                    sum += points[i].distance(points[i % #points + 1]);
+                }
+                sum
+            }
+        }
+    }
+
+    fn __tostring(self) {
+        match self {
+            Shape::Circle { r } => f"circle r={r}",
+            Shape::Rect { w, h } => f"rect {w}x{h}",
+            Shape::Polygon { points } => f"polygon of {#points} points",
+        }
+    }
+}
+
+/// A triangle built from geometry.lua's points.
+pub fn triangle(ax, ay, bx, by, cx, cy) -> Shape {
+    Shape::Polygon { points: [geometry::point(ax, ay), geometry::point(bx, by), geometry::point(cx, cy)] }
+}
+
+/// Adds up the areas of a list of shapes, whichever language built them.
+pub fn total_area(shapes: [Shape]) -> float {
+    let mut sum = 0.0;
+    for (_, s) in ipairs(shapes) {
+        sum += s.area();
+    }
+    sum
+}

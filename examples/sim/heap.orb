@@ -1,0 +1,59 @@
+// heap: a binary min-heap, ordered by `<` (so items may define `__lt`).
+// sim.orb loads it with `use heap::{Heap};`.
+
+pub struct Heap { items }
+
+impl Heap {
+    pub fn new() -> Heap {
+        Heap { items: [] }
+    }
+
+    pub fn len(self) -> int {
+        #self.items
+    }
+
+    pub fn push(self, item) {
+        let items = self.items;
+        let mut i = #items + 1;
+        items[i] = item;
+        // Sift up: swap with the parent while smaller than it.
+        while i > 1 {
+            let parent = i \ 2;
+            if !(items[i] < items[parent]) {
+                break;
+            }
+            (items[i], items[parent]) = (items[parent], items[i]);
+            i = parent;
+        }
+    }
+
+    /// Removes and returns the smallest item, or nil when the heap is empty.
+    pub fn pop(self) {
+        let items = self.items;
+        let n = #items;
+        if n == 0 {
+            return nil;
+        }
+        let top = items[1];
+        items[1] = items[n];
+        items[n] = nil;
+        // Sift down: swap with the smaller child while larger than it.
+        let mut i = 1;
+        loop {
+            let (l, r) = (2 * i, 2 * i + 1);
+            let mut smallest = i;
+            if l < n && items[l] < items[smallest] {
+                smallest = l;
+            }
+            if r < n && items[r] < items[smallest] {
+                smallest = r;
+            }
+            if smallest == i {
+                break;
+            }
+            (items[i], items[smallest]) = (items[smallest], items[i]);
+            i = smallest;
+        }
+        top
+    }
+}
