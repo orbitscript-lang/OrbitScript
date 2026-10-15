@@ -2,10 +2,11 @@
 //! module's exports.
 //!
 //! A struct `P` is one table that is both every instance's metatable and the namespace of its
-//! associated functions; its `__index` is a separate methods table, and `__name` is `"P"`.
-//! An enum `E` is a namespace table holding one metatable per data variant (`E.V`, with
-//! `E.V.new(t)` for Lua callers) and one shared, frozen instance per unit variant. Its methods
-//! table is shared by all variants, and its metamethods go on every variant's metatable.
+//! associated functions and methods; its `__index` is a separate methods table, so instances
+//! see only the methods, and `__name` is `"P"`. An enum `E` is a namespace table holding its
+//! associated functions and methods, one metatable per data variant (`E.V`, with `E.V.new(t)`
+//! for Lua callers) and one shared, frozen instance per unit variant. Its methods table is
+//! shared by all variants, and its metamethods go on every variant's metatable.
 
 use orbit_hir as hir;
 use orbit_hir::{ExprId, FuncId, FunctionName, LocalId, LocalKind, Span, StmtId, StrId};
@@ -637,6 +638,16 @@ impl Lowerer {
                         ),
                     ));
                 }
+                if !is_meta {
+                    // Methods and associated functions share the type table.
+                    if self.types[idx].members.contains(&name.sym) {
+                        return Err(self.error(
+                            name.span,
+                            format!("`{}` is already defined for this type", self.text(name.sym)),
+                        ));
+                    }
+                    self.types[idx].members.push(name.sym);
+                }
                 let (value, has_self) = match &m.kind {
                     ast::ItemKind::Fn(f) => {
                         let has_self = f.sig.self_param.is_some();
@@ -662,7 +673,8 @@ impl Lowerer {
                 } else {
                     value
                 };
-                // Where it goes: the metatable(s), the methods table, or the type itself.
+                // Where it goes: the metatable(s), or the type itself, and a method also in the
+                // methods table, so `P::method(p)` works wherever `P` is reachable.
                 let mut targets: Vec<ExprId> = Vec::new();
                 if is_meta {
                     if is_enum {
@@ -683,6 +695,7 @@ impl Lowerer {
                     }
                 } else if has_self {
                     targets.push(self.func_local_ref(mfunc, methods, mspan));
+                    targets.push(self.local_ref(depth, type_local, mspan));
                 } else {
                     targets.push(self.local_ref(depth, type_local, mspan));
                 }

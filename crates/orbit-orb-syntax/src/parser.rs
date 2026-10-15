@@ -379,10 +379,30 @@ impl Parser<'_> {
         }
 
         let e = self.expr()?;
+        let e = match self.assignment(start, e)? {
+            Ok(assign) => {
+                self.expect(Punct::Semi)?;
+                return Ok(StmtOrTail::Stmt(assign));
+            }
+            Err(e) => e,
+        };
+        if self.eat(Punct::Semi)? {
+            let span = self.span_from(start);
+            return Ok(StmtOrTail::Stmt(Stmt {
+                kind: StmtKind::Expr(e),
+                span,
+            }));
+        }
+        Ok(StmtOrTail::Tail(e))
+    }
+
+    /// The rest of an assignment whose target `e` (starting at `start`) is
+    /// parsed, when `=` or a compound operator follows; otherwise `e` back.
+    /// The caller takes the `;`.
+    fn assignment(&mut self, start: u32, e: Expr) -> PResult<Result<Stmt, Expr>> {
         if self.is(Punct::Assign) {
             self.advance()?;
             let value = self.expr()?;
-            self.expect(Punct::Semi)?;
             let targets = match e.kind {
                 ExprKind::Tuple(items) => items,
                 _ => vec![e],
@@ -395,7 +415,7 @@ impl Parser<'_> {
                     return Err(self.error(t.span, "invalid left-hand side of assignment"));
                 }
             }
-            return Ok(StmtOrTail::Stmt(Stmt {
+            return Ok(Ok(Stmt {
                 kind: StmtKind::Assign { targets, value },
                 span: self.span_from(start),
             }));
@@ -404,14 +424,13 @@ impl Parser<'_> {
             let op_at = self.tok.span.start;
             self.advance()?;
             let value = self.expr()?;
-            self.expect(Punct::Semi)?;
             if !matches!(
                 e.kind,
                 ExprKind::Name(_) | ExprKind::Field { .. } | ExprKind::Index { .. }
             ) {
                 return Err(self.error(e.span, "invalid left-hand side of assignment"));
             }
-            return Ok(StmtOrTail::Stmt(Stmt {
+            return Ok(Ok(Stmt {
                 kind: StmtKind::CompoundAssign {
                     op,
                     op_at,
@@ -421,14 +440,7 @@ impl Parser<'_> {
                 span: self.span_from(start),
             }));
         }
-        if self.eat(Punct::Semi)? {
-            let span = self.span_from(start);
-            return Ok(StmtOrTail::Stmt(Stmt {
-                kind: StmtKind::Expr(e),
-                span,
-            }));
-        }
-        Ok(StmtOrTail::Tail(e))
+        Ok(Err(e))
     }
 
     /// `scope` is a keyword at the start of a statement unless it's used as a variable
@@ -1624,6 +1636,16 @@ impl Parser<'_> {
                                 ));
                             }
                         }
+                    } else if let ExprKind::Name(name) = e.kind {
+                        // Struct literals read `P { x }` as `x: x`; here it
+                        // would silently be `[1] = x`, so neither is chosen.
+                        let name = self.lx.strings().display(name).into_owned();
+                        return Err(self.error(
+                            e.span,
+                            format!(
+                                "a bare name in `#{{ }}` is ambiguous: write `{name}: {name}` for a field, `({name})` for an array entry, or use `[...]` for an array"
+                            ),
+                        ));
                     } else {
                         MapEntry::Positional(e)
                     }
@@ -1714,7 +1736,24 @@ impl Parser<'_> {
                 None
             };
             self.expect(Punct::FatArrow)?;
+            let body_start = self.tok.span.start;
             let body = self.expr()?;
+            // `pat => target = value,` runs the assignment; the arm's value
+            // is nil, as `pat => { target = value; }` (Rust's unit).
+            let body = match self.assignment(body_start, body)? {
+                Ok(assign) => {
+                    let span = assign.span;
+                    Expr {
+                        kind: ExprKind::Block(Block {
+                            stmts: vec![assign],
+                            tail: None,
+                            span,
+                        }),
+                        span,
+                    }
+                }
+                Err(body) => body,
+            };
             let block_like = body.kind.is_block_like();
             arms.push(Arm {
                 pat,

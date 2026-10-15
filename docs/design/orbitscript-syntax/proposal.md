@@ -258,7 +258,7 @@ Lowering, with no new HIR:
 - `struct Point { x, y }` creates one table `Point` that is both the metatable of every instance and the namespace for associated functions. Its `__index` is a separate `methods` table, so instances see methods but not associated functions (`p.new(1, 2)` is an error, as in Rust). `__name` is set so `tostring` and error messages say `Point`.
 - `Point { x: 4, y: 6 }` is `setmetatable(#{ x: 4, y: 6 }, Point)`. Every field must be given (shorthand `Point { x, y }` takes locals of the same name); a missing or unknown field is a compile error when the struct is visible at compile time.
   **[cost]** As a library call that is a native call per construction. The struct literal has a fixed, known shape, so a fused `NewObject { dst, meta, hash_hint }` op (one new bytecode op, no ADR change) would make it cheaper than Lua's `setmetatable({...}, mt)`. Q19.
-- Methods in `impl` blocks go into `methods`; associated functions (no `self`) go into `Point`. Several `impl` blocks for one struct may appear in the same module.
+- Methods in `impl` blocks go into `methods`; associated functions (no `self`) go into `Point`. Methods also go into `Point` (Tym, 2026-10-14), so `Point::dist(p, q)` and `pcall(Point::dist, p, q)` work from any module, and from Lua as `Point.dist(p, q)`; instances still see only `methods`. A method and an associated function can't share a name. An enum's methods likewise go on its namespace table, and a method named like a variant is an error. Several `impl` blocks for one struct may appear in the same module.
 - Fields are public at runtime (they are table fields). A non-`pub` field is a privacy rule for `orbit-check`, not the VM.
 - No inheritance, as in Rust. Composition and traits-as-documentation only (Q18).
 
