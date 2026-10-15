@@ -1,17 +1,20 @@
 # Example programs. Each line: the example's directory, its entry file, and train=ARGS,
 # the arguments `cargo testkit pgo train` runs it with (each example takes a repeat count
-# or size as arg[1]; about 0.1 s each in a release build on cloud x86_64).
+# or size as arg[1]). The inputs are small on purpose: at 50 times these (about 0.1 s each),
+# the profile made the front end hot, which cost 116 KiB of binary and 16% on
+# spectral_norm (cloud x86_64, 2026-10-15). At these it still compiles OrbitScript
+# about 7% faster than a profile trained without the examples.
 #
 # With no arguments, an example must print exactly its NAME.expected file. A NAME.lua
 # next to an entry NAME.orb is its Lua twin, which must print the same, under `orbit`
 # and under the reference lua5.5. See README.md.
-calc       calc.orb       train=500     # enum AST, match, `?` through a recursive evaluator
-ledger     ledger.orb     train=2000    # `let scope` transaction guards, `scope` actions
-sim        sim.orb        train=100     # coroutines, a heap module loaded with `use`, `__lt`
-dijkstra   dijkstra.orb   train=5000    # shortest paths, gmatch captures, `break` with a value
-wordfreq   wordfreq.orb   train=4000    # map tables, string methods, sort with a closure
-vectors    vectors.orb    train=20000   # operator metamethods on structs
-life       life.orb       train=800     # nested arrays, exclusive ranges, `match` on pairs
-config     config.orb     train=1000    # files, `?` on io::open, `scope f.close();`
-interop    interop.lua    train=50000   # Lua using an OrbitScript module that uses a Lua module
-fizzbuzz   fizzbuzz.orb   train=20000   # the one-screen hello
+calc       calc.orb       train=10      # enum AST, match, `?` through a recursive evaluator
+ledger     ledger.orb     train=40      # `let scope` transaction guards, `scope` actions
+sim        sim.orb        train=2       # coroutines, a heap module loaded with `use`, `__lt`
+dijkstra   dijkstra.orb   train=100     # shortest paths, gmatch captures, `break` with a value
+wordfreq   wordfreq.orb   train=80      # map tables, string methods, sort with a closure
+vectors    vectors.orb    train=400     # operator metamethods on structs
+life       life.orb       train=16      # nested arrays, exclusive ranges, `match` on pairs
+config     config.orb     train=20      # files, `?` on io::open, `scope f.close();`
+interop    interop.lua    train=1000    # Lua using an OrbitScript module that uses a Lua module
+fizzbuzz   fizzbuzz.orb   train=400     # the one-screen hello

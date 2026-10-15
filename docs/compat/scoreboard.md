@@ -20,11 +20,11 @@ For each suite file the scoreboard says whether `orbit` compiles it, whether it 
 | 2026-10-06 | C1 stack through #68 (adds `<close>` in the HIR), on main with `load`/`dofile` (#55) and `os` (#57) | 1 of 31 (api) | 24 of 31 | 4 of 14 | 6 of 6 | 6 of 7 | Linux x86_64 cloud container |
 | 2026-10-07 | 094878b (all compat PRs merged; C1 exit met) | 13 of 31 | 31 of 31 | 31 of 33 | 6 of 6 | 12 of 12 | Linux x86_64 cloud container |
 | 2026-10-08 | 5f67c4d (PRs #79-#91 merged: io, binary chunks, bitwise metamethods, coroutine.lua, error lines and limits) | 21 of 31 | 31 of 31 | 39 of 39 | 6 of 6 | 20 of 20 | Linux x86_64 cloud container |
-| 2026-10-15 | 5103979 (all compat, perf and OrbitScript PRs through #156 merged) | 32 of 32 (with `heavy.lua`) | 32 of 32 | 51 of 51 | 6 of 6 | 26 of 26 | Linux x86_64 cloud container |
+| 2026-10-15 | 85ca6ab (all compat, perf and OrbitScript PRs through #158 merged) | 32 of 32 (with `heavy.lua`) | 32 of 32 | 51 of 51 | 6 of 6 | 26 of 26 | Linux x86_64 cloud container |
 
 Every suite file compiles. GC stress mode (`ORBIT_GC_STRESS=1`) gives the same results as the plain run, apart from skipping `heavy.lua`.
 
-## Current, 2026-10-15 (main 5103979)
+## Current, 2026-10-15 (main 85ca6ab)
 
 Suite: **32 of 32** files pass, 32 of 32 compile. `heavy.lua` now runs and passes. Under GC stress (`ORBIT_GC_STRESS=1`) every file but `heavy.lua` passes; the scoreboard skips `heavy.lua` there because collecting at every safe point makes it too slow.
 
@@ -71,35 +71,46 @@ Suite: **32 of 32** files pass, 32 of 32 compile. `heavy.lua` now runs and passe
 
 ### Benchmarks against lua5.5
 
-Linux x86_64 cloud container (4 cores), 7 runs each, full inputs. `orbit` is the PGO release build: `cargo build --release`, with the profile retrained on this commit over the full training set, which since #155 includes `examples/`. Wall-clock times vary by a few percent between runs, so treat small ratios as noise.
+Linux x86_64 cloud container (4 cores), 7 runs each, full inputs. `orbit` is the PGO release build (`cargo build --release`), with the profile retrained on this commit over the full training set. Since #155 that set includes `examples/`. Wall-clock times vary by a few percent between runs, and `coroutines.lua` by more: it measured 0.99 in another run the same hour. Treat small ratios as noise.
 
 | Benchmark | lua5.5 time | lua5.5 peak RSS | orbit time | orbit peak RSS | Time ratio |
 |---|---:|---:|---:|---:|---:|
-| startup.lua | 0.002s | 3.6 MiB | 0.002s | 4.3 MiB | - |
-| fib.lua | 0.565s | 3.6 MiB | 0.511s | 4.3 MiB | 0.90 |
-| binary_trees.lua | 2.341s | 66.6 MiB | 1.769s | 54.0 MiB | 0.76 |
-| nbody.lua | 1.648s | 3.6 MiB | 1.523s | 4.4 MiB | 0.92 |
-| spectral_norm.lua | 0.405s | 3.6 MiB | 0.471s | 4.3 MiB | 1.16 |
-| fannkuch.lua | 1.586s | 3.6 MiB | 1.464s | 4.2 MiB | 0.92 |
-| strings.lua | 0.558s | 49.5 MiB | 0.242s | 50.4 MiB | 0.43 |
-| tables.lua | 0.264s | 38.8 MiB | 0.221s | 40.0 MiB | 0.84 |
-| oop.lua | 0.577s | 3.5 MiB | 0.637s | 4.3 MiB | 1.10 |
-| coroutines.lua | 0.684s | 3.6 MiB | 0.691s | 4.3 MiB | 1.01 |
+| startup.lua | 0.002s | 3.5 MiB | 0.003s | 4.1 MiB | - |
+| fib.lua | 0.572s | 3.5 MiB | 0.498s | 4.2 MiB | 0.87 |
+| binary_trees.lua | 2.394s | 66.6 MiB | 1.888s | 53.8 MiB | 0.79 |
+| nbody.lua | 1.678s | 3.4 MiB | 1.501s | 4.3 MiB | 0.89 |
+| spectral_norm.lua | 0.420s | 3.5 MiB | 0.394s | 4.1 MiB | 0.94 |
+| fannkuch.lua | 1.584s | 3.4 MiB | 1.464s | 4.1 MiB | 0.92 |
+| strings.lua | 0.565s | 49.5 MiB | 0.272s | 50.3 MiB | 0.48 |
+| tables.lua | 0.271s | 38.8 MiB | 0.222s | 40.0 MiB | 0.82 |
+| oop.lua | 0.587s | 3.5 MiB | 0.660s | 4.1 MiB | 1.12 |
+| coroutines.lua | 0.667s | 3.4 MiB | 0.735s | 4.1 MiB | 1.10 |
 
 `startup.lua` is about 2.5 ms for `orbit` against 2.1 ms for lua5.5 (best of 40 runs, pinned to one core).
 
 | Interpreter | Binary size |
 |---|---:|
 | lua5.5 | 348 KiB |
-| orbit | 2044 KiB |
+| orbit | 1979 KiB |
 
 ```
-orbit vs lua5.5: time 0.88x, peak RSS 1.12x, binary size 5.87x, 10 of 10 benchmarks ran
+orbit vs lua5.5: time 0.88x, peak RSS 1.11x, binary size 5.69x, 10 of 10 benchmarks ran
 ```
 
-Since 5f67c4d `orbit` went from 1.42x to 0.88x of lua5.5's time. It is faster on seven of the ten benchmarks. `spectral_norm.lua` and `oop.lua` are still slower; both are bound by call cost. The binary grew from 1505 KiB to 2044 KiB with the C module shim, interactive mode and the OrbitScript front end. The C module shim and interactive mode are CLI features embedders can leave off. OrbitScript has been built in since #154.
+Since 5f67c4d `orbit` went from 1.42x to 0.88x of lua5.5's time. `oop.lua` is still slower because it is bound by call cost. The binary grew from 1505 KiB to 1979 KiB with the C module shim, interactive mode and the OrbitScript front end. The C module shim and interactive mode are CLI features embedders can leave off. OrbitScript has been built in since #154.
 
-Training on `examples/` changes the build. With a profile trained without the examples (same code, cloud x86_64, same run), `orbit` is 1928 KiB with a 3.9 MiB peak RSS for an empty script. `spectral_norm.lua` runs at 1.00x lua5.5 instead of 1.16x and `fannkuch.lua` at 1.00x instead of 0.92x; the other benchmarks are within noise. The examples spend much of their time compiling OrbitScript, so the profile marks the front end hot and LLVM optimizes it for speed instead of size.
+#### How much the examples weigh in training
+
+The examples train at small inputs (`train=` in `examples/manifest.txt`). The table compares profiles trained on the same code with the examples at different weights. It covers the binary size, an empty script's peak RSS, OrbitScript compile time (`bench/orb/compile.lua 2000`, best of 3) and the two benchmarks that moved (cloud x86_64, same hour, ratios to lua5.5):
+
+| Examples in training | Binary | Empty script | Compile `desugar.orb` | spectral_norm | fannkuch |
+|---|---:|---:|---:|---:|---:|
+| Left out | 1928 KiB | 3.6 MiB | 962 us | 1.04 | 0.94 |
+| Committed (1/50 of the original inputs) | 1979 KiB | 4.1 MiB | 893 us | 0.97 | 0.89 |
+| 1/10 of the original inputs | 2004 KiB | 4.1 MiB | 897 us | 1.01 | 0.89 |
+| Original inputs (#155) | 2044 KiB | 4.0 MiB | 907 us | 1.17 | 0.88 |
+
+At the original inputs, LLVM optimized more of the code for speed instead of size, so the binary grew. spectral_norm also slowed by about 16%. At 1/50 the compile speed-up stays and both of those costs are mostly gone.
 
 ## Baseline, 2026-10-04 (main 4aea612)
 
