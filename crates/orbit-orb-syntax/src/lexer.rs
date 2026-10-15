@@ -287,6 +287,24 @@ impl<'a> Lexer<'a> {
                 let id = self.strings.intern(&self.buf);
                 self.token(TokenKind::Str(id), start)
             }
+            b'r' if n1 == Some(b'#') && n2.is_some_and(is_ident_start) => {
+                // A raw name, `r#match`: always a name, even when it spells a keyword.
+                self.pos += 2;
+                let name_start = self.pos;
+                while self.cur().is_some_and(is_ident_char) {
+                    self.pos += 1;
+                }
+                let text = &self.src[name_start..self.pos];
+                if matches!(text, b"_" | b"self" | b"Self") {
+                    return Err(self.error_at(
+                        start,
+                        self.pos,
+                        format!("`{}` cannot be a raw name", String::from_utf8_lossy(text)),
+                    ));
+                }
+                let id = self.strings.intern(text);
+                self.token(TokenKind::Ident(id), start)
+            }
             b'f' if n1 == Some(b'"') => {
                 self.pos += 2;
                 let parts = self.template(start)?;
@@ -720,7 +738,9 @@ impl<'a> Lexer<'a> {
                             self.pos += 1;
                             self.quoted(s, false).map(|_| ())
                         }
-                        b'r' if matches!(self.at(1), Some(b'"' | b'#'))
+                        b'r' if (self.at(1) == Some(b'"')
+                            || (self.at(1) == Some(b'#')
+                                && matches!(self.at(2), Some(b'"' | b'#'))))
                             && (s == expr_start || !is_ident_char(self.src[s - 1])) =>
                         {
                             self.raw_string(s)
@@ -807,6 +827,23 @@ mod tests {
         assert!(err("9223372036854775808").contains("too large"));
         assert!(err("12abc").contains("malformed number `12abc`"));
         assert!(err("0x").contains("missing digits"));
+    }
+
+    #[test]
+    fn raw_names() {
+        let mut lx = Lexer::new("t", b"r#match r#x r#\"s\"# f\"{r#if}\"");
+        let mut got = Vec::new();
+        loop {
+            let t = lx.next_token().unwrap();
+            match t.kind {
+                TokenKind::Ident(id) => got.push(lx.strings().get(id).to_vec()),
+                TokenKind::Eof => break,
+                _ => got.push(b"other".to_vec()),
+            }
+        }
+        assert_eq!(got, [&b"match"[..], b"x", b"other", b"other"]);
+        assert!(err("r#_").contains("`_` cannot be a raw name"));
+        assert!(err("r#Self").contains("`Self` cannot be a raw name"));
     }
 
     #[test]

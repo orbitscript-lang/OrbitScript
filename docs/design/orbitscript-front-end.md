@@ -31,6 +31,7 @@ Where the proposal is silent, the lexer chooses:
 
 - **Integer literals.** A decimal literal that doesn't fit in `i64` is an error ("write `9223372036854775808.0` for a float") instead of Lua's silent conversion to a float. Hexadecimal, octal and binary literals keep Lua's rule and give the 64-bit pattern written (`0xffff_ffff_ffff_ffff == -1`), which bit masks need.
 - **No leading-dot floats** (`.5`), as in Rust; `1..10` lexes as a range.
+- **Raw names.** `r#name` is an identifier token even when `name` is a keyword (`r#match`); `r#_`, `r#self` and `r#Self` are errors. Inside a template hole, `r#` followed by a letter is a raw name, not a raw string.
 - **`#!` first line** is skipped, as the standalone Lua interpreter does for scripts.
 - **Templates** (`f"..."`) are split by the lexer into literal text and holes. A hole's expression is kept as a source range, and the parser parses it in place (so spans and lines are right). Brackets nest inside a hole and strings inside it are skipped whole, so `{t[#{a: 1}.a]}` and `{m["}"]}` work. The format spec starts at the first `:` at bracket depth 0 that isn't part of `::`.
 
@@ -42,6 +43,7 @@ Precedence, low to high, is Rust's table with the proposal's additions: `||`, `&
 
 Rust rules the parser follows where the proposal doesn't say otherwise:
 
+- **Keywords as member names.** After `.` and `::`, as field names (struct definitions, literals, patterns, `#{ key: value }`), variant names, and `fn`/`const` names in `impl`, a keyword is read as a name, so `string::match(s, p)` and `s.match(p)` work. Where the name would also bind or read a local (shorthand `P { match }`, the last segment of `use` without `as`), it needs `r#`. `pub` in a field list is the visibility modifier unless a `:`, `,` or `}` follows it. The contextual keyword `scope` is never a keyword when written `r#scope`.
 - **Struct literals are not parsed in `if`, `while`, `match` and `for` headers**, so `if x == y { ... }` reads the block as the body. Parenthesise a literal there.
 - **A block-like expression** (`if`, `match`, `loop`, `while`, `for`, `{ }`) at the start of a statement ends the statement, so it needs no `;`; it is the block's value only when it's the last thing in the block.
 - **Comparisons don't chain**: `a < b < c` is an error.

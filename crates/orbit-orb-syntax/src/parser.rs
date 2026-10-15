@@ -214,12 +214,48 @@ impl Parser<'_> {
                 self.advance()?;
                 Ok(Name { sym, span })
             }
+            TokenKind::Keyword(k) if !matches!(k, Keyword::SelfValue | Keyword::SelfType) => {
+                let mut d = self.expected("an identifier");
+                d.message += &format!("; write `r#{0}` to use `{0}` as a name", k.as_str());
+                Err(d)
+            }
             _ => Err(self.expected("an identifier")),
         }
     }
 
+    /// A name in a place where only a name can appear: a field or method after `.`, a path
+    /// segment after `::`, a field name, or a method in `impl`. Keywords are names here
+    /// (`string::match`, `t.loop`), since nothing else could be meant.
+    #[inline(never)]
+    fn member_name(&mut self) -> PResult<Name> {
+        match self.tok.kind {
+            TokenKind::Keyword(k) => {
+                let sym = self.lx.strings_mut().intern(k.as_str().as_bytes());
+                let span = self.tok.span;
+                self.advance()?;
+                Ok(Name { sym, span })
+            }
+            _ => self.name(),
+        }
+    }
+
+    /// The error for a keyword written as a member name in a place that would also bind or
+    /// read a local of that name (`P { match }`, `use m::match;`), where it needs `r#`.
+    fn keyword_binding(&self, name: Name) -> Diagnostic {
+        let text = self.lx.strings().display(name.sym).to_string();
+        self.error(
+            name.span,
+            format!("`{text}` is a keyword; write `r#{text}` to use it as a name"),
+        )
+    }
+
     fn is_ident(&self, sym: StrId) -> bool {
         self.tok.kind == TokenKind::Ident(sym)
+    }
+
+    /// The contextual keyword `scope`, as opposed to an ordinary name (`r#scope` included).
+    fn is_scope(&self) -> bool {
+        self.is_ident(self.sym_scope) && self.tok.span.end - self.tok.span.start == 5
     }
 
     // ---- blocks and statements ----------------------------------------------------------------
@@ -296,7 +332,7 @@ impl Parser<'_> {
                     kind: StmtKind::Item(item),
                 }));
             }
-            TokenKind::Ident(s) if s == self.sym_scope && self.scope_is_keyword()? => {
+            TokenKind::Ident(_) if self.is_scope() && self.scope_is_keyword()? => {
                 self.advance()?;
                 let inner = if self.is(Punct::LBrace) {
                     let block = self.block()?;
@@ -444,7 +480,7 @@ impl Parser<'_> {
         let start = self.tok.span.start;
         self.advance()?;
         let mut scope = false;
-        if self.is_ident(self.sym_scope)
+        if self.is_scope()
             && matches!(
                 self.peek()?,
                 TokenKind::Ident(_) | TokenKind::Keyword(Keyword::Mut)
@@ -488,7 +524,7 @@ impl Parser<'_> {
         let start = self.tok.span.start;
         let is_pub = self.eat_kw(Keyword::Pub)?;
         let kind = match self.tok.kind {
-            TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl()?),
+            TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl(false)?),
             TokenKind::Keyword(Keyword::Struct) => ItemKind::Struct(self.struct_decl()?),
             TokenKind::Keyword(Keyword::Enum) => ItemKind::Enum(self.enum_decl()?),
             TokenKind::Keyword(Keyword::Impl) if !is_pub => ItemKind::Impl(self.impl_decl()?),
@@ -535,10 +571,15 @@ impl Parser<'_> {
         })
     }
 
-    fn fn_decl(&mut self) -> PResult<FnDecl> {
+    /// `fn name(...) { ... }`; a `member` (a function in `impl`) may be named by a keyword.
+    fn fn_decl(&mut self, member: bool) -> PResult<FnDecl> {
         let start = self.tok.span.start;
         self.advance()?; // fn
-        let name = self.name()?;
+        let name = if member {
+            self.member_name()?
+        } else {
+            self.name()?
+        };
         self.skip_generics()?;
         let sig = self.fn_params()?;
         let body = self.block()?;
@@ -636,8 +677,16 @@ impl Parser<'_> {
         self.expect(Punct::LBrace)?;
         let mut fields = Vec::new();
         while !self.is(Punct::RBrace) {
-            let is_pub = self.eat_kw(Keyword::Pub)?;
-            let name = self.name()?;
+            // `pub` is a field's visibility unless it is the field's own name (`pub: bool`).
+            let is_pub = self.is_kw(Keyword::Pub)
+                && !matches!(
+                    self.peek()?,
+                    TokenKind::Punct(Punct::Colon | Punct::Comma | Punct::RBrace)
+                );
+            if is_pub {
+                self.advance()?;
+            }
+            let name = self.member_name()?;
             let ty = if self.eat(Punct::Colon)? {
                 Some(self.type_ann()?)
             } else {
@@ -677,7 +726,7 @@ impl Parser<'_> {
         let mut variants = Vec::new();
         while !self.is(Punct::RBrace) {
             let start = self.tok.span.start;
-            let vname = self.name()?;
+            let vname = self.member_name()?;
             let fields = if self.is(Punct::LBrace) {
                 Some(self.field_decls()?)
             } else if self.is(Punct::LParen) {
@@ -721,10 +770,10 @@ impl Parser<'_> {
             let start = self.tok.span.start;
             let is_pub = self.eat_kw(Keyword::Pub)?;
             let kind = match self.tok.kind {
-                TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl()?),
+                TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl(true)?),
                 TokenKind::Keyword(Keyword::Const) => {
                     self.advance()?;
-                    let name = self.name()?;
+                    let name = self.member_name()?;
                     let ty = if self.eat(Punct::Colon)? {
                         Some(self.type_ann()?)
                     } else {
@@ -749,16 +798,22 @@ impl Parser<'_> {
 
     fn use_decl(&mut self) -> PResult<UseDecl> {
         self.advance()?; // use
-        let mut path = vec![self.name()?];
+        // Path segments may be keywords (`use text::match as m;`), but a segment that becomes a
+        // local's name needs `r#` or an `as` alias.
+        let mut keyword_last = matches!(self.tok.kind, TokenKind::Keyword(_));
+        let mut path = vec![self.member_name()?];
         let mut tail = UseTail::Module { alias: None };
         while self.eat(Punct::ColonColon)? {
             if self.is(Punct::LBrace) {
                 self.advance()?;
                 let mut members = Vec::new();
                 while !self.is(Punct::RBrace) {
-                    let name = self.name()?;
+                    let keyword = matches!(self.tok.kind, TokenKind::Keyword(_));
+                    let name = self.member_name()?;
                     let alias = if self.eat_kw(Keyword::As)? {
                         Some(self.name()?)
+                    } else if keyword {
+                        return Err(self.keyword_binding(name));
                     } else {
                         None
                     };
@@ -769,14 +824,18 @@ impl Parser<'_> {
                 }
                 self.expect(Punct::RBrace)?;
                 tail = UseTail::Members(members);
+                keyword_last = false;
                 break;
             }
-            path.push(self.name()?);
+            keyword_last = matches!(self.tok.kind, TokenKind::Keyword(_));
+            path.push(self.member_name()?);
         }
         if matches!(tail, UseTail::Module { .. }) && self.eat_kw(Keyword::As)? {
             tail = UseTail::Module {
                 alias: Some(self.name()?),
             };
+        } else if keyword_last {
+            return Err(self.keyword_binding(*path.last().expect("a path segment")));
         }
         self.expect(Punct::Semi)?;
         Ok(UseDecl { path, tail })
@@ -827,7 +886,7 @@ impl Parser<'_> {
             TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfType | Keyword::Nil) => {
                 self.advance()?;
                 while self.eat(Punct::ColonColon)? {
-                    self.name()?;
+                    self.member_name()?;
                 }
                 if self.eat(Punct::Lt)? {
                     while !self.is(Punct::Gt) && !self.is(Punct::Shr) {
@@ -949,6 +1008,11 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::Nil) if !neg => ExprKind::Nil,
             TokenKind::Keyword(Keyword::True) if !neg => ExprKind::True,
             TokenKind::Keyword(Keyword::False) if !neg => ExprKind::False,
+            TokenKind::Keyword(k) if !neg && k != Keyword::SelfValue => {
+                let mut d = self.expected("a pattern");
+                d.message += &format!("; write `r#{0}` to use `{0}` as a name", k.as_str());
+                return Err(d);
+            }
             _ => return Err(self.expected("a pattern")),
         };
         self.advance()?;
@@ -967,9 +1031,12 @@ impl Parser<'_> {
                 rest = true;
                 break;
             }
-            let name = self.name()?;
+            let keyword = matches!(self.tok.kind, TokenKind::Keyword(_));
+            let name = self.member_name()?;
             let pat = if self.eat(Punct::Colon)? {
                 Some(self.pattern()?)
+            } else if keyword {
+                return Err(self.keyword_binding(name));
             } else {
                 None
             };
@@ -1002,7 +1069,7 @@ impl Parser<'_> {
             }
         };
         while self.eat(Punct::ColonColon)? {
-            let name = self.name()?;
+            let name = self.member_name()?;
             e = Expr {
                 kind: ExprKind::Path {
                     base: Box::new(e),
@@ -1148,7 +1215,7 @@ impl Parser<'_> {
             match self.tok.kind {
                 TokenKind::Punct(Punct::Dot) => {
                     self.advance()?;
-                    let name = self.name()?;
+                    let name = self.member_name()?;
                     if self.is(Punct::LParen) {
                         let args_at = self.tok.span.start;
                         let args = self.call_args()?;
@@ -1179,7 +1246,7 @@ impl Parser<'_> {
                             "generic arguments are only allowed in type annotations",
                         ));
                     }
-                    let name = self.name()?;
+                    let name = self.member_name()?;
                     e = Expr {
                         kind: ExprKind::Path {
                             base: Box::new(e),
@@ -1251,9 +1318,12 @@ impl Parser<'_> {
         self.expect(Punct::LBrace)?;
         let mut fields = Vec::new();
         while !self.is(Punct::RBrace) {
-            let name = self.name()?;
+            let keyword = matches!(self.tok.kind, TokenKind::Keyword(_));
+            let name = self.member_name()?;
             let value = if self.eat(Punct::Colon)? {
                 Some(self.expr()?)
+            } else if keyword {
+                return Err(self.keyword_binding(name));
             } else {
                 None
             };
@@ -1524,6 +1594,11 @@ impl Parser<'_> {
                     self.advance()?;
                     self.advance()?;
                     MapEntry::Named(sym, span, self.expr()?)
+                }
+                TokenKind::Keyword(_) if self.peek()? == TokenKind::Punct(Punct::Colon) => {
+                    let name = self.member_name()?;
+                    self.advance()?;
+                    MapEntry::Named(name.sym, name.span, self.expr()?)
                 }
                 TokenKind::Str(sym) if self.peek()? == TokenKind::Punct(Punct::Colon) => {
                     let span = self.tok.span;

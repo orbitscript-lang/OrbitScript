@@ -793,6 +793,31 @@ fn errors() {
             "'a: if x {}",
             "t.orb:1: expected `loop`, `while` or `for` after a label, found `if`",
         ),
+        (
+            "let match = 1;",
+            "t.orb:1: expected a pattern, found `match`; write `r#match` to use `match` as a name",
+        ),
+        (
+            "fn loop() {}",
+            "t.orb:1: expected an identifier, found `loop`; write `r#loop` to use `loop` as a name",
+        ),
+        (
+            "let p = P { match };",
+            "t.orb:1: `match` is a keyword; write `r#match` to use it as a name",
+        ),
+        (
+            "match p { P { match } => 1 }",
+            "t.orb:1: `match` is a keyword; write `r#match` to use it as a name",
+        ),
+        (
+            "use text::match;",
+            "t.orb:1: `match` is a keyword; write `r#match` to use it as a name",
+        ),
+        (
+            "use text::{find, match};",
+            "t.orb:1: `match` is a keyword; write `r#match` to use it as a name",
+        ),
+        ("let r#self = 1;", "t.orb:1: `self` cannot be a raw name"),
     ];
     for (src, want) in cases {
         assert_eq!(err(src), want, "{src}");
