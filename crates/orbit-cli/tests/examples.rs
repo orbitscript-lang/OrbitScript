@@ -2,8 +2,6 @@
 //! `.expected` files, Lua twins included. `cargo testkit examples` does the same and
 //! can also run the twins under the reference `lua5.5`.
 
-#![cfg(feature = "orbitscript")]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
