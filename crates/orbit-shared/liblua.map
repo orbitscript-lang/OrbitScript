@@ -1,0 +1,4 @@
+LUA_5.5 {
+  global: lua_*; luaL_*; luaopen_*; orbit_main; orbitc_main;
+  local: *;
+};

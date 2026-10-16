@@ -98,6 +98,9 @@ name = "orbit-capi"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "orbit-compiler",
+ "orbit-lua-syntax",
+ "orbit-orb-syntax",
  "orbit-stdlib",
  "orbit-vm",
 ]
@@ -165,6 +168,19 @@ dependencies = [
  "orbit",
  "orbit-compiler",
  "orbit-hir",
+]
+
+[[package]]
+name = "orbit-shared"
+version = "0.0.0"
+dependencies = [
+ "orbit",
+ "orbit-capi",
+ "orbit-compiler",
+ "orbit-hir",
+ "orbit-lua-syntax",
+ "orbit-orb-syntax",
+ "signal-hook",
 ]
 
 [[package]]

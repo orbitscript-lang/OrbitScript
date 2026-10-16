@@ -40,6 +40,8 @@ pub(crate) struct Bridge {
     /// The native running a C function, null between calls.
     ctx: Cell<*mut NativeCtx<'static>>,
     st: Shared,
+    /// SPIKE (liblua): the host's own context when C created this state.
+    host: Cell<*mut NativeCtx<'static>>,
 }
 
 /// Owns a VM's [`Bridge`] and its C state, from [`orbit_vm::Runtime::ext`].
@@ -71,6 +73,7 @@ pub(crate) fn install(vm: &mut Vm) {
         l: Cell::new(std::ptr::null_mut()),
         ctx: Cell::new(std::ptr::null_mut()),
         st: Shared::default(),
+        host: Cell::new(std::ptr::null_mut()),
     }));
     // SAFETY: plain allocation in C; `b` outlives the state (BridgeHandle).
     let l = unsafe { orbit_capi_newstate(b as *const c_void) };
@@ -982,4 +985,69 @@ pub(crate) fn load(
         "dynamic libraries not supported on this platform yet".into(),
         "absent",
     ))
+}
+
+// ---- SPIKE (liblua): states created from C ------------------------------------
+
+/// `lua_newstate`: a VM owned by the C program, whose stack between calls is
+/// the host window ([`Vm::host_ctx`]).
+#[cfg(feature = "host")]
+#[unsafe(no_mangle)]
+extern "C" fn orbit_r_newstate() -> *mut LState {
+    let vm: &'static mut Vm = Box::leak(Box::new(crate::host::new_vm()));
+    install(vm);
+    let ctx = vm.host_ctx();
+    let h = ctx.vm.rt.ext.get::<BridgeHandle>().map(|h| h.0);
+    let Some(p) = h else {
+        return std::ptr::null_mut();
+    };
+    let ctx = Box::into_raw(Box::new(ctx));
+    // SAFETY: the handle keeps the bridge alive until `orbit_r_close`.
+    let b = unsafe { &*p };
+    b.ctx.set(ctx);
+    b.host.set(ctx);
+    b.l.get()
+}
+
+/// `lua_close`: run the finalizers and free the VM, its bridge and `l`.
+#[cfg(feature = "host")]
+#[unsafe(no_mangle)]
+extern "C" fn orbit_r_close(l: *mut LState) {
+    // SAFETY: `l` came from `orbit_r_newstate` and is not used again.
+    let b = unsafe { &*((*l).rs as *const Bridge) };
+    let host = b.host.get();
+    if host.is_null() {
+        return;
+    }
+    // SAFETY: made by `orbit_r_newstate` with `Box::into_raw`; no C function
+    // is running, so nothing else uses it.
+    let ctx = unsafe { Box::from_raw(host) };
+    let vm: *mut Vm = &mut *ctx.vm;
+    drop(ctx);
+    // SAFETY: leaked by `orbit_r_newstate`; dropping it frees the bridge
+    // and the state, which nothing touches afterwards.
+    unsafe {
+        (*vm).close();
+        drop(Box::from_raw(vm));
+    }
+}
+
+/// `luaL_openselectedlibs`.
+#[cfg(feature = "host")]
+#[unsafe(no_mangle)]
+extern "C" fn orbit_r_openlibs(l: *mut LState) {
+    entry!(l, (), |_b, c| {
+        crate::host::open_libs(c.vm);
+        Ok(())
+    })
+}
+
+/// Push the pending error, for a panic function to read.
+#[unsafe(no_mangle)]
+extern "C" fn orbit_r_pushpending(l: *mut LState) {
+    entry!(l, (), |b, c| {
+        let v = b.st.borrow_mut().pending.take().unwrap_or(Value::Nil);
+        c.push(v);
+        Ok(())
+    })
 }

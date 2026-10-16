@@ -3,7 +3,11 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=csrc");
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    if std::env::var_os("CARGO_FEATURE_HOST").is_some() {
+        build.define("ORBIT_CAPI_HOST", None);
+    }
+    build
         .file("csrc/capi.c")
         .include("csrc/include")
         .define("ORBIT_CAPI_BUILD", None)

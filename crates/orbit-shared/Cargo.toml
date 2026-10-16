@@ -1,0 +1,30 @@
+[package]
+name = "orbit-shared"
+description = "SPIKE (never merges): the whole runtime as one shared library, for liblua drop-in and size measurements"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "orbitrt"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+orbit = { path = "../orbit" }
+orbit-compiler = { path = "../orbit-compiler" }
+orbit-hir = { path = "../orbit-hir" }
+orbit-lua-syntax = { path = "../orbit-lua-syntax" }
+orbit-orb-syntax = { path = "../orbit-orb-syntax" }
+signal-hook = "0.4.5"
+orbit-capi = { path = "../orbit-capi", features = ["host"] }
+
+[features]
+default = ["c-modules", "ffi", "line-editing", "cli"]
+cli = []
+c-modules = ["orbit/c-modules"]
+ffi = ["orbit/ffi"]
+repl = []
+line-editing = ["repl"]

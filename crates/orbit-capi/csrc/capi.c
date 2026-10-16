@@ -25,6 +25,7 @@ struct lua_State {
   void *rs;      /* the Rust bridge */
   jmp_buf *jb;   /* the innermost trampoline's jump target */
   int status;    /* set by Rust when an error is pending */
+  lua_CFunction panicf; /* SPIKE (liblua): lua_atpanic */
 };
 
 /* ------------------------------------------------------------------------
@@ -58,8 +59,13 @@ int orbit_capi_trampoline(lua_State *L, lua_CFunction f) {
   return n;
 }
 
+extern void orbit_r_pushpending(lua_State *L);
 static void orbit_throw(lua_State *L) {
   L->status = 0;
+  if (L->jb == NULL && L->panicf != NULL) {
+    orbit_r_pushpending(L);
+    L->panicf(L);
+  }
   if (L->jb == NULL) {
     fputs("OrbitScript: Lua error raised outside a C function call\n", stderr);
     abort();
@@ -226,9 +232,9 @@ LUALIB_API void *luaL_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 }
 
 LUA_API lua_CFunction lua_atpanic(lua_State *L, lua_CFunction panicf) {
-  (void)L;
-  (void)panicf;
-  return NULL;
+  lua_CFunction old = L->panicf;
+  L->panicf = panicf;
+  return old;
 }
 
 extern void orbit_r_warning(lua_State *L, const char *msg, int tocont);
@@ -844,8 +850,12 @@ LUALIB_API int luaL_loadfilex(lua_State *L, const char *filename, const char *mo
   /* A first line starting with '#' (a Unix exec line) is skipped, keeping
      its newline so line numbers stay right. */
   p = buf;
-  if (len > 0 && buf[0] == '#') {
+  /* A UTF-8 byte order mark is skipped too (main.lua checks both). */
+  if (len >= 3 && memcmp(p, "\xEF\xBB\xBF", 3) == 0) p += 3;
+  if (p < buf + len && *p == '#') {
     while (p < buf + len && *p != '\n') p++;
+    /* A binary chunk after the line starts right after its newline. */
+    if (p + 1 < buf + len && p[1] == '\x1b') p++;
   }
   chunkname = lua_tostring(L, -1);
   status = orbit_r_load(L, p, len - (size_t)(p - buf), chunkname, mode);
@@ -987,6 +997,37 @@ LUA_API int lua_gethookcount(lua_State *L) {
   return 0;
 }
 
+#if defined(ORBIT_CAPI_HOST)
+/* SPIKE (liblua): states created from C. The allocator is not used:
+   memory comes from the system allocator. */
+extern lua_State *orbit_r_newstate(void);
+extern void orbit_r_close(lua_State *L);
+extern void orbit_r_openlibs(lua_State *L);
+
+LUA_API const char lua_ident[] = "$LuaVersion: " LUA_COPYRIGHT " $";
+
+LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
+  (void)f;
+  (void)ud;
+  (void)seed;
+  return orbit_r_newstate();
+}
+
+LUALIB_API lua_State *luaL_newstate(void) {
+  return orbit_r_newstate();
+}
+
+LUA_API void lua_close(lua_State *L) {
+  orbit_r_close(L);
+}
+
+LUALIB_API void luaL_openselectedlibs(lua_State *L, int load, int preload) {
+  (void)load;
+  (void)preload;
+  orbit_r_openlibs(L);
+  CHECK(L);
+}
+#else
 /* Creating states from C isn't supported: embedding is Rust-only. */
 LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
   (void)f;
@@ -1002,6 +1043,7 @@ LUALIB_API lua_State *luaL_newstate(void) {
 LUA_API void lua_close(lua_State *L) {
   (void)L;
 }
+#endif
 
 LUA_API void lua_setallocf(lua_State *L, lua_Alloc f, void *ud) {
   (void)L;

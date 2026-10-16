@@ -762,6 +762,32 @@ impl Vm {
         Interrupt(self.rt.interrupt.clone())
     }
 
+    /// SPIKE (liblua): a native context over the host's own stack window,
+    /// for a C program that embeds the VM and calls the C API between
+    /// calls. The window starts above a placeholder native in register 0
+    /// of the main thread's stack, so `NativeCtx::call` sees a caller.
+    pub fn host_ctx(&mut self) -> NativeCtx<'_> {
+        fn host(_: &mut NativeCtx<'_>) -> Result<crate::NativeReturn, LuaError> {
+            Ok(crate::NativeReturn::Return(0))
+        }
+        let f = self.register_native("C host", host);
+        let Value::Native(id) = f else { unreachable!() };
+        debug_assert!(self.rt.stack.frames.is_empty());
+        if self.rt.stack.regs.is_empty() {
+            self.rt.stack.regs.push(f);
+        } else {
+            self.rt.stack.regs[0] = f;
+        }
+        self.rt.top = self.rt.top.max(1);
+        NativeCtx {
+            vm: self,
+            base: 1,
+            nargs: 0,
+            id,
+            upvals: None,
+        }
+    }
+
     /// Register a native function. `name` is its qualified name
     /// (`"print"`, `"string.rep"`), used in messages when the call site
     /// doesn't name it.
