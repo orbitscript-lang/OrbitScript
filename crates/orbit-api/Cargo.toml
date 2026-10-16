@@ -1,0 +1,25 @@
+[package]
+name = "orbit-api"
+description = "SPIKE (never merges): the embedding API, linked statically or through liborbit by one of three projections"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-api-types = { path = "../orbit-api-types" }
+orbit-api-core = { path = "../orbit-api-core", optional = true }
+orbit-table-iface = { path = "../orbit-table-iface", optional = true }
+orbit-abi-iface = { path = "../orbit-abi-iface", optional = true }
+orbit-stabby-iface = { path = "../orbit-stabby-iface", optional = true }
+abi_stable = { version = "0.11.3", optional = true }
+stabby = { version = "72.1.16", optional = true }
+
+[features]
+# Exactly one backend.
+static = ["dep:orbit-api-core"]
+table = ["dep:orbit-table-iface"]
+abi = ["dep:orbit-abi-iface", "dep:abi_stable"]
+stabby = ["dep:orbit-stabby-iface", "dep:stabby"]

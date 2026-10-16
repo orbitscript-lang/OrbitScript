@@ -1,0 +1,12 @@
+[package]
+name = "orbit-stabby-iface"
+description = "SPIKE (never merges): the boundary between liborbit and programs, described with stabby"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+stabby = "72.1.16"

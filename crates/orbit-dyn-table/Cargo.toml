@@ -1,0 +1,17 @@
+[package]
+name = "orbit-dyn-table"
+description = "SPIKE (never merges): liborbit with the hand-written function table"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "orbit_table"
+crate-type = ["cdylib"]
+
+[dependencies]
+orbit-api-core = { path = "../orbit-api-core" }
+orbit-table-iface = { path = "../orbit-table-iface" }

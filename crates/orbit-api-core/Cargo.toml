@@ -1,0 +1,16 @@
+[package]
+name = "orbit-api-core"
+description = "SPIKE (never merges): the curated embedding API every projection (static, fn table, abi_stable, stabby) implements"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit = { path = "../orbit", features = ["c-modules", "ffi"] }
+orbit-api-types = { path = "../orbit-api-types" }
+
+[lints]
+workspace = true

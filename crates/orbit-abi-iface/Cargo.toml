@@ -1,0 +1,12 @@
+[package]
+name = "orbit-abi-iface"
+description = "SPIKE (never merges): the boundary between liborbit and programs, described with abi_stable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+abi_stable = "0.11.3"

@@ -1,0 +1,9 @@
+[package]
+name = "orbit-table-iface"
+description = "SPIKE (never merges): the hand-written C ABI between liborbit and programs: one table of functions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false

@@ -1,0 +1,21 @@
+[package]
+name = "orbit-dyn-abi"
+description = "SPIKE (never merges): liborbit through abi_stable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "orbit_abi"
+crate-type = ["cdylib"]
+
+[dependencies]
+orbit-api-core = { path = "../orbit-api-core" }
+orbit-abi-iface = { path = "../orbit-abi-iface" }
+abi_stable = "0.11.3"
+
+[lints]
+workspace = true

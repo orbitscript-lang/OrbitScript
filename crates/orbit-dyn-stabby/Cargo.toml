@@ -1,0 +1,21 @@
+[package]
+name = "orbit-dyn-stabby"
+description = "SPIKE (never merges): liborbit through stabby"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "orbit_stabby"
+crate-type = ["cdylib"]
+
+[dependencies]
+orbit-api-core = { path = "../orbit-api-core" }
+orbit-stabby-iface = { path = "../orbit-stabby-iface" }
+stabby = "72.1.16"
+
+[lints]
+workspace = true

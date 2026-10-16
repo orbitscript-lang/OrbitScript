@@ -1,0 +1,21 @@
+[package]
+name = "orbit-mini"
+description = "SPIKE (never merges): a small interpreter on the embedding API, to compare how it is linked"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-api = { path = "../orbit-api" }
+
+[features]
+static = ["orbit-api/static"]
+table = ["orbit-api/table"]
+abi = ["orbit-api/abi"]
+stabby = ["orbit-api/stabby"]
+
+[lints]
+workspace = true
