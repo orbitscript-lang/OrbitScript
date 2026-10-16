@@ -1,6 +1,6 @@
 # ADR-8: Loading C modules (the Lua C API shim)
 
-Status: Accepted (Tym, 2026-10-13; proposed 2026-10-10, implemented in #124 and #125). Scope, binary compatibility, the `unsafe` exception, the `cc` build dependency, light userdata and the `io` handle behavior were each decided by Tym on 2026-10-09 and 2026-10-10; this record writes them down with the design the spike (`spike/c-modules`, never merged) measured.
+Status: Accepted (Tym, 2026-10-13; amended by ADR-10 for states created from C; proposed 2026-10-10, implemented in #124 and #125). Scope, binary compatibility, the `unsafe` exception, the `cc` build dependency, light userdata and the `io` handle behavior were each decided by Tym on 2026-10-09 and 2026-10-10; this record writes them down with the design the spike (`spike/c-modules`, never merged) measured.
 
 ## Context
 
@@ -41,7 +41,7 @@ ADR-1's light userdata (tag 10) is accepted (Tym, 2026-10-10). C pointers pushed
 1. **Now:** the module API real modules use: the stack, pushes and conversions, tables raw and with metamethods, `lua_call`/`lua_pcall` with message handlers, userdata with user values, metatables, the registry and `luaL_ref`, C closures and upvalues, `luaL_Buffer`, `lua_pushfstring`, the `luaL_check*`/`opt*` family, `luaL_newlib`/`setfuncs`/`requiref`, `lua_load`/`luaL_loadbuffer`, `luaL_tolstring`, `luaL_traceback`, `lua_rawgetp`/`rawsetp`, `lua_gc`, warnings.
 2. **Next:** `lua_getinfo`/`lua_getstack`, hooks from C, `lua_dump`, `luaL_Stream` interop with `io`.
 3. **Later:** yields across C (`lua_yieldk`, `lua_callk`, `lua_pcallk`), `lua_newthread`, `lua_resume`, a `lua_State` per coroutine; Windows (`lua55.dll`).
-- **Not planned:** creating states from C (`lua_newstate`, `luaL_newstate`, `lua_close`). Embedding stays Rust-only.
+- **Creating states from C** (`lua_newstate`, `luaL_newstate`, `lua_close`) moved to ADR-10 (2026-10-16), for programs that embed OrbitScript as `liblua`.
 
 ## Consequences
 - Release `orbit` grows by about 97 KiB (6%) with the feature (1,643,464 to 1,742,184 bytes, Linux x86_64, 2026-10-12).

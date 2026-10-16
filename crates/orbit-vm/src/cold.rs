@@ -387,6 +387,18 @@ impl Vm {
         }
     }
 
+    /// Collector work for a host that uses the VM between calls through
+    /// [`Vm::host_ctx`] (the C API's `lua_newstate`): when allocation has
+    /// earned a step, take it and run the finalizers it made due, as the
+    /// interpreter does at its safe points. Everything above the host's top
+    /// is dead.
+    pub fn host_safepoint(&mut self) {
+        if self.heap.should_step() && self.rt.stack.frames.is_empty() {
+            let live = self.rt.top;
+            self.gc_safepoint(live);
+        }
+    }
+
     /// A safe point's collector work: one step, then the finalizers it made
     /// due. Returns true if the heap is over its limit even after a full
     /// collection, so the caller raises `not enough memory`.

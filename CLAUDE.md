@@ -19,6 +19,7 @@
 | `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) | C |
 | `orbit-stdlib` | Lua standard library | D |
 | `orbit-capi` | Lua C API shim for loading C modules (`orbit` feature `c-modules`) | shared |
+| `orbit-lib` | `liborbit`, the runtime as one shared library that also serves as liblua 5.5 (ADR-10) | shared |
 | `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit` feature `ffi`) | shared |
 | `orbit` | Rust embedding API | shared |
 | `orbit-cli` | `orbit` interpreter and `orbitc` compiler binaries | shared |

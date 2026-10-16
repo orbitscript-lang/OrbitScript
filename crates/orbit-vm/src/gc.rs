@@ -175,6 +175,10 @@ impl Runtime {
     /// warnings are on ([`Runtime::warnings`]; off by default).
     pub fn warn(&mut self, msg: &[u8]) {
         use std::io::Write;
+        if let Some(hook) = &mut self.warn_hook {
+            (hook.0)(msg, false);
+            return;
+        }
         if !self.warnings {
             return;
         }

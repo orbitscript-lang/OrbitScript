@@ -30,6 +30,17 @@ cargo testkit diff --reference target/reference-lua/bin/lua5.5 --interp target/r
 
 Add a file whenever a behavior is subtle enough that a unit test might encode the wrong expectation: the reference interpreter decides.
 
+## Programs built for liblua
+
+`cargo testkit liblua` runs the suite through `lua5.5-host`, the reference `lua.c` linked against Lua's shared library the way Debian ships it (`liblua5.5.so.0`, symbols versioned `LUA_5.5`), with `liborbit` installed under that name instead (ADR-10). The program is built by `scripts/build-reference-lua.sh` (Linux only for now). `lua-5.5/expected-liblua.txt` lists what passes.
+
+```sh
+cargo build --release -p orbit-lib
+cargo testkit liblua --c-libs target/reference-lua/libs --expect tests/lua-5.5/expected-liblua.txt
+```
+
+`cargo test -p orbit-lib` also builds a small C host (`crates/orbit-lib/tests/chost/host.c`) against the library and checks states, libraries, panics, warnings, strings and the collector from C.
+
 ## Differential fuzzing
 
 `cargo testkit fuzz` generates random library calls, runs each batch under both interpreters and stops at the first call whose results or error differ. The targets are `format` (`string.format` specs and arguments), `pattern` (`find`, `match` and `gsub`), `pack` (`string.pack`, `unpack` and `packsize`) and `utf8`, or `all` for every one. Generators favor edge cases: limits of widths and precisions, halfway floats, malformed patterns, odd integer sizes and alignments, and invalid UTF-8.

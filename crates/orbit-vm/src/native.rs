@@ -255,9 +255,11 @@ impl NativeCtx<'_> {
         let func = self.vm.rt.top - nargs - 1;
         let me = self.base - 1;
         let s = &mut self.vm.rt.stack;
-        // With hooks on, the native already has its frame.
+        // With hooks on, the native already has its frame. The host's own
+        // context ([`Vm::host_ctx`]) gets none: its caller is outside Lua.
         let own = !matches!(s.frames.last(), Some(f) if f.func as usize == me
-            && matches!(f.kind, FrameKind::NativeCall { .. }));
+            && matches!(f.kind, FrameKind::NativeCall { .. }))
+            && self.vm.rt.host_native != Some(self.id);
         if own {
             let cdepth = s.same_depth();
             s.frames.push(crate::Frame {

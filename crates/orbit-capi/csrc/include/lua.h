@@ -12,15 +12,24 @@
 
 #include "luaconf.h"
 
+#define LUAI_TOSTRAUX(x) #x
+#define LUAI_TOSTR(x) LUAI_TOSTRAUX(x)
+
 #define LUA_VERSION_MAJOR_N 5
 #define LUA_VERSION_MINOR_N 5
 #define LUA_VERSION_RELEASE_N 1
+#define LUA_VERSION_MAJOR LUAI_TOSTR(LUA_VERSION_MAJOR_N)
+#define LUA_VERSION_MINOR LUAI_TOSTR(LUA_VERSION_MINOR_N)
+#define LUA_VERSION_RELEASE LUAI_TOSTR(LUA_VERSION_RELEASE_N)
 #define LUA_VERSION_NUM 505
 #define LUA_VERSION_RELEASE_NUM 50501
 #define LUA_VERSION "Lua 5.5"
 #define LUA_RELEASE "Lua 5.5.1"
 #define LUA_COPYRIGHT "OrbitScript (Lua 5.5 compatible)"
 #define LUA_AUTHORS "OrbitScript contributors"
+
+/* The start of a precompiled chunk: OrbitScript's own format, not PUC's. */
+#define LUA_SIGNATURE "\x1bOrbit"
 
 #define LUA_MULTRET (-1)
 
@@ -73,6 +82,9 @@ typedef struct lua_Debug lua_Debug;
 typedef void (*lua_Hook)(lua_State *L, lua_Debug *ar);
 
 /* State. */
+/* Identifies the library in a binary (the reference build has one too). */
+LUA_API const char lua_ident[];
+
 LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed);
 LUA_API void lua_close(lua_State *L);
 LUA_API lua_State *lua_newthread(lua_State *L);
