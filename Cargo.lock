@@ -118,6 +118,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit-cli-dyn"
+version = "0.0.0"
+dependencies = [
+ "orbit-dylib",
+ "signal-hook",
+]
+
+[[package]]
 name = "orbit-compiler"
 version = "0.0.0"
 dependencies = [
@@ -132,6 +140,18 @@ version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
  "orbit-gc",
+]
+
+[[package]]
+name = "orbit-dylib"
+version = "0.0.0"
+dependencies = [
+ "orbit",
+ "orbit-capi",
+ "orbit-compiler",
+ "orbit-hir",
+ "orbit-lua-syntax",
+ "orbit-orb-syntax",
 ]
 
 [[package]]

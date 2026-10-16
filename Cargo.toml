@@ -42,3 +42,9 @@ inherits = "release"
 
 [profile.pgo]
 inherits = "release"
+
+# SPIKE (liblua): Rust dylib layout. Dynamic std is built with unwinding.
+[profile.dyn]
+inherits = "release"
+panic = "unwind"
+lto = false

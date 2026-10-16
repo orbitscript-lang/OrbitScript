@@ -1,0 +1,28 @@
+[package]
+name = "orbit-cli-dyn"
+description = "SPIKE (never merges): the CLIs linked to the runtime dylib"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "orbit-dyn"
+path = "src/main.rs"
+
+[[bin]]
+name = "orbitc-dyn"
+path = "src/orbitc.rs"
+
+[dependencies]
+orbit = { package = "orbit-dylib", path = "../orbit-dylib" }
+signal-hook = "0.4.5"
+
+[features]
+default = ["c-modules", "ffi", "line-editing"]
+c-modules = []
+ffi = []
+repl = []
+line-editing = ["repl"]
