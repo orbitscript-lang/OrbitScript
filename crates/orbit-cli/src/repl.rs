@@ -5,7 +5,7 @@
 use std::io::{BufRead, Write};
 use std::sync::atomic::Ordering;
 
-use orbit::{MetaField, Value};
+use orbit_api::Value;
 
 use crate::{RUNNING, Runner, STDIN};
 
@@ -65,28 +65,10 @@ const COMPLETE: &[u8] = include_bytes!("repl/complete.lua");
 impl Runner {
     /// Call the global `warn`, if there is one.
     fn warn(&mut self, msg: &str) {
-        let vm = self.lua.vm();
-        let warn = vm.global("warn");
-        if matches!(warn, Value::Native(_) | Value::Closure(_)) {
-            let m = vm.new_str(msg.as_bytes());
-            let _ = vm.call(warn, &[m]);
+        let warn = self.lua.global("warn");
+        if matches!(warn, Value::Function(_)) {
+            let _ = self.lua.call(&warn, &[Value::from(msg)]);
         }
-    }
-
-    /// `v` as `tostring` shows it: through `__tostring` if it has one.
-    fn display_text(&mut self, v: Value) -> Vec<u8> {
-        let vm = self.lua.vm();
-        if let Value::Str(s) = v {
-            return vm.str_bytes(s).to_vec();
-        }
-        let mm = vm.rt.metamethod(&vm.heap, v, MetaField::ToString);
-        if !matches!(mm, Value::Nil)
-            && let Ok(r) = vm.call(mm, &[v])
-            && let Some(&Value::Str(s)) = r.first()
-        {
-            return vm.str_bytes(s).to_vec();
-        }
-        vm.to_display(v)
     }
 
     /// Print `_PROMPT` (or `_PROMPT2`) and read a line without its newline;
@@ -97,12 +79,16 @@ impl Runner {
         } else {
             ("_PROMPT", "> ")
         };
-        let p = self.lua.vm().global(name);
+        let p = self.lua.global(name);
         let prompt = match p {
             Value::Nil => default.as_bytes().to_vec(),
-            v => self.display_text(v),
+            // `__tostring`'s text, or `tostring`'s without it.
+            v => self
+                .lua
+                .to_string(&v)
+                .unwrap_or_else(|_| default.as_bytes().to_vec()),
         };
-        let _ = self.lua.vm().flush();
+        self.lua.flush();
         if let Some(line) = self.edit_line(&prompt) {
             return line;
         }
@@ -138,7 +124,7 @@ impl Runner {
             }
             let mut ret = b"return ".to_vec();
             ret.extend_from_slice(&line);
-            let f = match self.lua.load_buffer(&ret, STDIN) {
+            let f = match self.lua.load(&ret, STDIN) {
                 Ok(f) => {
                     self.add_history(&line);
                     Some(f)
@@ -146,10 +132,10 @@ impl Runner {
                 Err(_) => self.read_statement(line),
             };
             if let Some(f) = f {
-                self.call_and_print(f);
+                self.call_and_print(&f);
             }
         }
-        let _ = self.lua.vm().flush();
+        self.lua.flush();
         println!();
     }
 
@@ -158,7 +144,7 @@ impl Runner {
     /// History gets the whole statement, as one entry.
     fn read_statement(&mut self, mut buf: Vec<u8>) -> Option<Value> {
         loop {
-            match self.lua.load_buffer(&buf, STDIN) {
+            match self.lua.load(&buf, STDIN) {
                 Ok(f) => {
                     self.add_history(&buf);
                     return Some(f);
@@ -180,25 +166,13 @@ impl Runner {
         }
     }
 
-    fn call_and_print(&mut self, f: Value) {
-        self.lua.vm().pin(f);
-        let r = self.docall(f, &[]);
-        self.lua.vm().unpin(f);
-        let vm = self.lua.vm();
-        match r {
+    fn call_and_print(&mut self, f: &Value) {
+        match self.docall(f, &[]) {
             Ok(results) if results.is_empty() => {}
             Ok(results) => {
-                for &v in &results {
-                    vm.pin(v);
-                }
-                let print = vm.global("print");
-                let r = vm.call(print, &results);
-                for &v in &results {
-                    vm.unpin(v);
-                }
-                if let Err(e) = r {
-                    let msg = self.lua.vm().error_message(&e);
-                    self.report(&format!("error calling 'print' ({msg})"));
+                let print = self.lua.global("print");
+                if let Err(e) = self.lua.call(&print, &results) {
+                    self.report(&format!("error calling 'print' ({e})"));
                 }
             }
             Err(text) => self.report(&text),
@@ -249,48 +223,31 @@ impl Runner {
     /// before any line runs, so later changes to the libraries it uses
     /// don't reach it. `None` if it can't be made (a library is missing).
     fn completer(&mut self) -> Option<Value> {
-        let chunk = self.lua.load_buffer(COMPLETE, b"=complete").ok()?;
-        let vm = self.lua.vm();
-        vm.pin(chunk);
-        let r = vm.call(chunk, &[]);
-        vm.unpin(chunk);
-        match r.ok().and_then(|r| r.first().copied()) {
-            Some(f @ Value::Closure(_)) => {
-                vm.pin(f);
-                Some(f)
-            }
-            _ => None,
-        }
+        let chunk = self.lua.load(COMPLETE, b"=complete").ok()?;
+        let r = self.lua.call(&chunk, &[]).ok()?;
+        r.into_iter()
+            .next()
+            .filter(|f| matches!(f, Value::Function(_)))
     }
 
     /// Tab completion: the names that can follow `path` and start with
     /// `frag`.
     fn completions(&mut self, path: &[String], frag: &str) -> Vec<String> {
-        let Some(complete) = self.repl.complete else {
+        let Some(complete) = self.repl.complete.clone() else {
             return Vec::new();
         };
-        let vm = self.lua.vm();
-        let mut args = Vec::with_capacity(path.len() + 1);
-        for s in std::iter::once(frag).chain(path.iter().map(String::as_str)) {
-            let v = vm.new_str(s.as_bytes());
-            vm.pin(v);
-            args.push(v);
-        }
-        let r = vm.call(complete, &args);
-        let names = match &r {
+        let args: Vec<Value> = std::iter::once(frag)
+            .chain(path.iter().map(String::as_str))
+            .map(Value::from)
+            .collect();
+        match self.lua.call(&complete, &args) {
             Ok(vals) => vals
                 .iter()
-                .filter_map(|&v| match v {
-                    Value::Str(s) => Some(String::from_utf8_lossy(vm.str_bytes(s)).into_owned()),
-                    _ => None,
-                })
+                .filter_map(|v| v.as_bytes())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
                 .collect(),
             Err(_) => Vec::new(),
-        };
-        for &v in args.iter().rev() {
-            vm.unpin(v);
         }
-        names
     }
 }
 

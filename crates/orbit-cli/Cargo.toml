@@ -19,22 +19,26 @@ name = "orbitc"
 path = "src/orbitc.rs"
 
 [dependencies]
-orbit = { path = "../orbit" }
-orbit-compiler = { path = "../orbit-compiler" }
-orbit-hir = { path = "../orbit-hir" }
-orbit-lua-syntax = { path = "../orbit-lua-syntax" }
-orbit-orb-syntax = { path = "../orbit-orb-syntax" }
+# Both programs are written against the embedding API that crosses a
+# library boundary (ADR-10): `static` links the runtime in, `shared` uses
+# liborbit.
+orbit-api = { path = "../orbit-api", default-features = false }
 signal-hook = "0.4.5"
 
 [features]
-default = ["c-modules", "ffi", "line-editing"]
+default = ["static", "c-modules", "ffi", "line-editing"]
+# The runtime linked into each program: one self-contained file apiece.
+static = ["orbit-api/static"]
+# The runtime in liborbit, as packaging builds them (`cargo testkit
+# package`). The library decides which of the features below it has.
+shared = ["orbit-api/shared"]
 # Load C modules (on by default in the CLI, Tym 2026-10-09).
-c-modules = ["orbit/c-modules"]
+c-modules = ["orbit-api/c-modules"]
 # The `ffi` library, on unless `--no-ffi` is given (Tym 2026-10-14, ADR-9).
-ffi = ["orbit/ffi"]
+ffi = ["orbit-api/ffi"]
 # Link the system's shared libffi rather than a static copy built from
 # bundled sources.
-ffi-system-libffi = ["ffi", "orbit/ffi-system-libffi"]
+ffi-system-libffi = ["ffi", "orbit-api/ffi-system-libffi"]
 # Interactive mode (`-i`, or no script on a terminal), reading plain lines.
 # Without it, `-i` is an unrecognized option and a terminal on standard
 # input is read as a script, as a pipe is.

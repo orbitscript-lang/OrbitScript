@@ -39,6 +39,8 @@ cargo build --release -p orbit-lib
 cargo testkit liblua --c-libs target/reference-lua/libs --expect tests/lua-5.5/expected-liblua.txt
 ```
 
+`cargo testkit package` builds the shared layout of ADR-10 into `target/package/out`: `liborbit.so.0` with Lua's library names as aliases, `orbit` and `orbitc` built with `orbit-api`'s `shared` backend, and the C headers. Its builds use their own target directory, so the static `target/release/orbit` is left alone. Run the suite through the packaged `orbit` the same way as the static one (`--interp target/package/out/bin/orbit`), and `cargo testkit liblua --lib target/package/out/lib/liborbit.so.0`.
+
 `cargo test -p orbit-lib` also builds a small C host (`crates/orbit-lib/tests/chost/host.c`) against the library and checks states, libraries, panics, warnings, strings and the collector from C.
 
 ## Differential fuzzing

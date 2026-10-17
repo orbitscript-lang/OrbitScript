@@ -17,8 +17,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use orbit_compiler::bytecode::{UnlinkedChunk, format, verify};
-use orbit_lua_syntax::ParseOptions;
+use orbit_api::tools::{self, Compiled};
 
 /// The file a chunk is written to without `-o`, as `luac.out` for `luac`.
 const DEFAULT_OUTPUT: &str = "orbitc.out";
@@ -115,7 +114,7 @@ fn main() -> ExitCode {
     if cli.version {
         println!(
             "OrbitScript {}  compiler for Lua 5.5.1, designed by Lua.org, PUC-Rio",
-            orbit::VERSION
+            orbit_api::VERSION
         );
         if cli.inputs.is_empty() {
             return ExitCode::SUCCESS;
@@ -130,7 +129,7 @@ fn main() -> ExitCode {
     }
     for input in &cli.inputs {
         let path = (input != "-").then_some(input.as_bytes());
-        let result = match orbit::read_chunk_file(path) {
+        let result = match tools::read_chunk_file(path) {
             Ok((bytes, source)) => run(&cli, &bytes, &source),
             Err(e) => Err(e),
         };
@@ -145,88 +144,31 @@ fn main() -> ExitCode {
 /// Handle one input: `bytes` is its contents (any `#` line removed) and
 /// `source` its chunk source name (`@file` or `=stdin`).
 fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
-    let name = orbit::chunk_id(source);
-    let options = ParseOptions::default();
     let mut stdout = std::io::stdout();
-    if orbit::is_orbitscript_file(source) && bytes.first() != format::SIGNATURE.first() {
-        return run_orbitscript(cli, bytes, source, &name);
-    }
     match cli.stage {
         Stage::Ast => {
-            let ast = orbit_lua_syntax::parse_with(&name, bytes, &options)
-                .map_err(|d| d.to_lua_message(&name))?;
-            let _ = stdout.write_all(&orbit_lua_syntax::unparse(&ast));
-            return Ok(());
+            let _ = stdout.write_all(&tools::syntax_tree(bytes, source)?);
+            Ok(())
         }
         Stage::Hir => {
-            let hir = orbit_lua_syntax::to_hir(&name, bytes, &options)
-                .map_err(|d| d.to_lua_message(&name))?;
-            let _ = stdout.write_all(orbit_hir::print(&hir).as_bytes());
-            return Ok(());
-        }
-        Stage::Bytecode => {}
-    }
-    let chunk = load(bytes, source, &name, &options)?;
-    output(cli, &chunk)
-}
-
-/// List and write a compiled chunk, as the options ask.
-fn output(cli: &Cli, chunk: &UnlinkedChunk) -> Result<(), String> {
-    let mut stdout = std::io::stdout();
-    if cli.list {
-        let _ = stdout.write_all(orbit_compiler::disassemble(chunk).as_bytes());
-    }
-    if !cli.parse_only {
-        let out = cli.output.as_deref().unwrap_or(DEFAULT_OUTPUT);
-        let encoded = format::encode(chunk, cli.strip);
-        let written = if out == "-" {
-            stdout.write_all(&encoded)
-        } else {
-            std::fs::write(out, &encoded)
-        };
-        written.map_err(|e| format!("cannot write {out}: {e}"))?;
-    }
-    Ok(())
-}
-
-/// [`run`] for an OrbitScript file: the HIR, or a compiled chunk.
-fn run_orbitscript(cli: &Cli, bytes: &[u8], source: &[u8], name: &str) -> Result<(), String> {
-    let options = orbit_orb_syntax::ParseOptions::default();
-    match cli.stage {
-        Stage::Ast => Err(format!(
-            "{name}: --ast is not available for OrbitScript yet"
-        )),
-        Stage::Hir => {
-            let hir =
-                orbit_orb_syntax::to_hir(name, bytes, &options).map_err(|d| d.to_message(name))?;
-            let _ = std::io::stdout().write_all(orbit_hir::print(&hir).as_bytes());
+            let _ = stdout.write_all(tools::hir(bytes, source)?.as_bytes());
             Ok(())
         }
         Stage::Bytecode => {
-            let mut chunk =
-                orbit::compile_orbitscript(bytes, name, &options).map_err(|e| e.to_string())?;
-            chunk.source = source.into();
-            output(cli, &chunk)
+            let Compiled { chunk, listing } = tools::compile(bytes, source, cli.strip, cli.list)?;
+            if let Some(l) = listing {
+                let _ = stdout.write_all(l.as_bytes());
+            }
+            if !cli.parse_only {
+                let out = cli.output.as_deref().unwrap_or(DEFAULT_OUTPUT);
+                let written = if out == "-" {
+                    stdout.write_all(&chunk)
+                } else {
+                    std::fs::write(out, &chunk)
+                };
+                written.map_err(|e| format!("cannot write {out}: {e}"))?;
+            }
+            Ok(())
         }
     }
-}
-
-/// Compile source, or decode and check a binary chunk (for listing it, or
-/// writing it again stripped).
-fn load(
-    bytes: &[u8],
-    source: &[u8],
-    name: &str,
-    options: &ParseOptions,
-) -> Result<UnlinkedChunk, String> {
-    if bytes.first() == format::SIGNATURE.first() {
-        let bad = |e: &dyn std::fmt::Display| format!("{name}: bad binary format ({e})");
-        let chunk = format::decode(bytes).map_err(|e| bad(&e))?;
-        verify::verify(&chunk, verify::Level::STRONGEST).map_err(|e| bad(&e))?;
-        return Ok(chunk);
-    }
-    let mut chunk = orbit::compile(bytes, name, options).map_err(|e| e.to_string())?;
-    // As `load` does: the source as given, so a chunk read back names it.
-    chunk.source = source.into();
-    Ok(chunk)
 }

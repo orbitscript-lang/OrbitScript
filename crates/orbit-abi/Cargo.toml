@@ -1,0 +1,15 @@
+[package]
+name = "orbit-abi"
+description = "The boundary between liborbit and Rust programs, described with stabby (ADR-10)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+stabby = "72.1.16"
+
+[lints]
+workspace = true

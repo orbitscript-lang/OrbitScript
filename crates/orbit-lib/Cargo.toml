@@ -18,7 +18,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 orbit = { path = "../orbit", features = ["c-modules"] }
+orbit-abi = { path = "../orbit-abi" }
+orbit-api = { path = "../orbit-api", features = ["c-modules"] }
 orbit-capi = { path = "../orbit-capi", features = ["host"] }
+stabby = "72.1.16"
+
+[features]
+default = ["ffi"]
+# The `ffi` library, opened by programs that ask for it (ADR-9).
+ffi = ["orbit/ffi", "orbit-api/ffi"]
+# With `ffi`: link the system's shared libffi rather than a bundled copy.
+ffi-system-libffi = ["ffi", "orbit/ffi-system-libffi"]
 
 [lints]
 workspace = true

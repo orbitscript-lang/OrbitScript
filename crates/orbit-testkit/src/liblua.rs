@@ -76,12 +76,12 @@ fn install(lib: &Path, host: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn link(target: &Path, at: &Path) -> Result<()> {
+pub(crate) fn link(target: &Path, at: &Path) -> Result<()> {
     std::os::unix::fs::symlink(target, at).map_err(util::io_err(at.display()))
 }
 
 #[cfg(not(unix))]
-fn link(target: &Path, at: &Path) -> Result<()> {
+pub(crate) fn link(target: &Path, at: &Path) -> Result<()> {
     std::fs::copy(target, at)
         .map(|_| ())
         .map_err(util::io_err(at.display()))
