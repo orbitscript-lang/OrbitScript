@@ -48,6 +48,7 @@ struct orbit_r_table {
   int (*checkstack)(lua_State *L, int n);
   void (*close)(lua_State *L);
   void (*closeslot)(lua_State *L, int idx);
+  int (*closethread)(lua_State *L, lua_State *from);
   int (*compare)(lua_State *L, int a, int b, int op);
   void (*concat)(lua_State *L, int n);
   void (*copy)(lua_State *L, int fromidx, int toidx);
@@ -68,12 +69,13 @@ struct orbit_r_table {
   int (*iscfunction)(lua_State *L, int idx);
   int (*isinteger)(lua_State *L, int idx);
   int (*isnumber)(lua_State *L, int idx);
-  int (*isrunning)(lua_State *L, int idx);
   int (*isrustudata)(lua_State *L, int idx);
   int (*isstring)(lua_State *L, int idx);
   int (*isuserdata)(lua_State *L, int idx);
+  int (*isyieldable)(lua_State *L);
   void (*len)(lua_State *L, int idx);
   int (*load)(lua_State *L, const char *buf, size_t len, const char *chunkname, const char *mode);
+  lua_State *(*newthread)(lua_State *L);
   void * (*newuserdatauv)(lua_State *L, size_t sz, int nuvalue);
   int (*next)(lua_State *L, int idx);
   unsigned (*numbertocstring)(lua_State *L, int idx, char *buff);
@@ -97,6 +99,7 @@ struct orbit_r_table {
   void (*rawset)(lua_State *L, int idx);
   void (*rawseti)(lua_State *L, int idx, lua_Integer n);
   void (*rawsetp)(lua_State *L, int idx, const void *p);
+  int (*resume)(lua_State *L, lua_State *from, int narg, int *nres);
   void (*rotate)(lua_State *L, int idx, int n);
   void (*setfield)(lua_State *L, int idx, const char *k);
   void (*setglobal)(lua_State *L, const char *name);
@@ -108,6 +111,7 @@ struct orbit_r_table {
   void (*settop)(lua_State *L, int idx);
   const char * (*setupvalue)(lua_State *L, int funcindex, int n);
   void (*setwarnf)(lua_State *L, lua_WarnFunction f, void *ud);
+  int (*status)(lua_State *L);
   size_t (*stringtonumber)(lua_State *L, const char *s);
   int (*toboolean)(lua_State *L, int idx);
   lua_CFunction (*tocfunction)(lua_State *L, int idx);
@@ -117,6 +121,7 @@ struct orbit_r_table {
   const char * (*tolstringmeta)(lua_State *L, int idx, size_t *len);
   lua_Number (*tonumberx)(lua_State *L, int idx, int *isnum);
   const void * (*topointer)(lua_State *L, int idx);
+  lua_State *(*tothread)(lua_State *L, int idx);
   void * (*touserdata)(lua_State *L, int idx);
   void (*traceback)(lua_State *L, const char *msg, int level);
   int (*type)(lua_State *L, int idx);
@@ -127,6 +132,8 @@ struct orbit_r_table {
   lua_Number (*version)(lua_State *L);
   void (*warning)(lua_State *L, const char *msg, int tocont);
   void (*where)(lua_State *L, int lvl);
+  void (*xmove)(lua_State *from, lua_State *to, int n);
+  void (*yieldk)(lua_State *L, int nresults, lua_KContext ctx, lua_KFunction k);
 };
 
 static const struct orbit_r_table *orbit_r;
@@ -151,6 +158,23 @@ lua_State *orbit_capi_newstate(void *rs, const struct orbit_r_table *table) {
   return L;
 }
 
+/* The state of another thread of main's VM. As in Lua, its extra space
+   starts as a copy of the main thread's. */
+lua_State *orbit_capi_newthread(lua_State *main) {
+  char *block = malloc(LUA_EXTRASPACE + sizeof(struct lua_State));
+  lua_State *L;
+  if (block == NULL) return NULL;
+  memcpy(block, lua_getextraspace(main), LUA_EXTRASPACE);
+  L = (lua_State *)(block + LUA_EXTRASPACE);
+  memset(L, 0, sizeof(*L));
+  L->rs = main->rs;
+  L->wake = main->wake;
+  L->panicf = main->panicf;
+  L->allocf = main->allocf;
+  L->allocud = main->allocud;
+  return L;
+}
+
 void orbit_capi_freestate(lua_State *L) {
   if (L != NULL) free((char *)L - LUA_EXTRASPACE);
 }
@@ -163,6 +187,18 @@ int orbit_capi_trampoline(lua_State *L, lua_CFunction f) {
   volatile int n = -1;
   L->jb = &jb;
   if (setjmp(jb) == 0) n = f(L);
+  L->jb = old;
+  return n;
+}
+
+/* Call a continuation k(L, status, ctx) as orbit_capi_trampoline calls a C
+   function. */
+int orbit_capi_trampoline_k(lua_State *L, lua_KFunction k, int status, lua_KContext ctx) {
+  jmp_buf jb;
+  jmp_buf *volatile old = L->jb;
+  volatile int n = -1;
+  L->jb = &jb;
+  if (setjmp(jb) == 0) n = k(L, status, ctx);
   L->jb = old;
   return n;
 }
@@ -1007,50 +1043,25 @@ LUA_API int lua_dump(lua_State *L, lua_Writer writer, void *data, int strip) {
   return status;
 }
 
-LUA_API int lua_status(lua_State *L) {
-  (void)L;
-  return LUA_OK;
-}
-
-LUA_API int lua_isyieldable(lua_State *L) {
-  (void)L;
-  return 0;
-}
-
-LUA_API lua_State *lua_tothread(lua_State *L, int idx) {
-  int r = orbit_r->isrunning(L, idx);
-  CHECK(L);
-  return r ? L : NULL;
-}
+/* Threads. Every thread C sees has its own lua_State (made in Rust with
+   orbit_capi_newthread). lua_yieldk, and lua_callk/lua_pcallk with a
+   continuation where the thread can yield, leave the C function with a
+   longjmp, as an error does: Rust then does what it asked for. */
+API(int, status, (lua_State *L), (L))
+API(int, isyieldable, (lua_State *L), (L))
+API(lua_State *, tothread, (lua_State *L, int idx), (L, idx))
+API(lua_State *, newthread, (lua_State *L), (L))
+API(int, closethread, (lua_State *L, lua_State *from), (L, from))
+API(int, resume, (lua_State *L, lua_State *from, int narg, int *nres), (L, from, narg, nres))
 
 LUA_API void lua_xmove(lua_State *from, lua_State *to, int n) {
-  if (from != to && n > 0) unsupported(from, "lua_xmove between threads");
-}
-
-LUA_API lua_State *lua_newthread(lua_State *L) {
-  unsupported(L, "lua_newthread");
-  return NULL;
-}
-
-LUA_API int lua_closethread(lua_State *L, lua_State *from) {
-  (void)from;
-  unsupported(L, "lua_closethread");
-  return LUA_OK;
-}
-
-LUA_API int lua_resume(lua_State *L, lua_State *from, int narg, int *nres) {
-  (void)L;
-  (void)narg;
-  if (nres != NULL) *nres = 0;
-  unsupported(from != NULL ? from : L, "lua_resume");
-  return LUA_ERRRUN;
+  orbit_r->xmove(from, to, n);
+  CHECK(from);
 }
 
 LUA_API int lua_yieldk(lua_State *L, int nresults, lua_KContext ctx, lua_KFunction k) {
-  (void)nresults;
-  (void)ctx;
-  (void)k;
-  unsupported(L, "yielding from a C function");
+  orbit_r->yieldk(L, nresults, ctx, k);
+  CHECK(L);
   return 0;
 }
 

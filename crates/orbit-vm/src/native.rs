@@ -135,6 +135,9 @@ pub enum NativeReturn {
     /// Yield the last `nvals` values of the window to the resumer. The
     /// values the next resume passes become this native's results.
     Yield { nvals: usize },
+    /// [`NativeReturn::Yield`], then run `k` with the values the next
+    /// resume passes (the C API's `lua_yieldk` with a continuation).
+    YieldThen { nvals: usize, k: Continuation },
     /// End the running coroutine as if its body had returned nothing
     /// (`coroutine.close` of itself).
     Exit,
@@ -168,6 +171,13 @@ impl NativeCtx<'_> {
     #[inline]
     pub fn nargs(&self) -> usize {
         self.nargs
+    }
+
+    /// Where the window starts on its stack: tells this activation from
+    /// others on the same thread, for state kept across continuations.
+    #[inline]
+    pub fn window_start(&self) -> usize {
+        self.base
     }
 
     /// Values currently in the window.

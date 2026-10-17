@@ -30,7 +30,7 @@ use orbit_core::{
 };
 use orbit_gc::{Liveness, Marker, Roots};
 
-pub use coro::CoStatus;
+pub use coro::{CoStatus, WindowSave};
 pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 pub use meta::MetaField;
 pub use native::{

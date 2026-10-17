@@ -38,6 +38,7 @@ pub(crate) mod abi {
     pub const TUSERDATA: i32 = 7;
     pub const TTHREAD: i32 = 8;
     pub const OK: i32 = 0;
+    pub const YIELD: i32 = 1;
     pub const ERRRUN: i32 = 2;
     pub const ERRSYNTAX: i32 = 3;
     pub const ERRMEM: i32 = 4;
@@ -660,13 +661,6 @@ pub(crate) fn pushcclosure(c: &mut NativeCtx<'_>, f: u64, n: i32) -> Res<()> {
     Ok(())
 }
 
-/// Push the running thread (`lua_pushthread`); true if it is the main one.
-pub(crate) fn pushthread(c: &mut NativeCtx<'_>) -> bool {
-    let (t, main) = c.running();
-    c.push(Value::Thread(t));
-    main
-}
-
 // ---- getting and setting ----------------------------------------------------------
 
 pub(crate) fn gettable_with(c: &mut NativeCtx<'_>, obj: Value, key: Value) -> Res<i32> {
@@ -878,7 +872,7 @@ pub(crate) fn setmetatable(c: &mut NativeCtx<'_>, idx: i32) -> Res<()> {
 
 // ---- calls ----------------------------------------------------------------
 
-fn check_call(c: &mut NativeCtx<'_>, nargs: i32) -> Res<usize> {
+pub(crate) fn check_call(c: &mut NativeCtx<'_>, nargs: i32) -> Res<usize> {
     let nargs = nargs.max(0) as usize;
     if nargs + 1 > c.len() {
         return Err(c.error("C API: not enough elements for the call"));
@@ -887,7 +881,7 @@ fn check_call(c: &mut NativeCtx<'_>, nargs: i32) -> Res<usize> {
 }
 
 /// Keep `nresults` of the `n` results at the top (all for `LUA_MULTRET`).
-fn adjust(c: &mut NativeCtx<'_>, n: usize, nresults: i32) {
+pub(crate) fn adjust(c: &mut NativeCtx<'_>, n: usize, nresults: i32) {
     if nresults == abi::MULTRET {
         return;
     }
@@ -933,7 +927,7 @@ pub(crate) fn pcall(c: &mut NativeCtx<'_>, nargs: i32, nresults: i32, errfunc: i
 }
 
 /// The status code for an error that left a protected call.
-fn error_status(c: &NativeCtx<'_>, v: Value) -> i32 {
+pub(crate) fn error_status(c: &NativeCtx<'_>, v: Value) -> i32 {
     match v {
         Value::Str(s) if c.bytes(s) == orbit_vm::orbit_core::NoMemory::MESSAGE.as_bytes() => {
             abi::ERRMEM
