@@ -133,7 +133,16 @@ impl Vm {
             && (self.rt.stack.hook.mask & INTERRUPT != 0
                 || self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed))
         {
-            return Err(self.interrupted());
+            let handled = match self.rt.interrupt_handler {
+                Some(handler) => {
+                    self.clear_interrupt();
+                    handler(self)
+                }
+                None => false,
+            };
+            if !handled {
+                return Err(self.interrupted());
+            }
         }
         let h = &mut self.rt.stack.hook;
         if h.active || h.mask == 0 {

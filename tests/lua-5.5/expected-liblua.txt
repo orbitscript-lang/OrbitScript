@@ -1,5 +1,5 @@
 # Suite files lua-on-liborbit is expected to pass. Updated with:
-#   cargo testkit liblua --c-libs target/reference-lua/libs --expect tests/lua-5.5/expected-liblua.txt --update-expected
+#   cargo testkit conformance --interp ... --expect tests/lua-5.5/expected-liblua.txt --update-expected
 all.lua
 api.lua
 attrib.lua
@@ -21,6 +21,7 @@ goto.lua
 heavy.lua
 literals.lua
 locals.lua
+main.lua
 math.lua
 memerr.lua
 nextvar.lua

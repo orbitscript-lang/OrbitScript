@@ -63,6 +63,8 @@ fn call_c(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
         unreachable!("a C function's hidden upvalue is its address")
     };
     let n = ffi::invoke(ctx, f.get())?;
+    // Variables the function marked with lua_toclose close as it returns.
+    ctx.close_from(0)?;
     Ok(NativeReturn::Return(n))
 }
 

@@ -25,6 +25,13 @@ struct lua_State {
   void *rs;      /* the Rust bridge */
   jmp_buf *jb;   /* the innermost trampoline's jump target */
   int status;    /* set by Rust when an error is pending */
+  /* lua_sethook's request, which Rust installs at its next check. Only
+     stored to with atomic stores, so a signal handler can make it. */
+  int hookchanged; /* read by Rust (ffi.rs's LState) */
+  int hookmask;
+  int hookcount;
+  lua_Hook hook;
+  unsigned char *wake; /* the VM's interrupt flag */
   lua_CFunction panicf; /* lua_atpanic */
   lua_Alloc allocf;     /* the allocator lua_newstate got, unused */
   void *allocud;
@@ -40,6 +47,7 @@ struct orbit_r_table {
   void (*callk)(lua_State *L, int nargs, int nresults, lua_KContext ctx, lua_KFunction k);
   int (*checkstack)(lua_State *L, int n);
   void (*close)(lua_State *L);
+  void (*closeslot)(lua_State *L, int idx);
   int (*compare)(lua_State *L, int a, int b, int op);
   void (*concat)(lua_State *L, int n);
   void (*copy)(lua_State *L, int fromidx, int toidx);
@@ -51,6 +59,7 @@ struct orbit_r_table {
   int (*geti)(lua_State *L, int idx, lua_Integer n);
   int (*getinfo)(lua_State *L, const char *what, lua_Debug *ar);
   int (*getiuservalue)(lua_State *L, int idx, int n);
+  const char *(*getlocal)(lua_State *L, const lua_Debug *ar, int n);
   int (*getmetatable)(lua_State *L, int idx);
   int (*getstack)(lua_State *L, int level, lua_Debug *ar);
   int (*gettable)(lua_State *L, int idx);
@@ -93,6 +102,7 @@ struct orbit_r_table {
   void (*setglobal)(lua_State *L, const char *name);
   void (*seti)(lua_State *L, int idx, lua_Integer n);
   int (*setiuservalue)(lua_State *L, int idx, int n);
+  const char *(*setlocal)(lua_State *L, const lua_Debug *ar, int n);
   int (*setmetatable)(lua_State *L, int idx);
   void (*settable)(lua_State *L, int idx);
   void (*settop)(lua_State *L, int idx);
@@ -101,6 +111,7 @@ struct orbit_r_table {
   size_t (*stringtonumber)(lua_State *L, const char *s);
   int (*toboolean)(lua_State *L, int idx);
   lua_CFunction (*tocfunction)(lua_State *L, int idx);
+  void (*toclose)(lua_State *L, int idx);
   lua_Integer (*tointegerx)(lua_State *L, int idx, int *isnum);
   const char * (*tolstring)(lua_State *L, int idx, size_t *len);
   const char * (*tolstringmeta)(lua_State *L, int idx, size_t *len);
@@ -1043,52 +1054,74 @@ LUA_API int lua_yieldk(lua_State *L, int nresults, lua_KContext ctx, lua_KFuncti
   return 0;
 }
 
-LUA_API void lua_toclose(lua_State *L, int idx) {
-  (void)idx;
-  unsupported(L, "lua_toclose");
-}
+APIV(toclose, (lua_State *L, int idx), (L, idx))
+APIV(closeslot, (lua_State *L, int idx), (L, idx))
 
-LUA_API void lua_closeslot(lua_State *L, int idx) {
-  (void)idx;
-  unsupported(L, "lua_closeslot");
-}
+API(const char *, getlocal, (lua_State *L, const lua_Debug *ar, int n), (L, ar, n))
+API(const char *, setlocal, (lua_State *L, const lua_Debug *ar, int n), (L, ar, n))
 
-/* Locals of a level aren't readable from C yet. */
-LUA_API const char *lua_getlocal(lua_State *L, const lua_Debug *ar, int n) {
-  (void)ar;
-  (void)n;
-  (void)L;
-  return NULL;
-}
-
-LUA_API const char *lua_setlocal(lua_State *L, const lua_Debug *ar, int n) {
-  (void)ar;
-  (void)n;
-  (void)L;
-  return NULL;
-}
-
-/* Hooks set from C aren't run yet; a module that sets one sees no calls. */
+/* Safe to call from a signal handler, as Lua's own interpreter does on
+   Ctrl-C: it only stores the request and raises the VM's interrupt flag.
+   The VM installs the hook at its next check (a loop's backward jump, a
+   hook point, or the next API call). */
 LUA_API void lua_sethook(lua_State *L, lua_Hook func, int mask, int count) {
-  (void)L;
-  (void)func;
-  (void)mask;
-  (void)count;
+  if (func == NULL || mask == 0) {
+    func = NULL;
+    mask = 0;
+  }
+  __atomic_store_n(&L->hook, func, __ATOMIC_RELAXED);
+  __atomic_store_n(&L->hookmask, mask, __ATOMIC_RELAXED);
+  __atomic_store_n(&L->hookcount, count, __ATOMIC_RELAXED);
+  __atomic_store_n(&L->hookchanged, 1, __ATOMIC_RELEASE);
+  if (L->wake != NULL) __atomic_store_n(L->wake, 1, __ATOMIC_RELAXED);
 }
 
 LUA_API lua_Hook lua_gethook(lua_State *L) {
-  (void)L;
-  return NULL;
+  return __atomic_load_n(&L->hook, __ATOMIC_RELAXED);
 }
 
 LUA_API int lua_gethookmask(lua_State *L) {
-  (void)L;
-  return 0;
+  return __atomic_load_n(&L->hookmask, __ATOMIC_RELAXED);
 }
 
 LUA_API int lua_gethookcount(lua_State *L) {
-  (void)L;
-  return 0;
+  return __atomic_load_n(&L->hookcount, __ATOMIC_RELAXED);
+}
+
+/* For Rust: where lua_sethook raises the interrupt flag. */
+void orbit_capi_set_wake(lua_State *L, unsigned char *wake) {
+  L->wake = wake;
+}
+
+/* For Rust: the hook lua_sethook asked for, if it asked since the last
+   call (1), or 0. */
+int orbit_capi_take_hook(lua_State *L, lua_Hook *f, int *mask, int *count) {
+  if (!__atomic_exchange_n(&L->hookchanged, 0, __ATOMIC_ACQUIRE)) return 0;
+  *f = __atomic_load_n(&L->hook, __ATOMIC_RELAXED);
+  *mask = __atomic_load_n(&L->hookmask, __ATOMIC_RELAXED);
+  *count = __atomic_load_n(&L->hookcount, __ATOMIC_RELAXED);
+  return 1;
+}
+
+/* For Rust: run hook f for an event, as orbit_capi_trampoline runs a C
+   function. `level` is what lua_getinfo needs to find the hooked function.
+   Returns 0, or -1 if the hook raised an error (pending on the Rust side). */
+int orbit_capi_call_hook(lua_State *L, lua_Hook f, int event, int line, size_t level) {
+  jmp_buf jb;
+  jmp_buf *volatile old = L->jb;
+  volatile int r = -1;
+  lua_Debug ar;
+  memset(&ar, 0, sizeof ar);
+  ar.event = event;
+  ar.currentline = line;
+  ar.orbit_private = (void *)level;
+  L->jb = &jb;
+  if (setjmp(jb) == 0) {
+    f(L, &ar);
+    r = 0;
+  }
+  L->jb = old;
+  return r;
 }
 
 /* ------------------------------------------------------------------------

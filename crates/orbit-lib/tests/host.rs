@@ -123,3 +123,57 @@ fn a_plain_state_keeps_the_allocator_and_drops_warnings() {
 fn states_are_independent() {
     assert_eq!(run("states"), "a\nb\nb still open\n");
 }
+
+#[test]
+fn hooks_set_from_c_run_and_can_stop_code() {
+    // The reference liblua prints the same.
+    assert_eq!(
+        run("hooks"),
+        "hook set: 1 mask 4 count 0\n\
+         line 1 (getinfo 1) in chunk\n\
+         line 2 (getinfo 2) in chunk\n\
+         line 3 (getinfo 3) in chunk\n\
+         result 3\n\
+         hook cleared: 1\n\
+         false\tstopped after 100\n\
+         continued\n\
+         hook after stop: 1\n"
+    );
+}
+
+#[test]
+fn locals_of_a_lua_caller_from_c() {
+    // The reference liblua prints the same.
+    assert_eq!(
+        run("locals"),
+        "local 1 a = 1\n\
+         local 2 b = 2\n\
+         local 3 c = 3\n\
+         set a\n\
+         set past the end: NULL, top 1\n\
+         99\t3\n\
+         param 2: y\n\
+         param 3: NULL, top 1\n"
+    );
+}
+
+#[test]
+fn to_be_closed_slots_from_c() {
+    // The reference liblua prints the same.
+    assert_eq!(
+        run("toclose"),
+        "close\tc\tnil\n\
+         closed slot is nil: 1\n\
+         close\tb\tnil\n\
+         after settop\n\
+         close\ta\tnil\n\
+         7\n\
+         close\tc\tnil\n\
+         closed slot is nil: 1\n\
+         close\tb\tnil\n\
+         after settop\n\
+         close\ta\tboom\n\
+         false\tboom\n\
+         false\tvariable '(C temporary)' got a non-closable value\n"
+    );
+}
