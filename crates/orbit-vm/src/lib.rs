@@ -482,6 +482,10 @@ pub struct Runtime {
     /// The placeholder native under a host's context ([`Vm::host_ctx`]),
     /// which tracebacks and `debug.getinfo` don't show.
     pub host_native: Option<NativeId>,
+    /// Asked first when an interrupt is seen: true if it was the host's
+    /// (the C API's signal-safe `lua_sethook` raises the flag to have its
+    /// hook installed) and has been handled, false to raise `interrupted!`.
+    pub interrupt_handler: Option<fn(&mut Vm) -> bool>,
     /// When the VM started (for `os.clock`).
     pub start: Instant,
     /// Per-VM state of host libraries, one value per type (the `math`
@@ -742,6 +746,7 @@ impl Vm {
                 warnings: false,
                 warn_hook: None,
                 host_native: None,
+                interrupt_handler: None,
                 start: Instant::now(),
                 ext: Extensions::default(),
                 compile: None,
@@ -783,6 +788,30 @@ impl Vm {
     /// A handle that interrupts this VM ([`Interrupt`]).
     pub fn interrupt_handle(&self) -> Interrupt {
         Interrupt(self.rt.interrupt.clone())
+    }
+
+    /// The interrupt flag itself, for code that can only store to memory:
+    /// a C signal handler (the C API's `lua_sethook`). Storing a nonzero
+    /// byte does what [`Interrupt::request`] does. Valid as long as the VM.
+    pub fn interrupt_flag(&self) -> *mut bool {
+        self.rt.interrupt.as_ptr()
+    }
+
+    /// Lower the interrupt flag without raising `interrupted!` (an
+    /// [`Runtime::interrupt_handler`] that handled it).
+    pub fn clear_interrupt(&mut self) {
+        self.rt.stack.hook.mask &= !hook::INTERRUPT;
+        self.rt
+            .interrupt
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set the running stack's hook, as `debug.sethook` does: `mask` is
+    /// [`hook::CALL`] and friends, `count` the count interval. A nil `f`
+    /// or an empty mask with no count turns it off.
+    pub fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
+        self.rt.hooks_touched = true;
+        self.rt.stack.hook.set(f, mask, count);
     }
 
     /// A native context over the host's own stack window,

@@ -19,6 +19,12 @@ pub(crate) type Res<T> = Result<T, LuaError>;
 
 /// Constants from the C ABI (`lua.h`).
 pub(crate) mod abi {
+    /// Hook events (`lua_Debug.event`).
+    pub const HOOKCALL: i32 = 0;
+    pub const HOOKRET: i32 = 1;
+    pub const HOOKLINE: i32 = 2;
+    pub const HOOKCOUNT: i32 = 3;
+    pub const HOOKTAILCALL: i32 = 4;
     pub const REGISTRYINDEX: i32 = -(i32::MAX / 2 + 1000);
     pub const MULTRET: i32 = -1;
     pub const TNONE: i32 = -1;
@@ -277,7 +283,34 @@ pub(crate) fn settop(c: &mut NativeCtx<'_>, idx: i32) -> Res<()> {
     if new > c.len() {
         c.set(new - 1, Value::Nil);
     }
+    // Variables marked with lua_toclose above the new top close first.
+    c.close_from(new)?;
     c.truncate(new);
+    Ok(())
+}
+
+/// The window slot a stack index names, or an error.
+fn stack_slot(c: &mut NativeCtx<'_>, idx: i32) -> Res<usize> {
+    match slot(c, idx) {
+        Slot::Stack(i) => Ok(i),
+        _ => Err(c.error("C API: invalid stack index")),
+    }
+}
+
+/// `lua_toclose`.
+pub(crate) fn toclose(c: &mut NativeCtx<'_>, idx: i32) -> Res<()> {
+    let i = stack_slot(c, idx)?;
+    c.to_be_closed(i)
+}
+
+/// `lua_closeslot`: close the variable at `idx`, the newest one marked
+/// with `lua_toclose`, and set the slot to nil.
+pub(crate) fn closeslot(c: &mut NativeCtx<'_>, idx: i32) -> Res<()> {
+    let i = stack_slot(c, idx)?;
+    if c.is_newest_to_be_closed(i) {
+        c.close_from(i)?;
+    }
+    c.set(i, Value::Nil);
     Ok(())
 }
 
@@ -1189,6 +1222,38 @@ pub(crate) fn info(c: &NativeCtx<'_>, level: Option<usize>, f: Value) -> Option<
         }
     }
     Some(out)
+}
+
+/// `lua_getlocal` at activation `level`: local `n`'s name, its value
+/// pushed; `None`, pushing nothing, if there is no such local.
+pub(crate) fn getlocal(c: &mut NativeCtx<'_>, level: usize, n: i32) -> Option<Vec<u8>> {
+    let l = c.level(level)?;
+    let (name, v) = c.get_local(l, n.into())?;
+    c.push(v);
+    Some(name)
+}
+
+/// `lua_getlocal` with no activation: the name of parameter `n` of the
+/// Lua function on top of the stack, pushing nothing.
+pub(crate) fn param_name(c: &mut NativeCtx<'_>, n: i32) -> Option<Vec<u8>> {
+    let f = c.arg(c.len().checked_sub(1)?);
+    c.param_name(f, n.into())
+}
+
+/// `lua_setlocal`: pop the top value into local `n` of activation `level`
+/// and return its name; with no such local, pop nothing.
+pub(crate) fn setlocal(c: &mut NativeCtx<'_>, level: usize, n: i32) -> Res<Option<Vec<u8>>> {
+    need(c, 1)?;
+    let len = c.len();
+    let v = c.arg(len - 1);
+    let Some(l) = c.level(level) else {
+        return Ok(None);
+    };
+    let name = c.set_local(l, n.into(), v);
+    if name.is_some() {
+        c.truncate(len - 1);
+    }
+    Ok(name)
 }
 
 /// The function at activation `level`, pushed (`lua_getinfo`'s `f`).

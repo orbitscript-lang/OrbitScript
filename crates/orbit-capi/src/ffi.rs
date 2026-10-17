@@ -22,6 +22,8 @@ pub(crate) struct LState {
     rs: *const c_void,
     jb: *mut c_void,
     status: c_int,
+    /// Set by `lua_sethook` (atomically: it may run in a signal handler).
+    hookchanged: c_int,
 }
 
 type CFn = unsafe extern "C" fn(*mut LState) -> c_int;
@@ -31,7 +33,24 @@ unsafe extern "C" {
     fn orbit_capi_table_size() -> usize;
     fn orbit_capi_freestate(l: *mut LState);
     fn orbit_capi_trampoline(l: *mut LState, f: CFn) -> c_int;
+    fn orbit_capi_set_wake(l: *mut LState, wake: *mut u8);
+    fn orbit_capi_take_hook(
+        l: *mut LState,
+        f: *mut Option<HookFn>,
+        mask: *mut c_int,
+        count: *mut c_int,
+    ) -> c_int;
+    fn orbit_capi_call_hook(
+        l: *mut LState,
+        f: HookFn,
+        event: c_int,
+        line: c_int,
+        level: usize,
+    ) -> c_int;
 }
+
+/// `lua_Hook`.
+type HookFn = unsafe extern "C" fn(*mut LState, *mut c_void);
 
 /// What the C side reaches through a state: the running native and the
 /// API's state.
@@ -44,6 +63,11 @@ pub(crate) struct Bridge {
     /// In a state C created (ADR-10), the host's own context, which
     /// [`Bridge::ctx`] holds between calls; null otherwise.
     host: Cell<*mut NativeCtx<'static>>,
+    /// The native standing for each C hook function installed so far.
+    hooks: std::cell::RefCell<Vec<(usize, Value)>>,
+    /// While a C hook runs, its native's context: there, as in Lua, level 0
+    /// is the hooked function, one below the native's own.
+    hook_ctx: Cell<*mut NativeCtx<'static>>,
 }
 
 /// Owns a VM's [`Bridge`] and its C state, from [`orbit_vm::Runtime::ext`].
@@ -64,6 +88,7 @@ impl Drop for BridgeHandle {
 }
 
 pub(crate) fn install(vm: &mut Vm) {
+    let wake = vm.interrupt_flag().cast::<u8>();
     let h = vm
         .rt
         .ext
@@ -76,6 +101,8 @@ pub(crate) fn install(vm: &mut Vm) {
         ctx: Cell::new(std::ptr::null_mut()),
         st: Shared::default(),
         host: Cell::new(std::ptr::null_mut()),
+        hooks: Default::default(),
+        hook_ctx: Cell::new(std::ptr::null_mut()),
     }));
     // SAFETY: no arguments; the size of C's `struct orbit_r_table`.
     let c_size = unsafe { orbit_capi_table_size() };
@@ -88,44 +115,164 @@ pub(crate) fn install(vm: &mut Vm) {
     // and TABLE is static.
     let l = unsafe { orbit_capi_newstate(b as *const c_void, &TABLE) };
     assert!(!l.is_null(), "out of memory creating the C API state");
-    // SAFETY: `b` is live and not yet shared.
-    unsafe { (*b).l.set(l) };
+    // SAFETY: `b` is live and not yet shared. The interrupt flag lives as
+    // long as the VM, which outlives the state.
+    unsafe {
+        (*b).l.set(l);
+        orbit_capi_set_wake(l, wake);
+    }
     h.0 = b;
+    vm.rt.interrupt_handler = Some(on_interrupt);
     // Modules read the main thread from the registry, as in Lua.
     let (reg, main) = (vm.rt.registry, vm.main_thread());
     vm.table_set(reg, Value::Int(abi::RIDX_MAINTHREAD), Value::Thread(main));
 }
 
-/// Call C function `f` with the native's window as its stack.
-pub(crate) fn invoke(ctx: &mut NativeCtx<'_>, f: u64) -> Result<usize, LuaError> {
-    let p = match ctx.vm.rt.ext.get::<BridgeHandle>() {
-        Some(h) if !h.0.is_null() => h.0,
-        _ => return Err(ctx.error("the C API is not installed in this VM")),
+/// The VM's bridge, if the C API is installed.
+fn bridge<'a>(vm: &Vm) -> Option<&'a Bridge> {
+    match vm.rt.ext.get::<BridgeHandle>() {
+        // SAFETY: the handle keeps the bridge alive as long as the runtime.
+        Some(h) if !h.0.is_null() => Some(unsafe { &*h.0 }),
+        _ => None,
+    }
+}
+
+/// Run `call` on the C state with the native's context current, as a C
+/// function's call does; an error it raised comes back as `Err`.
+fn run_c(
+    ctx: &mut NativeCtx<'_>,
+    call: impl FnOnce(*mut LState) -> c_int,
+) -> Result<c_int, LuaError> {
+    let Some(b) = bridge(ctx.vm) else {
+        return Err(ctx.error("the C API is not installed in this VM"));
     };
-    // SAFETY: the handle keeps the bridge alive as long as the runtime.
-    let b = unsafe { &*p };
     // The native's context, for the entry points C calls; restored after,
     // so nested C calls each see their own.
     let raw = (ctx as *mut NativeCtx<'_>).cast::<NativeCtx<'static>>();
     let prev = b.ctx.replace(raw);
     let mark = b.st.borrow().strs.len();
-    // SAFETY: `f` came from a C module as a `lua_CFunction` (lua_pushcclosure
-    // or dlsym); calling it is what loading the module asked for.
-    let n = unsafe {
-        let cf = std::mem::transmute::<usize, CFn>(f as usize);
-        orbit_capi_trampoline(b.l.get(), cf)
-    };
+    let n = call(b.l.get());
     b.ctx.set(prev);
     b.st.borrow_mut().strs.truncate(mark);
+    take_hook(b, ctx.vm, true);
     if n < 0 {
         let v = b.st.borrow_mut().pending.take().unwrap_or(Value::Nil);
         return Err(ctx.error_value(v));
     }
+    Ok(n)
+}
+
+/// Call C function `f` with the native's window as its stack.
+pub(crate) fn invoke(ctx: &mut NativeCtx<'_>, f: u64) -> Result<usize, LuaError> {
+    let n = run_c(ctx, |l| {
+        // SAFETY: `f` came from a C module as a `lua_CFunction`
+        // (lua_pushcclosure or dlsym); calling it is what loading the
+        // module asked for.
+        unsafe {
+            let cf = std::mem::transmute::<usize, CFn>(f as usize);
+            orbit_capi_trampoline(l, cf)
+        }
+    })?;
     let n = n as usize;
     if n > ctx.len() {
         return Err(ctx.error("C function returned more results than its stack holds"));
     }
     Ok(n)
+}
+
+/// Install the hook `lua_sethook` asked for, if it asked since the last
+/// look. `clear` lowers the interrupt flag `lua_sethook` raised, which the
+/// interrupt handler has already lowered. Returns whether it asked.
+fn take_hook(b: &Bridge, vm: &mut Vm, clear: bool) -> bool {
+    let l = b.l.get();
+    // SAFETY: `l` is the bridge's live state; the field is only ever
+    // stored to atomically, and a stale read just delays the hook.
+    if unsafe { std::ptr::read_volatile(&(*l).hookchanged) } == 0 {
+        return false;
+    }
+    let (mut f, mut mask, mut count) = (None, 0, 0);
+    // SAFETY: the out-pointers are live locals.
+    if unsafe { orbit_capi_take_hook(l, &mut f, &mut mask, &mut count) } == 0 {
+        return false;
+    }
+    if clear {
+        vm.clear_interrupt();
+    }
+    let func = match f {
+        None => Value::Nil,
+        Some(f) => {
+            let key = f as usize;
+            let mut hooks = b.hooks.borrow_mut();
+            match hooks.iter().find(|(k, _)| *k == key) {
+                Some(&(_, v)) => v,
+                None => {
+                    let v = vm.register_native_with_data("hook", c_hook, [key as u64, 0]);
+                    hooks.push((key, v));
+                    v
+                }
+            }
+        }
+    };
+    // Lua's mask bits are the VM's (call 1, return 2, line 4, count 8).
+    vm.set_hook(func, (mask & 0xf) as u8, count.into());
+    true
+}
+
+/// The VM's interrupt handler: a `lua_sethook` from a signal handler
+/// raised the flag.
+fn on_interrupt(vm: &mut Vm) -> bool {
+    match bridge(vm) {
+        Some(b) => take_hook(b, vm, false),
+        None => false,
+    }
+}
+
+/// A level as C gives it, as the VM counts it: in a C hook, as in Lua,
+/// level 0 is the hooked function, one below the hook's own native.
+fn lua_level(b: &Bridge, level: c_int) -> c_int {
+    let in_hook = !b.hook_ctx.get().is_null() && std::ptr::eq(b.ctx.get(), b.hook_ctx.get());
+    if in_hook && level >= 0 {
+        level + 1
+    } else {
+        level
+    }
+}
+
+/// The native standing for a C hook (its function pointer in the data
+/// word), called as a Lua hook is: `(event, line)`.
+fn c_hook(ctx: &mut NativeCtx<'_>) -> Result<orbit_vm::NativeReturn, LuaError> {
+    let f = ctx.native_data()[0] as usize;
+    let event = match ctx.arg(0) {
+        Value::Str(s) => match ctx.bytes(s) {
+            b"call" => abi::HOOKCALL,
+            b"return" => abi::HOOKRET,
+            b"line" => abi::HOOKLINE,
+            b"count" => abi::HOOKCOUNT,
+            b"tail call" => abi::HOOKTAILCALL,
+            _ => return Ok(orbit_vm::NativeReturn::Return(0)),
+        },
+        _ => return Ok(orbit_vm::NativeReturn::Return(0)),
+    };
+    let line = match ctx.arg(1) {
+        Value::Int(i) => i as c_int,
+        _ => -1,
+    };
+    let raw = (ctx as *mut NativeCtx<'_>).cast::<NativeCtx<'static>>();
+    let prev = bridge(ctx.vm).map(|b| b.hook_ctx.replace(raw));
+    let r = run_c(ctx, |l| {
+        // SAFETY: `f` came from C as a `lua_Hook` (lua_sethook). From the
+        // hook's native, level 1 is the hooked function; lua_getinfo takes
+        // the level plus one.
+        unsafe {
+            let hf = std::mem::transmute::<usize, HookFn>(f);
+            orbit_capi_call_hook(l, hf, event, line, 2)
+        }
+    });
+    if let (Some(b), Some(p)) = (bridge(ctx.vm), prev) {
+        b.hook_ctx.set(p);
+    }
+    r?;
+    Ok(orbit_vm::NativeReturn::Return(0))
 }
 
 /// The context and bridge of the C function running on state `l`. Aborts
@@ -158,6 +305,7 @@ macro_rules! entry {
     ($l:expr, $default:expr, |$b:ident, $c:ident| $body:expr) => {{
         // SAFETY: `$l` came from C as the state of a running call.
         let ($b, $c) = unsafe { enter($l) };
+        take_hook($b, $c.vm, true);
         #[allow(clippy::redundant_closure_call)]
         let r: Res<_> = (|| $body)();
         host_prune($b, $c);
@@ -262,6 +410,7 @@ struct RTable {
     callk: extern "C" fn(*mut LState, c_int, c_int, isize, *const c_void),
     checkstack: extern "C" fn(*mut LState, c_int) -> c_int,
     close: extern "C" fn(*mut LState),
+    closeslot: extern "C" fn(*mut LState, c_int),
     compare: extern "C" fn(*mut LState, c_int, c_int, c_int) -> c_int,
     concat: extern "C" fn(*mut LState, c_int),
     copy: extern "C" fn(*mut LState, c_int, c_int),
@@ -273,6 +422,7 @@ struct RTable {
     geti: extern "C" fn(*mut LState, c_int, i64) -> c_int,
     getinfo: extern "C" fn(*mut LState, *const c_char, *mut LuaDebug) -> c_int,
     getiuservalue: extern "C" fn(*mut LState, c_int, c_int) -> c_int,
+    getlocal: extern "C" fn(*mut LState, *const LuaDebug, c_int) -> *const c_char,
     getmetatable: extern "C" fn(*mut LState, c_int) -> c_int,
     getstack: extern "C" fn(*mut LState, c_int, *mut LuaDebug) -> c_int,
     gettable: extern "C" fn(*mut LState, c_int) -> c_int,
@@ -315,6 +465,7 @@ struct RTable {
     setglobal: extern "C" fn(*mut LState, *const c_char),
     seti: extern "C" fn(*mut LState, c_int, i64),
     setiuservalue: extern "C" fn(*mut LState, c_int, c_int) -> c_int,
+    setlocal: extern "C" fn(*mut LState, *const LuaDebug, c_int) -> *const c_char,
     setmetatable: extern "C" fn(*mut LState, c_int) -> c_int,
     settable: extern "C" fn(*mut LState, c_int),
     settop: extern "C" fn(*mut LState, c_int),
@@ -323,6 +474,7 @@ struct RTable {
     stringtonumber: extern "C" fn(*mut LState, *const c_char) -> usize,
     toboolean: extern "C" fn(*mut LState, c_int) -> c_int,
     tocfunction: extern "C" fn(*mut LState, c_int) -> Option<CFn>,
+    toclose: extern "C" fn(*mut LState, c_int),
     tointegerx: extern "C" fn(*mut LState, c_int, *mut c_int) -> i64,
     tolstring: extern "C" fn(*mut LState, c_int, *mut usize) -> *const c_char,
     tolstringmeta: extern "C" fn(*mut LState, c_int, *mut usize) -> *const c_char,
@@ -347,6 +499,7 @@ static TABLE: RTable = RTable {
     callk: orbit_r_callk,
     checkstack: orbit_r_checkstack,
     close: orbit_r_close,
+    closeslot: orbit_r_closeslot,
     compare: orbit_r_compare,
     concat: orbit_r_concat,
     copy: orbit_r_copy,
@@ -358,6 +511,7 @@ static TABLE: RTable = RTable {
     geti: orbit_r_geti,
     getinfo: orbit_r_getinfo,
     getiuservalue: orbit_r_getiuservalue,
+    getlocal: orbit_r_getlocal,
     getmetatable: orbit_r_getmetatable,
     getstack: orbit_r_getstack,
     gettable: orbit_r_gettable,
@@ -400,6 +554,7 @@ static TABLE: RTable = RTable {
     setglobal: orbit_r_setglobal,
     seti: orbit_r_seti,
     setiuservalue: orbit_r_setiuservalue,
+    setlocal: orbit_r_setlocal,
     setmetatable: orbit_r_setmetatable,
     settable: orbit_r_settable,
     settop: orbit_r_settop,
@@ -408,6 +563,7 @@ static TABLE: RTable = RTable {
     stringtonumber: orbit_r_stringtonumber,
     toboolean: orbit_r_toboolean,
     tocfunction: orbit_r_tocfunction,
+    toclose: orbit_r_toclose,
     tointegerx: orbit_r_tointegerx,
     tolstring: orbit_r_tolstring,
     tolstringmeta: orbit_r_tolstringmeta,
@@ -779,8 +935,8 @@ extern "C" fn orbit_r_typeerror(l: *mut LState, arg: c_int, tname: *const c_char
 }
 
 extern "C" fn orbit_r_where(l: *mut LState, lvl: c_int) {
-    entry!(l, (), |_b, c| {
-        api::where_(c, lvl);
+    entry!(l, (), |b, c| {
+        api::where_(c, lua_level(b, lvl));
         Ok(())
     })
 }
@@ -859,8 +1015,8 @@ extern "C" fn orbit_r_traceback(l: *mut LState, msg: *const c_char, level: c_int
     // SAFETY: NUL-terminated or NULL.
     let text = unsafe { cbytes(msg) };
     let msg = (!msg.is_null()).then_some(text);
-    entry!(l, (), |_b, c| {
-        api::traceback(c, msg, level);
+    entry!(l, (), |b, c| {
+        api::traceback(c, msg, lua_level(b, level));
         Ok(())
     })
 }
@@ -913,13 +1069,55 @@ pub(crate) struct LuaDebug {
 }
 
 extern "C" fn orbit_r_getstack(l: *mut LState, level: c_int, ar: *mut LuaDebug) -> c_int {
-    entry!(l, 0, |_b, c| {
+    entry!(l, 0, |b, c| {
+        let level = lua_level(b, level);
         if !api::has_level(c, level) {
             return Ok(0);
         }
         // SAFETY: C passed a lua_Debug to fill.
         unsafe { (*ar).private = level as usize + 1 };
         Ok(1)
+    })
+}
+
+extern "C" fn orbit_r_toclose(l: *mut LState, idx: c_int) {
+    entry!(l, (), |_b, c| api::toclose(c, idx))
+}
+
+extern "C" fn orbit_r_closeslot(l: *mut LState, idx: c_int) {
+    entry!(l, (), |_b, c| api::closeslot(c, idx))
+}
+
+/// The level a `lua_Debug` from `lua_getstack` names.
+fn debug_level(c: &mut NativeCtx<'_>, ar: *const LuaDebug) -> Res<usize> {
+    // SAFETY: C passed a lua_Debug from lua_getstack.
+    match unsafe { (*ar).private } {
+        0 => Err(c.error("C API: lua_Debug without lua_getstack")),
+        p => Ok(p - 1),
+    }
+}
+
+extern "C" fn orbit_r_getlocal(l: *mut LState, ar: *const LuaDebug, n: c_int) -> *const c_char {
+    entry!(l, std::ptr::null(), |b, c| {
+        let name = if ar.is_null() {
+            api::param_name(c, n)
+        } else {
+            let level = debug_level(c, ar)?;
+            api::getlocal(c, level, n)
+        };
+        Ok(name.map_or(std::ptr::null(), |name| {
+            hand_out(&b.st, &name, std::ptr::null_mut())
+        }))
+    })
+}
+
+extern "C" fn orbit_r_setlocal(l: *mut LState, ar: *const LuaDebug, n: c_int) -> *const c_char {
+    entry!(l, std::ptr::null(), |b, c| {
+        let level = debug_level(c, ar)?;
+        let name = api::setlocal(c, level, n)?;
+        Ok(name.map_or(std::ptr::null(), |name| {
+            hand_out(&b.st, &name, std::ptr::null_mut())
+        }))
     })
 }
 
