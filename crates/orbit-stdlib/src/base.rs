@@ -438,6 +438,15 @@ fn warn(ctx: &mut NativeCtx<'_>) -> R {
     for i in 0..n {
         parts.push(ctx.check_str(i)?);
     }
+    if ctx.vm.rt.warn_hook.is_some() {
+        let pieces: Vec<Vec<u8>> = parts.iter().map(|&s| ctx.bytes(s).to_vec()).collect();
+        if let Some(hook) = &mut ctx.vm.rt.warn_hook {
+            for (i, p) in pieces.iter().enumerate() {
+                (hook.0)(p, i + 1 < pieces.len());
+            }
+        }
+        return Ok(NativeReturn::Return(0));
+    }
     // A single message starting with `@` is a control message; unknown ones
     // are ignored.
     if let [msg] = parts[..]

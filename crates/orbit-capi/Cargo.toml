@@ -12,6 +12,14 @@ links = "orbit_capi"
 [dependencies]
 orbit-vm = { path = "../orbit-vm" }
 orbit-stdlib = { path = "../orbit-stdlib", default-features = false, features = ["package"] }
+orbit-lua-syntax = { path = "../orbit-lua-syntax", optional = true }
+orbit-orb-syntax = { path = "../orbit-orb-syntax", optional = true }
+orbit-compiler = { path = "../orbit-compiler", optional = true }
+
+[features]
+# States created from C (`lua_newstate`, ADR-10): for the shared library
+# that programs embedding Lua link to.
+host = ["dep:orbit-lua-syntax", "dep:orbit-orb-syntax", "dep:orbit-compiler"]
 
 [build-dependencies]
 cc = "1.2"

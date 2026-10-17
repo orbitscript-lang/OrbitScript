@@ -1,0 +1,125 @@
+//! A C program that embeds OrbitScript through the Lua 5.5 C API
+//! (`chost/host.c`), built against orbit-capi's headers and linked to
+//! `liborbit` as a program built for liblua would be (ADR-10).
+#![cfg(target_os = "linux")]
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
+
+/// `liborbit_lib.so`, which Cargo builds next to this test (`deps/`).
+fn library() -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let deps = exe.parent().unwrap();
+    [deps, deps.parent().unwrap()]
+        .iter()
+        .map(|d| d.join("liborbit_lib.so"))
+        .find(|p| p.is_file())
+        .expect("liborbit_lib.so built")
+}
+
+/// The host program and the directory holding `liborbit.so.0`, built once.
+fn host() -> &'static (PathBuf, PathBuf) {
+    static HOST: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+    HOST.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("chost");
+        std::fs::create_dir_all(&dir).unwrap();
+        let soname = dir.join("liborbit.so.0");
+        let _ = std::fs::remove_file(&soname);
+        std::fs::copy(library(), &soname).unwrap();
+        let exe = dir.join("host");
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        let out = Command::new(cc)
+            .args(["-O1", "-Wall", "-Wextra", "-Werror", "-I"])
+            .arg(Path::new(MANIFEST).join("../orbit-capi/csrc/include"))
+            .arg("-o")
+            .arg(&exe)
+            .arg(Path::new(MANIFEST).join("tests/chost/host.c"))
+            .arg(&soname)
+            .output()
+            .expect("run the C compiler");
+        assert!(
+            out.status.success(),
+            "building host.c failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (exe, dir)
+    })
+}
+
+fn run(mode: &str) -> String {
+    let (exe, dir) = host();
+    let out = Command::new(exe)
+        .arg(mode)
+        .env("LD_LIBRARY_PATH", dir)
+        .output()
+        .unwrap();
+    let (o, e) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "stdout:\n{o}\nstderr:\n{e}");
+    o.into_owned()
+}
+
+#[test]
+fn a_program_creates_uses_and_closes_a_state() {
+    assert_eq!(
+        run("basic"),
+        "hello from Lua 5.5\n\
+         add: 42, top 1\n\
+         syntax: [string \"return 1 +\"]:1: unexpected symbol near <eof>\n\
+         pcall error: 0\n\
+         top 0\n\
+         finalized at close\n\
+         closed\n"
+    );
+}
+
+#[test]
+fn libraries_open_one_by_one_or_through_preload() {
+    assert_eq!(run("selected"), "table\tnil\tnil\tnil\ntable\t7\tnil\n");
+}
+
+#[test]
+fn an_unprotected_error_goes_to_the_panic_function() {
+    assert_eq!(run("panic"), "panic: unprotected\n");
+}
+
+#[test]
+fn warnings_go_to_the_program_piece_by_piece() {
+    assert_eq!(run("warn"), "warnings: @on|a+b|c|from +C|\n");
+}
+
+#[test]
+fn string_pointers_last_while_on_the_stack_and_no_longer() {
+    assert_eq!(
+        run("strings"),
+        "kept: kept string\nbounded: yes\nkept: kept string\n"
+    );
+}
+
+#[test]
+fn lua_gc_options() {
+    assert_eq!(
+        run("gc"),
+        "pause: 150\n\
+         gen (was inc): 1\n\
+         inc (was gen): 1\n\
+         running after stop: 0\n\
+         running after restart: 1\n\
+         collect: 0\n"
+    );
+}
+
+#[test]
+fn a_plain_state_keeps_the_allocator_and_drops_warnings() {
+    assert_eq!(run("alloc"), "allocator kept: 1\nok\n");
+}
+
+#[test]
+fn states_are_independent() {
+    assert_eq!(run("states"), "a\nb\nb still open\n");
+}

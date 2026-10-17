@@ -48,6 +48,7 @@ pub(crate) mod abi {
     pub const GCISRUNNING: i32 = 6;
     pub const GCGEN: i32 = 7;
     pub const GCINC: i32 = 8;
+    pub const GCPARAM: i32 = 9;
     /// `LUA_RIDX_MAINTHREAD`: where the registry keeps the main thread.
     pub const RIDX_MAINTHREAD: i64 = 3;
 }
@@ -60,8 +61,42 @@ pub(crate) struct State {
     /// The error a Rust entry point raised, for the trampoline's caller.
     pub pending: Option<Value>,
     /// NUL-terminated copies of strings handed to C. Each C call drops the
-    /// copies made during it when it returns.
-    pub strs: Vec<Box<[u8]>>,
+    /// copies made during it when it returns. Between calls, in a state C
+    /// created (ADR-10), copies of string values (`lua_tolstring`) last
+    /// while an equal string is on the host's stack; see
+    /// [`State::prune`].
+    pub strs: Vec<CStrCopy>,
+    /// How many copies the last [`State::prune`] kept.
+    pub kept: usize,
+}
+
+/// A string handed to C.
+#[derive(Debug)]
+pub(crate) struct CStrCopy {
+    /// The bytes and a trailing NUL.
+    pub bytes: Box<[u8]>,
+    /// A copy of a string value, which may go once no equal string is on
+    /// the host's stack. Other copies (`lua_getinfo`'s source) stay until
+    /// the state closes.
+    pub value: bool,
+}
+
+impl State {
+    /// Drop the copies of string values that no string on `stack` equals.
+    /// Runs when the copies have doubled since the last pruning, so each
+    /// costs O(1) amortized.
+    pub fn prune(&mut self, stack: &[&[u8]]) {
+        if self.strs.len() < 2 * self.kept + 16 {
+            return;
+        }
+        self.strs.retain(|s| {
+            !s.value || {
+                let text = &s.bytes[..s.bytes.len() - 1];
+                stack.contains(&text)
+            }
+        });
+        self.kept = self.strs.len();
+    }
 }
 
 pub(crate) type Shared = RefCell<State>;
@@ -921,21 +956,80 @@ pub(crate) fn next(c: &mut NativeCtx<'_>, idx: i32) -> Res<bool> {
     }
 }
 
-pub(crate) fn gc(c: &mut NativeCtx<'_>, what: i32) -> i32 {
+/// `lua_gc`. `a` and `b` are the option's arguments: the step size for
+/// `LUA_GCSTEP`, the parameter and its new value (negative: unchanged) for
+/// `LUA_GCPARAM`. Inside a finalizer every option does nothing and returns
+/// -1, as in Lua.
+pub(crate) fn gc(c: &mut NativeCtx<'_>, what: i32, a: i32, b: i32) -> i32 {
+    use orbit_vm::{GcMode, GcParam};
+    if c.vm.rt.gc.finalizing() {
+        return -1;
+    }
+    let mode_code = |m: GcMode| match m {
+        GcMode::Generational => abi::GCGEN,
+        GcMode::Incremental => abi::GCINC,
+    };
     match what {
-        abi::GCCOLLECT | abi::GCSTEP => {
+        abi::GCCOLLECT => {
             c.full_collect();
             0
         }
+        abi::GCSTEP => match c.vm.rt.gc.mode {
+            GcMode::Generational => {
+                c.full_collect();
+                0
+            }
+            GcMode::Incremental => {
+                let bytes = usize::try_from(a).unwrap_or(0).saturating_mul(1024);
+                c.vm.heap.step_with(&mut c.vm.rt, bytes) as i32
+            }
+        },
         abi::GCCOUNT => (c.vm.heap.bytes() / 1024) as i32,
         abi::GCCOUNTB => (c.vm.heap.bytes() % 1024) as i32,
-        abi::GCISRUNNING => 1,
-        abi::GCSTOP | abi::GCRESTART | abi::GCGEN | abi::GCINC => 0,
+        abi::GCSTOP => {
+            c.vm.heap.stop();
+            0
+        }
+        abi::GCRESTART => {
+            c.vm.heap.restart();
+            0
+        }
+        abi::GCISRUNNING => !c.vm.heap.is_stopped() as i32,
+        abi::GCGEN | abi::GCINC => {
+            let mode = if what == abi::GCGEN {
+                GcMode::Generational
+            } else {
+                GcMode::Incremental
+            };
+            mode_code(std::mem::replace(&mut c.vm.rt.gc.mode, mode))
+        }
+        abi::GCPARAM => {
+            // lua.h's LUA_GCP* order.
+            let p = match a {
+                0 => GcParam::MinorMul,
+                1 => GcParam::MajorMinor,
+                2 => GcParam::MinorMajor,
+                3 => GcParam::Pause,
+                4 => GcParam::StepMul,
+                5 => GcParam::StepSize,
+                _ => return -1,
+            };
+            let old = if b >= 0 {
+                c.vm.rt.gc.set_param(&mut c.vm.heap, p, i64::from(b))
+            } else {
+                c.vm.rt.gc.param(p)
+            };
+            i32::try_from(old).unwrap_or(i32::MAX)
+        }
         _ => -1,
     }
 }
 
 pub(crate) fn warning(c: &mut NativeCtx<'_>, msg: &[u8], tocont: bool) {
+    if let Some(hook) = &mut c.vm.rt.warn_hook {
+        (hook.0)(msg, tocont);
+        return;
+    }
     // Pieces are joined until the last one (`tocont` false) arrives.
     let pending = c.vm.rt.ext.get_or_insert_with(WarnBuffer::default);
     let first = pending.0.is_empty();
@@ -956,6 +1050,37 @@ pub(crate) fn warning(c: &mut NativeCtx<'_>, msg: &[u8], tocont: bool) {
 /// A warning whose pieces are still arriving (`lua_warning` with `tocont`).
 #[derive(Debug, Default)]
 struct WarnBuffer(Vec<u8>);
+
+/// `luaopen_*`: open standard library `lib` (its index in
+/// [`orbit_stdlib::Lib::ALL`]) and push its table, as `luaL_requiref`
+/// expects. Like Lua's, it leaves the global to `luaL_requiref`: a library
+/// opened through `package.preload` gets no global. Returns 0, pushing
+/// nothing, for a library this build leaves out.
+pub(crate) fn openlib(c: &mut NativeCtx<'_>, lib: i32) -> i32 {
+    let Some(&lib) = usize::try_from(lib)
+        .ok()
+        .and_then(|i| orbit_stdlib::Lib::ALL.get(i))
+    else {
+        return 0;
+    };
+    // `registry.LUA_NOENV` (set by `lua -E`) makes the libraries ignore
+    // environment variables.
+    let k = c.vm.new_str(b"LUA_NOENV");
+    let noenv = tbl::get(&c.vm.heap, c.vm.rt.registry, k);
+    let options = orbit_stdlib::Options {
+        ignore_env: !noenv.is_falsy(),
+        ..Default::default()
+    };
+    let before = (lib != orbit_stdlib::Lib::Base).then(|| c.vm.global(lib.name()));
+    let Some(t) = orbit_stdlib::open_one(c.vm, lib, options) else {
+        return 0;
+    };
+    if let Some(v) = before {
+        c.vm.set_global(lib.name(), v);
+    }
+    c.push(t);
+    1
+}
 
 // ---- auxiliary library pieces that need the VM ------------------------------
 

@@ -10,6 +10,8 @@
 
 mod api;
 mod ffi;
+#[cfg(feature = "host")]
+mod host;
 
 use orbit_vm::orbit_core::{LightUserData, Value};
 use orbit_vm::{LuaError, NativeCtx, NativeReturn, Vm};

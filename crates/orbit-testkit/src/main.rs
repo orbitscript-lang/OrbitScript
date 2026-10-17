@@ -10,6 +10,7 @@ mod diff;
 mod examples;
 mod fuzz;
 mod libfuzz;
+mod liblua;
 mod pgo;
 mod process;
 mod ratchet;
@@ -26,6 +27,7 @@ commands:
   diff          compare an interpreter's behavior with the reference lua5.5
   bench         time benchmarks and track peak RSS and binary size
   examples      run examples/ and check their output (and Lua twins)
+  liblua        run the suite through lua.c on liborbit (ADR-10)
   scoreboard    the whole Lua 5.5 compatibility picture in one report
   fuzz-syntax   compare compile errors on mutated programs with lua5.5
   fuzz          compare random library calls with the reference lua5.5
@@ -48,6 +50,7 @@ fn main() -> ExitCode {
         "scoreboard" => scoreboard::main(rest),
         "fuzz-syntax" => fuzz::main(rest),
         "fuzz" => libfuzz::main(rest),
+        "liblua" => liblua::main(rest),
         "pgo" => pgo::main(rest),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");

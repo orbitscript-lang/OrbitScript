@@ -1,0 +1,24 @@
+[package]
+name = "orbit-lib"
+description = "The runtime as one shared library, liborbit, which also serves as liblua 5.5 (ADR-10)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# Not `orbit`: that name is the Rust API crate's, and Cargo's outputs would
+# collide. Cargo builds `liborbit_lib.so`; its soname, and the name packaging
+# installs it under, is `liborbit.so.0` (build.rs).
+name = "orbit_lib"
+# `rlib` too, so `cargo test` builds the shared library for tests/host.rs.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+orbit = { path = "../orbit", features = ["c-modules"] }
+orbit-capi = { path = "../orbit-capi", features = ["host"] }
+
+[lints]
+workspace = true

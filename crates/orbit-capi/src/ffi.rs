@@ -14,7 +14,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use orbit_vm::orbit_core::Value;
 use orbit_vm::{LuaError, NativeCtx, Vm};
 
-use crate::api::{self, Res, Shared, abi};
+use crate::api::{self, CStrCopy, Res, Shared, abi};
 
 /// `struct lua_State` in `csrc/capi.c`.
 #[repr(C)]
@@ -27,7 +27,8 @@ pub(crate) struct LState {
 type CFn = unsafe extern "C" fn(*mut LState) -> c_int;
 
 unsafe extern "C" {
-    fn orbit_capi_newstate(rs: *const c_void) -> *mut LState;
+    fn orbit_capi_newstate(rs: *const c_void, table: *const RTable) -> *mut LState;
+    fn orbit_capi_table_size() -> usize;
     fn orbit_capi_freestate(l: *mut LState);
     fn orbit_capi_trampoline(l: *mut LState, f: CFn) -> c_int;
 }
@@ -40,6 +41,9 @@ pub(crate) struct Bridge {
     /// The native running a C function, null between calls.
     ctx: Cell<*mut NativeCtx<'static>>,
     st: Shared,
+    /// In a state C created (ADR-10), the host's own context, which
+    /// [`Bridge::ctx`] holds between calls; null otherwise.
+    host: Cell<*mut NativeCtx<'static>>,
 }
 
 /// Owns a VM's [`Bridge`] and its C state, from [`orbit_vm::Runtime::ext`].
@@ -71,9 +75,18 @@ pub(crate) fn install(vm: &mut Vm) {
         l: Cell::new(std::ptr::null_mut()),
         ctx: Cell::new(std::ptr::null_mut()),
         st: Shared::default(),
+        host: Cell::new(std::ptr::null_mut()),
     }));
-    // SAFETY: plain allocation in C; `b` outlives the state (BridgeHandle).
-    let l = unsafe { orbit_capi_newstate(b as *const c_void) };
+    // SAFETY: no arguments; the size of C's `struct orbit_r_table`.
+    let c_size = unsafe { orbit_capi_table_size() };
+    assert_eq!(
+        c_size,
+        size_of::<RTable>(),
+        "csrc/capi.c and RTable disagree"
+    );
+    // SAFETY: plain allocation in C; `b` outlives the state (BridgeHandle),
+    // and TABLE is static.
+    let l = unsafe { orbit_capi_newstate(b as *const c_void, &TABLE) };
     assert!(!l.is_null(), "out of memory creating the C API state");
     // SAFETY: `b` is live and not yet shared.
     unsafe { (*b).l.set(l) };
@@ -147,6 +160,7 @@ macro_rules! entry {
         let ($b, $c) = unsafe { enter($l) };
         #[allow(clippy::redundant_closure_call)]
         let r: Res<_> = (|| $body)();
+        host_prune($b, $c);
         match r {
             Ok(v) => v,
             Err(e) => {
@@ -157,15 +171,61 @@ macro_rules! entry {
     }};
 }
 
+/// Between calls in a state C created: let the collector run, and drop
+/// string copies no string on the host's stack needs any more
+/// ([`api::State::prune`]).
+fn host_prune(b: &Bridge, c: &mut NativeCtx<'static>) {
+    let host = b.host.get();
+    if host.is_null() || !std::ptr::eq(b.ctx.get(), host) {
+        return;
+    }
+    c.vm.host_safepoint();
+    {
+        let st = b.st.borrow();
+        if st.strs.len() < 2 * st.kept + 16 {
+            return;
+        }
+    }
+    let texts: Vec<&[u8]> = (0..c.len())
+        .filter_map(|i| match c.arg(i) {
+            Value::Str(s) => Some(c.bytes(s)),
+            _ => None,
+        })
+        .collect();
+    b.st.borrow_mut().prune(&texts);
+}
+
 /// A NUL-terminated copy of `bytes` that stays valid until the running C
 /// function returns.
 fn hand_out(st: &Shared, bytes: &[u8], len: *mut usize) -> *const c_char {
-    let mut copy = Vec::with_capacity(bytes.len() + 1);
-    copy.extend_from_slice(bytes);
-    copy.push(0);
-    let copy = copy.into_boxed_slice();
-    let p = copy.as_ptr() as *const c_char;
-    st.borrow_mut().strs.push(copy);
+    hand_out_copy(st, bytes, len, false)
+}
+
+/// [`hand_out`] for a string value C asked for (`lua_tolstring`): between
+/// calls in a state C created, the copy lives while an equal string is on
+/// the host's stack, and asking again for an equal string reuses a recent
+/// copy.
+fn hand_out_value(st: &Shared, bytes: &[u8], len: *mut usize) -> *const c_char {
+    hand_out_copy(st, bytes, len, true)
+}
+
+fn hand_out_copy(st: &Shared, bytes: &[u8], len: *mut usize, value: bool) -> *const c_char {
+    let mut state = st.borrow_mut();
+    let recent = state.strs.iter().rev().take(8).find(|s| {
+        s.value && value && s.bytes.len() == bytes.len() + 1 && &s.bytes[..bytes.len()] == bytes
+    });
+    let p = match recent {
+        Some(s) => s.bytes.as_ptr() as *const c_char,
+        None => {
+            let mut copy = Vec::with_capacity(bytes.len() + 1);
+            copy.extend_from_slice(bytes);
+            copy.push(0);
+            let copy = copy.into_boxed_slice();
+            let p = copy.as_ptr() as *const c_char;
+            state.strs.push(CStrCopy { bytes: copy, value });
+            p
+        }
+    };
     if !len.is_null() {
         // SAFETY: C passed a pointer to a size_t, or NULL.
         unsafe { *len = bytes.len() };
@@ -191,29 +251,198 @@ fn set_flag(p: *mut c_int, ok: bool) {
     }
 }
 
+/// The Rust entry points `csrc/capi.c` calls, handed to it once
+/// ([`install`]) so none of them is an exported symbol. Fields are in name
+/// order and match `struct orbit_r_table` there.
+#[repr(C)]
+struct RTable {
+    absindex: extern "C" fn(*mut LState, c_int) -> c_int,
+    argerror: extern "C" fn(*mut LState, c_int, *const c_char),
+    arith: extern "C" fn(*mut LState, c_int),
+    callk: extern "C" fn(*mut LState, c_int, c_int, isize, *const c_void),
+    checkstack: extern "C" fn(*mut LState, c_int) -> c_int,
+    close: extern "C" fn(*mut LState),
+    compare: extern "C" fn(*mut LState, c_int, c_int, c_int) -> c_int,
+    concat: extern "C" fn(*mut LState, c_int),
+    copy: extern "C" fn(*mut LState, c_int, c_int),
+    createtable: extern "C" fn(*mut LState, c_int, c_int),
+    error: extern "C" fn(*mut LState) -> c_int,
+    gc: extern "C" fn(*mut LState, c_int, c_int, c_int) -> c_int,
+    getfield: extern "C" fn(*mut LState, c_int, *const c_char) -> c_int,
+    getglobal: extern "C" fn(*mut LState, *const c_char) -> c_int,
+    geti: extern "C" fn(*mut LState, c_int, i64) -> c_int,
+    getinfo: extern "C" fn(*mut LState, *const c_char, *mut LuaDebug) -> c_int,
+    getiuservalue: extern "C" fn(*mut LState, c_int, c_int) -> c_int,
+    getmetatable: extern "C" fn(*mut LState, c_int) -> c_int,
+    getstack: extern "C" fn(*mut LState, c_int, *mut LuaDebug) -> c_int,
+    gettable: extern "C" fn(*mut LState, c_int) -> c_int,
+    gettop: extern "C" fn(*mut LState) -> c_int,
+    getupvalue: extern "C" fn(*mut LState, c_int, c_int) -> *const c_char,
+    iscfunction: extern "C" fn(*mut LState, c_int) -> c_int,
+    isinteger: extern "C" fn(*mut LState, c_int) -> c_int,
+    isnumber: extern "C" fn(*mut LState, c_int) -> c_int,
+    isrunning: extern "C" fn(*mut LState, c_int) -> c_int,
+    isrustudata: extern "C" fn(*mut LState, c_int) -> c_int,
+    isstring: extern "C" fn(*mut LState, c_int) -> c_int,
+    isuserdata: extern "C" fn(*mut LState, c_int) -> c_int,
+    len: extern "C" fn(*mut LState, c_int),
+    load: extern "C" fn(*mut LState, *const c_char, usize, *const c_char, *const c_char) -> c_int,
+    newuserdatauv: extern "C" fn(*mut LState, usize, c_int) -> *mut c_void,
+    next: extern "C" fn(*mut LState, c_int) -> c_int,
+    numbertocstring: extern "C" fn(*mut LState, c_int, *mut c_char) -> u32,
+    openlib: extern "C" fn(*mut LState, c_int) -> c_int,
+    pcallk: extern "C" fn(*mut LState, c_int, c_int, c_int, isize, *const c_void) -> c_int,
+    pushboolean: extern "C" fn(*mut LState, c_int),
+    pushcclosure: extern "C" fn(*mut LState, Option<CFn>, c_int),
+    pushinteger: extern "C" fn(*mut LState, i64),
+    pushlightuserdata: extern "C" fn(*mut LState, *mut c_void),
+    pushlstring: extern "C" fn(*mut LState, *const c_char, usize) -> *const c_char,
+    pushnil: extern "C" fn(*mut LState),
+    pushnumber: extern "C" fn(*mut LState, f64),
+    pushpending: extern "C" fn(*mut LState),
+    pushthread: extern "C" fn(*mut LState) -> c_int,
+    pushvalue: extern "C" fn(*mut LState, c_int),
+    rawequal: extern "C" fn(*mut LState, c_int, c_int) -> c_int,
+    rawget: extern "C" fn(*mut LState, c_int) -> c_int,
+    rawgeti: extern "C" fn(*mut LState, c_int, i64) -> c_int,
+    rawgetp: extern "C" fn(*mut LState, c_int, *const c_void) -> c_int,
+    rawlen: extern "C" fn(*mut LState, c_int) -> u64,
+    rawset: extern "C" fn(*mut LState, c_int),
+    rawseti: extern "C" fn(*mut LState, c_int, i64),
+    rawsetp: extern "C" fn(*mut LState, c_int, *const c_void),
+    rotate: extern "C" fn(*mut LState, c_int, c_int),
+    setfield: extern "C" fn(*mut LState, c_int, *const c_char),
+    setglobal: extern "C" fn(*mut LState, *const c_char),
+    seti: extern "C" fn(*mut LState, c_int, i64),
+    setiuservalue: extern "C" fn(*mut LState, c_int, c_int) -> c_int,
+    setmetatable: extern "C" fn(*mut LState, c_int) -> c_int,
+    settable: extern "C" fn(*mut LState, c_int),
+    settop: extern "C" fn(*mut LState, c_int),
+    setupvalue: extern "C" fn(*mut LState, c_int, c_int) -> *const c_char,
+    setwarnf: extern "C" fn(*mut LState, Option<WarnFn>, *mut c_void),
+    stringtonumber: extern "C" fn(*mut LState, *const c_char) -> usize,
+    toboolean: extern "C" fn(*mut LState, c_int) -> c_int,
+    tocfunction: extern "C" fn(*mut LState, c_int) -> Option<CFn>,
+    tointegerx: extern "C" fn(*mut LState, c_int, *mut c_int) -> i64,
+    tolstring: extern "C" fn(*mut LState, c_int, *mut usize) -> *const c_char,
+    tolstringmeta: extern "C" fn(*mut LState, c_int, *mut usize) -> *const c_char,
+    tonumberx: extern "C" fn(*mut LState, c_int, *mut c_int) -> f64,
+    topointer: extern "C" fn(*mut LState, c_int) -> *const c_void,
+    touserdata: extern "C" fn(*mut LState, c_int) -> *mut c_void,
+    traceback: extern "C" fn(*mut LState, *const c_char, c_int),
+    r#type: extern "C" fn(*mut LState, c_int) -> c_int,
+    typeerror: extern "C" fn(*mut LState, c_int, *const c_char),
+    unsupported: extern "C" fn(*mut LState, *const c_char),
+    upvalueid: extern "C" fn(*mut LState, c_int, c_int) -> *mut c_void,
+    upvaluejoin: extern "C" fn(*mut LState, c_int, c_int, c_int, c_int),
+    version: extern "C" fn(*mut LState) -> f64,
+    warning: extern "C" fn(*mut LState, *const c_char, c_int),
+    r#where: extern "C" fn(*mut LState, c_int),
+}
+
+static TABLE: RTable = RTable {
+    absindex: orbit_r_absindex,
+    argerror: orbit_r_argerror,
+    arith: orbit_r_arith,
+    callk: orbit_r_callk,
+    checkstack: orbit_r_checkstack,
+    close: orbit_r_close,
+    compare: orbit_r_compare,
+    concat: orbit_r_concat,
+    copy: orbit_r_copy,
+    createtable: orbit_r_createtable,
+    error: orbit_r_error,
+    gc: orbit_r_gc,
+    getfield: orbit_r_getfield,
+    getglobal: orbit_r_getglobal,
+    geti: orbit_r_geti,
+    getinfo: orbit_r_getinfo,
+    getiuservalue: orbit_r_getiuservalue,
+    getmetatable: orbit_r_getmetatable,
+    getstack: orbit_r_getstack,
+    gettable: orbit_r_gettable,
+    gettop: orbit_r_gettop,
+    getupvalue: orbit_r_getupvalue,
+    iscfunction: orbit_r_iscfunction,
+    isinteger: orbit_r_isinteger,
+    isnumber: orbit_r_isnumber,
+    isrunning: orbit_r_isrunning,
+    isrustudata: orbit_r_isrustudata,
+    isstring: orbit_r_isstring,
+    isuserdata: orbit_r_isuserdata,
+    len: orbit_r_len,
+    load: orbit_r_load,
+    newuserdatauv: orbit_r_newuserdatauv,
+    next: orbit_r_next,
+    numbertocstring: orbit_r_numbertocstring,
+    openlib: orbit_r_openlib,
+    pcallk: orbit_r_pcallk,
+    pushboolean: orbit_r_pushboolean,
+    pushcclosure: orbit_r_pushcclosure,
+    pushinteger: orbit_r_pushinteger,
+    pushlightuserdata: orbit_r_pushlightuserdata,
+    pushlstring: orbit_r_pushlstring,
+    pushnil: orbit_r_pushnil,
+    pushnumber: orbit_r_pushnumber,
+    pushpending: orbit_r_pushpending,
+    pushthread: orbit_r_pushthread,
+    pushvalue: orbit_r_pushvalue,
+    rawequal: orbit_r_rawequal,
+    rawget: orbit_r_rawget,
+    rawgeti: orbit_r_rawgeti,
+    rawgetp: orbit_r_rawgetp,
+    rawlen: orbit_r_rawlen,
+    rawset: orbit_r_rawset,
+    rawseti: orbit_r_rawseti,
+    rawsetp: orbit_r_rawsetp,
+    rotate: orbit_r_rotate,
+    setfield: orbit_r_setfield,
+    setglobal: orbit_r_setglobal,
+    seti: orbit_r_seti,
+    setiuservalue: orbit_r_setiuservalue,
+    setmetatable: orbit_r_setmetatable,
+    settable: orbit_r_settable,
+    settop: orbit_r_settop,
+    setupvalue: orbit_r_setupvalue,
+    setwarnf: orbit_r_setwarnf,
+    stringtonumber: orbit_r_stringtonumber,
+    toboolean: orbit_r_toboolean,
+    tocfunction: orbit_r_tocfunction,
+    tointegerx: orbit_r_tointegerx,
+    tolstring: orbit_r_tolstring,
+    tolstringmeta: orbit_r_tolstringmeta,
+    tonumberx: orbit_r_tonumberx,
+    topointer: orbit_r_topointer,
+    touserdata: orbit_r_touserdata,
+    traceback: orbit_r_traceback,
+    r#type: orbit_r_type,
+    typeerror: orbit_r_typeerror,
+    unsupported: orbit_r_unsupported,
+    upvalueid: orbit_r_upvalueid,
+    upvaluejoin: orbit_r_upvaluejoin,
+    version: orbit_r_version,
+    warning: orbit_r_warning,
+    r#where: orbit_r_where,
+};
+
 // ---- entry points (names match csrc/capi.c) ---------------------------------
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_version(l: *mut LState) -> f64 {
     entry!(l, 0.0, |_b, _c| Ok(505.0))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_absindex(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::absindex(c, idx)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_gettop(l: *mut LState) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::gettop(c)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_settop(l: *mut LState, idx: c_int) {
     entry!(l, (), |_b, c| api::settop(c, idx))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushvalue(l: *mut LState, idx: c_int) {
     entry!(l, (), |_b, c| {
         api::pushvalue(c, idx);
@@ -221,52 +450,42 @@ extern "C" fn orbit_r_pushvalue(l: *mut LState, idx: c_int) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rotate(l: *mut LState, idx: c_int, n: c_int) {
     entry!(l, (), |_b, c| api::rotate(c, idx, n))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_copy(l: *mut LState, from: c_int, to: c_int) {
     entry!(l, (), |_b, c| api::copy(c, from, to))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_checkstack(l: *mut LState, n: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::checkstack(c, n) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_isnumber(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::tonumber(c, idx).is_some() as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_isstring(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::isstring(c, idx) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_iscfunction(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::iscfunction(c, idx) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_isinteger(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::isinteger(c, idx) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_isuserdata(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::isuserdata(c, idx) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_type(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::type_(c, idx)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_tonumberx(l: *mut LState, idx: c_int, isnum: *mut c_int) -> f64 {
     entry!(l, 0.0, |_b, c| {
         let n = api::tonumber(c, idx);
@@ -275,7 +494,6 @@ extern "C" fn orbit_r_tonumberx(l: *mut LState, idx: c_int, isnum: *mut c_int) -
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_tointegerx(l: *mut LState, idx: c_int, isnum: *mut c_int) -> i64 {
     entry!(l, 0, |_b, c| {
         let n = api::tointeger(c, idx);
@@ -284,16 +502,14 @@ extern "C" fn orbit_r_tointegerx(l: *mut LState, idx: c_int, isnum: *mut c_int) 
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_toboolean(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::toboolean(c, idx) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_tolstring(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
         Ok(match api::tolstring(c, idx)? {
-            Some(s) => hand_out(&b.st, c.bytes(s), len),
+            Some(s) => hand_out_value(&b.st, c.bytes(s), len),
             None => {
                 if !len.is_null() {
                     // SAFETY: C passed a pointer to a size_t.
@@ -305,12 +521,10 @@ extern "C" fn orbit_r_tolstring(l: *mut LState, idx: c_int, len: *mut usize) -> 
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rawlen(l: *mut LState, idx: c_int) -> u64 {
     entry!(l, 0, |_b, c| Ok(api::rawlen(c, idx)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_tocfunction(l: *mut LState, idx: c_int) -> Option<CFn> {
     entry!(l, None, |_b, c| Ok(api::tocfunction(c, idx).map(|f| {
         // SAFETY: the address came from C as a `lua_CFunction`
@@ -319,29 +533,24 @@ extern "C" fn orbit_r_tocfunction(l: *mut LState, idx: c_int) -> Option<CFn> {
     })))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_touserdata(l: *mut LState, idx: c_int) -> *mut c_void {
     entry!(l, std::ptr::null_mut(), |_b, c| Ok(api::touserdata(c, idx)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_topointer(l: *mut LState, idx: c_int) -> *const c_void {
     entry!(l, std::ptr::null(), |_b, c| Ok(
         api::topointer(c, idx) as *const c_void
     ))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rawequal(l: *mut LState, a: c_int, b_: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::rawequal(c, a, b_) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_compare(l: *mut LState, a: c_int, b_: c_int, op: c_int) -> c_int {
     entry!(l, 0, |b, c| api::compare(c, a, b_, op).map(|r| r as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushnil(l: *mut LState) {
     entry!(l, (), |_b, c| {
         c.push(Value::Nil);
@@ -349,7 +558,6 @@ extern "C" fn orbit_r_pushnil(l: *mut LState) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushnumber(l: *mut LState, n: f64) {
     entry!(l, (), |_b, c| {
         c.push(Value::Float(n));
@@ -357,7 +565,6 @@ extern "C" fn orbit_r_pushnumber(l: *mut LState, n: f64) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushinteger(l: *mut LState, n: i64) {
     entry!(l, (), |_b, c| {
         c.push(Value::Int(n));
@@ -365,7 +572,6 @@ extern "C" fn orbit_r_pushinteger(l: *mut LState, n: i64) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushlstring(l: *mut LState, s: *const c_char, len: usize) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
         let bytes: &[u8] = if len == 0 {
@@ -375,11 +581,10 @@ extern "C" fn orbit_r_pushlstring(l: *mut LState, s: *const c_char, len: usize) 
             unsafe { std::slice::from_raw_parts(s as *const u8, len) }
         };
         let st = api::pushstr(c, bytes);
-        Ok(hand_out(&b.st, c.bytes(st), std::ptr::null_mut()))
+        Ok(hand_out_value(&b.st, c.bytes(st), std::ptr::null_mut()))
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushcclosure(l: *mut LState, f: Option<CFn>, n: c_int) {
     entry!(l, (), |_b, c| match f {
         Some(f) => api::pushcclosure(c, f as usize as u64, n),
@@ -387,7 +592,6 @@ extern "C" fn orbit_r_pushcclosure(l: *mut LState, f: Option<CFn>, n: c_int) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushboolean(l: *mut LState, v: c_int) {
     entry!(l, (), |_b, c| {
         c.push(Value::Bool(v != 0));
@@ -395,7 +599,6 @@ extern "C" fn orbit_r_pushboolean(l: *mut LState, v: c_int) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushlightuserdata(l: *mut LState, p: *mut c_void) {
     entry!(l, (), |_b, c| {
         c.push(api::light(p as usize));
@@ -403,19 +606,16 @@ extern "C" fn orbit_r_pushlightuserdata(l: *mut LState, p: *mut c_void) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_getglobal(l: *mut LState, name: *const c_char) -> c_int {
     // SAFETY: C passes a NUL-terminated name.
     let name = unsafe { cbytes(name) };
     entry!(l, 0, |b, c| api::getglobal(c, name))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_gettable(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |b, c| api::gettable(c, idx))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_getfield(l: *mut LState, idx: c_int, k: *const c_char) -> c_int {
     // SAFETY: C passes a NUL-terminated key.
     let k = unsafe { cbytes(k) };
@@ -426,7 +626,6 @@ extern "C" fn orbit_r_getfield(l: *mut LState, idx: c_int, k: *const c_char) -> 
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_geti(l: *mut LState, idx: c_int, n: i64) -> c_int {
     entry!(l, 0, |b, c| {
         let obj = api_get(c, idx);
@@ -434,17 +633,14 @@ extern "C" fn orbit_r_geti(l: *mut LState, idx: c_int, n: i64) -> c_int {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rawget(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| api::rawget(c, idx))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rawgeti(l: *mut LState, idx: c_int, n: i64) -> c_int {
     entry!(l, 0, |_b, c| api::rawget_with(c, idx, Value::Int(n)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rawgetp(l: *mut LState, idx: c_int, p: *const c_void) -> c_int {
     entry!(l, 0, |_b, c| api::rawget_with(
         c,
@@ -453,7 +649,6 @@ extern "C" fn orbit_r_rawgetp(l: *mut LState, idx: c_int, p: *const c_void) -> c
     ))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_createtable(l: *mut LState, narr: c_int, nrec: c_int) {
     entry!(l, (), |_b, c| {
         api::createtable(c, narr, nrec);
@@ -461,43 +656,36 @@ extern "C" fn orbit_r_createtable(l: *mut LState, narr: c_int, nrec: c_int) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_newuserdatauv(l: *mut LState, size: usize, nuv: c_int) -> *mut c_void {
     entry!(l, std::ptr::null_mut(), |_b, c| api::newuserdata(
         c, size, nuv
     ))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_getmetatable(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::getmetatable(c, idx) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_getiuservalue(l: *mut LState, idx: c_int, n: c_int) -> c_int {
     entry!(l, abi::TNONE, |_b, c| Ok(api::getiuservalue(c, idx, n)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_setglobal(l: *mut LState, name: *const c_char) {
     // SAFETY: C passes a NUL-terminated name.
     let name = unsafe { cbytes(name) };
     entry!(l, (), |b, c| api::setglobal(c, name))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_settable(l: *mut LState, idx: c_int) {
     entry!(l, (), |b, c| api::settable(c, idx))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_setfield(l: *mut LState, idx: c_int, k: *const c_char) {
     // SAFETY: C passes a NUL-terminated key.
     let k = unsafe { cbytes(k) };
     entry!(l, (), |b, c| api::setfield(c, idx, k))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_seti(l: *mut LState, idx: c_int, n: i64) {
     entry!(l, (), |b, c| {
         let obj = api_get(c, idx);
@@ -505,17 +693,14 @@ extern "C" fn orbit_r_seti(l: *mut LState, idx: c_int, n: i64) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rawset(l: *mut LState, idx: c_int) {
     entry!(l, (), |_b, c| api::rawset(c, idx))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rawseti(l: *mut LState, idx: c_int, n: i64) {
     entry!(l, (), |_b, c| api::rawset_with(c, idx, Value::Int(n)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_rawsetp(l: *mut LState, idx: c_int, p: *const c_void) {
     entry!(l, (), |_b, c| api::rawset_with(
         c,
@@ -524,17 +709,14 @@ extern "C" fn orbit_r_rawsetp(l: *mut LState, idx: c_int, p: *const c_void) {
     ))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_setmetatable(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| api::setmetatable(c, idx).map(|()| 1))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_setiuservalue(l: *mut LState, idx: c_int, n: c_int) -> c_int {
     entry!(l, 0, |_b, c| api::setiuservalue(c, idx, n).map(c_int::from))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_callk(
     l: *mut LState,
     nargs: c_int,
@@ -545,7 +727,6 @@ extern "C" fn orbit_r_callk(
     entry!(l, (), |b, c| api::call(c, nargs, nresults))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pcallk(
     l: *mut LState,
     nargs: c_int,
@@ -559,53 +740,44 @@ extern "C" fn orbit_r_pcallk(
     ))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_error(l: *mut LState) -> c_int {
     entry!(l, 0, |_b, c| Err::<c_int, _>(api::error(c)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_next(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| api::next(c, idx).map(|r| r as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_concat(l: *mut LState, n: c_int) {
     entry!(l, (), |_b, c| api::concat(c, n))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_len(l: *mut LState, idx: c_int) {
     entry!(l, (), |b, c| api::len(c, idx))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_stringtonumber(l: *mut LState, s: *const c_char) -> usize {
     // SAFETY: C passes a NUL-terminated string.
     let s = unsafe { cbytes(s) };
     entry!(l, 0, |_b, c| Ok(api::stringtonumber(c, s)))
 }
 
-#[unsafe(no_mangle)]
-extern "C" fn orbit_r_gc(l: *mut LState, what: c_int, _arg: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::gc(c, what)))
+extern "C" fn orbit_r_gc(l: *mut LState, what: c_int, a: c_int, b: c_int) -> c_int {
+    entry!(l, 0, |_b, c| Ok(api::gc(c, what, a, b)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_argerror(l: *mut LState, arg: c_int, msg: *const c_char) {
     // SAFETY: C passes a NUL-terminated message, or NULL.
     let msg = String::from_utf8_lossy(unsafe { cbytes(msg) }).into_owned();
     entry!(l, (), |_b, c| Err(api::argerror(c, arg, &msg)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_typeerror(l: *mut LState, arg: c_int, tname: *const c_char) {
     // SAFETY: C passes a NUL-terminated type name.
     let tname = String::from_utf8_lossy(unsafe { cbytes(tname) }).into_owned();
     entry!(l, (), |_b, c| Err(api::typeerror(c, arg, &tname)))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_where(l: *mut LState, lvl: c_int) {
     entry!(l, (), |_b, c| {
         api::where_(c, lvl);
@@ -613,20 +785,17 @@ extern "C" fn orbit_r_where(l: *mut LState, lvl: c_int) {
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_tolstringmeta(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
         let s = api::tolstring_meta(c, idx)?;
-        Ok(hand_out(&b.st, c.bytes(s), len))
+        Ok(hand_out_value(&b.st, c.bytes(s), len))
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_arith(l: *mut LState, op: c_int) {
     entry!(l, (), |_b, c| api::arith(c, op))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_numbertocstring(l: *mut LState, idx: c_int, buff: *mut c_char) -> u32 {
     entry!(l, 0, |_b, c| Ok(match api::number_text(c, idx) {
         Some(t) => {
@@ -643,7 +812,6 @@ extern "C" fn orbit_r_numbertocstring(l: *mut LState, idx: c_int, buff: *mut c_c
     }))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_load(
     l: *mut LState,
     buf: *const c_char,
@@ -674,12 +842,10 @@ extern "C" fn orbit_r_load(
     )))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_isrustudata(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::is_rust_userdata(c, idx) as c_int))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_warning(l: *mut LState, msg: *const c_char, tocont: c_int) {
     // SAFETY: NUL-terminated.
     let msg = unsafe { cbytes(msg) };
@@ -689,7 +855,6 @@ extern "C" fn orbit_r_warning(l: *mut LState, msg: *const c_char, tocont: c_int)
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_traceback(l: *mut LState, msg: *const c_char, level: c_int) {
     // SAFETY: NUL-terminated or NULL.
     let text = unsafe { cbytes(msg) };
@@ -700,14 +865,12 @@ extern "C" fn orbit_r_traceback(l: *mut LState, msg: *const c_char, level: c_int
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_pushthread(l: *mut LState) -> c_int {
     entry!(l, 0, |_b, c| Ok(api::pushthread(c) as c_int))
 }
 
 /// Whether the value at `idx` is the running thread (the only one this
 /// state stands for).
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_isrunning(l: *mut LState, idx: c_int) -> c_int {
     entry!(l, 0, |_b, c| Ok(match api::get(c, idx) {
         Value::Thread(t) => (t == c.running().0) as c_int,
@@ -715,7 +878,6 @@ extern "C" fn orbit_r_isrunning(l: *mut LState, idx: c_int) -> c_int {
     }))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_unsupported(l: *mut LState, what: *const c_char) {
     // SAFETY: NUL-terminated.
     let what = String::from_utf8_lossy(unsafe { cbytes(what) }).into_owned();
@@ -750,7 +912,6 @@ pub(crate) struct LuaDebug {
     private: usize,
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_getstack(l: *mut LState, level: c_int, ar: *mut LuaDebug) -> c_int {
     entry!(l, 0, |_b, c| {
         if !api::has_level(c, level) {
@@ -782,7 +943,6 @@ fn word(w: &str) -> *const c_char {
     s.as_ptr()
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_getinfo(l: *mut LState, what: *const c_char, ar: *mut LuaDebug) -> c_int {
     // SAFETY: NUL-terminated.
     let opts = unsafe { cbytes(what) };
@@ -871,7 +1031,6 @@ extern "C" fn orbit_r_getinfo(l: *mut LState, what: *const c_char, ar: *mut LuaD
     })
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_getupvalue(l: *mut LState, funcindex: c_int, n: c_int) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| Ok(
         match api::getupvalue(c, funcindex, n) {
@@ -881,7 +1040,6 @@ extern "C" fn orbit_r_getupvalue(l: *mut LState, funcindex: c_int, n: c_int) -> 
     ))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_setupvalue(l: *mut LState, funcindex: c_int, n: c_int) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| Ok(
         match api::setupvalue(c, funcindex, n)? {
@@ -891,14 +1049,12 @@ extern "C" fn orbit_r_setupvalue(l: *mut LState, funcindex: c_int, n: c_int) -> 
     ))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_upvalueid(l: *mut LState, funcindex: c_int, n: c_int) -> *mut c_void {
     entry!(l, std::ptr::null_mut(), |_b, c| Ok(
         api::upvalueid(c, funcindex, n) as *mut c_void
     ))
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn orbit_r_upvaluejoin(l: *mut LState, f1: c_int, n1: c_int, f2: c_int, n2: c_int) {
     entry!(l, (), |_b, c| api::upvaluejoin(c, f1, n1, f2, n2))
 }
@@ -982,4 +1138,119 @@ pub(crate) fn load(
         "dynamic libraries not supported on this platform yet".into(),
         "absent",
     ))
+}
+
+// ---- states created from C (ADR-10) ---------------------------------------------
+
+/// `luaopen_*`.
+extern "C" fn orbit_r_openlib(l: *mut LState, lib: c_int) -> c_int {
+    entry!(l, 0, |_b, c| Ok(api::openlib(c, lib)))
+}
+
+/// Push the pending error, for a panic function to read.
+extern "C" fn orbit_r_pushpending(l: *mut LState) {
+    entry!(l, (), |b, c| {
+        let v = b.st.borrow_mut().pending.take().unwrap_or(Value::Nil);
+        c.push(v);
+        Ok(())
+    })
+}
+
+type WarnFn = unsafe extern "C" fn(ud: *mut c_void, msg: *const c_char, tocont: c_int);
+
+/// `lua_setwarnf`: warnings go to `f` from now on; a null `f` drops them.
+extern "C" fn orbit_r_setwarnf(l: *mut LState, f: Option<WarnFn>, ud: *mut c_void) {
+    entry!(l, (), |_b, c| {
+        c.vm.rt.warn_hook = Some(orbit_vm::WarnHook(Box::new(move |msg, tocont| {
+            let Some(f) = f else { return };
+            let mut text = Vec::with_capacity(msg.len() + 1);
+            text.extend(msg.iter().map(|&b| if b == 0 { b'?' } else { b }));
+            text.push(0);
+            // SAFETY: `f` is the program's warning function, called as
+            // lua_setwarnf documents, with a NUL-terminated message that
+            // lives through the call.
+            unsafe { f(ud, text.as_ptr() as *const c_char, tocont as c_int) }
+        })));
+        Ok(())
+    })
+}
+
+#[cfg(feature = "host")]
+unsafe extern "C" {
+    fn orbit_capi_write_stdout(p: *const c_char, n: usize) -> usize;
+    fn orbit_capi_flush_stdout() -> c_int;
+}
+
+/// `print`'s output in a state C created: C's own `stdout`, so it
+/// interleaves with the program's `printf`s as in Lua.
+#[cfg(feature = "host")]
+#[derive(Debug)]
+struct CStdout;
+
+#[cfg(feature = "host")]
+impl std::io::Write for CStdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: `buf` is readable for its length.
+        let n = unsafe { orbit_capi_write_stdout(buf.as_ptr() as *const c_char, buf.len()) };
+        if n == 0 && !buf.is_empty() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // SAFETY: no arguments; fflush(stdout).
+        match unsafe { orbit_capi_flush_stdout() } {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
+}
+
+/// `lua_newstate`: a VM owned by the C program, whose stack between calls
+/// is the host window ([`Vm::host_ctx`]). Null if memory runs out.
+#[cfg(feature = "host")]
+#[unsafe(no_mangle)]
+extern "C" fn orbit_r_newstate() -> *mut LState {
+    let vm: &'static mut Vm = Box::leak(Box::new(crate::host::new_vm()));
+    vm.rt.out = Box::new(CStdout);
+    crate::install(vm);
+    let Some(p) = vm.rt.ext.get::<BridgeHandle>().map(|h| h.0) else {
+        return std::ptr::null_mut();
+    };
+    let ctx = Box::into_raw(Box::new(vm.host_ctx()));
+    // SAFETY: the handle keeps the bridge alive until `orbit_r_close`.
+    let b = unsafe { &*p };
+    b.ctx.set(ctx);
+    b.host.set(ctx);
+    b.l.get()
+}
+
+/// `lua_close`: close the state as Lua does (finalizers run), flush the
+/// libraries' files, and free the VM, its bridge and `l`. Only for states
+/// `orbit_r_newstate` made; it does nothing to others.
+extern "C" fn orbit_r_close(l: *mut LState) {
+    // SAFETY: `l` is a live state; its bridge lives as long as it does.
+    let b = unsafe { &*((*l).rs as *const Bridge) };
+    let host = b.host.get();
+    if host.is_null() || !std::ptr::eq(b.ctx.get(), host) {
+        // A state Rust made, or a C function closing its own caller.
+        return;
+    }
+    // SAFETY: made by `orbit_r_newstate` with `Box::into_raw`; no C function
+    // is running, so nothing else uses it.
+    let ctx = unsafe { Box::from_raw(host) };
+    b.ctx.set(std::ptr::null_mut());
+    b.host.set(std::ptr::null_mut());
+    let vm: *mut Vm = &mut *ctx.vm;
+    drop(ctx);
+    // SAFETY: leaked by `orbit_r_newstate` and reached only through this
+    // state, which the program gives up by calling lua_close. Dropping the
+    // VM drops the bridge handle, which frees the bridge and `l`.
+    unsafe {
+        (*vm).close();
+        orbit_stdlib::flush_files(&mut *vm);
+        let _ = std::io::Write::flush(&mut (*vm).rt.out);
+        drop(Box::from_raw(vm));
+    }
 }

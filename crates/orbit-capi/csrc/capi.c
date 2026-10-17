@@ -25,7 +25,104 @@ struct lua_State {
   void *rs;      /* the Rust bridge */
   jmp_buf *jb;   /* the innermost trampoline's jump target */
   int status;    /* set by Rust when an error is pending */
+  lua_CFunction panicf; /* lua_atpanic */
+  lua_Alloc allocf;     /* the allocator lua_newstate got, unused */
+  void *allocud;
 };
+
+/* The Rust entry points, handed over by orbit_capi_newstate so none of
+   them is an exported symbol. Fields are in name order and match RTable in
+   src/ffi.rs. */
+struct orbit_r_table {
+  int (*absindex)(lua_State *L, int idx);
+  void (*argerror)(lua_State *L, int arg, const char *extramsg);
+  void (*arith)(lua_State *L, int op);
+  void (*callk)(lua_State *L, int nargs, int nresults, lua_KContext ctx, lua_KFunction k);
+  int (*checkstack)(lua_State *L, int n);
+  void (*close)(lua_State *L);
+  int (*compare)(lua_State *L, int a, int b, int op);
+  void (*concat)(lua_State *L, int n);
+  void (*copy)(lua_State *L, int fromidx, int toidx);
+  void (*createtable)(lua_State *L, int narr, int nrec);
+  int (*error)(lua_State *L);
+  int (*gc)(lua_State *L, int what, int a, int b);
+  int (*getfield)(lua_State *L, int idx, const char *k);
+  int (*getglobal)(lua_State *L, const char *name);
+  int (*geti)(lua_State *L, int idx, lua_Integer n);
+  int (*getinfo)(lua_State *L, const char *what, lua_Debug *ar);
+  int (*getiuservalue)(lua_State *L, int idx, int n);
+  int (*getmetatable)(lua_State *L, int idx);
+  int (*getstack)(lua_State *L, int level, lua_Debug *ar);
+  int (*gettable)(lua_State *L, int idx);
+  int (*gettop)(lua_State *L);
+  const char * (*getupvalue)(lua_State *L, int funcindex, int n);
+  int (*iscfunction)(lua_State *L, int idx);
+  int (*isinteger)(lua_State *L, int idx);
+  int (*isnumber)(lua_State *L, int idx);
+  int (*isrunning)(lua_State *L, int idx);
+  int (*isrustudata)(lua_State *L, int idx);
+  int (*isstring)(lua_State *L, int idx);
+  int (*isuserdata)(lua_State *L, int idx);
+  void (*len)(lua_State *L, int idx);
+  int (*load)(lua_State *L, const char *buf, size_t len, const char *chunkname, const char *mode);
+  void * (*newuserdatauv)(lua_State *L, size_t sz, int nuvalue);
+  int (*next)(lua_State *L, int idx);
+  unsigned (*numbertocstring)(lua_State *L, int idx, char *buff);
+  int (*openlib)(lua_State *L, int lib);
+  int (*pcallk)(lua_State *L, int nargs, int nresults, int errfunc, lua_KContext ctx, lua_KFunction k);
+  void (*pushboolean)(lua_State *L, int b);
+  void (*pushcclosure)(lua_State *L, lua_CFunction fn, int n);
+  void (*pushinteger)(lua_State *L, lua_Integer n);
+  void (*pushlightuserdata)(lua_State *L, void *p);
+  const char * (*pushlstring)(lua_State *L, const char *s, size_t len);
+  void (*pushnil)(lua_State *L);
+  void (*pushnumber)(lua_State *L, lua_Number n);
+  void (*pushpending)(lua_State *L);
+  int (*pushthread)(lua_State *L);
+  void (*pushvalue)(lua_State *L, int idx);
+  int (*rawequal)(lua_State *L, int a, int b);
+  int (*rawget)(lua_State *L, int idx);
+  int (*rawgeti)(lua_State *L, int idx, lua_Integer n);
+  int (*rawgetp)(lua_State *L, int idx, const void *p);
+  lua_Unsigned (*rawlen)(lua_State *L, int idx);
+  void (*rawset)(lua_State *L, int idx);
+  void (*rawseti)(lua_State *L, int idx, lua_Integer n);
+  void (*rawsetp)(lua_State *L, int idx, const void *p);
+  void (*rotate)(lua_State *L, int idx, int n);
+  void (*setfield)(lua_State *L, int idx, const char *k);
+  void (*setglobal)(lua_State *L, const char *name);
+  void (*seti)(lua_State *L, int idx, lua_Integer n);
+  int (*setiuservalue)(lua_State *L, int idx, int n);
+  int (*setmetatable)(lua_State *L, int idx);
+  void (*settable)(lua_State *L, int idx);
+  void (*settop)(lua_State *L, int idx);
+  const char * (*setupvalue)(lua_State *L, int funcindex, int n);
+  void (*setwarnf)(lua_State *L, lua_WarnFunction f, void *ud);
+  size_t (*stringtonumber)(lua_State *L, const char *s);
+  int (*toboolean)(lua_State *L, int idx);
+  lua_CFunction (*tocfunction)(lua_State *L, int idx);
+  lua_Integer (*tointegerx)(lua_State *L, int idx, int *isnum);
+  const char * (*tolstring)(lua_State *L, int idx, size_t *len);
+  const char * (*tolstringmeta)(lua_State *L, int idx, size_t *len);
+  lua_Number (*tonumberx)(lua_State *L, int idx, int *isnum);
+  const void * (*topointer)(lua_State *L, int idx);
+  void * (*touserdata)(lua_State *L, int idx);
+  void (*traceback)(lua_State *L, const char *msg, int level);
+  int (*type)(lua_State *L, int idx);
+  void (*typeerror)(lua_State *L, int arg, const char *tname);
+  void (*unsupported)(lua_State *L, const char *what);
+  void * (*upvalueid)(lua_State *L, int fidx, int n);
+  void (*upvaluejoin)(lua_State *L, int fidx1, int n1, int fidx2, int n2);
+  lua_Number (*version)(lua_State *L);
+  void (*warning)(lua_State *L, const char *msg, int tocont);
+  void (*where)(lua_State *L, int lvl);
+};
+
+static const struct orbit_r_table *orbit_r;
+
+size_t orbit_capi_table_size(void) {
+  return sizeof(struct orbit_r_table);
+}
 
 /* ------------------------------------------------------------------------
  * States and the trampoline
@@ -33,12 +130,13 @@ struct lua_State {
 
 /* A state with LUA_EXTRASPACE bytes in front of it, as lua_getextraspace
    expects. */
-lua_State *orbit_capi_newstate(void *rs) {
+lua_State *orbit_capi_newstate(void *rs, const struct orbit_r_table *table) {
   char *block = calloc(1, LUA_EXTRASPACE + sizeof(struct lua_State));
   lua_State *L;
   if (block == NULL) return NULL;
   L = (lua_State *)(block + LUA_EXTRASPACE);
   L->rs = rs;
+  orbit_r = table;
   return L;
 }
 
@@ -60,6 +158,13 @@ int orbit_capi_trampoline(lua_State *L, lua_CFunction f) {
 
 static void orbit_throw(lua_State *L) {
   L->status = 0;
+  if (L->jb == NULL && L->panicf != NULL) {
+    /* An error outside every protected call: the panic function gets the
+       error on the stack; if it returns, the program aborts. */
+    orbit_r->pushpending(L);
+    L->panicf(L);
+    abort();
+  }
   if (L->jb == NULL) {
     fputs("OrbitScript: Lua error raised outside a C function call\n", stderr);
     abort();
@@ -74,16 +179,14 @@ static void orbit_throw(lua_State *L) {
 
 /* An entry point returning a value, and one returning nothing. */
 #define API(ret, name, params, args)                  \
-  extern ret orbit_r_##name params;                   \
   LUA_API ret lua_##name params {                     \
-    ret r_ = orbit_r_##name args;                     \
+    ret r_ = orbit_r->name args;                     \
     CHECK(L);                                         \
     return r_;                                        \
   }
 #define APIV(name, params, args)                      \
-  extern void orbit_r_##name params;                  \
   LUA_API void lua_##name params {                    \
-    orbit_r_##name args;                              \
+    orbit_r->name args;                              \
     CHECK(L);                                         \
   }
 
@@ -169,14 +272,17 @@ API(const char *, setupvalue, (lua_State *L, int funcindex, int n), (L, funcinde
 API(void *, upvalueid, (lua_State *L, int fidx, int n), (L, fidx, n))
 APIV(upvaluejoin, (lua_State *L, int fidx1, int n1, int fidx2, int n2), (L, fidx1, n1, fidx2, n2))
 
-extern int orbit_r_gc(lua_State *L, int what, int arg);
 LUA_API int lua_gc(lua_State *L, int what, ...) {
   va_list ap;
-  int arg = 0, r;
+  int a = 0, b = 0, r;
   va_start(ap, what);
-  if (what == LUA_GCSTEP) arg = va_arg(ap, int);
+  if (what == LUA_GCSTEP) a = va_arg(ap, int);
+  if (what == LUA_GCPARAM) {
+    a = va_arg(ap, int);
+    b = va_arg(ap, int);
+  }
   va_end(ap);
-  r = orbit_r_gc(L, what, arg);
+  r = orbit_r->gc(L, what, a, b);
   CHECK(L);
   return r;
 }
@@ -215,8 +321,13 @@ static void *orbit_default_alloc(void *ud, void *ptr, size_t osize, size_t nsize
   return realloc(ptr, nsize);
 }
 
+/* The allocator lua_newstate or lua_setallocf got is recorded but not
+   used: memory comes from Rust's allocator (ADR-10). */
 LUA_API lua_Alloc lua_getallocf(lua_State *L, void **ud) {
-  (void)L;
+  if (L->allocf != NULL) {
+    if (ud != NULL) *ud = L->allocud;
+    return L->allocf;
+  }
   if (ud != NULL) *ud = NULL;
   return orbit_default_alloc;
 }
@@ -226,14 +337,13 @@ LUALIB_API void *luaL_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 }
 
 LUA_API lua_CFunction lua_atpanic(lua_State *L, lua_CFunction panicf) {
-  (void)L;
-  (void)panicf;
-  return NULL;
+  lua_CFunction old = L->panicf;
+  L->panicf = panicf;
+  return old;
 }
 
-extern void orbit_r_warning(lua_State *L, const char *msg, int tocont);
 LUA_API void lua_warning(lua_State *L, const char *msg, int tocont) {
-  orbit_r_warning(L, msg, tocont);
+  orbit_r->warning(L, msg, tocont);
   CHECK(L);
 }
 
@@ -357,25 +467,21 @@ LUA_API const char *lua_pushfstring(lua_State *L, const char *fmt, ...) {
  * Auxiliary library
  * --------------------------------------------------------------------- */
 
-extern void orbit_r_argerror(lua_State *L, int arg, const char *extramsg);
-extern void orbit_r_typeerror(lua_State *L, int arg, const char *tname);
-extern void orbit_r_where(lua_State *L, int lvl);
-extern const char *orbit_r_tolstringmeta(lua_State *L, int idx, size_t *len);
 
 LUALIB_API int luaL_argerror(lua_State *L, int arg, const char *extramsg) {
-  orbit_r_argerror(L, arg, extramsg);
+  orbit_r->argerror(L, arg, extramsg);
   CHECK(L);
   return 0;
 }
 
 LUALIB_API int luaL_typeerror(lua_State *L, int arg, const char *tname) {
-  orbit_r_typeerror(L, arg, tname);
+  orbit_r->typeerror(L, arg, tname);
   CHECK(L);
   return 0;
 }
 
 LUALIB_API void luaL_where(lua_State *L, int lvl) {
-  orbit_r_where(L, lvl);
+  orbit_r->where(L, lvl);
   CHECK(L);
 }
 
@@ -418,7 +524,7 @@ LUALIB_API int luaL_callmeta(lua_State *L, int obj, const char *e) {
 }
 
 LUALIB_API const char *luaL_tolstring(lua_State *L, int idx, size_t *len) {
-  const char *r = orbit_r_tolstringmeta(L, idx, len);
+  const char *r = orbit_r->tolstringmeta(L, idx, len);
   CHECK(L);
   return r;
 }
@@ -511,11 +617,10 @@ LUALIB_API void *luaL_testudata(lua_State *L, int ud, const char *tname) {
   return same ? p : NULL;
 }
 
-extern int orbit_r_isrustudata(lua_State *L, int idx);
 LUALIB_API void *luaL_checkudata(lua_State *L, int ud, const char *tname) {
   void *p = luaL_testudata(L, ud, tname);
   if (p == NULL) {
-    int rust = orbit_r_isrustudata(L, ud);
+    int rust = orbit_r->isrustudata(L, ud);
     CHECK(L);
     /* An OrbitScript library's userdata (an io file) has no C memory, so
        no C module can take it, whatever its type name says. */
@@ -748,13 +853,11 @@ LUALIB_API char *luaL_buffinitsize(lua_State *L, luaL_Buffer *B, size_t sz) {
  * Loading chunks
  * --------------------------------------------------------------------- */
 
-extern int orbit_r_load(lua_State *L, const char *buf, size_t len, const char *chunkname,
-                        const char *mode);
 
 /* The buffer is freed before any error is raised, so no jump leaks it. */
 static int load_bytes(lua_State *L, char *buf, size_t len, const char *chunkname,
                       const char *mode, int owned) {
-  int status = orbit_r_load(L, buf, len, chunkname, mode);
+  int status = orbit_r->load(L, buf, len, chunkname, mode);
   if (owned) free(buf);
   CHECK(L);
   return status;
@@ -844,11 +947,15 @@ LUALIB_API int luaL_loadfilex(lua_State *L, const char *filename, const char *mo
   /* A first line starting with '#' (a Unix exec line) is skipped, keeping
      its newline so line numbers stay right. */
   p = buf;
-  if (len > 0 && buf[0] == '#') {
+  /* A UTF-8 byte order mark is skipped too. */
+  if (len >= 3 && memcmp(p, "\xEF\xBB\xBF", 3) == 0) p += 3;
+  if (p < buf + len && *p == '#') {
     while (p < buf + len && *p != '\n') p++;
+    /* A binary chunk after the line starts right after its newline. */
+    if (p + 1 < buf + len && p[1] == LUA_SIGNATURE[0]) p++;
   }
   chunkname = lua_tostring(L, -1);
-  status = orbit_r_load(L, p, len - (size_t)(p - buf), chunkname, mode);
+  status = orbit_r->load(L, p, len - (size_t)(p - buf), chunkname, mode);
   free(buf);
   CHECK(L);
   lua_rotate(L, -2, -1); /* drop the chunk name */
@@ -860,18 +967,16 @@ LUALIB_API int luaL_loadfilex(lua_State *L, const char *filename, const char *mo
  * Tracebacks, dumps and the rest of the API
  * --------------------------------------------------------------------- */
 
-extern void orbit_r_traceback(lua_State *L, const char *msg, int level);
-extern void orbit_r_unsupported(lua_State *L, const char *what);
 
 static void unsupported(lua_State *L, const char *what) {
-  orbit_r_unsupported(L, what);
+  orbit_r->unsupported(L, what);
   CHECK(L);
 }
 
 /* Only this state's own thread has a lua_State. */
 LUALIB_API void luaL_traceback(lua_State *L, lua_State *L1, const char *msg, int level) {
   if (L1 != L) unsupported(L, "luaL_traceback of another thread");
-  orbit_r_traceback(L, msg, level);
+  orbit_r->traceback(L, msg, level);
   CHECK(L);
 }
 
@@ -901,9 +1006,8 @@ LUA_API int lua_isyieldable(lua_State *L) {
   return 0;
 }
 
-extern int orbit_r_isrunning(lua_State *L, int idx);
 LUA_API lua_State *lua_tothread(lua_State *L, int idx) {
-  int r = orbit_r_isrunning(L, idx);
+  int r = orbit_r->isrunning(L, idx);
   CHECK(L);
   return r ? L : NULL;
 }
@@ -987,7 +1091,100 @@ LUA_API int lua_gethookcount(lua_State *L) {
   return 0;
 }
 
-/* Creating states from C isn't supported: embedding is Rust-only. */
+/* ------------------------------------------------------------------------
+ * States created from C (ADR-10) and the standard libraries
+ * --------------------------------------------------------------------- */
+
+const char lua_ident[] = "$LuaVersion: " LUA_COPYRIGHT " $";
+
+/* print's output in a state C created goes through C's stdout. */
+size_t orbit_capi_write_stdout(const char *p, size_t n) {
+  return fwrite(p, 1, n, stdout);
+}
+
+int orbit_capi_flush_stdout(void) {
+  return fflush(stdout);
+}
+
+static int orbit_openlib(lua_State *L, int lib) {
+  int n = orbit_r->openlib(L, lib);
+  CHECK(L);
+  if (n == 0) return luaL_error(L, "library not included in this build of OrbitScript");
+  return n;
+}
+
+/* Indices are the libraries' bit positions in lualib.h's masks. */
+LUAMOD_API int luaopen_base(lua_State *L) { return orbit_openlib(L, 0); }
+LUAMOD_API int luaopen_package(lua_State *L) { return orbit_openlib(L, 1); }
+LUAMOD_API int luaopen_coroutine(lua_State *L) { return orbit_openlib(L, 2); }
+LUAMOD_API int luaopen_debug(lua_State *L) { return orbit_openlib(L, 3); }
+LUAMOD_API int luaopen_io(lua_State *L) { return orbit_openlib(L, 4); }
+LUAMOD_API int luaopen_math(lua_State *L) { return orbit_openlib(L, 5); }
+LUAMOD_API int luaopen_os(lua_State *L) { return orbit_openlib(L, 6); }
+LUAMOD_API int luaopen_string(lua_State *L) { return orbit_openlib(L, 7); }
+LUAMOD_API int luaopen_table(lua_State *L) { return orbit_openlib(L, 8); }
+LUAMOD_API int luaopen_utf8(lua_State *L) { return orbit_openlib(L, 9); }
+
+static const struct {
+  const char *name;
+  lua_CFunction open;
+} orbit_libs[] = {
+    {LUA_GNAME, luaopen_base},          {LUA_LOADLIBNAME, luaopen_package},
+    {LUA_COLIBNAME, luaopen_coroutine}, {LUA_DBLIBNAME, luaopen_debug},
+    {LUA_IOLIBNAME, luaopen_io},        {LUA_MATHLIBNAME, luaopen_math},
+    {LUA_OSLIBNAME, luaopen_os},        {LUA_STRLIBNAME, luaopen_string},
+    {LUA_TABLIBNAME, luaopen_table},    {LUA_UTF8LIBNAME, luaopen_utf8},
+};
+
+LUALIB_API void luaL_openselectedlibs(lua_State *L, int load, int preload) {
+  int i;
+  luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
+  for (i = 0; i < (int)(sizeof(orbit_libs) / sizeof(orbit_libs[0])); i++) {
+    int mask = 1 << i;
+    if (load & mask) {
+      luaL_requiref(L, orbit_libs[i].name, orbit_libs[i].open, 1);
+      lua_pop(L, 1);
+    } else if (preload & mask) {
+      lua_pushcfunction(L, orbit_libs[i].open);
+      lua_setfield(L, -2, orbit_libs[i].name);
+    }
+  }
+  lua_pop(L, 1);
+}
+
+#if defined(ORBIT_CAPI_HOST)
+extern lua_State *orbit_r_newstate(void);
+
+LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
+  lua_State *L = orbit_r_newstate();
+  (void)seed;
+  if (L == NULL) return NULL;
+  L->allocf = f;
+  L->allocud = ud;
+  /* A plain state has no warning function: warnings are dropped. */
+  lua_setwarnf(L, NULL, NULL);
+  return L;
+}
+
+static int orbit_panic(lua_State *L) {
+  const char *msg = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1)
+                                                   : "error object is not a string";
+  fprintf(stderr, "PANIC: unprotected error in call to Lua API (%s)\n", msg);
+  fflush(stderr);
+  return 0;
+}
+
+LUALIB_API lua_State *luaL_newstate(void) {
+  lua_State *L = orbit_r_newstate();
+  if (L != NULL) lua_atpanic(L, orbit_panic);
+  return L;
+}
+
+LUA_API void lua_close(lua_State *L) {
+  orbit_r->close(L);
+}
+#else
+/* Without the `host` feature only Rust creates states. */
 LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
   (void)f;
   (void)ud;
@@ -1002,17 +1199,16 @@ LUALIB_API lua_State *luaL_newstate(void) {
 LUA_API void lua_close(lua_State *L) {
   (void)L;
 }
+#endif
 
 LUA_API void lua_setallocf(lua_State *L, lua_Alloc f, void *ud) {
-  (void)L;
-  (void)f;
-  (void)ud;
+  L->allocf = f;
+  L->allocud = ud;
 }
 
 LUA_API void lua_setwarnf(lua_State *L, lua_WarnFunction f, void *ud) {
-  (void)L;
-  (void)f;
-  (void)ud;
+  orbit_r->setwarnf(L, f, ud);
+  CHECK(L);
 }
 
 LUALIB_API unsigned luaL_makeseed(lua_State *L) {

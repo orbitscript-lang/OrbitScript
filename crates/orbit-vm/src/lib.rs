@@ -446,6 +446,21 @@ impl Stack {
     }
 }
 
+/// A host's warning function. It gets every warning piece by piece,
+/// control messages (`@on`, `@off`) included, with `true` for every piece
+/// but a message's last. While one is set, [`Runtime::warnings`] is not
+/// consulted: switching warnings on and off is the host's business.
+pub struct WarnHook(pub Box<WarnFn>);
+
+/// The function inside a [`WarnHook`]: a piece, and whether more follow.
+pub type WarnFn = dyn FnMut(&[u8], bool);
+
+impl std::fmt::Debug for WarnHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WarnHook")
+    }
+}
+
 /// Everything in the VM except the heap, split off so the heap can be
 /// borrowed mutably while this is borrowed as its [`Roots`].
 #[derive(Debug)]
@@ -461,6 +476,12 @@ pub struct Runtime {
     /// Whether `warn` messages are shown (on stderr). Off at start, as in
     /// the reference interpreter; `warn("@on")` and `warn("@off")` switch it.
     pub warnings: bool,
+    /// Where warnings go when the host takes them over (`lua_setwarnf`).
+    /// See [`WarnHook`].
+    pub warn_hook: Option<WarnHook>,
+    /// The placeholder native under a host's context ([`Vm::host_ctx`]),
+    /// which tracebacks and `debug.getinfo` don't show.
+    pub host_native: Option<NativeId>,
     /// When the VM started (for `os.clock`).
     pub start: Instant,
     /// Per-VM state of host libraries, one value per type (the `math`
@@ -719,6 +740,8 @@ impl Vm {
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 warnings: false,
+                warn_hook: None,
+                host_native: None,
                 start: Instant::now(),
                 ext: Extensions::default(),
                 compile: None,
@@ -760,6 +783,33 @@ impl Vm {
     /// A handle that interrupts this VM ([`Interrupt`]).
     pub fn interrupt_handle(&self) -> Interrupt {
         Interrupt(self.rt.interrupt.clone())
+    }
+
+    /// A native context over the host's own stack window,
+    /// for a C program that embeds the VM and calls the C API between
+    /// calls. The window starts above a placeholder native in register 0
+    /// of the main thread's stack, so `NativeCtx::call` sees a caller.
+    pub fn host_ctx(&mut self) -> NativeCtx<'_> {
+        fn host(_: &mut NativeCtx<'_>) -> Result<crate::NativeReturn, LuaError> {
+            Ok(crate::NativeReturn::Return(0))
+        }
+        let f = self.register_native("C host", host);
+        let Value::Native(id) = f else { unreachable!() };
+        self.rt.host_native = Some(id);
+        debug_assert!(self.rt.stack.frames.is_empty());
+        if self.rt.stack.regs.is_empty() {
+            self.rt.stack.regs.push(f);
+        } else {
+            self.rt.stack.regs[0] = f;
+        }
+        self.rt.top = self.rt.top.max(1);
+        NativeCtx {
+            vm: self,
+            base: 1,
+            nargs: 0,
+            id,
+            upvals: None,
+        }
     }
 
     /// Register a native function. `name` is its qualified name
