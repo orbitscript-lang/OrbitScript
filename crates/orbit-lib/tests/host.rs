@@ -177,3 +177,46 @@ fn to_be_closed_slots_from_c() {
          false\tvariable '(C temporary)' got a non-closable value\n"
     );
 }
+
+#[test]
+fn threads_from_c() {
+    // The reference liblua prints the same.
+    assert_eq!(
+        run("threads"),
+        "main yieldable 0, main status OK\n\
+         new thread: top 0, type thread, status OK\n\
+         resume: YIELD nres 1: 3 | status YIELD, top 1\n\
+         resume: YIELD nres 2: 20 two | status YIELD, top 2\n\
+         resume: OK nres 3: ab true true | status OK, top 3\n\
+         resume: ERRRUN error: cannot resume dead coroutine | status OK\n\
+         resume: YIELD nres 1: before | status YIELD, top 1\n\
+         resume: ERRRUN error: [string \"function fails(m) coroutine.yield('before') e...\"]:1: oops | status ERRRUN\n\
+         resume: ERRRUN error: cannot resume dead coroutine | status ERRRUN\n\
+         xmove: L top 2, co2 top 2, 5 five\n\
+         tothread same: 1, pushthread on co2: 0, main: 1, pushed is co2: 1\n\
+         yield\t2\tup\n\
+         back\t20\tdown\n\
+         yieldk\tfrom-c\n\
+         continued: YIELD ctx 42 with 2 values\n\
+         yieldk back\tr1\tr2\tk-done\n\
+         callk\t5\n\
+         call continued: YIELD ctx 7 top 2\n\
+         callk back\t11\tret\n\
+         pcallk\tp\n\
+         call continued: ERRRUN ctx 8 top 1\n\
+         pcallk back\tcaught: late\n\
+         call continued: OK ctx 7 top 2\n\
+         callk outside\t1\tplain\n\
+         yield outside\tfalse\tattempt to yield from outside a coroutine\n\
+         closethread after error: ERRRUN (null)\n\
+         after close: status OK, top 0\n\
+         resume: YIELD nres 1: from-c | status YIELD, top 1\n\
+         continued: YIELD ctx 42 with 1 values\n\
+         resume: OK nres 2: 99 k-done | status OK, top 2\n\
+         resume: YIELD nres 1: holding | status YIELD, top 1\n\
+         closed with\tnil\n\
+         closethread: OK, top 0\n\
+         false\ttable\n\
+         dead\n"
+    );
+}

@@ -494,6 +494,9 @@ impl Vm {
                 self.resume(co, nargs, k, ok, frame, func, want, id)
             }
             NativeReturn::Yield { nvals } => self.yield_(nvals, frame, func, want, id),
+            NativeReturn::YieldThen { nvals, k } => {
+                self.yield_then(nvals, k, crate::ResumeOk::Continue, frame, func, want, id)
+            }
             NativeReturn::Exit => self.exit_co(),
             NativeReturn::Close { co, k } => self.close_co(co, k, frame, func, want, id),
         }
