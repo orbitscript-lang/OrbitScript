@@ -1,0 +1,49 @@
+// Multiple results, `?`, closures and inferred results.
+
+fn open(path: string) -> (string?, string?) {
+    if path == "" { return (nil, "empty path"); }
+    (path, nil)
+}
+
+fn read(path: string) -> (string?, string?) {
+    let f = open(path)?;
+    let upper: string = f;
+    (f, nil)
+}
+
+fn strict(path: string) -> string {
+    let f = open(path)?; //~ T0208
+    f
+}
+
+fn none(path: string) {
+    open(path)?;
+}
+
+let (a, b) = open("x");
+let (c, d, e) = open("x"); //~ T0205
+let one = open("x");
+let as_string: string = one; //~ T0207
+
+fn pair() -> (int, string) { (1, "one") }
+fn wrong_pair() -> (int, string) { ("one", 1) } //~ T0201 T0201
+fn short_pair() -> (int, string) { 1 } //~ T0201
+
+fn count() -> int { //~ T0201
+    if true { return 1; }
+}
+
+// Results inferred from the body.
+fn inferred(x: int) { if x > 0 { x } else { -x } }
+let i: int = inferred(3);
+let not_s: string = inferred(3); //~ T0201
+fn rec(n: int) { if n == 0 { 0 } else { rec(n - 1) } }
+let r: string = rec(3);
+
+// Closures take parameter types from what they're passed to.
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+let doubled = apply(|n| n * 2, 3);
+let bad = apply(|n| n ~ "!", 3); //~ T0201
+let lifted = |x: int| x + 1;
+let res: int = lifted(2);
+let res2: string = lifted(2); //~ T0201

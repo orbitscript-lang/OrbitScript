@@ -1,0 +1,10 @@
+use geo;
+use geo::{Point, midpoint};
+
+let o = Point::origin();
+let d: float = o.dist(geo::Point::origin());
+let bad: float = o.dist(1.0); //~ T0201
+let m: Point = midpoint(o, o);
+let wrong: string = geo::midpoint(o, o); //~ T0201
+let g = geo::guess(1);
+let lit = Point { x: 1.0, y: "2" }; //~ T0201

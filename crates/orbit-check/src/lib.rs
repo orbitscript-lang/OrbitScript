@@ -5,27 +5,63 @@
 //! OrbitScript AST (not the HIR), never touches the runtime, and keeps per-module results so an
 //! editor can recheck one file at a time.
 //!
-//! This first stage resolves names and `use` paths across modules and answers the language
-//! server's name queries. Type checking builds on the symbol table it keeps.
+//! Checking a module takes two passes over its AST: `resolve` binds every name to a symbol and
+//! records where symbols are defined, then `typeck` types the module with those definitions.
 
 mod diag;
 mod resolve;
 mod symbols;
+mod typeck;
+mod types;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use orbit_hir::{Language, SourceInfo, Span};
+use orbit_hir::{Language, SourceInfo};
 use orbit_orb_syntax::ast;
 
 pub use diag::{Code, Diagnostic, Severity};
+pub use orbit_hir::Span;
 pub use symbols::{DocumentSymbol, Symbol, SymbolId, SymbolKind};
+pub use types::TypeId;
 
 use symbols::Module;
+use types::{Names, Ty, Types};
 
 /// A source file the workspace knows. Ids are stable for a path for the workspace's lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileId(u32);
+
+/// One completion candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Completion {
+    pub label: String,
+    pub kind: SymbolKind,
+    /// The candidate's type or signature.
+    pub detail: Option<String>,
+    pub keyword: bool,
+}
+
+/// Signature help for the call around a position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignatureHelp {
+    /// For example `new(x: float, y: float) -> Vec2`.
+    pub label: String,
+    /// Each parameter's byte range in `label`.
+    pub params: Vec<(u32, u32)>,
+    /// The parameter the cursor is on, if any.
+    pub active: Option<u32>,
+    /// The called function, for its documentation.
+    pub symbol: Option<SymbolId>,
+}
+
+/// An inferred type shown after a name bound without an annotation (`let n = 3` shows `: int`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlayHint {
+    /// Where the hint goes: just after the name.
+    pub offset: u32,
+    pub label: String,
+}
 
 /// A place in a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +125,8 @@ pub struct Workspace {
     sources: Box<dyn Sources>,
     files: Vec<File>,
     by_path: HashMap<PathBuf, FileId>,
+    /// Shared by every module, so a type means the same in each.
+    types: Types,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -124,6 +162,10 @@ fn is_lua(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "lua")
 }
 
+fn is_stub(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "orbi")
+}
+
 impl Workspace {
     pub fn new(config: Config, sources: Box<dyn Sources>) -> Workspace {
         Workspace {
@@ -131,6 +173,7 @@ impl Workspace {
             sources,
             files: Vec::new(),
             by_path: HashMap::new(),
+            types: Types::new(),
         }
     }
 
@@ -233,7 +276,13 @@ impl Workspace {
             return Module::default();
         }
         let name = path.display().to_string();
-        let ast = match orbit_orb_syntax::parse(&name, &text) {
+        let options = orbit_orb_syntax::ParseOptions {
+            type_trees: true,
+            stub: is_stub(&path),
+            doc_comments: true,
+            ..Default::default()
+        };
+        let ast = match orbit_orb_syntax::parse_with(&name, &text, &options) {
             Ok(ast) => ast,
             Err(e) => {
                 // Keep the last good symbols for queries; report the syntax error.
@@ -288,7 +337,7 @@ impl Workspace {
             let file = &files[f.0 as usize];
             (file.state == State::Done).then_some(&file.module)
         };
-        let mut m = resolve::resolve(
+        let (mut m, defs) = resolve::resolve(
             file,
             &ast,
             resolve::Deps {
@@ -296,6 +345,8 @@ impl Workspace {
                 checked: &checked,
             },
         );
+        typeck::check(file, &ast, &defs, &mut m, &mut self.types, &checked);
+        drop(defs);
         diagnostics.append(&mut m.diagnostics);
         diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
         m.diagnostics = diagnostics;
@@ -378,6 +429,225 @@ impl Workspace {
             .is_some_and(|s| s.kind != SymbolKind::Global)
     }
 
+    /// The type of the expression or name at `offset`, as the checker writes it (for hover).
+    pub fn type_at(&mut self, file: FileId, offset: u32) -> Option<String> {
+        self.ensure(file);
+        let t = self.files[file.0 as usize].module.type_at(offset)?;
+        Some(self.display_type(t))
+    }
+
+    /// How the checker writes a type, for example `Vec2?` or `fn(int) -> string`.
+    pub fn display_type(&self, t: TypeId) -> String {
+        self.types.display(t, self)
+    }
+
+    /// Completion at `offset`: after `.`, the fields and methods of the receiver's type; after
+    /// `::`, the members of a module, struct or enum. Until the parser recovers from errors this
+    /// works on a partly typed name (`p.le`), not on a bare `p.`.
+    pub fn completions_at(&mut self, file: FileId, offset: u32) -> Vec<Completion> {
+        self.ensure(file);
+        let m = &self.files[file.0 as usize].module;
+        let covers = |s: &Span| s.start <= offset && offset <= s.end;
+        let mut out = Vec::new();
+        if let Some(&(_, t)) = m.members_at.iter().rev().find(|(s, _)| covers(s)) {
+            for t in self.types.members(t) {
+                match self.types.get(t) {
+                    Ty::Nominal(id, _) | Ty::Variant(id, _) => {
+                        let holder = self.holder(*id);
+                        self.field_completions(*id, &mut out);
+                        self.member_completions(holder, true, &mut out);
+                    }
+                    Ty::Record { fields, .. } => {
+                        for (name, ft) in fields {
+                            out.push(Completion {
+                                label: name.clone(),
+                                kind: SymbolKind::Field,
+                                detail: Some(self.display_type(*ft)),
+                                keyword: false,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else if let Some(&(_, base)) = m.paths_at.iter().rev().find(|(s, _)| covers(s)) {
+            match self.symbol(base) {
+                Some(s) if s.kind == SymbolKind::Module => {
+                    if let Some(dep) = s.module {
+                        let mut exports: Vec<SymbolId> = self.files[dep.0 as usize]
+                            .module
+                            .exports
+                            .values()
+                            .copied()
+                            .collect();
+                        exports.sort_by_key(|e| e.index);
+                        for e in exports {
+                            self.push_completion(e, &mut out);
+                        }
+                    }
+                }
+                Some(_) => self.member_completions(base, false, &mut out),
+                None => {}
+            }
+        }
+        let mut seen = HashSet::new();
+        out.retain(|c| seen.insert(c.label.clone()));
+        out
+    }
+
+    fn holder(&self, id: SymbolId) -> SymbolId {
+        match self.symbol(id) {
+            Some(s) if s.kind == SymbolKind::Variant => SymbolId {
+                file: id.file,
+                index: s.container.unwrap_or(id.index),
+            },
+            _ => id,
+        }
+    }
+
+    fn field_completions(&self, owner: SymbolId, out: &mut Vec<Completion>) {
+        let m = &self.files[owner.file.0 as usize].module;
+        let mut ids: Vec<SymbolId> = m
+            .fields
+            .get(&owner.index)
+            .map(|t| t.values().copied().collect())
+            .unwrap_or_default();
+        ids.sort_by_key(|i| i.index);
+        for id in ids {
+            self.push_completion(id, out);
+        }
+    }
+
+    /// The members of a struct or enum; `on_instance` leaves out what `value.name` can't reach
+    /// (associated functions, variants and metamethods).
+    fn member_completions(&self, owner: SymbolId, on_instance: bool, out: &mut Vec<Completion>) {
+        let m = &self.files[owner.file.0 as usize].module;
+        let mut ids: Vec<SymbolId> = m
+            .members
+            .get(&owner.index)
+            .map(|t| t.values().copied().collect())
+            .unwrap_or_default();
+        ids.sort_by_key(|i| i.index);
+        for id in ids {
+            let Some(s) = self.symbol(id) else { continue };
+            if on_instance
+                && (matches!(s.kind, SymbolKind::AssocFn | SymbolKind::Variant)
+                    || s.name.starts_with("__"))
+            {
+                continue;
+            }
+            self.push_completion(id, out);
+        }
+    }
+
+    fn push_completion(&self, id: SymbolId, out: &mut Vec<Completion>) {
+        let Some(s) = self.symbol(id) else { return };
+        let detail = self.files[id.file.0 as usize]
+            .module
+            .sym_types
+            .get(&id.index)
+            .map(|&t| self.display_type(t));
+        out.push(Completion {
+            label: s.name.clone(),
+            kind: s.kind,
+            detail,
+            keyword: false,
+        });
+    }
+
+    /// Signature help inside the parentheses of a call.
+    pub fn signature_at(&mut self, file: FileId, offset: u32) -> Option<SignatureHelp> {
+        self.ensure(file);
+        let m = &self.files[file.0 as usize].module;
+        let call = m
+            .calls
+            .iter()
+            .filter(|c| c.args.start < offset && offset < c.args.end)
+            .min_by_key(|c| c.args.end - c.args.start)?;
+        let Ty::Fn(f) = self.types.get(call.callee) else {
+            return None;
+        };
+        let names = call.symbol.and_then(|s| {
+            self.files[s.file.0 as usize]
+                .module
+                .param_names
+                .get(&s.index)
+        });
+        let skip = usize::from(call.method && f.method);
+        let mut label = match call.symbol.and_then(|s| self.symbol(s)) {
+            Some(s) => s.name.clone(),
+            None => "fn".into(),
+        };
+        label.push('(');
+        let mut params = Vec::new();
+        let count = f.params.len() + usize::from(f.rest.is_some());
+        for i in skip..count {
+            if i > skip {
+                label.push_str(", ");
+            }
+            let start = label.len() as u32;
+            let name = names.and_then(|n| n.get(i));
+            let (ty, rest) = match f.params.get(i) {
+                Some(&t) => (t, false),
+                None => (f.rest.expect("a rest parameter"), true),
+            };
+            if rest {
+                label.push_str("...");
+            }
+            if let Some(n) = name {
+                label.push_str(n);
+                label.push_str(": ");
+            }
+            label.push_str(&self.display_type(ty));
+            params.push((start, label.len() as u32));
+        }
+        label.push(')');
+        match &f.results {
+            None => label.push_str(" -> any"),
+            Some(rs) if rs.is_empty() => {}
+            Some(rs) if rs.len() == 1 => {
+                label.push_str(" -> ");
+                label.push_str(&self.display_type(rs[0]));
+            }
+            Some(rs) => {
+                let rs: Vec<String> = rs.iter().map(|&r| self.display_type(r)).collect();
+                label.push_str(&format!(" -> ({})", rs.join(", ")));
+            }
+        }
+        let before = call.arg_ends.iter().filter(|&&e| e < offset).count() as u32;
+        let active = if (before as usize) < params.len() {
+            Some(before)
+        } else if f.rest.is_some() && !params.is_empty() {
+            Some(params.len() as u32 - 1)
+        } else {
+            None
+        };
+        Some(SignatureHelp {
+            label,
+            params,
+            active,
+            symbol: call.symbol,
+        })
+    }
+
+    /// Inferred types of the names bound without annotations in `range`.
+    pub fn inlay_hints(&mut self, file: FileId, range: Span) -> Vec<InlayHint> {
+        self.ensure(file);
+        let m = &self.files[file.0 as usize].module;
+        let mut hints: Vec<InlayHint> = m
+            .hints
+            .iter()
+            .filter(|(o, _)| range.start <= *o && *o <= range.end)
+            .map(|&(offset, t)| InlayHint {
+                offset,
+                label: format!(": {}", self.display_type(t)),
+            })
+            .collect();
+        hints.sort_by_key(|h| h.offset);
+        hints.dedup();
+        hints
+    }
+
     /// Every place that names `id` in the checked files, its definition included.
     pub fn references(&mut self, id: SymbolId) -> Vec<Location> {
         self.check_all();
@@ -393,5 +663,23 @@ impl Workspace {
             }
         }
         out
+    }
+}
+
+impl Names for Workspace {
+    fn name(&self, id: SymbolId) -> String {
+        let Some(s) = self.symbol(id) else {
+            return "?".into();
+        };
+        if s.kind == SymbolKind::Variant
+            && let Some(c) = s.container
+            && let Some(e) = self.symbol(SymbolId {
+                file: id.file,
+                index: c,
+            })
+        {
+            return format!("{}::{}", e.name, s.name);
+        }
+        s.name.clone()
     }
 }

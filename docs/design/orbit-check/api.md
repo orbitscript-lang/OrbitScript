@@ -97,6 +97,38 @@ impl Workspace {
 
 `Completion` carries a label, a `SymbolKind`, an optional detail (signature or type) and whether it is a keyword. Completion after `.` lists fields and methods of the receiver's type, after `::` associated functions, variants and module members, in a struct literal the missing fields, and otherwise names in scope plus keywords. With no type known (`any`), `.` completion returns nothing rather than guessing.
 
+`SignatureHelp` is the label (`new(x: float, y: float) -> Vec2`), each parameter's byte range in the label, the active parameter and the called function's `SymbolId` (for its doc comment). For `obj.m(...)` the label leaves out `self`. `InlayHint` is an offset just after a name bound without an annotation (a `let`, a pattern, a closure parameter) and a label such as `: int`; names whose type is `any` get none. `TypeId` values come with `display_type`, which writes a type the way messages do (`Vec2?`, `fn(int) -> string`, `#{ x: float }`).
+
+## Diagnostic codes
+
+Codes are stable: one never changes meaning, and a retired code isn't reused.
+
+| Code | Severity | Meaning |
+|---|---|---|
+| T0001 | error | the module doesn't parse |
+| T0002 | error | `use a::b` names no module on the search path |
+| T0101 | error | unknown name |
+| T0102 | error | an item used before its definition in the same function |
+| T0103 | error | the module has no public item of that name |
+| T0104 | error | the struct or enum has no such variant or associated item |
+| T0105 | error | a struct literal or pattern names a field the struct doesn't have |
+| T0106 | error | a type annotation names something undefined |
+| T0107 | error | a type annotation names a value |
+| T0108 | error | a struct literal leaves out a field |
+| T0201 | error | a value of the wrong type (argument, `let`, field, result, pattern) |
+| T0202 | error | too many or too few arguments |
+| T0203 | error | no such field or method on the value's type |
+| T0204 | error | calling something that isn't a function |
+| T0205 | error | `let (a, b) = f()` binds more names than `f` returns |
+| T0206 | error | an operator on operand types it doesn't take |
+| T0207 | error | a value that may be nil used where nil isn't allowed |
+| T0208 | error | `?` in a function whose results can't be `nil, err` |
+| T0301 | warning | `==` or `!=` between types that are never equal |
+| T0302 | warning | a bitwise operator on a float |
+| T0303 | warning | a condition that is always true |
+| T0304 | warning | a record field named like a type (the old map spelling `#{string: int}`) |
+| T0401 | error | a `match` on an enum, `bool` or optional value that misses cases |
+
 ## Broken code (dev tooling D3)
 
 - With parser recovery on, the AST contains `Error` nodes. Resolution and checking treat an `Error` expression or type as `any` and report nothing further about it, so one typo doesn't produce a cascade.
@@ -106,7 +138,7 @@ impl Workspace {
 ## Build order
 
 1. Skeleton (this thread, first PR): `Workspace`, `Sources`, `FileId`, `Diagnostic`, module graph through `use`, name resolution with a kept symbol table, `document_symbols`, `symbol_at`, `definition`, `references`, and an `orbit-check` CLI that prints resolution errors. That is everything L1 needs except completion and types.
-2. Types (C2, C3): `diagnostics` gains type errors; `type_at`, `signature_at`, `inlay_hints`, member completion.
+2. Types (C2, C3): `diagnostics` gains type errors; `type_at`, `signature_at`, `inlay_hints`, member completion. Built on branch `check/types`: completion after `.` and `::` works on a partly typed name (a bare `p.` needs parser recovery); completion of names in scope, keywords and missing struct-literal fields comes later.
 3. Stubs (C4): the stdlib from bundled `.orbi` files once the parser has a stub option.
 
 ## Agreed with the language server thread (2026-10-18)

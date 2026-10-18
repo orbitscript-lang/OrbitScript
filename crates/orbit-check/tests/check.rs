@@ -72,9 +72,16 @@ fn cases() {
     }
 }
 
-/// Every program the front end runs must resolve cleanly, since lowering accepts them.
+/// Every program the front end runs must resolve cleanly, since lowering accepts them, and
+/// type check with only the findings listed here.
 #[test]
-fn repository_programs_resolve() {
+fn repository_programs_check() {
+    // `rounds` comes from the command line and may be 0, which leaves `dist` nil.
+    let known: BTreeSet<_> = [("dijkstra.orb", 97, "T0207")]
+        .into_iter()
+        .map(|(f, l, c)| (f.to_string(), l, c.to_string()))
+        .collect();
+    let mut all = BTreeSet::new();
     let examples = root().join("examples");
     let mut dirs: Vec<_> = std::fs::read_dir(&examples)
         .unwrap()
@@ -85,8 +92,9 @@ fn repository_programs_resolve() {
     assert!(dirs.len() >= 10, "examples found: {dirs:?}");
     for dir in dirs {
         let (_, found) = check_dir(&dir);
-        assert!(found.is_empty(), "{}: {found:?}", dir.display());
+        all.extend(found);
     }
+    assert_eq!(all, known, "findings in examples/");
     let (_, found) = check_dir(&root().join("crates/orbit-runtime/src/stdlib/builtins"));
     // The built-ins take their intrinsics from a host module that isn't a file.
     assert!(
@@ -231,4 +239,87 @@ fn syntax_error_keeps_previous_symbols() {
         .collect();
     assert_eq!(codes, ["T0001"]);
     assert_eq!(ws.document_symbols(lib).len(), 2);
+}
+
+#[test]
+fn types_for_hover() {
+    let src = "struct P { x: float }\n\
+               fn get(p: P?) -> float { if p != nil { p.x } else { 0.0 } }\n\
+               let rec = #{ a: 1, b: \"s\" };\n\
+               let pair = |n: int| (n, tostring(n));\n\
+               let mut acc = 0;\n\
+               acc += 0.5;\n";
+    let mut ws = Workspace::new(Config::default(), Box::new(Memory(Vec::new())));
+    let f = ws.set_source(Path::new("/m/hover.orb"), src.as_bytes().to_vec());
+    assert!(ws.diagnostics(f).is_empty(), "{:?}", ws.diagnostics(f));
+    let at = |ws: &mut Workspace, needle: &str, skip: usize| {
+        let off = src.match_indices(needle).nth(skip).unwrap().0 as u32;
+        ws.type_at(f, off)
+    };
+    assert_eq!(at(&mut ws, "get", 0).as_deref(), Some("fn(P?) -> float"));
+    // `p` narrowed inside the `if`, not before.
+    assert_eq!(at(&mut ws, "p != nil", 0).as_deref(), Some("P?"));
+    assert_eq!(at(&mut ws, "p.x", 0).as_deref(), Some("P"));
+    assert_eq!(at(&mut ws, "x }", 0).as_deref(), Some("float"));
+    assert_eq!(
+        at(&mut ws, "rec", 0).as_deref(),
+        Some("#{ a: int, b: string }")
+    );
+    assert_eq!(
+        at(&mut ws, "pair", 0).as_deref(),
+        Some("fn(int) -> (int, any)")
+    );
+    assert_eq!(at(&mut ws, "acc", 0).as_deref(), Some("number"));
+}
+
+#[test]
+fn editor_queries() {
+    let src = "struct V { x: float, y: float }\n\
+               impl V {\n\
+                   fn new(x: float, y: float) -> V { V { x, y } }\n\
+                   fn dot(self, o: V) -> float { self.x * o.x + self.y * o.y }\n\
+                   fn __add(a, b) { a }\n\
+               }\n\
+               let v = V::new(1.0, 2.0);\n\
+               let d = v.dot(v);\n\
+               let e = v.x;\n\
+               let n = 3;\n\
+               let m: int = 4;\n";
+    let mut ws = Workspace::new(Config::default(), Box::new(Memory(Vec::new())));
+    let f = ws.set_source(Path::new("/m/q.orb"), src.as_bytes().to_vec());
+    assert!(ws.diagnostics(f).is_empty(), "{:?}", ws.diagnostics(f));
+    let off = |needle: &str| src.find(needle).unwrap() as u32;
+
+    let labels =
+        |c: Vec<orbit_check::Completion>| c.into_iter().map(|c| c.label).collect::<Vec<_>>();
+    assert_eq!(labels(ws.completions_at(f, off("x;"))), ["x", "y", "dot"]);
+    assert_eq!(
+        labels(ws.completions_at(f, off("new(1"))),
+        ["new", "dot", "__add"]
+    );
+
+    let sig = ws.signature_at(f, off("2.0)")).unwrap();
+    assert_eq!(sig.label, "new(x: float, y: float) -> V");
+    assert_eq!(sig.active, Some(1));
+    let (s, e) = sig.params[1];
+    assert_eq!(&sig.label[s as usize..e as usize], "y: float");
+    let sig = ws.signature_at(f, off("v);")).unwrap();
+    assert_eq!(sig.label, "dot(o: V) -> float");
+    assert_eq!(sig.active, Some(0));
+
+    let hints = ws.inlay_hints(
+        f,
+        orbit_check::Span {
+            start: 0,
+            end: src.len() as u32,
+        },
+    );
+    let shown: Vec<String> = hints
+        .iter()
+        .map(|h| {
+            let name = src[..h.offset as usize].rsplit(' ').next().unwrap();
+            format!("{name}{}", h.label)
+        })
+        .collect();
+    assert_eq!(shown, ["v: V", "d: float", "e: float", "n: int"]);
 }

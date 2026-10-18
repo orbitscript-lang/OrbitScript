@@ -7,7 +7,7 @@ use orbit_check::{Config, DiskSources, Severity, Workspace};
 
 const USAGE: &str = "usage: orbit-check [--path TEMPLATE]... [--root DIR] FILE|DIR...
 
-Checks OrbitScript (.orb) files: syntax, `use` paths and names so far.
+Checks OrbitScript (.orb) files: syntax, `use` paths, names and types.
 Directories are searched for .orb files.
 
   --path TEMPLATE  search template for `use a::b` (`?` becomes a/b); may repeat,
