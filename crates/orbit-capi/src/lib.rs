@@ -31,7 +31,7 @@ pub fn install(iso: &mut orbit::Isolate, lock_cpath: bool) {
 /// The C API in the isolate `s` belongs to, and its dynamic loader.
 fn install_loader(s: &mut Stack<'_>) {
     ffi::install(s);
-    s.extension::<DynLoader>().load = Some(ffi::load);
+    s.extension(|d: &mut DynLoader| d.load = Some(ffi::load));
 }
 
 /// The native behind every C function value. Its closure's data word

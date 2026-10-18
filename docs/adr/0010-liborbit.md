@@ -12,14 +12,18 @@ A Rust `dylib` would let the CLIs use today's Rust API across a library boundary
 
 ### Files
 - **`liborbit`** (`liborbit.so.0`, `liborbit.dylib`, `orbit.dll`) is a `cdylib` built by a new crate, `orbit-lib`. It holds the runtime (VM, standard library, both front ends), the Lua C API, and the Rust API's library half.
-- **`orbit` and `orbitc`** are Rust programs written against a new crate, **`orbit-api`**: a curated, ABI-stable Rust embedding API. `orbit-api` has two backends. `shared` reaches `liborbit` through `stabby`; `static` links the runtime into the program. The static backend is the default for `cargo build`, so a one-file `orbit` stays available for embedded systems; packaging builds the shared layout.
-- **`orbit`** (the crate) stays the full, unrestricted Rust API, linked statically. `orbit-api` is the subset that can cross a library boundary: states, values by handle, calls, globals, tables, natives with a context, and the tooling `orbitc` needs.
-- **Packaging** (a testkit command) installs Lua's names as aliases of `liborbit`: `liblua5.5.so.0`, `liblua-5.5.so`, `liblua.so.5.5`, `liblua.5.5.dylib`, and `lua55.dll` on Windows.
+- **`orbit` and `orbitc`** are Rust programs written against the one public crate, **`orbit`** (ADR-11), which has two backends. Its default feature `runtime` links the runtime into the program; its `shared` feature reaches `liborbit` through `stabby` instead. The API is the same either way, so `orbit-std`, `orbit-capi`, `orbit-ffi` and the CLIs build against both. The static backend is the default for `cargo build`, so a one-file `orbit` stays available for embedded systems; packaging builds the shared layout.
+- **Only two layers cross the boundary**: `orbit::stack` (the window and `Control`) and the `Isolate` itself (Tym, 2026-10-18 09:17Z). The typed API (`Scope`, handles, `Call`, classes) is written over the stack layer and runs in the program unchanged.
+- **Packaging** (a top-level `build.sh`, not a testkit command, since release builds aren't testing) installs Lua's names as aliases of `liborbit`: `liblua5.5.so.0`, `liblua-5.5.so`, `liblua.so.5.5`, `liblua.5.5.dylib`, and `lua55.dll` on Windows.
 
 ### The Rust boundary
-- `orbit-abi` declares the boundary with `#[stabby::stabby]`: values, and traits used as trait objects for a state, a native's context and a program's native. `liborbit` exports one constructor with `#[stabby::export]`; `orbit-api` imports it with `#[stabby::import]`, which checks the constructor's type report on first call.
-- stabby checks each trait's method names, not their signatures. To cover that, `orbit-abi`'s build script hashes its own source; the program compares its hash with the library's on the first call and refuses to run on a mismatch.
-- Neither side writes `unsafe`: `orbit-abi`, `orbit-api` and `orbit-lib` keep the workspace's `forbid(unsafe_code)`.
+- `orbit::abi` (built with the `shared` or `abi` feature) declares the boundary with `#[stabby::stabby]`: plain values (thread, native and error ids), and traits used as trait objects for the window (`StackAbi`), the isolate (`IsolateAbi`, `ControlAbi`) and what a program hands the library (`ProgramNative`, `ProgramContinuation`, `Entry`, the interrupt handler, hooks, the warning function and standard output). `orbit::export` (feature `abi`, hidden) is the library half over the runtime backend; `orbit-lib` builds on it.
+- `liborbit` exports two functions with `#[stabby::export]`: `orbit_check` and `orbit_new_isolate`. The program imports them with `#[stabby::import]`, which checks each one's type report on the first call; `Runtime::new` calls `orbit_check` first.
+- stabby checks each trait's method names, not their signatures. To cover that, `orbit`'s build script hashes `abi.rs` together with `rustc -V`; `orbit_check` compares the program's hash with the library's, and `Runtime::new` panics on a mismatch. Any edit to `abi.rs`, even formatting, needs both sides rebuilt.
+- **Program callbacks take the window as `StableLike`.** The window trait and the program's callback traits name each other, and stabby's layout proofs recursed through that loop without end (overflow errors, then 8-minute builds once the limit was raised). The callbacks take `StackArg` (`StableLike` around the window, with its layout stated by hand) and call `into_inner`, which breaks the loop at no run-time cost.
+- **The CLIs' libraries run inside `liborbit`.** A shared CLI installs the copies of `orbit-std`, the C module loader and `ffi` that `liborbit` carries (hidden `Isolate::install_bundled_*`), so `print`, `io.write` or an `ffi` call don't cross the boundary. An embedder's own natives do.
+- **What a host call costs** (cloud x86_64, no PGO, 2026-10-18, ns per call, static / shared): a script calling a stack-API native 25 / 185, a typed host function 68 / 290, the host calling a script function through a scope 84 / 305, push and pop of an integer on an open window 9 / 11.5; script code alone is unchanged. The extra ~160 ns per entry is stabby building the window's trait object: on stable Rust it looks up the vtable in a global registry each time, and the window trait has about 140 methods. Calls through an existing trait object cost a few nanoseconds. Tym chose to keep it as is (2026-10-18) over a small hot-path trait or stabby's other vtable registry; only an embedder's own natives on shared builds pay it.
+- Neither side writes `unsafe`: `orbit` and `orbit-lib` keep the workspace's `forbid(unsafe_code)`.
 
 ### The C boundary
 - Lua's symbols carry the version node `LUA_5.5`, which programs built on Debian and Ubuntu require and others ignore. Of ours, only `orbit_r_newstate` and stabby's symbols are exported besides: the C half of the API reaches the rest of Rust through one table of function pointers, which `orbit_r_newstate` hands it.
@@ -36,6 +40,7 @@ A Rust `dylib` would let the CLIs use today's Rust API across a library boundary
 
 ## Consequences
 - An install of `orbit`, `orbitc` and `liborbit` stores the runtime once.
-- The PGO profile is trained on the static build; the library compiles the same runtime functions, so it uses the same profile.
+- The PGO profile is trained on the static build; the library compiles the same runtime functions, so it uses the same profile. Once packaging exists, `pgo train` also trains the library.
 - Changes to the C API's internals must keep working when no C function is running.
-- `orbit-api` is a second Rust API to keep in step with `orbit`.
+- The stack layer and the isolate have two implementations (`stack/rt.rs` and `stack/shared.rs`, `isolate/rt.rs` and `isolate/shared.rs`) to keep in step; the rest of `orbit` has one.
+- Size (cloud x86_64, no PGO): the static `orbit` CLI is 2,115,344 bytes; the shared one is 582,144 bytes plus 2,312,232 bytes of `liborbit.so`.

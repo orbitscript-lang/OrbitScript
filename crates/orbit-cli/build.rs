@@ -1,7 +1,10 @@
 //! Link options for the `orbit` and `orbitc` binaries.
 //!
 //! With C modules on, the `orbit` binary exports the Lua C API so the
-//! modules it loads can link against it, as they link against `lua`.
+//! modules it loads can link against it, as they link against `lua`. With
+//! the runtime in liborbit (`shared` without `runtime`, cfg `bundled`), the
+//! library exports the API instead, and the binaries look for it next to
+//! themselves and in `../lib`.
 //!
 //! Release builds also fold identical functions (see [`fold_identical_code`]).
 
@@ -14,7 +17,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=RUSTC_LINKER");
     let os = var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let c_modules = std::env::var_os("CARGO_FEATURE_C_MODULES").is_some();
-    if c_modules && os == "linux" {
+    let bundled = std::env::var_os("CARGO_FEATURE_SHARED").is_some()
+        && std::env::var_os("CARGO_FEATURE_RUNTIME").is_none();
+    println!("cargo:rustc-check-cfg=cfg(bundled)");
+    if bundled {
+        println!("cargo:rustc-cfg=bundled");
+        if var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+            println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/../lib");
+            println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path");
+        } else if os != "windows" {
+            println!("cargo:rustc-link-arg-bins=-Wl,-rpath,$ORIGIN/../lib:$ORIGIN");
+        }
+    } else if c_modules && os == "linux" {
         for pattern in ["lua_*", "luaL_*"] {
             println!("cargo:rustc-link-arg-bins=-Wl,--export-dynamic-symbol={pattern}");
         }

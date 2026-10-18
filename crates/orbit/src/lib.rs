@@ -20,10 +20,24 @@
 //! assert_eq!(answer, 42);
 //! ```
 
+// stabby's trait macros nest deeply for the boundary's larger traits.
+#![recursion_limit = "1024"]
+
+#[cfg(not(any(runtime_backend, shared_backend)))]
+compile_error!("orbit needs a backend: enable the `runtime` or the `shared` feature");
+
+/// The `liborbit` boundary, for `orbit-lib` and the shared backend.
+#[cfg(any(feature = "abi", shared_backend))]
+#[doc(hidden)]
+pub mod abi;
 mod chunk;
 mod class;
 mod compiler;
 mod error;
+/// liborbit's side of the boundary, for `orbit-lib`.
+#[cfg(all(feature = "abi", runtime_backend))]
+#[doc(hidden)]
+pub mod export;
 mod host;
 mod isolate;
 mod pin;

@@ -17,8 +17,10 @@ name = "orbit_lib"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-orbit = { path = "../orbit" }
+orbit = { path = "../orbit", features = ["abi"] }
 orbit-capi = { path = "../orbit-capi", features = ["host"] }
+orbit-std = { path = "../orbit-std", features = ["ffi"] }
+stabby = "72.1.16"
 
 [lints]
 workspace = true

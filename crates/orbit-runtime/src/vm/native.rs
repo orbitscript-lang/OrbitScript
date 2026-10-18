@@ -160,6 +160,11 @@ pub struct NativeCtx<'a> {
 }
 
 impl NativeCtx<'_> {
+    /// The running native's index in the registry.
+    pub fn native_id(&self) -> NativeId {
+        self.id
+    }
+
     /// The data the running native was registered with
     /// ([`Vm::register_native_with_data`](crate::vm::Vm::register_native_with_data)).
     #[inline]

@@ -1,7 +1,8 @@
 //! C modules (ADR-8): builds `cmod/testmod.c` against orbit-capi's headers
 //! with the system C compiler and loads it into `orbit`. The same module
 //! loads into the reference `lua5.5`, which passes `cmod/testmod.lua` too.
-#![cfg(all(target_os = "linux", feature = "c-modules"))]
+//! A shared build loads it through liborbit's C module loader.
+#![cfg(all(target_os = "linux", any(feature = "c-modules", bundled)))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

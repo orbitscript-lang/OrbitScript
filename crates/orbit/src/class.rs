@@ -10,6 +10,7 @@ use crate::value::{Table, Userdata};
 
 /// How the API stores a host value in a userdata: taken out while a method
 /// runs, so the method can use the whole [`Call`] at the same time.
+#[cfg(runtime_backend)]
 pub(crate) struct Slot<T>(pub(crate) Option<T>);
 
 /// A Rust type made visible to scripts: values of `T` become userdata whose
@@ -164,7 +165,7 @@ struct Taken<'a, T: 'static> {
 impl<'a, T: 'static> Taken<'a, T> {
     fn take(call: &'a Call<'a>, class: &str) -> Result<Taken<'a, T>, Error> {
         // The object is argument 0, slot 1 of the window.
-        let taken = call.stack().userdata_cell::<T>(1).map(|cell| cell.take());
+        let taken = call.stack().with_userdata::<T, _>(1, Option::take);
         match taken {
             None => Err(call.type_error(0, class)),
             Some(None) => Err(call.error(format!(
@@ -185,8 +186,7 @@ impl<T: 'static> Drop for Taken<'_, T> {
         let Some(mut stack) = self.call.try_stack() else {
             return;
         };
-        if let Some(cell) = stack.userdata_cell::<T>(1) {
-            *cell = self.value.take();
-        }
+        let value = self.value.take();
+        stack.with_userdata::<T, _>(1, |cell| *cell = value);
     }
 }

@@ -25,7 +25,7 @@ pub struct DynLoader {
 }
 
 fn dyn_loader(s: &mut Stack<'_>) -> Option<LoadFn> {
-    s.extension::<DynLoader>().load
+    s.extension(|d: &mut DynLoader| d.load)
 }
 
 /// Lock the C module search path to `cpath` (ADR-8). The C searchers then
@@ -36,12 +36,12 @@ fn dyn_loader(s: &mut Stack<'_>) -> Option<LoadFn> {
 /// separator, so the text in place of `?` holds no `.`, and a path can't
 /// climb out of a template's directory with `..`.
 pub fn lock_cpath(s: &mut Stack<'_>, cpath: &[u8]) {
-    s.extension::<DynLoader>().locked_cpath = Some(cpath.to_vec());
+    s.extension(|d: &mut DynLoader| d.locked_cpath = Some(cpath.to_vec()));
 }
 
 /// The locked C module search path, if any.
 fn locked_cpath(s: &mut Stack<'_>) -> Option<Vec<u8>> {
-    s.extension::<DynLoader>().locked_cpath.clone()
+    s.extension(|d: &mut DynLoader| d.locked_cpath.clone())
 }
 
 /// Whether some template in `cpath` gives `file` with each `?` replaced by

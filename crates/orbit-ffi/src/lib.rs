@@ -209,7 +209,7 @@ const FUNCTIONS: &[(&[u8], Push)] = &[
 /// should call this. Installing twice does nothing. Leaves the stack as it
 /// was.
 pub fn install(s: &mut Stack<'_>) -> StackResult<()> {
-    if std::mem::replace(&mut s.extension::<State>().installed, true) {
+    if s.extension(|st: &mut State| std::mem::replace(&mut st.installed, true)) {
         return Ok(());
     }
     s.create_table(0, FUNCTIONS.len() as i32);
@@ -304,7 +304,7 @@ fn ffi_open(s: &mut Stack<'_>) -> StackResult<Return> {
 /// `ffi.bind(lib, name, result, args...)` (also `lib:bind(...)`): the C
 /// function `name` in `lib` as a function value.
 fn ffi_bind(s: &mut Stack<'_>) -> StackResult<Return> {
-    let handle = s.check_userdata::<Library>(1, LIBRARY_META)?.handle;
+    let handle = s.check_userdata(1, LIBRARY_META, |l: &mut Library| l.handle)?;
     let name = s.check_string(2)?.to_vec();
     let ret = type_arg(s, 3)?;
     if ret == Ty::Bytes {
@@ -326,22 +326,22 @@ fn ffi_bind(s: &mut Stack<'_>) -> StackResult<Return> {
             return Err(s.error(format!("cannot find C function '{name}': {e}")));
         }
     };
-    let index = match signature(s.extension::<State>(), ret, &args) {
+    let index = match s.extension(|st: &mut State| signature(st, ret, &args)) {
         Ok(i) => i,
         Err(e) => return Err(s.error(e)),
     };
     let data = [addr, index as u64];
-    let known = s
-        .extension::<State>()
-        .functions
-        .iter()
-        .find(|(d, _)| *d == data)
-        .map(|&(_, f)| f);
+    let known = s.extension(|st: &mut State| {
+        st.functions
+            .iter()
+            .find(|(d, _)| *d == data)
+            .map(|&(_, f)| f)
+    });
     let f = match known {
         Some(f) => f,
         None => {
             let f = s.control().register_native::<Call>(data);
-            s.extension::<State>().functions.push((data, f));
+            s.extension(|st: &mut State| st.functions.push((data, f)));
             f
         }
     };
@@ -407,12 +407,18 @@ fn extend(r: u64, t: Ty, signed: bool) -> u64 {
 }
 
 /// A pointer argument: light userdata, a buffer, or nil for NULL.
+/// Run `f` on the buffer in slot `arg`, if it holds one.
+fn buffer<R>(s: &mut Stack<'_>, arg: i32, f: impl FnOnce(&Buffer) -> R) -> Option<R> {
+    s.with_userdata::<Buffer, _>(arg, |b| b.as_ref().map(f))
+        .flatten()
+}
+
 fn ptr_arg(s: &mut Stack<'_>, arg: i32) -> StackResult<u64> {
     match s.type_at(arg) {
         Type::Nil | Type::None => Ok(0),
         Type::LightUserdata => Ok(s.to_userdata(arg) as u64),
-        Type::Userdata => match s.userdata::<Buffer>(arg) {
-            Some(b) => Ok(b.addr()),
+        Type::Userdata => match buffer(s, arg, |b| b.addr()) {
+            Some(addr) => Ok(addr),
             None => Err(s.type_error(arg, "pointer")),
         },
         _ => Err(s.type_error(arg, "pointer")),
@@ -450,8 +456,8 @@ fn push_value(s: &mut Stack<'_>, t: Ty, bits: u64) {
 /// The native behind every FFI function.
 fn call(s: &mut Stack<'_>) -> StackResult<Return> {
     let [addr, index] = s.native_data();
-    let sig = match s.find_extension::<State>() {
-        Some(state) => Rc::clone(&state.signatures[index as usize]),
+    let sig = match s.find_extension(|st: &State| Rc::clone(&st.signatures[index as usize])) {
+        Some(sig) => sig,
         None => unreachable!("bound through the library"),
     };
     let n = sig.args.len();
@@ -585,8 +591,8 @@ fn ffi_buffer(s: &mut Stack<'_>) -> StackResult<Return> {
 fn place(s: &mut Stack<'_>, arg: i32) -> StackResult<(u64, Option<usize>)> {
     match s.type_at(arg) {
         Type::LightUserdata => Ok((s.to_userdata(arg) as u64, None)),
-        Type::Userdata => match s.userdata::<Buffer>(arg) {
-            Some(b) => Ok((b.addr(), Some(b.0.len()))),
+        Type::Userdata => match buffer(s, arg, |b| (b.addr(), Some(b.0.len()))) {
+            Some(place) => Ok(place),
             None => Err(s.type_error(arg, "pointer")),
         },
         Type::Nil | Type::None => Err(s.arg_error(arg, "null pointer")),
@@ -614,10 +620,10 @@ fn ffi_string(s: &mut Stack<'_>) -> StackResult<Return> {
     let base = place(s, 1)?;
     let bytes = match (is_nil(s, 2), base.1) {
         (true, None) => sys::cstr_bytes(base.0).unwrap_or_default().to_vec(),
-        (true, Some(_)) => {
-            let b = s.userdata::<Buffer>(1).expect("a buffer");
+        (true, Some(_)) => buffer(s, 1, |b| {
             b.0.iter().map(Cell::get).take_while(|&c| c != 0).collect()
-        }
+        })
+        .expect("a buffer"),
         (false, _) => {
             let n = s.check_integer(2)?;
             if n < 0 {
@@ -690,20 +696,21 @@ fn ffi_sizeof(s: &mut Stack<'_>) -> StackResult<Return> {
 }
 
 fn library_tostring(s: &mut Stack<'_>) -> StackResult<Return> {
-    let h = s.check_userdata::<Library>(1, LIBRARY_META)?.handle;
+    let h = s.check_userdata(1, LIBRARY_META, |l: &mut Library| l.handle)?;
     s.push_bytes(format!("ffi.library: 0x{h:014x}").as_bytes());
     Ok(Return::values(1))
 }
 
 fn buffer_tostring(s: &mut Stack<'_>) -> StackResult<Return> {
-    let b = s.check_userdata::<Buffer>(1, BUFFER_META)?;
-    let text = format!("ffi.buffer ({} bytes): 0x{:014x}", b.0.len(), b.addr());
+    let text = s.check_userdata(1, BUFFER_META, |b: &mut Buffer| {
+        format!("ffi.buffer ({} bytes): 0x{:014x}", b.0.len(), b.addr())
+    })?;
     s.push_bytes(text.as_bytes());
     Ok(Return::values(1))
 }
 
 fn buffer_len(s: &mut Stack<'_>) -> StackResult<Return> {
-    let n = s.check_userdata::<Buffer>(1, BUFFER_META)?.0.len();
+    let n = s.check_userdata(1, BUFFER_META, |b: &mut Buffer| b.0.len())?;
     s.push_integer(n as i64);
     Ok(Return::values(1))
 }
