@@ -55,12 +55,9 @@ const INTRINSICS: &[(&str, NativeFn)] = &[
     ("typeerror", typeerror),
     ("raise", raise),
     ("checktab", checktab),
-    ("checkint", checkint),
     ("lenint", lenint),
-    ("ult", ult),
     ("newarray", newarray),
     ("metafield", metafield),
-    ("plainlen", plainlen),
     ("sortprim", sortprim),
 ];
 
@@ -122,12 +119,9 @@ fn intrinsic_name(name: &str) -> &'static str {
         "typeerror" => "(intrinsic typeerror)",
         "raise" => "(intrinsic raise)",
         "checktab" => "(intrinsic checktab)",
-        "checkint" => "(intrinsic checkint)",
         "lenint" => "(intrinsic lenint)",
-        "ult" => "(intrinsic ult)",
         "newarray" => "(intrinsic newarray)",
         "metafield" => "(intrinsic metafield)",
-        "plainlen" => "(intrinsic plainlen)",
         "sortprim" => "(intrinsic sortprim)",
         _ => "(intrinsic)",
     }
@@ -221,26 +215,6 @@ fn checktab(ctx: &mut NativeCtx<'_>) -> R {
     }
 }
 
-/// `checkint(v, n)`: argument `n` as an integer, as `luaL_checkinteger`
-/// takes it (integral floats and numeric strings convert).
-fn checkint(ctx: &mut NativeCtx<'_>) -> R {
-    let n = arg_number(ctx, 1);
-    let v = ctx.arg(0);
-    let num = match v {
-        Value::Int(_) | Value::Float(_) => Some(v),
-        Value::Str(s) => number::str_to_number(ctx.bytes(s)),
-        _ => None,
-    };
-    match num {
-        Some(Value::Int(i)) => ctx.ret1(Value::Int(i)),
-        Some(Value::Float(f)) => match float_to_int(f) {
-            Some(i) => ctx.ret1(Value::Int(i)),
-            None => Err(ctx.builtin_arg_error(n, "number has no integer representation")),
-        },
-        _ => Err(ctx.builtin_type_error(n, "number", Some(v))),
-    }
-}
-
 /// `lenint(len)`: a length (`#t`, which may come from `__len`) as an
 /// integer.
 fn lenint(ctx: &mut NativeCtx<'_>) -> R {
@@ -256,14 +230,6 @@ fn lenint(ctx: &mut NativeCtx<'_>) -> R {
         }
         _ => Err(ctx.builtin_error("object length is not an integer")),
     }
-}
-
-/// `ult(a, b)`: unsigned `a < b` for integers.
-fn ult(ctx: &mut NativeCtx<'_>) -> R {
-    let (Value::Int(a), Value::Int(b)) = (ctx.arg(0), ctx.arg(1)) else {
-        return ctx.ret1(Value::Bool(false));
-    };
-    ctx.ret1(Value::Bool((a as u64) < (b as u64)))
 }
 
 /// `newarray(n)`: an empty table with room for `n` array elements.
@@ -287,19 +253,6 @@ fn metafield(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.arg(0);
     let r = match (ctx.metatable(v), ctx.arg(1)) {
         (Some(mt), k @ Value::Str(_)) => ctx.vm.heap.get(mt).get(&ctx.vm.heap, k),
-        _ => Value::Nil,
-    };
-    ctx.ret1(r)
-}
-
-/// `plainlen(t)`: `#t` for a table without a metatable, so nothing can
-/// change what indexing and `#` do; otherwise nil, and the built-in takes
-/// its general path.
-fn plainlen(ctx: &mut NativeCtx<'_>) -> R {
-    let r = match ctx.arg(0) {
-        Value::Table(t) if ctx.vm.heap.get(t).meta.is_none() => {
-            Value::Int(ctx.vm.heap.get(t).border())
-        }
         _ => Value::Nil,
     };
     ctx.ret1(r)

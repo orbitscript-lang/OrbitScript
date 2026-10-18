@@ -92,6 +92,10 @@ pub(super) const WRITE: Needs = Needs {
     read: false,
     write: true,
 };
+pub(super) const READ_WRITE: Needs = Needs {
+    read: true,
+    write: true,
+};
 
 /// Argument `i` is a table, or has the metamethods `needs` names.
 pub(super) fn check_tab(
@@ -155,6 +159,179 @@ macro_rules! resume {
         }
     };
 }
+
+// ---- insert ---------------------------------------------------------------
+
+mod insert {
+    use super::*;
+
+    const T: usize = 0;
+    /// The position argument, when there are three.
+    const POS_ARG: usize = 1;
+    const V: usize = 2;
+    const PHASE: usize = 3;
+    const RESULT: usize = 4;
+    const NARGS: usize = 5;
+    const I: usize = 6;
+    const POS: usize = 7;
+    const WINDOW: usize = 8;
+
+    const P_LEN: i64 = 0;
+    const P_START: i64 = 1;
+    const P_SHIFT: i64 = 2;
+    const P_MOVE: i64 = 3;
+    const P_NEXT: i64 = 4;
+    const P_PUT: i64 = 5;
+    const P_DONE: i64 = 6;
+
+    pub(in super::super) fn start(ctx: &mut NativeCtx<'_>) -> R {
+        check_tab(ctx, T, READ_WRITE)?;
+        let nargs = ctx.nargs();
+        let (pos, v) = if nargs == 2 {
+            (Value::Nil, ctx.arg(1))
+        } else {
+            (ctx.arg(1), ctx.arg(2))
+        };
+        window(ctx, WINDOW);
+        ctx.set(POS_ARG, pos);
+        ctx.set(V, v);
+        set_int(ctx, NARGS, nargs as i64);
+        set_int(ctx, PHASE, P_LEN);
+        run(ctx)
+    }
+
+    resume!(k, RESULT, run);
+
+    fn run(ctx: &mut NativeCtx<'_>) -> R {
+        let t = ctx.arg(T);
+        loop {
+            match int(ctx, PHASE) {
+                P_LEN => issue!(ctx, PHASE, RESULT, P_START, len(ctx, t, k)?),
+                P_START => {
+                    let e = len_int(ctx, ctx.arg(RESULT))?.wrapping_add(1);
+                    match int(ctx, NARGS) {
+                        2 => {
+                            set_int(ctx, POS, e);
+                            set_int(ctx, PHASE, P_PUT);
+                        }
+                        3 => {
+                            let pos = ctx.check_int(POS_ARG)?;
+                            // `pos - 1` as unsigned: 1..=e is valid.
+                            if (pos as u64).wrapping_sub(1) >= e as u64 {
+                                return Err(ctx.arg_error(1, "position out of bounds"));
+                            }
+                            set_int(ctx, POS, pos);
+                            set_int(ctx, I, e);
+                            set_int(ctx, PHASE, P_SHIFT);
+                        }
+                        _ => return Err(ctx.error("wrong number of arguments to 'insert'")),
+                    }
+                }
+                P_SHIFT => {
+                    let i = int(ctx, I);
+                    if i > int(ctx, POS) {
+                        issue!(ctx, PHASE, RESULT, P_MOVE, get(ctx, t, i - 1, k)?);
+                    }
+                    set_int(ctx, PHASE, P_PUT);
+                }
+                P_MOVE => {
+                    let (i, v) = (int(ctx, I), ctx.arg(RESULT));
+                    issue!(ctx, PHASE, RESULT, P_NEXT, set(ctx, t, i, v, k)?);
+                }
+                P_NEXT => {
+                    set_int(ctx, I, int(ctx, I) - 1);
+                    set_int(ctx, PHASE, P_SHIFT);
+                }
+                P_PUT => {
+                    let (pos, v) = (int(ctx, POS), ctx.arg(V));
+                    issue!(ctx, PHASE, RESULT, P_DONE, set(ctx, t, pos, v, k)?);
+                }
+                _ => return Ok(NativeReturn::Return(0)),
+            }
+        }
+    }
+}
+
+pub(super) use insert::start as insert;
+
+// ---- remove ---------------------------------------------------------------
+
+mod remove {
+    use super::*;
+
+    const T: usize = 0;
+    const POS_ARG: usize = 1;
+    const PHASE: usize = 2;
+    const RESULT: usize = 3;
+    const SIZE: usize = 4;
+    const POS: usize = 5;
+    /// The removed value.
+    const RET: usize = 6;
+    const WINDOW: usize = 7;
+
+    const P_LEN: i64 = 0;
+    const P_START: i64 = 1;
+    const P_GOT: i64 = 2;
+    const P_LOOP: i64 = 3;
+    const P_SHIFT: i64 = 4;
+    const P_NEXT: i64 = 5;
+    const P_DONE: i64 = 6;
+
+    pub(in super::super) fn start(ctx: &mut NativeCtx<'_>) -> R {
+        check_tab(ctx, T, READ_WRITE)?;
+        window(ctx, WINDOW);
+        set_int(ctx, PHASE, P_LEN);
+        run(ctx)
+    }
+
+    resume!(k, RESULT, run);
+
+    fn run(ctx: &mut NativeCtx<'_>) -> R {
+        let t = ctx.arg(T);
+        loop {
+            match int(ctx, PHASE) {
+                P_LEN => issue!(ctx, PHASE, RESULT, P_START, len(ctx, t, k)?),
+                P_START => {
+                    let size = len_int(ctx, ctx.arg(RESULT))?;
+                    let pos = ctx.opt_int(POS_ARG, size)?;
+                    // `pos - 1` as unsigned: 1..=size+1 is valid.
+                    if pos != size && (pos as u64).wrapping_sub(1) > size as u64 {
+                        return Err(ctx.arg_error(1, "position out of bounds"));
+                    }
+                    set_int(ctx, SIZE, size);
+                    set_int(ctx, POS, pos);
+                    issue!(ctx, PHASE, RESULT, P_GOT, get(ctx, t, pos, k)?);
+                }
+                P_GOT => {
+                    let v = ctx.arg(RESULT);
+                    ctx.set(RET, v);
+                    set_int(ctx, PHASE, P_LOOP);
+                }
+                P_LOOP => {
+                    let pos = int(ctx, POS);
+                    if pos < int(ctx, SIZE) {
+                        issue!(ctx, PHASE, RESULT, P_SHIFT, get(ctx, t, pos + 1, k)?);
+                    }
+                    issue!(ctx, PHASE, RESULT, P_DONE, set(ctx, t, pos, Value::Nil, k)?);
+                }
+                P_SHIFT => {
+                    let (pos, v) = (int(ctx, POS), ctx.arg(RESULT));
+                    issue!(ctx, PHASE, RESULT, P_NEXT, set(ctx, t, pos, v, k)?);
+                }
+                P_NEXT => {
+                    set_int(ctx, POS, int(ctx, POS) + 1);
+                    set_int(ctx, PHASE, P_LOOP);
+                }
+                _ => {
+                    let v = ctx.arg(RET);
+                    return ctx.ret1(v);
+                }
+            }
+        }
+    }
+}
+
+pub(super) use remove::start as remove;
 
 // ---- concat ---------------------------------------------------------------
 

@@ -17,7 +17,7 @@ Each library is behind its own Cargo feature of `orbit-stdlib`, all on by defaul
 | | `string/format.rs` | `string.format`, including `%a` and `%q` |
 | | `string/pack.rs` | `pack unpack packsize` |
 | `utf8` | `utf8.rs` | The `utf8` library |
-| `table` | `table.rs`, `table/sort.rs` | The `table` library |
+| `table` | `table.rs`, `builtins/table.orb` | The `table` library (`sort` is written in OrbitScript, ADR-11) |
 | `math` | `math/mod.rs`, `math/rng.rs` | The `math` library and its xoshiro256** generator |
 
 The engines (`pattern`, `format`, `pack`, `rng`, UTF-8 decoding) are plain functions over bytes and numbers with no VM access. The glue converts arguments, calls the engine and turns its typed errors into Lua errors with lua5.5's wording. Keeping the engines pure lets unit tests and the differential fuzzers drive them directly, and keeps the code a future OrbitScript standard library would reuse independent of Lua's calling conventions.
@@ -70,13 +70,13 @@ flowchart LR
 
 A small helper in `orbit-stdlib` (`resume.rs`) gives these step functions `get`, `set`, `len` and `less_than` operations that either finish immediately or say a call is needed, so each table function reads like a loop.
 
-**sort.** The elements are copied into the native's window (which roots them for the GC), sorted there and written back. The algorithm is a bottom-up merge sort written as a state machine, because every comparison may be a call (a comparator or `__lt`). Merge sort does about n·log₂n − n comparisons, fewer than quicksort's average of about 1.39·n·log₂n, and comparisons dominate when they are Lua calls. Its scratch half needs n more window slots.
+**sort.** Since ADR-11 phase (d), `sort` is written in OrbitScript (`stdlib/builtins/table.orb`), with a native fast path for arrays of only numbers or only strings and no comparator. The elements are copied into a scratch table, sorted there and written back. The algorithm is a bottom-up merge sort, because every comparison may be a call (a comparator or `__lt`). Merge sort does about n·log₂n − n comparisons, fewer than quicksort's average of about 1.39·n·log₂n, and comparisons dominate when they are Lua calls. Its scratch half needs a second table of n slots.
 
 lua5.5 raises `invalid order function for sorting` when the comparator is inconsistent (sort.lua checks `function (a, b) return true end` on 4, 5 and 6 elements). A merge sort never runs out of bounds on such a comparator, so after sorting with a user comparator or `__lt` we check each adjacent pair once (n − 1 extra comparisons) and raise that error if any pair is out of order. Plain number and string comparisons are a total order (NaN aside) and skip the check. If the sort raises, the table is left as it was, where lua5.5 leaves it partly sorted; the manual leaves this unspecified.
 
 `sort` also checks the length against `INT_MAX`-style limits (`array too big`), and a length below 2 compares nothing.
 
-**Yielding from a comparator.** ADR-3 (Proposed) says sort comparators are yieldable, but the suite requires the opposite: errors.lua:401 and coroutine.lua:344 expect `table.sort({1,2,3}, coroutine.yield)` to fail with `attempt to yield across a C-call boundary`. The comparator calls are marked non-yieldable, which needs a per-call flag on `CallThen` from the VM thread. The project rule is to match lua5.5's yieldability exactly, so `gsub` callbacks and metamethods called from these libraries are non-yieldable too; making any of them yieldable later would be an extension recorded in `tests/lua-5.5/DEVIATIONS.md` with Tym's OK.
+**Yielding from a comparator.** ADR-3 (Proposed) says sort comparators are yieldable, but the suite requires the opposite: errors.lua:401 and coroutine.lua:344 expect `table.sort({1,2,3}, coroutine.yield)` to fail with `attempt to yield across a C-call boundary`. Built-in frames refuse yields, so the comparator calls are non-yieldable. The project rule is to match lua5.5's yieldability exactly, so `gsub` callbacks and metamethods called from these libraries are non-yieldable too; making any of them yieldable later would be an extension recorded in `tests/lua-5.5/DEVIATIONS.md` with Tym's OK.
 
 `table.create(n, m)` preallocates the array and hash parts (sort.lua measures the memory), checking `out of range` against `INT_MAX` and `table overflow` for the hash part.
 
