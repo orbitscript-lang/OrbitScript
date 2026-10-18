@@ -62,10 +62,8 @@ fn call_c(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
     let Value::LightUserData(f) = ctx.hidden_upvalue(0) else {
         unreachable!("a C function's hidden upvalue is its address")
     };
-    let n = ffi::invoke(ctx, f.get())?;
-    // Variables the function marked with lua_toclose close as it returns.
-    ctx.close_from(0)?;
-    Ok(NativeReturn::Return(n))
+    let out = ffi::invoke(ctx, f.get())?;
+    ffi::finish(ctx, out)
 }
 
 /// The id of [`call_c`], to tell C functions from other natives.

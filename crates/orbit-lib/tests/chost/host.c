@@ -289,6 +289,178 @@ static int toclose(void) {
   return 0;
 }
 
+/* ---- threads -------------------------------------------------------- */
+
+static const char *status_name(int s) {
+  switch (s) {
+    case LUA_OK: return "OK";
+    case LUA_YIELD: return "YIELD";
+    case LUA_ERRRUN: return "ERRRUN";
+    case LUA_ERRMEM: return "ERRMEM";
+    case LUA_ERRERR: return "ERRERR";
+    default: return "?";
+  }
+}
+
+/* Resume co with the top narg values of its stack and print the outcome,
+   leaving co's stack empty. */
+static int resume_print(lua_State *L, lua_State *co, int narg) {
+  int nres = -1, i;
+  int s = lua_resume(co, L, narg, &nres);
+  printf("resume: %s", status_name(s));
+  if (s == LUA_OK || s == LUA_YIELD) {
+    printf(" nres %d:", nres);
+    for (i = nres; i >= 1; i--) printf(" %s", luaL_tolstring(co, -i, NULL)), lua_pop(co, 1);
+  } else {
+    printf(" error: %s", lua_tostring(co, -1));
+  }
+  printf(" | status %s", status_name(lua_status(co)));
+  if (s == LUA_OK || s == LUA_YIELD) printf(", top %d", lua_gettop(co));
+  printf("\n");
+  lua_settop(co, 0);
+  fflush(stdout);
+  return s;
+}
+
+static int c_yield(lua_State *L) {
+  return lua_yield(L, lua_gettop(L));
+}
+
+static int after_yield(lua_State *L, int status, lua_KContext ctx) {
+  int n = lua_gettop(L);
+  printf("continued: %s ctx %d with %d values\n", status_name(status), (int)ctx, n);
+  lua_pushstring(L, "k-done");
+  return n + 1;
+}
+
+static int c_yieldk(lua_State *L) {
+  lua_pushstring(L, "from-c");
+  return lua_yieldk(L, 1, 42, after_yield);
+}
+
+static int after_call(lua_State *L, int status, lua_KContext ctx) {
+  printf("call continued: %s ctx %d top %d\n", status_name(status), (int)ctx, lua_gettop(L));
+  if (status != LUA_OK && status != LUA_YIELD) {
+    lua_pushfstring(L, "caught: %s", lua_tostring(L, -1));
+    return 1;
+  }
+  return lua_gettop(L);
+}
+
+static int c_call(lua_State *L) {
+  lua_callk(L, lua_gettop(L) - 1, LUA_MULTRET, 7, after_call);
+  return after_call(L, LUA_OK, 7);
+}
+
+static int c_pcall(lua_State *L) {
+  int s = lua_pcallk(L, lua_gettop(L) - 1, 1, 0, 8, after_call);
+  return after_call(L, s, 8);
+}
+
+static int c_isyieldable(lua_State *L) {
+  lua_pushboolean(L, lua_isyieldable(L));
+  return 1;
+}
+
+static int threads(void) {
+  lua_State *L = luaL_newstate(), *co, *co2;
+  luaL_openlibs(L);
+  lua_register(L, "c_yield", c_yield);
+  lua_register(L, "c_yieldk", c_yieldk);
+  lua_register(L, "c_call", c_call);
+  lua_register(L, "c_pcall", c_pcall);
+  lua_register(L, "c_isyieldable", c_isyieldable);
+  printf("main yieldable %d, main status %s\n", lua_isyieldable(L), status_name(lua_status(L)));
+
+  /* A generator run from C. */
+  co = lua_newthread(L);
+  printf("new thread: top %d, type %s, status %s\n", lua_gettop(co),
+         luaL_typename(L, -1), status_name(lua_status(co)));
+  run(L, "function gen(a, b)\n"
+         "  local x = coroutine.yield(a + b)\n"
+         "  local y, z = coroutine.yield(x * 2, 'two')\n"
+         "  return y .. z, coroutine.isyieldable(), c_isyieldable()\n"
+         "end");
+  lua_getglobal(co, "gen");
+  lua_pushinteger(co, 1);
+  lua_pushinteger(co, 2);
+  resume_print(L, co, 2);
+  lua_pushinteger(co, 10);
+  resume_print(L, co, 1);
+  lua_pushstring(co, "a");
+  lua_pushstring(co, "b");
+  resume_print(L, co, 2);
+  resume_print(L, co, 0);
+
+  /* The same thread, reused for another function. */
+  run(L, "function fails(m) coroutine.yield('before') error(m) end");
+  lua_getglobal(co, "fails");
+  lua_pushstring(co, "oops");
+  resume_print(L, co, 1);
+  resume_print(L, co, 0);
+  resume_print(L, co, 0);
+
+  /* Values move between threads; a thread's state is the same each time. */
+  co2 = lua_newthread(L);
+  lua_pushinteger(L, 5);
+  lua_pushstring(L, "five");
+  lua_xmove(L, co2, 2);
+  printf("xmove: L top %d, co2 top %d, %s %s\n", lua_gettop(L), lua_gettop(co2),
+         lua_tostring(co2, 1), lua_tostring(co2, 2));
+  printf("tothread same: %d", lua_tothread(L, -1) == co2);
+  printf(", pushthread on co2: %d", lua_pushthread(co2));
+  printf(", main: %d", lua_pushthread(L));
+  printf(", pushed is co2: %d\n", lua_tothread(co2, -1) == co2);
+  lua_settop(co2, 0);
+  lua_pop(L, 2);
+
+  /* C functions that yield, with and without continuations. */
+  run(L, "local co = coroutine.wrap(function(a) local x, y = c_yield(a + 1, 'up') return x * 2, y end)\n"
+         "print('yield', co(1))\n"
+         "print('back', co(10, 'down'))\n"
+         "co = coroutine.wrap(function() return c_yieldk() end)\n"
+         "print('yieldk', co())\n"
+         "print('yieldk back', co('r1', 'r2'))\n"
+         "co = coroutine.wrap(function()\n"
+         "  return c_call(function(x) local y = coroutine.yield(x) return y + 1, 'ret' end, 5)\n"
+         "end)\n"
+         "print('callk', co())\n"
+         "print('callk back', co(10))\n"
+         "co = coroutine.wrap(function()\n"
+         "  return c_pcall(function() coroutine.yield('p') error('late', 0) end)\n"
+         "end)\n"
+         "print('pcallk', co())\n"
+         "print('pcallk back', co())\n"
+         "print('callk outside', c_call(function(a) return a, 'plain' end, 1))\n"
+         "print('yield outside', pcall(c_yield, 1))");
+
+  /* A thread stopped by an error is reset by closing it. */
+  printf("closethread after error: %s %s\n", status_name(lua_closethread(co, L)), lua_tostring(co, -1));
+  lua_settop(co, 0);
+  printf("after close: status %s, top %d\n", status_name(lua_status(co)), lua_gettop(co));
+
+  /* A C thread driving a C function that yields. */
+  lua_getglobal(co, "c_yieldk");
+  resume_print(L, co, 0);
+  lua_pushinteger(co, 99);
+  resume_print(L, co, 1);
+
+  /* Closing a suspended thread runs its pending __close. */
+  run(L, "function closer()\n"
+         "  local t <close> = setmetatable({}, {__close = function(_, e) print('closed with', e) end})\n"
+         "  coroutine.yield('holding')\n"
+         "end");
+  lua_getglobal(co, "closer");
+  resume_print(L, co, 0);
+  printf("closethread: %s, top %d\n", status_name(lua_closethread(co, L)), lua_gettop(co));
+  run(L, "local co = coroutine.create(function() error({}) end)\n"
+         "local ok, e = coroutine.resume(co)\n"
+         "print(ok, type(e))\n"
+         "print(coroutine.status(co))");
+  lua_close(L);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *mode = argc > 1 ? argv[1] : "";
   if (strcmp(mode, "basic") == 0) return basic();
@@ -302,6 +474,7 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "hooks") == 0) return hooks();
   if (strcmp(mode, "locals") == 0) return locals();
   if (strcmp(mode, "toclose") == 0) return toclose();
+  if (strcmp(mode, "threads") == 0) return threads();
   fprintf(stderr, "unknown mode %s\n", mode);
   return 2;
 }
