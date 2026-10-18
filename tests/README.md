@@ -70,7 +70,9 @@ Limits:
 `cargo testkit pgo train` records a new profile with rustc's stable flags, writes it to `pgo/<target>.profdata`, then builds as above:
 
 1. It builds an instrumented `orbit` with `-Cprofile-generate` in the `pgo-gen` Cargo profile (`target/pgo-gen/orbit`). Only this throwaway binary carries the counters.
-2. It runs that binary over the training set: the benchmarks at their quick inputs, the examples at their `train=` inputs (see `examples/manifest.txt`), `tests/diff`, `tests/diff/compat` and `tests/first-light`. Then it merges the raw profiles with `llvm-profdata`.
+2. It runs that binary over the training set: the benchmarks at their quick inputs, the examples at their `train=` inputs (see `examples/manifest.txt`), `tests/diff`, `tests/diff/compat` and `tests/first-light`.
+3. It lays out the shared build (liborbit and the `orbit` that loads it) the same way with `./build.sh --profile pgo-gen` into `target/pgo-gen-shared`, and runs it over the same set. Without this, liborbit built by `./build.sh` (which also uses the committed profile) ran 1.3-2.1x slower than the static `orbit` on the benchmarks.
+4. It merges the raw profiles of both runs with `llvm-profdata`.
 
 A stale profile never produces wrong code, but it can make the release build much slower than one without a profile. LLVM drops the counts of a function whose code changed and finds none for a function that is new (a move or rename gives it a new symbol), and in a profile-guided build it compiles such a function as if it never ran. When #126 moved the interpreter loop, the profile trained before it made the release build 1.1-1.5x slower than a plain one on most benchmarks until it was retrained.
 
