@@ -23,6 +23,7 @@
 | `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit-std` feature `ffi`) | shared |
 | `orbit` | Rust embedding API | shared |
 | `orbit-cli` | `orbit` interpreter and `orbitc` compiler binaries | shared |
+| `orbit-check` | OrbitScript's optional type checker: library (used by the language server) and the `orbit-check` command. Reads the AST, never the runtime | F |
 | `orbit-testkit` | Conformance, differential and benchmark harness (dev tool, never shipped) | E |
 
 Design records live in `docs/adr/`. A **Proposed** ADR can be edited freely by its stream. An **Accepted** ADR changes only with Tym's approval, because other streams build on it.

@@ -1,0 +1,20 @@
+[package]
+name = "orbit-check"
+description = "OrbitScript's optional type checker: a library (also used by the language server) and the orbit-check command"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "orbit-check"
+path = "src/main.rs"
+
+[dependencies]
+orbit-hir = { path = "../orbit-hir" }
+orbit-orb-syntax = { path = "../orbit-orb-syntax" }
+
+[lints]
+workspace = true
