@@ -3,6 +3,7 @@
 //! Comments, strings and numbers follow Rust's spelling (`//`, nesting `/* */`, `r#"..."#`,
 //! `1_000`, `0b1010`); see `planning/orbitscript-syntax/proposal.md`, "Lexical structure".
 
+use crate::ast::DocComment;
 use crate::diag::Diagnostic;
 use crate::token::{Keyword, Punct, Token, TokenKind};
 use orbit_hir::{Language, SourceInfo, Span, StringPool};
@@ -40,6 +41,8 @@ pub struct Lexer<'a> {
     templates: Vec<Option<Template>>,
     /// Scratch buffer for decoding string literals.
     buf: Vec<u8>,
+    /// `///` and `//!` comments seen so far, when asked for ([`Lexer::keep_doc_comments`]).
+    docs: Option<Vec<DocComment>>,
 }
 
 impl std::fmt::Debug for Lexer<'_> {
@@ -70,6 +73,7 @@ impl<'a> Lexer<'a> {
             source: SourceInfo::new(chunk_name, Language::OrbitScript, src),
             templates: Vec::new(),
             buf: Vec::new(),
+            docs: None,
         };
         // A Unix `#!` line, unless it is the start of a `#![...]`-style attribute.
         if src.starts_with(b"#!") && !src.starts_with(b"#![") {
@@ -78,6 +82,21 @@ impl<'a> Lexer<'a> {
             }
         }
         lx
+    }
+
+    /// Record `///` and `//!` comments from here on (see [`Lexer::doc_comments`]).
+    pub fn keep_doc_comments(&mut self) {
+        self.docs.get_or_insert_with(Vec::new);
+    }
+
+    /// The doc comments lexed so far, in source order (empty unless kept).
+    pub fn doc_comments(&self) -> &[DocComment] {
+        self.docs.as_deref().unwrap_or(&[])
+    }
+
+    /// Takes the recorded doc comments.
+    pub fn take_doc_comments(&mut self) -> Vec<DocComment> {
+        self.docs.take().unwrap_or_default()
     }
 
     pub fn strings(&self) -> &StringPool {
@@ -169,11 +188,27 @@ impl<'a> Lexer<'a> {
             match c {
                 b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => self.pos += 1,
                 b'/' if self.at(1) == Some(b'/') => {
+                    let start = self.pos;
                     while let Some(c) = self.cur() {
                         if c == b'\n' || c == b'\r' {
                             break;
                         }
                         self.pos += 1;
+                    }
+                    if let Some(docs) = &mut self.docs {
+                        // `///` and `//!` are doc comments, as in Rust; `////` is not.
+                        let inner = match (self.src.get(start + 2), self.src.get(start + 3)) {
+                            (Some(b'/'), Some(b'/')) => None,
+                            (Some(b'/'), _) => Some(false),
+                            (Some(b'!'), _) => Some(true),
+                            _ => None,
+                        };
+                        if let Some(inner) = inner {
+                            docs.push(DocComment {
+                                inner,
+                                span: Span::new(start as u32, self.pos as u32),
+                            });
+                        }
                     }
                 }
                 b'/' if self.at(1) == Some(b'*') => {

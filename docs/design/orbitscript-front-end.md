@@ -52,7 +52,17 @@ Rust rules the parser follows where the proposal doesn't say otherwise:
 - **A bare name as a positional `#{ }` entry is an error.** Struct literals read `P { x, y }` as `x: x, y: y`, so `#{ word, count }` looks like the same shorthand but would build `[1] = word, [2] = count`. The message offers both spellings: `word: word` for a field, `(word)` (any other expression stays positional) or `[...]` for an array entry.
 - `scope` is a keyword at the start of a statement only when followed by a name, a keyword, a literal or `{`; `let scope` only when followed by a name. Everywhere else `scope` is an ordinary name.
 - Generic parameters (`fn first<T>`) and every type annotation are parsed and kept only as spans: the compiler ignores them, and `orbit-check` will define their structure.
-- Not in v1, each with a specific message: tuple structs and tuple variants, traits (`impl X for Y`), `as` casts, `()` as a value, `if let`/`while let`.
+- Not in v1, each with a specific message: tuple structs and tuple variants, traits (`impl X for Y`) and generic bounds, `()` as a value, `if let`/`while let`.
+
+### Options for tools
+
+`ParseOptions` has three flags that `load` and the CLI leave off; `orbit-check` (and later a language server) sets them. None changes what a program does.
+
+- **`type_trees`**: every `ast::Type` carries a `TypeKind` tree (paths with generic arguments, `nil`, `Self`, `T?`, unions, arrays, maps, records, tuples, `fn` types; `Error` is reserved for a recovering parse). Off, the type grammar is still parsed and checked, but only spans are kept and nothing is allocated for it.
+- **`stub`**: `.orbi` stubs. `fn` items and `impl` functions may end in `;`, and `const NAME: T;` needs no value. Lowering a stub is an error ("a stub declaration has no body to run").
+- **`doc_comments`**: the lexer records `///` (outer) and `//!` (inner) comments in `Ast::doc_comments`, and each item, `impl` members included, gets the `///` lines just before it in `Item::docs`. `////` is an ordinary comment, as in Rust.
+
+Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, `type A<T>`) and the `self: T` and `...rest: T` annotations are always kept. `type` aliases lower to nothing; `e as T` lowers like `(e)`.
 
 ## Lowering (step 2)
 

@@ -83,7 +83,10 @@ impl Dump<'_> {
                 self.out.push_str(&format!("(fn {} ", self.s(f.name.sym)));
                 self.sig(&f.sig);
                 self.out.push(' ');
-                self.block(&f.body);
+                match &f.body {
+                    Some(b) => self.block(b),
+                    None => self.out.push(';'),
+                }
                 self.out.push(')');
             }
             ItemKind::Struct(s) => {
@@ -135,8 +138,14 @@ impl Dump<'_> {
             }
             ItemKind::Const { name, value, .. } => {
                 self.out.push_str(&format!("(const {} ", self.s(name.sym)));
-                self.expr(value);
+                match value {
+                    Some(v) => self.expr(v),
+                    None => self.out.push(';'),
+                }
                 self.out.push(')');
+            }
+            ItemKind::TypeAlias { name, .. } => {
+                self.out.push_str(&format!("(type {})", self.s(name.sym)));
             }
             ItemKind::Global { name, value } => {
                 self.out.push_str(&format!("(global {} ", self.s(name.sym)));
@@ -313,6 +322,11 @@ impl Dump<'_> {
             ExprKind::Paren(e) => {
                 self.out.push_str("(paren ");
                 self.expr(e);
+                self.out.push(')');
+            }
+            ExprKind::As { expr, .. } => {
+                self.out.push_str("(as ");
+                self.expr(expr);
                 self.out.push(')');
             }
             ExprKind::Tuple(items) => {
@@ -701,7 +715,7 @@ fn items() {
         ),
         ("global x = 1;", "{(global x 1)}"),
         ("extern HOST_API, OTHER;", "{(extern HOST_API OTHER)}"),
-        ("let ages: #{string: int} = #{};", "{(let ages #{})}"),
+        ("let ages: #{[string]: int} = #{};", "{(let ages #{})}"),
         (
             "fn f(t: [Map<string, Vec<int>>], g: fn(int) -> bool) -> (int, string?) { }",
             "{(fn f (t g) {})}",
@@ -749,9 +763,11 @@ fn errors() {
             "t.orb:1: a `let scope` binding cannot be `mut`: it is closed with the value it was given",
         ),
         (
-            "let x = y as int;",
-            "t.orb:1: `as` casts are not supported; use `math::tointeger` or `tostring`",
+            "fn f<T: Show>(x: T) {}",
+            "t.orb:1: generic parameters can't have bounds (there are no traits yet)",
         ),
+        ("fn f(x: int);", "t.orb:1: expected `{`, found `;`"),
+        ("const N: int;", "t.orb:1: expected `=`, found `;`"),
         ("let x = ();", "t.orb:1: `()` is not a value; use `nil`"),
         (
             "f(_)",

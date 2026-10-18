@@ -2,8 +2,9 @@
 //!
 //! Every construct is kept as written, with spans. Names are not resolved here; lowering does
 //! that. The tree is short-lived (dropped after lowering), so it favours simplicity over
-//! layout. Type annotations are parsed and kept only as spans: the compiler ignores them, and
-//! the later `orbit-check` will define their structure.
+//! layout. Type annotations are always parsed (so bad ones are errors) but the compiler ignores
+//! them; with [`ParseOptions::type_trees`](crate::ParseOptions) they also carry a [`TypeKind`]
+//! tree for `orbit-check`.
 
 use orbit_hir::{SourceInfo, Span, StrId, StringPool};
 
@@ -14,6 +15,18 @@ pub struct Ast {
     pub body: Block,
     pub strings: StringPool,
     pub source: SourceInfo,
+    /// Every `///` and `//!` comment, in source order, when
+    /// [`ParseOptions::doc_comments`](crate::ParseOptions) is set. A `///` comment also
+    /// appears in the `docs` of the item it precedes.
+    pub doc_comments: Vec<DocComment>,
+}
+
+/// A `///` (outer: documents the next item) or `//!` (inner: documents the module) comment.
+/// The span covers the whole comment, slashes included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocComment {
+    pub inner: bool,
+    pub span: Span,
 }
 
 /// An identifier as written.
@@ -23,10 +36,57 @@ pub struct Name {
     pub span: Span,
 }
 
-/// A type annotation. Only its extent is kept for now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A type annotation. `kind` is `None` unless the parse asked for type trees.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Type {
     pub span: Span,
+    pub kind: Option<Box<TypeKind>>,
+}
+
+/// The structure of a type annotation (`orbit-check` only; the runtime never builds it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeKind {
+    /// `int`, `geo::Vec2`, `Stack<T>`: a name or path, with generic arguments.
+    Path {
+        segments: Vec<Name>,
+        args: Vec<Type>,
+    },
+    /// `nil`.
+    Nil,
+    /// `Self`.
+    SelfType,
+    /// `T?`.
+    Optional(Type),
+    /// `A | B | C`.
+    Union(Vec<Type>),
+    /// `[T]`.
+    Array(Type),
+    /// `#{[K]: V}`.
+    Map { key: Type, value: Type },
+    /// `#{ name: T, "two words": U }`: a table with these fields (open: others may exist).
+    Record(Vec<RecordField>),
+    /// `(A, B)`: several results. `()` is no results; `(T)` is just `T`.
+    Tuple(Vec<Type>),
+    /// `fn(A, B) -> R`.
+    Fn {
+        params: Vec<Type>,
+        ret: Option<Type>,
+    },
+    /// A type that failed to parse, in a recovering parse (reserved; never built yet).
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordField {
+    /// The key, as written (`name` or `"two words"`).
+    pub name: Name,
+    pub ty: Type,
+}
+
+/// A generic parameter `T` in `fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T>`, `type A<T>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GenericParam {
+    pub name: Name,
 }
 
 /// `{ stmt; stmt; tail }`.
@@ -70,7 +130,7 @@ pub enum StmtKind {
     },
     /// `scope stmt;` or `scope { ... }`: runs when the enclosing block exits.
     Scope(Box<Stmt>),
-    Item(Item),
+    Item(Box<Item>),
 }
 
 #[derive(Debug)]
@@ -78,6 +138,8 @@ pub struct Item {
     pub is_pub: bool,
     pub kind: ItemKind,
     pub span: Span,
+    /// The `///` comments just before the item (empty unless the parse kept doc comments).
+    pub docs: Vec<Span>,
 }
 
 #[derive(Debug)]
@@ -88,11 +150,17 @@ pub enum ItemKind {
     Impl(ImplDecl),
     /// `use a::b::c;`, `use a::b as x;`, `use a::b::{c, d as e};`
     Use(UseDecl),
-    /// `const NAME [: T] = value;`
+    /// `const NAME [: T] = value;`. `value` is `None` only in a stub (`const NAME: T;`).
     Const {
         name: Name,
         ty: Option<Type>,
-        value: Expr,
+        value: Option<Expr>,
+    },
+    /// `type Name<T> = T;`: an alias only `orbit-check` reads.
+    TypeAlias {
+        name: Name,
+        generics: Vec<GenericParam>,
+        ty: Type,
     },
     /// `global name = value;`: defines a global, failing if it already has a value.
     Global {
@@ -106,8 +174,10 @@ pub enum ItemKind {
 #[derive(Debug)]
 pub struct FnDecl {
     pub name: Name,
+    pub generics: Vec<GenericParam>,
     pub sig: FnSig,
-    pub body: Block,
+    /// `None` only in a stub (`fn f(x: int) -> int;`).
+    pub body: Option<Block>,
     pub span: Span,
 }
 
@@ -116,9 +186,13 @@ pub struct FnDecl {
 pub struct FnSig {
     /// Where an explicit `self` first parameter was written.
     pub self_param: Option<Span>,
+    /// `self: T`.
+    pub self_ty: Option<Type>,
     pub params: Vec<Param>,
     /// `...name`, a rest parameter (Lua 5.5's named vararg).
     pub rest: Option<Name>,
+    /// `...name: T`: the type of each extra argument.
+    pub rest_ty: Option<Type>,
     pub ret: Option<Type>,
 }
 
@@ -134,6 +208,7 @@ pub struct Param {
 #[derive(Debug)]
 pub struct StructDecl {
     pub name: Name,
+    pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDecl>,
 }
 
@@ -147,6 +222,7 @@ pub struct FieldDecl {
 #[derive(Debug)]
 pub struct EnumDecl {
     pub name: Name,
+    pub generics: Vec<GenericParam>,
     pub variants: Vec<Variant>,
 }
 
@@ -160,8 +236,12 @@ pub struct Variant {
 
 #[derive(Debug)]
 pub struct ImplDecl {
+    /// `impl<T>`.
+    pub generics: Vec<GenericParam>,
     /// The struct or enum the block adds to.
     pub target: Name,
+    /// `impl<T> Stack<T>`: the target's generic arguments.
+    pub target_args: Vec<Type>,
     pub members: Vec<Item>,
 }
 
@@ -250,6 +330,11 @@ pub enum ExprKind {
         expr: Box<Expr>,
     },
     Paren(Box<Expr>),
+    /// `expr as T`: a type assertion only `orbit-check` reads; it runs as `expr`.
+    As {
+        expr: Box<Expr>,
+        ty: Type,
+    },
     /// `(a, b)`: multiple values, valid where a list of results is.
     Tuple(Vec<Expr>),
     /// `...e`: all of `e`'s values (a call or the rest parameter).
@@ -428,7 +513,10 @@ pub enum BinOp {
 }
 
 /// Binding power of the prefix operators' operand: above `*`, below `**`.
-pub const UNARY_POWER: u8 = 10;
+pub const UNARY_POWER: u8 = 11;
+
+/// `expr as T` binds tighter than `* / \\ %` and looser than prefix operators, as in Rust.
+pub const AS_POWER: u8 = 10;
 
 impl BinOp {
     /// Left and right binding power, Rust's table from low to high: `||`, `&&`, comparisons
@@ -446,7 +534,7 @@ impl BinOp {
             Shl | Shr => (7, 8),
             Add | Sub | Concat => (8, 9),
             Mul | Div | IDiv | Mod => (9, 10),
-            Pow => (12, 11),
+            Pow => (13, 12),
         }
     }
 

@@ -627,14 +627,21 @@ This is Lua 5.5's own `global` declaration mode, always on: the front end behave
 ```rust
 let n: int = 3;
 let names: [string] = ["a", "b"];
-let ages: #{string: int} = #{};
+let ages: #{[string]: int} = #{};
 fn find(t: [Vec2], pred: fn(Vec2) -> bool) -> Vec2? { ... }
 fn divmod(a: int, b: int) -> (int, int) { (a \ b, a % b) }
+let id: int | string = 1;
+let cfg: #{ name: string, size: int } = #{ name: "x", size: 3 };
+type Pair<T> = (T, T);
+struct Stack<T> { items: [T] }
+let n = decode(s) as int;
 ```
 
-- Built-in type names follow Lua's runtime types, lower case: `nil bool int float number string table function thread userdata any`. `T?` is `T | nil`. `[T]` is an array table, `#{K: V}` a map table, `(A, B)` multiple results, `fn(A) -> R` a function type; struct and enum names are types.
-- The parser accepts them in every Rust position, records them as `TypeId`s in the HIR, and the compiler ignores them (vm.md: annotations are never trusted for code generation). Generics (`fn first<T>(t: [T]) -> T?`) parse but are only meaningful to `orbit-check`.
-- No `as` casts at runtime in v1 beyond what the library does (`math::tointeger`, `tostring`); `as` is reserved.
+- Built-in type names follow Lua's runtime types, lower case: `nil bool int float number string table function thread userdata any`. `T?` is `T | nil`. `[T]` is an array table, `#{[K]: V}` a map table, `#{ name: T, size: U }` a record (a table with those fields, others allowed), `A | B` a union, `(A, B)` multiple results, `fn(A) -> R` a function type; struct and enum names are types. Record and map spelling mirrors table literals, where `name: v` is a named key and `[k]: v` a computed one (Tym, 2026-10-18, type checker T5/T6; maps were `#{K: V}` before).
+- The parser accepts them in every Rust position and the compiler ignores them (vm.md: annotations are never trusted for code generation). `orbit-check` reads them from the AST (type checker T1/T2). Generics (`fn first<T>(t: [T]) -> T?`, `struct Stack<T>`, `enum`, `impl<T> Stack<T>`) parse but are only meaningful to `orbit-check`; there are no bounds, since there are no traits. Between a closure's `|...|`, a union parameter type needs parentheses: `|x: (int | nil)| ...`.
+- `type Name<T> = T;` declares an alias for `orbit-check`; it does nothing at run time. `type` is a keyword only at the start of an item followed by a name, so `type(x)` and a local named `type` keep working (T7).
+- `expr as T` is an assertion only `orbit-check` reads (T9). At run time it is `expr` as one value, like `(expr)`; there are still no conversions (use `math::tointeger`, `tostring`). It binds tighter than `*` and looser than prefix operators, as in Rust, and its type takes no top-level union (`x as (int | nil)`).
+- Stubs (`.orbi`, T12) describe Lua and C modules for `orbit-check`: the same syntax, with body-less `fn f(x: int) -> int;` and value-less `const N: int;`. Only `orbit-check` parses them; the runtime never loads `.orbi` files.
 
 ## Coroutines
 
