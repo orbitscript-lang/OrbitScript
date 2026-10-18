@@ -5,9 +5,9 @@
 use std::io::{BufRead, Write};
 use std::sync::atomic::Ordering;
 
-use orbit::{MetaField, Value};
+use orbit::{Chunk, Function, Pinned, Value};
 
-use crate::{RUNNING, Runner, STDIN};
+use crate::{RUNNING, Runner, STDIN, docall};
 
 #[cfg(feature = "line-editing")]
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -23,7 +23,7 @@ pub struct State {
     editor: Option<LineEditor>,
     /// The Lua function that lists completions (see [`COMPLETE`]).
     #[cfg(feature = "line-editing")]
-    complete: Option<Value>,
+    complete: Option<Pinned<Function<'static>>>,
 }
 
 #[cfg(feature = "line-editing")]
@@ -65,28 +65,11 @@ const COMPLETE: &[u8] = include_bytes!("repl/complete.lua");
 impl Runner {
     /// Call the global `warn`, if there is one.
     fn warn(&mut self, msg: &str) {
-        let vm = self.lua.vm();
-        let warn = vm.global("warn");
-        if matches!(warn, Value::Native(_) | Value::Closure(_)) {
-            let m = vm.new_str(msg.as_bytes());
-            let _ = vm.call(warn, &[m]);
-        }
-    }
-
-    /// `v` as `tostring` shows it: through `__tostring` if it has one.
-    fn display_text(&mut self, v: Value) -> Vec<u8> {
-        let vm = self.lua.vm();
-        if let Value::Str(s) = v {
-            return vm.str_bytes(s).to_vec();
-        }
-        let mm = vm.rt.metamethod(&vm.heap, v, MetaField::ToString);
-        if !matches!(mm, Value::Nil)
-            && let Ok(r) = vm.call(mm, &[v])
-            && let Some(&Value::Str(s)) = r.first()
-        {
-            return vm.str_bytes(s).to_vec();
-        }
-        vm.to_display(v)
+        self.iso.scope(|s| {
+            if let Ok(Value::Function(warn)) = s.globals().get::<Value>("warn") {
+                let _ = warn.call(msg);
+            }
+        });
     }
 
     /// Print `_PROMPT` (or `_PROMPT2`) and read a line without its newline;
@@ -97,12 +80,11 @@ impl Runner {
         } else {
             ("_PROMPT", "> ")
         };
-        let p = self.lua.vm().global(name);
-        let prompt = match p {
-            Value::Nil => default.as_bytes().to_vec(),
-            v => self.display_text(v),
-        };
-        let _ = self.lua.vm().flush();
+        let prompt = self.iso.scope(|s| match s.globals().get::<Value>(name) {
+            Ok(Value::Nil) | Err(_) => default.as_bytes().to_vec(),
+            Ok(v) => v.to_display().unwrap_or_default(),
+        });
+        self.iso.flush();
         if let Some(line) = self.edit_line(&prompt) {
             return line;
         }
@@ -138,7 +120,7 @@ impl Runner {
             }
             let mut ret = b"return ".to_vec();
             ret.extend_from_slice(&line);
-            let f = match self.lua.load_buffer(&ret, STDIN) {
+            let f = match self.iso.load(Chunk::new(&ret).name(STDIN)) {
                 Ok(f) => {
                     self.add_history(&line);
                     Some(f)
@@ -149,16 +131,16 @@ impl Runner {
                 self.call_and_print(f);
             }
         }
-        let _ = self.lua.vm().flush();
+        self.iso.flush();
         println!();
     }
 
     /// Compile `line` as statements, reading more lines while the chunk is
     /// incomplete. `None` after reporting a syntax error.
     /// History gets the whole statement, as one entry.
-    fn read_statement(&mut self, mut buf: Vec<u8>) -> Option<Value> {
+    fn read_statement(&mut self, mut buf: Vec<u8>) -> Option<Pinned<Function<'static>>> {
         loop {
-            match self.lua.load_buffer(&buf, STDIN) {
+            match self.iso.load(Chunk::new(&buf).name(STDIN)) {
                 Ok(f) => {
                     self.add_history(&buf);
                     return Some(f);
@@ -180,28 +162,25 @@ impl Runner {
         }
     }
 
-    fn call_and_print(&mut self, f: Value) {
-        self.lua.vm().pin(f);
-        let r = self.docall(f, &[]);
-        self.lua.vm().unpin(f);
-        let vm = self.lua.vm();
-        match r {
-            Ok(results) if results.is_empty() => {}
-            Ok(results) => {
-                for &v in &results {
-                    vm.pin(v);
-                }
-                let print = vm.global("print");
-                let r = vm.call(print, &results);
-                for &v in &results {
-                    vm.unpin(v);
-                }
-                if let Err(e) = r {
-                    let msg = self.lua.vm().error_message(&e);
-                    self.report(&format!("error calling 'print' ({msg})"));
-                }
+    fn call_and_print(&mut self, f: Pinned<Function<'static>>) {
+        let r = self.iso.scope(|s| {
+            let f = f.get(s).map_err(|e| e.to_string())?;
+            let results = docall(s, f, Vec::new())?;
+            if results.is_empty() {
+                return Ok(());
             }
-            Err(text) => self.report(&text),
+            let print = s.globals().get::<Value>("print");
+            let r = match print {
+                Ok(Value::Function(print)) => print.call(results).map(drop),
+                Ok(_) => Err(orbit::Error::runtime(
+                    "attempt to call a nil value (global 'print')",
+                )),
+                Err(e) => Err(e),
+            };
+            r.map_err(|e| format!("error calling 'print' ({})", e.message()))
+        });
+        if let Err(text) = r {
+            self.report(&text);
         }
     }
 }
@@ -248,49 +227,40 @@ impl Runner {
     /// The function behind [`Runner::completions`], made from [`COMPLETE`]
     /// before any line runs, so later changes to the libraries it uses
     /// don't reach it. `None` if it can't be made (a library is missing).
-    fn completer(&mut self) -> Option<Value> {
-        let chunk = self.lua.load_buffer(COMPLETE, b"=complete").ok()?;
-        let vm = self.lua.vm();
-        vm.pin(chunk);
-        let r = vm.call(chunk, &[]);
-        vm.unpin(chunk);
-        match r.ok().and_then(|r| r.first().copied()) {
-            Some(f @ Value::Closure(_)) => {
-                vm.pin(f);
-                Some(f)
+    fn completer(&mut self) -> Option<Pinned<Function<'static>>> {
+        self.iso.scope(|s| {
+            let chunk = s.load(Chunk::new(COMPLETE).name("=complete")).ok()?;
+            match chunk.call(()).ok()?.first() {
+                Some(Value::Function(f)) => Some(f.pin()),
+                _ => None,
             }
-            _ => None,
-        }
+        })
     }
 
     /// Tab completion: the names that can follow `path` and start with
     /// `frag`.
     fn completions(&mut self, path: &[String], frag: &str) -> Vec<String> {
-        let Some(complete) = self.repl.complete else {
+        let Some(complete) = &self.repl.complete else {
             return Vec::new();
         };
-        let vm = self.lua.vm();
-        let mut args = Vec::with_capacity(path.len() + 1);
-        for s in std::iter::once(frag).chain(path.iter().map(String::as_str)) {
-            let v = vm.new_str(s.as_bytes());
-            vm.pin(v);
-            args.push(v);
-        }
-        let r = vm.call(complete, &args);
-        let names = match &r {
-            Ok(vals) => vals
-                .iter()
-                .filter_map(|&v| match v {
-                    Value::Str(s) => Some(String::from_utf8_lossy(vm.str_bytes(s)).into_owned()),
-                    _ => None,
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        for &v in args.iter().rev() {
-            vm.unpin(v);
-        }
-        names
+        self.iso.scope(|s| {
+            let Ok(complete) = complete.get(s) else {
+                return Vec::new();
+            };
+            let args: Vec<&str> = std::iter::once(frag)
+                .chain(path.iter().map(String::as_str))
+                .collect();
+            match complete.call(args) {
+                Ok(vals) => vals
+                    .into_iter()
+                    .filter_map(|v| {
+                        v.as_str()
+                            .map(|st| String::from_utf8_lossy(&st.to_bytes()).into_owned())
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        })
     }
 }
 

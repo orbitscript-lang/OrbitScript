@@ -1,20 +1,32 @@
 //! Lowers OrbitScript programs, compiles them and runs them on the VM, checking what they
 //! print (or the error they raise).
 
-use orbit::Lua;
+use orbit::{Chunk, Config, Error, Isolate, Runtime, Value};
+use orbit_compiler::bytecode::{UnlinkedChunk, format};
 use orbit_orb_syntax::{ParseOptions, to_hir};
+
+fn isolate() -> Isolate {
+    Runtime::new().new_isolate(Config::default())
+}
+
+/// `chunk` as a binary chunk the isolate loads (keeping its debug info).
+fn binary(chunk: &UnlinkedChunk) -> Vec<u8> {
+    format::encode(chunk, false)
+}
 
 /// Runs `src`, returning its printed lines, then `error: <message>` if it raised one.
 fn run(src: &str) -> String {
-    let mut lua = Lua::new();
-    lua.exec(
-        b"__out = {}
-          print = function(...)
-            local t = table.pack(...)
-            for i = 1, t.n do t[i] = tostring(t[i]) end
-            __out[#__out + 1] = table.concat(t, '\\t')
-          end",
-        "=prelude",
+    let mut iso = isolate();
+    iso.exec(
+        Chunk::new(
+            "__out = {}
+             print = function(...)
+               local t = table.pack(...)
+               for i = 1, t.n do t[i] = tostring(t[i]) end
+               __out[#__out + 1] = table.concat(t, '\\t')
+             end",
+        )
+        .name("=prelude"),
     )
     .unwrap();
     let hir = match to_hir("test", src.as_bytes(), &ParseOptions::default()) {
@@ -26,19 +38,22 @@ fn run(src: &str) -> String {
         Ok(c) => c,
         Err(e) => return format!("compile error: {e}"),
     };
-    let f = lua.vm().load(&chunk);
-    let err = lua.call(f, &[]).err();
-    let out = lua
-        .exec(b"return table.concat(__out, '\\n')", "=out")
-        .unwrap();
-    let mut text = String::from_utf8_lossy(&lua.vm().to_display(out[0])).into_owned();
-    if let Some(e) = err {
-        if !text.is_empty() {
-            text.push('\n');
+    let bytes = binary(&chunk);
+    iso.scope(|s| {
+        let err = s.load(Chunk::new(&bytes).name("=test"))?.call(()).err();
+        let out = s
+            .load(Chunk::new("return table.concat(__out, '\\n')").name("=out"))?
+            .call(())?;
+        let mut text: String = out[0].get()?;
+        if let Some(e) = err {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&format!("error: {e}"));
         }
-        text.push_str(&format!("error: {e}"));
-    }
-    text
+        Ok::<_, Error>(text)
+    })
+    .unwrap()
 }
 
 /// The compile error for `src`.
@@ -332,7 +347,7 @@ wrapped\t1",
 
 #[test]
 fn exports() {
-    let mut lua = Lua::new();
+    let mut iso = isolate();
     let src = r##"
 pub fn parse(s) { tonumber(s) }
 fn helper() { 1 }
@@ -341,21 +356,26 @@ pub const VERSION = "1.2";
 pub enum Mode { Fast, Slow }
 "##;
     let hir = to_hir("m", src.as_bytes(), &ParseOptions::default()).unwrap();
-    let f = lua.vm().load(&orbit_compiler::compile(&hir).unwrap());
-    let r = lua.call(f, &[]).unwrap();
-    lua.vm().set_global("m", r[0]);
-    let out = lua
-        .exec(
-            b"local keys = {} for k in pairs(m) do keys[#keys + 1] = k end table.sort(keys)
-              return table.concat(keys, ' '), m.parse('42'), m.VERSION, m.Config.__name,
-                getmetatable(m.Mode.Fast).__name",
-            "=check",
-        )
+    let bytes = binary(&orbit_compiler::compile(&hir).unwrap());
+    let shown: Vec<String> = iso
+        .scope(|s| {
+            let r = s.load(Chunk::new(&bytes).name("=m"))?.call(())?;
+            s.globals().set("m", r[0])?;
+            let out = s
+                .load(
+                    Chunk::new(
+                        "local keys = {} for k in pairs(m) do keys[#keys + 1] = k end table.sort(keys)
+                         return table.concat(keys, ' '), m.parse('42'), m.VERSION, m.Config.__name,
+                           getmetatable(m.Mode.Fast).__name",
+                    )
+                    .name("=check"),
+                )?
+                .call(())?;
+            out.iter()
+                .map(|v: &Value| Ok(String::from_utf8_lossy(&v.to_display()?).into_owned()))
+                .collect::<Result<Vec<_>, Error>>()
+        })
         .unwrap();
-    let shown: Vec<String> = out
-        .iter()
-        .map(|v| String::from_utf8_lossy(&lua.vm().to_display(*v)).into_owned())
-        .collect();
     assert_eq!(
         shown,
         [

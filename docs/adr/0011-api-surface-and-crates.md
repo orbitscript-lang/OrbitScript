@@ -15,6 +15,18 @@ The first `stabby` boundary (#160, closed) wrapped the Rust API as it stood: a v
 - Values are **`Value`**, **`Str`** (borrowed), **`Table`**, **`Function`**, **`Thread`** and **`Userdata`**. Handles are scoped (they live for a scope's lifetime and cost nothing) or pinned (`Pinned<T>`, kept alive until dropped).
 - Hosts extend the runtime with **`HostFunction`**s (taking a `Call`), **`Class<T>`** for userdata types, and the `Io`, `Searcher`, `Clock` and `Hook` interfaces. Errors are `Syntax`, `Runtime` (keeping the error value), `Memory` and `Interrupted`.
 
+### Settled while building the API (phase b)
+- **One public crate**: `orbit` is this surface. `orbit::Lua` and raw VM access are gone from it; `orbit-capi` and `orbit-ffi` still reach the runtime directly, below the API.
+- **Scoped handles are window slots**: a `Scope` is a native function's stack window (the host's own window outside calls), so every handle is a GC root without bookkeeping and the window is cut back when the scope ends. Handles carry the scope's lifetime; pinned handles live in numbered slots the collector traces.
+- **A chunk's environment** is given at load time (`Scope::load_in(chunk, env)`) rather than on `Chunk`, so `Chunk` holds only bytes and names and can be built outside any scope.
+- **`Compiler` errors** are a `SyntaxError` with no script value, so compiling on another thread can send its result back; `Scope::load_compiled` links what it made.
+- **Host functions** take a `Call` and return with `Call::ret`; `Call::check` and `Call::opt` give Lua's argument errors. Typed closures (`|a: i64, b: Option<String>|`) are left for later.
+- **A panicking host function** raises a runtime error (`host function panicked: ...`) where the build unwinds, and aborts where it doesn't.
+- **Interrupts** stay catchable by `pcall`, matching `lua`; uncatchable budgets come with `set_budget`.
+- **Light userdata** is a `Value` variant holding the address as an opaque `u64`.
+- **Class methods** get the object taken out of its userdata while they run, so a method can use its whole `Call`; calling a method of an object whose method is running raises an error.
+- **Not yet built**: `Io`, `Searcher` and `Clock` (phase c, with `orbit-std`), debugger hooks (with the debugger plan), `yield_with`, budgets, and `Function::info`.
+
 ### Intrinsics and the standard library
 - The runtime exposes **intrinsics**: named primitive operations that need the VM's internals or its speed (string and table primitives, math, utf8, `string.pack`).
 - Each library function is then either bound directly to an intrinsic, written natively in the runtime, or written in OrbitScript on top of intrinsics and precompiled to bytecode at build time. The choice is made per function, by measurement: a call through an OrbitScript wrapper costs about 16 ns, `ipairs` and `table.sort` with a comparator ran faster written in Lua than natively, and `table.concat` and `string.rep` ran ten times slower.

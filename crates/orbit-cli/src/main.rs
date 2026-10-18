@@ -19,14 +19,17 @@
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod chunk_file;
 #[cfg(feature = "repl")]
 mod repl;
 
-use orbit::{CallOutcome, Lua, LuaError, MetaField, NativeCtx, NativeReturn, Options, Value};
+use orbit::{
+    Call, Chunk, Config, Error, Function, GcMode, Isolate, Ret, Runtime, Scope, Table, Value,
+};
 
 /// The chunk names `lua` gives command-line code and standard input.
 const COMMAND_LINE: &[u8] = b"=(command line)";
-const STDIN: &[u8] = b"=stdin";
+use chunk_file::{STDIN, read_chunk_file};
 
 /// Whether Ctrl-C interrupts Lua code; false while interactive mode waits
 /// for input, when Ctrl-C ends `orbit` as it ends `lua`.
@@ -184,39 +187,43 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return usage(&prog, e),
     };
-    let mut lua = Lua::with_options(Options {
-        ignore_env: cli.ignore_env,
-        lock_cpath: cli.lock_cpath,
-    });
-    #[cfg(feature = "ffi")]
-    if !cli.no_ffi {
-        lua.enable_ffi();
-    }
-    #[cfg(not(feature = "ffi"))]
-    let _ = cli.no_ffi;
-    // The standalone lua5.5 reports generational mode from the start. The
-    // incremental collector runs underneath either way.
-    lua.vm().rt.gc.mode = orbit::GcMode::Generational;
-    catch_interrupts(lua.vm().interrupt_handle());
-    if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
-        lua.vm().heap.set_stress(true);
-    }
-    if let Some(limit) = std::env::var_os("ORBIT_MEMORY_LIMIT") {
-        match limit.to_str().and_then(parse_size) {
-            Some(bytes) => lua.set_memory_limit(Some(bytes)),
+    let memory_limit = match std::env::var_os("ORBIT_MEMORY_LIMIT") {
+        None => None,
+        Some(limit) => match limit.to_str().and_then(parse_size) {
+            Some(bytes) => Some(bytes),
             None => {
                 eprintln!("{prog}: ORBIT_MEMORY_LIMIT: expected a size such as 512K, 64M or 1G");
                 return ExitCode::FAILURE;
             }
-        }
+        },
+    };
+    let config = Config::default()
+        .ignore_env(cli.ignore_env)
+        .lock_cpath(cli.lock_cpath)
+        .warnings(cli.warnings)
+        // The standalone lua5.5 reports generational mode from the start.
+        // The incremental collector runs underneath either way.
+        .gc_mode(GcMode::Generational)
+        .memory_limit(memory_limit);
+    #[cfg_attr(not(feature = "ffi"), allow(unused_mut))]
+    let mut iso = Runtime::new().new_isolate(config);
+    #[cfg(feature = "ffi")]
+    if !cli.no_ffi {
+        iso.enable_ffi();
     }
-    let mut run = Runner::new(lua, prog);
+    #[cfg(not(feature = "ffi"))]
+    let _ = cli.no_ffi;
+    catch_interrupts(iso.interrupt());
+    if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
+        iso.gc().set_stress(true);
+    }
+    let mut run = Runner::new(iso, prog);
     let ok = run.main(&cli, &args);
-    run.lua.flush_files();
+    run.iso.flush();
     // Like lua5.5, close the state on the way out, even after an error:
-    // every object with a `__gc` still registered is finalized.
-    run.lua.vm().close();
-    run.lua.flush_files();
+    // every object with a `__gc` still registered is finalized (dropping
+    // the isolate closes it and flushes again).
+    drop(run);
     if ok {
         ExitCode::SUCCESS
     } else {
@@ -225,53 +232,82 @@ fn main() -> ExitCode {
 }
 
 struct Runner {
-    lua: Lua,
+    iso: Isolate,
     prog: String,
-    /// `xpcall` and [`msghandler`], pinned: every chunk runs under them,
-    /// so an error's message is made while its stack is still there.
-    xpcall: Value,
-    handler: Value,
     #[cfg(feature = "repl")]
     #[cfg_attr(not(feature = "line-editing"), allow(dead_code))]
     repl: repl::State,
 }
 
+/// Call `f` as `lua` does: under [`msghandler`], so an error becomes the
+/// text to print. The call goes through a host function, as `lua`'s goes
+/// through its C driver, so tracebacks end in that function's `[C]: in ?`
+/// and C stack depths match `lua`'s.
+fn docall<'s>(
+    s: &'s Scope<'s>,
+    f: Function<'s>,
+    args: Vec<Value<'s>>,
+) -> Result<Vec<Value<'s>>, String> {
+    let driver = s.create_function(|c| {
+        let f: Function = c.check(0)?;
+        let handler = c.create_function(msghandler);
+        match f.call_handled(c.args().split_off(1), handler) {
+            Ok(mut r) => {
+                r.insert(0, Value::Bool(true));
+                c.ret(r)
+            }
+            Err(e) => {
+                let v = e.value().and_then(|v| v.get(c).ok());
+                c.ret((false, v.unwrap_or(Value::Nil)))
+            }
+        }
+    });
+    let mut call = vec![f.to_value()];
+    call.extend(args);
+    let mut r = driver.call(call).map_err(|e| e.to_string())?;
+    match r.first() {
+        Some(Value::Bool(true)) => {
+            r.remove(0);
+            Ok(r)
+        }
+        _ => Err(r
+            .get(1)
+            .and_then(|v| v.to_display().ok())
+            .map(|t| String::from_utf8_lossy(&t).into_owned())
+            .unwrap_or_default()),
+    }
+}
+
+/// `lua`'s message handler, run where the error was raised: an error
+/// object with `__tostring` becomes that text; anything else becomes its
+/// message plus a traceback.
+fn msghandler<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
+    let e = c.arg(0);
+    let text = match e {
+        Value::Str(_) | Value::Int(_) | Value::Float(_) => {
+            String::from_utf8_lossy(&e.to_display()?).into_owned()
+        }
+        _ => {
+            let has_tostring = e
+                .metatable()
+                .and_then(|mt| mt.raw_get::<Value>("__tostring").ok())
+                .is_some_and(|f| !f.is_nil());
+            if has_tostring && let Ok(t) = e.to_display() {
+                return c.ret(t.as_slice());
+            }
+            format!("(error object is a {} value)", e.type_name())
+        }
+    };
+    c.ret(format!("{text}\n{}", c.traceback(1)))
+}
+
 impl Runner {
-    fn new(mut lua: Lua, prog: String) -> Runner {
-        let vm = lua.vm();
-        let xpcall = vm.register_native("docall", docall);
-        let handler = vm.register_native("msghandler", msghandler);
-        vm.pin(xpcall);
-        vm.pin(handler);
+    fn new(iso: Isolate, prog: String) -> Runner {
         Runner {
-            lua,
+            iso,
             prog,
-            xpcall,
-            handler,
             #[cfg(feature = "repl")]
             repl: repl::State::default(),
-        }
-    }
-
-    /// Call `f` as `lua` does: under a message handler, so the error is the
-    /// text to print (the message and a traceback, or an error object's
-    /// `__tostring`).
-    fn docall(&mut self, f: Value, args: &[Value]) -> Result<Vec<Value>, String> {
-        let (xpcall, handler) = (self.xpcall, self.handler);
-        let vm = self.lua.vm();
-        let mut call = Vec::with_capacity(args.len() + 2);
-        call.extend([f, handler]);
-        call.extend_from_slice(args);
-        match vm.call(xpcall, &call) {
-            Ok(mut r) if matches!(r.first(), Some(Value::Bool(true))) => {
-                r.remove(0);
-                Ok(r)
-            }
-            Ok(r) => {
-                let e = r.get(1).copied().unwrap_or(Value::Nil);
-                Err(String::from_utf8_lossy(&vm.to_display(e)).into_owned())
-            }
-            Err(e) => Err(self.error_text(&e)),
         }
     }
 
@@ -280,9 +316,6 @@ impl Runner {
     fn main(&mut self, cli: &Cli, args: &[String]) -> bool {
         if cli.version || cli.interactive {
             print_version();
-        }
-        if cli.warnings {
-            self.lua.vm().rt.warnings = true;
         }
         self.set_arg_table(args, cli.script);
         if !cli.ignore_env && !self.run_init() {
@@ -320,7 +353,7 @@ impl Runner {
                 self.repl(cli.ignore_env);
                 return true;
             }
-            return self.run_file(None, &[]);
+            return self.run_file(None, false);
         }
         true
     }
@@ -328,16 +361,16 @@ impl Runner {
     /// `arg`: the script at 0 (the interpreter with no script), everything
     /// before it at negative indexes, its arguments from 1.
     fn set_arg_table(&mut self, args: &[String], script: Option<usize>) {
-        let vm = self.lua.vm();
         let base = script.unwrap_or(0) as i64;
-        let t = vm.new_table();
-        vm.pin(Value::Table(t));
-        for (k, a) in args.iter().enumerate() {
-            let v = vm.new_str(a.as_bytes());
-            vm.table_set(t, Value::Int(k as i64 - base), v);
-        }
-        vm.set_global("arg", Value::Table(t));
-        vm.unpin(Value::Table(t));
+        self.iso
+            .scope(|s| {
+                let t = s.create_table();
+                for (k, a) in args.iter().enumerate() {
+                    t.raw_set(k as i64 - base, a.as_str())?;
+                }
+                s.globals().set("arg", t)
+            })
+            .expect("setting 'arg' on a fresh isolate");
     }
 
     /// `LUA_INIT_5_5`, or else `LUA_INIT`: code to run, or `@file`.
@@ -350,51 +383,37 @@ impl Runner {
             },
         };
         match init.strip_prefix('@') {
-            Some(file) => self.run_file(Some(file), &[]),
+            Some(file) => self.run_file(Some(file), false),
             None => self.run_chunk(init.as_bytes(), format!("={name}").as_bytes()),
         }
     }
 
     /// `-l`: `global = require(module)`.
     fn require(&mut self, global: &str, module: &str) -> bool {
-        let vm = self.lua.vm();
-        let require = vm.global("require");
-        let m = vm.new_str(module.as_bytes());
-        vm.pin(m);
-        let r = self.docall(require, &[m]);
-        self.lua.vm().unpin(m);
-        match r {
-            Ok(r) => {
-                let v = r.first().copied().unwrap_or(Value::Nil);
-                self.lua.vm().set_global(global, v);
-                true
-            }
-            Err(text) => {
-                self.report(&format!("{}: {text}", self.prog));
-                false
-            }
-        }
+        let r = self.iso.scope(|s| {
+            let g = s.globals();
+            let require: Value = g.get("require").map_err(|e| e.to_string())?;
+            let Value::Function(require) = require else {
+                return Err("attempt to call a nil value (global 'require')".to_string());
+            };
+            let r = docall(s, require, vec![s.create_string(module).to_value()])?;
+            g.set(global, r.first().copied().unwrap_or(Value::Nil))
+                .map_err(|e| e.to_string())
+        });
+        self.report_failure(r)
     }
 
     /// The script, with arguments taken from `arg` as it is now: `arg[1]`
     /// to `arg[#arg]` (earlier code may have changed it).
     fn run_script(&mut self, script: &str) -> bool {
-        let vm = self.lua.vm();
-        let Value::Table(t) = vm.global("arg") else {
-            self.report(&format!("{}: 'arg' is not a table", self.prog));
-            return false;
-        };
-        let n = vm.heap.get(t).len(&vm.heap);
-        let args: Vec<Value> = (1..=n)
-            .map(|i| orbit::object::table::get(&vm.heap, t, Value::Int(i)))
-            .collect();
         let path = (script != "-").then_some(script);
-        self.run_file(path, &args)
+        self.run_file(path, true)
     }
 
-    /// Load a file (`None`: standard input) as `loadfile` does and call it.
-    fn run_file(&mut self, path: Option<&str>, args: &[Value]) -> bool {
-        let (bytes, source) = match orbit::read_chunk_file(path.map(str::as_bytes)) {
+    /// Load a file (`None`: standard input) as `loadfile` does and call it,
+    /// with the script arguments from `arg` when `with_args`.
+    fn run_file(&mut self, path: Option<&str>, with_args: bool) -> bool {
+        let (bytes, source) = match read_chunk_file(path) {
             Ok(r) => r,
             Err(m) => {
                 self.report(&format!("{}: {m}", self.prog));
@@ -406,132 +425,60 @@ impl Runner {
         } else {
             source
         };
-        self.load_and_call(&bytes, &source, args)
+        let r = self.iso.scope(|s| {
+            let args = if with_args {
+                let Some(t) = s.globals().raw_get::<Option<Table>>("arg").ok().flatten() else {
+                    return Err("'arg' is not a table".to_string());
+                };
+                (1..=t.raw_len() as i64)
+                    .map(|i| t.raw_get(i))
+                    .collect::<Result<Vec<Value>, _>>()
+                    .map_err(|e| e.to_string())?
+            } else {
+                Vec::new()
+            };
+            load_and_call(s, &bytes, &source, args)
+        });
+        self.report_failure(r)
     }
 
     fn run_chunk(&mut self, bytes: &[u8], source: &[u8]) -> bool {
-        self.load_and_call(bytes, source, &[])
+        let r = self
+            .iso
+            .scope(|s| load_and_call(s, bytes, source, Vec::new()));
+        self.report_failure(r)
     }
 
-    fn load_and_call(&mut self, bytes: &[u8], source: &[u8], args: &[Value]) -> bool {
-        let vm = self.lua.vm();
-        for &a in args {
-            vm.pin(a);
-        }
-        let f = self.lua.load_buffer(bytes, source);
-        let ok = match f {
-            Ok(f) => match self.docall(f, args) {
-                Ok(_) => true,
-                Err(text) => {
-                    self.report(&format!("{}: {text}", self.prog));
-                    false
-                }
-            },
-            Err(e) => {
-                self.report(&format!("{}: {e}", self.prog));
+    /// Report a failure as `lua` does (`<program>: <message>`); false
+    /// after one.
+    fn report_failure(&mut self, r: Result<(), String>) -> bool {
+        match r {
+            Ok(()) => true,
+            Err(text) => {
+                self.report(&format!("{}: {text}", self.prog));
                 false
             }
-        };
-        for &a in args {
-            self.lua.vm().unpin(a);
         }
-        ok
-    }
-
-    fn error_text(&mut self, e: &LuaError) -> String {
-        let vm = self.lua.vm();
-        if !matches!(e.value, Value::Str(_) | Value::Int(_) | Value::Float(_)) {
-            let mm = vm.rt.metamethod(&vm.heap, e.value, MetaField::ToString);
-            if !matches!(mm, Value::Nil) {
-                vm.pin(e.value);
-                let r = vm.call(mm, &[e.value]);
-                vm.unpin(e.value);
-                if let Ok(r) = r
-                    && let Some(&Value::Str(s)) = r.first()
-                {
-                    return String::from_utf8_lossy(vm.str_bytes(s)).into_owned();
-                }
-            }
-        }
-        let mut text = vm.error_message(e);
-        if let Some(tb) = &e.traceback {
-            text.push('\n');
-            text.push_str(tb);
-        }
-        text
     }
 
     /// Write a message to stderr after flushing `print` output, so the two
     /// come out in order.
     fn report(&mut self, msg: &str) {
-        self.lua.flush_files();
+        self.iso.flush();
         eprintln!("{msg}");
     }
 }
 
-/// `docall(f, handler, args...)`: `f(args...)` under `handler`, as
-/// `xpcall` does, from a native the traceback names only as `[C]: in ?`.
-fn docall(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let (f, h) = (ctx.arg(0), ctx.arg(1));
-    ctx.set(0, h);
-    ctx.set(1, Value::Bool(true));
-    Ok(NativeReturn::CallHandled {
-        f,
-        nargs: ctx.nargs() - 2,
-        k: docall_done,
-    })
-}
-
-fn docall_done(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeReturn, LuaError> {
-    match out {
-        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
-        CallOutcome::Err(e) => {
-            ctx.truncate(0);
-            ctx.push(Value::Bool(false));
-            ctx.push(e);
-            Ok(NativeReturn::Return(2))
-        }
-    }
-}
-
-/// `lua`'s message handler: an error object with `__tostring` becomes that
-/// text; anything else becomes its message plus a traceback.
-fn msghandler(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let e = ctx.arg(0);
-    let text = match e {
-        Value::Str(_) | Value::Int(_) | Value::Float(_) => {
-            let mut b = Vec::new();
-            ctx.display(e, &mut b);
-            String::from_utf8_lossy(&b).into_owned()
-        }
-        _ => {
-            let mm = ctx.vm.rt.metamethod(&ctx.vm.heap, e, MetaField::ToString);
-            if !matches!(mm, Value::Nil) {
-                ctx.push(e);
-                return Ok(NativeReturn::CallThen {
-                    f: mm,
-                    nargs: 1,
-                    k: tostring_done,
-                    protected: false,
-                });
-            }
-            format!("(error object is a {} value)", e.type_name())
-        }
-    };
-    let text = format!("{text}\n{}", ctx.traceback(1));
-    let s = ctx.new_str(text.as_bytes());
-    ctx.ret1(s)
-}
-
-fn tostring_done(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeReturn, LuaError> {
-    let n = match out {
-        CallOutcome::Ok(n) => n,
-        CallOutcome::Err(v) => return Err(ctx.error_value(v)),
-    };
-    match (n > 0).then(|| ctx.arg(ctx.len() - n)) {
-        Some(s @ Value::Str(_)) => ctx.ret1(s),
-        _ => Err(ctx.error("'__tostring' must return a string")),
-    }
+fn load_and_call<'s>(
+    s: &'s Scope<'s>,
+    bytes: &[u8],
+    source: &[u8],
+    args: Vec<Value<'s>>,
+) -> Result<(), String> {
+    let f = s
+        .load(Chunk::new(bytes).name(source))
+        .map_err(|e| e.to_string())?;
+    docall(s, f, args).map(drop)
 }
 
 /// The banner. It names the Lua release we implement, as `lua -v` does.

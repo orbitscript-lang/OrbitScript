@@ -30,7 +30,7 @@ fn verifier_accepts_compiler_output() {
     let (mut compiled, mut failures) = (0, Vec::new());
     for f in &files {
         let src = std::fs::read(f).unwrap();
-        let Ok(chunk) = orbit::compile(&src, "test", &Default::default()) else {
+        let Ok(chunk) = orbit::Compiler.compile(&src, "test", orbit::Language::Lua) else {
             continue;
         };
         compiled += 1;

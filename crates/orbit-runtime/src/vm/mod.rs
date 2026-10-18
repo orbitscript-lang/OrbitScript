@@ -61,7 +61,7 @@ impl LuaError {
 /// Compiles source text into an unlinked chunk, for `load`, `loadfile`,
 /// `dofile` and `require`. `chunk_name` is the name messages use
 /// (`script.lua` in `script.lua:3:`); an error is the complete message.
-/// The embedder installs it in [`Runtime::compile`] (`orbit::Lua` installs
+/// The embedder installs it in [`Runtime::compile`] (`orbit::Isolate` installs
 /// the Lua front end), so the VM and the libraries don't depend on a front
 /// end and a host can leave the compiler out.
 pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
@@ -491,7 +491,7 @@ pub struct Runtime {
     /// library's random generator, for example).
     pub ext: Extensions,
     /// The Lua compiler. A hook rather than a dependency, so the VM stays
-    /// free of the front ends; `orbit::Lua` installs it.
+    /// free of the front ends; `orbit::Isolate` installs it.
     pub compile: Option<CompileFn>,
     /// The OrbitScript compiler, installed with [`Runtime::compile`]. Source
     /// files whose name ends in `.orb` use it; everything else uses
@@ -517,6 +517,8 @@ pub struct Runtime {
     pub(crate) dead_cell: Gc<Cell>,
     /// Extra roots: values the embedder or loader holds.
     pub(crate) pinned: Vec<Value>,
+    /// Values a host keeps alive in numbered slots ([`Vm::pin_slot`]).
+    pub(crate) pin_slots: PinSlots,
     /// End of the values of the last open-ended call or `Vararg`.
     pub(crate) top: usize,
     /// MetaField names and per-type metatables.
@@ -599,6 +601,13 @@ impl Interrupt {
     }
 }
 
+/// Numbered GC roots that can be freed in any order ([`Vm::pin_slot`]).
+#[derive(Debug, Default)]
+pub(crate) struct PinSlots {
+    values: Vec<Value>,
+    free: Vec<u32>,
+}
+
 /// Library state kept per VM, keyed by type. It holds plain Rust data, never
 /// GC values (it is not traced).
 #[derive(Default)]
@@ -667,6 +676,9 @@ impl Roots<LuaSpace> for Runtime {
             m.mark(p);
         }
         for &v in &self.pinned {
+            mark(m, v);
+        }
+        for &v in &self.pin_slots.values {
             mark(m, v);
         }
         for &s in self.metas.field_names.all() {
@@ -757,6 +769,7 @@ impl Vm {
                 callee: None,
                 dead_cell,
                 pinned: Vec::new(),
+                pin_slots: PinSlots::default(),
                 top: 0,
                 metas: meta::Metas {
                     field_names,
@@ -821,9 +834,17 @@ impl Vm {
         fn host(_: &mut NativeCtx<'_>) -> Result<crate::vm::NativeReturn, LuaError> {
             Ok(crate::vm::NativeReturn::Return(0))
         }
-        let f = self.register_native("C host", host);
-        let Value::Native(id) = f else { unreachable!() };
-        self.rt.host_native = Some(id);
+        let id = match self.rt.host_native {
+            Some(id) => id,
+            None => {
+                let Value::Native(id) = self.register_native("C host", host) else {
+                    unreachable!()
+                };
+                self.rt.host_native = Some(id);
+                id
+            }
+        };
+        let f = Value::Native(id);
         debug_assert!(self.rt.stack.frames.is_empty());
         if self.rt.stack.regs.is_empty() {
             self.rt.stack.regs.push(f);
@@ -943,6 +964,35 @@ impl Vm {
     /// Registers `v` for finalization when `meta` has a `__gc` field.
     pub fn set_metatable(&mut self, v: Value, meta: Option<Gc<Table>>) -> bool {
         crate::object::gc::set_metatable(&mut self.heap, v, meta)
+    }
+
+    /// Keep `v` alive in a slot of its own until [`Vm::free_pin_slot`],
+    /// returning the slot. Unlike [`Vm::pin`], slots can be freed in any
+    /// order: they back the host API's long-lived handles.
+    pub fn pin_slot(&mut self, v: Value) -> u32 {
+        let slots = &mut self.rt.pin_slots;
+        match slots.free.pop() {
+            Some(i) => {
+                slots.values[i as usize] = v;
+                i
+            }
+            None => {
+                slots.values.push(v);
+                (slots.values.len() - 1) as u32
+            }
+        }
+    }
+
+    /// The value in pin slot `slot`.
+    pub fn pin_slot_value(&self, slot: u32) -> Value {
+        self.rt.pin_slots.values[slot as usize]
+    }
+
+    /// Release pin slot `slot` for reuse.
+    pub fn free_pin_slot(&mut self, slot: u32) {
+        let slots = &mut self.rt.pin_slots;
+        slots.values[slot as usize] = Value::Nil;
+        slots.free.push(slot);
     }
 
     /// Keep `v` alive until [`Vm::unpin`].

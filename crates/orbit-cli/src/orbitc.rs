@@ -17,6 +17,9 @@
 use std::io::Write;
 use std::process::ExitCode;
 
+mod chunk_file;
+
+use orbit::Compiler;
 use orbit_compiler::bytecode::{UnlinkedChunk, format, verify};
 use orbit_lua_syntax::ParseOptions;
 
@@ -129,8 +132,8 @@ fn main() -> ExitCode {
         return usage(&prog, "writing a chunk takes exactly one input file");
     }
     for input in &cli.inputs {
-        let path = (input != "-").then_some(input.as_bytes());
-        let result = match orbit::read_chunk_file(path) {
+        let path = (input != "-").then_some(input.as_str());
+        let result = match chunk_file::read_chunk_file(path) {
             Ok((bytes, source)) => run(&cli, &bytes, &source),
             Err(e) => Err(e),
         };
@@ -145,10 +148,10 @@ fn main() -> ExitCode {
 /// Handle one input: `bytes` is its contents (any `#` line removed) and
 /// `source` its chunk source name (`@file` or `=stdin`).
 fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
-    let name = orbit::chunk_id(source);
+    let name = Compiler::chunk_id(source);
     let options = ParseOptions::default();
     let mut stdout = std::io::stdout();
-    if orbit::is_orbitscript_file(source) && bytes.first() != format::SIGNATURE.first() {
+    if Compiler::is_orbitscript_name(source) && bytes.first() != format::SIGNATURE.first() {
         return run_orbitscript(cli, bytes, source, &name);
     }
     match cli.stage {
@@ -203,8 +206,9 @@ fn run_orbitscript(cli: &Cli, bytes: &[u8], source: &[u8], name: &str) -> Result
             Ok(())
         }
         Stage::Bytecode => {
-            let mut chunk =
-                orbit::compile_orbitscript(bytes, name, &options).map_err(|e| e.to_string())?;
+            let mut chunk = Compiler
+                .compile_orbitscript(bytes, name, &options)
+                .map_err(|e| e.to_string())?;
             chunk.source = source.into();
             output(cli, &chunk)
         }
@@ -225,7 +229,9 @@ fn load(
         verify::verify(&chunk, verify::Level::STRONGEST).map_err(|e| bad(&e))?;
         return Ok(chunk);
     }
-    let mut chunk = orbit::compile(bytes, name, options).map_err(|e| e.to_string())?;
+    let mut chunk = Compiler
+        .compile_lua(bytes, name, options)
+        .map_err(|e| e.to_string())?;
     // As `load` does: the source as given, so a chunk read back names it.
     chunk.source = source.into();
     Ok(chunk)

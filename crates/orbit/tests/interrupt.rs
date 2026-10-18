@@ -3,25 +3,29 @@
 use std::thread;
 use std::time::Duration;
 
-use orbit::Lua;
+use orbit::{Chunk, Config, Error, Runtime};
 
 /// Runs `src` while another thread requests an interrupt, and returns its
 /// results as text.
 fn interrupted(src: &str) -> Vec<String> {
-    let mut lua = Lua::new();
-    let handle = lua.vm().interrupt_handle();
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    let handle = iso.interrupt();
     let t = thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
         assert!(!handle.pending());
         handle.request();
         assert!(handle.pending());
     });
-    let out = lua.exec(src.as_bytes(), "t").unwrap();
+    let out = iso
+        .scope(|s| {
+            let out = s.load(Chunk::new(src).name("=t"))?.call(())?;
+            out.iter()
+                .map(|v| Ok(String::from_utf8_lossy(&v.to_display()?).into_owned()))
+                .collect::<Result<Vec<_>, Error>>()
+        })
+        .unwrap();
     t.join().unwrap();
-    let vm = lua.vm();
-    out.iter()
-        .map(|&v| String::from_utf8_lossy(&vm.to_display(v)).into_owned())
-        .collect()
+    out
 }
 
 #[test]

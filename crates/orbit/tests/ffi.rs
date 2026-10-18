@@ -4,25 +4,26 @@
 
 #![cfg(all(feature = "ffi", unix))]
 
-use orbit::Lua;
+use orbit::{Chunk, Config, Error, Isolate, Runtime};
 
-fn lua() -> Lua {
-    let mut lua = Lua::new();
-    lua.enable_ffi();
-    lua
+fn lua() -> Isolate {
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    iso.enable_ffi();
+    iso
 }
 
 /// Run `src` and show its results as `tostring` would, tab-separated.
-fn run_in(lua: &mut Lua, src: &str) -> String {
-    let out = match lua.exec(src.as_bytes(), "t") {
-        Ok(v) => v,
+fn run_in(iso: &mut Isolate, src: &str) -> String {
+    let out = iso.scope(|s| {
+        let out = s.load(Chunk::new(src).name("=t"))?.call(())?;
+        out.iter()
+            .map(|v| Ok(String::from_utf8_lossy(&v.to_display()?).into_owned()))
+            .collect::<Result<Vec<_>, Error>>()
+    });
+    match out {
+        Ok(v) => v.join("\t"),
         Err(e) => panic!("script failed: {e:?}"),
-    };
-    let vm = lua.vm();
-    out.iter()
-        .map(|&v| String::from_utf8_lossy(&vm.to_display(v)).into_owned())
-        .collect::<Vec<_>>()
-        .join("\t")
+    }
 }
 
 fn run(src: &str) -> String {
@@ -40,7 +41,7 @@ const LIBC: &str = "local libc = ffi.open() ";
 
 #[test]
 fn absent_until_the_host_enables_it() {
-    let mut lua = Lua::new();
+    let mut lua = Runtime::new().new_isolate(Config::default());
     assert_eq!(
         run_in(&mut lua, "return ffi, package.loaded.ffi"),
         "nil\tnil"

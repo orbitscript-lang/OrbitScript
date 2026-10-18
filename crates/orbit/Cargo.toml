@@ -40,7 +40,7 @@ verify-flow = ["orbit-runtime/verify-flow"]
 # Load C modules through the Lua C API (off by default for embedders).
 c-modules = ["dep:orbit-capi", "package"]
 # The `ffi` library: calling C functions in shared libraries (off by
-# default for embedders; a host still opts in with `Lua::enable_ffi`).
+# default for embedders; a host still opts in with `Isolate::enable_ffi`).
 ffi = ["dep:orbit-ffi"]
 # With `ffi`: link the system's shared libffi rather than a static copy built
 # from bundled sources.

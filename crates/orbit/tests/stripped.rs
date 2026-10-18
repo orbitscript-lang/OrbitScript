@@ -2,20 +2,25 @@
 //! chunk), as lua5.5 reports them: `error` adds no position, and a runtime
 //! error says `chunk:?:`.
 
-use orbit::{Lua, compile};
-use orbit_lua_syntax::ParseOptions;
+use orbit::{Chunk, Compiler, Config, Language, Runtime};
+use orbit_bytecode::format;
 
 fn run_stripped(src: &str) -> String {
-    let mut chunk = compile(src.as_bytes(), "?", &ParseOptions::default()).unwrap();
+    let mut chunk = Compiler
+        .compile(src.as_bytes(), "?", Language::Lua)
+        .unwrap();
+    // Only the line information goes, as in the chunk a C host strips by
+    // hand; names of locals stay.
     for p in &mut chunk.protos {
         p.debug.lines.clear();
     }
-    let mut lua = Lua::new();
-    let vm = lua.vm();
-    let f = vm.load(&chunk);
-    let out = lua.call(f, &[]).unwrap();
-    let vm = lua.vm();
-    String::from_utf8_lossy(&vm.to_display(out[0])).into_owned()
+    let bytes = format::encode(&chunk, false);
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    iso.scope(|s| {
+        let out = s.load(Chunk::new(&bytes).name("=?"))?.call(())?;
+        out[0].get()
+    })
+    .unwrap()
 }
 
 #[test]
