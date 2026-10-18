@@ -44,6 +44,8 @@ debug = ["orbit-runtime/debug"]
 dump = ["orbit-runtime/dump"]
 verify = ["orbit-runtime/verify"]
 verify-flow = ["orbit-runtime/verify-flow"]
+# The debugger engine (ADR-12), for the runtime backend.
+debugger = ["orbit-runtime/debugger"]
 
 [lints]
 workspace = true

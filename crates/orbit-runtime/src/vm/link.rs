@@ -151,6 +151,8 @@ pub(crate) fn link(
                     ncells: u.ncells,
                     builtin,
                     refuses_yield: builtin,
+                    #[cfg(feature = "debugger")]
+                    debug_mark: Default::default(),
                 }),
                 children,
                 captures: u.captures.as_slice().into(),
@@ -163,6 +165,11 @@ pub(crate) fn link(
                 debug: Rc::new(u.debug.clone()),
             };
             linked[i] = Some(heap.alloc(proto));
+        }
+        #[cfg(feature = "debugger")]
+        if rt.debug.watch && !builtin {
+            let protos: Vec<Gc<Proto>> = linked.iter().flatten().copied().collect();
+            rt.debug.linked(heap, &protos);
         }
         let main = linked[0].expect("chunk has a main function");
         let main_proto = heap.get(main);

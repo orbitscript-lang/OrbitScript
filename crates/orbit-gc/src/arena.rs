@@ -282,6 +282,8 @@ pub trait Store<T> {
     /// Store `v` in slot `i`, allocating its page if it is new or was
     /// released. The collector decides which pages exist.
     fn put(&mut self, i: u32, v: T) -> Gc<T>;
+    /// Call `f` on every object in an occupied slot, in slot order.
+    fn for_each(&self, f: &mut dyn FnMut(&T));
 }
 
 impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
@@ -316,6 +318,10 @@ impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
         let (p, o) = Self::split(gc.index);
         self.gens.of(p, o) == Some(gc.generation)
             && matches!(self.slots.get(gc.index as usize), Some(Some(_)))
+    }
+
+    fn for_each(&self, f: &mut dyn FnMut(&T)) {
+        self.slots.iter().flatten().for_each(f);
     }
 
     #[inline]

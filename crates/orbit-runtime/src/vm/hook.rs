@@ -133,6 +133,11 @@ impl Vm {
             && (self.rt.stack.hook.mask & INTERRUPT != 0
                 || self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed))
         {
+            // A debugger's pause rides on the interrupt flag.
+            #[cfg(feature = "debugger")]
+            if self.take_pause() {
+                return Ok(());
+            }
             let handled = match self.rt.interrupt_handler {
                 Some(handler) => {
                     self.clear_interrupt();
@@ -256,6 +261,19 @@ impl Vm {
             return Ok(());
         }
         let ev = self.new_str(event);
+        let line = line.map_or(Value::Nil, |l| Value::Int(l as i64));
+        self.rt.stack.hook.active = true;
+        self.rt.stack.hook.transfer = transfer;
+        let r = self.call_under_marker(&[h.func, ev, line]);
+        let hook = &mut self.rt.stack.hook;
+        hook.active = false;
+        hook.transfer = None;
+        r
+    }
+
+    /// Call `call[0]` with the rest as arguments above everything live on
+    /// the stack, under a [`FrameKind::Hook`] marker, discarding results.
+    pub(crate) fn call_under_marker(&mut self, call: &[Value]) -> Result<(), LuaError> {
         // Above everything live: the top frame's registers and the last
         // open results (or a native's window).
         let top = self.rt.stack.frames.last().expect("a frame");
@@ -280,16 +298,10 @@ impl Vm {
             extra: 0,
             cdepth,
         });
-        let line = line.map_or(Value::Nil, |l| Value::Int(l as i64));
-        self.rt.top = self.rt.stack.write(at, &[h.func, ev, line]);
-        self.rt.stack.hook.active = true;
-        self.rt.stack.hook.transfer = transfer;
+        self.rt.top = self.rt.stack.write(at, call);
         // The marker is a boundary: the call returns, or its error unwinds,
         // into it, and either pops it.
-        let r = self.call_at(at, 2);
-        let hook = &mut self.rt.stack.hook;
-        hook.active = false;
-        hook.transfer = None;
+        let r = self.call_at(at, call.len() - 1);
         self.rt.top = old_top;
         r
     }
@@ -348,5 +360,26 @@ impl Vm {
         let r = f(self, fi);
         self.rt.stack.frames.truncate(fi);
         r
+    }
+}
+
+#[cfg(not(feature = "debugger"))]
+impl Vm {
+    /// Whether the code at hand must run in the hooked loop: without a
+    /// debugger, whether a hook is set.
+    #[inline(always)]
+    pub(crate) fn hooked_here(
+        &self,
+        _code: &crate::object::ProtoCode,
+        _closure: crate::object::Gc<crate::object::Closure>,
+        _depth: usize,
+    ) -> bool {
+        self.rt.stack.hook.armed()
+    }
+
+    /// Whether the top frame must run in the hooked loop.
+    #[inline(always)]
+    pub(crate) fn top_hooked(&self) -> bool {
+        self.rt.stack.hook.armed()
     }
 }

@@ -202,6 +202,7 @@ dependencies = [
  "orbit-bytecode",
  "orbit-compiler",
  "orbit-gc",
+ "orbit-lua-syntax",
  "orbit-orb-syntax",
 ]
 
