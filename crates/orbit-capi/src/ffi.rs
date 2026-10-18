@@ -1,19 +1,22 @@
 //! The crate's only `unsafe` (ADR-6 exception, Tym 2026-10-10): the entry
 //! points `csrc/capi.c` calls, the call into C, and dynamic loading.
 //!
-//! Each entry point gets back the running native's context from the state
-//! pointer, does its work through the safe functions in [`crate::api`],
-//! and reports an error by leaving it pending and setting the state's
-//! status, never by unwinding: the C side turns that into a `longjmp` once
-//! this function has returned.
+//! Each entry point gets back the running native's [`Stack`] from the
+//! state pointer, does its work through the stack API (and the C-specific
+//! glue in [`crate::api`]), and reports an error by leaving it pending and
+//! setting the state's status, never by unwinding: the C side turns that
+//! into a `longjmp` once this function has returned.
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
 
-use orbit_runtime::object::{Gc, Thread, Value};
-use orbit_runtime::vm::{CallOutcome, CoStatus, LuaError, NativeCtx, NativeReturn, Vm};
+use orbit::ThreadStatus;
+use orbit::stack::{
+    Continuation, Control, InterruptHandler, Native, NativeRef, Outcome, Raised, Return, Stack,
+    Status, ThreadRef, ThreadWindow, Type,
+};
 
 use crate::api::{self, CStrCopy, Res, Shared, abi};
 
@@ -58,30 +61,36 @@ unsafe extern "C" {
 /// `lua_Hook`.
 type HookFn = unsafe extern "C" fn(*mut LState, *mut c_void);
 
+/// The stack of a running C function, as the bridge keeps it between the
+/// call into C and the entry points C calls back.
+type StackPtr = *mut Stack<'static>;
+
 /// What the C side reaches through a state: the running native and the
 /// API's state.
 #[derive(Debug)]
 pub(crate) struct Bridge {
     l: Cell<*mut LState>,
-    /// The native running a C function, null between calls.
-    ctx: Cell<*mut NativeCtx<'static>>,
+    /// The stack of the native running a C function, null between calls.
+    ctx: Cell<StackPtr>,
     st: Shared,
-    /// In a state C created (ADR-10), the host's own context, which
+    /// In a state C created (ADR-10), the host's own stack, which
     /// [`Bridge::ctx`] holds between calls; null otherwise.
-    host: Cell<*mut NativeCtx<'static>>,
+    host: Cell<StackPtr>,
+    /// In a state C created, its isolate, which the state owns.
+    isolate: Cell<*mut orbit::Isolate>,
     /// The native standing for each C hook function installed so far.
-    hooks: std::cell::RefCell<Vec<(usize, Value)>>,
-    /// While a C hook runs, its native's context: there, as in Lua, level 0
+    hooks: RefCell<Vec<(usize, NativeRef)>>,
+    /// While a C hook runs, its native's stack: there, as in Lua, level 0
     /// is the hooked function, one below the native's own.
-    hook_ctx: Cell<*mut NativeCtx<'static>>,
+    hook_ctx: Cell<StackPtr>,
     /// The main thread, which [`Bridge::l`] stands for.
-    main: Cell<Option<Gc<Thread>>>,
+    main: ThreadRef,
     /// The state standing for each other thread C has seen, by the
     /// thread's slot. A collected thread's state is reused by whichever
     /// thread takes its slot; all are freed with the bridge.
     threads: RefCell<HashMap<u32, ThreadState>>,
     /// Each state's thread, by the state's address.
-    by_l: RefCell<HashMap<usize, Gc<Thread>>>,
+    by_l: RefCell<HashMap<usize, ThreadRef>>,
     /// What the running C function asked for by jumping out of it
     /// (`lua_yieldk`, or `lua_callk`/`lua_pcallk` with a continuation).
     request: Cell<Option<Request>>,
@@ -93,7 +102,7 @@ pub(crate) struct Bridge {
 /// A thread other than the main one, as C sees it.
 #[derive(Debug)]
 struct ThreadState {
-    thread: Gc<Thread>,
+    thread: ThreadRef,
     l: *mut LState,
     /// Where its stack starts for C, when the VM can't tell: after it died
     /// with an error, just below the error C was handed.
@@ -127,7 +136,7 @@ pub(crate) enum Request {
 /// starts at `at`.
 #[derive(Debug, Clone, Copy)]
 struct Kont {
-    thread: Gc<Thread>,
+    thread: ThreadRef,
     at: usize,
     k: KFn,
     kctx: isize,
@@ -142,9 +151,15 @@ pub(crate) enum COut {
     Suspend(Request),
 }
 
-/// Owns a VM's [`Bridge`] and its C state, from [`orbit_runtime::vm::Runtime::ext`].
+/// Owns an isolate's [`Bridge`] and its C state, as an isolate extension.
 #[derive(Debug)]
 struct BridgeHandle(*const Bridge);
+
+impl Default for BridgeHandle {
+    fn default() -> BridgeHandle {
+        BridgeHandle(std::ptr::null())
+    }
+}
 
 impl Drop for BridgeHandle {
     fn drop(&mut self) {
@@ -162,14 +177,11 @@ impl Drop for BridgeHandle {
     }
 }
 
-pub(crate) fn install(vm: &mut Vm) {
-    let wake = vm.interrupt_flag().cast::<u8>();
-    let main = vm.main_thread();
-    let h = vm
-        .rt
-        .ext
-        .get_or_insert_with(|| BridgeHandle(std::ptr::null()));
-    if !h.0.is_null() {
+pub(crate) fn install(s: &mut Stack<'_>) {
+    let main = s.main_thread();
+    let mut ctl = s.control();
+    let wake = ctl.interrupt_flag().cast::<u8>();
+    if !ctl.extension::<BridgeHandle>().0.is_null() {
         return;
     }
     let b = Box::into_raw(Box::new(Bridge {
@@ -177,9 +189,10 @@ pub(crate) fn install(vm: &mut Vm) {
         ctx: Cell::new(std::ptr::null_mut()),
         st: Shared::default(),
         host: Cell::new(std::ptr::null_mut()),
+        isolate: Cell::new(std::ptr::null_mut()),
         hooks: Default::default(),
         hook_ctx: Cell::new(std::ptr::null_mut()),
-        main: Cell::new(Some(main)),
+        main,
         threads: Default::default(),
         by_l: Default::default(),
         request: Cell::new(None),
@@ -197,59 +210,58 @@ pub(crate) fn install(vm: &mut Vm) {
     let l = unsafe { orbit_capi_newstate(b as *const c_void, &TABLE) };
     assert!(!l.is_null(), "out of memory creating the C API state");
     // SAFETY: `b` is live and not yet shared. The interrupt flag lives as
-    // long as the VM, which outlives the state.
+    // long as the isolate, which outlives the state.
     unsafe {
         (*b).l.set(l);
         orbit_capi_set_wake(l, wake);
     }
-    h.0 = b;
-    vm.rt.interrupt_handler = Some(on_interrupt);
+    ctl.extension::<BridgeHandle>().0 = b;
+    ctl.set_interrupt_handler::<OnInterrupt>();
     // Modules read the main thread from the registry, as in Lua.
-    let (reg, main) = (vm.rt.registry, vm.main_thread());
-    vm.table_set(reg, Value::Int(abi::RIDX_MAINTHREAD), Value::Thread(main));
+    ctl.publish_main_thread();
 }
 
-/// The VM's bridge, if the C API is installed.
-fn bridge<'a>(vm: &Vm) -> Option<&'a Bridge> {
-    match vm.rt.ext.get::<BridgeHandle>() {
-        // SAFETY: the handle keeps the bridge alive as long as the runtime.
-        Some(h) if !h.0.is_null() => Some(unsafe { &*h.0 }),
-        _ => None,
-    }
+/// The isolate's bridge, if the C API is installed.
+fn bridge<'a>(ctl: &mut Control<'_>) -> Option<&'a Bridge> {
+    let h = ctl.extension::<BridgeHandle>().0;
+    // SAFETY: the handle keeps the bridge alive as long as the isolate.
+    (!h.is_null()).then(|| unsafe { &*h })
 }
 
-/// Run `call` on the C state with the native's context current, as a C
+/// Run `call` on the C state with the native's stack current, as a C
 /// function's call does; an error it raised comes back as `Err`.
-fn run_c(
-    ctx: &mut NativeCtx<'_>,
-    call: impl FnOnce(*mut LState) -> c_int,
-) -> Result<COut, LuaError> {
-    let Some(b) = bridge(ctx.vm) else {
-        return Err(ctx.error("the C API is not installed in this VM"));
+fn run_c(s: &mut Stack<'_>, call: impl FnOnce(*mut LState) -> c_int) -> Res<COut> {
+    let Some(b) = bridge(&mut s.control()) else {
+        return Err(s.error("the C API is not installed in this VM"));
     };
-    let l = state_for(b, ctx.running().0);
-    // The native's context, for the entry points C calls; restored after,
+    let l = state_for(b, s.running_thread());
+    // The native's stack, for the entry points C calls; restored after,
     // so nested C calls each see their own.
-    let raw = (ctx as *mut NativeCtx<'_>).cast::<NativeCtx<'static>>();
+    let raw = (s as *mut Stack<'_>).cast::<Stack<'static>>();
     let prev = b.ctx.replace(raw);
     let mark = b.st.borrow().strs.len();
     let n = call(l);
     b.ctx.set(prev);
     b.st.borrow_mut().strs.truncate(mark);
-    take_hook(b, ctx.vm, true);
+    take_hook(b, &mut s.control(), true);
     if n < 0 {
         if let Some(r) = b.request.take() {
             return Ok(COut::Suspend(r));
         }
-        let v = b.st.borrow_mut().pending.take().unwrap_or(Value::Nil);
-        return Err(ctx.error_value(v));
+        return Err(match b.st.borrow_mut().pending.take() {
+            Some(e) => e,
+            None => {
+                s.push_nil();
+                s.error_from_top()
+            }
+        });
     }
     Ok(COut::Ret(n as usize))
 }
 
 /// Call C function `f` with the native's window as its stack.
-pub(crate) fn invoke(ctx: &mut NativeCtx<'_>, f: u64) -> Result<COut, LuaError> {
-    run_c(ctx, |l| {
+pub(crate) fn invoke(s: &mut Stack<'_>, f: u64) -> Res<COut> {
+    run_c(s, |l| {
         // SAFETY: `f` came from a C module as a `lua_CFunction`
         // (lua_pushcclosure or dlsym); calling it is what loading the
         // module asked for.
@@ -262,28 +274,25 @@ pub(crate) fn invoke(ctx: &mut NativeCtx<'_>, f: u64) -> Result<COut, LuaError> 
 
 /// What the native running a C function does once C is done: return its
 /// results, or do what it asked for by jumping out.
-pub(crate) fn finish(ctx: &mut NativeCtx<'_>, out: COut) -> Result<NativeReturn, LuaError> {
+pub(crate) fn finish(s: &mut Stack<'_>, out: COut) -> Res<Return> {
     match out {
         COut::Ret(n) => {
-            if n > ctx.len() {
-                return Err(ctx.error("C function returned more results than its stack holds"));
+            if n > s.top() as usize {
+                return Err(s.error("C function returned more results than its stack holds"));
             }
             // Variables the function marked with lua_toclose close as it
             // returns.
-            ctx.close_from(0)?;
-            Ok(NativeReturn::Return(n))
+            s.close_all()?;
+            Ok(Return::values(n))
         }
-        COut::Suspend(Request::Yield { n, k: None, .. }) => Ok(NativeReturn::Yield { nvals: n }),
+        COut::Suspend(Request::Yield { n, k: None, .. }) => Ok(Return::yield_values(n)),
         COut::Suspend(Request::Yield {
             n,
             k: Some(k),
             kctx,
         }) => {
-            push_kont(ctx, k, kctx, 0);
-            Ok(NativeReturn::YieldThen {
-                nvals: n,
-                k: c_yield_k,
-            })
+            push_kont(s, k, kctx, 0);
+            Ok(Return::yield_then::<YieldK>(n))
         }
         COut::Suspend(Request::Call {
             nargs,
@@ -292,37 +301,25 @@ pub(crate) fn finish(ctx: &mut NativeCtx<'_>, out: COut) -> Result<NativeReturn,
             k,
             kctx,
         }) => {
-            push_kont(ctx, k, kctx, nresults);
-            // The function comes out from below its arguments.
-            let at = ctx.len() - nargs - 1;
-            let f = ctx.arg(at);
-            for i in at..ctx.len() - 1 {
-                let v = ctx.arg(i + 1);
-                ctx.set(i, v);
-            }
-            let len = ctx.len();
-            ctx.truncate(len - 1);
-            Ok(NativeReturn::CallThenYieldable {
-                f,
-                nargs,
-                k: c_call_k,
-                protected,
-            })
+            push_kont(s, k, kctx, nresults);
+            Ok(Return::call_then::<CallK>(nargs, protected))
         }
     }
 }
 
-/// Keep continuation `k` for the C function running in `ctx` until the
-/// VM comes back to it. Entries of dead threads, and ones left by
-/// functions an error unwound at or above this one, go.
-fn push_kont(ctx: &mut NativeCtx<'_>, k: KFn, kctx: isize, nresults: i32) {
-    let Some(b) = bridge(ctx.vm) else { return };
-    let (thread, at) = (ctx.running().0, ctx.window_start());
+/// Keep continuation `k` for the C function running on `s` until the VM
+/// comes back to it. Entries of dead threads, and ones left by functions
+/// an error unwound at or above this one, go.
+fn push_kont(s: &mut Stack<'_>, k: KFn, kctx: isize, nresults: i32) {
+    let Some(b) = bridge(&mut s.control()) else {
+        return;
+    };
+    let (thread, at) = (s.running_thread(), s.window_start());
     let mut konts = b.konts.borrow_mut();
     konts.retain(|e| {
         !(e.thread == thread && e.at >= at)
-            && ctx.vm.heap.is_live(e.thread)
-            && ctx.thread_status(e.thread) != CoStatus::Dead
+            && s.thread_is_live(e.thread)
+            && s.thread_status(e.thread) != ThreadStatus::Dead
     });
     konts.push(Kont {
         thread,
@@ -333,62 +330,70 @@ fn push_kont(ctx: &mut NativeCtx<'_>, k: KFn, kctx: isize, nresults: i32) {
     });
 }
 
-/// The continuation [`push_kont`] kept for the C function in `ctx`.
-fn pop_kont(ctx: &mut NativeCtx<'_>) -> Result<Kont, LuaError> {
-    let (thread, at) = (ctx.running().0, ctx.window_start());
-    let found = bridge(ctx.vm).and_then(|b| {
+/// The continuation [`push_kont`] kept for the C function on `s`.
+fn pop_kont(s: &mut Stack<'_>) -> Res<Kont> {
+    let (thread, at) = (s.running_thread(), s.window_start());
+    let found = bridge(&mut s.control()).and_then(|b| {
         let mut konts = b.konts.borrow_mut();
         let i = konts
             .iter()
             .rposition(|e| e.thread == thread && e.at == at)?;
         Some(konts.remove(i))
     });
-    found.ok_or_else(|| ctx.error("C API: a continuation went missing"))
+    found.ok_or_else(|| s.error("C API: a continuation went missing"))
 }
 
 /// Resumed after `lua_yieldk`: run the C continuation.
-fn c_yield_k(ctx: &mut NativeCtx<'_>, o: CallOutcome) -> Result<NativeReturn, LuaError> {
-    let kont = pop_kont(ctx)?;
-    if let CallOutcome::Err(v) = o {
-        return Err(ctx.error_value(v));
+struct YieldK;
+
+impl Continuation for YieldK {
+    fn resume(s: &mut Stack<'_>, o: Outcome) -> Res<Return> {
+        let kont = pop_kont(s)?;
+        if let Outcome::Err(e) = o {
+            return Err(e);
+        }
+        run_k(s, kont, abi::YIELD)
     }
-    run_k(ctx, kont, abi::YIELD)
 }
 
 /// Back from `lua_callk`'s or `lua_pcallk`'s call: run the C continuation
 /// with the results or the error.
-fn c_call_k(ctx: &mut NativeCtx<'_>, o: CallOutcome) -> Result<NativeReturn, LuaError> {
-    let kont = pop_kont(ctx)?;
-    let status = match o {
-        CallOutcome::Ok(n) => {
-            api::adjust(ctx, n, kont.nresults);
-            abi::YIELD
-        }
-        CallOutcome::Err(v) => {
-            let status = api::error_status(ctx, v);
-            ctx.push(v);
-            status
-        }
-    };
-    run_k(ctx, kont, status)
+struct CallK;
+
+impl Continuation for CallK {
+    fn resume(s: &mut Stack<'_>, o: Outcome) -> Res<Return> {
+        let kont = pop_kont(s)?;
+        let status = match o {
+            Outcome::Ok(n) => {
+                s.adjust_results(n, kont.nresults);
+                abi::YIELD
+            }
+            Outcome::Err(e) => {
+                let status = s.status_of(&e) as c_int;
+                s.push_raised(&e);
+                status
+            }
+        };
+        run_k(s, kont, status)
+    }
 }
 
-fn run_k(ctx: &mut NativeCtx<'_>, kont: Kont, status: c_int) -> Result<NativeReturn, LuaError> {
-    let out = run_c(ctx, |l| {
+fn run_k(s: &mut Stack<'_>, kont: Kont, status: c_int) -> Res<Return> {
+    let out = run_c(s, |l| {
         // SAFETY: `k` came from C as a `lua_KFunction` (lua_yieldk,
         // lua_callk or lua_pcallk) for the function it continues.
         unsafe { orbit_capi_trampoline_k(l, kont.k, status, kont.kctx) }
     })?;
-    finish(ctx, out)
+    finish(s, out)
 }
 
 /// The state standing for thread `t`, made the first time C sees it.
-fn state_for(b: &Bridge, t: Gc<Thread>) -> *mut LState {
-    if b.main.get() == Some(t) {
+fn state_for(b: &Bridge, t: ThreadRef) -> *mut LState {
+    if b.main == t {
         return b.l.get();
     }
     let mut threads = b.threads.borrow_mut();
-    let e = threads.entry(t.index()).or_insert_with(|| ThreadState {
+    let e = threads.entry(t.slot()).or_insert_with(|| ThreadState {
         thread: t,
         // SAFETY: the main state is live; the new one is freed with the
         // bridge.
@@ -411,9 +416,9 @@ fn state_for(b: &Bridge, t: Gc<Thread>) -> *mut LState {
 }
 
 /// The thread state `l` stands for.
-fn thread_of(b: &Bridge, l: *mut LState) -> Gc<Thread> {
+fn thread_of(b: &Bridge, l: *mut LState) -> ThreadRef {
     if l == b.l.get() {
-        return b.main.get().expect("the main thread");
+        return b.main;
     }
     match b.by_l.borrow().get(&(l as usize)) {
         Some(&t) => t,
@@ -424,41 +429,18 @@ fn thread_of(b: &Bridge, l: *mut LState) -> Gc<Thread> {
     }
 }
 
-/// Run `f` on the stack of thread `t` as C sees it ([`NativeCtx::on_thread_window`]).
-fn with_window<R>(
-    b: &Bridge,
-    c: &mut NativeCtx<'_>,
-    t: Gc<Thread>,
-    f: impl FnOnce(&mut NativeCtx<'_>) -> R,
-) -> R {
-    let mut f = Some(f);
-    let mut out = None;
-    on_window(b, c, t, &mut |c| out = f.take().map(|f| f(c)));
-    out.expect("the window ran")
-}
-
 /// Where C's view of thread `t`'s stack starts, if the VM can't tell.
-fn thread_base(b: &Bridge, t: Gc<Thread>) -> Option<usize> {
+fn thread_base(b: &Bridge, t: ThreadRef) -> Option<usize> {
     b.threads
         .borrow()
-        .get(&t.index())
+        .get(&t.slot())
         .filter(|e| e.thread == t)
         .and_then(|e| e.base)
 }
 
-/// [`with_window`]'s one copy of the switch.
-#[inline(never)]
-fn on_window(
-    b: &Bridge,
-    c: &mut NativeCtx<'_>,
-    t: Gc<Thread>,
-    f: &mut dyn FnMut(&mut NativeCtx<'_>),
-) {
-    c.on_thread_window(t, thread_base(b, t), f)
-}
 /// Set what [`ThreadState`] keeps for `t` after a resume or close.
-fn set_thread(b: &Bridge, t: Gc<Thread>, base: Option<usize>, status: c_int) {
-    if let Some(e) = b.threads.borrow_mut().get_mut(&t.index())
+fn set_thread(b: &Bridge, t: ThreadRef, base: Option<usize>, status: c_int) {
+    if let Some(e) = b.threads.borrow_mut().get_mut(&t.slot())
         && e.thread == t
     {
         e.base = base;
@@ -469,7 +451,7 @@ fn set_thread(b: &Bridge, t: Gc<Thread>, base: Option<usize>, status: c_int) {
 /// Install the hook `lua_sethook` asked for, if it asked since the last
 /// look. `clear` lowers the interrupt flag `lua_sethook` raised, which the
 /// interrupt handler has already lowered. Returns whether it asked.
-fn take_hook(b: &Bridge, vm: &mut Vm, clear: bool) -> bool {
+fn take_hook(b: &Bridge, ctl: &mut Control<'_>, clear: bool) -> bool {
     let l = b.l.get();
     // SAFETY: `l` is the bridge's live state; the field is only ever
     // stored to atomically, and a stale read just delays the hook.
@@ -482,34 +464,35 @@ fn take_hook(b: &Bridge, vm: &mut Vm, clear: bool) -> bool {
         return false;
     }
     if clear {
-        vm.clear_interrupt();
+        ctl.clear_interrupt();
     }
-    let func = match f {
-        None => Value::Nil,
-        Some(f) => {
-            let key = f as usize;
-            let mut hooks = b.hooks.borrow_mut();
-            match hooks.iter().find(|(k, _)| *k == key) {
-                Some(&(_, v)) => v,
-                None => {
-                    let v = vm.register_native_with_data("hook", c_hook, [key as u64, 0]);
-                    hooks.push((key, v));
-                    v
-                }
+    let func = f.map(|f| {
+        let key = f as usize;
+        let mut hooks = b.hooks.borrow_mut();
+        match hooks.iter().find(|(k, _)| *k == key) {
+            Some(&(_, v)) => v,
+            None => {
+                let v = ctl.register_native::<CHook>([key as u64, 0]);
+                hooks.push((key, v));
+                v
             }
         }
-    };
+    });
     // Lua's mask bits are the VM's (call 1, return 2, line 4, count 8).
-    vm.set_hook(func, (mask & 0xf) as u8, count.into());
+    ctl.set_hook(func, (mask & 0xf) as u8, count.into());
     true
 }
 
-/// The VM's interrupt handler: a `lua_sethook` from a signal handler
+/// The isolate's interrupt handler: a `lua_sethook` from a signal handler
 /// raised the flag.
-fn on_interrupt(vm: &mut Vm) -> bool {
-    match bridge(vm) {
-        Some(b) => take_hook(b, vm, false),
-        None => false,
+struct OnInterrupt;
+
+impl InterruptHandler for OnInterrupt {
+    fn handle(ctl: &mut Control<'_>) -> bool {
+        match bridge(ctl) {
+            Some(b) => take_hook(b, ctl, false),
+            None => false,
+        }
     }
 }
 
@@ -526,52 +509,52 @@ fn lua_level(b: &Bridge, level: c_int) -> c_int {
 
 /// The native standing for a C hook (its function pointer in the data
 /// word), called as a Lua hook is: `(event, line)`.
-fn c_hook(ctx: &mut NativeCtx<'_>) -> Result<orbit_runtime::vm::NativeReturn, LuaError> {
-    let f = ctx.native_data()[0] as usize;
-    let event = match ctx.arg(0) {
-        Value::Str(s) => match ctx.bytes(s) {
-            b"call" => abi::HOOKCALL,
-            b"return" => abi::HOOKRET,
-            b"line" => abi::HOOKLINE,
-            b"count" => abi::HOOKCOUNT,
-            b"tail call" => abi::HOOKTAILCALL,
-            _ => return Ok(orbit_runtime::vm::NativeReturn::Return(0)),
-        },
-        _ => return Ok(orbit_runtime::vm::NativeReturn::Return(0)),
-    };
-    let line = match ctx.arg(1) {
-        Value::Int(i) => i as c_int,
-        _ => -1,
-    };
-    let raw = (ctx as *mut NativeCtx<'_>).cast::<NativeCtx<'static>>();
-    let prev = bridge(ctx.vm).map(|b| b.hook_ctx.replace(raw));
-    let r = run_c(ctx, |l| {
-        // SAFETY: `f` came from C as a `lua_Hook` (lua_sethook). From the
-        // hook's native, level 1 is the hooked function; lua_getinfo takes
-        // the level plus one.
-        unsafe {
-            let hf = std::mem::transmute::<usize, HookFn>(f);
-            orbit_capi_call_hook(l, hf, event, line, 2)
+struct CHook;
+
+impl Native for CHook {
+    const NAME: &'static str = "hook";
+
+    fn call(s: &mut Stack<'_>) -> Res<Return> {
+        let f = s.native_data()[0] as usize;
+        let event = match s.string_at(1) {
+            Some(b"call") => abi::HOOKCALL,
+            Some(b"return") => abi::HOOKRET,
+            Some(b"line") => abi::HOOKLINE,
+            Some(b"count") => abi::HOOKCOUNT,
+            Some(b"tail call") => abi::HOOKTAILCALL,
+            _ => return Ok(Return::values(0)),
+        };
+        let line = match s.type_at(2) {
+            Type::Number if s.is_integer(2) => s.to_integer(2).unwrap_or(-1) as c_int,
+            _ => -1,
+        };
+        let raw = (s as *mut Stack<'_>).cast::<Stack<'static>>();
+        let prev = bridge(&mut s.control()).map(|b| b.hook_ctx.replace(raw));
+        let r = run_c(s, |l| {
+            // SAFETY: `f` came from C as a `lua_Hook` (lua_sethook). From
+            // the hook's native, level 1 is the hooked function;
+            // lua_getinfo takes the level plus one.
+            unsafe {
+                let hf = std::mem::transmute::<usize, HookFn>(f);
+                orbit_capi_call_hook(l, hf, event, line, 2)
+            }
+        });
+        if let (Some(b), Some(p)) = (bridge(&mut s.control()), prev) {
+            b.hook_ctx.set(p);
         }
-    });
-    if let (Some(b), Some(p)) = (bridge(ctx.vm), prev) {
-        b.hook_ctx.set(p);
+        if let COut::Suspend(_) = r? {
+            return Err(s.error("attempt to yield from a C hook"));
+        }
+        Ok(Return::values(0))
     }
-    if let COut::Suspend(_) = r? {
-        return Err(ctx.error("attempt to yield from a C hook"));
-    }
-    Ok(orbit_runtime::vm::NativeReturn::Return(0))
 }
 
-/// The context and bridge of the C function running on state `l`. Aborts
+/// The stack and bridge of the C function running on state `l`. Aborts
 /// if none is (C code kept `L` and used it after its call returned).
 ///
 /// # Safety
 /// `l` is a state made by [`install`].
-unsafe fn enter<'a>(
-    l: *mut LState,
-    here: bool,
-) -> (&'a Bridge, &'a mut NativeCtx<'static>, Window) {
+unsafe fn enter<'a>(l: *mut LState, here: bool) -> (&'a Bridge, &'a mut Stack<'static>, Window) {
     // SAFETY: per the contract; the bridge lives as long as the state.
     let b = unsafe { &*((*l).rs as *const Bridge) };
     let c = b.ctx.get();
@@ -579,30 +562,30 @@ unsafe fn enter<'a>(
         eprintln!("OrbitScript: Lua C API called outside a C function call");
         std::process::abort();
     }
-    // SAFETY: set by `invoke` from a live `&mut NativeCtx` that is not used
+    // SAFETY: set by `run_c` from a live `&mut Stack` that is not used
     // again until the C function returns.
     let c = unsafe { &mut *c };
-    take_hook(b, c.vm, true);
+    take_hook(b, &mut c.control(), true);
     let other = if here { None } else { foreign(b, c, l) };
-    let window = other.map(|t| (t, c.enter_thread_window(t, thread_base(b, t))));
+    let window = other.map(|t| (t, c.enter_thread(t, thread_base(b, t))));
     (b, c, window)
 }
 
 /// The other thread an entry point's body works on, if any.
-type Window = Option<(Gc<Thread>, orbit_runtime::vm::WindowSave)>;
+type Window = Option<(ThreadRef, ThreadWindow)>;
 
 /// The end of an entry point that [`enter`] began.
-fn leave(b: &Bridge, c: &mut NativeCtx<'static>, window: Window) {
+fn leave(b: &Bridge, c: &mut Stack<'static>, window: Window) {
     if let Some((t, saved)) = window {
-        c.leave_thread_window(t, saved);
+        c.leave_thread(t, saved);
     }
     host_prune(b, c);
 }
 
 /// The thread `l` stands for, if it isn't the running one.
-fn foreign(b: &Bridge, c: &NativeCtx<'_>, l: *mut LState) -> Option<Gc<Thread>> {
-    let running = c.running().0;
-    if l == b.l.get() && b.main.get() == Some(running) {
+fn foreign(b: &Bridge, c: &Stack<'_>, l: *mut LState) -> Option<ThreadRef> {
+    let running = c.running_thread();
+    if l == b.l.get() && b.main == running {
         return None;
     }
     let t = thread_of(b, l);
@@ -620,8 +603,8 @@ fn suspend(l: *mut LState, req: Request) {
     }
 }
 
-fn fail(l: *mut LState, b: &Bridge, e: LuaError) {
-    b.st.borrow_mut().pending = Some(e.value);
+fn fail(l: *mut LState, b: &Bridge, e: Raised) {
+    b.st.borrow_mut().pending = Some(e);
     // SAFETY: `l` is the live state the entry point was called with.
     unsafe { (*l).status = 1 };
 }
@@ -657,12 +640,12 @@ macro_rules! entry {
 /// Between calls in a state C created: let the collector run, and drop
 /// string copies no string on the host's stack needs any more
 /// ([`api::State::prune`]).
-fn host_prune(b: &Bridge, c: &mut NativeCtx<'static>) {
+fn host_prune(b: &Bridge, c: &mut Stack<'static>) {
     let host = b.host.get();
     if host.is_null() || !std::ptr::eq(b.ctx.get(), host) {
         return;
     }
-    c.vm.host_safepoint();
+    c.safepoint();
     {
         let st = b.st.borrow();
         if st.strs.len() < 2 * st.kept + 16 {
@@ -670,24 +653,26 @@ fn host_prune(b: &Bridge, c: &mut NativeCtx<'static>) {
         }
     }
     // Strings on the stacks of the threads C has seen count too.
-    let threads: Vec<Gc<Thread>> = b
+    let threads: Vec<(ThreadRef, Option<usize>)> = b
         .threads
         .borrow()
         .values()
-        .map(|e| e.thread)
-        .filter(|&t| c.vm.heap.is_live(t) && c.thread_status(t) != CoStatus::Running)
+        .filter(|e| {
+            c.thread_is_live(e.thread) && c.thread_status(e.thread) != ThreadStatus::Running
+        })
+        .map(|e| (e.thread, e.base))
         .collect();
     let mut texts: Vec<Vec<u8>> = Vec::new();
-    let mut collect = |c: &mut NativeCtx<'_>| {
-        for i in 0..c.len() {
-            if let Value::Str(s) = c.arg(i) {
-                texts.push(c.bytes(s).to_vec());
+    let mut collect = |c: &mut Stack<'_>| {
+        for i in 1..=c.top() {
+            if let Some(s) = c.string_at(i) {
+                texts.push(s.to_vec());
             }
         }
     };
     collect(c);
-    for t in threads {
-        with_window(b, c, t, &mut collect);
+    for (t, base) in threads {
+        c.on_thread(t, base, &mut collect);
     }
     let texts: Vec<&[u8]> = texts.iter().map(Vec::as_slice).collect();
     b.st.borrow_mut().prune(&texts);
@@ -952,63 +937,63 @@ extern "C" fn orbit_r_version(l: *mut LState) -> f64 {
 }
 
 extern "C" fn orbit_r_absindex(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::absindex(c, idx)))
+    entry!(l, 0, |_b, c| Ok(c.abs_index(idx)))
 }
 
 extern "C" fn orbit_r_gettop(l: *mut LState) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::gettop(c)))
+    entry!(l, 0, |_b, c| Ok(c.top()))
 }
 
 extern "C" fn orbit_r_settop(l: *mut LState, idx: c_int) {
-    entry!(l, (), |_b, c| api::settop(c, idx))
+    entry!(l, (), |_b, c| c.set_top(idx))
 }
 
 extern "C" fn orbit_r_pushvalue(l: *mut LState, idx: c_int) {
     entry!(l, (), |_b, c| {
-        api::pushvalue(c, idx);
+        c.push_copy(idx);
         Ok(())
     })
 }
 
 extern "C" fn orbit_r_rotate(l: *mut LState, idx: c_int, n: c_int) {
-    entry!(l, (), |_b, c| api::rotate(c, idx, n))
+    entry!(l, (), |_b, c| c.rotate(idx, n))
 }
 
 extern "C" fn orbit_r_copy(l: *mut LState, from: c_int, to: c_int) {
-    entry!(l, (), |_b, c| api::copy(c, from, to))
+    entry!(l, (), |_b, c| c.copy(from, to))
 }
 
 extern "C" fn orbit_r_checkstack(l: *mut LState, n: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::checkstack(c, n) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.check_room(n) as c_int))
 }
 
 extern "C" fn orbit_r_isnumber(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::tonumber(c, idx).is_some() as c_int))
+    entry!(l, 0, |_b, c| Ok(c.to_number(idx).is_some() as c_int))
 }
 
 extern "C" fn orbit_r_isstring(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::isstring(c, idx) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.is_string(idx) as c_int))
 }
 
 extern "C" fn orbit_r_iscfunction(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::iscfunction(c, idx) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.is_native_function(idx) as c_int))
 }
 
 extern "C" fn orbit_r_isinteger(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::isinteger(c, idx) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.is_integer(idx) as c_int))
 }
 
 extern "C" fn orbit_r_isuserdata(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::isuserdata(c, idx) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.is_userdata(idx) as c_int))
 }
 
 extern "C" fn orbit_r_type(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::type_(c, idx)))
+    entry!(l, 0, |_b, c| Ok(api::type_code(c.type_at(idx))))
 }
 
 extern "C" fn orbit_r_tonumberx(l: *mut LState, idx: c_int, isnum: *mut c_int) -> f64 {
     entry!(l, 0.0, |_b, c| {
-        let n = api::tonumber(c, idx);
+        let n = c.to_number(idx);
         set_flag(isnum, n.is_some());
         Ok(n.unwrap_or(0.0))
     })
@@ -1016,20 +1001,20 @@ extern "C" fn orbit_r_tonumberx(l: *mut LState, idx: c_int, isnum: *mut c_int) -
 
 extern "C" fn orbit_r_tointegerx(l: *mut LState, idx: c_int, isnum: *mut c_int) -> i64 {
     entry!(l, 0, |_b, c| {
-        let n = api::tointeger(c, idx);
+        let n = c.to_integer(idx);
         set_flag(isnum, n.is_some());
         Ok(n.unwrap_or(0))
     })
 }
 
 extern "C" fn orbit_r_toboolean(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::toboolean(c, idx) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.to_boolean(idx) as c_int))
 }
 
 extern "C" fn orbit_r_tolstring(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
-        Ok(match api::tolstring(c, idx)? {
-            Some(s) => hand_out_value(&b.st, c.bytes(s), len),
+        Ok(match c.to_str(idx)? {
+            Some(s) => hand_out_value(&b.st, s, len),
             None => {
                 if !len.is_null() {
                     // SAFETY: C passed a pointer to a size_t.
@@ -1042,52 +1027,54 @@ extern "C" fn orbit_r_tolstring(l: *mut LState, idx: c_int, len: *mut usize) -> 
 }
 
 extern "C" fn orbit_r_rawlen(l: *mut LState, idx: c_int) -> u64 {
-    entry!(l, 0, |_b, c| Ok(api::rawlen(c, idx)))
+    entry!(l, 0, |_b, c| Ok(c.raw_len(idx)))
 }
 
 extern "C" fn orbit_r_tocfunction(l: *mut LState, idx: c_int) -> Option<CFn> {
-    entry!(l, None, |_b, c| Ok(api::tocfunction(c, idx).map(|f| {
-        // SAFETY: the address came from C as a `lua_CFunction`
-        // (lua_pushcclosure), kept where scripts can't change it.
-        unsafe { std::mem::transmute::<usize, CFn>(f as usize) }
-    })))
+    entry!(l, None, |_b, c| Ok(c
+        .closure_data_of::<crate::CFunction>(idx)
+        .map(|f| {
+            // SAFETY: the address came from C as a `lua_CFunction`
+            // (lua_pushcclosure), kept where scripts can't change it.
+            unsafe { std::mem::transmute::<usize, CFn>(f as usize) }
+        })))
 }
 
 extern "C" fn orbit_r_touserdata(l: *mut LState, idx: c_int) -> *mut c_void {
-    entry!(l, std::ptr::null_mut(), |_b, c| Ok(api::touserdata(c, idx)))
+    entry!(l, std::ptr::null_mut(), |_b, c| Ok(c.to_userdata(idx)))
 }
 
 extern "C" fn orbit_r_topointer(l: *mut LState, idx: c_int) -> *const c_void {
     entry!(l, std::ptr::null(), |_b, c| Ok(
-        api::topointer(c, idx) as *const c_void
+        c.to_pointer(idx) as *const c_void
     ))
 }
 
 extern "C" fn orbit_r_rawequal(l: *mut LState, a: c_int, b_: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::rawequal(c, a, b_) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.raw_equal(a, b_) as c_int))
 }
 
 extern "C" fn orbit_r_compare(l: *mut LState, a: c_int, b_: c_int, op: c_int) -> c_int {
-    entry!(l, 0, |b, c| api::compare(c, a, b_, op).map(|r| r as c_int))
+    entry!(l, 0, |_b, c| api::compare(c, a, b_, op).map(|r| r as c_int))
 }
 
 extern "C" fn orbit_r_pushnil(l: *mut LState) {
     entry!(l, (), |_b, c| {
-        c.push(Value::Nil);
+        c.push_nil();
         Ok(())
     })
 }
 
 extern "C" fn orbit_r_pushnumber(l: *mut LState, n: f64) {
     entry!(l, (), |_b, c| {
-        c.push(Value::Float(n));
+        c.push_number(n);
         Ok(())
     })
 }
 
 extern "C" fn orbit_r_pushinteger(l: *mut LState, n: i64) {
     entry!(l, (), |_b, c| {
-        c.push(Value::Int(n));
+        c.push_integer(n);
         Ok(())
     })
 }
@@ -1100,8 +1087,8 @@ extern "C" fn orbit_r_pushlstring(l: *mut LState, s: *const c_char, len: usize) 
             // SAFETY: C passed `len` readable bytes at `s`.
             unsafe { std::slice::from_raw_parts(s as *const u8, len) }
         };
-        let st = api::pushstr(c, bytes);
-        Ok(hand_out_value(&b.st, c.bytes(st), std::ptr::null_mut()))
+        let st = c.push_bytes(bytes);
+        Ok(hand_out_value(&b.st, st, std::ptr::null_mut()))
     })
 }
 
@@ -1114,14 +1101,14 @@ extern "C" fn orbit_r_pushcclosure(l: *mut LState, f: Option<CFn>, n: c_int) {
 
 extern "C" fn orbit_r_pushboolean(l: *mut LState, v: c_int) {
     entry!(l, (), |_b, c| {
-        c.push(Value::Bool(v != 0));
+        c.push_boolean(v != 0);
         Ok(())
     })
 }
 
 extern "C" fn orbit_r_pushlightuserdata(l: *mut LState, p: *mut c_void) {
     entry!(l, (), |_b, c| {
-        c.push(api::light(p as usize));
+        c.push_light_userdata(p as usize);
         Ok(())
     })
 }
@@ -1129,112 +1116,96 @@ extern "C" fn orbit_r_pushlightuserdata(l: *mut LState, p: *mut c_void) {
 extern "C" fn orbit_r_getglobal(l: *mut LState, name: *const c_char) -> c_int {
     // SAFETY: C passes a NUL-terminated name.
     let name = unsafe { cbytes(name) };
-    entry!(l, 0, |b, c| api::getglobal(c, name))
+    entry!(l, 0, |_b, c| c.get_global(name).map(api::type_code))
 }
 
 extern "C" fn orbit_r_gettable(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |b, c| api::gettable(c, idx))
+    entry!(l, 0, |_b, c| c.get_table(idx).map(api::type_code))
 }
 
 extern "C" fn orbit_r_getfield(l: *mut LState, idx: c_int, k: *const c_char) -> c_int {
     // SAFETY: C passes a NUL-terminated key.
     let k = unsafe { cbytes(k) };
-    entry!(l, 0, |b, c| {
-        let obj = api_get(c, idx);
-        let key = c.new_str(k);
-        api::gettable_with(c, obj, key)
-    })
+    entry!(l, 0, |b, c| { c.get_field(idx, k).map(api::type_code) })
 }
 
 extern "C" fn orbit_r_geti(l: *mut LState, idx: c_int, n: i64) -> c_int {
-    entry!(l, 0, |b, c| {
-        let obj = api_get(c, idx);
-        api::gettable_with(c, obj, Value::Int(n))
-    })
+    entry!(l, 0, |b, c| { c.get_index(idx, n).map(api::type_code) })
 }
 
 extern "C" fn orbit_r_rawget(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| api::rawget(c, idx))
+    entry!(l, 0, |_b, c| c.raw_get(idx).map(api::type_code))
 }
 
 extern "C" fn orbit_r_rawgeti(l: *mut LState, idx: c_int, n: i64) -> c_int {
-    entry!(l, 0, |_b, c| api::rawget_with(c, idx, Value::Int(n)))
+    entry!(l, 0, |_b, c| c.raw_get_index(idx, n).map(api::type_code))
 }
 
 extern "C" fn orbit_r_rawgetp(l: *mut LState, idx: c_int, p: *const c_void) -> c_int {
-    entry!(l, 0, |_b, c| api::rawget_with(
-        c,
-        idx,
-        api::light(p as usize)
-    ))
+    entry!(l, 0, |_b, c| c
+        .raw_get_light(idx, p as usize)
+        .map(api::type_code))
 }
 
 extern "C" fn orbit_r_createtable(l: *mut LState, narr: c_int, nrec: c_int) {
     entry!(l, (), |_b, c| {
-        api::createtable(c, narr, nrec);
+        c.create_table(narr, nrec);
         Ok(())
     })
 }
 
 extern "C" fn orbit_r_newuserdatauv(l: *mut LState, size: usize, nuv: c_int) -> *mut c_void {
-    entry!(l, std::ptr::null_mut(), |_b, c| api::newuserdata(
-        c, size, nuv
-    ))
+    entry!(l, std::ptr::null_mut(), |_b, c| c.new_userdata(size, nuv))
 }
 
 extern "C" fn orbit_r_getmetatable(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::getmetatable(c, idx) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.get_metatable(idx) as c_int))
 }
 
 extern "C" fn orbit_r_getiuservalue(l: *mut LState, idx: c_int, n: c_int) -> c_int {
-    entry!(l, abi::TNONE, |_b, c| Ok(api::getiuservalue(c, idx, n)))
+    entry!(l, abi::TNONE, |_b, c| Ok(api::type_code(
+        c.get_user_value(idx, n)
+    )))
 }
 
 extern "C" fn orbit_r_setglobal(l: *mut LState, name: *const c_char) {
     // SAFETY: C passes a NUL-terminated name.
     let name = unsafe { cbytes(name) };
-    entry!(l, (), |b, c| api::setglobal(c, name))
+    entry!(l, (), |b, c| c.set_global(name))
 }
 
 extern "C" fn orbit_r_settable(l: *mut LState, idx: c_int) {
-    entry!(l, (), |b, c| api::settable(c, idx))
+    entry!(l, (), |b, c| c.set_table(idx))
 }
 
 extern "C" fn orbit_r_setfield(l: *mut LState, idx: c_int, k: *const c_char) {
     // SAFETY: C passes a NUL-terminated key.
     let k = unsafe { cbytes(k) };
-    entry!(l, (), |b, c| api::setfield(c, idx, k))
+    entry!(l, (), |b, c| c.set_field(idx, k))
 }
 
 extern "C" fn orbit_r_seti(l: *mut LState, idx: c_int, n: i64) {
-    entry!(l, (), |b, c| {
-        let obj = api_get(c, idx);
-        api::set_popping(c, obj, Value::Int(n))
-    })
+    entry!(l, (), |b, c| { c.set_index_int(idx, n) })
 }
 
 extern "C" fn orbit_r_rawset(l: *mut LState, idx: c_int) {
-    entry!(l, (), |_b, c| api::rawset(c, idx))
+    entry!(l, (), |_b, c| c.raw_set(idx))
 }
 
 extern "C" fn orbit_r_rawseti(l: *mut LState, idx: c_int, n: i64) {
-    entry!(l, (), |_b, c| api::rawset_with(c, idx, Value::Int(n)))
+    entry!(l, (), |_b, c| c.raw_set_index(idx, n))
 }
 
 extern "C" fn orbit_r_rawsetp(l: *mut LState, idx: c_int, p: *const c_void) {
-    entry!(l, (), |_b, c| api::rawset_with(
-        c,
-        idx,
-        api::light(p as usize)
-    ))
+    entry!(l, (), |_b, c| c.raw_set_light(idx, p as usize))
 }
 
 extern "C" fn orbit_r_setmetatable(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| api::setmetatable(c, idx).map(|()| 1))
+    entry!(l, 0, |_b, c| c.set_metatable(idx).map(|()| 1))
 }
 
 extern "C" fn orbit_r_setiuservalue(l: *mut LState, idx: c_int, n: c_int) -> c_int {
-    entry!(l, 0, |_b, c| api::setiuservalue(c, idx, n).map(c_int::from))
+    entry!(l, 0, |_b, c| c.set_user_value(idx, n).map(c_int::from))
 }
 
 /// `lua_callk`: with a continuation, where the thread can yield, the C
@@ -1251,7 +1222,7 @@ extern "C" fn orbit_r_callk(
         if let Some(k) = k
             && can_continue(b, c, l)
         {
-            let nargs = api::check_call(c, nargs)?;
+            let nargs = c.check_call(nargs)?;
             return Ok(Some(Request::Call {
                 nargs,
                 nresults,
@@ -1260,7 +1231,7 @@ extern "C" fn orbit_r_callk(
                 kctx,
             }));
         }
-        api::call(c, nargs, nresults).map(|()| None)
+        c.call(nargs, nresults).map(|()| None)
     });
     if let Some(r) = req {
         suspend(l, r);
@@ -1282,7 +1253,7 @@ extern "C" fn orbit_r_pcallk(
             && errfunc == 0
             && can_continue(b, c, l)
         {
-            let nargs = api::check_call(c, nargs)?;
+            let nargs = c.check_call(nargs)?;
             return Ok(Ok(Request::Call {
                 nargs,
                 nresults,
@@ -1291,7 +1262,7 @@ extern "C" fn orbit_r_pcallk(
                 kctx,
             }));
         }
-        api::pcall(c, nargs, nresults, errfunc).map(Err)
+        c.pcall(nargs, nresults, errfunc).map(|s| Err(s as c_int))
     });
     match req {
         Ok(r) => {
@@ -1303,25 +1274,25 @@ extern "C" fn orbit_r_pcallk(
 }
 
 extern "C" fn orbit_r_error(l: *mut LState) -> c_int {
-    entry!(l, 0, |_b, c| Err::<c_int, _>(api::error(c)))
+    entry!(l, 0, |_b, c| Err::<c_int, _>(c.error_from_top()))
 }
 
 extern "C" fn orbit_r_next(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| api::next(c, idx).map(|r| r as c_int))
+    entry!(l, 0, |_b, c| c.next(idx).map(|r| r as c_int))
 }
 
 extern "C" fn orbit_r_concat(l: *mut LState, n: c_int) {
-    entry!(l, (), |_b, c| api::concat(c, n))
+    entry!(l, (), |_b, c| c.concat(n))
 }
 
 extern "C" fn orbit_r_len(l: *mut LState, idx: c_int) {
-    entry!(l, (), |b, c| api::len(c, idx))
+    entry!(l, (), |b, c| c.len(idx))
 }
 
 extern "C" fn orbit_r_stringtonumber(l: *mut LState, s: *const c_char) -> usize {
     // SAFETY: C passes a NUL-terminated string.
     let s = unsafe { cbytes(s) };
-    entry!(l, 0, |_b, c| Ok(api::stringtonumber(c, s)))
+    entry!(l, 0, |_b, c| Ok(c.push_numeral(s)))
 }
 
 extern "C" fn orbit_r_gc(l: *mut LState, what: c_int, a: c_int, b: c_int) -> c_int {
@@ -1331,26 +1302,26 @@ extern "C" fn orbit_r_gc(l: *mut LState, what: c_int, a: c_int, b: c_int) -> c_i
 extern "C" fn orbit_r_argerror(l: *mut LState, arg: c_int, msg: *const c_char) {
     // SAFETY: C passes a NUL-terminated message, or NULL.
     let msg = String::from_utf8_lossy(unsafe { cbytes(msg) }).into_owned();
-    entry!(l, (), |_b, c| Err(api::argerror(c, arg, &msg)))
+    entry!(l, (), |_b, c| Err(c.arg_error(arg, &msg)))
 }
 
 extern "C" fn orbit_r_typeerror(l: *mut LState, arg: c_int, tname: *const c_char) {
     // SAFETY: C passes a NUL-terminated type name.
     let tname = String::from_utf8_lossy(unsafe { cbytes(tname) }).into_owned();
-    entry!(l, (), |_b, c| Err(api::typeerror(c, arg, &tname)))
+    entry!(l, (), |_b, c| Err(c.type_error(arg, &tname)))
 }
 
 extern "C" fn orbit_r_where(l: *mut LState, lvl: c_int) {
     entry!(l, (), |b, c| {
-        api::where_(c, lua_level(b, lvl));
+        c.push_where(lua_level(b, lvl));
         Ok(())
     })
 }
 
 extern "C" fn orbit_r_tolstringmeta(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
-        let s = api::tolstring_meta(c, idx)?;
-        Ok(hand_out_value(&b.st, c.bytes(s), len))
+        let s = c.to_display_string(idx)?;
+        Ok(hand_out_value(&b.st, s, len))
     })
 }
 
@@ -1359,7 +1330,7 @@ extern "C" fn orbit_r_arith(l: *mut LState, op: c_int) {
 }
 
 extern "C" fn orbit_r_numbertocstring(l: *mut LState, idx: c_int, buff: *mut c_char) -> u32 {
-    entry!(l, 0, |_b, c| Ok(match api::number_text(c, idx) {
+    entry!(l, 0, |_b, c| Ok(match c.number_text(idx) {
         Some(t) => {
             // `LUA_N2SBUFFSZ` (64) bytes is room for any number Lua prints.
             let n = t.len().min(63);
@@ -1399,20 +1370,20 @@ extern "C" fn orbit_r_load(
     } else {
         unsafe { cbytes(mode) }
     };
-    entry!(l, abi::ERRSYNTAX, |_b, c| Ok(api::load(
-        c, bytes, name, mode
-    )))
+    entry!(l, abi::ERRSYNTAX, |_b, c| Ok(
+        c.load(bytes, name, mode) as c_int
+    ))
 }
 
 extern "C" fn orbit_r_isrustudata(l: *mut LState, idx: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::is_rust_userdata(c, idx) as c_int))
+    entry!(l, 0, |_b, c| Ok(c.is_host_userdata(idx) as c_int))
 }
 
 extern "C" fn orbit_r_warning(l: *mut LState, msg: *const c_char, tocont: c_int) {
     // SAFETY: NUL-terminated.
     let msg = unsafe { cbytes(msg) };
     entry!(l, (), |_b, c| {
-        api::warning(c, msg, tocont != 0);
+        c.warn(msg, tocont != 0);
         Ok(())
     })
 }
@@ -1422,7 +1393,7 @@ extern "C" fn orbit_r_traceback(l: *mut LState, msg: *const c_char, level: c_int
     let text = unsafe { cbytes(msg) };
     let msg = (!msg.is_null()).then_some(text);
     entry!(l, (), |b, c| {
-        api::traceback(c, msg, lua_level(b, level));
+        c.push_traceback(msg, lua_level(b, level));
         Ok(())
     })
 }
@@ -1430,8 +1401,8 @@ extern "C" fn orbit_r_traceback(l: *mut LState, msg: *const c_char, level: c_int
 extern "C" fn orbit_r_pushthread(l: *mut LState) -> c_int {
     entry!(l, 0, |b, c| {
         let t = thread_of(b, l);
-        c.push(Value::Thread(t));
-        Ok((b.main.get() == Some(t)) as c_int)
+        c.push_thread(t);
+        Ok((b.main == t) as c_int)
     })
 }
 
@@ -1439,16 +1410,15 @@ extern "C" fn orbit_r_pushthread(l: *mut LState) -> c_int {
 
 extern "C" fn orbit_r_newthread(l: *mut LState) -> *mut LState {
     entry!(l, std::ptr::null_mut(), |b, c| {
-        let t = c.new_empty_thread();
-        c.push(Value::Thread(t));
+        let t = c.push_new_thread();
         Ok(state_for(b, t))
     })
 }
 
 extern "C" fn orbit_r_tothread(l: *mut LState, idx: c_int) -> *mut LState {
-    entry!(l, std::ptr::null_mut(), |b, c| Ok(match api::get(c, idx) {
-        Value::Thread(t) => state_for(b, t),
-        _ => std::ptr::null_mut(),
+    entry!(l, std::ptr::null_mut(), |b, c| Ok(match c.to_thread(idx) {
+        Some(t) => state_for(b, t),
+        None => std::ptr::null_mut(),
     }))
 }
 
@@ -1460,7 +1430,7 @@ extern "C" fn orbit_r_status(l: *mut LState) -> c_int {
         } else if c.thread_failed(t) {
             b.threads
                 .borrow()
-                .get(&t.index())
+                .get(&t.slot())
                 .filter(|e| e.thread == t)
                 .map_or(abi::ERRRUN, |e| e.status)
         } else {
@@ -1481,14 +1451,7 @@ extern "C" fn orbit_r_xmove(from: *mut LState, to: *mut LState, n: c_int) {
             return Ok(());
         }
         let (tf, tt) = (thread_of(b, from), thread_of(b, to));
-        let vals = with_window(b, c, tf, |c| {
-            let len = c.len();
-            let n = n.min(len);
-            let vals: Vec<Value> = (len - n..len).map(|i| c.arg(i)).collect();
-            c.truncate(len - n);
-            vals
-        });
-        with_window(b, c, tt, |c| vals.iter().for_each(|&v| c.push(v)));
+        c.move_values((tf, thread_base(b, tf)), (tt, thread_base(b, tt)), n);
         Ok(())
     })
 }
@@ -1504,40 +1467,16 @@ extern "C" fn orbit_r_resume(
     entry!(here l, abi::ERRRUN, |b, c| {
         let t = thread_of(b, l);
         let narg = usize::try_from(narg).unwrap_or(0);
-        let args = with_window(b, c, t, |c| {
-            let len = c.len();
-            if narg > len {
-                return None;
-            }
-            let args: Vec<Value> = (len - narg..len).map(|i| c.arg(i)).collect();
-            c.truncate(len - narg);
-            Some(args)
-        });
-        let Some(args) = args else {
-            return Err(c.error("C API: not enough values to resume with"));
-        };
-        let (status, vals) = match c.resume_nested(t, &args) {
-            Ok((done, vals)) => {
-                set_thread(b, t, None, abi::OK);
-                (if done { abi::OK } else { abi::YIELD }, vals)
-            }
-            Err(v) => {
-                let status = api::error_status(c, v);
-                if c.thread_failed(t) {
-                    set_thread(b, t, Some(c.thread_top(t)), status);
-                }
-                (status, vec![v])
-            }
-        };
-        with_window(b, c, t, |c| vals.iter().for_each(|&v| c.push(v)));
+        let r = c.resume(t, thread_base(b, t), narg)?;
+        let status = r.status as c_int;
+        match r.status {
+            Status::Ok | Status::Yield => set_thread(b, t, None, abi::OK),
+            _ if r.failed_top.is_some() => set_thread(b, t, r.failed_top, status),
+            _ => {}
+        }
         if !nres.is_null() {
-            let n = if status == abi::OK || status == abi::YIELD {
-                vals.len()
-            } else {
-                0
-            };
             // SAFETY: C passed a pointer to an int, or NULL.
-            unsafe { *nres = n as c_int };
+            unsafe { *nres = r.nresults as c_int };
         }
         Ok(status)
     })
@@ -1549,21 +1488,14 @@ extern "C" fn orbit_r_closethread(l: *mut LState, _from: *mut LState) -> c_int {
     entry!(here l, abi::OK, |b, c| {
         let t = thread_of(b, l);
         set_thread(b, t, None, abi::OK);
-        Ok(match c.close_nested(t) {
-            Ok(()) => abi::OK,
-            Err(v) => {
-                let status = api::error_status(c, v);
-                with_window(b, c, t, |c| c.push(v));
-                status
-            }
-        })
+        Ok(c.close_thread(t) as c_int)
     })
 }
 
 /// Whether the running C function can continue in a C continuation after
 /// leaving: it runs on `l`'s thread, which can yield where it is.
-fn can_continue(b: &Bridge, c: &NativeCtx<'_>, l: *mut LState) -> bool {
-    let running = c.running().0;
+fn can_continue(b: &Bridge, c: &Stack<'_>, l: *mut LState) -> bool {
+    let running = c.running_thread();
     !std::ptr::eq(b.ctx.get(), b.host.get())
         && !std::ptr::eq(b.ctx.get(), b.hook_ctx.get())
         && thread_of(b, l) == running
@@ -1573,7 +1505,7 @@ fn can_continue(b: &Bridge, c: &NativeCtx<'_>, l: *mut LState) -> bool {
 extern "C" fn orbit_r_yieldk(l: *mut LState, nresults: c_int, kctx: isize, k: Option<KFn>) {
     let req = entry!(l, None, |_b, c| {
         let n = usize::try_from(nresults).unwrap_or(0);
-        if n > c.len() {
+        if n > c.top() as usize {
             return Err(c.error("C API: not enough values to yield"));
         }
         Ok(Some(Request::Yield { n, k, kctx }))
@@ -1620,7 +1552,7 @@ pub(crate) struct LuaDebug {
 extern "C" fn orbit_r_getstack(l: *mut LState, level: c_int, ar: *mut LuaDebug) -> c_int {
     entry!(l, 0, |b, c| {
         let level = lua_level(b, level);
-        if !api::has_level(c, level) {
+        if !c.has_level(level) {
             return Ok(0);
         }
         // SAFETY: C passed a lua_Debug to fill.
@@ -1630,15 +1562,15 @@ extern "C" fn orbit_r_getstack(l: *mut LState, level: c_int, ar: *mut LuaDebug) 
 }
 
 extern "C" fn orbit_r_toclose(l: *mut LState, idx: c_int) {
-    entry!(l, (), |_b, c| api::toclose(c, idx))
+    entry!(l, (), |_b, c| c.to_close(idx))
 }
 
 extern "C" fn orbit_r_closeslot(l: *mut LState, idx: c_int) {
-    entry!(l, (), |_b, c| api::closeslot(c, idx))
+    entry!(l, (), |_b, c| c.close_slot(idx))
 }
 
 /// The level a `lua_Debug` from `lua_getstack` names.
-fn debug_level(c: &mut NativeCtx<'_>, ar: *const LuaDebug) -> Res<usize> {
+fn debug_level(c: &mut Stack<'_>, ar: *const LuaDebug) -> Res<usize> {
     // SAFETY: C passed a lua_Debug from lua_getstack.
     match unsafe { (*ar).private } {
         0 => Err(c.error("C API: lua_Debug without lua_getstack")),
@@ -1649,10 +1581,10 @@ fn debug_level(c: &mut NativeCtx<'_>, ar: *const LuaDebug) -> Res<usize> {
 extern "C" fn orbit_r_getlocal(l: *mut LState, ar: *const LuaDebug, n: c_int) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
         let name = if ar.is_null() {
-            api::param_name(c, n)
+            c.param_name(n)
         } else {
             let level = debug_level(c, ar)?;
-            api::getlocal(c, level, n)
+            c.get_local(level, n)
         };
         Ok(name.map_or(std::ptr::null(), |name| {
             hand_out(&b.st, &name, std::ptr::null_mut())
@@ -1663,7 +1595,7 @@ extern "C" fn orbit_r_getlocal(l: *mut LState, ar: *const LuaDebug, n: c_int) ->
 extern "C" fn orbit_r_setlocal(l: *mut LState, ar: *const LuaDebug, n: c_int) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
         let level = debug_level(c, ar)?;
-        let name = api::setlocal(c, level, n)?;
+        let name = c.set_local(level, n)?;
         Ok(name.map_or(std::ptr::null(), |name| {
             hand_out(&b.st, &name, std::ptr::null_mut())
         }))
@@ -1694,29 +1626,24 @@ extern "C" fn orbit_r_getinfo(l: *mut LState, what: *const c_char, ar: *mut LuaD
     // SAFETY: NUL-terminated.
     let opts = unsafe { cbytes(what) };
     entry!(l, 0, |b, c| {
-        let (opts, level, f) = if opts.first() == Some(&b'>') {
-            let len = c.len();
-            if len == 0 {
+        // With '>', the function stays on top until the strings are made.
+        let (opts, level) = if opts.first() == Some(&b'>') {
+            if c.top() == 0 {
                 return Err(c.error("C API: function expected for '>'"));
             }
-            let f = c.arg(len - 1);
-            c.truncate(len - 1);
-            // Keep it rooted while the strings are made.
-            c.push(f);
-            (&opts[1..], None, f)
+            (&opts[1..], None)
         } else {
             // SAFETY: C passed a lua_Debug from lua_getstack.
             let private = unsafe { (*ar).private };
             if private == 0 {
                 return Err(c.error("C API: lua_getinfo without lua_getstack"));
             }
-            (opts, Some(private - 1), Value::Nil)
+            (opts, Some(private - 1))
         };
-        let Some(info) = api::info(c, level, f) else {
-            if level.is_none() {
-                let len = c.len();
-                c.truncate(len - 1);
-            }
+        let Some(info) = (match level {
+            Some(n) => c.level_info(n),
+            None => Some(c.function_info(-1)),
+        }) else {
             return Ok(0);
         };
         // SAFETY: `ar` is the caller's lua_Debug; the strings handed out live
@@ -1761,18 +1688,15 @@ extern "C" fn orbit_r_getinfo(l: *mut LState, what: *const c_char, ar: *mut LuaD
                 _ => return Ok(0),
             }
         }
-        if level.is_none() {
-            let len = c.len();
-            c.truncate(len - 1);
-        }
-        if opts.contains(&b'f') {
-            match level {
-                Some(n) => api::push_level_func(c, n),
-                None => c.push(f),
-            }
+        // '>' pops the function, which 'f' pushes back.
+        match (level, opts.contains(&b'f')) {
+            (None, false) => c.set_top(-2)?,
+            (None, true) => {}
+            (Some(n), true) => c.push_level_function(n),
+            (Some(_), false) => {}
         }
         if opts.contains(&b'L') {
-            c.push(Value::Nil);
+            c.push_nil();
         }
         Ok(1)
     })
@@ -1780,7 +1704,7 @@ extern "C" fn orbit_r_getinfo(l: *mut LState, what: *const c_char, ar: *mut LuaD
 
 extern "C" fn orbit_r_getupvalue(l: *mut LState, funcindex: c_int, n: c_int) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| Ok(
-        match api::getupvalue(c, funcindex, n) {
+        match c.get_upvalue(funcindex, n) {
             Some(name) => hand_out(&b.st, &name, std::ptr::null_mut()),
             None => std::ptr::null(),
         }
@@ -1789,7 +1713,7 @@ extern "C" fn orbit_r_getupvalue(l: *mut LState, funcindex: c_int, n: c_int) -> 
 
 extern "C" fn orbit_r_setupvalue(l: *mut LState, funcindex: c_int, n: c_int) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| Ok(
-        match api::setupvalue(c, funcindex, n)? {
+        match c.set_upvalue(funcindex, n)? {
             Some(name) => hand_out(&b.st, &name, std::ptr::null_mut()),
             None => std::ptr::null(),
         }
@@ -1798,17 +1722,12 @@ extern "C" fn orbit_r_setupvalue(l: *mut LState, funcindex: c_int, n: c_int) -> 
 
 extern "C" fn orbit_r_upvalueid(l: *mut LState, funcindex: c_int, n: c_int) -> *mut c_void {
     entry!(l, std::ptr::null_mut(), |_b, c| Ok(
-        api::upvalueid(c, funcindex, n) as *mut c_void
+        c.upvalue_id(funcindex, n) as *mut c_void
     ))
 }
 
 extern "C" fn orbit_r_upvaluejoin(l: *mut LState, f1: c_int, n1: c_int, f2: c_int, n2: c_int) {
-    entry!(l, (), |_b, c| api::upvaluejoin(c, f1, n1, f2, n2))
-}
-
-fn api_get(c: &NativeCtx<'_>, idx: c_int) -> Value {
-    // `lua_getfield`/`geti`/`seti` read their object before pushing.
-    api::get(c, idx)
+    entry!(l, (), |_b, c| c.join_upvalues(f1, n1, f2, n2))
 }
 
 // ---- dynamic loading ----------------------------------------------------------
@@ -1843,10 +1762,10 @@ fn dl_error() -> String {
 /// until the process exits, as their functions may be referenced anywhere.
 #[cfg(unix)]
 pub(crate) fn load(
-    ctx: &mut NativeCtx<'_>,
+    s: &mut Stack<'_>,
     path: &[u8],
     sym: &[u8],
-) -> Result<Value, (String, &'static str)> {
+) -> Result<(), (String, &'static str)> {
     let cpath =
         std::ffi::CString::new(path).map_err(|_| ("path contains a NUL byte".into(), "open"))?;
     let global = sym == b"*";
@@ -1863,7 +1782,8 @@ pub(crate) fn load(
         return Err((dl_error(), "open"));
     }
     if global {
-        return Ok(Value::Bool(true));
+        s.push_boolean(true);
+        return Ok(());
     }
     let csym =
         std::ffi::CString::new(sym).map_err(|_| ("symbol contains a NUL byte".into(), "init"))?;
@@ -1872,15 +1792,16 @@ pub(crate) fn load(
     if f.is_null() {
         return Err((dl_error(), "init"));
     }
-    Ok(crate::c_function(ctx, f as usize as u64, &[]))
+    crate::push_c_function(s, f as usize as u64, 0)
+        .map_err(|_| ("not enough memory".into(), "init"))
 }
 
 #[cfg(not(unix))]
 pub(crate) fn load(
-    _ctx: &mut NativeCtx<'_>,
+    _s: &mut Stack<'_>,
     _path: &[u8],
     _sym: &[u8],
-) -> Result<Value, (String, &'static str)> {
+) -> Result<(), (String, &'static str)> {
     Err((
         "dynamic libraries not supported on this platform yet".into(),
         "absent",
@@ -1891,14 +1812,16 @@ pub(crate) fn load(
 
 /// `luaopen_*`.
 extern "C" fn orbit_r_openlib(l: *mut LState, lib: c_int) -> c_int {
-    entry!(l, 0, |_b, c| Ok(api::openlib(c, lib)))
+    entry!(l, 0, |_b, c| api::openlib(c, lib))
 }
 
 /// Push the pending error, for a panic function to read.
 extern "C" fn orbit_r_pushpending(l: *mut LState) {
     entry!(l, (), |b, c| {
-        let v = b.st.borrow_mut().pending.take().unwrap_or(Value::Nil);
-        c.push(v);
+        match b.st.borrow_mut().pending.take() {
+            Some(e) => c.push_raised(&e),
+            None => c.push_nil(),
+        }
         Ok(())
     })
 }
@@ -1908,7 +1831,7 @@ type WarnFn = unsafe extern "C" fn(ud: *mut c_void, msg: *const c_char, tocont: 
 /// `lua_setwarnf`: warnings go to `f` from now on; a null `f` drops them.
 extern "C" fn orbit_r_setwarnf(l: *mut LState, f: Option<WarnFn>, ud: *mut c_void) {
     entry!(l, (), |_b, c| {
-        c.vm.rt.warn_hook = Some(orbit_runtime::vm::WarnHook(Box::new(move |msg, tocont| {
+        c.set_warn_hook(move |msg: &[u8], tocont: bool| {
             let Some(f) = f else { return };
             let mut text = Vec::with_capacity(msg.len() + 1);
             text.extend(msg.iter().map(|&b| if b == 0 { b'?' } else { b }));
@@ -1917,7 +1840,7 @@ extern "C" fn orbit_r_setwarnf(l: *mut LState, f: Option<WarnFn>, ud: *mut c_voi
             // lua_setwarnf documents, with a NUL-terminated message that
             // lives through the call.
             unsafe { f(ud, text.as_ptr() as *const c_char, tocont as c_int) }
-        })));
+        });
         Ok(())
     })
 }
@@ -1954,28 +1877,34 @@ impl std::io::Write for CStdout {
     }
 }
 
-/// `lua_newstate`: a VM owned by the C program, whose stack between calls
-/// is the host window ([`Vm::host_ctx`]). Null if memory runs out.
+/// `lua_newstate`: an isolate owned by the C program, with no libraries
+/// open, whose stack between calls is the host's window
+/// ([`orbit::Isolate::host_stack`]). Null if memory runs out.
 #[cfg(feature = "host")]
 #[unsafe(no_mangle)]
 extern "C" fn orbit_r_newstate() -> *mut LState {
-    let vm: &'static mut Vm = Box::leak(Box::new(crate::host::new_vm()));
-    vm.rt.out = Box::new(CStdout);
-    crate::install_loader(vm);
-    let Some(p) = vm.rt.ext.get::<BridgeHandle>().map(|h| h.0) else {
+    let config = orbit::Config::default().libraries(&[]);
+    let iso = Box::into_raw(Box::new(orbit::Runtime::new().new_isolate(config)));
+    // SAFETY: just made; reached only through the state from now on, and
+    // freed by `orbit_r_close`.
+    let iso_ref: &'static mut orbit::Isolate = unsafe { &mut *iso };
+    iso_ref.set_stdout(CStdout);
+    let host: StackPtr = Box::into_raw(Box::new(iso_ref.host_stack()));
+    // SAFETY: just made, and not shared yet.
+    let s = unsafe { &mut *host };
+    crate::install_loader(s);
+    let Some(b) = bridge(&mut s.control()) else {
         return std::ptr::null_mut();
     };
-    let ctx = Box::into_raw(Box::new(vm.host_ctx()));
-    // SAFETY: the handle keeps the bridge alive until `orbit_r_close`.
-    let b = unsafe { &*p };
-    b.ctx.set(ctx);
-    b.host.set(ctx);
+    b.ctx.set(host);
+    b.host.set(host);
+    b.isolate.set(iso);
     b.l.get()
 }
 
 /// `lua_close`: close the state as Lua does (finalizers run), flush the
-/// libraries' files, and free the VM, its bridge and `l`. Only for states
-/// `orbit_r_newstate` made; it does nothing to others.
+/// libraries' files, and free the isolate, its bridge and `l`. Only for
+/// states `orbit_r_newstate` made; it does nothing to others.
 extern "C" fn orbit_r_close(l: *mut LState) {
     // SAFETY: `l` is a live state; its bridge lives as long as it does.
     let b = unsafe { &*((*l).rs as *const Bridge) };
@@ -1984,20 +1913,16 @@ extern "C" fn orbit_r_close(l: *mut LState) {
         // A state Rust made, or a C function closing its own caller.
         return;
     }
-    // SAFETY: made by `orbit_r_newstate` with `Box::into_raw`; no C function
-    // is running, so nothing else uses it.
-    let ctx = unsafe { Box::from_raw(host) };
+    let iso = b.isolate.replace(std::ptr::null_mut());
     b.ctx.set(std::ptr::null_mut());
     b.host.set(std::ptr::null_mut());
-    let vm: *mut Vm = &mut *ctx.vm;
-    drop(ctx);
-    // SAFETY: leaked by `orbit_r_newstate` and reached only through this
-    // state, which the program gives up by calling lua_close. Dropping the
-    // VM drops the bridge handle, which frees the bridge and `l`.
+    // SAFETY: both made by `orbit_r_newstate` with `Box::into_raw` and
+    // reached only through this state, which the program gives up by
+    // calling lua_close; no C function is running. The host stack borrows
+    // the isolate, so it goes first. Dropping the isolate closes it and
+    // drops the bridge handle, which frees the bridge and `l`.
     unsafe {
-        (*vm).close();
-        orbit_runtime::stdlib::flush_files(&mut *vm);
-        let _ = std::io::Write::flush(&mut (*vm).rt.out);
-        drop(Box::from_raw(vm));
+        drop(Box::from_raw(host));
+        drop(Box::from_raw(iso));
     }
 }

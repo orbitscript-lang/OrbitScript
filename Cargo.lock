@@ -96,7 +96,6 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "orbit",
- "orbit-runtime",
  "orbit-std",
 ]
 
