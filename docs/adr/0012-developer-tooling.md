@@ -1,6 +1,6 @@
 # ADR-12: Developer tooling: language server and debugger
 
-Status: Proposed (2026-10-18). Tym asked on 2026-10-16 what OrbitScript needs for the tooling developers expect: a language server with completion and navigation, and debugging with breakpoints and stepping. He decided the plan's questions D1 to D12 on 2026-10-18. The full plan, with measurements and the options weighed, is `planning/dev-tooling/plan.md` in the project files; this record keeps the decisions. Accepting it amends ADR-6 (one more `unsafe` exception, D12), adds `serde_json` to the dependencies of the tooling crates, and adds `orbit_newstate` and `orbit_debug_listen` to `liborbit`'s `orbit_` exports (ADR-10).
+Status: Proposed (2026-10-18). Tym asked on 2026-10-16 what OrbitScript needs for the tooling developers expect: a language server with completion and navigation, and debugging with breakpoints and stepping. He decided the plan's questions D1 to D13 on 2026-10-18. The full plan, with measurements and the options weighed, is `planning/dev-tooling/plan.md` in the project files; this record keeps the decisions. Accepting it amends ADR-6 (one more `unsafe` exception, D12), adds `serde_json` to the dependencies of `orbit-std` and the tooling crates, and adds `orbit_newstate` and `orbit_debug_listen` to `liborbit`'s `orbit_` exports (ADR-10).
 
 ## Context
 
@@ -31,8 +31,9 @@ flowchart LR
 - **A dedicated binary, `orbit-lsp`** (D2), outside `default-members`. It reuses the other crates instead of duplicating them: the front ends for parsing, `orbit-check`'s library for analysis, a formatter crate later, and the `orbit` API.
 - **The type checker is fully reused** (D1). `orbit-lsp` links `orbit-check`'s library, which is shaped for editor use: it accepts ASTs with error nodes (treated as `any`, never a panic), keeps what it resolves (each reference's definition, each expression's type), answers position queries and rechecks one file and its dependents. There is no second resolver. Lua files get go-to-definition for locals from the HIR, which already links each reference to its declaration, until the checker covers Lua.
 - **Error recovery and comment keeping live in the shared parsers** (D3), behind `ParseOptions` flags that `load` never sets, so the runtime's behaviour and messages don't change. Comments go to a trivia side table next to the AST; the tree doesn't change. The same parser builds type trees for the checker behind its own flag (type checker T2): one parser per language.
-- **The protocol and feature layer is written in OrbitScript** (D9), running in a small Rust host. The host owns stdio framing and calls into the checker; the scripts get JSON from a native `json` module the host registers.
-- **JSON is `serde_json`** (D4), used by the tooling crates (`orbit-lsp`'s host, `orbit-dap`). `orbit-runtime` takes no JSON dependency and is reached only through the public `orbit` API. The PR that adds it adds its `DEPS.md` row with the measured size.
+- **The protocol and feature layer is written in OrbitScript** (D9), running in a small Rust host. The host owns stdio framing and calls into the checker; the scripts use the stdlib `json` module.
+- **JSON is `serde_json`** (D4), used by `orbit-std` and the tooling crates (`orbit-lsp`'s host, `orbit-dap`), so binaries carry one copy. `orbit-runtime` takes no JSON dependency and is reached only through the public `orbit` API. The PR that adds it adds its `DEPS.md` row with the measured size.
+- **A stdlib `json` module** (D13) in `orbit-std`, backed by `serde_json`, behind a `json` feature that the CLIs and the `build.sh` package turn on, so every script gets it, not only the language server. It is reached as `require "orbit.json"` rather than a global or the bare name `json`, so Lua programs that ship their own `json.lua` keep loading theirs. `encode(value [, options])` and `decode(text [, options])`; JSON `null` decodes to a `json.null` sentinel; an empty table encodes as `[]` unless marked as an object; integers and floats keep their subtype; decode errors return `nil, message`.
 - **Transport**: JSON-RPC 2.0 over stdio with `Content-Length` framing, one thread with a short debounce on edits.
 
 ### Debug engine
@@ -74,7 +75,7 @@ flowchart LR
 ### Several isolates in one process
 
 - **One DAP session per process** (D10), shared by every isolate that allows debugging. The first one to start serving opens the listener; later ones register with it.
-- **Each isolate is one independent DAP thread**, named from `Config` or numbered in creation order. Its coroutines appear inside its call stack. Breakpoints are per file and apply to every isolate that loaded the file.
+- **Each isolate is one independent DAP thread**, named from `Config` or numbered in creation order. Its coroutines appear inside its call stack. Showing coroutines as threads of their own may be revisited after research into how M:N runtimes (Go, Kotlin coroutines, Java virtual threads) present them in debuggers. Breakpoints are per file and apply to every isolate that loaded the file.
 - **Isolates stop independently** (`allThreadsStopped: false`). The server runs on its own OS thread and never touches an isolate: each isolate has an agent on its own thread, reached over channels. A paused isolate answers requests from its own thread; a running one is reached only through its interrupt flag and a queue of breakpoint changes applied at its next switch point. Nothing needs `Send`.
 
 ### Editor
@@ -101,7 +102,8 @@ The language server and the debugger are built in parallel (D8). The language se
 - The front ends gain recovery, trivia and doc-comment attachment. `orbit` grows by their code, with a target under 10 KiB. `load` is unchanged.
 - `orbit-check`'s library takes on editor-facing duties (error nodes, kept symbols and types, position queries, incremental rechecks), which the type checker thread designs for.
 - `liborbit` grows by the DAP server, a few tens of KiB to be measured, unused unless a host turns it on. A debug connection can run any code, so it is protected by file permissions and the documentation says not to ship it enabled.
-- `orbit-runtime` stays free of JSON and I/O. `orbit-dap` and `orbit-lsp`'s host take `serde_json`, each with a `DEPS.md` row.
+- `orbit-runtime` stays free of JSON and I/O. `orbit-std` (feature `json`), `orbit-dap` and `orbit-lsp`'s host take `serde_json`, recorded in `DEPS.md`.
+- Scripts gain a standard `json` module, an Orbit extension beyond Lua's standard library.
 - One more `unsafe` exception, the Windows socket and event wrapper, until `std` covers it.
 - The debugger ABI is added to `orbit::abi` in a single change, so `liborbit` and its programs are rebuilt once.
 - A known front-end bug shows up in the debugger: OrbitScript items visible in the whole block are reported live before they are assigned, so they show a stale register value. It needs fixing in the compiler or lowering before the debugger ships.
