@@ -972,10 +972,11 @@ impl Parser<'_> {
         if !unions || !self.is(Punct::Pipe) {
             return Ok(first);
         }
-        let mut members = self.keep(first);
+        let mut members = Vec::new();
+        self.push_member(&mut members, first);
         while self.eat(Punct::Pipe)? {
             let t = self.type_suffixed(unions)?;
-            self.push_type(&mut members, t);
+            self.push_member(&mut members, t);
         }
         Ok(self.make_type(start, || TypeKind::Union(members)))
     }
@@ -1063,7 +1064,12 @@ impl Parser<'_> {
                 self.advance()?;
                 self.expect(Punct::LParen)?;
                 let mut params = Vec::new();
+                let mut rest = None;
                 while !self.is(Punct::RParen) {
+                    if self.eat(Punct::DotDotDot)? {
+                        rest = Some(self.type_ann()?);
+                        break;
+                    }
                     let t = self.type_ann()?;
                     self.push_type(&mut params, t);
                     if !self.eat(Punct::Comma)? {
@@ -1076,7 +1082,7 @@ impl Parser<'_> {
                 } else {
                     None
                 };
-                TypeKind::Fn { params, ret }
+                TypeKind::Fn { params, rest, ret }
             }
             TokenKind::Keyword(Keyword::Nil) => {
                 self.advance()?;
@@ -1138,10 +1144,17 @@ impl Parser<'_> {
         }
     }
 
-    fn keep(&self, t: Type) -> Vec<Type> {
-        let mut v = Vec::new();
-        self.push_type(&mut v, t);
-        v
+    /// Adds a union member, flattening a (parenthesised) union into its members.
+    fn push_member(&self, members: &mut Vec<Type>, t: Type) {
+        match t.kind {
+            Some(kind) if matches!(*kind, TypeKind::Union(_)) => {
+                let TypeKind::Union(inner) = *kind else {
+                    unreachable!()
+                };
+                members.extend(inner);
+            }
+            kind => self.push_type(members, Type { span: t.span, kind }),
+        }
     }
 
     // ---- patterns -----------------------------------------------------------------------------

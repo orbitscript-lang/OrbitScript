@@ -57,7 +57,7 @@ pub enum TypeKind {
     SelfType,
     /// `T?`.
     Optional(Type),
-    /// `A | B | C`.
+    /// `A | B | C`, flattened: a parenthesised union inside one adds its members.
     Union(Vec<Type>),
     /// `[T]`.
     Array(Type),
@@ -67,9 +67,11 @@ pub enum TypeKind {
     Record(Vec<RecordField>),
     /// `(A, B)`: several results. `()` is no results; `(T)` is just `T`.
     Tuple(Vec<Type>),
-    /// `fn(A, B) -> R`.
+    /// `fn(A, B, ...T) -> R`.
     Fn {
         params: Vec<Type>,
+        /// `...T`: the type of each extra argument.
+        rest: Option<Type>,
         ret: Option<Type>,
     },
     /// A type that failed to parse, in a recovering parse (reserved; never built yet).

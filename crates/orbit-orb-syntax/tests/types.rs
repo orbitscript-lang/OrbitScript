@@ -45,10 +45,18 @@ fn ty(strings: &StringPool, t: &Type) -> String {
             format!("(record {})", fs.join(" "))
         }
         TypeKind::Tuple(ts) => format!("(tuple {})", list(ts)),
-        TypeKind::Fn { params, ret } => match ret {
-            Some(r) => format!("(fn ({}) {})", list(params), ty(strings, r)),
-            None => format!("(fn ({}))", list(params)),
-        },
+        TypeKind::Fn { params, rest, ret } => {
+            let mut ps = list(params);
+            if let Some(r) = rest {
+                ps = format!("{ps} ...{}", ty(strings, r))
+                    .trim_start()
+                    .to_string();
+            }
+            match ret {
+                Some(r) => format!("(fn ({ps}) {})", ty(strings, r)),
+                None => format!("(fn ({ps}))"),
+            }
+        }
         TypeKind::Error => "error".into(),
     }
 }
@@ -103,6 +111,15 @@ fn type_trees() {
         ),
         ("let x: fn(int, string) -> bool;", "(fn (int string) bool)"),
         ("let x: fn();", "(fn ())"),
+        (
+            "let x: fn(string, ...any) -> int;",
+            "(fn (string ...any) int)",
+        ),
+        ("let x: fn(...int);", "(fn (...int))"),
+        (
+            "let x: (int | nil) | (bool | string);",
+            "(| int nil bool string)",
+        ),
         ("let x: fn() -> int | nil;", "(fn () (| int nil))"),
         ("type Pair<T> = (T, T);", "(tuple T T)"),
         ("type Id = int | string;", "(| int string)"),
