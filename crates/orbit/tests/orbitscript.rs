@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use orbit::{Lua, Value};
+use orbit::{Chunk, Config, Error, Isolate, Language, Runtime};
 
 /// A fresh directory under the target directory, holding `files`.
 fn dir_with(test: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -17,12 +17,19 @@ fn dir_with(test: &str, files: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
-fn exec_str(lua: &mut Lua, src: &str) -> Vec<String> {
-    let values = lua.exec(src.as_bytes(), "=test").unwrap();
-    values
-        .iter()
-        .map(|v| String::from_utf8_lossy(&lua.vm().to_display(*v)).into_owned())
-        .collect()
+fn isolate() -> Isolate {
+    Runtime::new().new_isolate(Config::default())
+}
+
+fn exec_str(iso: &mut Isolate, src: &str) -> Vec<String> {
+    iso.scope(|s| {
+        let values = s.load(Chunk::new(src).name("=test"))?.call(())?;
+        values
+            .iter()
+            .map(|v| Ok(String::from_utf8_lossy(&v.to_display()?).into_owned()))
+            .collect::<Result<Vec<_>, Error>>()
+    })
+    .unwrap()
 }
 
 #[test]
@@ -50,10 +57,10 @@ fn require_finds_orb_modules() {
             ),
         ],
     );
-    let mut lua = Lua::new();
+    let mut iso = isolate();
     let d = dir.display();
     let out = exec_str(
-        &mut lua,
+        &mut iso,
         &format!(
             "package.path = '{d}/?.lua;{d}/?.orb'
              local app = require('app')
@@ -65,9 +72,9 @@ fn require_finds_orb_modules() {
 
 #[test]
 fn orb_modules_are_on_package_path() {
-    let mut lua = Lua::new();
+    let mut iso = isolate();
     let out = exec_str(
-        &mut lua,
+        &mut iso,
         "local default = package.path:find('./?.orb', 1, true) ~= nil
          package.path = './?.lua;./?.orb' package.cpath = './?.so'
          local ok, msg = pcall(require, 'nope')
@@ -93,10 +100,10 @@ fn loadfile_and_dofile_pick_the_language_by_name() {
             ("c.lua", "return 'lua'"),
         ],
     );
-    let mut lua = Lua::new();
+    let mut iso = isolate();
     let d = dir.display();
     let out = exec_str(
-        &mut lua,
+        &mut iso,
         &format!(
             "local f = assert(loadfile('{d}/a.orb'))
              local g, err = loadfile('{d}/b.orb')
@@ -114,14 +121,24 @@ fn loadfile_and_dofile_pick_the_language_by_name() {
 }
 
 #[test]
-fn load_orbitscript_and_lua_share_globals() {
-    let mut lua = Lua::new();
-    lua.exec(b"shared = { n = 41 }", "=lua").unwrap();
-    let f = lua
-        .load_orbitscript(b"extern shared;\nshared.n += 1;\nshared.n", "orb")
+fn orbitscript_and_lua_chunks_share_globals() {
+    let mut iso = isolate();
+    iso.exec(Chunk::new("shared = { n = 41 }").name("=lua"))
         .unwrap();
-    let r = lua.call(f, &[]).unwrap();
-    assert!(matches!(r[0], Value::Int(42)));
-    let err = lua.load_orbitscript(b"let = 1;", "orb").unwrap_err();
-    assert_eq!(err.to_string(), "orb:1: expected a pattern, found `=`");
+    let n: i64 = iso
+        .scope(|s| {
+            let f = s.load(
+                Chunk::new("extern shared;\nshared.n += 1;\nshared.n")
+                    .name("=orb")
+                    .language(Language::OrbitScript),
+            )?;
+            f.call(())?[0].get()
+        })
+        .unwrap();
+    assert_eq!(n, 42);
+    // By its name, `@x.orb` is OrbitScript without saying so.
+    let err = iso
+        .exec(Chunk::new("let = 1;").name("@orb.orb"))
+        .unwrap_err();
+    assert_eq!(err.to_string(), "orb.orb:1: expected a pattern, found `=`");
 }

@@ -8,6 +8,7 @@
 mod base;
 #[cfg(feature = "dump")]
 pub mod checks;
+mod chunk;
 #[cfg(feature = "coroutine")]
 mod coroutine;
 #[cfg(feature = "debug")]
@@ -39,10 +40,10 @@ mod utf8;
 
 use crate::vm::{NativeFn, Vm};
 
+pub use chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
+
 #[cfg(feature = "load")]
-pub use load::{
-    BINARY_SIGNATURE, chunk_id, is_orbitscript_file, load_buffer, load_chunk_in, read_chunk_file,
-};
+pub use load::{load_buffer, load_chunk_in, read_chunk_file};
 #[cfg(feature = "package")]
 pub use package::{DynLoader, LoadFn, lock_cpath};
 
@@ -123,7 +124,7 @@ impl Lib {
     ];
 
     /// The order [`open_libs_with`] opens them in.
-    const OPEN_ORDER: [Lib; 10] = [
+    pub const OPEN_ORDER: [Lib; 10] = [
         Lib::Base,
         Lib::String,
         Lib::Utf8,

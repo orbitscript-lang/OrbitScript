@@ -1,59 +1,56 @@
-//! Natives calling back into Lua and running the call to the end
-//! (`NativeCtx::call`, what the C API's `lua_call` and `lua_pcall` use).
+//! Host functions calling back into scripts and running the call to the end
+//! ([`Function::call`], built on what the C API's `lua_call` uses).
 
-use orbit::Lua;
-use orbit_runtime::object::Value;
-use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn};
+use orbit::{Chunk, Config, Error, Function, Isolate, Runtime, Value};
 
-/// `callnow(f, ...)`: calls `f(...)` now and returns its results.
-fn callnow(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let n = ctx.nargs();
-    let r = ctx.call(n - 1, None)?;
-    Ok(NativeReturn::Return(r))
+fn isolate() -> Isolate {
+    Runtime::new().new_isolate(Config::default())
 }
 
-/// `pcallnow(h, f, ...)`: calls `f(...)` now with message handler `h`;
-/// returns `true, results...` or `false, err`.
-fn pcallnow(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let n = ctx.nargs();
-    let at = ctx.len() - (n - 1);
-    match ctx.call(n - 2, Some(0)) {
-        Ok(r) => {
-            ctx.insert(at, Value::Bool(true));
-            Ok(NativeReturn::Return(r + 1))
-        }
-        Err(e) => {
-            ctx.push(Value::Bool(false));
-            ctx.push(e.value);
-            Ok(NativeReturn::Return(2))
-        }
-    }
-}
-
-fn needs_table(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    ctx.check_table(0)?;
-    Ok(NativeReturn::Return(0))
-}
-
+/// Runs `src` named `t` with the host functions `callnow` and `tracenow`,
+/// and returns its results as `tostring` shows them.
 fn run(src: &str) -> Vec<String> {
-    let mut lua = Lua::new();
-    let vm = lua.vm();
-    for (name, f) in [
-        ("callnow", callnow as orbit_runtime::vm::NativeFn),
-        ("pcallnow", pcallnow),
-    ] {
-        let f = vm.register_native(name, f);
-        vm.set_global(name, f);
-    }
-    let out = lua.exec(src.as_bytes(), "t").unwrap();
-    let vm = lua.vm();
-    out.iter()
-        .map(|&v| String::from_utf8_lossy(&vm.to_display(v)).into_owned())
-        .collect()
+    let mut iso = isolate();
+    iso.scope(|s| {
+        let g = s.globals();
+        // `callnow(f, ...)`: calls `f(...)` now and returns its results.
+        g.set(
+            "callnow",
+            s.create_function(|c| {
+                let f: Function = c.check(0)?;
+                let r = f.call(c.args()[1..].to_vec())?;
+                c.ret(r)
+            }),
+        )?;
+        // `tracenow(f, ...)`: `true, results...`, or `false, message,
+        // traceback` from where the error was raised.
+        g.set(
+            "tracenow",
+            s.create_function(|c| {
+                let f: Function = c.check(0)?;
+                match f.call_traced(c.args()[1..].to_vec()) {
+                    Ok(mut r) => {
+                        r.insert(0, Value::Bool(true));
+                        c.ret(r)
+                    }
+                    Err(e) => c.ret((
+                        false,
+                        e.message().to_owned(),
+                        e.traceback().unwrap_or("").to_owned(),
+                    )),
+                }
+            }),
+        )?;
+        let out = s.load(Chunk::new(src).name("=t"))?.call(())?;
+        out.iter()
+            .map(|v| Ok(String::from_utf8_lossy(&v.to_display()?).into_owned()))
+            .collect::<Result<Vec<_>, Error>>()
+    })
+    .unwrap()
 }
 
 #[test]
-fn results_replace_the_function_and_arguments() {
+fn results_come_back_in_order() {
     assert_eq!(
         run("return 'below', callnow(function(a, b) return b, a, a + b end, 1, 2)"),
         ["below", "2", "1", "3"]
@@ -65,9 +62,9 @@ fn results_replace_the_function_and_arguments() {
 }
 
 #[test]
-fn errors_propagate_and_the_native_is_level_one() {
-    // `error` at level 1 positions at its caller: the native, which has no
-    // line, as in lua5.5.
+fn errors_propagate_and_the_host_function_is_level_one() {
+    // `error` at level 1 positions at its caller: the host function, which
+    // has no line, as in lua5.5.
     assert_eq!(run("return pcall(callnow, error, 'x')"), ["false", "x"]);
     assert_eq!(
         run("return pcall(callnow, function() error('y') end)"),
@@ -76,25 +73,20 @@ fn errors_propagate_and_the_native_is_level_one() {
 }
 
 #[test]
-fn the_message_handler_runs_where_the_error_was_raised() {
-    let out = run(
-        "return pcallnow(function(m) return m .. '|' .. debug.traceback() end,
-                     function() local x = nil; return x.y end)",
-    );
+fn tracebacks_show_where_the_error_was_raised() {
+    let out = run("return tracenow(function()
+                     local x = nil; return x.y end)");
     assert_eq!(out[0], "false");
     assert!(
         out[1].starts_with("t:2: attempt to index a nil value"),
         "{}",
         out[1]
     );
-    assert!(out[1].contains("[C]: in global 'pcallnow'"), "{}", out[1]);
-    assert!(out[1].contains("in function <t:2>"), "{}", out[1]);
+    assert!(out[2].starts_with("stack traceback:"), "{}", out[2]);
+    assert!(out[2].contains("in function <t:1>"), "{}", out[2]);
+    assert!(out[2].contains("[C]: in global 'tracenow'"), "{}", out[2]);
     assert_eq!(
-        run("return pcallnow(function(m) return 'handled: ' .. m end, error, 'z', 0)"),
-        ["false", "handled: z"]
-    );
-    assert_eq!(
-        run("return pcallnow(print, function(...) return ... end, 1, 2)"),
+        run("return tracenow(function(...) return ... end, 1, 2)"),
         ["true", "1", "2"]
     );
 }
@@ -130,58 +122,48 @@ fn deep_recursion_through_it_overflows_cleanly() {
 
 #[test]
 fn argument_errors_name_the_function_by_its_module() {
-    let mut lua = Lua::new();
-    let vm = lua.vm();
-    let f = vm.register_native("needs_table", needs_table);
-    vm.set_global("f", f);
-    let out = lua
-        .exec(
-            b"package.loaded.mymod = {check = f}; f = nil
-              return select(2, pcall(package.loaded.mymod.check, 1))",
-            "t",
-        )
+    let mut iso = isolate();
+    let msg: String = iso
+        .scope(|s| {
+            let f = s.create_function(|c| {
+                c.check::<orbit::Table>(0)?;
+                c.ret(())
+            });
+            s.globals().set("f", f)?;
+            let r = s
+                .load(Chunk::new(
+                    "package.loaded.mymod = {check = f}; f = nil
+                     return select(2, pcall(package.loaded.mymod.check, 1))",
+                ))?
+                .call(())?;
+            r[0].get()
+        })
         .unwrap();
-    let vm = lua.vm();
     assert_eq!(
-        String::from_utf8_lossy(&vm.to_display(out[0])),
+        msg,
         "bad argument #1 to 'mymod.check' (table expected, got number)"
     );
 }
 
-/// Returns its visible upvalue, its hidden one and how many it shows.
-fn peek(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let (a, b, n) = (ctx.upvalue(0), ctx.hidden_upvalue(0), ctx.upvalue_count());
-    ctx.push(a);
-    ctx.push(b);
-    ctx.push(Value::Int(n as i64));
-    Ok(NativeReturn::Return(3))
-}
-
-fn make_peek(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let f = ctx.new_closure_hidden("peek", peek, &[Value::Int(1)], &[Value::Int(2)]);
-    ctx.ret1(f)
-}
-
 #[test]
-fn hidden_upvalues_are_out_of_scripts_reach() {
-    let mut lua = Lua::new();
-    let vm = lua.vm();
-    let f = vm.register_native("make_peek", make_peek);
-    vm.set_global("make_peek", f);
-    let out = lua
-        .exec(
-            b"local f = make_peek()
-              local a, b, n = f()
-              local name, v = debug.getupvalue(f, 1)
-              return a, b, n, v, debug.getupvalue(f, 2), debug.setupvalue(f, 2, 99),
-                     debug.getinfo(f, 'u').nups, select(2, f())",
-            "t",
-        )
+fn host_functions_show_scripts_no_upvalues() {
+    // A host function's state lives in a hidden upvalue the debug library
+    // can't see or change.
+    let mut iso = isolate();
+    let out: Vec<String> = iso
+        .scope(|s| {
+            let f = s.create_function(|c| c.ret(7));
+            s.globals().set("f", f)?;
+            let r = s
+                .load(Chunk::new(
+                    "return debug.getupvalue(f, 1), debug.setupvalue(f, 1, 99),
+                            debug.getinfo(f, 'u').nups, f()",
+                ))?
+                .call(())?;
+            r.iter()
+                .map(|v| Ok(String::from_utf8_lossy(&v.to_display()?).into_owned()))
+                .collect::<Result<Vec<_>, Error>>()
+        })
         .unwrap();
-    let vm = lua.vm();
-    let text: Vec<String> = out
-        .iter()
-        .map(|&v| String::from_utf8_lossy(&vm.to_display(v)).into_owned())
-        .collect();
-    assert_eq!(text, ["1", "2", "1", "1", "nil", "nil", "1", "2", "1"]);
+    assert_eq!(out, ["nil", "nil", "0", "7"]);
 }

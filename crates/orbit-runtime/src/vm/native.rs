@@ -167,6 +167,18 @@ impl NativeCtx<'_> {
         self.vm.rt.natives[self.id.0 as usize].data
     }
 
+    /// The same window, borrowed for a shorter time: for host code that
+    /// keeps a context in a value of its own while the native runs.
+    pub fn reborrow(&mut self) -> NativeCtx<'_> {
+        NativeCtx {
+            vm: self.vm,
+            base: self.base,
+            nargs: self.nargs,
+            id: self.id,
+            upvals: self.upvals,
+        }
+    }
+
     /// Number of arguments the native was called with.
     #[inline]
     pub fn nargs(&self) -> usize {
@@ -329,7 +341,15 @@ impl NativeCtx<'_> {
             });
         }
         let below = s.frames.len();
-        let cdepth = s.deeper();
+        // As in `Vm::call`, the host's outermost call is the one
+        // `c_overflow` already counts, so a host that calls through a
+        // function of its own first (as `lua`'s driver does) keeps lua5.5's
+        // depths.
+        let cdepth = if below == 0 && self.vm.rt.host_native == Some(self.id) {
+            s.same_depth()
+        } else {
+            s.deeper()
+        };
         let r = if self.vm.c_overflow(cdepth) {
             Err(self.error("C stack overflow"))
         } else {

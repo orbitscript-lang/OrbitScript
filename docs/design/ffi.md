@@ -23,7 +23,7 @@ Declaration syntax for OrbitScript (`extern fn`) is a planned follow-up that wil
 
 The library gives scripts the same power a C module has: they can call any function the process can load and read or write any address. So it is a capability the host grants:
 
-- **Embedders** need the `ffi` Cargo feature on `orbit`, which is off by default, and must also call `Lua::enable_ffi()`. Without that call, scripts see no `ffi` global and `require "ffi"` fails, even when the feature is compiled in.
+- **Embedders** need the `ffi` Cargo feature on `orbit`, which is off by default, and must also call `Isolate::enable_ffi()`. Without that call, scripts see no `ffi` global and `require "ffi"` fails, even when the feature is compiled in.
 - **The `orbit` CLI** builds with the feature and enables it, unless it is started with `--no-ffi`.
 
 Once enabled, the library is the `ffi` global and `package.loaded.ffi`. It is also part of OrbitScript's prelude, so `.orb` code can use it without declaring it.

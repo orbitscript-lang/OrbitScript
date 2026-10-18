@@ -11,7 +11,7 @@ Exit criterion: `literals.lua`, `constructs.lua`, `attrib.lua`, `files.lua`, `ve
 | Piece | Crate | Notes |
 |---|---|---|
 | `load`, `loadfile`, `dofile`, `chunk_id` | `orbit-stdlib` (`load.rs`, feature `load`) | Compiles through a hook, so `orbit-stdlib` stays free of the front end |
-| The compiler hook | `orbit-vm` (`Runtime::compile`) | Installed by the embedder; `orbit::Lua` installs the Lua front end |
+| The compiler hook | `orbit-vm` (`Runtime::compile`) | Installed by the embedder; `orbit::Isolate` installs the Lua front end |
 | Linking with an environment | `orbit-vm` (`link.rs`) | `Vm::load_with_env`, `NativeCtx::link` |
 | `require`, `package` | `orbit-stdlib` (`package.rs`, feature `package`) | |
 | Binary chunk format and verifier | `orbit-bytecode` (`chunk_format.rs`, `verify.rs`) | Plain data in, plain data out: no VM needed, so both are unit-testable and fuzzable |
@@ -52,7 +52,7 @@ pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, S
 // Runtime::compile: Option<CompileFn>
 ```
 
-`orbit::Lua::new()` installs the Lua front end. **OrbitScript** has a second hook, `Runtime::compile_orbitscript`, which `orbit::Lua` always installs (OrbitScript has no Cargo feature: it is the runtime's own language). A source chunk named `@path.orb` (from `loadfile`, `dofile`, `require` or the CLI's script) uses it; everything else, including `load` of a string, `-e`, standard input and interactive mode, stays Lua. The default `package.path` also has `.orb` entries after `lua`'s (`/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb`), and the Lua searcher loads whichever file it finds, the loader picking the compiler by the name. There is no separate OrbitScript path or searcher, so `#package.searchers` is 4 as in `lua` (`tests/diff/require.lua` checks it). A script that sets `package.path` (or `LUA_PATH`) itself decides whether `.orb` files are searched; a missing module's message lists the `.orb` files tried along with the others.
+An `orbit::Isolate` installs the Lua front end. **OrbitScript** has a second hook, `Runtime::compile_orbitscript`, which `orbit::Isolate` always installs (OrbitScript has no Cargo feature: it is the runtime's own language). A source chunk named `@path.orb` (from `loadfile`, `dofile`, `require` or the CLI's script) uses it; everything else, including `load` of a string, `-e`, standard input and interactive mode, stays Lua. The default `package.path` also has `.orb` entries after `lua`'s (`/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb`), and the Lua searcher loads whichever file it finds, the loader picking the compiler by the name. There is no separate OrbitScript path or searcher, so `#package.searchers` is 4 as in `lua` (`tests/diff/require.lua` checks it). A script that sets `package.path` (or `LUA_PATH`) itself decides whether `.orb` files are searched; a missing module's message lists the `.orb` files tried along with the others.
 
 ### Environments and captures
 

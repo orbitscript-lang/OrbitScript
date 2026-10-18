@@ -263,10 +263,11 @@ Registered through one API (`vm.register_native("print", print)` and library tab
 ## Embedding and CLI
 
 ```rust
-let mut lua = orbit::Lua::new();          // opens the first-light libraries
-let f = lua.load(source, "script.lua")?;  // parse → lower → analyse → compile → link
-lua.call(f, &[])?;
+let mut iso = orbit::Runtime::new().new_isolate(orbit::Config::default());
+iso.exec(orbit::Chunk::new(source).name("@script.lua"))?; // compile → link → run
 ```
+
+(The embedding API has since been redesigned; ADR-11 describes it.)
 
 `orbit-cli`: `orbit script.lua [args...]` sets the global `arg` table (`arg[0]` is the script), runs it, and on an uncaught error prints `<program>: <message>` and a traceback to stderr with exit status 1, the shape the diff runner expects. The separate `orbitc` compiler (after `luac`) prints the intermediate forms (`--ast`, `--hir`, `-l`) and writes binary chunks.
 

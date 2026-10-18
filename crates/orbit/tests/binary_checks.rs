@@ -1,30 +1,37 @@
 //! `load` checks binary chunks at the level the build and `ORBIT_VERIFY`
-//! (or `checks::set_level`) choose.
+//! (or `Isolate::set_binary_checks`) choose.
 
-use orbit::checks::set_level;
-use orbit::{Lua, Value};
-use orbit_compiler::bytecode::verify::Level;
+#![cfg(feature = "verify")]
+
+use orbit::{BinaryChecks, Chunk, Compiler, Config, Error, Isolate, Language, Runtime, Value};
 use orbit_compiler::bytecode::{MULTI, Op, format};
-use orbit_lua_syntax::ParseOptions;
 
 /// A binary chunk whose main function is `code`.
 fn chunk_with(code: Vec<Op>) -> Vec<u8> {
-    let mut chunk = orbit::compile(b"local a = 1", "t", &ParseOptions::default()).unwrap();
+    let mut chunk = Compiler
+        .compile(b"local a = 1", "t", Language::Lua)
+        .unwrap();
     chunk.protos[0].code = code;
     chunk.protos[0].debug = Default::default();
     format::encode(&chunk, true)
 }
 
 /// Whether `load` accepts `bytes`, and its message if not.
-fn load(lua: &mut Lua, bytes: &[u8]) -> Result<(), String> {
-    let s = lua.vm().new_str(bytes);
-    lua.vm().set_global("B", s);
-    let r = lua.exec(b"return load(B)", "t").unwrap();
-    match r[..] {
-        [Value::Closure(_)] => Ok(()),
-        [Value::Nil, m] => Err(String::from_utf8_lossy(&lua.vm().to_display(m)).into_owned()),
-        _ => panic!("unexpected load results"),
-    }
+fn load(iso: &mut Isolate, bytes: &[u8]) -> Result<(), String> {
+    iso.scope(|s| {
+        s.globals().set("B", bytes)?;
+        let r = s.load(Chunk::new("return load(B)"))?.call(())?;
+        Ok::<_, Error>(match r[..] {
+            [Value::Function(_)] => Ok(()),
+            [Value::Nil, m] => Err(String::from_utf8_lossy(&m.to_display()?).into_owned()),
+            _ => panic!("unexpected load results"),
+        })
+    })
+    .unwrap()
+}
+
+fn isolate() -> Isolate {
+    Runtime::new().new_isolate(Config::default())
 }
 
 #[test]
@@ -36,20 +43,20 @@ fn each_level_runs_its_layers() {
     }]);
     // Fails layer 1: a register past the frame.
     let structure = chunk_with(vec![Op::Return1 { src: 200 }]);
-    let mut lua = Lua::new();
+    let mut iso = isolate();
 
-    set_level(lua.vm(), Some(Level::Full));
-    let e = load(&mut lua, &flow).unwrap_err();
+    iso.set_binary_checks(Some(BinaryChecks::Full));
+    let e = load(&mut iso, &flow).unwrap_err();
     assert!(e.contains("open operand without an open producer"), "{e}");
-    let e = load(&mut lua, &structure).unwrap_err();
+    let e = load(&mut iso, &structure).unwrap_err();
     assert!(e.contains("bad binary format"), "{e}");
 
-    set_level(lua.vm(), Some(Level::Structure));
-    assert_eq!(load(&mut lua, &flow), Ok(()));
-    assert!(load(&mut lua, &structure).is_err());
+    iso.set_binary_checks(Some(BinaryChecks::Structure));
+    assert_eq!(load(&mut iso, &flow), Ok(()));
+    assert!(load(&mut iso, &structure).is_err());
 
-    set_level(lua.vm(), None);
-    assert_eq!(load(&mut lua, &structure), Ok(()));
+    iso.set_binary_checks(None);
+    assert_eq!(load(&mut iso, &structure), Ok(()));
 }
 
 #[test]
@@ -88,10 +95,10 @@ fn variables_to_close_stay_balanced() {
             Some("paths join with different variables to close"),
         ),
     ];
-    let mut lua = Lua::new();
-    set_level(lua.vm(), Some(Level::Full));
+    let mut iso = isolate();
+    iso.set_binary_checks(Some(BinaryChecks::Full));
     for (code, want) in cases {
-        let r = load(&mut lua, &chunk_with(code.clone()));
+        let r = load(&mut iso, &chunk_with(code.clone()));
         match want {
             None => assert_eq!(r, Ok(()), "{code:?}"),
             Some(w) => {

@@ -50,15 +50,20 @@ fn run_child(path: &Path, level: &str) {
     {
         std::process::exit(3);
     }
-    let mut lua = orbit::Lua::new();
-    let f = lua.vm().load(&chunk);
-    let _ = lua.call(f, &[]);
+    let mut iso = orbit::Runtime::new().new_isolate(orbit::Config::default());
+    iso.scope(|s| {
+        let _ = s.load_compiled(&chunk).call(());
+    });
 }
 
 fn corpus() -> Vec<UnlinkedChunk> {
     sources()
         .iter()
-        .filter_map(|s| orbit::compile(s, "fuzz", &Default::default()).ok())
+        .filter_map(|s| {
+            orbit::Compiler
+                .compile(s, "fuzz", orbit::Language::Lua)
+                .ok()
+        })
         .collect()
 }
 
@@ -217,7 +222,7 @@ fn fuzz(mutants: usize, seed: u64) {
     let t = Instant::now();
     for _ in 0..reps {
         for s in &sources {
-            let _ = orbit::compile(s, "fuzz", &Default::default());
+            let _ = orbit::Compiler.compile(s, "fuzz", orbit::Language::Lua);
         }
     }
     println!("compile: {:?}", t.elapsed() / reps);
