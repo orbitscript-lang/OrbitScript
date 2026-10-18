@@ -300,7 +300,11 @@ impl Interp {
                         ));
                     }
                 }
-                Op::VarargTable { .. } | Op::VarargGet { .. } | Op::VarargUnpack { .. } => {
+                Op::VarargTable { .. }
+                | Op::VarargGet { .. }
+                | Op::VarargLen { .. }
+                | Op::VarargGetInt { .. }
+                | Op::VarargUnpack { .. } => {
                     return Err(format!("{op:?} is not covered by this test interpreter"));
                 }
                 Op::NewTable { dst, .. } => r[dst as usize] = V::Table(Rc::default()),

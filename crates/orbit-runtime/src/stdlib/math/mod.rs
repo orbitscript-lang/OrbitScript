@@ -3,7 +3,7 @@
 mod rng;
 
 use crate::object::number::{self, float_to_int, str_to_number};
-use crate::object::{Gc, Table, Value};
+use crate::object::{Gc, LuaHeap, Table, Value};
 use crate::vm::{CallOutcome, FastFn, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
 
 use rng::Xoshiro;
@@ -48,7 +48,7 @@ pub(crate) const FAST: &[(&str, FastFn)] = &[
     ("math.sqrt", sqrt_fast),
 ];
 
-fn floor_fast(args: &[Value]) -> Option<Value> {
+fn floor_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
     match *args.first()? {
         Value::Float(f) => {
             let r = f.floor();
@@ -59,7 +59,7 @@ fn floor_fast(args: &[Value]) -> Option<Value> {
     }
 }
 
-fn abs_fast(args: &[Value]) -> Option<Value> {
+fn abs_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
     match *args.first()? {
         Value::Int(i) => Some(Value::Int(i.wrapping_abs())),
         Value::Float(f) => Some(Value::Float(f.abs())),
@@ -89,15 +89,15 @@ fn extreme_fast(args: &[Value], want_max: bool) -> Option<Value> {
     Some(best)
 }
 
-fn max_fast(args: &[Value]) -> Option<Value> {
+fn max_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
     extreme_fast(args, true)
 }
 
-fn min_fast(args: &[Value]) -> Option<Value> {
+fn min_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
     extreme_fast(args, false)
 }
 
-fn sqrt_fast(args: &[Value]) -> Option<Value> {
+fn sqrt_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
     match *args.first()? {
         Value::Float(f) => Some(Value::Float(f.sqrt())),
         Value::Int(i) => Some(Value::Float((i as f64).sqrt())),

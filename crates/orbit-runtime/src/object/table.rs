@@ -1067,17 +1067,7 @@ impl Table {
     pub fn border(&self) -> i64 {
         let n = self.array.len();
         if n > 0 && self.array.tag(n - 1) == Tag::Nil {
-            // A border inside the array: t[lo] non-nil (or lo = 0), t[hi] nil.
-            let (mut lo, mut hi) = (0usize, n);
-            while hi - lo > 1 {
-                let mid = (lo + hi) / 2;
-                if self.array.tag(mid - 1) == Tag::Nil {
-                    hi = mid;
-                } else {
-                    lo = mid;
-                }
-            }
-            return lo as i64;
+            return self.array.inner_border() as i64;
         }
         if self.used == 0 || self.get_int(n as i64 + 1).is_nil() {
             return n as i64;
@@ -1312,11 +1302,32 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
         if tab.meta.is_some() && tab.array.tag(idx) == Tag::Nil {
             return IntStore::Slow;
         }
-        tab.array.set(idx, v);
+        // The interpreter stores numbers by parts, so for them the nil
+        // test folds away.
+        if v.is_nil() {
+            tab.array.set_nil_hinted(idx);
+        } else {
+            tab.array.set(idx, v);
+        }
         return IntStore::Array;
     }
     if tab.meta.is_some() {
         return IntStore::Slow;
+    }
+    // Appending (`t[#t + 1] = v`) with room left in the array part and no
+    // hash part that could hold the key: no allocation, so the GC's byte
+    // count is unaffected. With a memory limit a store errors once the heap
+    // is over it even if it allocates nothing (`set_key`), so only appends
+    // without one take this path.
+    if idx == tab.array.len() as u64
+        && tab.array.len() < tab.array.cap()
+        && tab.used == 0
+        && !v.is_nil()
+        && heap.limit().is_none()
+    {
+        let pushed = heap.get_mut(t).array.push_in_place(v);
+        debug_assert!(pushed, "checked for room above");
+        return IntStore::Array;
     }
     match set_key(heap, t, &Key::int(i), v) {
         Ok(_) => IntStore::Other,

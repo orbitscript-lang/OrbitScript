@@ -1252,7 +1252,8 @@ impl Vm {
                             if !HOOKED
                                 && (want <= 1 || want == MULTI)
                                 && let Some(fast) = self.rt.natives[id.0 as usize].fast
-                                && let Some(v) = w.get(f + 1..f + 1 + n).and_then(fast) =>
+                                && let Some(v) =
+                                    w.get(f + 1..f + 1 + n).and_then(|a| fast(&self.heap, a)) =>
                         {
                             if want != 0 {
                                 w[f] = v;
@@ -2105,6 +2106,22 @@ impl Vm {
                         let k = reg!(key);
                         let v = self.op_vararg_get(base, nvarargs, k);
                         w = window!();
+                        reg!(dst) = v;
+                    }
+                    Op::VarargLen { dst } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs;
+                        reg!(dst) = Value::Int(nvarargs as i64);
+                    }
+                    Op::VarargGetInt { dst, index } => {
+                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs as usize;
+                        let i = index as usize;
+                        // The extra arguments sit just below the frame's base.
+                        let v = if (1..=nvarargs).contains(&i) {
+                            self.rt.stack.regs[base - nvarargs + i - 1]
+                        } else {
+                            Value::Nil
+                        };
+                        w = window_sized!();
                         reg!(dst) = v;
                     }
                     Op::VarargUnpack { dst, table, count } => {
