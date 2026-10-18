@@ -1,6 +1,6 @@
 # ADR-12: Developer tooling: language server and debugger
 
-Status: Proposed (2026-10-18). Tym asked on 2026-10-16 what OrbitScript needs for the tooling developers expect: a language server with completion and navigation, and debugging with breakpoints and stepping. He decided the plan's questions D1 to D13 on 2026-10-18. The full plan, with measurements and the options weighed, is `planning/dev-tooling/plan.md` in the project files; this record keeps the decisions. Accepting it amends ADR-6 (one more `unsafe` exception, D12), adds `serde_json` to the dependencies of `orbit-std` and the tooling crates, and adds `orbit_newstate` and `orbit_debug_listen` to `liborbit`'s `orbit_` exports (ADR-10).
+Status: Accepted (Tym, 2026-10-18 22:51Z; proposed the same day). Tym asked on 2026-10-16 what OrbitScript needs for the tooling developers expect: a language server with completion and navigation, and debugging with breakpoints and stepping. He decided the plan's questions D1 to D13 on 2026-10-18. The full plan, with measurements and the options weighed, is `planning/dev-tooling/plan.md` in the project files; this record keeps the decisions. Accepting it amends ADR-6 (one more `unsafe` exception, D12), adds `serde_json` to the dependencies of `orbit-std` and the tooling crates, and adds `orbit_newstate` and `orbit_debug_listen` to `liborbit`'s `orbit_` exports (ADR-10).
 
 ## Context
 
