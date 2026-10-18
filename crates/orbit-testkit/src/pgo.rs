@@ -9,8 +9,13 @@
 //!    `-Cprofile-generate`. Only this throwaway binary carries the counters.
 //! 2. Run it over a training set (the benchmarks at their quick inputs, the
 //!    examples at their training inputs, and the `tests/diff` and
-//!    `tests/first-light` programs), then merge the raw
-//!    profiles with `llvm-profdata` into `pgo/<target>.profdata`.
+//!    `tests/first-light` programs).
+//! 3. Build the shared layout (liborbit and the `orbit` that loads it, ADR-10)
+//!    the same way with `build.sh`, and run it over the same set, so the
+//!    profile also covers the code only liborbit has (the ABI boundary).
+//! 4. Merge the raw profiles with `llvm-profdata` into
+//!    `pgo/<target>.profdata`. A release build of liborbit uses it as the
+//!    static `orbit` does.
 //!
 //! `pgo build` (the default) builds `orbit` in the `pgo` profile with
 //! `-Cprofile-use` and the committed profile. That is an ordinary release
@@ -55,8 +60,9 @@ or they are new, as after a move or rename). Fails if there are any:
 retrain then. A freshly trained profile covers every function, even those
 the training never ran.
 
-train: records a new profile with an instrumented build
-(target/pgo-gen/orbit) running the training set, writes it to
+train: records a new profile with instrumented builds running the training
+set: the static orbit (target/pgo-gen/orbit), then the shared layout that
+build.sh lays out (liborbit and its orbit, in target/pgo-gen-shared). Writes it to
 pgo/<target>.profdata for committing, then builds as above. Needs
 llvm-profdata from the same LLVM as rustc: `rustup component add
 llvm-tools`, or set LLVM_PROFDATA.
@@ -153,7 +159,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     Ok(true)
 }
 
-/// Records a profile with the instrumented build and writes it to `out`.
+/// Records a profile with the instrumented builds and writes it to `out`.
 fn train(
     root: &Path,
     target: &Path,
@@ -181,26 +187,22 @@ fn train(
     // Build scripts were instrumented too and may have written profiles.
     util::fresh_dir(&raw)?;
     println!("== training on {} programs", jobs.len());
-    let mut failed = 0usize;
-    for job in &jobs {
-        let mut cmd = Command::new(&instrumented);
-        cmd.args(&job.args)
-            .current_dir(&job.cwd)
-            .env("LLVM_PROFILE_FILE", raw.join("orbit-%p-%m.profraw"));
-        let (exit, wall, _, stderr) =
-            process::spawn_and_wait(cmd, timeout).map_err(io_err(instrumented.display()))?;
-        // Programs that exit with an error still record useful counts.
-        if exit != Exit::Code(0) {
-            failed += 1;
-            let why = util::tail(&stderr, 1);
-            println!("  {:<40} {} {why}", job.args[0], exit.describe());
-        } else {
-            println!("  {:<40} {}", job.args[0], util::secs(wall));
-        }
-    }
-    if failed > 0 {
-        println!("  ({failed} programs exited with an error; their counts are kept)");
-    }
+    run_jobs(&instrumented, &jobs, &raw, timeout)?;
+
+    // The shared layout. Its build scripts write their profiles elsewhere:
+    // only the programs' runs count.
+    let shared = target.join("pgo-gen-shared");
+    println!("== building the instrumented shared layout (build.sh, profile pgo-gen)");
+    build_shared(
+        root,
+        &shared,
+        &format!(
+            "-Cprofile-generate={}",
+            target.join("pgo-data").join("raw-build").display()
+        ),
+    )?;
+    println!("== training liborbit on {} programs", jobs.len());
+    run_jobs(&shared.join("bin").join(exe("orbit")), &jobs, &raw, timeout)?;
 
     println!("== merging profiles into {}", out.display());
     if let Some(dir) = out.parent() {
@@ -418,6 +420,50 @@ fn training_set(root: &Path, with_bench: bool, exclude: &[String]) -> Result<Vec
 
 /// Builds the `orbit` binary in `profile` with extra rustc flags on top of
 /// whatever flags the environment already sets.
+/// Runs each training job with `binary`, its raw profiles going to `raw`.
+fn run_jobs(binary: &Path, jobs: &[Job], raw: &Path, timeout: Duration) -> Result<()> {
+    let mut failed = 0usize;
+    for job in jobs {
+        let mut cmd = Command::new(binary);
+        cmd.args(&job.args)
+            .current_dir(&job.cwd)
+            .env("LLVM_PROFILE_FILE", raw.join("orbit-%p-%m.profraw"));
+        let (exit, wall, _, stderr) =
+            process::spawn_and_wait(cmd, timeout).map_err(io_err(binary.display()))?;
+        // Programs that exit with an error still record useful counts.
+        if exit != Exit::Code(0) {
+            failed += 1;
+            let why = util::tail(&stderr, 1);
+            println!("  {:<40} {} {why}", job.args[0], exit.describe());
+        } else {
+            println!("  {:<40} {}", job.args[0], util::secs(wall));
+        }
+    }
+    if failed > 0 {
+        println!("  ({failed} programs exited with an error; their counts are kept)");
+    }
+    Ok(())
+}
+
+/// Lays out the shared build (liborbit and its `orbit`) in `out` with
+/// `build.sh` in the `pgo-gen` profile, compiled with `flag`.
+fn build_shared(root: &Path, out: &Path, flag: &str) -> Result<()> {
+    let status = Command::new("sh")
+        .arg(root.join("build.sh"))
+        .args(["--profile", "pgo-gen", "--out"])
+        .arg(out)
+        .current_dir(root)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", rustflags_with(&[flag]))
+        .status()
+        .map_err(io_err("running sh build.sh"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("build.sh --profile pgo-gen failed".to_string())
+    }
+}
+
 fn cargo_build(root: &Path, profile: &str, extra: &[&str]) -> Result<()> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let flags = rustflags_with(extra);
