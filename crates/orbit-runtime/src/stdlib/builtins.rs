@@ -2,9 +2,10 @@
 //! they use (ADR-11).
 //!
 //! The modules in `builtins/` are compiled by the build script and embedded
-//! as binary chunks. Each loads with a fresh `intrinsics` table (plus `next`
-//! and `type`) as its only globals, so scripts can neither reach the
-//! intrinsics nor change what a built-in calls, and returns its exports. Their prototypes are
+//! as binary chunks. Each loads with its own environment holding only the
+//! intrinsics (taken with `use intrinsics::{...}`), `next` and `type`, so
+//! scripts can neither reach the intrinsics nor change what a built-in
+//! calls, and returns its exports. Their prototypes are
 //! marked built-in, so the debug interface, error messages and tracebacks
 //! show them as C functions.
 //!
@@ -48,9 +49,9 @@ pub(crate) static BASE: Module =
 pub(crate) static TABLE: Module =
     Module::new(include_bytes!(concat!(env!("OUT_DIR"), "/table.orbc")));
 
-/// The intrinsics a built-in module reaches through its global
-/// `intrinsics` table. Its other globals are `next` and `type`, the base
-/// library's own functions.
+/// The intrinsics a built-in module takes with `use intrinsics::{...}`,
+/// copying each once when the module loads. Its other globals are `next`
+/// and `type`, the base library's own functions.
 const INTRINSICS: &[(&str, NativeFn)] = &[
     ("argerror", argerror),
     ("typeerror", typeerror),
@@ -64,6 +65,11 @@ const INTRINSICS: &[(&str, NativeFn)] = &[
     ("plainlen", plainlen),
     ("sortprim", sortprim),
 ];
+
+/// Where a module's environment keeps the intrinsics table for
+/// [`require`]. Not a name a module can use: OrbitScript has no implicit
+/// globals.
+const INTRINSICS_KEY: &str = "(intrinsics)";
 
 /// Built-ins that code they call may yield across, as their C counterparts
 /// in the reference allow (`pairs` calls `__pairs` yieldably). Every other
@@ -84,7 +90,9 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
         let v = vm.native_named(name, f);
         vm.raw_set_str(intrinsics_t, name, v);
     }
-    vm.raw_set_str(env_t, "intrinsics", intrinsics);
+    vm.raw_set_str(env_t, INTRINSICS_KEY, intrinsics);
+    let require = vm.native_named("require", require);
+    vm.raw_set_str(env_t, "require", require);
     let shared: [(&'static str, NativeFn); 2] =
         [("next", super::base::next), ("type", super::base::type_)];
     for (name, f) in shared {
@@ -135,6 +143,7 @@ fn intrinsic_name(name: &str) -> &'static str {
         "metafield" => "(intrinsic metafield)",
         "plainlen" => "(intrinsic plainlen)",
         "sortprim" => "(intrinsic sortprim)",
+        "require" => "(intrinsic require)",
         _ => "(intrinsic)",
     }
 }
@@ -348,4 +357,22 @@ fn sortprim(ctx: &mut NativeCtx<'_>) -> R {
             .map_err(|_| ctx.no_memory())?;
     }
     ctx.ret1(Value::Bool(true))
+}
+
+/// `require(name)` inside a built-in module, which `use` calls: only
+/// `intrinsics` exists.
+fn require(ctx: &mut NativeCtx<'_>) -> R {
+    let name = ctx.arg(0);
+    let is_intrinsics = matches!(name, Value::Str(s) if ctx.bytes(s) == b"intrinsics");
+    let found = match ctx.builtin_env() {
+        Value::Table(env) if is_intrinsics => {
+            let k = ctx.new_str(INTRINSICS_KEY.as_bytes());
+            ctx.vm.heap.get(env).get(&ctx.vm.heap, k)
+        }
+        _ => Value::Nil,
+    };
+    if found.is_nil() {
+        return Err(ctx.builtin_error("built-in modules can only use 'intrinsics'"));
+    }
+    ctx.ret1(found)
 }

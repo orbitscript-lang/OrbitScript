@@ -5,7 +5,7 @@
 // what they use. The debug interface shows their functions as C functions.
 // A built-in avoids tail calls, which would drop its frame.
 
-extern intrinsics;
+use intrinsics::{argerror, metafield};
 
 // The iterator `ipairs` returns: one function, so every call returns the
 // same one, as the reference does.
@@ -20,17 +20,17 @@ fn ipairs_next(t, i) {
 
 pub fn ipairs(...args) {
     if args.n == 0 {
-        intrinsics::argerror(1, "value expected");
+        argerror(1, "value expected");
     }
     (ipairs_next, args[1], 0)
 }
 
 pub fn pairs(...args) {
     if args.n == 0 {
-        intrinsics::argerror(1, "value expected");
+        argerror(1, "value expected");
     }
     let t = args[1];
-    let h = intrinsics::metafield(t, "__pairs");
+    let h = metafield(t, "__pairs");
     if h != nil {
         // Exactly four of its results: the fourth is the loop's
         // to-be-closed value.

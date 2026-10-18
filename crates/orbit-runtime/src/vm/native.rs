@@ -585,6 +585,21 @@ impl NativeCtx<'_> {
             .rposition(|f| matches!(f.kind, FrameKind::Lua { .. }))
     }
 
+    /// The environment (`_ENV`) of the built-in calling this intrinsic: its
+    /// first capture.
+    pub(crate) fn builtin_env(&self) -> Value {
+        let Some(i) = self.builtin_frame() else {
+            return Value::Nil;
+        };
+        let FrameKind::Lua { closure, .. } = self.vm.rt.stack.frames[i].kind else {
+            unreachable!("builtin_frame finds a Lua frame")
+        };
+        match self.vm.heap.get(closure).captures.first() {
+            Some(&cell) => self.vm.heap.get(cell).value,
+            None => Value::Nil,
+        }
+    }
+
     /// An error with a message, positioned at the caller of the built-in
     /// calling this intrinsic: `luaL_error` from that built-in.
     pub(crate) fn builtin_error(&mut self, msg: impl AsRef<str>) -> LuaError {
