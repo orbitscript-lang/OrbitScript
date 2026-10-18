@@ -38,11 +38,18 @@ pub(crate) fn extend_nil(regs: &mut Vec<Value>, len: usize) {
     }
 }
 
+/// Extend the stack to cover the window at `base` and return it.
+#[cold]
+#[inline(never)]
+fn grow_window(regs: &mut Vec<Value>, base: usize) -> &mut [Value; WINDOW] {
+    extend_nil(regs, base + WINDOW);
+    <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW]).expect("a full window")
+}
+
 /// Where a new Lua frame's state lives, so the dispatch loop can enter it
 /// without reading the frame back.
 struct Entered {
     base: usize,
-    code_id: usize,
 }
 
 /// How a run of one dispatch loop instantiation ended.
@@ -262,6 +269,72 @@ fn enter_lua_frame(
     nargs: usize,
     want: u8,
 ) -> Result<Entered, Exc> {
+    // The caller saved its pc already.
+    let ret_pc = rt.stack.frames.last().map_or(0, |f| f.pc);
+    match enter_lua_frame_fast(rt, &proto, c, func, nargs, want, ret_pc) {
+        Some(base) => Ok(Entered { base }),
+        None => enter_lua_frame_general(rt, proto, c, func, nargs, want),
+    }
+}
+
+/// The common call: exactly the parameters, no varargs, room for the
+/// frame. Pushes the frame and returns its base, leaving sizing the register
+/// window to the caller; `None` for any other call.
+#[inline(always)]
+fn enter_lua_frame_fast(
+    rt: &mut crate::vm::Runtime,
+    proto: &Shape,
+    c: Gc<Closure>,
+    func: usize,
+    nargs: usize,
+    want: u8,
+    ret_pc: u32,
+) -> Option<usize> {
+    if nargs != proto.nparams as usize || proto.is_vararg {
+        return None;
+    }
+    let base = func + 1;
+    if base + (proto.nregs as usize).max(nargs) > rt.limits.max_stack {
+        return None;
+    }
+    let cells = &mut rt.stack.cells;
+    let cell_base = cells.len();
+    if proto.ncells > 0 {
+        cells.resize(cell_base + proto.ncells as usize, rt.dead_cell);
+    }
+    let frames = &mut rt.stack.frames;
+    if let Some(caller) = frames.last_mut() {
+        caller.pc = ret_pc;
+    }
+    frames.push(Frame {
+        kind: FrameKind::Lua {
+            closure: c,
+            code_id: proto.code_id,
+        },
+        func: func as u32,
+        base: base as u32,
+        pc: 0,
+        cell_base: cell_base as u32,
+        nvarargs: 0,
+        want,
+        tail: false,
+        extra: 0,
+        cdepth: 0,
+    });
+    Some(base)
+}
+
+/// [`enter_lua_frame`] for every other call, including the stack overflow
+/// error.
+#[inline(never)]
+fn enter_lua_frame_general(
+    rt: &mut crate::vm::Runtime,
+    proto: Shape,
+    c: Gc<Closure>,
+    func: usize,
+    nargs: usize,
+    want: u8,
+) -> Result<Entered, Exc> {
     let code_id = proto.code_id;
     let np = proto.nparams as usize;
     let nregs = proto.nregs as usize;
@@ -308,7 +381,7 @@ fn enter_lua_frame(
         extra: 0,
         cdepth: 0,
     });
-    Ok(Entered { base, code_id })
+    Ok(Entered { base })
 }
 
 impl Vm {
@@ -948,22 +1021,15 @@ impl Vm {
             macro_rules! window {
                 () => {{
                     let regs = &mut self.rt.stack.regs;
-                    if regs.len() < base + WINDOW {
-                        extend_nil(regs, base + WINDOW);
+                    // One length check: the slice below repeats it, and the
+                    // compiler drops the repeat.
+                    if regs.len() >= base + WINDOW {
+                        <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW])
+                            .expect("a full window")
+                    } else {
+                        grow_window(regs, base)
                     }
-                    <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW])
-                        .expect("a full window")
                 }};
-            }
-            // The window when the stack is known to be long enough: after
-            // entering a frame (`push_lua_frame` sized it) or returning to
-            // one (its window lies below the callee's).
-            macro_rules! window_sized {
-                () => {
-                    (&mut self.rt.stack.regs[base..])
-                        .first_chunk_mut::<WINDOW>()
-                        .expect("a full window")
-                };
             }
             let mut w = window!();
             // The running frame's cell base and vararg count, for the few
@@ -1223,9 +1289,9 @@ impl Vm {
                     let f: usize = $f;
                     let fa = base + f;
                     let n = $nargs;
-                    save_pc!();
                     let want: u8 = $want;
                     match w[f] {
+                        // A Lua callee's frame entry saves the pc.
                         Value::Closure(c) => {
                             // A function calling itself: the running frame
                             // keeps `closure` alive, so an equal handle is
@@ -1235,16 +1301,38 @@ impl Vm {
                             } else {
                                 Shape::of(&self.heap.get(c).code)
                             };
-                            let e = tri!(enter_lua_frame(&mut self.rt, shape, c, fa, n, want));
+                            let new_base = match enter_lua_frame_fast(
+                                &mut self.rt,
+                                &shape,
+                                c,
+                                fa,
+                                n,
+                                want,
+                                pc as u32,
+                            ) {
+                                Some(b) => b,
+                                None => {
+                                    save_pc!();
+                                    tri!(enter_lua_frame_general(
+                                        &mut self.rt,
+                                        Shape::of(&self.heap.get(c).code),
+                                        c,
+                                        fa,
+                                        n,
+                                        want
+                                    ))
+                                    .base
+                                }
+                            };
                             if HOOKED {
                                 self.rt.stack.hook.call_pending = Some(false);
                             }
                             depth += 1;
                             closure = c;
-                            base = e.base;
+                            base = new_base;
                             pc = 0;
-                            switch_code!(c, e.code_id);
-                            w = window_sized!();
+                            switch_code!(c, shape.code_id);
+                            w = window!();
                         }
                         // A native's fast path, when it has one and takes
                         // these arguments: no window, no frame.
@@ -1263,6 +1351,7 @@ impl Vm {
                         // Any other native, called in place: no frame, and a
                         // plain return goes straight back to this loop.
                         Value::Native(id) if !HOOKED => {
+                            save_pc!();
                             self.rt.top = fa + 1 + n;
                             let nf = self.rt.natives[id.0 as usize].f;
                             let mut ctx = NativeCtx {
@@ -1329,7 +1418,10 @@ impl Vm {
                                 Err(e) => throw!(self.native_raised(id, fa, e)),
                             }
                         }
-                        _ => match self.call_value(fa, n, want) {
+                        _ => match {
+                            save_pc!();
+                            self.call_value(fa, n, want)
+                        } {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
                                 // The native may have set or cleared a hook.
                                 if self.rt.stack.hook.armed() != HOOKED {
@@ -1369,6 +1461,10 @@ impl Vm {
                         if want == MULTI {
                             regs.copy_within(src..src + n, func);
                             self.rt.top = func + n;
+                        } else if n == 0 {
+                            let want = want as usize;
+                            regs[func..func + want].fill(Value::Nil);
+                            self.rt.top = func + want;
                         } else {
                             let want = want as usize;
                             let k = n.min(want);
@@ -1379,7 +1475,7 @@ impl Vm {
                         depth -= 1;
                         closure = c;
                         switch_code!(c, code_id);
-                        w = window_sized!();
+                        w = window!();
                         continue;
                     }
                     flow!(self.do_return(src, n))
@@ -1406,7 +1502,14 @@ impl Vm {
                     // Numbers are copied by parts: the source was usually
                     // just written that way, and a whole 16-byte load would
                     // stall on store forwarding.
-                    Op::Move { dst, src } => by_parts!(src, |v| reg!(dst) = v),
+                    Op::Move { dst, src } => match reg!(src) {
+                        Value::Int(x) => reg!(dst) = Value::Int(x),
+                        Value::Float(f) => reg!(dst) = Value::Float(f),
+                        Value::Table(t) => reg!(dst) = Value::Table(t),
+                        Value::Str(x) => reg!(dst) = Value::Str(x),
+                        Value::Closure(c) => reg!(dst) = Value::Closure(c),
+                        v => reg!(dst) = v,
+                    },
                     Op::LoadNil { dst, count } => {
                         let at = dst as usize;
                         for r in &mut w[at..at + count as usize] {
@@ -2084,7 +2187,7 @@ impl Vm {
                             depth -= 1;
                             closure = c;
                             switch_code!(c, code_id);
-                            w = window_sized!();
+                            w = window!();
                             continue;
                         }
                         lua_return!(base + src as usize, 1)
@@ -2121,7 +2224,7 @@ impl Vm {
                         } else {
                             Value::Nil
                         };
-                        w = window_sized!();
+                        w = window!();
                         reg!(dst) = v;
                     }
                     Op::VarargUnpack { dst, table, count } => {
