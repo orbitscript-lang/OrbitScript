@@ -42,6 +42,14 @@ pub struct Completion {
     pub keyword: bool,
 }
 
+/// What completion offers at a position.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Completions {
+    /// The partly typed name the items replace (empty, at the position, when there is none).
+    pub replace: Span,
+    pub items: Vec<Completion>,
+}
+
 /// Signature help for the call around a position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignatureHelp {
@@ -444,12 +452,17 @@ impl Workspace {
     /// Completion at `offset`: after `.`, the fields and methods of the receiver's type; after
     /// `::`, the members of a module, struct or enum. Until the parser recovers from errors this
     /// works on a partly typed name (`p.le`), not on a bare `p.`.
-    pub fn completions_at(&mut self, file: FileId, offset: u32) -> Vec<Completion> {
+    pub fn completions_at(&mut self, file: FileId, offset: u32) -> Completions {
         self.ensure(file);
         let m = &self.files[file.0 as usize].module;
         let covers = |s: &Span| s.start <= offset && offset <= s.end;
         let mut out = Vec::new();
-        if let Some(&(_, t)) = m.members_at.iter().rev().find(|(s, _)| covers(s)) {
+        let mut replace = Span {
+            start: offset,
+            end: offset,
+        };
+        if let Some(&(span, t)) = m.members_at.iter().rev().find(|(s, _)| covers(s)) {
+            replace = span;
             for t in self.types.members(t) {
                 match self.types.get(t) {
                     Ty::Nominal(id, _) | Ty::Variant(id, _) => {
@@ -470,7 +483,8 @@ impl Workspace {
                     _ => {}
                 }
             }
-        } else if let Some(&(_, base)) = m.paths_at.iter().rev().find(|(s, _)| covers(s)) {
+        } else if let Some(&(span, base)) = m.paths_at.iter().rev().find(|(s, _)| covers(s)) {
+            replace = span;
             match self.symbol(base) {
                 Some(s) if s.kind == SymbolKind::Module => {
                     if let Some(dep) = s.module {
@@ -492,7 +506,10 @@ impl Workspace {
         }
         let mut seen = HashSet::new();
         out.retain(|c| seen.insert(c.label.clone()));
-        out
+        Completions {
+            replace,
+            items: out,
+        }
     }
 
     fn holder(&self, id: SymbolId) -> SymbolId {

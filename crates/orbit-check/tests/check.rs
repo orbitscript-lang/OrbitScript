@@ -291,7 +291,16 @@ fn editor_queries() {
     let off = |needle: &str| src.find(needle).unwrap() as u32;
 
     let labels =
-        |c: Vec<orbit_check::Completion>| c.into_iter().map(|c| c.label).collect::<Vec<_>>();
+        |c: orbit_check::Completions| c.items.into_iter().map(|c| c.label).collect::<Vec<_>>();
+    // The partly typed name `x` is what a completion replaces.
+    let x = off("x;");
+    assert_eq!(
+        ws.completions_at(f, x + 1).replace,
+        orbit_check::Span {
+            start: x,
+            end: x + 1
+        }
+    );
     assert_eq!(labels(ws.completions_at(f, off("x;"))), ["x", "y", "dot"]);
     assert_eq!(
         labels(ws.completions_at(f, off("new(1"))),

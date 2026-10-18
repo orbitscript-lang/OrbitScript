@@ -85,7 +85,7 @@ impl Workspace {
     pub fn references(&mut self, symbol: SymbolId) -> Vec<Location>;          // whole workspace for pub items
     pub fn symbol(&self, symbol: SymbolId) -> Option<&Symbol>;               // name, kind, name span, item span; later signature and doc spans
     pub fn can_rename(&self, symbol: SymbolId) -> bool;                       // for prepareRename: false for globals, the prelude and stubs
-    pub fn completions_at(&mut self, file: FileId, offset: u32) -> Vec<Completion>;
+    pub fn completions_at(&mut self, file: FileId, offset: u32) -> Completions;
     pub fn workspace_symbols(&mut self, query: &str) -> Vec<(SymbolId, Location)>;
 
     // L2: types
@@ -95,7 +95,7 @@ impl Workspace {
 }
 ```
 
-`Completion` carries a label, a `SymbolKind`, an optional detail (signature or type) and whether it is a keyword. Completion after `.` lists fields and methods of the receiver's type, after `::` associated functions, variants and module members, in a struct literal the missing fields, and otherwise names in scope plus keywords. With no type known (`any`), `.` completion returns nothing rather than guessing.
+`Completions` is the items plus `replace`, the span of the partly typed name they replace (empty at the position when there is none). A `Completion` carries a label, a `SymbolKind`, an optional detail (signature or type) and whether it is a keyword. Completion after `.` lists fields and methods of the receiver's type, after `::` associated functions, variants and module members, in a struct literal the missing fields, and otherwise names in scope plus keywords. With no type known (`any`), `.` completion returns nothing rather than guessing.
 
 `SignatureHelp` is the label (`new(x: float, y: float) -> Vec2`), each parameter's byte range in the label, the active parameter and the called function's `SymbolId` (for its doc comment). For `obj.m(...)` the label leaves out `self`. `InlayHint` is an offset just after a name bound without an annotation (a `let`, a pattern, a closure parameter) and a label such as `: int`; names whose type is `any` get none. `TypeId` values come with `display_type`, which writes a type the way messages do (`Vec2?`, `fn(int) -> string`, `#{ x: float }`).
 

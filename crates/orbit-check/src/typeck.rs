@@ -574,15 +574,16 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             TypeKind::Tuple(ts) if ts.len() == 1 => self.lower(&ts[0]),
             TypeKind::Tuple(ts) if ts.is_empty() => self.types.nil,
             TypeKind::Tuple(_) | TypeKind::Error => any,
-            TypeKind::Fn { params, ret } => {
+            TypeKind::Fn { params, rest, ret } => {
                 let params = params.iter().map(|p| self.lower(p)).collect();
+                let rest = rest.as_ref().map(|r| self.lower(r));
                 let results = Some(match ret {
                     Some(r) => self.lower_results(r),
                     None => Vec::new(),
                 });
                 self.types.intern(Ty::Fn(FnTy {
                     params,
-                    rest: None,
+                    rest,
                     results,
                     method: false,
                     generics: Vec::new(),

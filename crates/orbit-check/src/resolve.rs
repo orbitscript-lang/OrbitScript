@@ -866,9 +866,12 @@ impl<'a> Resolver<'a> {
                     self.ty(&f.ty);
                 }
             }
-            TypeKind::Fn { params, ret } => {
+            TypeKind::Fn { params, rest, ret } => {
                 for p in params {
                     self.ty(p);
+                }
+                if let Some(r) = rest {
+                    self.ty(r);
                 }
                 if let Some(r) = ret {
                     self.ty(r);
