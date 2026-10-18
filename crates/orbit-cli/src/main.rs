@@ -37,6 +37,7 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// Ctrl-C raises `interrupted!` in the running Lua code, which `pcall` can
 /// catch, as in `lua`. A second one before the VM reaches a check (inside a
 /// long library call, say) ends the process, as it does `lua`.
+#[cfg(unix)]
 fn catch_interrupts(interrupt: orbit::Interrupt) {
     let mut signals = match signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT]) {
         Ok(s) => s,
@@ -46,12 +47,37 @@ fn catch_interrupts(interrupt: orbit::Interrupt) {
         .name("interrupt".into())
         .spawn(move || {
             for _ in signals.forever() {
-                if !RUNNING.load(Ordering::Relaxed) || interrupt.pending() {
-                    std::process::exit(130);
-                }
-                interrupt.request();
+                on_interrupt(&interrupt);
             }
         });
+}
+
+/// [`catch_interrupts`] where signal-hook has no signal iterator
+/// (Windows): the handler raises a flag, which a thread watches.
+#[cfg(not(unix))]
+fn catch_interrupts(interrupt: orbit::Interrupt) {
+    use std::sync::Arc;
+    let flag = Arc::new(AtomicBool::new(false));
+    if signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag)).is_err() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("interrupt".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                if flag.swap(false, Ordering::Relaxed) {
+                    on_interrupt(&interrupt);
+                }
+            }
+        });
+}
+
+fn on_interrupt(interrupt: &orbit::Interrupt) {
+    if !RUNNING.load(Ordering::Relaxed) || interrupt.pending() {
+        std::process::exit(130);
+    }
+    interrupt.request();
 }
 
 /// A `-e` or `-l` option, run in command-line order.
