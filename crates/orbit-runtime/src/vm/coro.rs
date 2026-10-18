@@ -560,7 +560,7 @@ impl Vm {
                 "attempt to yield from outside a coroutine".into(),
             ));
         };
-        if !yieldable(&self.rt.stack) || self.rt.stack.aux.closing != Closing::No {
+        if !yieldable(&self.heap, &self.rt.stack) || self.rt.stack.aux.closing != Closing::No {
             return Err(Exc::Plain(
                 "attempt to yield across a C-call boundary".into(),
             ));
@@ -750,18 +750,18 @@ fn window_base(s: &Stack, top: usize) -> usize {
 
 /// Whether code running on top of `stack` (a coroutine's) may yield:
 /// nothing between it and the coroutine's base refuses.
-pub(crate) fn yieldable(stack: &Stack) -> bool {
-    !stack.frames.iter().any(|f| {
-        matches!(
-            f.kind,
-            FrameKind::Native {
-                yieldable: false,
-                ..
-            } | FrameKind::Handler
-                | FrameKind::Boundary { .. }
-                // A hook is a nested call, as a Lua hook is in the reference.
-                | FrameKind::Hook
-        )
+pub(crate) fn yieldable(heap: &LuaHeap, stack: &Stack) -> bool {
+    !stack.frames.iter().any(|f| match f.kind {
+        FrameKind::Native {
+            yieldable: false, ..
+        }
+        | FrameKind::Handler
+        | FrameKind::Boundary { .. }
+        // A hook is a nested call, as a Lua hook is in the reference.
+        | FrameKind::Hook => true,
+        // Most built-ins refuse, as the C functions they stand for do.
+        FrameKind::Lua { closure, .. } => heap.get(closure).code.refuses_yield,
+        _ => false,
     })
 }
 
@@ -791,7 +791,7 @@ impl NativeCtx<'_> {
         } else {
             &co(&self.vm.heap, t).stack
         };
-        s.aux.closing == Closing::No && yieldable(s)
+        s.aux.closing == Closing::No && yieldable(&self.vm.heap, s)
     }
 
     /// A new suspended coroutine running `f`.
@@ -1212,6 +1212,8 @@ fn stub_proto(id: NativeId) -> Proto {
             is_vararg: true,
             nregs: 0,
             ncells: 0,
+            builtin: false,
+            refuses_yield: false,
         }),
         children: Box::new([]),
         captures: Box::new([]),

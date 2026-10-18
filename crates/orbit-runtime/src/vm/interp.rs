@@ -526,6 +526,7 @@ impl Vm {
                 if let Some(op) = operand
                     && let Some(f) = self.rt.stack.frames.last()
                     && let FrameKind::Lua { closure, .. } = f.kind
+                    && !crate::vm::debug::is_builtin(&self.heap, closure)
                 {
                     let proto = self.heap.get(self.heap.get(closure).proto);
                     let pc = f.pc.saturating_sub(1);
@@ -2009,13 +2010,13 @@ impl Vm {
                         } else {
                             nargs as usize
                         };
-                        // A native closure in tail position is called like
-                        // a native, keeping this frame, as natives are.
+                        // A native closure or a built-in in tail position
+                        // is called like a native, keeping this frame, as
+                        // natives are.
                         if let Value::Closure(c) = w[func as usize]
-                            && !matches!(
-                                self.heap.get(c).code.code.first(),
-                                Some(Op::NativeEntry { .. })
-                            )
+                            && let code = &self.heap.get(c).code
+                            && !code.builtin
+                            && !matches!(code.code.first(), Some(Op::NativeEntry { .. }))
                         {
                             let f = self.rt.stack.frames.pop().expect("frame");
                             self.rt.stack.cells.truncate(f.cell_base as usize);

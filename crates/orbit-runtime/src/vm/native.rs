@@ -461,7 +461,7 @@ impl NativeCtx<'_> {
     /// Link a compiled chunk, as [`Vm::load_with_env`](crate::vm::Vm::load_with_env)
     /// does. The function is unrooted until stored in the window.
     pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
-        crate::vm::link::link(&mut self.vm.heap, &mut self.vm.rt, chunk, env)
+        crate::vm::link::link(&mut self.vm.heap, &mut self.vm.rt, chunk, env, false)
     }
 
     /// A new table (unrooted until stored in the window).
@@ -519,9 +519,26 @@ impl NativeCtx<'_> {
     /// call. Falls back to the name a loaded module gives it, then to the
     /// registered name.
     pub fn call_name(&self) -> (String, bool) {
-        if let Some(f) = self.vm.rt.stack.frames.last()
+        let me = match self.upvals {
+            Some(c) => Value::Closure(c),
+            None => Value::Native(self.id),
+        };
+        let caller = self.vm.rt.stack.frames.last().copied();
+        self.name_at(caller, me).unwrap_or_else(|| {
+            (
+                self.vm.rt.natives[self.id.0 as usize].name.to_owned(),
+                false,
+            )
+        })
+    }
+
+    /// How `caller`'s call instruction names `me`, or else the name a loaded
+    /// module gives it.
+    fn name_at(&self, caller: Option<crate::vm::Frame>, me: Value) -> Option<(String, bool)> {
+        if let Some(f) = caller
             && let FrameKind::Lua { closure, .. } = f.kind
             && f.pc > 0
+            && !crate::vm::debug::is_builtin(&self.vm.heap, closure)
         {
             let proto = self.vm.heap.get(self.vm.heap.get(closure).proto);
             let pc = f.pc - 1;
@@ -529,7 +546,7 @@ impl NativeCtx<'_> {
                 proto.code.code.get(pc as usize),
                 Some(Op::GenericCall { .. })
             ) {
-                return ("for iterator".to_owned(), false);
+                return Some(("for iterator".to_owned(), false));
             }
             if matches!(
                 proto.code.code.get(pc as usize),
@@ -544,22 +561,79 @@ impl NativeCtx<'_> {
                     Origin::Method(n) => (n, true),
                     Origin::Constant(n) => (n, false),
                 };
-                return (String::from_utf8_lossy(name).into_owned(), method);
+                return Some((String::from_utf8_lossy(name).into_owned(), method));
             }
         }
         // As the reference does, a function with no name at its call site is
         // named by where a loaded module keeps it.
-        let me = match self.upvals {
-            Some(c) => Value::Closure(c),
-            None => Value::Native(self.id),
+        self.vm
+            .rt
+            .global_name(&self.vm.heap, me)
+            .map(|name| (String::from_utf8_lossy(&name).into_owned(), false))
+    }
+
+    // ---- intrinsics' errors ----------------------------------------------
+
+    /// For an intrinsic: the frame of the built-in library function calling
+    /// it, the newest Lua frame (an intrinsic has none of its own).
+    fn builtin_frame(&self) -> Option<usize> {
+        self.vm
+            .rt
+            .stack
+            .frames
+            .iter()
+            .rposition(|f| matches!(f.kind, FrameKind::Lua { .. }))
+    }
+
+    /// An error with a message, positioned at the caller of the built-in
+    /// calling this intrinsic: `luaL_error` from that built-in.
+    pub(crate) fn builtin_error(&mut self, msg: impl AsRef<str>) -> LuaError {
+        let text = format!("{}{}", self.where_(2), msg.as_ref());
+        LuaError::new(self.new_str(text.as_bytes()))
+    }
+
+    /// `bad argument #n to 'name' (msg)` for argument `n` (1-based) of the
+    /// built-in calling this intrinsic, named as [`NativeCtx::call_name`]
+    /// names a native.
+    pub(crate) fn builtin_arg_error(&mut self, n: usize, msg: impl AsRef<str>) -> LuaError {
+        let frames = &self.vm.rt.stack.frames;
+        let named = self.builtin_frame().and_then(|i| {
+            let f = frames[i];
+            let FrameKind::Lua { closure, .. } = f.kind else {
+                return None;
+            };
+            // A built-in entered by a tail call has no call site.
+            let caller = if f.tail {
+                None
+            } else {
+                i.checked_sub(1).map(|c| frames[c])
+            };
+            self.name_at(caller, Value::Closure(closure))
+        });
+        let (name, method) = named.unwrap_or_else(|| ("?".to_owned(), false));
+        let text = if method && n == 1 {
+            format!("calling '{name}' on bad self ({})", msg.as_ref())
+        } else {
+            let n = if method { n - 1 } else { n };
+            format!("bad argument #{n} to '{name}' ({})", msg.as_ref())
         };
-        if let Some(name) = self.vm.rt.global_name(&self.vm.heap, me) {
-            return (String::from_utf8_lossy(&name).into_owned(), false);
-        }
-        (
-            self.vm.rt.natives[self.id.0 as usize].name.to_owned(),
-            false,
-        )
+        self.builtin_error(text)
+    }
+
+    /// `bad argument` for a wrong type: `v` is the argument, `None` when it
+    /// is absent.
+    pub(crate) fn builtin_type_error(
+        &mut self,
+        n: usize,
+        expected: &str,
+        v: Option<Value>,
+    ) -> LuaError {
+        let got = match v {
+            None => "no value".into(),
+            Some(Value::LightUserData(_)) => "light userdata".into(),
+            Some(v) => self.vm.rt.metas.type_name(&self.vm.heap, v),
+        };
+        self.builtin_arg_error(n, format!("{expected} expected, got {got}"))
     }
 
     /// `bad argument #i to 'name' (msg)`, for 0-based argument `i`.

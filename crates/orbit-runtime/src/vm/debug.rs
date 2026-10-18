@@ -109,9 +109,13 @@ pub struct FuncInfo {
 
 impl Runtime {
     /// How many hidden upvalues closure `c` has (see [`crate::vm::Native::hidden`]).
+    /// A built-in library function hides all of its upvalues, as a C
+    /// function with none would.
     pub(crate) fn hidden_upvalues(&self, heap: &LuaHeap, c: &Closure) -> usize {
-        match heap.get(c.proto).code.code.first() {
+        let p = heap.get(c.proto);
+        match p.code.code.first() {
             Some(Op::NativeEntry { id }) => self.natives[*id as usize].hidden as usize,
+            _ if p.code.builtin => c.captures.len(),
             _ => 0,
         }
     }
@@ -271,7 +275,8 @@ impl Runtime {
             {
                 named("metamethod", b"__gc")
             }
-            FrameKind::Lua { closure, .. } if caller.pc > 0 => {
+            // A built-in calls like a C function: its callees have no name.
+            FrameKind::Lua { closure, .. } if caller.pc > 0 && !is_builtin(heap, closure) => {
                 let proto = heap.get(heap.get(closure).proto);
                 let pc = caller.pc - 1;
                 match proto.code.code.get(pc as usize)? {
@@ -323,7 +328,7 @@ impl Runtime {
         };
         let f = &self.stack.frames[i];
         match f.kind {
-            FrameKind::Lua { closure, .. } => {
+            FrameKind::Lua { closure, .. } if !is_builtin(heap, closure) => {
                 let proto = heap.get(heap.get(closure).proto);
                 let line = pc_line(proto, f.pc.saturating_sub(1));
                 if line <= 0 {
@@ -364,7 +369,9 @@ impl Runtime {
                     FrameKind::Lua { closure, .. } => {
                         let c = heap.get(closure);
                         let limit = next.unwrap_or(f.base as usize + c.code.nregs as usize);
-                        (f.base as usize, limit, Some((c, f)))
+                        // A built-in's registers are a C function's window.
+                        let named = (!c.code.builtin).then_some((c, f));
+                        (f.base as usize, limit, named)
                     }
                     FrameKind::Native { call_at, .. } => {
                         (f.base as usize, next.unwrap_or(call_at as usize), None)
@@ -628,6 +635,12 @@ fn is_activation(k: FrameKind) -> bool {
     }
 }
 
+/// Whether closure `c` belongs to a built-in library written in
+/// OrbitScript, which the debug interface shows as a C function.
+pub(crate) fn is_builtin(heap: &LuaHeap, c: Gc<Closure>) -> bool {
+    heap.get(c).code.builtin
+}
+
 /// The function frame `i` runs.
 fn frame_func(stack: &Stack, i: usize) -> Value {
     let f = &stack.frames[i];
@@ -734,7 +747,7 @@ pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
             if !matches!(
                 heap.get(heap.get(c).proto).code.code.first(),
                 Some(Op::NativeEntry { .. })
-            ) =>
+            ) && !is_builtin(heap, c) =>
         {
             let c = heap.get(c);
             let p = heap.get(c.proto);
@@ -900,7 +913,7 @@ impl crate::vm::NativeCtx<'_> {
     pub fn active_lines(&self, f: Value) -> Option<Vec<u32>> {
         match f {
             // A native closure is a C function to scripts: no lines.
-            Value::Closure(c) if self.native_of(f).is_none() => {
+            Value::Closure(c) if self.native_of(f).is_none() && !is_builtin(&self.vm.heap, c) => {
                 Some(active_lines(&self.vm.heap, c))
             }
             _ => None,
