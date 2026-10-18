@@ -196,12 +196,11 @@ impl Isolate {
     /// Run `f` with a scope for making and using handles. Everything the
     /// scope made is released when `f` returns.
     pub fn scope<R>(&mut self, f: impl for<'s> FnOnce(&'s Scope<'s>) -> R) -> R {
-        let ctx = self.vm.host_ctx();
-        let start = ctx.len();
-        let scope = Scope::new(ctx);
-        scope.release_pins(&mut scope.ctx());
+        let stack = Stack::new(self.vm.host_ctx());
+        let start = stack.top();
+        let scope = Scope::new(stack);
         let r = f(&scope);
-        scope.ctx().truncate(start);
+        let _ = scope.stack().set_top(start);
         r
     }
 
@@ -337,26 +336,11 @@ impl Gc<'_> {
     }
 }
 
-impl<'s> Scope<'s> {
-    /// [`Isolate::before_exit`], from inside the isolate (a library that
-    /// keeps buffers registers its flush when it opens).
-    pub fn before_exit(&self, hook: impl Fn() + 'static) {
-        exit_hooks(self.ctx().vm).0.push(Box::new(hook));
-    }
-
-    /// Make `module` what `require(name)` returns, as if a searcher had
-    /// loaded it (`package.loaded[name] = module`).
-    pub fn register_module(&'s self, name: &str, module: Table<'s>) {
-        let mut ctx = self.ctx();
-        stdlib::mark_loaded(ctx.vm, name, module.raw());
-    }
-}
-
 /// The [`Isolate::before_exit`] hooks.
 #[derive(Default)]
-struct ExitHooks(Vec<Box<dyn Fn()>>);
+pub(crate) struct ExitHooks(pub(crate) Vec<Box<dyn Fn()>>);
 
-fn exit_hooks(vm: &mut Vm) -> &mut ExitHooks {
+pub(crate) fn exit_hooks(vm: &mut Vm) -> &mut ExitHooks {
     vm.rt.ext.get_or_insert_with(ExitHooks::default)
 }
 

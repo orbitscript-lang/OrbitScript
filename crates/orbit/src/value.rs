@@ -4,13 +4,12 @@ use std::cell::{Ref, RefMut};
 
 use std::fmt;
 
-use orbit_runtime::object::{self as raw, Gc, number};
-use orbit_runtime::vm::{CoStatus, Meta, MetaField, NativeCtx};
+use orbit_runtime::object::number;
 
-use crate::class::Slot;
 use crate::error::Error;
 use crate::pin::Pinned;
 use crate::scope::Scope;
+use crate::stack::{Continuation, Native, Outcome, Return, Stack, StackResult, Type};
 
 /// Any script value. Handles ([`Str`], [`Table`], ...) live as long as the
 /// scope they came from.
@@ -35,19 +34,26 @@ macro_rules! handle {
         #[derive(Clone, Copy)]
         pub struct $name<'s> {
             s: &'s Scope<'s>,
-            v: raw::Value,
+            /// Its slot in the scope's window.
+            idx: i32,
         }
 
         impl<'s> $name<'s> {
-            /// A handle to `v`, which must be in the scope's window and of
-            /// this kind.
-            pub(crate) fn from_raw(s: &'s Scope<'s>, v: raw::Value) -> $name<'s> {
-                $name { s, v }
+            /// The handle to slot `idx`, which must hold a value of this
+            /// kind.
+            pub(crate) fn at(s: &'s Scope<'s>, idx: i32) -> $name<'s> {
+                $name { s, idx }
+            }
+
+            /// The handle to the value on top of the window.
+            pub(crate) fn top(s: &'s Scope<'s>) -> $name<'s> {
+                let idx = s.stack_ref().top();
+                $name { s, idx }
             }
 
             #[allow(dead_code, reason = "not every kind of handle needs it")]
-            pub(crate) fn raw(&self) -> raw::Value {
-                self.v
+            pub(crate) fn slot(&self) -> i32 {
+                self.idx
             }
 
             /// This handle as a [`Value`].
@@ -57,13 +63,13 @@ macro_rules! handle {
 
             /// Keep the value alive past the scope.
             pub fn pin(&self) -> Pinned<$name<'static>> {
-                self.s.pin_raw(self.v)
+                self.s.pin_slot(self.idx)
             }
         }
 
         impl fmt::Debug for $name<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}({:?})", stringify!($name), self.v)
+                write!(f, "{}(#{})", stringify!($name), self.idx)
             }
         }
 
@@ -97,40 +103,53 @@ handle!(
 );
 
 impl<'s> Value<'s> {
-    pub(crate) fn from_raw(s: &'s Scope<'s>, v: raw::Value) -> Value<'s> {
-        match v {
-            raw::Value::Nil => Value::Nil,
-            raw::Value::Bool(b) => Value::Bool(b),
-            raw::Value::Int(i) => Value::Int(i),
-            raw::Value::Float(f) => Value::Float(f),
-            raw::Value::Str(_) => Value::Str(Str::from_raw(s, v)),
-            raw::Value::Table(_) => Value::Table(Table::from_raw(s, v)),
-            raw::Value::Closure(_) | raw::Value::Native(_) => {
-                Value::Function(Function::from_raw(s, v))
-            }
-            raw::Value::UserData(_) => Value::Userdata(Userdata::from_raw(s, v)),
-            raw::Value::Thread(_) => Value::Thread(Thread::from_raw(s, v)),
-            raw::Value::LightUserData(p) => Value::LightUserdata(p.get()),
+    /// The value in slot `idx` of the scope's window: a handle to that
+    /// slot, or the value itself for nil, booleans, numbers and light
+    /// userdata.
+    pub(crate) fn at(s: &'s Scope<'s>, idx: i32) -> Value<'s> {
+        let stack = s.stack_ref();
+        match stack.type_at(idx) {
+            Type::None | Type::Nil => Value::Nil,
+            Type::Boolean => Value::Bool(stack.to_boolean(idx)),
+            Type::Number => match stack.is_integer(idx) {
+                true => Value::Int(stack.to_integer(idx).expect("an integer")),
+                false => Value::Float(stack.to_number(idx).expect("a number")),
+            },
+            Type::String => Value::Str(Str::at(s, idx)),
+            Type::Table => Value::Table(Table::at(s, idx)),
+            Type::Function => Value::Function(Function::at(s, idx)),
+            Type::Thread => Value::Thread(Thread::at(s, idx)),
+            Type::Userdata => Value::Userdata(Userdata::at(s, idx)),
+            Type::LightUserdata => Value::LightUserdata(stack.to_userdata(idx) as usize as u64),
         }
     }
 
-    pub(crate) fn raw(&self) -> raw::Value {
+    /// Push the value on `stack`, the window of its scope.
+    pub(crate) fn push(&self, stack: &mut Stack<'_>) {
         match *self {
-            Value::Nil => raw::Value::Nil,
-            Value::Bool(b) => raw::Value::Bool(b),
-            Value::Int(i) => raw::Value::Int(i),
-            Value::Float(f) => raw::Value::Float(f),
-            Value::Str(h) => h.v,
-            Value::Table(h) => h.v,
-            Value::Function(h) => h.v,
-            Value::Thread(h) => h.v,
-            Value::Userdata(h) => h.v,
-            Value::LightUserdata(p) => raw::Value::LightUserData(raw::LightUserData::new(p)),
+            Value::Nil => stack.push_nil(),
+            Value::Bool(b) => stack.push_boolean(b),
+            Value::Int(i) => stack.push_integer(i),
+            Value::Float(f) => stack.push_number(f),
+            Value::LightUserdata(p) => stack.push_light_userdata(p as usize),
+            v => stack.push_copy(v.slot().expect("a handle")),
         }
     }
 
-    /// The scope of a handle (`None` for nil, booleans, numbers and light
+    /// The slot of a handle (`None` for nil, booleans, numbers and light
     /// userdata, which need none).
+    pub(crate) fn slot(&self) -> Option<i32> {
+        match *self {
+            Value::Str(h) => Some(h.idx),
+            Value::Table(h) => Some(h.idx),
+            Value::Function(h) => Some(h.idx),
+            Value::Thread(h) => Some(h.idx),
+            Value::Userdata(h) => Some(h.idx),
+            _ => None,
+        }
+    }
+
+    /// The scope of a handle.
     fn scope(&self) -> Option<&'s Scope<'s>> {
         match *self {
             Value::Str(h) => Some(h.s),
@@ -145,14 +164,21 @@ impl<'s> Value<'s> {
     /// The address of a table, function, thread or userdata, as `%p`
     /// shows it (`None` for other values): the same while the object lives.
     pub fn address(&self) -> Option<u64> {
-        self.raw().identity()
+        let s = self.scope()?;
+        s.stack_ref().identity(self.slot()?)
     }
 
     /// The basic type name, as `type` returns it.
     pub fn type_name(&self) -> &'static str {
         match self {
-            Value::LightUserdata(_) => "userdata",
-            v => v.raw().type_name(),
+            Value::Nil => "nil",
+            Value::Bool(_) => "boolean",
+            Value::Int(_) | Value::Float(_) => "number",
+            Value::Str(_) => "string",
+            Value::Table(_) => "table",
+            Value::Function(_) => "function",
+            Value::Thread(_) => "thread",
+            Value::Userdata(_) | Value::LightUserdata(_) => "userdata",
         }
     }
 
@@ -163,23 +189,27 @@ impl<'s> Value<'s> {
     /// Whether the value counts as true in a condition (anything but nil
     /// and false).
     pub fn truthy(&self) -> bool {
-        !self.raw().is_falsy()
+        !matches!(self, Value::Nil | Value::Bool(false))
     }
 
     /// Whether two values are the same without calling `__eq` (`rawequal`).
     pub fn raw_eq(&self, other: &Value<'s>) -> bool {
-        match self.scope().or(other.scope()) {
-            Some(s) => raw::value::raw_eq(&s.ctx().vm.heap, self.raw(), other.raw()),
-            None => self.raw().same(other.raw()) || self.raw_num_eq(other),
-        }
-    }
-
-    fn raw_num_eq(&self, other: &Value<'_>) -> bool {
-        match (*self, *other) {
-            (Value::Int(i), Value::Float(f)) | (Value::Float(f), Value::Int(i)) => {
-                number::int_eq_float(i, f)
+        match (self.slot(), other.slot()) {
+            (Some(a), Some(b)) => {
+                let s = self.scope().expect("a handle");
+                s.stack_ref().raw_equal(a, b)
             }
-            (Value::Float(a), Value::Float(b)) => a == b,
+            (None, None) => match (*self, *other) {
+                (Value::Nil, Value::Nil) => true,
+                (Value::Bool(a), Value::Bool(b)) => a == b,
+                (Value::Int(a), Value::Int(b)) => a == b,
+                (Value::Float(a), Value::Float(b)) => a == b,
+                (Value::Int(i), Value::Float(f)) | (Value::Float(f), Value::Int(i)) => {
+                    number::int_eq_float(i, f)
+                }
+                (Value::LightUserdata(a), Value::LightUserdata(b)) => a == b,
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -196,7 +226,7 @@ impl<'s> Value<'s> {
     ///
     /// [`to_display`]: Value::to_display
     pub fn write_display(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        let Some(s) = self.scope() else {
+        let (Some(s), Some(idx)) = (self.scope(), self.slot()) else {
             match self {
                 Value::Nil => out.extend_from_slice(b"nil"),
                 Value::Bool(b) => out.extend_from_slice(b.to_string().as_bytes()),
@@ -209,37 +239,14 @@ impl<'s> Value<'s> {
             }
             return Ok(());
         };
-        let v = self.raw();
-        let mut ctx = s.ctx();
-        let mm = ctx.metamethod(v, MetaField::ToString);
-        if mm.is_nil() {
-            ctx.display(v, out);
-            return Ok(());
-        }
-        let at = ctx.len();
-        ctx.push(mm);
-        ctx.push(v);
-        let r = ctx.call(1, None);
-        let done = match r {
-            // A number will do, as for Lua's `luaL_tolstring`.
-            Ok(n) => match (n > 0).then(|| ctx.arg(at)) {
-                Some(raw::Value::Str(st)) => {
-                    out.extend_from_slice(ctx.bytes(st));
-                    Ok(())
-                }
-                Some(v @ (raw::Value::Int(_) | raw::Value::Float(_))) => {
-                    ctx.display(v, out);
-                    Ok(())
-                }
-                _ => {
-                    let e = ctx.error("'__tostring' must return a string");
-                    Err(s.lua_error(&mut ctx, e))
-                }
-            },
-            Err(e) => Err(s.lua_error(&mut ctx, e)),
-        };
-        ctx.truncate(at);
-        done
+        let mut stack = s.stack();
+        let at = stack.top();
+        let r = stack
+            .to_display_string(idx)
+            .map(|b| out.extend_from_slice(b));
+        let r = r.map_err(|e| s.error_of(&mut stack, e));
+        let _ = stack.set_top(at);
+        r
     }
 
     /// Append a string's bytes, or a number's text as `tostring` writes it,
@@ -249,9 +256,9 @@ impl<'s> Value<'s> {
         match self {
             Value::Str(st) => out.extend_from_slice(&st.as_bytes()),
             Value::Int(i) => number::push_int(out, *i),
-            Value::Float(_) => {
+            Value::Float(f) => {
                 let mut text = String::new();
-                number::fmt_number(&mut text, self.raw());
+                number::fmt_number(&mut text, orbit_runtime::object::Value::Float(*f));
                 out.extend_from_slice(text.as_bytes());
             }
             _ => return false,
@@ -263,8 +270,7 @@ impl<'s> Value<'s> {
     /// shared by its type (strings have one).
     pub fn metatable(&self) -> Option<Table<'s>> {
         let s = self.scope()?;
-        let mt = s.ctx().metatable(self.raw())?;
-        Some(Table::from_raw(s, s.root(raw::Value::Table(mt)).raw()))
+        metatable_of(s, self.slot()?)
     }
 
     /// Convert to a Rust value ([`FromValue`]).
@@ -276,7 +282,7 @@ impl<'s> Value<'s> {
     /// Keep the value alive past the scope. Values that are not handles
     /// need no pin, but can have one, so a host can store any value alike.
     pub fn pin(&self) -> Option<Pinned<Value<'static>>> {
-        self.scope().map(|s| s.pin_raw(self.raw()))
+        Some(self.scope()?.pin_slot(self.slot()?))
     }
 
     pub fn as_str(self) -> Option<Str<'s>> {
@@ -315,6 +321,12 @@ impl<'s> Value<'s> {
     }
 }
 
+/// The metatable of the value in slot `idx`.
+fn metatable_of<'s>(s: &'s Scope<'s>, idx: i32) -> Option<Table<'s>> {
+    let found = s.stack().get_metatable(idx);
+    found.then(|| Table::top(s))
+}
+
 impl fmt::Debug for Value<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -335,19 +347,14 @@ impl fmt::Debug for Value<'_> {
 // ---- strings ----------------------------------------------------------------
 
 impl<'s> Str<'s> {
-    fn gc(&self) -> Gc<raw::LuaStr> {
-        let raw::Value::Str(s) = self.v else {
-            unreachable!("a Str handle holds a string")
-        };
-        s
-    }
-
     /// The bytes, borrowed in place. While the borrow lives, other
     /// operations on the scope panic; copy with [`Str::to_bytes`] to keep
     /// them.
     pub fn as_bytes(&self) -> Ref<'_, [u8]> {
-        let st = self.gc();
-        Ref::map(self.s.ctx_ref(), |ctx| ctx.bytes(st))
+        let idx = self.idx;
+        Ref::map(self.s.stack_ref(), |stack| {
+            stack.string_at(idx).expect("a Str handle holds a string")
+        })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -372,48 +379,32 @@ impl<'s> Str<'s> {
 // ---- tables -----------------------------------------------------------------
 
 impl<'s> Table<'s> {
-    fn gc(&self) -> Gc<raw::Table> {
-        let raw::Value::Table(t) = self.v else {
-            unreachable!("a Table handle holds a table")
-        };
-        t
-    }
-
     /// `t[key]`, with `__index`.
     pub fn get<V: FromValue<'s>>(&self, key: impl IntoValue<'s>) -> Result<V, Error> {
-        let k = self.s.value(key)?.raw();
-        let mut ctx = self.s.ctx();
-        let m = ctx.index(self.v, k);
-        let v = self.s.finish_meta(&mut ctx, m)?;
-        drop(ctx);
-        self.s.root(v).get()
+        key.push_onto(self.s)?;
+        self.s.run(|st| st.get_table(self.idx))?;
+        self.s.top().get()
     }
 
     /// `t[key] = value`, with `__newindex`.
     pub fn set(&self, key: impl IntoValue<'s>, value: impl IntoValue<'s>) -> Result<(), Error> {
-        let k = self.s.value(key)?.raw();
-        let v = self.s.value(value)?.raw();
-        let mut ctx = self.s.ctx();
-        let m = ctx.set_index(self.v, k, v).map(|m| match m {
-            Meta::Done(()) => Meta::Done(raw::Value::Nil),
-            Meta::Call { f, nargs } => Meta::Call { f, nargs },
-        });
-        self.s.finish_meta(&mut ctx, m).map(drop)
+        key.push_onto(self.s)?;
+        value.push_onto(self.s)?;
+        self.s.run(|st| st.set_table(self.idx))
     }
 
     /// `t[key]` without metamethods (`rawget`).
     pub fn raw_get<V: FromValue<'s>>(&self, key: impl IntoValue<'s>) -> Result<V, Error> {
-        let k = self.s.value(key)?.raw();
-        let v = raw::table::get(&self.s.ctx().vm.heap, self.gc(), k);
-        self.s.root(v).get()
+        key.push_onto(self.s)?;
+        self.s.run(|st| st.raw_get(self.idx))?;
+        self.s.top().get()
     }
 
     /// `t[key] = value` without metamethods (`rawset`).
     pub fn raw_set(&self, key: impl IntoValue<'s>, value: impl IntoValue<'s>) -> Result<(), Error> {
-        let k = self.s.value(key)?.raw();
-        let v = self.s.value(value)?.raw();
-        let mut ctx = self.s.ctx();
-        raw_store(&mut ctx, self.gc(), k, v)
+        key.push_onto(self.s)?;
+        value.push_onto(self.s)?;
+        self.s.run(|st| st.raw_set(self.idx))
     }
 
     /// `#t`, with `__len`.
@@ -422,17 +413,13 @@ impl<'s> Table<'s> {
         reason = "`#t` is a border, not a count, so `#t == 0` isn't emptiness"
     )]
     pub fn len(&self) -> Result<i64, Error> {
-        let mut ctx = self.s.ctx();
-        let m = ctx.length(self.v);
-        let v = self.s.finish_meta(&mut ctx, m)?;
-        drop(ctx);
-        self.s.root(v).get()
+        self.s.run(|st| st.len(self.idx))?;
+        self.s.top().get()
     }
 
     /// `#t` without metamethods (`rawlen`).
     pub fn raw_len(&self) -> usize {
-        let ctx = self.s.ctx();
-        ctx.vm.heap.get(self.gc()).len(&ctx.vm.heap) as usize
+        self.s.stack_ref().raw_len(self.idx) as usize
     }
 
     /// Append `value` after the last element (`t[#t + 1] = value`, raw).
@@ -442,18 +429,19 @@ impl<'s> Table<'s> {
     }
 
     pub fn metatable(&self) -> Option<Table<'s>> {
-        let mt = self.s.ctx().metatable(self.v)?;
-        Some(Table::from_raw(
-            self.s,
-            self.s.root(raw::Value::Table(mt)).raw(),
-        ))
+        metatable_of(self.s, self.idx)
     }
 
     /// Set or clear the metatable. A metatable with `__gc` registers the
     /// table for finalization, as `setmetatable` does.
     pub fn set_metatable(&self, mt: Option<Table<'s>>) {
-        let mut ctx = self.s.ctx();
-        ctx.vm.set_metatable(self.v, mt.map(|t| t.gc()));
+        let mut stack = self.s.stack();
+        match mt {
+            Some(mt) => stack.push_copy(mt.idx),
+            None => stack.push_nil(),
+        }
+        let r = stack.set_metatable(self.idx);
+        debug_assert!(r.is_ok(), "a table or nil is a metatable");
     }
 
     /// The table's pairs, without `__pairs`, in `next` order. Changing the
@@ -462,27 +450,18 @@ impl<'s> Table<'s> {
     pub fn pairs(&self) -> Pairs<'s> {
         Pairs {
             t: *self,
-            key: raw::Value::Nil,
+            key: None,
             done: false,
         }
     }
-}
-
-/// A raw table store, with the VM's error for a nil or NaN key.
-fn raw_store(
-    ctx: &mut NativeCtx<'_>,
-    t: Gc<raw::Table>,
-    k: raw::Value,
-    v: raw::Value,
-) -> Result<(), Error> {
-    raw::table::set(&mut ctx.vm.heap, t, k, v).map_err(|e| Error::runtime(e.message()))
 }
 
 /// The iterator [`Table::pairs`] returns.
 #[derive(Debug)]
 pub struct Pairs<'s> {
     t: Table<'s>,
-    key: raw::Value,
+    /// The slot of the last key given.
+    key: Option<i32>,
     done: bool,
 }
 
@@ -494,22 +473,25 @@ impl<'s> Iterator for Pairs<'s> {
             return None;
         }
         let s = self.t.s;
-        let next = {
-            let ctx = s.ctx();
-            ctx.vm.heap.get(self.t.gc()).next(&ctx.vm.heap, self.key)
-        };
-        match next {
-            Ok(Some((k, v))) => {
-                self.key = k;
-                Some(Ok((s.root(k), s.root(v))))
+        let mut stack = s.stack();
+        match self.key {
+            Some(k) => stack.push_copy(k),
+            None => stack.push_nil(),
+        }
+        match stack.next(self.t.idx) {
+            Ok(true) => {
+                let top = stack.top();
+                drop(stack);
+                self.key = Some(top - 1);
+                Some(Ok((s.at(top - 1), s.at(top))))
             }
-            Ok(None) => {
+            Ok(false) => {
                 self.done = true;
                 None
             }
-            Err(_) => {
+            Err(e) => {
                 self.done = true;
-                Some(Err(Error::runtime("invalid key to 'next'")))
+                Some(Err(s.error_of(&mut stack, e)))
             }
         }
     }
@@ -538,7 +520,7 @@ impl<'s> Function<'s> {
         args: impl IntoValues<'s>,
         handler: Function<'s>,
     ) -> Result<Vec<Value<'s>>, Error> {
-        self.call_with(args, Handler::Function(handler.v))
+        self.call_with(args, Handler::Function(handler.idx))
     }
 
     fn call_with(
@@ -547,41 +529,45 @@ impl<'s> Function<'s> {
         handler: Handler,
     ) -> Result<Vec<Value<'s>>, Error> {
         let s = self.s;
-        let at = s.ctx().len();
-        let slot = match handler {
-            Handler::None => None,
-            Handler::Traceback => {
-                let mut ctx = s.ctx();
-                let h = ctx.native("traceback handler", crate::host::traceback_handler);
-                ctx.push(h);
-                Some(at)
-            }
-            Handler::Function(h) => {
-                s.ctx().push(h);
-                Some(at)
-            }
-        };
-        s.ctx().push(self.v);
+        let mut stack = s.stack();
+        let at = stack.top();
+        match handler {
+            Handler::None => {}
+            Handler::Traceback => stack.push_native::<TracebackHandler>(),
+            Handler::Function(h) => stack.push_copy(h),
+        }
+        stack.push_copy(self.idx);
+        drop(stack);
         let nargs = match args.push_into(s) {
-            Ok(n) => n,
+            Ok(n) => n as i32,
             Err(e) => {
-                s.ctx().truncate(at);
+                let _ = s.stack().set_top(at);
                 return Err(e);
             }
         };
-        let mut ctx = s.ctx();
-        match ctx.call(nargs, slot) {
-            Ok(n) => {
-                drop(ctx);
+        let mut stack = s.stack();
+        let r = match handler {
+            Handler::None => stack.call(nargs, crate::stack::MULTRET),
+            _ => stack.call_handled(nargs, crate::stack::MULTRET, at + 1),
+        };
+        match r {
+            Ok(()) => {
+                let base = if matches!(handler, Handler::None) {
+                    at
+                } else {
+                    at + 1
+                };
+                let n = (stack.top() - base) as usize;
+                drop(stack);
                 Ok(s.last(n))
             }
             Err(e) => {
                 let tb = match handler {
-                    Handler::Traceback => crate::host::take_traceback(&mut ctx),
+                    Handler::Traceback => stack.extension::<PendingTraceback>().0.take(),
                     _ => None,
                 };
-                let err = s.lua_error(&mut ctx, e);
-                ctx.truncate(at);
+                let err = s.error_of(&mut stack, e);
+                let _ = stack.set_top(at);
                 Err(err.with_traceback(tb))
             }
         }
@@ -593,7 +579,42 @@ impl<'s> Function<'s> {
 enum Handler {
     None,
     Traceback,
-    Function(raw::Value),
+    /// The handler function's slot.
+    Function(i32),
+}
+
+/// The traceback [`TracebackHandler`] took, waiting for the caller.
+#[derive(Default)]
+struct PendingTraceback(Option<String>);
+
+/// A message handler that notes a traceback and leaves the error as it is
+/// ([`Function::call_traced`]).
+struct TracebackHandler;
+
+impl Native for TracebackHandler {
+    const NAME: &'static str = "traceback handler";
+
+    fn call(s: &mut Stack<'_>) -> StackResult<Return> {
+        s.push_traceback(None, 1);
+        let tb = String::from_utf8_lossy(s.string_at(-1).unwrap_or_default()).into_owned();
+        s.set_top(-2)?;
+        s.extension::<PendingTraceback>().0 = Some(tb);
+        s.push_copy(1);
+        Ok(Return::values(1))
+    }
+}
+
+/// The end of a [`Call::tail_call`](crate::Call::tail_call): the call's
+/// results, or its error, are the host function's.
+pub(crate) struct TailCalled;
+
+impl Continuation for TailCalled {
+    fn resume(_: &mut Stack<'_>, outcome: Outcome) -> StackResult<Return> {
+        match outcome {
+            Outcome::Ok(n) => Ok(Return::values(n)),
+            Outcome::Err(e) => Err(e),
+        }
+    }
 }
 
 // ---- threads ----------------------------------------------------------------
@@ -618,89 +639,54 @@ pub enum Resumed<'s> {
 }
 
 impl<'s> Thread<'s> {
-    fn gc(&self) -> Gc<raw::Thread> {
-        let raw::Value::Thread(t) = self.v else {
-            unreachable!("a Thread handle holds a thread")
-        };
-        t
-    }
-
     /// Resume the coroutine with `args` and wait until it yields, returns
     /// or fails.
     pub fn resume(&self, args: impl IntoValues<'s>) -> Result<Resumed<'s>, Error> {
         let s = self.s;
-        let at = s.ctx().len();
         let n = args.push_into(s)?;
-        let mut ctx = s.ctx();
-        let args: Vec<raw::Value> = (at..at + n).map(|i| ctx.arg(i)).collect();
-        let r = ctx.resume_nested(self.gc(), &args);
-        ctx.truncate(at);
-        match r {
-            Ok((returned, vals)) => {
-                for &v in &vals {
-                    ctx.push(v);
-                }
-                drop(ctx);
-                let vals = s.last(vals.len());
-                Ok(if returned {
-                    Resumed::Returned(vals)
-                } else {
-                    Resumed::Yielded(vals)
-                })
-            }
-            Err(e) => {
-                let e = orbit_runtime::vm::LuaError::new(e);
-                Err(s.lua_error(&mut ctx, e))
-            }
-        }
+        let (returned, n) = s.run(|st| st.resume_here(self.idx, n))?;
+        let vals = s.last(n);
+        Ok(if returned {
+            Resumed::Returned(vals)
+        } else {
+            Resumed::Yielded(vals)
+        })
     }
 
     pub fn status(&self) -> ThreadStatus {
-        match self.s.ctx().thread_status(self.gc()) {
-            CoStatus::Suspended => ThreadStatus::Suspended,
-            CoStatus::Running => ThreadStatus::Running,
-            CoStatus::Normal => ThreadStatus::Normal,
-            CoStatus::Dead => ThreadStatus::Dead,
-        }
+        let stack = self.s.stack_ref();
+        let t = stack
+            .to_thread(self.idx)
+            .expect("a Thread handle holds a thread");
+        stack.thread_status(t)
     }
 }
 
 impl<'s> Scope<'s> {
     /// A coroutine that runs `f` when first resumed.
     pub fn create_thread(&'s self, f: Function<'s>) -> Thread<'s> {
-        let t = self.ctx().new_thread(f.v);
-        Thread::from_raw(self, self.root(raw::Value::Thread(t)).raw())
+        self.stack().push_coroutine(f.idx);
+        Thread::top(self)
     }
 }
 
 // ---- userdata ---------------------------------------------------------------
 
 impl<'s> Userdata<'s> {
-    pub(crate) fn gc(&self) -> Gc<raw::UserData> {
-        let raw::Value::UserData(u) = self.v else {
-            unreachable!("a Userdata handle holds a userdata")
-        };
-        u
-    }
-
     /// The host value, if it is a `T` this API stored
     /// ([`Scope::create_userdata`], [`Class`](crate::Class)). While the
     /// borrow lives, other operations on the scope panic.
     pub fn borrow<T: 'static>(&self) -> Result<Ref<'_, T>, Error> {
-        let u = self.gc();
-        Ref::filter_map(self.s.ctx_ref(), |ctx| {
-            ctx.userdata_ref::<Slot<T>>(u).and_then(|s| s.0.as_ref())
-        })
-        .map_err(|_| Error::runtime(not_a::<T>()))
+        let idx = self.idx;
+        Ref::filter_map(self.s.stack_ref(), |stack| stack.userdata::<T>(idx))
+            .map_err(|_| Error::runtime(not_a::<T>()))
     }
 
     /// The host value, mutably, if it is a `T` this API stored.
     pub fn borrow_mut<T: 'static>(&self) -> Result<RefMut<'_, T>, Error> {
-        let u = self.gc();
-        RefMut::filter_map(self.s.ctx(), |ctx| {
-            ctx.userdata_mut::<Slot<T>>(u).and_then(|s| s.0.as_mut())
-        })
-        .map_err(|_| Error::runtime(not_a::<T>()))
+        let idx = self.idx;
+        RefMut::filter_map(self.s.stack(), |stack| stack.userdata_mut::<T>(idx))
+            .map_err(|_| Error::runtime(not_a::<T>()))
     }
 }
 
@@ -741,10 +727,9 @@ pub trait FromValue<'s>: Sized {
 
 /// A Rust type that converts to a script value.
 pub trait IntoValue<'s> {
-    /// The value; a new string or table is not yet rooted, so the caller
-    /// roots it before allocating again.
+    /// Push the value on the scope's window.
     #[doc(hidden)]
-    fn into_raw(self, s: &'s Scope<'s>) -> Result<raw::Value, Error>;
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error>;
 }
 
 /// Values given to or returned from a call: `()`, one value, a tuple, or a
@@ -768,15 +753,24 @@ impl<'s> FromValue<'s> for bool {
     }
 }
 
+/// A string as the number it spells, as arithmetic converts it.
+fn numeral(st: Str<'_>) -> Option<Value<'_>> {
+    let stack = st.s.stack_ref();
+    match stack.to_integer(st.idx) {
+        Some(i) => Some(Value::Int(i)),
+        None => stack.to_number(st.idx).map(Value::Float),
+    }
+}
+
 impl<'s> FromValue<'s> for i64 {
     fn from_value(v: Value<'s>) -> Result<Self, FromValueError> {
         let n = match v {
-            Value::Str(st) => number::str_to_number(&st.as_bytes()),
-            v => Some(v.raw()),
+            Value::Str(st) => numeral(st),
+            v => Some(v),
         };
         match n {
-            Some(raw::Value::Int(i)) => Ok(i),
-            Some(raw::Value::Float(f)) => number::float_to_int(f).ok_or(FromValueError::Invalid(
+            Some(Value::Int(i)) => Ok(i),
+            Some(Value::Float(f)) => number::float_to_int(f).ok_or(FromValueError::Invalid(
                 "number has no integer representation",
             )),
             _ => Err(FromValueError::Expected("number")),
@@ -787,11 +781,14 @@ impl<'s> FromValue<'s> for i64 {
 impl<'s> FromValue<'s> for f64 {
     fn from_value(v: Value<'s>) -> Result<Self, FromValueError> {
         let n = match v {
-            Value::Str(st) => number::str_to_number(&st.as_bytes()),
-            v => Some(v.raw()),
+            Value::Str(st) => numeral(st),
+            v => Some(v),
         };
-        n.and_then(|n| n.as_f64())
-            .ok_or(FromValueError::Expected("number"))
+        match n {
+            Some(Value::Int(i)) => Ok(i as f64),
+            Some(Value::Float(f)) => Ok(f),
+            _ => Err(FromValueError::Expected("number")),
+        }
     }
 }
 
@@ -838,8 +835,9 @@ macro_rules! from_handle {
         }
 
         impl<'s> IntoValue<'s> for $t<'s> {
-            fn into_raw(self, _: &'s Scope<'s>) -> Result<raw::Value, Error> {
-                Ok(self.v)
+            fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+                s.stack().push_copy(self.idx);
+                Ok(())
             }
         }
     )*};
@@ -854,28 +852,32 @@ from_handle!(
 );
 
 impl<'s> IntoValue<'s> for Value<'s> {
-    fn into_raw(self, _: &'s Scope<'s>) -> Result<raw::Value, Error> {
-        Ok(self.raw())
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        self.push(&mut s.stack());
+        Ok(())
     }
 }
 
 impl<'s> IntoValue<'s> for &Value<'s> {
-    fn into_raw(self, _: &'s Scope<'s>) -> Result<raw::Value, Error> {
-        Ok(self.raw())
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        self.push(&mut s.stack());
+        Ok(())
     }
 }
 
 impl<'s> IntoValue<'s> for bool {
-    fn into_raw(self, _: &'s Scope<'s>) -> Result<raw::Value, Error> {
-        Ok(raw::Value::Bool(self))
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        s.stack().push_boolean(self);
+        Ok(())
     }
 }
 
 macro_rules! into_int {
     ($($t:ty),*) => {$(
         impl<'s> IntoValue<'s> for $t {
-            fn into_raw(self, _: &'s Scope<'s>) -> Result<raw::Value, Error> {
-                Ok(raw::Value::Int(i64::from(self)))
+            fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+                s.stack().push_integer(i64::from(self));
+                Ok(())
             }
         }
     )*};
@@ -884,35 +886,42 @@ macro_rules! into_int {
 into_int!(i8, i16, i32, i64, u8, u16, u32);
 
 impl<'s> IntoValue<'s> for f64 {
-    fn into_raw(self, _: &'s Scope<'s>) -> Result<raw::Value, Error> {
-        Ok(raw::Value::Float(self))
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        s.stack().push_number(self);
+        Ok(())
     }
 }
 
 impl<'s> IntoValue<'s> for &str {
-    fn into_raw(self, s: &'s Scope<'s>) -> Result<raw::Value, Error> {
-        Ok(s.ctx().new_str(self.as_bytes()))
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        s.stack().push_bytes(self.as_bytes());
+        Ok(())
     }
 }
 
 impl<'s> IntoValue<'s> for String {
-    fn into_raw(self, s: &'s Scope<'s>) -> Result<raw::Value, Error> {
-        Ok(s.ctx().new_str_owned(self.into_bytes()))
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        s.stack().push_bytes(self.as_bytes());
+        Ok(())
     }
 }
 
 impl<'s> IntoValue<'s> for &[u8] {
-    fn into_raw(self, s: &'s Scope<'s>) -> Result<raw::Value, Error> {
-        Ok(s.ctx().new_str(self))
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        s.stack().push_bytes(self);
+        Ok(())
     }
 }
 
 impl<'s, T: IntoValue<'s>> IntoValue<'s> for Option<T> {
     /// nil for `None`.
-    fn into_raw(self, s: &'s Scope<'s>) -> Result<raw::Value, Error> {
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
         match self {
-            Some(v) => v.into_raw(s),
-            None => Ok(raw::Value::Nil),
+            Some(v) => v.push_onto(s),
+            None => {
+                s.stack().push_nil();
+                Ok(())
+            }
         }
     }
 }
@@ -925,8 +934,7 @@ impl<'s> IntoValues<'s> for () {
 
 impl<'s, T: IntoValue<'s>> IntoValues<'s> for T {
     fn push_into(self, s: &'s Scope<'s>) -> Result<usize, Error> {
-        let v = self.into_raw(s)?;
-        s.ctx().push(v);
+        self.push_onto(s)?;
         Ok(1)
     }
 }
@@ -935,7 +943,7 @@ impl<'s, T: IntoValue<'s>> IntoValues<'s> for Vec<T> {
     fn push_into(self, s: &'s Scope<'s>) -> Result<usize, Error> {
         let n = self.len();
         for v in self {
-            v.push_into(s)?;
+            v.push_onto(s)?;
         }
         Ok(n)
     }

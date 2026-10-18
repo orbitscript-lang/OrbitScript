@@ -2,13 +2,11 @@
 
 use std::marker::PhantomData;
 
-use orbit_runtime::object::{self as raw, Gc};
-
 use crate::error::Error;
 use crate::host::{Call, HostFunction, Ret};
 use crate::pin::Pinned;
 use crate::scope::Scope;
-use crate::value::{Table, Userdata, Value};
+use crate::value::{Table, Userdata};
 
 /// How the API stores a host value in a userdata: taken out while a method
 /// runs, so the method can use the whole [`Call`] at the same time.
@@ -57,7 +55,10 @@ impl<T: 'static> Class<T> {
     pub fn instance<'s>(&self, s: &'s Scope<'s>, value: T) -> Result<Userdata<'s>, Error> {
         let meta = self.meta.get(s)?;
         let u = s.create_userdata(value);
-        s.ctx().vm.set_metatable(u.raw(), Some(table_gc(meta)));
+        let mut stack = s.stack();
+        stack.push_copy(meta.slot());
+        let r = stack.set_metatable(u.slot());
+        debug_assert!(r.is_ok(), "a table is a metatable");
         Ok(u)
     }
 
@@ -153,44 +154,27 @@ impl<'s> Scope<'s> {
     }
 }
 
-fn table_gc(t: Table<'_>) -> Gc<raw::Table> {
-    match t.raw() {
-        raw::Value::Table(t) => t,
-        _ => unreachable!("a Table handle holds a table"),
-    }
-}
-
 /// An object taken out of its userdata while its method runs; dropping it
 /// puts the object back, even when the method fails or panics.
 struct Taken<'a, T: 'static> {
     call: &'a Call<'a>,
-    u: Gc<raw::UserData>,
     value: Option<T>,
 }
 
 impl<'a, T: 'static> Taken<'a, T> {
     fn take(call: &'a Call<'a>, class: &str) -> Result<Taken<'a, T>, Error> {
-        let u = match call.arg(0) {
-            Value::Userdata(u) => Some(u.gc()),
-            _ => None,
-        };
-        let mut ctx = call.ctx();
-        let value = u.and_then(|u| ctx.userdata_mut::<Slot<T>>(u));
-        let Some(slot) = value else {
-            let e = ctx.type_error(0, class);
-            return Err(call.lua_error(&mut ctx, e));
-        };
-        let Some(value) = slot.0.take() else {
-            let e = ctx.error(format!(
+        // The object is argument 0, slot 1 of the window.
+        let taken = call.stack().userdata_cell::<T>(1).map(|cell| cell.take());
+        match taken {
+            None => Err(call.type_error(0, class)),
+            Some(None) => Err(call.error(format!(
                 "{class} object is already in use by a running method"
-            ));
-            return Err(call.lua_error(&mut ctx, e));
-        };
-        Ok(Taken {
-            call,
-            u: u.expect("a slot came from a userdata"),
-            value: Some(value),
-        })
+            ))),
+            Some(Some(value)) => Ok(Taken {
+                call,
+                value: Some(value),
+            }),
+        }
     }
 }
 
@@ -198,11 +182,11 @@ impl<T: 'static> Drop for Taken<'_, T> {
     fn drop(&mut self) {
         // During a panic's unwinding the window may still be borrowed;
         // then the object stays taken rather than panicking again.
-        let Some(mut ctx) = self.call.try_ctx() else {
+        let Some(mut stack) = self.call.try_stack() else {
             return;
         };
-        if let Some(slot) = ctx.userdata_mut::<Slot<T>>(self.u) {
-            slot.0 = self.value.take();
+        if let Some(cell) = stack.userdata_cell::<T>(1) {
+            *cell = self.value.take();
         }
     }
 }

@@ -365,6 +365,9 @@ mod tests {
             assert_eq!(r[0].get::<i64>()?, 42);
             assert_eq!(env.get::<i64>("x")?, 42);
             assert!(s.globals().get::<Value>("x")?.is_nil());
+            // Any value will do as an environment, as for `load`.
+            let r = s.load_in(Chunk::new("return _ENV"), 7)?.call(())?;
+            assert_eq!(r[0].get::<i64>()?, 7);
             Ok::<_, Error>(())
         })
         .unwrap();

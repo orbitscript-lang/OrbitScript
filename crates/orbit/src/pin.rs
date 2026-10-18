@@ -78,8 +78,8 @@ impl<K: PinKind> Pinned<K> {
                 "pinned handle used in another isolate"
             }));
         };
-        let v = s.ctx().vm.pin_slot_value(slot);
-        Ok(K::at(s.root(v)).expect("a pin slot holds the kind it was pinned as"))
+        s.stack().push_pinned(slot);
+        Ok(K::at(s.top()).expect("a pin slot holds the kind it was pinned as"))
     }
 }
 
