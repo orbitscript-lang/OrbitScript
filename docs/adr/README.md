@@ -13,5 +13,6 @@
 | [0009](0009-ffi.md) | Calling C functions from scripts (`ffi`) | Accepted |
 | [0010](0010-liborbit.md) | The runtime as a shared library (`liborbit`, aliased as `liblua`) | Proposed |
 | [0011](0011-api-surface-and-crates.md) | Public API surface and crate layout | Proposed |
+| [0012](0012-developer-tooling.md) | Developer tooling: language server and debugger | Accepted |
 
 Statuses: **Proposed** (open for edits), **Accepted** (changes need Tym's approval), **Superseded**.
