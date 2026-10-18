@@ -12,6 +12,7 @@ use std::cell::Cell;
 use orbit_gc::{Gc, Liveness, Marker, Trace, WeakMode};
 
 mod array;
+mod pool;
 
 use array::ArrayPart;
 
@@ -288,7 +289,7 @@ pub enum Slot {
 #[derive(Debug, Default)]
 pub struct Table {
     array: ArrayPart,
-    entries: Box<[Entry]>,
+    entries: Entries,
     /// Hash slots in use, dead entries included.
     used: u32,
     /// The hash slot of the key [`Table::next`] last returned, so the next
@@ -330,7 +331,7 @@ impl Trace<LuaSpace> for Table {
             }
         }
         if self.used > 0 {
-            for e in &self.entries {
+            for e in self.entries.iter() {
                 // Dead entries keep their keys alive until the next rebuild,
                 // so `next` can still compare against them.
                 mark(m, e.key());
@@ -390,7 +391,7 @@ impl Table {
         if self.used == 0 {
             return;
         }
-        for e in &self.entries {
+        for e in self.entries.iter() {
             if e.is_empty() {
                 continue;
             }
@@ -577,6 +578,29 @@ impl Table {
         Ok(t)
     }
 
+    /// Give a new, empty table room for `array` array slots and `hash`
+    /// hash entries, where it already is. A table built by value and then
+    /// moved into its arena slot is copied with wide loads over the narrow
+    /// stores that built it, which stalls the CPU, so the VM allocates
+    /// `Table::new()` (all constants) and sizes it in place. Use through
+    /// [`Heap::update`](orbit_gc::Heap::update), which charges the bytes.
+    pub fn presize(&mut self, array: usize, hash: usize) {
+        debug_assert!(self.array.cap() == 0 && self.entries.is_empty());
+        let fail = || -> ! {
+            crate::object::mem::abort(
+                array
+                    .saturating_mul(9)
+                    .saturating_add(hash.saturating_mul(24)),
+            )
+        };
+        if array > 0 {
+            self.array = ArrayPart::with_capacity(array).unwrap_or_else(|_| fail());
+        }
+        if hash > 0 {
+            self.entries = new_entries(hash_capacity(hash)).unwrap_or_else(|_| fail());
+        }
+    }
+
     /// Length of the array part.
     #[inline(always)]
     pub fn array_len(&self) -> usize {
@@ -682,27 +706,45 @@ impl Table {
         self.probe(&key, |a, b| str_eq(heap, a, b)).ok()
     }
 
-    /// Insert string key `key` (absent: its home slot is empty, so no probe
-    /// can find it elsewhere) with value `v` at its home slot, if the hash
-    /// part has room. A fresh table's `{x = .., y = ..}` stores take this
-    /// path. Returns the slot. Use through
-    /// [`Heap::update`](orbit_gc::Heap::update) or after a barrier: it changes
-    /// no capacity.
+    /// Where a store of string key `key` goes when its inline cache missed:
+    /// `Ok` with the slot that holds the key (live or dead), `Err(Some(_))`
+    /// with the empty slot that ends its probe when the hash part has room
+    /// for it (fill it with [`Table::insert_str_at`]), or `Err(None)` when
+    /// the store needs the general path. A fresh table's `{x = .., y = ..}`
+    /// stores take the `Err(Some(_))` case.
     #[inline]
-    pub fn insert_str_home(&mut self, key: &Key, v: Value) -> Option<usize> {
+    pub fn find_str_store(&self, heap: &LuaHeap, key: &Key) -> Result<usize, Option<usize>> {
         let len = self.entries.len();
-        if v.is_nil() || (self.used as usize) >= max_used(len) {
-            return None;
+        let room = (self.used as usize) < max_used(len);
+        // An empty home slot ends the probe at once.
+        let home = key.hash as usize & len.wrapping_sub(1);
+        if let Some(e) = self.entries.get(home)
+            && e.is_empty()
+        {
+            return Err(room.then_some(home));
         }
-        let i = key.hash as usize & len.wrapping_sub(1);
-        let e = self.entries.get(i)?;
-        if !e.is_empty() {
-            return None;
+        match self.probe(key, |a, b| str_eq(heap, a, b)) {
+            Ok(i) => Ok(i),
+            Err(Some(i))
+                if self.entries[i].is_empty()
+                    && (self.used as usize) < max_used(self.entries.len()) =>
+            {
+                Err(Some(i))
+            }
+            Err(_) => Err(None),
         }
+    }
+
+    /// Insert absent string key `key` with non-nil value `v` at empty slot
+    /// `slot`, from [`Table::find_str_store`]. Use through
+    /// [`Heap::update`](orbit_gc::Heap::update) or after a barrier: it
+    /// changes no capacity.
+    #[inline]
+    pub fn insert_str_at(&mut self, slot: usize, key: &Key, v: Value) {
+        debug_assert!(self.entries[slot].is_empty() && !v.is_nil());
         self.forget_absent_meta();
-        self.entries[i].fill(key.value, key.hash, v);
+        self.entries[slot].fill(key.value, key.hash, v);
         self.used += 1;
-        Some(i)
     }
 
     /// The value in hash slot `slot` if that slot holds exactly key `s` (an
@@ -1203,12 +1245,18 @@ fn max_used(cap: usize) -> usize {
     if cap <= 8 { cap } else { cap / 4 * 3 }
 }
 
+/// A hash part's slots.
+type Entries = pool::Recycled<Entry>;
+
 /// An empty hash part of `cap` slots.
-fn new_entries(cap: usize) -> Result<Box<[Entry]>, NoMemory> {
+fn new_entries(cap: usize) -> Result<Entries, NoMemory> {
+    if let Some(part) = pool::take(cap) {
+        return Ok(pool::Recycled(part));
+    }
     let mut v = Vec::new();
     v.try_reserve_exact(cap)?;
     v.resize(cap, Entry::default());
-    Ok(v.into_boxed_slice())
+    Ok(pool::Recycled(v.into_boxed_slice()))
 }
 
 /// The smallest hash part with room for `n` keys.
@@ -1772,15 +1820,14 @@ mod tests {
         assert!(lookup(&heap, t, MetaField::Gc).is_nil());
         heap.get_mut(t).set_slot(slot, Value::Int(4));
         assert!(matches!(lookup(&heap, t, MetaField::Gc), Value::Int(4)));
-        // `insert_str_home` on a table with room.
+        // `insert_str_at` on a table with room.
         let h = heap.alloc(Table::with_capacity(0, 64));
         assert!(lookup(&heap, h, MetaField::Mode).is_nil());
         let key = Key::str(&heap, name(MetaField::Mode));
-        assert!(
-            heap.get_mut(h)
-                .insert_str_home(&key, Value::Int(5))
-                .is_some()
-        );
+        let Err(Some(slot)) = heap.get(h).find_str_store(&heap, &key) else {
+            panic!("room for a new key");
+        };
+        heap.get_mut(h).insert_str_at(slot, &key, Value::Int(5));
         assert!(matches!(lookup(&heap, h, MetaField::Mode), Value::Int(5)));
         // `write` with a slot found earlier, and growth through rebuilds:
         // every cached field, stored one at a time after a failed lookup.
@@ -1907,16 +1954,15 @@ mod tests {
         }
 
         // Small parts, where fields share hint positions and slots move on
-        // every rebuild; `insert_str_home` and `write` with a found slot.
+        // every rebuild; `insert_str_at` and `write` with a found slot.
         for n in [1usize, 2, 4, 8] {
             let h = heap.alloc(Table::with_capacity(0, n));
             for (i, &e) in MetaField::ALL.iter().enumerate() {
                 let key = Key::str(&heap, name(e));
-                if heap
-                    .get_mut(h)
-                    .insert_str_home(&key, Value::Int(i as i64))
-                    .is_none()
-                {
+                if let Err(Some(slot)) = heap.get(h).find_str_store(&heap, &key) {
+                    heap.get_mut(h)
+                        .insert_str_at(slot, &key, Value::Int(i as i64));
+                } else {
                     let slot = heap.get(h).find_slot(&heap, &key, false);
                     heap.get_mut(h)
                         .write(slot, &key, Value::Int(i as i64))

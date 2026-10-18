@@ -13,6 +13,7 @@
 //! of slots from `len` up are never read. Tag bytes are only ever written
 //! from a [`Tag`].
 
+use super::pool::{self, Recycled};
 use crate::object::value::{Payload, Tag};
 use crate::object::{NoMemory, Value};
 
@@ -21,7 +22,7 @@ use crate::object::{NoMemory, Value};
 /// do in one instruction.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
-struct Slot {
+pub(super) struct Slot {
     payload: [u8; 8],
     tag: u8,
 }
@@ -37,7 +38,7 @@ impl Slot {
 
 #[derive(Debug, Default)]
 pub(super) struct ArrayPart {
-    slots: Box<[Slot]>,
+    slots: Recycled<Slot>,
     len: u32,
     /// Where the last nil was stored by [`ArrayPart::set_nil_hinted`]: a
     /// guess at the border once the last slot is nil. Only a hint, checked
@@ -51,11 +52,17 @@ impl ArrayPart {
             return Ok(ArrayPart::default());
         }
         assert!(cap <= u32::MAX as usize, "table overflow");
-        let mut slots = Vec::new();
-        slots.try_reserve_exact(cap)?;
-        slots.resize(cap, Slot::default());
+        let slots = match pool::take(cap) {
+            Some(slots) => slots,
+            None => {
+                let mut slots = Vec::new();
+                slots.try_reserve_exact(cap)?;
+                slots.resize(cap, Slot::default());
+                slots.into_boxed_slice()
+            }
+        };
         Ok(ArrayPart {
-            slots: slots.into_boxed_slice(),
+            slots: Recycled(slots),
             len: 0,
             nil_hint: 0,
         })
@@ -185,15 +192,15 @@ impl ArrayPart {
     /// nothing changes.
     pub(super) fn realloc(&mut self, cap: usize) -> Result<(), NoMemory> {
         assert!(cap <= u32::MAX as usize, "table overflow");
-        let mut v = std::mem::take(&mut self.slots).into_vec();
+        let mut v = std::mem::take(&mut self.slots.0).into_vec();
         if v.try_reserve_exact(cap - v.len()).is_err() {
             // A boxed slice's vector is exactly full, so this gives the
             // same allocation back.
-            self.slots = v.into_boxed_slice();
+            self.slots.0 = v.into_boxed_slice();
             return Err(NoMemory);
         }
         v.resize(cap, Slot::default());
-        self.slots = v.into_boxed_slice();
+        self.slots.0 = v.into_boxed_slice();
         Ok(())
     }
 

@@ -317,7 +317,13 @@ impl Vm {
     /// `NewTable`.
     #[inline(never)]
     pub(crate) fn op_new_table(&mut self, array_hint: usize, hash_hint: usize) -> Gc<Table> {
-        self.heap.alloc(Table::with_capacity(array_hint, hash_hint))
+        // Sized in place: see `Table::presize`.
+        let t = self.heap.alloc(Table::new());
+        if array_hint | hash_hint != 0 {
+            self.heap
+                .update(t, |tab| tab.presize(array_hint, hash_hint));
+        }
+        t
     }
 
     /// `CellNew`: a fresh cell holding `v` in cell slot `slot`.
@@ -820,10 +826,20 @@ pub(crate) fn set_str_miss(
             }
             return meta::new_index(heap, metas, Value::Table(t), Value::Str(k), v);
         }
-        heap.barrier_back(t);
-        if let Some(slot) = heap.get_mut(t).insert_str_home(&key, v) {
-            cache.fill(slot);
-            return Ok(());
+        match heap.get(t).find_str_store(heap, &key) {
+            Ok(slot) => {
+                cache.fill(slot);
+                heap.barrier_back(t);
+                heap.get_mut(t).set_slot(slot, v);
+                return Ok(());
+            }
+            Err(Some(slot)) if !v.is_nil() => {
+                cache.fill(slot);
+                heap.barrier_back(t);
+                heap.get_mut(t).insert_str_at(slot, &key, v);
+                return Ok(());
+            }
+            Err(_) => {}
         }
         match table::set_key(heap, t, &key, v) {
             Ok(Some(slot)) => cache.fill(slot),

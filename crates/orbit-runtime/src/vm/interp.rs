@@ -1502,7 +1502,14 @@ impl Vm {
                     // Numbers are copied by parts: the source was usually
                     // just written that way, and a whole 16-byte load would
                     // stall on store forwarding.
-                    Op::Move { dst, src } => by_parts!(src, |v| reg!(dst) = v),
+                    Op::Move { dst, src } => match reg!(src) {
+                        Value::Int(x) => reg!(dst) = Value::Int(x),
+                        Value::Float(f) => reg!(dst) = Value::Float(f),
+                        Value::Table(t) => reg!(dst) = Value::Table(t),
+                        Value::Str(x) => reg!(dst) = Value::Str(x),
+                        Value::Closure(c) => reg!(dst) = Value::Closure(c),
+                        v => reg!(dst) = v,
+                    },
                     Op::LoadNil { dst, count } => {
                         let at = dst as usize;
                         for r in &mut w[at..at + count as usize] {
