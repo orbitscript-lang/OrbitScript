@@ -2,9 +2,9 @@
 //! they use (ADR-11).
 //!
 //! The modules in `builtins/` are compiled by the build script and embedded
-//! as binary chunks. Each loads with a fresh table of intrinsics as its
-//! only globals, so scripts can neither reach the intrinsics nor change
-//! what a built-in calls, and returns its exports. Their prototypes are
+//! as binary chunks. Each loads with a fresh `intrinsics` table (plus `next`
+//! and `type`) as its only globals, so scripts can neither reach the
+//! intrinsics nor change what a built-in calls, and returns its exports. Their prototypes are
 //! marked built-in, so the debug interface, error messages and tracebacks
 //! show them as C functions.
 //!
@@ -48,8 +48,9 @@ pub(crate) static BASE: Module =
 pub(crate) static TABLE: Module =
     Module::new(include_bytes!(concat!(env!("OUT_DIR"), "/table.orbc")));
 
-/// The intrinsics a built-in module sees as its globals, besides `next`
-/// and `type`, which are the base library's own functions.
+/// The intrinsics a built-in module reaches through its global
+/// `intrinsics` table. Its other globals are `next` and `type`, the base
+/// library's own functions.
 const INTRINSICS: &[(&str, NativeFn)] = &[
     ("argerror", argerror),
     ("typeerror", typeerror),
@@ -75,10 +76,15 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
     let Value::Table(env_t) = env else {
         unreachable!("a new table")
     };
+    let intrinsics = vm.new_table_value();
+    let Value::Table(intrinsics_t) = intrinsics else {
+        unreachable!("a new table")
+    };
     for &(name, f) in INTRINSICS {
         let v = vm.native_named(name, f);
-        vm.raw_set_str(env_t, name, v);
+        vm.raw_set_str(intrinsics_t, name, v);
     }
+    vm.raw_set_str(env_t, "intrinsics", intrinsics);
     let shared: [(&'static str, NativeFn); 2] =
         [("next", super::base::next), ("type", super::base::type_)];
     for (name, f) in shared {
