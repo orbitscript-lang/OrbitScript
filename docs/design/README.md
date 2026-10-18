@@ -11,7 +11,7 @@ The first goal after the Phase 0 foundations is "first light": a small but real 
 | [first-light-subset.md](first-light-subset.md) | Which part of Lua 5.5 first light runs, and what's deliberately left out and where it goes later |
 | [lua-front-end.md](lua-front-end.md) | `orbit-lua-syntax`: lexer, parser, AST, name resolution and lowering to HIR |
 | [hir.md](hir.md) | `orbit-hir`: the language-neutral IR both front ends produce, and its shared analysis passes |
-| [vm.md](vm.md) | `orbit-core` objects, the bytecode, `orbit-compiler`, the `orbit-vm` interpreter, the stdlib subset, and the CLI |
+| [vm.md](vm.md) | The runtime objects, the bytecode, `orbit-compiler`, the interpreter, the stdlib subset, and the CLI (objects, interpreter and stdlib are now the `object`, `vm` and `stdlib` modules of `orbit-runtime`) |
 
 ```mermaid
 flowchart LR
@@ -21,10 +21,10 @@ flowchart LR
     orbsyn --> hir
     hir --> comp["orbit-compiler<br/>registers, bytecode, debug info"]
     comp --> unlinked["UnlinkedProto<br/>(plain data)"]
-    unlinked -- "link: intern, allocate" --> vm["orbit-vm<br/>interpreter"]
-    vm --> core["orbit-core<br/>Value, tables, strings, closures"]
+    unlinked -- "link: intern, allocate" --> vm["orbit-runtime::vm<br/>interpreter"]
+    vm --> core["orbit-runtime::object<br/>Value, tables, strings, closures"]
     core --> gc["orbit-gc<br/>heap"]
-    host["orbit-stdlib, orbit, orbit-cli"] --> vm
+    host["orbit-runtime::stdlib, orbit, orbit-cli"] --> vm
 
     subgraph pure ["Pure, Send data: no GC or VM access"]
         luasyn
@@ -37,7 +37,7 @@ flowchart LR
 
 Everything in the box, before the link step, is plain `Send` data with no GC or VM access, which keeps a parallel front end open (see [lua-front-end.md](lua-front-end.md#parallel-and-async-front-end)).
 
-Crate dependencies this implies: `orbit-hir` depends on nothing; `orbit-lua-syntax` depends on `orbit-hir` (the Phase 0 placeholder has it the other way round); `orbit-bytecode` (the instruction set and `UnlinkedProto`) depends on nothing; `orbit-compiler` depends on `orbit-hir` and `orbit-bytecode`; `orbit-core` depends on `orbit-gc` and `orbit-bytecode` (prototypes hold code); `orbit-vm` depends on `orbit-core` and `orbit-bytecode`.
+Crate dependencies this implies: `orbit-hir` depends on nothing; `orbit-lua-syntax` depends on `orbit-hir` (the Phase 0 placeholder has it the other way round); `orbit-bytecode` (the instruction set and `UnlinkedProto`) depends on nothing; `orbit-compiler` depends on `orbit-hir` and `orbit-bytecode`; `orbit-runtime` depends on `orbit-gc` and `orbit-bytecode` (prototypes hold code). It was three crates (`orbit-core`, `orbit-vm`, `orbit-stdlib`) until ADR-11 merged them.
 
 ## Choices that need Tym's review
 

@@ -5,7 +5,7 @@
 //! (interning strings, allocating prototypes bottom-up). It is its own crate,
 //! with no dependencies, because three crates need it: `orbit-compiler`
 //! emits it, `orbit-core`'s `Proto` stores it, and `orbit-vm` runs it (and
-//! re-exports it as `orbit_vm::op`). The compiler thereby stays free of the
+//! re-exports it as `orbit_runtime::vm::op`). The compiler thereby stays free of the
 //! runtime and the GC.
 //!
 //! Notation in the instruction docs: `R[x]` is register `x` of the current

@@ -80,13 +80,11 @@ dependencies = [
  "orbit-bytecode",
  "orbit-capi",
  "orbit-compiler",
- "orbit-core",
  "orbit-ffi",
  "orbit-hir",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
- "orbit-stdlib",
- "orbit-vm",
+ "orbit-runtime",
 ]
 
 [[package]]
@@ -101,8 +99,7 @@ dependencies = [
  "orbit-compiler",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
- "orbit-stdlib",
- "orbit-vm",
+ "orbit-runtime",
 ]
 
 [[package]]
@@ -127,20 +124,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "orbit-core"
-version = "0.0.0"
-dependencies = [
- "orbit-bytecode",
- "orbit-gc",
-]
-
-[[package]]
 name = "orbit-ffi"
 version = "0.0.0"
 dependencies = [
  "libffi-sys",
- "orbit-stdlib",
- "orbit-vm",
+ "orbit-runtime",
 ]
 
 [[package]]
@@ -179,12 +167,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "orbit-stdlib"
+name = "orbit-runtime"
 version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
- "orbit-core",
- "orbit-vm",
+ "orbit-gc",
 ]
 
 [[package]]
@@ -200,15 +187,6 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "orbit-vm"
-version = "0.0.0"
-dependencies = [
- "orbit-bytecode",
- "orbit-core",
- "orbit-gc",
 ]
 
 [[package]]

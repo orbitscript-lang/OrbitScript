@@ -1,0 +1,42 @@
+# ADR-11: Public API surface and crate layout
+
+Status: Proposed (2026-10-18). Tym asked on 2026-10-18 (00:34Z) to define the public embedding API as an object model before choosing how it crosses the `liborbit` boundary, and approved the design and the crate layout below between 01:12Z and 02:35Z. Accepting this record supersedes ADR-10's `orbit-abi`/`orbit-api` split and its choice of `stabby` (the boundary is chosen again once the new API exists), and changes the crate table in `CLAUDE.md`.
+
+## Context
+
+The first `stabby` boundary (#160, closed) wrapped the Rust API as it stood: a value went through five types between the VM and the program (the core `Value`, two raw forms on each side of the boundary, and the API's `Value`), and each operation was written five times. The API had grown from what the CLIs needed rather than from a design. The full surface, with diagrams and measurements, is in the Claude Doc "OrbitScript embedding API surface" (https://claude.ai/code/artifact/2b15da4b-abf6-4866-8bcd-89eb319db36e).
+
+## Decision
+
+### The object model
+- **`Runtime`** is built from a `Config` (libraries, memory limit, GC mode, warnings, the host's `Io` and `Searcher`) and creates **`Isolate`**s. An isolate is one VM: it loads and runs chunks, owns globals, creates values, defines host classes, registers modules, and exposes the collector, interrupts, budgets and the debugger.
+- **`Chunk`** is built only from bytes the host supplies, with a name, a language (Lua or OrbitScript), a mode (text, binary) and an optional environment. The runtime never opens files or reads stdin: resolving paths is the host's job.
+- **`Compiler`** is `Send + Sync` and needs no isolate.
+- Values are **`Value`**, **`Str`** (borrowed), **`Table`**, **`Function`**, **`Thread`** and **`Userdata`**. Handles are scoped (they live for a scope's lifetime and cost nothing) or pinned (`Pinned<T>`, kept alive until dropped).
+- Hosts extend the runtime with **`HostFunction`**s (taking a `Call`), **`Class<T>`** for userdata types, and the `Io`, `Searcher`, `Clock` and `Hook` interfaces. Errors are `Syntax`, `Runtime` (keeping the error value), `Memory` and `Interrupted`.
+
+### Intrinsics and the standard library
+- The runtime exposes **intrinsics**: named primitive operations that need the VM's internals or its speed (string and table primitives, math, utf8, `string.pack`).
+- Each library function is then either bound directly to an intrinsic, written natively in the runtime, or written in OrbitScript on top of intrinsics and precompiled to bytecode at build time. The choice is made per function, by measurement: a call through an OrbitScript wrapper costs about 16 ns, `ipairs` and `table.sort` with a comparator ran faster written in Lua than natively, and `table.concat` and `string.rep` ran ten times slower.
+- Functions written in OrbitScript keep the observable behaviour of natives: error messages name the function, error levels skip the built-in frame, and tracebacks show `[C]`.
+- **`orbit-std`** implements the I/O-facing parts of the standard library (`io`, `os`, `print`, `loadfile`, `dofile`, file searchers, environment variables, C modules, `ffi`) over the public API only, with no access to the runtime's internals. The CLIs install it.
+
+### Crates, bottom up
+| Layer | Crates |
+|---|---|
+| Memory | `orbit-gc`, `orbit-virtmem` |
+| Front ends and compiler | `orbit-lua-syntax`, `orbit-orb-syntax`, `orbit-hir`, `orbit-compiler`, `orbit-bytecode` |
+| Runtime | `orbit-runtime`: the former `orbit-core`, `orbit-vm` and `orbit-stdlib`, the intrinsics, and the precompiled built-in modules. Objects, interpreter and libraries stay separate modules so each can be tested alone |
+| Public API | `orbit` |
+| Host libraries | `orbit-std`; `orbit-capi` and `orbit-ffi` |
+| Programs | `orbit-cli`, `orbit-lib`, `orbit-testkit` |
+
+No test enforces the layering: the ABI boundary, once chosen, enforces it.
+
+### Order of work
+Each step is its own PR and keeps the suite passing: (a) merge `orbit-core`, `orbit-vm` and `orbit-stdlib` into `orbit-runtime` without behaviour changes; (b) the new `orbit` API and the CLIs ported to it, replacing `orbit::Lua`; (c) `orbit-std` takes over I/O; (d) the first OrbitScript built-ins (`table.insert`, `table.remove`, `table.sort`, `ipairs`, `pairs`) with built-in frames; (e) the `liborbit` boundary (`stabby`, a hand-written flat C ABI, or a COM-like interface table).
+
+## Consequences
+- One runtime crate means one set of Cargo features for objects, interpreter and libraries; the PGO profile has to be retrained after the merge because symbol names change.
+- Accepted ADRs and older design notes still name `orbit-core`, `orbit-vm` and `orbit-stdlib`; read those as the modules `orbit_runtime::object`, `orbit_runtime::vm` and `orbit_runtime::stdlib`.
+- Threads with open work on the old crates rebase onto the new layout once it lands.

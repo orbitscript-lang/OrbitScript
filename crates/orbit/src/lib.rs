@@ -11,18 +11,18 @@ use std::fmt;
 use orbit_compiler::bytecode::UnlinkedChunk;
 use orbit_lua_syntax::ParseOptions;
 
-pub use orbit_core;
-pub use orbit_core::Value;
-pub use orbit_stdlib::Options;
+pub use orbit_runtime::object;
+pub use orbit_runtime::object::Value;
+pub use orbit_runtime::stdlib::Options;
 /// How much `load` checks binary chunks (features `verify`, `verify-flow`;
 /// `ORBIT_VERIFY`).
 #[cfg(feature = "dump")]
-pub use orbit_stdlib::checks;
+pub use orbit_runtime::stdlib::checks;
 #[cfg(feature = "load")]
-pub use orbit_stdlib::{chunk_id, is_orbitscript_file, read_chunk_file};
+pub use orbit_runtime::stdlib::{chunk_id, is_orbitscript_file, read_chunk_file};
 #[cfg(feature = "debug")]
-pub use orbit_vm::Interrupt;
-pub use orbit_vm::{
+pub use orbit_runtime::vm::Interrupt;
+pub use orbit_runtime::vm::{
     CallOutcome, GcMode, LIMIT_GRACE, LuaError, MetaField, NativeCtx, NativeReturn, ResumeOk, Vm,
 };
 
@@ -93,12 +93,12 @@ fn compile_hir(hir: &orbit_hir::Chunk) -> Result<UnlinkedChunk, Error> {
 }
 
 /// The compiler `load` and friends use: the Lua front end with default
-/// options ([`orbit_vm::CompileFn`]).
+/// options ([`orbit_runtime::vm::CompileFn`]).
 fn compile_lua(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
     compile(src, chunk_name, &ParseOptions::default()).map_err(|e| e.to_string())
 }
 
-/// The compiler `.orb` files use ([`orbit_vm::Runtime::compile_orbitscript`]).
+/// The compiler `.orb` files use ([`orbit_runtime::vm::Runtime::compile_orbitscript`]).
 fn compile_orb(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
     compile_orbitscript(src, chunk_name, &orbit_orb_syntax::ParseOptions::default())
         .map_err(|e| e.to_string())
@@ -128,7 +128,7 @@ impl Lua {
         {
             vm.rt.compile_orbitscript = Some(compile_orb);
         }
-        orbit_stdlib::open_libs_with(&mut vm, options);
+        orbit_runtime::stdlib::open_libs_with(&mut vm, options);
         #[cfg(feature = "c-modules")]
         orbit_capi::install(&mut vm);
         Lua { vm }
@@ -187,12 +187,12 @@ impl Lua {
     /// source name is `source` (`@file`, `=name`), as `loadfile` would. The
     /// function is unrooted.
     pub fn load_buffer(&mut self, bytes: &[u8], source: &[u8]) -> Result<Value, Error> {
-        orbit_stdlib::load_buffer(&mut self.vm, bytes, source).map_err(Error::Syntax)
+        orbit_runtime::stdlib::load_buffer(&mut self.vm, bytes, source).map_err(Error::Syntax)
     }
 
     /// Flush open files and `print` output, as closing the state does.
     pub fn flush_files(&mut self) {
-        orbit_stdlib::flush_files(&mut self.vm);
+        orbit_runtime::stdlib::flush_files(&mut self.vm);
     }
 
     /// Call a function.

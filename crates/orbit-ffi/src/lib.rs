@@ -9,7 +9,7 @@
 //! ```
 //!
 //! An FFI function is a plain native whose data words
-//! ([`orbit_vm::Vm::register_native_with_data`]) hold the C function's
+//! ([`orbit_runtime::vm::Vm::register_native_with_data`]) hold the C function's
 //! address and which of the VM's signatures it has; libffi makes the call. The host decides whether scripts get the library at all
 //! ([`install`]); once they have it they can call any C function and read
 //! and write any memory, as a C module could. All `unsafe` code is in
@@ -20,8 +20,8 @@ mod sys;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use orbit_vm::orbit_core::{Gc, LightUserData, Table, UserData, Value};
-use orbit_vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_runtime::object::{Gc, LightUserData, Table, UserData, Value};
+use orbit_runtime::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
 
 /// A C type the library converts values to and from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -171,10 +171,10 @@ pub fn install(vm: &mut Vm) {
     if std::mem::replace(&mut state.installed, true) {
         return;
     }
-    let ffi = orbit_stdlib::open_lib(vm, "ffi", FUNCTIONS);
+    let ffi = orbit_runtime::stdlib::open_lib(vm, "ffi", FUNCTIONS);
     vm.pin(Value::Table(ffi));
     let k = vm.new_str(b"bind");
-    let bind = orbit_vm::orbit_core::table::get(&vm.heap, ffi, k);
+    let bind = orbit_runtime::object::table::get(&vm.heap, ffi, k);
     let (_, methods) = new_meta(vm, LIBRARY_META, "ffi.library.__tostring", library_tostring);
     set(vm, methods, "bind", bind);
     let (meta, _) = new_meta(vm, BUFFER_META, "ffi.buffer.__tostring", buffer_tostring);
@@ -219,7 +219,7 @@ fn light(bits: u64) -> Value {
 fn new_object<T: std::any::Any>(ctx: &mut NativeCtx<'_>, data: T, meta: &str) -> Value {
     let k = ctx.new_str(meta.as_bytes());
     let reg = ctx.vm.rt.registry;
-    let meta = match orbit_vm::orbit_core::table::get(&ctx.vm.heap, reg, k) {
+    let meta = match orbit_runtime::object::table::get(&ctx.vm.heap, reg, k) {
         Value::Table(t) => Some(t),
         _ => None,
     };

@@ -2,8 +2,8 @@
 //! semantics.
 
 use orbit::Lua;
-use orbit_vm::orbit_core::{LightUserData, Value};
-use orbit_vm::{LuaError, NativeCtx, NativeReturn};
+use orbit_runtime::object::{LightUserData, Value};
+use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn};
 
 fn token(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
     let n = ctx.check_int(0)?;

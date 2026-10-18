@@ -12,8 +12,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
 
-use orbit_vm::orbit_core::{Gc, Thread, Value};
-use orbit_vm::{CallOutcome, CoStatus, LuaError, NativeCtx, NativeReturn, Vm};
+use orbit_runtime::object::{Gc, Thread, Value};
+use orbit_runtime::vm::{CallOutcome, CoStatus, LuaError, NativeCtx, NativeReturn, Vm};
 
 use crate::api::{self, CStrCopy, Res, Shared, abi};
 
@@ -142,7 +142,7 @@ pub(crate) enum COut {
     Suspend(Request),
 }
 
-/// Owns a VM's [`Bridge`] and its C state, from [`orbit_vm::Runtime::ext`].
+/// Owns a VM's [`Bridge`] and its C state, from [`orbit_runtime::vm::Runtime::ext`].
 #[derive(Debug)]
 struct BridgeHandle(*const Bridge);
 
@@ -526,7 +526,7 @@ fn lua_level(b: &Bridge, level: c_int) -> c_int {
 
 /// The native standing for a C hook (its function pointer in the data
 /// word), called as a Lua hook is: `(event, line)`.
-fn c_hook(ctx: &mut NativeCtx<'_>) -> Result<orbit_vm::NativeReturn, LuaError> {
+fn c_hook(ctx: &mut NativeCtx<'_>) -> Result<orbit_runtime::vm::NativeReturn, LuaError> {
     let f = ctx.native_data()[0] as usize;
     let event = match ctx.arg(0) {
         Value::Str(s) => match ctx.bytes(s) {
@@ -535,9 +535,9 @@ fn c_hook(ctx: &mut NativeCtx<'_>) -> Result<orbit_vm::NativeReturn, LuaError> {
             b"line" => abi::HOOKLINE,
             b"count" => abi::HOOKCOUNT,
             b"tail call" => abi::HOOKTAILCALL,
-            _ => return Ok(orbit_vm::NativeReturn::Return(0)),
+            _ => return Ok(orbit_runtime::vm::NativeReturn::Return(0)),
         },
-        _ => return Ok(orbit_vm::NativeReturn::Return(0)),
+        _ => return Ok(orbit_runtime::vm::NativeReturn::Return(0)),
     };
     let line = match ctx.arg(1) {
         Value::Int(i) => i as c_int,
@@ -560,7 +560,7 @@ fn c_hook(ctx: &mut NativeCtx<'_>) -> Result<orbit_vm::NativeReturn, LuaError> {
     if let COut::Suspend(_) = r? {
         return Err(ctx.error("attempt to yield from a C hook"));
     }
-    Ok(orbit_vm::NativeReturn::Return(0))
+    Ok(orbit_runtime::vm::NativeReturn::Return(0))
 }
 
 /// The context and bridge of the C function running on state `l`. Aborts
@@ -589,7 +589,7 @@ unsafe fn enter<'a>(
 }
 
 /// The other thread an entry point's body works on, if any.
-type Window = Option<(Gc<Thread>, orbit_vm::WindowSave)>;
+type Window = Option<(Gc<Thread>, orbit_runtime::vm::WindowSave)>;
 
 /// The end of an entry point that [`enter`] began.
 fn leave(b: &Bridge, c: &mut NativeCtx<'static>, window: Window) {
@@ -1839,7 +1839,7 @@ fn dl_error() -> String {
     String::from_utf8_lossy(unsafe { cbytes(p) }).into_owned()
 }
 
-/// The [`orbit_stdlib::LoadFn`] for this crate. Libraries stay loaded
+/// The [`orbit_runtime::stdlib::LoadFn`] for this crate. Libraries stay loaded
 /// until the process exits, as their functions may be referenced anywhere.
 #[cfg(unix)]
 pub(crate) fn load(
@@ -1908,7 +1908,7 @@ type WarnFn = unsafe extern "C" fn(ud: *mut c_void, msg: *const c_char, tocont: 
 /// `lua_setwarnf`: warnings go to `f` from now on; a null `f` drops them.
 extern "C" fn orbit_r_setwarnf(l: *mut LState, f: Option<WarnFn>, ud: *mut c_void) {
     entry!(l, (), |_b, c| {
-        c.vm.rt.warn_hook = Some(orbit_vm::WarnHook(Box::new(move |msg, tocont| {
+        c.vm.rt.warn_hook = Some(orbit_runtime::vm::WarnHook(Box::new(move |msg, tocont| {
             let Some(f) = f else { return };
             let mut text = Vec::with_capacity(msg.len() + 1);
             text.extend(msg.iter().map(|&b| if b == 0 { b'?' } else { b }));
@@ -1996,7 +1996,7 @@ extern "C" fn orbit_r_close(l: *mut LState) {
     // VM drops the bridge handle, which frees the bridge and `l`.
     unsafe {
         (*vm).close();
-        orbit_stdlib::flush_files(&mut *vm);
+        orbit_runtime::stdlib::flush_files(&mut *vm);
         let _ = std::io::Write::flush(&mut (*vm).rt.out);
         drop(Box::from_raw(vm));
     }

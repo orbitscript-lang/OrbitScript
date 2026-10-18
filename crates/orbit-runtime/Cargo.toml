@@ -1,0 +1,50 @@
+[package]
+name = "orbit-runtime"
+description = "The OrbitScript runtime: values, heap, strings and tables, the bytecode interpreter, and the built-in libraries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-bytecode = { path = "../orbit-bytecode" }
+orbit-gc = { path = "../orbit-gc" }
+
+[lints]
+workspace = true
+
+[features]
+default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine", "debug", "io", "dump", "verify", "verify-flow"]
+string = []
+utf8 = []
+table = []
+math = []
+# `load`, `loadfile` and `dofile` (source chunks need the host to install a
+# compiler in `Runtime::compile`).
+load = []
+# The `io` library.
+io = []
+# `string.dump`, and loading the binary chunks it writes.
+dump = ["load", "string"]
+# Check binary chunks before `load` links them: layer 1 of the verifier
+# (structure). Without it binary chunks run unchecked, and a malformed one
+# can make the VM panic. `ORBIT_VERIFY` can lower the level at run time.
+verify = ["dump"]
+# Layer 2 of the verifier (data flow) as well: with both layers no binary
+# chunk can make the VM panic.
+verify-flow = ["verify", "orbit-bytecode/verify-flow"]
+# The `os` library (without it, no `os` table at all).
+os = []
+# `require` and the `package` library.
+package = ["load"]
+# The `coroutine` library.
+coroutine = []
+# The `debug` library.
+debug = ["hooks"]
+# Per-instruction type-feedback bytes on prototypes, for a future JIT
+# (docs/design/vm.md, "Type feedback").
+type-feedback = []
+# Debug hooks (`debug.sethook`): a second, hooked copy of the dispatch loop.
+hooks = []

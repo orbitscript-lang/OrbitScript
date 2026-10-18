@@ -2,8 +2,8 @@
 //! (`NativeCtx::call`, what the C API's `lua_call` and `lua_pcall` use).
 
 use orbit::Lua;
-use orbit_vm::orbit_core::Value;
-use orbit_vm::{LuaError, NativeCtx, NativeReturn};
+use orbit_runtime::object::Value;
+use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn};
 
 /// `callnow(f, ...)`: calls `f(...)` now and returns its results.
 fn callnow(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
@@ -39,7 +39,7 @@ fn run(src: &str) -> Vec<String> {
     let mut lua = Lua::new();
     let vm = lua.vm();
     for (name, f) in [
-        ("callnow", callnow as orbit_vm::NativeFn),
+        ("callnow", callnow as orbit_runtime::vm::NativeFn),
         ("pcallnow", pcallnow),
     ] {
         let f = vm.register_native(name, f);
