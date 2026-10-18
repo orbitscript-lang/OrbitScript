@@ -365,7 +365,8 @@ impl Lowerer {
                 };
                 hir::ExprKind::Unary { op, expr: inner }
             }
-            K::Paren(inner) => return self.single(inner, out),
+            // `e as T` only informs `orbit-check`; like `(e)`, it is one value.
+            K::Paren(inner) | K::As { expr: inner, .. } => return self.single(inner, out),
             K::Tuple(_) => {
                 return Err(self.error(
                     span,

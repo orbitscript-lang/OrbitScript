@@ -28,6 +28,7 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
         body,
         strings,
         source,
+        ..
     } = ast;
     let mut strings = strings;
     let syms = Syms::new(&mut strings);

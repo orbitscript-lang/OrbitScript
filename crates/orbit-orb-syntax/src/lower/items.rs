@@ -33,10 +33,11 @@ impl Lowerer {
         }
         match &item.kind {
             ast::ItemKind::Fn(f) => {
+                let body = self.fn_body(f)?;
                 let local = self.define_item(f.name, ItemTag::Fn, out, |lx, local, out| {
                     let func = lx.function(
                         &f.sig,
-                        FnBody::Block(&f.body),
+                        FnBody::Block(body),
                         FunctionName::Local(f.name.sym),
                         f.span,
                     )?;
@@ -64,6 +65,7 @@ impl Lowerer {
                 Ok(())
             }
             ast::ItemKind::Const { name, value, .. } => {
+                let value = self.const_value(item, value)?;
                 self.check_const(value)?;
                 let local = self.define_value_item(*name, ItemTag::Const, value, out)?;
                 self.export(item, *name, local, out);
@@ -80,6 +82,8 @@ impl Lowerer {
                 Ok(())
             }
             ast::ItemKind::Impl(i) => self.impl_block(i, item.span, out),
+            // Aliases are for `orbit-check`; nothing runs.
+            ast::ItemKind::TypeAlias { .. } => Ok(()),
             ast::ItemKind::Use(u) => self.use_decl(u, item.span, out),
             ast::ItemKind::Global { name, value } => {
                 let v = self.single(value, out)?;
@@ -227,6 +231,24 @@ impl Lowerer {
     }
 
     /// A `const` value must be a literal or another `const`.
+    /// A function's body; a stub declaration (`fn f();`) has none and can't run.
+    fn fn_body<'b>(&self, f: &'b ast::FnDecl) -> LResult<&'b ast::Block> {
+        f.body
+            .as_ref()
+            .ok_or_else(|| self.error(f.span, "a stub declaration has no body to run"))
+    }
+
+    /// A constant's value; a stub declaration (`const N: int;`) has none and can't run.
+    fn const_value<'b>(
+        &self,
+        item: &ast::Item,
+        value: &'b Option<ast::Expr>,
+    ) -> LResult<&'b ast::Expr> {
+        value
+            .as_ref()
+            .ok_or_else(|| self.error(item.span, "a stub declaration has no value to run"))
+    }
+
     fn check_const(&mut self, value: &ast::Expr) -> LResult<()> {
         let ok = match &value.kind {
             K::Nil | K::True | K::False | K::Int(_) | K::Float(_) | K::Str(_) => true,
@@ -656,13 +678,15 @@ impl Lowerer {
                         } else {
                             FunctionName::Field(name.sym)
                         };
-                        let func = self.function(&f.sig, FnBody::Block(&f.body), fname, f.span)?;
+                        let body = self.fn_body(f)?;
+                        let func = self.function(&f.sig, FnBody::Block(body), fname, f.span)?;
                         (
                             self.add_expr(hir::ExprKind::Closure(func), f.span),
                             has_self,
                         )
                     }
                     ast::ItemKind::Const { value, .. } => {
+                        let value = self.const_value(m, value)?;
                         self.check_const(value)?;
                         (self.single(value, out)?, false)
                     }

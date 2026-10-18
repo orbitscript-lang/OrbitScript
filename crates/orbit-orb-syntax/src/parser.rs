@@ -11,17 +11,30 @@ use crate::lexer::{Lexer, TemplatePart};
 use crate::token::{Keyword, Punct, Token, TokenKind};
 use orbit_hir::{Span, StrId};
 
-/// Parser settings.
+/// Parser settings. The defaults are what the runtime uses; the other flags are for tools
+/// (`orbit-check`, a language server) and never change how a program runs.
 #[derive(Clone, Debug)]
 pub struct ParseOptions {
     /// Maximum nesting of blocks and expressions, so deeply nested input can't overflow the
     /// Rust stack.
     pub max_depth: u32,
+    /// Build a [`TypeKind`] tree for every type annotation (otherwise only spans are kept).
+    pub type_trees: bool,
+    /// Parse a stub (`.orbi`): `fn` items and `impl` functions may end in `;` instead of a body,
+    /// and `const NAME: T;` needs no value. A stub can't be lowered.
+    pub stub: bool,
+    /// Keep `///` and `//!` comments ([`Ast::doc_comments`], [`Item::docs`]).
+    pub doc_comments: bool,
 }
 
 impl Default for ParseOptions {
     fn default() -> ParseOptions {
-        ParseOptions { max_depth: 200 }
+        ParseOptions {
+            max_depth: 200,
+            type_trees: false,
+            stub: false,
+            doc_comments: false,
+        }
     }
 }
 
@@ -37,6 +50,10 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
     let mut lx = Lexer::new(chunk_name, src);
     let sym_scope = lx.strings_mut().intern(b"scope");
     let sym_underscore = lx.strings_mut().intern(b"_");
+    let sym_type = lx.strings_mut().intern(b"type");
+    if options.doc_comments {
+        lx.keep_doc_comments();
+    }
     let mut p = Parser {
         lx,
         tok: Token {
@@ -47,8 +64,12 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
         prev_end: 0,
         depth: 0,
         max_depth: options.max_depth,
+        type_trees: options.type_trees,
+        stub: options.stub,
+        next_doc: 0,
         sym_scope,
         sym_underscore,
+        sym_type,
     };
     p.advance()?;
     let start = p.tok.span.start;
@@ -58,11 +79,13 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
         tail,
         span: Span::new(start.min(p.tok.span.end), src.len() as u32),
     };
+    let doc_comments = p.lx.take_doc_comments();
     let (strings, source) = p.lx.finish();
     Ok(Ast {
         body,
         strings,
         source,
+        doc_comments,
     })
 }
 
@@ -82,8 +105,13 @@ struct Parser<'a> {
     prev_end: u32,
     depth: u32,
     max_depth: u32,
+    type_trees: bool,
+    stub: bool,
+    /// The first doc comment not yet attached to (or passed by) an item.
+    next_doc: usize,
     sym_scope: StrId,
     sym_underscore: StrId,
+    sym_type: StrId,
 }
 
 type PResult<T> = Result<T, Diagnostic>;
@@ -258,6 +286,11 @@ impl Parser<'_> {
         self.is_ident(self.sym_scope) && self.tok.span.end - self.tok.span.start == 5
     }
 
+    /// The contextual keyword `type` (not `r#type`).
+    fn is_type_keyword(&self) -> bool {
+        self.is_ident(self.sym_type) && self.tok.span.end - self.tok.span.start == 4
+    }
+
     // ---- blocks and statements ----------------------------------------------------------------
 
     /// `{ ... }`.
@@ -329,7 +362,14 @@ impl Parser<'_> {
                 let item = self.item()?;
                 return Ok(StmtOrTail::Stmt(Stmt {
                     span: item.span,
-                    kind: StmtKind::Item(item),
+                    kind: StmtKind::Item(Box::new(item)),
+                }));
+            }
+            TokenKind::Ident(_) if self.is_type_keyword() && self.type_is_keyword()? => {
+                let item = self.item()?;
+                return Ok(StmtOrTail::Stmt(Stmt {
+                    span: item.span,
+                    kind: StmtKind::Item(Box::new(item)),
                 }));
             }
             TokenKind::Ident(_) if self.is_scope() && self.scope_is_keyword()? => {
@@ -534,8 +574,10 @@ impl Parser<'_> {
 
     fn item(&mut self) -> PResult<Item> {
         let start = self.tok.span.start;
+        let docs = self.item_docs();
         let is_pub = self.eat_kw(Keyword::Pub)?;
         let kind = match self.tok.kind {
+            TokenKind::Ident(_) if self.is_type_keyword() => self.type_alias()?,
             TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl(false)?),
             TokenKind::Keyword(Keyword::Struct) => ItemKind::Struct(self.struct_decl()?),
             TokenKind::Keyword(Keyword::Enum) => ItemKind::Enum(self.enum_decl()?),
@@ -544,15 +586,7 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::Const) => {
                 self.advance()?;
                 let name = self.name()?;
-                let ty = if self.eat(Punct::Colon)? {
-                    Some(self.type_ann()?)
-                } else {
-                    None
-                };
-                self.expect(Punct::Assign)?;
-                let value = self.expr()?;
-                self.expect(Punct::Semi)?;
-                ItemKind::Const { name, ty, value }
+                self.const_rest(name)?
             }
             TokenKind::Keyword(Keyword::Global) if !is_pub => {
                 self.advance()?;
@@ -572,7 +606,7 @@ impl Parser<'_> {
                 ItemKind::Extern(names)
             }
             _ if is_pub => {
-                return Err(self.expected("`fn`, `struct`, `enum` or `const` after `pub`"));
+                return Err(self.expected("`fn`, `struct`, `enum`, `const` or `type` after `pub`"));
             }
             _ => return Err(self.expected("an item")),
         };
@@ -580,7 +614,59 @@ impl Parser<'_> {
             is_pub,
             kind,
             span: self.span_from(start),
+            docs,
         })
+    }
+
+    /// `[: T] = value;` after `const NAME`; a stub may write `: T;` with no value.
+    fn const_rest(&mut self, name: Name) -> PResult<ItemKind> {
+        let ty = if self.eat(Punct::Colon)? {
+            Some(self.type_ann()?)
+        } else {
+            None
+        };
+        let value = if self.stub && ty.is_some() && self.is(Punct::Semi) {
+            None
+        } else {
+            self.expect(Punct::Assign)?;
+            Some(self.expr()?)
+        };
+        self.expect(Punct::Semi)?;
+        Ok(ItemKind::Const { name, ty, value })
+    }
+
+    /// `type Name<T> = T;` (the current token is `type`).
+    fn type_alias(&mut self) -> PResult<ItemKind> {
+        self.advance()?; // type
+        let name = self.name()?;
+        let generics = self.generics()?;
+        self.expect(Punct::Assign)?;
+        let ty = self.type_ann()?;
+        self.expect(Punct::Semi)?;
+        Ok(ItemKind::TypeAlias { name, generics, ty })
+    }
+
+    /// Whether the current `type` token starts an alias (`type Name`), not a use of a
+    /// variable or function named `type` (`type(x)`).
+    fn type_is_keyword(&mut self) -> PResult<bool> {
+        Ok(matches!(self.peek()?, TokenKind::Ident(_)))
+    }
+
+    /// The `///` comments between the previous token and the current one, which starts an
+    /// item. Doc comments before anything else are passed over.
+    fn item_docs(&mut self) -> Vec<Span> {
+        let mut docs = Vec::new();
+        let all = self.lx.doc_comments();
+        while let Some(d) = all.get(self.next_doc) {
+            if d.span.start >= self.tok.span.start {
+                break;
+            }
+            if !d.inner && d.span.start >= self.prev_end {
+                docs.push(d.span);
+            }
+            self.next_doc += 1;
+        }
+        docs
     }
 
     /// `fn name(...) { ... }`; a `member` (a function in `impl`) may be named by a keyword.
@@ -592,11 +678,16 @@ impl Parser<'_> {
         } else {
             self.name()?
         };
-        self.skip_generics()?;
+        let generics = self.generics()?;
         let sig = self.fn_params()?;
-        let body = self.block()?;
+        let body = if self.stub && self.eat(Punct::Semi)? {
+            None
+        } else {
+            Some(self.block()?)
+        };
         Ok(FnDecl {
             name,
+            generics,
             sig,
             body,
             span: self.span_from(start),
@@ -616,6 +707,9 @@ impl Parser<'_> {
 
     /// A parameter list up to (not including) `close`.
     fn params(&mut self, close: Punct) -> PResult<FnSig> {
+        // In a closure's `|...|`, a parameter type can't be a bare union (the `|` would end
+        // the list); `|x: (int | nil)|` works.
+        let unions = close != Punct::Pipe;
         let mut sig = FnSig::default();
         let mut first = true;
         while !self.is(close) {
@@ -633,19 +727,19 @@ impl Parser<'_> {
                 sig.self_param = Some(self.tok.span);
                 self.advance()?;
                 if self.eat(Punct::Colon)? {
-                    self.type_ann()?;
+                    sig.self_ty = Some(self.type_of(unions)?);
                 }
             } else if self.eat(Punct::DotDotDot)? {
                 sig.rest = Some(self.name()?);
                 if self.eat(Punct::Colon)? {
-                    self.type_ann()?;
+                    sig.rest_ty = Some(self.type_of(unions)?);
                 }
             } else {
                 let mutable = self.eat_kw(Keyword::Mut)?;
                 let name = self.name()?;
                 let name = (name.sym != self.sym_underscore).then_some(name);
                 let ty = if self.eat(Punct::Colon)? {
-                    Some(self.type_ann()?)
+                    Some(self.type_of(unions)?)
                 } else {
                     None
                 };
@@ -664,25 +758,27 @@ impl Parser<'_> {
         Ok(sig)
     }
 
-    /// Skips `<...>` generic parameters, which only `orbit-check` will read.
-    fn skip_generics(&mut self) -> PResult<()> {
-        if !self.is(Punct::Lt) {
-            return Ok(());
+    /// `<T, U>` generic parameters, which only `orbit-check` reads. There are no traits, so
+    /// a parameter is just a name.
+    fn generics(&mut self) -> PResult<Vec<GenericParam>> {
+        let mut params = Vec::new();
+        if !self.eat(Punct::Lt)? {
+            return Ok(params);
         }
-        let mut depth = 0i32;
-        loop {
-            match self.tok.kind {
-                TokenKind::Punct(Punct::Lt) => depth += 1,
-                TokenKind::Punct(Punct::Gt) => depth -= 1,
-                TokenKind::Punct(Punct::Shr) => depth -= 2,
-                TokenKind::Eof => return Err(self.expected("`>`")),
-                _ => {}
+        while !self.is(Punct::Gt) {
+            params.push(GenericParam { name: self.name()? });
+            if self.is(Punct::Colon) {
+                return Err(self.error(
+                    self.tok.span,
+                    "generic parameters can't have bounds (there are no traits yet)",
+                ));
             }
-            self.advance()?;
-            if depth <= 0 {
-                return Ok(());
+            if !self.eat(Punct::Comma)? {
+                break;
             }
         }
+        self.expect(Punct::Gt)?;
+        Ok(params)
     }
 
     fn field_decls(&mut self) -> PResult<Vec<FieldDecl>> {
@@ -716,7 +812,7 @@ impl Parser<'_> {
     fn struct_decl(&mut self) -> PResult<StructDecl> {
         self.advance()?; // struct
         let name = self.name()?;
-        self.skip_generics()?;
+        let generics = self.generics()?;
         let fields = if self.eat(Punct::Semi)? {
             Vec::new()
         } else if self.is(Punct::LParen) {
@@ -727,13 +823,17 @@ impl Parser<'_> {
         } else {
             self.field_decls()?
         };
-        Ok(StructDecl { name, fields })
+        Ok(StructDecl {
+            name,
+            generics,
+            fields,
+        })
     }
 
     fn enum_decl(&mut self) -> PResult<EnumDecl> {
         self.advance()?; // enum
         let name = self.name()?;
-        self.skip_generics()?;
+        let generics = self.generics()?;
         self.expect(Punct::LBrace)?;
         let mut variants = Vec::new();
         while !self.is(Punct::RBrace) {
@@ -759,17 +859,21 @@ impl Parser<'_> {
             }
         }
         self.expect(Punct::RBrace)?;
-        Ok(EnumDecl { name, variants })
+        Ok(EnumDecl {
+            name,
+            generics,
+            variants,
+        })
     }
 
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
         self.advance()?; // impl
-        self.skip_generics()?;
+        let generics = self.generics()?;
         let target = match self.tok.kind {
             TokenKind::Ident(_) => self.name()?,
             _ => return Err(self.expected("a struct or enum name")),
         };
-        self.skip_generics()?;
+        let target_args = self.type_args()?;
         if self.is_kw(Keyword::For) {
             return Err(self.error(
                 self.tok.span,
@@ -780,21 +884,14 @@ impl Parser<'_> {
         let mut members = Vec::new();
         while !self.is(Punct::RBrace) {
             let start = self.tok.span.start;
+            let docs = self.item_docs();
             let is_pub = self.eat_kw(Keyword::Pub)?;
             let kind = match self.tok.kind {
                 TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl(true)?),
                 TokenKind::Keyword(Keyword::Const) => {
                     self.advance()?;
                     let name = self.member_name()?;
-                    let ty = if self.eat(Punct::Colon)? {
-                        Some(self.type_ann()?)
-                    } else {
-                        None
-                    };
-                    self.expect(Punct::Assign)?;
-                    let value = self.expr()?;
-                    self.expect(Punct::Semi)?;
-                    ItemKind::Const { name, ty, value }
+                    self.const_rest(name)?
                 }
                 _ => return Err(self.expected("`fn` or `const` in `impl`")),
             };
@@ -802,10 +899,16 @@ impl Parser<'_> {
                 is_pub,
                 kind,
                 span: self.span_from(start),
+                docs,
             });
         }
         self.expect(Punct::RBrace)?;
-        Ok(ImplDecl { target, members })
+        Ok(ImplDecl {
+            generics,
+            target,
+            target_args,
+            members,
+        })
     }
 
     fn use_decl(&mut self) -> PResult<UseDecl> {
@@ -855,68 +958,203 @@ impl Parser<'_> {
 
     // ---- types --------------------------------------------------------------------------------
 
+    /// A type annotation; with `type_trees` off, only its span is kept and nothing is
+    /// allocated.
     fn type_ann(&mut self) -> PResult<Type> {
+        self.type_of(true)
+    }
+
+    /// A type, where `unions` says whether a top-level `A | B` is allowed (not between a
+    /// closure's `|...|`, nor after `as`, where `|` is an operator).
+    fn type_of(&mut self, unions: bool) -> PResult<Type> {
+        let start = self.tok.span.start;
+        let first = self.type_suffixed(unions)?;
+        if !unions || !self.is(Punct::Pipe) {
+            return Ok(first);
+        }
+        let mut members = Vec::new();
+        self.push_member(&mut members, first);
+        while self.eat(Punct::Pipe)? {
+            let t = self.type_suffixed(unions)?;
+            self.push_member(&mut members, t);
+        }
+        Ok(self.make_type(start, || TypeKind::Union(members)))
+    }
+
+    /// A type with any `?` suffixes.
+    fn type_suffixed(&mut self, unions: bool) -> PResult<Type> {
+        let start = self.tok.span.start;
+        let mut t = self.type_primary(unions)?;
+        while self.eat(Punct::Question)? {
+            t = self.make_type(start, || TypeKind::Optional(t));
+        }
+        Ok(t)
+    }
+
+    fn type_primary(&mut self, unions: bool) -> PResult<Type> {
         self.enter()?;
         let start = self.tok.span.start;
-        match self.tok.kind {
+        let kind = match self.tok.kind {
             TokenKind::Punct(Punct::LParen) => {
                 self.advance()?;
+                let mut items = Vec::new();
+                let mut count = 0;
+                let mut trailing_comma = false;
                 while !self.is(Punct::RParen) {
-                    self.type_ann()?;
-                    if !self.eat(Punct::Comma)? {
+                    let t = self.type_ann()?;
+                    self.push_type(&mut items, t);
+                    count += 1;
+                    trailing_comma = self.eat(Punct::Comma)?;
+                    if !trailing_comma {
                         break;
                     }
                 }
                 self.expect(Punct::RParen)?;
+                if count == 1 && !trailing_comma {
+                    // `(T)` groups, as in `(string | number)?`.
+                    self.leave();
+                    let inner = items.pop();
+                    return Ok(Type {
+                        span: self.span_from(start),
+                        kind: inner.and_then(|t| t.kind),
+                    });
+                }
+                TypeKind::Tuple(items)
             }
             TokenKind::Punct(Punct::LBracket) => {
                 self.advance()?;
-                self.type_ann()?;
+                let t = self.type_ann()?;
                 self.expect(Punct::RBracket)?;
+                TypeKind::Array(t)
             }
             TokenKind::Punct(Punct::HashBrace) => {
                 self.advance()?;
-                self.type_ann()?;
-                self.expect(Punct::Colon)?;
-                self.type_ann()?;
-                self.expect(Punct::RBrace)?;
-            }
-            TokenKind::Keyword(Keyword::Fn) => {
-                self.advance()?;
-                self.expect(Punct::LParen)?;
-                while !self.is(Punct::RParen) {
-                    self.type_ann()?;
-                    if !self.eat(Punct::Comma)? {
-                        break;
-                    }
-                }
-                self.expect(Punct::RParen)?;
-                if self.eat(Punct::Arrow)? {
-                    self.type_ann()?;
-                }
-            }
-            TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfType | Keyword::Nil) => {
-                self.advance()?;
-                while self.eat(Punct::ColonColon)? {
-                    self.member_name()?;
-                }
-                if self.eat(Punct::Lt)? {
-                    while !self.is(Punct::Gt) && !self.is(Punct::Shr) {
-                        self.type_ann()?;
+                if self.eat(Punct::LBracket)? {
+                    let key = self.type_ann()?;
+                    self.expect(Punct::RBracket)?;
+                    self.expect(Punct::Colon)?;
+                    let value = self.type_ann()?;
+                    self.expect(Punct::RBrace)?;
+                    TypeKind::Map { key, value }
+                } else {
+                    let mut fields = Vec::new();
+                    while !self.is(Punct::RBrace) {
+                        let name = match self.tok.kind {
+                            TokenKind::Str(sym) => {
+                                let span = self.tok.span;
+                                self.advance()?;
+                                Name { sym, span }
+                            }
+                            _ => self.member_name()?,
+                        };
+                        self.expect(Punct::Colon)?;
+                        let ty = self.type_ann()?;
+                        if self.type_trees {
+                            fields.push(RecordField { name, ty });
+                        }
                         if !self.eat(Punct::Comma)? {
                             break;
                         }
                     }
-                    self.expect_gt()?;
+                    self.expect(Punct::RBrace)?;
+                    TypeKind::Record(fields)
                 }
             }
+            TokenKind::Keyword(Keyword::Fn) => {
+                self.advance()?;
+                self.expect(Punct::LParen)?;
+                let mut params = Vec::new();
+                let mut rest = None;
+                while !self.is(Punct::RParen) {
+                    if self.eat(Punct::DotDotDot)? {
+                        rest = Some(self.type_ann()?);
+                        break;
+                    }
+                    let t = self.type_ann()?;
+                    self.push_type(&mut params, t);
+                    if !self.eat(Punct::Comma)? {
+                        break;
+                    }
+                }
+                self.expect(Punct::RParen)?;
+                let ret = if self.eat(Punct::Arrow)? {
+                    Some(self.type_of(unions)?)
+                } else {
+                    None
+                };
+                TypeKind::Fn { params, rest, ret }
+            }
+            TokenKind::Keyword(Keyword::Nil) => {
+                self.advance()?;
+                TypeKind::Nil
+            }
+            TokenKind::Keyword(Keyword::SelfType) => {
+                self.advance()?;
+                TypeKind::SelfType
+            }
+            TokenKind::Ident(_) => {
+                let first = self.name()?;
+                let mut segments = Vec::new();
+                if self.type_trees {
+                    segments.push(first);
+                }
+                while self.eat(Punct::ColonColon)? {
+                    let seg = self.member_name()?;
+                    if self.type_trees {
+                        segments.push(seg);
+                    }
+                }
+                let args = self.type_args()?;
+                TypeKind::Path { segments, args }
+            }
             _ => return Err(self.expected("a type")),
-        }
-        while self.eat(Punct::Question)? {}
+        };
         self.leave();
-        Ok(Type {
+        Ok(self.make_type(start, || kind))
+    }
+
+    /// `<A, B>` generic arguments, if present.
+    fn type_args(&mut self) -> PResult<Vec<Type>> {
+        let mut args = Vec::new();
+        if self.eat(Punct::Lt)? {
+            while !self.is(Punct::Gt) && !self.is(Punct::Shr) {
+                let t = self.type_ann()?;
+                self.push_type(&mut args, t);
+                if !self.eat(Punct::Comma)? {
+                    break;
+                }
+            }
+            self.expect_gt()?;
+        }
+        Ok(args)
+    }
+
+    /// A type spanning from `start` to here, with a tree only when asked for.
+    fn make_type(&self, start: u32, kind: impl FnOnce() -> TypeKind) -> Type {
+        Type {
             span: self.span_from(start),
-        })
+            kind: self.type_trees.then(|| Box::new(kind())),
+        }
+    }
+
+    /// Collects a child type, unless trees are off (so nothing is allocated).
+    fn push_type(&self, list: &mut Vec<Type>, t: Type) {
+        if self.type_trees {
+            list.push(t);
+        }
+    }
+
+    /// Adds a union member, flattening a (parenthesised) union into its members.
+    fn push_member(&self, members: &mut Vec<Type>, t: Type) {
+        match t.kind {
+            Some(kind) if matches!(*kind, TypeKind::Union(_)) => {
+                let TypeKind::Union(inner) = *kind else {
+                    unreachable!()
+                };
+                members.extend(inner);
+            }
+            kind => self.push_type(members, Type { span: t.span, kind }),
+        }
     }
 
     // ---- patterns -----------------------------------------------------------------------------
@@ -1154,7 +1392,26 @@ impl Parser<'_> {
         let start = self.tok.span.start;
         let mut lhs = self.unary(ctx)?;
         let mut last_cmp: Option<BinOp> = None;
-        while let Some(op) = self.binop() {
+        loop {
+            if self.is_kw(Keyword::As) {
+                if AS_POWER < min_bp {
+                    break;
+                }
+                // `|` after the type is the operator: `x as int | 1`.
+                self.advance()?;
+                let ty = self.type_of(false)?;
+                lhs = Expr {
+                    kind: ExprKind::As {
+                        expr: Box::new(lhs),
+                        ty,
+                    },
+                    span: self.span_from(start),
+                };
+                continue;
+            }
+            let Some(op) = self.binop() else {
+                break;
+            };
             let (l, r) = op.binding_power();
             if l < min_bp {
                 break;
@@ -1300,12 +1557,6 @@ impl Parser<'_> {
                         kind: ExprKind::Try(Box::new(e)),
                         span: self.span_from(start),
                     };
-                }
-                TokenKind::Keyword(Keyword::As) => {
-                    return Err(self.error(
-                        self.tok.span,
-                        "`as` casts are not supported; use `math::tointeger` or `tostring`",
-                    ));
                 }
                 _ => return Ok(e),
             }
@@ -1816,6 +2067,8 @@ impl Parser<'_> {
     }
 }
 
+// Only ever a return value, moved once; boxing the statement would cost an allocation each.
+#[allow(clippy::large_enum_variant)]
 enum StmtOrTail {
     Stmt(Stmt),
     /// An expression not followed by `;`: the block's value if the block ends here.

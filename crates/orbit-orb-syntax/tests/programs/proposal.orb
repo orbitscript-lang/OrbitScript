@@ -197,7 +197,7 @@ global x = v;
 // Optional types
 let n: int = 3;
 let names: [string] = ["a", "b"];
-let ages: #{string: int} = #{};
+let ages: #{[string]: int} = #{};
 fn find(t: [Vec2], pred: fn(Vec2) -> bool) -> Vec2? { nil }
 fn divmod(a: int, b: int) -> (int, int) { (a \ b, a % b) }
 fn first<T>(t: [T]) -> T? { t[1] }
