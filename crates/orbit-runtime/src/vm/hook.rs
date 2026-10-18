@@ -164,11 +164,13 @@ impl Vm {
                 self.call_hook(event, None, Some((fi, 1, np)))?;
             }
         }
+        // A built-in runs like a C function: no count or line events.
+        let builtin = self.heap.get(closure).code.builtin;
         let h = &mut self.rt.stack.hook;
         // A count event makes the same instruction report its line again
         // (observed from lua5.5).
         let mut counted = false;
-        if h.mask & COUNT != 0 && !h.active {
+        if h.mask & COUNT != 0 && !h.active && !builtin {
             h.count = h.count.saturating_sub(1);
             if h.count == 0 {
                 h.count = h.base_count.clamp(0, u32::MAX as i64) as u32;
@@ -177,7 +179,7 @@ impl Vm {
             }
         }
         let h = &mut self.rt.stack.hook;
-        if h.mask & LINE != 0 {
+        if h.mask & LINE != 0 && !builtin {
             let proto = self.heap.get(self.heap.get(closure).proto);
             let lines = &proto.debug;
             let old = if h.old_depth != depth as u32 {

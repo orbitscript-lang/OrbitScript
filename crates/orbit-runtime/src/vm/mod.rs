@@ -17,7 +17,7 @@ mod interp;
 mod link;
 mod meta;
 mod native;
-mod ops;
+pub(crate) mod ops;
 
 use std::fmt;
 use std::io::Write;

@@ -6,6 +6,7 @@
 //! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
+mod builtins;
 #[cfg(feature = "dump")]
 pub mod checks;
 mod chunk;
@@ -185,7 +186,12 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
         }
         #[cfg(feature = "table")]
         Lib::Table => {
-            open_lib(vm, "table", table::FUNCTIONS);
+            let t = open_lib(vm, "table", table::FUNCTIONS);
+            // `insert`, `remove` and `sort` are written in OrbitScript.
+            for (name, f) in builtins::load(vm, &builtins::TABLE) {
+                let k = vm.new_str(&name);
+                vm.table_set(t, k, f);
+            }
             true
         }
         #[cfg(feature = "math")]

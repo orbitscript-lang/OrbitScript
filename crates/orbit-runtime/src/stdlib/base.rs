@@ -6,7 +6,7 @@ use crate::object::number::str_to_number;
 use crate::object::table as tbl;
 use crate::object::value::raw_eq;
 use crate::vm::{
-    CallOutcome, GcMode, GcParam, LuaError, Meta, MetaField, NativeCtx, NativeFn, NativeReturn, Vm,
+    CallOutcome, GcMode, GcParam, LuaError, MetaField, NativeCtx, NativeFn, NativeReturn, Vm,
     finalize_then_return,
 };
 
@@ -16,8 +16,6 @@ const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("type", type_),
     ("tostring", tostring),
     ("tonumber", tonumber),
-    ("ipairs", ipairs),
-    ("pairs", pairs),
     ("select", select),
     ("error", error),
     ("pcall", pcall),
@@ -51,6 +49,12 @@ pub(crate) fn open(vm: &mut Vm) {
     vm.unpin(Value::Table(mt));
     let v = vm.new_str(b"Lua 5.5");
     vm.set_global("_VERSION", v);
+    // `ipairs` and `pairs` are written in OrbitScript.
+    for (name, f) in super::builtins::load(vm, &super::builtins::BASE) {
+        let k = vm.new_str(&name);
+        let g = vm.rt.globals;
+        vm.table_set(g, k, f);
+    }
 }
 
 /// The value `__tostring` returned (`got` results from window slot `at`),
@@ -66,7 +70,7 @@ fn tostring_result(ctx: &mut NativeCtx<'_>, got: usize, at: usize) -> Result<Val
     }
 }
 
-fn type_(ctx: &mut NativeCtx<'_>) -> R {
+pub(crate) fn type_(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(0)?;
     let s = ctx.new_str(v.type_name().as_bytes());
     ctx.ret1(s)
@@ -176,85 +180,7 @@ fn parse_in_base(s: &[u8], base: u32) -> Option<i64> {
     Some(if neg { n.wrapping_neg() } else { n })
 }
 
-fn ipairs(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_any(0)?;
-    let iter = ctx.native("ipairs_iter", ipairs_iter);
-    ctx.push(iter);
-    ctx.push(t);
-    ctx.push(Value::Int(0));
-    Ok(NativeReturn::Return(3))
-}
-
-fn ipairs_iter(ctx: &mut NativeCtx<'_>) -> R {
-    let i = ctx.check_int(1)?.wrapping_add(1);
-    let t = ctx.arg(0);
-    ctx.truncate(2);
-    match ctx.index(t, Value::Int(i))? {
-        Meta::Done(v) => ipairs_step(ctx, i, v),
-        Meta::Call { f, nargs } => Ok(NativeReturn::CallThen {
-            f,
-            nargs,
-            k: ipairs_indexed,
-            protected: false,
-        }),
-    }
-}
-
-fn ipairs_indexed(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let CallOutcome::Ok(got) = outcome else {
-        unreachable!("unprotected call")
-    };
-    let i = ctx.check_int(1)?.wrapping_add(1);
-    let v = if got > 0 { ctx.arg(2) } else { Value::Nil };
-    ctx.truncate(2);
-    ipairs_step(ctx, i, v)
-}
-
-fn ipairs_step(ctx: &mut NativeCtx<'_>, i: i64, v: Value) -> R {
-    if v.is_nil() {
-        return ctx.ret1(Value::Nil);
-    }
-    ctx.push(Value::Int(i));
-    ctx.push(v);
-    Ok(NativeReturn::Return(2))
-}
-
-fn pairs(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_any(0)?;
-    let h = ctx.metamethod(t, MetaField::Pairs);
-    if !h.is_nil() {
-        ctx.truncate(1);
-        ctx.push(t);
-        // lua5.5 lets `__pairs` yield.
-        return Ok(NativeReturn::CallThenYieldable {
-            f: h,
-            nargs: 1,
-            k: pairs_done,
-            protected: false,
-        });
-    }
-    let next_fn = ctx.native("next", next);
-    ctx.push(next_fn);
-    ctx.push(t);
-    ctx.push(Value::Nil);
-    ctx.push(Value::Nil);
-    Ok(NativeReturn::Return(4))
-}
-
-/// `__pairs` returned: pass on exactly four of its results, the fourth
-/// being the loop's to-be-closed value.
-fn pairs_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let CallOutcome::Ok(got) = outcome else {
-        unreachable!("unprotected call")
-    };
-    ctx.truncate(1 + got.min(4));
-    while ctx.len() < 5 {
-        ctx.push(Value::Nil);
-    }
-    Ok(NativeReturn::Return(4))
-}
-
-fn next(ctx: &mut NativeCtx<'_>) -> R {
+pub(crate) fn next(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_table(0)?;
     let k = ctx.arg(1);
     match ctx.vm.heap.get(t).next(&ctx.vm.heap, k) {

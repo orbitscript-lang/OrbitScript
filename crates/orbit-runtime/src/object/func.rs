@@ -66,21 +66,41 @@ pub struct ProtoCode {
     pub is_vararg: bool,
     pub nregs: u8,
     pub ncells: u8,
+    /// Part of a built-in library written in OrbitScript: the debug
+    /// interface shows its activations as C functions (ADR-11).
+    pub builtin: bool,
+    /// Nothing may yield across its activations (`attempt to yield across
+    /// a C-call boundary`): set for every built-in but the few whose C
+    /// counterparts in the reference allow it.
+    pub refuses_yield: bool,
 }
 
 impl ProtoCode {
     /// A copy in which [`Op::CapSelf`] reads capture `cap` instead, for a
     /// closure whose self capture no longer holds it (a `debug` write).
     pub fn without_cap_self(&self, cap: u8) -> ProtoCode {
+        let code = self
+            .code
+            .iter()
+            .map(|&op| match op {
+                Op::CapSelf { dst } => Op::CapGet { dst, cap },
+                op => op,
+            })
+            .collect();
+        self.with_code(code)
+    }
+
+    /// A copy that code it calls may yield across.
+    pub fn allowing_yields(&self) -> ProtoCode {
         ProtoCode {
-            code: self
-                .code
-                .iter()
-                .map(|&op| match op {
-                    Op::CapSelf { dst } => Op::CapGet { dst, cap },
-                    op => op,
-                })
-                .collect(),
+            refuses_yield: false,
+            ..self.with_code(self.code.clone())
+        }
+    }
+
+    fn with_code(&self, code: Box<[Op]>) -> ProtoCode {
+        ProtoCode {
+            code,
             consts: self.consts.clone(),
             caches: self.caches.clone(),
             #[cfg(feature = "type-feedback")]
@@ -89,6 +109,8 @@ impl ProtoCode {
             is_vararg: self.is_vararg,
             nregs: self.nregs,
             ncells: self.ncells,
+            builtin: self.builtin,
+            refuses_yield: self.refuses_yield,
         }
     }
 }

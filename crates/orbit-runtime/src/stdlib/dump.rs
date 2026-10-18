@@ -12,11 +12,15 @@ type R = Result<NativeReturn, LuaError>;
 pub(crate) const FUNCTIONS: &[(&str, crate::vm::NativeFn)] = &[("string.dump", dump)];
 
 fn dump(ctx: &mut NativeCtx<'_>) -> R {
-    // A native closure (a host or C function) is no Lua function.
+    // A native closure (a host or C function) is no Lua function, and
+    // neither is a built-in library function.
     let f = ctx.arg(0);
     let (Value::Closure(c), None) = (f, ctx.native_of(f)) else {
         return Err(ctx.arg_error(0, "Lua function expected"));
     };
+    if ctx.vm.heap.get(c).code.builtin {
+        return Err(ctx.arg_error(0, "Lua function expected"));
+    }
     let strip = !ctx.arg(1).is_falsy();
     let root = ctx.vm.heap.get(c).proto;
     let chunk = unlink(&ctx.vm.heap, root);

@@ -12,6 +12,13 @@ publish = false
 orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-gc = { path = "../orbit-gc" }
 
+# The build script compiles the built-in OrbitScript modules (ADR-11); none
+# of this is linked into the runtime.
+[build-dependencies]
+orbit-bytecode = { path = "../orbit-bytecode" }
+orbit-compiler = { path = "../orbit-compiler" }
+orbit-orb-syntax = { path = "../orbit-orb-syntax" }
+
 [lints]
 workspace = true
 
