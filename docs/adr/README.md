@@ -10,7 +10,7 @@
 | [0006](0006-safety-toolchain-size.md) | Safety, toolchain and size | Accepted |
 | [0007](0007-dependencies.md) | Dependency policy | Accepted |
 | [0008](0008-c-modules.md) | Loading C modules | Accepted |
-| [0009](0009-ffi.md) | Calling C functions from scripts (`ffi`) | Proposed |
+| [0009](0009-ffi.md) | Calling C functions from scripts (`ffi`) | Accepted |
 | [0010](0010-liborbit.md) | The runtime as a shared library (`liborbit`, aliased as `liblua`) | Proposed |
 | [0011](0011-api-surface-and-crates.md) | Public API surface and crate layout | Proposed |
 

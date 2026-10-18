@@ -1,6 +1,6 @@
 # The `ffi` library
 
-Status: Proposed (with ADR-9). Crate `orbit-ffi`; `orbit` feature `ffi`.
+Status: Accepted (with ADR-9, 2026-10-18). Crate `orbit-ffi`; `orbit-std` feature `ffi`.
 
 The `ffi` library lets Lua and OrbitScript code call C functions in shared libraries directly, without writing a C module. A script opens a library, binds a function by name with its C signature, and calls the result like any other function:
 
@@ -104,11 +104,11 @@ flowchart LR
     errno --> res["convert the result"]
 ```
 
-- **Function values are plain natives.** `Vm::register_native_with_data` registers a native with two data words: the C address and the index of its signature in the library's per-VM state (`NativeCtx::native_data`). A call takes the VM's direct native path.
+- **Function values are plain natives.** `Control::register_native` (on `orbit::stack`) registers a native with two data words: the C address and the index of its signature in the library's per-VM state (`native_data`). A call takes the VM's direct native path.
   - The C module shim's functions are native closures. Their call goes through a stub Lua frame, which costs 15-20 ns per call (measured in the spike, `planning/ffi/prototype.md` in the project files).
   - Natives are never freed, so bindings are interned per (address, signature). The count is bounded by the distinct functions scripts bind.
 - **libffi makes the call** (`orbit-ffi/src/sys.rs`). Each distinct signature gets one call description (`ffi_cif`), prepared by `ffi_prep_cif` when it is first bound. A call fills one 64-bit slot per argument, passes libffi a pointer to each, and reads the result from a 64-bit slot.
-- **Linking libffi.** By default the `libffi-sys` crate builds libffi from its bundled sources and links it statically (needs a C compiler, `sh` and `make` at build time). The `ffi-system-libffi` feature of `orbit` and `orbit-cli` (`system-libffi` on `orbit-ffi`) links the system's shared `libffi` instead.
+- **Linking libffi.** By default the `libffi-sys` crate builds libffi from its bundled sources and links it statically (needs a C compiler, `sh` and `make` at build time). The `ffi-system-libffi` feature of `orbit-std` and `orbit-cli` (`system-libffi` on `orbit-ffi`) links the system's shared `libffi` instead.
 - **Strings.**
   - Conversions that can allocate run before any string pointer is taken, because allocating can move short strings, which live inline in the heap (ADR-5).
   - `cstr` copies go into a 256-byte stack buffer while they fit, and into their own allocations after that.

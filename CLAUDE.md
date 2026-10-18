@@ -20,7 +20,7 @@
 | `orbit-std` | The I/O-facing standard library (`io`, `os`, `print`, `loadfile`, `dofile`, the Lua searcher), built on the public `orbit` API | shared |
 | `orbit-capi` | Lua C API shim for loading C modules, installed above `orbit-std` (`orbit-cli` feature `c-modules`) | shared |
 | `orbit-lib` | `liborbit`, the runtime as one shared library that also serves as liblua 5.5 (ADR-10) | shared |
-| `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit` feature `ffi`) | shared |
+| `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit-std` feature `ffi`) | shared |
 | `orbit` | Rust embedding API | shared |
 | `orbit-cli` | `orbit` interpreter and `orbitc` compiler binaries | shared |
 | `orbit-testkit` | Conformance, differential and benchmark harness (dev tool, never shipped) | E |
