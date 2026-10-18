@@ -40,7 +40,7 @@ pub(crate) mod abi {
     pub const GCINC: i32 = 8;
     pub const GCPARAM: i32 = 9;
     /// `LUA_RIDX_GLOBALS`: where the registry keeps the global table.
-    pub const RIDX_GLOBALS: i64 = 2;
+    pub const RIDX_GLOBALS: i64 = orbit::stack::RIDX_GLOBALS;
 }
 
 /// Per-VM state the API keeps between calls. Borrowed only for short

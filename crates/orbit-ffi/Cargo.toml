@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-orbit-runtime = { path = "../orbit-runtime", default-features = false }
+orbit = { path = "../orbit", default-features = false }
 # Makes the calls (ADR-9). By default it builds libffi from its bundled
 # sources and links it statically, which needs a C compiler, `sh` and `make`
 # (MSVC targets use only the C compiler).

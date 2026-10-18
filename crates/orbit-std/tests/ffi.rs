@@ -8,7 +8,7 @@ use orbit::{Chunk, Config, Error, Isolate, Runtime};
 
 fn lua() -> Isolate {
     let mut iso = Runtime::new().new_isolate(Config::default());
-    iso.enable_ffi();
+    orbit_std::install_ffi(&mut iso);
     iso
 }
 
@@ -46,8 +46,8 @@ fn absent_until_the_host_enables_it() {
         run_in(&mut lua, "return ffi, package.loaded.ffi"),
         "nil\tnil"
     );
-    lua.enable_ffi();
-    lua.enable_ffi();
+    orbit_std::install_ffi(&mut lua);
+    orbit_std::install_ffi(&mut lua);
     assert_eq!(
         run_in(&mut lua, "return type(ffi), package.loaded.ffi == ffi"),
         "table\ttrue"

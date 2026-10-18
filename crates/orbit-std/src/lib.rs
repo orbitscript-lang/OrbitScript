@@ -90,6 +90,19 @@ fn publish<'s>(s: &'s Scope<'s>, name: &str, lib: orbit::Table<'s>) -> Result<()
     Ok(())
 }
 
+/// Give scripts the `ffi` library (the `ffi` global and
+/// `package.loaded.ffi`): calling C functions in any shared library the
+/// process can load, and reading and writing memory through pointers. That
+/// is as much power as a C module has, so a host enables it only for
+/// scripts it trusts that far (ADR-9). Calling it again does nothing.
+#[cfg(feature = "ffi")]
+pub fn install_ffi(iso: &mut Isolate) {
+    let r = iso.stack(orbit_ffi::install);
+    // Only running out of memory under a heap limit can fail, and a new
+    // isolate's limit leaves room for one small library.
+    debug_assert!(r.is_ok(), "installing ffi raised {r:?}");
+}
+
 /// Add `print`, `loadfile` and `dofile` to the global table.
 pub fn open_base<'s>(s: &'s Scope<'s>) -> Result<(), Error> {
     base::open(s)

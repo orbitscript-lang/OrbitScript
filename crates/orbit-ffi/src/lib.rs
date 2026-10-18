@@ -8,20 +8,23 @@
 //! print(strlen("hello"))                      --> 5
 //! ```
 //!
-//! An FFI function is a plain native whose data words
-//! ([`orbit_runtime::vm::Vm::register_native_with_data`]) hold the C function's
-//! address and which of the VM's signatures it has; libffi makes the call. The host decides whether scripts get the library at all
-//! ([`install`]); once they have it they can call any C function and read
-//! and write any memory, as a C module could. All `unsafe` code is in
-//! [`sys`].
+//! The library is built on the public stack API ([`orbit::stack`]), like
+//! any host library. An FFI function is a plain native whose data words
+//! ([`Control::register_native`](orbit::stack::Control::register_native))
+//! hold the C function's address and which of the isolate's signatures it
+//! has; libffi makes the call. The host decides whether scripts get the
+//! library at all ([`install`]); once they have it they can call any C
+//! function and read and write any memory, as a C module could. All
+//! `unsafe` code is in [`sys`].
 
 mod sys;
 
 use std::cell::Cell;
 use std::rc::Rc;
 
-use orbit_runtime::object::{Gc, LightUserData, Table, UserData, Value};
-use orbit_runtime::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit::stack::{
+    Native, NativeRef, REGISTRY_INDEX, RIDX_GLOBALS, Return, Stack, StackResult, Type,
+};
 
 /// A C type the library converts values to and from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -128,7 +131,7 @@ impl Buffer {
     }
 }
 
-/// Per-VM state. Natives are never freed, so there is one function value
+/// Per-isolate state. Natives are never freed, so there is one function
 /// per distinct address and signature: binding the same function twice
 /// gives the same value, and the natives stay bounded by what scripts
 /// declare. Binding is rare next to calling, so lists do.
@@ -138,8 +141,8 @@ struct State {
     /// Every distinct signature bound; an FFI function's second data word
     /// is its index here.
     signatures: Vec<Rc<Signature>>,
-    /// Function values by their data words, [address, signature index].
-    functions: Vec<([u64; 2], Value)>,
+    /// Functions by their data words, [address, signature index].
+    functions: Vec<([u64; 2], NativeRef)>,
 }
 
 thread_local! {
@@ -150,166 +153,205 @@ thread_local! {
 const LIBRARY_META: &str = "ffi.library";
 const BUFFER_META: &str = "ffi.buffer";
 
-const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("ffi.open", ffi_open),
-    ("ffi.bind", ffi_bind),
-    ("ffi.buffer", ffi_buffer),
-    ("ffi.string", ffi_string),
-    ("ffi.get", ffi_get),
-    ("ffi.set", ffi_set),
-    ("ffi.offset", ffi_offset),
-    ("ffi.sizeof", ffi_sizeof),
-    ("ffi.errno", ffi_errno),
+/// A native type for each function the library has.
+macro_rules! natives {
+    ($($native:ident $name:literal $f:ident;)*) => {$(
+        struct $native;
+
+        impl Native for $native {
+            const NAME: &'static str = $name;
+
+            fn call(s: &mut Stack<'_>) -> StackResult<Return> {
+                $f(s)
+            }
+        }
+    )*};
+}
+
+natives! {
+    Open "ffi.open" ffi_open;
+    Bind "ffi.bind" ffi_bind;
+    NewBuffer "ffi.buffer" ffi_buffer;
+    ToString "ffi.string" ffi_string;
+    Get "ffi.get" ffi_get;
+    Set "ffi.set" ffi_set;
+    Offset "ffi.offset" ffi_offset;
+    SizeOf "ffi.sizeof" ffi_sizeof;
+    Errno "ffi.errno" ffi_errno;
+    Call "ffi function" call;
+    LibraryToString "ffi.library.__tostring" library_tostring;
+    BufferToString "ffi.buffer.__tostring" buffer_tostring;
+    BufferLen "ffi.buffer.__len" buffer_len;
+}
+
+/// Pushes a function.
+type Push = for<'a, 'b> fn(&'a mut Stack<'b>);
+
+fn push<N: Native>(s: &mut Stack<'_>) {
+    s.push_native::<N>();
+}
+
+const FUNCTIONS: &[(&[u8], Push)] = &[
+    (b"open", push::<Open>),
+    (b"bind", push::<Bind>),
+    (b"buffer", push::<NewBuffer>),
+    (b"string", push::<ToString>),
+    (b"get", push::<Get>),
+    (b"set", push::<Set>),
+    (b"offset", push::<Offset>),
+    (b"sizeof", push::<SizeOf>),
+    (b"errno", push::<Errno>),
 ];
 
-/// Open the `ffi` library on `vm`: the `ffi` global and
-/// `package.loaded.ffi`. Scripts can then call any C function in any
-/// library the process can load, so only hosts that trust their scripts as
-/// much as native code should call this. Installing twice does nothing.
-pub fn install(vm: &mut Vm) {
-    let state = vm.rt.ext.get_or_insert_with(State::default);
-    if std::mem::replace(&mut state.installed, true) {
-        return;
+/// Open the `ffi` library: the `ffi` global and `package.loaded.ffi`.
+/// Scripts can then call any C function in any library the process can
+/// load, so only hosts that trust their scripts as much as native code
+/// should call this. Installing twice does nothing. Leaves the stack as it
+/// was.
+pub fn install(s: &mut Stack<'_>) -> StackResult<()> {
+    if std::mem::replace(&mut s.extension::<State>().installed, true) {
+        return Ok(());
     }
-    let ffi = orbit_runtime::stdlib::open_lib(vm, "ffi", FUNCTIONS);
-    vm.pin(Value::Table(ffi));
-    let k = vm.new_str(b"bind");
-    let bind = orbit_runtime::object::table::get(&vm.heap, ffi, k);
-    let (_, methods) = new_meta(vm, LIBRARY_META, "ffi.library.__tostring", library_tostring);
-    set(vm, methods, "bind", bind);
-    let (meta, _) = new_meta(vm, BUFFER_META, "ffi.buffer.__tostring", buffer_tostring);
-    let len = vm.register_native("ffi.buffer.__len", buffer_len);
-    set(vm, meta, "__len", len);
-    vm.unpin(Value::Table(ffi));
-}
-
-fn set(vm: &mut Vm, t: Gc<Table>, k: &str, v: Value) {
-    let k = vm.new_str(k.as_bytes());
-    vm.table_set(t, k, v);
-}
-
-/// A metatable for userdata named `name`, kept in the registry under that
-/// name, with `__name`, `__tostring` and an `__index` table for methods:
-/// both tables. The registry keeps them alive.
-fn new_meta(
-    vm: &mut Vm,
-    name: &str,
-    tostring_name: &'static str,
-    tostring: NativeFn,
-) -> (Gc<Table>, Gc<Table>) {
-    let meta = vm.new_table();
-    vm.pin(Value::Table(meta));
-    let index = vm.new_table();
-    set(vm, meta, "__index", Value::Table(index));
-    let n = vm.new_str(name.as_bytes());
-    set(vm, meta, "__name", n);
-    let v = vm.register_native(tostring_name, tostring);
-    set(vm, meta, "__tostring", v);
-    let reg = vm.rt.registry;
-    set(vm, reg, name, Value::Table(meta));
-    vm.unpin(Value::Table(meta));
-    (meta, index)
-}
-
-fn light(bits: u64) -> Value {
-    Value::LightUserData(LightUserData::new(bits))
-}
-
-/// A userdata of `T` with the metatable registered under `meta`.
-fn new_object<T: std::any::Any>(ctx: &mut NativeCtx<'_>, data: T, meta: &str) -> Value {
-    let k = ctx.new_str(meta.as_bytes());
-    let reg = ctx.vm.rt.registry;
-    let meta = match orbit_runtime::object::table::get(&ctx.vm.heap, reg, k) {
-        Value::Table(t) => Some(t),
-        _ => None,
-    };
-    let u = ctx.new_userdata(data);
-    ctx.vm.heap.update(u, |u: &mut UserData| u.meta = meta);
-    Value::UserData(u)
-}
-
-fn type_arg(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Ty, LuaError> {
-    let s = ctx.check_str(i)?;
-    match Ty::parse(ctx.bytes(s)) {
-        Some(t) => Ok(t),
-        None => {
-            let name = String::from_utf8_lossy(ctx.bytes(s)).into_owned();
-            Err(ctx.arg_error(i, format!("unknown C type '{name}'")))
-        }
+    s.create_table(0, FUNCTIONS.len() as i32);
+    for &(name, push) in FUNCTIONS {
+        push(s);
+        s.raw_set_field(-2, name)?;
     }
+    // [ffi]
+    new_meta(s, LIBRARY_META, push::<LibraryToString>)?;
+    s.raw_get_field(-3, b"bind")?;
+    s.raw_set_field(-2, b"bind")?;
+    s.set_top(-3)?;
+    new_meta(s, BUFFER_META, push::<BufferToString>)?;
+    s.set_top(-2)?;
+    s.push_native::<BufferLen>();
+    s.raw_set_field(-2, b"__len")?;
+    s.set_top(-2)?;
+    // `package.loaded.ffi`, then the global.
+    if s.raw_get_field(REGISTRY_INDEX, b"_LOADED")? != Type::Table {
+        s.set_top(-2)?;
+        s.create_table(0, 1);
+        s.push_copy(-1);
+        s.raw_set_field(REGISTRY_INDEX, b"_LOADED")?;
+    }
+    s.push_copy(-2);
+    s.raw_set_field(-2, b"ffi")?;
+    s.raw_get_index(REGISTRY_INDEX, RIDX_GLOBALS)?;
+    s.push_copy(-3);
+    s.raw_set_field(-2, b"ffi")?;
+    s.set_top(-4)
+}
+
+/// Push a metatable for userdata named `name`, kept in the registry under
+/// that name, with `__name`, `__tostring` (pushed by `tostring`) and an
+/// `__index` table for methods, which is pushed after it.
+fn new_meta(s: &mut Stack<'_>, name: &str, tostring: Push) -> StackResult<()> {
+    s.create_table(0, 3);
+    s.push_bytes(name.as_bytes());
+    s.raw_set_field(-2, b"__name")?;
+    tostring(s);
+    s.raw_set_field(-2, b"__tostring")?;
+    s.push_copy(-1);
+    s.raw_set_field(REGISTRY_INDEX, name.as_bytes())?;
+    // [meta]
+    s.create_table(0, 1);
+    s.push_copy(-1);
+    s.raw_set_field(-3, b"__index")
+}
+
+/// Push a userdata holding `data`, with the metatable registered under
+/// `meta`.
+fn push_object<T: std::any::Any>(s: &mut Stack<'_>, data: T, meta: &str) -> StackResult<()> {
+    s.push_userdata(data);
+    s.raw_get_field(REGISTRY_INDEX, meta.as_bytes())?;
+    s.set_metatable(-2)
+}
+
+fn type_arg(s: &mut Stack<'_>, arg: i32) -> StackResult<Ty> {
+    let name = s.check_string(arg)?;
+    if let Some(t) = Ty::parse(name) {
+        return Ok(t);
+    }
+    let name = String::from_utf8_lossy(name).into_owned();
+    Err(s.arg_error(arg, &format!("unknown C type '{name}'")))
+}
+
+/// Whether argument `arg` is nil or absent.
+fn is_nil(s: &Stack<'_>, arg: i32) -> bool {
+    matches!(s.type_at(arg), Type::Nil | Type::None)
 }
 
 /// `ffi.open([name])`: a shared library by file name or path, or with no
 /// name the symbols already in the process.
-fn ffi_open(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let name = match ctx.arg(0) {
-        Value::Nil => None,
-        _ => {
-            let s = ctx.check_str(0)?;
-            Some(ctx.bytes(s).to_vec())
-        }
+fn ffi_open(s: &mut Stack<'_>) -> StackResult<Return> {
+    let name = if is_nil(s, 1) {
+        None
+    } else {
+        Some(s.check_string(1)?.to_vec())
     };
     match sys::open(name.as_deref()) {
         Ok(handle) => {
-            let v = new_object(ctx, Library { handle }, LIBRARY_META);
-            ctx.ret1(v)
+            push_object(s, Library { handle }, LIBRARY_META)?;
+            Ok(Return::values(1))
         }
         Err(e) => {
             let name = String::from_utf8_lossy(name.as_deref().unwrap_or_default()).into_owned();
-            Err(ctx.error(format!("cannot open library '{name}': {e}")))
+            Err(s.error(format!("cannot open library '{name}': {e}")))
         }
     }
 }
 
 /// `ffi.bind(lib, name, result, args...)` (also `lib:bind(...)`): the C
 /// function `name` in `lib` as a function value.
-fn ffi_bind(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let lib = ctx.check_userdata::<Library>(0, LIBRARY_META)?;
-    let handle = ctx.userdata_ref::<Library>(lib).expect("checked").handle;
-    let name = ctx.check_str(1)?;
-    let ret = type_arg(ctx, 2)?;
+fn ffi_bind(s: &mut Stack<'_>) -> StackResult<Return> {
+    let handle = s.check_userdata::<Library>(1, LIBRARY_META)?.handle;
+    let name = s.check_string(2)?.to_vec();
+    let ret = type_arg(s, 3)?;
     if ret == Ty::Bytes {
-        return Err(ctx.arg_error(2, "'bytes' is an argument type only"));
+        return Err(s.arg_error(3, "'bytes' is an argument type only"));
     }
-    let nargs = ctx.nargs().saturating_sub(3);
-    let mut args = Vec::with_capacity(nargs);
-    for k in 0..nargs {
-        let t = type_arg(ctx, 3 + k)?;
+    let nargs = (s.top() - 3).max(0);
+    let mut args = Vec::with_capacity(nargs as usize);
+    for arg in 4..4 + nargs {
+        let t = type_arg(s, arg)?;
         if t == Ty::Void {
-            return Err(ctx.arg_error(3 + k, "'void' is a result type only"));
+            return Err(s.arg_error(arg, "'void' is a result type only"));
         }
         args.push(t);
     }
-    let name = ctx.bytes(name).to_vec();
     let addr = match sys::symbol(handle, &name) {
         Ok(a) => a,
         Err(e) => {
             let name = String::from_utf8_lossy(&name).into_owned();
-            return Err(ctx.error(format!("cannot find C function '{name}': {e}")));
+            return Err(s.error(format!("cannot find C function '{name}': {e}")));
         }
     };
-    let index = match signature(ctx.vm, ret, &args) {
+    let index = match signature(s.extension::<State>(), ret, &args) {
         Ok(i) => i,
-        Err(e) => return Err(ctx.error(e)),
+        Err(e) => return Err(s.error(e)),
     };
     let data = [addr, index as u64];
-    let state = ctx.vm.rt.ext.get_or_insert_with(State::default);
-    let v = match state.functions.iter().find(|(d, _)| *d == data) {
-        Some(&(_, v)) => v,
+    let known = s
+        .extension::<State>()
+        .functions
+        .iter()
+        .find(|(d, _)| *d == data)
+        .map(|&(_, f)| f);
+    let f = match known {
+        Some(f) => f,
         None => {
-            let v = ctx.vm.register_native_with_data("ffi function", call, data);
-            let state = ctx.vm.rt.ext.get_or_insert_with(State::default);
-            state.functions.push((data, v));
-            v
+            let f = s.control().register_native::<Call>(data);
+            s.extension::<State>().functions.push((data, f));
+            f
         }
     };
-    ctx.ret1(v)
+    s.push_registered(f);
+    Ok(Return::values(1))
 }
 
 /// The index in [`State::signatures`] of `ret` and `args`, prepared on
 /// first use.
-fn signature(vm: &mut Vm, ret: Ty, args: &[Ty]) -> Result<usize, String> {
-    let state = vm.rt.ext.get_or_insert_with(State::default);
+fn signature(state: &mut State, ret: Ty, args: &[Ty]) -> Result<usize, String> {
     if let Some(i) = state
         .signatures
         .iter()
@@ -330,12 +372,9 @@ fn signature(vm: &mut Vm, ret: Ty, args: &[Ty]) -> Result<usize, String> {
 
 /// An integer argument for a C integer of type `t`: any value either the
 /// signed or the unsigned type of that width can hold, in the low bits.
-#[inline]
-fn int_arg(ctx: &mut NativeCtx<'_>, k: usize, t: Ty) -> Result<u64, LuaError> {
-    let n = match ctx.arg(k) {
-        Value::Int(n) => n,
-        _ => ctx.check_int(k)?,
-    };
+#[inline(always)]
+fn int_arg(s: &mut Stack<'_>, arg: i32, t: Ty) -> StackResult<u64> {
+    let n = s.check_integer(arg)?;
     let (bits, signed) = match t {
         Ty::I8 => (8, true),
         Ty::U8 => (8, false),
@@ -346,7 +385,7 @@ fn int_arg(ctx: &mut NativeCtx<'_>, k: usize, t: Ty) -> Result<u64, LuaError> {
         _ => return Ok(n as u64),
     };
     if n < -(1i64 << (bits - 1)) || n >= 1i64 << bits {
-        return Err(ctx.arg_error(k, "value out of range"));
+        return Err(s.arg_error(arg, "value out of range"));
     }
     Ok(extend(n as u64, t, signed))
 }
@@ -368,47 +407,50 @@ fn extend(r: u64, t: Ty, signed: bool) -> u64 {
 }
 
 /// A pointer argument: light userdata, a buffer, or nil for NULL.
-fn ptr_arg(ctx: &mut NativeCtx<'_>, k: usize) -> Result<u64, LuaError> {
-    match ctx.arg(k) {
-        Value::Nil => Ok(0),
-        Value::LightUserData(p) => Ok(p.get()),
-        Value::UserData(u) => match ctx.userdata_ref::<Buffer>(u) {
+fn ptr_arg(s: &mut Stack<'_>, arg: i32) -> StackResult<u64> {
+    match s.type_at(arg) {
+        Type::Nil | Type::None => Ok(0),
+        Type::LightUserdata => Ok(s.to_userdata(arg) as u64),
+        Type::Userdata => match s.userdata::<Buffer>(arg) {
             Some(b) => Ok(b.addr()),
-            None => Err(ctx.type_error(k, "pointer")),
+            None => Err(s.type_error(arg, "pointer")),
         },
-        _ => Err(ctx.type_error(k, "pointer")),
+        _ => Err(s.type_error(arg, "pointer")),
     }
 }
 
-/// A C value of type `t` (in `bits`, as a register or memory holds it) as
-/// a Lua value.
-fn to_value(ctx: &mut NativeCtx<'_>, t: Ty, bits: u64) -> Value {
+/// Push a C value of type `t` (in `bits`, as a register or memory holds
+/// it) as a Lua value.
+#[inline(always)]
+fn push_value(s: &mut Stack<'_>, t: Ty, bits: u64) {
     match t {
-        Ty::Void => Value::Nil,
-        Ty::I8 | Ty::I16 | Ty::I32 => Value::Int(extend(bits, t, true) as i64),
-        Ty::U8 | Ty::U16 | Ty::U32 => Value::Int(extend(bits, t, false) as i64),
-        Ty::I64 | Ty::U64 => Value::Int(bits as i64),
+        Ty::Void => s.push_nil(),
+        Ty::I8 | Ty::I16 | Ty::I32 => s.push_integer(extend(bits, t, true) as i64),
+        Ty::U8 | Ty::U16 | Ty::U32 => s.push_integer(extend(bits, t, false) as i64),
+        Ty::I64 | Ty::U64 => s.push_integer(bits as i64),
         Ty::Ptr => {
             if bits == 0 {
-                Value::Nil
+                s.push_nil();
             } else {
-                light(bits)
+                s.push_light_userdata(bits as usize);
             }
         }
         Ty::CStr => match sys::cstr_bytes(bits) {
-            Some(b) => ctx.new_str(b),
-            None => Value::Nil,
+            Some(b) => {
+                s.push_bytes(b);
+            }
+            None => s.push_nil(),
         },
-        Ty::Double => Value::Float(f64::from_bits(bits)),
-        Ty::Float => Value::Float(f64::from(f32::from_bits(bits as u32))),
+        Ty::Double => s.push_number(f64::from_bits(bits)),
+        Ty::Float => s.push_number(f64::from(f32::from_bits(bits as u32))),
         Ty::Bytes => unreachable!("rejected as a result"),
     }
 }
 
 /// The native behind every FFI function.
-fn call(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let [addr, index] = ctx.native_data();
-    let sig = match ctx.vm.rt.ext.get::<State>() {
+fn call(s: &mut Stack<'_>) -> StackResult<Return> {
+    let [addr, index] = s.native_data();
+    let sig = match s.find_extension::<State>() {
         Some(state) => Rc::clone(&state.signatures[index as usize]),
         None => unreachable!("bound through the library"),
     };
@@ -422,36 +464,36 @@ fn call(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
         &mut heap
     };
     if sig.has_strings {
-        return call_with_strings(ctx, addr, &sig, slots);
+        return call_with_strings(s, addr, &sig, slots);
     }
-    for (k, (slot, &t)) in slots.iter_mut().zip(&sig.args).enumerate() {
-        *slot = arg(ctx, k, t)?;
+    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(&sig.args)) {
+        *slot = arg_value(s, arg, t)?;
     }
     let r = sig.cif.call(addr, slots);
-    finish(ctx, sig.ret, r)
+    finish(s, sig.ret, r)
 }
 
 /// [`call`] for signatures with `cstr` or `bytes` arguments.
 #[inline(never)]
 fn call_with_strings(
-    ctx: &mut NativeCtx<'_>,
+    s: &mut Stack<'_>,
     addr: u64,
     sig: &Signature,
     slots: &mut [u64],
-) -> Result<NativeReturn, LuaError> {
+) -> StackResult<Return> {
     // First every check and conversion, which may allocate (a number
     // passed as a string becomes one) and so move short strings; then,
     // with nothing left to allocate in the heap, the string pointers.
-    let mut strs = Vec::new();
-    for (k, &t) in sig.args.iter().enumerate() {
+    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(&sig.args)) {
         if let Ty::CStr | Ty::Bytes = t {
-            let s = ctx.check_str(k)?;
-            if t == Ty::CStr && ctx.bytes(s).contains(&0) {
-                return Err(ctx.arg_error(k, "string contains a NUL byte"));
+            let Some(bytes) = s.to_str(arg)? else {
+                return Err(s.type_error(arg, "string"));
+            };
+            if t == Ty::CStr && bytes.contains(&0) {
+                return Err(s.arg_error(arg, "string contains a NUL byte"));
             }
-            strs.push((k, t, s));
         } else {
-            slots[k] = arg(ctx, k, t)?;
+            *slot = arg_value(s, arg, t)?;
         }
     }
     // C strings: copied with a NUL, into this stack buffer while they fit
@@ -460,9 +502,12 @@ fn call_with_strings(
     let mut stack = [0u8; 256];
     let mut used = 0;
     let mut long: Vec<Vec<u8>> = Vec::new();
-    for &(k, t, s) in &strs {
-        let bytes = ctx.bytes(s);
-        slots[k] = if t == Ty::Bytes {
+    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(&sig.args)) {
+        if !matches!(t, Ty::CStr | Ty::Bytes) {
+            continue;
+        }
+        let bytes = s.string_at(arg).expect("converted above");
+        *slot = if t == Ty::Bytes {
             bytes.as_ptr() as u64
         } else if used + bytes.len() < stack.len() {
             let at = used;
@@ -481,40 +526,37 @@ fn call_with_strings(
     }
     let r = sig.cif.call(addr, slots);
     drop(long);
-    finish(ctx, sig.ret, r)
+    finish(s, sig.ret, r)
 }
 
-/// Argument `k` (not a string) as a value of type `t`, in the low bits.
+/// Argument `arg` (not a string) as a value of type `t`, in the low bits.
 #[inline(always)]
-fn arg(ctx: &mut NativeCtx<'_>, k: usize, t: Ty) -> Result<u64, LuaError> {
+fn arg_value(s: &mut Stack<'_>, arg: i32, t: Ty) -> StackResult<u64> {
     Ok(match t {
-        Ty::Ptr => ptr_arg(ctx, k)?,
-        Ty::Double => match ctx.arg(k) {
-            Value::Float(x) => x,
-            _ => ctx.check_f64(k)?,
-        }
-        .to_bits(),
-        Ty::Float => u64::from((ctx.check_f64(k)? as f32).to_bits()),
+        Ty::Ptr => ptr_arg(s, arg)?,
+        Ty::Double => s.check_number(arg)?.to_bits(),
+        Ty::Float => u64::from((s.check_number(arg)? as f32).to_bits()),
         Ty::Void | Ty::CStr | Ty::Bytes => unreachable!("handled by the caller"),
-        _ => int_arg(ctx, k, t)?,
+        _ => int_arg(s, arg, t)?,
     })
 }
 
 /// Record `errno` and return result register `r` as `ret`.
 #[inline(always)]
-fn finish(ctx: &mut NativeCtx<'_>, ret: Ty, r: u64) -> Result<NativeReturn, LuaError> {
+fn finish(s: &mut Stack<'_>, ret: Ty, r: u64) -> StackResult<Return> {
     ERRNO.with(|e| e.set(sys::errno()));
     if ret == Ty::Void {
-        return Ok(NativeReturn::Return(0));
+        return Ok(Return::values(0));
     }
-    let v = to_value(ctx, ret, r);
-    ctx.ret1(v)
+    push_value(s, ret, r);
+    Ok(Return::values(1))
 }
 
 /// `ffi.errno()`: `errno` as the last FFI call left it.
-fn ffi_errno(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
+fn ffi_errno(s: &mut Stack<'_>) -> StackResult<Return> {
     let e = ERRNO.with(Cell::get);
-    ctx.ret1(Value::Int(i64::from(e)))
+    s.push_integer(i64::from(e));
+    Ok(Return::values(1))
 }
 
 /// Most bytes `ffi.buffer` allocates.
@@ -522,157 +564,146 @@ const MAX_BUFFER: i64 = 1 << 31;
 
 /// `ffi.buffer(size)` (zeroed) or `ffi.buffer(s)` (the bytes of `s` and a
 /// NUL).
-fn ffi_buffer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let bytes: Box<[Cell<u8>]> = match ctx.arg(0) {
-        Value::Str(s) => {
-            let b = ctx.bytes(s);
-            b.iter().copied().chain([0]).map(Cell::new).collect()
+fn ffi_buffer(s: &mut Stack<'_>) -> StackResult<Return> {
+    let bytes: Box<[Cell<u8>]> = if s.type_at(1) == Type::String {
+        let b = s.string_at(1).expect("a string");
+        b.iter().copied().chain([0]).map(Cell::new).collect()
+    } else {
+        let n = s.check_integer(1)?;
+        if !(0..=MAX_BUFFER).contains(&n) {
+            return Err(s.arg_error(1, "size out of range"));
         }
-        _ => {
-            let n = ctx.check_int(0)?;
-            if !(0..=MAX_BUFFER).contains(&n) {
-                return Err(ctx.arg_error(0, "size out of range"));
-            }
-            ctx.reserve(n as usize)?;
-            (0..n).map(|_| Cell::new(0)).collect()
-        }
+        s.reserve_memory(n as usize)?;
+        (0..n).map(|_| Cell::new(0)).collect()
     };
-    let v = new_object(ctx, Buffer(bytes), BUFFER_META);
-    ctx.ret1(v)
+    push_object(s, Buffer(bytes), BUFFER_META)?;
+    Ok(Return::values(1))
 }
 
-/// Where argument `i` points, and how many bytes from there a script may
+/// Where argument `arg` points, and how many bytes from there a script may
 /// touch: `Some` for a buffer (checked), `None` for a raw pointer.
-fn place(ctx: &mut NativeCtx<'_>, i: usize) -> Result<(u64, Option<usize>), LuaError> {
-    match ctx.arg(i) {
-        Value::LightUserData(p) => Ok((p.get(), None)),
-        Value::UserData(u) => match ctx.userdata_ref::<Buffer>(u) {
+fn place(s: &mut Stack<'_>, arg: i32) -> StackResult<(u64, Option<usize>)> {
+    match s.type_at(arg) {
+        Type::LightUserdata => Ok((s.to_userdata(arg) as u64, None)),
+        Type::Userdata => match s.userdata::<Buffer>(arg) {
             Some(b) => Ok((b.addr(), Some(b.0.len()))),
-            None => Err(ctx.type_error(i, "pointer")),
+            None => Err(s.type_error(arg, "pointer")),
         },
-        Value::Nil => Err(ctx.arg_error(i, "null pointer")),
-        _ => Err(ctx.type_error(i, "pointer")),
+        Type::Nil | Type::None => Err(s.arg_error(arg, "null pointer")),
+        _ => Err(s.type_error(arg, "pointer")),
     }
 }
 
 /// A byte offset argument (default 0) and the address it gives, checked
 /// against a buffer's length for `len` bytes.
-fn at(
-    ctx: &mut NativeCtx<'_>,
-    i: usize,
-    base: (u64, Option<usize>),
-    len: usize,
-) -> Result<u64, LuaError> {
-    let off = ctx.opt_int(i, 0)?;
+fn at(s: &mut Stack<'_>, arg: i32, base: (u64, Option<usize>), len: usize) -> StackResult<u64> {
+    let off = s.opt_integer(arg, 0)?;
     if let Some(size) = base.1
         && (off < 0
             || (off as u64)
                 .checked_add(len as u64)
                 .is_none_or(|e| e > size as u64))
     {
-        return Err(ctx.arg_error(i, "out of the buffer's bounds"));
+        return Err(s.arg_error(arg, "out of the buffer's bounds"));
     }
     Ok(base.0.wrapping_add(off as u64))
 }
 
 /// `ffi.string(p [, len])`: `len` bytes at `p`, or up to the first NUL.
-fn ffi_string(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let base = place(ctx, 0)?;
-    let bytes = match (ctx.arg(1), base.1) {
-        (Value::Nil, None) => sys::cstr_bytes(base.0).unwrap_or_default().to_vec(),
-        (Value::Nil, Some(_)) => {
-            let Value::UserData(u) = ctx.arg(0) else {
-                unreachable!("a buffer")
-            };
-            let b = ctx.userdata_ref::<Buffer>(u).expect("a buffer");
+fn ffi_string(s: &mut Stack<'_>) -> StackResult<Return> {
+    let base = place(s, 1)?;
+    let bytes = match (is_nil(s, 2), base.1) {
+        (true, None) => sys::cstr_bytes(base.0).unwrap_or_default().to_vec(),
+        (true, Some(_)) => {
+            let b = s.userdata::<Buffer>(1).expect("a buffer");
             b.0.iter().map(Cell::get).take_while(|&c| c != 0).collect()
         }
-        _ => {
-            let n = ctx.check_int(1)?;
+        (false, _) => {
+            let n = s.check_integer(2)?;
             if n < 0 {
-                return Err(ctx.arg_error(1, "negative length"));
+                return Err(s.arg_error(2, "negative length"));
             }
-            ctx.reserve(n as usize)?;
-            let p = at(ctx, 2, base, n as usize)?;
+            s.reserve_memory(n as usize)?;
+            let p = at(s, 3, base, n as usize)?;
             let mut out = vec![0; n as usize];
             sys::read(p, &mut out);
             out
         }
     };
-    let v = ctx.new_str(&bytes);
-    ctx.ret1(v)
+    s.push_bytes(&bytes);
+    Ok(Return::values(1))
 }
 
 /// The type argument of `ffi.get`/`ffi.set`/`ffi.sizeof` and its size.
-fn memory_type(ctx: &mut NativeCtx<'_>, i: usize) -> Result<(Ty, usize), LuaError> {
-    let t = type_arg(ctx, i)?;
+fn memory_type(s: &mut Stack<'_>, arg: i32) -> StackResult<(Ty, usize)> {
+    let t = type_arg(s, arg)?;
     match t.size() {
         Some(n) => Ok((t, n)),
-        None => Err(ctx.arg_error(i, "type has no size")),
+        None => Err(s.arg_error(arg, "type has no size")),
     }
 }
 
 /// `ffi.get(p, type [, offset])`: the value of `type` at `p + offset`
 /// (a `cstr` field is read as a pointer, then the string at it).
-fn ffi_get(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let base = place(ctx, 0)?;
-    let (t, size) = memory_type(ctx, 1)?;
-    let p = at(ctx, 2, base, size)?;
+fn ffi_get(s: &mut Stack<'_>) -> StackResult<Return> {
+    let base = place(s, 1)?;
+    let (t, size) = memory_type(s, 2)?;
+    let p = at(s, 3, base, size)?;
     let mut raw = [0u8; 8];
     sys::read(p, &mut raw[..size]);
-    let v = to_value(ctx, t, u64::from_le_bytes(raw));
-    ctx.ret1(v)
+    push_value(s, t, u64::from_le_bytes(raw));
+    Ok(Return::values(1))
 }
 
 /// `ffi.set(p, type, offset, value)`: store `value` as a `type` at
 /// `p + offset`.
-fn ffi_set(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let base = place(ctx, 0)?;
-    let (t, size) = memory_type(ctx, 1)?;
+fn ffi_set(s: &mut Stack<'_>) -> StackResult<Return> {
+    let base = place(s, 1)?;
+    let (t, size) = memory_type(s, 2)?;
     let bits = match t {
-        Ty::CStr => return Err(ctx.arg_error(1, "'cstr' cannot be stored; store a 'ptr'")),
-        Ty::Ptr => ptr_arg(ctx, 3)?,
-        Ty::Double => ctx.check_f64(3)?.to_bits(),
-        Ty::Float => u64::from((ctx.check_f64(3)? as f32).to_bits()),
-        _ => int_arg(ctx, 3, t)?,
+        Ty::CStr => return Err(s.arg_error(2, "'cstr' cannot be stored; store a 'ptr'")),
+        Ty::Ptr => ptr_arg(s, 4)?,
+        Ty::Double => s.check_number(4)?.to_bits(),
+        Ty::Float => u64::from((s.check_number(4)? as f32).to_bits()),
+        _ => int_arg(s, 4, t)?,
     };
-    let p = at(ctx, 2, base, size)?;
+    let p = at(s, 3, base, size)?;
     sys::write(p, &bits.to_le_bytes()[..size]);
-    Ok(NativeReturn::Return(0))
+    Ok(Return::values(0))
 }
 
 /// `ffi.offset(p, n)`: the pointer `n` bytes past `p`. For a buffer, `n`
 /// must be within it; the result is a raw pointer, valid while the buffer
 /// lives.
-fn ffi_offset(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let base = place(ctx, 0)?;
-    let p = at(ctx, 1, base, 0)?;
-    ctx.ret1(light(p))
+fn ffi_offset(s: &mut Stack<'_>) -> StackResult<Return> {
+    let base = place(s, 1)?;
+    let p = at(s, 2, base, 0)?;
+    s.push_light_userdata(p as usize);
+    Ok(Return::values(1))
 }
 
 /// `ffi.sizeof(type)`: its size in bytes.
-fn ffi_sizeof(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let (_, n) = memory_type(ctx, 0)?;
-    ctx.ret1(Value::Int(n as i64))
+fn ffi_sizeof(s: &mut Stack<'_>) -> StackResult<Return> {
+    let (_, n) = memory_type(s, 1)?;
+    s.push_integer(n as i64);
+    Ok(Return::values(1))
 }
 
-fn library_tostring(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let u = ctx.check_userdata::<Library>(0, LIBRARY_META)?;
-    let h = ctx.userdata_ref::<Library>(u).expect("checked").handle;
-    let v = ctx.new_str(format!("ffi.library: 0x{h:014x}").as_bytes());
-    ctx.ret1(v)
+fn library_tostring(s: &mut Stack<'_>) -> StackResult<Return> {
+    let h = s.check_userdata::<Library>(1, LIBRARY_META)?.handle;
+    s.push_bytes(format!("ffi.library: 0x{h:014x}").as_bytes());
+    Ok(Return::values(1))
 }
 
-fn buffer_tostring(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let u = ctx.check_userdata::<Buffer>(0, BUFFER_META)?;
-    let b = ctx.userdata_ref::<Buffer>(u).expect("checked");
+fn buffer_tostring(s: &mut Stack<'_>) -> StackResult<Return> {
+    let b = s.check_userdata::<Buffer>(1, BUFFER_META)?;
     let text = format!("ffi.buffer ({} bytes): 0x{:014x}", b.0.len(), b.addr());
-    let v = ctx.new_str(text.as_bytes());
-    ctx.ret1(v)
+    s.push_bytes(text.as_bytes());
+    Ok(Return::values(1))
 }
 
-fn buffer_len(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let u = ctx.check_userdata::<Buffer>(0, BUFFER_META)?;
-    let n = ctx.userdata_ref::<Buffer>(u).expect("checked").0.len();
-    ctx.ret1(Value::Int(n as i64))
+fn buffer_len(s: &mut Stack<'_>) -> StackResult<Return> {
+    let n = s.check_userdata::<Buffer>(1, BUFFER_META)?.0.len();
+    s.push_integer(n as i64);
+    Ok(Return::values(1))
 }

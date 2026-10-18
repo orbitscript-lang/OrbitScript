@@ -79,7 +79,6 @@ version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
  "orbit-compiler",
- "orbit-ffi",
  "orbit-hir",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
@@ -127,7 +126,7 @@ name = "orbit-ffi"
 version = "0.0.0"
 dependencies = [
  "libffi-sys",
- "orbit-runtime",
+ "orbit",
 ]
 
 [[package]]
@@ -180,6 +179,7 @@ name = "orbit-std"
 version = "0.0.0"
 dependencies = [
  "orbit",
+ "orbit-ffi",
 ]
 
 [[package]]
