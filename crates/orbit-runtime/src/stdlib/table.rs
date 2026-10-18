@@ -13,8 +13,6 @@ use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
 type R = Result<NativeReturn, LuaError>;
 
 pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("table.insert", insert),
-    ("table.remove", remove),
     ("table.concat", concat),
     ("table.unpack", unpack),
     ("table.pack", pack),
@@ -50,56 +48,6 @@ fn plain(ctx: &NativeCtx<'_>, i: usize) -> Option<Gc<Table>> {
 /// `#t` for the table functions.
 fn length(ctx: &NativeCtx<'_>, t: Gc<Table>) -> i64 {
     ctx.vm.heap.get(t).border()
-}
-
-fn insert(ctx: &mut NativeCtx<'_>) -> R {
-    let Some(t) = plain(ctx, 0) else {
-        return slow::insert(ctx);
-    };
-    let end = length(ctx, t).wrapping_add(1);
-    match ctx.nargs() {
-        2 => {
-            let v = ctx.arg(1);
-            set(ctx, t, end, v)?;
-        }
-        3 => {
-            let pos = ctx.check_int(1)?;
-            // `pos - 1` as unsigned: 1..=end is valid.
-            if (pos as u64).wrapping_sub(1) >= end as u64 {
-                return Err(ctx.arg_error(1, "position out of bounds"));
-            }
-            let mut i = end;
-            while i > pos {
-                let v = get(ctx, t, i - 1);
-                set(ctx, t, i, v)?;
-                i -= 1;
-            }
-            let v = ctx.arg(2);
-            set(ctx, t, pos, v)?;
-        }
-        _ => return Err(ctx.error("wrong number of arguments to 'insert'")),
-    }
-    Ok(NativeReturn::Return(0))
-}
-
-fn remove(ctx: &mut NativeCtx<'_>) -> R {
-    let Some(t) = plain(ctx, 0) else {
-        return slow::remove(ctx);
-    };
-    let size = length(ctx, t);
-    let mut pos = ctx.opt_int(1, size)?;
-    // `pos - 1` as unsigned: 1..=size+1 is valid when a position is given.
-    if ctx.nargs() > 1 && pos != size && (pos as u64).wrapping_sub(1) > size as u64 {
-        return Err(ctx.arg_error(1, "position out of bounds"));
-    }
-    let v = get(ctx, t, pos);
-    while pos < size {
-        let next = get(ctx, t, pos + 1);
-        set(ctx, t, pos, next)?;
-        pos += 1;
-    }
-    set(ctx, t, pos, Value::Nil)?;
-    ctx.ret1(v)
 }
 
 fn concat(ctx: &mut NativeCtx<'_>) -> R {

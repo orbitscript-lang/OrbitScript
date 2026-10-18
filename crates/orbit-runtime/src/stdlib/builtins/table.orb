@@ -1,16 +1,64 @@
-// `table.sort`, written in OrbitScript (ADR-11). See base.orb for how
-// built-in modules are compiled and loaded. `table.insert` and
-// `table.remove` stay native until calls to Lua functions with varargs cost
-// less: written here they ran about twice as long.
+// `table.insert`, `table.remove` and `table.sort`, written in OrbitScript
+// (ADR-11). See base.orb for how built-in modules are compiled and loaded.
 //
 // Indexing and `#` go through the language's own operations, so `__index`,
 // `__newindex` and `__len` apply as they do for the reference's table
 // library. As in the reference, nothing may yield across them.
 
-extern argerror, typeerror, raise, checktab, lenint, newarray, sortprim;
+extern argerror, typeerror, raise, checktab, checkint, lenint, ult, newarray, plainlen, sortprim;
 
 // The largest array `sort` accepts (a C `int`).
 const MAX_SORT = 2147483647;
+
+pub fn insert(t, ...rest) {
+    let mut e = plainlen(t);
+    if e == nil {
+        checktab(t);
+        e = lenint(#t);
+    }
+    e += 1;
+    let n = rest.n;
+    if n == 1 {
+        t[e] = rest[1];
+    } else if n == 2 {
+        let pos = checkint(rest[1], 2);
+        // `pos - 1` as unsigned: 1..=e is valid.
+        if !ult(pos - 1, e) {
+            argerror(2, "position out of bounds");
+        }
+        let mut i = e;
+        while i > pos {
+            t[i] = t[i - 1];
+            i -= 1;
+        }
+        t[pos] = rest[2];
+    } else {
+        raise("wrong number of arguments to 'insert'");
+    }
+}
+
+pub fn remove(t, ...rest) {
+    let mut size = plainlen(t);
+    if size == nil {
+        checktab(t);
+        size = lenint(#t);
+    }
+    let mut pos = size;
+    if rest[1] != nil {
+        pos = checkint(rest[1], 2);
+        // `pos - 1` as unsigned: 1..=size+1 is valid.
+        if pos != size && ult(size, pos - 1) {
+            argerror(2, "position out of bounds");
+        }
+    }
+    let v = t[pos];
+    while pos < size {
+        t[pos] = t[pos + 1];
+        pos += 1;
+    }
+    t[pos] = nil;
+    v
+}
 
 // A stable bottom-up merge sort over a copy of the elements, so each element
 // is read and written once whatever metamethods the table has.

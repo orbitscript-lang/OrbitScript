@@ -17,7 +17,7 @@ Each library is behind its own Cargo feature of `orbit-stdlib`, all on by defaul
 | | `string/format.rs` | `string.format`, including `%a` and `%q` |
 | | `string/pack.rs` | `pack unpack packsize` |
 | `utf8` | `utf8.rs` | The `utf8` library |
-| `table` | `table.rs`, `builtins/table.orb` | The `table` library (`sort` is written in OrbitScript, ADR-11) |
+| `table` | `table.rs`, `builtins/table.orb` | The `table` library (`insert`, `remove` and `sort` are written in OrbitScript, ADR-11) |
 | `math` | `math/mod.rs`, `math/rng.rs` | The `math` library and its xoshiro256** generator |
 
 The engines (`pattern`, `format`, `pack`, `rng`, UTF-8 decoding) are plain functions over bytes and numbers with no VM access. The glue converts arguments, calls the engine and turns its typed errors into Lua errors with lua5.5's wording. Keeping the engines pure lets unit tests and the differential fuzzers drive them directly, and keeps the code a future OrbitScript standard library would reuse independent of Lua's calling conventions.
