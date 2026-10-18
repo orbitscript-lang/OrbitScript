@@ -17,8 +17,6 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-mod chunk_file;
-
 use orbit::Compiler;
 use orbit_compiler::bytecode::{UnlinkedChunk, format, verify};
 use orbit_lua_syntax::ParseOptions;
@@ -133,7 +131,7 @@ fn main() -> ExitCode {
     }
     for input in &cli.inputs {
         let path = (input != "-").then_some(input.as_str());
-        let result = match chunk_file::read_chunk_file(path) {
+        let result = match orbit_std::read_chunk_file(path.map(str::as_bytes)) {
             Ok((bytes, source)) => run(&cli, &bytes, &source),
             Err(e) => Err(e),
         };

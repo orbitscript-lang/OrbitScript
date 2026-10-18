@@ -19,7 +19,6 @@
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-mod chunk_file;
 #[cfg(feature = "repl")]
 mod repl;
 
@@ -29,7 +28,7 @@ use orbit::{
 
 /// The chunk names `lua` gives command-line code and standard input.
 const COMMAND_LINE: &[u8] = b"=(command line)";
-use chunk_file::{STDIN, read_chunk_file};
+use orbit_std::{STDIN, read_chunk_file};
 
 /// Whether Ctrl-C interrupts Lua code; false while interactive mode waits
 /// for input, when Ctrl-C ends `orbit` as it ends `lua`.
@@ -199,14 +198,24 @@ fn main() -> ExitCode {
     };
     let config = Config::default()
         .ignore_env(cli.ignore_env)
-        .lock_cpath(cli.lock_cpath)
         .warnings(cli.warnings)
         // The standalone lua5.5 reports generational mode from the start.
         // The incremental collector runs underneath either way.
         .gc_mode(GcMode::Generational)
         .memory_limit(memory_limit);
-    #[cfg_attr(not(feature = "ffi"), allow(unused_mut))]
     let mut iso = Runtime::new().new_isolate(config);
+    let options = orbit_std::Options {
+        ignore_env: cli.ignore_env,
+        ..Default::default()
+    };
+    if let Err(e) = orbit_std::install(&mut iso, &options) {
+        eprintln!("{prog}: {}", e.message());
+        return ExitCode::FAILURE;
+    }
+    #[cfg(feature = "c-modules")]
+    orbit_capi::install(&mut iso, cli.lock_cpath);
+    #[cfg(not(feature = "c-modules"))]
+    let _ = cli.lock_cpath;
     #[cfg(feature = "ffi")]
     if !cli.no_ffi {
         iso.enable_ffi();
@@ -413,7 +422,7 @@ impl Runner {
     /// Load a file (`None`: standard input) as `loadfile` does and call it,
     /// with the script arguments from `arg` when `with_args`.
     fn run_file(&mut self, path: Option<&str>, with_args: bool) -> bool {
-        let (bytes, source) = match read_chunk_file(path) {
+        let (bytes, source) = match read_chunk_file(path.map(str::as_bytes)) {
             Ok(r) => r,
             Err(m) => {
                 self.report(&format!("{}: {m}", self.prog));

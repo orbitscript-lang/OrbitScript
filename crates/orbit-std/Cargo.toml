@@ -1,0 +1,25 @@
+[package]
+name = "orbit-std"
+description = "The OrbitScript standard library's I/O-facing parts (io, os, print, files, searchers), built on the public API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit = { path = "../orbit", default-features = false }
+
+[dev-dependencies]
+orbit = { path = "../orbit" }
+
+[features]
+default = ["io", "os"]
+# The `io` library.
+io = []
+# The `os` library.
+os = []
+
+[lints]
+workspace = true

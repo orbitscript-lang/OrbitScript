@@ -17,7 +17,7 @@ name = "orbit_lib"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-orbit = { path = "../orbit", features = ["c-modules"] }
+orbit = { path = "../orbit" }
 orbit-capi = { path = "../orbit-capi", features = ["host"] }
 
 [lints]

@@ -394,10 +394,11 @@ pub fn push_int(out: &mut Vec<u8>, i: i64) {
 
 /// Append a number as `tostring` shows it; `None` for non-numbers.
 pub fn fmt_number(out: &mut String, v: Value) -> Option<()> {
-    use std::fmt::Write;
     match v {
         Value::Int(i) => {
-            let _ = write!(out, "{i}");
+            let mut digits = Vec::with_capacity(20);
+            push_int(&mut digits, i);
+            out.extend(digits.iter().map(|&b| char::from(b)));
         }
         Value::Float(f) => fmt_float(out, f),
         _ => return None,

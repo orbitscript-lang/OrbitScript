@@ -78,7 +78,6 @@ name = "orbit"
 version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
- "orbit-capi",
  "orbit-compiler",
  "orbit-ffi",
  "orbit-hir",
@@ -96,10 +95,9 @@ name = "orbit-capi"
 version = "0.0.0"
 dependencies = [
  "cc",
- "orbit-compiler",
- "orbit-lua-syntax",
- "orbit-orb-syntax",
+ "orbit",
  "orbit-runtime",
+ "orbit-std",
 ]
 
 [[package]]
@@ -107,10 +105,12 @@ name = "orbit-cli"
 version = "0.0.0"
 dependencies = [
  "orbit",
+ "orbit-capi",
  "orbit-compiler",
  "orbit-hir",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
+ "orbit-std",
  "signal-hook",
 ]
 
@@ -172,6 +172,13 @@ version = "0.0.0"
 dependencies = [
  "orbit-bytecode",
  "orbit-gc",
+]
+
+[[package]]
+name = "orbit-std"
+version = "0.0.0"
+dependencies = [
+ "orbit",
 ]
 
 [[package]]

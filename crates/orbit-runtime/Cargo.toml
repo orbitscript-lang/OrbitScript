@@ -16,16 +16,14 @@ orbit-gc = { path = "../orbit-gc" }
 workspace = true
 
 [features]
-default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine", "debug", "io", "dump", "verify", "verify-flow"]
+default = ["string", "utf8", "table", "math", "load", "package", "coroutine", "debug", "dump", "verify", "verify-flow"]
 string = []
 utf8 = []
 table = []
 math = []
-# `load`, `loadfile` and `dofile` (source chunks need the host to install a
-# compiler in `Runtime::compile`).
+# `load` (source chunks need the host to install a compiler in
+# `Runtime::compile`).
 load = []
-# The `io` library.
-io = []
 # `string.dump`, and loading the binary chunks it writes.
 dump = ["load", "string"]
 # Check binary chunks before `load` links them: layer 1 of the verifier
@@ -35,8 +33,6 @@ verify = ["dump"]
 # Layer 2 of the verifier (data flow) as well: with both layers no binary
 # chunk can make the VM panic.
 verify-flow = ["verify", "orbit-bytecode/verify-flow"]
-# The `os` library (without it, no `os` table at all).
-os = []
 # `require` and the `package` library.
 package = ["load"]
 # The `coroutine` library.

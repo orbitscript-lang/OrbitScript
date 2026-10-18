@@ -171,6 +171,28 @@ impl<'s> Scope<'s> {
 
     // ---- public surface ---------------------------------------------------
 
+    /// The registry: a table only host code reaches, where C modules keep
+    /// their own state (Lua's `LUA_REGISTRYINDEX`).
+    pub fn registry(&'s self) -> Table<'s> {
+        let r = self.ctx().vm.rt.registry;
+        Table::from_raw(self, self.root(raw::Value::Table(r)).raw())
+    }
+
+    /// Write to the isolate's standard output, the stream `print` and
+    /// `io.stdout` share (C's `stdout` when the C API created the state).
+    /// `f` must not use the scope: the window is borrowed while it runs.
+    pub fn with_stdout<R>(&self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
+        let mut ctx = self.ctx();
+        f(&mut *ctx.vm.rt.out)
+    }
+
+    /// `text` as a Lua numeral (decimal or hexadecimal, integer or float,
+    /// spaces around allowed), as `tonumber` reads a string; `None` if it
+    /// isn't one.
+    pub fn parse_number(&'s self, text: &[u8]) -> Option<Value<'s>> {
+        raw::number::str_to_number(text).map(|v| self.wrap(v))
+    }
+
     /// The global table.
     pub fn globals(&'s self) -> Table<'s> {
         let g = self.ctx().vm.rt.globals;
@@ -229,9 +251,14 @@ impl<'s> Scope<'s> {
     }
 
     /// [`Scope::load`], with `env` as the chunk's `_ENV` instead of the
-    /// global table.
-    pub fn load_in(&'s self, chunk: Chunk<'_>, env: Table<'s>) -> Result<Function<'s>, Error> {
-        let f = crate::chunk::load(self, &chunk, Some(env.raw()))?;
+    /// global table: usually a table, but any value will do, as for `load`.
+    pub fn load_in(
+        &'s self,
+        chunk: Chunk<'_>,
+        env: impl IntoValue<'s>,
+    ) -> Result<Function<'s>, Error> {
+        let env = self.value(env)?.raw();
+        let f = crate::chunk::load(self, &chunk, Some(env))?;
         Ok(Function::from_raw(self, self.root(f).raw()))
     }
 }

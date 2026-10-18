@@ -142,6 +142,12 @@ impl<'s> Value<'s> {
         }
     }
 
+    /// The address of a table, function, thread or userdata, as `%p`
+    /// shows it (`None` for other values): the same while the object lives.
+    pub fn address(&self) -> Option<u64> {
+        self.raw().identity()
+    }
+
     /// The basic type name, as `type` returns it.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -180,39 +186,77 @@ impl<'s> Value<'s> {
 
     /// The text `tostring` gives: `__tostring` and `__name` are honoured.
     pub fn to_display(&self) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        self.write_display(&mut out)?;
+        Ok(out)
+    }
+
+    /// Append the text `tostring` gives to `out`, as [`to_display`] does
+    /// without a buffer per value.
+    ///
+    /// [`to_display`]: Value::to_display
+    pub fn write_display(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         let Some(s) = self.scope() else {
-            let mut out = String::new();
-            return Ok(match self {
-                Value::Nil => b"nil".to_vec(),
-                Value::Bool(b) => b.to_string().into_bytes(),
-                Value::LightUserdata(p) => format!("userdata: {p:#x}").into_bytes(),
-                v => {
-                    number::fmt_number(&mut out, v.raw());
-                    out.into_bytes()
+            match self {
+                Value::Nil => out.extend_from_slice(b"nil"),
+                Value::Bool(b) => out.extend_from_slice(b.to_string().as_bytes()),
+                Value::LightUserdata(p) => {
+                    out.extend_from_slice(format!("userdata: {p:#x}").as_bytes())
                 }
-            });
+                v => {
+                    v.write_text(out);
+                }
+            }
+            return Ok(());
         };
         let v = self.raw();
         let mut ctx = s.ctx();
         let mm = ctx.metamethod(v, MetaField::ToString);
         if mm.is_nil() {
-            let mut out = Vec::new();
-            ctx.display(v, &mut out);
-            return Ok(out);
+            ctx.display(v, out);
+            return Ok(());
         }
         let at = ctx.len();
         ctx.push(mm);
         ctx.push(v);
         let r = ctx.call(1, None);
-        let out = match r {
+        let done = match r {
+            // A number will do, as for Lua's `luaL_tolstring`.
             Ok(n) => match (n > 0).then(|| ctx.arg(at)) {
-                Some(raw::Value::Str(st)) => Ok(ctx.bytes(st).to_vec()),
-                _ => Err(Error::runtime("'__tostring' must return a string")),
+                Some(raw::Value::Str(st)) => {
+                    out.extend_from_slice(ctx.bytes(st));
+                    Ok(())
+                }
+                Some(v @ (raw::Value::Int(_) | raw::Value::Float(_))) => {
+                    ctx.display(v, out);
+                    Ok(())
+                }
+                _ => {
+                    let e = ctx.error("'__tostring' must return a string");
+                    Err(s.lua_error(&mut ctx, e))
+                }
             },
             Err(e) => Err(s.lua_error(&mut ctx, e)),
         };
         ctx.truncate(at);
-        out
+        done
+    }
+
+    /// Append a string's bytes, or a number's text as `tostring` writes it,
+    /// to `out`: what converting to `Vec<u8>` gives, without the buffer.
+    /// Other values append nothing and give `false`.
+    pub fn write_text(&self, out: &mut Vec<u8>) -> bool {
+        match self {
+            Value::Str(st) => out.extend_from_slice(&st.as_bytes()),
+            Value::Int(i) => number::push_int(out, *i),
+            Value::Float(_) => {
+                let mut text = String::new();
+                number::fmt_number(&mut text, self.raw());
+                out.extend_from_slice(text.as_bytes());
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// The value's metatable: a table's or userdata's own, or the one
@@ -756,12 +800,13 @@ impl<'s> FromValue<'s> for Vec<u8> {
     fn from_value(v: Value<'s>) -> Result<Self, FromValueError> {
         match v {
             Value::Str(st) => Ok(st.to_bytes()),
-            Value::Int(_) | Value::Float(_) => {
-                let mut out = String::new();
-                number::fmt_number(&mut out, v.raw());
-                Ok(out.into_bytes())
+            _ => {
+                let mut out = Vec::new();
+                match v.write_text(&mut out) {
+                    true => Ok(out),
+                    false => Err(FromValueError::Expected("string")),
+                }
             }
-            _ => Err(FromValueError::Expected("string")),
         }
     }
 }

@@ -25,13 +25,21 @@ The first `stabby` boundary (#160, closed) wrapped the Rust API as it stood: a v
 - **Interrupts** stay catchable by `pcall`, matching `lua`; uncatchable budgets come with `set_budget`.
 - **Light userdata** is a `Value` variant holding the address as an opaque `u64`.
 - **Class methods** get the object taken out of its userdata while they run, so a method can use its whole `Call`; calling a method of an object whose method is running raises an error.
-- **Not yet built**: `Io`, `Searcher` and `Clock` (phase c, with `orbit-std`), debugger hooks (with the debugger plan), `yield_with`, budgets, and `Function::info`.
+- **Not yet built**: debugger hooks (with the debugger plan), `yield_with`, budgets, and `Function::info`.
+
+### Settled while moving I/O out (phase c)
+- **The runtime does no I/O.** `orbit-runtime` keeps `load`, `require`, `package.loaded`, `package.preload` and the preload searcher; it has no `io` or `os` library, no `print`, `loadfile`, `dofile` or `debug.debug`, and reads no environment variables except `ORBIT_VERIFY`.
+- **`orbit-std` uses only the public API.** `orbit_std::install(&mut isolate, &Options)` adds `print`, `loadfile`, `dofile`, `debug.debug`, `package.path`, `package.cpath`, `package.searchpath`, the Lua searcher, and the `io` and `os` libraries (features `io` and `os`). `FILE*` is a `Class`; files write through `Scope::with_stdout`, so `print`, `io.write` and C's `printf` (through `liborbit`) share one buffer. `os.exit` is `Call::exit`, which closes the isolate when asked, runs the `before_exit` hooks (open files flush there) and flushes standard output.
+- **`Options` instead of `Io`, `Searcher` and `Clock`.** No host has needed to replace the file system or clock yet, so `orbit-std` calls `std` directly; a host that wants scripts without file access doesn't install it, or installs only some of it. The interfaces stay a possible later addition.
+- **`orbit-capi` sits above `orbit-std`.** C modules need the `io` and `os` libraries for `luaopen_io` and friends, so `orbit-capi` depends on `orbit-std`, `orbit` has no `c-modules` feature, and the CLIs call `orbit_capi::install(&mut isolate, lock_cpath)` after `orbit_std::install`. This moves ADR-8's install step out of the runtime's `Options` without changing what scripts see. With `orbit-std` alone, `package.searchers` holds the preload and Lua searchers and `package.loadlib` reports C modules absent.
+- **`ffi`** stays `Isolate::enable_ffi` (feature `ffi`) for now; it moves into `orbit-std` with the `liborbit` boundary.
+- **Host functions cost more than the runtime's own natives.** A host function is a native closure entered through a Lua-style frame and a trampoline: about 250 more instructions per call than a built-in native (x86_64, no PGO), which made loops of tiny writes run 30 to 40% more instructions (`print`, `file:write`, an empty `io.write`). Calling native closures without the stub frame is the main follow-up.
 
 ### Intrinsics and the standard library
 - The runtime exposes **intrinsics**: named primitive operations that need the VM's internals or its speed (string and table primitives, math, utf8, `string.pack`).
 - Each library function is then either bound directly to an intrinsic, written natively in the runtime, or written in OrbitScript on top of intrinsics and precompiled to bytecode at build time. The choice is made per function, by measurement: a call through an OrbitScript wrapper costs about 16 ns, `ipairs` and `table.sort` with a comparator ran faster written in Lua than natively, and `table.concat` and `string.rep` ran ten times slower.
 - Functions written in OrbitScript keep the observable behaviour of natives: error messages name the function, error levels skip the built-in frame, and tracebacks show `[C]`.
-- **`orbit-std`** implements the I/O-facing parts of the standard library (`io`, `os`, `print`, `loadfile`, `dofile`, file searchers, environment variables, C modules, `ffi`) over the public API only, with no access to the runtime's internals. The CLIs install it.
+- **`orbit-std`** implements the I/O-facing parts of the standard library (`io`, `os`, `print`, `loadfile`, `dofile`, file searchers, environment variables, C modules, `ffi`) over the public API only, with no access to the runtime's internals. The CLIs install it. (Phase c changed the C module and `ffi` parts: see above.)
 
 ### Crates, bottom up
 | Layer | Crates |

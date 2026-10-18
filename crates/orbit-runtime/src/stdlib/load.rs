@@ -1,12 +1,11 @@
-//! Loading chunks: `load`, `loadfile` and `dofile`
+//! Loading chunks: `load` (`loadfile` and `dofile` read files, so they
+//! are `orbit-std`'s)
 //! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md)).
 //!
 //! Source text goes through the compiler the host installed in
 //! [`Runtime::compile`](crate::vm::Runtime::compile), so this library needs
 //! no front end of its own. Binary chunks (`string.dump` output) start with
 //! [`BINARY_SIGNATURE`].
-
-use std::io::Read;
 
 use crate::object::{LuaHeap, Value};
 use crate::vm::op::UnlinkedChunk;
@@ -16,8 +15,7 @@ pub use super::chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
 type R = Result<NativeReturn, LuaError>;
 
-pub(crate) const FUNCTIONS: &[(&str, NativeFn)] =
-    &[("load", load), ("loadfile", loadfile), ("dofile", dofile)];
+pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[("load", load)];
 
 /// Which kinds of chunk a `mode` string allows.
 pub(crate) struct Mode<'a>(pub(crate) &'a [u8]);
@@ -255,105 +253,6 @@ fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     let r = load_chunk(ctx, &bytes, &source, &Mode(&mode), env);
     ctx.truncate(0);
     ret_loaded(ctx, r)
-}
-
-/// Read a file (`None`: standard input) the way `loadfile` does: a UTF-8
-/// byte-order mark and a first line starting with `#` are dropped, keeping
-/// the line break so line numbers stay right (and dropping it too when a
-/// binary chunk follows). Returns the bytes and the chunk's source name.
-pub fn read_chunk_file(path: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let (mut bytes, source) = match path {
-        None => {
-            let mut b = Vec::new();
-            std::io::stdin()
-                .read_to_end(&mut b)
-                .map_err(|_| "cannot read stdin".to_string())?;
-            (b, b"=stdin".to_vec())
-        }
-        Some(p) => {
-            let name = String::from_utf8_lossy(p).into_owned();
-            let mut f = std::fs::File::open(crate::stdlib::os_path(p))
-                .map_err(|e| format!("cannot open {name}: {}", crate::stdlib::os_error_text(&e)))?;
-            let mut b = Vec::new();
-            f.read_to_end(&mut b)
-                .map_err(|_| format!("cannot read {name}"))?;
-            let mut source = b"@".to_vec();
-            source.extend_from_slice(p);
-            (b, source)
-        }
-    };
-    let mut start = 0;
-    if bytes.starts_with(b"\xEF\xBB\xBF") {
-        start = 3;
-    }
-    if bytes.get(start) == Some(&b'#') {
-        let end = bytes[start..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(bytes.len(), |i| start + i);
-        start = match bytes.get(end + 1) {
-            Some(&BINARY_SIGNATURE) => end + 1,
-            _ => end,
-        };
-    }
-    bytes.drain(..start);
-    Ok((bytes, source))
-}
-
-/// `loadfile` and `dofile`'s first steps: the file name argument (nil for
-/// standard input) and the loaded function or message.
-fn load_file_arg(
-    ctx: &mut NativeCtx<'_>,
-    mode: &[u8],
-    env: Value,
-) -> Result<Result<Value, String>, LuaError> {
-    let path = match ctx.arg(0) {
-        Value::Nil => None,
-        _ => {
-            let s = ctx.check_str(0)?;
-            Some(ctx.bytes(s).to_vec())
-        }
-    };
-    Ok(read_chunk_file(path.as_deref())
-        .and_then(|(bytes, source)| load_chunk(ctx, &bytes, &source, &Mode(mode), env)))
-}
-
-fn loadfile(ctx: &mut NativeCtx<'_>) -> R {
-    let mode = opt_bytes(ctx, 1, b"bt")?;
-    let env = if ctx.nargs() >= 3 {
-        ctx.arg(2)
-    } else {
-        Value::Table(ctx.vm.rt.globals)
-    };
-    let r = load_file_arg(ctx, &mode, env)?;
-    ret_loaded(ctx, r)
-}
-
-fn dofile(ctx: &mut NativeCtx<'_>) -> R {
-    let env = Value::Table(ctx.vm.rt.globals);
-    match load_file_arg(ctx, b"bt", env)? {
-        Ok(f) => {
-            ctx.truncate(0);
-            // lua5.5 lets the chunk yield across `dofile`.
-            Ok(NativeReturn::CallThenYieldable {
-                f,
-                nargs: 0,
-                k: dofile_done,
-                protected: false,
-            })
-        }
-        Err(msg) => {
-            let m = ctx.new_str(msg.as_bytes());
-            Err(ctx.error_value(m))
-        }
-    }
-}
-
-fn dofile_done(_ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    match outcome {
-        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n)),
-        CallOutcome::Err(e) => Err(LuaError::new(e)),
-    }
 }
 
 #[cfg(test)]

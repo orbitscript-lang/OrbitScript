@@ -114,8 +114,7 @@ impl Rule {
         };
         // The year of `t` in standard time is the one whose rules apply
         // (the switches happen near mid-year or at year ends).
-        let (year, _, _) =
-            crate::stdlib::time::civil_from_days((t + self.std.offset).div_euclid(86_400));
+        let (year, _, _) = crate::time::civil_from_days((t + self.std.offset).div_euclid(86_400));
         // glibc uses 1970's switches for every earlier time.
         let year = year.max(1970);
         let in_dst = |year: i64| {
@@ -140,7 +139,7 @@ impl Rule {
 
 /// Days since the epoch of a rule's switch day in `year`.
 fn day_of(day: Day, year: i64) -> i64 {
-    use crate::stdlib::time::days_from_civil;
+    use crate::time::days_from_civil;
     let jan1 = days_from_civil(year, 1, 1);
     let leap = days_from_civil(year, 3, 1) - days_from_civil(year, 2, 1) == 29;
     match day {
@@ -416,7 +415,7 @@ fn load(tz: Option<&OsString>) -> Zone {
     let Some(tz) = tz else {
         return read("/etc/localtime".as_ref()).unwrap_or_else(Zone::utc);
     };
-    let bytes = crate::stdlib::os_bytes(tz);
+    let bytes = crate::sys::os_bytes(tz);
     let name = bytes.strip_prefix(b":").unwrap_or(&bytes);
     if name.is_empty() {
         // glibc's name for UTC when `TZ` is set but empty.
@@ -426,7 +425,7 @@ fn load(tz: Option<&OsString>) -> Zone {
         }
         return z;
     }
-    let path = crate::stdlib::os_path(name);
+    let path = crate::sys::os_path(name);
     let file = if path.is_absolute() {
         read(&path)
     } else if name.windows(2).any(|w| w == b"..") {

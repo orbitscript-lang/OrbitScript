@@ -36,6 +36,15 @@ impl Error {
         Error::new(ErrorKind::Runtime, message.into())
     }
 
+    /// Lua's `not enough memory`, which scripts can catch like any error
+    /// (a host function that can't allocate raises it).
+    pub fn memory() -> Error {
+        Error::new(
+            ErrorKind::Memory,
+            orbit_runtime::object::NoMemory::MESSAGE.to_owned(),
+        )
+    }
+
     /// A syntax error with `message` (`chunk:line: text`).
     pub fn syntax(message: impl Into<String>) -> Error {
         Error::new(ErrorKind::Syntax, message.into())
