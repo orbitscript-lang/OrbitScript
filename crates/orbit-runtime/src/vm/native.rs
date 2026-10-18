@@ -42,11 +42,12 @@ pub enum Operator {
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 
 /// An optional fast path for a native that returns one value and needs
-/// nothing but its arguments (most of `math`). It gets the arguments and
-/// returns the result, or `None` to run the full native instead (wrong
-/// types, errors, anything unusual), so it never changes behavior. It cannot
+/// nothing but its arguments and a look at the heap (most of `math`, and
+/// the intrinsics built-ins call most). It gets the arguments and returns
+/// the result, or `None` to run the full native instead (wrong types,
+/// errors, anything unusual), so it never changes behavior. It cannot
 /// allocate, call back into Lua, or fail.
-pub type FastFn = fn(&[Value]) -> Option<Value>;
+pub type FastFn = fn(&crate::object::LuaHeap, &[Value]) -> Option<Value>;
 
 /// What a native does after a call it requested with
 /// [`NativeReturn::CallThen`] finishes.

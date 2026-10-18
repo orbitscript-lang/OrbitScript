@@ -15,9 +15,9 @@
 use std::sync::OnceLock;
 
 use crate::object::number::{self, float_to_int};
-use crate::object::{Table, Value};
+use crate::object::{LuaHeap, Table, Value};
 use crate::vm::op::{UnlinkedChunk, format};
-use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::vm::{FastFn, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -66,6 +66,16 @@ const INTRINSICS: &[(&str, NativeFn)] = &[
     ("sortprim", sortprim),
 ];
 
+/// Fast paths for the intrinsics built-ins call on every call (see
+/// [`FastFn`]): a call through one skips the native's context, which costs
+/// more than the intrinsic's own work.
+const FAST_INTRINSICS: &[(&str, FastFn)] = &[
+    ("checkint", checkint_fast),
+    ("lenint", lenint_fast),
+    ("ult", ult_fast),
+    ("plainlen", plainlen_fast),
+];
+
 /// Where a module's environment keeps the intrinsics table for
 /// [`require`]. Not a name a module can use: OrbitScript has no implicit
 /// globals.
@@ -89,6 +99,9 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
     for &(name, f) in INTRINSICS {
         let v = vm.native_named(name, f);
         vm.raw_set_str(intrinsics_t, name, v);
+    }
+    for &(name, fast) in FAST_INTRINSICS {
+        vm.set_native_fast_path(intrinsic_name(name), fast);
     }
     vm.raw_set_str(env_t, INTRINSICS_KEY, intrinsics);
     let require = vm.native_named("require", require);
@@ -256,6 +269,14 @@ fn checkint(ctx: &mut NativeCtx<'_>) -> R {
     }
 }
 
+/// `checkint`'s integer case.
+fn checkint_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
+    match args.first() {
+        Some(&v @ Value::Int(_)) => Some(v),
+        _ => None,
+    }
+}
+
 /// `lenint(len)`: a length (`#t`, which may come from `__len`) as an
 /// integer.
 fn lenint(ctx: &mut NativeCtx<'_>) -> R {
@@ -273,12 +294,27 @@ fn lenint(ctx: &mut NativeCtx<'_>) -> R {
     }
 }
 
+/// `lenint`'s integer case.
+fn lenint_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
+    match args.first() {
+        Some(&v @ Value::Int(_)) => Some(v),
+        _ => None,
+    }
+}
+
 /// `ult(a, b)`: unsigned `a < b` for integers.
 fn ult(ctx: &mut NativeCtx<'_>) -> R {
     let (Value::Int(a), Value::Int(b)) = (ctx.arg(0), ctx.arg(1)) else {
         return ctx.ret1(Value::Bool(false));
     };
     ctx.ret1(Value::Bool((a as u64) < (b as u64)))
+}
+
+fn ult_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
+    Some(Value::Bool(match args {
+        [Value::Int(a), Value::Int(b), ..] => (*a as u64) < (*b as u64),
+        _ => false,
+    }))
 }
 
 /// `newarray(n)`: an empty table with room for `n` array elements.
@@ -318,6 +354,13 @@ fn plainlen(ctx: &mut NativeCtx<'_>) -> R {
         _ => Value::Nil,
     };
     ctx.ret1(r)
+}
+
+fn plainlen_fast(heap: &LuaHeap, args: &[Value]) -> Option<Value> {
+    Some(match args.first() {
+        Some(&Value::Table(t)) if heap.get(t).meta.is_none() => Value::Int(heap.get(t).border()),
+        _ => Value::Nil,
+    })
 }
 
 /// `sortprim(a, n)`: sort `a[1..=n]` in place by `<` if they are all

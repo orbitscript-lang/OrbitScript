@@ -403,6 +403,8 @@ op_table! {
     84 KDiv { dst, k, b };
     85 CellClear { from, count };
     86 ForPrepExclusive { base, exit };
+    87 VarargLen { dst };
+    88 VarargGetInt { dst, index };
 }
 
 /// One instruction's encoding (for tests and fuzzing).

@@ -45,6 +45,7 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 Op::NewTable { dst, .. } => reg(dst),
                 Op::VarargTable { dst } => p.is_vararg && reg(dst),
                 Op::VarargGet { dst, key } => p.is_vararg && reg(dst) && reg(key),
+                Op::VarargLen { dst } | Op::VarargGetInt { dst, .. } => p.is_vararg && reg(dst),
                 Op::VarargUnpack { dst, table, count } => {
                     p.is_vararg && reg(table) && regs(dst, count)
                 }

@@ -138,8 +138,21 @@ impl FuncState<'_> {
                     // Lua names no integer key of a vararg table.
                     _ => b"?".as_slice().into(),
                 };
-                let (k, _) = self.operand(key, dst)?;
-                self.emit(Op::VarargGet { dst, key: k });
+                match self.const_of(key) {
+                    Some(ConstVal::Str(_)) if &*name == b"n" => {
+                        self.emit(Op::VarargLen { dst });
+                    }
+                    Some(ConstVal::Int(i @ 1..=255)) => {
+                        self.emit(Op::VarargGetInt {
+                            dst,
+                            index: i as u8,
+                        });
+                    }
+                    _ => {
+                        let (k, _) = self.operand(key, dst)?;
+                        self.emit(Op::VarargGet { dst, key: k });
+                    }
+                }
                 Some(Origin::Field(name))
             }
             &ExprKind::Local(l) => {

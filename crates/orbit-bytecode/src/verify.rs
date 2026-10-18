@@ -315,7 +315,10 @@ impl Function<'_> {
                 ic(c)?;
                 cap(0)
             }
-            Op::NewTable { dst, .. } | Op::VarargTable { dst } => reg(dst),
+            Op::NewTable { dst, .. }
+            | Op::VarargTable { dst }
+            | Op::VarargLen { dst }
+            | Op::VarargGetInt { dst, .. } => reg(dst),
             Op::CheckUndefined { src, name } => {
                 reg(src)?;
                 key(name)

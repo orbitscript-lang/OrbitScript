@@ -286,6 +286,13 @@ pub enum Op {
     /// `R[dst]` = what the vararg table would hold at `R[key]`, without building it: the
     /// extra argument for an integer key `1..count`, the count for `"n"`, nil otherwise.
     VarargGet { dst: Reg, key: Reg },
+    /// `R[dst]` = the vararg table's `n`, the count of extra arguments, without building
+    /// the table (`VarargGet` with the constant key `"n"`).
+    VarargLen { dst: Reg },
+    /// `R[dst]` = what the vararg table would hold at the constant key `index`, without
+    /// building it: the extra argument if `index <= count`, nil otherwise (`VarargGet` with
+    /// a constant integer key from 1 to 255).
+    VarargGetInt { dst: Reg, index: u8 },
     /// Like `Vararg`, but reads the vararg table `R[table]` raw: `R[table][1..n]` with
     /// `n = R[table].n`, which must be an integer in `0..2^30` (error: "vararg table has no
     /// proper 'n'").
