@@ -10,7 +10,6 @@ publish = false
 links = "orbit_capi"
 
 [dependencies]
-orbit-runtime = { path = "../orbit-runtime", default-features = false, features = ["package"] }
 # The public API, for the libraries `orbit-std` builds on it: `luaopen_io`
 # and friends open them, and C states are isolates the API can reach.
 orbit = { path = "../orbit", default-features = false, features = ["package"] }

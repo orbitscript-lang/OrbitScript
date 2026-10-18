@@ -11,6 +11,7 @@ use crate::compiler::{self, Compiler};
 use crate::error::Error;
 use crate::pin::Pinned;
 use crate::scope::{Scope, Shared};
+use crate::stack::{Control, Stack};
 use crate::value::{Function, Table};
 
 /// The runtime library. Creates isolates and gives the compiler; in a
@@ -67,7 +68,7 @@ impl Library {
         Library::Utf8,
     ];
 
-    fn lib(self) -> Lib {
+    pub(crate) fn lib(self) -> Lib {
         match self {
             Library::Base => Lib::Base,
             Library::Package => Lib::Package,
@@ -101,7 +102,7 @@ pub enum GcMode {
 }
 
 impl GcMode {
-    fn raw(self) -> vm::GcMode {
+    pub(crate) fn raw(self) -> vm::GcMode {
         match self {
             GcMode::Incremental => vm::GcMode::Incremental,
             GcMode::Generational => vm::GcMode::Generational,
@@ -204,8 +205,32 @@ impl Isolate {
         r
     }
 
-    pub(crate) fn vm_mut(&mut self) -> &mut Vm {
-        &mut self.vm
+    /// Run `f` on the host's window ([`Stack`]); what `f` leaves there is
+    /// dropped after.
+    pub fn stack<R>(&mut self, f: impl FnOnce(&mut Stack<'_>) -> R) -> R {
+        let ctx = self.vm.host_ctx();
+        let start = ctx.len();
+        let mut s = Stack::new(ctx);
+        let r = f(&mut s);
+        let _ = s.set_top(start as i32);
+        r
+    }
+
+    /// The host's window, kept as it is between uses: for a host that
+    /// drives the isolate through the stack API alone, as a C program does
+    /// through the Lua C API.
+    pub fn host_stack(&mut self) -> Stack<'_> {
+        Stack::new(self.vm.host_ctx())
+    }
+
+    /// What reaches the isolate itself ([`Control`]).
+    pub fn control(&mut self) -> Control<'_> {
+        Control::new(&mut self.vm)
+    }
+
+    /// Send standard output (`print`, `io.stdout`) to `out`.
+    pub fn set_stdout(&mut self, out: impl std::io::Write + std::fmt::Debug + 'static) {
+        self.vm.rt.out = Box::new(out);
     }
 
     /// Load and run a chunk, dropping its results.
