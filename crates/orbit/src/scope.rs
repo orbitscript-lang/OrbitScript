@@ -1,23 +1,23 @@
 //! [`Scope`]: the stretch of host code in which scoped handles live.
 //!
 //! A scope is a window of the VM's stack, the same window a native function
-//! works in: every handle a scope gives out is a value in that window, so
-//! the collector sees it without any bookkeeping, and the window is cut back
-//! when the scope ends. Handles carry the scope's lifetime, so the borrow
-//! checker keeps them from outliving it.
+//! works in: every handle a scope gives out is a slot in that window, so
+//! the collector sees its value without any bookkeeping, and the window is
+//! cut back when the scope ends. Handles carry the scope's lifetime, so the
+//! borrow checker keeps them from outliving it.
+//!
+//! The typed API is written over the stack API ([`Stack`]): a scope holds
+//! the window's stack and every handle is a slot index in it.
 
 use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
-use orbit_runtime::object::{self as raw, NoMemory};
-use orbit_runtime::vm::{LuaError, Meta, NativeCtx};
-
 use crate::chunk::Chunk;
 use crate::error::{Error, ErrorKind};
-use crate::host::{self, HostFunction};
+use crate::host::HostFunction;
 use crate::pin::{PinKind, Pinned};
-
+use crate::stack::{REGISTRY_INDEX, RIDX_GLOBALS, Raised, Stack, Status, Type};
 use crate::value::{Function, IntoValue, Str, Table, Userdata, Value};
 
 /// Per-isolate state that handles reach without the VM: pinned handles
@@ -38,7 +38,7 @@ pub(crate) struct Shared {
 /// [`Call`]: crate::Call
 /// [`Isolate::scope`]: crate::Isolate::scope
 pub struct Scope<'s> {
-    ctx: RefCell<NativeCtx<'s>>,
+    stack: RefCell<Stack<'s>>,
     pub(crate) shared: Rc<Shared>,
 }
 
@@ -49,124 +49,109 @@ impl fmt::Debug for Scope<'_> {
 }
 
 impl<'s> Scope<'s> {
-    pub(crate) fn new(ctx: NativeCtx<'s>) -> Scope<'s> {
-        let shared = ctx
-            .vm
-            .rt
-            .ext
-            .get::<Rc<Shared>>()
+    pub(crate) fn new(stack: Stack<'s>) -> Scope<'s> {
+        let shared = stack
+            .find_extension::<Rc<Shared>>()
             .cloned()
             .expect("every VM the API reaches belongs to an isolate");
-        Scope {
-            ctx: RefCell::new(ctx),
+        let scope = Scope {
+            stack: RefCell::new(stack),
             shared,
-        }
+        };
+        scope.release_pins(&mut scope.stack());
+        scope
     }
 
     /// The window, borrowed for one operation. Handles never hold the
     /// borrow, so two at once only happens if a borrow escapes (a held
     /// [`Str::as_bytes`]); that panics rather than aliasing.
-    pub(crate) fn ctx(&self) -> RefMut<'_, NativeCtx<'s>> {
-        self.ctx.borrow_mut()
+    pub(crate) fn stack(&self) -> RefMut<'_, Stack<'s>> {
+        self.stack.borrow_mut()
     }
 
-    pub(crate) fn try_ctx(&self) -> Option<RefMut<'_, NativeCtx<'s>>> {
-        self.ctx.try_borrow_mut().ok()
+    pub(crate) fn try_stack(&self) -> Option<RefMut<'_, Stack<'s>>> {
+        self.stack.try_borrow_mut().ok()
     }
 
-    pub(crate) fn ctx_ref(&self) -> Ref<'_, NativeCtx<'s>> {
-        self.ctx.borrow()
+    pub(crate) fn stack_ref(&self) -> Ref<'_, Stack<'s>> {
+        self.stack.borrow()
     }
 
-    /// A handle to `v`, which must already be in the window.
-    pub(crate) fn wrap(&'s self, v: raw::Value) -> Value<'s> {
-        Value::from_raw(self, v)
+    /// The handle to the value in slot `idx`.
+    pub(crate) fn at(&'s self, idx: i32) -> Value<'s> {
+        Value::at(self, idx)
     }
 
-    /// Put `v` in the window and give out a handle to it.
-    pub(crate) fn root(&'s self, v: raw::Value) -> Value<'s> {
-        self.ctx().push(v);
-        self.wrap(v)
+    /// A handle to the value on top of the window.
+    pub(crate) fn top(&'s self) -> Value<'s> {
+        let top = self.stack_ref().top();
+        self.at(top)
     }
 
     /// The window's last `n` values, as handles.
     pub(crate) fn last(&'s self, n: usize) -> Vec<Value<'s>> {
-        let ctx = self.ctx();
-        let len = ctx.len();
-        let vals: Vec<raw::Value> = (len - n..len).map(|i| ctx.arg(i)).collect();
-        drop(ctx);
-        vals.into_iter().map(|v| self.wrap(v)).collect()
+        let top = self.stack_ref().top();
+        (top + 1 - n as i32..=top).map(|i| self.at(i)).collect()
     }
 
-    /// Keep `v` alive in a pin slot of its own.
-    pub(crate) fn pin_raw<K: PinKind>(&self, v: raw::Value) -> Pinned<K> {
-        let mut ctx = self.ctx();
-        self.release_pins(&mut ctx);
-        let slot = ctx.vm.pin_slot(v);
+    /// Keep the value in slot `idx` alive in a pin slot of its own.
+    pub(crate) fn pin_slot<K: PinKind>(&self, idx: i32) -> Pinned<K> {
+        let mut stack = self.stack();
+        self.release_pins(&mut stack);
+        let slot = stack.pin(idx);
         Pinned::new(&self.shared, slot)
     }
 
     /// Free the slots of pinned handles dropped since the last call.
-    pub(crate) fn release_pins(&self, ctx: &mut NativeCtx<'_>) {
+    pub(crate) fn release_pins(&self, stack: &mut Stack<'_>) {
         for slot in self.shared.released.borrow_mut().drain(..) {
-            ctx.vm.free_pin_slot(slot);
+            stack.unpin(slot);
         }
     }
 
     /// An error raised in the VM, as the API reports it, keeping its value.
-    pub(crate) fn lua_error(&self, ctx: &mut NativeCtx<'_>, e: LuaError) -> Error {
-        let message = ctx.vm.error_message(&e);
-        let kind = if message == NoMemory::MESSAGE {
-            ErrorKind::Memory
-        } else if message.ends_with("interrupted!") {
+    pub(crate) fn error_of(&self, stack: &mut Stack<'_>, e: Raised) -> Error {
+        let kind = match stack.status_of(&e) {
+            Status::Memory => ErrorKind::Memory,
+            _ => ErrorKind::Runtime,
+        };
+        let (message, traceback) = stack.take_raised(e);
+        let kind = if kind == ErrorKind::Runtime && message.ends_with("interrupted!") {
             ErrorKind::Interrupted
         } else {
-            ErrorKind::Runtime
+            kind
         };
-        self.release_pins(ctx);
-        let slot = ctx.vm.pin_slot(e.value);
+        self.release_pins(stack);
+        let slot = stack.pin(-1);
+        let _ = stack.set_top(-2);
         Error::new(kind, message)
-            .with_traceback(e.traceback)
+            .with_traceback(traceback)
             .with_value(Pinned::new(&self.shared, slot))
     }
 
     /// An API error, as the VM raises it: its value when it came from a
     /// script, otherwise its message.
-    pub(crate) fn to_lua_error(&self, ctx: &mut NativeCtx<'_>, e: Error) -> LuaError {
+    pub(crate) fn raise(&self, stack: &mut Stack<'_>, e: Error) -> Raised {
         if let Some(p) = e.value()
             && let Some(slot) = p.slot_in(&self.shared)
         {
-            return LuaError::new(ctx.vm.pin_slot_value(slot));
+            stack.push_pinned(slot);
+            return stack.error_from_top();
         }
         if e.kind() == ErrorKind::Memory {
-            return ctx.no_memory();
+            return stack.memory_error();
         }
-        LuaError::new(ctx.new_str(e.message().as_bytes()))
+        stack.push_bytes(e.message().as_bytes());
+        stack.error_from_top()
     }
 
-    /// Finish an operation that may call a metamethod: run the call now and
-    /// take its first result.
-    pub(crate) fn finish_meta(
+    /// Run `op` on the window, turning a raised error into an [`Error`].
+    pub(crate) fn run<R>(
         &self,
-        ctx: &mut NativeCtx<'_>,
-        m: Result<Meta<raw::Value>, LuaError>,
-    ) -> Result<raw::Value, Error> {
-        match m {
-            Ok(Meta::Done(v)) => Ok(v),
-            Ok(Meta::Call { f, nargs }) => {
-                let at = ctx.len() - nargs;
-                ctx.insert(at, f);
-                match ctx.call(nargs, None) {
-                    Ok(n) => {
-                        let v = if n > 0 { ctx.arg(at) } else { raw::Value::Nil };
-                        ctx.truncate(at);
-                        Ok(v)
-                    }
-                    Err(e) => Err(self.lua_error(ctx, e)),
-                }
-            }
-            Err(e) => Err(self.lua_error(ctx, e)),
-        }
+        op: impl FnOnce(&mut Stack<'s>) -> Result<R, Raised>,
+    ) -> Result<R, Error> {
+        let mut stack = self.stack();
+        op(&mut stack).map_err(|e| self.error_of(&mut stack, e))
     }
 
     // ---- public surface ---------------------------------------------------
@@ -174,80 +159,83 @@ impl<'s> Scope<'s> {
     /// The registry: a table only host code reaches, where C modules keep
     /// their own state (Lua's `LUA_REGISTRYINDEX`).
     pub fn registry(&'s self) -> Table<'s> {
-        let r = self.ctx().vm.rt.registry;
-        Table::from_raw(self, self.root(raw::Value::Table(r)).raw())
+        self.stack().push_copy(REGISTRY_INDEX);
+        Table::top(self)
     }
 
     /// Write to the isolate's standard output, the stream `print` and
     /// `io.stdout` share (C's `stdout` when the C API created the state).
     /// `f` must not use the scope: the window is borrowed while it runs.
     pub fn with_stdout<R>(&self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
-        let mut ctx = self.ctx();
-        f(&mut *ctx.vm.rt.out)
+        self.stack().with_stdout(f)
     }
 
     /// `text` as a Lua numeral (decimal or hexadecimal, integer or float,
     /// spaces around allowed), as `tonumber` reads a string; `None` if it
     /// isn't one.
     pub fn parse_number(&'s self, text: &[u8]) -> Option<Value<'s>> {
-        raw::number::str_to_number(text).map(|v| self.wrap(v))
+        let mut stack = self.stack();
+        if stack.push_numeral(text) == 0 {
+            return None;
+        }
+        let v = if stack.is_integer(-1) {
+            Value::Int(stack.to_integer(-1).expect("an integer"))
+        } else {
+            Value::Float(stack.to_number(-1).expect("a number"))
+        };
+        let _ = stack.set_top(-2);
+        Some(v)
     }
 
     /// The global table.
     pub fn globals(&'s self) -> Table<'s> {
-        let g = self.ctx().vm.rt.globals;
-        Table::from_raw(self, self.root(raw::Value::Table(g)).raw())
+        let _ = self.stack().raw_get_index(REGISTRY_INDEX, RIDX_GLOBALS);
+        Table::top(self)
     }
 
     /// A new empty table.
     pub fn create_table(&'s self) -> Table<'s> {
-        let mut ctx = self.ctx();
-        let t = ctx.new_table(raw::Table::new());
-        drop(ctx);
-        Table::from_raw(self, self.root(raw::Value::Table(t)).raw())
+        self.stack().create_table(0, 0);
+        Table::top(self)
     }
 
     /// A string with these bytes (any bytes, not only UTF-8).
     pub fn create_string(&'s self, bytes: impl AsRef<[u8]>) -> Str<'s> {
-        let v = self.ctx().new_str(bytes.as_ref());
-        Str::from_raw(self, self.root(v).raw())
+        self.stack().push_bytes(bytes.as_ref());
+        Str::top(self)
     }
 
     /// A function scripts can call that runs `f` ([`HostFunction`]).
     pub fn create_function(&'s self, f: impl HostFunction) -> Function<'s> {
-        let v = host::function_value(&mut self.ctx(), Rc::new(f));
-        Function::from_raw(self, self.root(v).raw())
+        crate::host::push_function(&mut self.stack(), Rc::new(f));
+        Function::top(self)
     }
 
     /// A userdata holding `value`, with no class: scripts can pass it
     /// around but not call methods on it. See [`Class`](crate::Class) for
     /// userdata with methods.
     pub fn create_userdata<T: 'static>(&'s self, value: T) -> Userdata<'s> {
-        let u = host::new_userdata(&mut self.ctx(), value);
-        Userdata::from_raw(self, self.root(raw::Value::UserData(u)).raw())
+        self.stack().push_userdata(value);
+        Userdata::top(self)
     }
 
     /// Convert a Rust value to a script value.
     pub fn value(&'s self, v: impl IntoValue<'s>) -> Result<Value<'s>, Error> {
-        let r = v.into_raw(self)?;
-        Ok(self.root(r))
+        v.push_onto(self)?;
+        Ok(self.top())
     }
 
     /// Compile (or decode) `chunk` and give its main function, which runs
     /// the chunk when called.
     pub fn load(&'s self, chunk: Chunk<'_>) -> Result<Function<'s>, Error> {
-        let f = crate::chunk::load(self, &chunk, None)?;
-        Ok(Function::from_raw(self, self.root(f).raw()))
+        self.load_with(&chunk, 0)
     }
 
     /// Link a chunk [`Compiler`](crate::Compiler) compiled, perhaps on
     /// another thread, and give its main function.
     pub fn load_compiled(&'s self, chunk: &crate::UnlinkedChunk) -> Function<'s> {
-        let mut ctx = self.ctx();
-        let env = raw::Value::Table(ctx.vm.rt.globals);
-        let f = ctx.link(chunk, env);
-        drop(ctx);
-        Function::from_raw(self, self.root(f).raw())
+        self.stack().push_compiled(chunk);
+        Function::top(self)
     }
 
     /// [`Scope::load`], with `env` as the chunk's `_ENV` instead of the
@@ -257,8 +245,49 @@ impl<'s> Scope<'s> {
         chunk: Chunk<'_>,
         env: impl IntoValue<'s>,
     ) -> Result<Function<'s>, Error> {
-        let env = self.value(env)?.raw();
-        let f = crate::chunk::load(self, &chunk, Some(env))?;
-        Ok(Function::from_raw(self, self.root(f).raw()))
+        env.push_onto(self)?;
+        let env = self.stack_ref().top();
+        self.load_with(&chunk, env)
+    }
+
+    fn load_with(&'s self, chunk: &Chunk<'_>, env: i32) -> Result<Function<'s>, Error> {
+        let mut stack = self.stack();
+        match stack.load_chunk(chunk, env) {
+            Status::Ok => {
+                drop(stack);
+                Ok(Function::top(self))
+            }
+            _ => {
+                let message =
+                    String::from_utf8_lossy(stack.string_at(-1).unwrap_or_default()).into_owned();
+                let _ = stack.set_top(-2);
+                Err(Error::syntax(message))
+            }
+        }
+    }
+
+    /// [`Isolate::before_exit`](crate::Isolate::before_exit), from inside
+    /// the isolate (a library that keeps buffers registers its flush when
+    /// it opens).
+    pub fn before_exit(&self, hook: impl Fn() + 'static) {
+        self.stack().before_exit(hook);
+    }
+
+    /// Make `module` what `require(name)` returns, as if a searcher had
+    /// loaded it (`package.loaded[name] = module`).
+    pub fn register_module(&'s self, name: &str, module: Table<'s>) {
+        let mut stack = self.stack();
+        let r: Result<(), Raised> = (|| {
+            if stack.raw_get_field(REGISTRY_INDEX, b"_LOADED")? != Type::Table {
+                stack.set_top(-2)?;
+                stack.create_table(0, 1);
+                stack.push_copy(-1);
+                stack.raw_set_field(REGISTRY_INDEX, b"_LOADED")?;
+            }
+            stack.push_copy(module.slot());
+            stack.raw_set_field(-2, name.as_bytes())?;
+            stack.set_top(-2)
+        })();
+        debug_assert!(r.is_ok(), "registering a module raised {r:?}");
     }
 }

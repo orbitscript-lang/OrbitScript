@@ -3,12 +3,10 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use orbit_runtime::object::{self as raw, Gc};
-use orbit_runtime::vm::{CallOutcome, LuaError, NativeCtx, NativeReturn};
-
 use crate::error::Error;
 use crate::scope::Scope;
-use crate::value::{FromValue, FromValueError, Function, IntoValues, Value};
+use crate::stack::{Return, Stack, StackResult};
+use crate::value::{FromValue, FromValueError, Function, IntoValues, TailCalled, Value};
 
 /// A function scripts can call. Closures implement it:
 ///
@@ -43,14 +41,12 @@ pub struct Ret(RetKind);
 
 #[derive(Debug, Clone, Copy)]
 enum RetKind {
-    /// Where the results start in the window, and how many there are.
-    Values { at: usize, n: usize },
-    /// Call `f` with the `nargs` values from `at`; its results are ours.
-    TailCall {
-        f: raw::Value,
-        at: usize,
-        nargs: usize,
-    },
+    /// Where the results start in the window (the first one's slot), and
+    /// how many there are.
+    Values { at: i32, n: usize },
+    /// Call the function in slot `f` with the `nargs` values from slot
+    /// `at`; its results are ours.
+    TailCall { f: i32, at: i32, nargs: usize },
     /// End the process (`os.exit`).
     Exit { code: i32, close: bool },
 }
@@ -88,12 +84,11 @@ impl<'s> Call<'s> {
     /// Argument `i` (0-based), or nil past the last.
     pub fn arg(&'s self, i: usize) -> Value<'s> {
         // Arguments are the first slots of the window, so already rooted.
-        let v = if i < self.nargs {
-            self.ctx().arg(i)
+        if i < self.nargs {
+            self.at(i as i32 + 1)
         } else {
-            raw::Value::Nil
-        };
-        self.wrap(v)
+            Value::Nil
+        }
     }
 
     /// All the arguments.
@@ -104,13 +99,9 @@ impl<'s> Call<'s> {
     /// Argument `i` as a `T`, or Lua's argument error: `bad argument #1 to
     /// 'f' (number expected, got string)`, positioned at the caller.
     pub fn check<T: FromValue<'s>>(&'s self, i: usize) -> Result<T, Error> {
-        T::from_value(self.arg(i)).map_err(|e| {
-            let mut ctx = self.ctx();
-            let le = match e {
-                FromValueError::Expected(want) => ctx.type_error(i, want),
-                FromValueError::Invalid(why) => ctx.arg_error(i, why),
-            };
-            self.lua_error(&mut ctx, le)
+        T::from_value(self.arg(i)).map_err(|e| match e {
+            FromValueError::Expected(want) => self.type_error(i, want),
+            FromValueError::Invalid(why) => self.arg_error(i, why),
         })
     }
 
@@ -126,14 +117,14 @@ impl<'s> Call<'s> {
     /// A runtime error with `message`, positioned at the caller as Lua's
     /// `error` does at level 1 (`chunk:line: message`).
     pub fn error(&self, message: impl AsRef<str>) -> Error {
-        let mut ctx = self.ctx();
-        let e = ctx.error(message);
-        self.lua_error(&mut ctx, e)
+        let mut stack = self.stack();
+        let e = stack.error(message);
+        self.error_of(&mut stack, e)
     }
 
     /// Return `values` from the host function.
     pub fn ret(&'s self, values: impl IntoValues<'s>) -> Result<Ret, Error> {
-        let at = self.ctx().len();
+        let at = self.stack_ref().top() + 1;
         let n = values.push_into(self)?;
         Ok(Ret(RetKind::Values { at, n }))
     }
@@ -142,10 +133,10 @@ impl<'s> Call<'s> {
     /// this function's. Unlike [`Function::call`](crate::Function::call),
     /// code `f` runs may yield across it, as across `dofile`.
     pub fn tail_call(&'s self, f: Function<'s>, args: impl IntoValues<'s>) -> Result<Ret, Error> {
-        let at = self.ctx().len();
+        let at = self.stack_ref().top() + 1;
         let nargs = args.push_into(self)?;
         Ok(Ret(RetKind::TailCall {
-            f: f.raw(),
+            f: f.slot(),
             at,
             nargs,
         }))
@@ -163,113 +154,77 @@ impl<'s> Call<'s> {
     /// Lua's argument error: `bad argument #2 to 'f' (message)`, positioned
     /// at the caller. `i` is 0-based, like [`Call::arg`].
     pub fn arg_error(&self, i: usize, message: impl AsRef<str>) -> Error {
-        let mut ctx = self.ctx();
-        let e = ctx.arg_error(i, message.as_ref());
-        self.lua_error(&mut ctx, e)
+        let mut stack = self.stack();
+        let e = stack.arg_error(i as i32 + 1, message.as_ref());
+        self.error_of(&mut stack, e)
     }
 
     /// Lua's type error for argument `i`: `bad argument #1 to 'f' (FILE*
     /// expected, got nil)`.
     pub fn type_error(&self, i: usize, expected: &str) -> Error {
-        let mut ctx = self.ctx();
-        let e = ctx.type_error(i, expected);
-        self.lua_error(&mut ctx, e)
+        let mut stack = self.stack();
+        let e = stack.type_error(i as i32 + 1, expected);
+        self.error_of(&mut stack, e)
     }
 
     /// `stack traceback:` and the levels from `level` down (1 is the
     /// function that called this one).
     pub fn traceback(&self, level: usize) -> String {
-        self.ctx().traceback(level)
+        let mut stack = self.stack();
+        stack.push_traceback(None, level as i32);
+        let tb = String::from_utf8_lossy(stack.string_at(-1).unwrap_or_default()).into_owned();
+        let _ = stack.set_top(-2);
+        tb
     }
 }
 
-/// The name host functions are registered under. Messages name a host
-/// function by its call site, or by where a loaded module keeps it.
-const HOST_FUNCTION: &str = "?";
-
-/// The host function a [`HostFunction`] value holds, in a hidden upvalue
-/// scripts can't reach.
-struct HostBox(Rc<dyn HostFunction>);
-
-/// A function value that runs `f` (not yet rooted).
-pub(crate) fn function_value(ctx: &mut NativeCtx<'_>, f: Rc<dyn HostFunction>) -> raw::Value {
-    let u = raw::Value::UserData(ctx.new_userdata(HostBox(f)));
-    let at = ctx.len();
-    ctx.push(u);
-    let v = ctx.new_closure_hidden(HOST_FUNCTION, trampoline, &[], &[u]);
-    ctx.truncate(at);
-    v
+/// Push a function that runs `f`.
+pub(crate) fn push_function(stack: &mut Stack<'_>, f: Rc<dyn HostFunction>) {
+    stack.push_function(move |s| run(s, &*f));
 }
 
-/// A userdata holding `value` (not yet rooted).
-pub(crate) fn new_userdata<T: 'static>(ctx: &mut NativeCtx<'_>, value: T) -> Gc<raw::UserData> {
-    ctx.new_userdata(crate::class::Slot(Some(value)))
-}
-
-/// The native behind every host function.
-fn trampoline(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let raw::Value::UserData(u) = ctx.hidden_upvalue(0) else {
-        unreachable!("a host function's hidden upvalue is its function")
-    };
-    let f = ctx
-        .userdata_ref::<HostBox>(u)
-        .expect("a host function's hidden upvalue holds a HostBox")
-        .0
-        .clone();
-    let nargs = ctx.nargs();
+/// Run host function `f` in a native's window.
+fn run(s: &mut Stack<'_>, f: &dyn HostFunction) -> StackResult<Return> {
+    let nargs = s.top() as usize;
     let call = Call {
-        scope: Scope::new(ctx.reborrow()),
+        scope: Scope::new(s.reborrow()),
         nargs,
     };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&call)))
         .unwrap_or_else(|p| Err(Error::runtime(panic_message(&*p))));
-    // The call stays borrowed for the window's whole lifetime, so the rest
-    // goes through its window too.
     let scope: &Scope<'_> = &call;
-    let mut ctx = scope.ctx();
+    let mut stack = scope.stack();
     match r {
         Ok(Ret(RetKind::Values { at, n })) => {
-            move_to_end(&mut ctx, at, n)?;
-            Ok(NativeReturn::Return(n))
+            move_to_end(&mut stack, at, n)?;
+            Ok(Return::values(n))
         }
         Ok(Ret(RetKind::TailCall { f, at, nargs })) => {
-            move_to_end(&mut ctx, at, nargs)?;
-            Ok(NativeReturn::CallThenYieldable {
-                f,
-                nargs,
-                k: tail_called,
-                protected: false,
-            })
+            // The function, then its arguments, at the end.
+            stack.push_copy(f);
+            for i in at..at + nargs as i32 {
+                stack.push_copy(i);
+            }
+            Ok(Return::call_then::<TailCalled>(nargs, false))
         }
-        Ok(Ret(RetKind::Exit { code, close })) => {
-            crate::isolate::exit_process(&mut ctx, code, close)
-        }
-        Err(e) => Err(scope.to_lua_error(&mut ctx, e)),
+        Ok(Ret(RetKind::Exit { code, close })) => Ok(Return::exit(code, close)),
+        Err(e) => Err(scope.raise(&mut stack, e)),
     }
 }
 
-/// Make the `n` values from `at` the last of the window.
-fn move_to_end(ctx: &mut NativeCtx<'_>, at: usize, n: usize) -> Result<(), LuaError> {
-    let len = ctx.len();
-    if at + n > len {
-        return Err(ctx.error("host function returned results it no longer has"));
+/// Make the `n` values from slot `at` the last of the window.
+fn move_to_end(stack: &mut Stack<'_>, at: i32, n: usize) -> StackResult<()> {
+    let top = stack.top();
+    if at + n as i32 - 1 > top {
+        return Err(stack.error("host function returned results it no longer has"));
     }
-    // Results made before other values: move them to the end.
-    if at + n != len {
-        for i in at..at + n {
-            let v = ctx.arg(i);
-            ctx.push(v);
+    // Results made before other values: copy them to the end.
+    if at + n as i32 - 1 != top {
+        for i in at..at + n as i32 {
+            stack.push_copy(i);
         }
     }
     Ok(())
-}
-
-/// The end of a [`Call::tail_call`]: the call's results are ours.
-fn tail_called(_: &mut NativeCtx<'_>, outcome: CallOutcome) -> Result<NativeReturn, LuaError> {
-    match outcome {
-        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n)),
-        CallOutcome::Err(e) => Err(LuaError::new(e)),
-    }
 }
 
 fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
@@ -279,31 +234,4 @@ fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
         .or_else(|| p.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("panic");
     format!("host function panicked: {what}")
-}
-
-/// The traceback [`traceback_handler`] took, waiting for the caller.
-#[derive(Default)]
-struct PendingTraceback(Option<String>);
-
-/// A message handler that notes a traceback and leaves the error as it is
-/// ([`Function::call_traced`](crate::Function::call_traced)).
-pub(crate) fn traceback_handler(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let tb = ctx.traceback(1);
-    ctx.vm
-        .rt
-        .ext
-        .get_or_insert_with(PendingTraceback::default)
-        .0 = Some(tb);
-    let e = ctx.arg(0);
-    ctx.ret1(e)
-}
-
-/// The traceback the handler noted, if any.
-pub(crate) fn take_traceback(ctx: &mut NativeCtx<'_>) -> Option<String> {
-    ctx.vm
-        .rt
-        .ext
-        .get_or_insert_with(PendingTraceback::default)
-        .0
-        .take()
 }

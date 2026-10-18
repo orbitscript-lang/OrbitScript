@@ -9,9 +9,11 @@
 //! window reads as "none"; writing to one, or a wrong type where an
 //! operation needs a table, is an error, never undefined behaviour.
 //!
-//! The typed handles stay the API for Rust hosts. This layer is for
-//! bindings that need Lua's exact semantics, the Lua C API above all
-//! (`orbit-capi`), and is what crosses the `liborbit` boundary.
+//! The typed handles stay the API for Rust hosts, and are written over
+//! this layer: a [`Scope`] holds a stack and each handle is a slot in it.
+//! This layer is also for bindings that need Lua's exact semantics, the
+//! Lua C API above all (`orbit-capi`), and is what crosses the `liborbit`
+//! boundary.
 //!
 //! Natives written against it implement [`Native`]; one that waits for a
 //! call or a yield continues in a [`Continuation`]. Both are types rather
@@ -75,6 +77,21 @@ pub enum Type {
 }
 
 impl Type {
+    /// The name `type` gives (`"no value"` for [`Type::None`]).
+    pub fn name(self) -> &'static str {
+        match self {
+            Type::None => "no value",
+            Type::Nil => "nil",
+            Type::Boolean => "boolean",
+            Type::LightUserdata | Type::Userdata => "userdata",
+            Type::Number => "number",
+            Type::String => "string",
+            Type::Table => "table",
+            Type::Function => "function",
+            Type::Thread => "thread",
+        }
+    }
+
     fn of(v: RawValue) -> Type {
         match v {
             RawValue::Nil => Type::Nil,
@@ -261,6 +278,10 @@ enum Ret {
         protected: bool,
         k: vm::Continuation,
     },
+    Exit {
+        code: i32,
+        close: bool,
+    },
 }
 
 impl Return {
@@ -289,6 +310,43 @@ impl Return {
             protected,
             k: continue_in::<K>,
         })
+    }
+
+    /// End the process with exit status `code`, as `os.exit` does: first,
+    /// when `close`, closing the isolate (the main thread's variables still
+    /// to close, then every pending finalizer); then running the
+    /// [`Stack::before_exit`] hooks and flushing standard output.
+    pub fn exit(code: i32, close: bool) -> Return {
+        Return(Ret::Exit { code, close })
+    }
+}
+
+/// A function made from a Rust closure ([`Stack::push_function`]).
+type FnBox = std::rc::Rc<dyn for<'a, 'b> Fn(&'a mut Stack<'b>) -> StackResult<Return>>;
+
+/// What a function's hidden upvalue holds: its closure.
+struct FunctionBox(FnBox);
+
+/// The name functions made from closures are registered under. Messages
+/// name them by their call site, or by where a loaded module keeps them.
+const CLOSURE_NAME: &str = "?";
+
+/// The runtime native behind every [`Stack::push_function`] function.
+fn function_entry(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
+    let RawValue::UserData(u) = ctx.hidden_upvalue(0) else {
+        unreachable!("a function's hidden upvalue is its closure")
+    };
+    let f = ctx
+        .userdata_ref::<FunctionBox>(u)
+        .expect("a function's hidden upvalue holds its closure")
+        .0
+        .clone();
+    let mut s = Stack {
+        ctx: ctx.reborrow(),
+    };
+    match f(&mut s) {
+        Ok(r) => s.finish(r),
+        Err(Raised(e)) => Err(e),
     }
 }
 
@@ -444,6 +502,14 @@ impl<'s> Stack<'s> {
         Stack { ctx }
     }
 
+    /// The same window, borrowed for a shorter time: for code that keeps a
+    /// stack in a value of its own while the native runs.
+    pub fn reborrow(&mut self) -> Stack<'_> {
+        Stack {
+            ctx: self.ctx.reborrow(),
+        }
+    }
+
     /// Turn what a native ended with into the runtime's terms.
     #[inline(always)]
     fn finish(&mut self, r: Return) -> Result<NativeReturn, LuaError> {
@@ -489,6 +555,7 @@ impl<'s> Stack<'s> {
                     protected,
                 }
             }
+            Ret::Exit { code, close } => return crate::isolate::exit_process(c, code, close),
         })
     }
 
@@ -897,6 +964,24 @@ impl<'s> Stack<'s> {
         }
     }
 
+    /// The host value of type `T` in the userdata at `idx`, mutably.
+    pub fn userdata_mut<T: Any>(&mut self, idx: i32) -> Option<&mut T> {
+        self.userdata_cell::<T>(idx)?.as_mut()
+    }
+
+    /// The cell that holds the host value of type `T` in the userdata at
+    /// `idx`, which reads `None` while the value is taken out (a running
+    /// method has it); `None` if the userdata holds no `T`.
+    pub fn userdata_cell<T: Any>(&mut self, idx: i32) -> Option<&mut Option<T>> {
+        match self.get(idx) {
+            RawValue::UserData(u) => self
+                .ctx
+                .userdata_mut::<crate::class::Slot<T>>(u)
+                .map(|s| &mut s.0),
+            _ => None,
+        }
+    }
+
     /// Argument `arg` (1-based) as the host value of type `T`, or Lua's
     /// type error naming `expected`.
     pub fn check_userdata<T: Any>(&mut self, arg: i32, expected: &str) -> StackResult<&T> {
@@ -913,6 +998,12 @@ impl<'s> Stack<'s> {
             RawValue::UserData(u) => !self.ctx.vm.heap.get(u).is::<Block>(),
             _ => false,
         }
+    }
+
+    /// The identity of a table, function, thread or userdata, as `%p`
+    /// shows it; `None` for other values. The same while the object lives.
+    pub fn identity(&self, idx: i32) -> Option<u64> {
+        self.get(idx).identity()
     }
 
     /// A value's identity as a number (`lua_topointer`), for hashing and
@@ -1057,7 +1148,7 @@ impl<'s> Stack<'s> {
     /// Push a userdata holding host value `value`, which
     /// [`Stack::userdata`] reads back.
     pub fn push_userdata<T: Any>(&mut self, value: T) {
-        let u = crate::host::new_userdata(&mut self.ctx, value);
+        let u = self.ctx.new_userdata(crate::class::Slot(Some(value)));
         self.ctx.push(RawValue::UserData(u));
     }
 
@@ -1065,6 +1156,24 @@ impl<'s> Stack<'s> {
     /// outside the heap, raising Lua's memory error past the heap limit.
     pub fn reserve_memory(&mut self, bytes: usize) -> StackResult<()> {
         Ok(self.ctx.reserve(bytes)?)
+    }
+
+    /// Push a function that runs `f`, which reads its arguments and
+    /// returns as a [`Native`] does. The closure lives as long as the
+    /// function value.
+    pub fn push_function(
+        &mut self,
+        f: impl for<'a, 'b> Fn(&'a mut Stack<'b>) -> StackResult<Return> + 'static,
+    ) {
+        let f: FnBox = std::rc::Rc::new(f);
+        let u = RawValue::UserData(self.ctx.new_userdata(FunctionBox(f)));
+        let at = self.ctx.len();
+        self.ctx.push(u);
+        let v = self
+            .ctx
+            .new_closure_hidden(CLOSURE_NAME, function_entry, &[], &[u]);
+        self.ctx.truncate(at);
+        self.ctx.push(v);
     }
 
     /// Push native `N` as a function value.
@@ -1438,6 +1547,19 @@ impl<'s> Stack<'s> {
         Ok(())
     }
 
+    /// [`Stack::call`] with a message handler at `handler`, which runs on
+    /// an error with the error value, on top of the frames that raised it,
+    /// and gives the error's value.
+    pub fn call_handled(&mut self, nargs: i32, nresults: i32, handler: i32) -> StackResult<()> {
+        let nargs = self.check_call(nargs)?;
+        let Slot::Stack(h) = self.slot(handler) else {
+            return Err(self.error("invalid message handler index"));
+        };
+        let n = self.ctx.call(nargs, Some(h))?;
+        self.adjust_results(n, nresults);
+        Ok(())
+    }
+
     /// [`Stack::call`], catching an error: the error value replaces the
     /// function and arguments. `handler` is the stack index of a message
     /// handler, or 0 for none.
@@ -1482,6 +1604,19 @@ impl<'s> Stack<'s> {
         self.ctx.push(e.0.value);
     }
 
+    /// Push an error's value, and give its message as the standalone
+    /// interpreter prints it and the traceback it carries, if any.
+    pub fn take_raised(&mut self, e: Raised) -> (String, Option<String>) {
+        let message = self.ctx.vm.error_message(&e.0);
+        self.ctx.push(e.0.value);
+        (message, e.0.traceback)
+    }
+
+    /// Lua's `not enough memory` error, to return.
+    pub fn memory_error(&mut self) -> Raised {
+        Raised(self.ctx.no_memory())
+    }
+
     /// Compile (or decode) `bytes` as a chunk named `name`, with the global
     /// table as its `_ENV`, and push its function, or the message.
     /// `mode` is `load`'s: `b"t"`, `b"b"` or `b"bt"`.
@@ -1502,6 +1637,40 @@ impl<'s> Stack<'s> {
                 status
             }
         }
+    }
+
+    /// Compile (or decode) `chunk` and push its function, with the value at
+    /// `env` as its `_ENV` (0: the global table); or push the message and
+    /// give [`Status::Syntax`] (or [`Status::Memory`]).
+    pub fn load_chunk(&mut self, chunk: &crate::Chunk<'_>, env: i32) -> Status {
+        let env = if env == 0 {
+            RawValue::Table(self.ctx.vm.rt.globals)
+        } else {
+            self.get(env)
+        };
+        match crate::chunk::load(&mut self.ctx, chunk, env) {
+            Ok(f) => {
+                self.ctx.push(f);
+                Status::Ok
+            }
+            Err(msg) => {
+                let status = if msg.contains(NoMemory::MESSAGE) {
+                    Status::Memory
+                } else {
+                    Status::Syntax
+                };
+                self.push_str_value(msg.as_bytes());
+                status
+            }
+        }
+    }
+
+    /// Push the main function of a chunk [`Compiler`](crate::Compiler)
+    /// compiled, linked here with the global table as its `_ENV`.
+    pub fn push_compiled(&mut self, chunk: &crate::UnlinkedChunk) {
+        let env = RawValue::Table(self.ctx.vm.rt.globals);
+        let f = self.ctx.link(chunk, env);
+        self.ctx.push(f);
     }
 
     // ---- errors --------------------------------------------------------------------
@@ -1610,10 +1779,11 @@ impl<'s> Stack<'s> {
             self.ctx.push(v);
             let n = self.ctx.call(1, None)?;
             self.adjust_results(n, 1);
-            return match self.top_value() {
-                RawValue::Str(st) => Ok(self.ctx.bytes(st)),
-                _ => Err(self.error("'__tostring' must return a string")),
-            };
+            // A number will do, as for Lua's `luaL_tolstring`.
+            if !self.is_string(-1) {
+                return Err(self.error("'__tostring' must return a string"));
+            }
+            return Ok(self.to_str(-1)?.expect("a string or a number"));
         }
         let mut out = Vec::new();
         self.ctx.display(v, &mut out);
@@ -1742,11 +1912,10 @@ impl<'s> Stack<'s> {
     /// builds on it (`orbit-std`'s libraries). What `f` made is dropped
     /// after.
     pub fn with_scope<R>(&mut self, f: impl for<'a> FnOnce(&'a Scope<'a>) -> R) -> R {
-        let start = self.ctx.len();
-        let scope = Scope::new(self.ctx.reborrow());
-        scope.release_pins(&mut scope.ctx());
+        let start = self.top();
+        let scope = Scope::new(self.reborrow());
         let r = f(&scope);
-        scope.ctx().truncate(start);
+        let _ = scope.stack().set_top(start);
         r
     }
 
@@ -1755,16 +1924,55 @@ impl<'s> Stack<'s> {
         &mut self,
         f: impl for<'a> FnOnce(&'a Scope<'a>) -> Option<Value<'a>>,
     ) -> bool {
-        let v = self.with_scope(|s| f(s).map(|v| v.raw()));
-        // Unrooted only between the scope's end and this push, with no
-        // allocation in between.
-        match v {
+        let start = self.top();
+        let scope = Scope::new(self.reborrow());
+        let v = f(&scope);
+        let mut stack = scope.stack();
+        let end = match v {
             Some(v) => {
-                self.ctx.push(v);
-                true
+                v.push(&mut stack);
+                let r = stack.copy(-1, start + 1);
+                debug_assert!(r.is_ok(), "the slot after the start exists");
+                start + 1
             }
-            None => false,
-        }
+            None => start,
+        };
+        let _ = stack.set_top(end);
+        v.is_some()
+    }
+
+    /// Keep the value at `idx` alive in a pin slot of its own until
+    /// [`Stack::unpin`], and give the slot: for values a host keeps
+    /// between calls.
+    pub fn pin(&mut self, idx: i32) -> u32 {
+        let v = self.get(idx);
+        self.ctx.vm.pin_slot(v)
+    }
+
+    /// Push the value in pin slot `slot`.
+    pub fn push_pinned(&mut self, slot: u32) {
+        let v = self.ctx.vm.pin_slot_value(slot);
+        self.ctx.push(v);
+    }
+
+    /// Free pin slot `slot`.
+    pub fn unpin(&mut self, slot: u32) {
+        self.ctx.vm.free_pin_slot(slot);
+    }
+
+    /// Write to the isolate's standard output, the stream `print` and
+    /// `io.stdout` share. `f` must not reach the isolate.
+    pub fn with_stdout<R>(&mut self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
+        f(&mut *self.ctx.vm.rt.out)
+    }
+
+    /// Run `hook` when a script ends the process ([`Return::exit`],
+    /// `os.exit`), after the isolate closes (if it does) and before
+    /// standard output is flushed.
+    pub fn before_exit(&mut self, hook: impl Fn() + 'static) {
+        crate::isolate::exit_hooks(self.ctx.vm)
+            .0
+            .push(Box::new(hook));
     }
 
     /// Let the collector run if it is due, as between statements: for a
@@ -1952,6 +2160,35 @@ impl<'s> Stack<'s> {
         };
         self.on_thread(t, base, |s| vals.iter().for_each(|&v| s.ctx.push(v)));
         Ok(out)
+    }
+
+    /// Push a coroutine that runs the function at `f` when first resumed.
+    pub fn push_coroutine(&mut self, f: i32) {
+        let f = self.get(f);
+        let t = self.ctx.new_thread(f);
+        self.ctx.push(RawValue::Thread(t));
+    }
+
+    /// Resume the coroutine at `idx` with the window's top `nargs` values
+    /// (popped) until it yields, returns or fails, and push what it yielded
+    /// or returned: whether it returned, and how many values. Nothing can
+    /// yield across this call.
+    pub fn resume_here(&mut self, idx: i32, nargs: usize) -> StackResult<(bool, usize)> {
+        let RawValue::Thread(t) = self.get(idx) else {
+            return Err(self.error("thread expected"));
+        };
+        self.need(nargs)?;
+        let at = self.ctx.len() - nargs;
+        let args: Vec<RawValue> = (at..at + nargs).map(|i| self.ctx.arg(i)).collect();
+        let r = self.ctx.resume_nested(t, &args);
+        self.ctx.truncate(at);
+        match r {
+            Ok((returned, vals)) => {
+                vals.iter().for_each(|&v| self.ctx.push(v));
+                Ok((returned, vals.len()))
+            }
+            Err(v) => Err(Raised(LuaError::new(v))),
+        }
     }
 
     /// Close `t` (suspended or dead), as `lua_closethread` does: its
