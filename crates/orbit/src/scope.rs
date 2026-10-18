@@ -51,8 +51,7 @@ impl fmt::Debug for Scope<'_> {
 impl<'s> Scope<'s> {
     pub(crate) fn new(stack: Stack<'s>) -> Scope<'s> {
         let shared = stack
-            .find_extension::<Rc<Shared>>()
-            .cloned()
+            .find_extension::<Rc<Shared>, _>(Rc::clone)
             .expect("every VM the API reaches belongs to an isolate");
         let scope = Scope {
             stack: RefCell::new(stack),

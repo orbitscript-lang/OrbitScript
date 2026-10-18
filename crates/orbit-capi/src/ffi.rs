@@ -181,7 +181,7 @@ pub(crate) fn install(s: &mut Stack<'_>) {
     let main = s.main_thread();
     let mut ctl = s.control();
     let wake = ctl.interrupt_flag().cast::<u8>();
-    if !ctl.extension::<BridgeHandle>().0.is_null() {
+    if !ctl.extension(|h: &mut BridgeHandle| h.0.is_null()) {
         return;
     }
     let b = Box::into_raw(Box::new(Bridge {
@@ -215,7 +215,7 @@ pub(crate) fn install(s: &mut Stack<'_>) {
         (*b).l.set(l);
         orbit_capi_set_wake(l, wake);
     }
-    ctl.extension::<BridgeHandle>().0 = b;
+    ctl.extension(|h: &mut BridgeHandle| h.0 = b);
     ctl.set_interrupt_handler::<OnInterrupt>();
     // Modules read the main thread from the registry, as in Lua.
     ctl.publish_main_thread();
@@ -223,7 +223,7 @@ pub(crate) fn install(s: &mut Stack<'_>) {
 
 /// The isolate's bridge, if the C API is installed.
 fn bridge<'a>(ctl: &mut Control<'_>) -> Option<&'a Bridge> {
-    let h = ctl.extension::<BridgeHandle>().0;
+    let h = ctl.extension(|h: &mut BridgeHandle| h.0);
     // SAFETY: the handle keeps the bridge alive as long as the isolate.
     (!h.is_null()).then(|| unsafe { &*h })
 }

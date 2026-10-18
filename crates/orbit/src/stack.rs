@@ -952,9 +952,42 @@ impl<'s> Stack<'s> {
         }
     }
 
-    /// The host value of type `T` in the userdata at `idx`
-    /// ([`Stack::push_userdata`]); `None` for any other value.
-    pub fn userdata<T: Any>(&self, idx: i32) -> Option<&T> {
+    /// Run `f` on the cell holding the host value of type `T` in the
+    /// userdata at `idx` ([`Stack::push_userdata`]). The cell reads `None`
+    /// while the value is taken out (a running method has it). `None`,
+    /// without calling `f`, if the value there holds no `T`.
+    pub fn with_userdata<T: Any, R>(
+        &mut self,
+        idx: i32,
+        f: impl FnOnce(&mut Option<T>) -> R,
+    ) -> Option<R> {
+        match self.get(idx) {
+            RawValue::UserData(u) => self
+                .ctx
+                .userdata_mut::<crate::class::Slot<T>>(u)
+                .map(|s| f(&mut s.0)),
+            _ => None,
+        }
+    }
+
+    /// Run `f` on argument `arg` (1-based) as the host value of type `T`,
+    /// or raise Lua's type error naming `expected` (also while the value is
+    /// taken out).
+    pub fn check_userdata<T: Any, R>(
+        &mut self,
+        arg: i32,
+        expected: &str,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> StackResult<R> {
+        match self.with_userdata::<T, _>(arg, |cell| cell.as_mut().map(f)) {
+            Some(Some(r)) => Ok(r),
+            _ => Err(self.type_error(arg, expected)),
+        }
+    }
+
+    /// The host value of type `T` in the userdata at `idx`, in place: for
+    /// the typed handles' borrows.
+    pub(crate) fn userdata_in_place<T: Any>(&self, idx: i32) -> Option<&T> {
         match self.get(idx) {
             RawValue::UserData(u) => self
                 .ctx
@@ -964,31 +997,15 @@ impl<'s> Stack<'s> {
         }
     }
 
-    /// The host value of type `T` in the userdata at `idx`, mutably.
-    pub fn userdata_mut<T: Any>(&mut self, idx: i32) -> Option<&mut T> {
-        self.userdata_cell::<T>(idx)?.as_mut()
-    }
-
-    /// The cell that holds the host value of type `T` in the userdata at
-    /// `idx`, which reads `None` while the value is taken out (a running
-    /// method has it); `None` if the userdata holds no `T`.
-    pub fn userdata_cell<T: Any>(&mut self, idx: i32) -> Option<&mut Option<T>> {
+    /// [`Stack::userdata_in_place`], mutably.
+    pub(crate) fn userdata_in_place_mut<T: Any>(&mut self, idx: i32) -> Option<&mut T> {
         match self.get(idx) {
             RawValue::UserData(u) => self
                 .ctx
                 .userdata_mut::<crate::class::Slot<T>>(u)
-                .map(|s| &mut s.0),
+                .and_then(|s| s.0.as_mut()),
             _ => None,
         }
-    }
-
-    /// Argument `arg` (1-based) as the host value of type `T`, or Lua's
-    /// type error naming `expected`.
-    pub fn check_userdata<T: Any>(&mut self, arg: i32, expected: &str) -> StackResult<&T> {
-        if self.userdata::<T>(arg).is_none() {
-            return Err(self.type_error(arg, expected));
-        }
-        Ok(self.userdata::<T>(arg).expect("checked above"))
     }
 
     /// Whether `idx` is a userdata holding a host value rather than a
@@ -1981,17 +1998,20 @@ impl<'s> Stack<'s> {
         self.ctx.vm.host_safepoint();
     }
 
-    /// The isolate's extension value of type `T`, made with `Default` on
-    /// first use: per-isolate state for a binding.
-    pub fn extension<T: Any + Default>(&mut self) -> &mut T {
-        self.ctx.vm.rt.ext.get_or_insert_with(T::default)
+    /// Run `f` on the isolate's extension value of type `T`, made with
+    /// `Default` on first use: per-isolate state for a binding. `f` can't
+    /// reach the stack.
+    #[inline]
+    pub fn extension<T: Any + Default, R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
+        f(self.ctx.vm.rt.ext.get_or_insert_with(T::default))
     }
 
-    /// The isolate's extension value of type `T` if one was made, without
-    /// making one: the cheaper lookup for a native's hot path.
+    /// Run `f` on the isolate's extension value of type `T` if one was
+    /// made, without making one: the cheaper lookup for a native's hot
+    /// path.
     #[inline]
-    pub fn find_extension<T: Any>(&self) -> Option<&T> {
-        self.ctx.vm.rt.ext.get::<T>()
+    pub fn find_extension<T: Any, R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        self.ctx.vm.rt.ext.get::<T>().map(f)
     }
 
     /// What reaches the isolate itself: hooks, the interrupt handler.
@@ -2374,8 +2394,8 @@ impl<'a> Control<'a> {
     }
 
     /// See [`Stack::extension`].
-    pub fn extension<T: Any + Default>(&mut self) -> &mut T {
-        self.vm.rt.ext.get_or_insert_with(T::default)
+    pub fn extension<T: Any + Default, R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
+        f(self.vm.rt.ext.get_or_insert_with(T::default))
     }
 
     /// The interrupt flag, for code that can only store to memory (a C

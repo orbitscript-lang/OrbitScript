@@ -563,7 +563,7 @@ impl<'s> Function<'s> {
             }
             Err(e) => {
                 let tb = match handler {
-                    Handler::Traceback => stack.extension::<PendingTraceback>().0.take(),
+                    Handler::Traceback => stack.extension(|p: &mut PendingTraceback| p.0.take()),
                     _ => None,
                 };
                 let err = s.error_of(&mut stack, e);
@@ -598,7 +598,7 @@ impl Native for TracebackHandler {
         s.push_traceback(None, 1);
         let tb = String::from_utf8_lossy(s.string_at(-1).unwrap_or_default()).into_owned();
         s.set_top(-2)?;
-        s.extension::<PendingTraceback>().0 = Some(tb);
+        s.extension(|p: &mut PendingTraceback| p.0 = Some(tb));
         s.push_copy(1);
         Ok(Return::values(1))
     }
@@ -678,15 +678,19 @@ impl<'s> Userdata<'s> {
     /// borrow lives, other operations on the scope panic.
     pub fn borrow<T: 'static>(&self) -> Result<Ref<'_, T>, Error> {
         let idx = self.idx;
-        Ref::filter_map(self.s.stack_ref(), |stack| stack.userdata::<T>(idx))
-            .map_err(|_| Error::runtime(not_a::<T>()))
+        Ref::filter_map(self.s.stack_ref(), |stack| {
+            stack.userdata_in_place::<T>(idx)
+        })
+        .map_err(|_| Error::runtime(not_a::<T>()))
     }
 
     /// The host value, mutably, if it is a `T` this API stored.
     pub fn borrow_mut<T: 'static>(&self) -> Result<RefMut<'_, T>, Error> {
         let idx = self.idx;
-        RefMut::filter_map(self.s.stack(), |stack| stack.userdata_mut::<T>(idx))
-            .map_err(|_| Error::runtime(not_a::<T>()))
+        RefMut::filter_map(self.s.stack(), |stack| {
+            stack.userdata_in_place_mut::<T>(idx)
+        })
+        .map_err(|_| Error::runtime(not_a::<T>()))
     }
 }
 
