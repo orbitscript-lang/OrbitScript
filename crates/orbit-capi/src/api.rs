@@ -7,11 +7,11 @@
 
 use std::cell::RefCell;
 
-use orbit_vm::orbit_core::number::{float_to_int, fmt_number, str_to_number};
-use orbit_vm::orbit_core::table as tbl;
-use orbit_vm::orbit_core::value::raw_eq;
-use orbit_vm::orbit_core::{Gc, LightUserData, LuaStr, Table, Value, gc};
-use orbit_vm::{LuaError, Meta, MetaField, NativeCtx, Operator};
+use orbit_runtime::object::number::{float_to_int, fmt_number, str_to_number};
+use orbit_runtime::object::table as tbl;
+use orbit_runtime::object::value::raw_eq;
+use orbit_runtime::object::{Gc, LightUserData, LuaStr, Table, Value, gc};
+use orbit_runtime::vm::{LuaError, Meta, MetaField, NativeCtx, Operator};
 
 use crate::CBlock;
 
@@ -735,7 +735,7 @@ pub(crate) fn newuserdata(
 /// `None` if it has no such value.
 enum UserValue {
     /// The userdata's own slot (one user value, or a Rust userdata's).
-    Slot(Gc<orbit_vm::orbit_core::UserData>),
+    Slot(Gc<orbit_runtime::object::UserData>),
     /// Entry `n` of the table in that slot.
     InTable(Gc<Table>, i64),
 }
@@ -929,7 +929,7 @@ pub(crate) fn pcall(c: &mut NativeCtx<'_>, nargs: i32, nresults: i32, errfunc: i
 /// The status code for an error that left a protected call.
 pub(crate) fn error_status(c: &NativeCtx<'_>, v: Value) -> i32 {
     match v {
-        Value::Str(s) if c.bytes(s) == orbit_vm::orbit_core::NoMemory::MESSAGE.as_bytes() => {
+        Value::Str(s) if c.bytes(s) == orbit_runtime::object::NoMemory::MESSAGE.as_bytes() => {
             abi::ERRMEM
         }
         Value::Str(s) if c.bytes(s) == b"error in error handling" => abi::ERRERR,
@@ -941,13 +941,13 @@ pub(crate) fn error_status(c: &NativeCtx<'_>, v: Value) -> i32 {
 /// first upvalue is the global table. Pushes the function or the message.
 pub(crate) fn load(c: &mut NativeCtx<'_>, bytes: &[u8], name: &[u8], mode: &[u8]) -> i32 {
     let env = Value::Table(c.vm.rt.globals);
-    match orbit_stdlib::load_chunk_in(c, bytes, name, mode, env) {
+    match orbit_runtime::stdlib::load_chunk_in(c, bytes, name, mode, env) {
         Ok(f) => {
             c.push(f);
             abi::OK
         }
         Err(msg) => {
-            let status = if msg.contains(orbit_vm::orbit_core::NoMemory::MESSAGE) {
+            let status = if msg.contains(orbit_runtime::object::NoMemory::MESSAGE) {
                 abi::ERRMEM
             } else {
                 abi::ERRSYNTAX
@@ -988,7 +988,7 @@ pub(crate) fn next(c: &mut NativeCtx<'_>, idx: i32) -> Res<bool> {
 /// `LUA_GCPARAM`. Inside a finalizer every option does nothing and returns
 /// -1, as in Lua.
 pub(crate) fn gc(c: &mut NativeCtx<'_>, what: i32, a: i32, b: i32) -> i32 {
-    use orbit_vm::{GcMode, GcParam};
+    use orbit_runtime::vm::{GcMode, GcParam};
     if c.vm.rt.gc.finalizing() {
         return -1;
     }
@@ -1079,14 +1079,14 @@ pub(crate) fn warning(c: &mut NativeCtx<'_>, msg: &[u8], tocont: bool) {
 struct WarnBuffer(Vec<u8>);
 
 /// `luaopen_*`: open standard library `lib` (its index in
-/// [`orbit_stdlib::Lib::ALL`]) and push its table, as `luaL_requiref`
+/// [`orbit_runtime::stdlib::Lib::ALL`]) and push its table, as `luaL_requiref`
 /// expects. Like Lua's, it leaves the global to `luaL_requiref`: a library
 /// opened through `package.preload` gets no global. Returns 0, pushing
 /// nothing, for a library this build leaves out.
 pub(crate) fn openlib(c: &mut NativeCtx<'_>, lib: i32) -> i32 {
     let Some(&lib) = usize::try_from(lib)
         .ok()
-        .and_then(|i| orbit_stdlib::Lib::ALL.get(i))
+        .and_then(|i| orbit_runtime::stdlib::Lib::ALL.get(i))
     else {
         return 0;
     };
@@ -1094,12 +1094,12 @@ pub(crate) fn openlib(c: &mut NativeCtx<'_>, lib: i32) -> i32 {
     // environment variables.
     let k = c.vm.new_str(b"LUA_NOENV");
     let noenv = tbl::get(&c.vm.heap, c.vm.rt.registry, k);
-    let options = orbit_stdlib::Options {
+    let options = orbit_runtime::stdlib::Options {
         ignore_env: !noenv.is_falsy(),
         ..Default::default()
     };
-    let before = (lib != orbit_stdlib::Lib::Base).then(|| c.vm.global(lib.name()));
-    let Some(t) = orbit_stdlib::open_one(c.vm, lib, options) else {
+    let before = (lib != orbit_runtime::stdlib::Lib::Base).then(|| c.vm.global(lib.name()));
+    let Some(t) = orbit_runtime::stdlib::open_one(c.vm, lib, options) else {
         return 0;
     };
     if let Some(v) = before {

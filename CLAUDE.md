@@ -3,7 +3,7 @@
 ## Non-negotiables
 - **Stable Rust only.** No nightly or beta features, no `#![feature]`, no `-Z` flags.
 - **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The exceptions are the future `orbit-jit` crate, `orbit-virtmem` (virtual memory buffer for arena slots, approved by Tym on 2026-10-11), `orbit-gc`'s memory-trimming calls (glibc `malloc_trim` and macOS `malloc_zone_pressure_relief`) behind its `memory-trimming` feature (ADR-2, ADR-6), `orbit-capi/src/ffi.rs` (C modules, ADR-8), and `orbit-ffi/src/sys.rs` (the `ffi` library, ADR-9). Anything else needs Tym's sign-off in an ADR.
-- **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-gc`, `orbit-core`, `orbit-vm` and `orbit-compiler` take no runtime dependencies without an ADR.
+- **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-gc`, `orbit-runtime` and `orbit-compiler` take no runtime dependencies without an ADR.
 - **Greenfield, never ported.** Learn from PUC Lua's observable behavior (the reference `lua5.5` binary, the official suite, the manual), never from its source code. Don't read, translate or mirror PUC Lua's C sources unless Tym explicitly asks for it for a specific purpose. Design for multiple front ends (Lua and OrbitScript) throughout.
 - **Lua 5.5 compatibility is judged by behavior.** When unsure, compare against the reference `lua5.5` interpreter and the official test suite, not memory of older Lua versions.
 
@@ -14,10 +14,9 @@
 | `orbit-orb-syntax` | OrbitScript lexer, parser, AST, lowering to HIR (always built in, no feature) | F |
 | `orbit-virtmem` | Low-level OS virtual address reservation and page commit buffer (`VmBuffer`) | B |
 | `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates | B |
-| `orbit-core` | Value, strings, tables, built on `orbit-gc` | B |
-| `orbit-hir`, `orbit-compiler`, `orbit-vm` | HIR, bytecode compiler, interpreter | C |
+| `orbit-runtime` | Values, strings, tables (`object`), the interpreter (`vm`) and the built-in libraries (`stdlib`), built on `orbit-gc` | B, C, D |
+| `orbit-hir`, `orbit-compiler` | HIR, bytecode compiler | C |
 | `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) | C |
-| `orbit-stdlib` | Lua standard library | D |
 | `orbit-capi` | Lua C API shim for loading C modules (`orbit` feature `c-modules`) | shared |
 | `orbit-lib` | `liborbit`, the runtime as one shared library that also serves as liblua 5.5 (ADR-10) | shared |
 | `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit` feature `ffi`) | shared |

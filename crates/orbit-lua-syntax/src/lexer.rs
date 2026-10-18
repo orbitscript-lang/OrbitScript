@@ -630,7 +630,7 @@ fn convert_hex(text: &[u8]) -> Result<TokenKind, NumError> {
 /// (`hex digits [. hex digits] [p [sign] decimal digits]`), rounded once to the nearest `f64`
 /// (ties to even), subnormals included.
 ///
-/// `orbit_core::number` converts the same syntax for `tonumber`; the two share test vectors,
+/// `orbit_runtime::object::number` converts the same syntax for `tonumber`; the two share test vectors,
 /// not code, because the front end doesn't depend on the runtime.
 fn hex_float(text: &[u8]) -> f64 {
     // Significant digits go into `mant` (up to 15 of them, 60 bits); later nonzero digits
@@ -844,7 +844,7 @@ mod tests {
     }
 
     /// Hexadecimal floats, checked against the reference `lua5.5` (`%.17g` of each value).
-    /// `orbit_core::number` has the same table for `tonumber`.
+    /// `orbit_runtime::object::number` has the same table for `tonumber`.
     #[test]
     fn hex_floats() {
         let cases: &[(&str, f64)] = &[

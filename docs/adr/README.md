@@ -12,5 +12,6 @@
 | [0008](0008-c-modules.md) | Loading C modules | Accepted |
 | [0009](0009-ffi.md) | Calling C functions from scripts (`ffi`) | Proposed |
 | [0010](0010-liborbit.md) | The runtime as a shared library (`liborbit`, aliased as `liblua`) | Proposed |
+| [0011](0011-api-surface-and-crates.md) | Public API surface and crate layout | Proposed |
 
 Statuses: **Proposed** (open for edits), **Accepted** (changes need Tym's approval), **Superseded**.

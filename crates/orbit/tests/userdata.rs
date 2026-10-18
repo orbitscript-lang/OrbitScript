@@ -2,8 +2,8 @@
 //! methods are natives.
 
 use orbit::Lua;
-use orbit_vm::orbit_core::Value;
-use orbit_vm::{LuaError, NativeCtx, NativeReturn};
+use orbit_runtime::object::Value;
+use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn};
 
 #[derive(Debug)]
 struct Counter {

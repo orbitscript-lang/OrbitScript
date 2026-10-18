@@ -8,7 +8,7 @@
 //! they agree by construction. Checked against the reference `lua5.5`.
 //!
 //! It lives in `orbit-bytecode` because that is the one crate the compiler
-//! and the runtime share; `orbit_core::number` re-exports it.
+//! and the runtime share; `orbit_runtime::object::number` re-exports it.
 
 /// A Lua number: an integer or a float.
 #[derive(Debug, Clone, Copy, PartialEq)]

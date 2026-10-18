@@ -13,8 +13,8 @@ mod ffi;
 #[cfg(feature = "host")]
 mod host;
 
-use orbit_vm::orbit_core::{LightUserData, Value};
-use orbit_vm::{LuaError, NativeCtx, NativeReturn, Vm};
+use orbit_runtime::object::{LightUserData, Value};
+use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn, Vm};
 
 /// Install the C API on `vm`: `package.loadlib` and the C searchers load
 /// libraries from now on.
@@ -22,7 +22,7 @@ pub fn install(vm: &mut Vm) {
     ffi::install(vm);
     vm.rt
         .ext
-        .get_or_insert_with(orbit_stdlib::DynLoader::default)
+        .get_or_insert_with(orbit_runtime::stdlib::DynLoader::default)
         .load = Some(ffi::load);
 }
 
@@ -67,7 +67,7 @@ fn call_c(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
 }
 
 /// The id of [`call_c`], to tell C functions from other natives.
-pub(crate) fn c_native_id(ctx: &mut NativeCtx<'_>) -> orbit_vm::orbit_core::NativeId {
+pub(crate) fn c_native_id(ctx: &mut NativeCtx<'_>) -> orbit_runtime::object::NativeId {
     match ctx.native(C_FUNCTION, call_c) {
         Value::Native(id) => id,
         _ => unreachable!("natives are registered as natives"),

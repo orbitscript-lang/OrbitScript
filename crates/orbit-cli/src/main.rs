@@ -386,7 +386,7 @@ impl Runner {
         };
         let n = vm.heap.get(t).len(&vm.heap);
         let args: Vec<Value> = (1..=n)
-            .map(|i| orbit::orbit_core::table::get(&vm.heap, t, Value::Int(i)))
+            .map(|i| orbit::object::table::get(&vm.heap, t, Value::Int(i)))
             .collect();
         let path = (script != "-").then_some(script);
         self.run_file(path, &args)
