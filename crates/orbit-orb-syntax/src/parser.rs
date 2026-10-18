@@ -23,8 +23,14 @@ pub struct ParseOptions {
     /// Parse a stub (`.orbi`): `fn` items and `impl` functions may end in `;` instead of a body,
     /// and `const NAME: T;` needs no value. A stub can't be lowered.
     pub stub: bool,
-    /// Keep `///` and `//!` comments ([`Ast::doc_comments`], [`Item::docs`]).
+    /// Keep `///` and `//!` comments ([`Ast::comments`], [`Item::docs`]).
     pub doc_comments: bool,
+    /// Keep every comment in [`Ast::comments`] (for a formatter or an editor).
+    pub keep_trivia: bool,
+    /// Go on after a syntax error, for an editor: the error is recorded, the broken statement
+    /// becomes an `Error` node and parsing resumes at the next statement. Use
+    /// [`parse_recovering`] to get every error; [`parse_with`] still gives only the first.
+    pub recover: bool,
 }
 
 impl Default for ParseOptions {
@@ -34,6 +40,8 @@ impl Default for ParseOptions {
             type_trees: false,
             stub: false,
             doc_comments: false,
+            keep_trivia: false,
+            recover: false,
         }
     }
 }
@@ -44,6 +52,51 @@ pub fn parse(chunk_name: &str, src: &[u8]) -> Result<Ast, Diagnostic> {
 }
 
 pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Result<Ast, Diagnostic> {
+    let (ast, mut errors) = parse_module(chunk_name, src, options)?;
+    if !errors.is_empty() {
+        return Err(errors.swap_remove(0));
+    }
+    Ok(ast)
+}
+
+/// Parses one module, going on after syntax errors ([`ParseOptions::recover`]): the AST
+/// holds everything that parsed, with `Error` nodes where something didn't, and the errors
+/// come in source order.
+pub fn parse_recovering(
+    chunk_name: &str,
+    src: &[u8],
+    options: &ParseOptions,
+) -> (Ast, Vec<Diagnostic>) {
+    let options = ParseOptions {
+        recover: true,
+        ..options.clone()
+    };
+    match parse_module(chunk_name, src, &options) {
+        Ok(result) => result,
+        // Only a source too large to parse at all gets here.
+        Err(d) => {
+            let (strings, source) = Lexer::new(chunk_name, b"").finish();
+            let body = Block {
+                stmts: Vec::new(),
+                tail: None,
+                span: Span::default(),
+            };
+            let ast = Ast {
+                body,
+                strings,
+                source,
+                comments: Vec::new(),
+            };
+            (ast, vec![d])
+        }
+    }
+}
+
+fn parse_module(
+    chunk_name: &str,
+    src: &[u8],
+    options: &ParseOptions,
+) -> Result<(Ast, Vec<Diagnostic>), Diagnostic> {
     if u32::try_from(src.len()).is_err() {
         return Err(Diagnostic::new(Span::default(), 1, "chunk too large"));
     }
@@ -51,8 +104,8 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
     let sym_scope = lx.strings_mut().intern(b"scope");
     let sym_underscore = lx.strings_mut().intern(b"_");
     let sym_type = lx.strings_mut().intern(b"type");
-    if options.doc_comments {
-        lx.keep_doc_comments();
+    if options.doc_comments || options.keep_trivia {
+        lx.keep_comments(options.keep_trivia);
     }
     let mut p = Parser {
         lx,
@@ -66,6 +119,9 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
         max_depth: options.max_depth,
         type_trees: options.type_trees,
         stub: options.stub,
+        recover: options.recover,
+        errors: Vec::new(),
+        lex_error_at: None,
         next_doc: 0,
         sym_scope,
         sym_underscore,
@@ -79,14 +135,29 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
         tail,
         span: Span::new(start.min(p.tok.span.end), src.len() as u32),
     };
-    let doc_comments = p.lx.take_doc_comments();
+    let comments = p.lx.take_comments();
+    let errors = std::mem::take(&mut p.errors);
     let (strings, source) = p.lx.finish();
-    Ok(Ast {
+    let ast = Ast {
         body,
         strings,
         source,
-        doc_comments,
-    })
+        comments,
+    };
+    Ok((ast, errors))
+}
+
+/// What [`Parser::synchronize`] skips after an error.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sync {
+    Statement,
+    /// A member of an `impl`: up to the next `fn`, `pub` or `const` starting a line, not
+    /// the next `let` or `;` (which may be in the member's body).
+    Member,
+    /// The rest of a line.
+    Line,
+    /// A match arm.
+    Arm,
 }
 
 /// Where an expression appears, for Rust's struct-literal restriction.
@@ -107,6 +178,11 @@ struct Parser<'a> {
     max_depth: u32,
     type_trees: bool,
     stub: bool,
+    recover: bool,
+    /// The errors recovered from so far (only with `recover`).
+    errors: Vec<Diagnostic>,
+    /// Where the last lexer error recovered from was.
+    lex_error_at: Option<u32>,
     /// The first doc comment not yet attached to (or passed by) an item.
     next_doc: usize,
     sym_scope: StrId,
@@ -115,6 +191,33 @@ struct Parser<'a> {
 }
 
 type PResult<T> = Result<T, Diagnostic>;
+
+/// Keywords that start a statement or item: when recovering from an error, one at the start
+/// of a line is where the next statement most likely begins. The first `ITEM_KEYWORDS` of
+/// them can't appear inside an expression, so they end a broken statement even inside an
+/// unclosed bracket.
+const STATEMENT_KEYWORDS: &[Keyword] = &[
+    Keyword::Let,
+    Keyword::Fn,
+    Keyword::Pub,
+    Keyword::Struct,
+    Keyword::Enum,
+    Keyword::Impl,
+    Keyword::Use,
+    Keyword::Const,
+    Keyword::Global,
+    Keyword::Extern,
+    // ITEM_KEYWORDS ends here.
+    Keyword::Return,
+    Keyword::Break,
+    Keyword::Continue,
+    Keyword::If,
+    Keyword::While,
+    Keyword::For,
+    Keyword::Loop,
+    Keyword::Match,
+];
+const ITEM_KEYWORDS: usize = 10;
 
 impl Parser<'_> {
     // ---- tokens -------------------------------------------------------------------------------
@@ -127,7 +230,7 @@ impl Parser<'_> {
         self.prev_end = self.tok.span.end;
         self.tok = match self.ahead.take() {
             Some(t) => t,
-            None => self.lx.next_token()?,
+            None => self.lex()?,
         };
         Ok(())
     }
@@ -135,9 +238,218 @@ impl Parser<'_> {
     #[inline(never)]
     fn peek(&mut self) -> PResult<TokenKind> {
         if self.ahead.is_none() {
-            self.ahead = Some(self.lx.next_token()?);
+            self.ahead = Some(self.lex()?);
         }
         Ok(self.ahead.expect("lookahead").kind)
+    }
+
+    /// The next token from the lexer. When recovering, a lexer error is recorded and the bad
+    /// token skipped or replaced.
+    fn lex(&mut self) -> PResult<Token> {
+        loop {
+            match self.lx.next_token() {
+                Ok(t) => return Ok(t),
+                Err(d) if self.recover => {
+                    self.lex_error_at = Some(d.span.start);
+                    self.report(d);
+                    if let Some(t) = self.lx.skip_bad_token() {
+                        return Ok(t);
+                    }
+                }
+                Err(d) => return Err(d),
+            }
+        }
+    }
+
+    /// Records an error recovered from, unless one was already reported at the same place.
+    #[inline(never)]
+    fn report(&mut self, d: Diagnostic) {
+        if self
+            .errors
+            .last()
+            .is_none_or(|e| e.span.start != d.span.start)
+        {
+            self.errors.push(d);
+        }
+    }
+
+    /// Records a parse error recovered from, unless it comes right after a lexer error
+    /// (which most likely caused it).
+    fn recovered(&mut self, d: Diagnostic) {
+        if !self.lex_error_at.is_some_and(|at| at >= self.prev_end) {
+            self.report(d);
+        }
+    }
+
+    /// Records the error that ended a statement or member starting at `start`, unless it
+    /// follows a lexer error in the same statement (it is most likely caused by it).
+    fn report_in(&mut self, d: Diagnostic, start: u32) {
+        if !self.lex_error_at.is_some_and(|at| at >= start) {
+            self.report(d);
+        }
+    }
+
+    /// Skips the rest of something broken that started at `start`, after an error: through
+    /// a `;` (or a `,` ending a match arm) or a `}` that closes a bracket opened in it, or up
+    /// to a `}` closing the enclosing block (`braced`), a statement keyword that starts a line
+    /// (for a line or an arm, any token that does), a line indented no deeper than the start,
+    /// or the end of input. Always moves on at least one token.
+    fn synchronize(&mut self, start: u32, braced: bool, sync: Sync) {
+        let mut moved = self.tok.span.start != start;
+        // Brackets opened between `start` and the error are still open.
+        let mut depth = if moved && sync != Sync::Line {
+            self.lx.open_brackets(Span::new(start, self.tok.span.start))
+        } else {
+            0
+        };
+        let indent = (sync != Sync::Line).then(|| self.line_indent(start));
+        loop {
+            // Indentation outlasts brackets the error left unbalanced.
+            if moved
+                && let Some(indent) = indent
+                && self.starts_line()
+            {
+                let col = self.line_indent(self.tok.span.start);
+                match self.tok.kind {
+                    _ if col > indent => {}
+                    TokenKind::Punct(Punct::RParen | Punct::RBracket) => {}
+                    TokenKind::Punct(Punct::RBrace) if !braced || col == indent => {}
+                    _ => return,
+                }
+            }
+            match self.tok.kind {
+                TokenKind::Eof => return,
+                TokenKind::Punct(Punct::Semi) if depth == 0 && sync != Sync::Member => {
+                    let _ = self.advance();
+                    return;
+                }
+                TokenKind::Punct(Punct::Comma) if depth == 0 && sync == Sync::Arm => {
+                    let _ = self.advance();
+                    return;
+                }
+                kind if moved
+                    && match kind {
+                        TokenKind::Keyword(k) if sync == Sync::Member => {
+                            matches!(k, Keyword::Fn | Keyword::Pub | Keyword::Const)
+                        }
+                        TokenKind::Keyword(k) => STATEMENT_KEYWORDS
+                            .iter()
+                            .position(|&s| s == k)
+                            .is_some_and(|i| depth == 0 || i < ITEM_KEYWORDS),
+                        _ => depth == 0 && matches!(sync, Sync::Line | Sync::Arm),
+                    }
+                    && self.starts_line() =>
+                {
+                    return;
+                }
+                TokenKind::Punct(
+                    Punct::LParen | Punct::LBracket | Punct::LBrace | Punct::HashBrace,
+                ) => depth += 1,
+                TokenKind::Punct(Punct::RParen | Punct::RBracket) => {
+                    depth = depth.saturating_sub(1);
+                }
+                TokenKind::Punct(Punct::RBrace) if depth > 0 => {
+                    depth -= 1;
+                    // A block at the end of a line ends a statement (in an arm, it may be a
+                    // pattern's).
+                    if depth == 0 && matches!(sync, Sync::Statement | Sync::Member) {
+                        let _ = self.advance();
+                        if self.starts_line() {
+                            return;
+                        }
+                        continue;
+                    }
+                }
+                TokenKind::Punct(Punct::RBrace) if braced && moved => return,
+                _ => {}
+            }
+            // Lexing can't fail while recovering.
+            let _ = self.advance();
+            moved = true;
+        }
+    }
+
+    /// Whether the current token is the first on its line.
+    fn starts_line(&self) -> bool {
+        let src = self.lx.src();
+        let mut i = self.tok.span.start as usize;
+        while i > 0 && matches!(src[i - 1], b' ' | b'\t') {
+            i -= 1;
+        }
+        i == 0 || matches!(src[i - 1], b'\n' | b'\r')
+    }
+
+    /// How far the line holding `offset` is indented (spaces and tabs, one column each).
+    fn line_indent(&self, offset: u32) -> usize {
+        let src = self.lx.src();
+        let mut i = (offset as usize).min(src.len());
+        while i > 0 && !matches!(src[i - 1], b'\n' | b'\r') {
+            i -= 1;
+        }
+        src[i..]
+            .iter()
+            .take_while(|&&c| c == b' ' || c == b'\t')
+            .count()
+    }
+
+    /// When recovering, whether the current token starts an item at the very start of a
+    /// line: inside a block that means its `}` is most likely missing.
+    fn item_at_line_start(&self) -> bool {
+        let at = self.tok.span.start as usize;
+        self.recover
+            && matches!(
+                self.tok.kind,
+                TokenKind::Keyword(
+                    Keyword::Fn
+                        | Keyword::Pub
+                        | Keyword::Struct
+                        | Keyword::Enum
+                        | Keyword::Impl
+                        | Keyword::Use
+                        | Keyword::Const
+                        | Keyword::Global
+                        | Keyword::Extern
+                )
+            )
+            && (at == 0 || self.lx.src()[at - 1] == b'\n')
+    }
+
+    /// When recovering, whether the `{` at `open` is missing its `}` because an item starts
+    /// a line here; reports it if so.
+    fn unclosed_before_item(&mut self, open: u32) -> bool {
+        let missing = self.item_at_line_start();
+        if missing {
+            let d = self.unclosed(open);
+            self.recovered(d);
+        }
+        missing
+    }
+
+    /// The error for a `{` (at `open`) that is never closed.
+    fn unclosed(&self, open: u32) -> Diagnostic {
+        self.expected(&format!(
+            "`}}` to close the `{{` at line {}",
+            self.lx.line_of(open)
+        ))
+    }
+
+    /// `;` ending a statement or item. When recovering, a missing `;` is recorded and
+    /// parsing goes on as if it were there.
+    #[inline(never)]
+    fn semi(&mut self) -> PResult<()> {
+        if self.is(Punct::Semi) {
+            return self.advance();
+        }
+        let d = self.expected("`;`");
+        if !self.recover {
+            return Err(d);
+        }
+        self.recovered(d);
+        // On the same line, what follows is most likely more of the broken statement.
+        if !self.starts_line() {
+            self.synchronize(u32::MAX, true, Sync::Line);
+        }
+        Ok(())
     }
 
     fn is(&self, p: Punct) -> bool {
@@ -211,10 +523,14 @@ impl Parser<'_> {
 
     #[inline(never)]
     fn expected(&self, what: &str) -> Diagnostic {
-        self.error(
+        let d = self.error(
             self.tok.span,
             format!("expected {what}, found {}", self.describe(self.tok.kind)),
-        )
+        );
+        if self.tok.kind == TokenKind::Eof && self.lx.at_source_end() {
+            return d.at_eof();
+        }
+        d
     }
 
     fn span_from(&self, start: u32) -> Span {
@@ -298,7 +614,10 @@ impl Parser<'_> {
         self.enter()?;
         let start = self.expect(Punct::LBrace)?.start;
         let (stmts, tail) = self.block_body(Some(start))?;
-        self.expect(Punct::RBrace)?;
+        // When recovering, `block_body` may stop early and report the missing `}` itself.
+        if !self.recover || self.is(Punct::RBrace) {
+            self.expect(Punct::RBrace)?;
+        }
         self.leave();
         Ok(Block {
             stmts,
@@ -315,30 +634,62 @@ impl Parser<'_> {
                 TokenKind::Punct(Punct::RBrace) if open.is_some() => return Ok((stmts, None)),
                 TokenKind::Eof => {
                     if let Some(open) = open {
-                        return Err(self.error(
-                            self.tok.span,
-                            format!(
-                                "expected `}}` to close the `{{` at line {}, found end of file",
-                                self.lx.line_of(open)
-                            ),
-                        ));
+                        let d = self.unclosed(open);
+                        if !self.recover {
+                            return Err(d);
+                        }
+                        self.recovered(d);
                     }
                     return Ok((stmts, None));
                 }
                 TokenKind::Punct(Punct::Semi) => self.advance()?,
-                _ => match self.statement()? {
-                    StmtOrTail::Stmt(s) => stmts.push(s),
-                    StmtOrTail::Tail(e) => {
-                        let at_end = match open {
-                            Some(_) => self.is(Punct::RBrace),
-                            None => self.tok.kind == TokenKind::Eof,
-                        };
-                        if at_end {
-                            return Ok((stmts, Some(Box::new(e))));
+                _ if open.is_some() && self.item_at_line_start() => {
+                    let d = self.unclosed(open.unwrap_or_default());
+                    self.recovered(d);
+                    return Ok((stmts, None));
+                }
+                _ => {
+                    let start = self.tok.span.start;
+                    let depth = self.depth;
+                    let err = match self.statement() {
+                        Ok(StmtOrTail::Stmt(s)) => {
+                            stmts.push(s);
+                            continue;
                         }
-                        return Err(self.expected("`;`"));
+                        Ok(StmtOrTail::Tail(e)) => {
+                            let at_end = match open {
+                                Some(_) => self.is(Punct::RBrace),
+                                None => self.tok.kind == TokenKind::Eof,
+                            };
+                            if at_end {
+                                return Ok((stmts, Some(Box::new(e))));
+                            }
+                            let d = self.expected("`;`");
+                            if self.recover && self.tok.span.start != start {
+                                // A missing `;`: keep the expression and go on.
+                                self.recovered(d);
+                                let span = e.span;
+                                stmts.push(Stmt {
+                                    kind: StmtKind::Expr(e),
+                                    span,
+                                });
+                                continue;
+                            }
+                            d
+                        }
+                        Err(d) => d,
+                    };
+                    if !self.recover {
+                        return Err(err);
                     }
-                },
+                    self.depth = depth;
+                    self.report_in(err, start);
+                    self.synchronize(start, open.is_some(), Sync::Statement);
+                    stmts.push(Stmt {
+                        kind: StmtKind::Error,
+                        span: self.span_from(start),
+                    });
+                }
             }
         }
     }
@@ -421,7 +772,7 @@ impl Parser<'_> {
         let e = self.expr()?;
         let e = match self.assignment(start, e)? {
             Ok(assign) => {
-                self.expect(Punct::Semi)?;
+                self.semi()?;
                 return Ok(StmtOrTail::Stmt(assign));
             }
             Err(e) => e,
@@ -558,7 +909,7 @@ impl Parser<'_> {
         } else {
             None
         };
-        self.expect(Punct::Semi)?;
+        self.semi()?;
         Ok(Stmt {
             kind: StmtKind::Let {
                 scope,
@@ -593,7 +944,7 @@ impl Parser<'_> {
                 let name = self.name()?;
                 self.expect(Punct::Assign)?;
                 let value = self.expr()?;
-                self.expect(Punct::Semi)?;
+                self.semi()?;
                 ItemKind::Global { name, value }
             }
             TokenKind::Keyword(Keyword::Extern) if !is_pub => {
@@ -602,7 +953,7 @@ impl Parser<'_> {
                 while self.eat(Punct::Comma)? {
                     names.push(self.name()?);
                 }
-                self.expect(Punct::Semi)?;
+                self.semi()?;
                 ItemKind::Extern(names)
             }
             _ if is_pub => {
@@ -631,7 +982,7 @@ impl Parser<'_> {
             self.expect(Punct::Assign)?;
             Some(self.expr()?)
         };
-        self.expect(Punct::Semi)?;
+        self.semi()?;
         Ok(ItemKind::Const { name, ty, value })
     }
 
@@ -642,7 +993,7 @@ impl Parser<'_> {
         let generics = self.generics()?;
         self.expect(Punct::Assign)?;
         let ty = self.type_ann()?;
-        self.expect(Punct::Semi)?;
+        self.semi()?;
         Ok(ItemKind::TypeAlias { name, generics, ty })
     }
 
@@ -656,12 +1007,12 @@ impl Parser<'_> {
     /// item. Doc comments before anything else are passed over.
     fn item_docs(&mut self) -> Vec<Span> {
         let mut docs = Vec::new();
-        let all = self.lx.doc_comments();
+        let all = self.lx.comments();
         while let Some(d) = all.get(self.next_doc) {
             if d.span.start >= self.tok.span.start {
                 break;
             }
-            if !d.inner && d.span.start >= self.prev_end {
+            if d.kind == CommentKind::Doc && d.span.start >= self.prev_end {
                 docs.push(d.span);
             }
             self.next_doc += 1;
@@ -782,9 +1133,12 @@ impl Parser<'_> {
     }
 
     fn field_decls(&mut self) -> PResult<Vec<FieldDecl>> {
-        self.expect(Punct::LBrace)?;
+        let open = self.expect(Punct::LBrace)?.start;
         let mut fields = Vec::new();
         while !self.is(Punct::RBrace) {
+            if self.unclosed_before_item(open) {
+                return Ok(fields);
+            }
             // `pub` is a field's visibility unless it is the field's own name (`pub: bool`).
             let is_pub = self.is_kw(Keyword::Pub)
                 && !matches!(
@@ -805,7 +1159,9 @@ impl Parser<'_> {
                 break;
             }
         }
-        self.expect(Punct::RBrace)?;
+        if !self.unclosed_before_item(open) {
+            self.expect(Punct::RBrace)?;
+        }
         Ok(fields)
     }
 
@@ -834,9 +1190,12 @@ impl Parser<'_> {
         self.advance()?; // enum
         let name = self.name()?;
         let generics = self.generics()?;
-        self.expect(Punct::LBrace)?;
+        let open = self.expect(Punct::LBrace)?.start;
         let mut variants = Vec::new();
         while !self.is(Punct::RBrace) {
+            if self.unclosed_before_item(open) {
+                break;
+            }
             let start = self.tok.span.start;
             let vname = self.member_name()?;
             let fields = if self.is(Punct::LBrace) {
@@ -858,7 +1217,9 @@ impl Parser<'_> {
                 break;
             }
         }
-        self.expect(Punct::RBrace)?;
+        if !self.unclosed_before_item(open) {
+            self.expect(Punct::RBrace)?;
+        }
         Ok(EnumDecl {
             name,
             generics,
@@ -880,34 +1241,62 @@ impl Parser<'_> {
                 "traits are not supported yet; write metamethods such as `fn __add` directly in `impl`",
             ));
         }
-        self.expect(Punct::LBrace)?;
+        let open = self.expect(Punct::LBrace)?.start;
         let mut members = Vec::new();
         while !self.is(Punct::RBrace) {
+            if self.recover && (self.tok.kind == TokenKind::Eof || self.item_at_line_start()) {
+                let d = self.unclosed(open);
+                self.recovered(d);
+                break;
+            }
             let start = self.tok.span.start;
-            let docs = self.item_docs();
-            let is_pub = self.eat_kw(Keyword::Pub)?;
-            let kind = match self.tok.kind {
-                TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl(true)?),
-                TokenKind::Keyword(Keyword::Const) => {
-                    self.advance()?;
-                    let name = self.member_name()?;
-                    self.const_rest(name)?
+            let depth = self.depth;
+            match self.impl_member() {
+                Ok(member) => members.push(member),
+                Err(d) if self.recover => {
+                    self.depth = depth;
+                    self.report_in(d, start);
+                    self.synchronize(start, true, Sync::Member);
+                    members.push(Item {
+                        is_pub: false,
+                        kind: ItemKind::Error,
+                        span: self.span_from(start),
+                        docs: Vec::new(),
+                    });
                 }
-                _ => return Err(self.expected("`fn` or `const` in `impl`")),
-            };
-            members.push(Item {
-                is_pub,
-                kind,
-                span: self.span_from(start),
-                docs,
-            });
+                Err(d) => return Err(d),
+            }
         }
-        self.expect(Punct::RBrace)?;
+        if !self.recover || self.is(Punct::RBrace) {
+            self.expect(Punct::RBrace)?;
+        }
         Ok(ImplDecl {
             generics,
             target,
             target_args,
             members,
+        })
+    }
+
+    /// A `fn` or `const` in an `impl` block.
+    fn impl_member(&mut self) -> PResult<Item> {
+        let start = self.tok.span.start;
+        let docs = self.item_docs();
+        let is_pub = self.eat_kw(Keyword::Pub)?;
+        let kind = match self.tok.kind {
+            TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl(true)?),
+            TokenKind::Keyword(Keyword::Const) => {
+                self.advance()?;
+                let name = self.member_name()?;
+                self.const_rest(name)?
+            }
+            _ => return Err(self.expected("`fn` or `const` in `impl`")),
+        };
+        Ok(Item {
+            is_pub,
+            kind,
+            span: self.span_from(start),
+            docs,
         })
     }
 
@@ -952,7 +1341,7 @@ impl Parser<'_> {
         } else if keyword_last {
             return Err(self.keyword_binding(*path.last().expect("a path segment")));
         }
-        self.expect(Punct::Semi)?;
+        self.semi()?;
         Ok(UseDecl { path, tail })
     }
 
@@ -1760,6 +2149,18 @@ impl Parser<'_> {
                     "`let` is a statement; it can't be used as an expression",
                 ));
             }
+            TokenKind::Eof
+            | TokenKind::Punct(
+                Punct::Semi | Punct::Comma | Punct::RParen | Punct::RBracket | Punct::RBrace,
+            ) if self.recover => {
+                // A missing expression, as in `let x = ;`: what's around it still parses.
+                let d = self.expected("an expression");
+                self.recovered(d);
+                Expr {
+                    kind: ExprKind::Error,
+                    span: Span::new(start, start),
+                }
+            }
             _ => return Err(self.expected("an expression")),
         };
         self.leave();
@@ -1804,31 +2205,42 @@ impl Parser<'_> {
             match part {
                 TemplatePart::Text(t) => pieces.push(TemplatePiece::Text(t)),
                 TemplatePart::Hole { expr, spec } => {
-                    if expr.start == expr.end
+                    let e = if expr.start == expr.end
                         || self.lx.src()[expr.start as usize..expr.end as usize]
                             .iter()
                             .all(u8::is_ascii_whitespace)
                     {
-                        return Err(self.error(
+                        Err(self.error(
                             expr,
                             "empty `{}` in template; write `{{}}` for literal braces",
-                        ));
-                    }
-                    // Parse the hole's source range as an expression, then resume after the
-                    // template.
-                    let saved_tok = self.tok;
-                    let saved_ahead = self.ahead.take();
-                    let saved_prev = self.prev_end;
-                    let saved_lx = self.lx.enter(expr);
-                    self.advance()?;
-                    let e = self.expr()?;
-                    if self.tok.kind != TokenKind::Eof {
-                        return Err(self.expected("`}` to end the template hole"));
-                    }
-                    self.lx.restore(saved_lx);
-                    self.tok = saved_tok;
-                    self.ahead = saved_ahead;
-                    self.prev_end = saved_prev;
+                        ))
+                    } else {
+                        // Parse the hole's source range as an expression, then resume after
+                        // the template, whether or not the hole parsed.
+                        let saved_tok = self.tok;
+                        let saved_ahead = self.ahead.take();
+                        let saved_prev = self.prev_end;
+                        let saved_depth = self.depth;
+                        let saved_lx = self.lx.enter(expr);
+                        let e = self.hole_expr();
+                        self.lx.restore(saved_lx);
+                        self.tok = saved_tok;
+                        self.ahead = saved_ahead;
+                        self.prev_end = saved_prev;
+                        self.depth = saved_depth;
+                        e
+                    };
+                    let e = match e {
+                        Ok(e) => e,
+                        Err(d) if self.recover => {
+                            self.recovered(d);
+                            Expr {
+                                kind: ExprKind::Error,
+                                span: expr,
+                            }
+                        }
+                        Err(d) => return Err(d),
+                    };
                     pieces.push(TemplatePiece::Hole {
                         expr: e,
                         spec: spec.map(|s| FormatSpec {
@@ -1843,6 +2255,16 @@ impl Parser<'_> {
             kind: ExprKind::Template(pieces),
             span,
         })
+    }
+
+    /// The expression in a template hole, with the lexer limited to the hole.
+    fn hole_expr(&mut self) -> PResult<Expr> {
+        self.advance()?;
+        let e = self.expr()?;
+        if self.tok.kind != TokenKind::Eof {
+            return Err(self.expected("`}` to end the template hole"));
+        }
+        Ok(e)
     }
 
     fn map_literal(&mut self) -> PResult<Expr> {
@@ -1887,7 +2309,10 @@ impl Parser<'_> {
                                 ));
                             }
                         }
-                    } else if let ExprKind::Name(name) = e.kind {
+                    } else if let ExprKind::Name(name) = e.kind
+                        && self.tok.kind != TokenKind::Eof
+                    {
+                        // (At the end of input it may be a field name still being typed.)
                         // Struct literals read `P { x }` as `x: x`; here it
                         // would silently be `[1] = x`, so neither is chosen.
                         let name = self.lx.strings().display(name).into_owned();
@@ -1976,53 +2401,98 @@ impl Parser<'_> {
         let start = self.tok.span.start;
         self.advance()?; // match
         let scrutinee = self.expr_ctx(Ctx::NoStruct)?;
-        self.expect(Punct::LBrace)?;
+        let open = self.expect(Punct::LBrace)?.start;
         let mut arms = Vec::new();
         while !self.is(Punct::RBrace) {
-            let arm_start = self.tok.span.start;
-            let pat = self.pattern()?;
-            let guard = if self.eat_kw(Keyword::If)? {
-                Some(self.expr()?)
-            } else {
-                None
-            };
-            self.expect(Punct::FatArrow)?;
-            let body_start = self.tok.span.start;
-            let body = self.expr()?;
-            // `pat => target = value,` runs the assignment; the arm's value
-            // is nil, as `pat => { target = value; }` (Rust's unit).
-            let body = match self.assignment(body_start, body)? {
-                Ok(assign) => {
-                    let span = assign.span;
-                    Expr {
-                        kind: ExprKind::Block(Block {
-                            stmts: vec![assign],
-                            tail: None,
-                            span,
-                        }),
-                        span,
-                    }
-                }
-                Err(body) => body,
-            };
-            let block_like = body.kind.is_block_like();
-            arms.push(Arm {
-                pat,
-                guard,
-                body,
-                span: self.span_from(arm_start),
-            });
-            if !self.eat(Punct::Comma)? && !block_like {
+            if self.recover && self.match_ended() {
+                let d = self.unclosed(open);
+                self.recovered(d);
                 break;
             }
+            let arm_start = self.tok.span.start;
+            let depth = self.depth;
+            let arm = match self.arm() {
+                Ok(arm) => arm,
+                Err(d) if self.recover => {
+                    self.depth = depth;
+                    self.report_in(d, arm_start);
+                    self.synchronize(arm_start, true, Sync::Arm);
+                    continue;
+                }
+                Err(d) => return Err(d),
+            };
+            let block_like = arm.body.kind.is_block_like();
+            arms.push(arm);
+            if !self.eat(Punct::Comma)? && !block_like {
+                if !self.recover || self.is(Punct::RBrace) {
+                    break;
+                }
+                // A missing `,`: on the same line, the arm goes on with something broken.
+                let d = self.expected("`,`");
+                self.recovered(d);
+                if !self.starts_line() {
+                    self.synchronize(arm_start, true, Sync::Arm);
+                }
+            }
         }
-        self.expect(Punct::RBrace)?;
+        if !self.recover || self.is(Punct::RBrace) {
+            self.expect(Punct::RBrace)?;
+        }
         Ok(Expr {
             kind: ExprKind::Match {
                 scrutinee: Box::new(scrutinee),
                 arms,
             },
             span: self.span_from(start),
+        })
+    }
+
+    /// When recovering, whether the token where a match arm should start shows that the
+    /// match's `}` is missing: the end of input, a `;`, or a `let` or item keyword starting
+    /// a line.
+    fn match_ended(&self) -> bool {
+        match self.tok.kind {
+            TokenKind::Eof | TokenKind::Punct(Punct::Semi) => true,
+            TokenKind::Keyword(k) => {
+                STATEMENT_KEYWORDS[..ITEM_KEYWORDS].contains(&k) && self.starts_line()
+            }
+            _ => false,
+        }
+    }
+
+    /// `pat [if guard] => body`.
+    fn arm(&mut self) -> PResult<Arm> {
+        let arm_start = self.tok.span.start;
+        let pat = self.pattern()?;
+        let guard = if self.eat_kw(Keyword::If)? {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        self.expect(Punct::FatArrow)?;
+        let body_start = self.tok.span.start;
+        let body = self.expr()?;
+        // `pat => target = value,` runs the assignment; the arm's value
+        // is nil, as `pat => { target = value; }` (Rust's unit).
+        let body = match self.assignment(body_start, body)? {
+            Ok(assign) => {
+                let span = assign.span;
+                Expr {
+                    kind: ExprKind::Block(Block {
+                        stmts: vec![assign],
+                        tail: None,
+                        span,
+                    }),
+                    span,
+                }
+            }
+            Err(body) => body,
+        };
+        Ok(Arm {
+            pat,
+            guard,
+            body,
+            span: self.span_from(arm_start),
         })
     }
 

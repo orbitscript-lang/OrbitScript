@@ -33,6 +33,7 @@ impl Dump<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match &s.kind {
+            StmtKind::Error => self.out.push_str("(error)"),
             StmtKind::Let {
                 scope, pat, value, ..
             } => {
@@ -79,6 +80,7 @@ impl Dump<'_> {
             self.out.push_str("pub ");
         }
         match &item.kind {
+            ItemKind::Error => self.out.push_str("(error)"),
             ItemKind::Fn(f) => {
                 self.out.push_str(&format!("(fn {} ", self.s(f.name.sym)));
                 self.sig(&f.sig);
@@ -195,6 +197,7 @@ impl Dump<'_> {
 
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
+            ExprKind::Error => self.out.push_str("<error>"),
             ExprKind::Nil => self.out.push_str("nil"),
             ExprKind::True => self.out.push_str("true"),
             ExprKind::False => self.out.push_str("false"),

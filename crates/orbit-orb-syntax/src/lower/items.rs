@@ -84,6 +84,7 @@ impl Lowerer {
             ast::ItemKind::Impl(i) => self.impl_block(i, item.span, out),
             // Aliases are for `orbit-check`; nothing runs.
             ast::ItemKind::TypeAlias { .. } => Ok(()),
+            ast::ItemKind::Error => Err(self.unparsed(item.span)),
             ast::ItemKind::Use(u) => self.use_decl(u, item.span, out),
             ast::ItemKind::Global { name, value } => {
                 let v = self.single(value, out)?;
@@ -639,6 +640,7 @@ impl Lowerer {
                 let (name, mspan) = match &m.kind {
                     ast::ItemKind::Fn(f) => (f.name, f.span),
                     ast::ItemKind::Const { name, .. } => (*name, m.span),
+                    ast::ItemKind::Error => return Err(self.unparsed(m.span)),
                     _ => unreachable!("the parser allows `fn` and `const` in `impl`"),
                 };
                 let text = self.chunk.strings.get(name.sym).to_vec();

@@ -9,6 +9,19 @@ pub struct Diagnostic {
     /// The 1-based line of `span.start`.
     pub line: u32,
     pub message: String,
+    pub kind: DiagnosticKind,
+}
+
+/// What kind of error a [`Diagnostic`] is, for tools that react to some kinds specially.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DiagnosticKind {
+    #[default]
+    Other,
+    /// The source ends in the middle of something: an unclosed `{`, string or comment, or a
+    /// construct cut short. A REPL reads another line; an editor knows the input is
+    /// incomplete rather than wrong.
+    UnexpectedEof,
 }
 
 impl Diagnostic {
@@ -17,7 +30,14 @@ impl Diagnostic {
             span,
             line,
             message: message.into(),
+            kind: DiagnosticKind::Other,
         }
+    }
+
+    /// The same diagnostic, marked [`DiagnosticKind::UnexpectedEof`].
+    pub fn at_eof(mut self) -> Diagnostic {
+        self.kind = DiagnosticKind::UnexpectedEof;
+        self
     }
 
     /// The one-line form the interpreter prints: `chunk:line: message`.

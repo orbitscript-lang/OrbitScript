@@ -3,7 +3,7 @@
 //! Comments, strings and numbers follow Rust's spelling (`//`, nesting `/* */`, `r#"..."#`,
 //! `1_000`, `0b1010`); see `planning/orbitscript-syntax/proposal.md`, "Lexical structure".
 
-use crate::ast::DocComment;
+use crate::ast::{Comment, CommentKind};
 use crate::diag::Diagnostic;
 use crate::token::{Keyword, Punct, Token, TokenKind};
 use orbit_hir::{Language, SourceInfo, Span, StringPool};
@@ -41,8 +41,12 @@ pub struct Lexer<'a> {
     templates: Vec<Option<Template>>,
     /// Scratch buffer for decoding string literals.
     buf: Vec<u8>,
-    /// `///` and `//!` comments seen so far, when asked for ([`Lexer::keep_doc_comments`]).
-    docs: Option<Vec<DocComment>>,
+    /// Comments seen so far, when asked for ([`Lexer::keep_comments`]).
+    comments: Option<Vec<Comment>>,
+    /// Keep every comment, not only doc comments.
+    all_comments: bool,
+    /// Where the token being lexed starts (after spaces and comments).
+    tok_start: usize,
 }
 
 impl std::fmt::Debug for Lexer<'_> {
@@ -73,7 +77,9 @@ impl<'a> Lexer<'a> {
             source: SourceInfo::new(chunk_name, Language::OrbitScript, src),
             templates: Vec::new(),
             buf: Vec::new(),
-            docs: None,
+            comments: None,
+            all_comments: false,
+            tok_start: 0,
         };
         // A Unix `#!` line, unless it is the start of a `#![...]`-style attribute.
         if src.starts_with(b"#!") && !src.starts_with(b"#![") {
@@ -84,19 +90,21 @@ impl<'a> Lexer<'a> {
         lx
     }
 
-    /// Record `///` and `//!` comments from here on (see [`Lexer::doc_comments`]).
-    pub fn keep_doc_comments(&mut self) {
-        self.docs.get_or_insert_with(Vec::new);
+    /// Record comments from here on (see [`Lexer::comments`]): `///` and `//!` ones, or
+    /// every comment when `all` is set.
+    pub fn keep_comments(&mut self, all: bool) {
+        self.comments.get_or_insert_with(Vec::new);
+        self.all_comments |= all;
     }
 
-    /// The doc comments lexed so far, in source order (empty unless kept).
-    pub fn doc_comments(&self) -> &[DocComment] {
-        self.docs.as_deref().unwrap_or(&[])
+    /// The comments lexed so far, in source order (empty unless kept).
+    pub fn comments(&self) -> &[Comment] {
+        self.comments.as_deref().unwrap_or(&[])
     }
 
-    /// Takes the recorded doc comments.
-    pub fn take_doc_comments(&mut self) -> Vec<DocComment> {
-        self.docs.take().unwrap_or_default()
+    /// Takes the recorded comments.
+    pub fn take_comments(&mut self) -> Vec<Comment> {
+        self.comments.take().unwrap_or_default()
     }
 
     pub fn strings(&self) -> &StringPool {
@@ -195,20 +203,15 @@ impl<'a> Lexer<'a> {
                         }
                         self.pos += 1;
                     }
-                    if let Some(docs) = &mut self.docs {
+                    if self.comments.is_some() {
                         // `///` and `//!` are doc comments, as in Rust; `////` is not.
-                        let inner = match (self.src.get(start + 2), self.src.get(start + 3)) {
-                            (Some(b'/'), Some(b'/')) => None,
-                            (Some(b'/'), _) => Some(false),
-                            (Some(b'!'), _) => Some(true),
-                            _ => None,
+                        let kind = match (self.src.get(start + 2), self.src.get(start + 3)) {
+                            (Some(b'/'), Some(b'/')) => CommentKind::Line,
+                            (Some(b'/'), _) => CommentKind::Doc,
+                            (Some(b'!'), _) => CommentKind::InnerDoc,
+                            _ => CommentKind::Line,
                         };
-                        if let Some(inner) = inner {
-                            docs.push(DocComment {
-                                inner,
-                                span: Span::new(start as u32, self.pos as u32),
-                            });
-                        }
+                        self.push_comment(kind, start);
                     }
                 }
                 b'/' if self.at(1) == Some(b'*') => {
@@ -218,11 +221,9 @@ impl<'a> Lexer<'a> {
                     while depth > 0 {
                         match (self.cur(), self.at(1)) {
                             (None, _) => {
-                                return Err(self.error_at(
-                                    start,
-                                    start + 2,
-                                    "unterminated block comment",
-                                ));
+                                return Err(self
+                                    .error_at(start, start + 2, "unterminated block comment")
+                                    .at_eof());
                             }
                             (Some(b'*'), Some(b'/')) => {
                                 depth -= 1;
@@ -235,6 +236,9 @@ impl<'a> Lexer<'a> {
                             _ => self.pos += 1,
                         }
                     }
+                    if self.comments.is_some() {
+                        self.push_comment(CommentKind::Block, start);
+                    }
                 }
                 _ => break,
             }
@@ -242,9 +246,87 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
+    #[inline(never)]
+    fn push_comment(&mut self, kind: CommentKind, start: usize) {
+        if !(self.all_comments || kind.is_doc()) {
+            return;
+        }
+        if let Some(comments) = &mut self.comments {
+            comments.push(Comment {
+                kind,
+                span: Span::new(start as u32, self.pos as u32),
+            });
+        }
+    }
+
+    /// How many brackets (`(`, `[`, `{`, `#{`) the tokens in `span` leave open, for error
+    /// recovery. Lexer state is kept, and no comments are recorded.
+    pub fn open_brackets(&mut self, span: Span) -> u32 {
+        let saved = self.enter(span);
+        let comments = self.comments.take();
+        let mut depth = 0u32;
+        while let Ok(t) = self.next_token() {
+            match t.kind {
+                TokenKind::Eof => break,
+                TokenKind::Punct(
+                    Punct::LParen | Punct::LBracket | Punct::LBrace | Punct::HashBrace,
+                ) => {
+                    depth += 1;
+                }
+                TokenKind::Punct(Punct::RParen | Punct::RBracket | Punct::RBrace) => {
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+        self.comments = comments;
+        self.restore(saved);
+        depth
+    }
+
+    /// Whether lexing runs to the end of the source (and not just to the end of a template
+    /// hole), so an end-of-input token really is the end of the file.
+    pub fn at_source_end(&self) -> bool {
+        self.limit == self.src.len()
+    }
+
+    /// After [`Lexer::next_token`] failed, skips the rest of the bad token so lexing can go
+    /// on (for a parse that recovers from errors). A bad string or number gives a stand-in
+    /// token (an empty string, `0`) so the parse around it still works.
+    pub fn skip_bad_token(&mut self) -> Option<Token> {
+        let start = self.tok_start;
+        if start >= self.limit {
+            self.pos = self.limit;
+            return None;
+        }
+        let c = self.src[start];
+        let quote = c == b'"' || matches!(c, b'r' | b'f') && self.src.get(start + 1) == Some(&b'"');
+        self.pos = self
+            .pos
+            .max(start + utf8_len(&self.src[start..self.limit]))
+            .min(self.limit);
+        if quote {
+            // Up to the closing quote, if any.
+            while let Some(c) = self.cur() {
+                self.pos += if c == b'\\' { 2 } else { 1 };
+                if c == b'"' {
+                    break;
+                }
+            }
+            self.pos = self.pos.min(self.limit);
+            let id = self.strings.intern(b"");
+            return Some(self.token(TokenKind::Str(id), start));
+        }
+        c.is_ascii_digit()
+            .then(|| self.token(TokenKind::Int(0), start))
+    }
+
     pub fn next_token(&mut self) -> Result<Token, Diagnostic> {
+        // An error in a comment is "in" the comment, not in the token before it.
+        self.tok_start = self.pos;
         self.skip_trivia()?;
         let start = self.pos;
+        self.tok_start = start;
         let Some(c) = self.cur() else {
             return Ok(self.token(TokenKind::Eof, start));
         };
@@ -529,7 +611,9 @@ impl<'a> Lexer<'a> {
         }
         loop {
             let Some(c) = self.cur() else {
-                return Err(self.error_at(start, self.pos, "unterminated string"));
+                return Err(self
+                    .error_at(start, self.pos, "unterminated string")
+                    .at_eof());
             };
             match c {
                 b'"' => {
@@ -552,7 +636,9 @@ impl<'a> Lexer<'a> {
         let esc_start = self.pos;
         self.pos += 1;
         let Some(c) = self.cur() else {
-            return Err(self.error_at(esc_start, self.pos, "unterminated string"));
+            return Err(self
+                .error_at(esc_start, self.pos, "unterminated string")
+                .at_eof());
         };
         self.pos += 1;
         match c {
@@ -659,7 +745,9 @@ impl<'a> Lexer<'a> {
         let body = self.pos;
         loop {
             let Some(c) = self.cur() else {
-                return Err(self.error_at(start, self.pos, "unterminated raw string"));
+                return Err(self
+                    .error_at(start, self.pos, "unterminated raw string")
+                    .at_eof());
             };
             self.pos += 1;
             if c == b'"' && (0..hashes).all(|i| self.at(i) == Some(b'#')) {
@@ -717,7 +805,10 @@ impl<'a> Lexer<'a> {
     fn hole(&mut self, open: usize) -> Result<TemplatePart, Diagnostic> {
         let expr_start = self.pos;
         let mut depth = 0u32;
-        let unterminated = |lx: &Self| lx.error_at(open, lx.pos, "unterminated `{` in template");
+        let unterminated = |lx: &Self| {
+            lx.error_at(open, lx.pos, "unterminated `{` in template")
+                .at_eof()
+        };
         loop {
             let Some(c) = self.cur() else {
                 return Err(unterminated(self));

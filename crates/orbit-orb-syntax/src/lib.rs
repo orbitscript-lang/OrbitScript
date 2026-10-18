@@ -12,9 +12,9 @@ mod lower;
 mod parser;
 pub mod token;
 
-pub use diag::Diagnostic;
+pub use diag::{Diagnostic, DiagnosticKind};
 pub use lower::lower;
-pub use parser::{ParseOptions, parse, parse_with};
+pub use parser::{ParseOptions, parse, parse_recovering, parse_with};
 
 /// The whole OrbitScript front end: parses `src`, lowers it to HIR and runs the HIR's shared
 /// analysis, giving a chunk ready for the compiler.

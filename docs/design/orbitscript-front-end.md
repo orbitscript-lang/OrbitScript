@@ -56,11 +56,28 @@ Rust rules the parser follows where the proposal doesn't say otherwise:
 
 ### Options for tools
 
-`ParseOptions` has three flags that `load` and the CLI leave off; `orbit-check` (and later a language server) sets them. None changes what a program does.
+`ParseOptions` has five flags that `load` and the CLI leave off; `orbit-check` and the language server set them. None changes what a program does.
 
-- **`type_trees`**: every `ast::Type` carries a `TypeKind` tree (paths with generic arguments, `nil`, `Self`, `T?`, unions, arrays, maps, records, tuples, `fn` types; `Error` is reserved for a recovering parse). Off, the type grammar is still parsed and checked, but only spans are kept and nothing is allocated for it.
+- **`type_trees`**: every `ast::Type` carries a `TypeKind` tree (paths with generic arguments, `nil`, `Self`, `T?`, unions, arrays, maps, records, tuples, `fn` types; `Error` is reserved). Off, the type grammar is still parsed and checked, but only spans are kept and nothing is allocated for it.
 - **`stub`**: `.orbi` stubs. `fn` items and `impl` functions may end in `;`, and `const NAME: T;` needs no value. Lowering a stub is an error ("a stub declaration has no body to run").
-- **`doc_comments`**: the lexer records `///` (outer) and `//!` (inner) comments in `Ast::doc_comments`, and each item, `impl` members included, gets the `///` lines just before it in `Item::docs`. `////` is an ordinary comment, as in Rust.
+- **`doc_comments`**: the lexer records `///` (`CommentKind::Doc`) and `//!` (`InnerDoc`) comments in `Ast::comments`, and each item, `impl` members included, gets the `///` lines just before it in `Item::docs`. `////` is an ordinary comment, as in Rust.
+- **`keep_trivia`**: `Ast::comments` holds every comment (`Line`, `Block`, `Doc`, `InnerDoc`), in source order, for a formatter or an editor. The tree itself doesn't change.
+- **`recover`**: parsing goes on after a syntax error (see below). `parse_recovering` returns the AST and every error; `parse_with` still returns only the first.
+
+Every `Diagnostic` has a `kind`: `UnexpectedEof` when the input stops in the middle of something (an unclosed `{`, string, comment or template hole, or a construct cut short), so a REPL can read another line; `Other` for the rest.
+
+### Error recovery
+
+With `recover`, an error is recorded and the parse picks up where the next thing most likely starts, so an editor gets an AST for everything around the broken line:
+
+- **A missing expression** before `;`, `,`, `)`, `]`, `}` or the end (`let x = ;`, `f(a, )`) becomes `ExprKind::Error` and the construct around it is kept.
+- **A missing `;`** is reported and parsing goes on as if it were there; the rest of the line, if any, is skipped.
+- **A broken statement** becomes `StmtKind::Error`, a broken `impl` member `ItemKind::Error`, and a broken match arm is dropped. The parser skips to a synchronisation point: a `;` (a `,` for an arm), a `}` closing a block the statement opened at the end of a line, the enclosing block's `}`, a statement keyword starting a line, or a line indented no deeper than the statement. Brackets opened before the error are counted (by re-lexing the statement) so their closers aren't mistaken for the block's.
+- **A missing `}`** is assumed where an item keyword (`fn`, `pub`, `struct`, `enum`, `impl`, `use`, `const`, `global`, `extern`) starts a line at column 0 inside a block, `impl`, struct or enum, or where `;`, `let` or an item keyword appears where a match arm should start.
+- **A lexer error** is recorded and the bad token skipped; a bad string or number becomes an empty string or `0`, so `let s = "\q";` still binds `s`. A parse error right after a lexer error isn't reported (it is most likely the same mistake).
+- **A broken template hole** becomes an `Error` expression inside the template.
+
+Lowering rejects `Error` nodes ("this code has a syntax error, so it can't run"). On every OrbitScript file in the repository, a recovering parse gives exactly the same tree as a normal one, and deleting the first or last token of any line never loses an item before or after the break (`tests/recover.rs`).
 
 Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, `type A<T>`) and the `self: T` and `...rest: T` annotations are always kept. `type` aliases lower to nothing; `e as T` lowers like `(e)`.
 

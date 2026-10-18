@@ -322,6 +322,12 @@ impl Lowerer {
         Diagnostic::new(span, self.chunk.source.line_of(span.start), message)
     }
 
+    /// The error for an `Error` node, which only an error-recovering parse makes.
+    #[cold]
+    fn unparsed(&self, span: Span) -> Diagnostic {
+        self.error(span, "this code has a syntax error, so it can't run")
+    }
+
     fn text(&self, sym: StrId) -> String {
         self.chunk.strings.display(sym).into_owned()
     }
@@ -794,6 +800,7 @@ impl Lowerer {
             } => self.let_stmt(*scope, pat, value.as_ref(), s.span, out),
             ast::StmtKind::Item(item) => self.item(item, out),
             ast::StmtKind::Scope(inner) => self.scope_action(inner, s.span, out),
+            ast::StmtKind::Error => Err(self.unparsed(s.span)),
             _ => {
                 // Statements a hoisted operand added stay in a block of their own, so their
                 // temporaries end with the statement.
