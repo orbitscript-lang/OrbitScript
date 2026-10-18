@@ -208,20 +208,10 @@ fn main() -> ExitCode {
         ignore_env: cli.ignore_env,
         ..Default::default()
     };
-    if let Err(e) = orbit_std::install(&mut iso, &options) {
+    if let Err(e) = install_libraries(&mut iso, &options, &cli) {
         eprintln!("{prog}: {}", e.message());
         return ExitCode::FAILURE;
     }
-    #[cfg(feature = "c-modules")]
-    orbit_capi::install(&mut iso, cli.lock_cpath);
-    #[cfg(not(feature = "c-modules"))]
-    let _ = cli.lock_cpath;
-    #[cfg(feature = "ffi")]
-    if !cli.no_ffi {
-        orbit_std::install_ffi(&mut iso);
-    }
-    #[cfg(not(feature = "ffi"))]
-    let _ = cli.no_ffi;
     catch_interrupts(iso.interrupt());
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         iso.gc().set_stress(true);
@@ -496,4 +486,42 @@ fn print_version() {
         "OrbitScript {}  implements Lua 5.5.1, designed by Lua.org, PUC-Rio",
         orbit::VERSION
     );
+}
+
+/// Install `orbit-std`, the C module loader and `ffi`, as this build has
+/// them.
+#[cfg(not(bundled))]
+fn install_libraries(
+    iso: &mut Isolate,
+    options: &orbit_std::Options,
+    cli: &Cli,
+) -> Result<(), Error> {
+    orbit_std::install(iso, options)?;
+    #[cfg(feature = "c-modules")]
+    orbit_capi::install(iso, cli.lock_cpath);
+    #[cfg(not(feature = "c-modules"))]
+    let _ = cli.lock_cpath;
+    #[cfg(feature = "ffi")]
+    if !cli.no_ffi {
+        orbit_std::install_ffi(iso);
+    }
+    #[cfg(not(feature = "ffi"))]
+    let _ = cli.no_ffi;
+    Ok(())
+}
+
+/// Install the copies of `orbit-std`, the C module loader and `ffi` that
+/// liborbit carries, so their functions run without crossing the boundary.
+#[cfg(bundled)]
+fn install_libraries(
+    iso: &mut Isolate,
+    options: &orbit_std::Options,
+    cli: &Cli,
+) -> Result<(), Error> {
+    iso.install_bundled_std(options.base, options.io, options.os, options.ignore_env)?;
+    iso.install_bundled_c_modules(cli.lock_cpath);
+    if !cli.no_ffi {
+        iso.install_bundled_ffi();
+    }
+    Ok(())
 }

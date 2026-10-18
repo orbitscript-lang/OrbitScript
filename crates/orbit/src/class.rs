@@ -10,6 +10,7 @@ use crate::value::{Table, Userdata};
 
 /// How the API stores a host value in a userdata: taken out while a method
 /// runs, so the method can use the whole [`Call`] at the same time.
+#[cfg(runtime_backend)]
 pub(crate) struct Slot<T>(pub(crate) Option<T>);
 
 /// A Rust type made visible to scripts: values of `T` become userdata whose

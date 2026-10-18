@@ -1,24 +1,4 @@
-//! The stack API: Lua-C-API-shaped operations on a call's window, in safe
-//! Rust (ADR-11, phase e).
-//!
-//! A [`Stack`] is the window of values a native function works in, the
-//! same window a [`Scope`] wraps. Values are addressed by index with Lua's
-//! convention: 1 is the window's first slot, -1 its top, and two kinds of
-//! pseudo-index reach the registry ([`REGISTRY_INDEX`]) and the running
-//! native closure's upvalues ([`upvalue_index`]). An index outside the
-//! window reads as "none"; writing to one, or a wrong type where an
-//! operation needs a table, is an error, never undefined behaviour.
-//!
-//! The typed handles stay the API for Rust hosts, and are written over
-//! this layer: a [`Scope`] holds a stack and each handle is a slot in it.
-//! This layer is also for bindings that need Lua's exact semantics, the
-//! Lua C API above all (`orbit-capi`), and is what crosses the `liborbit`
-//! boundary.
-//!
-//! Natives written against it implement [`Native`]; one that waits for a
-//! call or a yield continues in a [`Continuation`]. Both are types rather
-//! than function values, so each compiles to its own trampoline with no
-//! indirect call.
+//! The stack API over the runtime linked into this program.
 
 use std::any::Any;
 use std::ffi::c_void;
@@ -26,7 +6,9 @@ use std::ffi::c_void;
 use orbit_runtime::object::number::{float_to_int, fmt_number, str_to_number};
 use orbit_runtime::object::table as tbl;
 use orbit_runtime::object::value::raw_eq;
-use orbit_runtime::object::{self as raw, Gc, LightUserData, LuaStr, NoMemory, Table, gc};
+use orbit_runtime::object::{
+    self as raw, Gc, LightUserData, LuaStr, NativeId, NoMemory, Table, gc,
+};
 use orbit_runtime::stdlib;
 use orbit_runtime::vm::{
     self, CallOutcome, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn, Operator, Vm,
@@ -36,288 +18,59 @@ use crate::isolate::Library;
 use crate::scope::Scope;
 use crate::value::{ThreadStatus, Value};
 
+use super::{
+    ArithOp, CompareOp, Continuation, FrameInfo, GcOp, GcParam, InterruptHandler, MULTRET, Native,
+    Outcome, REGISTRY_INDEX, RIDX_MAINTHREAD, Resumed, Ret, Return, StackResult, Status, Type,
+};
+
 type RawValue = raw::Value;
-
-/// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).
-pub const REGISTRY_INDEX: i32 = -(i32::MAX / 2 + 1000);
-
-/// The pseudo-index of upvalue `i` (1-based) of the running native
-/// closure (Lua's `lua_upvalueindex`).
-pub const fn upvalue_index(i: i32) -> i32 {
-    REGISTRY_INDEX - i
-}
-
-/// As a result count: keep every result (Lua's `LUA_MULTRET`).
-pub const MULTRET: i32 = -1;
-
-/// Registry entry 3: the main thread (Lua's `LUA_RIDX_MAINTHREAD`).
-pub const RIDX_MAINTHREAD: i64 = 3;
-
-/// The registry index of the global table (`LUA_RIDX_GLOBALS`).
-pub const RIDX_GLOBALS: i64 = 2;
 
 /// The most values a native's window may hold, as `LUAI_MAXSTACK`.
 const MAX_STACK: usize = 1_000_000;
 
-/// A value's type, with Lua's type codes as discriminants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum Type {
-    /// No value: an index outside the window.
-    None = -1,
-    Nil = 0,
-    Boolean = 1,
-    LightUserdata = 2,
-    Number = 3,
-    String = 4,
-    Table = 5,
-    Function = 6,
-    Userdata = 7,
-    Thread = 8,
-}
-
-impl Type {
-    /// The name `type` gives (`"no value"` for [`Type::None`]).
-    pub fn name(self) -> &'static str {
-        match self {
-            Type::None => "no value",
-            Type::Nil => "nil",
-            Type::Boolean => "boolean",
-            Type::LightUserdata | Type::Userdata => "userdata",
-            Type::Number => "number",
-            Type::String => "string",
-            Type::Table => "table",
-            Type::Function => "function",
-            Type::Thread => "thread",
-        }
-    }
-
-    fn of(v: RawValue) -> Type {
-        match v {
-            RawValue::Nil => Type::Nil,
-            RawValue::Bool(_) => Type::Boolean,
-            RawValue::Int(_) | RawValue::Float(_) => Type::Number,
-            RawValue::Str(_) => Type::String,
-            RawValue::Table(_) => Type::Table,
-            RawValue::Closure(_) | RawValue::Native(_) => Type::Function,
-            RawValue::UserData(_) => Type::Userdata,
-            RawValue::Thread(_) => Type::Thread,
-            RawValue::LightUserData(_) => Type::LightUserdata,
-        }
+/// The type of `v`.
+fn type_of(v: RawValue) -> Type {
+    match v {
+        RawValue::Nil => Type::Nil,
+        RawValue::Bool(_) => Type::Boolean,
+        RawValue::Int(_) | RawValue::Float(_) => Type::Number,
+        RawValue::Str(_) => Type::String,
+        RawValue::Table(_) => Type::Table,
+        RawValue::Closure(_) | RawValue::Native(_) => Type::Function,
+        RawValue::UserData(_) => Type::Userdata,
+        RawValue::Thread(_) => Type::Thread,
+        RawValue::LightUserData(_) => Type::LightUserdata,
     }
 }
 
-/// How a protected call, a resume or a load ended, with Lua's status
-/// codes as discriminants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum Status {
-    Ok = 0,
-    Yield = 1,
-    /// A runtime error.
-    Runtime = 2,
-    Syntax = 3,
-    Memory = 4,
-    /// An error in the message handler.
-    Handler = 5,
-}
-
-/// A comparison for [`Stack::compare`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompareOp {
-    Eq,
-    Lt,
-    Le,
-}
-
-/// An operator for [`Stack::arith`], in Lua's `LUA_OP*` order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArithOp {
-    Add,
-    Sub,
-    Mul,
-    Mod,
-    Pow,
-    Div,
-    IDiv,
-    BAnd,
-    BOr,
-    BXor,
-    Shl,
-    Shr,
-    Unm,
-    BNot,
-}
-
-impl ArithOp {
-    /// All of them, by Lua's code.
-    pub const ALL: [ArithOp; 14] = [
-        ArithOp::Add,
-        ArithOp::Sub,
-        ArithOp::Mul,
-        ArithOp::Mod,
-        ArithOp::Pow,
-        ArithOp::Div,
-        ArithOp::IDiv,
-        ArithOp::BAnd,
-        ArithOp::BOr,
-        ArithOp::BXor,
-        ArithOp::Shl,
-        ArithOp::Shr,
-        ArithOp::Unm,
-        ArithOp::BNot,
-    ];
-
-    fn raw(self) -> Operator {
-        match self {
-            ArithOp::Add => Operator::Add,
-            ArithOp::Sub => Operator::Sub,
-            ArithOp::Mul => Operator::Mul,
-            ArithOp::Mod => Operator::Mod,
-            ArithOp::Pow => Operator::Pow,
-            ArithOp::Div => Operator::Div,
-            ArithOp::IDiv => Operator::IDiv,
-            ArithOp::BAnd => Operator::BAnd,
-            ArithOp::BOr => Operator::BOr,
-            ArithOp::BXor => Operator::BXor,
-            ArithOp::Shl => Operator::Shl,
-            ArithOp::Shr => Operator::Shr,
-            ArithOp::Unm => Operator::Unm,
-            ArithOp::BNot => Operator::BNot,
-        }
+/// The runtime's operator for `op`.
+fn operator(op: ArithOp) -> Operator {
+    match op {
+        ArithOp::Add => Operator::Add,
+        ArithOp::Sub => Operator::Sub,
+        ArithOp::Mul => Operator::Mul,
+        ArithOp::Mod => Operator::Mod,
+        ArithOp::Pow => Operator::Pow,
+        ArithOp::Div => Operator::Div,
+        ArithOp::IDiv => Operator::IDiv,
+        ArithOp::BAnd => Operator::BAnd,
+        ArithOp::BOr => Operator::BOr,
+        ArithOp::BXor => Operator::BXor,
+        ArithOp::Shl => Operator::Shl,
+        ArithOp::Shr => Operator::Shr,
+        ArithOp::Unm => Operator::Unm,
+        ArithOp::BNot => Operator::BNot,
     }
-
-    fn unary(self) -> bool {
-        matches!(self, ArithOp::Unm | ArithOp::BNot)
-    }
-}
-
-/// A collector parameter for [`GcOp::Param`], in Lua's `LUA_GCP*` order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GcParam {
-    MinorMul,
-    MajorMinor,
-    MinorMajor,
-    Pause,
-    StepMul,
-    StepSize,
-}
-
-/// What [`Stack::gc`] does (Lua's `lua_gc` options).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GcOp {
-    Stop,
-    Restart,
-    Collect,
-    /// Kilobytes in use.
-    Count,
-    /// Bytes in use past the last whole kilobyte.
-    CountRemainder,
-    /// An incremental step of about this many kilobytes.
-    Step(i32),
-    IsRunning,
-    /// Read a parameter, and set it when the value is `Some`.
-    Param(GcParam, Option<i64>),
 }
 
 /// An error raised in the isolate, to return from a native (an `Err`
 /// unwinds to the nearest protected call). Holds the error value.
 #[derive(Debug)]
-pub struct Raised(LuaError);
-
-/// The result of a stack operation that can raise.
-pub type StackResult<T> = Result<T, Raised>;
+pub struct Raised(pub(crate) LuaError);
 
 impl From<LuaError> for Raised {
     fn from(e: LuaError) -> Raised {
         Raised(e)
-    }
-}
-
-/// A native function written against the stack API. Its window starts
-/// with its arguments; it ends with a [`Return`].
-pub trait Native: 'static {
-    /// The name the native is registered under, used in messages when the
-    /// call site doesn't name it. It identifies the native: two natives
-    /// must not share one.
-    const NAME: &'static str;
-
-    fn call(s: &mut Stack<'_>) -> StackResult<Return>;
-}
-
-/// How a native continues after the call or yield it ended with
-/// ([`Return::call_then`], [`Return::yield_then`]). It runs in the same
-/// window, with the same upvalues.
-pub trait Continuation: 'static {
-    fn resume(s: &mut Stack<'_>, outcome: Outcome) -> StackResult<Return>;
-}
-
-/// What a [`Continuation`] continues from.
-#[derive(Debug)]
-pub enum Outcome {
-    /// The call returned this many results, now the window's last values;
-    /// or the coroutine was resumed with this many values.
-    Ok(usize),
-    /// The protected call failed, or the coroutine was closed while
-    /// suspended.
-    Err(Raised),
-}
-
-/// How a [`Native`] ends.
-#[derive(Debug, Clone, Copy)]
-#[must_use]
-pub struct Return(Ret);
-
-#[derive(Debug, Clone, Copy)]
-enum Ret {
-    Values(usize),
-    Yield(usize),
-    YieldThen(usize, vm::Continuation),
-    CallThen {
-        nargs: usize,
-        protected: bool,
-        k: vm::Continuation,
-    },
-    Exit {
-        code: i32,
-        close: bool,
-    },
-}
-
-impl Return {
-    /// Return the window's top `n` values.
-    pub fn values(n: usize) -> Return {
-        Return(Ret::Values(n))
-    }
-
-    /// Yield the window's top `n` values; when resumed, return the values
-    /// the resume passed.
-    pub fn yield_values(n: usize) -> Return {
-        Return(Ret::Yield(n))
-    }
-
-    /// Yield the window's top `n` values; when resumed, continue in `K`.
-    pub fn yield_then<K: Continuation>(n: usize) -> Return {
-        Return(Ret::YieldThen(n, continue_in::<K>))
-    }
-
-    /// Call the function below the window's top `nargs` values, which code
-    /// may yield across, then continue in `K` with its results (or, when
-    /// `protected`, its error).
-    pub fn call_then<K: Continuation>(nargs: usize, protected: bool) -> Return {
-        Return(Ret::CallThen {
-            nargs,
-            protected,
-            k: continue_in::<K>,
-        })
-    }
-
-    /// End the process with exit status `code`, as `os.exit` does: first,
-    /// when `close`, closing the isolate (the main thread's variables still
-    /// to close, then every pending finalizer); then running the
-    /// [`Stack::before_exit`] hooks and flushing standard output.
-    pub fn exit(code: i32, close: bool) -> Return {
-        Return(Ret::Exit { code, close })
     }
 }
 
@@ -361,6 +114,14 @@ fn native_entry<N: Native>(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaE
     }
 }
 
+/// How a [`Return`] names the continuation to run: the runtime's.
+pub(crate) type ContRef = vm::Continuation;
+
+/// The continuation behind `K`.
+pub(crate) fn cont_ref<K: Continuation>() -> ContRef {
+    continue_in::<K>
+}
+
 /// The runtime continuation behind every [`Continuation`] `K`.
 fn continue_in<K: Continuation>(
     ctx: &mut NativeCtx<'_>,
@@ -386,6 +147,17 @@ fn continue_in<K: Continuation>(
 pub struct ThreadRef(Gc<raw::Thread>);
 
 impl ThreadRef {
+    /// The thread's heap handle as plain bits, and back.
+    #[cfg(feature = "abi")]
+    pub(crate) fn to_bits(self) -> u64 {
+        self.0.to_bits()
+    }
+
+    #[cfg(feature = "abi")]
+    pub(crate) fn from_bits(bits: u64) -> ThreadRef {
+        ThreadRef(Gc::from_bits(bits))
+    }
+
     /// The heap slot the thread occupies. A collected thread's slot goes to
     /// the next thread made, so this tells live threads apart only.
     pub fn slot(self) -> u32 {
@@ -397,42 +169,19 @@ impl ThreadRef {
 /// [`Stack::enter_thread`] and [`Stack::leave_thread`].
 #[derive(Debug)]
 #[must_use]
-pub struct ThreadWindow(vm::WindowSave);
+pub struct ThreadWindow(pub(crate) vm::WindowSave);
 
 /// A native with data words, from [`Control::register_native`]: a plain
 /// value with no collector state, to keep as long as the isolate.
 #[derive(Debug, Clone, Copy)]
-pub struct NativeRef(RawValue);
+pub struct NativeRef(pub(crate) RawValue);
 
-/// What [`Stack::resume`] ended with. The results, or the error, are on
-/// the resumed thread's stack.
-#[derive(Debug, Clone, Copy)]
-pub struct Resumed {
-    pub status: Status,
-    /// How many values it yielded or returned (0 after an error).
-    pub nresults: usize,
-    /// After an error that killed the thread: where its stack ended, which
-    /// is where a view of its stack should start from now on.
-    pub failed_top: Option<usize>,
-}
-
-/// What [`Stack::level_info`] and [`Stack::function_info`] report
-/// (`lua_getinfo`).
-#[derive(Debug, Default)]
-pub struct FrameInfo {
-    pub name: Option<Vec<u8>>,
-    pub namewhat: &'static str,
-    pub what: &'static str,
-    pub source: Vec<u8>,
-    pub short_src: String,
-    pub currentline: i32,
-    pub linedefined: i32,
-    pub lastlinedefined: i32,
-    pub nups: u8,
-    pub nparams: u8,
-    pub isvararg: bool,
-    pub extraargs: u8,
-    pub istailcall: bool,
+#[cfg(feature = "abi")]
+impl NativeRef {
+    /// The native with index `id`.
+    pub(crate) fn from_index(id: u32) -> NativeRef {
+        NativeRef(RawValue::Native(NativeId(id)))
+    }
 }
 
 /// Memory a binding asked for with [`Stack::new_userdata`], aligned to 16
@@ -486,7 +235,7 @@ struct WarnBuffer(Vec<u8>);
 
 /// The window of a native function, or the host's window between calls.
 pub struct Stack<'s> {
-    ctx: NativeCtx<'s>,
+    pub(crate) ctx: NativeCtx<'s>,
 }
 
 impl std::fmt::Debug for Stack<'_> {
@@ -512,7 +261,7 @@ impl<'s> Stack<'s> {
 
     /// Turn what a native ended with into the runtime's terms.
     #[inline(always)]
-    fn finish(&mut self, r: Return) -> Result<NativeReturn, LuaError> {
+    pub(crate) fn finish(&mut self, r: Return) -> Result<NativeReturn, LuaError> {
         match r.0 {
             Ret::Values(n) if n <= self.ctx.len() => Ok(NativeReturn::Return(n)),
             _ => self.finish_other(r),
@@ -555,7 +304,9 @@ impl<'s> Stack<'s> {
                     protected,
                 }
             }
-            Ret::Exit { code, close } => return crate::isolate::exit_process(c, code, close),
+            Ret::Exit { code, close } => {
+                return crate::isolate::backend::exit_process(c, code, close);
+            }
         })
     }
 
@@ -818,7 +569,7 @@ impl<'s> Stack<'s> {
         if self.is_none(idx) {
             Type::None
         } else {
-            Type::of(self.get(idx))
+            type_of(self.get(idx))
         }
     }
 
@@ -1035,18 +786,47 @@ impl<'s> Stack<'s> {
     /// The data word of the closure of native `N` at `idx`
     /// ([`Stack::push_native_closure`]); `None` if it isn't one.
     pub fn closure_data_of<N: Native>(&mut self, idx: i32) -> Option<u64> {
-        let v = self.get(idx);
-        let id = self.ctx.native(N::NAME, native_entry::<N>);
-        let RawValue::Native(id) = id else {
+        let id = self.native_index_of(N::NAME, native_entry::<N>);
+        self.closure_data_of_index(idx, id)
+    }
+
+    /// The index the native `f` is registered under as `name`, registering
+    /// it first if it isn't.
+    pub(crate) fn native_index_of(&mut self, name: &'static str, f: vm::NativeFn) -> u32 {
+        let RawValue::Native(id) = self.ctx.native(name, f) else {
             unreachable!("natives are registered as natives")
         };
-        if self.ctx.native_of(v) != Some(id) {
+        id.0
+    }
+
+    /// [`Stack::closure_data_of`] for the native with index `id`.
+    pub(crate) fn closure_data_of_index(&mut self, idx: i32, id: u32) -> Option<u64> {
+        let v = self.get(idx);
+        if self.ctx.native_of(v) != Some(NativeId(id)) {
             return None;
         }
         match self.ctx.hidden_upvalue_of(v, 0) {
             RawValue::LightUserData(p) => Some(p.get()),
             _ => None,
         }
+    }
+
+    /// See [`Control::interrupt_flag`].
+    #[cfg(feature = "abi")]
+    pub(crate) fn interrupt_flag(&self) -> *mut bool {
+        self.ctx.vm.interrupt_flag()
+    }
+
+    /// The running native's index.
+    #[cfg(feature = "abi")]
+    pub(crate) fn running_native(&self) -> u32 {
+        self.ctx.native_id().0
+    }
+
+    /// Push the native with index `id`.
+    #[cfg(feature = "abi")]
+    pub(crate) fn push_native_index(&mut self, id: u32) {
+        self.ctx.push(RawValue::Native(NativeId(id)));
     }
 
     /// Whether the values at `a` and `b` are equal without metamethods.
@@ -1082,7 +862,7 @@ impl<'s> Stack<'s> {
         } else {
             (self.ctx.arg(len - 2), self.ctx.arg(len - 1))
         };
-        let m = self.ctx.arith(op.raw(), a, b)?;
+        let m = self.ctx.arith(operator(op), a, b)?;
         let r = self.finish_meta(m, |v| v)?;
         // The operands stay on the stack (rooted) until the result replaces them.
         let len = self.ctx.len();
@@ -1203,13 +983,23 @@ impl<'s> Stack<'s> {
     /// which it reads at [`upvalue_index`], and over `data`, a word scripts
     /// can neither see nor change ([`Stack::closure_data`]).
     pub fn push_native_closure<N: Native>(&mut self, nups: usize, data: u64) -> StackResult<()> {
+        self.push_closure_of(N::NAME, native_entry::<N>, nups, data)
+    }
+
+    /// [`Stack::push_native_closure`] for the native `f`, registered as
+    /// `name`.
+    pub(crate) fn push_closure_of(
+        &mut self,
+        name: &'static str,
+        f: vm::NativeFn,
+        nups: usize,
+        data: u64,
+    ) -> StackResult<()> {
         self.need(nups)?;
         let len = self.ctx.len();
         let ups = self.ctx.window()[len - nups..].to_vec();
         let hidden = [RawValue::LightUserData(LightUserData::new(data))];
-        let v = self
-            .ctx
-            .new_closure_hidden(N::NAME, native_entry::<N>, &ups, &hidden);
+        let v = self.ctx.new_closure_hidden(name, f, &ups, &hidden);
         self.ctx.truncate(len - nups);
         self.ctx.push(v);
         Ok(())
@@ -1243,7 +1033,7 @@ impl<'s> Stack<'s> {
         self.ctx.truncate(len - 1);
         let v = v?;
         self.ctx.push(v);
-        Ok(Type::of(v))
+        Ok(type_of(v))
     }
 
     /// Push `t[k]` for the table at `idx` and the key on top (popped),
@@ -1278,7 +1068,7 @@ impl<'s> Stack<'s> {
         let t = self.table_at(idx)?;
         let v = tbl::get(&self.ctx.vm.heap, t, key);
         self.ctx.push(v);
-        Ok(Type::of(v))
+        Ok(type_of(v))
     }
 
     /// Push `t[k]` for the table at `idx` and the key on top (popped), with
@@ -1288,7 +1078,7 @@ impl<'s> Stack<'s> {
         let key = self.pop_raw()?;
         let v = tbl::get(&self.ctx.vm.heap, t, key);
         self.ctx.push(v);
-        Ok(Type::of(v))
+        Ok(type_of(v))
     }
 
     pub fn raw_get_index(&mut self, idx: i32, n: i64) -> StackResult<Type> {
@@ -1369,7 +1159,7 @@ impl<'s> Stack<'s> {
             }
         };
         self.ctx.push(v);
-        Type::of(v)
+        type_of(v)
     }
 
     /// Pop the top value into user value `n` of the userdata at `idx`;
@@ -1987,7 +1777,7 @@ impl<'s> Stack<'s> {
     /// `os.exit`), after the isolate closes (if it does) and before
     /// standard output is flushed.
     pub fn before_exit(&mut self, hook: impl Fn() + 'static) {
-        crate::isolate::exit_hooks(self.ctx.vm)
+        crate::isolate::backend::exit_hooks(self.ctx.vm)
             .0
             .push(Box::new(hook));
     }
@@ -2367,21 +2157,13 @@ fn light(p: usize) -> RawValue {
 /// [`Stack::control`], [`Isolate::control`](crate::Isolate::control), or an
 /// [`InterruptHandler`].
 pub struct Control<'a> {
-    vm: &'a mut Vm,
+    pub(crate) vm: &'a mut Vm,
 }
 
 impl std::fmt::Debug for Control<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Control").finish_non_exhaustive()
     }
-}
-
-/// Runs when the isolate's interrupt flag is raised
-/// ([`Control::set_interrupt_handler`]): returns true if it handled the
-/// interrupt, so running code goes on, or false to stop it with
-/// `interrupted!`.
-pub trait InterruptHandler: 'static {
-    fn handle(c: &mut Control<'_>) -> bool;
 }
 
 fn interrupt_entry<H: InterruptHandler>(vm: &mut Vm) -> bool {
@@ -2391,6 +2173,11 @@ fn interrupt_entry<H: InterruptHandler>(vm: &mut Vm) -> bool {
 impl<'a> Control<'a> {
     pub(crate) fn new(vm: &'a mut Vm) -> Control<'a> {
         Control { vm }
+    }
+
+    #[cfg(feature = "abi")]
+    pub(crate) fn reborrow(&mut self) -> Control<'_> {
+        Control { vm: &mut *self.vm }
     }
 
     /// See [`Stack::extension`].
@@ -2420,10 +2207,25 @@ impl<'a> Control<'a> {
     /// ([`Stack::native_data`]). Each call adds one, which lives as long as
     /// the isolate, so callers keep one per distinct `data`.
     pub fn register_native<N: Native>(&mut self, data: [u64; 2]) -> NativeRef {
-        NativeRef(
-            self.vm
-                .register_native_with_data(N::NAME, native_entry::<N>, data),
-        )
+        NativeRef(RawValue::Native(NativeId(self.register_native_fn(
+            N::NAME,
+            native_entry::<N>,
+            data,
+        ))))
+    }
+
+    /// [`Control::register_native`] for the native `f`, as `name`: its
+    /// index.
+    pub(crate) fn register_native_fn(
+        &mut self,
+        name: &'static str,
+        f: vm::NativeFn,
+        data: [u64; 2],
+    ) -> u32 {
+        let RawValue::Native(id) = self.vm.register_native_with_data(name, f, data) else {
+            unreachable!("natives are registered as natives")
+        };
+        id.0
     }
 
     /// Set the running thread's hook, as `debug.sethook` does: `f` is
@@ -2445,116 +2247,5 @@ impl<'a> Control<'a> {
 
     pub fn main_thread(&self) -> ThreadRef {
         ThreadRef(self.vm.main_thread())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Config, Runtime};
-
-    /// `add(a, b)`, and a call back into the script through a continuation.
-    struct Add;
-
-    impl Native for Add {
-        const NAME: &'static str = "add";
-
-        fn call(s: &mut Stack<'_>) -> StackResult<Return> {
-            let (Some(a), Some(b)) = (s.to_integer(1), s.to_integer(2)) else {
-                return Err(s.arg_error(1, "integers expected"));
-            };
-            s.push_integer(a + b);
-            Ok(Return::values(1))
-        }
-    }
-
-    /// `twice(f, x)`: `f(f(x))`, calling through continuations, so `f`
-    /// may yield.
-    struct Twice;
-
-    impl Native for Twice {
-        const NAME: &'static str = "twice";
-
-        fn call(s: &mut Stack<'_>) -> StackResult<Return> {
-            s.push_copy(1);
-            s.push_copy(2);
-            Ok(Return::call_then::<Again>(1, false))
-        }
-    }
-
-    struct Again;
-
-    impl Continuation for Again {
-        fn resume(s: &mut Stack<'_>, o: Outcome) -> StackResult<Return> {
-            let Outcome::Ok(n) = o else {
-                unreachable!("an unprotected call's error unwinds past us")
-            };
-            s.adjust_results(n, 1);
-            s.push_copy(1);
-            s.rotate(-2, 1)?;
-            Ok(Return::call_then::<Done>(1, false))
-        }
-    }
-
-    struct Done;
-
-    impl Continuation for Done {
-        fn resume(_: &mut Stack<'_>, o: Outcome) -> StackResult<Return> {
-            match o {
-                Outcome::Ok(n) => Ok(Return::values(n.min(1))),
-                Outcome::Err(e) => Err(e),
-            }
-        }
-    }
-
-    #[test]
-    fn natives_continuations_and_tables() {
-        let mut iso = Runtime::new().new_isolate(Config::default());
-        iso.stack(|s| {
-            s.push_native::<Add>();
-            s.set_global(b"add").unwrap();
-            s.push_native::<Twice>();
-            s.set_global(b"twice").unwrap();
-            s.create_table(0, 1);
-            s.push_bytes(b"v");
-            s.set_field(-2, b"k").unwrap();
-            s.set_global(b"t").unwrap();
-        });
-        let src = "local co = coroutine.wrap(function(x) \
-                     return twice(function(y) return coroutine.yield(y) + 1 end, x) end) \
-                   local a = co(1) local b = co(10) local c = co(20) \
-                   return add(2, 3), t.k, a, b, c, pcall(add, 'x')";
-        iso.stack(|s| {
-            assert_eq!(s.load(src.as_bytes(), b"=test", b"t"), Status::Ok);
-            assert_eq!(s.pcall(0, MULTRET, 0).unwrap(), Status::Ok);
-            assert_eq!(s.top(), 7);
-            assert_eq!(s.to_integer(1), Some(5));
-            assert_eq!(s.string_at(2), Some(&b"v"[..]));
-            // The first yield passes 1 out; 10 + 1 goes in again; 20 + 1
-            // comes back.
-            assert_eq!(
-                (s.to_integer(3), s.to_integer(4), s.to_integer(5)),
-                (Some(1), Some(11), Some(21))
-            );
-            assert!(!s.to_boolean(6));
-            assert_eq!(
-                s.string_at(7),
-                Some(&b"bad argument #1 to 'add' (integers expected)"[..])
-            );
-        });
-    }
-
-    #[test]
-    fn indices_outside_the_window_read_as_none() {
-        let mut iso = Runtime::new().new_isolate(Config::default());
-        iso.stack(|s| {
-            s.push_integer(1);
-            assert_eq!(s.type_at(2), Type::None);
-            assert_eq!(s.type_at(-2), Type::None);
-            assert_eq!(s.type_at(upvalue_index(1)), Type::None);
-            assert_eq!(s.type_at(REGISTRY_INDEX), Type::Table);
-            assert!(s.copy(1, 5).is_err());
-            assert!(s.raw_get(1).is_err());
-        });
     }
 }

@@ -213,9 +213,9 @@ fn memory_limit_from_the_environment() {
 }
 
 /// Without the `c-modules` feature, `package.loadlib` gives Lua's result for
-/// a build without dynamic libraries.
+/// a build without dynamic libraries. (A shared build has liborbit's.)
 #[test]
-#[cfg(not(feature = "c-modules"))]
+#[cfg(not(any(feature = "c-modules", bundled)))]
 fn loadlib_is_absent_without_c_modules() {
     let o = orbit(
         &["-e", "print(select(3, package.loadlib('x.so', 'f')))"],

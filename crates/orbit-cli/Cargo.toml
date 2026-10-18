@@ -19,7 +19,7 @@ name = "orbitc"
 path = "src/orbitc.rs"
 
 [dependencies]
-orbit = { path = "../orbit" }
+orbit = { path = "../orbit", default-features = false }
 orbit-std = { path = "../orbit-std" }
 orbit-capi = { path = "../orbit-capi", optional = true }
 orbit-compiler = { path = "../orbit-compiler" }
@@ -29,7 +29,14 @@ orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 signal-hook = "0.4.5"
 
 [features]
-default = ["c-modules", "ffi", "line-editing"]
+default = ["runtime", "c-modules", "ffi", "line-editing"]
+# The runtime linked into the binaries: one self-contained `orbit`.
+runtime = ["orbit/default"]
+# The runtime in liborbit instead (ADR-10), which also carries `orbit-std`,
+# the C module loader and `ffi` for the binaries to install. Build with
+# `--no-default-features --features shared,line-editing`; `runtime` wins
+# when both are on.
+shared = ["orbit/shared"]
 # Load C modules (on by default in the CLI, Tym 2026-10-09).
 c-modules = ["dep:orbit-capi"]
 # The `ffi` library, on unless `--no-ffi` is given (Tym 2026-10-14, ADR-9).

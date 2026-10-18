@@ -676,6 +676,7 @@ impl<'s> Userdata<'s> {
     /// The host value, if it is a `T` this API stored
     /// ([`Scope::create_userdata`], [`Class`](crate::Class)). While the
     /// borrow lives, other operations on the scope panic.
+    #[cfg(runtime_backend)]
     pub fn borrow<T: 'static>(&self) -> Result<Ref<'_, T>, Error> {
         let idx = self.idx;
         Ref::filter_map(self.s.stack_ref(), |stack| {
@@ -685,10 +686,34 @@ impl<'s> Userdata<'s> {
     }
 
     /// The host value, mutably, if it is a `T` this API stored.
+    #[cfg(runtime_backend)]
     pub fn borrow_mut<T: 'static>(&self) -> Result<RefMut<'_, T>, Error> {
         let idx = self.idx;
         RefMut::filter_map(self.s.stack(), |stack| {
             stack.userdata_in_place_mut::<T>(idx)
+        })
+        .map_err(|_| Error::runtime(not_a::<T>()))
+    }
+
+    /// The host value, if it is a `T` this API stored
+    /// ([`Scope::create_userdata`], [`Class`](crate::Class)). While the
+    /// borrow lives, making userdata and calling methods panic.
+    #[cfg(shared_backend)]
+    pub fn borrow<T: 'static>(&self) -> Result<Ref<'_, T>, Error> {
+        let id = self.s.stack().host_value_id(self.idx);
+        Ref::filter_map(self.s.host.values.borrow(), |v| {
+            id.and_then(|id| v.get::<T>(id)).and_then(Option::as_ref)
+        })
+        .map_err(|_| Error::runtime(not_a::<T>()))
+    }
+
+    /// The host value, mutably, if it is a `T` this API stored.
+    #[cfg(shared_backend)]
+    pub fn borrow_mut<T: 'static>(&self) -> Result<RefMut<'_, T>, Error> {
+        let id = self.s.stack().host_value_id(self.idx);
+        RefMut::filter_map(self.s.host.values.borrow_mut(), |v| {
+            id.and_then(|id| v.get_mut::<T>(id))
+                .and_then(Option::as_mut)
         })
         .map_err(|_| Error::runtime(not_a::<T>()))
     }

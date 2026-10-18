@@ -1,11 +1,8 @@
 //! [`Chunk`]: code for an isolate to load, as bytes the host supplies.
 
-use orbit_runtime::object as raw;
-use orbit_runtime::stdlib::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
+use orbit_runtime::stdlib::is_orbitscript_file;
 
-use orbit_runtime::vm::NativeCtx;
-
-use crate::compiler::{Compiler, Language};
+use crate::compiler::Language;
 
 /// Which kinds of chunk [`Scope::load`] accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -81,61 +78,77 @@ impl<'a> Chunk<'a> {
         }
     }
 
+    #[cfg(runtime_backend)]
     pub(crate) fn is_binary(&self) -> bool {
-        self.bytes.first() == Some(&BINARY_SIGNATURE)
+        self.bytes.first() == Some(&orbit_runtime::stdlib::BINARY_SIGNATURE)
     }
 }
 
-/// Compile or decode `chunk` and link it with `env` as its `_ENV`,
-/// returning its main function (not yet rooted), or the message.
-pub(crate) fn load(
-    ctx: &mut NativeCtx<'_>,
-    chunk: &Chunk<'_>,
-    env: raw::Value,
-) -> Result<raw::Value, String> {
-    let binary = chunk.is_binary();
-    let allowed = match chunk.mode {
-        Mode::Text => !binary,
-        Mode::Binary => binary,
-        Mode::Both => true,
-    };
-    if !allowed {
-        let (what, mode) = if binary {
-            ("binary", "t")
-        } else {
-            ("text", "b")
+#[cfg(runtime_backend)]
+pub(crate) use loading::load;
+
+/// Loading over the runtime linked into this program; on the shared
+/// backend, `liborbit` loads.
+#[cfg(runtime_backend)]
+mod loading {
+    use orbit_runtime::object as raw;
+    use orbit_runtime::stdlib::chunk_id;
+    use orbit_runtime::vm::NativeCtx;
+
+    use super::{Chunk, Mode};
+    use crate::compiler::Compiler;
+
+    /// Compile or decode `chunk` and link it with `env` as its `_ENV`,
+    /// returning its main function (not yet rooted), or the message.
+    pub(crate) fn load(
+        ctx: &mut NativeCtx<'_>,
+        chunk: &Chunk<'_>,
+        env: raw::Value,
+    ) -> Result<raw::Value, String> {
+        let binary = chunk.is_binary();
+        let allowed = match chunk.mode {
+            Mode::Text => !binary,
+            Mode::Binary => binary,
+            Mode::Both => true,
         };
-        return Err(format!("attempt to load a {what} chunk (mode is '{mode}')"));
+        if !allowed {
+            let (what, mode) = if binary {
+                ("binary", "t")
+            } else {
+                ("text", "b")
+            };
+            return Err(format!("attempt to load a {what} chunk (mode is '{mode}')"));
+        }
+        if binary {
+            return load_binary(ctx, chunk, env);
+        }
+        let name = chunk_id(chunk.source());
+        let mut unlinked = Compiler
+            .compile(chunk.bytes, &name, chunk.resolved_language())
+            .map_err(|e| e.0)?;
+        // `debug.getinfo`'s `source` is the name as given, not its short form.
+        unlinked.source = chunk.source().into();
+        Ok(ctx.link(&unlinked, env))
     }
-    if binary {
-        return load_binary(ctx, chunk, env);
+
+    #[cfg(feature = "dump")]
+    fn load_binary(
+        ctx: &mut NativeCtx<'_>,
+        chunk: &Chunk<'_>,
+        env: raw::Value,
+    ) -> Result<raw::Value, String> {
+        orbit_runtime::stdlib::load_chunk_in(ctx, chunk.bytes, chunk.source(), b"b", env)
     }
-    let name = chunk_id(chunk.source());
-    let mut unlinked = Compiler
-        .compile(chunk.bytes, &name, chunk.resolved_language())
-        .map_err(|e| e.0)?;
-    // `debug.getinfo`'s `source` is the name as given, not its short form.
-    unlinked.source = chunk.source().into();
-    Ok(ctx.link(&unlinked, env))
-}
 
-#[cfg(feature = "dump")]
-fn load_binary(
-    ctx: &mut NativeCtx<'_>,
-    chunk: &Chunk<'_>,
-    env: raw::Value,
-) -> Result<raw::Value, String> {
-    orbit_runtime::stdlib::load_chunk_in(ctx, chunk.bytes, chunk.source(), b"b", env)
-}
-
-#[cfg(not(feature = "dump"))]
-fn load_binary(
-    _: &mut NativeCtx<'_>,
-    chunk: &Chunk<'_>,
-    _: raw::Value,
-) -> Result<raw::Value, String> {
-    Err(format!(
-        "{}: bad binary format (binary chunks not enabled)",
-        chunk_id(chunk.source())
-    ))
+    #[cfg(not(feature = "dump"))]
+    fn load_binary(
+        _: &mut NativeCtx<'_>,
+        chunk: &Chunk<'_>,
+        _: raw::Value,
+    ) -> Result<raw::Value, String> {
+        Err(format!(
+            "{}: bad binary format (binary chunks not enabled)",
+            chunk_id(chunk.source())
+        ))
+    }
 }
