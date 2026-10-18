@@ -266,18 +266,15 @@ fn binding_errors() {
 
 #[test]
 fn from_orbitscript() {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ffi-orbitscript");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("strlen.orb");
-    std::fs::write(
-        &path,
-        "let libc = ffi::open();\n\
-         let strlen = libc.bind(\"strlen\", \"size\", \"cstr\");\n\
-         strlen(\"orbit\")\n",
-    )
-    .unwrap();
-    let src = format!("return dofile({:?})", path.to_str().unwrap());
-    assert_eq!(run(&src), "5");
+    let mut iso = lua();
+    let src = "let libc = ffi::open();\n\
+               let strlen = libc.bind(\"strlen\", \"size\", \"cstr\");\n\
+               return strlen(\"orbit\");\n";
+    let n = iso.scope(|s| {
+        let out = s.load(Chunk::new(src).name("@strlen.orb"))?.call(())?;
+        out[0].get::<i64>()
+    });
+    assert_eq!(n.unwrap(), 5);
 }
 
 /// Signatures the C library has no function for: more arguments than there

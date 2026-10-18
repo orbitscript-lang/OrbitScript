@@ -11,14 +11,15 @@ links = "orbit_capi"
 
 [dependencies]
 orbit-runtime = { path = "../orbit-runtime", default-features = false, features = ["package"] }
-orbit-lua-syntax = { path = "../orbit-lua-syntax", optional = true }
-orbit-orb-syntax = { path = "../orbit-orb-syntax", optional = true }
-orbit-compiler = { path = "../orbit-compiler", optional = true }
+# The public API, for the libraries `orbit-std` builds on it: `luaopen_io`
+# and friends open them, and C states are isolates the API can reach.
+orbit = { path = "../orbit", default-features = false, features = ["package"] }
+orbit-std = { path = "../orbit-std" }
 
 [features]
 # States created from C (`lua_newstate`, ADR-10): for the shared library
 # that programs embedding Lua link to.
-host = ["dep:orbit-lua-syntax", "dep:orbit-orb-syntax", "dep:orbit-compiler"]
+host = []
 
 [build-dependencies]
 cc = "1.2"

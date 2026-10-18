@@ -20,6 +20,8 @@ path = "src/orbitc.rs"
 
 [dependencies]
 orbit = { path = "../orbit" }
+orbit-std = { path = "../orbit-std" }
+orbit-capi = { path = "../orbit-capi", optional = true }
 orbit-compiler = { path = "../orbit-compiler" }
 orbit-hir = { path = "../orbit-hir" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
@@ -29,7 +31,7 @@ signal-hook = "0.4.5"
 [features]
 default = ["c-modules", "ffi", "line-editing"]
 # Load C modules (on by default in the CLI, Tym 2026-10-09).
-c-modules = ["orbit/c-modules"]
+c-modules = ["dep:orbit-capi"]
 # The `ffi` library, on unless `--no-ffi` is given (Tym 2026-10-14, ADR-9).
 ffi = ["orbit/ffi"]
 # Link the system's shared libffi rather than a static copy built from

@@ -8,16 +8,19 @@ Exit criterion: `literals.lua`, `constructs.lua`, `attrib.lua`, `files.lua`, `ve
 
 ## Where the code lives
 
+Since ADR-11 phase (c), everything that touches files, the environment or the process lives in `orbit-std`, built on the public API; older crate names below the table read as described in ADR-11.
+
 | Piece | Crate | Notes |
 |---|---|---|
-| `load`, `loadfile`, `dofile`, `chunk_id` | `orbit-stdlib` (`load.rs`, feature `load`) | Compiles through a hook, so `orbit-stdlib` stays free of the front end |
+| `load`, `chunk_id` | `orbit-runtime` (`stdlib/load.rs`, feature `load`) | Compiles through a hook, so the runtime stays free of the front end |
+| `loadfile`, `dofile`, `print`, `debug.debug` | `orbit-std` (`base.rs`) | Built on the public `orbit` API (ADR-11) |
 | The compiler hook | `orbit-vm` (`Runtime::compile`) | Installed by the embedder; `orbit::Isolate` installs the Lua front end |
 | Linking with an environment | `orbit-vm` (`link.rs`) | `Vm::load_with_env`, `NativeCtx::link` |
-| `require`, `package` | `orbit-stdlib` (`package.rs`, feature `package`) | |
+| `require`, `package` | `orbit-runtime` (`stdlib/package.rs`, feature `package`): `require`, `loaded`, `preload`; `orbit-std` (`package.rs`): paths, `searchpath`, the Lua searcher; `orbit-capi` (`searchers.rs`): the C searchers and `loadlib` | |
 | Binary chunk format and verifier | `orbit-bytecode` (`chunk_format.rs`, `verify.rs`) | Plain data in, plain data out: no VM needed, so both are unit-testable and fuzzable |
 | `string.dump` | `orbit-stdlib` (`dump.rs`, feature `dump`) | Rebuilds an `UnlinkedChunk` from a linked prototype, then encodes it |
-| `io` | `orbit-stdlib` (`io.rs`, feature `io`) | File handles are userdata once C2 lands |
-| `os` | `orbit-stdlib` (`os.rs`, feature `os`) | Local time and CPU time need a decision (below) |
+| `io` | `orbit-std` (`io.rs`, feature `io`) | `FILE*` is an `orbit::Class` |
+| `os` | `orbit-std` (`os.rs`, `time.rs`, `tz.rs`, feature `os`) | Local time and CPU time: ADR-7 |
 | CLI | `orbit-cli` | Hand-written option parsing, no dependency |
 
 ```mermaid

@@ -15,26 +15,16 @@ mod coroutine;
 mod debug;
 #[cfg(feature = "dump")]
 mod dump;
-#[cfg(feature = "io")]
-mod io;
 #[cfg(feature = "load")]
 mod load;
 #[cfg(feature = "math")]
 mod math;
-#[cfg(feature = "os")]
-mod os;
 #[cfg(feature = "package")]
 mod package;
 #[cfg(feature = "string")]
 mod string;
-#[cfg(any(feature = "os", feature = "io"))]
-mod sys;
 #[cfg(feature = "table")]
 mod table;
-#[cfg(feature = "os")]
-mod time;
-#[cfg(feature = "os")]
-mod tz;
 #[cfg(feature = "utf8")]
 mod utf8;
 
@@ -43,9 +33,7 @@ use crate::vm::{NativeFn, Vm};
 pub use chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
 #[cfg(feature = "load")]
-pub use load::{load_buffer, load_chunk_in, read_chunk_file};
-#[cfg(feature = "package")]
-pub use package::{DynLoader, LoadFn, lock_cpath};
+pub use load::{load_buffer, load_chunk_in};
 
 /// The first result of a call a native requested with `CallThen` (nil if
 /// none); the call's results are dropped from the window.
@@ -71,12 +59,8 @@ pub(crate) fn first_result(
 /// How [`open_libs_with`] sets the libraries up.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
-    /// Ignore environment variables (`LUA_PATH`, `LUA_CPATH` and their
-    /// versioned forms, `ORBIT_VERIFY`), as `lua -E` does.
+    /// Ignore the environment variable `ORBIT_VERIFY`, as `lua -E` does.
     pub ignore_env: bool,
-    /// Lock the C module search path to the one `package.cpath` starts
-    /// with (from `LUA_CPATH` or the default): see [`lock_cpath`].
-    pub lock_cpath: bool,
 }
 
 /// Open every library with default [`Options`].
@@ -213,19 +197,9 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
             }
             true
         }
-        #[cfg(feature = "os")]
-        Lib::Os => {
-            open_lib(vm, "os", os::FUNCTIONS);
-            true
-        }
-        #[cfg(feature = "io")]
-        Lib::Io => {
-            io::open(vm);
-            true
-        }
         #[cfg(feature = "package")]
         Lib::Package => {
-            package::open(vm, options.ignore_env, options.lock_cpath);
+            package::open(vm);
             true
         }
         #[cfg(feature = "coroutine")]
@@ -246,11 +220,9 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
     opened.then(|| vm.global(lib.name()))
 }
 
-/// Flush every open file's buffer and `print`'s output, as closing the
+/// Flush standard output (`print`'s and `io.stdout`'s), as closing the
 /// state does at exit.
 pub fn flush_files(vm: &mut Vm) {
-    #[cfg(feature = "io")]
-    io::flush_all(&mut *vm.rt.out);
     let _ = vm.flush();
 }
 
@@ -313,83 +285,5 @@ fn add_functions(
         let fv = vm.register_native(qualified, f);
         let k = vm.new_str(short.as_bytes());
         vm.table_set(t, k, fv);
-    }
-}
-
-/// A file name from Lua bytes. On Unix any bytes are a valid name; elsewhere
-/// names must be text, and invalid UTF-8 is replaced.
-#[allow(dead_code)]
-pub(crate) fn os_path(bytes: &[u8]) -> std::path::PathBuf {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        std::ffi::OsStr::from_bytes(bytes).into()
-    }
-    #[cfg(not(unix))]
-    {
-        String::from_utf8_lossy(bytes).into_owned().into()
-    }
-}
-
-/// The bytes of an OS string (lossy outside Unix).
-#[allow(dead_code)]
-pub(crate) fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        s.as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        s.to_string_lossy().into_owned().into_bytes()
-    }
-}
-
-/// Create a new, empty file with a unique name in the temporary directory
-/// (`os.tmpname`, `io.tmpfile`). Creating it, rather than only picking a
-/// name, means no other process can take the name first.
-#[allow(dead_code)]
-pub(crate) fn temp_file() -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
-    use std::hash::{BuildHasher, Hasher};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let dir = std::env::temp_dir();
-    let mut last = None;
-    for _ in 0..100 {
-        // RandomState is seeded randomly per process; mix in a counter so
-        // every attempt differs.
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
-        h.write_u32(std::process::id());
-        let mut bits = h.finish();
-        let mut name = String::from("orbit_");
-        for _ in 0..6 {
-            name.push(CHARS[(bits % CHARS.len() as u64) as usize] as char);
-            bits /= CHARS.len() as u64;
-        }
-        let path = dir.join(name);
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(f) => return Ok((path, f)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| std::io::Error::other("no unique name")))
-}
-
-/// The C library's text for an I/O error (`No such file or directory`),
-/// without the ` (os error 2)` that Rust appends.
-#[allow(dead_code)]
-pub(crate) fn os_error_text(e: &std::io::Error) -> String {
-    let s = e.to_string();
-    match s.rfind(" (os error ") {
-        Some(i) => s[..i].to_string(),
-        None => s,
     }
 }

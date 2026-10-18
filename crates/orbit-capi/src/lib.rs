@@ -12,18 +12,28 @@ mod api;
 mod ffi;
 #[cfg(feature = "host")]
 mod host;
+mod searchers;
 
 use orbit_runtime::object::{LightUserData, Value};
 use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn, Vm};
 
-/// Install the C API on `vm`: `package.loadlib` and the C searchers load
-/// libraries from now on.
-pub fn install(vm: &mut Vm) {
+pub use searchers::{DynLoader, LoadFn, lock_cpath};
+
+/// Let scripts in `iso` load C modules: add the C searchers to
+/// `package.searchers` (after `orbit-std`'s Lua searcher, so install that
+/// first) and a working `package.loadlib`. With `lock_cpath`, the
+/// searchers and `package.loadlib` keep to the C module path
+/// `package.cpath` has now, whatever scripts set it to ([`lock_cpath`]).
+pub fn install(iso: &mut orbit::Isolate, lock_cpath: bool) {
+    let vm = orbit::runtime_access::vm(iso);
+    install_loader(vm);
+    searchers::install_searchers(&mut vm.host_ctx(), lock_cpath);
+}
+
+/// The C API on `vm`, and its dynamic loader.
+fn install_loader(vm: &mut Vm) {
     ffi::install(vm);
-    vm.rt
-        .ext
-        .get_or_insert_with(orbit_runtime::stdlib::DynLoader::default)
-        .load = Some(ffi::load);
+    vm.rt.ext.get_or_insert_with(DynLoader::default).load = Some(ffi::load);
 }
 
 /// Memory a C module asked for with `lua_newuserdatauv`, aligned to 16

@@ -52,6 +52,44 @@ pub use orbit_compiler::bytecode::UnlinkedChunk;
 /// The runtime version, taken from the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Access below the API, for `orbit-capi` (which ADR-11 lets reach the
+/// runtime directly, and which builds on `orbit-std`). Not for other hosts:
+/// nothing here is stable.
+#[doc(hidden)]
+pub mod runtime_access {
+    use orbit_runtime::vm::{NativeCtx, Vm};
+
+    use crate::{Isolate, Scope};
+
+    /// Make a VM the C API created one the API can reach, with both front
+    /// ends as `load`'s compilers.
+    pub fn adopt(vm: &mut Vm) {
+        crate::isolate::adopt(vm);
+    }
+
+    /// Run `f` with a scope over the native window `ctx` (from a native
+    /// function, or a VM's host window); what `f` made is dropped after.
+    pub fn with_scope<R>(ctx: &mut NativeCtx<'_>, f: impl for<'s> FnOnce(&'s Scope<'s>) -> R) -> R {
+        let start = ctx.len();
+        let scope = Scope::new(ctx.reborrow());
+        scope.release_pins(&mut scope.ctx());
+        let r = f(&scope);
+        scope.ctx().truncate(start);
+        r
+    }
+
+    /// The isolate's VM.
+    pub fn vm(iso: &mut Isolate) -> &mut Vm {
+        iso.vm_mut()
+    }
+
+    /// A handle's runtime value. It stays alive only while the scope that
+    /// gave the handle lasts.
+    pub fn raw(v: crate::Value<'_>) -> orbit_runtime::object::Value {
+        v.raw()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

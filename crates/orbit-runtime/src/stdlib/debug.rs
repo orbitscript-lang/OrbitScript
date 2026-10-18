@@ -27,8 +27,6 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("debug.traceback", traceback),
     ("debug.sethook", sethook),
     ("debug.gethook", gethook),
-    #[cfg(feature = "load")]
-    ("debug.debug", debug),
 ];
 
 /// Push `s` as a string.
@@ -472,84 +470,4 @@ fn gethook(ctx: &mut NativeCtx<'_>) -> R {
     push_str(ctx, &s);
     ctx.push(Value::Int(count));
     Ok(NativeReturn::Return(3))
-}
-
-/// `debug.debug`: run each line read from stdin as a chunk until a line
-/// reading `cont` (or end of input). Prompts and error messages go to
-/// stderr, as in the reference.
-#[cfg(feature = "load")]
-fn debug(ctx: &mut NativeCtx<'_>) -> R {
-    use std::io::{BufRead, Write};
-    ctx.truncate(0);
-    loop {
-        let _ = ctx.vm.rt.out.flush();
-        let _ = std::io::stderr().write_all(b"lua_debug> ");
-        let mut line = Vec::new();
-        match std::io::stdin().lock().read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return Ok(NativeReturn::Return(0)),
-            Ok(_) => {}
-        }
-        if line == b"cont\n" || line == b"cont" {
-            return Ok(NativeReturn::Return(0));
-        }
-        let env = Value::Table(ctx.vm.rt.globals);
-        let mode = crate::stdlib::load::Mode(b"bt");
-        match crate::stdlib::load::load_chunk(ctx, &line, b"=(debug command)", &mode, env) {
-            Ok(f) => {
-                return Ok(NativeReturn::CallThen {
-                    f,
-                    nargs: 0,
-                    k: debug_ran,
-                    protected: true,
-                });
-            }
-            Err(msg) => debug_error(msg.as_bytes()),
-        }
-    }
-}
-
-/// A `debug.debug` command finished: report its error, then read the next.
-#[cfg(feature = "load")]
-fn debug_ran(ctx: &mut NativeCtx<'_>, out: crate::vm::CallOutcome) -> R {
-    let crate::vm::CallOutcome::Err(e) = out else {
-        return debug(ctx);
-    };
-    // The message as `tostring` would give it.
-    let h = ctx.metamethod(e, crate::vm::MetaField::ToString);
-    if !h.is_nil() {
-        ctx.truncate(0);
-        ctx.push(e);
-        return Ok(NativeReturn::CallThen {
-            f: h,
-            nargs: 1,
-            k: debug_shown,
-            protected: true,
-        });
-    }
-    let mut text = Vec::new();
-    ctx.display(e, &mut text);
-    debug_error(&text);
-    debug(ctx)
-}
-
-/// An error object's `__tostring` returned (or failed).
-#[cfg(feature = "load")]
-fn debug_shown(ctx: &mut NativeCtx<'_>, out: crate::vm::CallOutcome) -> R {
-    let v = match out {
-        crate::vm::CallOutcome::Ok(n) if n > 0 => ctx.arg(ctx.len() - n),
-        crate::vm::CallOutcome::Ok(_) => Value::Nil,
-        crate::vm::CallOutcome::Err(e) => e,
-    };
-    let mut text = Vec::new();
-    ctx.display(v, &mut text);
-    debug_error(&text);
-    debug(ctx)
-}
-
-#[cfg(feature = "load")]
-fn debug_error(msg: &[u8]) {
-    use std::io::Write;
-    let mut err = std::io::stderr().lock();
-    let _ = err.write_all(msg);
-    let _ = err.write_all(b"\n");
 }

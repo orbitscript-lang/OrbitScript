@@ -1839,7 +1839,7 @@ fn dl_error() -> String {
     String::from_utf8_lossy(unsafe { cbytes(p) }).into_owned()
 }
 
-/// The [`orbit_runtime::stdlib::LoadFn`] for this crate. Libraries stay loaded
+/// The [`crate::LoadFn`] for this crate. Libraries stay loaded
 /// until the process exits, as their functions may be referenced anywhere.
 #[cfg(unix)]
 pub(crate) fn load(
@@ -1961,7 +1961,7 @@ impl std::io::Write for CStdout {
 extern "C" fn orbit_r_newstate() -> *mut LState {
     let vm: &'static mut Vm = Box::leak(Box::new(crate::host::new_vm()));
     vm.rt.out = Box::new(CStdout);
-    crate::install(vm);
+    crate::install_loader(vm);
     let Some(p) = vm.rt.ext.get::<BridgeHandle>().map(|h| h.0) else {
         return std::ptr::null_mut();
     };

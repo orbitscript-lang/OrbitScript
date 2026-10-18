@@ -13,7 +13,6 @@ orbit-compiler = { path = "../orbit-compiler" }
 orbit-hir = { path = "../orbit-hir" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 orbit-runtime = { path = "../orbit-runtime", default-features = false }
-orbit-capi = { path = "../orbit-capi", optional = true }
 orbit-ffi = { path = "../orbit-ffi", optional = true }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 
@@ -23,22 +22,18 @@ orbit-bytecode = { path = "../orbit-bytecode", features = ["verify-flow"] }
 
 [features]
 # The standard library's optional parts (see `orbit-runtime`).
-default = ["string", "utf8", "table", "math", "load", "os", "package", "coroutine", "debug", "io", "dump", "verify", "verify-flow"]
+default = ["string", "utf8", "table", "math", "load", "package", "coroutine", "debug", "dump", "verify", "verify-flow"]
 string = ["orbit-runtime/string"]
 utf8 = ["orbit-runtime/utf8"]
 table = ["orbit-runtime/table"]
 math = ["orbit-runtime/math"]
 load = ["orbit-runtime/load"]
-os = ["orbit-runtime/os"]
 package = ["orbit-runtime/package"]
 coroutine = ["orbit-runtime/coroutine"]
 debug = ["orbit-runtime/debug"]
-io = ["orbit-runtime/io"]
 dump = ["orbit-runtime/dump"]
 verify = ["orbit-runtime/verify"]
 verify-flow = ["orbit-runtime/verify-flow"]
-# Load C modules through the Lua C API (off by default for embedders).
-c-modules = ["dep:orbit-capi", "package"]
 # The `ffi` library: calling C functions in shared libraries (off by
 # default for embedders; a host still opts in with `Isolate::enable_ffi`).
 ffi = ["dep:orbit-ffi"]

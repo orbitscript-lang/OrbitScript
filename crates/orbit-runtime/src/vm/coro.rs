@@ -1250,6 +1250,12 @@ impl Vm {
         if let Ok(NativeReturn::Resume { co, nargs, k, ok }) = r {
             return self.resume(co, nargs, k, ok, None, func, want, id);
         }
-        self.native_returned(r?, None, func, want, id)
+        let r = r?;
+        if let NativeReturn::Return(n) = r
+            && self.rt.stack.hook.wants(crate::vm::hook::RETURN)
+        {
+            self.native_return_hook(func, id, n).map_err(Exc::Lua)?;
+        }
+        self.native_returned(r, None, func, want, id)
     }
 }

@@ -1,6 +1,6 @@
 //! Calendar arithmetic and `strftime`-style formatting for `os.date` and
 //! `os.time`, in the C locale. Pure functions on plain numbers: the time
-//! zone comes in as an offset from [`crate::stdlib::tz`].
+//! zone comes in as an offset from [`crate::tz`].
 //!
 //! The day-count conversions are the well-known proleptic Gregorian
 //! formulas (days since 1970-01-01, with 400-year eras), valid for every

@@ -11,6 +11,7 @@ use orbit_runtime::object::number::{float_to_int, fmt_number, str_to_number};
 use orbit_runtime::object::table as tbl;
 use orbit_runtime::object::value::raw_eq;
 use orbit_runtime::object::{Gc, LightUserData, LuaStr, Table, Value, gc};
+use orbit_runtime::stdlib::Lib;
 use orbit_runtime::vm::{LuaError, Meta, MetaField, NativeCtx, Operator};
 
 use crate::CBlock;
@@ -1084,29 +1085,56 @@ struct WarnBuffer(Vec<u8>);
 /// opened through `package.preload` gets no global. Returns 0, pushing
 /// nothing, for a library this build leaves out.
 pub(crate) fn openlib(c: &mut NativeCtx<'_>, lib: i32) -> i32 {
-    let Some(&lib) = usize::try_from(lib)
-        .ok()
-        .and_then(|i| orbit_runtime::stdlib::Lib::ALL.get(i))
-    else {
+    let Some(&lib) = usize::try_from(lib).ok().and_then(|i| Lib::ALL.get(i)) else {
         return 0;
     };
     // `registry.LUA_NOENV` (set by `lua -E`) makes the libraries ignore
     // environment variables.
     let k = c.vm.new_str(b"LUA_NOENV");
     let noenv = tbl::get(&c.vm.heap, c.vm.rt.registry, k);
-    let options = orbit_runtime::stdlib::Options {
-        ignore_env: !noenv.is_falsy(),
-        ..Default::default()
-    };
-    let before = (lib != orbit_runtime::stdlib::Lib::Base).then(|| c.vm.global(lib.name()));
-    let Some(t) = orbit_runtime::stdlib::open_one(c.vm, lib, options) else {
-        return 0;
+    let ignore_env = !noenv.is_falsy();
+    let options = orbit_runtime::stdlib::Options { ignore_env };
+    let before = (lib != Lib::Base).then(|| c.vm.global(lib.name()));
+    let t = match lib {
+        // The libraries that touch the system are `orbit-std`'s.
+        Lib::Io | Lib::Os => match open_std(c, lib) {
+            Some(t) => t,
+            None => return 0,
+        },
+        _ => {
+            let Some(t) = orbit_runtime::stdlib::open_one(c.vm, lib, options) else {
+                return 0;
+            };
+            // What `orbit-std` adds to the runtime's own libraries.
+            let added = orbit::runtime_access::with_scope(c, |s| match lib {
+                Lib::Base => orbit_std::open_base(s),
+                Lib::Package => orbit_std::open_package(s, ignore_env),
+                Lib::Debug => orbit_std::open_debug(s),
+                _ => Ok(()),
+            });
+            debug_assert!(added.is_ok(), "opening a library raised {added:?}");
+            if lib == Lib::Package {
+                crate::searchers::install_searchers(c, false);
+            }
+            t
+        }
     };
     if let Some(v) = before {
         c.vm.set_global(lib.name(), v);
     }
     c.push(t);
     1
+}
+
+/// `orbit-std`'s `io` or `os` table, unrooted (`None` if it failed).
+fn open_std(c: &mut NativeCtx<'_>, lib: Lib) -> Option<Value> {
+    orbit::runtime_access::with_scope(c, |s| {
+        let t = match lib {
+            Lib::Io => orbit_std::open_io(s),
+            _ => orbit_std::open_os(s),
+        };
+        t.ok().map(|t| orbit::runtime_access::raw(t.to_value()))
+    })
 }
 
 // ---- auxiliary library pieces that need the VM ------------------------------

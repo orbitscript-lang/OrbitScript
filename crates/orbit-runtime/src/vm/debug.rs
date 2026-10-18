@@ -899,7 +899,10 @@ impl crate::vm::NativeCtx<'_> {
     /// Lines of `f` that have code, or `None` for a native.
     pub fn active_lines(&self, f: Value) -> Option<Vec<u32>> {
         match f {
-            Value::Closure(c) => Some(active_lines(&self.vm.heap, c)),
+            // A native closure is a C function to scripts: no lines.
+            Value::Closure(c) if self.native_of(f).is_none() => {
+                Some(active_lines(&self.vm.heap, c))
+            }
             _ => None,
         }
     }

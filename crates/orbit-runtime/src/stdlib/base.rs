@@ -1,6 +1,4 @@
-//! Base functions: `print`, `type`, `pcall`, `error`, `pairs` and friends.
-
-use std::io::Write;
+//! Base functions: `type`, `pcall`, `error`, `pairs` and friends.
 
 use crate::object::Tag;
 use crate::object::Value;
@@ -15,7 +13,6 @@ use crate::vm::{
 type R = Result<NativeReturn, LuaError>;
 
 const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("print", print),
     ("type", type_),
     ("tostring", tostring),
     ("tonumber", tonumber),
@@ -54,61 +51,6 @@ pub(crate) fn open(vm: &mut Vm) {
     vm.unpin(Value::Table(mt));
     let v = vm.new_str(b"Lua 5.5");
     vm.set_global("_VERSION", v);
-}
-
-/// `print`: arguments with a `__tostring` are converted first, one
-/// `CallThen` each, the result replacing the argument in the window.
-fn print(ctx: &mut NativeCtx<'_>) -> R {
-    let n = ctx.nargs();
-    print_from(ctx, n, 0)
-}
-
-/// Print the `n` arguments, converting from argument `start` on.
-fn print_from(ctx: &mut NativeCtx<'_>, n: usize, start: usize) -> R {
-    for i in start..n {
-        let v = ctx.arg(i);
-        let h = ctx.metamethod(v, MetaField::ToString);
-        if !h.is_nil() {
-            // Window: args, then the index being converted, then the
-            // call's argument (replaced by its results).
-            ctx.truncate(n);
-            ctx.push(Value::Int(i as i64));
-            ctx.push(v);
-            return Ok(NativeReturn::CallThen {
-                f: h,
-                nargs: 1,
-                k: print_converted,
-                protected: false,
-            });
-        }
-    }
-    let mut line = Vec::new();
-    for i in 0..n {
-        if i > 0 {
-            line.push(b'\t');
-        }
-        ctx.display(ctx.arg(i), &mut line);
-    }
-    line.push(b'\n');
-    let _ = ctx.vm.rt.out.write_all(&line);
-    // lua flushes after every `print`, so output reaches a pipe at once.
-    let _ = ctx.vm.rt.out.flush();
-    Ok(NativeReturn::Return(0))
-}
-
-fn print_converted(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let CallOutcome::Ok(got) = outcome else {
-        unreachable!("unprotected call")
-    };
-    // The window up to the call is print's arguments plus the index.
-    let n = ctx.nargs() - 1;
-    let Value::Int(i) = ctx.arg(n) else {
-        unreachable!("print's progress")
-    };
-    let r = tostring_result(ctx, got, n + 1)?;
-    ctx.set(i as usize, r);
-    ctx.truncate(n);
-    print_from(ctx, n, i as usize + 1)
 }
 
 /// The value `__tostring` returned (`got` results from window slot `at`),

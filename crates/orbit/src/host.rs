@@ -4,11 +4,11 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use orbit_runtime::object::{self as raw, Gc};
-use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn};
+use orbit_runtime::vm::{CallOutcome, LuaError, NativeCtx, NativeReturn};
 
 use crate::error::Error;
 use crate::scope::Scope;
-use crate::value::{FromValue, FromValueError, IntoValues, Value};
+use crate::value::{FromValue, FromValueError, Function, IntoValues, Value};
 
 /// A function scripts can call. Closures implement it:
 ///
@@ -35,13 +35,24 @@ pub trait HostFunction: for<'s> Fn(&'s Call<'s>) -> Result<Ret, Error> + 'static
 
 impl<F> HostFunction for F where F: for<'s> Fn(&'s Call<'s>) -> Result<Ret, Error> + 'static {}
 
-/// The results of a host function, from [`Call::ret`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The results of a host function, from [`Call::ret`] (or what it ends
+/// with instead: [`Call::tail_call`], [`Call::exit`]).
+#[derive(Debug, Clone, Copy)]
 #[must_use]
-pub struct Ret {
+pub struct Ret(RetKind);
+
+#[derive(Debug, Clone, Copy)]
+enum RetKind {
     /// Where the results start in the window, and how many there are.
-    at: usize,
-    n: usize,
+    Values { at: usize, n: usize },
+    /// Call `f` with the `nargs` values from `at`; its results are ours.
+    TailCall {
+        f: raw::Value,
+        at: usize,
+        nargs: usize,
+    },
+    /// End the process (`os.exit`).
+    Exit { code: i32, close: bool },
 }
 
 /// What a host function sees while it runs: its arguments, and a
@@ -124,7 +135,45 @@ impl<'s> Call<'s> {
     pub fn ret(&'s self, values: impl IntoValues<'s>) -> Result<Ret, Error> {
         let at = self.ctx().len();
         let n = values.push_into(self)?;
-        Ok(Ret { at, n })
+        Ok(Ret(RetKind::Values { at, n }))
+    }
+
+    /// End by calling `f` with `args`: its results, or its error, become
+    /// this function's. Unlike [`Function::call`](crate::Function::call),
+    /// code `f` runs may yield across it, as across `dofile`.
+    pub fn tail_call(&'s self, f: Function<'s>, args: impl IntoValues<'s>) -> Result<Ret, Error> {
+        let at = self.ctx().len();
+        let nargs = args.push_into(self)?;
+        Ok(Ret(RetKind::TailCall {
+            f: f.raw(),
+            at,
+            nargs,
+        }))
+    }
+
+    /// End the process with exit status `code`, as `os.exit` does: first,
+    /// when `close`, closing the isolate (the main thread's variables still
+    /// to close, then every pending finalizer); then running the
+    /// [`Isolate::before_exit`](crate::Isolate::before_exit) hooks and
+    /// flushing standard output.
+    pub fn exit(&self, code: i32, close: bool) -> Result<Ret, Error> {
+        Ok(Ret(RetKind::Exit { code, close }))
+    }
+
+    /// Lua's argument error: `bad argument #2 to 'f' (message)`, positioned
+    /// at the caller. `i` is 0-based, like [`Call::arg`].
+    pub fn arg_error(&self, i: usize, message: impl AsRef<str>) -> Error {
+        let mut ctx = self.ctx();
+        let e = ctx.arg_error(i, message.as_ref());
+        self.lua_error(&mut ctx, e)
+    }
+
+    /// Lua's type error for argument `i`: `bad argument #1 to 'f' (FILE*
+    /// expected, got nil)`.
+    pub fn type_error(&self, i: usize, expected: &str) -> Error {
+        let mut ctx = self.ctx();
+        let e = ctx.type_error(i, expected);
+        self.lua_error(&mut ctx, e)
     }
 
     /// `stack traceback:` and the levels from `level` down (1 is the
@@ -174,24 +223,52 @@ fn trampoline(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
     };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&call)))
         .unwrap_or_else(|p| Err(Error::runtime(panic_message(&*p))));
+    // The call stays borrowed for the window's whole lifetime, so the rest
+    // goes through its window too.
     let scope: &Scope<'_> = &call;
     let mut ctx = scope.ctx();
     match r {
-        Ok(Ret { at, n }) => {
-            let len = ctx.len();
-            if at + n > len {
-                return Err(ctx.error("host function returned results it no longer has"));
-            }
-            // Results made before other values: move them to the end.
-            if at + n != len {
-                for i in at..at + n {
-                    let v = ctx.arg(i);
-                    ctx.push(v);
-                }
-            }
+        Ok(Ret(RetKind::Values { at, n })) => {
+            move_to_end(&mut ctx, at, n)?;
             Ok(NativeReturn::Return(n))
         }
+        Ok(Ret(RetKind::TailCall { f, at, nargs })) => {
+            move_to_end(&mut ctx, at, nargs)?;
+            Ok(NativeReturn::CallThenYieldable {
+                f,
+                nargs,
+                k: tail_called,
+                protected: false,
+            })
+        }
+        Ok(Ret(RetKind::Exit { code, close })) => {
+            crate::isolate::exit_process(&mut ctx, code, close)
+        }
         Err(e) => Err(scope.to_lua_error(&mut ctx, e)),
+    }
+}
+
+/// Make the `n` values from `at` the last of the window.
+fn move_to_end(ctx: &mut NativeCtx<'_>, at: usize, n: usize) -> Result<(), LuaError> {
+    let len = ctx.len();
+    if at + n > len {
+        return Err(ctx.error("host function returned results it no longer has"));
+    }
+    // Results made before other values: move them to the end.
+    if at + n != len {
+        for i in at..at + n {
+            let v = ctx.arg(i);
+            ctx.push(v);
+        }
+    }
+    Ok(())
+}
+
+/// The end of a [`Call::tail_call`]: the call's results are ours.
+fn tail_called(_: &mut NativeCtx<'_>, outcome: CallOutcome) -> Result<NativeReturn, LuaError> {
+    match outcome {
+        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n)),
+        CallOutcome::Err(e) => Err(LuaError::new(e)),
     }
 }
 
