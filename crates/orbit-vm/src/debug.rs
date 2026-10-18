@@ -30,9 +30,11 @@ pub(crate) struct Running {
     pub func: usize,
 }
 
-/// One activation on the stack, as the debug library numbers them.
+/// One activation on the stack, as the debug library numbers them, and
+/// for the top frame under a running native without a frame, that
+/// native's function slot (where the frame's registers end).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Level(LevelAt);
+pub struct Level(LevelAt, Option<usize>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LevelAt {
@@ -126,14 +128,17 @@ impl Runtime {
                 if matches!(f.kind, FrameKind::NativeCall { .. } | FrameKind::Native { .. })
                     && f.func as usize == r.func);
             if n == 0 {
-                return Some(Level(if own {
-                    LevelAt::Frame(top - 1)
-                } else {
-                    LevelAt::Running {
-                        id: r.id,
-                        func: r.func,
-                    }
-                }));
+                return Some(Level(
+                    if own {
+                        LevelAt::Frame(top - 1)
+                    } else {
+                        LevelAt::Running {
+                            id: r.id,
+                            func: r.func,
+                        }
+                    },
+                    None,
+                ));
             }
             if own {
                 top -= 1;
@@ -141,8 +146,9 @@ impl Runtime {
         } else if n == 0 {
             return None;
         }
+        let below = running.filter(|_| top == frames.len()).map(|r| r.func);
         self.find_activation(top, n)
-            .map(|i| Level(LevelAt::Frame(i)))
+            .map(|i| Level(LevelAt::Frame(i), below.filter(|_| i + 1 == top)))
     }
 
     /// Activations `from`, `from + 1`, and so on, in one pass over the
@@ -150,15 +156,15 @@ impl Runtime {
     pub(crate) fn levels(&self, running: Option<Running>, from: usize) -> Vec<Level> {
         let mut out = Vec::new();
         let mut next = self.level(running, from);
-        if let Some(l @ Level(LevelAt::Running { .. })) = next {
+        if let Some(l @ Level(LevelAt::Running { .. }, _)) = next {
             out.push(l);
             next = self.level(running, from + 1);
         }
-        while let Some(l @ Level(LevelAt::Frame(i))) = next {
+        while let Some(l @ Level(LevelAt::Frame(i), _)) = next {
             out.push(l);
             next = self
                 .find_activation(self.scan_on(i), 1)
-                .map(|i| Level(LevelAt::Frame(i)));
+                .map(|i| Level(LevelAt::Frame(i), None));
         }
         out
     }
@@ -350,7 +356,10 @@ impl Runtime {
                 let f = &self.stack.frames[i];
                 // Registers above the frame's are in use only up to the
                 // function slot of whatever it is calling.
-                let next = self.stack.frames[i + 1..].first().map(|g| g.func as usize);
+                let next = self.stack.frames[i + 1..]
+                    .first()
+                    .map(|g| g.func as usize)
+                    .or(l.1);
                 match f.kind {
                     FrameKind::Lua { closure, .. } => {
                         let c = heap.get(closure);
@@ -811,8 +820,7 @@ impl crate::NativeCtx<'_> {
     /// `count` the count interval (count events only when positive). A nil
     /// `f` or an empty mask with no count turns it off.
     pub fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
-        self.vm.rt.hooks_touched = true;
-        self.vm.rt.stack.hook.set(f, mask, count);
+        self.vm.set_hook(f, mask, count);
     }
 
     /// This stack's hook: function (nil when off), event mask without the

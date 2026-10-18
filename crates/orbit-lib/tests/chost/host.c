@@ -177,6 +177,118 @@ static int states(void) {
   return 0;
 }
 
+static void line_hook(lua_State *L, lua_Debug *ar) {
+  int line = ar->currentline;
+  if (ar->event != LUA_HOOKLINE) return;
+  if (lua_getinfo(L, "Sl", ar))
+    printf("line %d (getinfo %d) in %s\n", line, ar->currentline, ar->short_src);
+}
+
+static int counts;
+
+static void stop_hook(lua_State *L, lua_Debug *ar) {
+  (void)ar;
+  if (++counts < 100) return;
+  /* As lua.c's Ctrl-C hook does. */
+  lua_sethook(L, NULL, 0, 0);
+  luaL_error(L, "stopped after %d", counts);
+}
+
+static int hooks(void) {
+  lua_State *L = luaL_newstate();
+  luaL_openlibs(L);
+  lua_sethook(L, line_hook, LUA_MASKLINE, 0);
+  printf("hook set: %d mask %d count %d\n", lua_gethook(L) == line_hook,
+         lua_gethookmask(L), lua_gethookcount(L));
+  if (luaL_loadbuffer(L, "local a = 1\nlocal b = 2\nreturn a + b", 36, "=chunk") ||
+      lua_pcall(L, 0, 1, 0))
+    printf("error: %s\n", lua_tostring(L, -1));
+  else
+    printf("result %d\n", (int)lua_tointeger(L, -1));
+  lua_settop(L, 0);
+  lua_sethook(L, NULL, 0, 0);
+  printf("hook cleared: %d\n", lua_gethook(L) == NULL);
+  lua_sethook(L, stop_hook, LUA_MASKCOUNT, 1);
+  run(L, "print(pcall(function() while true do end end)) print('continued')");
+  printf("hook after stop: %d\n", lua_gethook(L) == NULL);
+  lua_close(L);
+  return 0;
+}
+
+static int peek(lua_State *L) {
+  lua_Debug ar;
+  const char *name;
+  int i;
+  if (!lua_getstack(L, 1, &ar)) return 0;
+  for (i = 1; (name = lua_getlocal(L, &ar, i)) != NULL; i++) {
+    printf("local %d %s = %s\n", i, name, luaL_tolstring(L, -1, NULL));
+    lua_pop(L, 2);
+  }
+  lua_pushinteger(L, 99);
+  name = lua_setlocal(L, &ar, 1);
+  printf("set %s\n", name ? name : "(none)");
+  lua_pushinteger(L, 5);
+  name = lua_setlocal(L, &ar, 50);
+  printf("set past the end: %s, top %d\n", name ? name : "NULL", lua_gettop(L));
+  lua_pop(L, 1);
+  return 0;
+}
+
+static int locals(void) {
+  lua_State *L = luaL_newstate();
+  luaL_openlibs(L);
+  lua_register(L, "peek", peek);
+  run(L, "local function f(a, b) local c = a + b; peek(); return a, c end print(f(1, 2))");
+  run(L, "function g(x, y) local z end");
+  lua_getglobal(L, "g");
+  printf("param 2: %s\n", lua_getlocal(L, NULL, 2));
+  printf("param 3: %s, top %d\n", lua_getlocal(L, NULL, 3) ? "?" : "NULL", lua_gettop(L));
+  lua_close(L);
+  return 0;
+}
+
+static void closable(lua_State *L, const char *name) {
+  lua_getglobal(L, "closable");
+  lua_pushstring(L, name);
+  lua_call(L, 1, 1);
+  lua_toclose(L, -1);
+}
+
+static int with_tbc(lua_State *L) {
+  int fail = lua_toboolean(L, 1);
+  closable(L, "a");
+  closable(L, "b");
+  closable(L, "c");
+  lua_closeslot(L, -1);
+  printf("closed slot is nil: %d\n", lua_isnil(L, -1));
+  lua_settop(L, 2); /* drops b's slot, closing it */
+  printf("after settop\n");
+  if (fail) luaL_error(L, "boom");
+  lua_pushinteger(L, 7);
+  return 1; /* a closes on the way out */
+}
+
+static int bad_tbc(lua_State *L) {
+  lua_pushinteger(L, 1);
+  lua_toclose(L, -1);
+  return 0;
+}
+
+static int toclose(void) {
+  lua_State *L = luaL_newstate();
+  luaL_openlibs(L);
+  lua_register(L, "with_tbc", with_tbc);
+  lua_register(L, "bad_tbc", bad_tbc);
+  run(L, "function closable(name)\n"
+         "  return setmetatable({}, {__close = function(_, e) print('close', name, e) end})\n"
+         "end\n"
+         "print(with_tbc(false))\n"
+         "print(pcall(with_tbc, true))\n"
+         "print(pcall(bad_tbc))");
+  lua_close(L);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *mode = argc > 1 ? argv[1] : "";
   if (strcmp(mode, "basic") == 0) return basic();
@@ -187,6 +299,9 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "gc") == 0) return gc();
   if (strcmp(mode, "alloc") == 0) return alloc();
   if (strcmp(mode, "states") == 0) return states();
+  if (strcmp(mode, "hooks") == 0) return hooks();
+  if (strcmp(mode, "locals") == 0) return locals();
+  if (strcmp(mode, "toclose") == 0) return toclose();
   fprintf(stderr, "unknown mode %s\n", mode);
   return 2;
 }

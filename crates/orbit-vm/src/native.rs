@@ -232,6 +232,49 @@ impl NativeCtx<'_> {
         self.vm.rt.top = self.vm.rt.top.min(self.base + len);
     }
 
+    /// Mark window slot `i` to be closed when the window shrinks below it
+    /// or the native returns or fails, as the C API's `lua_toclose` does.
+    /// Nil and false need no closing; anything else needs a `__close`.
+    pub fn to_be_closed(&mut self, i: usize) -> Result<(), LuaError> {
+        let v = self.arg(i);
+        if matches!(v, Value::Nil | Value::Bool(false)) {
+            return Ok(());
+        }
+        if self.metamethod(v, MetaField::Close).is_nil() {
+            return Err(self.error("variable '(C temporary)' got a non-closable value"));
+        }
+        self.vm.rt.stack.aux.tbc.push((self.base + i) as u32);
+        Ok(())
+    }
+
+    /// Whether window slot `i` is the newest variable marked to be closed.
+    pub fn is_newest_to_be_closed(&self, i: usize) -> bool {
+        self.vm.rt.stack.aux.tbc.last() == Some(&((self.base + i) as u32))
+    }
+
+    /// Close the window's variables marked to be closed at slot `from` and
+    /// above, newest first: each one's `__close(value, nil)`. An error a
+    /// handler raises stops it; the rest close as that error unwinds.
+    pub fn close_from(&mut self, from: usize) -> Result<(), LuaError> {
+        let at = self.base + from;
+        while let Some(&t) = self.vm.rt.stack.aux.tbc.last() {
+            if (t as usize) < at {
+                break;
+            }
+            self.vm.rt.stack.aux.tbc.pop();
+            let v = self.vm.rt.stack.regs[t as usize];
+            let h = self.metamethod(v, MetaField::Close);
+            let mark = self.len();
+            self.push(h);
+            self.push(v);
+            self.push(Value::Nil);
+            let r = self.call(2, None);
+            self.truncate(mark);
+            r?;
+        }
+        Ok(())
+    }
+
     /// The window's values.
     pub fn window(&self) -> &[Value] {
         &self.vm.rt.stack.regs[self.base..self.vm.rt.top]
