@@ -480,10 +480,16 @@ impl<'a> Resolver<'a> {
         match &item.kind {
             ItemKind::Fn(f) => {
                 let index = self.define_pending(f.name);
-                self.function(&f.sig, index, |r| r.block(&f.body, false));
+                self.function(&f.sig, index, |r| {
+                    if let Some(b) = &f.body {
+                        r.block(b, false);
+                    }
+                });
             }
             ItemKind::Const { name, value, .. } => {
-                self.expr(value);
+                if let Some(v) = value {
+                    self.expr(v);
+                }
                 self.define_pending(*name);
             }
             ItemKind::Struct(s) => {
@@ -505,14 +511,20 @@ impl<'a> Resolver<'a> {
                     match &member.kind {
                         ItemKind::Fn(f) => {
                             let index = self.predefined.get(&f.name.span.start).copied();
-                            self.function(&f.sig, index, |r| r.block(&f.body, false));
+                            self.function(&f.sig, index, |r| {
+                                if let Some(b) = &f.body {
+                                    r.block(b, false);
+                                }
+                            });
                         }
-                        ItemKind::Const { value, .. } => self.expr(value),
+                        ItemKind::Const { value: Some(v), .. } => self.expr(v),
                         _ => self.item(member, false),
                     }
                 }
                 self.impl_target = outer;
             }
+            // Type names are resolved once the checker parses with type trees.
+            ItemKind::TypeAlias { .. } => {}
             ItemKind::Use(u) => self.use_decl(u, item.span),
             ItemKind::Global { name, value } => {
                 self.expr(value);
@@ -736,7 +748,8 @@ impl<'a> Resolver<'a> {
             ExprKind::Unary { expr, .. }
             | ExprKind::Paren(expr)
             | ExprKind::Spread(expr)
-            | ExprKind::Try(expr) => self.expr(expr),
+            | ExprKind::Try(expr)
+            | ExprKind::As { expr, .. } => self.expr(expr),
             ExprKind::Range { start, end, .. } => {
                 self.expr(start);
                 self.expr(end);

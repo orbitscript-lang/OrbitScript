@@ -250,11 +250,10 @@ impl Workspace {
         let mut diagnostics = Vec::new();
         let mut deps = Vec::new();
         for s in &ast.body.stmts {
-            let ast::StmtKind::Item(ast::Item {
-                kind: ast::ItemKind::Use(u),
-                ..
-            }) = &s.kind
-            else {
+            let ast::StmtKind::Item(item) = &s.kind else {
+                continue;
+            };
+            let ast::ItemKind::Use(u) = &item.kind else {
                 continue;
             };
             let segs: Vec<String> = u
