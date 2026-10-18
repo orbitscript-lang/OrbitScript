@@ -39,6 +39,10 @@ impl Slot {
 pub(super) struct ArrayPart {
     slots: Box<[Slot]>,
     len: u32,
+    /// Where the last nil was stored by [`ArrayPart::set_nil_hinted`]: a
+    /// guess at the border once the last slot is nil. Only a hint, checked
+    /// before use; it fits in the padding after `len`.
+    nil_hint: u32,
 }
 
 impl ArrayPart {
@@ -53,6 +57,7 @@ impl ArrayPart {
         Ok(ArrayPart {
             slots: slots.into_boxed_slice(),
             len: 0,
+            nil_hint: 0,
         })
     }
 
@@ -102,6 +107,41 @@ impl ArrayPart {
         };
     }
 
+    /// Stores nil in slot `i` and remembers it as a border candidate.
+    #[inline(always)]
+    pub(super) fn set_nil_hinted(&mut self, i: usize) {
+        self.set(i, Value::Nil);
+        self.nil_hint = i as u32;
+    }
+
+    /// A border inside the array part when its last slot is nil: `b` with
+    /// slot `b` nil and slot `b - 1` not (or `b = 0`). A table used as a
+    /// stack moves its border one slot at a time, so the slot of the last
+    /// nil stored and the one after it are tried before bisecting.
+    pub(super) fn inner_border(&self) -> usize {
+        let n = self.len();
+        debug_assert!(n > 0 && self.tag(n - 1) == Tag::Nil);
+        let is_border =
+            |b: usize| b < n && self.tag(b) == Tag::Nil && (b == 0 || self.tag(b - 1) != Tag::Nil);
+        let h = self.nil_hint as usize;
+        for b in [h, h + 1] {
+            if is_border(b) {
+                return b;
+            }
+        }
+        // Slot `lo - 1` non-nil (or `lo = 0`), slot `hi - 1` nil.
+        let (mut lo, mut hi) = (0usize, n);
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if self.tag(mid - 1) == Tag::Nil {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        lo
+    }
+
     #[inline(always)]
     pub(super) fn push(&mut self, v: Value) -> Result<(), NoMemory> {
         if self.len() == self.cap() {
@@ -110,6 +150,18 @@ impl ArrayPart {
         self.len += 1;
         self.set(self.len() - 1, v);
         Ok(())
+    }
+
+    /// Appends `v` if there is spare capacity, without allocating. Returns
+    /// whether it did.
+    #[inline(always)]
+    pub(super) fn push_in_place(&mut self, v: Value) -> bool {
+        if self.len() == self.cap() {
+            return false;
+        }
+        self.len += 1;
+        self.set(self.len() - 1, v);
+        true
     }
 
     #[cold]
