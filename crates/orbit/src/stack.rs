@@ -51,6 +51,9 @@ pub const MULTRET: i32 = -1;
 /// Registry entry 3: the main thread (Lua's `LUA_RIDX_MAINTHREAD`).
 pub const RIDX_MAINTHREAD: i64 = 3;
 
+/// The registry index of the global table (`LUA_RIDX_GLOBALS`).
+pub const RIDX_GLOBALS: i64 = 2;
+
 /// The most values a native's window may hold, as `LUAI_MAXSTACK`.
 const MAX_STACK: usize = 1_000_000;
 
@@ -442,7 +445,16 @@ impl<'s> Stack<'s> {
     }
 
     /// Turn what a native ended with into the runtime's terms.
+    #[inline(always)]
     fn finish(&mut self, r: Return) -> Result<NativeReturn, LuaError> {
+        match r.0 {
+            Ret::Values(n) if n <= self.ctx.len() => Ok(NativeReturn::Return(n)),
+            _ => self.finish_other(r),
+        }
+    }
+
+    #[inline(never)]
+    fn finish_other(&mut self, r: Return) -> Result<NativeReturn, LuaError> {
         let c = &mut self.ctx;
         Ok(match r.0 {
             Ret::Values(n) => {
@@ -482,6 +494,7 @@ impl<'s> Stack<'s> {
 
     // ---- indices -----------------------------------------------------------
 
+    #[inline]
     fn slot(&self, idx: i32) -> Slot {
         let c = &self.ctx;
         let len = c.len() as i64;
@@ -514,6 +527,7 @@ impl<'s> Stack<'s> {
         }
     }
 
+    #[inline]
     fn get(&self, idx: i32) -> RawValue {
         match self.slot(idx) {
             Slot::Stack(i) => self.ctx.arg(i),
@@ -871,6 +885,27 @@ impl<'s> Stack<'s> {
         }
     }
 
+    /// The host value of type `T` in the userdata at `idx`
+    /// ([`Stack::push_userdata`]); `None` for any other value.
+    pub fn userdata<T: Any>(&self, idx: i32) -> Option<&T> {
+        match self.get(idx) {
+            RawValue::UserData(u) => self
+                .ctx
+                .userdata_ref::<crate::class::Slot<T>>(u)
+                .and_then(|s| s.0.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Argument `arg` (1-based) as the host value of type `T`, or Lua's
+    /// type error naming `expected`.
+    pub fn check_userdata<T: Any>(&mut self, arg: i32, expected: &str) -> StackResult<&T> {
+        if self.userdata::<T>(arg).is_none() {
+            return Err(self.type_error(arg, expected));
+        }
+        Ok(self.userdata::<T>(arg).expect("checked above"))
+    }
+
     /// Whether `idx` is a userdata holding a host value rather than a
     /// [`Stack::new_userdata`] block.
     pub fn is_host_userdata(&self, idx: i32) -> bool {
@@ -1017,6 +1052,19 @@ impl<'s> Stack<'s> {
 
     pub fn push_light_userdata(&mut self, p: usize) {
         self.ctx.push(light(p));
+    }
+
+    /// Push a userdata holding host value `value`, which
+    /// [`Stack::userdata`] reads back.
+    pub fn push_userdata<T: Any>(&mut self, value: T) {
+        let u = crate::host::new_userdata(&mut self.ctx, value);
+        self.ctx.push(RawValue::UserData(u));
+    }
+
+    /// Account for `bytes` of memory the caller is about to allocate
+    /// outside the heap, raising Lua's memory error past the heap limit.
+    pub fn reserve_memory(&mut self, bytes: usize) -> StackResult<()> {
+        Ok(self.ctx.reserve(bytes)?)
     }
 
     /// Push native `N` as a function value.
@@ -1490,6 +1538,42 @@ impl<'s> Stack<'s> {
         Ok(self.ctx.bytes(s))
     }
 
+    /// Argument `arg` (1-based) as an integer (floats with an exact integer
+    /// value and numeric strings convert), or Lua's argument error.
+    #[inline(always)]
+    pub fn check_integer(&mut self, arg: i32) -> StackResult<i64> {
+        match self.get(arg) {
+            RawValue::Int(n) => Ok(n),
+            _ => self.check_integer_slow(arg),
+        }
+    }
+
+    #[inline(never)]
+    fn check_integer_slow(&mut self, arg: i32) -> StackResult<i64> {
+        Ok(self.ctx.check_int((arg.max(1) - 1) as usize)?)
+    }
+
+    /// Like [`Stack::check_integer`], but `default` for an absent or nil
+    /// argument.
+    pub fn opt_integer(&mut self, arg: i32, default: i64) -> StackResult<i64> {
+        Ok(self.ctx.opt_int((arg.max(1) - 1) as usize, default)?)
+    }
+
+    /// Argument `arg` (1-based) as a float (numeric strings convert), or
+    /// Lua's argument error.
+    #[inline(always)]
+    pub fn check_number(&mut self, arg: i32) -> StackResult<f64> {
+        match self.get(arg) {
+            RawValue::Float(x) => Ok(x),
+            _ => self.check_number_slow(arg),
+        }
+    }
+
+    #[inline(never)]
+    fn check_number_slow(&mut self, arg: i32) -> StackResult<f64> {
+        Ok(self.ctx.check_f64((arg.max(1) - 1) as usize)?)
+    }
+
     /// The value at `idx` as `tostring` shows it without metamethods.
     pub fn display(&self, idx: i32) -> Vec<u8> {
         let mut out = Vec::new();
@@ -1693,6 +1777,13 @@ impl<'s> Stack<'s> {
     /// first use: per-isolate state for a binding.
     pub fn extension<T: Any + Default>(&mut self) -> &mut T {
         self.ctx.vm.rt.ext.get_or_insert_with(T::default)
+    }
+
+    /// The isolate's extension value of type `T` if one was made, without
+    /// making one: the cheaper lookup for a native's hot path.
+    #[inline]
+    pub fn find_extension<T: Any>(&self) -> Option<&T> {
+        self.ctx.vm.rt.ext.get::<T>()
     }
 
     /// What reaches the isolate itself: hooks, the interrupt handler.

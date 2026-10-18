@@ -218,7 +218,7 @@ fn main() -> ExitCode {
     let _ = cli.lock_cpath;
     #[cfg(feature = "ffi")]
     if !cli.no_ffi {
-        iso.enable_ffi();
+        orbit_std::install_ffi(&mut iso);
     }
     #[cfg(not(feature = "ffi"))]
     let _ = cli.no_ffi;

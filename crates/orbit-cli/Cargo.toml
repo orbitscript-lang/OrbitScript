@@ -33,10 +33,10 @@ default = ["c-modules", "ffi", "line-editing"]
 # Load C modules (on by default in the CLI, Tym 2026-10-09).
 c-modules = ["dep:orbit-capi"]
 # The `ffi` library, on unless `--no-ffi` is given (Tym 2026-10-14, ADR-9).
-ffi = ["orbit/ffi"]
+ffi = ["orbit-std/ffi"]
 # Link the system's shared libffi rather than a static copy built from
 # bundled sources.
-ffi-system-libffi = ["ffi", "orbit/ffi-system-libffi"]
+ffi-system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
 # Interactive mode (`-i`, or no script on a terminal), reading plain lines.
 # Without it, `-i` is an unrecognized option and a terminal on standard
 # input is read as a script, as a pipe is.
