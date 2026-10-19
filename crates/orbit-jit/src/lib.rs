@@ -25,6 +25,7 @@ use orbit_runtime::vm::op::Op;
 
 #[cfg(feature = "cranelift")]
 mod cranelift;
+mod layout;
 #[cfg(feature = "cranelift")]
 pub use cranelift::Cranelift;
 

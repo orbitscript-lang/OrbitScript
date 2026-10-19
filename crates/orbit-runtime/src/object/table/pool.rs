@@ -101,6 +101,7 @@ fn give<T: Part>(part: Box<[T]>) {
 
 /// An owned part that goes back to the pool when dropped.
 #[derive(Debug, Default)]
+#[repr(transparent)]
 pub(super) struct Recycled<T: Part>(pub(super) Box<[T]>);
 
 impl<T: Part> Drop for Recycled<T> {

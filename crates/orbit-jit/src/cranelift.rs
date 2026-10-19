@@ -15,16 +15,21 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variab
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, default_libcall_names};
 
-use orbit_runtime::object::{ProtoCode, Value};
+use orbit_runtime::object::{FieldCache, ProtoCode, Value};
 use orbit_runtime::vm::op::{MULTI, Op};
 
+use crate::layout::{self, Inline};
 use crate::{entries, jump_target};
-use orbit_runtime::vm::{EXIT, HelperFn, Helpers, JitBackend, JitFn, NO_VALUE, TAKEN, const_parts};
+use orbit_runtime::vm::{
+    CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, EXIT, HelperFn, Helpers, JitBackend, JitFn,
+    NO_VALUE, TAKEN, const_parts,
+};
 
 const TAG_NIL: i64 = 0;
 const TAG_BOOL: i64 = 1;
 const TAG_INT: i64 = 2;
 const TAG_FLOAT: i64 = 3;
+const TAG_STR: i64 = 4;
 const TAG_TABLE: i64 = 5;
 const TAG_CLOSURE: i64 = 6;
 
@@ -165,6 +170,19 @@ struct Tr<'a, 'b> {
     flags: MemFlagsData,
     /// Back edges' interrupt polls: block, loop header.
     polls: Vec<(Block, usize)>,
+    /// Flags for loads and stores that may be unaligned (array slots).
+    uflags: MemFlagsData,
+    /// The pinned table layout, when inline table access is on.
+    inline: Option<&'static Inline>,
+}
+
+/// What a table access indexes with.
+#[derive(Clone, Copy)]
+enum Key<'c> {
+    /// An integer key, the array part first.
+    Int(Opnd),
+    /// A string constant through its field cache.
+    Field(&'c FieldCache),
 }
 
 /// Build the function: an entry switch on the pc, then a block per
@@ -245,6 +263,8 @@ fn translate(
         helpers,
         flags,
         polls: Vec::new(),
+        uflags: MemFlagsData::new().with_notrap(),
+        inline: layout::inline(),
     };
     for p in 0..n {
         t.b.switch_to_block(t.blocks[p]);
@@ -253,7 +273,7 @@ fn translate(
     // Back edges poll the interrupt flag and leave at the loop header.
     for (pb, h) in std::mem::take(&mut t.polls) {
         t.b.switch_to_block(pb);
-        let ptr = t.b.ins().load(types::I64, t.flags, t.ctx, 16);
+        let ptr = t.b.ins().load(types::I64, t.flags, t.ctx, CTX_INTERRUPT);
         let set = t.b.ins().uload8(types::I32, t.flags, ptr, 0);
         let out = t.b.create_block();
         t.b.ins().brif(set, out, &[], t.blocks[h], &[]);
@@ -622,34 +642,216 @@ impl Tr<'_, '_> {
         self.fall(p);
     }
 
-    /// A table read through fast helper `fast`: `R[obj][key]` (an integer
-    /// key) or, with no key, the field whose cache is at `cache`. Anything
-    /// it declines goes to the full helper `full`.
-    fn fast_get(
-        &mut self,
-        p: usize,
-        dst: u8,
-        obj: u8,
-        key: Option<Opnd>,
-        fast: usize,
-        cache: i64,
-        full: HelperFn,
-    ) {
+    /// The arena slot of the table in `R[obj]` (already known to hold a
+    /// table), bounds- and occupancy-checked; `miss` otherwise.
+    fn table_slot(&mut self, l: &Inline, obj: u8, miss: Block) -> CValue {
+        let regs = self.regs();
+        let idx = self.b.ins().uload32(self.flags, regs, obj as i32 * 16 + 8);
+        let lenp = self
+            .b
+            .ins()
+            .load(types::I64, self.flags, self.ctx, CTX_TABLES_LEN);
+        let len = self.b.ins().load(types::I64, self.flags, lenp, 0);
+        let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, idx, len);
+        let ok = self.b.create_block();
+        self.b.ins().brif(inb, ok, &[], miss, &[]);
+        self.b.switch_to_block(ok);
+        let base = self
+            .b
+            .ins()
+            .load(types::I64, self.flags, self.ctx, CTX_TABLES);
+        let off = self.b.ins().imul_imm_s(idx, l.slot_size);
+        let slot = self.b.ins().iadd(base, off);
+        let mark = match l.empty_width {
+            1 => self
+                .b
+                .ins()
+                .uload8(types::I64, self.uflags, slot, l.empty_at),
+            2 => self
+                .b
+                .ins()
+                .uload16(types::I64, self.uflags, slot, l.empty_at),
+            4 => self.b.ins().uload32(self.uflags, slot, l.empty_at),
+            _ => self.b.ins().load(types::I64, self.uflags, slot, l.empty_at),
+        };
+        let empty = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, mark, l.empty_value as i64);
+        let ok = self.b.create_block();
+        self.b.ins().brif(empty, miss, &[], ok, &[]);
+        self.b.switch_to_block(ok);
+        slot
+    }
+
+    /// Continue in a new block when `cond` holds, else go to `miss`.
+    fn guard(&mut self, cond: CValue, miss: Block) {
+        let ok = self.b.create_block();
+        self.b.ins().brif(cond, ok, &[], miss, &[]);
+        self.b.switch_to_block(ok);
+    }
+
+    /// `R[dst] = tag, payload`.
+    fn store_dyn(&mut self, dst: u8, t: CValue, v: CValue) {
+        let regs = self.regs();
+        self.b.ins().store(self.flags, t, regs, dst as i32 * 16);
+        self.b.ins().store(self.flags, v, regs, dst as i32 * 16 + 8);
+    }
+
+    /// The inline read of a present value: the array slot or cached hash
+    /// entry, stored in `R[dst]`; `miss` for anything else.
+    fn inline_get(&mut self, l: &Inline, dst: u8, obj: u8, key: Key, miss: Block) {
+        let slot = self.table_slot(l, obj, miss);
+        let (t, v) = match key {
+            Key::Int(k) => {
+                let k = self.opnd_int(k);
+                let arr = self.b.ins().load(types::I64, self.flags, slot, l.array_ptr);
+                let cap = self.b.ins().load(types::I64, self.flags, slot, l.array_cap);
+                let k1 = self.b.ins().iadd_imm_s(k, -1);
+                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, k1, cap);
+                self.guard(inb, miss);
+                let off = self.b.ins().imul_imm_s(k1, l.array_slot_size);
+                let a = self.b.ins().iadd(arr, off);
+                let t = self
+                    .b
+                    .ins()
+                    .uload8(types::I64, self.uflags, a, l.array_slot_tag);
+                let live = self.b.ins().icmp_imm_s(IntCC::NotEqual, t, TAG_NIL);
+                self.guard(live, miss);
+                let v = self.b.ins().load(types::I64, self.uflags, a, 0);
+                (t, v)
+            }
+            Key::Field(c) => {
+                let e = self.cached_entry(l, slot, c, miss);
+                let t = self
+                    .b
+                    .ins()
+                    .uload8(types::I64, self.flags, e, l.entry_value_tag);
+                let live = self.b.ins().icmp_imm_s(IntCC::NotEqual, t, TAG_NIL);
+                self.guard(live, miss);
+                let v = self
+                    .b
+                    .ins()
+                    .load(types::I64, self.flags, e, l.entry_value_payload);
+                (t, v)
+            }
+        };
+        self.store_dyn(dst, t, v);
+    }
+
+    /// The hash entry field cache `c` points at, if it holds `c`'s key.
+    fn cached_entry(&mut self, l: &Inline, slot: CValue, c: &FieldCache, miss: Block) -> CValue {
+        let ca = self
+            .b
+            .ins()
+            .iconst(types::I64, c as *const FieldCache as i64);
+        let cs = self.b.ins().uload32(self.flags, ca, l.cache_slot);
+        let ep = self
+            .b
+            .ins()
+            .load(types::I64, self.flags, slot, l.entries_ptr);
+        let el = self
+            .b
+            .ins()
+            .load(types::I64, self.flags, slot, l.entries_len);
+        let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, cs, el);
+        self.guard(inb, miss);
+        let off = self.b.ins().imul_imm_s(cs, l.entry_size);
+        let e = self.b.ins().iadd(ep, off);
+        let kt = self
+            .b
+            .ins()
+            .uload8(types::I64, self.flags, e, l.entry_key_tag);
+        let is_str = self.b.ins().icmp_imm_s(IntCC::Equal, kt, TAG_STR);
+        self.guard(is_str, miss);
+        let kp = self
+            .b
+            .ins()
+            .load(types::I64, self.flags, e, l.entry_key_payload);
+        let want = const_parts(Value::Str(c.key)).1;
+        let same = self.b.ins().icmp_imm_s(IntCC::Equal, kp, want as i64);
+        self.guard(same, miss);
+        e
+    }
+
+    /// The inline store of a number or boolean over a present value (no
+    /// write barrier needed: it refers to no object); `miss` otherwise.
+    fn inline_set(&mut self, l: &Inline, obj: u8, key: Key, src: u8, miss: Block) {
+        let regs = self.regs();
+        let vt = self
+            .b
+            .ins()
+            .uload8(types::I64, self.flags, regs, src as i32 * 16);
+        let vt1 = self.b.ins().iadd_imm_s(vt, -TAG_BOOL);
+        let plain =
+            self.b
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, vt1, TAG_FLOAT - TAG_BOOL);
+        self.guard(plain, miss);
+        let slot = self.table_slot(l, obj, miss);
+        let vp = self.payload(src, types::I64);
+        match key {
+            Key::Int(k) => {
+                let k = self.opnd_int(k);
+                let len = self.b.ins().uload32(self.flags, slot, l.array_len);
+                let k1 = self.b.ins().iadd_imm_s(k, -1);
+                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, k1, len);
+                self.guard(inb, miss);
+                let arr = self.b.ins().load(types::I64, self.flags, slot, l.array_ptr);
+                let off = self.b.ins().imul_imm_s(k1, l.array_slot_size);
+                let a = self.b.ins().iadd(arr, off);
+                let old = self
+                    .b
+                    .ins()
+                    .uload8(types::I64, self.uflags, a, l.array_slot_tag);
+                let live = self.b.ins().icmp_imm_s(IntCC::NotEqual, old, TAG_NIL);
+                self.guard(live, miss);
+                self.b.ins().store(self.uflags, vp, a, 0);
+                self.b.ins().istore8(self.uflags, vt, a, l.array_slot_tag);
+            }
+            Key::Field(c) => {
+                let e = self.cached_entry(l, slot, c, miss);
+                let old = self
+                    .b
+                    .ins()
+                    .uload8(types::I64, self.flags, e, l.entry_value_tag);
+                let live = self.b.ins().icmp_imm_s(IntCC::NotEqual, old, TAG_NIL);
+                self.guard(live, miss);
+                self.b.ins().store(self.flags, vp, e, l.entry_value_payload);
+                self.b.ins().istore8(self.flags, vt, e, l.entry_value_tag);
+                let zero = self.b.ins().iconst(types::I16, 0);
+                self.b.ins().store(self.flags, zero, slot, l.absent_meta);
+            }
+        }
+    }
+
+    /// A table read: inline when the layout is pinned, then through fast
+    /// helper `fast`, then through the full helper `full`.
+    fn fast_get(&mut self, p: usize, dst: u8, obj: u8, key: Key, fast: usize, full: HelperFn) {
         let slow = self.b.create_block();
         let go = self.b.create_block();
         let to = self.tag(obj);
         let mut ok = self.b.ins().icmp_imm_s(IntCC::Equal, to, TAG_TABLE);
-        if let Some(Opnd::Reg(k)) = key {
+        if let Key::Int(Opnd::Reg(k)) = key {
             let tk = self.tag(k);
             let ik = self.b.ins().icmp_imm_s(IntCC::Equal, tk, TAG_INT);
             ok = self.b.ins().band(ok, ik);
         }
         self.b.ins().brif(ok, go, &[], slow, &[]);
         self.b.switch_to_block(go);
+        if let Some(l) = self.inline {
+            let lean = self.b.create_block();
+            self.inline_get(l, dst, obj, key, lean);
+            self.fall(p);
+            self.b.switch_to_block(lean);
+        }
         let t = self.payload(obj, types::I64);
         let third = match key {
-            Some(k) => self.opnd_int(k),
-            None => self.b.ins().iconst(types::I64, cache),
+            Key::Int(k) => self.opnd_int(k),
+            Key::Field(c) => self
+                .b
+                .ins()
+                .iconst(types::I64, c as *const FieldCache as i64),
         };
         let callee = self.b.ins().iconst(types::I64, fast as i64);
         let call = self
@@ -662,32 +864,32 @@ impl Tr<'_, '_> {
         self.helper_then_next(full, p);
     }
 
-    /// A table store through fast helper `fast`, as [`Tr::fast_get`].
-    fn fast_set(
-        &mut self,
-        p: usize,
-        obj: u8,
-        key: Option<Opnd>,
-        src: u8,
-        fast: usize,
-        cache: i64,
-        full: HelperFn,
-    ) {
+    /// A table store, as [`Tr::fast_get`].
+    fn fast_set(&mut self, p: usize, obj: u8, key: Key, src: u8, fast: usize, full: HelperFn) {
         let slow = self.b.create_block();
         let go = self.b.create_block();
         let to = self.tag(obj);
         let mut ok = self.b.ins().icmp_imm_s(IntCC::Equal, to, TAG_TABLE);
-        if let Some(Opnd::Reg(k)) = key {
+        if let Key::Int(Opnd::Reg(k)) = key {
             let tk = self.tag(k);
             let ik = self.b.ins().icmp_imm_s(IntCC::Equal, tk, TAG_INT);
             ok = self.b.ins().band(ok, ik);
         }
         self.b.ins().brif(ok, go, &[], slow, &[]);
         self.b.switch_to_block(go);
+        if let Some(l) = self.inline {
+            let lean = self.b.create_block();
+            self.inline_set(l, obj, key, src, lean);
+            self.fall(p);
+            self.b.switch_to_block(lean);
+        }
         let t = self.payload(obj, types::I64);
         let third = match key {
-            Some(k) => self.opnd_int(k),
-            None => self.b.ins().iconst(types::I64, cache),
+            Key::Int(k) => self.opnd_int(k),
+            Key::Field(c) => self
+                .b
+                .ins()
+                .iconst(types::I64, c as *const FieldCache as i64),
         };
         let regs = self.regs();
         let vt = self
@@ -1006,49 +1208,31 @@ impl Tr<'_, '_> {
             ),
 
             Op::GetField { dst, obj, ic, .. } => {
-                let cache = &self.code.caches[ic as usize] as *const _ as i64;
-                self.fast_get(p, dst, obj, None, h.field_get as usize, cache, h.get_field)
+                let code = self.code;
+                let c = Key::Field(&code.caches[ic as usize]);
+                self.fast_get(p, dst, obj, c, h.field_get as usize, h.get_field)
             }
             Op::SetField { obj, src, ic, .. } => {
-                let cache = &self.code.caches[ic as usize] as *const _ as i64;
-                self.fast_set(p, obj, None, src, h.field_set as usize, cache, h.set_field)
+                let code = self.code;
+                let c = Key::Field(&code.caches[ic as usize]);
+                self.fast_set(p, obj, c, src, h.field_set as usize, h.set_field)
             }
-            Op::GetIndex { dst, obj, key } => self.fast_get(
-                p,
-                dst,
-                obj,
-                Some(Opnd::Reg(key)),
-                h.array_get as usize,
-                0,
-                h.get_index,
-            ),
-            Op::GetIndexInt { dst, obj, key } => self.fast_get(
-                p,
-                dst,
-                obj,
-                Some(Opnd::Int(key as i64)),
-                h.array_get as usize,
-                0,
-                h.get_index,
-            ),
-            Op::SetIndex { obj, key, src } => self.fast_set(
-                p,
-                obj,
-                Some(Opnd::Reg(key)),
-                src,
-                h.array_set as usize,
-                0,
-                h.set_index,
-            ),
-            Op::SetIndexInt { obj, key, src } => self.fast_set(
-                p,
-                obj,
-                Some(Opnd::Int(key as i64)),
-                src,
-                h.array_set as usize,
-                0,
-                h.set_index,
-            ),
+            Op::GetIndex { dst, obj, key } => {
+                let k = Key::Int(Opnd::Reg(key));
+                self.fast_get(p, dst, obj, k, h.array_get as usize, h.get_index)
+            }
+            Op::GetIndexInt { dst, obj, key } => {
+                let k = Key::Int(Opnd::Int(key as i64));
+                self.fast_get(p, dst, obj, k, h.array_get as usize, h.get_index)
+            }
+            Op::SetIndex { obj, key, src } => {
+                let k = Key::Int(Opnd::Reg(key));
+                self.fast_set(p, obj, k, src, h.array_set as usize, h.set_index)
+            }
+            Op::SetIndexInt { obj, key, src } => {
+                let k = Key::Int(Opnd::Int(key as i64));
+                self.fast_set(p, obj, k, src, h.array_set as usize, h.set_index)
+            }
             Op::GetGlobal { dst, ic, .. } => {
                 let cache = &self.code.caches[ic as usize] as *const _ as i64;
                 let slow = self.b.create_block();

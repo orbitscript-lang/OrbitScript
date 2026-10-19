@@ -232,6 +232,19 @@ impl<S: Space> Heap<S> {
         self.space.arena().get(gc)
     }
 
+    /// The raw slots of `T`'s arena: slot 0's address (stable for the
+    /// heap's life) and the address of the slot count (stable while the
+    /// heap doesn't move). Slots are `Option<T>`, one per handle index. For
+    /// JIT code (planning/jit), which bounds-checks every index against
+    /// the count and checks the slot is occupied before reading it.
+    #[doc(hidden)]
+    pub fn raw_slots<T>(&self) -> (usize, *const usize)
+    where
+        S: Holds<T>,
+    {
+        self.space.arena().raw_slots()
+    }
+
     /// Mutable access with no write barrier and no byte accounting. Use it
     /// for writes that store no handles and don't change
     /// [`Trace::extra_bytes`]; otherwise use [`Heap::update`], or pair it with

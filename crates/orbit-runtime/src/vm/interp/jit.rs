@@ -43,7 +43,16 @@ pub struct JitCtx {
     /// on their back edges: when set they leave to the interpreter, which
     /// raises it.
     pub interrupt: *const std::sync::atomic::AtomicBool,
+    /// The table arena's slot 0 and slot count ([`orbit_gc::Heap::raw_slots`]),
+    /// for reading tables in place with [`crate::object::TABLE_LAYOUT`].
+    pub tables: usize,
+    pub tables_len: *const usize,
 }
+
+/// Byte offsets of [`JitCtx`]'s fields, for generated code.
+pub const CTX_INTERRUPT: i32 = std::mem::offset_of!(JitCtx, interrupt) as i32;
+pub const CTX_TABLES: i32 = std::mem::offset_of!(JitCtx, tables) as i32;
+pub const CTX_TABLES_LEN: i32 = std::mem::offset_of!(JitCtx, tables_len) as i32;
 
 /// A compiled prototype: runs the top frame, a call of the closure whose
 /// handle bits are `closure`, from instruction `pc`.
@@ -360,6 +369,8 @@ impl Vm {
             regs: window_ptr(self),
             depth: 0,
             interrupt: std::sync::Arc::as_ptr(&self.rt.interrupt),
+            tables: self.heap.raw_slots::<Table>().0,
+            tables_len: self.heap.raw_slots::<Table>().1,
         };
         let top = self.rt.stack.frames.last().expect("frame");
         let mut pc = top.pc;

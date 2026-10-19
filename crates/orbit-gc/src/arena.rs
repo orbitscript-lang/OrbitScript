@@ -284,9 +284,16 @@ pub trait Store<T> {
     fn put(&mut self, i: u32, v: T) -> Gc<T>;
     /// Call `f` on every object in an occupied slot, in slot order.
     fn for_each(&self, f: &mut dyn FnMut(&T));
+    /// Where slot 0 is and where the slot count is kept, for JIT code that
+    /// reads objects in place (each slot is an `Option<T>`).
+    fn raw_slots(&self) -> (usize, *const usize);
 }
 
 impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
+    fn raw_slots(&self) -> (usize, *const usize) {
+        (self.slots.base_addr(), self.slots.len_addr())
+    }
+
     #[inline(always)]
     #[track_caller]
     fn get(&self, gc: Gc<T>) -> &T {

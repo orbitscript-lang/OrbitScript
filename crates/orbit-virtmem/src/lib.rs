@@ -98,6 +98,24 @@ impl<T> VmBuffer<T> {
         self.len
     }
 
+    /// Where slot 0 lives. The reservation never moves, so this stays valid
+    /// for the buffer's life (slots past [`len`](Self::len) aren't
+    /// initialized). For JIT code that reads slots in place.
+    #[inline]
+    #[must_use]
+    pub fn base_addr(&self) -> usize {
+        self.base.as_ptr() as usize
+    }
+
+    /// Where the buffer keeps its length, for JIT code that bounds-checks a
+    /// slot index against the current length. Valid while the buffer
+    /// itself doesn't move.
+    #[inline]
+    #[must_use]
+    pub fn len_addr(&self) -> *const usize {
+        &raw const self.len
+    }
+
     /// Whether the buffer has zero initialized slots.
     #[inline]
     #[must_use]

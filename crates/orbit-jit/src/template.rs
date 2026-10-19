@@ -13,14 +13,19 @@ use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, ExecutableBuffer, dynasm
 
 use orbit_runtime::object::{ProtoCode, Value};
 use orbit_runtime::vm::op::Op;
-use orbit_runtime::vm::{EXIT, HelperFn, Helpers, JitBackend, JitFn, NO_VALUE, TAKEN, const_parts};
+use orbit_runtime::vm::{
+    CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, EXIT, HelperFn, Helpers, JitBackend, JitFn,
+    NO_VALUE, TAKEN, const_parts,
+};
 
+use crate::layout::{self, Inline};
 use crate::{entries, jump_target};
 
 const TAG_NIL: i32 = 0;
 const TAG_BOOL: i32 = 1;
 const TAG_INT: i32 = 2;
 const TAG_FLOAT: i32 = 3;
+const TAG_STR: i32 = 4;
 const TAG_TABLE: i32 = 5;
 const TAG_CLOSURE: i32 = 6;
 
@@ -65,6 +70,7 @@ impl JitBackend for Template {
             blocks,
             ret,
             polls: Vec::new(),
+            inline: layout::inline(),
         };
         t.prologue();
         for p in 0..code.code.len() {
@@ -82,7 +88,7 @@ impl JitBackend for Template {
             dynasm!(t.ops
                 ; .arch x64
                 ; =>pb
-                ; mov rax, [r13 + 16]
+                ; mov rax, [r13 + CTX_INTERRUPT]
                 ; cmp BYTE [rax], 0
                 ; je =>head
             );
@@ -128,6 +134,8 @@ struct Tr<'a> {
     ret: DynamicLabel,
     /// Back edges' interrupt polls: label, loop header.
     polls: Vec<(DynamicLabel, usize)>,
+    /// The pinned table layout, when inline table access is on.
+    inline: Option<&'static Inline>,
 }
 
 /// Where a register's tag and payload live, from r14.
@@ -626,6 +634,51 @@ impl Tr<'_> {
         );
     }
 
+    /// rax = the arena slot of the table in `R[obj]` (known to hold a
+    /// table), bounds- and occupancy-checked; `miss` otherwise. Clobbers rcx.
+    fn table_slot(&mut self, l: &Inline, obj: u8, miss: DynamicLabel) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov eax, DWORD [r14 + pl(obj)]
+            ; mov rcx, [r13 + CTX_TABLES_LEN]
+            ; cmp rax, [rcx]
+            ; jae =>miss
+            ; imul rax, rax, l.slot_size as i32
+            ; add rax, [r13 + CTX_TABLES]
+        );
+        let (at, v) = (l.empty_at, l.empty_value);
+        match l.empty_width {
+            1 => dynasm!(self.ops ; .arch x64 ; cmp BYTE [rax + at], v as u8 as i8),
+            2 => dynasm!(self.ops ; .arch x64 ; cmp WORD [rax + at], v as u16 as i16),
+            4 => dynasm!(self.ops ; .arch x64 ; cmp DWORD [rax + at], v as u32 as i32),
+            _ => dynasm!(self.ops
+                ; .arch x64
+                ; mov rcx, QWORD v as i64
+                ; cmp [rax + at], rcx
+            ),
+        }
+        dynasm!(self.ops ; .arch x64 ; je =>miss);
+    }
+
+    /// rcx = the hash entry the field cache in rdx points at, if it holds
+    /// the cache's key (payload bits `fkey`); `miss` otherwise. rax = the
+    /// table's slot. Clobbers rsi.
+    fn cached_entry(&mut self, l: &Inline, fkey: u64, miss: DynamicLabel) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov ecx, DWORD [rdx + l.cache_slot]
+            ; cmp rcx, [rax + l.entries_len]
+            ; jae =>miss
+            ; imul rcx, rcx, l.entry_size as i32
+            ; add rcx, [rax + l.entries_ptr]
+            ; cmp BYTE [rcx + l.entry_key_tag], TAG_STR as i8
+            ; jne =>miss
+            ; mov rsi, QWORD fkey as i64
+            ; cmp [rcx + l.entry_key_payload], rsi
+            ; jne =>miss
+        );
+    }
+
     /// A fast table read: `fast(vm, table, third)` returns the value in
     /// rax:rdx, tag `NO_VALUE` if it declined; then `full`.
     fn fast_get(
@@ -636,10 +689,12 @@ impl Tr<'_> {
         key: Option<KeyOp>,
         fast: usize,
         third: i64,
+        fkey: u64,
         full: HelperFn,
     ) {
         let next = self.next(p);
         let slow = self.ops.new_dynamic_label();
+        let lean = self.ops.new_dynamic_label();
         dynasm!(self.ops
             ; .arch x64
             ; cmp BYTE [r14 + at(obj)], TAG_TABLE as i8
@@ -655,8 +710,43 @@ impl Tr<'_> {
             Some(KeyOp::Int(i)) => dynasm!(self.ops ; .arch x64 ; mov rdx, QWORD i),
             None => dynasm!(self.ops ; .arch x64 ; mov rdx, QWORD third),
         }
+        if let Some(l) = self.inline {
+            self.table_slot(l, obj, lean);
+            if key.is_some() {
+                // rdx = the integer key.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; lea rcx, [rdx - 1]
+                    ; cmp rcx, [rax + l.array_cap]
+                    ; jae =>lean
+                    ; imul rcx, rcx, l.array_slot_size as i32
+                    ; add rcx, [rax + l.array_ptr]
+                    ; movzx esi, BYTE [rcx + l.array_slot_tag]
+                    ; test esi, esi
+                    ; jz =>lean
+                    ; mov rdi, [rcx]
+                );
+            } else {
+                // rdx = the field cache.
+                self.cached_entry(l, fkey, lean);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movzx esi, BYTE [rcx + l.entry_value_tag]
+                    ; test esi, esi
+                    ; jz =>lean
+                    ; mov rdi, [rcx + l.entry_value_payload]
+                );
+            }
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov [r14 + at(dst)], rsi
+                ; mov [r14 + pl(dst)], rdi
+                ; jmp =>next
+            );
+        }
         dynasm!(self.ops
             ; .arch x64
+            ; =>lean
             ; mov rdi, r12
             ; mov rsi, [r14 + pl(obj)]
             ; mov rax, QWORD fast as i64
@@ -679,10 +769,12 @@ impl Tr<'_> {
         src: u8,
         fast: usize,
         third: i64,
+        fkey: u64,
         full: HelperFn,
     ) {
         let next = self.next(p);
         let slow = self.ops.new_dynamic_label();
+        let lean = self.ops.new_dynamic_label();
         dynasm!(self.ops
             ; .arch x64
             ; cmp BYTE [r14 + at(obj)], TAG_TABLE as i8
@@ -698,8 +790,49 @@ impl Tr<'_> {
             Some(KeyOp::Int(i)) => dynasm!(self.ops ; .arch x64 ; mov rdx, QWORD i),
             None => dynasm!(self.ops ; .arch x64 ; mov rdx, QWORD third),
         }
+        if let Some(l) = self.inline {
+            // Numbers and booleans only: they need no write barrier.
+            dynasm!(self.ops
+                ; .arch x64
+                ; movzx r8d, BYTE [r14 + at(src)]
+                ; lea r9d, [r8 - TAG_BOOL]
+                ; cmp r9d, TAG_FLOAT - TAG_BOOL
+                ; ja =>lean
+            );
+            self.table_slot(l, obj, lean);
+            if key.is_some() {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; lea rcx, [rdx - 1]
+                    ; mov r10d, DWORD [rax + l.array_len]
+                    ; cmp rcx, r10
+                    ; jae =>lean
+                    ; imul rcx, rcx, l.array_slot_size as i32
+                    ; add rcx, [rax + l.array_ptr]
+                    ; cmp BYTE [rcx + l.array_slot_tag], TAG_NIL as i8
+                    ; je =>lean
+                    ; mov r9, [r14 + pl(src)]
+                    ; mov [rcx], r9
+                    ; mov [rcx + l.array_slot_tag], r8b
+                    ; jmp =>next
+                );
+            } else {
+                self.cached_entry(l, fkey, lean);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; cmp BYTE [rcx + l.entry_value_tag], TAG_NIL as i8
+                    ; je =>lean
+                    ; mov r9, [r14 + pl(src)]
+                    ; mov [rcx + l.entry_value_payload], r9
+                    ; mov [rcx + l.entry_value_tag], r8b
+                    ; mov WORD [rax + l.absent_meta], 0
+                    ; jmp =>next
+                );
+            }
+        }
         dynasm!(self.ops
             ; .arch x64
+            ; =>lean
             ; mov rdi, r12
             ; mov rsi, [r14 + pl(obj)]
             ; movzx ecx, BYTE [r14 + at(src)]
@@ -944,49 +1077,49 @@ impl Tr<'_> {
             Op::JumpGeInt { a, imm, want, .. } => self.cmp_imm_jump(p, op, a, imm, Cmp::Ge, want),
 
             Op::GetField { dst, obj, ic, .. } => {
-                let cache = &self.code.caches[ic as usize] as *const _ as i64;
-                self.fast_get(p, dst, obj, None, h.field_get as usize, cache, h.get_field)
+                let c = &self.code.caches[ic as usize];
+                let (cache, fkey) = (c as *const _ as i64, const_parts(Value::Str(c.key)).1);
+                self.fast_get(
+                    p,
+                    dst,
+                    obj,
+                    None,
+                    h.field_get as usize,
+                    cache,
+                    fkey,
+                    h.get_field,
+                )
             }
             Op::SetField { obj, src, ic, .. } => {
-                let cache = &self.code.caches[ic as usize] as *const _ as i64;
-                self.fast_set(p, obj, None, src, h.field_set as usize, cache, h.set_field)
+                let c = &self.code.caches[ic as usize];
+                let (cache, fkey) = (c as *const _ as i64, const_parts(Value::Str(c.key)).1);
+                self.fast_set(
+                    p,
+                    obj,
+                    None,
+                    src,
+                    h.field_set as usize,
+                    cache,
+                    fkey,
+                    h.set_field,
+                )
             }
-            Op::GetIndex { dst, obj, key } => self.fast_get(
-                p,
-                dst,
-                obj,
-                Some(KeyOp::Reg(key)),
-                h.array_get as usize,
-                0,
-                h.get_index,
-            ),
-            Op::GetIndexInt { dst, obj, key } => self.fast_get(
-                p,
-                dst,
-                obj,
-                Some(KeyOp::Int(key as i64)),
-                h.array_get as usize,
-                0,
-                h.get_index,
-            ),
-            Op::SetIndex { obj, key, src } => self.fast_set(
-                p,
-                obj,
-                Some(KeyOp::Reg(key)),
-                src,
-                h.array_set as usize,
-                0,
-                h.set_index,
-            ),
-            Op::SetIndexInt { obj, key, src } => self.fast_set(
-                p,
-                obj,
-                Some(KeyOp::Int(key as i64)),
-                src,
-                h.array_set as usize,
-                0,
-                h.set_index,
-            ),
+            Op::GetIndex { dst, obj, key } => {
+                let k = Some(KeyOp::Reg(key));
+                self.fast_get(p, dst, obj, k, h.array_get as usize, 0, 0, h.get_index)
+            }
+            Op::GetIndexInt { dst, obj, key } => {
+                let k = Some(KeyOp::Int(key as i64));
+                self.fast_get(p, dst, obj, k, h.array_get as usize, 0, 0, h.get_index)
+            }
+            Op::SetIndex { obj, key, src } => {
+                let k = Some(KeyOp::Reg(key));
+                self.fast_set(p, obj, k, src, h.array_set as usize, 0, 0, h.set_index)
+            }
+            Op::SetIndexInt { obj, key, src } => {
+                let k = Some(KeyOp::Int(key as i64));
+                self.fast_set(p, obj, k, src, h.array_set as usize, 0, 0, h.set_index)
+            }
             Op::GetGlobal { dst, ic, .. } => {
                 let cache = &self.code.caches[ic as usize] as *const _ as i64;
                 let slow = self.ops.new_dynamic_label();

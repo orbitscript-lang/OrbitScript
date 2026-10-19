@@ -28,6 +28,8 @@ pub use meta::MetaField;
 pub use orbit_gc::{Gc, Heap};
 pub use string::{Interner, LuaStr, OrbitStr, OrbitString};
 pub use table::Table;
+#[cfg(feature = "jit")]
+pub use table::{TABLE_LAYOUT, TableLayout};
 pub use thread::{Thread, ThreadState};
 pub use userdata::UserData;
 pub use value::{LightUserData, NativeId, Payload, Tag, Value};

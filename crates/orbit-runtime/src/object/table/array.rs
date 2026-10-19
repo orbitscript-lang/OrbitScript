@@ -46,6 +46,17 @@ pub(super) struct ArrayPart {
     nil_hint: u32,
 }
 
+/// Where an array part keeps its slots (a `Box<[Slot]>`) and its length,
+/// for JIT code reading tables in place (planning/jit).
+#[cfg(feature = "jit")]
+pub(super) const SLOTS_OFFSET: usize = std::mem::offset_of!(ArrayPart, slots);
+#[cfg(feature = "jit")]
+pub(super) const LEN_OFFSET: usize = std::mem::offset_of!(ArrayPart, len);
+#[cfg(feature = "jit")]
+pub(super) const SLOT_SIZE: usize = std::mem::size_of::<Slot>();
+#[cfg(feature = "jit")]
+pub(super) const SLOT_TAG: usize = std::mem::offset_of!(Slot, tag);
+
 impl ArrayPart {
     pub(super) fn with_capacity(cap: usize) -> Result<ArrayPart, NoMemory> {
         if cap == 0 {

@@ -169,6 +169,53 @@ const _: () = assert!(std::mem::size_of::<Entry>() == 24);
 #[cfg(not(debug_assertions))]
 const _: () = assert!(std::mem::size_of::<Table>() == 56);
 
+/// Where JIT code finds a table's parts when it reads one in place
+/// (planning/jit). Byte offsets into the arena slot (`Option<Table>`,
+/// whose `Some` payload starts at offset 0 since it has the same size as
+/// a `Table`) and into a hash [`Entry`]. A part's `Box<[T]>` is a pointer
+/// and a length; which word is which, orbit-jit checks once at start-up.
+#[cfg(feature = "jit")]
+#[derive(Debug, Clone, Copy)]
+pub struct TableLayout {
+    /// Bytes per arena slot.
+    pub slot_size: usize,
+    /// The array part's `Box<[Slot]>`.
+    pub array_slots: usize,
+    /// The array part's length (`u32`).
+    pub array_len: usize,
+    /// Bytes per array slot: payload at 0, tag byte at `array_slot_tag`.
+    pub array_slot_size: usize,
+    pub array_slot_tag: usize,
+    /// The hash part's `Box<[Entry]>`.
+    pub entries: usize,
+    /// `absent_meta` (`u16`), cleared by every store into the hash part.
+    pub absent_meta: usize,
+    pub entry_size: usize,
+    pub entry_value_payload: usize,
+    pub entry_key_payload: usize,
+    pub entry_value_tag: usize,
+    pub entry_key_tag: usize,
+}
+
+#[cfg(feature = "jit")]
+const _: () = assert!(std::mem::size_of::<Option<Table>>() == std::mem::size_of::<Table>());
+
+#[cfg(feature = "jit")]
+pub const TABLE_LAYOUT: TableLayout = TableLayout {
+    slot_size: std::mem::size_of::<Option<Table>>(),
+    array_slots: std::mem::offset_of!(Table, array) + array::SLOTS_OFFSET,
+    array_len: std::mem::offset_of!(Table, array) + array::LEN_OFFSET,
+    array_slot_size: array::SLOT_SIZE,
+    array_slot_tag: array::SLOT_TAG,
+    entries: std::mem::offset_of!(Table, entries),
+    absent_meta: std::mem::offset_of!(Table, absent_meta),
+    entry_size: std::mem::size_of::<Entry>(),
+    entry_value_payload: std::mem::offset_of!(Entry, value_payload),
+    entry_key_payload: std::mem::offset_of!(Entry, key_payload),
+    entry_value_tag: std::mem::offset_of!(Entry, value_tag),
+    entry_key_tag: std::mem::offset_of!(Entry, key_tag),
+};
+
 impl Default for Entry {
     #[inline(always)]
     fn default() -> Entry {
