@@ -1,0 +1,81 @@
+// The prelude: the names every OrbitScript module can read without declaring them. These are
+// Lua 5.5's base library and standard modules, plus `panic`, which the front end compiles as
+// `error`. Bundled with orbit-check; tests/stubs.rs checks them against the runtime and the
+// front end's own list.
+//
+// A body-less function with no `->` has results the checker doesn't know: each is `any`. That
+// is how stubs write functions whose result count depends on the arguments (`pcall`, `select`).
+
+use coroutine;
+use debug;
+use ffi;
+use io;
+use math;
+use os;
+use package;
+use string;
+use table;
+use utf8;
+
+/// Raises an error when `v` is `false` or `nil`; otherwise returns it.
+pub fn assert<T>(v: T?, message: any?) -> T;
+/// Controls the garbage collector: `"collect"`, `"count"`, `"step"`, `"incremental"`, ...
+pub fn collectgarbage(option: string?, ...args: any) -> any;
+/// Runs the Lua or OrbitScript file `filename` (standard input with none) and returns its
+/// results.
+pub fn dofile(filename: string?);
+/// Raises `message` as an error; `level` says which caller to blame.
+pub fn error(message: any, level: int?);
+/// `error` under OrbitScript's name for it.
+pub fn panic(message: any, level: int?);
+/// The metatable of `object`, or its `__metatable` field when it has one.
+pub fn getmetatable(object: any) -> any;
+/// Iterates over the array part of `t`: `for (i, v) in ipairs(t)`.
+pub fn ipairs<T>(t: [T] | table) -> (fn([T], int) -> (int?, T), [T], int);
+/// Compiles a chunk from a string, or from a function that returns its pieces.
+pub fn load(chunk: string | function, chunkname: string?, mode: string?, env: table?) -> (function?, string?);
+/// Compiles the file `filename` (standard input with none) without running it.
+pub fn loadfile(filename: string?, mode: string?, env: table?) -> (function?, string?);
+/// The key after `index` in `t` and its value, or `nil` after the last.
+pub fn next<K, V>(t: #{[K]: V} | table, index: K?) -> (K?, V);
+/// Iterates over every key and value of `t`: `for (k, v) in pairs(t)`.
+pub fn pairs<K, V>(t: #{[K]: V} | table) -> (fn(#{[K]: V}, K?) -> (K?, V), #{[K]: V}, nil);
+/// Calls `f` in protected mode: `true` and its results, or `false` and the error.
+pub fn pcall(f: any, ...args: any);
+/// Writes its arguments to standard output with `tostring`, separated by tabs.
+pub fn print(...args: any) -> ();
+/// Whether `a` and `b` are the same value, without calling `__eq`.
+pub fn rawequal(a: any, b: any) -> bool;
+/// `t[k]` without calling `__index`.
+pub fn rawget(t: table, k: any) -> any;
+/// The length of a table or string, without calling `__len`.
+pub fn rawlen(v: table | string) -> int;
+/// `t[k] = v` without calling `__newindex`; returns `t`.
+pub fn rawset<T>(t: T, k: any, v: any) -> T;
+/// Loads the module `name` (once) and returns it, with what its searcher found.
+pub fn require(name: string) -> (any, any);
+/// With `"#"`: how many arguments follow.
+pub fn select(n: string, ...args: any) -> int;
+/// The arguments after the `n`th (counting from the end when negative).
+pub fn select(n: int, ...args: any);
+/// Sets the metatable of the table `t` (removes it with `nil`); returns `t`.
+pub fn setmetatable<T>(t: T, metatable: table?) -> T;
+/// `v` as a number, or `nil` when it isn't one.
+pub fn tonumber(v: any) -> number?;
+/// The integer `s` writes in `base` (2 to 36), or `nil`.
+pub fn tonumber(s: string, base: int) -> int?;
+/// `v` as a string, through `__tostring` or `__name` when it has them.
+pub fn tostring(v: any) -> string;
+/// The name of the type of `v`: `"nil"`, `"number"`, `"string"`, `"table"`, ...
+pub fn r#type(v: any) -> string;
+/// Emits a warning made of its arguments; `"@on"` and `"@off"` switch warnings.
+pub fn warn(message: string, ...rest: string) -> ();
+/// `pcall` with a message handler for the error.
+pub fn xpcall(f: any, handler: any, ...args: any);
+
+/// The global environment.
+pub const _G: table;
+/// The running version, `"Lua 5.5"`.
+pub const _VERSION: string;
+/// The command line, in the standalone interpreter: the script at 0, its arguments after it.
+pub const arg: #{[int]: string};

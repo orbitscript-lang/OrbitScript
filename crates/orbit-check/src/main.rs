@@ -5,14 +5,18 @@ use std::process::ExitCode;
 
 use orbit_check::{Config, DiskSources, Severity, Workspace};
 
-const USAGE: &str = "usage: orbit-check [--path TEMPLATE]... [--root DIR] FILE|DIR...
+const USAGE: &str =
+    "usage: orbit-check [--strict] [--deny-warnings] [--path TEMPLATE]... [--root DIR] FILE|DIR...
 
 Checks OrbitScript (.orb) files: syntax, `use` paths, names and types.
 Directories are searched for .orb files.
 
   --path TEMPLATE  search template for `use a::b` (`?` becomes a/b); may repeat,
                    replacing the default ?.orb ?/init.orb ?.lua ?/init.lua
-  --root DIR       directory the templates are relative to (default: .)";
+  --root DIR       directory the templates are relative to (default: .)
+  --strict         check every module strictly, as `//! orbit-check: strict` does:
+                   typed `pub fn` signatures, `bool` conditions, no untyped Lua modules
+  --deny-warnings  exit with status 1 when there are warnings, not only errors";
 
 fn collect(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if path.is_dir() {
@@ -36,6 +40,7 @@ fn main() -> ExitCode {
     let mut config = Config::default();
     let mut paths = Vec::new();
     let mut search = Vec::new();
+    let mut deny_warnings = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -43,6 +48,8 @@ fn main() -> ExitCode {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
+            "--strict" => config.strict = true,
+            "--deny-warnings" => deny_warnings = true,
             "--path" | "--root" if i + 1 >= args.len() => {
                 eprintln!("orbit-check: {} needs a value\n{USAGE}", args[i]);
                 return ExitCode::from(2);
@@ -119,7 +126,7 @@ fn main() -> ExitCode {
         plural(warnings, "warning"),
         plural(results.len(), "file"),
     );
-    if errors > 0 {
+    if errors > 0 || (deny_warnings && warnings > 0) {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS

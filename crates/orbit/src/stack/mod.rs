@@ -298,6 +298,11 @@ pub struct FrameInfo {
     pub isvararg: bool,
     pub extraargs: u8,
     pub istailcall: bool,
+    /// The name the function was defined with (`local function f`,
+    /// `function t.f`, `fn f`), from its source rather than the call:
+    /// for a debugger to show where `name` is unknown, such as a tail
+    /// call. Not part of `debug.getinfo`.
+    pub defined_name: Option<Vec<u8>>,
 }
 
 /// Runs when the isolate's interrupt flag is raised

@@ -21,6 +21,7 @@
 | `orbit-capi` | Lua C API shim for loading C modules, installed above `orbit-std` (`orbit-cli` feature `c-modules`) | shared |
 | `orbit-lib` | `liborbit`, the runtime as one shared library that also serves as liblua 5.5 (ADR-10) | shared |
 | `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit-std` feature `ffi`) | shared |
+| `orbit-dap` | The Debug Adapter Protocol server behind `orbit --debug-server` (ADR-12), on the public `orbit::debugger` API | shared |
 | `orbit` | Rust embedding API | shared |
 | `orbit-cli` | `orbit` interpreter and `orbitc` compiler binaries | shared |
 | `orbit-check` | OrbitScript's optional type checker: library (used by the language server) and the `orbit-check` command. Reads the AST, never the runtime | F |

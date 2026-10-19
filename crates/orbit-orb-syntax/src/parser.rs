@@ -128,6 +128,7 @@ fn parse_module(
         ahead: None,
         prev_end: 0,
         depth: 0,
+        result_parens: false,
         max_depth: options.max_depth,
         type_trees: options.type_trees,
         stub: options.stub,
@@ -187,6 +188,8 @@ struct Parser<'a> {
     /// End of the last consumed token.
     prev_end: u32,
     depth: u32,
+    /// The next type is a function's result, where a tuple may end with `...T`.
+    result_parens: bool,
     max_depth: u32,
     type_trees: bool,
     stub: bool,
@@ -1063,7 +1066,7 @@ impl Parser<'_> {
         let mut sig = self.params(Punct::RParen)?;
         self.expect(Punct::RParen)?;
         if self.eat(Punct::Arrow)? {
-            sig.ret = Some(self.type_ann()?);
+            sig.ret = Some(self.result_type(true)?);
         }
         Ok(sig)
     }
@@ -1382,6 +1385,27 @@ impl Parser<'_> {
         Ok(self.make_type(start, || TypeKind::Union(members)))
     }
 
+    /// A function's result type: a type, `...T` (any number of `T`s), or a tuple whose last
+    /// item may be `...T`, as in `(bool, ...any)`.
+    fn result_type(&mut self, unions: bool) -> PResult<Type> {
+        if self.is(Punct::DotDotDot) {
+            return self.rest_type();
+        }
+        // `type_primary` takes the flag, so only the outermost tuple sees it.
+        self.result_parens = true;
+        let t = self.type_of(unions);
+        self.result_parens = false;
+        t
+    }
+
+    /// `...T`, at `...`.
+    fn rest_type(&mut self) -> PResult<Type> {
+        let start = self.tok.span.start;
+        self.advance()?;
+        let t = self.type_ann()?;
+        Ok(self.make_type(start, || TypeKind::Rest(t)))
+    }
+
     /// A type with any `?` suffixes.
     fn type_suffixed(&mut self, unions: bool) -> PResult<Type> {
         let start = self.tok.span.start;
@@ -1395,6 +1419,7 @@ impl Parser<'_> {
     fn type_primary(&mut self, unions: bool) -> PResult<Type> {
         self.enter()?;
         let start = self.tok.span.start;
+        let result = std::mem::take(&mut self.result_parens);
         let kind = match self.tok.kind {
             TokenKind::Punct(Punct::LParen) => {
                 self.advance()?;
@@ -1402,6 +1427,14 @@ impl Parser<'_> {
                 let mut count = 0;
                 let mut trailing_comma = false;
                 while !self.is(Punct::RParen) {
+                    if result && self.is(Punct::DotDotDot) {
+                        // `(A, ...B)`: the rest is last.
+                        let t = self.rest_type()?;
+                        self.push_type(&mut items, t);
+                        count += 1;
+                        trailing_comma = self.eat(Punct::Comma)?;
+                        break;
+                    }
                     let t = self.type_ann()?;
                     self.push_type(&mut items, t);
                     count += 1;
@@ -1479,7 +1512,7 @@ impl Parser<'_> {
                 }
                 self.expect(Punct::RParen)?;
                 let ret = if self.eat(Punct::Arrow)? {
-                    Some(self.type_of(unions)?)
+                    Some(self.result_type(unions)?)
                 } else {
                     None
                 };
@@ -2378,7 +2411,7 @@ impl Parser<'_> {
             return Err(self.error(span, "closures cannot take `self`"));
         }
         let body = if self.eat(Punct::Arrow)? {
-            sig.ret = Some(self.type_ann()?);
+            sig.ret = Some(self.result_type(true)?);
             let block = self.block()?;
             Expr {
                 span: block.span,

@@ -9,7 +9,9 @@
 //! records where symbols are defined, then `typeck` types the module with those definitions.
 
 mod diag;
+mod pragma;
 mod resolve;
+mod stdlib;
 mod symbols;
 mod typeck;
 mod types;
@@ -17,8 +19,8 @@ mod types;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use orbit_hir::{Language, SourceInfo};
 use orbit_orb_syntax::ast;
+use orbit_orb_syntax::token::{CONTEXTUAL_KEYWORDS, KEYWORDS};
 
 pub use diag::{Code, Diagnostic, Severity};
 pub use orbit_hir::Span;
@@ -100,6 +102,8 @@ pub struct Config {
     pub root: PathBuf,
     /// `package.path`-style templates for `use a::b`: `?` becomes `a/b`, tried in order.
     pub search_path: Vec<String>,
+    /// Check every module strictly (proposal T13), as `//! orbit-check: strict` does for one.
+    pub strict: bool,
 }
 
 impl Default for Config {
@@ -109,6 +113,7 @@ impl Default for Config {
             search_path: ["?.orb", "?/init.orb", "?.lua", "?/init.lua"]
                 .map(String::from)
                 .to_vec(),
+            strict: false,
         }
     }
 }
@@ -126,6 +131,14 @@ struct File {
     overlay: Option<Vec<u8>>,
     state: State,
     module: Module,
+    /// A bundled stub's text: the prelude or a standard library module.
+    builtin: Option<&'static str>,
+}
+
+/// The prelude stub's file and the names it gives every module.
+struct Prelude {
+    file: FileId,
+    names: HashMap<String, SymbolId>,
 }
 
 pub struct Workspace {
@@ -135,6 +148,8 @@ pub struct Workspace {
     by_path: HashMap<PathBuf, FileId>,
     /// Shared by every module, so a type means the same in each.
     types: Types,
+    /// Loaded with the first module checked.
+    prelude: Option<Prelude>,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -166,6 +181,49 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The identifier around `offset` (empty at `offset` when there is none).
+fn word_at(text: &[u8], offset: u32) -> (u32, u32) {
+    let offset = (offset as usize).min(text.len());
+    let start = text[..offset]
+        .iter()
+        .rposition(|&b| !is_word_byte(b))
+        .map_or(0, |i| i + 1);
+    let end = text[offset..]
+        .iter()
+        .position(|&b| !is_word_byte(b))
+        .map_or(text.len(), |i| offset + i);
+    (start as u32, end as u32)
+}
+
+#[derive(Clone, Copy)]
+enum Sep {
+    Dot,
+    Path,
+}
+
+/// `name.` or `name::` just before `start`: the name and which separator.
+fn receiver_before(text: &[u8], start: u32) -> Option<(String, Sep)> {
+    let start = start as usize;
+    let (sep, len) = if text[..start].ends_with(b"::") {
+        (Sep::Path, 2)
+    } else if text[..start].ends_with(b".") && !text[..start].ends_with(b"..") {
+        (Sep::Dot, 1)
+    } else {
+        return None;
+    };
+    let end = start - len;
+    let (name_start, _) = word_at(text, end as u32);
+    let name = &text[name_start as usize..end];
+    if name.is_empty() || name[0].is_ascii_digit() {
+        return None;
+    }
+    Some((String::from_utf8_lossy(name).into_owned(), sep))
+}
+
 fn is_lua(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "lua")
 }
@@ -182,11 +240,16 @@ impl Workspace {
             files: Vec::new(),
             by_path: HashMap::new(),
             types: Types::new(),
+            prelude: None,
         }
     }
 
     fn intern_path(&mut self, path: &Path) -> FileId {
-        let path = normalize(path);
+        let path = if path.starts_with(stdlib::ROOT) {
+            path.to_path_buf()
+        } else {
+            normalize(path)
+        };
         if let Some(&id) = self.by_path.get(&path) {
             return id;
         }
@@ -197,8 +260,56 @@ impl Workspace {
             overlay: None,
             state: State::Stale,
             module: Module::default(),
+            builtin: None,
         });
         id
+    }
+
+    /// The file of a bundled stub, `key` being its `use` path (`math`, `std.json`) or `prelude`.
+    fn builtin_file(&mut self, key: &str, text: &'static str) -> FileId {
+        let path = PathBuf::from(format!("{}/{}.orbi", stdlib::ROOT, key.replace('.', "/")));
+        if let Some(&id) = self.by_path.get(&path) {
+            return id;
+        }
+        let id = self.intern_path(&path);
+        // Not normalized: the path names no real file.
+        let f = &mut self.files[id.0 as usize];
+        f.builtin = Some(text);
+        id
+    }
+
+    /// Whether `file` is one of the bundled stubs (the prelude and the standard library).
+    pub fn is_builtin(&self, file: FileId) -> bool {
+        self.files[file.0 as usize].builtin.is_some()
+    }
+
+    /// A bundled stub's text, for an editor to show when going to a definition in it.
+    pub fn builtin_source(&self, file: FileId) -> Option<&'static str> {
+        self.files[file.0 as usize].builtin
+    }
+
+    /// Checks the prelude stub, once, and collects the names it gives every module: its public
+    /// items and the standard library modules it `use`s.
+    fn load_prelude(&mut self) {
+        if self.prelude.is_some() {
+            return;
+        }
+        let file = self.builtin_file("prelude", stdlib::PRELUDE);
+        self.ensure(file);
+        let m = &self.files[file.0 as usize].module;
+        let mut names: HashMap<String, SymbolId> = m.exports.clone();
+        for (i, s) in m.symbols.iter().enumerate() {
+            if s.kind == SymbolKind::Module && s.container.is_none() {
+                names.insert(
+                    s.name.clone(),
+                    SymbolId {
+                        file,
+                        index: i as u32,
+                    },
+                );
+            }
+        }
+        self.prelude = Some(Prelude { file, names });
     }
 
     /// Adds a file to check, read through `Sources`.
@@ -263,6 +374,10 @@ impl Workspace {
         if self.files[file.0 as usize].state != State::Stale {
             return;
         }
+        let builtin = self.files[file.0 as usize].builtin.is_some();
+        if !builtin {
+            self.load_prelude();
+        }
         self.files[file.0 as usize].state = State::Checking;
         let module = self.check_file(file);
         let f = &mut self.files[file.0 as usize];
@@ -272,9 +387,11 @@ impl Workspace {
 
     fn check_file(&mut self, file: FileId) -> Module {
         let path = self.files[file.0 as usize].path.clone();
-        let text = match &self.files[file.0 as usize].overlay {
-            Some(t) => Some(t.clone()),
-            None => self.sources.read(&path),
+        let builtin = self.files[file.0 as usize].builtin;
+        let text = match (&self.files[file.0 as usize].overlay, builtin) {
+            (Some(t), _) => Some(t.clone()),
+            (None, Some(b)) => Some(b.as_bytes().to_vec()),
+            (None, None) => self.sources.read(&path),
         };
         let Some(text) = text else {
             return Module::default();
@@ -288,23 +405,27 @@ impl Workspace {
             type_trees: true,
             stub: is_stub(&path),
             doc_comments: true,
+            // Every comment, for the `// orbit-check: ignore` pragmas.
+            keep_trivia: true,
             ..Default::default()
         };
-        let ast = match orbit_orb_syntax::parse_with(&name, &text, &options) {
-            Ok(ast) => ast,
-            Err(e) => {
-                // Keep the last good symbols for queries; report the syntax error.
-                let old = &mut self.files[file.0 as usize].module;
-                let mut m = std::mem::take(old);
-                m.source = Some(SourceInfo::new(name, Language::OrbitScript, &text));
-                m.diagnostics = vec![Diagnostic::error(file, e.span, Code::Syntax, e.message)];
-                return m;
-            }
+        // The parser goes on after a syntax error, so the rest of a module being edited is
+        // still checked; a statement that didn't parse is an `Error` node, typed `any`.
+        let (ast, syntax_errors) = orbit_orb_syntax::parse_recovering(&name, &text, &options);
+        let mut diagnostics: Vec<Diagnostic> = syntax_errors
+            .into_iter()
+            .map(|e| Diagnostic::error(file, e.span, Code::Syntax, e.message))
+            .collect();
+        let pragmas = pragma::Pragmas::read(&text, &ast.comments, &ast.source);
+        let mode = match pragmas.mode {
+            Some(m) => m,
+            None if self.config.strict && builtin.is_none() => pragma::Mode::Strict,
+            None => pragma::Mode::Default,
         };
+        let strict = mode == pragma::Mode::Strict;
 
         // `use` is module-level only, so the dependencies are known before resolving.
         let mut modules = HashMap::new();
-        let mut diagnostics = Vec::new();
         let mut deps = Vec::new();
         for s in &ast.body.stmts {
             let ast::StmtKind::Item(item) = &s.kind else {
@@ -322,8 +443,23 @@ impl Workspace {
             if modules.contains_key(&key) {
                 continue;
             }
-            match self.find_module(&segs) {
+            match self.find_module(&segs, builtin.is_some()) {
                 Some(dep) => {
+                    if strict && is_lua(&self.files[dep.0 as usize].path) {
+                        let span = u.path[0].span.to(u.path[u.path.len() - 1].span);
+                        let path = self.files[dep.0 as usize].path.with_extension("orbi");
+                        diagnostics.push(Diagnostic::error(
+                            file,
+                            span,
+                            Code::UntypedModule,
+                            format!(
+                                "`{}` is a Lua module without types; strict mode needs a stub \
+                                 beside it ({})",
+                                segs.join("::"),
+                                path.display()
+                            ),
+                        ));
+                    }
                     self.ensure(dep);
                     modules.insert(key, dep);
                     deps.push(dep);
@@ -345,17 +481,41 @@ impl Workspace {
             let file = &files[f.0 as usize];
             (file.state == State::Done).then_some(&file.module)
         };
+        let no_prelude = HashMap::new();
+        let (prelude, prelude_names) = match (&self.prelude, builtin) {
+            (Some(p), None) => (Some(p.file), &p.names),
+            _ => (None, &no_prelude),
+        };
         let (mut m, defs) = resolve::resolve(
             file,
             &ast,
             resolve::Deps {
                 modules: &modules,
+                prelude: prelude_names,
                 checked: &checked,
             },
         );
-        typeck::check(file, &ast, &defs, &mut m, &mut self.types, &checked);
+        typeck::check(
+            file,
+            &ast,
+            &defs,
+            &mut m,
+            &mut self.types,
+            typeck::Deps {
+                checked: &checked,
+                prelude,
+                strict,
+            },
+        );
         drop(defs);
         diagnostics.append(&mut m.diagnostics);
+        if builtin.is_none() && !is_stub(&path) {
+            diagnostics.extend(typeck::lints(file, &ast, &text, &m));
+        }
+        if mode == pragma::Mode::Off {
+            diagnostics.retain(|d| d.code == Code::Syntax);
+        }
+        pragmas.apply(file, &ast.source, strict, &mut diagnostics);
         diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
         m.diagnostics = diagnostics;
         m.deps = deps;
@@ -363,22 +523,37 @@ impl Workspace {
         m
     }
 
-    /// The file `use a::b` names: the first search-path template that gives a readable file.
-    fn find_module(&mut self, segs: &[String]) -> Option<FileId> {
+    /// The file `use a::b` names: the first search-path template that gives a readable file
+    /// (a `.orbi` stub beside a Lua module wins over it), then the bundled standard library.
+    /// The bundled stubs see only each other.
+    fn find_module(&mut self, segs: &[String], builtin_only: bool) -> Option<FileId> {
         let rel = segs.join("/");
-        for template in self.config.search_path.clone() {
-            let path = self.config.root.join(template.replace('?', &rel));
-            let path = normalize(&path);
-            if self.by_path.contains_key(&path)
-                && (self.files[self.by_path[&path].0 as usize].overlay.is_some())
-            {
-                return Some(self.by_path[&path]);
-            }
-            if self.sources.read(&path).is_some() {
-                return Some(self.intern_path(&path));
+        let templates = if builtin_only {
+            Vec::new()
+        } else {
+            self.config.search_path.clone()
+        };
+        for template in templates {
+            let path = normalize(&self.config.root.join(template.replace('?', &rel)));
+            let candidates = if is_lua(&path) {
+                vec![path.with_extension("orbi"), path]
+            } else {
+                vec![path]
+            };
+            for path in candidates {
+                if let Some(&id) = self.by_path.get(&path)
+                    && self.files[id.0 as usize].overlay.is_some()
+                {
+                    return Some(id);
+                }
+                if self.sources.read(&path).is_some() {
+                    return Some(self.intern_path(&path));
+                }
             }
         }
-        None
+        let key = segs.join(".");
+        let &(_, text) = stdlib::MODULES.iter().find(|(k, _)| *k == key)?;
+        Some(self.builtin_file(&key, text))
     }
 
     // ---- queries ------------------------------------------------------------------------------
@@ -390,6 +565,7 @@ impl Workspace {
     }
 
     /// Checks every file the workspace knows, including modules reached through `use`.
+    /// The bundled stubs are left out.
     pub fn check_all(&mut self) -> Vec<(FileId, &[Diagnostic])> {
         let mut i = 0;
         while i < self.files.len() {
@@ -399,6 +575,7 @@ impl Workspace {
         self.files
             .iter()
             .enumerate()
+            .filter(|(_, f)| f.builtin.is_none())
             .map(|(i, f)| (FileId(i as u32), f.module.diagnostics.as_slice()))
             .collect()
     }
@@ -431,10 +608,12 @@ impl Workspace {
     }
 
     /// Whether renaming `id` can be offered: false for globals (`extern`, `global`), which are
-    /// shared with code the checker can't see.
+    /// shared with code the checker can't see, and for the bundled standard library.
     pub fn can_rename(&self, id: SymbolId) -> bool {
-        self.symbol(id)
-            .is_some_and(|s| s.kind != SymbolKind::Global)
+        !self.is_builtin(id.file)
+            && self
+                .symbol(id)
+                .is_some_and(|s| s.kind != SymbolKind::Global)
     }
 
     /// The type of the expression or name at `offset`, as the checker writes it (for hover).
@@ -450,8 +629,9 @@ impl Workspace {
     }
 
     /// Completion at `offset`: after `.`, the fields and methods of the receiver's type; after
-    /// `::`, the members of a module, struct or enum. Until the parser recovers from errors this
-    /// works on a partly typed name (`p.le`), not on a bare `p.`.
+    /// `::`, the members of a module, struct or enum; otherwise the names in scope, the prelude's
+    /// names and keywords. A bare `p.` (a statement that didn't parse) works when the receiver
+    /// is a plain name.
     pub fn completions_at(&mut self, file: FileId, offset: u32) -> Completions {
         self.ensure(file);
         let m = &self.files[file.0 as usize].module;
@@ -463,45 +643,24 @@ impl Workspace {
         };
         if let Some(&(span, t)) = m.members_at.iter().rev().find(|(s, _)| covers(s)) {
             replace = span;
-            for t in self.types.members(t) {
-                match self.types.get(t) {
-                    Ty::Nominal(id, _) | Ty::Variant(id, _) => {
-                        let holder = self.holder(*id);
-                        self.field_completions(*id, &mut out);
-                        self.member_completions(holder, true, &mut out);
-                    }
-                    Ty::Record { fields, .. } => {
-                        for (name, ft) in fields {
-                            out.push(Completion {
-                                label: name.clone(),
-                                kind: SymbolKind::Field,
-                                detail: Some(self.display_type(*ft)),
-                                keyword: false,
-                            });
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            self.type_member_completions(t, &mut out);
         } else if let Some(&(span, base)) = m.paths_at.iter().rev().find(|(s, _)| covers(s)) {
             replace = span;
             match self.symbol(base) {
                 Some(s) if s.kind == SymbolKind::Module => {
                     if let Some(dep) = s.module {
-                        let mut exports: Vec<SymbolId> = self.files[dep.0 as usize]
-                            .module
-                            .exports
-                            .values()
-                            .copied()
-                            .collect();
-                        exports.sort_by_key(|e| e.index);
-                        for e in exports {
-                            self.push_completion(e, &mut out);
-                        }
+                        self.export_completions(dep, &mut out);
                     }
                 }
                 Some(_) => self.member_completions(base, false, &mut out),
                 None => {}
+            }
+        } else if let Some(text) = self.text(file) {
+            let (start, end) = word_at(&text, offset);
+            replace = Span { start, end };
+            match receiver_before(&text, start) {
+                Some((name, sep)) => self.receiver_completions(file, start, &name, sep, &mut out),
+                None => self.scope_completions(file, start, &mut out),
             }
         }
         let mut seen = HashSet::new();
@@ -512,6 +671,91 @@ impl Workspace {
         }
     }
 
+    /// The text of `file` as it was last checked.
+    fn text(&self, file: FileId) -> Option<Vec<u8>> {
+        let f = &self.files[file.0 as usize];
+        match (&f.overlay, f.builtin) {
+            (Some(t), _) => Some(t.clone()),
+            (None, Some(b)) => Some(b.as_bytes().to_vec()),
+            (None, None) => self.sources.read(&f.path),
+        }
+    }
+
+    /// The symbols in scope at `offset` in `file`, innermost first, from the scopes recorded
+    /// while checking.
+    fn visible(&self, file: FileId, offset: u32) -> Vec<SymbolId> {
+        let m = &self.files[file.0 as usize].module;
+        let mut found: Vec<(u32, SymbolId)> = m
+            .scope_names
+            .iter()
+            .filter(|(extent, from, _)| *from <= offset && offset <= extent.end)
+            .map(|&(extent, _, id)| (extent.end - extent.start, id))
+            .collect();
+        // Innermost scopes first, and in each the latest binding, so a shadowing name wins.
+        found.sort_by_key(|&(size, id)| (size, std::cmp::Reverse(id.index)));
+        found.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Names in scope at `offset`, then the prelude's, then keywords.
+    fn scope_completions(&self, file: FileId, offset: u32, out: &mut Vec<Completion>) {
+        for id in self.visible(file, offset) {
+            self.push_completion(id, out);
+        }
+        if let Some(p) = &self.prelude {
+            let mut names: Vec<(&String, &SymbolId)> = p.names.iter().collect();
+            names.sort_by_key(|(n, _)| *n);
+            for (_, &id) in names {
+                self.push_completion(id, out);
+            }
+        }
+        for k in KEYWORDS.iter().chain(CONTEXTUAL_KEYWORDS) {
+            out.push(Completion {
+                label: k.to_string(),
+                kind: SymbolKind::Local,
+                detail: None,
+                keyword: true,
+            });
+        }
+    }
+
+    /// Completion after `name.` or `name::` where the parse has nothing for it (a bare `p.`).
+    fn receiver_completions(
+        &self,
+        file: FileId,
+        offset: u32,
+        name: &str,
+        sep: Sep,
+        out: &mut Vec<Completion>,
+    ) {
+        let found = self
+            .visible(file, offset)
+            .into_iter()
+            .find(|&id| self.symbol(id).is_some_and(|s| s.name == name));
+        let found = found.or_else(|| self.prelude.as_ref()?.names.get(name).copied());
+        let Some(id) = found else { return };
+        match sep {
+            Sep::Dot => {
+                let Some(&t) = self.files[id.file.0 as usize]
+                    .module
+                    .sym_types
+                    .get(&id.index)
+                else {
+                    return;
+                };
+                self.type_member_completions(t, out);
+            }
+            Sep::Path => match self.symbol(id) {
+                Some(s) if s.kind == SymbolKind::Module => {
+                    if let Some(dep) = s.module {
+                        self.export_completions(dep, out);
+                    }
+                }
+                Some(_) => self.member_completions(id, false, out),
+                None => {}
+            },
+        }
+    }
+
     fn holder(&self, id: SymbolId) -> SymbolId {
         match self.symbol(id) {
             Some(s) if s.kind == SymbolKind::Variant => SymbolId {
@@ -519,6 +763,51 @@ impl Workspace {
                 index: s.container.unwrap_or(id.index),
             },
             _ => id,
+        }
+    }
+
+    /// The fields and methods a value of type `t` has.
+    fn type_member_completions(&self, t: TypeId, out: &mut Vec<Completion>) {
+        for t in self.types.members(t) {
+            match self.types.get(t) {
+                Ty::Nominal(id, _) | Ty::Variant(id, _) => {
+                    let holder = self.holder(*id);
+                    self.field_completions(*id, out);
+                    self.member_completions(holder, true, out);
+                }
+                Ty::Record { fields, .. } => {
+                    for (name, ft) in fields {
+                        out.push(Completion {
+                            label: name.clone(),
+                            kind: SymbolKind::Field,
+                            detail: Some(self.display_type(*ft)),
+                            keyword: false,
+                        });
+                    }
+                }
+                // Strings have the `string` library's functions as methods.
+                Ty::Str => {
+                    let lib = self.prelude.as_ref().and_then(|p| p.names.get("string"));
+                    if let Some(dep) = lib.and_then(|&id| self.symbol(id)).and_then(|s| s.module) {
+                        self.export_completions(dep, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A module's public items, in source order.
+    fn export_completions(&self, module: FileId, out: &mut Vec<Completion>) {
+        let mut exports: Vec<SymbolId> = self.files[module.0 as usize]
+            .module
+            .exports
+            .values()
+            .copied()
+            .collect();
+        exports.sort_by_key(|e| e.index);
+        for e in exports {
+            self.push_completion(e, out);
         }
     }
 
@@ -590,7 +879,8 @@ impl Workspace {
                 .param_names
                 .get(&s.index)
         });
-        let skip = usize::from(call.method && f.method);
+        // A method call passes the receiver as the first parameter.
+        let skip = usize::from(call.method);
         let mut label = match call.symbol.and_then(|s| self.symbol(s)) {
             Some(s) => s.name.clone(),
             None => "fn".into(),
@@ -698,5 +988,34 @@ impl Names for Workspace {
             return format!("{}::{}", e.name, s.name);
         }
         s.name.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bundled stubs parse and resolve with no diagnostics.
+    #[test]
+    fn bundled_stubs_are_clean() {
+        let mut ws = Workspace::new(Config::default(), Box::new(DiskSources));
+        ws.load_prelude();
+        for &(key, text) in stdlib::MODULES {
+            let file = ws.builtin_file(key, text);
+            ws.ensure(file);
+        }
+        let mut problems = Vec::new();
+        for f in &ws.files {
+            for d in &f.module.diagnostics {
+                let (line, _) = match &f.module.source {
+                    Some(s) => (s.line_of(d.span.start), 0),
+                    None => (0, 0),
+                };
+                problems.push(format!("{}:{line}: {}", f.path.display(), d.message));
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+        let names = &ws.prelude.as_ref().expect("the prelude").names;
+        assert!(names.contains_key("print") && names.contains_key("math"));
     }
 }

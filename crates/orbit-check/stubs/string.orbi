@@ -1,0 +1,36 @@
+// The `string` library. Strings have these as methods too: `s.upper()` is `string::upper(s)`.
+
+/// The codes of the bytes `i` to `j` (default `i`, which defaults to 1).
+pub fn byte(s: string, i: int?, j: int?);
+/// A string made of the bytes with these codes.
+pub fn char(...codes: int) -> string;
+/// The binary form of a Lua function, for `load`.
+pub fn dump(f: function, strip: bool?) -> string;
+/// Where `pattern` first matches in `s`: start, end and the captures, or `nil`.
+pub fn find(s: string, pattern: string, init: int?, plain: bool?);
+/// Formats its arguments like C's `printf`, with `%q` for a readable literal.
+pub fn format(fmt: string, ...args: any) -> string;
+/// An iterator over the matches of `pattern` in `s`, giving the captures of each.
+pub fn gmatch(s: string, pattern: string, init: int?) -> fn() -> any;
+/// `s` with matches of `pattern` replaced, and how many there were.
+pub fn gsub(s: string, pattern: string, repl: string | table | function, n: int?) -> (string, int);
+/// The length of `s` in bytes.
+pub fn len(s: string) -> int;
+/// `s` with upper-case letters changed to lower case.
+pub fn lower(s: string) -> string;
+/// The captures of the first match of `pattern` in `s` (the whole match with none), or `nil`.
+pub fn r#match(s: string, pattern: string, init: int?);
+/// The values packed into a binary string as `fmt` says.
+pub fn pack(fmt: string, ...values: any) -> string;
+/// The size of a string packed with `fmt`, which can't hold variable-length formats.
+pub fn packsize(fmt: string) -> int;
+/// `n` copies of `s`, separated by `sep`.
+pub fn rep(s: string, n: int, sep: string?) -> string;
+/// `s` backwards.
+pub fn reverse(s: string) -> string;
+/// The bytes of `s` from `i` to `j` (default the end); negative positions count from the end.
+pub fn sub(s: string, i: int, j: int?) -> string;
+/// The values packed in `s` as `fmt` says, then the position after them.
+pub fn unpack(fmt: string, s: string, pos: int?);
+/// `s` with lower-case letters changed to upper case.
+pub fn upper(s: string) -> string;

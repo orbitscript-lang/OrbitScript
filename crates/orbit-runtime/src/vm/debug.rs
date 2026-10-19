@@ -105,6 +105,10 @@ pub struct FuncInfo {
     pub nups: usize,
     pub nparams: u8,
     pub is_vararg: bool,
+    /// The name the function was defined with (`local function f`,
+    /// `function t.f`, `fn f`), from the source rather than a call site;
+    /// `None` for main chunks, anonymous functions and natives.
+    pub defined_name: Option<Vec<u8>>,
 }
 
 impl Runtime {
@@ -765,6 +769,13 @@ pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
                 nups: c.captures.len(),
                 nparams: p.code.nparams,
                 is_vararg: p.code.is_vararg,
+                defined_name: match &p.name {
+                    orbit_bytecode::FunctionName::Global(n)
+                    | orbit_bytecode::FunctionName::Local(n)
+                    | orbit_bytecode::FunctionName::Field(n)
+                    | orbit_bytecode::FunctionName::Method(n) => Some(n.to_vec()),
+                    _ => None,
+                },
             }
         }
         _ => FuncInfo {
@@ -783,6 +794,7 @@ pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
             },
             nparams: 0,
             is_vararg: true,
+            defined_name: None,
         },
     }
 }

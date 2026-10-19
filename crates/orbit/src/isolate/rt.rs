@@ -67,6 +67,10 @@ impl Isolate {
             }
         }
         vm.set_memory_limit(config.memory_limit);
+        #[cfg(feature = "debugger")]
+        if config.debugger == super::Debugger::Disabled {
+            vm.disable_debugger();
+        }
         Isolate { vm }
     }
 
@@ -165,6 +169,127 @@ impl Isolate {
         exit_hooks(&mut self.vm).0.push(Box::new(hook));
     }
 }
+
+#[cfg(feature = "debugger")]
+mod debug {
+    use orbit_runtime::vm::debugger as engine;
+
+    use super::Isolate;
+    use crate::debugger::{
+        Breakpoint, DebugEvents, ErrorBreak, PauseHandle, Paused, Resume, StopReason,
+    };
+    use crate::error::Error;
+    use crate::stack::Stack;
+
+    /// [`PauseHandle`]'s state: none in an isolate no debugger may attach
+    /// to.
+    #[derive(Debug, Clone)]
+    pub(crate) struct PauseInner(Option<engine::PauseHandle>);
+
+    impl PauseInner {
+        pub(crate) fn request(&self) {
+            if let Some(p) = &self.0 {
+                p.request()
+            }
+        }
+    }
+
+    /// A host's events, as the engine calls them.
+    struct Events(Box<dyn DebugEvents>);
+
+    impl engine::DebugEvents for Events {
+        fn stopped(
+            &mut self,
+            p: &mut engine::Paused<'_, '_>,
+            reason: engine::StopReason,
+        ) -> engine::Resume {
+            let mut s = Stack::new(p.ctx().reborrow());
+            let reason = match reason {
+                engine::StopReason::Breakpoint { line } => StopReason::Breakpoint { line },
+                engine::StopReason::Step => StopReason::Step,
+                engine::StopReason::Pause => StopReason::Pause,
+                engine::StopReason::Error { value, caught } => {
+                    s.ctx.push(value);
+                    StopReason::Error { caught }
+                }
+            };
+            let error = matches!(reason, StopReason::Error { .. });
+            let resume = self.0.stopped(&mut Paused::new(&mut s, error), reason);
+            match resume {
+                Resume::Continue => engine::Resume::Continue,
+                Resume::StepIn => engine::Resume::StepIn,
+                Resume::StepOver => engine::Resume::StepOver,
+                Resume::StepOut => engine::Resume::StepOut,
+            }
+        }
+
+        fn breakpoints_resolved(&mut self, source: &[u8], breakpoints: &[engine::Breakpoint]) {
+            let bps: Vec<Breakpoint> = breakpoints.iter().map(|&b| breakpoint(b)).collect();
+            self.0.breakpoints_resolved(source, &bps)
+        }
+    }
+
+    fn breakpoint(b: engine::Breakpoint) -> Breakpoint {
+        Breakpoint {
+            requested: b.requested,
+            line: b.line,
+        }
+    }
+
+    /// The debugger (ADR-12; feature `debugger`). See [`crate::debugger`].
+    impl Isolate {
+        /// Report stops to `events` from now on; `None` detaches the
+        /// debugger, which also ends any step. Fails in an isolate made
+        /// with [`crate::Debugger::Disabled`].
+        pub fn set_debug_events(
+            &mut self,
+            events: Option<Box<dyn DebugEvents>>,
+        ) -> Result<(), Error> {
+            let events = events.map(|e| Box::new(Events(e)) as Box<dyn engine::DebugEvents>);
+            if self.vm.set_debug_events(events) {
+                Ok(())
+            } else {
+                Err(Error::runtime("this isolate allows no debugger"))
+            }
+        }
+
+        /// Replace the breakpoints of `source` (a chunk's name as given to
+        /// the loader: `@file.lua` for a file) with breakpoints on `lines`,
+        /// and say where each one is. Those of a source not loaded yet
+        /// resolve when it is ([`DebugEvents::breakpoints_resolved`]).
+        pub fn set_breakpoints(&mut self, source: &[u8], lines: &[u32]) -> Vec<Breakpoint> {
+            self.control().set_breakpoints(source, lines)
+        }
+
+        /// Stop at the next line that runs, as a step in does
+        /// ([`StopReason::Step`]): set before running a program to stop on
+        /// its entry. Does nothing while no events are attached.
+        pub fn stop_on_next_line(&mut self) {
+            self.control().stop_on_next_line()
+        }
+
+        /// Which errors stop the program ([`StopReason::Error`]).
+        pub fn set_error_break(&mut self, on: ErrorBreak) {
+            self.control().set_error_break(on)
+        }
+
+        /// Whether a debugger may attach.
+        #[cfg(feature = "abi")]
+        pub(crate) fn debugger_allowed(&self) -> bool {
+            self.vm.debugger_allowed()
+        }
+
+        /// A handle that pauses this isolate from any thread.
+        pub fn pause_handle(&self) -> PauseHandle {
+            PauseHandle(PauseInner(
+                self.vm.debugger_allowed().then(|| self.vm.pause_handle()),
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "debugger")]
+pub(crate) use debug::PauseInner;
 
 /// What liborbit's side of the boundary reads through `&self`.
 #[cfg(feature = "abi")]

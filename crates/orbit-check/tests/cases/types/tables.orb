@@ -35,5 +35,5 @@ let s = sum(ints); //~ T0201
 let direct = sum([1, 2, 3]);
 
 let old_map: #{string: int} = #{}; //~ T0304 T0201
-let cast = (ages as #{[string]: string})["ann"];
+let cast = (ages as #{[string]: string})["ann"]; //~ T0210
 let cast_ok: string = cast;

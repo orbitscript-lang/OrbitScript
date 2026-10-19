@@ -1163,16 +1163,24 @@ impl Parser<'_> {
         Ok(lhs)
     }
 
+    /// Reports a missing expression at `span` and stands in an error node for it (recovery
+    /// only). Out of line, so `simple_expr`'s frame stays small for deeply nested expressions
+    /// in debug builds.
+    #[inline(never)]
+    fn missing_expr(&mut self, span: Span) -> Expr {
+        let d = self.error_here("unexpected symbol");
+        self.recovered(d);
+        Expr {
+            kind: ExprKind::Error,
+            span: Span::new(span.start, span.start),
+        }
+    }
+
     fn simple_expr(&mut self) -> PResult<Expr> {
         let span = self.tok.span;
         if self.dedented() {
             // A missing expression before the next statement, as in `x =` on its own line.
-            let d = self.error_here("unexpected symbol");
-            self.recovered(d);
-            return Ok(Expr {
-                kind: ExprKind::Error,
-                span: Span::new(span.start, span.start),
-            });
+            return Ok(self.missing_expr(span));
         }
         let kind = match self.tok.kind {
             TokenKind::Int(n) => ExprKind::Int(n),
@@ -1237,12 +1245,7 @@ impl Parser<'_> {
                 | Keyword::Until,
             ) if self.recover => {
                 // A missing expression, as in `local x = )`: what's around it still parses.
-                let d = self.error_here("unexpected symbol");
-                self.recovered(d);
-                Ok(Expr {
-                    kind: ExprKind::Error,
-                    span: Span::new(span.start, span.start),
-                })
+                Ok(self.missing_expr(span))
             }
             _ => Err(self.error_here("unexpected symbol")),
         }
@@ -1250,7 +1253,16 @@ impl Parser<'_> {
 
     fn suffixed_expr(&mut self) -> PResult<Expr> {
         let start = self.tok.span.start;
-        let mut e = self.primary_expr()?;
+        let e = self.primary_expr()?;
+        self.suffixes(start, e)
+    }
+
+    /// The `.name`, `[key]`, `:name(args)` and call suffixes after `e`, which starts at
+    /// `start`. Out of line, so the frames of a parenthesised expression's recursion
+    /// (`suffixed_expr`, `primary_expr`) stay small: debug builds keep a slot for every
+    /// temporary, and 200 nesting levels must fit a 2 MiB thread stack.
+    #[inline(never)]
+    fn suffixes(&mut self, start: u32, mut e: Expr) -> PResult<Expr> {
         loop {
             let kind = match self.tok.kind {
                 TokenKind::Punct(Punct::Dot) => {

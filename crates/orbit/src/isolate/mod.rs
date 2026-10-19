@@ -93,6 +93,17 @@ pub enum GcMode {
     Generational,
 }
 
+/// Whether a debugger may attach to an isolate ([`Config::debugger`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Debugger {
+    /// One may, if the build has the engine (feature `debugger`).
+    #[default]
+    Allowed,
+    /// None can, for the isolate's whole life: a host that runs code it
+    /// doesn't want inspected says so here (ADR-12, D5).
+    Disabled,
+}
+
 /// How an isolate is set up.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -101,6 +112,7 @@ pub struct Config {
     gc_mode: GcMode,
     warnings: bool,
     ignore_env: bool,
+    debugger: Debugger,
 }
 
 impl Default for Config {
@@ -113,6 +125,7 @@ impl Default for Config {
             gc_mode: GcMode::Incremental,
             warnings: false,
             ignore_env: false,
+            debugger: Debugger::Allowed,
         }
     }
 }
@@ -147,6 +160,13 @@ impl Config {
     /// Ignore the environment variable `ORBIT_VERIFY`, as `lua -E` does.
     pub fn ignore_env(mut self, ignore: bool) -> Config {
         self.ignore_env = ignore;
+        self
+    }
+
+    /// Whether a debugger may ever attach. Only set when the isolate is
+    /// made: there is no turning it off later.
+    pub fn debugger(mut self, debugger: Debugger) -> Config {
+        self.debugger = debugger;
         self
     }
 }

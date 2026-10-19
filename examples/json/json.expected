@@ -1,0 +1,35 @@
+Orbit Outfitters (EUR), opened 2019, 4 products
+  TNT-2  189.50 float   x4  2 tags, current          Two-person tent
+  LMP-1      24 integer x0  2 tags, replaced by LMP-2 Head lamp
+  LMP-2   39.90 float   x12 2 tags, current          Head lamp « Pro »
+  MAP-7       8 integer x30 0 tags, current          Trail map: "Lakes"
+lights: Head lamp, Head lamp « Pro »
+notes is {}, tags of MAP-7 are []
+{
+  "reorder": [],
+  "shop": "Orbit Outfitters",
+  "stock_value": 1476.8,
+  "tags": {
+    "camping": 3,
+    "light": 2,
+    "shelter": 1
+  }
+}
+{"gift":false,"id":1001,"lines":[{"qty":2,"sku":"MAP-7"}],"note":null,"ratio":0.5,"whole":2.0}
+{"order":90071992547409930001,"total":44.90,"visits":[3,null,null,null,1,null,null]}
+[3,3.0,"3",true,false]
+1 nil 3 nil -> [1,null,3,null]
+café ☃ tab	end (17 bytes)
+"line\nbreak \"quoted\" \u0001"
+{"1":"a","3":"c"}
+{"from":[0,0],"to":[3,4]}
+round trip ok
+decode {"a": 1,}  -> nil, trailing comma at line 1 column 9
+decode [1, 2      -> nil, EOF while parsing a list at line 1 column 5
+decode nul        -> nil, EOF while parsing a value at line 1 column 3
+decode "\x"       -> nil, invalid escape at line 1 column 3
+encode a function -> cannot encode a function at value.handlers[1]
+encode a cycle -> cannot encode a table that contains itself at value.self
+encode NaN -> cannot encode NaN at value.ratio
+encode a bad key -> cannot encode a key of type boolean
+json.null is null, a table

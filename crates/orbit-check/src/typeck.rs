@@ -9,6 +9,11 @@
 //! function's type is needed (possibly before the walk reaches it), so each body is checked
 //! once. Symbols of other modules have the types that module's check stored.
 
+mod cast;
+mod lint;
+
+pub(crate) use lint::lints;
+
 use std::collections::{HashMap, HashSet};
 
 use orbit_hir::{Span, StrId, StringPool};
@@ -84,6 +89,7 @@ struct Checker<'a, 'b, 'c> {
     m: &'b mut Module,
     types: &'b mut Types,
     checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
+    prelude: Option<FileId>,
     /// The symbol each name refers to, by its span. The last one recorded at a span wins: for
     /// a shorthand field `{ x }` that is the local.
     refs: HashMap<(u32, u32), SymbolId>,
@@ -101,6 +107,9 @@ struct Checker<'a, 'b, 'c> {
     self_type: Option<TypeId>,
     /// Whether bindings get inlay hints (not under an annotation).
     hinting: bool,
+    strict: bool,
+    /// Errors found so far, counted even while `quiet` (to try an overload).
+    failures: u32,
 }
 
 fn sk(s: Span) -> (u32, u32) {
@@ -109,13 +118,23 @@ fn sk(s: Span) -> (u32, u32) {
 
 /// Checks `ast`, whose names `resolve` recorded in `m`, adding type errors and the types of its
 /// symbols and expressions to `m`.
+/// What checking a module needs from the rest of the workspace.
+pub(crate) struct Deps<'c> {
+    /// Already checked modules, by file.
+    pub checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
+    /// The prelude stub, whose functions (`type`, `error`) some checks recognize.
+    pub prelude: Option<FileId>,
+    /// Strict mode (proposal T13): annotated `pub fn`s and `bool` conditions.
+    pub strict: bool,
+}
+
 pub(crate) fn check<'a, 'b, 'c>(
     file: FileId,
     ast: &'a ast::Ast,
     defs: &'b Defs<'a>,
     m: &'b mut Module,
     types: &'b mut Types,
-    checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
+    deps: Deps<'c>,
 ) {
     let mut refs = HashMap::new();
     for &(span, id) in &m.refs {
@@ -133,7 +152,8 @@ pub(crate) fn check<'a, 'b, 'c>(
         defs,
         m,
         types,
-        checked,
+        checked: deps.checked,
+        prelude: deps.prelude,
         refs,
         by_span,
         in_progress: HashSet::new(),
@@ -143,6 +163,8 @@ pub(crate) fn check<'a, 'b, 'c>(
         quiet: 0,
         self_type: None,
         hinting: true,
+        strict: deps.strict,
+        failures: 0,
     };
     let mut variants: Vec<(u32, u32)> = defs
         .defs
@@ -155,6 +177,24 @@ pub(crate) fn check<'a, 'b, 'c>(
     variants.sort();
     for (v, e) in variants {
         c.types.set_variant_enum(c.id(v), c.id(e));
+    }
+
+    // A body-less function declared more than once in a stub is overloaded: a call takes the
+    // first declaration its arguments fit.
+    let mut by_name: HashMap<StrId, Vec<SymbolId>> = HashMap::new();
+    for s in &ast.body.stmts {
+        if let StmtKind::Item(item) = &s.kind
+            && let ItemKind::Fn(f) = &item.kind
+            && f.body.is_none()
+            && let Some(i) = c.local_at(f.name.span)
+        {
+            by_name.entry(f.name.sym).or_default().push(c.id(i));
+        }
+    }
+    for group in by_name.into_values().filter(|g| g.len() > 1) {
+        for id in &group {
+            c.m.overloads.insert(id.index, group.clone());
+        }
     }
 
     c.fns.push(FnCtx {
@@ -200,6 +240,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     // ---- reporting ----------------------------------------------------------------------------
 
     fn error(&mut self, span: Span, code: Code, message: String) {
+        self.failures += 1;
         if self.quiet == 0 {
             self.m
                 .diagnostics
@@ -573,9 +614,12 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             TypeKind::Tuple(ts) if ts.len() == 1 => self.lower(&ts[0]),
             TypeKind::Tuple(ts) if ts.is_empty() => self.types.nil,
-            TypeKind::Tuple(_) | TypeKind::Error => any,
+            // Variadic results are typed `any` for now.
+            TypeKind::Tuple(_) | TypeKind::Rest(_) | TypeKind::Error => any,
             TypeKind::Fn { params, rest, ret } => {
-                let params = params.iter().map(|p| self.lower(p)).collect();
+                let lowered: Vec<TypeId> = params.iter().map(|p| self.lower(p)).collect();
+                let required = self.required(params.iter().map(Some).zip(lowered.iter().copied()));
+                let params = lowered;
                 let rest = rest.as_ref().map(|r| self.lower(r));
                 let results = Some(match ret {
                     Some(r) => self.lower_results(r),
@@ -585,6 +629,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     params,
                     rest,
                     results,
+                    required,
                     method: false,
                     generics: Vec::new(),
                 }))
@@ -593,6 +638,21 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     }
 
     /// A result annotation: `(A, B)` is two results, anything else one.
+    /// How many of these parameters need an argument: up to the last one whose annotation isn't
+    /// `T?` and doesn't otherwise allow nil (`any?` is optional, unannotated and `any` aren't).
+    fn required<'t>(&self, params: impl Iterator<Item = (Option<&'t ast::Type>, TypeId)>) -> usize {
+        let mut n = 0;
+        for (i, (ann, t)) in params.enumerate() {
+            let optional = ann.is_some_and(|a| {
+                matches!(a.kind.as_deref(), Some(TypeKind::Optional(_))) || self.types.may_be_nil(t)
+            });
+            if !optional {
+                n = i + 1;
+            }
+        }
+        n
+    }
+
     fn lower_results(&mut self, t: &ast::Type) -> Vec<TypeId> {
         match t.kind.as_deref() {
             Some(TypeKind::Tuple(ts)) => ts.iter().map(|t| self.lower(t)).collect(),
@@ -696,16 +756,22 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .map(|_| sig.rest_ty.as_ref().map_or(any, |t| self.lower(t)));
         let mut generics: Vec<SymbolId> = owner.map(|o| o.generics.clone()).unwrap_or_default();
         generics.extend(self.m.generics.get(&index).cloned().unwrap_or_default());
-        let results = match (&sig.ret, &decl.body) {
-            (Some(t), _) => Some(self.lower_results(t)),
-            (None, None) => Some(Vec::new()),
-            (None, Some(_)) => None,
-        };
-        let infer = results.is_none();
+        // A stub declaration without `->` has unknown results (each `any`); write `-> ()` for
+        // none.
+        let results = sig.ret.as_ref().map(|t| self.lower_results(t));
+        let infer = results.is_none() && decl.body.is_some();
+        let required = usize::from(method)
+            + self.required(
+                sig.params
+                    .iter()
+                    .map(|p| p.ty.as_ref())
+                    .zip(params[usize::from(method)..].iter().copied()),
+            );
         let mut f = FnTy {
             params,
             rest,
             results,
+            required,
             method,
             generics,
         };
@@ -935,6 +1001,43 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         self.self_type = saved;
     }
 
+    /// Strict mode: a `pub fn` annotates its parameters, and its results when it has any.
+    fn strict_signature(&mut self, f: &'a ast::FnDecl) {
+        if !self.strict || f.body.is_none() {
+            return;
+        }
+        let name = self.text(f.name.sym);
+        for p in f.sig.params.iter().filter(|p| p.ty.is_none()) {
+            let what = match p.name {
+                Some(n) => format!("parameter `{}`", self.text(n.sym)),
+                None => "parameter `_`".to_string(),
+            };
+            let msg = format!("{what} of public function `{name}` needs a type (strict mode)");
+            self.error(p.span, Code::MissingParamType, msg);
+        }
+        if let (Some(rest), None) = (f.sig.rest, &f.sig.rest_ty) {
+            let msg = format!(
+                "parameter `...{}` of public function `{name}` needs a type (strict mode)",
+                self.text(rest.sym)
+            );
+            self.error(rest.span, Code::MissingParamType, msg);
+        }
+        let t = self
+            .local_at(f.name.span)
+            .map(|i| self.sym_type(self.id(i)));
+        if f.sig.ret.is_none()
+            && let Some(t) = t
+            && let Ty::Fn(ft) = self.types.get(t).clone()
+            && let Some(rs) = ft.results.filter(|rs| !rs.is_empty())
+        {
+            let msg = format!(
+                "public function `{name}` returns {} but has no result type (strict mode)",
+                self.results_text(&rs)
+            );
+            self.error(f.name.span, Code::MissingResultType, msg);
+        }
+    }
+
     fn closure(&mut self, c: &'a ast::Closure, expected: Option<TypeId>) -> TypeId {
         let any = self.types.any;
         let exp = expected.and_then(|t| {
@@ -999,10 +1102,15 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             _ => (Some(cx.returned(Some(body), body.span)), false),
         });
+        let required = params
+            .iter()
+            .rposition(|&p| !self.types.may_be_nil(p))
+            .map_or(0, |i| i + 1);
         self.types.intern(Ty::Fn(FnTy {
             params,
             rest,
             results,
+            required,
             method: false,
             generics: Vec::new(),
         }))
@@ -1193,7 +1301,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 let ot = self.non_nil_or_report(ot, obj);
                 // Writing `nil` removes the element (`t[#t] = nil` pops).
                 match self.types.get(ot).clone() {
-                    Ty::Array(t) => Some(self.types.optional(t)),
+                    Ty::Array(t) => {
+                        self.zero_index(key);
+                        Some(self.types.optional(t))
+                    }
                     Ty::Map(k, v) => {
                         self.expect(kt, k, key.span, Some("the map key".into()));
                         Some(self.types.optional(v))
@@ -1272,14 +1383,24 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn item(&mut self, item: &'a ast::Item) {
         match &item.kind {
-            ItemKind::Fn(f) => self.fn_item(f),
+            ItemKind::Fn(f) => {
+                self.fn_item(f);
+                if item.is_pub {
+                    self.strict_signature(f);
+                }
+            }
             ItemKind::Const { name, ty, value } => {
                 self.const_item(*name, ty.as_ref(), value.as_ref())
             }
             ItemKind::Impl(imp) => {
                 for member in &imp.members {
                     match &member.kind {
-                        ItemKind::Fn(f) => self.fn_item(f),
+                        ItemKind::Fn(f) => {
+                            self.fn_item(f);
+                            if member.is_pub {
+                                self.strict_signature(f);
+                            }
+                        }
                         ItemKind::Const { name, ty, value } => {
                             self.const_item(*name, ty.as_ref(), value.as_ref())
                         }
@@ -1455,11 +1576,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             ExprKind::Unary { op, expr } => self.unary(*op, expr),
             ExprKind::Paren(inner) => self.expr(inner, expected),
-            ExprKind::As { expr, ty, optional } => {
-                self.expr(expr, None);
-                let t = self.lower(ty);
-                if *optional { self.types.optional(t) } else { t }
-            }
+            ExprKind::As { expr, ty, optional } => self.cast(expr, ty, *optional, e.span),
             ExprKind::Tuple(items) => {
                 let ts: Vec<TypeId> = items.iter().map(|i| self.expr(i, None)).collect();
                 ts.first().copied().unwrap_or(nil)
@@ -1656,12 +1773,31 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 }
             },
             Ty::Map(_, v) => v,
+            Ty::Str if self.prelude.is_some() => match self.string_member(text) {
+                Some(m) => self.sym_type(m),
+                None => {
+                    self.error(
+                        span,
+                        Code::NoMember,
+                        format!("string has no field `{text}`"),
+                    );
+                    any
+                }
+            },
             Ty::Int | Ty::Float | Ty::Bool | Ty::Fn(_) | Ty::Function => {
                 let msg = format!("type {} has no field `{text}`", self.show(t));
                 self.error(span, Code::NoMember, msg);
                 any
             }
             _ => any,
+        }
+    }
+
+    /// `t[0]` on an array: Lua arrays start at 1.
+    fn zero_index(&mut self, key: &ast::Expr) {
+        if matches!(key.kind, ExprKind::Int(0)) {
+            let msg = "arrays start at 1, so `[0]` is never an element; the first is `[1]`";
+            self.warning(key.span, Code::ZeroIndex, msg.to_string());
         }
     }
 
@@ -1675,6 +1811,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let ot = self.non_nil_or_report(ot, obj);
         match self.types.get(ot).clone() {
             Ty::Array(t) => {
+                self.zero_index(key);
                 if matches!(self.types.get(kt), Ty::Str | Ty::Bool) {
                     let msg = format!("arrays are indexed by `int`, found {}", self.show(kt));
                     self.error(key.span, Code::BadOperand, msg);
@@ -1714,6 +1851,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 let symbol = self.path_symbol(callee);
                 self.call_site(*args_at, e.span, args, ct, symbol, false);
                 let name = self.describe(callee);
+                if let Some(group) = symbol.and_then(|s| self.overloads_of(s)) {
+                    return self.overloaded_call(&group, args, &name, e.span, expected);
+                }
                 self.call(ct, None, args, &name, e.span, expected)
             }
             ExprKind::MethodCall {
@@ -1738,6 +1878,50 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             _ => None,
         }
+    }
+
+    fn overloads_of(&self, id: SymbolId) -> Option<Vec<SymbolId>> {
+        self.module_of(id.file)?.overloads.get(&id.index).cloned()
+    }
+
+    /// A call of an overloaded stub function: the first declaration the arguments fit, tried
+    /// without reporting anything.
+    fn overloaded_call(
+        &mut self,
+        group: &[SymbolId],
+        args: &'a [ast::Expr],
+        name: &str,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Results {
+        let types: Vec<TypeId> = group.iter().map(|&id| self.sym_type(id)).collect();
+        let fns: Vec<FnTy> = types
+            .iter()
+            .filter_map(|&t| match self.types.get(t) {
+                Ty::Fn(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        for f in &fns {
+            let before = self.failures;
+            self.quiet += 1;
+            self.apply(f, None, args, name, span, expected);
+            self.quiet -= 1;
+            if self.failures == before {
+                return self.apply(f, None, args, name, span, expected);
+            }
+        }
+        let shown: Vec<String> = types
+            .iter()
+            .map(|&t| format!("`{}`", self.types.display(t, self)))
+            .collect();
+        let msg = format!(
+            "no form of {name} takes these arguments; it is one of: {}",
+            shown.join(", ")
+        );
+        self.error(span, Code::Mismatch, msg);
+        self.args_any(args);
+        None
     }
 
     fn call_site(
@@ -1855,6 +2039,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let generic = !f.generics.is_empty();
         let mut map: HashMap<SymbolId, TypeId> = HashMap::new();
         let mut params: &[TypeId] = &f.params;
+        let mut params_skipped = 0;
         if let Some(st) = self_arg
             && let Some((&p0, rest)) = params.split_first()
         {
@@ -1862,16 +2047,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.types.unify(p0, st, &mut map);
             }
             params = rest;
+            params_skipped = 1;
         }
         let spread = args
             .last()
             .is_some_and(|a| matches!(a.kind, ExprKind::Spread(_)));
         let n = args.len();
         if !spread {
-            let needed = params
-                .iter()
-                .rposition(|&p| !self.types.may_be_nil(p))
-                .map_or(0, |i| i + 1);
+            let needed = f.required.saturating_sub(params_skipped);
             if n > params.len() && f.rest.is_none() {
                 let msg = format!(
                     "{name} takes {} argument{}, found {n}",
@@ -1995,6 +2178,19 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                         let msg = format!("{} has no method `{text}`", self.show(ot));
                         self.error(name.span, Code::NoMember, msg);
                     }
+                    self.args_any(args);
+                    None
+                }
+            },
+            // Strings take the `string` library's functions as methods.
+            Ty::Str if self.prelude.is_some() => match self.string_member(&text) {
+                Some(m) => {
+                    let mt = self.sym_type(m);
+                    self.call(mt, Some(ot), args, &desc, span, expected)
+                }
+                None => {
+                    let msg = format!("string has no method `{text}`");
+                    self.error(name.span, Code::NoMember, msg);
                     self.args_any(args);
                     None
                 }
@@ -2737,8 +2933,29 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         (yes, no)
     }
 
+    /// The `string` library's function `name`, which strings have as a method.
+    fn string_member(&self, name: &str) -> Option<SymbolId> {
+        let prelude = (self.checked)(self.prelude?)?;
+        let lib = prelude
+            .symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Module && s.name == "string")?
+            .module?;
+        (self.checked)(lib)?.exports.get(name).copied()
+    }
+
+    /// Whether `e` names the prelude's `name` (not a local of the same name).
     fn is_prelude(&self, e: &ast::Expr, name: &str) -> bool {
-        matches!(e.kind, ExprKind::Name(s) if self.ref_at(e.span).is_none() && self.strings.get(s) == name.as_bytes())
+        let ExprKind::Name(s) = e.kind else {
+            return false;
+        };
+        if self.strings.get(s) != name.as_bytes() {
+            return false;
+        }
+        match self.ref_at(e.span) {
+            Some(id) => Some(id.file) == self.prelude,
+            None => self.prelude.is_none(),
+        }
     }
 
     /// `type(x)` or `math::type(x)` (the bool says which): its argument.
@@ -2815,6 +3032,25 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     }
 
     fn condition_warning(&mut self, t: TypeId, span: Span) {
+        if self.strict {
+            let ms = self.types.members(t);
+            let not_bool = ms
+                .iter()
+                .any(|&m| !matches!(self.types.get(m), Ty::Any | Ty::Bool));
+            if not_bool {
+                let hint = if ms.iter().any(|&m| *self.types.get(m) == Ty::Nil) {
+                    "compare it, such as `x != nil`"
+                } else {
+                    "compare it, such as `n > 0`"
+                };
+                let msg = format!(
+                    "this condition has type {}, not `bool` (strict mode); {hint}",
+                    self.show(t)
+                );
+                self.error(span, Code::NotBool, msg);
+                return;
+            }
+        }
         let always = self.types.members(t).iter().all(|&m| {
             !matches!(
                 self.types.get(m),

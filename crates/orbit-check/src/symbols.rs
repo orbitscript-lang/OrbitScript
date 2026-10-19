@@ -121,6 +121,9 @@ pub(crate) struct Module {
     pub fields: HashMap<u32, HashMap<String, SymbolId>>,
     /// For a generic struct, enum, alias or function (by symbol index): its parameters.
     pub generics: HashMap<u32, Vec<SymbolId>>,
+    /// A stub function declared more than once (overloads), by the symbol index of each
+    /// declaration: all of its declarations, in order.
+    pub overloads: HashMap<u32, Vec<SymbolId>>,
     /// Each symbol's type, once the checker has computed it (by symbol index).
     pub sym_types: HashMap<u32, crate::TypeId>,
     /// The type of each checked expression and name, for hover (sorted by span).
@@ -135,6 +138,9 @@ pub(crate) struct Module {
     pub hints: Vec<(u32, crate::TypeId)>,
     /// Each function's parameter names (by symbol index), `self` included.
     pub param_names: HashMap<u32, Vec<String>>,
+    /// What each scope binds, for completion of names: the source the scope covers, where in
+    /// it the name becomes visible, and the symbol.
+    pub scope_names: Vec<(Span, u32, SymbolId)>,
     pub diagnostics: Vec<Diagnostic>,
     pub deps: Vec<FileId>,
 }

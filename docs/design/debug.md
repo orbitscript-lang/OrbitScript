@@ -212,6 +212,52 @@ ADR-12 adds a debugger engine (`orbit-runtime` feature `debugger`, `src/vm/debug
 
 Cost, measured on the cloud x86_64 container without PGO: the feature on and nothing attached changes instruction counts by -1.4% to +1.0% across the benchmarks (callgrind, quick inputs); attached, with a breakpoint in a function the benchmark never calls, run times are 0.96x to 1.06x (`tests/debugger.rs`, `overhead_outside_breakpoints`).
 
+### Embedding API
+
+`orbit::debugger` (feature `debugger` of `orbit`, over either backend) is what hosts and the DAP server use:
+
+- **On `Isolate`**: `set_debug_events(Option<Box<dyn DebugEvents>>)`, `set_breakpoints(source, lines)`, `set_error_break(ErrorBreak)`, `stop_on_next_line()` (stop on entry) and `pause_handle()`, whose `PauseHandle` is `Send` and works from any thread. ADR-12's `resume` and `step` are the `Resume` that `DebugEvents::stopped` returns.
+- **`Paused`** is the stopped program as the callback sees it, with levels from the function that stopped (0) outwards: `frame(level)` and `frames()` (`debug.getinfo`'s `FrameInfo`), `locals(level)` and `upvalues(level)` as `Variable`s holding pinned values, `set_local(level, index, value)`, `set_breakpoints` and `set_error_break` (requests that arrive while stopped), `globals()`, `error()` for an error stop, `scope(f)` for reading values or calling script code, and `stack()` for the rest of the stack API (whose level 0 is the reporting native). Locals named in parentheses (the compilers' hidden ones) are left out.
+- **`Config::debugger(Debugger::Disabled)`** refuses a debugger for the isolate's whole life (`Vm::disable_debugger`, so the engine enforces it however it is reached): `set_debug_events` fails, breakpoints never resolve and pausing does nothing (D5).
+- **Shared layout**: `IsolateAbi::set_debug_events` and `pause_handle`, `ControlAbi::set_breakpoints`, `set_error_break` and `stop_on_next_line` (on `Control`, so they work both from the host and from inside a stop), the `DebugEventsAbi` callback trait a program implements, `PauseAbi`, and `ConfigAbi::debugger`. A stop hands the program the reporting native's window, with the error in slot 1, so `Paused` is the same code on both backends. A `liborbit` built without its `debugger` feature refuses `set_debug_events`.
+
+### DAP server and `orbit --debug-server`
+
+`orbit-dap` is the Debug Adapter Protocol server (D4, D5), on the public API only (`orbit::debugger`), so it builds over either backend. `orbit --debug-server` (CLI feature `dap`, on by default; `build.sh` turns on `orbit-lib/debugger` and `dap` for the shared layout) is the editor's debug adapter: it speaks DAP with the editor over standard input and output, but the script never runs in that process. On `launch` it opens a socket (D11: `launch-<pid>-<nonce>.sock`, 0600, in the per-user directory) and starts `orbit --debug-connect <socket> <script> <args>`, which connects back and runs the script as `orbit <script> <args>` would, debugged over the socket. The adapter relays between the two, so the script's standard input and output, and anything native code writes to file descriptors 0 and 1, are never the editor's stream.
+
+```mermaid
+sequenceDiagram
+    participant E as Editor
+    participant A as orbit --debug-server
+    participant P as orbit --debug-connect
+    E->>A: initialize
+    A-->>E: capabilities
+    E->>A: launch (program, args, cwd, env, console)
+    A->>A: open the socket
+    A->>E: runInTerminal (or start P itself)
+    E->>P: start in the editor's terminal
+    P->>A: connect
+    A->>P: initialize, launch (replayed)
+    P-->>E: initialized, launch response (relayed)
+    E->>P: setBreakpoints, configurationDone, ... (relayed)
+    P-->>E: stopped, output, exited, terminated (relayed)
+```
+
+- **Where the script runs** follows the launch's `console`: `"integratedTerminal"` (the default) or `"externalTerminal"` ask the editor to start it in a terminal (DAP's `runInTerminal`), where it reads what is typed and writes there. `"internalConsole"`, or an editor that offers no terminals, makes the adapter start it with no standard input (reads see end of input) and send its output and `orbit`'s error reports to the debug console as `output` events.
+- **The adapter answers `initialize` itself**, then replays it and `launch` to the program and relays everything else both ways, renumbering what it sends the editor. If the program's connection ends without `terminated`, the adapter sends it; if the editor leaves, the program sees its connection close and stops. A program the adapter started itself is killed if it has not exited 2 s after its connection closes.
+- **Unix only for now.** Windows needs the AF_UNIX wrapper (D12), which comes with attach.
+- **Two threads in the program.** A reader thread takes the editor's messages and answers `threads` and `pause` itself. Anything else is queued for the isolate's thread; while the script runs, the reader pauses it through `PauseHandle` to get it answered (a *service* stop, which the editor never sees as `stopped`), and `disconnect` or `terminate` interrupts it.
+- **One DAP thread per isolate** (D10), id 1 for `orbit --debug-connect`; coroutines show in its call stack.
+- **Breakpoints** match a chunk by the names a script can be loaded under (`@/abs/path`, `@rel`, `@./rel`, relative to the launch directory) and are reported unverified until their chunk loads, then `breakpoint` changed events say where they landed.
+- **Exception filters**: `uncaught` (errors no `pcall` catches; the CLI's own handler does not count) and `all`.
+- **Frame names** come from the call site, as `debug.getinfo` gives them, or else from the name the function was defined with (`FrameInfo::defined_name`, from the prototype), so a tail-called function still has one.
+- **Scopes**: Locals, Upvalues and Globals; tables expand, with their metatable as `(metatable)`. `evaluate` reads names and dotted fields only.
+- `os.exit` sends `terminated` from a `before_exit` hook.
+
+Cost: `dap` adds 202.5 KiB to the release `orbit` (2,252,064 → 2,459,416 bytes, cloud x86_64, no PGO), of which the engine is 12.3 KiB and `orbit-dap` the rest; `serde_json` is already linked for `std.json`.
+
+Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Attaching to a running process (sockets, D11) and the VS Code extension (D7) come next.
+
 ## Error-message parity
 
 Messages already match the reference for most runtime errors ([VM design](vm.md#error-messages)). What remains for `errors.lua` and `calls.lua` is finished last, as each case unblocks: `global 'x'` versus `field 'x'` for `_ENV` accesses through a local `_ENV`, upvalue and constant names in arithmetic and concatenation, `bad extra argument` for `__call` chains (`extraargs`), `for iterator` naming, and the `(...tail calls...)` lines. Where matching would need bytecode analysis after the fact, the compiler records one more origin instead, as the VM design intends.
@@ -219,7 +265,7 @@ Messages already match the reference for most runtime errors ([VM design](vm.md#
 ## Cargo features
 
 - `orbit-stdlib/debug` (default on): the `debug` table. Enables `orbit-vm/hooks`.
-- `orbit-runtime/debugger`: the debugger engine. Enables `hooks`. Off by default; `orbit` and `orbit-cli` forward it as `debugger`.
+- `orbit-runtime/debugger`: the debugger engine. Enables `hooks`. Off by default; `orbit`, `orbit-cli` and `orbit-lib` forward it as `debugger`, and `orbit-cli`'s `dap` (on by default) turns it on. In `orbit` it also adds the `orbit::debugger` API.
 - `orbit-vm/hooks`: hook state, the hooked loop, hook frames. Introspection (`getinfo`, locals, upvalues, tracebacks) is always compiled: tracebacks and `error` levels need it anyway.
 
 ## Interfaces in other threads' areas

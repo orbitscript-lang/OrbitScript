@@ -9,11 +9,11 @@ global calls = 0;
 
 // ---- structs, impl, metamethods -------------------------------------------------------
 
-struct Vec2 { x: float, y: float }
+struct Vec2 { x: number, y: number }
 
 impl Vec2 {
     pub fn new(x, y) -> Vec2 { Vec2 { x, y } }
-    pub fn dot(self, o) -> float { self.x * o.x + self.y * o.y }
+    pub fn dot(self, o) -> number { self.x * o.x + self.y * o.y }
     pub fn scale(self, k) { self.x *= k; self.y *= k; }
     fn __add(self, o) { Vec2::new(self.x + o.x, self.y + o.y) }
     fn __sub(self, o) { Vec2 { x: self.x - o.x, y: self.y - o.y } }
@@ -35,14 +35,14 @@ impl Counter {
 // ---- enums and match ------------------------------------------------------------------
 
 enum Shape {
-    Circle { r: float },
-    Rect { w: float, h: float },
-    Tri { a: float, b: float, c: float },
+    Circle { r: number },
+    Rect { w: number, h: number },
+    Tri { a: number, b: number, c: number },
     Empty,
 }
 
 impl Shape {
-    pub fn area(self) -> float {
+    pub fn area(self) -> number {
         match self {
             Shape::Circle { r } => 3 * r * r,
             Shape::Rect { w, h: height } if w > 0 => w * height,
@@ -218,7 +218,7 @@ fn round(i) {
         + if p < Vec2::new(100, 100) { 1 } else { 0 } + #p
 }
 
-let n = if arg != nil && arg[1] != nil { math::tointeger(arg[1]) } else { ROUNDS };
+let n = if arg != nil && arg[1] != nil { math::tointeger(arg[1]) as int } else { ROUNDS };
 let mut total = 0;
 for i in 1..=n { total += round(i); }
 print(f"desugar: {n} rounds, checksum {total:.6}, calls {calls}");

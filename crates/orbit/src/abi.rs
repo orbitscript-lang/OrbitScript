@@ -115,6 +115,7 @@ pub struct FrameInfoAbi {
     pub isvararg: bool,
     pub extraargs: u8,
     pub istailcall: bool,
+    pub defined_name: SOption<SVec<u8>>,
 }
 
 /// [`crate::Config`]: libraries as a bit per [`crate::Library::ALL`]
@@ -127,6 +128,37 @@ pub struct ConfigAbi {
     pub gc_mode: u8,
     pub warnings: bool,
     pub ignore_env: bool,
+    /// Whether a debugger may attach ([`crate::Debugger::Allowed`]).
+    pub debugger: bool,
+}
+
+/// A breakpoint ([`crate::debugger::Breakpoint`]); `line` 0 while it
+/// isn't resolved, since lines count from 1.
+#[stabby::stabby]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct BreakpointAbi {
+    pub requested: u32,
+    pub line: u32,
+}
+
+/// Why the program stopped ([`crate::debugger::StopReason`]): `kind` is
+/// [`StopAbi::BREAKPOINT`] (at `line`) or one of the others below. For an
+/// error, the window's slot 1 holds the error.
+#[stabby::stabby]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct StopAbi {
+    pub kind: u8,
+    pub caught: bool,
+    pub line: u32,
+}
+
+impl StopAbi {
+    pub const BREAKPOINT: u8 = 0;
+    pub const STEP: u8 = 1;
+    pub const PAUSE: u8 = 2;
+    pub const ERROR: u8 = 3;
 }
 
 /// A native's window, or the host's ([`crate::Stack`]). Each method is the
@@ -347,6 +379,17 @@ pub trait ControlAbi {
     extern "C" fn set_hook(&mut self, f: SOption<u32>, mask: u8, count: i64);
     extern "C" fn publish_main_thread(&mut self);
     extern "C" fn main_thread(&self) -> ThreadAbi;
+    /// [`crate::Isolate::set_breakpoints`]; all unresolved when the
+    /// library has no engine.
+    extern "C" fn set_breakpoints<'b>(
+        &mut self,
+        source: Slice<'b, u8>,
+        lines: Slice<'b, u32>,
+    ) -> SVec<BreakpointAbi>;
+    /// `on`: 0 never, 1 uncaught, 2 all.
+    extern "C" fn set_error_break(&mut self, on: u8);
+    /// [`crate::Isolate::stop_on_next_line`].
+    extern "C" fn stop_on_next_line(&mut self);
 }
 
 pub type ControlMut<'a> = dynptr!(&'a mut dyn ControlAbi);
@@ -386,6 +429,11 @@ pub trait IsolateAbi {
     /// Install the library's `ffi` (`orbit_std::install_ffi`); false if it
     /// was built without it.
     extern "C" fn install_ffi(&mut self) -> bool;
+    /// [`crate::Isolate::set_debug_events`]; false if the isolate allows
+    /// no debugger or the library was built without the engine.
+    extern "C" fn set_debug_events(&mut self, events: SOption<DebugEventsBox>) -> bool;
+    /// None when no debugger can attach.
+    extern "C" fn pause_handle(&self) -> SOption<PauseArc>;
 }
 
 pub type IsolateBox = dynptr!(SBox<dyn IsolateAbi>);
@@ -398,6 +446,29 @@ pub trait InterruptAbi {
 }
 
 pub type InterruptArc = dynptr!(stabby::sync::Arc<dyn InterruptAbi + Send + Sync>);
+
+/// Pauses an isolate from any thread ([`crate::debugger::PauseHandle`]).
+#[stabby::stabby(checked)]
+pub trait PauseAbi {
+    extern "C" fn request(&self);
+}
+
+pub type PauseArc = dynptr!(stabby::sync::Arc<dyn PauseAbi + Send + Sync>);
+
+/// A program's [`crate::debugger::DebugEvents`]. `stopped` gets the window
+/// of the native reporting the stop and answers with a
+/// [`crate::debugger::Resume`]: 0 continue, 1 step in, 2 over, 3 out.
+#[stabby::stabby(checked)]
+pub trait DebugEventsAbi {
+    extern "C" fn stopped<'a>(&mut self, s: StackArg<'a>, reason: StopAbi) -> u8;
+    extern "C" fn breakpoints_resolved<'b>(
+        &mut self,
+        source: Slice<'b, u8>,
+        breakpoints: Slice<'b, BreakpointAbi>,
+    );
+}
+
+pub type DebugEventsBox = dynptr!(SBox<dyn DebugEventsAbi>);
 
 /// A program's native: a [`crate::stack::Native`] or a function made from
 /// a closure.

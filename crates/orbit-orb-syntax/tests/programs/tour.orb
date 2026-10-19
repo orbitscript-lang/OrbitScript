@@ -1,7 +1,7 @@
 // A runnable tour of OrbitScript: lowered, compiled and run by tests/run.rs, and the seed
 // for its mutation test.
 
-struct Vec2 { x: float, y: float }
+struct Vec2 { x: number, y: number }
 
 impl Vec2 {
     pub fn new(x, y) -> Vec2 { Vec2 { x, y } }
@@ -13,13 +13,13 @@ impl Vec2 {
 }
 
 enum Shape {
-    Circle { r: float },
-    Rect { w: float, h: float },
+    Circle { r: number },
+    Rect { w: number, h: number },
     Empty,
 }
 
 impl Shape {
-    pub fn area(self) -> float {
+    pub fn area(self) -> number {
         match self {
             Shape::Circle { r } => 3 * r * r,
             Shape::Rect { w, h: height } if w > 0 => w * height,

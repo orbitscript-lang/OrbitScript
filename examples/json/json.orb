@@ -1,0 +1,153 @@
+// json: read, query, build and write JSON with the std.json module.
+//
+// Shows decoding a file, `json::null`, integers and floats, `json::object` and
+// `json::array` for empty tables and arrays with holes, `json::number` for exact
+// numerals, the scalar conversions, `keep_null`, encode's `pretty` and `sort_keys` options, a struct
+// that encodes as an array through `__tojson`, and the errors `decode` returns and
+// `encode` raises. json.lua is the same program in Lua.
+//
+// Usage: orbit json.orb [rounds]   (rounds > 1 repeats the work, for benchmarking)
+
+extern arg;
+
+use std::json;
+
+fn read_file(path) {
+    let f = assert(io::open(path));
+    scope f.close();
+    f.read("a")
+}
+
+/// Every product carrying `tag`, by name.
+fn tagged(shop, tag) {
+    let names = [];
+    for (_, p) in ipairs(shop.products) {
+        for (_, t) in ipairs(p.tags) {
+            if t == tag {
+                names[#names + 1] = p.name;
+            }
+        }
+    }
+    names
+}
+
+/// The stock report: counts per tag and what to reorder. Built from scratch, so the
+/// empty cases are marked: an empty `reorder` should still be an array and an empty
+/// `tags` table an object.
+fn report(shop) {
+    let tags = json::object();
+    let reorder = json::array();
+    let mut value = 0.0;
+    for (_, p) in ipairs(shop.products) {
+        for (_, t) in ipairs(p.tags) {
+            tags[t] = (tags[t] || 0) + 1;
+        }
+        if p.stock == 0 && p.replaced_by == json::null {
+            reorder[#reorder + 1] = p.sku;
+        }
+        value += p.price * p.stock;
+    }
+    #{ shop: shop.name, tags: tags, reorder: reorder, stock_value: value }
+}
+
+// A struct encodes as an object of its fields unless its `__tojson` metamethod gives
+// something else to write: here the array [x, y].
+struct Point { x, y }
+
+impl Point {
+    pub fn new(x, y) -> Point { Point { x, y } }
+
+    fn __tojson(self) { json::array([self.x, self.y]) }
+}
+
+fn run() {
+    let out = [];
+    let say = |s| { out[#out + 1] = s; };
+
+    // Decoding: objects become tables with string keys, arrays sequences.
+    let shop = assert(json::decode(read_file("shop.json")));
+    say(f"{shop.name} ({shop.currency}), opened {shop.opened}, {#shop.products} products");
+    for (_, p) in ipairs(shop.products) {
+        // Numbers keep their subtype: 24 is an integer, 189.5 a float.
+        let kind = math::type(p.price);
+        let price = if kind == "integer" { f"{p.price}" } else { string::format("%.2f", p.price) };
+        // JSON null is json::null, never nil, so the field is still there.
+        let status = if p.replaced_by == json::null { "current" } else { "replaced by " ~ p.replaced_by };
+        say(string::format("  %s %7s %-7s x%-2d %d tags, %-16s %s", p.sku, price, kind,
+            p.stock, #p.tags, status, p.name));
+    }
+    say("lights: " ~ table::concat(tagged(shop, "light"), ", "));
+    say(f"notes is {json::encode(shop.notes)}, tags of MAP-7 are {json::encode(shop.products[4].tags)}");
+
+    // Encoding, pretty-printed with sorted keys so the output is stable.
+    say(json::encode(report(shop), #{ pretty: true, sort_keys: true }));
+
+    // Compact output; sort_keys makes it deterministic.
+    let order = #{
+        id: 1001, lines: [#{ sku: "MAP-7", qty: 2 }], gift: false,
+        note: json::null, ratio: 0.5, whole: 2.0,
+    };
+    say(json::encode(order, #{ sort_keys: true }));
+
+    // What plain values can't say: an array with holes (here a week of visit
+    // counts) and numbers written exactly as given, beyond what a Lua number holds.
+    let visits = json::array([], 7);
+    visits[1] = 3;
+    visits[5] = 1;
+    let receipt = #{
+        order: json::number("90071992547409930001"), total: json::number("44.90"), visits: visits,
+    };
+    say(json::encode(receipt, #{ sort_keys: true }));
+    // Scalars write as their Lua type; json::int, float, string and bool convert
+    // (by the rules of `as`), and bool follows conditions.
+    say(json::encode([json::int(3.0), json::float(3), json::string(3), json::bool(0), json::bool(nil)]));
+    // With keep_null off, null decodes to nil; the array keeps its length.
+    let sparse = json::decode("[1, null, 3, null]", #{ keep_null: false });
+    say(f"{sparse[1]} {sparse[2]} {sparse[3]} {sparse[4]} -> {json::encode(sparse)}");
+
+    // Strings: escapes in, UTF-8 out, and the other way.
+    let s = json::decode(r#""café ☃ tab\tend""#);
+    say(f"{s} ({#s} bytes)");
+    say(json::encode("line\nbreak \"quoted\" \x01"));
+
+    // Tables with number keys that aren't a sequence become objects.
+    say(json::encode(#{ [1]: "a", [3]: "c" }, #{ sort_keys: true }));
+    // A type can choose what it encodes as.
+    say(json::encode(#{ from: Point::new(0, 0), to: Point::new(3, 4) }, #{ sort_keys: true }));
+
+    // Round trip: decoding what encode wrote gives the same values back.
+    let again = json::decode(json::encode(shop));
+    assert(again.products[2].replaced_by == "LMP-2");
+    assert(again.products[1].replaced_by == json::null);
+    assert(math::type(again.products[2].price) == "integer");
+    assert(again.products[1].price == 189.5);
+    assert(json::encode(again.notes) == "{}");
+    say("round trip ok");
+
+    // Errors: decode returns nil and a message; encode raises.
+    for (_, bad) in ipairs([r#"{"a": 1,}"#, "[1, 2", "nul", r#""\x""#]) {
+        let (v, err) = json::decode(bad);
+        say(string::format("decode %-10s -> %s, %s", bad, tostring(v), err));
+    }
+    let lp = #{};
+    lp.self = lp;
+    let cases = [
+        ["a function", #{ handlers: [print] }],
+        ["a cycle", lp],
+        ["NaN", #{ ratio: 0 / 0 }],
+        ["a bad key", #{ [true]: 1 }],
+    ];
+    for (_, case) in ipairs(cases) {
+        let (ok, err) = pcall(json::encode, case[2]);
+        say(f"encode {case[1]} -> {if ok { "ok" } else { err }}");
+    }
+    say(f"json.null is {tostring(json::null)}, a {type(json::null)}");
+    table::concat(out, "\n")
+}
+
+let rounds = tonumber(arg[1]) || 1;
+let mut text = nil;
+for _ in 1..=rounds {
+    text = run();
+}
+print(text);

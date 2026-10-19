@@ -122,8 +122,8 @@ build() {
 # The static `orbit` and `orbitc`, and the shared build: liborbit first, as
 # the programs link against it.
 static_args="-p orbit-cli"
-lib_args="-p orbit-lib"
-shared_args="-p orbit-cli --no-default-features --features shared,line-editing"
+lib_args="-p orbit-lib --features debugger"
+shared_args="-p orbit-cli --no-default-features --features shared,line-editing,dap"
 
 # The rustflags of a build optimized with the profile at $pgo.
 #

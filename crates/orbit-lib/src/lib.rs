@@ -34,6 +34,9 @@ impl orbit::export::Bundled for Bundled {
             base,
             io,
             os,
+            // Not a switch of its own across the boundary: it adds no
+            // global and touches nothing outside the isolate.
+            json: true,
             ignore_env,
         };
         orbit_std::install(iso, &options)

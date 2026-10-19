@@ -1,0 +1,72 @@
+// `as` runs while the program does: scalars convert, named types and unions are checked.
+
+struct Point { x: float, y: float }
+struct Line { a: Point, b: Point }
+struct Name { text: string }
+impl Name {
+    fn __tostring(self) -> string { self.text }
+}
+enum Shape { Circle { r: float }, Square { side: float } }
+type Ids = [int];
+
+fn scalars(f: float, n: number, s: string, flag: bool, maybe: int?, any_value) {
+    let a: int = f as int;
+    let b: int = n as int;
+    let c: float = 3 as float;
+    let d: string = n as string;
+    let e: string = flag as string;
+    let g: int = s as int; //~ T0209
+    let h: int = flag as int; //~ T0209
+    let i: int = any_value as int;
+    let j: int? = f as? int;
+    let k: int = j; //~ T0207
+    let l: int? = maybe as int?;
+    let m = nil as int; //~ T0209
+    let o = nil as int?;
+}
+
+fn bools(n: int, s: string, flag: bool, maybe: int?, any_value) {
+    let a: bool = flag as bool;
+    let b: bool = maybe as bool;
+    let c: bool = any_value as bool;
+    let d = n as bool; //~ T0209
+    let e = s as bool; //~ T0209
+}
+
+fn named(p: Point, l: Line, sh: Shape, nm: Name, t: table, any_value) {
+    let a: Point = any_value as Point;
+    let b: Point = t as Point;
+    let c = p as Line; //~ T0209
+    let d: Shape = Shape::Circle { r: 1.0 } as Shape;
+    let e: Shape::Circle = sh as Shape::Circle;
+    let f = p as Shape; //~ T0209
+    let g: string = nm as string;
+    let h: string = p as string; //~ T0209
+    let i: Point? = any_value as? Point;
+    let j: Point = i; //~ T0207
+}
+
+fn unions(v: int | string | bool, f: float, any_value) {
+    let a: int | string = v as (int | string);
+    let b = f as (int | string); //~ T0209
+    let c: Point | Line | nil = any_value as (Point | Line)?;
+}
+
+fn narrowing(x: Point | Line, y, z) {
+    let p = x as Point;
+    let q: Point = x;
+    y as Point;
+    let r: Point = y;
+    let n = z as int;
+    let s: string = z;
+}
+
+fn first<T>(items: [T]) {
+    let a = items as [T]; //~ T0210
+    let b = items[1] as T; //~ T0210
+    let c = items as Ids; //~ T0210
+    let d = items as #{ n: int }; //~ T0210
+    let e = items as table; //~ T0210
+    let f = items as (Point | [int]); //~ T0210
+    let g = items as any;
+}

@@ -20,7 +20,7 @@ flowchart LR
     ext -- "LSP, stdio" --> lsp["orbit-lsp<br/>Rust host + OrbitScript layer"]
     lsp --> check["orbit-check (library)"]
     lsp --> syn["front ends<br/>recovery + trivia"]
-    ext -- "DAP, stdio" --> cli["orbit --dap<br/>orbit --dap-attach &lt;pid&gt;"]
+    ext -- "DAP, stdio" --> cli["orbit --debug-server<br/>orbit --debug-attach &lt;pid&gt;"]
     cli -- "DAP, Unix socket" --> dap["orbit-dap<br/>(in the program or liborbit)"]
     dap --> api["orbit API<br/>Isolate debugger"]
     api --> eng["debug engine<br/>orbit-runtime, feature debugger"]
@@ -33,7 +33,7 @@ flowchart LR
 - **Error recovery and comment keeping live in the shared parsers** (D3), behind `ParseOptions` flags that `load` never sets, so the runtime's behaviour and messages don't change. Comments go to a trivia side table next to the AST; the tree doesn't change. The same parser builds type trees for the checker behind its own flag (type checker T2): one parser per language.
 - **The protocol and feature layer is written in OrbitScript** (D9), running in a small Rust host. The host owns stdio framing and calls into the checker; the scripts use the stdlib `json` module.
 - **JSON is `serde_json`** (D4), used by `orbit-std` and the tooling crates (`orbit-lsp`'s host, `orbit-dap`), so binaries carry one copy. `orbit-runtime` takes no JSON dependency and is reached only through the public `orbit` API. The PR that adds it adds its `DEPS.md` row with the measured size.
-- **A stdlib `json` module** (D13) in `orbit-std`, backed by `serde_json`, behind a `json` feature that the CLIs and the `build.sh` package turn on, so every script gets it, not only the language server. It is reached as `require "orbit.json"` rather than a global or the bare name `json`, so Lua programs that ship their own `json.lua` keep loading theirs. `encode(value [, options])` and `decode(text [, options])`; JSON `null` decodes to a `json.null` sentinel; an empty table encodes as `[]` unless marked as an object; integers and floats keep their subtype; decode errors return `nil, message`.
+- **A stdlib `json` module** (D13) in `orbit-std`, backed by `serde_json`, behind a `json` feature that the CLIs and the `build.sh` package turn on, so every script gets it, not only the language server. It is reached as `require "std.json"` (Tym 2026-10-19: `std.` leaves room for a fuller standard library) rather than a global or the bare name `json`, so Lua programs that ship their own `json.lua` keep loading theirs. `encode(value [, options])` and `decode(text [, options])`; JSON `null` decodes to a `json.null` sentinel; an empty table encodes as `[]` unless marked as an object; integers and floats keep their subtype; decode errors return `nil, message`.
 - **Transport**: JSON-RPC 2.0 over stdio with `Content-Length` framing, one thread with a short debounce on edits.
 
 ### Debug engine
@@ -55,21 +55,21 @@ flowchart LR
 ### The DAP server and who turns it on
 
 - **`orbit-dap`** is a crate on the public `orbit` API and `serde_json`, with its own I/O (stdio and local sockets). It builds over either backend, like `orbit-std`.
-- **Launch**: `orbit --dap` speaks DAP on stdio and runs the program from the `launch` request in-process. The CLI links `orbit-dap` behind a `dap` feature, on by default.
+- **Launch**: `orbit --debug-server` is the editor's debug adapter, speaking DAP on stdio. It never runs the program itself: it starts `orbit --debug-connect <socket> <program> <args>` in the editor's terminal (`runInTerminal`) or, with `console` `"internalConsole"`, as its own child with no input, and relays to it over a local socket (D11), so the program's standard input and output never carry the protocol (Tym, 2026-10-19). The CLI links `orbit-dap` behind a `dap` feature, on by default.
 - **`liborbit` carries `orbit-dap` too** (D5), behind an `orbit-lib` feature that `build.sh` turns on, so C hosts can be debugged: `orbit_debug_listen(lua_State *L, const char *addr)` for hosts that add a debug option, and `ORBIT_DEBUG=1`, read when a state is created through the C API, for unmodified hosts. Rust programs call `orbit_dap::serve`. Without the feature both C functions still exist, and listening fails.
 - **Suppressed per isolate, at creation only** (D5). Rust: `Config::debugger` on `Runtime::new_isolate`, `Debugger::Allowed` (default), `Debugger::Disabled`, or `Debugger::FromEnv` (only isolates with this read `ORBIT_DEBUG`). C: `orbit_newstate(lua_Alloc f, void *ud, unsigned flags)` with `ORBIT_STATE_NO_DEBUGGER`, exported in the `ORBIT_0` symbol version; `lua_newstate` and `luaL_newstate` behave as `orbit_newstate` with no flags. A disabled isolate has no engine state. There is no process-wide switch and no way to disable it later.
 - **The host decides when the server starts** (D11). The library never opens a socket on its own. The start functions are safe to call from any thread at any time.
-  - The `orbit` CLI owns its process, so `kill -USR1 <pid>` starts the server (its existing `signal-hook` thread handles it). `--dap-listen` starts it at launch and `--no-debug-signal` removes the handler.
+  - The `orbit` CLI owns its process, so `kill -USR1 <pid>` starts the server (its existing `signal-hook` thread handles it). `--debug-listen` starts it at launch and `--no-debug-signal` removes the handler.
   - On Windows the CLI waits on a named event, `Local\orbit-debug-<pid>`, instead.
-  - `orbit --dap-attach` checks that the target is an `orbit` CLI before signalling, since `SIGUSR1` terminates processes that don't handle it.
+  - `orbit --debug-attach` checks that the target is an `orbit` CLI before signalling, since `SIGUSR1` terminates processes that don't handle it.
   - Other hosts use `ORBIT_DEBUG` or call the start function from their own trigger.
 
 ### Transport and attaching
 
 - **Local Unix domain sockets only, no TCP** (D11). The server listens on `$XDG_RUNTIME_DIR/orbit/<pid>-<nonce>.sock`, falling back to `$TMPDIR/orbit-<uid>` or `/tmp/orbit-<uid>` on Linux, `$TMPDIR/orbit` on macOS and `%LOCALAPPDATA%\orbit` on Windows. The directory is 0700 and the socket 0600, so only the same user can connect, with no token. Remote devices are reached by the user forwarding the socket over SSH.
 - **Stale sockets**: a crashed process leaves its socket behind, and on some platforms it survives a reboot. The random nonce means a reused pid never lands on an old name. Clients trust a socket only if its `describe` answer gives the expected pid and process start time. Each server start, and the lister, delete sockets that refuse connections.
-- **Discovery**: `orbit --dap-attach --list` sends each socket one `describe` request (program, arguments, start time, versions, isolates, whether a debugger is attached) before any DAP traffic. It also lists `orbit` CLIs without a running server, found by process name. The runtime writes no discovery files.
-- **The editor connects through a stdio relay**, `orbit --dap-attach <pid>`, which signals the target if needed, connects to its socket and relays DAP over stdio. It works the same on every platform and in every editor, and avoids Node treating Windows socket paths as named pipes.
+- **Discovery**: `orbit --debug-attach --list` sends each socket one `describe` request (program, arguments, start time, versions, isolates, whether a debugger is attached) before any DAP traffic. It also lists `orbit` CLIs without a running server, found by process name. The runtime writes no discovery files.
+- **The editor connects through a stdio relay**, `orbit --debug-attach <pid>`, which signals the target if needed, connects to its socket and relays DAP over stdio. It works the same on every platform and in every editor, and avoids Node treating Windows socket paths as named pipes.
 - **Windows AF_UNIX via our own Winsock wrapper** (D12): `socket`, `bind`, `listen`, `accept`, `recv`, `send` and `closesocket` through `windows-sys` (already a dependency of `orbit-virtmem`), about 150 lines in one file with an `unsafe` exception, which also holds the named-event code. It is deleted when `std`'s Windows Unix sockets (nightly feature `windows_unix_domain_sockets`) are stable. Every supported Windows (10 build 17063 and later) has AF_UNIX.
 
 ### Several isolates in one process
@@ -80,11 +80,11 @@ flowchart LR
 
 ### Editor
 
-- **A VS Code extension in this repository**, `editors/vscode` (D7), self-contained so it can move to its own repository later. It starts `orbit-lsp`, `orbit --dap` and `orbit --dap-attach`, and fills its process picker from `orbit --dap-attach --list`.
+- **A VS Code extension in this repository**, `editors/vscode` (D7), self-contained so it can move to its own repository later. It starts `orbit-lsp`, `orbit --debug-server` and `orbit --debug-attach`, and fills its process picker from `orbit --debug-attach --list`.
 
 ### Order
 
-The language server and the debugger are built in parallel (D8). The language server starts with parser recovery and trivia (owned by the front-end threads), then diagnostics and outline, then the checker-backed tiers. The debugger starts with the engine and the `Isolate` API, then `orbit --dap`, then attach.
+The language server and the debugger are built in parallel (D8). The language server starts with parser recovery and trivia (owned by the front-end threads), then diagnostics and outline, then the checker-backed tiers. The debugger starts with the engine and the `Isolate` API, then `orbit --debug-server`, then attach.
 
 ## Not planned
 

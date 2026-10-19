@@ -14,50 +14,6 @@ use orbit_orb_syntax::ast::{self, ExprKind, ItemKind, PatKind, StmtKind, TypeKin
 use crate::symbols::{Module, Symbol, SymbolId, SymbolKind};
 use crate::{Code, Diagnostic, FileId, Severity};
 
-/// Globals every module can read without declaring them. The bundled stdlib stubs replace this
-/// list once the parser accepts stub files (proposal T12); until then it must match the front
-/// end's prelude.
-pub(crate) const PRELUDE: &[&str] = &[
-    "assert",
-    "collectgarbage",
-    "dofile",
-    "error",
-    "getmetatable",
-    "ipairs",
-    "load",
-    "loadfile",
-    "next",
-    "pairs",
-    "pcall",
-    "print",
-    "rawequal",
-    "rawget",
-    "rawlen",
-    "rawset",
-    "require",
-    "select",
-    "setmetatable",
-    "tonumber",
-    "tostring",
-    "type",
-    "warn",
-    "xpcall",
-    "_G",
-    "_VERSION",
-    "arg",
-    "coroutine",
-    "debug",
-    "ffi",
-    "io",
-    "math",
-    "os",
-    "package",
-    "string",
-    "table",
-    "utf8",
-    "panic",
-];
-
 /// Type names that need no definition (proposal, "The type language").
 pub(crate) const BUILTIN_TYPES: &[&str] = &[
     "nil", "bool", "int", "float", "number", "string", "table", "function", "thread", "userdata",
@@ -133,7 +89,7 @@ pub(crate) struct Defs<'a> {
 #[derive(Clone, Copy, Debug)]
 enum Res {
     Sym(SymbolId),
-    /// A prelude global, or something whose meaning isn't known (from Lua, or after an error).
+    /// Something whose meaning isn't known (from Lua, or after an error).
     Unknown,
 }
 
@@ -141,6 +97,8 @@ enum Res {
 pub(crate) struct Deps<'a> {
     /// `use` paths (`a.b`) to the file found for them.
     pub modules: &'a HashMap<String, FileId>,
+    /// The names every module can read without declaring them, from the prelude stub.
+    pub prelude: &'a HashMap<String, SymbolId>,
     /// Already checked modules, by file. `None` while a module is being checked (a cycle).
     pub checked: &'a dyn Fn(FileId) -> Option<&'a Module>,
 }
@@ -148,6 +106,8 @@ pub(crate) struct Deps<'a> {
 struct Scope {
     /// The function nesting depth the scope belongs to.
     depth: u32,
+    /// The source the scope covers, for completion.
+    extent: Span,
     entries: Vec<(StrId, Res)>,
     /// Items later in this block: name and symbol index.
     pending: Vec<(StrId, u32)>,
@@ -167,6 +127,8 @@ struct Resolver<'a> {
     /// Symbols created ahead of their definition (items found when a block is entered), by the
     /// start of their name.
     predefined: HashMap<u32, u32>,
+    /// Where a `let` binding comes into scope (the end of its statement), by symbol index.
+    visible_from: HashMap<u32, u32>,
     defs: Defs<'a>,
 }
 
@@ -184,6 +146,7 @@ pub(crate) fn resolve<'a>(file: FileId, ast: &'a ast::Ast, deps: Deps<'a>) -> (M
         container: None,
         impl_target: None,
         predefined: HashMap::new(),
+        visible_from: HashMap::new(),
         defs: Defs::default(),
     };
     r.block(&ast.body, true);
@@ -257,12 +220,31 @@ impl<'a> Resolver<'a> {
         i
     }
 
-    fn push_scope(&mut self) {
+    fn push_scope(&mut self, extent: Span) {
         self.scopes.push(Scope {
             depth: self.depth,
+            extent,
             entries: Vec::new(),
             pending: Vec::new(),
         });
+    }
+
+    /// Closes the innermost scope, recording what it bound for completion.
+    fn pop_scope(&mut self) {
+        let scope = self.scopes.pop().expect("a scope");
+        for (_, res) in scope.entries {
+            let Res::Sym(id) = res else { continue };
+            // Items are visible in their whole scope, other names once defined.
+            let from = match self.symbol(id) {
+                Some(s) if id.file == self.file && !s.kind.is_item() => self
+                    .visible_from
+                    .get(&id.index)
+                    .copied()
+                    .unwrap_or(s.span.end),
+                _ => scope.extent.start,
+            };
+            self.m.scope_names.push((scope.extent, from, id));
+        }
     }
 
     // ---- names --------------------------------------------------------------------------------
@@ -288,11 +270,10 @@ impl<'a> Resolver<'a> {
                 return Res::Sym(self.id(index));
             }
         }
-        let text = self.strings.get(name.sym);
-        if PRELUDE.iter().any(|p| p.as_bytes() == text) {
-            return Res::Unknown;
-        }
         let text = self.text(name.sym);
+        if let Some(&id) = self.deps.prelude.get(&text) {
+            return Res::Sym(id);
+        }
         self.error(
             name.span,
             Code::UnknownName,
@@ -425,7 +406,7 @@ impl<'a> Resolver<'a> {
     // ---- blocks and items ---------------------------------------------------------------------
 
     fn block(&mut self, b: &'a ast::Block, module_level: bool) {
-        self.push_scope();
+        self.push_scope(b.span);
         self.predeclare(&b.stmts, module_level);
         for s in &b.stmts {
             self.stmt(s, module_level);
@@ -433,7 +414,7 @@ impl<'a> Resolver<'a> {
         if let Some(t) = &b.tail {
             self.expr(t);
         }
-        self.scopes.pop();
+        self.pop_scope();
     }
 
     /// Creates symbols for the block's items before walking it, so later items can be referred
@@ -570,8 +551,13 @@ impl<'a> Resolver<'a> {
     }
 
     /// Opens a scope binding generic parameters as type symbols; returns their ids.
-    fn generics(&mut self, params: &[ast::GenericParam], owner: Option<u32>) -> Vec<SymbolId> {
-        self.push_scope();
+    fn generics(
+        &mut self,
+        params: &[ast::GenericParam],
+        owner: Option<u32>,
+        extent: Span,
+    ) -> Vec<SymbolId> {
+        self.push_scope(extent);
         let ids: Vec<SymbolId> = params
             .iter()
             .map(|g| {
@@ -591,7 +577,7 @@ impl<'a> Resolver<'a> {
         match &item.kind {
             ItemKind::Fn(f) => {
                 let index = self.define_pending(f.name);
-                self.function(&f.sig, &f.generics, index, |r| {
+                self.function(&f.sig, &f.generics, index, item.span, |r| {
                     if let Some(b) = &f.body {
                         r.block(b, false);
                     }
@@ -608,17 +594,17 @@ impl<'a> Resolver<'a> {
             }
             ItemKind::Struct(s) => {
                 let index = self.define_pending(s.name);
-                self.generics(&s.generics, index);
+                self.generics(&s.generics, index, item.span);
                 for f in &s.fields {
                     if let Some(t) = &f.ty {
                         self.ty(t);
                     }
                 }
-                self.scopes.pop();
+                self.pop_scope();
             }
             ItemKind::Enum(e) => {
                 let index = self.define_pending(e.name);
-                self.generics(&e.generics, index);
+                self.generics(&e.generics, index, item.span);
                 for v in e.variants.iter().filter_map(|v| v.fields.as_ref()) {
                     for f in v {
                         if let Some(t) = &f.ty {
@@ -626,17 +612,17 @@ impl<'a> Resolver<'a> {
                         }
                     }
                 }
-                self.scopes.pop();
+                self.pop_scope();
             }
             ItemKind::TypeAlias { name, generics, ty } => {
                 let index = self.define_pending(*name);
-                self.generics(generics, index);
+                self.generics(generics, index, item.span);
                 self.ty(ty);
-                self.scopes.pop();
+                self.pop_scope();
             }
             ItemKind::Impl(imp) => {
                 let target = self.name_ref(imp.target);
-                let generics = self.generics(&imp.generics, None);
+                let generics = self.generics(&imp.generics, None, item.span);
                 for a in &imp.target_args {
                     self.ty(a);
                 }
@@ -662,7 +648,7 @@ impl<'a> Resolver<'a> {
                                     },
                                 );
                             }
-                            self.function(&f.sig, &f.generics, index, |r| {
+                            self.function(&f.sig, &f.generics, index, member.span, |r| {
                                 if let Some(b) = &f.body {
                                     r.block(b, false);
                                 }
@@ -689,7 +675,7 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 self.impl_target = outer;
-                self.scopes.pop();
+                self.pop_scope();
             }
             ItemKind::Use(u) => self.use_decl(u, item.span),
             ItemKind::Error => {}
@@ -716,6 +702,7 @@ impl<'a> Resolver<'a> {
         sig: &'a ast::FnSig,
         generics: &[ast::GenericParam],
         item: Option<u32>,
+        extent: Span,
         body: impl FnOnce(&mut Self),
     ) {
         self.depth += 1;
@@ -723,7 +710,7 @@ impl<'a> Resolver<'a> {
             Some(i) => self.container.replace(i),
             None => self.container,
         };
-        self.generics(generics, item);
+        self.generics(generics, item, extent);
         for t in [&sig.self_ty, &sig.rest_ty, &sig.ret].into_iter().flatten() {
             self.ty(t);
         }
@@ -753,7 +740,7 @@ impl<'a> Resolver<'a> {
             );
         }
         body(self);
-        self.scopes.pop();
+        self.pop_scope();
         self.container = outer;
         self.depth -= 1;
     }
@@ -838,7 +825,7 @@ impl<'a> Resolver<'a> {
                     self.m.refs.push((t.span, id));
                 }
             }
-            TypeKind::Optional(t) | TypeKind::Array(t) => self.ty(t),
+            TypeKind::Optional(t) | TypeKind::Array(t) | TypeKind::Rest(t) => self.ty(t),
             TypeKind::Union(ts) | TypeKind::Tuple(ts) => {
                 for t in ts {
                     self.ty(t);
@@ -937,6 +924,9 @@ impl<'a> Resolver<'a> {
                 }
                 let first = self.m.symbols.len() as u32;
                 self.bind_pat(pat);
+                for i in first..self.m.symbols.len() as u32 {
+                    self.visible_from.insert(i, s.span.end);
+                }
                 // Plain names (`let x`, `let (a, b)`) take their type from the annotation or
                 // the value; anything else is typed while checking the pattern.
                 let simple: Vec<(usize, bool)> = match &pat.kind {
@@ -1097,7 +1087,7 @@ impl<'a> Resolver<'a> {
                 self.expr(obj);
                 self.exprs(args);
             }
-            ExprKind::Closure(c) => self.function(&c.sig, &[], None, |r| r.expr(&c.body)),
+            ExprKind::Closure(c) => self.function(&c.sig, &[], None, c.span, |r| r.expr(&c.body)),
             ExprKind::Array(items) | ExprKind::Tuple(items) => self.exprs(items),
             ExprKind::Map(entries) => {
                 for entry in entries {
@@ -1150,13 +1140,13 @@ impl<'a> Resolver<'a> {
             ExprKind::Match { scrutinee, arms } => {
                 self.expr(scrutinee);
                 for arm in arms {
-                    self.push_scope();
+                    self.push_scope(arm.span);
                     self.bind_pat(&arm.pat);
                     if let Some(g) = &arm.guard {
                         self.expr(g);
                     }
                     self.expr(&arm.body);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
             }
             ExprKind::Block(b) => self.block(b, false),
@@ -1169,10 +1159,10 @@ impl<'a> Resolver<'a> {
                 pat, iter, body, ..
             } => {
                 self.expr(iter);
-                self.push_scope();
+                self.push_scope(pat.span.to(body.span));
                 self.bind_pat(pat);
                 self.block(body, false);
-                self.scopes.pop();
+                self.pop_scope();
             }
             ExprKind::Break { value, .. } => {
                 if let Some(v) = value {

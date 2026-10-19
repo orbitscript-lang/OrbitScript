@@ -1,0 +1,56 @@
+// The `math` library. Where Lua gives an integer for integer arguments and a float otherwise,
+// a stub returns the argument's type (`abs`, `max`, `min`).
+
+/// The absolute value of `x`.
+pub fn abs<T>(x: T) -> T;
+pub fn acos(x: number) -> float;
+pub fn asin(x: number) -> float;
+/// The arc tangent of `y / x`, using both signs for the quadrant.
+pub fn atan(y: number, x: number?) -> float;
+/// The smallest integer at least `x`.
+pub fn ceil(x: number) -> int;
+pub fn cos(x: number) -> float;
+/// `x` radians in degrees.
+pub fn deg(x: number) -> float;
+pub fn exp(x: number) -> float;
+/// The largest integer at most `x`.
+pub fn floor(x: number) -> int;
+/// The remainder of `x / y` that rounds the quotient towards zero.
+pub fn fmod(x: number, y: number) -> number;
+/// `m` and `e` with `x == m * 2^e`, `m` in [0.5, 1).
+pub fn frexp(x: number) -> (float, int);
+/// `m * 2^e`.
+pub fn ldexp(m: number, e: int) -> float;
+/// The logarithm of `x` in `base` (default e).
+pub fn log(x: number, base: number?) -> float;
+/// The largest argument.
+pub fn max<T>(x: T, ...rest: T) -> T;
+/// The smallest argument.
+pub fn min<T>(x: T, ...rest: T) -> T;
+/// The integral and fractional parts of `x`.
+pub fn modf(x: number) -> (float, float);
+/// `x` degrees in radians.
+pub fn rad(x: number) -> float;
+/// A float in [0, 1).
+pub fn random() -> float;
+/// An integer in [1, m].
+pub fn random(m: int) -> int;
+/// An integer in [m, n].
+pub fn random(m: int, n: int) -> int;
+/// Seeds the generator (randomly with no arguments); returns the two seed parts.
+pub fn randomseed(x: int?, y: int?) -> (int, int);
+pub fn sin(x: number) -> float;
+pub fn sqrt(x: number) -> float;
+pub fn tan(x: number) -> float;
+/// `x` as an integer when it is one exactly, otherwise `nil`.
+pub fn tointeger(x: any) -> int?;
+/// `"integer"`, `"float"`, or `nil` when `x` isn't a number.
+pub fn r#type(x: any) -> string?;
+/// Whether `m < n` as unsigned integers.
+pub fn ult(m: int, n: int) -> bool;
+
+/// Infinity.
+pub const huge: float;
+pub const maxinteger: int;
+pub const mininteger: int;
+pub const pi: float;
