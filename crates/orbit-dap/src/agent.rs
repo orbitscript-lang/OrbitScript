@@ -81,6 +81,13 @@ pub(crate) struct State {
     scopes: Vec<Scoped>,
     /// The editor disconnected: run on without stopping.
     detached: bool,
+    /// Debuggers attach to the running program ([`crate::serve`]) and
+    /// leave it running.
+    attach: bool,
+    /// The attached editor this state belongs to (`Inbox::session`).
+    session: u64,
+    /// Breakpoints or error stops may be set in the isolate.
+    armed: bool,
 }
 
 impl State {
@@ -96,7 +103,56 @@ impl State {
             next_id: 1,
             scopes: Vec::new(),
             detached: false,
+            attach: false,
+            session: 0,
+            armed: false,
         }
+    }
+
+    /// The state of a program debuggers attach to: no editor yet, and the
+    /// program keeps its own output.
+    #[cfg(unix)]
+    pub(crate) fn attached(link: Arc<Link>) -> State {
+        State {
+            output_to_editor: false,
+            detached: true,
+            attach: true,
+            ..State::new(link)
+        }
+    }
+
+    /// Follow the attached editors: a new one starts afresh, and one that
+    /// left takes its breakpoints with it.
+    fn follow_session(&mut self, p: &mut Paused<'_, '_>) {
+        let (session, closed) = {
+            let inbox = self.link.inbox.lock().unwrap_or_else(|e| e.into_inner());
+            (inbox.session, inbox.closed)
+        };
+        if session != self.session {
+            self.clear(p);
+            self.files.clear();
+            self.next_id = 1;
+            self.scopes.clear();
+            self.session = session;
+            self.detached = closed;
+        } else if closed {
+            self.clear(p);
+            self.detached = true;
+        }
+    }
+
+    /// Remove the editor's breakpoints and error stops from the isolate.
+    fn clear(&mut self, p: &mut Paused<'_, '_>) {
+        if !std::mem::take(&mut self.armed) {
+            return;
+        }
+        for file in self.files.values() {
+            for name in &file.names {
+                p.set_breakpoints(name, &[]);
+            }
+        }
+        self.files.clear();
+        p.set_error_break(ErrorBreak::Never);
     }
 
     pub(crate) fn launch(&mut self, launch: &Launch) {
@@ -189,6 +245,7 @@ impl State {
         let resolved = if self.no_debug {
             vec![None; lines.len()]
         } else {
+            self.armed = true;
             self.apply(target, &path)
         };
         let body: Vec<Json> = breakpoints
@@ -214,6 +271,7 @@ impl State {
             ErrorBreak::Never
         };
         if !self.no_debug {
+            self.armed = true;
             target.set_error_break(on);
         }
         self.link.respond(r, json!({}));
@@ -260,7 +318,14 @@ impl State {
     /// The program stopped.
     fn stopped(&mut self, p: &mut Paused<'_, '_>, reason: StopReason) -> Resume {
         let user_pause = self.link.stop_running();
+        if self.attach {
+            self.follow_session(p);
+        }
         if self.detached {
+            // No editor: what is queued is a departed one's.
+            let mut inbox = self.link.inbox.lock().unwrap_or_else(|e| e.into_inner());
+            inbox.queue.clear();
+            inbox.running = true;
             return Resume::Continue;
         }
         let entry = std::mem::take(&mut self.entry) && reason == StopReason::Step;
@@ -292,6 +357,8 @@ impl State {
                     None => {
                         // The editor went away.
                         self.detached = true;
+                        self.clear(p);
+                        self.go_on();
                         return Resume::Continue;
                     }
                 }
@@ -341,12 +408,18 @@ impl State {
                 self.link.respond(r, json!({}));
                 Resume::StepOut
             }
-            "disconnect" | "terminate" => {
+            command @ ("disconnect" | "terminate") => {
                 self.link.respond(r, json!({}));
                 self.detached = true;
-                // A launched program ends with its session.
+                // A launched program ends with its session; an attached
+                // one only when the editor asks.
+                let ends_program =
+                    !self.attach || command == "terminate" || a["terminateDebuggee"] == true;
+                if self.attach {
+                    self.clear(p);
+                }
                 let inbox = self.link.inbox.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(i) = &inbox.interrupt {
+                if ends_program && let Some(i) = &inbox.interrupt {
                     i.request();
                 }
                 Resume::Continue
@@ -361,6 +434,11 @@ impl State {
             }
             "configurationDone" => {
                 self.link.respond(r, json!({}));
+                return None;
+            }
+            "launch" => {
+                self.link
+                    .fail(r, "this program is already running: attach to it");
                 return None;
             }
             "stackTrace" => {

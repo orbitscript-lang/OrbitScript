@@ -98,6 +98,12 @@ struct Cli {
     lock_cpath: bool,
     no_ffi: bool,
     warnings: bool,
+    /// `--debug-listen`: serve debuggers from the start.
+    #[cfg(all(feature = "dap", unix))]
+    debug_listen: bool,
+    /// `--no-debug-signal`: don't start serving debuggers on `SIGUSR1`.
+    #[cfg(all(feature = "dap", unix))]
+    no_debug_signal: bool,
     /// Index of the script in the arguments (`-` for standard input).
     script: Option<usize>,
 }
@@ -130,6 +136,10 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
             "-W" => cli.warnings = true,
             "--lock-cpath" => cli.lock_cpath = true,
             "--no-ffi" => cli.no_ffi = true,
+            #[cfg(all(feature = "dap", unix))]
+            "--debug-listen" => cli.debug_listen = true,
+            #[cfg(all(feature = "dap", unix))]
+            "--no-debug-signal" => cli.no_debug_signal = true,
             _ if a.starts_with("-e") || a.starts_with("-l") => {
                 let opt = if a.starts_with("-e") { "-e" } else { "-l" };
                 // The value is glued on (`-eprint(1)`) or the next argument,
@@ -205,7 +215,13 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          -         stop handling options and execute stdin\n"
     );
     #[cfg(all(feature = "dap", unix))]
-    eprintln!("  --debug-server  (alone) be an editor's debug adapter, over stdio");
+    eprint!(
+        "  --debug-listen     serve debuggers from the start (otherwise on SIGUSR1)\n  \
+         --no-debug-signal  don't serve debuggers on SIGUSR1\n  \
+         --debug-server     (alone) be an editor's debug adapter, over stdio\n  \
+         --debug-attach pid (alone) relay an editor's session to a running program\n  \
+         --debug-attach --list  (alone) list the programs a debugger can attach to\n"
+    );
     ExitCode::FAILURE
 }
 
@@ -216,22 +232,30 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         Some("--debug-server") => return dap::server(&prog),
         Some("--debug-connect") => return dap::connect(&prog, &args),
+        Some("--debug-attach") => return dap::attach(&prog, &args),
         _ => {}
     }
     let cli = match parse(&args) {
         Ok(c) => c,
         Err(e) => return usage(&prog, e),
     };
-    let iso = match new_isolate(&cli) {
+    #[cfg_attr(not(all(feature = "dap", unix)), allow(unused_mut))]
+    let mut iso = match new_isolate(&cli) {
         Ok(iso) => iso,
         Err(m) => {
             eprintln!("{prog}: {m}");
             return ExitCode::FAILURE;
         }
     };
+    #[cfg(all(feature = "dap", unix))]
+    let service = dap::serve(&mut iso, &cli, &args, &prog);
     let mut run = Runner::new(iso, prog);
     let ok = run.main(&cli, &args);
     run.iso.flush();
+    #[cfg(all(feature = "dap", unix))]
+    if let Some(s) = service {
+        s.stop();
+    }
     // Like lua5.5, close the state on the way out, even after an error:
     // every object with a `__gc` still registered is finalized (dropping
     // the isolate closes it and flushes again).
