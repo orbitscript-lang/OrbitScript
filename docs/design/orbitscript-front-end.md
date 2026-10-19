@@ -62,13 +62,13 @@ Rust rules the parser follows where the proposal doesn't say otherwise:
 - **`stub`**: `.orbi` stubs. `fn` items and `impl` functions may end in `;`, and `const NAME: T;` needs no value. Lowering a stub is an error ("a stub declaration has no body to run").
 - **`doc_comments`**: the lexer records `///` (`CommentKind::Doc`) and `//!` (`InnerDoc`) comments in `Ast::comments`, and each item, `impl` members included, gets the `///` lines just before it in `Item::docs`. `////` is an ordinary comment, as in Rust.
 - **`keep_trivia`**: `Ast::comments` holds every comment (`Line`, `Block`, `Doc`, `InnerDoc`), in source order, for a formatter or an editor. The tree itself doesn't change.
-- **`recover`**: parsing goes on after a syntax error (see below). `parse_recovering` returns the AST and every error; `parse_with` still returns only the first.
+- **`recover`**: parsing goes on after a syntax error (see below). `parse_recovering` returns the AST and every error; `parse_with` ignores the switch and returns only the first.
 
 Every `Diagnostic` has a `kind`: `UnexpectedEof` when the input stops in the middle of something (an unclosed `{`, string, comment or template hole, or a construct cut short), so a REPL can read another line; `Other` for the rest.
 
 ### Error recovery
 
-With `recover`, an error is recorded and the parse picks up where the next thing most likely starts, so an editor gets an AST for everything around the broken line:
+`parse_recovering` first parses normally, so a module without errors gets exactly the tree `parse_with` gives (the layout rules below never see valid code). Only a module with errors is parsed again with recovery, where an error is recorded and the parse picks up where the next thing most likely starts, so an editor gets an AST for everything around the broken line:
 
 - **A missing expression** before `;`, `,`, `)`, `]`, `}` or the end (`let x = ;`, `f(a, )`) becomes `ExprKind::Error` and the construct around it is kept.
 - **A missing `;`** is reported and parsing goes on as if it were there; the rest of the line, if any, is skipped.
@@ -77,7 +77,7 @@ With `recover`, an error is recorded and the parse picks up where the next thing
 - **A lexer error** is recorded and the bad token skipped; a bad string or number becomes an empty string or `0`, so `let s = "\q";` still binds `s`. A parse error right after a lexer error isn't reported (it is most likely the same mistake).
 - **A broken template hole** becomes an `Error` expression inside the template.
 
-Lowering rejects `Error` nodes ("this code has a syntax error, so it can't run"). On every OrbitScript file in the repository, a recovering parse gives exactly the same tree as a normal one, and deleting the first or last token of any line never loses an item before or after the break (`tests/recover.rs`).
+Lowering rejects `Error` nodes ("this code has a syntax error, so it can't run"). Deleting the first or last token of any line of any OrbitScript file in the repository never loses an item before or after the break (`tests/recover.rs`).
 
 Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, `type A<T>`) and the `self: T` and `...rest: T` annotations are always kept. `type` aliases lower to nothing; `e as T` lowers like `(e)`.
 
