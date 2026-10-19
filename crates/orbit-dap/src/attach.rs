@@ -1,4 +1,4 @@
-//! Attaching to a running program (ADR-12, D11): the program serves
+//! Attaching to a running program (ADR-12, D10, D11): the program serves
 //! debuggers on a local socket ([`serve`], [`Service::start`]), and
 //! `orbit --debug-attach` finds it ([`list`]) and relays an editor's
 //! session to it ([`attach`]).
@@ -8,20 +8,27 @@
 //! answered with what the program is and closed; anything else starts a
 //! DAP session, one at a time. The program runs on while editors come and
 //! go; a session that ends takes its breakpoints with it.
+//!
+//! A process has one server, however many isolates it serves ([`Hub`]):
+//! each isolate is a DAP thread of its own that stops on its own. The
+//! session answers what concerns them all (threads, breakpoints, error
+//! stops) itself and passes the rest to the isolate a request names, by
+//! its thread id or the thread bits of a frame id or variables reference.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use orbit::Isolate;
 use serde_json::{Value, json};
 
 use crate::socket::Stream;
-use crate::{Link, agent, read_loop, socket, wire};
+use crate::{Link, Wire, agent, socket, wire};
 
 /// The version of the `describe` answer.
 const DESCRIBE_VERSION: u32 = 1;
@@ -39,7 +46,7 @@ pub struct About {
 
 /// A program's debug server, from any thread ([`serve`]).
 #[derive(Clone)]
-pub struct Service(Arc<Shared>);
+pub struct Service(Arc<Hub>);
 
 impl std::fmt::Debug for Service {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,45 +54,113 @@ impl std::fmt::Debug for Service {
     }
 }
 
-struct Shared {
-    link: Arc<Link>,
+/// The process's debug server, while something serves or uses it.
+static HUB: Mutex<Weak<Hub>> = Mutex::new(Weak::new());
+
+/// The one debug server of a process, shared by its isolates.
+struct Hub {
+    wire: Arc<Wire>,
     about: About,
     started: SystemTime,
     /// The socket, once listening.
     socket: Mutex<Option<socket::Bound>>,
     stopped: AtomicBool,
+    session: Mutex<Session>,
+}
+
+/// The isolates being served and what the editor has set for them.
+#[derive(Default)]
+struct Session {
+    isolates: Vec<Arc<Link>>,
+    /// The last thread id given out.
+    last_thread: i64,
+    /// An editor is connected.
+    connected: bool,
+    /// Counts the editors that attached ([`crate::Inbox::session`]).
+    id: u64,
+    /// The editor's last `setBreakpoints` per source, as passed on, for
+    /// isolates that arrive later.
+    breakpoints: BTreeMap<String, Value>,
+    /// Its last `setExceptionBreakpoints`, as passed on.
+    exceptions: Option<Value>,
+    /// The last breakpoint id given out.
+    last_breakpoint: i64,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Make `iso` debuggable by editors that attach later. Nothing listens
 /// until [`Service::start`], which any thread may call; until a debugger
 /// attaches the program runs as it would undebugged. Fails if the isolate
-/// allows no debugger. One isolate per process for now: it is the DAP
-/// thread 1.
+/// allows no debugger.
+///
+/// Every isolate served in a process shares one server (D10): the first
+/// call makes it, with `about`; later calls join it (their `about` is not
+/// used) and their isolates appear to an attached editor as new threads.
+/// An isolate leaves when it closes.
 pub fn serve(iso: &mut Isolate, about: About) -> Result<Service, orbit::Error> {
-    let link = Arc::new(Link::new(Box::new(std::io::sink())));
+    // Fails here if the isolate allows no debugger, and lets go of an
+    // earlier `serve`, before the session is locked: closing an isolate's
+    // events takes the lock to leave the session.
+    iso.set_debug_events(None)?;
+    let hub = {
+        let mut slot = lock(&HUB);
+        match slot.upgrade() {
+            Some(hub) => hub,
+            None => {
+                let hub = Arc::new(Hub {
+                    wire: Arc::new(Wire::new(Box::new(std::io::sink()))),
+                    about,
+                    started: SystemTime::now(),
+                    socket: Mutex::new(None),
+                    stopped: AtomicBool::new(false),
+                    session: Mutex::new(Session::default()),
+                });
+                *slot = Arc::downgrade(&hub);
+                hub
+            }
+        }
+    };
+    let mut session = lock(&hub.session);
+    let thread = session.last_thread + 1;
+    let link = Arc::new(Link::new(Arc::clone(&hub.wire), thread));
     let state = Rc::new(RefCell::new(agent::State::attached(Arc::clone(&link))));
-    iso.set_debug_events(Some(Box::new(agent::Events(state))))?;
+    let leave = {
+        let hub = Arc::clone(&hub);
+        Box::new(move || hub.leave(thread))
+    };
+    iso.set_debug_events(Some(Box::new(agent::Events::with_drop(state, leave))))?;
+    session.last_thread = thread;
     {
-        let mut inbox = link.inbox.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inbox = lock(&link.inbox);
         inbox.attach = true;
         inbox.running = true;
-        inbox.closed = true;
+        inbox.closed = !session.connected;
+        inbox.connected = session.connected;
+        inbox.session = session.id;
         inbox.pause = Some(iso.pause_handle());
         inbox.interrupt = Some(iso.interrupt());
     }
-    Ok(Service(Arc::new(Shared {
-        link,
-        about,
-        started: SystemTime::now(),
-        socket: Mutex::new(None),
-        stopped: AtomicBool::new(false),
-    })))
+    if session.connected {
+        // Join the session as it stands.
+        let set = session.breakpoints.values().chain(&session.exceptions);
+        for r in set {
+            link.deliver(r.clone());
+        }
+        hub.wire
+            .event("thread", json!({"reason": "started", "threadId": thread}));
+    }
+    session.isolates.push(link);
+    drop(session);
+    Ok(Service(hub))
 }
 
 impl Service {
     /// Listen for debuggers, if not yet listening; the socket's path.
     pub fn start(&self) -> std::io::Result<PathBuf> {
-        let mut socket = self.0.socket.lock().unwrap_or_else(|e| e.into_inner());
+        let mut socket = lock(&self.0.socket);
         if let Some(b) = &*socket {
             return Ok(b.path.clone());
         }
@@ -97,20 +172,20 @@ impl Service {
         let path = bound.path.clone();
         let listener = bound.listener.try_clone()?;
         *socket = Some(bound);
-        let shared = Arc::clone(&self.0);
+        let hub = Arc::clone(&self.0);
         std::thread::Builder::new()
             .name("orbit-dap listener".into())
             .spawn(move || {
                 loop {
                     let stream = listener.accept();
-                    if shared.stopped.load(Ordering::Relaxed) {
+                    if hub.stopped.load(Ordering::Relaxed) {
                         break;
                     }
                     if let Ok(stream) = stream {
-                        let shared = Arc::clone(&shared);
+                        let hub = Arc::clone(&hub);
                         let _ = std::thread::Builder::new()
                             .name("orbit-dap reader".into())
-                            .spawn(move || shared.connection(stream));
+                            .spawn(move || hub.connection(stream));
                     }
                 }
             })?;
@@ -119,20 +194,14 @@ impl Service {
 
     /// The socket's path while listening.
     pub fn path(&self) -> Option<PathBuf> {
-        let socket = self.0.socket.lock().unwrap_or_else(|e| e.into_inner());
-        socket.as_ref().map(|b| b.path.clone())
+        lock(&self.0.socket).as_ref().map(|b| b.path.clone())
     }
 
-    /// Stop listening and remove the socket. A session in progress goes
-    /// on until its editor leaves.
+    /// Stop listening and remove the socket, for every isolate in the
+    /// process. A session in progress goes on until its editor leaves.
     pub fn stop(&self) {
         self.0.stopped.store(true, Ordering::Relaxed);
-        let bound = self
-            .0
-            .socket
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        let bound = lock(&self.0.socket).take();
         if let Some(b) = bound {
             // Wake the listener so it sees `stopped`.
             let _ = Stream::connect(&b.path);
@@ -140,7 +209,27 @@ impl Service {
     }
 }
 
-impl Shared {
+impl Hub {
+    /// Isolate `thread` closed.
+    fn leave(&self, thread: i64) {
+        let mut session = lock(&self.session);
+        let Some(i) = session.isolates.iter().position(|l| l.thread == thread) else {
+            return;
+        };
+        let link = session.isolates.remove(i);
+        let waiting = std::mem::take(&mut lock(&link.inbox).queue);
+        for r in waiting {
+            // What the session answered itself needs no answer now.
+            if r["_session"] != true {
+                self.wire.fail(&r, "the isolate has closed");
+            }
+        }
+        if session.connected {
+            self.wire
+                .event("thread", json!({"reason": "exited", "threadId": thread}));
+        }
+    }
+
     /// Serve one connection: a `describe`, or a debugging session.
     fn connection(&self, stream: Stream) {
         let Ok(mut out) = stream.try_clone() else {
@@ -166,37 +255,185 @@ impl Shared {
             }
             let _ = wire::write(out, &r);
         };
-        let mut inbox = self.link.inbox.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = lock(&self.session);
         if first["command"] == "describe" {
-            let attached = inbox.connected;
-            drop(inbox);
-            reply(&mut out, self.describe(attached), None);
+            let body = self.describe(&session);
+            drop(session);
+            reply(&mut out, body, None);
             return;
         }
-        if inbox.connected {
-            drop(inbox);
+        if session.connected {
+            drop(session);
             reply(&mut out, json!({}), Some("a debugger is already attached"));
             return;
         }
-        inbox.connected = true;
-        inbox.closed = false;
-        inbox.session += 1;
-        inbox.queue.clear();
-        inbox.user_pause = false;
-        *self.link.out.lock().unwrap_or_else(|e| e.into_inner()) = Box::new(out);
-        self.link.seq.store(0, Ordering::Relaxed);
-        drop(inbox);
-        let link = Arc::clone(&self.link);
-        read_loop(link, input.into_inner(), Some(first));
+        session.connected = true;
+        session.id += 1;
+        session.breakpoints.clear();
+        session.exceptions = None;
+        session.last_breakpoint = 0;
+        self.wire.redirect(Box::new(out));
+        for link in &session.isolates {
+            let mut inbox = lock(&link.inbox);
+            inbox.connected = true;
+            inbox.closed = false;
+            inbox.session = session.id;
+            inbox.queue.clear();
+            inbox.user_pause = false;
+        }
+        drop(session);
+        let mut input = BufReader::new(input.into_inner());
+        let mut first = Some(first);
+        while let Some(msg) = first
+            .take()
+            .or_else(|| wire::read(&mut input).ok().flatten())
+        {
+            if msg["type"] == "request" && !self.request(&msg) {
+                break;
+            }
+        }
+        let mut session = lock(&self.session);
+        session.connected = false;
+        for link in &session.isolates {
+            link.close();
+        }
         // Nothing more goes to this editor.
-        *self.link.out.lock().unwrap_or_else(|e| e.into_inner()) = Box::new(std::io::sink());
+        self.wire.redirect(Box::new(std::io::sink()));
     }
 
-    fn describe(&self, attached: bool) -> Value {
+    /// Answer `r`, or pass it to the isolate it is for; `false` once the
+    /// session is over.
+    fn request(&self, r: &Value) -> bool {
+        let a = &r["arguments"];
+        let mut session = lock(&self.session);
+        // The isolate a request names.
+        let named = |id: Option<u64>| -> Option<Arc<Link>> {
+            let thread = agent::thread_of(id?);
+            session
+                .isolates
+                .iter()
+                .find(|l| l.thread == thread)
+                .cloned()
+        };
+        let target = match r["command"].as_str().unwrap_or("") {
+            "initialize" => {
+                self.wire.respond(r, agent::capabilities());
+                self.wire.event("initialized", json!({}));
+                return true;
+            }
+            "attach" | "configurationDone" => {
+                self.wire.respond(r, json!({}));
+                return true;
+            }
+            "launch" => {
+                self.wire
+                    .fail(r, "this program is already running: attach to it");
+                return true;
+            }
+            "threads" => {
+                let threads: Vec<Value> = session
+                    .isolates
+                    .iter()
+                    .map(|l| json!({"id": l.thread, "name": thread_name(l.thread)}))
+                    .collect();
+                self.wire.respond(r, json!({"threads": threads}));
+                return true;
+            }
+            "setBreakpoints" => {
+                let Some(path) = a["source"]["path"].as_str() else {
+                    self.wire.fail(r, "setBreakpoints needs a source path");
+                    return true;
+                };
+                let lines: Vec<u64> = a["breakpoints"]
+                    .as_array()
+                    .map(|b| b.iter().filter_map(|b| b["line"].as_u64()).collect())
+                    .unwrap_or_default();
+                let ids: Vec<i64> = lines
+                    .iter()
+                    .map(|_| {
+                        session.last_breakpoint += 1;
+                        session.last_breakpoint
+                    })
+                    .collect();
+                // Each isolate that has the file reports where it put them.
+                let body: Vec<Value> = ids
+                    .iter()
+                    .zip(&lines)
+                    .map(|(id, line)| json!({"id": id, "verified": false, "line": line}))
+                    .collect();
+                self.wire.respond(r, json!({"breakpoints": body}));
+                let mut pass = r.clone();
+                pass["_session"] = json!(true);
+                pass["_ids"] = json!(ids);
+                session.breakpoints.insert(path.to_owned(), pass.clone());
+                for link in &session.isolates {
+                    link.deliver(pass.clone());
+                }
+                return true;
+            }
+            "setExceptionBreakpoints" => {
+                self.wire.respond(r, json!({}));
+                let mut pass = r.clone();
+                pass["_session"] = json!(true);
+                session.exceptions = Some(pass.clone());
+                for link in &session.isolates {
+                    link.deliver(pass.clone());
+                }
+                return true;
+            }
+            command @ ("disconnect" | "terminate") => {
+                if command == "terminate" || a["terminateDebuggee"] == true {
+                    for link in &session.isolates {
+                        if let Some(i) = &lock(&link.inbox).interrupt {
+                            i.request();
+                        }
+                    }
+                }
+                self.wire.respond(r, json!({}));
+                return false;
+            }
+            "pause" => {
+                let Some(link) = named(a["threadId"].as_u64().map(|t| t << agent::ID_BITS)) else {
+                    self.wire.fail(r, "no such thread");
+                    return true;
+                };
+                link.pause();
+                self.wire.respond(r, json!({}));
+                return true;
+            }
+            "continue" | "next" | "stepIn" | "stepOut" | "stackTrace" => {
+                named(a["threadId"].as_u64().map(|t| t << agent::ID_BITS))
+            }
+            "scopes" => named(a["frameId"].as_u64()),
+            "variables" => named(a["variablesReference"].as_u64()),
+            // An expression with no frame is looked up in the first isolate.
+            "evaluate" => match a["frameId"].as_u64() {
+                Some(id) => named(Some(id)),
+                None => session.isolates.first().cloned(),
+            },
+            command => {
+                self.wire.fail(r, &format!("'{command}' isn't supported"));
+                return true;
+            }
+        };
+        drop(session);
+        match target {
+            Some(link) => link.deliver(r.clone()),
+            None => self.wire.fail(r, "no such thread"),
+        }
+        true
+    }
+
+    fn describe(&self, session: &Session) -> Value {
         let started = self
             .started
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
+        let isolates: Vec<Value> = session
+            .isolates
+            .iter()
+            .map(|l| json!({"id": l.thread, "name": thread_name(l.thread)}))
+            .collect();
         json!({
             "version": DESCRIBE_VERSION,
             "pid": std::process::id(),
@@ -204,10 +441,15 @@ impl Shared {
             "args": self.about.args,
             "startTime": started,
             "runtime": format!("orbit {}", env!("CARGO_PKG_VERSION")),
-            "isolates": [{"id": 1, "name": "main"}],
-            "attached": attached,
+            "isolates": isolates,
+            "attached": session.connected,
         })
     }
+}
+
+/// What the editor calls isolate `thread`.
+fn thread_name(thread: i64) -> String {
+    format!("isolate {thread}")
 }
 
 /// The sockets of programs serving debuggers: `(pid, path)`.

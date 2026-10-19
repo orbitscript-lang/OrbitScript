@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::socket::Stream;
-use crate::{Link, agent, socket, wire};
+use crate::{Link, Wire, agent, socket, wire};
 
 /// How long a starting program has to connect back.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,7 +33,10 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// a program under a debugger connecting to a socket: it is followed by
 /// the socket's path, the program and its arguments.
 pub fn adapter(child: &[OsString]) -> i32 {
-    let link = Arc::new(Link::new(Box::new(std::io::stdout())));
+    let link = Arc::new(Link::new(
+        Arc::new(Wire::new(Box::new(std::io::stdout()))),
+        1,
+    ));
     let mut input = BufReader::new(std::io::stdin());
     let mut initialize = None;
     let mut early = Vec::new();
@@ -118,7 +121,7 @@ fn start(
     let mut process = None;
     let mut output = Vec::new();
     if let Some(kind) = terminal {
-        let request_seq = link.send(json!({
+        let request_seq = link.wire.send(json!({
             "type": "request",
             "command": "runInTerminal",
             "arguments": {
@@ -330,7 +333,7 @@ impl Program {
                 Some("event") if m["event"] == "terminated" => terminated = true,
                 _ => {}
             }
-            link.send(m);
+            link.wire.send(m);
         }
         let status = self.process.as_mut().and_then(wait_or_kill);
         // The program's output comes before the session's end.

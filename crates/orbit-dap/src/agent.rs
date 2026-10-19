@@ -67,6 +67,37 @@ enum Scoped {
     Table(Pinned<Table<'static>>),
 }
 
+/// Frame ids and variables references carry their isolate's thread in
+/// the bits above these, so the session can route requests by them.
+pub(crate) const ID_BITS: u32 = 24;
+
+/// The variables references handed out during one stop.
+struct Refs {
+    /// The isolate's thread, shifted to the top of each reference.
+    base: u64,
+    list: Vec<Scoped>,
+}
+
+impl Refs {
+    fn push(&mut self, s: Scoped) -> u64 {
+        self.list.push(s);
+        self.base | self.list.len() as u64
+    }
+
+    /// The index of `reference` in the list, if it is this isolate's.
+    fn index(&self, reference: u64) -> Option<usize> {
+        if reference & !((1 << ID_BITS) - 1) != self.base {
+            return None;
+        }
+        let i = ((reference & ((1 << ID_BITS) - 1)) as usize).checked_sub(1)?;
+        (i < self.list.len()).then_some(i)
+    }
+
+    fn clear(&mut self) {
+        self.list.clear();
+    }
+}
+
 pub(crate) struct State {
     link: Arc<Link>,
     cwd: PathBuf,
@@ -78,11 +109,12 @@ pub(crate) struct State {
     files: HashMap<PathBuf, FileBreakpoints>,
     next_id: i64,
     /// Variables references handed out during this stop.
-    scopes: Vec<Scoped>,
+    scopes: Refs,
     /// The editor disconnected: run on without stopping.
     detached: bool,
     /// Debuggers attach to the running program ([`crate::serve`]) and
-    /// leave it running.
+    /// leave it running. Its session answers configuration requests for
+    /// every isolate, and this one only applies them.
     attach: bool,
     /// The attached editor this state belongs to (`Inbox::session`).
     session: u64,
@@ -92,6 +124,7 @@ pub(crate) struct State {
 
 impl State {
     pub(crate) fn new(link: Arc<Link>) -> State {
+        let base = (link.thread as u64) << ID_BITS;
         State {
             link,
             cwd: std::env::current_dir().unwrap_or_default(),
@@ -101,7 +134,10 @@ impl State {
             entry: false,
             files: HashMap::new(),
             next_id: 1,
-            scopes: Vec::new(),
+            scopes: Refs {
+                base,
+                list: Vec::new(),
+            },
             detached: false,
             attach: false,
             session: 0,
@@ -227,11 +263,20 @@ impl State {
                     .collect()
             })
             .unwrap_or_default();
+        // The session numbers an attached program's breakpoints.
+        let given: Vec<i64> = r["_ids"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Json::as_i64).collect())
+            .unwrap_or_default();
         let breakpoints = lines
             .iter()
-            .map(|&l| {
-                self.next_id += 1;
-                (self.next_id - 1, l)
+            .enumerate()
+            .map(|(i, &l)| match given.get(i) {
+                Some(&id) => (id, l),
+                None => {
+                    self.next_id += 1;
+                    (self.next_id - 1, l)
+                }
             })
             .collect::<Vec<_>>();
         self.files.insert(
@@ -247,6 +292,15 @@ impl State {
             self.armed = true;
             self.apply(target, &path)
         };
+        if self.attach {
+            // Answered by the session; say which ones this isolate placed.
+            for (&(id, _), line) in breakpoints.iter().zip(resolved) {
+                if let Some(line) = line {
+                    self.changed(id, line);
+                }
+            }
+            return;
+        }
         let body: Vec<Json> = breakpoints
             .iter()
             .zip(resolved)
@@ -273,7 +327,9 @@ impl State {
             self.armed = true;
             target.set_error_break(on);
         }
-        self.link.respond(r, json!({}));
+        if !self.attach {
+            self.link.respond(r, json!({}));
+        }
     }
 
     /// A request before the program runs.
@@ -305,13 +361,18 @@ impl State {
                     .find(|b| b.requested == requested)
                     .and_then(|b| b.line)
                 {
-                    self.link.event(
-                        "breakpoint",
-                        json!({"reason": "changed", "breakpoint": {"id": id, "verified": true, "line": line}}),
-                    );
+                    self.changed(id, line);
                 }
             }
         }
+    }
+
+    /// Breakpoint `id` is set, at `line`.
+    fn changed(&self, id: i64, line: u32) {
+        self.link.event(
+            "breakpoint",
+            json!({"reason": "changed", "breakpoint": {"id": id, "verified": true, "line": line}}),
+        );
     }
 
     /// The program stopped.
@@ -342,7 +403,12 @@ impl State {
         };
         let announced = event.is_some();
         if let Some((why, text)) = event {
-            let mut body = json!({"reason": why, "threadId": 1, "allThreadsStopped": true});
+            // Each attached isolate stops on its own (D10).
+            let mut body = json!({
+                "reason": why,
+                "threadId": self.link.thread,
+                "allThreadsStopped": !self.attach,
+            });
             if let Some(text) = text {
                 body["description"] = json!(text);
                 body["text"] = json!(text);
@@ -392,7 +458,8 @@ impl State {
         let a = &r["arguments"];
         let resume = match r["command"].as_str().unwrap_or("") {
             "continue" => {
-                self.link.respond(r, json!({"allThreadsContinued": true}));
+                self.link
+                    .respond(r, json!({"allThreadsContinued": !self.attach}));
                 Resume::Continue
             }
             "next" => {
@@ -446,8 +513,10 @@ impl State {
                 return None;
             }
             "scopes" => {
-                let level = frame_level(a);
-                let body = self.scopes_of(p, level);
+                let body = match self.frame_level(a) {
+                    Some(level) => self.scopes_of(p, level),
+                    None => json!({"scopes": []}),
+                };
                 self.link.respond(r, body);
                 return None;
             }
@@ -473,6 +542,16 @@ impl State {
         Some(resume)
     }
 
+    /// The level a request's `frameId` names, if it is one of this
+    /// isolate's frames.
+    fn frame_level(&self, a: &Json) -> Option<usize> {
+        let id = a["frameId"].as_u64()?;
+        if id >> ID_BITS != self.scopes.base >> ID_BITS {
+            return None;
+        }
+        ((id & ((1 << ID_BITS) - 1)) as usize).checked_sub(1)
+    }
+
     fn stack_trace(&self, p: &mut Paused<'_, '_>, a: &Json) -> Json {
         let frames = p.frames();
         let start = a["startFrame"].as_u64().unwrap_or(0) as usize;
@@ -487,7 +566,7 @@ impl State {
             .take(count)
             .map(|(level, f)| {
                 let mut frame = json!({
-                    "id": level + 1,
+                    "id": self.scopes.base | (level as u64 + 1),
                     "name": frame_name(f),
                     "line": f.currentline.max(0),
                     "column": if f.currentline > 0 { 1 } else { 0 },
@@ -511,13 +590,9 @@ impl State {
         if p.frame(level).is_none() {
             return json!({"scopes": []});
         }
-        let mut reference = |s: Scoped| {
-            self.scopes.push(s);
-            self.scopes.len()
-        };
-        let locals = reference(Scoped::Locals(level));
-        let upvalues = reference(Scoped::Upvalues(level));
-        let globals = reference(Scoped::Globals);
+        let locals = self.scopes.push(Scoped::Locals(level));
+        let upvalues = self.scopes.push(Scoped::Upvalues(level));
+        let globals = self.scopes.push(Scoped::Globals);
         json!({"scopes": [
             {"name": "Locals", "presentationHint": "locals", "variablesReference": locals, "expensive": false},
             {"name": "Upvalues", "variablesReference": upvalues, "expensive": false},
@@ -526,8 +601,8 @@ impl State {
     }
 
     fn variables(&mut self, p: &mut Paused<'_, '_>, reference: u64) -> Option<Vec<Json>> {
-        let i = (reference as usize).checked_sub(1)?;
-        let vars = match self.scopes.get(i)? {
+        let i = self.scopes.index(reference)?;
+        let vars = match &self.scopes.list[i] {
             Scoped::Locals(level) => p.locals(*level),
             Scoped::Upvalues(level) => p.upvalues(*level),
             Scoped::Globals => {
@@ -538,7 +613,7 @@ impl State {
             Scoped::Table(_) => {
                 let scopes = &mut self.scopes;
                 return p.scope(|s| {
-                    let Scoped::Table(t) = &scopes[i] else {
+                    let Scoped::Table(t) = &scopes.list[i] else {
                         unreachable!("checked above")
                     };
                     let t = t.get(s).ok()?;
@@ -571,9 +646,8 @@ impl State {
         if !is_name(first) || !parts.clone().all(is_name) {
             return Err("only names and fields (a.b.c) can be evaluated yet".into());
         }
-        let found = match a["frameId"].as_u64() {
-            Some(id) => {
-                let level = (id as usize).saturating_sub(1);
+        let found = match self.frame_level(a) {
+            Some(level) => {
                 let local = p
                     .locals(level)
                     .into_iter()
@@ -613,21 +687,50 @@ impl State {
 }
 
 /// The host's events, as the isolate reports them.
-pub(crate) struct Events(pub(crate) Rc<RefCell<State>>);
+pub(crate) struct Events {
+    state: Rc<RefCell<State>>,
+    /// Runs when the isolate closes (or stops being debugged).
+    on_drop: Option<Box<dyn FnOnce()>>,
+}
 
-impl DebugEvents for Events {
-    fn stopped(&mut self, paused: &mut Paused<'_, '_>, reason: StopReason) -> Resume {
-        self.0.borrow_mut().stopped(paused, reason)
+impl Events {
+    pub(crate) fn new(state: Rc<RefCell<State>>) -> Events {
+        Events {
+            state,
+            on_drop: None,
+        }
     }
 
-    fn breakpoints_resolved(&mut self, source: &[u8], breakpoints: &[Breakpoint]) {
-        self.0.borrow().resolved(source, breakpoints)
+    pub(crate) fn with_drop(state: Rc<RefCell<State>>, on_drop: Box<dyn FnOnce()>) -> Events {
+        Events {
+            state,
+            on_drop: Some(on_drop),
+        }
     }
 }
 
-/// The level a request's `frameId` names.
-fn frame_level(a: &Json) -> usize {
-    (a["frameId"].as_u64().unwrap_or(1) as usize).saturating_sub(1)
+impl Drop for Events {
+    fn drop(&mut self) {
+        if let Some(f) = self.on_drop.take() {
+            f();
+        }
+    }
+}
+
+impl DebugEvents for Events {
+    fn stopped(&mut self, paused: &mut Paused<'_, '_>, reason: StopReason) -> Resume {
+        self.state.borrow_mut().stopped(paused, reason)
+    }
+
+    fn breakpoints_resolved(&mut self, source: &[u8], breakpoints: &[Breakpoint]) {
+        self.state.borrow().resolved(source, breakpoints)
+    }
+}
+
+/// The isolate a frame id, variables reference or thread-tagged id
+/// belongs to.
+pub(crate) fn thread_of(id: u64) -> i64 {
+    (id >> ID_BITS) as i64
 }
 
 fn frame_name(f: &orbit::stack::FrameInfo) -> String {
@@ -668,12 +771,9 @@ fn text_of<'s>(s: &'s Scope<'s>, e: &Pinned<orbit::Value<'static>>) -> String {
 }
 
 /// One variable for the editor; a table gets a reference to expand it.
-fn describe(scopes: &mut Vec<Scoped>, name: String, v: orbit::Value<'_>) -> Json {
+fn describe(scopes: &mut Refs, name: String, v: orbit::Value<'_>) -> Json {
     let reference = match v.as_table() {
-        Some(t) => {
-            scopes.push(Scoped::Table(t.pin()));
-            scopes.len()
-        }
+        Some(t) => scopes.push(Scoped::Table(t.pin())),
         None => 0,
     };
     json!({
@@ -689,7 +789,7 @@ const MAX_FIELDS: usize = 1000;
 
 /// A table's fields: integer keys in order, then string keys by name, then
 /// the rest.
-fn table_children<'s>(s: &'s Scope<'s>, scopes: &mut Vec<Scoped>, t: Table<'s>) -> Vec<Json> {
+fn table_children<'s>(s: &'s Scope<'s>, scopes: &mut Refs, t: Table<'s>) -> Vec<Json> {
     use orbit::Value;
     let _ = s;
     let mut fields: Vec<(u8, String, i64, Value<'s>)> = Vec::new();
