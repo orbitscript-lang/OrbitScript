@@ -1280,4 +1280,25 @@ impl<'a> Control<'a> {
     pub fn main_thread(&self) -> ThreadRef {
         self.c.main_thread().into()
     }
+
+    /// [`crate::Isolate::set_breakpoints`], also from inside a stop.
+    #[cfg(feature = "debugger")]
+    pub fn set_breakpoints(
+        &mut self,
+        source: &[u8],
+        lines: &[u32],
+    ) -> Vec<crate::debugger::Breakpoint> {
+        self.c
+            .set_breakpoints(source.into(), lines.into())
+            .iter()
+            .map(|&b| crate::debugger::abi::breakpoint_from(b))
+            .collect()
+    }
+
+    /// [`crate::Isolate::set_error_break`], also from inside a stop.
+    #[cfg(feature = "debugger")]
+    pub fn set_error_break(&mut self, on: crate::debugger::ErrorBreak) {
+        self.c
+            .set_error_break(crate::debugger::abi::error_break_to(on))
+    }
 }

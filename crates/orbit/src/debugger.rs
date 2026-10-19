@@ -220,6 +220,17 @@ impl<'a, 'b> Paused<'a, 'b> {
         })
     }
 
+    /// [`crate::Isolate::set_breakpoints`], for requests that come while
+    /// stopped.
+    pub fn set_breakpoints(&mut self, source: &[u8], lines: &[u32]) -> Vec<Breakpoint> {
+        self.s.control().set_breakpoints(source, lines)
+    }
+
+    /// [`crate::Isolate::set_error_break`], while stopped.
+    pub fn set_error_break(&mut self, on: ErrorBreak) {
+        self.s.control().set_error_break(on)
+    }
+
     /// The global table.
     pub fn globals(&mut self) -> Pinned<Table<'static>> {
         self.s.with_scope(|s| s.globals().pin())

@@ -378,6 +378,15 @@ pub trait ControlAbi {
     extern "C" fn set_hook(&mut self, f: SOption<u32>, mask: u8, count: i64);
     extern "C" fn publish_main_thread(&mut self);
     extern "C" fn main_thread(&self) -> ThreadAbi;
+    /// [`crate::Isolate::set_breakpoints`]; all unresolved when the
+    /// library has no engine.
+    extern "C" fn set_breakpoints<'b>(
+        &mut self,
+        source: Slice<'b, u8>,
+        lines: Slice<'b, u32>,
+    ) -> SVec<BreakpointAbi>;
+    /// `on`: 0 never, 1 uncaught, 2 all.
+    extern "C" fn set_error_break(&mut self, on: u8);
 }
 
 pub type ControlMut<'a> = dynptr!(&'a mut dyn ControlAbi);
@@ -420,13 +429,6 @@ pub trait IsolateAbi {
     /// [`crate::Isolate::set_debug_events`]; false if the isolate allows
     /// no debugger or the library was built without the engine.
     extern "C" fn set_debug_events(&mut self, events: SOption<DebugEventsBox>) -> bool;
-    extern "C" fn set_breakpoints<'b>(
-        &mut self,
-        source: Slice<'b, u8>,
-        lines: Slice<'b, u32>,
-    ) -> SVec<BreakpointAbi>;
-    /// `on`: 0 never, 1 uncaught, 2 all.
-    extern "C" fn set_error_break(&mut self, on: u8);
     /// None when no debugger can attach.
     extern "C" fn pause_handle(&self) -> SOption<PauseArc>;
 }

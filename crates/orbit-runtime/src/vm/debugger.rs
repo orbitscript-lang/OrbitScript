@@ -190,6 +190,8 @@ pub(crate) struct Debugger {
     /// The instruction the line check last saw, and its frame depth.
     old_pc: u32,
     old_depth: u32,
+    /// No debugger may attach, ever ([`Vm::disable_debugger`]).
+    disabled: bool,
 }
 
 impl std::fmt::Debug for Debugger {
@@ -296,15 +298,36 @@ fn resolve(lines: &[u32], requested: u32) -> Option<u32> {
 }
 
 impl Vm {
-    /// Report stops to `events` from now on (`None` detaches it, which also
-    /// ends any step).
-    pub fn set_debug_events(&mut self, events: Option<Box<dyn DebugEvents>>) {
+    /// Refuse any debugger from now on: for a VM whose host doesn't want
+    /// its code inspected. There is no undoing it.
+    pub fn disable_debugger(&mut self) {
         let d = &mut self.rt.debug;
+        d.disabled = true;
+        d.events = None;
+        d.step = None;
+        d.breakpoints.clear();
+        d.update_watch();
+    }
+
+    /// Whether a debugger may attach.
+    pub fn debugger_allowed(&self) -> bool {
+        !self.rt.debug.disabled
+    }
+
+    /// Report stops to `events` from now on (`None` detaches it, which also
+    /// ends any step). False, attaching nothing, after
+    /// [`Vm::disable_debugger`].
+    pub fn set_debug_events(&mut self, events: Option<Box<dyn DebugEvents>>) -> bool {
+        let d = &mut self.rt.debug;
+        if d.disabled {
+            return false;
+        }
         d.events = events;
         if d.events.is_none() {
             d.step = None;
         }
         d.update_watch();
+        true
     }
 
     /// Replace the breakpoints of `source` (a chunk's source as given to
@@ -312,6 +335,15 @@ impl Vm {
     /// and say where each one is. Breakpoints of a source not loaded yet
     /// resolve when it is ([`DebugEvents::breakpoints_resolved`]).
     pub fn set_breakpoints(&mut self, source: &[u8], lines: &[u32]) -> Vec<Breakpoint> {
+        if self.rt.debug.disabled {
+            return lines
+                .iter()
+                .map(|&requested| Breakpoint {
+                    requested,
+                    line: None,
+                })
+                .collect();
+        }
         let mut code = Vec::new();
         self.heap.for_each(|p: &Proto| {
             if *p.source == *source && !p.code.builtin {

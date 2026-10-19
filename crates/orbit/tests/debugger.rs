@@ -366,3 +366,33 @@ fn orbitscript_frames() {
     assert!(log[0].frames[0].ends_with("@2"), "{:?}", log[0].frames);
     assert_eq!(log[0].locals, ["n=21"]);
 }
+
+#[test]
+fn breakpoints_change_while_stopped() {
+    let mut iso = isolate();
+    let log = Log::default();
+    let mut first = true;
+    iso.set_debug_events(Some(Box::new(Recorder {
+        log: Rc::clone(&log),
+        answers: Vec::new(),
+        edit: Some(Box::new(move |p| {
+            if std::mem::take(&mut first) {
+                let bps = p.set_breakpoints(b"=prog", &[3, 6]);
+                assert_eq!(
+                    bps[1],
+                    Breakpoint {
+                        requested: 6,
+                        line: Some(6)
+                    }
+                );
+                p.set_error_break(ErrorBreak::All);
+            }
+        })),
+        resolved: Rc::default(),
+    })))
+    .unwrap();
+    iso.set_breakpoints(b"=prog", &[3]);
+    run(&mut iso, PROGRAM).unwrap();
+    let frames: Vec<String> = log.borrow().iter().map(|s| s.frames[0].clone()).collect();
+    assert_eq!(frames, ["add@3", "@6", "add@3"]);
+}

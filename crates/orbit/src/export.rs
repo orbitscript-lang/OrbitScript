@@ -925,6 +925,35 @@ macro_rules! control_abi {
                 let $p = self;
                 thread($peek.main_thread())
             }
+            extern "C" fn set_breakpoints<'b>(
+                &mut self,
+                source: Slice<'b, u8>,
+                lines: Slice<'b, u32>,
+            ) -> SVec<BreakpointAbi> {
+                let $this = self;
+                #[cfg(feature = "debugger")]
+                let bps = $ctl
+                    .set_breakpoints(&source, &lines)
+                    .into_iter()
+                    .map(crate::debugger::abi::breakpoint_to)
+                    .collect();
+                #[cfg(not(feature = "debugger"))]
+                let bps = {
+                    let _ = (&$this, source);
+                    lines
+                        .iter()
+                        .map(|&requested| BreakpointAbi { requested, line: 0 })
+                        .collect()
+                };
+                bps
+            }
+            extern "C" fn set_error_break(&mut self, on: u8) {
+                let $this = self;
+                #[cfg(feature = "debugger")]
+                $ctl.set_error_break(crate::debugger::abi::error_break_from(on));
+                #[cfg(not(feature = "debugger"))]
+                let _ = (&$this, on);
+            }
         }
     };
 }
@@ -1084,35 +1113,6 @@ impl<B: Bundled> IsolateAbi for IsoObj<B> {
     #[cfg(not(feature = "debugger"))]
     extern "C" fn set_debug_events(&mut self, _events: SOption<DebugEventsBox>) -> bool {
         false
-    }
-    extern "C" fn set_breakpoints<'b>(
-        &mut self,
-        source: Slice<'b, u8>,
-        lines: Slice<'b, u32>,
-    ) -> SVec<BreakpointAbi> {
-        #[cfg(feature = "debugger")]
-        let bps = self
-            .iso
-            .set_breakpoints(&source, &lines)
-            .into_iter()
-            .map(crate::debugger::abi::breakpoint_to)
-            .collect();
-        #[cfg(not(feature = "debugger"))]
-        let bps = {
-            let _ = source;
-            lines
-                .iter()
-                .map(|&requested| BreakpointAbi { requested, line: 0 })
-                .collect()
-        };
-        bps
-    }
-    extern "C" fn set_error_break(&mut self, on: u8) {
-        #[cfg(feature = "debugger")]
-        self.iso
-            .set_error_break(crate::debugger::abi::error_break_from(on));
-        #[cfg(not(feature = "debugger"))]
-        let _ = on;
     }
     extern "C" fn pause_handle(&self) -> SOption<PauseArc> {
         #[cfg(feature = "debugger")]

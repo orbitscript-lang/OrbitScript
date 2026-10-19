@@ -50,9 +50,6 @@ impl GcMode {
 #[derive(Debug)]
 pub struct Isolate {
     vm: Vm,
-    /// Whether a debugger may attach ([`Config::debugger`]).
-    #[cfg(feature = "debugger")]
-    debugger: bool,
 }
 
 impl Isolate {
@@ -70,11 +67,11 @@ impl Isolate {
             }
         }
         vm.set_memory_limit(config.memory_limit);
-        Isolate {
-            vm,
-            #[cfg(feature = "debugger")]
-            debugger: config.debugger == super::Debugger::Allowed,
+        #[cfg(feature = "debugger")]
+        if config.debugger == super::Debugger::Disabled {
+            vm.disable_debugger();
         }
+        Isolate { vm }
     }
 
     /// Run `f` with a scope for making and using handles. Everything the
@@ -248,13 +245,12 @@ mod debug {
             &mut self,
             events: Option<Box<dyn DebugEvents>>,
         ) -> Result<(), Error> {
-            if !self.debugger {
-                return Err(Error::runtime("this isolate allows no debugger"));
+            let events = events.map(|e| Box::new(Events(e)) as Box<dyn engine::DebugEvents>);
+            if self.vm.set_debug_events(events) {
+                Ok(())
+            } else {
+                Err(Error::runtime("this isolate allows no debugger"))
             }
-            self.vm.set_debug_events(
-                events.map(|e| Box::new(Events(e)) as Box<dyn engine::DebugEvents>),
-            );
-            Ok(())
         }
 
         /// Replace the breakpoints of `source` (a chunk's name as given to
@@ -262,40 +258,25 @@ mod debug {
         /// and say where each one is. Those of a source not loaded yet
         /// resolve when it is ([`DebugEvents::breakpoints_resolved`]).
         pub fn set_breakpoints(&mut self, source: &[u8], lines: &[u32]) -> Vec<Breakpoint> {
-            if !self.debugger {
-                return lines
-                    .iter()
-                    .map(|&requested| Breakpoint {
-                        requested,
-                        line: None,
-                    })
-                    .collect();
-            }
-            self.vm
-                .set_breakpoints(source, lines)
-                .into_iter()
-                .map(breakpoint)
-                .collect()
+            self.control().set_breakpoints(source, lines)
         }
 
         /// Which errors stop the program ([`StopReason::Error`]).
         pub fn set_error_break(&mut self, on: ErrorBreak) {
-            self.vm.set_error_break(match on {
-                ErrorBreak::Never => engine::ErrorBreak::Never,
-                ErrorBreak::Uncaught => engine::ErrorBreak::Uncaught,
-                ErrorBreak::All => engine::ErrorBreak::All,
-            })
+            self.control().set_error_break(on)
         }
 
         /// Whether a debugger may attach.
         #[cfg(feature = "abi")]
         pub(crate) fn debugger_allowed(&self) -> bool {
-            self.debugger
+            self.vm.debugger_allowed()
         }
 
         /// A handle that pauses this isolate from any thread.
         pub fn pause_handle(&self) -> PauseHandle {
-            PauseHandle(PauseInner(self.debugger.then(|| self.vm.pause_handle())))
+            PauseHandle(PauseInner(
+                self.vm.debugger_allowed().then(|| self.vm.pause_handle()),
+            ))
         }
     }
 }

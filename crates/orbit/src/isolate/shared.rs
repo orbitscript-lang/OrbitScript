@@ -227,7 +227,7 @@ mod debug {
 
     use super::Isolate;
     use crate::abi::*;
-    use crate::debugger::abi::{breakpoint_from, error_break_to, resume_to, stop_from};
+    use crate::debugger::abi::{breakpoint_from, resume_to, stop_from};
     use crate::debugger::{Breakpoint, DebugEvents, ErrorBreak, PauseHandle, Paused, StopReason};
     use crate::error::Error;
     use crate::stack::backend::{HostState, on_window};
@@ -303,16 +303,12 @@ mod debug {
         /// and say where each one is. Those of a source not loaded yet
         /// resolve when it is ([`DebugEvents::breakpoints_resolved`]).
         pub fn set_breakpoints(&mut self, source: &[u8], lines: &[u32]) -> Vec<Breakpoint> {
-            self.obj
-                .set_breakpoints(source.into(), lines.into())
-                .iter()
-                .map(|&b| breakpoint_from(b))
-                .collect()
+            self.control().set_breakpoints(source, lines)
         }
 
         /// Which errors stop the program ([`StopReason::Error`]).
         pub fn set_error_break(&mut self, on: ErrorBreak) {
-            self.obj.set_error_break(error_break_to(on))
+            self.control().set_error_break(on)
         }
 
         /// A handle that pauses this isolate from any thread.
