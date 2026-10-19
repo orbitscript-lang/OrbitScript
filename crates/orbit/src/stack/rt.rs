@@ -565,6 +565,18 @@ impl<'s> Stack<'s> {
 
     // ---- reading -----------------------------------------------------------------
 
+    /// [`Stack::type_at`] for argument `i` (1-based), without the
+    /// pseudo-index cases: the typed parameters' test.
+    #[inline(always)]
+    pub(crate) fn arg_type(&self, i: i32) -> Type {
+        let at = (i as usize).wrapping_sub(1);
+        if i >= 1 && at < self.ctx.len() {
+            type_of(self.ctx.arg(at))
+        } else {
+            Type::None
+        }
+    }
+
     pub fn type_at(&self, idx: i32) -> Type {
         if self.is_none(idx) {
             Type::None

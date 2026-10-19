@@ -115,6 +115,7 @@ dependencies = [
  "orbit-compiler",
  "orbit-hir",
  "orbit-lua-syntax",
+ "orbit-macros",
  "orbit-orb-syntax",
  "orbit-runtime",
  "stabby",
@@ -211,6 +212,15 @@ name = "orbit-lua-syntax"
 version = "0.0.0"
 dependencies = [
  "orbit-hir",
+]
+
+[[package]]
+name = "orbit-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
