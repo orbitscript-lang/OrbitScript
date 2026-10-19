@@ -176,14 +176,14 @@ fn arrays_with_holes_and_a_length() {
 #[test]
 fn scalar_conversions() {
     let src = r#"
-        return json.encode({json.int(2.0), json.int("7"), json.float(2), json.float("1e3"),
+        return json.encode({json.int(2.0), json.int(-7), json.float(2), json.float(1000),
             json.string(2), json.string(1.5), json.string(true), json.string("s"),
             json.bool(0), json.bool(""), json.bool(nil), json.bool(false), json.bool(json.null),
             json.string(setmetatable({}, {__tostring = function() return "custom" end}))})
     "#;
     assert_eq!(
         lua(src).unwrap(),
-        [r#"[2,7,2.0,1000.0,"2","1.5","true","s",true,true,false,false,false,"custom"]"#]
+        [r#"[2,-7,2.0,1000.0,"2","1.5","true","s",true,true,false,false,false,"custom"]"#]
     );
     // A plain conversion says the same thing.
     assert_eq!(
@@ -192,7 +192,8 @@ fn scalar_conversions() {
     );
     for (call, message) in [
         ("json.int(2.5)", "no integer representation"),
-        ("json.int('x')", "no integer representation"),
+        ("json.int('7')", "number expected"),
+        ("json.float('1')", "number expected"),
         ("json.int({})", "number expected"),
         ("json.float('x')", "number expected"),
         ("json.string({})", "string, number or boolean expected"),

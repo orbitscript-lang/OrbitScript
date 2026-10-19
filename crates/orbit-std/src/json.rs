@@ -197,14 +197,15 @@ fn number(s: &mut Stack<'_>) -> StackResult<Return> {
 }
 
 // The scalar conversions give plain values: Lua's own types already decide
-// each scalar's JSON type, so `json.int(x)` and `math.tointeger(x)` encode
-// the same way, and either is a fine way to say what to write.
+// each scalar's JSON type, so `json.int(x)` and `x as int` encode the same
+// way. They follow the rules of OrbitScript's runtime `as` (Tym 2026-10-19,
+// runtime-as R7) and should call its cast functions once those land.
 
-/// `json.int(v)`: an integer, a float with an integral value, or a numeral, as an integer.
+/// `json.int(v)`: an integer, or a float with an integral value, as an integer
+/// (the rules of OrbitScript's `as int`; numerals are `tonumber`'s job).
 fn to_int(s: &mut Stack<'_>) -> StackResult<Return> {
-    match s.type_at(1) {
-        Type::Number | Type::String => {}
-        _ => return Err(s.type_error(1, "number")),
+    if s.type_at(1) != Type::Number {
+        return Err(s.type_error(1, "number"));
     }
     let Some(n) = s.to_integer(1) else {
         return Err(s.arg_error(1, "number has no integer representation"));
@@ -213,10 +214,10 @@ fn to_int(s: &mut Stack<'_>) -> StackResult<Return> {
     Ok(Return::values(1))
 }
 
-/// `json.float(v)`: a number or a numeral, as a float.
+/// `json.float(v)`: a number as a float (as `as float`).
 fn to_float(s: &mut Stack<'_>) -> StackResult<Return> {
     let n = match s.type_at(1) {
-        Type::Number | Type::String => s.to_number(1),
+        Type::Number => s.to_number(1),
         _ => None,
     };
     let Some(n) = n else {

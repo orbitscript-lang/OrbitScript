@@ -94,8 +94,8 @@ local function run()
     total = json.number("44.90"), visits = visits}
   say(json.encode(receipt, {sort_keys = true}))
   -- Scalars write as their Lua type; json.int, float, string and bool convert
-  -- (as math.tointeger, + 0.0 and tostring would), and bool follows conditions.
-  say(json.encode({json.int("3"), json.float(3), json.string(3), json.bool(0),
+  -- (by the rules of OrbitScript's `as`), and bool follows conditions.
+  say(json.encode({json.int(3.0), json.float(3), json.string(3), json.bool(0),
     json.bool(json.null)}))
   -- With keep_null off, null decodes to nil; the array keeps its length.
   local sparse = json.decode("[1, null, 3, null]", {keep_null = false})
