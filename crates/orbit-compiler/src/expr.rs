@@ -1,7 +1,7 @@
 //! Expressions: values into registers, multiple results, calls and conditions.
 
-use orbit_bytecode::{Const, Constant, MULTI, Op, Origin};
-use orbit_hir::{BinOp, ExprId, ExprKind, ExprList, TableEntry, UnOp};
+use orbit_bytecode::{Const, Constant, MULTI, Op, Origin, cast};
+use orbit_hir::{BinOp, Cast, CastKind, ExprId, ExprKind, ExprList, TableEntry, UnOp};
 
 use crate::consts::{self, ConstVal};
 use crate::func::{FuncState, Label, Result, Slot};
@@ -257,6 +257,25 @@ impl FuncState<'_> {
                 None
             }
             &ExprKind::First(inner) => self.expr_to(inner, dst)?,
+            &ExprKind::Cast {
+                expr: inner,
+                ty,
+                cast,
+            } => {
+                let (src, _) = self.operand(inner, dst)?;
+                let ty = match ty {
+                    Some(ty) => self.expr_any(ty)?.0,
+                    None => 0,
+                };
+                self.at_offset(at);
+                self.emit(Op::Cast {
+                    dst,
+                    src,
+                    ty,
+                    mode: cast_mode(cast),
+                });
+                None
+            }
         };
         self.free = mark;
         Ok(origin)
@@ -883,4 +902,20 @@ impl FuncState<'_> {
         self.free = mark;
         Ok(())
     }
+}
+
+/// The [`Op::Cast`] mode for a cast.
+fn cast_mode(c: Cast) -> u8 {
+    let kind = match c.kind {
+        CastKind::Int => cast::INT,
+        CastKind::Float => cast::FLOAT,
+        CastKind::Number => cast::NUMBER,
+        CastKind::String => cast::STRING,
+        CastKind::Bool => cast::BOOL,
+        CastKind::Nil => cast::NIL,
+        CastKind::Named => cast::NAMED,
+        CastKind::Fail => cast::FAIL,
+    };
+    let flag = |on: bool, bit: u8| if on { bit } else { 0 };
+    kind | flag(c.nilable, cast::NILABLE) | flag(c.soft, cast::SOFT) | flag(c.test, cast::TEST)
 }

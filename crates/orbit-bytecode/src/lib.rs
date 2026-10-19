@@ -20,6 +20,38 @@ pub mod format;
 pub mod number;
 pub mod verify;
 
+/// The `mode` of [`Op::Cast`]: a kind in the low four bits, plus flags.
+pub mod cast {
+    /// An integer, or a float with an exact integer value (converted); fails with "number
+    /// has no integer representation" on other floats.
+    pub const INT: u8 = 0;
+    /// A number, converted to a float.
+    pub const FLOAT: u8 = 1;
+    /// An integer or a float, unchanged.
+    pub const NUMBER: u8 = 2;
+    /// A string; a number or boolean written as `tostring` writes it; or what the value's
+    /// `__tostring` returns.
+    pub const STRING: u8 = 3;
+    /// Truthiness: `false` for `nil` and `false`, `true` otherwise. Never fails.
+    pub const BOOL: u8 = 4;
+    /// `nil` only.
+    pub const NIL: u8 = 5;
+    /// A value whose metatable is `R[ty]` (a struct or data variant), that is `R[ty]` (a
+    /// unit variant), or whose metatable names `R[ty]` as its enum.
+    pub const NAMED: u8 = 6;
+    /// Fails, naming `R[ty]` as the target.
+    pub const FAIL: u8 = 7;
+    /// The bits holding the kind.
+    pub const KIND: u8 = 0x0f;
+    /// `nil` passes unchanged.
+    pub const NILABLE: u8 = 0x10;
+    /// On failure the result is `nil` instead of an error.
+    pub const SOFT: u8 = 0x20;
+    /// Only test the type, without converting: the result is a boolean. `INT` then means
+    /// an integer, `FLOAT` a float, `STRING` a string and `BOOL` a boolean.
+    pub const TEST: u8 = 0x40;
+}
+
 /// A count operand meaning "all values": as `nresults`, keep every result
 /// and set top; as `nargs` or a `count`, use every value up to top.
 pub const MULTI: u8 = 255;
@@ -203,6 +235,16 @@ pub enum Op {
     Not { dst: Reg, src: Reg },
     /// `R[dst] = #R[src]`
     Len { dst: Reg, src: Reg },
+    /// `R[dst] = R[src] as T`, OrbitScript's run-time cast: converts or checks `R[src]` as
+    /// `mode` says (a [`cast`] kind and flags). `R[ty]` is the type table of a
+    /// [`cast::NAMED`] cast and the target's text (a string) for [`cast::FAIL`]; the other
+    /// kinds ignore it.
+    Cast {
+        dst: Reg,
+        src: Reg,
+        ty: Reg,
+        mode: u8,
+    },
     /// `R[dst] = R[first] .. ... .. R[first+count-1]`
     Concat { dst: Reg, first: Reg, count: u8 },
 

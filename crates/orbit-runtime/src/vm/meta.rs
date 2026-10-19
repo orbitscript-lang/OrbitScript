@@ -134,6 +134,9 @@ pub(crate) enum MetaAction {
     /// `Close`: restore `rt.top` (the open-ended results the close must
     /// keep) and run the instruction again for the next variable.
     Close { top: u32 },
+    /// `Cast` to a string through `__tostring`: `R[dst] = result`, which
+    /// must be a string or a number (converted).
+    ToStr { dst: u8 },
     /// A `__close` handler run while an error unwinds: raise the error
     /// (in the frame's `func` slot) again. `handled`: it has been through
     /// its message handler.

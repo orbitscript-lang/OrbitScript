@@ -43,6 +43,7 @@ fn check(chunk: &UnlinkedChunk) -> Result<(), String> {
                 }
                 Op::CheckUndefined { src, name } => reg(src) && (name as usize) < p.consts.len(),
                 Op::NewTable { dst, .. } => reg(dst),
+                Op::Cast { dst, src, ty, .. } => reg(dst) && reg(src) && reg(ty),
                 Op::VarargTable { dst } => p.is_vararg && reg(dst),
                 Op::VarargGet { dst, key } => p.is_vararg && reg(dst) && reg(key),
                 Op::VarargLen { dst } | Op::VarargGetInt { dst, .. } => p.is_vararg && reg(dst),

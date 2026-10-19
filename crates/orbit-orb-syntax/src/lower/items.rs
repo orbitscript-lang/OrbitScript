@@ -6,7 +6,8 @@
 //! see only the methods, and `__name` is `"P"`. An enum `E` is a namespace table holding its
 //! associated functions and methods, one metatable per data variant (`E.V`, with `E.V.new(t)`
 //! for Lua callers) and one shared, frozen instance per unit variant. Its methods table is
-//! shared by all variants, and its metamethods go on every variant's metatable.
+//! shared by all variants, and its metamethods go on every variant's metatable. Every variant's
+//! metatable also links back to the enum with `__enum`, for `v as E`.
 
 use orbit_hir as hir;
 use orbit_hir::{ExprId, FuncId, FunctionName, LocalId, LocalKind, Span, StmtId, StrId};
@@ -33,36 +34,11 @@ impl Lowerer {
         }
         match &item.kind {
             ast::ItemKind::Fn(f) => {
-                let body = self.fn_body(f)?;
-                let local = self.define_item(f.name, ItemTag::Fn, out, |lx, local, out| {
-                    let func = lx.function(
-                        &f.sig,
-                        FnBody::Block(body),
-                        FunctionName::Local(f.name.sym),
-                        f.span,
-                    )?;
-                    match local {
-                        // Declared early for a use before the definition.
-                        Some(local) => {
-                            let c = lx.add_expr(hir::ExprKind::Closure(func), f.span);
-                            lx.push(
-                                out,
-                                hir::StmtKind::Assign {
-                                    targets: vec![hir::Place::Local(local)],
-                                    values: vec![c].into(),
-                                },
-                                f.span,
-                            );
-                            Ok(None)
-                        }
-                        None => Ok(Some(hir::StmtKind::LocalFunction {
-                            local: lx.pending_fn_local.take().expect("function local"),
-                            func,
-                        })),
-                    }
-                })?;
-                self.export(item, f.name, local, out);
-                Ok(())
+                let n = self.generics.len();
+                self.generics.extend(f.generics.iter().map(|g| g.name.sym));
+                let r = self.fn_item(item, f, out);
+                self.generics.truncate(n);
+                r
             }
             ast::ItemKind::Const { name, value, .. } => {
                 let value = self.const_value(item, value)?;
@@ -81,7 +57,13 @@ impl Lowerer {
                 self.export(item, e.name, local, out);
                 Ok(())
             }
-            ast::ItemKind::Impl(i) => self.impl_block(i, item.span, out),
+            ast::ItemKind::Impl(i) => {
+                let n = self.generics.len();
+                self.generics.extend(i.generics.iter().map(|g| g.name.sym));
+                let r = self.impl_block(i, item.span, out);
+                self.generics.truncate(n);
+                r
+            }
             // Aliases are for `orbit-check`; nothing runs.
             ast::ItemKind::TypeAlias { .. } => Ok(()),
             ast::ItemKind::Error => Err(self.unparsed(item.span)),
@@ -106,6 +88,39 @@ impl Lowerer {
                 Ok(())
             }
         }
+    }
+
+    fn fn_item(&mut self, item: &ast::Item, f: &ast::FnDecl, out: &mut Vec<StmtId>) -> LResult<()> {
+        let body = self.fn_body(f)?;
+        let local = self.define_item(f.name, ItemTag::Fn, out, |lx, local, out| {
+            let func = lx.function(
+                &f.sig,
+                FnBody::Block(body),
+                FunctionName::Local(f.name.sym),
+                f.span,
+            )?;
+            match local {
+                // Declared early for a use before the definition.
+                Some(local) => {
+                    let c = lx.add_expr(hir::ExprKind::Closure(func), f.span);
+                    lx.push(
+                        out,
+                        hir::StmtKind::Assign {
+                            targets: vec![hir::Place::Local(local)],
+                            values: vec![c].into(),
+                        },
+                        f.span,
+                    );
+                    Ok(None)
+                }
+                None => Ok(Some(hir::StmtKind::LocalFunction {
+                    local: lx.pending_fn_local.take().expect("function local"),
+                    func,
+                })),
+            }
+        })?;
+        self.export(item, f.name, local, out);
+        Ok(())
     }
 
     fn bind_global(&mut self, sym: StrId) {
@@ -414,8 +429,15 @@ impl Lowerer {
     ) -> LResult<LocalId> {
         let idx = self.type_index(e.name);
         let methods = self.methods_table(idx, span, out);
-        let ns = self.add_expr(hir::ExprKind::Table(Vec::new()), span);
+        // E = { __name = "E" }, the name `as` errors use.
+        let k = self.str_expr(self.syms.name, span);
+        let n = self.str_expr(e.name.sym, span);
+        let ns = self.add_expr(
+            hir::ExprKind::Table(vec![hir::TableEntry::Keyed(k, n)]),
+            span,
+        );
         let local = self.define_value_item_expr(e.name, ItemTag::Type(idx), ns, out);
+        let enum_key = self.intern(b"__enum");
 
         let mut seen = Vec::new();
         let mut freeze: Option<LocalId> = None;
@@ -436,15 +458,20 @@ impl Lowerer {
             let k = self.str_expr(self.syms.name, v.span);
             let n = self.str_expr(full, v.span);
             entries.push(hir::TableEntry::Keyed(k, n));
+            // `__enum = E`: `v as E` accepts the variants of E.
+            let k = self.str_expr(enum_key, v.span);
+            let n = self.local_expr(local, v.span);
+            entries.push(hir::TableEntry::Keyed(k, n));
             let value = if v.fields.is_some() {
-                // E.V = { __index = methods, __name = "E::V", new = |t| setmetatable(t, E.V) }
+                // E.V = { __index = methods, __name = "E::V", __enum = E, new = |t| setmetatable(t, E.V) }
                 let new = self.variant_new(local, v.name.sym, v.span);
                 let k = self.str_expr(self.syms.new, v.span);
                 let c = self.add_expr(hir::ExprKind::Closure(new), v.span);
                 entries.push(hir::TableEntry::Keyed(k, c));
                 self.add_expr(hir::ExprKind::Table(entries), v.span)
             } else {
-                // E.V = setmetatable({}, { __index = methods, __name = "E::V", __newindex = freeze })
+                // E.V = setmetatable({}, { __index = methods, __name = "E::V", __enum = E,
+                //                          __newindex = freeze })
                 let f = match freeze {
                     Some(f) => f,
                     None => {
@@ -681,7 +708,11 @@ impl Lowerer {
                             FunctionName::Field(name.sym)
                         };
                         let body = self.fn_body(f)?;
-                        let func = self.function(&f.sig, FnBody::Block(body), fname, f.span)?;
+                        let n = self.generics.len();
+                        self.generics.extend(f.generics.iter().map(|g| g.name.sym));
+                        let func = self.function(&f.sig, FnBody::Block(body), fname, f.span);
+                        self.generics.truncate(n);
+                        let func = func?;
                         (
                             self.add_expr(hir::ExprKind::Closure(func), f.span),
                             has_self,

@@ -478,6 +478,46 @@ pub enum ExprKind {
     },
     /// Truncates a multi-value expression to its first value.
     First(ExprId),
+    /// A run-time cast (OrbitScript's `e as T`): converts or checks `expr` as [`Cast`]
+    /// says. `ty` is the type table of a [`CastKind::Named`] cast and the target's text for
+    /// [`CastKind::Fail`]; the other kinds have none.
+    Cast {
+        expr: ExprId,
+        ty: Option<ExprId>,
+        cast: Cast,
+    },
+}
+
+/// What an [`ExprKind::Cast`] does with its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cast {
+    pub kind: CastKind,
+    /// `nil` passes unchanged (a cast to `T?`).
+    pub nilable: bool,
+    /// On failure the result is `nil` instead of an error (`as?`).
+    pub soft: bool,
+    /// Only test the value's type, without converting it: the result is a boolean (a member
+    /// of a union cast).
+    pub test: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastKind {
+    /// An integer, or a float with an exact integer value (converted).
+    Int,
+    /// A number, converted to a float.
+    Float,
+    /// An integer or a float.
+    Number,
+    /// A string; a number or boolean as `tostring` writes it; a value with `__tostring`.
+    String,
+    /// Truthiness (`nil` and `false` are false); when testing, a boolean.
+    Bool,
+    Nil,
+    /// A value of the struct, enum or variant whose table is `ty`.
+    Named,
+    /// Always fails, naming the target `ty` (a string): the end of a union cast.
+    Fail,
 }
 
 impl ExprKind {
@@ -527,6 +567,12 @@ impl ExprKind {
             }
             ExprKind::Unary { expr, .. } | ExprKind::First(expr) | ExprKind::VarargIndex(expr) => {
                 f(*expr)
+            }
+            ExprKind::Cast { expr, ty, .. } => {
+                f(*expr);
+                if let Some(ty) = ty {
+                    f(*ty);
+                }
             }
         }
     }

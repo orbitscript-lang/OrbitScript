@@ -1132,7 +1132,7 @@ impl<'a> Resolver<'a> {
             | ExprKind::Paren(expr)
             | ExprKind::Spread(expr)
             | ExprKind::Try(expr) => self.expr(expr),
-            ExprKind::As { expr, ty } => {
+            ExprKind::As { expr, ty, .. } => {
                 self.expr(expr);
                 self.ty(ty);
             }

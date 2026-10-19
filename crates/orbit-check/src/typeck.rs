@@ -1455,9 +1455,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             ExprKind::Unary { op, expr } => self.unary(*op, expr),
             ExprKind::Paren(inner) => self.expr(inner, expected),
-            ExprKind::As { expr, ty } => {
+            ExprKind::As { expr, ty, optional } => {
                 self.expr(expr, None);
-                self.lower(ty)
+                let t = self.lower(ty);
+                if *optional { self.types.optional(t) } else { t }
             }
             ExprKind::Tuple(items) => {
                 let ts: Vec<TypeId> = items.iter().map(|i| self.expr(i, None)).collect();

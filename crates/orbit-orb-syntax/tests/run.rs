@@ -607,6 +607,194 @@ print(m("ab", "b"));
 }
 
 #[test]
+fn scalar_casts() {
+    check(
+        r##"
+fn err(f) { let (_, e) = pcall(f); e }
+print(2 as int, 2.0 as int, math::type(2.0 as int), 3 as float, 1.5 as number);
+print(err(|| 3.5 as int));
+print(err(|| (2 ** 63) as int));
+print(err(|| "3" as int));
+print(err(|| nil as int));
+print(1 as float, ((1 << 53) + 1) as float == 2.0 ** 53, err(|| "1" as float));
+print(1 as string, 1.0 as string, 1e15 as string, true as string, "s" as string);
+print(err(|| nil as string), err(|| #{} as string), err(|| print as string));
+print(nil as bool, false as bool, 0 as bool, "" as bool, true as bool);
+print(nil as nil, err(|| false as nil));
+print(1 as any, nil as int?, 3.5 as? int, "x" as? int, 2.0 as? int, nil as? int);
+print(err(|| "x" as int?), 1 as int? + 1);
+"##,
+        "
+2\t2\tinteger\t3.0\t1.5
+test:4: number has no integer representation
+test:5: number has no integer representation
+test:6: cannot cast string to int
+test:7: cannot cast nil to int
+1.0\ttrue\ttest:8: cannot cast string to float
+1\t1.0\t1e+15\ttrue\ts
+test:10: cannot cast nil to string\ttest:10: cannot cast table to string\ttest:10: cannot cast function to string
+false\tfalse\ttrue\ttrue\ttrue
+nil\ttest:12: cannot cast boolean to nil
+1\tnil\tnil\tnil\t2\tnil
+test:14: cannot cast string to int?\t2",
+    );
+}
+
+#[test]
+fn tostring_casts() {
+    check(
+        r##"
+fn err(f) { let (_, e) = pcall(f); e }
+struct T { v: int }
+impl T { fn __tostring(self) { f"T({self.v})" } }
+struct N {}
+impl N { fn __tostring(self) { 42 } }
+struct Bad {}
+impl Bad { fn __tostring(self) { #{} } }
+let s = T { v: 3 } as string;
+print(s, type(s), N {} as string, math::type(N {} as string));
+// A bad `__tostring` is a bug, not a failed cast: `as?` raises too.
+print(err(|| Bad {} as string), err(|| Bad {} as? string));
+"##,
+        "
+T(3)\tstring\t42\tnil
+test:12: '__tostring' must return a string\ttest:12: '__tostring' must return a string",
+    );
+}
+
+#[test]
+fn named_casts() {
+    check(
+        r##"
+fn err(f) { let (_, e) = pcall(f); e }
+struct Point { x: int, y: int }
+enum Shape { Circle { r: float }, Empty }
+enum Other { A }
+let p = Point { x: 1, y: 2 };
+let c = Shape::Circle { r: 1.0 };
+print((p as Point).x, (#{ x: 1 } as? Point) == nil, nil as Point?, p as? Shape);
+print(c as Shape == c, c as Shape::Circle == c, Shape::Empty as Shape == Shape::Empty);
+print(Shape::Empty as Shape::Empty == Shape::Empty, Other::A as? Shape);
+print(err(|| #{} as Point));
+print(err(|| p as Shape));
+print(err(|| c as Shape::Empty));
+print(err(|| Other::A as Shape::Circle));
+print(err(|| 1 as Point?));
+impl Point { fn same(self, o) { o as? Self != nil } }
+print(p.same(Point { x: 0, y: 0 }), p.same(c));
+"##,
+        "
+1\ttrue\tnil\tnil
+true\ttrue\ttrue
+true\tnil
+test:11: cannot cast table to Point
+test:12: cannot cast Point to Shape
+test:13: cannot cast Shape::Circle to Shape::Empty
+test:14: cannot cast Other::A to Shape::Circle
+test:15: cannot cast number to Point?
+true\tfalse",
+    );
+}
+
+#[test]
+fn union_casts() {
+    check(
+        r##"
+fn err(f) { let (_, e) = pcall(f); e }
+struct Point { x: int }
+let p = Point { x: 1 };
+print(1 as (int | string), "a" as (int | string), nil as (int | string)?, false as (bool | int));
+print(p as (Point | int) == p, 1.0 as? (int | string), nil as (int? | Point));
+print(err(|| 1.0 as (int | string)));
+print(err(|| nil as (int | string)));
+print(err(|| true as (Point | float)?));
+print(2 as (any | int), 1.5 as (float | nil));
+"##,
+        "
+1\ta\tnil\tfalse
+true\tnil\tnil
+test:7: cannot cast number to int | string
+test:8: cannot cast nil to int | string
+test:9: cannot cast boolean to (Point | float)?
+2\t1.5",
+    );
+}
+
+#[test]
+fn uncheckable_casts() {
+    let cases = [
+        (
+            "let x = y as [int];",
+            "test:1: `as` can't check `[int]` while the program runs; give the value a type annotation instead",
+        ),
+        (
+            "let x = y as #{ a: int, b: string? };",
+            "test:1: `as` can't check `#{ a: int, b: string? }` while",
+        ),
+        (
+            "let x = y as #{[string]: int};",
+            "test:1: `as` can't check `#{[string]: int}`",
+        ),
+        (
+            "let x = y as fn(int) -> string;",
+            "test:1: `as` can't check `fn(int) -> string`",
+        ),
+        (
+            "let x = y as (int, string);",
+            "test:1: `as` can't check `(int, string)`",
+        ),
+        (
+            "let x = y as (int | [int]);",
+            "test:1: `as` can't check `[int]`",
+        ),
+        ("fn f<T>(y) { y as T }", "test:1: `as` can't check `T`"),
+        (
+            "struct S<T> { v: T } impl<T> S<T> { fn get(self) { self.v as T } }",
+            "test:1: `as` can't check `T`",
+        ),
+        (
+            "struct S<T> { v: T } let x = y as S<int>;",
+            "test:1: `as` can't check `S<int>`",
+        ),
+        (
+            "type Ids = [int]; let x = y as Ids;",
+            "test:1: `as` can't use the type alias `Ids`; name the type it stands for",
+        ),
+        (
+            "fn f(y) { y as Id } type Id = int;",
+            "test:1: `as` can't use the type alias `Id`",
+        ),
+        (
+            "struct P {} let x = y as P::Q;",
+            "test:1: `P` is a struct, not an enum",
+        ),
+        (
+            "enum E { A } let x = y as E::B;",
+            "test:1: no variant `B` in enum `E`",
+        ),
+    ];
+    for (src, want) in cases {
+        let got = compile_error(&format!("extern y; {src}"));
+        assert!(got.starts_with(want), "{src}\n  got: {got}\n want: {want}");
+    }
+}
+
+#[test]
+fn cast_parsing() {
+    check(
+        r##"
+let x = 2.0;
+print(x as int | 1, x as int + 1, (x as int?) == 2, x as? int == 2, -x as int);
+fn half(v) { (v as int?)? \ 2 }
+print(half(4.0));
+"##,
+        "
+3\t3\ttrue\ttrue\t-2
+2",
+    );
+}
+
+#[test]
 fn compile_errors() {
     let cases = [
         (

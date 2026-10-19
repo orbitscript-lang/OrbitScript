@@ -398,6 +398,8 @@ impl Interp {
                     r[dst as usize] = V::Int(bit.apply(x, y));
                 }
                 Op::BNot { dst, src } => r[dst as usize] = V::Int(!r[src as usize].int()?),
+                // Only OrbitScript's `as` compiles to it.
+                Op::Cast { .. } => return Err("cast: not supported here".into()),
                 Op::Len { dst, src } => {
                     let n = match &r[src as usize] {
                         V::Str(s) => s.len() as i64,

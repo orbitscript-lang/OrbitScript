@@ -323,6 +323,14 @@ impl Function<'_> {
                 reg(src)?;
                 key(name)
             }
+            Op::Cast { dst, src, ty, mode } => {
+                if mode & crate::cast::KIND > crate::cast::FAIL || mode & 0x80 != 0 {
+                    return self.fail(at, "unknown cast mode");
+                }
+                reg(dst)?;
+                reg(src)?;
+                reg(ty)
+            }
             Op::VarargGet { dst, key: k } => {
                 reg(dst)?;
                 reg(k)

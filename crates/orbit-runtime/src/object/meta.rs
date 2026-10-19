@@ -62,6 +62,7 @@ meta_fields! {
     Shl = "__shl",
     Shr = "__shr",
     BNot = "__bnot",
+    Enum = "__enum",
 }
 
 /// How many fields (the first ones) have a bit in a table's absent-field
