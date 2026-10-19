@@ -88,7 +88,7 @@ The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass
 | [vm-semantics.md](vm-semantics.md) | Metatables and metamethods, userdata, coroutines, to-be-closed variables, `xpcall` (milestones C2, C3; ADR-3) |
 | [stdlib-string-table-math.md](stdlib-string-table-math.md) | The full `string`, `utf8`, `table` and `math` libraries (milestone C5a): patterns, `format`, `pack`, resumable table functions, `sort`, xoshiro256** seeding, differential fuzzers |
 | [chunks-io-os-cli.md](chunks-io-os-cli.md) | `load` and friends, `require`/`package`, binary chunks and their verifier, the `io` and `os` libraries, and the command line |
-| [json.md](json.md) | The `orbit.json` module (`orbit-std` feature `json`, ADR-12 D13): its API, how values map to JSON, how it's built and what it costs |
+| [json.md](json.md) | The `std.json` module (`orbit-std` feature `json`, ADR-12 D13): its API, how values map to JSON, how it's built and what it costs |
 | [debug.md](debug.md) | The `debug` library, function names and levels, tracebacks, and hooks (milestones C5d, C6) |
 
 ## OrbitScript

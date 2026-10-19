@@ -1,7 +1,7 @@
-//! The `orbit.json` module: JSON text to and from values, over
+//! The `std.json` module: JSON text to and from values, over
 //! `serde_json` (ADR-12, D13).
 //!
-//! Reached as `require "orbit.json"` (`use orbit::json;`), never as a
+//! Reached as `require "std.json"` (`use std::json;`), never as a
 //! global, so programs that bring their own `json` module keep it.
 //!
 //! - `encode(value [, options])` gives the JSON text, raising an error for

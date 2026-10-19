@@ -26,7 +26,7 @@ os = []
 # The `ffi` library: calling C functions in shared libraries (off by
 # default for embedders; a host still opts in with `install_ffi`).
 ffi = ["dep:orbit-ffi"]
-# The `orbit.json` module: JSON encoding and decoding over `serde_json`
+# The `std.json` module: JSON encoding and decoding over `serde_json`
 # (ADR-12, D13).
 json = ["dep:serde", "dep:serde_json"]
 # With `ffi`: link the system's shared libffi rather than a static copy built

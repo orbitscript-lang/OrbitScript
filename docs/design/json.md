@@ -1,4 +1,4 @@
-# The `orbit.json` module
+# The `std.json` module
 
 Status: **Proposed**. Tym decided that JSON is a standard library module backed by `serde_json` (2026-10-18, ADR-12 D13); the API below is the plan's default, to settle in review.
 
@@ -7,11 +7,11 @@ Status: **Proposed**. Tym decided that JSON is a standard library module backed 
 ## Reaching it
 
 ```lua
-local json = require "orbit.json"
+local json = require "std.json"
 ```
 
 ```rust
-use orbit::json;
+use std::json;
 ```
 
 It is never a global and never the bare name `json`, so a program that ships its own `json.lua` keeps loading that.

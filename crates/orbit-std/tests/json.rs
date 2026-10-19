@@ -1,4 +1,4 @@
-//! The `orbit.json` module.
+//! The `std.json` module.
 #![cfg(feature = "json")]
 
 use orbit::{Chunk, Config, Error, Isolate, Runtime};
@@ -11,7 +11,7 @@ fn isolate() -> Isolate {
 
 /// Run Lua `src` with `json` in scope and give its results as text.
 fn lua(src: &str) -> Result<Vec<String>, String> {
-    run(Chunk::new(&format!("local json = require 'orbit.json'\n{src}")).name("=test"))
+    run(Chunk::new(&format!("local json = require 'std.json'\n{src}")).name("=test"))
 }
 
 fn run(chunk: Chunk<'_>) -> Result<Vec<String>, String> {
@@ -220,7 +220,7 @@ fn not_a_global() {
 
 #[test]
 fn orbitscript_uses_it() {
-    let src = "use orbit::json;\n\
+    let src = "use std::json;\n\
                let v = json::decode(\"[1, {\\\"k\\\": \\\"v\\\"}]\");\n\
                json::encode(v)";
     let v = run(Chunk::new(src)
