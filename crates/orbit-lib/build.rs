@@ -1,7 +1,8 @@
 //! Names the library and exports Lua's API from it (ADR-10).
 //!
 //! - ELF (Linux, the BSDs): `liborbit.so.0`, Lua's names under the symbol
-//!   version `LUA_5.5` (`liborbit.map`). Only lld accepts our version script
+//!   version `LUA_5.5` and our own (`orbit.h`) under `ORBIT_0`
+//!   (`liborbit.map`). Only lld accepts our version script
 //!   next to the one rustc writes (GNU ld refuses to combine them), so where
 //!   rustc links through the C compiler this switches to lld, as the CLIs'
 //!   build does for code folding.
@@ -33,6 +34,8 @@ fn main() {
             "-exported_symbol,_lua_*",
             "-exported_symbol,_luaL_*",
             "-exported_symbol,_luaopen_*",
+            "-exported_symbol,_orbit_newstate",
+            "-exported_symbol,_orbit_debug_listen",
         ] {
             println!("cargo:rustc-link-arg-cdylib=-Wl,{arg}");
         }

@@ -131,6 +131,7 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "orbit",
+ "orbit-dap",
  "orbit-std",
 ]
 
@@ -205,6 +206,7 @@ dependencies = [
  "orbit",
  "orbit-capi",
  "orbit-std",
+ "serde_json",
  "stabby",
 ]
 

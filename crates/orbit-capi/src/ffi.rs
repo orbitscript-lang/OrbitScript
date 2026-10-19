@@ -78,6 +78,8 @@ pub(crate) struct Bridge {
     host: Cell<StackPtr>,
     /// In a state C created, its isolate, which the state owns.
     isolate: Cell<*mut orbit::Isolate>,
+    /// A state C created that debuggers can attach to ([`crate::debug`]).
+    debuggable: Cell<bool>,
     /// The native standing for each C hook function installed so far.
     hooks: RefCell<Vec<(usize, NativeRef)>>,
     /// While a C hook runs, its native's stack: there, as in Lua, level 0
@@ -190,6 +192,7 @@ pub(crate) fn install(s: &mut Stack<'_>) {
         st: Shared::default(),
         host: Cell::new(std::ptr::null_mut()),
         isolate: Cell::new(std::ptr::null_mut()),
+        debuggable: Cell::new(false),
         hooks: Default::default(),
         hook_ctx: Cell::new(std::ptr::null_mut()),
         main,
@@ -1877,18 +1880,30 @@ impl std::io::Write for CStdout {
     }
 }
 
-/// `lua_newstate`: an isolate owned by the C program, with no libraries
-/// open, whose stack between calls is the host's window
-/// ([`orbit::Isolate::host_stack`]). Null if memory runs out.
+/// `orbit_newstate`'s flag for a state no debugger may attach to.
+#[cfg(feature = "host")]
+const STATE_NO_DEBUGGER: std::ffi::c_uint = 1;
+
+/// `orbit_newstate` (and `lua_newstate`, with no flags): an isolate owned
+/// by the C program, with no libraries open, whose stack between calls is
+/// the host's window ([`orbit::Isolate::host_stack`]). Null if memory runs
+/// out.
 #[cfg(feature = "host")]
 #[unsafe(no_mangle)]
-extern "C" fn orbit_r_newstate() -> *mut LState {
-    let config = orbit::Config::default().libraries(&[]);
+extern "C" fn orbit_r_newstate(flags: std::ffi::c_uint) -> *mut LState {
+    let allowed = flags & STATE_NO_DEBUGGER == 0;
+    let debugger = if allowed {
+        orbit::Debugger::Allowed
+    } else {
+        orbit::Debugger::Disabled
+    };
+    let config = orbit::Config::default().libraries(&[]).debugger(debugger);
     let iso = Box::into_raw(Box::new(orbit::Runtime::new().new_isolate(config)));
     // SAFETY: just made; reached only through the state from now on, and
     // freed by `orbit_r_close`.
     let iso_ref: &'static mut orbit::Isolate = unsafe { &mut *iso };
     iso_ref.set_stdout(CStdout);
+    let debuggable = allowed && crate::debug::serve(iso_ref);
     let host: StackPtr = Box::into_raw(Box::new(iso_ref.host_stack()));
     // SAFETY: just made, and not shared yet.
     let s = unsafe { &mut *host };
@@ -1899,7 +1914,29 @@ extern "C" fn orbit_r_newstate() -> *mut LState {
     b.ctx.set(host);
     b.host.set(host);
     b.isolate.set(iso);
+    b.debuggable.set(debuggable);
     b.l.get()
+}
+
+/// `orbit_debug_listen`: start the process's debug server for debuggers
+/// to attach to `l` and the program's other states, as
+/// [`crate::debug::listen`] answers; -1 if `l` allows no debugger.
+#[cfg(feature = "host")]
+#[unsafe(no_mangle)]
+extern "C" fn orbit_r_debug_listen(l: *mut LState, announce: c_int) -> c_int {
+    // SAFETY: `l` is a live state; its bridge lives as long as it does.
+    let b = unsafe { &*((*l).rs as *const Bridge) };
+    if !b.debuggable.get() {
+        return -1;
+    }
+    crate::debug::listen(announce != 0)
+}
+
+/// The program is exiting: remove the debug server's socket.
+#[cfg(feature = "host")]
+#[unsafe(no_mangle)]
+extern "C" fn orbit_r_debug_stop() {
+    crate::debug::stop();
 }
 
 /// `lua_close`: close the state as Lua does (finalizers run), flush the

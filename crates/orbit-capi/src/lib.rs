@@ -9,6 +9,8 @@
 //! frames (`csrc/capi.c`). All `unsafe` is in [`ffi`].
 
 mod api;
+#[cfg(feature = "host")]
+mod debug;
 mod ffi;
 mod searchers;
 

@@ -10,3 +10,10 @@ LUA_5.5 {
   local:
     *;
 };
+
+/* OrbitScript's own additions (orbit.h). */
+ORBIT_0 {
+  global:
+    orbit_newstate;
+    orbit_debug_listen;
+};

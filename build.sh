@@ -32,7 +32,7 @@
 #   Windows: bin/orbit.exe, orbitc.exe, orbit_lib.dll, and lua55.dll, which
 #                forwards Lua's names to orbit_lib.dll (a copy would be a
 #                second runtime in the process); run from Git Bash or MSYS2
-#   all:     include/lua.h, luaconf.h, lualib.h, lauxlib.h
+#   all:     include/lua.h, luaconf.h, lualib.h, lauxlib.h, orbit.h
 # The static layout: bin/orbit and bin/orbitc, one file each.
 #
 # Builds always name the target (`cargo build --target`), as cargo-pgo's do:
@@ -211,7 +211,7 @@ lay_out() {
             files="bin/orbit bin/orbitc lib/$lib"
             ;;
     esac
-    for h in lua.h luaconf.h lualib.h lauxlib.h; do
+    for h in lua.h luaconf.h lualib.h lauxlib.h orbit.h; do
         cp "$headers/$h" "$dir/include/$h"
     done
 }

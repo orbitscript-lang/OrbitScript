@@ -22,10 +22,14 @@ orbit-capi = { path = "../orbit-capi", features = ["host"] }
 orbit-std = { path = "../orbit-std", features = ["ffi", "json"] }
 stabby = "72.1.16"
 
+[dev-dependencies]
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
 [features]
 # The debugger engine and its API (ADR-12), for programs on the shared
-# backend and, later, the DAP server the library carries.
-debugger = ["orbit/debugger"]
+# backend, and the DAP server C hosts start (`orbit_debug_listen`,
+# `ORBIT_DEBUG`).
+debugger = ["orbit/debugger", "orbit-capi/debugger"]
 
 [lints]
 workspace = true
