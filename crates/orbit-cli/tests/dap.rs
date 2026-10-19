@@ -31,17 +31,16 @@ impl Editor {
         Editor::start(program, extra, false)
     }
 
-    fn start(program: &Path, extra: Value, terminals: bool) -> Editor {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_orbit"))
-            .arg("--debug-server")
-            .env_remove("LUA_INIT")
-            .env_remove("LUA_INIT_5_5")
+    /// An editor talking to `orbit` started with `args`.
+    fn spawn(args: &[&str], terminals: bool) -> Editor {
+        let mut child = orbit()
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
-        let mut e = Editor {
+        Editor {
             to: child.stdin.take().unwrap(),
             from: BufReader::new(child.stdout.take().unwrap()),
             child,
@@ -49,7 +48,25 @@ impl Editor {
             events: VecDeque::new(),
             terminals,
             terminal: None,
-        };
+        }
+    }
+
+    /// Attach to the running program `pid`.
+    fn attach(pid: u32) -> Editor {
+        let mut e = Editor::spawn(&["--debug-attach", &pid.to_string()], false);
+        let r = e.request(
+            "initialize",
+            json!({"adapterID": "orbit", "linesStartAt1": true}),
+        );
+        assert_eq!(r["success"], true, "{r}");
+        let r = e.request("attach", json!({}));
+        assert_eq!(r["success"], true, "{r}");
+        e.event("initialized");
+        e
+    }
+
+    fn start(program: &Path, extra: Value, terminals: bool) -> Editor {
+        let mut e = Editor::spawn(&["--debug-server"], terminals);
         let r = e.request(
             "initialize",
             json!({"adapterID": "orbit", "linesStartAt1": true,
@@ -171,6 +188,13 @@ impl Editor {
         drop(self.to);
         self.child.wait().unwrap().code().unwrap_or(-1)
     }
+}
+
+/// The `orbit` binary, without the environment's `LUA_INIT`.
+fn orbit() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_orbit"));
+    c.env_remove("LUA_INIT").env_remove("LUA_INIT_5_5");
+    c
 }
 
 fn script(name: &str, text: &str) -> PathBuf {
@@ -296,4 +320,179 @@ fn a_missing_script_is_reported() {
     let err = e.output("stderr");
     assert!(err.contains("cannot open"), "{err}");
     assert_eq!(e.disconnect(), 1);
+}
+
+/// Runs until the file named by its argument exists, counting in `n`
+/// (line 4 runs on each turn), after printing `ready`.
+const LOOPER: &str = "\
+local stop = ...
+print('ready')
+local n = 0
+while true do
+  n = n + 1
+  if n % 1000 == 0 then
+    local f = io.open(stop)
+    if f then f:close() break end
+  end
+end
+print('done', n > 0)
+";
+
+/// A running program and the file that ends it.
+struct Running {
+    child: Child,
+    stop: PathBuf,
+    stdout: BufReader<ChildStdout>,
+    stderr: BufReader<std::process::ChildStderr>,
+}
+
+impl Running {
+    fn start(name: &str, options: &[&str]) -> Running {
+        let p = script(&format!("{name}.lua"), LOOPER);
+        let stop = p.with_extension("stop");
+        let _ = std::fs::remove_file(&stop);
+        let mut child = orbit()
+            .args(options)
+            .arg(&p)
+            .arg(&stop)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut r = Running {
+            stdout: BufReader::new(child.stdout.take().unwrap()),
+            stderr: BufReader::new(child.stderr.take().unwrap()),
+            child,
+            stop,
+        };
+        assert_eq!(r.line(), "ready\n");
+        r
+    }
+
+    fn line(&mut self) -> String {
+        let mut l = String::new();
+        self.stdout.read_line(&mut l).unwrap();
+        l
+    }
+
+    fn err_line(&mut self) -> String {
+        let mut l = String::new();
+        self.stderr.read_line(&mut l).unwrap();
+        l
+    }
+
+    /// End the program; its exit code and the rest of its output.
+    fn finish(mut self) -> (i32, String) {
+        std::fs::write(&self.stop, "").unwrap();
+        let code = self.child.wait().unwrap().code().unwrap_or(-1);
+        let mut out = String::new();
+        self.stdout.read_to_string(&mut out).unwrap();
+        (code, out)
+    }
+}
+
+fn listed(pid: u32) -> Option<Value> {
+    let out = orbit().args(["--debug-attach", "--list"]).output().unwrap();
+    assert!(out.status.success());
+    let list: Value = serde_json::from_slice(&out.stdout).unwrap();
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["pid"] == pid)
+        .cloned()
+}
+
+#[test]
+fn editors_attach_to_a_running_program_and_leave_it_running() {
+    let mut run = Running::start("listen", &["--debug-listen"]);
+    let pid = run.child.id();
+    let announced = run.err_line();
+    assert!(announced.contains("debugger listening on"), "{announced}");
+    let path = PathBuf::from(announced.trim_end().rsplit(' ').next().unwrap());
+    assert!(path.exists());
+    let d = listed(pid).expect("listed");
+    assert_eq!(d["listening"], true);
+    assert_eq!(d["attached"], false);
+    assert!(
+        d["program"].as_str().unwrap().ends_with("listen.lua"),
+        "{d}"
+    );
+
+    let p = script("listen.lua", LOOPER);
+    for _ in 0..2 {
+        // Each editor's breakpoints go with it; the second one sets its own.
+        let mut e = Editor::attach(pid);
+        let r = e.request(
+            "setBreakpoints",
+            json!({"source": {"path": p.display().to_string()}, "breakpoints": [{"line": 5}]}),
+        );
+        assert_eq!(r["body"]["breakpoints"][0]["verified"], true, "{r}");
+        e.request("configurationDone", json!({}));
+        let stop = e.event("stopped");
+        assert_eq!(stop["body"]["reason"], "breakpoint");
+        let trace = e.request("stackTrace", json!({"threadId": 1}));
+        assert_eq!(trace["body"]["stackFrames"][0]["line"], 5, "{trace}");
+        assert_eq!(listed(pid).unwrap()["attached"], true);
+        assert_eq!(e.disconnect(), 0);
+    }
+    let (code, out) = run.finish();
+    assert_eq!(code, 0);
+    assert_eq!(out, "done\ttrue\n");
+    assert!(!path.exists(), "the socket is removed on exit");
+}
+
+#[test]
+fn sigusr1_starts_serving() {
+    let mut run = Running::start("signal", &[]);
+    let pid = run.child.id();
+    assert_eq!(listed(pid).unwrap()["listening"], false);
+    let mut e = Editor::attach(pid);
+    assert!(run.err_line().contains("debugger listening on"));
+    e.request("configurationDone", json!({}));
+    e.request("pause", json!({"threadId": 1}));
+    assert_eq!(e.event("stopped")["body"]["reason"], "pause");
+    e.request("continue", json!({"threadId": 1}));
+    assert_eq!(e.disconnect(), 0);
+    let (code, out) = run.finish();
+    assert_eq!(code, 0);
+    assert_eq!(out, "done\ttrue\n");
+}
+
+#[test]
+fn programs_that_serve_no_debuggers_are_left_alone() {
+    let run = Running::start("nosignal", &["--no-debug-signal"]);
+    let pid = run.child.id();
+    assert!(listed(pid).is_none());
+    let out = orbit()
+        .args(["--debug-attach", &pid.to_string()])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not serving debuggers"), "{err}");
+    let (code, _) = run.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn an_editor_that_vanishes_releases_the_program() {
+    let run = Running::start("vanish", &["--debug-listen"]);
+    let pid = run.child.id();
+    let p = script("vanish.lua", LOOPER);
+    let mut e = Editor::attach(pid);
+    e.request(
+        "setBreakpoints",
+        json!({"source": {"path": p.display().to_string()}, "breakpoints": [{"line": 5}]}),
+    );
+    e.request("configurationDone", json!({}));
+    assert_eq!(e.event("stopped")["body"]["reason"], "breakpoint");
+    // The editor dies at the stop: the program goes on without its
+    // breakpoints.
+    e.child.kill().unwrap();
+    e.child.wait().unwrap();
+    let (code, out) = run.finish();
+    assert_eq!(code, 0);
+    assert_eq!(out, "done\ttrue\n");
 }
