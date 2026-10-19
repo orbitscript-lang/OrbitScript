@@ -43,6 +43,8 @@ pub enum Ty {
     Variant(SymbolId, Vec<TypeId>),
     /// A generic parameter, inside the item that declares it.
     Param(SymbolId),
+    /// Any number of values of a type (`...T`): only ever the last of a function's results.
+    Rest(TypeId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -197,8 +199,45 @@ impl Types {
         self.union(&ms)
     }
 
+    /// Whether `t` allows nil. A `...T` result allows no value at all, so it counts.
     pub fn may_be_nil(&self, t: TypeId) -> bool {
-        self.members(t).contains(&self.nil)
+        matches!(self.get(t), Ty::Rest(_)) || self.members(t).contains(&self.nil)
+    }
+
+    /// A results list's fixed results and the type of its `...T` tail, if it has one.
+    pub fn split_results<'r>(&self, rs: &'r [TypeId]) -> (&'r [TypeId], Option<TypeId>) {
+        match rs.split_last() {
+            Some((&last, fixed)) => match self.get(last) {
+                Ty::Rest(t) => (fixed, Some(*t)),
+                _ => (rs, None),
+            },
+            None => (rs, None),
+        }
+    }
+
+    /// The type of result `i`: a `...T` tail gives `T` for every position it covers (leniently,
+    /// like indexing an array, though it may give fewer values).
+    pub fn result_at(&self, rs: &[TypeId], i: usize) -> Option<TypeId> {
+        let (fixed, rest) = self.split_results(rs);
+        fixed.get(i).copied().or(rest)
+    }
+
+    /// Whether results `ra` can stand in for results `rb`.
+    pub fn results_assignable(&self, ra: &[TypeId], rb: &[TypeId]) -> bool {
+        let (fa, rest_a) = self.split_results(ra);
+        let (fb, rest_b) = self.split_results(rb);
+        let fixed_ok = (0..fa.len().max(fb.len())).all(|i| {
+            match (self.result_at(ra, i), self.result_at(rb, i)) {
+                (Some(ta), Some(tb)) => self.assignable(ta, tb),
+                (None, Some(tb)) => self.may_be_nil(tb),
+                (_, None) => true,
+            }
+        });
+        let rest_ok = match (rest_a, rest_b) {
+            (Some(ta), Some(tb)) => self.assignable(ta, tb),
+            _ => true,
+        };
+        fixed_ok && rest_ok
     }
 
     pub fn is_numeric(&self, t: TypeId) -> bool {
@@ -246,6 +285,7 @@ impl Types {
             }
             (Ty::Variant(a, aa), Ty::Variant(b, ba)) => a == b && aa == ba,
             (Ty::Fn(a), Ty::Fn(b)) => self.fn_assignable(a, b),
+            (Ty::Rest(a), Ty::Rest(b)) => self.assignable(*a, *b),
             _ => false,
         }
     }
@@ -270,10 +310,7 @@ impl Types {
             .zip(&b.params)
             .all(|(&pa, &pb)| self.assignable(pb, pa));
         let results_ok = match (&a.results, &b.results) {
-            (Some(ra), Some(rb)) => rb.iter().enumerate().all(|(i, &tb)| match ra.get(i) {
-                Some(&ta) => self.assignable(ta, tb),
-                None => self.may_be_nil(tb),
-            }),
+            (Some(ra), Some(rb)) => self.results_assignable(ra, rb),
             _ => true,
         };
         params_ok && results_ok
@@ -329,6 +366,10 @@ impl Types {
                 let args = args.iter().map(|&a| self.subst(a, map)).collect();
                 self.intern(Ty::Variant(id, args))
             }
+            Ty::Rest(e) => {
+                let e = self.subst(e, map);
+                self.intern(Ty::Rest(e))
+            }
             _ => t,
         }
     }
@@ -341,7 +382,7 @@ impl Types {
                     map.insert(p, actual);
                 }
             }
-            (Ty::Array(a), Ty::Array(b)) => self.unify(a, b, map),
+            (Ty::Array(a), Ty::Array(b)) | (Ty::Rest(a), Ty::Rest(b)) => self.unify(a, b, map),
             (Ty::Map(ka, va), Ty::Map(kb, vb)) => {
                 self.unify(ka, kb, map);
                 self.unify(va, vb, map);
@@ -387,8 +428,11 @@ impl Types {
                     self.unify(x, y, map);
                 }
                 if let (Some(ra), Some(rb)) = (&fa.results, &fb.results) {
-                    for (&x, &y) in ra.iter().zip(rb) {
-                        self.unify(x, y, map);
+                    // Position by position, a `...T` tail standing for each position it covers.
+                    for i in 0..ra.len().max(rb.len()) {
+                        if let (Some(x), Some(y)) = (self.result_at(ra, i), self.result_at(rb, i)) {
+                            self.unify(x, y, map);
+                        }
                     }
                 }
             }
@@ -481,6 +525,7 @@ impl Types {
             Ty::Nominal(id, a) => format!("{}{}", names.name(*id), args(a)),
             Ty::Variant(id, a) => format!("{}{}", names.name(*id), args(a)),
             Ty::Param(id) => names.name(*id),
+            Ty::Rest(t) => format!("...{}", self.display(*t, names)),
         }
     }
 }

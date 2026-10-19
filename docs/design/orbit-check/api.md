@@ -168,7 +168,8 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 
 ### How the stubs are written
 
-- A body-less function with no `->` has unknown results (each `any`), for functions whose result count depends on the arguments (`pcall`, `select`, `string.find`). `-> ()` means no results.
+- A body-less function with no `->` has unknown results (each `any`). `-> ()` means no results. A function whose result count depends on the arguments says what it can with a variadic result: `pcall` is `-> (bool, ...any)`, `string.byte` is `-> ...int`, `table.unpack` is `<T>(list: [T] | table, ...) -> ...T`.
+- `...T` results: each name a `let` binds from them, and each position a caller reads, has type `T` (leniently, as array indexing does, though there may be fewer values), and a `let` binding more names than the fixed results is not a T0205. A `return` checks every extra value against `T`. A function whose inferred results include a call ending in `...T` ends in `...T` too.
 - A parameter written `T?` may be left out; an unannotated or `any` parameter needs an argument.
 - Strings take the `string` stub's functions as methods: `s.upper()` checks as `string::upper(s)`.
 - A stub may declare a body-less function more than once (overloads): a call takes the first declaration its arguments fit, so `math::random()` is `float` and `math::random(1, 6)` is `int`. When none fits, the error lists every form (T0201). Hover and signature help show the last declaration. Overloads exist only in stubs; OrbitScript code can't declare them.

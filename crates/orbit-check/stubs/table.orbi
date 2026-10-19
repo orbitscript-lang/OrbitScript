@@ -15,4 +15,4 @@ pub fn remove<T>(list: [T] | table, pos: int?) -> T?;
 /// Sorts `list` in place, with `comp(a, b)` saying whether `a` goes first (default `<`).
 pub fn sort<T>(list: [T] | table, comp: (fn(T, T) -> bool)?) -> ();
 /// The elements `i` (default 1) to `j` (default the length) of `list`.
-pub fn unpack(list: table, i: int?, j: int?);
+pub fn unpack<T>(list: [T] | table, i: int?, j: int?) -> ...T;

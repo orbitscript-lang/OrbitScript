@@ -211,7 +211,7 @@ pub fn open(path: string, mode: string?) -> (File?, string?);
 pub fn lines(path: string?, ...formats: string | int) -> fn() -> string?;
 ```
 
-  Note: `file:read("l", "n")` returns one value per format, which the type grammar can't say yet. A variadic result `-> ...T` would cover it; until then such a function has no `->`, so its results are unknown (`any`).
+  Note: `file:read("l", "n")` returns one value per format, written as the variadic result `-> ...any` (front end #202 added `-> ...T` and `-> (A, ...T)`).
 
   In a stub, a body-less function with no `->` has unknown results (each `any`), which is how stubs write `pcall` or `string.find`, whose result count depends on the arguments; `-> ()` means none.
 

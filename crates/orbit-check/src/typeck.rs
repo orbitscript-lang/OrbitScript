@@ -521,7 +521,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         match slot {
             None => self.expr(e, None),
             Some(i) => match self.expr_multi(e, None) {
-                Some(rs) => rs.get(i).copied().unwrap_or(self.types.nil),
+                Some(rs) => self.types.result_at(&rs, i).unwrap_or(self.types.nil),
                 None => self.types.any,
             },
         }
@@ -614,7 +614,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             TypeKind::Tuple(ts) if ts.len() == 1 => self.lower(&ts[0]),
             TypeKind::Tuple(ts) if ts.is_empty() => self.types.nil,
-            // Variadic results are typed `any` for now.
+            // Several values, or `...T`, only make sense as results (`lower_results`).
             TypeKind::Tuple(_) | TypeKind::Rest(_) | TypeKind::Error => any,
             TypeKind::Fn { params, rest, ret } => {
                 let lowered: Vec<TypeId> = params.iter().map(|p| self.lower(p)).collect();
@@ -655,8 +655,19 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn lower_results(&mut self, t: &ast::Type) -> Vec<TypeId> {
         match t.kind.as_deref() {
-            Some(TypeKind::Tuple(ts)) => ts.iter().map(|t| self.lower(t)).collect(),
-            _ => vec![self.lower(t)],
+            Some(TypeKind::Tuple(ts)) => ts.iter().map(|t| self.lower_result(t)).collect(),
+            _ => vec![self.lower_result(t)],
+        }
+    }
+
+    /// One result: `...T` (the parser allows it only last) is any number of `T`.
+    fn lower_result(&mut self, t: &ast::Type) -> TypeId {
+        match t.kind.as_deref() {
+            Some(TypeKind::Rest(e)) => {
+                let e = self.lower(e);
+                self.types.intern(Ty::Rest(e))
+            }
+            _ => self.lower(t),
         }
     }
 
@@ -857,27 +868,29 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     /// Joins the result lists of every way out of a function.
     fn join(&mut self, lists: Vec<Results>) -> Results {
-        let total = lists.len();
-        let mut cols: Vec<Vec<TypeId>> = Vec::new();
-        for l in lists {
-            for (i, t) in l?.into_iter().enumerate() {
-                if cols.len() <= i {
-                    cols.push(Vec::new());
-                }
-                cols[i].push(t);
-            }
-        }
+        let lists: Vec<Vec<TypeId>> = lists.into_iter().collect::<Option<_>>()?;
         let nil = self.types.nil;
-        Some(
-            cols.into_iter()
-                .map(|mut c| {
-                    if c.len() < total {
-                        c.push(nil);
-                    }
-                    self.types.union(&c)
-                })
-                .collect(),
-        )
+        let fixed = |l: &Vec<TypeId>| self.types.split_results(l).0.len();
+        let width = lists.iter().map(fixed).max().unwrap_or(0);
+        let mut out: Vec<TypeId> = (0..width)
+            .map(|i| {
+                let col: Vec<TypeId> = lists
+                    .iter()
+                    .map(|l| self.types.result_at(l, i).unwrap_or(nil))
+                    .collect();
+                self.types.union(&col)
+            })
+            .collect();
+        // A way out that gives `...T` makes the function's results end in `...T` too.
+        let rests: Vec<TypeId> = lists
+            .iter()
+            .filter_map(|l| self.types.split_results(l).1)
+            .collect();
+        if !rests.is_empty() {
+            let t = self.types.union(&rests);
+            out.push(self.types.intern(Ty::Rest(t)));
+        }
+        Some(out)
     }
 
     /// A function body block: its statements, then its tail as the returned values.
@@ -925,25 +938,30 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 ExprKind::Call { .. } | ExprKind::MethodCall { .. } | ExprKind::Spread(_)
             )
         {
-            let vals = self.expr_multi(one, rs.first().copied());
+            let vals = self.expr_multi(one, self.types.result_at(&rs, 0));
             if let Some(vs) = &vals {
-                for (i, &r) in rs.iter().enumerate() {
-                    match vs.get(i) {
-                        Some(&v) => self.expect(v, r, e.span, None),
-                        None if !self.types.may_be_nil(r) => {
+                let (fixed, rest) = self.types.split_results(&rs);
+                let (vs_fixed, vs_rest) = self.types.split_results(vs);
+                for i in 0..fixed.len().max(vs_fixed.len()) {
+                    match (self.types.result_at(vs, i), self.types.result_at(&rs, i)) {
+                        (Some(v), Some(r)) => self.expect(v, r, e.span, None),
+                        (None, Some(r)) if !self.types.may_be_nil(r) => {
                             let msg = format!("missing result {} (result {})", self.show(r), i + 1);
                             self.error(e.span, Code::Mismatch, msg);
                         }
-                        None => {}
+                        _ => {}
                     }
+                }
+                if let (Some(v), Some(r)) = (vs_rest, rest) {
+                    self.expect(v, r, e.span, None);
                 }
             }
             return vals;
         }
         let mut out = Vec::new();
         for (i, item) in items.iter().enumerate() {
-            match rs.get(i) {
-                Some(&r) => {
+            match self.types.result_at(&rs, i) {
+                Some(r) => {
                     let t = self.expr(item, Some(r));
                     self.expect_at(item, t, r, None);
                     out.push(t);
@@ -951,7 +969,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 None => out.push(self.expr(item, None)),
             }
         }
-        if items.len() > rs.len() {
+        if self.types.split_results(&rs).1.is_none() && items.len() > rs.len() {
             let msg = format!(
                 "returns {} values, but the function's results are {}",
                 items.len(),
@@ -1175,9 +1193,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             };
             let mut short = false;
             for (i, item) in items.iter().enumerate() {
-                let d = declared.as_ref().and_then(|d| d.get(i).copied());
+                let d = declared.as_ref().and_then(|d| self.types.result_at(d, i));
                 let got = match &vals {
-                    Some(vs) => vs.get(i).copied(),
+                    Some(vs) => self.types.result_at(vs, i),
                     None => Some(any),
                 };
                 let t = match (d, got) {
@@ -1266,7 +1284,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let vals = self.expr_multi(value, None);
         for (i, target) in targets.iter().enumerate() {
             let t = match &vals {
-                Some(vs) => vs.get(i).copied().unwrap_or(nil),
+                Some(vs) => self.types.result_at(vs, i).unwrap_or(nil),
                 None => any,
             };
             self.store(target, declared[i], t, value.span);
@@ -1486,7 +1504,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn first(&self, rs: &Results) -> TypeId {
         match rs {
-            Some(rs) => rs.first().copied().unwrap_or(self.types.nil),
+            Some(rs) => self.types.result_at(rs, 0).unwrap_or(self.types.nil),
             None => self.types.any,
         }
     }
@@ -2106,7 +2124,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
         if generic {
             if let (Some(exp), Some(rs)) = (expected, &f.results)
-                && let Some(&r0) = rs.first()
+                && let Some(r0) = self.types.result_at(rs, 0)
             {
                 self.types.unify(r0, exp, &mut map);
             }
@@ -2759,7 +2777,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     /// Lua's type families, as bits: values from different families are never equal.
     fn families(&self, t: TypeId) -> u32 {
         match self.types.get(t) {
-            Ty::Any | Ty::Param(_) => u32::MAX,
+            Ty::Any | Ty::Param(_) | Ty::Rest(_) => u32::MAX,
             Ty::Nil => 1,
             Ty::Bool => 2,
             Ty::Int | Ty::Float => 4,
@@ -2978,7 +2996,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn type_name(&self, t: TypeId, math: bool) -> TypeName {
         match self.types.get(t) {
-            Ty::Any | Ty::Param(_) => TypeName::Unknown,
+            Ty::Any | Ty::Param(_) | Ty::Rest(_) => TypeName::Unknown,
             Ty::Int if math => TypeName::Is("integer"),
             Ty::Float if math => TypeName::Is("float"),
             _ if math => TypeName::Never,
@@ -3129,11 +3147,19 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 let it = self.expr(iter, None);
                 match self.types.get(it).clone() {
                     // An iterator function: each variable takes a result, the first not nil.
-                    Ty::Fn(f) => f.results.map(|mut rs| {
-                        if let Some(r) = rs.first_mut() {
+                    Ty::Fn(f) => f.results.map(|rs| {
+                        // `...T` results become one `T` per variable.
+                        let vars = match &pat.kind {
+                            PatKind::Tuple(items) => items.len(),
+                            _ => 1,
+                        };
+                        let n = vars.max(rs.len());
+                        let mut vs: Vec<TypeId> =
+                            (0..n).map_while(|i| self.types.result_at(&rs, i)).collect();
+                        if let Some(r) = vs.first_mut() {
                             *r = self.types.non_nil(*r);
                         }
-                        rs
+                        vs
                     }),
                     _ => None,
                 }

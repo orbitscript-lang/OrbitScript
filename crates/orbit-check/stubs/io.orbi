@@ -11,7 +11,7 @@ impl File {
     /// An iterator over the file read with `formats` (default one line at a time).
     pub fn lines(self, ...formats: string | int) -> fn() -> any;
     /// Reads one value per format: `"l"` a line, `"n"` a number, `"a"` everything, or a count.
-    pub fn read(self, ...formats: string | int);
+    pub fn read(self, ...formats: string | int) -> ...any;
     /// Moves to `offset` from `whence` (`"set"`, `"cur"` or `"end"`); returns the position.
     pub fn seek(self, whence: string?, offset: int?) -> (int?, string?);
     /// Sets buffering: `"no"`, `"full"` or `"line"`.
@@ -36,7 +36,7 @@ pub fn output(file: (string | File)?) -> File;
 /// Runs `prog` with a pipe to read its output (`"r"`) or write its input (`"w"`).
 pub fn popen(prog: string, mode: string?) -> (File?, string?);
 /// `File::read` on the input file.
-pub fn read(...formats: string | int);
+pub fn read(...formats: string | int) -> ...any;
 /// A temporary file, removed when the program ends.
 pub fn tmpfile() -> (File?, string?, int?);
 /// `"file"`, `"closed file"`, or `nil` when `obj` isn't a file.
