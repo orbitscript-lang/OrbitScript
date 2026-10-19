@@ -221,6 +221,37 @@ Cost, measured on the cloud x86_64 container without PGO: the feature on and not
 - **`Config::debugger(Debugger::Disabled)`** refuses a debugger for the isolate's whole life (`Vm::disable_debugger`, so the engine enforces it however it is reached): `set_debug_events` fails, breakpoints never resolve and pausing does nothing (D5).
 - **Shared layout**: `IsolateAbi::set_debug_events` and `pause_handle`, `ControlAbi::set_breakpoints`, `set_error_break` and `stop_on_next_line` (on `Control`, so they work both from the host and from inside a stop), the `DebugEventsAbi` callback trait a program implements, `PauseAbi`, and `ConfigAbi::debugger`. A stop hands the program the reporting native's window, with the error in slot 1, so `Paused` is the same code on both backends. A `liborbit` built without its `debugger` feature refuses `set_debug_events`.
 
+### DAP server and `orbit --dap`
+
+`orbit-dap` is the Debug Adapter Protocol server (D4, D5), on the public API only (`orbit::debugger`), so it builds over either backend. `orbit --dap` (CLI feature `dap`, on by default; `build.sh` turns on `orbit-lib/debugger` and `dap` for the shared layout) speaks it over standard input and output: the editor's `launch` request names the script, its arguments and working directory, and the script runs as `orbit <script> <args>` would, with its output and `orbit`'s error reports sent as `output` events.
+
+```mermaid
+sequenceDiagram
+    participant E as Editor
+    participant R as Reader thread
+    participant H as Isolate's thread
+    E->>R: initialize, launch
+    R->>H: launch (program, args, cwd)
+    H->>H: new isolate, attach, breakpoints
+    E->>R: configurationDone
+    H->>H: run the script
+    E->>R: setBreakpoints (while running)
+    R->>H: pause (unseen by the editor)
+    H-->>E: response, script goes on
+    H-->>E: stopped (breakpoint, step, pause, exception)
+    E->>R: stackTrace, scopes, variables, evaluate, continue
+    H-->>E: exited, terminated
+```
+
+- **Two threads.** A reader thread takes the editor's messages and answers `threads` and `pause` itself. Anything else is queued for the isolate's thread; while the script runs, the reader pauses it through `PauseHandle` to get it answered (a *service* stop, which the editor never sees as `stopped`), and `disconnect` or `terminate` interrupts it.
+- **One DAP thread per isolate** (D10), id 1 for `orbit --dap`; coroutines show in its call stack.
+- **Breakpoints** match a chunk by the names a script can be loaded under (`@/abs/path`, `@rel`, `@./rel`, relative to the launch directory) and are reported unverified until their chunk loads, then `breakpoint` changed events say where they landed.
+- **Exception filters**: `uncaught` (errors no `pcall` catches; the CLI's own handler does not count) and `all`.
+- **Scopes**: Locals, Upvalues and Globals; tables expand, with their metatable as `(metatable)`. `evaluate` reads names and dotted fields only.
+- `os.exit` sends `terminated` from a `before_exit` hook.
+
+Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol; OrbitScript frames have no names yet. Attaching to a running process (sockets, D11) and the VS Code extension (D7) come next.
+
 ## Error-message parity
 
 Messages already match the reference for most runtime errors ([VM design](vm.md#error-messages)). What remains for `errors.lua` and `calls.lua` is finished last, as each case unblocks: `global 'x'` versus `field 'x'` for `_ENV` accesses through a local `_ENV`, upvalue and constant names in arithmetic and concatenation, `bad extra argument` for `__call` chains (`extraargs`), `for iterator` naming, and the `(...tail calls...)` lines. Where matching would need bytecode analysis after the fact, the compiler records one more origin instead, as the VM design intends.
@@ -228,7 +259,7 @@ Messages already match the reference for most runtime errors ([VM design](vm.md#
 ## Cargo features
 
 - `orbit-stdlib/debug` (default on): the `debug` table. Enables `orbit-vm/hooks`.
-- `orbit-runtime/debugger`: the debugger engine. Enables `hooks`. Off by default; `orbit`, `orbit-cli` and `orbit-lib` forward it as `debugger`. In `orbit` it also adds the `orbit::debugger` API.
+- `orbit-runtime/debugger`: the debugger engine. Enables `hooks`. Off by default; `orbit`, `orbit-cli` and `orbit-lib` forward it as `debugger`, and `orbit-cli`'s `dap` (on by default) turns it on. In `orbit` it also adds the `orbit::debugger` API.
 - `orbit-vm/hooks`: hook state, the hooked loop, hook frames. Introspection (`getinfo`, locals, upvalues, tracebacks) is always compiled: tracebacks and `error` levels need it anyway.
 
 ## Interfaces in other threads' areas

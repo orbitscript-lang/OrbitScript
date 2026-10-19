@@ -2036,6 +2036,7 @@ impl<'s> Stack<'s> {
             isvararg: fi.is_vararg,
             currentline: -1,
             namewhat: "",
+            defined_name: fi.defined_name,
             ..FrameInfo::default()
         };
         if let Some(l) = at {

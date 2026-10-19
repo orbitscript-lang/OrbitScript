@@ -1,0 +1,20 @@
+[package]
+name = "orbit-dap"
+description = "The Debug Adapter Protocol server for OrbitScript and Lua (ADR-12), on the public orbit API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit = { path = "../orbit", default-features = false, features = ["debugger"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+orbit = { path = "../orbit", features = ["debugger"] }
+orbit-std = { path = "../orbit-std" }
+
+[lints]
+workspace = true

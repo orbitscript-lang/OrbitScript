@@ -19,6 +19,8 @@
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(feature = "dap")]
+mod dap;
 #[cfg(feature = "repl")]
 mod repl;
 
@@ -202,23 +204,52 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          --        stop handling options\n  \
          -         stop handling options and execute stdin\n"
     );
+    #[cfg(feature = "dap")]
+    eprintln!("  --dap     (alone) run the script an editor's debugger launches, over stdio");
     ExitCode::FAILURE
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().cloned().unwrap_or_else(|| "orbit".into());
+    #[cfg(feature = "dap")]
+    if args.get(1).is_some_and(|a| a == "--dap") {
+        return dap::main(&prog);
+    }
     let cli = match parse(&args) {
         Ok(c) => c,
         Err(e) => return usage(&prog, e),
     };
+    let iso = match new_isolate(&cli) {
+        Ok(iso) => iso,
+        Err(m) => {
+            eprintln!("{prog}: {m}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut run = Runner::new(iso, prog);
+    let ok = run.main(&cli, &args);
+    run.iso.flush();
+    // Like lua5.5, close the state on the way out, even after an error:
+    // every object with a `__gc` still registered is finalized (dropping
+    // the isolate closes it and flushes again).
+    drop(run);
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// The isolate the command line asks for, with its libraries installed and
+/// Ctrl-C hooked up.
+fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
     let memory_limit = match std::env::var_os("ORBIT_MEMORY_LIMIT") {
         None => None,
         Some(limit) => match limit.to_str().and_then(parse_size) {
             Some(bytes) => Some(bytes),
             None => {
-                eprintln!("{prog}: ORBIT_MEMORY_LIMIT: expected a size such as 512K, 64M or 1G");
-                return ExitCode::FAILURE;
+                return Err("ORBIT_MEMORY_LIMIT: expected a size such as 512K, 64M or 1G".into());
             }
         },
     };
@@ -234,31 +265,22 @@ fn main() -> ExitCode {
         ignore_env: cli.ignore_env,
         ..Default::default()
     };
-    if let Err(e) = install_libraries(&mut iso, &options, &cli) {
-        eprintln!("{prog}: {}", e.message());
-        return ExitCode::FAILURE;
-    }
+    install_libraries(&mut iso, &options, cli).map_err(|e| e.message().to_owned())?;
     catch_interrupts(iso.interrupt());
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         iso.gc().set_stress(true);
     }
-    let mut run = Runner::new(iso, prog);
-    let ok = run.main(&cli, &args);
-    run.iso.flush();
-    // Like lua5.5, close the state on the way out, even after an error:
-    // every object with a `__gc` still registered is finalized (dropping
-    // the isolate closes it and flushes again).
-    drop(run);
-    if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    Ok(iso)
 }
+
+/// Where a [`Runner`] sends its messages instead of stderr.
+type Report = Box<dyn Fn(&str)>;
 
 struct Runner {
     iso: Isolate,
     prog: String,
+    /// Where messages go instead of stderr (`--dap`: the editor).
+    report_to: Option<Report>,
     #[cfg(feature = "repl")]
     #[cfg_attr(not(feature = "line-editing"), allow(dead_code))]
     repl: repl::State,
@@ -331,6 +353,7 @@ impl Runner {
         Runner {
             iso,
             prog,
+            report_to: None,
             #[cfg(feature = "repl")]
             repl: repl::State::default(),
         }
@@ -490,7 +513,10 @@ impl Runner {
     /// come out in order.
     fn report(&mut self, msg: &str) {
         self.iso.flush();
-        eprintln!("{msg}");
+        match &self.report_to {
+            Some(f) => f(&format!("{msg}\n")),
+            None => eprintln!("{msg}"),
+        }
     }
 }
 
