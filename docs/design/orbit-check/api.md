@@ -135,6 +135,10 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 | T0304 | warning | a record field named like a type (the old map spelling `#{string: int}`) |
 | T0305 | warning | an `orbit-check: ignore` that ignores nothing (strict mode) |
 | T0306 | warning | an `orbit-check:` comment that isn't a pragma, or names an unknown code |
+| T0307 | warning | `t[0]` on an array (arrays start at 1) |
+| T0308 | warning | `for i in 0..#t` that reads `t[i]`: it reads `t[0]` and skips the last element |
+| T0309 | warning | a local that is never read (names starting with `_` and `let scope` bindings are exempt) |
+| T0310 | warning | a `use`d module or name that is never used (`pub use` is exempt) |
 | T0401 | error | a `match` on an enum, `bool` or optional value that misses cases |
 | T0501 | error | a `pub fn` parameter without a type (strict mode) |
 | T0502 | error | a `pub fn` that returns values without a result type (strict mode) |
@@ -160,6 +164,7 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 3. Stubs (C4): the prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`. That includes `std.json` (`stubs/std/json.orbi`, shown as `<builtin>/std/json.orbi`). `tests/stubs.rs` fails when a stub and the runtime's libraries, or the prelude and the front end's list, disagree. Also in this stage: completion of names in scope and keywords, and parsing with recovery.
 
 4. Strict mode and pragmas (C5, T13): the `ignore` and module pragmas, `Config::strict`, `--strict` and `--deny-warnings`.
+5. Lints (C5): T0307-T0310. Assigning to a local counts as using it, so a value that is only ever written is not reported.
 
 ### How the stubs are written
 

@@ -1,0 +1,39 @@
+// Lints: indexing arrays from 0, and names that are never used.
+
+use helpers::{double, triple}; //~ T0310
+use helpers; //~ T0310
+use luamod;
+use luamod as unused_lua; //~ T0310
+
+fn first(xs: [int]) -> int {
+    let zero = xs[0]; //~ T0307 T0309
+    xs[0] = 1; //~ T0307
+    xs[1]
+}
+
+fn sum(xs: [int]) -> int {
+    let mut total = 0;
+    for i in 0..#xs { //~ T0308
+        total += xs[i];
+    }
+    for i in 1..=#xs {
+        total += xs[i];
+    }
+    for i in 0..#xs {
+        print(i);
+    }
+    total
+}
+
+fn names(_ignored: int, param: int) {
+    let unused = 1; //~ T0309
+    let _kept = 2;
+    let used = 3;
+    print(used);
+    let scope handle = io::open("x");
+    for (k, v) in pairs(#{}) { //~ T0309
+        print(v);
+    }
+}
+
+print(double(2), luamod::f());
