@@ -9,6 +9,7 @@
 //! records where symbols are defined, then `typeck` types the module with those definitions.
 
 mod diag;
+mod pragma;
 mod resolve;
 mod stdlib;
 mod symbols;
@@ -101,6 +102,8 @@ pub struct Config {
     pub root: PathBuf,
     /// `package.path`-style templates for `use a::b`: `?` becomes `a/b`, tried in order.
     pub search_path: Vec<String>,
+    /// Check every module strictly (proposal T13), as `//! orbit-check: strict` does for one.
+    pub strict: bool,
 }
 
 impl Default for Config {
@@ -110,6 +113,7 @@ impl Default for Config {
             search_path: ["?.orb", "?/init.orb", "?.lua", "?/init.lua"]
                 .map(String::from)
                 .to_vec(),
+            strict: false,
         }
     }
 }
@@ -401,6 +405,8 @@ impl Workspace {
             type_trees: true,
             stub: is_stub(&path),
             doc_comments: true,
+            // Every comment, for the `// orbit-check: ignore` pragmas.
+            keep_trivia: true,
             ..Default::default()
         };
         // The parser goes on after a syntax error, so the rest of a module being edited is
@@ -410,6 +416,13 @@ impl Workspace {
             .into_iter()
             .map(|e| Diagnostic::error(file, e.span, Code::Syntax, e.message))
             .collect();
+        let pragmas = pragma::Pragmas::read(&text, &ast.comments, &ast.source);
+        let mode = match pragmas.mode {
+            Some(m) => m,
+            None if self.config.strict && builtin.is_none() => pragma::Mode::Strict,
+            None => pragma::Mode::Default,
+        };
+        let strict = mode == pragma::Mode::Strict;
 
         // `use` is module-level only, so the dependencies are known before resolving.
         let mut modules = HashMap::new();
@@ -432,6 +445,21 @@ impl Workspace {
             }
             match self.find_module(&segs, builtin.is_some()) {
                 Some(dep) => {
+                    if strict && is_lua(&self.files[dep.0 as usize].path) {
+                        let span = u.path[0].span.to(u.path[u.path.len() - 1].span);
+                        let path = self.files[dep.0 as usize].path.with_extension("orbi");
+                        diagnostics.push(Diagnostic::error(
+                            file,
+                            span,
+                            Code::UntypedModule,
+                            format!(
+                                "`{}` is a Lua module without types; strict mode needs a stub \
+                                 beside it ({})",
+                                segs.join("::"),
+                                path.display()
+                            ),
+                        ));
+                    }
                     self.ensure(dep);
                     modules.insert(key, dep);
                     deps.push(dep);
@@ -476,10 +504,15 @@ impl Workspace {
             typeck::Deps {
                 checked: &checked,
                 prelude,
+                strict,
             },
         );
         drop(defs);
         diagnostics.append(&mut m.diagnostics);
+        if mode == pragma::Mode::Off {
+            diagnostics.retain(|d| d.code == Code::Syntax);
+        }
+        pragmas.apply(file, &ast.source, strict, &mut diagnostics);
         diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
         m.diagnostics = diagnostics;
         m.deps = deps;

@@ -32,6 +32,7 @@ pub struct Config {
     /// Default: ["./?.orb", "./?/init.orb", "./?.lua", "./?/init.lua"]. A `.orbi` stub beside a
     /// `.lua` module wins over it; the bundled standard library comes last.
     pub search_path: Vec<String>,
+    /// Check every module strictly, as `//! orbit-check: strict` does for one (`--strict`).
     pub strict: bool,
     /// `extern` names the host provides, with optional types (`--extern NAME: T`).
     pub externs: Vec<(String, Option<String>)>,
@@ -132,7 +133,20 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 | T0302 | warning | a bitwise operator on a float |
 | T0303 | warning | a condition that is always true |
 | T0304 | warning | a record field named like a type (the old map spelling `#{string: int}`) |
+| T0305 | warning | an `orbit-check: ignore` that ignores nothing (strict mode) |
+| T0306 | warning | an `orbit-check:` comment that isn't a pragma, or names an unknown code |
 | T0401 | error | a `match` on an enum, `bool` or optional value that misses cases |
+| T0501 | error | a `pub fn` parameter without a type (strict mode) |
+| T0502 | error | a `pub fn` that returns values without a result type (strict mode) |
+| T0503 | error | a condition that isn't `bool` (strict mode) |
+| T0504 | error | `use` of a Lua module with no `.orbi` stub (strict mode) |
+
+## Pragmas and strict mode (T13)
+
+- `// orbit-check: ignore` drops everything reported on its line, and `// orbit-check: ignore[T0207, T0201]` only those codes. A syntax error is never dropped. The comment goes at the end of the line it covers.
+- `//! orbit-check: strict` checks the module strictly, and `//! orbit-check: off` reports only syntax errors for it. `Config::strict` (`--strict`) makes every module strict except those marked `off`; the bundled stubs are never strict.
+- Strict mode adds T0501-T0504, and T0305 for an `ignore` with nothing to ignore. A `pub fn` in a module or a `pub` method needs types on its parameters (`self` aside) and, when it returns values, a result type. A condition must be `bool` (or `any`): `if n` becomes `if n > 0`, `if x` on an optional becomes `if x != nil`. An untyped Lua module is reported once, at its `use`, rather than at every use of a value from it.
+- `orbit-check --deny-warnings` exits with status 1 on warnings too.
 
 ## Broken code (dev tooling D3)
 
@@ -144,6 +158,8 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 1. Skeleton (this thread, first PR): `Workspace`, `Sources`, `FileId`, `Diagnostic`, module graph through `use`, name resolution with a kept symbol table, `document_symbols`, `symbol_at`, `definition`, `references`, and an `orbit-check` CLI that prints resolution errors. That is everything L1 needs except completion and types.
 2. Types (C2, C3): `diagnostics` gains type errors; `type_at`, `signature_at`, `inlay_hints`, member completion. Merged in #188.
 3. Stubs (C4): the prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`. That includes `std.json` (`stubs/std/json.orbi`, shown as `<builtin>/std/json.orbi`). `tests/stubs.rs` fails when a stub and the runtime's libraries, or the prelude and the front end's list, disagree. Also in this stage: completion of names in scope and keywords, and parsing with recovery.
+
+4. Strict mode and pragmas (C5, T13): the `ignore` and module pragmas, `Config::strict`, `--strict` and `--deny-warnings`.
 
 ### How the stubs are written
 

@@ -1,0 +1,10 @@
+// Without the pragma the same code is fine, apart from the always-true condition warning.
+use untyped;
+
+pub fn add(a: int, b) -> int { a + b }
+fn conditions(n: int, maybe: string?) {
+    if n { print(n); } //~ T0303
+    if maybe { print(maybe); }
+}
+let s: string = 3; // orbit-check: ignore
+let v: string = 3; //~ T0201

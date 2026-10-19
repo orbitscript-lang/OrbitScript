@@ -1,0 +1,1 @@
+pub fn scale(x: int) -> int;

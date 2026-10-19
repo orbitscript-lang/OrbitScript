@@ -24,7 +24,8 @@ impl Severity {
 /// A stable diagnostic code. Codes never change meaning; retired ones are not reused.
 ///
 /// `T00xx` are syntax and module errors, `T01xx` names, `T02xx` type errors, `T03xx` warnings
-/// about code that runs but is probably wrong, `T04xx` `match` coverage.
+/// about code that runs but is probably wrong (and about pragmas), `T04xx` `match` coverage,
+/// `T05xx` what strict mode adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Code {
     /// The module doesn't parse.
@@ -75,8 +76,20 @@ pub enum Code {
     AlwaysTrue,
     /// A record type field named like a built-in type (`#{string: int}`, the old map spelling).
     RecordFieldLikeType,
+    /// An `orbit-check: ignore` that ignores nothing (strict mode).
+    UnusedIgnore,
+    /// An `orbit-check:` comment that isn't a pragma, or names an unknown code.
+    BadPragma,
     /// A `match` that misses cases.
     NonExhaustive,
+    /// A `pub fn` parameter without a type (strict mode).
+    MissingParamType,
+    /// A `pub fn` that returns values without a result type (strict mode).
+    MissingResultType,
+    /// A condition that isn't `bool` (strict mode).
+    NotBool,
+    /// `use` of a Lua module that has no `.orbi` stub (strict mode).
+    UntypedModule,
 }
 
 impl Code {
@@ -106,8 +119,54 @@ impl Code {
             Code::FloatBitwise => "T0302",
             Code::AlwaysTrue => "T0303",
             Code::RecordFieldLikeType => "T0304",
+            Code::UnusedIgnore => "T0305",
+            Code::BadPragma => "T0306",
             Code::NonExhaustive => "T0401",
+            Code::MissingParamType => "T0501",
+            Code::MissingResultType => "T0502",
+            Code::NotBool => "T0503",
+            Code::UntypedModule => "T0504",
         }
+    }
+
+    /// Every code, in order.
+    pub const ALL: &[Code] = &[
+        Code::Syntax,
+        Code::ModuleNotFound,
+        Code::UnknownName,
+        Code::UsedBeforeDefinition,
+        Code::NoPublicItem,
+        Code::NoAssociatedItem,
+        Code::UnknownField,
+        Code::UnknownType,
+        Code::NotAType,
+        Code::MissingField,
+        Code::Mismatch,
+        Code::ArgCount,
+        Code::NoMember,
+        Code::NotCallable,
+        Code::ResultCount,
+        Code::BadOperand,
+        Code::MaybeNil,
+        Code::TryResult,
+        Code::ImpossibleCast,
+        Code::UncheckableCast,
+        Code::AlwaysUnequal,
+        Code::FloatBitwise,
+        Code::AlwaysTrue,
+        Code::RecordFieldLikeType,
+        Code::UnusedIgnore,
+        Code::BadPragma,
+        Code::NonExhaustive,
+        Code::MissingParamType,
+        Code::MissingResultType,
+        Code::NotBool,
+        Code::UntypedModule,
+    ];
+
+    /// The code written `name` (`T0201`).
+    pub fn parse(name: &str) -> Option<Code> {
+        Code::ALL.iter().copied().find(|c| c.as_str() == name)
     }
 }
 
@@ -140,6 +199,20 @@ impl Diagnostic {
         Diagnostic {
             severity: Severity::Warning,
             ..Diagnostic::error(file, span, code, message)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Code;
+
+    #[test]
+    fn codes_are_unique_and_parse_back() {
+        let mut seen = std::collections::HashSet::new();
+        for &c in Code::ALL {
+            assert!(seen.insert(c.as_str()), "{} twice", c.as_str());
+            assert_eq!(Code::parse(c.as_str()), Some(c));
         }
     }
 }
