@@ -54,12 +54,16 @@ pub fn rawlen(v: table | string) -> int;
 pub fn rawset<T>(t: T, k: any, v: any) -> T;
 /// Loads the module `name` (once) and returns it, with what its searcher found.
 pub fn require(name: string) -> (any, any);
-/// The arguments after the `n`th, or with `"#"`, how many there are.
-pub fn select(n: int | string, ...args: any);
+/// With `"#"`: how many arguments follow.
+pub fn select(n: string, ...args: any) -> int;
+/// The arguments after the `n`th (counting from the end when negative).
+pub fn select(n: int, ...args: any);
 /// Sets the metatable of the table `t` (removes it with `nil`); returns `t`.
 pub fn setmetatable<T>(t: T, metatable: table?) -> T;
-/// `v` as a number, or `nil` when it isn't one; `base` reads an integer in that base.
-pub fn tonumber(v: any, base: int?) -> number?;
+/// `v` as a number, or `nil` when it isn't one.
+pub fn tonumber(v: any) -> number?;
+/// The integer `s` writes in `base` (2 to 36), or `nil`.
+pub fn tonumber(s: string, base: int) -> int?;
 /// `v` as a string, through `__tostring` or `__name` when it has them.
 pub fn tostring(v: any) -> string;
 /// The name of the type of `v`: `"nil"`, `"number"`, `"string"`, `"table"`, ...
