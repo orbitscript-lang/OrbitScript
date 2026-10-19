@@ -63,6 +63,10 @@ pub enum Code {
     MaybeNil,
     /// `?` in a function whose results can't be `nil, err`.
     TryResult,
+    /// An `as` cast whose source can never pass it (or `as bool` on a value never false).
+    ImpossibleCast,
+    /// An `as` target the runtime can't check: structural types, type parameters, aliases.
+    UncheckableCast,
     /// `==` or `!=` between types that are never equal.
     AlwaysUnequal,
     /// A bitwise operator on a float.
@@ -96,6 +100,8 @@ impl Code {
             Code::BadOperand => "T0206",
             Code::MaybeNil => "T0207",
             Code::TryResult => "T0208",
+            Code::ImpossibleCast => "T0209",
+            Code::UncheckableCast => "T0210",
             Code::AlwaysUnequal => "T0301",
             Code::FloatBitwise => "T0302",
             Code::AlwaysTrue => "T0303",

@@ -9,6 +9,8 @@
 //! function's type is needed (possibly before the walk reaches it), so each body is checked
 //! once. Symbols of other modules have the types that module's check stored.
 
+mod cast;
+
 use std::collections::{HashMap, HashSet};
 
 use orbit_hir::{Span, StrId, StringPool};
@@ -1494,11 +1496,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             ExprKind::Unary { op, expr } => self.unary(*op, expr),
             ExprKind::Paren(inner) => self.expr(inner, expected),
-            ExprKind::As { expr, ty, optional } => {
-                self.expr(expr, None);
-                let t = self.lower(ty);
-                if *optional { self.types.optional(t) } else { t }
-            }
+            ExprKind::As { expr, ty, optional } => self.cast(expr, ty, *optional, e.span),
             ExprKind::Tuple(items) => {
                 let ts: Vec<TypeId> = items.iter().map(|i| self.expr(i, None)).collect();
                 ts.first().copied().unwrap_or(nil)

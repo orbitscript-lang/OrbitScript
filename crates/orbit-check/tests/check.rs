@@ -408,3 +408,47 @@ fn completion_after_a_bare_separator() {
         "{math:?}"
     );
 }
+
+/// The language server shows the checker's errors for `.orb` files, so an `as` target the
+/// compiler rejects must get the same message from both.
+#[test]
+fn cast_errors_match_the_compiler() {
+    let cases = [
+        "let x = y as [int];",
+        "let x = y as #{ a: int, b: string? };",
+        "let x = y as #{[string]: int};",
+        "let x = y as fn(int) -> string;",
+        "let x = y as (int, string);",
+        "let x = y as (int | [int]);",
+        "let x = y as? [int]?;",
+        "fn f<T>(y) { y as T }",
+        "struct S<T> { v: T } impl<T> S<T> { fn get(self) { self.v as T } }",
+        "struct S<T> { v: T } let x = y as S<int>;",
+        "type Ids = [int]; let x = y as Ids;",
+        "fn f(y) { y as Id } type Id = int;",
+        "let x = y as table;",
+        "let x = y as function?;",
+        "let x = y as (int | thread);",
+        "let x = y as userdata;",
+    ];
+    for src in cases {
+        let src = format!("extern y; {src}");
+        let compiler = orbit_orb_syntax::to_hir("t", src.as_bytes(), &Default::default())
+            .expect_err("the compiler rejects the cast")
+            .message;
+        let mut ws = Workspace::new(
+            Config {
+                root: PathBuf::from("/w"),
+                ..Config::default()
+            },
+            Box::new(Memory(vec![])),
+        );
+        let file = ws.set_source(Path::new("/w/t.orb"), src.clone().into_bytes());
+        let checker: Vec<_> = ws
+            .diagnostics(file)
+            .iter()
+            .map(|d| (d.code.as_str(), d.message.clone()))
+            .collect();
+        assert_eq!(checker, [("T0210", compiler)], "{src}");
+    }
+}

@@ -126,6 +126,8 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 | T0206 | error | an operator on operand types it doesn't take |
 | T0207 | error | a value that may be nil used where nil isn't allowed |
 | T0208 | error | `?` in a function whose results can't be `nil, err` |
+| T0209 | error | an `as` cast that can never succeed, or `as bool` on a value that is never false |
+| T0210 | error | an `as` target the program can't check while it runs (structural types, `table`, type parameters, aliases); same message as the compiler |
 | T0301 | warning | `==` or `!=` between types that are never equal |
 | T0302 | warning | a bitwise operator on a float |
 | T0303 | warning | a condition that is always true |
