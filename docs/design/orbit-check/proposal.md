@@ -249,7 +249,7 @@ flowchart LR
     c5["C5 generics, aliases,<br/>records, strict mode, lints"] --> later["Later: language server,<br/>LuaLS comments"]
 ```
 
-- **Tests:** `tests/check/*.orb` files with expected diagnostics written inline (`//~ T0201`), compared exactly; plus "checks clean" runs over `examples/` and the front end's `tests/programs`. A fuzz target feeds parser output to the checker (it must never panic).
+- **Tests:** `tests/check/*.orb` files with expected diagnostics written inline (`//~ T0201`), compared exactly; plus "checks clean" runs over `examples/` and the front end's `tests/programs`. A fuzz target feeds parser output to the checker (it must never panic). Built as `tests/mutations.rs` instead, since cargo-fuzz needs nightly: every `.orb` and stub in the repository is broken in reproducible ways (bytes cut, copied or replaced by tokens) and each result is checked and queried like the language server would.
 - **Done for v1:** every `.orb` in the repository checks clean in default mode (adding annotations to the examples where they help), the seeded-error corpus is all caught, and checking `examples/` takes well under 100 ms on the cloud container.
 - **Same rules as the rest of the code:** stable Rust, no `unsafe`, no dependencies, greenfield (designs above are read as published documentation only).
 
