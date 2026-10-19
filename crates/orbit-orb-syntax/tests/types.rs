@@ -150,7 +150,7 @@ fn trees_are_off_by_default() {
         panic!()
     };
     assert!(ty.kind.is_none());
-    assert!(ast.doc_comments.is_empty());
+    assert!(ast.comments.is_empty());
 }
 
 #[test]
@@ -214,9 +214,9 @@ fn doc_comments_attach_to_the_next_item() {
     let ast = parse_with("t.orb", src.as_bytes(), &tools()).unwrap();
     let text = |s: Span| src[s.start as usize..s.end as usize].to_string();
     let all: Vec<_> = ast
-        .doc_comments
+        .comments
         .iter()
-        .map(|d| (d.inner, text(d.span)))
+        .map(|d| (d.kind == CommentKind::InnerDoc, text(d.span)))
         .collect();
     assert_eq!(
         all,

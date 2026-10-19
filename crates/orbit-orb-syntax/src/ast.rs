@@ -15,18 +15,36 @@ pub struct Ast {
     pub body: Block,
     pub strings: StringPool,
     pub source: SourceInfo,
-    /// Every `///` and `//!` comment, in source order, when
-    /// [`ParseOptions::doc_comments`](crate::ParseOptions) is set. A `///` comment also
-    /// appears in the `docs` of the item it precedes.
-    pub doc_comments: Vec<DocComment>,
+    /// Comments in source order: every `///` and `//!` comment when
+    /// [`ParseOptions::doc_comments`](crate::ParseOptions) is set, every comment when
+    /// [`ParseOptions::keep_trivia`](crate::ParseOptions) is. A `///` comment also appears
+    /// in the `docs` of the item it precedes.
+    pub comments: Vec<Comment>,
 }
 
-/// A `///` (outer: documents the next item) or `//!` (inner: documents the module) comment.
-/// The span covers the whole comment, slashes included.
+/// One comment. The span covers all of it, `//` or `/* */` included.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DocComment {
-    pub inner: bool,
+pub struct Comment {
+    pub kind: CommentKind,
     pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentKind {
+    /// `// ...` (and `//// ...`, which is not a doc comment).
+    Line,
+    /// `/* ... */`, possibly nested.
+    Block,
+    /// `/// ...`: documents the item after it.
+    Doc,
+    /// `//! ...`: documents the module.
+    InnerDoc,
+}
+
+impl CommentKind {
+    pub fn is_doc(self) -> bool {
+        matches!(self, CommentKind::Doc | CommentKind::InnerDoc)
+    }
 }
 
 /// An identifier as written.
@@ -133,6 +151,9 @@ pub enum StmtKind {
     /// `scope stmt;` or `scope { ... }`: runs when the enclosing block exits.
     Scope(Box<Stmt>),
     Item(Box<Item>),
+    /// A statement that failed to parse (only with
+    /// [`ParseOptions::recover`](crate::ParseOptions)); the span covers what was skipped.
+    Error,
 }
 
 #[derive(Debug)]
@@ -171,6 +192,9 @@ pub enum ItemKind {
     },
     /// `extern A, B;`: names globals the module reads and writes.
     Extern(Vec<Name>),
+    /// A member of an `impl` that failed to parse (only with
+    /// [`ParseOptions::recover`](crate::ParseOptions)).
+    Error,
 }
 
 #[derive(Debug)]
@@ -383,6 +407,9 @@ pub enum ExprKind {
         label: Option<Name>,
     },
     Return(Option<Box<Expr>>),
+    /// A missing expression (only with [`ParseOptions::recover`](crate::ParseOptions)), as
+    /// in `let x = ;`. The span is empty, at the token where the expression should start.
+    Error,
 }
 
 impl ExprKind {

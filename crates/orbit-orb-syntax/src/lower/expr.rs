@@ -226,6 +226,7 @@ impl Lowerer {
             K::Int(v) => hir::ExprKind::Int(*v),
             K::Float(v) => hir::ExprKind::Float(*v),
             K::Str(s) => hir::ExprKind::Str(*s),
+            K::Error => return Err(self.unparsed(span)),
             K::Template(pieces) => return self.template(pieces, span, out),
             K::Name(sym) => {
                 return self.name_expr(ast::Name { sym: *sym, span });
