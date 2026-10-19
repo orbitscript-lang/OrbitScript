@@ -247,10 +247,11 @@ sequenceDiagram
 - **One DAP thread per isolate** (D10), id 1 for `orbit --dap`; coroutines show in its call stack.
 - **Breakpoints** match a chunk by the names a script can be loaded under (`@/abs/path`, `@rel`, `@./rel`, relative to the launch directory) and are reported unverified until their chunk loads, then `breakpoint` changed events say where they landed.
 - **Exception filters**: `uncaught` (errors no `pcall` catches; the CLI's own handler does not count) and `all`.
+- **Frame names** come from the call site, as `debug.getinfo` gives them, or else from the name the function was defined with (`FrameInfo::defined_name`, from the prototype), so a tail-called function still has one.
 - **Scopes**: Locals, Upvalues and Globals; tables expand, with their metatable as `(metatable)`. `evaluate` reads names and dotted fields only.
 - `os.exit` sends `terminated` from a `before_exit` hook.
 
-Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol; OrbitScript frames have no names yet. Attaching to a running process (sockets, D11) and the VS Code extension (D7) come next.
+Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Attaching to a running process (sockets, D11) and the VS Code extension (D7) come next.
 
 ## Error-message parity
 
