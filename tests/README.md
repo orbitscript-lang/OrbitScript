@@ -65,7 +65,7 @@ Limits:
 - A `RUSTC_WRAPPER` in the environment (sccache, say) replaces this one, and the build is then not profile-guided.
 - Cargo reads `.cargo/config.toml` only for builds inside this repository. Crates that depend on `orbit`, and `cargo install`, get a plain release build.
 
-`cargo testkit pgo` builds the same profile-guided binary as `target/pgo/orbit` without the wrapper; `--profile FILE` uses another profile (`pgo check` takes it too).
+`cargo testkit pgo` builds the same profile-guided binary as `target/pgo/orbit`, even with a `RUSTC_WRAPPER` set; `--profile FILE` uses another profile (`pgo check` takes it too). It runs the wrapper with `ORBIT_PGO_PROFILE` naming the profile and `ORBIT_PGO_FLAGS` adding rustc flags, so only optimized compiles get them: flags in `RUSTFLAGS` would also reach build scripts and the crates they depend on, which have no profile. On Windows it passes the flags in `RUSTFLAGS` instead, and `pgo check` then also lists those crates' functions.
 
 `cargo testkit pgo train` records a new profile with rustc's stable flags, writes it to `pgo/<target>.profdata`, then builds as above:
 

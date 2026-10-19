@@ -9,6 +9,11 @@
 # Left alone: unoptimized compiles (dev builds, build scripts), compiles that
 # already pass -Cprofile-generate or -Cprofile-use (`cargo testkit pgo`), and
 # targets with no committed profile. See tests/README.md.
+#
+# `cargo testkit pgo` sets ORBIT_PGO_PROFILE to use another profile and
+# ORBIT_PGO_FLAGS (space-separated) to add rustc flags to the same compiles.
+# Flags in RUSTFLAGS would also reach build scripts and the crates they
+# depend on, which aren't optimized and so have no profile.
 rustc="$1"
 shift
 
@@ -30,9 +35,17 @@ if [ "$optimized" = yes ]; then
     if [ -z "$target" ]; then
         target="$("$rustc" -vV | sed -n 's/^host: //p')"
     fi
-    profile="$(cd "$(dirname "$0")/.." && pwd)/pgo/$target.profdata"
+    profile="${ORBIT_PGO_PROFILE:-$(cd "$(dirname "$0")/.." && pwd)/pgo/$target.profdata}"
     if [ -f "$profile" ]; then
-        exec "$rustc" "$@" "-Cprofile-use=$profile" "-Cllvm-args=-vectorizer-min-trip-count=1"
+        # With a profile, LLVM's loop vectorizer treats a loop whose measured
+        # trip count is under 16 as tiny and vectorizes it with masked lanes
+        # instead of a scalar remainder. Without masked stores (x86-64 before
+        # AVX-512) each lane becomes a compare and a branch: clearing a few
+        # registers after a native returns grew to about 280 instructions and
+        # made coroutines 12% slower than the plain release build. A minimum
+        # of 1 keeps the usual vector loop with a scalar remainder.
+        # shellcheck disable=SC2086 # ORBIT_PGO_FLAGS is a list of flags
+        exec "$rustc" "$@" "-Cprofile-use=$profile" "-Cllvm-args=-vectorizer-min-trip-count=1" ${ORBIT_PGO_FLAGS:-}
     fi
 fi
 exec "$rustc" "$@"

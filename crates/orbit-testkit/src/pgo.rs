@@ -232,9 +232,26 @@ fn build(target: &Path, root: &Path, profile: &Path) -> Result<()> {
         "== building the optimized orbit (profile pgo) with {}",
         profile.display()
     );
-    let flags = use_flags(&copy);
-    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
-    cargo_build(root, "pgo", &flags)?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut cmd = Command::new(&cargo);
+    cmd.args([
+        "build",
+        "--profile",
+        "pgo",
+        "-p",
+        "orbit-cli",
+        "--bin",
+        "orbit",
+    ])
+    .current_dir(root);
+    use_profile(&mut cmd, root, &copy, &[]);
+    let status = cmd.status().map_err(io_err(format!(
+        "running {}",
+        PathBuf::from(&cargo).display()
+    )))?;
+    if !status.success() {
+        return Err("cargo build --profile pgo failed".to_string());
+    }
     let out = target.join("pgo").join(exe("orbit"));
     println!("\n{}", out.display());
     Ok(())
@@ -248,31 +265,31 @@ fn build(target: &Path, root: &Path, profile: &Path) -> Result<()> {
 /// 1.1-1.5x slower than a build without a profile.
 fn check(target: &Path, root: &Path, profile: &Path) -> Result<bool> {
     let copy = profile_copy(target, profile)?;
-    let mut flags = use_flags(&copy);
-    // Off by default: also name the functions the profile has no record of.
-    flags.push("-Cllvm-args=-pgo-warn-missing-function".to_string());
     println!("== checking {} against the code", profile.display());
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let out = Command::new(&cargo)
-        .args([
-            "build",
-            "--profile",
-            "pgo",
-            "-p",
-            "orbit-cli",
-            "--bin",
-            "orbit",
-        ])
-        .current_dir(root)
-        .env("CARGO_TARGET_DIR", target.join("pgo-check"))
-        .env("CARGO_BUILD_RUSTC_WRAPPER", "")
-        .env_remove("RUSTFLAGS")
-        .env("CARGO_ENCODED_RUSTFLAGS", rustflags_with(&flags))
-        .output()
-        .map_err(io_err(format!(
-            "running {}",
-            PathBuf::from(&cargo).display()
-        )))?;
+    let mut cmd = Command::new(&cargo);
+    cmd.args([
+        "build",
+        "--profile",
+        "pgo",
+        "-p",
+        "orbit-cli",
+        "--bin",
+        "orbit",
+    ])
+    .current_dir(root)
+    .env("CARGO_TARGET_DIR", target.join("pgo-check"));
+    // Off by default: also name the functions the profile has no record of.
+    use_profile(
+        &mut cmd,
+        root,
+        &copy,
+        &["-Cllvm-args=-pgo-warn-missing-function"],
+    );
+    let out = cmd.output().map_err(io_err(format!(
+        "running {}",
+        PathBuf::from(&cargo).display()
+    )))?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
         print!("{stderr}");
@@ -348,20 +365,33 @@ fn profile_copy(target: &Path, profile: &Path) -> Result<PathBuf> {
     Ok(copy)
 }
 
-/// The rustc flags of a build optimized with the profile at `copy`.
-fn use_flags(copy: &Path) -> Vec<String> {
-    vec![
-        format!("-Cprofile-use={}", copy.display()),
-        // With a profile, LLVM's loop vectorizer treats a loop whose
-        // measured trip count is under 16 as tiny and vectorizes it with
-        // masked lanes instead of a scalar remainder. Without masked
-        // stores (x86-64 before AVX-512) each lane becomes a compare and
-        // a branch: clearing a few registers after a native returns
-        // (`fill(Value::Nil)`) grew to about 280 instructions and made
-        // coroutines 12% slower than the plain release build. A minimum
-        // of 1 keeps the usual vector loop with a scalar remainder.
-        "-Cllvm-args=-vectorizer-min-trip-count=1".to_string(),
-    ]
+/// Has `cmd` (a cargo build) optimize with the profile at `copy`, adding
+/// `extra` rustc flags to the optimized compiles.
+///
+/// The rustc wrapper applies them, as it applies the committed profile to a
+/// plain `cargo build --release`: flags in `RUSTFLAGS` would also reach the
+/// build scripts and the crates they depend on (orbit-runtime's build script
+/// compiles the compiler crates), which aren't optimized and have no profile,
+/// so `pgo check` would list thousands of their functions as new. Windows,
+/// which can't run the shell-script wrapper, gets the flags in `RUSTFLAGS`.
+fn use_profile(cmd: &mut Command, root: &Path, copy: &Path, extra: &[&str]) {
+    if cfg!(windows) {
+        let mut flags = vec![
+            format!("-Cprofile-use={}", copy.display()),
+            // As tools/pgo-rustc adds it; see the comment there.
+            "-Cllvm-args=-vectorizer-min-trip-count=1".to_string(),
+        ];
+        flags.extend(extra.iter().map(|f| f.to_string()));
+        cmd.env("CARGO_BUILD_RUSTC_WRAPPER", "")
+            .env_remove("RUSTFLAGS")
+            .env("CARGO_ENCODED_RUSTFLAGS", rustflags_with(&flags));
+    } else {
+        // RUSTC_WRAPPER wins over the one in .cargo/config.toml, and over a
+        // RUSTC_WRAPPER (sccache, say) already in the environment.
+        cmd.env("RUSTC_WRAPPER", root.join("tools").join("pgo-rustc"))
+            .env("ORBIT_PGO_PROFILE", copy)
+            .env("ORBIT_PGO_FLAGS", extra.join(" "));
+    }
 }
 
 /// The training programs, as argument lists for `orbit` and the directory to
