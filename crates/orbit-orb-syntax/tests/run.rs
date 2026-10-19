@@ -681,6 +681,8 @@ print(err(|| c as Shape::Empty));
 print(err(|| Other::A as Shape::Circle));
 print(err(|| 1 as Point?));
 impl Point { fn same(self, o) { o as? Self != nil } }
+struct table { v: int }
+print((table { v: 5 } as table).v);
 print(p.same(Point { x: 0, y: 0 }), p.same(c));
 "##,
         "
@@ -692,6 +694,7 @@ test:12: cannot cast Point to Shape
 test:13: cannot cast Shape::Circle to Shape::Empty
 test:14: cannot cast Other::A to Shape::Circle
 test:15: cannot cast number to Point?
+5
 true\tfalse",
     );
 }
@@ -763,6 +766,22 @@ fn uncheckable_casts() {
         (
             "fn f(y) { y as Id } type Id = int;",
             "test:1: `as` can't use the type alias `Id`",
+        ),
+        (
+            "let x = y as table;",
+            "test:1: `as` can't check `table` while the program runs",
+        ),
+        (
+            "let x = y as function?;",
+            "test:1: `as` can't check `function` while",
+        ),
+        (
+            "let x = y as (int | thread);",
+            "test:1: `as` can't check `thread` while",
+        ),
+        (
+            "let x = y as userdata;",
+            "test:1: `as` can't check `userdata` while",
         ),
         (
             "struct P {} let x = y as P::Q;",

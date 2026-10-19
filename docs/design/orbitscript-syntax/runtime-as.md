@@ -43,7 +43,7 @@ A `type` alias is not allowed as a target, even `type Id = int`. Following it ma
 
 ### Structural types are a compile error
 
-Records (`#{ x: int }`), maps, arrays (`[T]`), tuples, `fn` types and type parameters (`T`) can't be checked cheaply or completely at run time. An array check is O(n) and recursive, and a function's type can't be checked at all. A cast to one of these is rejected when the code is compiled ("\`as\` can't check \`[int]\` while the program runs; give the value a type annotation instead"), so nobody gets a check that looks complete but isn't. A type alias is rejected for the reason given above.
+Records (`#{ x: int }`), maps, arrays (`[T]`), tuples, `fn` types, type parameters (`T`) and the built-in names `table`, `function`, `thread` and `userdata` can't be checked cheaply or completely at run time. An array check is O(n) and recursive, and a function's type can't be checked at all. A cast to one of these is rejected when the code is compiled ("\`as\` can't check \`[int]\` while the program runs; give the value a type annotation instead"), so nobody gets a check that looks complete but isn't. A type alias is rejected for the reason given above.
 
 ### `as any` and `as?`
 

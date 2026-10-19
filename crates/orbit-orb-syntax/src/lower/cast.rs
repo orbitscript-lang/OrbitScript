@@ -199,6 +199,10 @@ impl Lowerer {
                             b"string" => Some(Target::Scalar(CastKind::String)),
                             b"bool" => Some(Target::Scalar(CastKind::Bool)),
                             b"any" => Some(Target::Any),
+                            // Built-in type names with no cast rule.
+                            b"table" | b"function" | b"thread" | b"userdata" => {
+                                return Err(self.uncheckable(ty));
+                            }
                             _ => None,
                         };
                         if let Some(t) = scalar {
