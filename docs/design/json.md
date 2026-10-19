@@ -14,6 +14,8 @@ local json = require "std.json"
 use std::json;
 ```
 
+[`examples/json`](../../examples/json/) uses the whole API in OrbitScript (`json.orb`) and Lua (`json.lua`), and is checked with the other examples.
+
 It is never a global and never the bare name `json`, so a program that ships its own `json.lua` keeps loading that.
 
 ## API
