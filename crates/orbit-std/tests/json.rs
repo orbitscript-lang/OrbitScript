@@ -147,6 +147,67 @@ fn tojson_gives_the_value_to_write() {
 }
 
 #[test]
+fn arrays_with_holes_and_a_length() {
+    // A marked array writes its holes as null, up to its largest key or the
+    // length it was given.
+    assert_eq!(
+        one("return json.encode(json.array({1, nil, 3}))"),
+        "[1,null,3]"
+    );
+    assert_eq!(
+        one("return json.encode(json.array({[2] = 'b'}, 4))"),
+        "[null,\"b\",null,null]"
+    );
+    assert_eq!(one("return json.encode(json.array({}, 0))"), "[]");
+    assert_eq!(one("return json.encode(json.array(nil, 2))"), "[null,null]");
+    let e = lua("return json.encode(json.array({1, 2, 3}, 2))").unwrap_err();
+    assert!(
+        e.contains("array of length 2 with an element at [3]"),
+        "{e}"
+    );
+    let e = lua("return json.encode(json.array({x = 1}))").unwrap_err();
+    assert!(e.contains("keys aren't positive integers"), "{e}");
+    let e = lua("return json.array({}, -1)").unwrap_err();
+    assert!(e.contains("length must not be negative"), "{e}");
+    // Unmarked, a table with holes is still an object.
+    assert_eq!(one("return json.encode({1, nil, 3})"), "{\"1\":1,\"3\":3}");
+}
+
+#[test]
+fn numbers_written_exactly() {
+    let src = r#"
+        local id = json.number("12345678901234567890")
+        return json.encode({id = id, price = json.number("19.90"), e = json.number("-1.5e-7")},
+            {sort_keys = true}), tostring(id)
+    "#;
+    assert_eq!(
+        lua(src).unwrap(),
+        [
+            r#"{"e":-1.5e-7,"id":12345678901234567890,"price":19.90}"#,
+            "12345678901234567890"
+        ]
+    );
+    for bad in [
+        "'1.'", "'01'", "'+1'", "' 1'", "'1e'", "'NaN'", "''", "'0x10'",
+    ] {
+        let e = lua(&format!("return json.number({bad})")).unwrap_err();
+        assert!(e.contains("not a JSON number"), "{bad}: {e}");
+    }
+}
+
+#[test]
+fn decode_can_drop_nulls() {
+    let src = r#"
+        local v = json.decode('{"a": null, "b": [1, null, 3, null]}', {keep_null = false})
+        assert(v.a == nil and v.b[2] == nil and v.b[3] == 3)
+        -- The array keeps its length, so it encodes back the same.
+        return json.encode(v.b), tostring(json.decode('null', {keep_null = false}))
+    "#;
+    assert_eq!(lua(src).unwrap(), ["[1,null,3,null]", "nil"]);
+    assert_eq!(one("return json.decode('[null]')[1] == json.null"), "true");
+}
+
+#[test]
 fn sort_keys_orders_members_by_bytes() {
     assert_eq!(
         one(

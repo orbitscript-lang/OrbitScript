@@ -23,11 +23,14 @@ It is never a global and never the bare name `json`, so a program that ships its
 | Call | Gives |
 |---|---|
 | `json.encode(value [, options])` | The JSON text. Raises an error for anything JSON can't hold, saying what and where (`cannot encode a function at value.handlers[2]`) |
-| `json.decode(text)` | The value, or `nil` and `serde_json`'s message (`expected value at line 1 column 7`) |
+| `json.decode(text [, options])` | The value, or `nil` and `serde_json`'s message (`expected value at line 1 column 7`) |
 | `json.null` | Stands for JSON's `null`, so it survives inside tables; `tostring` gives `null`, and it can't be changed |
-| `json.object([t])`, `json.array([t])` | `t` (or a new table) marked to encode as an object or an array whatever its keys |
+| `json.object([t])`, `json.array([t [, n]])` | `t` (or a new table) marked to encode as an object or an array whatever its keys. A marked array may have holes, written as `null`; with `n` it has length `n` |
+| `json.number(numeral)` | A value written exactly as `numeral` (`json.number("19.90")`, a 20-digit ID): for numbers a Lua integer or float can't hold. The numeral must be valid JSON; `tostring` gives it back |
 
-`encode`'s options are a table: `pretty = true` writes one member per line indented by two spaces, and `sort_keys = true` writes object keys in byte order, for output that diffs and tests well. Without it members come in `next` order.
+`encode`'s options are a table: `pretty = true` writes one member per line indented by two spaces, and `sort_keys = true` writes object keys in byte order, for output that diffs and tests well. Without it members come in `next` order. `decode`'s option `keep_null = false` decodes `null` as `nil`: object members go away, and an array with holes is marked with its length, so it encodes back with its `null`s.
+
+Lua's own types already decide each scalar's JSON type (`1`, `1.0` and `"1"` all write differently), so there are no scalar markers: `x + 0.0`, `math.tointeger(x)` and `tostring(x)` do the conversions. The markers cover what a plain value can't say: an empty table's shape, an array's holes and length, and a numeral beyond Lua's numbers.
 
 ## Values
 
@@ -43,8 +46,8 @@ flowchart LR
 ```
 
 - **`__tojson`**: a table or userdata whose metatable has a `__tojson` function is written as whatever that function returns for it, so a type picks its own JSON form (`fn __tojson(self) { json::array([self.x, self.y]) }` in an OrbitScript `impl`). A table it returns must be marked with `json.array` or `json.object` (or have a `__tojson` of its own), so the hook says the shape it writes; strings, numbers, booleans and `json.null` are written as they are. Its errors go to `encode`'s caller; giving back the value itself, or a table that holds it, is a cycle error.
-- **Tables**: an array when the keys are exactly `1..n` (an empty table is `[]`), otherwise an object. Object keys are strings, or numbers written as text (`{[1] = "a", [3] = "c"}` is `{"1":"a","3":"c"}`); other key types are an error. A metatable's `__jsontype` field (`"object"`, `"array"` or `"null"`) decides instead, which is what the markers and `json.null` use, and lets a class pick its shape. A table marked as an array whose keys aren't `1..n` is an error.
-- **Numbers** keep their subtype both ways: `1` and `1.0` encode differently and decode back to an integer and a float. A numeral past the 64-bit integers decodes to the nearest float, as Lua reads it. NaN and infinities are an error.
+- **Tables**: an array when the keys are exactly `1..n` (an empty table is `[]`), otherwise an object. Object keys are strings, or numbers written as text (`{[1] = "a", [3] = "c"}` is `{"1":"a","3":"c"}`); other key types are an error. A metatable's `__jsontype` field (`"object"`, `"array"` or `"null"`) decides instead, which is what the markers and `json.null` use, and lets a class pick its shape. A table marked as an array whose keys aren't positive integers, or go past its length, is an error.
+- **Numbers** keep their subtype both ways: `1` and `1.0` encode differently and decode back to an integer and a float. A numeral past the 64-bit integers decodes to the nearest float, as Lua reads it: `serde_json` hands over numbers already converted unless its `arbitrary_precision` feature is on, which passes them through a private map key, so keeping them exact on decode waits for a cleaner way in. NaN and infinities are an error.
 - **Strings** must be valid UTF-8 to encode; decoding gives UTF-8 with escapes resolved.
 - **`nil`** at the top encodes as `null`. JSON `null` decodes to `json.null`, so arrays keep their length.
 - **Empty objects** decode marked as objects, so `{}` round-trips; empty arrays are `[]` anyway.
@@ -65,5 +68,5 @@ Measured 2026-10-19, cloud x86_64, release builds without PGO:
 
 ## Not yet
 
-- Decoding options (a different value for `null`, keys as integers).
+- Decoding big numbers exactly (as `json.number`), and keys as integers.
 - Streaming (reading from a file without the whole text in memory).
