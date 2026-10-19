@@ -128,6 +128,16 @@ fn a_missing_close_brace_before_an_item_at_column_zero() {
     assert_eq!(top_items(&ast), ["fn a", "fn b", "impl P", "struct Q"]);
 }
 
+/// Valid code written flush (items at column 0 inside blocks) parses as it does without
+/// recovery: only a module with errors goes through the layout heuristics.
+#[test]
+fn valid_flush_code_has_no_errors() {
+    let src = "impl V {\nfn a() {}\n}\nfn f() {\nfn g() {}\ng()\n}\nstruct S {\nx: int,\n}\n";
+    let (ast, errors) = recovering(src);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(top_items(&ast), ["impl V", "fn f", "struct S"]);
+}
+
 #[test]
 fn a_broken_impl_member_keeps_the_others() {
     let src = "impl P {\n    fn a(self) {}\n    fn b(self, { }\n    fn c(self) {}\n    oops\n    const D = 1;\n}\nfn after() {}\n";

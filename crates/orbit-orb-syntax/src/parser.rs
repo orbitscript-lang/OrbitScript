@@ -29,7 +29,8 @@ pub struct ParseOptions {
     pub keep_trivia: bool,
     /// Go on after a syntax error, for an editor: the error is recorded, the broken statement
     /// becomes an `Error` node and parsing resumes at the next statement. Use
-    /// [`parse_recovering`] to get every error; [`parse_with`] still gives only the first.
+    /// [`parse_recovering`] to get every error; [`parse_with`] ignores it and gives only the
+    /// first.
     pub recover: bool,
 }
 
@@ -52,21 +53,32 @@ pub fn parse(chunk_name: &str, src: &[u8]) -> Result<Ast, Diagnostic> {
 }
 
 pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Result<Ast, Diagnostic> {
-    let (ast, mut errors) = parse_module(chunk_name, src, options)?;
-    if !errors.is_empty() {
-        return Err(errors.swap_remove(0));
-    }
-    Ok(ast)
+    let plain;
+    let options = if options.recover {
+        plain = ParseOptions {
+            recover: false,
+            ..options.clone()
+        };
+        &plain
+    } else {
+        options
+    };
+    parse_module(chunk_name, src, options).map(|(ast, _)| ast)
 }
 
 /// Parses one module, going on after syntax errors ([`ParseOptions::recover`]): the AST
 /// holds everything that parsed, with `Error` nodes where something didn't, and the errors
-/// come in source order.
+/// come in source order. A module without errors gets the AST [`parse_with`] gives.
 pub fn parse_recovering(
     chunk_name: &str,
     src: &[u8],
     options: &ParseOptions,
 ) -> (Ast, Vec<Diagnostic>) {
+    // Only a module with errors is parsed again with recovery, whose layout heuristics (an
+    // item keyword at column 0 ends a block, for one) could misread valid code.
+    if let Ok(ast) = parse_with(chunk_name, src, options) {
+        return (ast, Vec::new());
+    }
     let options = ParseOptions {
         recover: true,
         ..options.clone()
