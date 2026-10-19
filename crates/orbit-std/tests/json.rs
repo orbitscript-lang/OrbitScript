@@ -183,8 +183,9 @@ fn scalar_conversions() {
     "#;
     assert_eq!(
         lua(src).unwrap(),
-        [r#"[2,-7,2.0,1000.0,"2","1.5","true","s",true,true,false,false,false,"custom"]"#]
+        [r#"[2,-7,2.0,1000.0,"2","1.5","true","s",true,true,false,false,true,"custom"]"#]
     );
+    // json.null is a value like any other to `as bool`: only nil and false are false.
     // A plain conversion says the same thing.
     assert_eq!(
         one("return json.encode({math.tointeger(2.0), 2 + 0.0, tostring(2)})"),
@@ -192,12 +193,15 @@ fn scalar_conversions() {
     );
     for (call, message) in [
         ("json.int(2.5)", "no integer representation"),
-        ("json.int('7')", "number expected"),
-        ("json.float('1')", "number expected"),
-        ("json.int({})", "number expected"),
-        ("json.float('x')", "number expected"),
-        ("json.string({})", "string, number or boolean expected"),
-        ("json.string(nil)", "string, number or boolean expected"),
+        (
+            "json.int('7')",
+            "bad argument #1 to 'int' (cannot cast string to int)",
+        ),
+        ("json.float('1')", "cannot cast string to float"),
+        ("json.int({})", "cannot cast table to int"),
+        ("json.string({})", "cannot cast table to string"),
+        ("json.string(nil)", "cannot cast nil to string"),
+        ("json.int()", "value expected"),
     ] {
         let e = lua(&format!("return {call}")).unwrap_err();
         assert!(e.contains(message), "{call}: {e}");

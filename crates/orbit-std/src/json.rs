@@ -23,7 +23,8 @@
 
 use std::fmt::Write as _;
 
-use orbit::stack::{Native, Raised, Return, Stack, StackResult, Type, upvalue_index};
+use orbit::stack::{Native, Raised, Return, Stack, StackResult, Status, Type, upvalue_index};
+use orbit::{Chunk, Language};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
 /// How deep values nest, both ways: `serde_json`'s own limit for decoding.
@@ -34,8 +35,15 @@ const NULL: i32 = upvalue_index(1);
 const OBJECT_META: i32 = upvalue_index(2);
 const ARRAY_META: i32 = upvalue_index(3);
 const NUMBER_META: i32 = upvalue_index(4);
+/// OrbitScript's casts, `[1]` to `[4]`: `as int`, `as float`, `as string`, `as bool`.
+const CASTS: i32 = upvalue_index(5);
 /// How many upvalues each function has.
-const UPVALUES: i32 = 4;
+const UPVALUES: i32 = 5;
+
+/// The casts, as OrbitScript runs them, so `json.int(x)` and `x as int` can't
+/// disagree (Tym 2026-10-19, runtime-as R7).
+const CASTS_SOURCE: &[u8] =
+    b"return (|v| v as int, |v| v as float, |v| v as string, |v| v as bool);";
 
 macro_rules! natives {
     ($($native:ident $name:literal $f:ident;)*) => {$(
@@ -88,6 +96,9 @@ pub(crate) fn open(s: &mut Stack<'_>) -> StackResult<()> {
     s.raw_set_field(-2, b"__jsontype")?;
     s.push_native::<NumberToString>();
     s.raw_set_field(-2, b"__tostring")?;
+    // Filled on first use: compiling them costs more than the rest of the
+    // module's setup.
+    s.create_table(4, 0);
     let ups = s.top() - (UPVALUES - 1);
     s.create_table(0, 6);
     let lib = s.top();
@@ -198,63 +209,54 @@ fn number(s: &mut Stack<'_>) -> StackResult<Return> {
 
 // The scalar conversions give plain values: Lua's own types already decide
 // each scalar's JSON type, so `json.int(x)` and `x as int` encode the same
-// way. They follow the rules of OrbitScript's runtime `as` (Tym 2026-10-19,
-// runtime-as R7) and should call its cast functions once those land.
+// way. They run OrbitScript's own casts.
 
-/// `json.int(v)`: an integer, or a float with an integral value, as an integer
-/// (the rules of OrbitScript's `as int`; numerals are `tonumber`'s job).
-fn to_int(s: &mut Stack<'_>) -> StackResult<Return> {
-    if s.type_at(1) != Type::Number {
-        return Err(s.type_error(1, "number"));
-    }
-    let Some(n) = s.to_integer(1) else {
-        return Err(s.arg_error(1, "number has no integer representation"));
-    };
-    s.push_integer(n);
-    Ok(Return::values(1))
-}
-
-/// `json.float(v)`: a number as a float (as `as float`).
-fn to_float(s: &mut Stack<'_>) -> StackResult<Return> {
-    let n = match s.type_at(1) {
-        Type::Number => s.to_number(1),
-        _ => None,
-    };
-    let Some(n) = n else {
-        return Err(s.type_error(1, "number"));
-    };
-    s.push_number(n);
-    Ok(Return::values(1))
-}
-
-/// `json.string(v)`: a string, number or boolean, or a value with
-/// `__tostring`, as `tostring` writes it.
-fn to_string(s: &mut Stack<'_>) -> StackResult<Return> {
-    let ok = match s.type_at(1) {
-        Type::String => return Ok(Return::values(1)),
-        Type::Number | Type::Boolean => true,
-        _ if s.get_metatable(1) => {
-            s.raw_get_field(-1, b"__tostring")?;
-            let has = s.type_at(-1) != Type::Nil;
-            s.set_top(1)?;
-            has
-        }
-        _ => false,
-    };
-    if !ok {
-        return Err(s.type_error(1, "string, number or boolean"));
+/// `json.int(v)` .. `json.bool(v)`: `v as int` .. `v as bool`, with an
+/// error naming the argument instead of a line of the casts' chunk.
+fn cast(s: &mut Stack<'_>, which: i64) -> StackResult<Return> {
+    if s.type_at(1) == Type::None {
+        return Err(s.arg_error(1, "value expected"));
     }
     s.set_top(1)?;
-    s.to_display_string(1)?;
-    Ok(Return::values(1))
+    s.raw_get_index(CASTS, which)?;
+    if s.type_at(-1) == Type::Nil {
+        s.set_top(1)?;
+        let chunk = Chunk::new(CASTS_SOURCE)
+            .name("=std.json")
+            .language(Language::OrbitScript);
+        if s.load_chunk(&chunk, 0) != Status::Ok {
+            return Err(s.error("std.json: compiling its casts failed"));
+        }
+        s.call(0, 4)?;
+        for i in (1..=4).rev() {
+            s.raw_set_index(CASTS, i)?;
+        }
+        s.raw_get_index(CASTS, which)?;
+    }
+    s.push_copy(1);
+    if s.pcall(1, 1, 0)? == Status::Ok {
+        return Ok(Return::values(1));
+    }
+    let message = s.string_at(-1).unwrap_or_default();
+    let message = String::from_utf8_lossy(message.strip_prefix(b"std.json:1: ").unwrap_or(message))
+        .into_owned();
+    Err(s.arg_error(1, &message))
 }
 
-/// `json.bool(v)`: `false` for `nil`, `false` and `json.null`, and `true` for
-/// anything else, as conditions treat values (so `0` and `""` are `true`).
+fn to_int(s: &mut Stack<'_>) -> StackResult<Return> {
+    cast(s, 1)
+}
+
+fn to_float(s: &mut Stack<'_>) -> StackResult<Return> {
+    cast(s, 2)
+}
+
+fn to_string(s: &mut Stack<'_>) -> StackResult<Return> {
+    cast(s, 3)
+}
+
 fn to_bool(s: &mut Stack<'_>) -> StackResult<Return> {
-    let b = s.to_boolean(1) && !s.raw_equal(1, NULL);
-    s.push_boolean(b);
-    Ok(Return::values(1))
+    cast(s, 4)
 }
 
 fn number_to_string(s: &mut Stack<'_>) -> StackResult<Return> {
