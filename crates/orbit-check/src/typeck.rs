@@ -1018,6 +1018,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn stmt(&mut self, s: &'a ast::Stmt) {
         match &s.kind {
+            StmtKind::Error => {}
             StmtKind::Let {
                 scope,
                 pat,
@@ -1373,6 +1374,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let t = &*self.types;
         let (any, nil, bool_) = (t.any, t.nil, t.bool);
         match &e.kind {
+            ExprKind::Error => any,
             ExprKind::Nil => nil,
             ExprKind::True | ExprKind::False => bool_,
             ExprKind::Int(_) => self.types.int,
@@ -3247,6 +3249,7 @@ fn walk_stmt<'a>(s: &'a ast::Stmt, f: &mut dyn FnMut(Node<'a>) -> bool) {
         return;
     }
     match &s.kind {
+        StmtKind::Error => {}
         StmtKind::Let { value, .. } => {
             if let Some(v) = value {
                 walk_expr(v, f);
@@ -3293,6 +3296,7 @@ fn walk_expr<'a>(e: &'a ast::Expr, f: &mut dyn FnMut(Node<'a>) -> bool) {
     }
     match &e.kind {
         ExprKind::Nil
+        | ExprKind::Error
         | ExprKind::True
         | ExprKind::False
         | ExprKind::Int(_)
