@@ -974,8 +974,16 @@ impl<'s> Stack<'s> {
     }
 
     /// Push native `N` as a function value.
+    #[inline]
     pub fn push_native<N: Native>(&mut self) {
-        let f = self.ctx.native(N::NAME, native_entry::<N>);
+        self.push_native_fn(N::NAME, native_entry::<N>);
+    }
+
+    /// The non-generic half of [`Stack::push_native`], so each native
+    /// doesn't carry its own copy of the registry lookup.
+    #[inline(never)]
+    fn push_native_fn(&mut self, name: &'static str, f: vm::NativeFn) {
+        let f = self.ctx.native(name, f);
         self.ctx.push(f);
     }
 
