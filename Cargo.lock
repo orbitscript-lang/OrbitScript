@@ -150,10 +150,12 @@ dependencies = [
  "orbit",
  "orbit-capi",
  "orbit-compiler",
+ "orbit-dap",
  "orbit-hir",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
  "orbit-std",
+ "serde_json",
  "signal-hook",
 ]
 
@@ -164,6 +166,15 @@ dependencies = [
  "orbit-bytecode",
  "orbit-hir",
  "orbit-lua-syntax",
+]
+
+[[package]]
+name = "orbit-dap"
+version = "0.0.0"
+dependencies = [
+ "orbit",
+ "orbit-std",
+ "serde_json",
 ]
 
 [[package]]

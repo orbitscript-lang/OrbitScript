@@ -42,9 +42,9 @@ target="$root/target/package"
 cargo=${CARGO:-cargo}
 cd "$root"
 # The library first: the programs link against it.
-CARGO_TARGET_DIR="$target" "$cargo" build --profile "$profile" -p orbit-lib
+CARGO_TARGET_DIR="$target" "$cargo" build --profile "$profile" -p orbit-lib --features debugger
 CARGO_TARGET_DIR="$target" "$cargo" build --profile "$profile" -p orbit-cli \
-    --no-default-features --features shared,line-editing
+    --no-default-features --features shared,line-editing,dap
 case "$profile" in
     dev) built="$target/debug" ;;
     *) built="$target/$profile" ;;

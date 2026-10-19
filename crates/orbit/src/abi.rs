@@ -115,6 +115,7 @@ pub struct FrameInfoAbi {
     pub isvararg: bool,
     pub extraargs: u8,
     pub istailcall: bool,
+    pub defined_name: SOption<SVec<u8>>,
 }
 
 /// [`crate::Config`]: libraries as a bit per [`crate::Library::ALL`]

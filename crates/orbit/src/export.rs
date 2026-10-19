@@ -175,6 +175,7 @@ fn frame_info(f: FrameInfo) -> FrameInfoAbi {
         isvararg: f.isvararg,
         extraargs: f.extraargs,
         istailcall: f.istailcall,
+        defined_name: bytes(f.defined_name),
     }
 }
 
