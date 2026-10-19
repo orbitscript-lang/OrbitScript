@@ -30,8 +30,14 @@ pub(crate) mod backend;
 #[path = "shared.rs"]
 pub(crate) mod backend;
 
+mod typed;
+
 pub(crate) use backend::{ContRef, cont_ref};
 pub use backend::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
+pub use typed::{
+    Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Push, Rest, Results,
+    TableArg, function,
+};
 
 /// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).
 pub const REGISTRY_INDEX: i32 = -(i32::MAX / 2 + 1000);

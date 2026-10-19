@@ -2,9 +2,10 @@
 
 use std::time::Instant;
 
-use orbit::{Call, Error, Ret, Scope, Table, Value};
+use orbit::stack::{Arg, Either, Fail, Nil, Return, Stack, StackResult, Type};
+use orbit::{Call, Error, Ret, Scope, Table, Value, native};
 
-use crate::sys::{exit_status, file_error, flush_stdout, os_bytes, os_path, shell};
+use crate::sys::{exit_status, file_error, flush_stdout, os_bytes, os_error_text, os_path, shell};
 use crate::time::{self, Tm};
 use crate::tz;
 
@@ -15,42 +16,53 @@ fn clock<'s>(c: &'s Call<'s>, start: Instant) -> Result<Ret, Error> {
     c.ret(start.elapsed().as_secs_f64())
 }
 
-fn getenv<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let name: Vec<u8> = c.check(0)?;
-    match std::env::var_os(os_path(&name)) {
-        Some(v) => c.ret(&os_bytes(&v)[..]),
-        None => c.ret(Value::Nil),
-    }
+#[native(name = "os.getenv")]
+fn getenv(name: &[u8]) -> Option<Vec<u8>> {
+    std::env::var_os(os_path(name)).map(|v| os_bytes(&v))
 }
 
-fn remove<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let name: Vec<u8> = c.check(0)?;
-    let path = os_path(&name);
+/// What a failed file operation returns: `nil, message, code`
+/// (`luaL_fileresult`).
+type Failed = (Nil, Vec<u8>, i64);
+
+fn failed(e: &std::io::Error, name: Option<&[u8]>) -> Failed {
+    let mut msg = Vec::new();
+    if let Some(n) = name {
+        msg.extend_from_slice(n);
+        msg.extend_from_slice(b": ");
+    }
+    msg.extend_from_slice(os_error_text(e).as_bytes());
+    (Nil, msg, i64::from(e.raw_os_error().unwrap_or(0)))
+}
+
+#[native(name = "os.remove")]
+fn remove(name: &[u8]) -> Either<bool, Failed> {
+    let path = os_path(name);
     // C's `remove` deletes files and empty directories.
     let r = match std::fs::symlink_metadata(&path) {
         Ok(m) if m.is_dir() => std::fs::remove_dir(&path),
         _ => std::fs::remove_file(&path),
     };
     match r {
-        Ok(()) => c.ret(true),
-        Err(e) => file_error(c, &e, Some(&name)),
+        Ok(()) => Either::Left(true),
+        Err(e) => Either::Right(failed(&e, Some(name))),
     }
 }
 
-fn rename<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let from: Vec<u8> = c.check(0)?;
-    let to: Vec<u8> = c.check(1)?;
-    match std::fs::rename(os_path(&from), os_path(&to)) {
-        Ok(()) => c.ret(true),
+#[native(name = "os.rename")]
+fn rename(from: &[u8], to: &[u8]) -> Either<bool, Failed> {
+    match std::fs::rename(os_path(from), os_path(to)) {
+        Ok(()) => Either::Left(true),
         // lua5.5 names no file in this message.
-        Err(e) => file_error(c, &e, None),
+        Err(e) => Either::Right(failed(&e, None)),
     }
 }
 
-fn tmpname<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
+#[native(name = "os.tmpname")]
+fn tmpname() -> Result<Vec<u8>, &'static str> {
     match crate::sys::temp_file() {
-        Ok((path, _)) => c.ret(&os_bytes(path.as_os_str())[..]),
-        Err(_) => Err(c.error("unable to generate a unique filename")),
+        Ok((path, _)) => Ok(os_bytes(path.as_os_str())),
+        Err(_) => Err("unable to generate a unique filename"),
     }
 }
 
@@ -68,22 +80,37 @@ fn execute<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
     }
 }
 
-fn exit<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let code = match c.arg(0) {
-        Value::Nil | Value::Bool(true) => 0,
-        Value::Bool(false) => 1,
-        _ => c.check::<i64>(0)? as i32,
-    };
-    c.exit(code, c.arg(1).truthy())
+/// `os.exit`'s status: `true` or absent is success, `false` failure.
+struct ExitCode(i32);
+
+impl Arg<'_> for ExitCode {
+    type Checked = ExitCode;
+
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<ExitCode> {
+        Ok(ExitCode(match s.type_at(i) {
+            Type::None | Type::Nil => 0,
+            Type::Boolean => i32::from(!s.to_boolean(i)),
+            _ => s.check_integer(i)? as i32,
+        }))
+    }
+
+    fn get(_: &Stack<'_>, _: i32, code: ExitCode) -> ExitCode {
+        code
+    }
 }
 
-fn difftime<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let t2: i64 = c.check(0)?;
-    let t1: i64 = c.check(1)?;
-    c.ret(t2 as f64 - t1 as f64)
+#[native(name = "os.exit")]
+fn exit(code: ExitCode, close: bool) -> Return {
+    Return::exit(code.0, close)
 }
 
-fn setlocale<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
+#[native(name = "os.difftime")]
+fn difftime(t2: i64, t1: i64) -> f64 {
+    t2 as f64 - t1 as f64
+}
+
+#[native(name = "os.setlocale")]
+fn setlocale(locale: Option<&[u8]>, category: Option<&[u8]>) -> Result<Option<&'static str>, Fail> {
     const CATEGORIES: [&[u8]; 6] = [
         b"all",
         b"collate",
@@ -92,22 +119,17 @@ fn setlocale<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
         b"numeric",
         b"time",
     ];
-    if !c.arg(1).is_nil() {
-        let cat: Vec<u8> = c.check(1)?;
-        if !CATEGORIES.contains(&&cat[..]) {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(&cat));
-            return Err(c.arg_error(1, msg));
-        }
+    if let Some(cat) = category
+        && !CATEGORIES.contains(&cat)
+    {
+        let msg = format!("invalid option '{}'", String::from_utf8_lossy(cat));
+        return Err(Fail::arg(2, msg));
     }
     // Only the C locale exists: querying or asking for it (by any of its
     // names) gives "C", anything else fails.
-    let ok = match c.arg(0) {
-        Value::Nil => true,
-        _ => matches!(&c.check::<Vec<u8>>(0)?[..], b"" | b"C" | b"POSIX"),
-    };
-    if ok { c.ret("C") } else { c.ret(Value::Nil) }
+    let ok = matches!(locale, None | Some(b"" | b"C" | b"POSIX"));
+    Ok(ok.then_some("C"))
 }
-
 /// The current time in seconds since the epoch.
 fn now() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -249,14 +271,14 @@ pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
     let start = Instant::now();
     os.raw_set("clock", s.create_function(move |c| clock(c, start)))?;
     os.raw_set("date", s.create_function(date))?;
-    os.raw_set("difftime", s.create_function(difftime))?;
+    os.raw_set("difftime", s.create_native::<difftime>())?;
     os.raw_set("execute", s.create_function(execute))?;
-    os.raw_set("exit", s.create_function(exit))?;
-    os.raw_set("getenv", s.create_function(getenv))?;
-    os.raw_set("remove", s.create_function(remove))?;
-    os.raw_set("rename", s.create_function(rename))?;
-    os.raw_set("setlocale", s.create_function(setlocale))?;
+    os.raw_set("exit", s.create_native::<exit>())?;
+    os.raw_set("getenv", s.create_native::<getenv>())?;
+    os.raw_set("remove", s.create_native::<remove>())?;
+    os.raw_set("rename", s.create_native::<rename>())?;
+    os.raw_set("setlocale", s.create_native::<setlocale>())?;
     os.raw_set("time", s.create_function(time_))?;
-    os.raw_set("tmpname", s.create_function(tmpname))?;
+    os.raw_set("tmpname", s.create_native::<tmpname>())?;
     Ok(os)
 }

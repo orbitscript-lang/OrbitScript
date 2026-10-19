@@ -551,6 +551,12 @@ impl<'s> Stack<'s> {
 
     // ---- reading values --------------------------------------------------------------
 
+    /// [`Stack::type_at`] for argument `i` (1-based).
+    #[inline(always)]
+    pub(crate) fn arg_type(&self, i: i32) -> Type {
+        self.type_at(i)
+    }
+
     pub fn type_at(&self, idx: i32) -> Type {
         type_of(self.w.type_at(idx))
     }
