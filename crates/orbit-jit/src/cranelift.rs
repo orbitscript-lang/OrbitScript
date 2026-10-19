@@ -18,11 +18,11 @@ use cranelift_module::{Linkage, Module, default_libcall_names};
 use orbit_runtime::object::{FieldCache, ProtoCode, Value};
 use orbit_runtime::vm::op::{MULTI, Op};
 
-use crate::layout::{self, Inline};
+use crate::layout::{self, Calls, Inline};
 use crate::{entries, jump_target};
 use orbit_runtime::vm::{
-    CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, EXIT, HelperFn, Helpers, JitBackend, JitFn,
-    NO_VALUE, TAKEN, const_parts,
+    CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH, CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, EXIT,
+    HelperFn, Helpers, JitBackend, JitFn, NO_VALUE, RET, TAKEN, const_parts,
 };
 
 const TAG_NIL: i64 = 0;
@@ -174,6 +174,11 @@ struct Tr<'a, 'b> {
     uflags: MemFlagsData,
     /// The pinned table layout, when inline table access is on.
     inline: Option<&'static Inline>,
+    /// The pinned frame layout, when inline calls are on.
+    calls: Option<&'static Calls>,
+    /// Compiled functions, and [`Helpers::finish_call`].
+    jsig: SigRef,
+    fsig: SigRef,
 }
 
 /// What a table access indexes with.
@@ -227,6 +232,18 @@ fn translate(
     }
     ss.returns.push(AbiParam::new(types::I8));
     let setsig = b.import_signature(ss);
+    let mut js = Signature::new(call_conv);
+    for t in [types::I64, types::I64, types::I32, types::I64] {
+        js.params.push(AbiParam::new(t));
+    }
+    js.returns.push(AbiParam::new(types::I64));
+    let jsig = b.import_signature(js);
+    let mut fs = Signature::new(call_conv);
+    for _ in 0..3 {
+        fs.params.push(AbiParam::new(types::I64));
+    }
+    fs.returns.push(AbiParam::new(types::I64));
+    let fsig = b.import_signature(fs);
 
     let flags = MemFlagsData::trusted();
     let regs = b.declare_var(types::I64);
@@ -265,6 +282,9 @@ fn translate(
         polls: Vec::new(),
         uflags: MemFlagsData::new().with_notrap(),
         inline: layout::inline(),
+        calls: layout::calls(),
+        jsig,
+        fsig,
     };
     for p in 0..n {
         t.b.switch_to_block(t.blocks[p]);
@@ -825,6 +845,223 @@ impl Tr<'_, '_> {
         }
     }
 
+    /// Whether the arena slot at `slot` holds an object: go to `miss` when
+    /// it carries the empty marker.
+    fn occupied(&mut self, slot: CValue, at: i32, width: u8, value: u64, miss: Block) {
+        let mark = match width {
+            1 => self.b.ins().uload8(types::I64, self.uflags, slot, at),
+            2 => self.b.ins().uload16(types::I64, self.uflags, slot, at),
+            4 => self.b.ins().uload32(self.uflags, slot, at),
+            _ => self.b.ins().load(types::I64, self.uflags, slot, at),
+        };
+        let empty = self.b.ins().icmp_imm_s(IntCC::Equal, mark, value as i64);
+        let ok = self.b.create_block();
+        self.b.ins().brif(empty, miss, &[], ok, &[]);
+        self.b.switch_to_block(ok);
+    }
+
+    /// `R[func](args)` for a compiled Lua function with exactly `nargs`
+    /// parameters and no captured locals: pushes its frame in place and
+    /// calls its code directly. Anything else goes through the `call`
+    /// helper.
+    fn inline_call(&mut self, p: usize, l: &Calls, func: u8, nargs: u8, want: u8) {
+        let slow = self.b.create_block();
+        let fl_ = self.flags;
+        let t = self.tag(func);
+        let is_c = self.b.ins().icmp_imm_s(IntCC::Equal, t, TAG_CLOSURE);
+        self.guard(is_c, slow);
+        let regs = self.regs();
+        let cbits = self
+            .b
+            .ins()
+            .load(types::I64, fl_, regs, func as i32 * 16 + 8);
+        let cidx = self.b.ins().uload32(fl_, regs, func as i32 * 16 + 8);
+        let lenp = self
+            .b
+            .ins()
+            .load(types::I64, fl_, self.ctx, CTX_CLOSURES_LEN);
+        let len = self.b.ins().load(types::I64, fl_, lenp, 0);
+        let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, cidx, len);
+        self.guard(inb, slow);
+        let cbase = self.b.ins().load(types::I64, fl_, self.ctx, CTX_CLOSURES);
+        let off = self.b.ins().imul_imm_s(cidx, l.closure_slot_size);
+        let slot = self.b.ins().iadd(cbase, off);
+        self.occupied(slot, l.empty_at, l.empty_width, l.empty_value, slow);
+        let rcp = self.b.ins().load(types::I64, fl_, slot, l.closure_code);
+        let code = self.b.ins().iadd_imm_s(rcp, l.rc_value as i64);
+        let entry = self.b.ins().load(types::I64, fl_, code, l.proto_entry);
+        let compiled = self.b.ins().icmp_imm_s(IntCC::NotEqual, entry, 0);
+        self.guard(compiled, slow);
+        let np = self.b.ins().uload8(types::I64, fl_, code, l.proto_nparams);
+        let same = self.b.ins().icmp_imm_s(IntCC::Equal, np, nargs as i64);
+        self.guard(same, slow);
+        let va = self
+            .b
+            .ins()
+            .uload8(types::I64, fl_, code, l.proto_is_vararg);
+        let nc = self.b.ins().uload8(types::I64, fl_, code, l.proto_ncells);
+        let either = self.b.ins().bor(va, nc);
+        let plain = self.b.ins().icmp_imm_s(IntCC::Equal, either, 0);
+        self.guard(plain, slow);
+        let nr = self.b.ins().uload8(types::I64, fl_, code, l.proto_nregs);
+        let depth = self.b.ins().uload32(fl_, self.ctx, CTX_DEPTH);
+        let shallow = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, depth, l.max_depth as i64);
+        self.guard(shallow, slow);
+        let vm = self.vm;
+        let fp = self.b.ins().load(types::I64, fl_, vm, l.frames_ptr);
+        let fln = self.b.ins().load(types::I64, fl_, vm, l.frames_len);
+        let fcap = self.b.ins().load(types::I64, fl_, vm, l.frames_cap);
+        let room = self.b.ins().icmp(IntCC::UnsignedLessThan, fln, fcap);
+        self.guard(room, slow);
+        let top_off = self.b.ins().imul_imm_s(fln, l.frame_size);
+        let nf = self.b.ins().iadd(fp, top_off);
+        let caller = self.b.ins().iadd_imm_s(nf, -l.frame_size);
+        let cb = self.b.ins().uload32(fl_, caller, l.frame_base);
+        let fabs = self.b.ins().iadd_imm_s(cb, func as i64);
+        let nb = self.b.ins().iadd_imm_s(fabs, 1);
+        let na = self.b.ins().iconst(types::I64, nargs as i64);
+        let big = self.b.ins().umax(nr, na);
+        let need = self.b.ins().iadd(nb, big);
+        let maxs = self.b.ins().load(types::I64, fl_, vm, l.max_stack);
+        let fits = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, need, maxs);
+        self.guard(fits, slow);
+        let rl = self.b.ins().load(types::I64, fl_, vm, l.regs_len);
+        let wend = self.b.ins().iadd_imm_s(nb, l.window);
+        let whole = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, wend, rl);
+        self.guard(whole, slow);
+        // Commit: the caller's return pc, then the callee's frame.
+        let ret_pc = self.b.ins().iconst(types::I64, p as i64 + 1);
+        self.b.ins().istore32(fl_, ret_pc, caller, l.frame_pc);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let tag = self.b.ins().iconst(types::I64, l.lua_kind_tag as i64);
+        self.b.ins().istore8(fl_, tag, nf, l.frame_kind);
+        self.b.ins().istore32(fl_, cidx, nf, l.frame_closure);
+        self.b.ins().store(fl_, code, nf, l.frame_code_id);
+        self.b.ins().istore32(fl_, fabs, nf, l.frame_func);
+        self.b.ins().istore32(fl_, nb, nf, l.frame_base);
+        self.b.ins().istore32(fl_, zero, nf, l.frame_pc);
+        let cl = self.b.ins().load(types::I64, fl_, vm, l.cells_len);
+        self.b.ins().istore32(fl_, cl, nf, l.frame_cell_base);
+        self.b.ins().istore32(fl_, zero, nf, l.frame_nvarargs);
+        let w = self.b.ins().iconst(types::I64, want as i64);
+        self.b.ins().istore8(fl_, w, nf, l.frame_want);
+        self.b.ins().istore8(fl_, zero, nf, l.frame_tail);
+        self.b.ins().istore8(fl_, zero, nf, l.frame_extra);
+        self.b.ins().istore8(fl_, zero, nf, l.frame_cdepth);
+        let fl1 = self.b.ins().iadd_imm_s(fln, 1);
+        self.b.ins().store(fl_, fl1, vm, l.frames_len);
+        let rp = self.b.ins().load(types::I64, fl_, vm, l.regs_ptr);
+        let woff = self.b.ins().ishl_imm_u(nb, 4);
+        let win = self.b.ins().iadd(rp, woff);
+        self.b.ins().store(fl_, win, self.ctx, 0);
+        let d1 = self.b.ins().iadd_imm_s(depth, 1);
+        self.b.ins().istore32(fl_, d1, self.ctx, CTX_DEPTH);
+        let pc0 = self.b.ins().iconst(types::I32, 0);
+        let call = self
+            .b
+            .ins()
+            .call_indirect(self.jsig, entry, &[vm, self.ctx, pc0, cbits]);
+        let st = self.b.inst_results(call)[0];
+        self.b.ins().istore32(fl_, depth, self.ctx, CTX_DEPTH);
+        let r0 = self.b.ins().load(types::I64, fl_, self.ctx, 0);
+        self.b.def_var(self.regs, r0);
+        let is_ret = self.b.ins().icmp_imm_s(IntCC::Equal, st, RET as i64);
+        let done = self.b.create_block();
+        let other = self.b.create_block();
+        self.b.ins().brif(is_ret, done, &[], other, &[]);
+        self.b.switch_to_block(other);
+        let fin = self
+            .b
+            .ins()
+            .iconst(types::I64, self.helpers.finish_call as usize as i64);
+        let call = self
+            .b
+            .ins()
+            .call_indirect(self.fsig, fin, &[vm, self.ctx, st]);
+        let r = self.b.inst_results(call)[0];
+        let r0 = self.b.ins().load(types::I64, fl_, self.ctx, 0);
+        self.b.def_var(self.regs, r0);
+        let next = self.next(p);
+        self.check(r, next, p);
+        self.b.switch_to_block(done);
+        self.fall(p);
+        self.b.switch_to_block(slow);
+        self.helper_then_next(self.helpers.call, p);
+    }
+
+    /// `Return0` / `Return1` into a Lua caller wanting at most one result,
+    /// with no captured locals to drop: pops the frame in place and returns
+    /// [`RET`]. Anything else goes to `slow`.
+    fn inline_ret(&mut self, l: &Calls, src: Option<u8>, slow: Block) {
+        let fl_ = self.flags;
+        let vm = self.vm;
+        let fp = self.b.ins().load(types::I64, fl_, vm, l.frames_ptr);
+        let fln = self.b.ins().load(types::I64, fl_, vm, l.frames_len);
+        let two = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, fln, 2);
+        self.guard(two, slow);
+        let fl1 = self.b.ins().iadd_imm_s(fln, -1);
+        let off = self.b.ins().imul_imm_s(fl1, l.frame_size);
+        let f = self.b.ins().iadd(fp, off);
+        let caller = self.b.ins().iadd_imm_s(f, -l.frame_size);
+        let ck = self.b.ins().uload8(types::I64, fl_, caller, l.frame_kind);
+        let lua = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, ck, l.lua_kind_tag as i64);
+        self.guard(lua, slow);
+        let want = self.b.ins().uload8(types::I64, fl_, f, l.frame_want);
+        let small = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, want, 1);
+        self.guard(small, slow);
+        let cb = self.b.ins().uload32(fl_, f, l.frame_cell_base);
+        let cl = self.b.ins().load(types::I64, fl_, vm, l.cells_len);
+        let nocells = self.b.ins().icmp(IntCC::Equal, cb, cl);
+        self.guard(nocells, slow);
+        let func = self.b.ins().uload32(fl_, f, l.frame_func);
+        let rp = self.b.ins().load(types::I64, fl_, vm, l.regs_ptr);
+        let foff = self.b.ins().ishl_imm_u(func, 4);
+        let dst = self.b.ins().iadd(rp, foff);
+        let copy = self.b.create_block();
+        let after = self.b.create_block();
+        self.b.ins().brif(want, copy, &[], after, &[]);
+        self.b.switch_to_block(copy);
+        match src {
+            Some(s) => {
+                let regs = self.regs();
+                let t = self.b.ins().load(types::I64, fl_, regs, s as i32 * 16);
+                let v = self.b.ins().load(types::I64, fl_, regs, s as i32 * 16 + 8);
+                self.b.ins().store(fl_, t, dst, 0);
+                self.b.ins().store(fl_, v, dst, 8);
+            }
+            None => {
+                let z = self.b.ins().iconst(types::I64, TAG_NIL);
+                self.b.ins().store(fl_, z, dst, 0);
+            }
+        }
+        self.b.ins().jump(after, &[]);
+        self.b.switch_to_block(after);
+        let top = self.b.ins().iadd(func, want);
+        self.b.ins().store(fl_, top, vm, l.top);
+        self.b.ins().store(fl_, fl1, vm, l.frames_len);
+        let cbase = self.b.ins().uload32(fl_, caller, l.frame_base);
+        let coff = self.b.ins().ishl_imm_u(cbase, 4);
+        let win = self.b.ins().iadd(rp, coff);
+        self.b.ins().store(fl_, win, self.ctx, 0);
+        let r = self.b.ins().iconst(types::I64, RET as i64);
+        self.b.ins().return_(&[r]);
+    }
+
     /// A table read: inline when the layout is pinned, then through fast
     /// helper `fast`, then through the full helper `full`.
     fn fast_get(&mut self, p: usize, dst: u8, obj: u8, key: Key, fast: usize, full: HelperFn) {
@@ -1270,10 +1507,30 @@ impl Tr<'_, '_> {
             | Op::CapSet { .. } => self.helper_then_next(h.cell, p),
             Op::Closure { .. } => self.helper_then_next(h.closure, p),
 
+            Op::Call {
+                func,
+                nargs,
+                nresults,
+            } if nargs != MULTI && nresults != MULTI && self.calls.is_some() => {
+                let l = self.calls.expect("calls");
+                self.inline_call(p, l, func, nargs, nresults)
+            }
             Op::Call { nresults, .. } if nresults != MULTI || p + 1 < self.code.code.len() => {
                 self.helper_then_next(h.call, p)
             }
             Op::GenericCall { .. } => self.helper_then_next(h.call, p),
+            Op::Return0 | Op::Return1 { .. } if self.calls.is_some() => {
+                let l = self.calls.expect("calls");
+                let src = match op {
+                    Op::Return1 { src } => Some(src),
+                    _ => None,
+                };
+                let slow = self.b.create_block();
+                self.inline_ret(l, src, slow);
+                self.b.switch_to_block(slow);
+                let r = self.helper(h.ret, p);
+                self.b.ins().return_(&[r]);
+            }
             Op::Return { .. } | Op::Return0 | Op::Return1 { .. } => {
                 let r = self.helper(h.ret, p);
                 self.b.ins().return_(&[r]);

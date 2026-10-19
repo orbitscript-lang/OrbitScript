@@ -47,12 +47,121 @@ pub struct JitCtx {
     /// for reading tables in place with [`crate::object::TABLE_LAYOUT`].
     pub tables: usize,
     pub tables_len: *const usize,
+    /// The closure arena's, likewise, for inline calls ([`CALL_LAYOUT`]).
+    pub closures: usize,
+    pub closures_len: *const usize,
 }
 
 /// Byte offsets of [`JitCtx`]'s fields, for generated code.
 pub const CTX_INTERRUPT: i32 = std::mem::offset_of!(JitCtx, interrupt) as i32;
 pub const CTX_TABLES: i32 = std::mem::offset_of!(JitCtx, tables) as i32;
 pub const CTX_TABLES_LEN: i32 = std::mem::offset_of!(JitCtx, tables_len) as i32;
+pub const CTX_DEPTH: i32 = std::mem::offset_of!(JitCtx, depth) as i32;
+pub const CTX_CLOSURES: i32 = std::mem::offset_of!(JitCtx, closures) as i32;
+pub const CTX_CLOSURES_LEN: i32 = std::mem::offset_of!(JitCtx, closures_len) as i32;
+
+/// Where generated code finds what a Lua-to-Lua call and return touch
+/// (planning/jit): byte offsets into the [`Vm`], a [`Frame`] (pinned by
+/// `repr(C)` under the `jit` feature), a closure's arena slot and a
+/// [`ProtoCode`]. A `Vec`'s pointer, length and capacity words, and the
+/// `Rc` header before a `ProtoCode`, orbit-jit checks at start-up.
+#[derive(Debug, Clone, Copy)]
+pub struct CallLayout {
+    /// The register, cell and frame `Vec`s, `rt.top` and
+    /// `rt.limits.max_stack`, in a `Vm`.
+    pub regs: usize,
+    pub cells: usize,
+    pub frames: usize,
+    pub top: usize,
+    pub max_stack: usize,
+    pub frame_size: usize,
+    /// The kind's tag byte, and a Lua frame's closure (`u32` handle index)
+    /// and code address.
+    pub frame_kind: usize,
+    pub lua_kind_tag: u8,
+    pub frame_closure: usize,
+    pub frame_code_id: usize,
+    /// The `u32` fields, then the four bytes `want`, `tail`, `extra`,
+    /// `cdepth`.
+    pub frame_func: usize,
+    pub frame_base: usize,
+    pub frame_pc: usize,
+    pub frame_cell_base: usize,
+    pub frame_nvarargs: usize,
+    pub frame_want: usize,
+    pub frame_tail: usize,
+    pub frame_extra: usize,
+    pub frame_cdepth: usize,
+    /// A closure's arena slot size and its `Rc<ProtoCode>`.
+    pub closure_slot_size: usize,
+    pub closure_code: usize,
+    /// The compiled entry (`Option<JitFn>`, null when not compiled) and the
+    /// frame shape bytes of a `ProtoCode`.
+    pub proto_entry: usize,
+    pub proto_nparams: usize,
+    pub proto_is_vararg: usize,
+    pub proto_nregs: usize,
+    pub proto_ncells: usize,
+    /// Registers a frame's window must have past its base.
+    pub window: usize,
+    pub max_depth: u32,
+    /// Handles carry a generation ([`orbit_gc::CHECKED_HANDLES`]), so a
+    /// frame's closure isn't just the `u32` index.
+    pub checked_handles: bool,
+}
+
+/// [`FrameKind::Lua`] as `repr(C, u8)` lays it out: the tag byte, then the
+/// variant's fields as a `repr(C)` struct at the union's alignment.
+#[repr(C)]
+struct LuaKindMirror {
+    tag: u8,
+    lua: LuaKindFields,
+}
+
+#[repr(C)]
+struct LuaKindFields {
+    closure: Gc<Closure>,
+    code_id: usize,
+}
+
+const _: () = assert!(std::mem::align_of::<FrameKind>() == std::mem::align_of::<LuaKindFields>());
+
+pub const CALL_LAYOUT: CallLayout = CallLayout {
+    regs: std::mem::offset_of!(Vm, rt.stack.regs),
+    cells: std::mem::offset_of!(Vm, rt.stack.cells),
+    frames: std::mem::offset_of!(Vm, rt.stack.frames),
+    top: std::mem::offset_of!(Vm, rt.top),
+    max_stack: std::mem::offset_of!(Vm, rt.limits.max_stack),
+    frame_size: std::mem::size_of::<Frame>(),
+    frame_kind: std::mem::offset_of!(Frame, kind),
+    lua_kind_tag: 0,
+    frame_closure: std::mem::offset_of!(Frame, kind)
+        + std::mem::offset_of!(LuaKindMirror, lua.closure),
+    frame_code_id: std::mem::offset_of!(Frame, kind)
+        + std::mem::offset_of!(LuaKindMirror, lua.code_id),
+    frame_func: std::mem::offset_of!(Frame, func),
+    frame_base: std::mem::offset_of!(Frame, base),
+    frame_pc: std::mem::offset_of!(Frame, pc),
+    frame_cell_base: std::mem::offset_of!(Frame, cell_base),
+    frame_nvarargs: std::mem::offset_of!(Frame, nvarargs),
+    frame_want: std::mem::offset_of!(Frame, want),
+    frame_tail: std::mem::offset_of!(Frame, tail),
+    frame_extra: std::mem::offset_of!(Frame, extra),
+    frame_cdepth: std::mem::offset_of!(Frame, cdepth),
+    closure_slot_size: std::mem::size_of::<Option<Closure>>(),
+    closure_code: std::mem::offset_of!(Closure, code),
+    proto_entry: std::mem::offset_of!(ProtoCode, jit) + std::mem::offset_of!(JitSlot, entry),
+    proto_nparams: std::mem::offset_of!(ProtoCode, nparams),
+    proto_is_vararg: std::mem::offset_of!(ProtoCode, is_vararg),
+    proto_nregs: std::mem::offset_of!(ProtoCode, nregs),
+    proto_ncells: std::mem::offset_of!(ProtoCode, ncells),
+    window: WINDOW,
+    max_depth: MAX_DEPTH,
+    checked_handles: orbit_gc::CHECKED_HANDLES,
+};
+
+// `Option<Closure>` keeps a closure at the slot's start (same size).
+const _: () = assert!(std::mem::size_of::<Option<Closure>>() == std::mem::size_of::<Closure>());
 
 /// A compiled prototype: runs the top frame, a call of the closure whose
 /// handle bits are `closure`, from instruction `pc`.
@@ -265,6 +374,10 @@ pub struct Helpers {
     pub field_set: extern "C" fn(&mut Vm, u64, &FieldCache, u64, u64) -> bool,
     /// `GetGlobal` through its inline cache; [`NO_VALUE`] on a miss.
     pub global_get: extern "C" fn(&Vm, u64, &FieldCache) -> Parts,
+    /// After an inline call whose callee returned status `s` (not
+    /// [`RET`]): runs the tail calls a [`TAIL`] asks for, as the `call`
+    /// helper does. 0 when the call is done, else the status to return.
+    pub finish_call: extern "C" fn(&mut Vm, &mut JitCtx, u64) -> u64,
 }
 
 pub static HELPERS: Helpers = Helpers {
@@ -294,6 +407,7 @@ pub static HELPERS: Helpers = Helpers {
     field_get,
     field_set,
     global_get,
+    finish_call,
 };
 
 /// A constant's tag and payload, for code that loads it.
@@ -371,6 +485,8 @@ impl Vm {
             interrupt: std::sync::Arc::as_ptr(&self.rt.interrupt),
             tables: self.heap.raw_slots::<Table>().0,
             tables_len: self.heap.raw_slots::<Table>().1,
+            closures: self.heap.raw_slots::<Closure>().0,
+            closures_len: self.heap.raw_slots::<Closure>().1,
         };
         let top = self.rt.stack.frames.last().expect("frame");
         let mut pc = top.pc;
@@ -1175,6 +1291,22 @@ extern "C" fn ret(vm: &mut Vm, ctx: &mut JitCtx, code: &ProtoCode, pc: u32) -> u
     // The caller's window lies below this one: the stack is long enough.
     ctx.regs = regs[caller_base..].as_mut_ptr();
     RET
+}
+
+extern "C" fn finish_call(vm: &mut Vm, ctx: &mut JitCtx, mut s: u64) -> u64 {
+    ctx.depth += 1;
+    while s == TAIL {
+        let FrameKind::Lua { closure, .. } = vm.rt.stack.frames.last().expect("frame").kind else {
+            unreachable!("a tail call enters Lua")
+        };
+        let code = &vm.heap.get(closure).code;
+        s = match vm.rt.jit.entry(code) {
+            Some(g) => g(vm, ctx, 0, closure.to_bits()),
+            None => exit_at(0),
+        };
+    }
+    ctx.depth -= 1;
+    if s == RET { 0 } else { s }
 }
 
 /// `TailCall` of a Lua function, as the interpreter makes it: the

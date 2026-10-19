@@ -36,8 +36,9 @@ pub use coro::{CoStatus, WindowSave};
 pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 #[cfg(feature = "jit")]
 pub use interp::jit::{
-    CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, DEFER, EXIT, HELPERS, HelperFn, Helpers, JitBackend,
-    JitCtx, JitFn, JitSlot, JitState, NO_VALUE, Parts, RET, TAIL, TAKEN, const_parts, exit_at,
+    CALL_LAYOUT, CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH, CTX_INTERRUPT, CTX_TABLES,
+    CTX_TABLES_LEN, CallLayout, DEFER, EXIT, HELPERS, HelperFn, Helpers, JitBackend, JitCtx, JitFn,
+    JitSlot, JitState, NO_VALUE, Parts, RET, TAIL, TAKEN, const_parts, exit_at,
 };
 pub use meta::MetaField;
 pub use native::{
@@ -112,7 +113,11 @@ impl fmt::Debug for Native {
     }
 }
 
+// With the `jit` feature the layout is pinned (`repr(C, u8)`: a tag
+// byte, then the variant's fields) so JIT code can push and read Lua
+// frames in place (planning/jit). It makes a `Frame` 56 bytes, not 48.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "jit", repr(C, u8))]
 pub(crate) enum FrameKind {
     Lua {
         closure: Gc<Closure>,
@@ -123,15 +128,15 @@ pub(crate) enum FrameKind {
     },
     /// A native waiting for a call it asked for with `CallThen`.
     Native {
-        id: NativeId,
         k: Continuation,
+        id: NativeId,
+        /// Where the requested call's function sits.
+        call_at: u32,
         catch: Catch,
         /// Whether code the requested call runs may yield across this
         /// frame (`pcall`, the body of `xpcall`, `__pairs`, `dofile`), as
         /// in lua5.5. Most library callbacks may not.
         yieldable: bool,
-        /// Where the requested call's function sits.
-        call_at: u32,
         /// How a resume or yield waiting here takes values back
         /// ([`ResumeOk::Continue`] for everything else).
         ok: ResumeOk,
@@ -183,6 +188,7 @@ pub(crate) enum Catch {
 
 /// One activation record.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "jit", repr(C))]
 pub(crate) struct Frame {
     pub kind: FrameKind,
     /// Register where the callee was; results go here.

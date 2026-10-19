@@ -12,13 +12,13 @@ use dynasmrt::x64::Assembler;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, ExecutableBuffer, dynasm};
 
 use orbit_runtime::object::{ProtoCode, Value};
-use orbit_runtime::vm::op::Op;
+use orbit_runtime::vm::op::{MULTI, Op};
 use orbit_runtime::vm::{
-    CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, EXIT, HelperFn, Helpers, JitBackend, JitFn,
-    NO_VALUE, TAKEN, const_parts,
+    CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH, CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, EXIT,
+    HelperFn, Helpers, JitBackend, JitFn, NO_VALUE, RET, TAKEN, const_parts,
 };
 
-use crate::layout::{self, Inline};
+use crate::layout::{self, Calls, Inline};
 use crate::{entries, jump_target};
 
 const TAG_NIL: i32 = 0;
@@ -71,6 +71,7 @@ impl JitBackend for Template {
             ret,
             polls: Vec::new(),
             inline: layout::inline(),
+            calls: layout::calls(),
         };
         t.prologue();
         for p in 0..code.code.len() {
@@ -136,6 +137,8 @@ struct Tr<'a> {
     polls: Vec<(DynamicLabel, usize)>,
     /// The pinned table layout, when inline table access is on.
     inline: Option<&'static Inline>,
+    /// The pinned call layout, when inline Lua-to-Lua calls are on.
+    calls: Option<&'static Calls>,
 }
 
 /// Where a register's tag and payload live, from r14.
@@ -646,8 +649,13 @@ impl Tr<'_> {
             ; imul rax, rax, l.slot_size as i32
             ; add rax, [r13 + CTX_TABLES]
         );
-        let (at, v) = (l.empty_at, l.empty_value);
-        match l.empty_width {
+        self.occupied(l.empty_at, l.empty_width, l.empty_value, miss);
+    }
+
+    /// Jump to `miss` if the arena slot at rax is empty (holds `value` in
+    /// the `width` bytes at `at`). Clobbers rcx.
+    fn occupied(&mut self, at: i32, width: u8, v: u64, miss: DynamicLabel) {
+        match width {
             1 => dynasm!(self.ops ; .arch x64 ; cmp BYTE [rax + at], v as u8 as i8),
             2 => dynasm!(self.ops ; .arch x64 ; cmp WORD [rax + at], v as u16 as i16),
             4 => dynasm!(self.ops ; .arch x64 ; cmp DWORD [rax + at], v as u32 as i32),
@@ -658,6 +666,163 @@ impl Tr<'_> {
             ),
         }
         dynasm!(self.ops ; .arch x64 ; je =>miss);
+    }
+
+    /// `R[func](args)` for a compiled Lua function with exactly `nargs`
+    /// parameters and no captured locals: pushes its frame in place and
+    /// calls its code directly. Anything else goes through the `call`
+    /// helper.
+    fn inline_call(&mut self, p: usize, l: &Calls, func: u8, nargs: u8, want: u8) {
+        let slow = self.ops.new_dynamic_label();
+        let next = self.next(p);
+        let ret = self.ret;
+        let fsz = l.frame_size as i32;
+        dynasm!(self.ops
+            ; .arch x64
+            ; cmp BYTE [r14 + at(func)], TAG_CLOSURE as i8
+            ; jne =>slow
+            ; mov eax, DWORD [r14 + pl(func)]
+            ; mov rcx, [r13 + CTX_CLOSURES_LEN]
+            ; cmp rax, [rcx]
+            ; jae =>slow
+            ; mov r8, rax
+            ; imul rax, rax, l.closure_slot_size as i32
+            ; add rax, [r13 + CTX_CLOSURES]
+        );
+        self.occupied(l.empty_at, l.empty_width, l.empty_value, slow);
+        dynasm!(self.ops
+            ; .arch x64
+            // rsi = the callee's code, r9 = its entry.
+            ; mov rsi, [rax + l.closure_code]
+            ; add rsi, l.rc_value
+            ; mov r9, [rsi + l.proto_entry]
+            ; test r9, r9
+            ; jz =>slow
+            ; cmp BYTE [rsi + l.proto_nparams], nargs as i8
+            ; jne =>slow
+            ; movzx eax, BYTE [rsi + l.proto_is_vararg]
+            ; or al, BYTE [rsi + l.proto_ncells]
+            ; jnz =>slow
+            ; cmp DWORD [r13 + CTX_DEPTH], l.max_depth as i32
+            ; jae =>slow
+            // rdi = frame count, r10 = the new frame, r11 = its base.
+            ; mov rdi, [r12 + l.frames_len]
+            ; cmp rdi, [r12 + l.frames_cap]
+            ; jae =>slow
+            ; imul r10, rdi, fsz
+            ; add r10, [r12 + l.frames_ptr]
+            ; mov r11d, DWORD [r10 + l.frame_base - fsz]
+            ; add r11, func as i32 + 1
+            ; movzx eax, BYTE [rsi + l.proto_nregs]
+            ; mov ecx, nargs as i32
+            ; cmp eax, ecx
+            ; cmovb eax, ecx
+            ; add rax, r11
+            ; cmp rax, [r12 + l.max_stack]
+            ; ja =>slow
+            ; lea rax, [r11 + l.window as i32]
+            ; cmp rax, [r12 + l.regs_len]
+            ; ja =>slow
+            // Commit: the caller's return pc, then the callee's frame.
+            ; mov DWORD [r10 + l.frame_pc - fsz], p as i32 + 1
+            ; mov BYTE [r10 + l.frame_kind], l.lua_kind_tag as i8
+            ; mov DWORD [r10 + l.frame_closure], r8d
+            ; mov [r10 + l.frame_code_id], rsi
+            ; lea eax, [r11 - 1]
+            ; mov DWORD [r10 + l.frame_func], eax
+            ; mov DWORD [r10 + l.frame_base], r11d
+            ; mov DWORD [r10 + l.frame_pc], 0
+            ; mov rax, [r12 + l.cells_len]
+            ; mov DWORD [r10 + l.frame_cell_base], eax
+            ; mov DWORD [r10 + l.frame_nvarargs], 0
+            ; mov BYTE [r10 + l.frame_want], want as i8
+            ; mov BYTE [r10 + l.frame_tail], 0
+            ; mov BYTE [r10 + l.frame_extra], 0
+            ; mov BYTE [r10 + l.frame_cdepth], 0
+            ; inc rdi
+            ; mov [r12 + l.frames_len], rdi
+            ; mov rax, [r12 + l.regs_ptr]
+            ; shl r11, 4
+            ; add rax, r11
+            ; mov [r13], rax
+            ; inc DWORD [r13 + CTX_DEPTH]
+            ; mov rcx, [r14 + pl(func)]
+            ; mov rdi, r12
+            ; mov rsi, r13
+            ; xor edx, edx
+            ; call r9
+            ; dec DWORD [r13 + CTX_DEPTH]
+            ; mov r14, [r13]
+            ; cmp rax, RET as i32
+            ; je =>next
+            ; mov rdi, r12
+            ; mov rsi, r13
+            ; mov rdx, rax
+            ; mov rax, QWORD self.helpers.finish_call as usize as i64
+            ; call rax
+            ; mov r14, [r13]
+            ; test rax, rax
+            ; jnz =>ret
+            ; jmp =>next
+            ; =>slow
+        );
+        self.helper_then_next(self.helpers.call, p);
+    }
+
+    /// `Return0` / `Return1` into a Lua caller wanting at most one result,
+    /// with no captured locals to drop: pops the frame in place and returns
+    /// [`RET`]. Anything else goes to `slow`.
+    fn inline_ret(&mut self, l: &Calls, src: Option<u8>, slow: DynamicLabel) {
+        let ret = self.ret;
+        let fsz = l.frame_size as i32;
+        dynasm!(self.ops
+            ; .arch x64
+            // rax = frame count - 1, r10 = the returning frame.
+            ; mov rax, [r12 + l.frames_len]
+            ; cmp rax, 2
+            ; jb =>slow
+            ; dec rax
+            ; imul r10, rax, fsz
+            ; add r10, [r12 + l.frames_ptr]
+            ; cmp BYTE [r10 + l.frame_kind - fsz], l.lua_kind_tag as i8
+            ; jne =>slow
+            ; movzx ecx, BYTE [r10 + l.frame_want]
+            ; cmp ecx, 1
+            ; ja =>slow
+            ; mov edx, DWORD [r10 + l.frame_cell_base]
+            ; cmp rdx, [r12 + l.cells_len]
+            ; jne =>slow
+            // rdx = func, rsi = the register stack.
+            ; mov edx, DWORD [r10 + l.frame_func]
+            ; mov rsi, [r12 + l.regs_ptr]
+            ; test ecx, ecx
+            ; jz >after
+            ; mov r11, rdx
+            ; shl r11, 4
+        );
+        match src {
+            Some(s) => dynasm!(self.ops
+                ; .arch x64
+                ; mov r8, [r14 + at(s)]
+                ; mov r9, [r14 + pl(s)]
+                ; mov [rsi + r11], r8
+                ; mov [rsi + r11 + 8], r9
+            ),
+            None => dynasm!(self.ops ; .arch x64 ; mov QWORD [rsi + r11], TAG_NIL),
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; after:
+            ; add rdx, rcx
+            ; mov [r12 + l.top], rdx
+            ; mov [r12 + l.frames_len], rax
+            ; mov ecx, DWORD [r10 + l.frame_base - fsz]
+            ; shl rcx, 4
+            ; add rcx, rsi
+            ; mov [r13], rcx
+            ; mov eax, RET as i32
+            ; jmp =>ret
+        );
     }
 
     /// rcx = the hash entry the field cache in rdx points at, if it holds
@@ -1151,8 +1316,29 @@ impl Tr<'_> {
             Op::Closure { .. } => self.helper_then_next(h.closure, p),
             Op::SetList { .. } => self.helper_then_next(h.set_list, p),
 
+            Op::Call {
+                func,
+                nargs,
+                nresults,
+            } if nargs != MULTI && nresults != MULTI && self.calls.is_some() => {
+                let l = self.calls.expect("calls");
+                self.inline_call(p, l, func, nargs, nresults)
+            }
             Op::Call { .. } | Op::GenericCall { .. } => self.helper_then_next(h.call, p),
             Op::TailCall { .. } => self.helper_then_next(h.tail_call, p),
+            Op::Return0 | Op::Return1 { .. } if self.calls.is_some() => {
+                let l = self.calls.expect("calls");
+                let src = match op {
+                    Op::Return1 { src } => Some(src),
+                    _ => None,
+                };
+                let slow = self.ops.new_dynamic_label();
+                self.inline_ret(l, src, slow);
+                dynasm!(self.ops ; .arch x64 ; =>slow);
+                self.helper(h.ret, p);
+                let ret = self.ret;
+                dynasm!(self.ops ; .arch x64 ; jmp =>ret);
+            }
             Op::Return { .. } | Op::Return0 | Op::Return1 { .. } => {
                 self.helper(h.ret, p);
                 let ret = self.ret;
