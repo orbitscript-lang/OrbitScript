@@ -282,7 +282,7 @@ impl Hub {
             inbox.user_pause = false;
         }
         drop(session);
-        let mut input = BufReader::new(input.into_inner());
+        // The same reader: it may hold requests sent with the first.
         let mut first = Some(first);
         while let Some(msg) = first
             .take()

@@ -59,8 +59,8 @@ impl Editor {
         serde_json::from_slice(&body).unwrap()
     }
 
-    /// Send a request and give its response.
-    fn request(&mut self, command: &str, arguments: Value) -> Value {
+    /// Send a request; its seq.
+    fn send(&mut self, command: &str, arguments: Value) -> i64 {
         self.seq += 1;
         let seq = self.seq;
         let msg =
@@ -68,6 +68,11 @@ impl Editor {
         let body = serde_json::to_vec(&msg).unwrap();
         write!(self.to, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
         self.to.write_all(&body).unwrap();
+        seq
+    }
+
+    /// The response to request `seq`.
+    fn response(&mut self, seq: i64) -> Value {
         loop {
             let m = self.read();
             if m["type"] == "response" && m["request_seq"] == seq {
@@ -75,6 +80,12 @@ impl Editor {
             }
             self.events.push_back(m);
         }
+    }
+
+    /// Send a request and give its response.
+    fn request(&mut self, command: &str, arguments: Value) -> Value {
+        let seq = self.send(command, arguments);
+        self.response(seq)
     }
 
     /// Wait for event `name`, keeping the others.
@@ -161,8 +172,11 @@ fn each_isolate_is_a_thread_that_stops_on_its_own() {
     let path = service.start().unwrap();
 
     let mut e = Editor::connect(&path);
-    e.request("initialize", json!({"adapterID": "orbit"}));
-    e.request("attach", json!({}));
+    // Sent together, as editors do: the session reads both.
+    let initialize = e.send("initialize", json!({"adapterID": "orbit"}));
+    let attach = e.send("attach", json!({}));
+    assert_eq!(e.response(initialize)["success"], true);
+    assert_eq!(e.response(attach)["success"], true);
     let threads = e.request("threads", json!({}));
     assert_eq!(
         threads["body"]["threads"],
