@@ -51,7 +51,7 @@ end
 local Point = {}
 Point.__index = Point
 function Point.new(x, y) return setmetatable({x = x, y = y}, Point) end
-function Point:__tojson() return {self.x, self.y} end
+function Point:__tojson() return json.array({self.x, self.y}) end
 
 local function run()
   local out = {}

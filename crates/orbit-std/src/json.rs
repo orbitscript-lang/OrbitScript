@@ -17,7 +17,8 @@
 //! otherwise as an object, whose keys must be strings or numbers. Integers
 //! and floats keep their subtype both ways (`1` and `1.0`). A metatable's
 //! `__tojson` metamethod gives the value to write instead (tables and
-//! userdata), and a `__jsontype` field (`"object"`, `"array"` or `"null"`) overrides the
+//! userdata; a table it gives must be marked with `json.array` or
+//! `json.object`, or have a `__tojson` of its own), and a `__jsontype` field (`"object"`, `"array"` or `"null"`) overrides the
 //! shape, as the markers and `null` use.
 
 use std::fmt::Write as _;
@@ -297,6 +298,12 @@ impl Encoder {
         }
         s.push_copy(idx);
         s.call(1, 1)?;
+        // A table must say its shape, so the hook reads as what it writes.
+        if s.type_at(-1) == Type::Table && shape(s, -1)? == Shape::Any && !has_hook(s, -1)? {
+            return Err(bad(
+                "__tojson returned a table that is not json.array(...) or json.object(...)",
+            ));
+        }
         self.open.push(id);
         let r = self.value(s, s.top());
         self.open.pop();
@@ -461,6 +468,17 @@ impl Encoder {
         self.out.push(b'\n');
         self.out.resize(self.out.len() + 2 * depth, b' ');
     }
+}
+
+/// Whether the value at `idx` has a `__tojson` function of its own.
+fn has_hook(s: &mut Stack<'_>, idx: i32) -> StackResult<bool> {
+    if !s.get_metatable(idx) {
+        return Ok(false);
+    }
+    s.raw_get_field(-1, b"__tojson")?;
+    let hook = s.type_at(-1) == Type::Function;
+    s.set_top(-3)?;
+    Ok(hook)
 }
 
 /// The shape the metatable of the table at `t` asks for.

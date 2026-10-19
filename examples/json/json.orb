@@ -56,7 +56,7 @@ struct Point { x, y }
 impl Point {
     pub fn new(x, y) -> Point { Point { x, y } }
 
-    fn __tojson(self) { [self.x, self.y] }
+    fn __tojson(self) { json::array([self.x, self.y]) }
 }
 
 fn run() {
