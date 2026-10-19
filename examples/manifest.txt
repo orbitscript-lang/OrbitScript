@@ -7,7 +7,8 @@
 #
 # With no arguments, an example must print exactly its NAME.expected file. A NAME.lua
 # next to an entry NAME.orb is its Lua twin, which must print the same, under `orbit`
-# and under the reference lua5.5. See README.md.
+# and under the reference lua5.5 unless the line says reference=no (the twin uses a
+# library lua5.5 doesn't have). See README.md.
 calc       calc.orb       train=10      # enum AST, match, `?` through a recursive evaluator
 ledger     ledger.orb     train=40      # `let scope` transaction guards, `scope` actions
 sim        sim.orb        train=2       # coroutines, a heap module loaded with `use`, `__lt`
@@ -18,3 +19,4 @@ life       life.orb       train=16      # nested arrays, exclusive ranges, `matc
 config     config.orb     train=20      # files, `?` on io::open, `scope f.close();`
 interop    interop.lua    train=1000    # Lua using an OrbitScript module that uses a Lua module
 fizzbuzz   fizzbuzz.orb   train=400     # the one-screen hello
+json       json.orb       train=20 reference=no  # std.json: decode a file, null, markers, options, errors

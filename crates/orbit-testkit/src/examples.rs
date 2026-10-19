@@ -32,6 +32,9 @@ pub struct Example {
     pub entry: String,
     /// The arguments `pgo train` runs it with.
     pub train: Vec<String>,
+    /// Whether its Lua twin also runs under the reference `lua5.5`; `reference=no`
+    /// for one that uses an orbit-only library (`std.json`).
+    pub reference: bool,
 }
 
 impl Example {
@@ -52,8 +55,8 @@ impl Example {
     }
 }
 
-/// Parses `examples/manifest.txt`: `dir  entry  train=ARGS  # what it shows`, with ARGS
-/// comma-separated.
+/// Parses `examples/manifest.txt`: `dir  entry  train=ARGS [reference=no]  # what it
+/// shows`, with ARGS comma-separated.
 pub fn parse_manifest(text: &str) -> Result<Vec<Example>> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -71,9 +74,11 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Example>> {
             dir: dir.to_string(),
             entry: entry.to_string(),
             train: Vec::new(),
+            reference: true,
         };
         for opt in opts {
             match opt.split_once('=') {
+                Some(("reference", "no")) => e.reference = false,
                 Some(("train", v)) => {
                     e.train = v
                         .split(',')
@@ -156,7 +161,7 @@ pub fn main(args: &[String]) -> Result<bool> {
         let mut runs = vec![(&interp, e.entry.clone())];
         if let Some(twin) = e.twin(&examples_dir) {
             runs.push((&interp, twin.clone()));
-            if let Some(r) = &reference {
+            if let Some(r) = reference.as_ref().filter(|_| e.reference) {
                 runs.push((r, twin));
             }
         }
@@ -204,7 +209,8 @@ mod tests {
 
     #[test]
     fn manifest_lines() {
-        let text = "# comment\n\ncalc  calc.orb  train=500  # shows things\ninterop interop.lua\n";
+        let text = "# comment\n\ncalc  calc.orb  train=500  # shows things\n\
+                    interop interop.lua reference=no\n";
         let list = parse_manifest(text).unwrap();
         assert_eq!(
             list,
@@ -213,17 +219,20 @@ mod tests {
                     dir: "calc".into(),
                     entry: "calc.orb".into(),
                     train: vec!["500".into()],
+                    reference: true,
                 },
                 Example {
                     dir: "interop".into(),
                     entry: "interop.lua".into(),
                     train: Vec::new(),
+                    reference: false,
                 },
             ]
         );
         assert_eq!(list[0].expected(), "calc.expected");
         assert!(parse_manifest("calc\n").is_err());
         assert!(parse_manifest("calc calc.orb quick=1\n").is_err());
+        assert!(parse_manifest("calc calc.orb reference=maybe\n").is_err());
     }
 
     #[test]

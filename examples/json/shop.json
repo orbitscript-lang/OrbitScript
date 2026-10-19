@@ -1,0 +1,16 @@
+{
+  "name": "Orbit Outfitters",
+  "currency": "EUR",
+  "opened": 2019,
+  "products": [
+    {"sku": "TNT-2", "name": "Two-person tent", "price": 189.5, "stock": 4,
+     "tags": ["camping", "shelter"], "replaced_by": null},
+    {"sku": "LMP-1", "name": "Head lamp", "price": 24, "stock": 0,
+     "tags": ["camping", "light"], "replaced_by": "LMP-2"},
+    {"sku": "LMP-2", "name": "Head lamp « Pro »", "price": 39.9, "stock": 12,
+     "tags": ["camping", "light"], "replaced_by": null},
+    {"sku": "MAP-7", "name": "Trail map: \"Lakes\"", "price": 8, "stock": 30,
+     "tags": [], "replaced_by": null}
+  ],
+  "notes": {}
+}

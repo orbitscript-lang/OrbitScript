@@ -19,7 +19,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 orbit = { path = "../orbit", features = ["abi"] }
 orbit-capi = { path = "../orbit-capi", features = ["host"] }
-orbit-std = { path = "../orbit-std", features = ["ffi"] }
+orbit-std = { path = "../orbit-std", features = ["ffi", "json"] }
 stabby = "72.1.16"
 
 [lints]

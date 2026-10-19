@@ -19,6 +19,7 @@ orbit calc.lua          # the same program in plain Lua
 | [`life`](life/) | Conway's Game of Life on a torus: nested arrays, exclusive ranges, `%` wrapping, `match` on a pair. |
 | [`config`](config/) | INI files: `io::open(path)?`, `scope f.close();`, errors with line numbers. |
 | [`interop`](interop/) | Lua code using an OrbitScript module ([`shapes.orb`](interop/shapes.orb)) that uses a Lua module ([`geometry.lua`](interop/geometry.lua)). |
+| [`json`](json/) | A shop's stock file read and reported with the `std.json` module: decoding, `json::null`, integers and floats, `json::object`/`json::array` for empty tables, `pretty` and `sort_keys`, a struct encoding as an array through `__tojson`, and decode and encode errors. Has a Lua twin (runs under `orbit` only: `lua5.5` has no `std.json`). |
 | [`fizzbuzz`](fizzbuzz/) | The one-screen hello: `match` on `(n % 3, n % 5)`. |
 
 ## Where OrbitScript helps

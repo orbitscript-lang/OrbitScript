@@ -29,7 +29,7 @@ orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 signal-hook = "0.4.5"
 
 [features]
-default = ["runtime", "c-modules", "ffi", "line-editing"]
+default = ["runtime", "c-modules", "ffi", "json", "line-editing"]
 # The runtime linked into the binaries: one self-contained `orbit`.
 runtime = ["orbit/default"]
 # The runtime in liborbit instead (ADR-10), which also carries `orbit-std`,
@@ -41,6 +41,8 @@ shared = ["orbit/shared"]
 c-modules = ["dep:orbit-capi"]
 # The `ffi` library, on unless `--no-ffi` is given (Tym 2026-10-14, ADR-9).
 ffi = ["orbit-std/ffi"]
+# The `std.json` module (ADR-12, D13).
+json = ["orbit-std/json"]
 # Link the system's shared libffi rather than a static copy built from
 # bundled sources.
 ffi-system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
