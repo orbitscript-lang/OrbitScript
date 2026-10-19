@@ -585,7 +585,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             TypeKind::Tuple(ts) if ts.len() == 1 => self.lower(&ts[0]),
             TypeKind::Tuple(ts) if ts.is_empty() => self.types.nil,
-            TypeKind::Tuple(_) | TypeKind::Error => any,
+            // Variadic results are typed `any` for now.
+            TypeKind::Tuple(_) | TypeKind::Rest(_) | TypeKind::Error => any,
             TypeKind::Fn { params, rest, ret } => {
                 let lowered: Vec<TypeId> = params.iter().map(|p| self.lower(p)).collect();
                 let required = self.required(params.iter().map(Some).zip(lowered.iter().copied()));

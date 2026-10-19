@@ -239,6 +239,10 @@ impl<'a> Checker<'a, '_, '_> {
                     s.push('>');
                 }
             }
+            TypeKind::Rest(t) => {
+                s.push_str("...");
+                self.write_type(t, s);
+            }
             TypeKind::Nil => s.push_str("nil"),
             TypeKind::SelfType => s.push_str("Self"),
             TypeKind::Optional(inner) => {
