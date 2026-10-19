@@ -526,6 +526,7 @@ impl<'a> Resolver<'a> {
             // Type names are resolved once the checker parses with type trees.
             ItemKind::TypeAlias { .. } => {}
             ItemKind::Use(u) => self.use_decl(u, item.span),
+            ItemKind::Error => {}
             ItemKind::Global { name, value } => {
                 self.expr(value);
                 let i = self.bind_new(*name, SymbolKind::Global, item.span);
@@ -614,6 +615,7 @@ impl<'a> Resolver<'a> {
 
     fn stmt(&mut self, s: &ast::Stmt, module_level: bool) {
         match &s.kind {
+            StmtKind::Error => {}
             StmtKind::Let { pat, value, .. } => {
                 if let Some(v) = value {
                     self.expr(v);
@@ -690,7 +692,8 @@ impl<'a> Resolver<'a> {
             | ExprKind::Float(_)
             | ExprKind::Str(_)
             | ExprKind::SelfValue
-            | ExprKind::Continue { .. } => {}
+            | ExprKind::Continue { .. }
+            | ExprKind::Error => {}
             ExprKind::Name(_) | ExprKind::SelfType | ExprKind::Path { .. } => {
                 self.path(e);
             }
