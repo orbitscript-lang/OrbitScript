@@ -370,6 +370,23 @@ impl Vm {
         bps
     }
 
+    /// Stop at the next line that runs, in any function, as a step in
+    /// would ([`StopReason::Step`]): for stopping on entry to a program.
+    /// Does nothing while no events are attached.
+    pub fn stop_on_next_line(&mut self) {
+        let d = &mut self.rt.debug;
+        if d.events.is_none() {
+            return;
+        }
+        d.step = Some(Step {
+            kind: StepKind::In,
+            depth: self.rt.stack.frames.len(),
+            thread: self.rt.current,
+            proto: None,
+        });
+        d.update_watch();
+    }
+
     /// Which errors stop the program ([`StopReason::Error`]).
     pub fn set_error_break(&mut self, on: ErrorBreak) {
         self.rt.debug.on_error = on;

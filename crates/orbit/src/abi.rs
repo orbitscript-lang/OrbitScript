@@ -387,6 +387,8 @@ pub trait ControlAbi {
     ) -> SVec<BreakpointAbi>;
     /// `on`: 0 never, 1 uncaught, 2 all.
     extern "C" fn set_error_break(&mut self, on: u8);
+    /// [`crate::Isolate::stop_on_next_line`].
+    extern "C" fn stop_on_next_line(&mut self);
 }
 
 pub type ControlMut<'a> = dynptr!(&'a mut dyn ControlAbi);

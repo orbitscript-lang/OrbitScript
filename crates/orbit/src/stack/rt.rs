@@ -2266,6 +2266,12 @@ impl<'a> Control<'a> {
             .collect()
     }
 
+    /// [`crate::Isolate::stop_on_next_line`].
+    #[cfg(feature = "debugger")]
+    pub fn stop_on_next_line(&mut self) {
+        self.vm.stop_on_next_line()
+    }
+
     /// [`crate::Isolate::set_error_break`], also from inside a stop.
     #[cfg(feature = "debugger")]
     pub fn set_error_break(&mut self, on: crate::debugger::ErrorBreak) {

@@ -954,6 +954,13 @@ macro_rules! control_abi {
                 #[cfg(not(feature = "debugger"))]
                 let _ = (&$this, on);
             }
+            extern "C" fn stop_on_next_line(&mut self) {
+                let $this = self;
+                #[cfg(feature = "debugger")]
+                $ctl.stop_on_next_line();
+                #[cfg(not(feature = "debugger"))]
+                let _ = &$this;
+            }
         }
     };
 }

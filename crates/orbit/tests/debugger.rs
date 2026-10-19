@@ -396,3 +396,15 @@ fn breakpoints_change_while_stopped() {
     let frames: Vec<String> = log.borrow().iter().map(|s| s.frames[0].clone()).collect();
     assert_eq!(frames, ["add@3", "@6", "add@3"]);
 }
+
+#[test]
+fn stop_on_the_first_line() {
+    let mut iso = isolate();
+    let log = attach(&mut iso, &[]);
+    iso.stop_on_next_line();
+    run(&mut iso, PROGRAM).unwrap();
+    let log = log.borrow();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].why, StopReason::Step);
+    assert_eq!(log[0].frames, ["@4"]);
+}

@@ -261,6 +261,13 @@ mod debug {
             self.control().set_breakpoints(source, lines)
         }
 
+        /// Stop at the next line that runs, as a step in does
+        /// ([`StopReason::Step`]): set before running a program to stop on
+        /// its entry. Does nothing while no events are attached.
+        pub fn stop_on_next_line(&mut self) {
+            self.control().stop_on_next_line()
+        }
+
         /// Which errors stop the program ([`StopReason::Error`]).
         pub fn set_error_break(&mut self, on: ErrorBreak) {
             self.control().set_error_break(on)
