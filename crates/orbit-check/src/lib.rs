@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use orbit_orb_syntax::ast;
+use orbit_orb_syntax::token::{CONTEXTUAL_KEYWORDS, KEYWORDS};
 
 pub use diag::{Code, Diagnostic, Severity};
 pub use orbit_hir::Span;
@@ -175,14 +176,6 @@ fn normalize(path: &Path) -> PathBuf {
     }
     out
 }
-
-/// Words offered as keyword completions: the keywords, and `type` and `scope`, which are
-/// keywords only where they start an item or a `let`.
-const KEYWORDS: &[&str] = &[
-    "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for", "global",
-    "if", "impl", "in", "let", "loop", "match", "mut", "nil", "pub", "return", "scope", "Self",
-    "self", "struct", "true", "type", "use", "while",
-];
 
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -679,7 +672,7 @@ impl Workspace {
                 self.push_completion(id, out);
             }
         }
-        for k in KEYWORDS {
+        for k in KEYWORDS.iter().chain(CONTEXTUAL_KEYWORDS) {
             out.push(Completion {
                 label: k.to_string(),
                 kind: SymbolKind::Local,
@@ -988,14 +981,5 @@ mod tests {
         assert!(problems.is_empty(), "{}", problems.join("\n"));
         let names = &ws.prelude.as_ref().expect("the prelude").names;
         assert!(names.contains_key("print") && names.contains_key("math"));
-    }
-
-    #[test]
-    fn keyword_completions_are_keywords() {
-        for k in KEYWORDS {
-            let contextual = ["type", "scope"].contains(k);
-            let keyword = orbit_orb_syntax::token::Keyword::from_bytes(k.as_bytes()).is_some();
-            assert!(keyword != contextual, "{k}");
-        }
     }
 }
