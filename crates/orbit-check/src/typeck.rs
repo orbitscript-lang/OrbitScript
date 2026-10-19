@@ -22,7 +22,7 @@ use orbit_orb_syntax::ast::{
 };
 
 use crate::resolve::{Def, Defs, Owner};
-use crate::symbols::{Module, Symbol, SymbolId, SymbolKind};
+use crate::symbols::{Module, StructLit, Symbol, SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
 use crate::{Code, Diagnostic, FileId};
 
@@ -1571,7 +1571,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             ExprKind::Closure(c) => self.closure(c, expected),
             ExprKind::Array(items) => self.array_lit(items, expected),
             ExprKind::Map(entries) => self.map_lit(entries, expected),
-            ExprKind::StructLit { path, fields } => self.struct_lit(path, fields, expected),
+            ExprKind::StructLit { path, fields } => self.struct_lit(e.span, path, fields, expected),
             ExprKind::Binary {
                 op: BinOp::And | BinOp::Or,
                 ..
@@ -2413,6 +2413,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn struct_lit(
         &mut self,
+        span: Span,
         path: &'a ast::Expr,
         fields: &'a [ast::FieldInit],
         expected: Option<TypeId>,
@@ -2435,6 +2436,20 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             return any;
         };
+        if self.quiet == 0 {
+            let fields = fields
+                .iter()
+                .map(|f| {
+                    let value = f.value.as_ref().map_or(f.name.span, |v| v.span);
+                    (self.text(f.name.sym), f.name.span, value)
+                })
+                .collect();
+            self.m.struct_lits.push(StructLit {
+                span,
+                target: id,
+                fields,
+            });
+        }
         let holder = self.holder(id);
         let gens = self.generics_of(holder);
         let mut map: HashMap<SymbolId, TypeId> = HashMap::new();

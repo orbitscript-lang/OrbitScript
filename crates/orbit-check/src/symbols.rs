@@ -102,6 +102,17 @@ pub(crate) struct CallSite {
     pub method: bool,
 }
 
+/// A struct or variant literal: `Path { name: value, ... }`.
+#[derive(Clone, Debug)]
+pub(crate) struct StructLit {
+    /// The whole literal, path included.
+    pub span: Span,
+    /// The struct or variant.
+    pub target: SymbolId,
+    /// Each field written: its name, the name's span and the value's (the name's for `{ x }`).
+    pub fields: Vec<(String, Span, Span)>,
+}
+
 /// Everything the checker knows about one module after checking it.
 #[derive(Debug, Default)]
 pub(crate) struct Module {
@@ -132,6 +143,8 @@ pub(crate) struct Module {
     pub members_at: Vec<(Span, crate::TypeId)>,
     /// Each `base::name` with the symbol `base` names, for completion after `::`.
     pub paths_at: Vec<(Span, SymbolId)>,
+    /// Each struct or variant literal, for completion of its missing fields.
+    pub(crate) struct_lits: Vec<StructLit>,
     /// Each call, for signature help.
     pub calls: Vec<CallSite>,
     /// Names bound without an annotation, for inlay hints: where the name ends, and its type.
