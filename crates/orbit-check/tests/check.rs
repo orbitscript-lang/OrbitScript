@@ -452,3 +452,80 @@ fn cast_errors_match_the_compiler() {
         assert_eq!(checker, [("T0210", compiler)], "{src}");
     }
 }
+
+/// What one module reports as `(line, code, message)`, checked alone.
+fn diagnostics_of(src: &str, strict: bool) -> Vec<(u32, &'static str, String)> {
+    let mut ws = Workspace::new(
+        Config {
+            root: PathBuf::from("/p"),
+            strict,
+            ..Config::default()
+        },
+        Box::new(Memory(vec![])),
+    );
+    let f = ws.set_source(Path::new("/p/m.orb"), src.as_bytes().to_vec());
+    let diags = ws.diagnostics(f).to_vec();
+    diags
+        .iter()
+        .map(|d| {
+            (
+                ws.line_col(f, d.span.start).0,
+                d.code.as_str(),
+                d.message.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn pragmas() {
+    let codes = |src: &str, strict: bool| -> Vec<(u32, &'static str)> {
+        diagnostics_of(src, strict)
+            .into_iter()
+            .map(|(l, c, _)| (l, c))
+            .collect()
+    };
+    // An `ignore` for another code leaves the error; one for nothing is reported in strict mode.
+    let src =
+        "let a: string = 3; // orbit-check: ignore[T0207]\nlet b = 1; // orbit-check: ignore\n";
+    assert_eq!(codes(src, false), [(1, "T0201")]);
+    assert_eq!(codes(src, true), [(1, "T0201"), (1, "T0305"), (2, "T0305")]);
+    // Several codes; a syntax error is never ignored.
+    let src = "let a: string = nil; // orbit-check: ignore[T0201, T0207]\nlet = ; // orbit-check: ignore\n";
+    assert_eq!(codes(src, false), [(2, "T0001")]);
+    // `Config::strict` checks every module strictly; `//! orbit-check: off` still wins.
+    assert_eq!(codes("pub fn f(x) {}\n", true), [(1, "T0501")]);
+    assert_eq!(codes("//! orbit-check: off\npub fn f(x) {}\n", true), []);
+    // Pragmas it doesn't understand.
+    let bad = diagnostics_of(
+        "// orbit-check: strict\nlet a = 1; // orbit-check: ignore[T9999]\n// orbit-check: igonre\n",
+        false,
+    );
+    let shown: Vec<_> = bad.iter().map(|(l, c, m)| format!("{l} {c} {m}")).collect();
+    assert_eq!(
+        shown,
+        [
+            "1 T0306 `strict` applies to a whole module: write `//! orbit-check: strict`",
+            "2 T0306 `T9999` is not a diagnostic code",
+            "3 T0306 `orbit-check: igonre` is not a pragma; a line takes `// orbit-check: ignore` or `ignore[T0201]`, a module `//! orbit-check: strict` or `off`",
+        ]
+    );
+}
+
+#[test]
+fn strict_messages() {
+    let src = "pub fn add(a: int, b, ...rest) { a + b }\nfn c(n: int?) { if n { } }\n";
+    let shown: Vec<_> = diagnostics_of(src, true)
+        .into_iter()
+        .map(|(l, c, m)| format!("{l} {c} {m}"))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "1 T0502 public function `add` returns `(any)` but has no result type (strict mode)",
+            "1 T0501 parameter `b` of public function `add` needs a type (strict mode)",
+            "1 T0501 parameter `...rest` of public function `add` needs a type (strict mode)",
+            "2 T0503 this condition has type `int?`, not `bool` (strict mode); compare it, such as `x != nil`",
+        ]
+    );
+}

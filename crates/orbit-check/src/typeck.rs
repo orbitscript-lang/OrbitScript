@@ -104,6 +104,7 @@ struct Checker<'a, 'b, 'c> {
     self_type: Option<TypeId>,
     /// Whether bindings get inlay hints (not under an annotation).
     hinting: bool,
+    strict: bool,
 }
 
 fn sk(s: Span) -> (u32, u32) {
@@ -118,6 +119,8 @@ pub(crate) struct Deps<'c> {
     pub checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
     /// The prelude stub, whose functions (`type`, `error`) some checks recognize.
     pub prelude: Option<FileId>,
+    /// Strict mode (proposal T13): annotated `pub fn`s and `bool` conditions.
+    pub strict: bool,
 }
 
 pub(crate) fn check<'a, 'b, 'c>(
@@ -155,6 +158,7 @@ pub(crate) fn check<'a, 'b, 'c>(
         quiet: 0,
         self_type: None,
         hinting: true,
+        strict: deps.strict,
     };
     let mut variants: Vec<(u32, u32)> = defs
         .defs
@@ -972,6 +976,43 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         self.self_type = saved;
     }
 
+    /// Strict mode: a `pub fn` annotates its parameters, and its results when it has any.
+    fn strict_signature(&mut self, f: &'a ast::FnDecl) {
+        if !self.strict || f.body.is_none() {
+            return;
+        }
+        let name = self.text(f.name.sym);
+        for p in f.sig.params.iter().filter(|p| p.ty.is_none()) {
+            let what = match p.name {
+                Some(n) => format!("parameter `{}`", self.text(n.sym)),
+                None => "parameter `_`".to_string(),
+            };
+            let msg = format!("{what} of public function `{name}` needs a type (strict mode)");
+            self.error(p.span, Code::MissingParamType, msg);
+        }
+        if let (Some(rest), None) = (f.sig.rest, &f.sig.rest_ty) {
+            let msg = format!(
+                "parameter `...{}` of public function `{name}` needs a type (strict mode)",
+                self.text(rest.sym)
+            );
+            self.error(rest.span, Code::MissingParamType, msg);
+        }
+        let t = self
+            .local_at(f.name.span)
+            .map(|i| self.sym_type(self.id(i)));
+        if f.sig.ret.is_none()
+            && let Some(t) = t
+            && let Ty::Fn(ft) = self.types.get(t).clone()
+            && let Some(rs) = ft.results.filter(|rs| !rs.is_empty())
+        {
+            let msg = format!(
+                "public function `{name}` returns {} but has no result type (strict mode)",
+                self.results_text(&rs)
+            );
+            self.error(f.name.span, Code::MissingResultType, msg);
+        }
+    }
+
     fn closure(&mut self, c: &'a ast::Closure, expected: Option<TypeId>) -> TypeId {
         let any = self.types.any;
         let exp = expected.and_then(|t| {
@@ -1314,14 +1355,24 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn item(&mut self, item: &'a ast::Item) {
         match &item.kind {
-            ItemKind::Fn(f) => self.fn_item(f),
+            ItemKind::Fn(f) => {
+                self.fn_item(f);
+                if item.is_pub {
+                    self.strict_signature(f);
+                }
+            }
             ItemKind::Const { name, ty, value } => {
                 self.const_item(*name, ty.as_ref(), value.as_ref())
             }
             ItemKind::Impl(imp) => {
                 for member in &imp.members {
                     match &member.kind {
-                        ItemKind::Fn(f) => self.fn_item(f),
+                        ItemKind::Fn(f) => {
+                            self.fn_item(f);
+                            if member.is_pub {
+                                self.strict_signature(f);
+                            }
+                        }
                         ItemKind::Const { name, ty, value } => {
                             self.const_item(*name, ty.as_ref(), value.as_ref())
                         }
@@ -2897,6 +2948,25 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     }
 
     fn condition_warning(&mut self, t: TypeId, span: Span) {
+        if self.strict {
+            let ms = self.types.members(t);
+            let not_bool = ms
+                .iter()
+                .any(|&m| !matches!(self.types.get(m), Ty::Any | Ty::Bool));
+            if not_bool {
+                let hint = if ms.iter().any(|&m| *self.types.get(m) == Ty::Nil) {
+                    "compare it, such as `x != nil`"
+                } else {
+                    "compare it, such as `n > 0`"
+                };
+                let msg = format!(
+                    "this condition has type {}, not `bool` (strict mode); {hint}",
+                    self.show(t)
+                );
+                self.error(span, Code::NotBool, msg);
+                return;
+            }
+        }
         let always = self.types.members(t).iter().all(|&m| {
             !matches!(
                 self.types.get(m),
