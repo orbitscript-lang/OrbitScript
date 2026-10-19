@@ -1075,6 +1075,93 @@ impl<B: Bundled> IsolateAbi for IsoObj<B> {
     extern "C" fn install_ffi(&mut self) -> bool {
         B::install_ffi(&mut self.iso)
     }
+    #[cfg(feature = "debugger")]
+    extern "C" fn set_debug_events(&mut self, events: SOption<DebugEventsBox>) -> bool {
+        let events = Option::<DebugEventsBox>::from(events)
+            .map(|e| Box::new(ProgramEvents(e)) as Box<dyn crate::debugger::DebugEvents>);
+        self.iso.set_debug_events(events).is_ok()
+    }
+    #[cfg(not(feature = "debugger"))]
+    extern "C" fn set_debug_events(&mut self, _events: SOption<DebugEventsBox>) -> bool {
+        false
+    }
+    extern "C" fn set_breakpoints<'b>(
+        &mut self,
+        source: Slice<'b, u8>,
+        lines: Slice<'b, u32>,
+    ) -> SVec<BreakpointAbi> {
+        #[cfg(feature = "debugger")]
+        let bps = self
+            .iso
+            .set_breakpoints(&source, &lines)
+            .into_iter()
+            .map(crate::debugger::abi::breakpoint_to)
+            .collect();
+        #[cfg(not(feature = "debugger"))]
+        let bps = {
+            let _ = source;
+            lines
+                .iter()
+                .map(|&requested| BreakpointAbi { requested, line: 0 })
+                .collect()
+        };
+        bps
+    }
+    extern "C" fn set_error_break(&mut self, on: u8) {
+        #[cfg(feature = "debugger")]
+        self.iso
+            .set_error_break(crate::debugger::abi::error_break_from(on));
+        #[cfg(not(feature = "debugger"))]
+        let _ = on;
+    }
+    extern "C" fn pause_handle(&self) -> SOption<PauseArc> {
+        #[cfg(feature = "debugger")]
+        if self.iso.debugger_allowed() {
+            let arc: PauseArc = stabby::sync::Arc::new(LibPause(self.iso.pause_handle())).into();
+            return SOption::Some(arc);
+        }
+        SOption::None()
+    }
+}
+
+/// [`crate::debugger::PauseHandle`], for any thread.
+#[cfg(feature = "debugger")]
+struct LibPause(crate::debugger::PauseHandle);
+
+#[cfg(feature = "debugger")]
+impl PauseAbi for LibPause {
+    extern "C" fn request(&self) {
+        self.0.request()
+    }
+}
+
+/// A program's debug events, as the isolate reports to them.
+#[cfg(feature = "debugger")]
+struct ProgramEvents(DebugEventsBox);
+
+#[cfg(feature = "debugger")]
+impl crate::debugger::DebugEvents for ProgramEvents {
+    fn stopped(
+        &mut self,
+        paused: &mut crate::debugger::Paused<'_, '_>,
+        reason: crate::debugger::StopReason,
+    ) -> crate::debugger::Resume {
+        use crate::debugger::abi::{resume_from, stop_to};
+        // The error, for an error stop, is already in slot 1.
+        let mut w = Win::new(paused.stack());
+        let code = self
+            .0
+            .stopped(StableLike::new((&mut w).into()), stop_to(reason));
+        resume_from(code)
+    }
+
+    fn breakpoints_resolved(&mut self, source: &[u8], bps: &[crate::debugger::Breakpoint]) {
+        let bps: Vec<BreakpointAbi> = bps
+            .iter()
+            .map(|&b| crate::debugger::abi::breakpoint_to(b))
+            .collect();
+        self.0.breakpoints_resolved(source.into(), bps[..].into())
+    }
 }
 
 /// A new isolate set up as `config` says, for a program on the shared
@@ -1091,7 +1178,12 @@ pub fn new_isolate<B: Bundled>(config: ConfigAbi) -> IsolateBox {
         .memory_limit(config.memory_limit.into())
         .gc_mode(gc_mode(config.gc_mode))
         .warnings(config.warnings)
-        .ignore_env(config.ignore_env);
+        .ignore_env(config.ignore_env)
+        .debugger(if config.debugger {
+            crate::Debugger::Allowed
+        } else {
+            crate::Debugger::Disabled
+        });
     let iso = Runtime::new().new_isolate(config);
     SBox::new(IsoObj::<B> {
         iso,

@@ -212,7 +212,11 @@ impl Drop for HeldId {
 }
 
 /// Run `f` on the window the library hands a program object.
-fn on_window<R>(host: &Rc<HostState>, s: StackArg<'_>, f: impl FnOnce(&mut Stack<'_>) -> R) -> R {
+pub(crate) fn on_window<R>(
+    host: &Rc<HostState>,
+    s: StackArg<'_>,
+    f: impl FnOnce(&mut Stack<'_>) -> R,
+) -> R {
     let mut s = s.into_inner();
     let mut stack = Stack::new(&mut s, Rc::clone(host));
     f(&mut stack)

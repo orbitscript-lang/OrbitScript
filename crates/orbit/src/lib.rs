@@ -33,6 +33,8 @@ pub mod abi;
 mod chunk;
 mod class;
 mod compiler;
+#[cfg(feature = "debugger")]
+pub mod debugger;
 mod error;
 /// liborbit's side of the boundary, for `orbit-lib`.
 #[cfg(all(feature = "abi", runtime_backend))]
@@ -52,7 +54,7 @@ pub use error::{Error, ErrorKind};
 pub use host::{Call, HostFunction, Ret};
 #[cfg(feature = "verify")]
 pub use isolate::BinaryChecks;
-pub use isolate::{Config, Gc, GcMode, Interrupt, Isolate, Library, Runtime};
+pub use isolate::{Config, Debugger, Gc, GcMode, Interrupt, Isolate, Library, Runtime};
 pub use pin::{PinKind, Pinned};
 pub use scope::Scope;
 pub use value::{

@@ -212,6 +212,15 @@ ADR-12 adds a debugger engine (`orbit-runtime` feature `debugger`, `src/vm/debug
 
 Cost, measured on the cloud x86_64 container without PGO: the feature on and nothing attached changes instruction counts by -1.4% to +1.0% across the benchmarks (callgrind, quick inputs); attached, with a breakpoint in a function the benchmark never calls, run times are 0.96x to 1.06x (`tests/debugger.rs`, `overhead_outside_breakpoints`).
 
+### Embedding API
+
+`orbit::debugger` (feature `debugger` of `orbit`, over either backend) is what hosts and the DAP server use:
+
+- **On `Isolate`**: `set_debug_events(Option<Box<dyn DebugEvents>>)`, `set_breakpoints(source, lines)`, `set_error_break(ErrorBreak)` and `pause_handle()`, whose `PauseHandle` is `Send` and works from any thread. ADR-12's `resume` and `step` are the `Resume` that `DebugEvents::stopped` returns.
+- **`Paused`** is the stopped program as the callback sees it, with levels from the function that stopped (0) outwards: `frame(level)` and `frames()` (`debug.getinfo`'s `FrameInfo`), `locals(level)` and `upvalues(level)` as `Variable`s holding pinned values, `set_local(level, index, value)`, `globals()`, `error()` for an error stop, `scope(f)` for reading values or calling script code, and `stack()` for the rest of the stack API (whose level 0 is the reporting native). Locals named in parentheses (the compilers' hidden ones) are left out.
+- **`Config::debugger(Debugger::Disabled)`** refuses a debugger for the isolate's whole life: `set_debug_events` fails, breakpoints never resolve and pausing does nothing (D5).
+- **Shared layout**: four `IsolateAbi` methods, the `DebugEventsAbi` callback trait a program implements, `PauseAbi`, and `ConfigAbi::debugger`. A stop hands the program the reporting native's window, with the error in slot 1, so `Paused` is the same code on both backends. A `liborbit` built without its `debugger` feature refuses `set_debug_events`.
+
 ## Error-message parity
 
 Messages already match the reference for most runtime errors ([VM design](vm.md#error-messages)). What remains for `errors.lua` and `calls.lua` is finished last, as each case unblocks: `global 'x'` versus `field 'x'` for `_ENV` accesses through a local `_ENV`, upvalue and constant names in arithmetic and concatenation, `bad extra argument` for `__call` chains (`extraargs`), `for iterator` naming, and the `(...tail calls...)` lines. Where matching would need bytecode analysis after the fact, the compiler records one more origin instead, as the VM design intends.
@@ -219,7 +228,7 @@ Messages already match the reference for most runtime errors ([VM design](vm.md#
 ## Cargo features
 
 - `orbit-stdlib/debug` (default on): the `debug` table. Enables `orbit-vm/hooks`.
-- `orbit-runtime/debugger`: the debugger engine. Enables `hooks`. Off by default; `orbit` and `orbit-cli` forward it as `debugger`.
+- `orbit-runtime/debugger`: the debugger engine. Enables `hooks`. Off by default; `orbit`, `orbit-cli` and `orbit-lib` forward it as `debugger`. In `orbit` it also adds the `orbit::debugger` API.
 - `orbit-vm/hooks`: hook state, the hooked loop, hook frames. Introspection (`getinfo`, locals, upvalues, tracebacks) is always compiled: tracebacks and `error` levels need it anyway.
 
 ## Interfaces in other threads' areas
