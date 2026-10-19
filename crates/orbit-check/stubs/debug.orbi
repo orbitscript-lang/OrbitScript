@@ -1,0 +1,34 @@
+// The `debug` library. Most of it takes an optional thread first, so its parameters are loose.
+
+/// Reads and runs commands from standard input until `cont`.
+pub fn debug() -> ();
+/// The hook of `co` (default the running coroutine): function, mask and count.
+pub fn gethook(co: thread?);
+/// A table describing a function or a stack level.
+pub fn getinfo(...args: any) -> table?;
+/// The name and value of a local variable at a stack level.
+pub fn getlocal(...args: any);
+/// The metatable of `value`, ignoring `__metatable`.
+pub fn getmetatable(value: any) -> table?;
+/// The registry table.
+pub fn getregistry() -> table;
+/// The name and value of upvalue `up` of `f`.
+pub fn getupvalue(f: function, up: int);
+/// The `n`th user value of `u`, and whether it has one.
+pub fn getuservalue(u: any, n: int?);
+/// Sets a hook function, called on calls, returns, lines or every `count` instructions.
+pub fn sethook(...args: any) -> ();
+/// Sets a local variable at a stack level; returns its name.
+pub fn setlocal(...args: any);
+/// Sets the metatable of any value; returns `value`.
+pub fn setmetatable<T>(value: T, metatable: table?) -> T;
+/// Sets upvalue `up` of `f`; returns its name.
+pub fn setupvalue(f: function, up: int, value: any);
+/// Sets the `n`th user value of `udata`; returns `udata`.
+pub fn setuservalue(udata: any, value: any, n: int?);
+/// A traceback of the stack, after `message`.
+pub fn traceback(...args: any) -> any;
+/// A value identifying upvalue `n` of `f`.
+pub fn upvalueid(f: function, n: int) -> any;
+/// Makes upvalue `n1` of `f1` refer to upvalue `n2` of `f2`.
+pub fn upvaluejoin(f1: function, n1: int, f2: function, n2: int) -> ();

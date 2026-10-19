@@ -1,0 +1,49 @@
+// The `io` library.
+
+/// An open file.
+pub struct File {}
+
+impl File {
+    /// Closes the file; a `popen` file also gives the command's exit status.
+    pub fn close(self);
+    /// Writes out anything buffered.
+    pub fn flush(self) -> (File?, string?);
+    /// An iterator over the file read with `formats` (default one line at a time).
+    pub fn lines(self, ...formats: string | int) -> fn() -> any;
+    /// Reads one value per format: `"l"` a line, `"n"` a number, `"a"` everything, or a count.
+    pub fn read(self, ...formats: string | int);
+    /// Moves to `offset` from `whence` (`"set"`, `"cur"` or `"end"`); returns the position.
+    pub fn seek(self, whence: string?, offset: int?) -> (int?, string?);
+    /// Sets buffering: `"no"`, `"full"` or `"line"`.
+    pub fn setvbuf(self, mode: string, size: int?) -> (bool?, string?);
+    /// Writes each string or number; returns the file.
+    pub fn write(self, ...values: string | number) -> (File?, string?);
+    fn __close(self, err: any) -> ();
+}
+
+/// Closes `file` (default the output file).
+pub fn close(file: File?);
+/// Flushes the output file.
+pub fn flush() -> (File?, string?);
+/// Sets the input file to the file named or given; returns the input file.
+pub fn input(file: (string | File)?) -> File;
+/// An iterator over the file `filename` (default the input file) read with `formats`.
+pub fn lines(filename: string?, ...formats: string | int) -> fn() -> any;
+/// Opens `filename` in `mode` (`"r"`, `"w"`, `"a"`, with `"+"` and `"b"`).
+pub fn open(filename: string, mode: string?) -> (File?, string?, int?);
+/// Sets the output file to the file named or given; returns the output file.
+pub fn output(file: (string | File)?) -> File;
+/// Runs `prog` with a pipe to read its output (`"r"`) or write its input (`"w"`).
+pub fn popen(prog: string, mode: string?) -> (File?, string?);
+/// `File::read` on the input file.
+pub fn read(...formats: string | int);
+/// A temporary file, removed when the program ends.
+pub fn tmpfile() -> (File?, string?, int?);
+/// `"file"`, `"closed file"`, or `nil` when `obj` isn't a file.
+pub fn r#type(obj: any) -> string?;
+/// `File::write` on the output file.
+pub fn write(...values: string | number) -> (File?, string?);
+
+pub const stderr: File;
+pub const stdin: File;
+pub const stdout: File;

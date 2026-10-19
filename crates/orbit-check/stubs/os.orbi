@@ -1,0 +1,24 @@
+// The `os` library (ADR-7).
+
+/// Seconds since the program started (wall time, ADR-7).
+pub fn clock() -> float;
+/// `time` (default now) formatted as `format` says; `"*t"` and `"!*t"` give a table.
+pub fn date(format: string?, time: int?) -> any;
+/// `t2 - t1` in seconds.
+pub fn difftime(t2: int, t1: int?) -> float;
+/// Runs `command` in a shell: whether it succeeded, how it ended and its status.
+pub fn execute(command: string?);
+/// Ends the program with `code` (`true` success, `false` failure, or a number).
+pub fn exit(code: (bool | int)?, close: bool?) -> ();
+/// The environment variable `name`, or `nil`.
+pub fn getenv(name: string) -> string?;
+/// Deletes a file or empty directory.
+pub fn remove(filename: string) -> (bool?, string?, int?);
+/// Renames a file or directory.
+pub fn rename(oldname: string, newname: string) -> (bool?, string?, int?);
+/// Sets or queries the locale for `category` (default `"all"`).
+pub fn setlocale(locale: string?, category: string?) -> string?;
+/// The current time, or the time a date table describes, in seconds.
+pub fn time(t: table?) -> int;
+/// A name usable for a temporary file.
+pub fn tmpname() -> string;

@@ -135,6 +135,9 @@ pub(crate) struct Module {
     pub hints: Vec<(u32, crate::TypeId)>,
     /// Each function's parameter names (by symbol index), `self` included.
     pub param_names: HashMap<u32, Vec<String>>,
+    /// What each scope binds, for completion of names: the source the scope covers, where in
+    /// it the name becomes visible, and the symbol.
+    pub scope_names: Vec<(Span, u32, SymbolId)>,
     pub diagnostics: Vec<Diagnostic>,
     pub deps: Vec<FileId>,
 }

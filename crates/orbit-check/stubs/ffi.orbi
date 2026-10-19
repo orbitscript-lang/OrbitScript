@@ -1,0 +1,21 @@
+// The `ffi` library (ADR-9, docs/design/ffi.md), when the host enables it. Pointers and buffers
+// are userdata. Bound functions take and return what their signature says, so they are `any`.
+
+/// Binds the C function `name` in `lib` with a signature.
+pub fn bind(...args: any) -> any;
+/// A zero-filled buffer of `size` bytes, or one holding the bytes of a string plus a NUL.
+pub fn buffer(size_or_bytes: int | string) -> userdata;
+/// `errno` as the most recent FFI call left it.
+pub fn errno() -> int;
+/// The value of a sized `type` stored at `p + offset`.
+pub fn get(p: userdata, r#type: string, offset: int?) -> any;
+/// The raw pointer `n` bytes past `p`.
+pub fn offset(p: userdata, n: int) -> userdata;
+/// Opens a shared library by name or path (the running process with none).
+pub fn open(name: string?) -> any;
+/// Stores `value` as `type` at `p + offset`.
+pub fn set(p: userdata, r#type: string, offset: int, value: any) -> ();
+/// The size of a type in bytes.
+pub fn sizeof(r#type: string) -> int;
+/// `len` bytes at `p` (plus `offset`), or the bytes up to the first NUL.
+pub fn string(p: userdata, len: int?, offset: int?) -> string;

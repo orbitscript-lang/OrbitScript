@@ -51,6 +51,9 @@ pub struct FnTy {
     pub params: Vec<TypeId>,
     /// The type of each extra argument, for `...rest`.
     pub rest: Option<TypeId>,
+    /// How many leading parameters need an argument: up to the last one not written `T?` (or
+    /// otherwise able to be nil).
+    pub required: usize,
     /// `None`: results unknown (any number of `any`).
     pub results: Option<Vec<TypeId>>,
     /// Whether the first parameter is `self` (so `obj.m(...)` passes it).
@@ -313,6 +316,7 @@ impl Types {
                     params,
                     rest,
                     results,
+                    required: f.required,
                     method: f.method,
                     generics: f.generics.clone(),
                 }))
@@ -341,6 +345,18 @@ impl Types {
             (Ty::Map(ka, va), Ty::Map(kb, vb)) => {
                 self.unify(ka, kb, map);
                 self.unify(va, vb, map);
+            }
+            // An array is a map from `int`.
+            (Ty::Map(k, v), Ty::Array(e)) => {
+                let int = self.int;
+                self.unify(k, int, map);
+                self.unify(v, e, map);
+            }
+            (Ty::Union(ms), _) if !ms.iter().any(|&m| matches!(self.get(m), Ty::Param(_))) => {
+                // `[T] | table`: the members that can bind something try in turn.
+                for m in ms {
+                    self.unify(m, actual, map);
+                }
             }
             (Ty::Union(ms), _) => {
                 // `T?` against a value: bind `T` to the value without nil.

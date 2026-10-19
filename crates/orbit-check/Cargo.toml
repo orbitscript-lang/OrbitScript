@@ -16,5 +16,10 @@ path = "src/main.rs"
 orbit-hir = { path = "../orbit-hir" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 
+[dev-dependencies]
+# tests/stubs.rs compares the bundled stubs with the libraries the runtime installs.
+orbit = { path = "../orbit" }
+orbit-std = { path = "../orbit-std", features = ["json"] }
+
 [lints]
 workspace = true

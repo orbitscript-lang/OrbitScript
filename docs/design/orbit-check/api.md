@@ -1,6 +1,6 @@
 # `orbit-check` library API (draft for the language server)
 
-Status: **Agreed with the language server thread** (2026-10-18). The first part (names) is implemented in `crates/orbit-check`. Tym decided the language server links this library (dev tooling D1), so this API, not the command line, is the checker's main interface. Design background: [proposal.md](proposal.md).
+Status: **Agreed with the language server thread** (2026-10-18). Names (stage 1), types (stage 2) and the bundled stubs (stage 3) are implemented in `crates/orbit-check`. Tym decided the language server links this library (dev tooling D1), so this API, not the command line, is the checker's main interface. Design background: [proposal.md](proposal.md).
 
 ## Shape
 
@@ -29,7 +29,8 @@ pub struct Workspace { /* modules, interners, config */ }
 
 pub struct Config {
     /// `package.path`-style search templates for `use a::b`, tried in order.
-    /// Default: ["./?.orb", "./?/init.orb", "./?.lua", "./?/init.lua"], plus stubs (`?.orbi`) beside each.
+    /// Default: ["./?.orb", "./?/init.orb", "./?.lua", "./?/init.lua"]. A `.orbi` stub beside a
+    /// `.lua` module wins over it; the bundled standard library comes last.
     pub search_path: Vec<String>,
     pub strict: bool,
     /// `extern` names the host provides, with optional types (`--extern NAME: T`).
@@ -86,6 +87,8 @@ impl Workspace {
     pub fn symbol(&self, symbol: SymbolId) -> Option<&Symbol>;               // name, kind, name span, item span; later signature and doc spans
     pub fn can_rename(&self, symbol: SymbolId) -> bool;                       // for prepareRename: false for globals, the prelude and stubs
     pub fn completions_at(&mut self, file: FileId, offset: u32) -> Completions;
+    pub fn is_builtin(&self, file: FileId) -> bool;                           // the prelude or a bundled stdlib stub
+    pub fn builtin_source(&self, file: FileId) -> Option<&'static str>;       // its text, for going to a definition in it
     pub fn workspace_symbols(&mut self, query: &str) -> Vec<(SymbolId, Location)>;
 
     // L2: types
@@ -95,7 +98,7 @@ impl Workspace {
 }
 ```
 
-`Completions` is the items plus `replace`, the span of the partly typed name they replace (empty at the position when there is none). A `Completion` carries a label, a `SymbolKind`, an optional detail (signature or type) and whether it is a keyword. Completion after `.` lists fields and methods of the receiver's type, after `::` associated functions, variants and module members, in a struct literal the missing fields, and otherwise names in scope plus keywords. With no type known (`any`), `.` completion returns nothing rather than guessing.
+`Completions` is the items plus `replace`, the span of the partly typed name they replace (empty at the position when there is none). A `Completion` carries a label, a `SymbolKind`, an optional detail (signature or type) and whether it is a keyword. Completion after `.` lists fields and methods of the receiver's type (a string's are the `string` library's functions), after `::` associated functions, variants and module members, and otherwise the names in scope, innermost first, then the prelude's names, then keywords. A bare `p.` or `m::` (a statement that didn't parse) works when the receiver is a plain name. With no type known (`any`), `.` completion returns nothing rather than guessing. The missing fields of a struct literal come later.
 
 `SignatureHelp` is the label (`new(x: float, y: float) -> Vec2`), each parameter's byte range in the label, the active parameter and the called function's `SymbolId` (for its doc comment). For `obj.m(...)` the label leaves out `self`. `InlayHint` is an offset just after a name bound without an annotation (a `let`, a pattern, a closure parameter) and a label such as `: int`; names whose type is `any` get none. `TypeId` values come with `display_type`, which writes a type the way messages do (`Vec2?`, `fn(int) -> string`, `#{ x: float }`).
 
@@ -131,15 +134,21 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 
 ## Broken code (dev tooling D3)
 
-- With parser recovery on, the AST contains `Error` nodes. Resolution and checking treat an `Error` expression or type as `any` and report nothing further about it, so one typo doesn't produce a cascade.
-- Until recovery lands, a module that fails to parse keeps the results of its last successful parse for queries (marked stale) and reports the one parse error.
+- The checker parses with recovery (`parse_recovering`): every syntax error is reported, and a statement or item that didn't parse becomes an `Error` node. Resolution and checking treat it as `any` and report nothing further about it. Names it would have defined are unknown to the code after it.
 - Lowering is not run. The checker reports the name errors lowering reports today ("cannot find `x` in this scope", "used before its definition"), in the same words, so the server should take `.orb` diagnostics from the checker only, not from both.
 
 ## Build order
 
 1. Skeleton (this thread, first PR): `Workspace`, `Sources`, `FileId`, `Diagnostic`, module graph through `use`, name resolution with a kept symbol table, `document_symbols`, `symbol_at`, `definition`, `references`, and an `orbit-check` CLI that prints resolution errors. That is everything L1 needs except completion and types.
-2. Types (C2, C3): `diagnostics` gains type errors; `type_at`, `signature_at`, `inlay_hints`, member completion. Built on branch `check/types`: completion after `.` and `::` works on a partly typed name (a bare `p.` needs parser recovery); completion of names in scope, keywords and missing struct-literal fields comes later.
-3. Stubs (C4): the stdlib from bundled `.orbi` files once the parser has a stub option.
+2. Types (C2, C3): `diagnostics` gains type errors; `type_at`, `signature_at`, `inlay_hints`, member completion. Merged in #188.
+3. Stubs (C4): the prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`. That includes `std.json` (`stubs/std/json.orbi`, shown as `<builtin>/std/json.orbi`). `tests/stubs.rs` fails when a stub and the runtime's libraries, or the prelude and the front end's list, disagree. Also in this stage: completion of names in scope and keywords, and parsing with recovery.
+
+### How the stubs are written
+
+- A body-less function with no `->` has unknown results (each `any`), for functions whose result count depends on the arguments (`pcall`, `select`, `string.find`). `-> ()` means no results.
+- A parameter written `T?` may be left out; an unannotated or `any` parameter needs an argument.
+- Strings take the `string` stub's functions as methods: `s.upper()` checks as `string::upper(s)`.
+- Lua functions whose result type depends on the arguments' types return the argument's type through a generic (`math::abs<T>(x: T) -> T`), or `any` where nothing simpler is right (`os::date`). Overloads would fix these and are not in the type language yet.
 
 ## Agreed with the language server thread (2026-10-18)
 

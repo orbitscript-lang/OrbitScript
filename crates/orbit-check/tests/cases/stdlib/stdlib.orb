@@ -1,0 +1,67 @@
+// The bundled stubs: the prelude, the library modules and string methods.
+use luamod;
+use luamod::{scale};
+use std::json;
+
+let s = "hello";
+let up: string = s.upper();
+let n: int = s.len();
+let bad: int = s.upper(); //~ T0201
+s.nope(); //~ T0203
+let rep = s.rep(3, ", ");
+let rep_bad = s.rep("3"); //~ T0201
+let f: string = string::format("%d items", 3);
+let w = "a b".gmatch("%a+");
+
+let xs = [3, 1, 2];
+for (i, v) in ipairs(xs) {
+    let a: int = i + v;
+    let b: string = v; //~ T0201
+}
+let counts: #{[string]: int} = #{};
+for (k, v) in pairs(counts) {
+    let a: string = k;
+    let b: string = v; //~ T0201
+}
+for (k, v) in pairs(xs) {
+    let a: int = k + v;
+}
+table::insert(xs, 4);
+table::insert(xs, 1, 0);
+table::insert(xs, "four"); //~ T0201
+table::sort(xs, |a, b| a > b);
+let last: int? = table::remove(xs);
+let joined: string = table::concat(["a", "b"], ",");
+
+let root: float = math::sqrt(2);
+let fl: int = math::floor(2.5);
+let big: int = math::max(1, 5, 3);
+let pi: int = math::pi; //~ T0201
+let r: float = math::abs(-1.5);
+print(math::nope); //~ T0103
+
+let file = assert(io::open("data.txt", "r"));
+file.write("x", 1);
+file.write(true); //~ T0201
+let maybe = io::open("data.txt");
+maybe.close(); //~ T0207
+let name: string? = os::getenv("HOME");
+let now: int = os::time();
+
+let (ok, err) = pcall(print, "hi");
+let (a, b, c) = select(1, 2, 3, 4);
+let t: string = tostring(1);
+let num: number? = tonumber("1");
+print("a", 1, nil);
+let mt = setmetatable(#{}, #{});
+
+let sc: int = scale(2);
+let wrong: string = luamod::scale(2); //~ T0201
+
+let text: string = json::encode(#{ a: 1 }, #{ pretty: true });
+let bad_opts = json::encode(1, #{ pretty: 1 }); //~ T0201
+let (value, problem) = json::decode(text);
+let message: string = problem; //~ T0207
+let i: int = json::int(2.0);
+let s: int = json::string(2); //~ T0201
+let is_null = value == json::null;
