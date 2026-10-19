@@ -1798,16 +1798,7 @@ impl Parser<'_> {
                 if AS_POWER < min_bp {
                     break;
                 }
-                // `|` after the type is the operator: `x as int | 1`.
-                self.advance()?;
-                let ty = self.type_of(false)?;
-                lhs = Expr {
-                    kind: ExprKind::As {
-                        expr: Box::new(lhs),
-                        ty,
-                    },
-                    span: self.span_from(start),
-                };
+                lhs = self.cast(lhs, start)?;
                 continue;
             }
             let Some(op) = self.binop() else {
@@ -1845,6 +1836,28 @@ impl Parser<'_> {
         }
         self.leave();
         Ok(lhs)
+    }
+
+    /// `lhs as T` or `lhs as? T`, at `as`. Out of line, to keep `binary`'s frame small for
+    /// deeply nested expressions.
+    #[inline(never)]
+    fn cast(&mut self, lhs: Expr, start: u32) -> PResult<Expr> {
+        // `|` after the type is the operator: `x as int | 1`.
+        self.advance()?;
+        // `as?`: nil when the value isn't of the type.
+        let optional = self.eat(Punct::Question)?;
+        // The cast runs, so its target's tree is always built.
+        let trees = std::mem::replace(&mut self.type_trees, true);
+        let ty = self.type_of(false);
+        self.type_trees = trees;
+        Ok(Expr {
+            kind: ExprKind::As {
+                expr: Box::new(lhs),
+                ty: ty?,
+                optional,
+            },
+            span: self.span_from(start),
+        })
     }
 
     fn unary(&mut self, ctx: Ctx) -> PResult<Expr> {

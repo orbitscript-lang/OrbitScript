@@ -130,7 +130,7 @@ fn type_trees() {
 }
 
 #[test]
-fn trees_are_off_by_default() {
+fn trees_are_off_by_default_except_for_casts() {
     let ast = parse_with(
         "t.orb",
         b"let x: #{ a: int } | nil = y as int;",
@@ -149,7 +149,8 @@ fn trees_are_off_by_default() {
     let ExprKind::As { ty, .. } = &v.kind else {
         panic!()
     };
-    assert!(ty.kind.is_none());
+    // A cast runs, so its target always has a tree.
+    assert!(ty.kind.is_some());
     assert!(ast.comments.is_empty());
 }
 
@@ -290,7 +291,7 @@ fn type_only_syntax_runs_unchanged() {
     let src = b"type Num = int | float;
                 pub type Pt = #{ x: Num, y: Num };
                 let type = 1;
-                let n = (3 as Num) * 2 as int + type;
+                let n = (3 as number) * 2 as int + type;
                 fn kind(v) { type(v) }";
     to_hir("t.orb", src, &ParseOptions::default()).unwrap();
 }

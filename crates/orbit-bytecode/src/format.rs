@@ -405,6 +405,7 @@ op_table! {
     86 ForPrepExclusive { base, exit };
     87 VarargLen { dst };
     88 VarargGetInt { dst, index };
+    89 Cast { dst, src, ty, mode };
 }
 
 /// One instruction's encoding (for tests and fuzzing).

@@ -10,6 +10,10 @@
 //! the rest here. That keeps the loop's size, and the hot instructions'
 //! register allocation, independent of how many instructions there are.
 
+use std::borrow::Cow;
+
+use crate::object::number::float_to_int;
+
 use crate::object::table::{self, Key};
 use crate::object::{Cell, Closure, FieldCache, Gc, LuaHeap, LuaStr, NoMemory, Table, Value};
 use orbit_bytecode::{CaptureSource, MULTI, Op};
@@ -232,6 +236,7 @@ impl Vm {
             Op::Close { .. } => MetaAction::Close {
                 top: self.rt.top as u32,
             },
+            Op::Cast { dst, .. } => MetaAction::ToStr { dst },
             other => unreachable!("{other:?} doesn't call metamethods"),
         }
     }
@@ -265,6 +270,15 @@ impl Vm {
                 caller.pc -= 1;
             }
             MetaAction::Unwind { .. } => unreachable!("handled above"),
+            MetaAction::ToStr { dst } => {
+                let v = match res {
+                    Value::Str(_) => res,
+                    Value::Int(_) | Value::Float(_) => self.number_string(res)?,
+                    _ => return Err(Exc::Rt("'__tostring' must return a string".into(), None)),
+                };
+                let base = self.rt.stack.frames.last().expect("caller frame").base as usize;
+                self.rt.stack.regs[base + dst as usize] = v;
+            }
             MetaAction::Concat { dst, first, left } => {
                 let from = base + first as usize;
                 let left = left as usize;
@@ -489,6 +503,42 @@ impl Vm {
         }
     }
 
+    /// `Cast` to a string (not a test): `v` itself, a number or boolean
+    /// written as `tostring` writes it, or a call to its `__tostring`.
+    #[inline(never)]
+    pub(crate) fn op_cast_string(&mut self, v: Value, mode: u8) -> Result<Value, Exc> {
+        use orbit_bytecode::cast;
+        match v {
+            Value::Str(_) => Ok(v),
+            Value::Int(_) | Value::Float(_) => self.number_string(v),
+            Value::Bool(b) => {
+                let s: &[u8] = if b { b"true" } else { b"false" };
+                Ok(Value::Str(self.rt.strings.new_str(&mut self.heap, s)))
+            }
+            Value::Nil if mode & cast::NILABLE != 0 => Ok(v),
+            _ => {
+                let h = self.rt.metamethod(&self.heap, v, MetaField::ToString);
+                if !h.is_nil() {
+                    Err(Exc::Meta(MetaCall::new(h, MetaField::ToString, &[v])))
+                } else if mode & cast::SOFT != 0 {
+                    Ok(Value::Nil)
+                } else {
+                    Err(cast_error(&self.heap, &self.rt.metas, v, Value::Nil, mode))
+                }
+            }
+        }
+    }
+
+    /// A number as a string, as `tostring` writes it.
+    fn number_string(&mut self, v: Value) -> Result<Value, Exc> {
+        self.reserve(64)?;
+        let mut buf = Vec::new();
+        ops::concat_piece(&self.heap, v, &mut buf);
+        Ok(Value::Str(
+            self.rt.strings.new_str_owned(&mut self.heap, buf),
+        ))
+    }
+
     /// `SetList`: store the `n` values at stack index `from` into `t`,
     /// starting at index `start`.
     #[inline(never)]
@@ -671,6 +721,114 @@ impl Vm {
             r[3] = Value::Float(start);
         }
         Ok(runs)
+    }
+}
+
+/// `Cast`, past the fast paths, except a conversion to a string
+/// ([`Vm::op_cast_string`]): `v as` the target `mode` names, `ty` the named
+/// type (or, for `FAIL`, the target's text). See [`orbit_bytecode::cast`].
+#[inline(never)]
+pub(crate) fn op_cast(
+    heap: &LuaHeap,
+    metas: &Metas,
+    v: Value,
+    ty: Value,
+    mode: u8,
+) -> Result<Value, Exc> {
+    use orbit_bytecode::cast;
+    let kind = mode & cast::KIND;
+    if mode & cast::TEST != 0 {
+        let ok = match kind {
+            cast::INT => matches!(v, Value::Int(_)),
+            cast::FLOAT => matches!(v, Value::Float(_)),
+            cast::NUMBER => matches!(v, Value::Int(_) | Value::Float(_)),
+            cast::STRING => matches!(v, Value::Str(_)),
+            cast::BOOL => matches!(v, Value::Bool(_)),
+            cast::NIL => v.is_nil(),
+            cast::NAMED => is_named(heap, metas, v, ty),
+            _ => false,
+        };
+        return Ok(Value::Bool(ok || (v.is_nil() && mode & cast::NILABLE != 0)));
+    }
+    if v.is_nil() && mode & cast::NILABLE != 0 {
+        return Ok(v);
+    }
+    let done = match (kind, v) {
+        (cast::INT, Value::Int(_)) => Some(v),
+        (cast::INT, Value::Float(f)) => match float_to_int(f) {
+            Some(i) => Some(Value::Int(i)),
+            None if mode & cast::SOFT != 0 => return Ok(Value::Nil),
+            None => {
+                return Err(Exc::Rt("number has no integer representation".into(), None));
+            }
+        },
+        (cast::FLOAT, Value::Int(i)) => Some(Value::Float(i as f64)),
+        (cast::FLOAT | cast::NUMBER, Value::Float(_)) | (cast::NUMBER, Value::Int(_)) => Some(v),
+        (cast::BOOL, _) => Some(Value::Bool(!v.is_falsy())),
+        (cast::NIL, Value::Nil) => Some(v),
+        (cast::NAMED, _) if is_named(heap, metas, v, ty) => Some(v),
+        _ => None,
+    };
+    match done {
+        Some(v) => Ok(v),
+        None if mode & cast::SOFT != 0 => Ok(Value::Nil),
+        None => Err(cast_error(heap, metas, v, ty, mode)),
+    }
+}
+
+/// `v` is a value of the struct, enum or variant `ty`: its metatable is
+/// `ty`, it is `ty` (a unit variant), or its metatable's `__enum` is `ty`.
+fn is_named(heap: &LuaHeap, metas: &Metas, v: Value, ty: Value) -> bool {
+    let Value::Table(ty) = ty else { return false };
+    if let Value::Table(t) = v
+        && t == ty
+    {
+        return true;
+    }
+    let Some(mt) = metas.metatable(heap, v) else {
+        return false;
+    };
+    if mt == ty {
+        return true;
+    }
+    let name = metas.field_names.name(MetaField::Enum);
+    let link = heap.get(mt).meta_field(heap, MetaField::Enum, name);
+    matches!(link, Value::Table(e) if e == ty)
+}
+
+/// "cannot cast boolean to int": the error of a failed cast.
+#[cold]
+fn cast_error(heap: &LuaHeap, metas: &Metas, v: Value, ty: Value, mode: u8) -> Exc {
+    use orbit_bytecode::cast;
+    let target: Cow<'_, str> = match mode & cast::KIND {
+        cast::INT => "int".into(),
+        cast::FLOAT => "float".into(),
+        cast::NUMBER => "number".into(),
+        cast::STRING => "string".into(),
+        cast::BOOL => "bool".into(),
+        cast::NIL => "nil".into(),
+        _ => type_text(heap, metas, ty),
+    };
+    let q = if mode & cast::NILABLE != 0 { "?" } else { "" };
+    let from = metas.type_name(heap, v);
+    Exc::Rt(format!("cannot cast {from} to {target}{q}"), None)
+}
+
+/// The name of a cast's target `ty`: the string itself, the table's own
+/// `__name` (a struct, data variant or enum), or its metatable's (a unit
+/// variant).
+fn type_text<'a>(heap: &'a LuaHeap, metas: &Metas, ty: Value) -> Cow<'a, str> {
+    let own = match ty {
+        Value::Str(_) => ty,
+        Value::Table(t) => {
+            let name = metas.field_names.name(MetaField::Name);
+            heap.get(t).meta_field(heap, MetaField::Name, name)
+        }
+        _ => Value::Nil,
+    };
+    match own {
+        Value::Str(s) => String::from_utf8_lossy(heap.get(s).as_bytes()),
+        _ => metas.type_name(heap, ty),
     }
 }
 

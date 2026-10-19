@@ -111,6 +111,7 @@ impl Function<'_> {
             | Op::VarargGet { dst, .. }
             | Op::VarargLen { dst }
             | Op::VarargGetInt { dst, .. }
+            | Op::Cast { dst, .. }
             | Op::Closure { dst, .. } => s.kill(dst, 1),
             Op::CheckUndefined { .. } => {}
             // `__concat` leaves partial results in the operand registers.

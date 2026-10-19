@@ -356,10 +356,13 @@ pub enum ExprKind {
         expr: Box<Expr>,
     },
     Paren(Box<Expr>),
-    /// `expr as T`: a type assertion only `orbit-check` reads; it runs as `expr`.
+    /// `expr as T`, or `expr as? T` (`optional`): a cast checked while the program runs. `as`
+    /// raises an error when the value isn't a `T`, `as?` gives `nil`. `ty` always has its
+    /// tree, whatever the parse options.
     As {
         expr: Box<Expr>,
         ty: Type,
+        optional: bool,
     },
     /// `(a, b)`: multiple values, valid where a list of results is.
     Tuple(Vec<Expr>),

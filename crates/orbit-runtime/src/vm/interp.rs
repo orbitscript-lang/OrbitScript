@@ -9,7 +9,7 @@ use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{MULTI, Op, Origin};
 
 use crate::vm::cold::{
-    already_defined, env_error, get_str_miss, method_miss, op_len, set_str_miss,
+    already_defined, env_error, get_str_miss, method_miss, op_cast, op_len, set_str_miss,
 };
 use crate::vm::meta::MetaField;
 use crate::vm::native::{CallOutcome, NativeCtx, NativeReturn};
@@ -2064,6 +2064,24 @@ impl Vm {
                         let x = reg!(src);
                         reg!(dst) = tri!(op_len(&self.heap, &self.rt.metas, x));
                     }
+                    Op::Cast { dst, src, ty, mode } => match reg!(src) {
+                        Value::Int(_) if mode == orbit_bytecode::cast::INT => reg!(dst) = reg!(src),
+                        // Converting to a string allocates or calls `__tostring`.
+                        x if mode
+                            & !orbit_bytecode::cast::SOFT
+                            & !orbit_bytecode::cast::NILABLE
+                            == orbit_bytecode::cast::STRING =>
+                        {
+                            let v = tri!(self.op_cast_string(x, mode));
+                            w = window!();
+                            reg!(dst) = v;
+                            safepoint!();
+                        }
+                        x => {
+                            let t = reg!(ty);
+                            reg!(dst) = tri!(op_cast(&self.heap, &self.rt.metas, x, t, mode));
+                        }
+                    },
                     Op::Concat { dst, first, count } => {
                         let v = tri!(self.op_concat(base + first as usize, count as usize));
                         w = window!();
