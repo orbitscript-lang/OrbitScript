@@ -57,6 +57,18 @@ pub enum Keyword {
     While,
 }
 
+/// Every keyword's spelling, for tools such as completion.
+pub const KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for", "global",
+    "if", "impl", "in", "let", "loop", "match", "mut", "nil", "pub", "return", "Self", "self",
+    "struct", "true", "use", "while",
+];
+
+/// Words that are keywords only in one position and ordinary names elsewhere: `type` at the
+/// start of an item followed by a name (`type Id = int;`), and `scope` at the start of a
+/// statement (`scope close(f);`).
+pub const CONTEXTUAL_KEYWORDS: &[&str] = &["type", "scope"];
+
 impl Keyword {
     pub fn from_bytes(s: &[u8]) -> Option<Keyword> {
         use Keyword::*;
@@ -240,5 +252,86 @@ impl Punct {
             Question => "?",
             Hash => "#",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyword_lists_match_the_lexer() {
+        for &k in KEYWORDS {
+            let kw = Keyword::from_bytes(k.as_bytes()).expect(k);
+            assert_eq!(kw.as_str(), k);
+        }
+        for &k in CONTEXTUAL_KEYWORDS {
+            assert!(Keyword::from_bytes(k.as_bytes()).is_none(), "{k}");
+        }
+        // Every `Keyword` is listed: the enum's variants are in alphabetical order, and
+        // `as_str` is exhaustive, so a new variant missing from `KEYWORDS` fails here.
+        let all = [
+            Keyword::As,
+            Keyword::Break,
+            Keyword::Const,
+            Keyword::Continue,
+            Keyword::Else,
+            Keyword::Enum,
+            Keyword::Extern,
+            Keyword::False,
+            Keyword::Fn,
+            Keyword::For,
+            Keyword::Global,
+            Keyword::If,
+            Keyword::Impl,
+            Keyword::In,
+            Keyword::Let,
+            Keyword::Loop,
+            Keyword::Match,
+            Keyword::Mut,
+            Keyword::Nil,
+            Keyword::Pub,
+            Keyword::Return,
+            Keyword::SelfType,
+            Keyword::SelfValue,
+            Keyword::Struct,
+            Keyword::True,
+            Keyword::Use,
+            Keyword::While,
+        ];
+        for kw in all {
+            // A compile error here means a new keyword: add it to `all` and `KEYWORDS`.
+            match kw {
+                Keyword::As
+                | Keyword::Break
+                | Keyword::Const
+                | Keyword::Continue
+                | Keyword::Else
+                | Keyword::Enum
+                | Keyword::Extern
+                | Keyword::False
+                | Keyword::Fn
+                | Keyword::For
+                | Keyword::Global
+                | Keyword::If
+                | Keyword::Impl
+                | Keyword::In
+                | Keyword::Let
+                | Keyword::Loop
+                | Keyword::Match
+                | Keyword::Mut
+                | Keyword::Nil
+                | Keyword::Pub
+                | Keyword::Return
+                | Keyword::SelfType
+                | Keyword::SelfValue
+                | Keyword::Struct
+                | Keyword::True
+                | Keyword::Use
+                | Keyword::While => {}
+            }
+            assert!(KEYWORDS.contains(&kw.as_str()), "{}", kw.as_str());
+        }
+        assert_eq!(KEYWORDS.len(), all.len());
     }
 }
