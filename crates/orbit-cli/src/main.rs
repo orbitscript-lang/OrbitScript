@@ -19,7 +19,7 @@
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(all(feature = "dap", unix))]
+#[cfg(feature = "dap")]
 mod dap;
 #[cfg(feature = "repl")]
 mod repl;
@@ -99,10 +99,10 @@ struct Cli {
     no_ffi: bool,
     warnings: bool,
     /// `--debug-listen`: serve debuggers from the start.
-    #[cfg(all(feature = "dap", unix))]
+    #[cfg(feature = "dap")]
     debug_listen: bool,
     /// `--no-debug-signal`: don't start serving debuggers on `SIGUSR1`.
-    #[cfg(all(feature = "dap", unix))]
+    #[cfg(feature = "dap")]
     no_debug_signal: bool,
     /// Index of the script in the arguments (`-` for standard input).
     script: Option<usize>,
@@ -136,9 +136,9 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
             "-W" => cli.warnings = true,
             "--lock-cpath" => cli.lock_cpath = true,
             "--no-ffi" => cli.no_ffi = true,
-            #[cfg(all(feature = "dap", unix))]
+            #[cfg(feature = "dap")]
             "--debug-listen" => cli.debug_listen = true,
-            #[cfg(all(feature = "dap", unix))]
+            #[cfg(feature = "dap")]
             "--no-debug-signal" => cli.no_debug_signal = true,
             _ if a.starts_with("-e") || a.starts_with("-l") => {
                 let opt = if a.starts_with("-e") { "-e" } else { "-l" };
@@ -214,7 +214,7 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          --        stop handling options\n  \
          -         stop handling options and execute stdin\n"
     );
-    #[cfg(all(feature = "dap", unix))]
+    #[cfg(feature = "dap")]
     eprint!(
         "  --debug-listen     serve debuggers from the start (otherwise on SIGUSR1)\n  \
          --no-debug-signal  don't serve debuggers on SIGUSR1\n  \
@@ -228,7 +228,7 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().cloned().unwrap_or_else(|| "orbit".into());
-    #[cfg(all(feature = "dap", unix))]
+    #[cfg(feature = "dap")]
     match args.get(1).map(String::as_str) {
         Some("--debug-server") => return dap::server(&prog),
         Some("--debug-connect") => return dap::connect(&prog, &args),
@@ -247,12 +247,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    #[cfg(all(feature = "dap", unix))]
+    #[cfg(feature = "dap")]
     let service = dap::serve(&mut iso, &cli, &args, &prog);
     let mut run = Runner::new(iso, prog);
     let ok = run.main(&cli, &args);
     run.iso.flush();
-    #[cfg(all(feature = "dap", unix))]
+    #[cfg(feature = "dap")]
     if let Some(s) = service {
         s.stop();
     }

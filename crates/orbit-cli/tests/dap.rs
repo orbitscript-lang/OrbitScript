@@ -3,7 +3,7 @@
 //! as its own process. `orbit-dap`'s own tests cover the protocol; these
 //! check what the command line adds (the script's process, arguments,
 //! error reports, `os.exit`, the script's input and output).
-#![cfg(all(feature = "dap", unix))]
+#![cfg(feature = "dap")]
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -443,9 +443,11 @@ fn editors_attach_to_a_running_program_and_leave_it_running() {
 }
 
 #[test]
-fn sigusr1_starts_serving() {
+fn a_debug_request_starts_serving() {
     let mut run = Running::start("signal", &[]);
     let pid = run.child.id();
+    // Elsewhere only programs already serving are listed.
+    #[cfg(target_os = "linux")]
     assert_eq!(listed(pid).unwrap()["listening"], false);
     let mut e = Editor::attach(pid);
     assert!(run.err_line().contains("debugger listening on"));

@@ -24,17 +24,16 @@
 //!    disconnect.
 
 mod agent;
-#[cfg(unix)]
 mod attach;
-#[cfg(unix)]
 mod launcher;
-#[cfg(unix)]
 mod socket;
+#[cfg(windows)]
+mod win;
 mod wire;
 
-#[cfg(unix)]
+#[cfg(windows)]
+pub use attach::debug_requests;
 pub use attach::{About, Service, attach, list, serve};
-#[cfg(unix)]
 pub use launcher::adapter;
 
 use std::collections::VecDeque;
@@ -263,9 +262,8 @@ impl std::fmt::Debug for Server {
 impl Server {
     /// Speak DAP over the socket at `path`, where the [`adapter`] that
     /// started this program waits.
-    #[cfg(unix)]
     pub fn connect(path: &std::path::Path) -> std::io::Result<Server> {
-        let stream = std::os::unix::net::UnixStream::connect(path)?;
+        let stream = socket::Stream::connect(path)?;
         Ok(Server::new(stream.try_clone()?, stream))
     }
 
