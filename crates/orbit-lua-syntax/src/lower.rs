@@ -26,6 +26,7 @@ pub fn lower(ast: Ast, src: &[u8]) -> Result<hir::Chunk, Diagnostic> {
         chunk,
         strings,
         source,
+        ..
     } = ast;
     let mut lx = Lowerer {
         chunk: hir::Chunk {
@@ -197,6 +198,12 @@ impl Lowerer<'_> {
 
     fn error(&self, span: Span, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(span, self.line_of(span), message, None)
+    }
+
+    /// The error for an `Error` node, which only an error-recovering parse makes.
+    #[cold]
+    fn unparsed(&self, span: Span) -> Diagnostic {
+        self.error(span, "this code has a syntax error, so it can't run")
     }
 
     fn name_text(&self, sym: StrId) -> String {
@@ -860,6 +867,7 @@ impl Lowerer<'_> {
                 hir::StmtKind::LocalFunction { local, func }
             }
             StmtKind::Break => hir::StmtKind::Break,
+            StmtKind::Error => return Err(self.unparsed(s.span)),
             StmtKind::Goto(name) => {
                 self.goto(*name, s.span, stmts);
                 return Ok(());
@@ -1027,6 +1035,7 @@ impl Lowerer<'_> {
             ExprKind::Float(x) => hir::ExprKind::Float(*x),
             ExprKind::Str(s) => hir::ExprKind::Str(*s),
             ExprKind::Vararg => hir::ExprKind::Vararg,
+            ExprKind::Error => return Err(self.unparsed(span)),
             ExprKind::Name(sym) => return self.name_expr(ast::Name { sym: *sym, span }),
             ExprKind::Index { obj, key } => {
                 let obj = self.expr(obj)?;

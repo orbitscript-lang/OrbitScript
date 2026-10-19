@@ -225,6 +225,7 @@ fn parse_and_round_trip(path: &Path) -> Result<(), String> {
     let options = ParseOptions {
         skip_comment_line: true,
         max_depth: 1000,
+        ..ParseOptions::default()
     };
     let ast = parse_with("f.lua", &src, &options).map_err(|d| d.to_lua_message("f.lua"))?;
     let printed = unparse(&ast);
