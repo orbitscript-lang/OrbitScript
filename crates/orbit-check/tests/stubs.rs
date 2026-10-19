@@ -70,6 +70,7 @@ fn runtime() -> (BTreeSet<String>, BTreeSet<String>) {
                 for f in pairs(v) do names[#names + 1] = k .. "." .. f end
             end
         end
+        for f in pairs(require("std.json")) do names[#names + 1] = "std.json." .. f end
         local methods = {}
         for m in pairs(getmetatable(io.stdout).__index) do methods[#methods + 1] = m end
         return table.concat(names, " "), table.concat(methods, " ")
@@ -111,6 +112,10 @@ fn stubs_match_the_runtime() {
             }
         }
     }
+    for f in stub_names(&read("stubs/std/json.orbi")) {
+        stubbed.insert(format!("std.json.{f}"));
+    }
+
     assert_eq!(
         expected.difference(&stubbed).collect::<Vec<_>>(),
         Vec::<&String>::new(),

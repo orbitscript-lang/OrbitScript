@@ -77,8 +77,7 @@ fn cases() {
 #[test]
 fn repository_programs_check() {
     // `rounds` comes from the command line and may be 0, which leaves `dist` nil.
-    // `std.json` has no bundled stub yet (it follows the module's PR).
-    let known: BTreeSet<_> = [("dijkstra.orb", 97, "T0207"), ("json.orb", 13, "T0002")]
+    let known: BTreeSet<_> = [("dijkstra.orb", 97, "T0207")]
         .into_iter()
         .map(|(f, l, c)| (f.to_string(), l, c.to_string()))
         .collect();

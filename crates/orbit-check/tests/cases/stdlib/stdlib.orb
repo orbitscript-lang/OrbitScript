@@ -1,6 +1,7 @@
 // The bundled stubs: the prelude, the library modules and string methods.
 use luamod;
 use luamod::{scale};
+use std::json;
 
 let s = "hello";
 let up: string = s.upper();
@@ -56,3 +57,11 @@ let mt = setmetatable(#{}, #{});
 
 let sc: int = scale(2);
 let wrong: string = luamod::scale(2); //~ T0201
+
+let text: string = json::encode(#{ a: 1 }, #{ pretty: true });
+let bad_opts = json::encode(1, #{ pretty: 1 }); //~ T0201
+let (value, problem) = json::decode(text);
+let message: string = problem; //~ T0207
+let i: int = json::int(2.0);
+let s: int = json::string(2); //~ T0201
+let is_null = value == json::null;

@@ -141,7 +141,7 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 
 1. Skeleton (this thread, first PR): `Workspace`, `Sources`, `FileId`, `Diagnostic`, module graph through `use`, name resolution with a kept symbol table, `document_symbols`, `symbol_at`, `definition`, `references`, and an `orbit-check` CLI that prints resolution errors. That is everything L1 needs except completion and types.
 2. Types (C2, C3): `diagnostics` gains type errors; `type_at`, `signature_at`, `inlay_hints`, member completion. Merged in #188.
-3. Stubs (C4): the prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`. `tests/stubs.rs` fails when a stub and the runtime's libraries, or the prelude and the front end's list, disagree. Also in this stage: completion of names in scope and keywords, and parsing with recovery.
+3. Stubs (C4): the prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`. That includes `std.json` (`stubs/std/json.orbi`, shown as `<builtin>/std/json.orbi`). `tests/stubs.rs` fails when a stub and the runtime's libraries, or the prelude and the front end's list, disagree. Also in this stage: completion of names in scope and keywords, and parsing with recovery.
 
 ### How the stubs are written
 

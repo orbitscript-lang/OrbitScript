@@ -16,6 +16,7 @@ pub(crate) const MODULES: &[(&str, &str)] = &[
     ("math", include_str!("../stubs/math.orbi")),
     ("os", include_str!("../stubs/os.orbi")),
     ("package", include_str!("../stubs/package.orbi")),
+    ("std.json", include_str!("../stubs/std/json.orbi")),
     ("string", include_str!("../stubs/string.orbi")),
     ("table", include_str!("../stubs/table.orbi")),
     ("utf8", include_str!("../stubs/utf8.orbi")),

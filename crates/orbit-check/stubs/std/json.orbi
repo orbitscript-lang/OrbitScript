@@ -1,0 +1,28 @@
+// The `std.json` module (docs/design/json.md): `use std::json;` in OrbitScript,
+// `require "std.json"` in Lua.
+
+/// What `null` decodes to, so it survives inside tables; `tostring` gives `null`.
+pub struct Null {}
+
+/// Stands for JSON's `null`.
+pub const null: Null;
+
+/// The JSON text for `value`; raises an error for anything JSON can't hold. `pretty` writes one
+/// member per line, `sort_keys` writes object keys in byte order.
+pub fn encode(value, options: #{ pretty: bool?, sort_keys: bool? }?) -> string;
+/// The value `text` holds, or `nil` and a message. `keep_null: false` decodes `null` as `nil`.
+pub fn decode(text: string, options: #{ keep_null: bool? }?) -> (any, string?);
+/// `t` (or a new table) marked to encode as an object whatever its keys.
+pub fn object(t: table?) -> table;
+/// `t` (or a new table) marked to encode as an array, of length `n` if given; holes are `null`.
+pub fn array(t: table?, n: int?) -> table;
+/// A value written exactly as `numeral`, for numbers an integer or float can't hold.
+pub fn number(numeral: string) -> table;
+/// `v as int`: an integer, or a float with an exact integer value.
+pub fn int(v) -> int;
+/// `v as float`: any number.
+pub fn float(v) -> float;
+/// `v as string`: strings, numbers, booleans and values with `__tostring`.
+pub fn string(v) -> string;
+/// `v as bool`: `false` for `nil` and `false`, `true` otherwise.
+pub fn bool(v) -> bool;
