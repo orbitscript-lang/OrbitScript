@@ -3,7 +3,8 @@
 
 use std::io::{BufRead, Read, Write};
 
-use orbit::{Call, Chunk, Error, Function, Mode, Ret, Scope, Table, Value};
+use orbit::stack::{Either, Nil, Rest, Return, Stack, StackResult, Status};
+use orbit::{Chunk, Error, Mode, Scope, Table, native};
 
 use crate::sys::{os_error_text, os_path};
 
@@ -59,35 +60,31 @@ pub fn read_chunk_file(path: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), String
 
 /// `print`: each argument as `tostring` gives it, tab-separated, then a
 /// newline, to the isolate's standard output.
-fn print<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
+#[native]
+fn print(s: &mut Stack<'_>, args: Rest) -> StackResult<()> {
     let mut line = Vec::new();
-    for i in 0..c.nargs() {
-        if i > 0 {
+    for i in args.indices() {
+        if i > args.first {
             line.push(b'\t');
         }
-        c.arg(i).write_display(&mut line)?;
+        let top = s.top();
+        line.extend_from_slice(s.to_display_string(i)?);
+        s.set_top(top)?;
     }
     line.push(b'\n');
-    c.with_stdout(|out| {
+    s.with_stdout(|out| {
         let _ = out.write_all(&line);
         // lua flushes after every `print`, so output reaches a pipe at once.
         let _ = out.flush();
     });
-    c.ret(())
+    Ok(())
 }
 
-/// Load the file argument 0 names (nil: standard input) with `mode`
-/// (`load`'s mode string) and `env`: the function, or the message.
-fn load_file<'s>(
-    c: &'s Call<'s>,
-    mode: &[u8],
-    env: Option<Value<'s>>,
-) -> Result<Result<Function<'s>, String>, Error> {
-    let path: Option<Vec<u8>> = c.check(0)?;
-    let (bytes, source) = match read_chunk_file(path.as_deref()) {
-        Ok(read) => read,
-        Err(msg) => return Ok(Err(msg)),
-    };
+/// Load the file `path` names (`None`: standard input) with `mode`
+/// (`load`'s mode string) and the value at `env` as its `_ENV` (0: the
+/// globals): push the function, or give the message.
+fn load_file(s: &mut Stack<'_>, path: Option<&[u8]>, mode: &[u8], env: i32) -> Result<(), String> {
+    let (bytes, source) = read_chunk_file(path)?;
     let binary = bytes.first() == Some(&BINARY_SIGNATURE);
     let (want, what) = if binary {
         (b'b', "binary")
@@ -95,52 +92,63 @@ fn load_file<'s>(
         (b't', "text")
     };
     if !mode.contains(&want) {
-        return Ok(Err(format!(
+        return Err(format!(
             "attempt to load a {what} chunk (mode is '{}')",
             String::from_utf8_lossy(mode)
-        )));
+        ));
     }
     let chunk = Chunk::new(&bytes).name(&source).mode(Mode::Both);
-    let loaded = match env {
-        Some(env) => c.load_in(chunk, env),
-        None => c.load(chunk),
-    };
-    Ok(loaded.map_err(|e| e.message().to_owned()))
-}
-
-fn loadfile<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let mode = c
-        .opt::<Option<Vec<u8>>>(1, None)?
-        .unwrap_or_else(|| b"bt".to_vec());
-    let env = (c.nargs() >= 3).then(|| c.arg(2));
-    match load_file(c, &mode, env)? {
-        Ok(f) => c.ret(f),
-        Err(msg) => c.ret((Value::Nil, msg)),
+    match s.load_chunk(&chunk, env) {
+        Status::Ok => Ok(()),
+        _ => {
+            let msg = String::from_utf8_lossy(s.string_at(-1).unwrap_or_default()).into_owned();
+            let _ = s.set_top(-2);
+            Err(msg)
+        }
     }
 }
 
-fn dofile<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    match load_file(c, b"bt", None)? {
-        // lua5.5 lets the chunk yield across `dofile`.
-        Ok(f) => c.tail_call(f, ()),
-        Err(msg) => Err(Error::runtime(msg)),
+#[native]
+fn loadfile(
+    s: &mut Stack<'_>,
+    path: Option<Vec<u8>>,
+    mode: Option<Vec<u8>>,
+) -> Either<Return, (Nil, String)> {
+    let mode = mode.unwrap_or_else(|| b"bt".to_vec());
+    // An `env` argument, even nil, replaces the globals.
+    let env = if s.top() >= 3 { 3 } else { 0 };
+    match load_file(s, path.as_deref(), &mode, env) {
+        Ok(()) => Either::Left(Return::values(1)),
+        Err(msg) => Either::Right((Nil, msg)),
     }
+}
+
+#[native]
+fn dofile(s: &mut Stack<'_>, path: Option<Vec<u8>>) -> Result<Return, String> {
+    load_file(s, path.as_deref(), b"bt", 0)?;
+    // lua5.5 lets the chunk yield across `dofile`.
+    Ok(Return::tail_call(0))
 }
 
 /// `debug.debug`: run each line read from stdin as a chunk until a line
 /// reading `cont` (or end of input). Prompts and error messages go to
 /// stderr, as in the reference.
-fn debug_loop<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
+#[native(name = "debug.debug")]
+fn debug_loop(s: &mut Stack<'_>) {
+    s.with_scope(debug_lines);
+}
+
+fn debug_lines<'s>(c: &'s Scope<'s>) {
     loop {
         crate::sys::flush_stdout(c);
         let _ = std::io::stderr().write_all(b"lua_debug> ");
         let mut line = Vec::new();
         match std::io::stdin().lock().read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return c.ret(()),
+            Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
         if line == b"cont\n" || line == b"cont" {
-            return c.ret(());
+            return;
         }
         let ran = c
             .load(Chunk::new(&line).name("=(debug command)"))
@@ -161,16 +169,16 @@ fn debug_loop<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
 /// Add `print`, `loadfile` and `dofile` to the global table.
 pub fn open<'s>(s: &'s Scope<'s>) -> Result<(), Error> {
     let g = s.globals();
-    g.raw_set("print", s.create_function(print))?;
-    g.raw_set("loadfile", s.create_function(loadfile))?;
-    g.raw_set("dofile", s.create_function(dofile))?;
+    g.raw_set("print", s.create_native::<print>())?;
+    g.raw_set("loadfile", s.create_native::<loadfile>())?;
+    g.raw_set("dofile", s.create_native::<dofile>())?;
     Ok(())
 }
 
 /// Add `debug.debug` to the `debug` library, if it is open.
 pub fn open_debug<'s>(s: &'s Scope<'s>) -> Result<(), Error> {
     if let Some(debug) = s.globals().raw_get::<Option<Table>>("debug")? {
-        debug.raw_set("debug", s.create_function(debug_loop))?;
+        debug.raw_set("debug", s.create_native::<debug_loop>())?;
     }
     Ok(())
 }

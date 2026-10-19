@@ -215,6 +215,16 @@ impl<'s> Scope<'s> {
         Function::top(self)
     }
 
+    /// A function scripts can call that runs the stack-API native `N`
+    /// (one written with [`#[native]`](crate::native), say). Unlike
+    /// [`Scope::create_function`] it captures nothing, and calls skip the
+    /// host-function trampoline.
+    #[inline]
+    pub fn create_native<N: crate::stack::Native>(&'s self) -> Function<'s> {
+        self.stack().push_native::<N>();
+        Function::top(self)
+    }
+
     /// A userdata holding `value`, with no class: scripts can pass it
     /// around but not call methods on it. See [`Class`](crate::Class) for
     /// userdata with methods.

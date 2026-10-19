@@ -7,7 +7,8 @@
 //! reads files. The C searchers and `package.loadlib` come from
 //! `orbit-capi`, which installs itself after this library.
 
-use orbit::{Call, Chunk, Error, Ret, Scope, Table, Value};
+use orbit::stack::{Any, Either, Nil, Stack, StackResult, Status, Type};
+use orbit::{Chunk, Error, Scope, Table, Value, native};
 
 use crate::base::read_chunk_file;
 use crate::sys::os_path;
@@ -95,19 +96,26 @@ fn replace(s: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     out
 }
 
-fn searchpath<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    // lua5.5 checks the path first.
-    let path: Vec<u8> = c.check(1)?;
-    let name: Vec<u8> = c.check(0)?;
-    let sep = c
-        .opt::<Option<Vec<u8>>>(2, None)?
-        .unwrap_or_else(|| b".".to_vec());
-    let rep = c
-        .opt::<Option<Vec<u8>>>(3, None)?
-        .unwrap_or_else(|| DIRSEP.as_bytes().to_vec());
-    match search_path(&name, &path, &sep, &rep) {
-        Ok(file) => c.ret(&file[..]),
-        Err(msg) => c.ret((Value::Nil, &msg[..])),
+/// `nil` and the `no file` lines.
+type NotFound = (Nil, Vec<u8>);
+
+#[native(name = "package.searchpath")]
+fn searchpath(s: &mut Stack<'_>) -> StackResult<Either<Vec<u8>, NotFound>> {
+    // By hand rather than as parameters: lua5.5 checks the path first.
+    let path = s.check_string(2)?.to_vec();
+    let name = s.check_string(1)?.to_vec();
+    let sep = opt_string(s, 3)?.unwrap_or_else(|| b".".to_vec());
+    let rep = opt_string(s, 4)?.unwrap_or_else(|| DIRSEP.as_bytes().to_vec());
+    Ok(match search_path(&name, &path, &sep, &rep) {
+        Ok(file) => Either::Left(file),
+        Err(msg) => Either::Right((Nil, msg)),
+    })
+}
+
+fn opt_string(s: &mut Stack<'_>, i: i32) -> StackResult<Option<Vec<u8>>> {
+    match s.type_at(i) {
+        Type::None | Type::Nil => Ok(None),
+        _ => Ok(Some(s.check_string(i)?.to_vec())),
     }
 }
 
@@ -136,35 +144,40 @@ pub fn load_error(name: &[u8], file: &[u8], why: &str) -> String {
     )
 }
 
+/// A searcher's loader (the function at its index) and the file it read.
+type Loaded = (Any, Vec<u8>);
+
 /// The Lua searcher. It also finds `.orb` modules: they are on
 /// `package.path` (`DEFAULT_PATH`), and the loader picks the compiler by the
 /// file name.
-fn search_lua<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let name: Vec<u8> = c.check(0)?;
-    let path = path_field(c, "path").map_err(|msg| c.error(msg))?;
+#[native(name = "package.searchers[2]")]
+fn search_lua(s: &mut Stack<'_>, name: Vec<u8>) -> Result<Either<Vec<u8>, Loaded>, String> {
+    let path = s.with_scope(|sc| path_field(sc, "path"))?;
     let file = match search_path(&name, &path, b".", DIRSEP.as_bytes()) {
         Ok(f) => f,
-        Err(msg) => return c.ret(&msg[..]),
+        Err(msg) => return Ok(Either::Left(msg)),
     };
-    let loaded = read_chunk_file(Some(&file)).and_then(|(bytes, source)| {
-        c.load(Chunk::new(&bytes).name(&source))
-            .map_err(|e| e.message().to_owned())
-    });
-    match loaded {
-        Ok(f) => c.ret((f, &file[..])),
-        Err(why) => Err(c.error(load_error(&name, &file, &why))),
+    let (bytes, source) =
+        read_chunk_file(Some(&file)).map_err(|why| load_error(&name, &file, &why))?;
+    match s.load_chunk(&Chunk::new(&bytes).name(&source), 0) {
+        Status::Ok => Ok(Either::Right((Any(s.top()), file))),
+        _ => {
+            let why = String::from_utf8_lossy(s.string_at(-1).unwrap_or_default()).into_owned();
+            Err(load_error(&name, &file, &why))
+        }
     }
 }
 
-/// `package.loadlib` when no C modules are installed.
-fn loadlib_absent<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    c.check::<Vec<u8>>(0)?;
-    c.check::<Vec<u8>>(1)?;
-    c.ret((
-        Value::Nil,
+/// `package.loadlib` when no C modules are installed. Not registered as
+/// `package.loadlib`: a native's name identifies it, and `orbit-capi`'s
+/// working one has that name.
+#[native(name = "loadlib")]
+fn loadlib_absent(_lib: &[u8], _func: &[u8]) -> (Nil, &'static str, &'static str) {
+    (
+        Nil,
         "dynamic libraries not enabled; check your Lua installation",
         "absent",
-    ))
+    )
 }
 
 /// Set `package.path` and `package.cpath` (from the environment unless
@@ -179,10 +192,10 @@ pub fn open<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<(), Error> {
     pkg.raw_set("path", path)?;
     let cpath = env_path("LUA_CPATH_5_5", "LUA_CPATH", DEFAULT_CPATH, ignore_env);
     pkg.raw_set("cpath", cpath)?;
-    pkg.raw_set("searchpath", s.create_function(searchpath))?;
-    pkg.raw_set("loadlib", s.create_function(loadlib_absent))?;
+    pkg.raw_set("searchpath", s.create_native::<searchpath>())?;
+    pkg.raw_set("loadlib", s.create_native::<loadlib_absent>())?;
     if let Some(searchers) = pkg.raw_get::<Option<Table>>("searchers")? {
-        searchers.push(s.create_function(search_lua))?;
+        searchers.push(s.create_native::<search_lua>())?;
     }
     Ok(())
 }

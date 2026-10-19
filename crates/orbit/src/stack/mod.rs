@@ -30,8 +30,14 @@ pub(crate) mod backend;
 #[path = "shared.rs"]
 pub(crate) mod backend;
 
+mod typed;
+
 pub(crate) use backend::{ContRef, cont_ref};
 pub use backend::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
+pub use typed::{
+    Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Push, Rest, Results,
+    TableArg, function,
+};
 
 /// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).
 pub const REGISTRY_INDEX: i32 = -(i32::MAX / 2 + 1000);
@@ -258,6 +264,13 @@ impl Return {
             protected,
             k: cont_ref::<K>(),
         })
+    }
+
+    /// Call the function below the window's top `nargs` values as the
+    /// native's last act: its results, or its error, are the native's, and
+    /// code it runs may yield across it (as across `dofile`).
+    pub fn tail_call(nargs: usize) -> Return {
+        Return::call_then::<crate::value::TailCalled>(nargs, false)
     }
 
     /// End the process with exit status `code`, as `os.exit` does: first,

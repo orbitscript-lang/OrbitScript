@@ -74,6 +74,7 @@ show(pcall(os.difftime))
 show(os.setlocale(), os.setlocale("C"), os.setlocale(""), os.setlocale("POSIX"))
 show(os.setlocale("xx_XX"), os.setlocale(nil, "numeric"), os.setlocale("C", "all"))
 show(pcall(os.setlocale, "C", "bad"))
+show(pcall(os.setlocale, {}, "bogus"))
 
 -- Environment.
 show(type(os.getenv("PATH")), os.getenv("ORBIT_SURELY_NOT_SET_42"))
