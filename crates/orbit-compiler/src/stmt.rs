@@ -55,24 +55,7 @@ impl FuncState<'_> {
         self.at(stmt.span);
         match &stmt.kind {
             StmtKind::Let { locals, values } => self.let_(locals, values, stmt.at),
-            &StmtKind::LocalFunction { local, func } => {
-                let r = self.alloc()?;
-                self.active = self.free;
-                if self.f.local(local).captured {
-                    // The cell must exist before the closure, which captures it to recurse.
-                    self.emit(Op::LoadNil { dst: r, count: 1 });
-                    self.declare(local, r)?;
-                    let Slot::Cell(cell) = self.slots[local.index()] else {
-                        unreachable!()
-                    };
-                    self.emit_closure(r, func)?;
-                    self.emit(Op::CellSet { cell, src: r });
-                } else {
-                    self.declare(local, r)?;
-                    self.emit_closure(r, func)?;
-                }
-                Ok(())
-            }
+            &StmtKind::LocalFunction { local, func } => self.local_function(local, func),
             StmtKind::Assign { targets, values } => self.assign(targets, values, stmt.at),
             StmtKind::Define { targets, values } => self.define(targets, values),
             &StmtKind::Eval(e) => {

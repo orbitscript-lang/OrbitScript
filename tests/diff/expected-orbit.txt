@@ -16,6 +16,7 @@ debug_co_gc.lua
 debug_hooks.lua
 debug_hooks_co.lua
 debug_info.lua
+debug_local_function.lua
 debug_locals.lua
 debug_setmetatable_gc.lua
 dump.lua
