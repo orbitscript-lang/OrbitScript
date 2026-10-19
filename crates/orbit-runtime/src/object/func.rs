@@ -73,6 +73,11 @@ pub struct ProtoCode {
     /// a C-call boundary`): set for every built-in but the few whose C
     /// counterparts in the reference allow it.
     pub refuses_yield: bool,
+    /// The debugger's mark: the breakpoint generation this code was last
+    /// checked against, shifted left one, and whether it has a breakpoint
+    /// in bit 0 (0 when never checked).
+    #[cfg(feature = "debugger")]
+    pub debug_mark: StdCell<u32>,
 }
 
 impl ProtoCode {
@@ -111,6 +116,8 @@ impl ProtoCode {
             ncells: self.ncells,
             builtin: self.builtin,
             refuses_yield: self.refuses_yield,
+            #[cfg(feature = "debugger")]
+            debug_mark: StdCell::new(0),
         }
     }
 }

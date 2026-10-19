@@ -647,6 +647,12 @@ impl Vm {
     /// `coroutine.close` is closing (its frames already popped to the base),
     /// the base frame closes its variables too.
     pub(crate) fn unwind(&mut self, mut e: LuaError) -> Result<Flow, LuaError> {
+        // Once per error, before its handler and before anything unwinds
+        // (`coroutine.close` unwinding a dead coroutine raises nothing new).
+        #[cfg(feature = "debugger")]
+        if !self.rt.handled && !self.rt.errerr && !crate::vm::coro::closing(&self.rt) {
+            self.debug_error(e.value);
+        }
         let mut errerr = false;
         loop {
             errerr |= std::mem::take(&mut self.rt.errerr);
@@ -936,7 +942,7 @@ impl Vm {
     pub(crate) fn run(&mut self) -> Result<(), LuaError> {
         loop {
             #[cfg(feature = "hooks")]
-            let ran = if self.rt.stack.hook.armed() {
+            let ran = if self.top_hooked() {
                 self.run_loop::<true>()?
             } else {
                 self.run_loop::<false>()?
@@ -973,6 +979,7 @@ impl Vm {
         'reload: loop {
             // The running frame's state. Lua-to-Lua calls and returns switch
             // it in place; everything else comes back through `'reload`.
+            #[cfg(not(feature = "debugger"))]
             if self.rt.stack.hook.armed() != HOOKED {
                 return Ok(Ran::Switch);
             }
@@ -992,6 +999,16 @@ impl Vm {
             if code_id != Rc::as_ptr(&cur) as usize {
                 cur = self.heap.get(closure).code.clone();
             }
+            // The debugger decides by function and depth, so it needs the
+            // frame's code first.
+            #[cfg(feature = "debugger")]
+            if self.hooked_here(&cur, closure, depth) != HOOKED {
+                return Ok(Ran::Switch);
+            }
+            #[cfg(feature = "debugger")]
+            if HOOKED {
+                self.debug_reloaded(pc, depth);
+            }
             let mut code = &cur.code[..];
             macro_rules! switch_code {
                 ($closure:expr, $code_id:expr) => {
@@ -1009,6 +1026,16 @@ impl Vm {
                             }
                         }
                         code = &cur.code[..];
+                        // While a breakpoint or step is set, entering other
+                        // code may need the other loop. Recursion keeps the
+                        // loop: a step keeps its own function hooked at
+                        // every depth.
+                        #[cfg(feature = "debugger")]
+                        if self.rt.debug.watch && self.debug_switches(&cur, $closure, depth, HOOKED)
+                        {
+                            self.rt.stack.frames[depth - 1].pc = pc as u32;
+                            return Ok(Ran::Switch);
+                        }
                     }
                 };
             }
@@ -1406,7 +1433,7 @@ impl Vm {
                                     }
                                     match self.native_returned(r, None, fa, want, id) {
                                         Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
-                                            if self.rt.stack.hook.armed() {
+                                            if self.hooked_here(&cur, closure, depth) {
                                                 return Ok(Ran::Switch);
                                             }
                                             w = window!();
@@ -1424,7 +1451,7 @@ impl Vm {
                         } {
                             Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
                                 // The native may have set or cleared a hook.
-                                if self.rt.stack.hook.armed() != HOOKED {
+                                if self.hooked_here(&cur, closure, depth) != HOOKED {
                                     return Ok(Ran::Switch);
                                 }
                                 w = window!();
@@ -1490,7 +1517,13 @@ impl Vm {
                     if let Err(e) = self.hook_point(pc - 1, op) {
                         throw!(Exc::Lua(e));
                     }
-                    if !self.rt.stack.hook.armed() {
+                    #[cfg(feature = "debugger")]
+                    if self.rt.debug.watch
+                        && let Err(e) = self.debug_point(pc - 1)
+                    {
+                        throw!(Exc::Lua(e));
+                    }
+                    if !self.hooked_here(&cur, closure, depth) {
                         // The hook was turned off: run this instruction in
                         // the plain loop.
                         self.rt.stack.frames[depth - 1].pc = pc as u32 - 1;

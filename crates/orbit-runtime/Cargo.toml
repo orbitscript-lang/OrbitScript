@@ -19,6 +19,11 @@ orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-compiler = { path = "../orbit-compiler" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 
+[dev-dependencies]
+orbit-compiler = { path = "../orbit-compiler" }
+orbit-lua-syntax = { path = "../orbit-lua-syntax" }
+orbit-orb-syntax = { path = "../orbit-orb-syntax" }
+
 [lints]
 workspace = true
 
@@ -51,3 +56,6 @@ debug = ["hooks"]
 type-feedback = []
 # Debug hooks (`debug.sethook`): a second, hooked copy of the dispatch loop.
 hooks = []
+# The debugger engine (ADR-12): breakpoints, stepping, pause and stops on
+# errors, reported to a host's `DebugEvents`.
+debugger = ["hooks"]

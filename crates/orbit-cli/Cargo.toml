@@ -50,6 +50,8 @@ ffi-system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
 repl = []
 # Line editing, history and Tab completion in interactive mode.
 line-editing = ["repl"]
+# The debugger engine (ADR-12). Nothing uses it yet: `orbit --dap` will.
+debugger = ["orbit/debugger"]
 
 [lints]
 workspace = true

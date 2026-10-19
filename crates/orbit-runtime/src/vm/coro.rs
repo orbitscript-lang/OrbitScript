@@ -1214,6 +1214,8 @@ fn stub_proto(id: NativeId) -> Proto {
             ncells: 0,
             builtin: false,
             refuses_yield: false,
+            #[cfg(feature = "debugger")]
+            debug_mark: Default::default(),
         }),
         children: Box::new([]),
         captures: Box::new([]),

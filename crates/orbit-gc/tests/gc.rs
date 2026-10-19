@@ -33,6 +33,18 @@ fn unreachable_objects_and_cycles_are_collected() {
 }
 
 #[test]
+fn for_each_visits_the_objects_in_their_arena() {
+    let mut h = TestHeap::new();
+    let root = obj(&mut h, 1);
+    obj(&mut h, 2);
+    text(&mut h, "not an Obj");
+    h.full_collect(&mut Stack(vec![Ref::Obj(root)]));
+    let mut ids = Vec::new();
+    h.for_each(|o: &common::Obj| ids.push(o.id));
+    assert_eq!(ids, [1]);
+}
+
+#[test]
 fn freed_slots_are_reused() {
     let mut h = TestHeap::new();
     let a = obj(&mut h, 1);
