@@ -1,5 +1,5 @@
 # Example programs. Each line: the example's directory, its entry file, and train=ARGS,
-# the arguments `cargo testkit pgo train` runs it with (each example takes a repeat count
+# the arguments PGO training (`./build.sh --pgo-train`) runs it with (each example takes a repeat count
 # or size as arg[1]). The inputs are small on purpose: at 50 times these (about 0.1 s each),
 # the profile made the front end hot, which cost 116 KiB of binary and 16% on
 # spectral_norm (cloud x86_64, 2026-10-15). At these it still compiles OrbitScript

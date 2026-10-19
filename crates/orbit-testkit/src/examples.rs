@@ -30,7 +30,7 @@ pub struct Example {
     pub dir: String,
     /// The file to run, relative to the directory.
     pub entry: String,
-    /// The arguments `pgo train` runs it with.
+    /// The arguments PGO training (`./build.sh --pgo-train`) runs it with.
     pub train: Vec<String>,
 }
 

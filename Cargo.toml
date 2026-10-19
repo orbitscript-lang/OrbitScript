@@ -2,10 +2,10 @@
 resolver = "3"
 members = ["crates/*"]
 # A plain `cargo build --release` at the root builds the CLI (`orbit` and
-# `orbitc`) the way `cargo testkit pgo train` does. Building every member
+# `orbitc`) with the features `./build.sh` gives it. Building every member
 # turns on orbit-runtime's default features, which changes its symbol names, so
-# the committed profile would miss its functions and LLVM would compile them
-# as cold code. `--workspace` still builds and tests everything.
+# a PGO profile would miss its functions and LLVM would compile them as cold
+# code. `--workspace` still builds and tests everything.
 default-members = ["crates/orbit-cli"]
 # spike/ is its own throwaway workspace (stream S0).
 exclude = ["spike"]
@@ -31,14 +31,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-
-# Profile-guided optimization, built by `cargo testkit pgo` (tests/README.md).
-# `pgo-gen` is the instrumented build that records the training profile and is
-# never shipped; `pgo` is the release build optimized with the profile
-# committed in `pgo/`. Both
-# exist so the rustflags each one needs don't touch `target/release`.
-[profile.pgo-gen]
-inherits = "release"
-
-[profile.pgo]
-inherits = "release"
