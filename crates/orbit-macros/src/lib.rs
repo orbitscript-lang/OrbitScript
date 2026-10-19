@@ -18,7 +18,7 @@
 //! Hand-rolled over `proc_macro`'s token trees, so it adds no build
 //! dependency: it only needs the signature's shape, never the body.
 
-use proc_macro::{Delimiter, Spacing, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Spacing, TokenStream, TokenTree};
 
 #[proc_macro_attribute]
 pub fn native(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -42,9 +42,12 @@ fn compile_error(message: &str) -> TokenStream {
         .expect("a compile_error! call parses")
 }
 
-/// One parameter: its type's tokens, and whether it is the stack.
+/// One parameter: its type (as text for messages, and as the original
+/// tokens, spliced into the generated code so errors point at it), and
+/// whether it is the stack.
 struct Param {
     ty: String,
+    tokens: TokenStream,
     stack: bool,
 }
 
@@ -91,6 +94,22 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, String> {
         }
         _ => return Err("#[native]: expected the parameter list".into()),
     };
+    // The return type, if any: the tokens between `->` and the body (or a
+    // `where` clause).
+    let mut ret = TokenStream::new();
+    if matches!(tokens.peek(), Some(TokenTree::Punct(p)) if p.as_char() == '-') {
+        tokens.next();
+        tokens.next();
+        for t in tokens.by_ref() {
+            match &t {
+                TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => break,
+                TokenTree::Ident(i) if i.to_string() == "where" => break,
+                _ => ret.extend([t]),
+            }
+        }
+    }
+    // `impl Trait` can't be named in the generated code.
+    let ret_nameable = !ret.is_empty() && !ret.to_string().contains("impl");
 
     // Borrowed arguments are read through a shared borrow of the stack, so
     // the body can't have the stack mutably at the same time. Say so here
@@ -116,7 +135,8 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, String> {
             continue;
         }
         arg += 1;
-        let ty = &p.ty;
+        // A placeholder, replaced by the parameter's own type tokens.
+        let ty = format!("__orbit_ty_{k}");
         checks.push_str(&format!(
             "let __c{k} = <{ty} as ::orbit::stack::Arg>::check(__s, {arg})?;\n"
         ));
@@ -126,6 +146,11 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, String> {
         call_args.push(format!("__v{k}"));
     }
     let call_args = call_args.join(", ");
+    let push = if ret_nameable {
+        "<__orbit_ret as ::orbit::stack::Results>::push_results"
+    } else {
+        "::orbit::stack::Results::push_results"
+    };
     let generated = format!(
         "#[allow(non_camel_case_types)]
         #[doc(hidden)]
@@ -143,13 +168,46 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, String> {
                     {gets}
                     {name}({call_args})
                 }};
-                ::orbit::stack::Results::push_results(__r, __s)
+                {push}(__r, __s)
             }}
         }}"
     );
-    generated
+    let generated: TokenStream = generated
         .parse()
-        .map_err(|e| format!("#[native] generated bad code: {e:?}"))
+        .map_err(|e| format!("#[native] generated bad code: {e:?}"))?;
+    Ok(splice(generated, &params, &ret))
+}
+
+/// Replace the placeholders `__orbit_ty_K` and `__orbit_ret` with the
+/// signature's own tokens, which keep their spans: a parameter type that
+/// isn't an `Arg` is reported at that parameter, not at the attribute.
+fn splice(stream: TokenStream, params: &[Param], ret: &TokenStream) -> TokenStream {
+    stream
+        .into_iter()
+        .map(|t| match t {
+            TokenTree::Ident(ref i) => {
+                let name = i.to_string();
+                let with = if name == "__orbit_ret" {
+                    Some(ret.clone())
+                } else {
+                    name.strip_prefix("__orbit_ty_")
+                        .and_then(|k| k.parse::<usize>().ok())
+                        .map(|k| params[k].tokens.clone())
+                };
+                match with {
+                    // An invisible group keeps a multi-token type one type.
+                    Some(tokens) => TokenTree::Group(Group::new(Delimiter::None, tokens)),
+                    None => t,
+                }
+            }
+            TokenTree::Group(g) => {
+                let mut inner = Group::new(g.delimiter(), splice(g.stream(), params, ret));
+                inner.set_span(g.span());
+                TokenTree::Group(inner)
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// `name = "lib.f"`, or nothing.
@@ -210,9 +268,9 @@ fn param(tokens: Vec<TokenTree>) -> Result<Param, String> {
         .iter()
         .position(|t| matches!(t, TokenTree::Punct(p) if p.as_char() == ':'))
         .ok_or("#[native]: each parameter needs a type (`self` isn't allowed)")?;
-    let ty: TokenStream = tokens[colon + 1..].iter().cloned().collect();
-    let ty = ty.to_string();
+    let tokens: TokenStream = tokens[colon + 1..].iter().cloned().collect();
+    let ty = tokens.to_string();
     let compact: String = ty.chars().filter(|c| !c.is_whitespace()).collect();
     let stack = compact.starts_with("&mut") && compact.contains("Stack");
-    Ok(Param { ty, stack })
+    Ok(Param { ty, tokens, stack })
 }
