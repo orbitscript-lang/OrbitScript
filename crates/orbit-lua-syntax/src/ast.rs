@@ -12,6 +12,27 @@ pub struct Ast {
     pub chunk: Chunk,
     pub strings: StringPool,
     pub source: SourceInfo,
+    /// Every comment in source order, when
+    /// [`ParseOptions::keep_trivia`](crate::ParseOptions) is set (empty otherwise).
+    pub comments: Vec<Comment>,
+}
+
+/// One comment. The span covers all of it, `--` and any long brackets included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Comment {
+    pub kind: CommentKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentKind {
+    /// `-- ...`.
+    Line,
+    /// `--[[ ... ]]` (any level).
+    Block,
+    /// `--- ...`, the documentation and annotation comments Lua tools use (`---@param`).
+    /// `----` is not one.
+    Doc,
 }
 
 #[derive(Debug)]
@@ -135,6 +156,9 @@ pub enum StmtKind {
     GlobalAll {
         attrib: Option<Attrib>,
     },
+    /// A statement that failed to parse (only with
+    /// [`ParseOptions::recover`](crate::ParseOptions)); the span covers what was skipped.
+    Error,
 }
 
 /// The name of a `function` statement: `a.b.c:m`.
@@ -208,6 +232,9 @@ pub enum ExprKind {
         expr: Box<Expr>,
     },
     Paren(Box<Expr>),
+    /// A missing expression (only with [`ParseOptions::recover`](crate::ParseOptions)), as
+    /// in `local x = )`. The span is empty, at the token where the expression should start.
+    Error,
 }
 
 #[derive(Debug)]

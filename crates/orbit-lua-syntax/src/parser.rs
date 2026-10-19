@@ -18,6 +18,13 @@ pub struct ParseOptions {
     pub max_depth: u32,
     /// Skip a first line starting with `#`, as the standalone interpreter does for script files.
     pub skip_comment_line: bool,
+    /// Keep every comment in [`Ast::comments`] (for a formatter or an editor).
+    pub keep_trivia: bool,
+    /// Go on after a syntax error, for an editor: the error is recorded, the broken statement
+    /// becomes an `Error` node and parsing resumes at the next statement. Use
+    /// [`parse_recovering`] to get every error; [`parse_with`] ignores it and gives only the
+    /// first, as the reference reports it.
+    pub recover: bool,
 }
 
 impl Default for ParseOptions {
@@ -25,6 +32,8 @@ impl Default for ParseOptions {
         ParseOptions {
             max_depth: 200,
             skip_comment_line: false,
+            keep_trivia: false,
+            recover: false,
         }
     }
 }
@@ -35,12 +44,66 @@ pub fn parse(chunk_name: &str, src: &[u8]) -> Result<Ast, Diagnostic> {
 }
 
 pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Result<Ast, Diagnostic> {
+    parse_chunk(chunk_name, src, options, false).map(|(ast, _)| ast)
+}
+
+/// Parses one chunk, going on after syntax errors ([`ParseOptions::recover`]): the AST holds
+/// everything that parsed, with `Error` nodes where something didn't, and the errors come in
+/// source order. A chunk without errors gets the AST [`parse_with`] gives. In one with errors,
+/// indentation counts: a statement starting a line no deeper than the line opening its block
+/// (when the block's body was indented deeper) or a function at the start of a line ends the
+/// block, so a missing `end` is reported there rather than at the end of the chunk.
+pub fn parse_recovering(
+    chunk_name: &str,
+    src: &[u8],
+    options: &ParseOptions,
+) -> (Ast, Vec<Diagnostic>) {
+    // Only a chunk with errors is parsed again, with the indentation-based recovery, so a valid
+    // one can never be misread.
+    if let Ok(result) = parse_chunk(chunk_name, src, options, false) {
+        return result;
+    }
+    match parse_chunk(chunk_name, src, options, true) {
+        Ok(result) => result,
+        // Only a source too large to parse at all gets here.
+        Err(d) => {
+            let ast = Ast {
+                chunk: Chunk {
+                    body: Block {
+                        stmts: Vec::new(),
+                        ret: None,
+                        span: Span::default(),
+                    },
+                    span: Span::default(),
+                },
+                strings: Default::default(),
+                source: SourceInfo {
+                    name: chunk_name.into(),
+                    language: Language::Lua,
+                    line_starts: vec![0],
+                },
+                comments: Vec::new(),
+            };
+            (ast, vec![d])
+        }
+    }
+}
+
+fn parse_chunk(
+    chunk_name: &str,
+    src: &[u8],
+    options: &ParseOptions,
+    recover: bool,
+) -> Result<(Ast, Vec<Diagnostic>), Diagnostic> {
     if u32::try_from(src.len()).is_err() {
         return Err(Diagnostic::new(Span::default(), 1, "chunk too large", None));
     }
     let mut lexer = Lexer::new(src);
     if options.skip_comment_line {
         lexer.skip_comment_line();
+    }
+    if options.keep_trivia {
+        lexer.keep_comments();
     }
     let global = lexer.strings_mut().intern(b"global");
     let mut p = Parser {
@@ -60,15 +123,35 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
             line: None,
         }],
         sym_global: global,
+        recover,
+        errors: Vec::new(),
+        lex_error_at: None,
+        stmt_start: 0,
+        stmt_indent: 0,
+        layout: recover && uses_layout(src),
     };
     p.advance()?;
-    let body = p.block()?;
-    if p.tok.kind != TokenKind::Eof {
-        return Err(p.error_expected("<eof>"));
+    let mut body = p.block()?;
+    while p.tok.kind != TokenKind::Eof {
+        let d = p.error_expected("<eof>");
+        if !p.recover {
+            return Err(d);
+        }
+        // A stray `end` (or a statement after `return`): skip it and go on.
+        p.recovered(d);
+        if !matches!(p.tok.kind, TokenKind::Keyword(Keyword::Return)) {
+            p.advance()?;
+        }
+        let more = p.block()?;
+        body.stmts.extend(more.stmts);
+        body.ret = more.ret.or(body.ret);
+        body.span = span_from(body.span.start, more.span.end);
     }
     let span = Span::new(0, src.len() as u32);
+    let comments = p.lx.take_comments();
+    let errors = std::mem::take(&mut p.errors);
     let (strings, line_starts) = p.lx.finish();
-    Ok(Ast {
+    let ast = Ast {
         chunk: Chunk { body, span },
         strings,
         source: SourceInfo {
@@ -76,7 +159,9 @@ pub fn parse_with(chunk_name: &str, src: &[u8], options: &ParseOptions) -> Resul
             language: Language::Lua,
             line_starts,
         },
-    })
+        comments,
+    };
+    Ok((ast, errors))
 }
 
 /// Most local variables one function may have in scope at once, as in lua5.5.
@@ -104,6 +189,18 @@ struct Parser<'a> {
     max_depth: u32,
     funcs: Vec<FuncState>,
     sym_global: StrId,
+    recover: bool,
+    /// The errors recovered from so far (only with `recover`).
+    errors: Vec<Diagnostic>,
+    /// Where the last lexer error recovered from was.
+    lex_error_at: Option<u32>,
+    /// Where the statement being parsed starts, and how far its line is indented: when
+    /// recovering, a later line indented no deeper starts something else.
+    stmt_start: u32,
+    stmt_indent: usize,
+    /// Whether indentation shows where blocks end, as it does unless the code is written flush
+    /// (no line indented, and some line starting with an `end` closing a multi-line block).
+    layout: bool,
 }
 
 type PResult<T> = Result<T, Diagnostic>;
@@ -123,7 +220,7 @@ impl Parser<'_> {
         self.prev_end = self.tok.span.end;
         self.tok = match self.ahead.take() {
             Some(t) => t,
-            None => self.lx.next_token()?,
+            None => self.lex()?,
         };
         Ok(())
     }
@@ -131,9 +228,27 @@ impl Parser<'_> {
     #[inline(never)]
     fn peek(&mut self) -> PResult<TokenKind> {
         if self.ahead.is_none() {
-            self.ahead = Some(self.lx.next_token()?);
+            self.ahead = Some(self.lex()?);
         }
         Ok(self.ahead.expect("lookahead").kind)
+    }
+
+    /// The next token from the lexer. When recovering, a lexer error is recorded and the bad
+    /// token skipped or replaced.
+    fn lex(&mut self) -> PResult<Token> {
+        loop {
+            match self.lx.next_token() {
+                Ok(t) => return Ok(t),
+                Err(d) if self.recover => {
+                    self.lex_error_at = Some(d.span.start);
+                    self.report(d);
+                    if let Some(t) = self.lx.skip_bad_token() {
+                        return Ok(t);
+                    }
+                }
+                Err(d) => return Err(d),
+            }
+        }
     }
 
     fn is_punct(&self, p: Punct) -> bool {
@@ -203,7 +318,13 @@ impl Parser<'_> {
     #[inline(never)]
     fn expect_kw(&mut self, k: Keyword) -> PResult<()> {
         if !self.is_kw(k) {
-            return Err(self.error_expected(&format!("'{}'", k.as_str())));
+            let d = self.error_expected(&format!("'{}'", k.as_str()));
+            // When recovering, a missing `then` or `do` is taken as there.
+            if self.recover && matches!(k, Keyword::Then | Keyword::Do) {
+                self.recovered(d);
+                return Ok(());
+            }
+            return Err(d);
         }
         self.advance()
     }
@@ -214,18 +335,23 @@ impl Parser<'_> {
         if self.tok.kind == what {
             return self.advance();
         }
-        let what = match what {
+        let what_text = match what {
             TokenKind::Keyword(k) => k.as_str(),
             TokenKind::Punct(p) => p.as_str(),
             _ => unreachable!("closing token is a keyword or punctuation"),
         };
-        if open_line == self.cur_line() {
-            Err(self.error_expected(&format!("'{what}'")))
+        let d = if open_line == self.cur_line() {
+            self.error_expected(&format!("'{what_text}'"))
         } else {
-            Err(self.error_here(format!(
-                "'{what}' expected (to close '{who}' at line {open_line})"
-            )))
+            self.error_here(format!(
+                "'{what_text}' expected (to close '{who}' at line {open_line})"
+            ))
+        };
+        if !self.recover {
+            return Err(d);
         }
+        self.recovered(d);
+        self.skip_to_close(what, open_line)
     }
 
     #[inline(never)]
@@ -276,6 +402,196 @@ impl Parser<'_> {
         )))
     }
 
+    // ---- error recovery -----------------------------------------------------------------------
+
+    /// Records an error recovered from, unless one was already reported at the same place.
+    #[inline(never)]
+    fn report(&mut self, d: Diagnostic) {
+        if self
+            .errors
+            .last()
+            .is_none_or(|e| e.span.start != d.span.start)
+        {
+            self.errors.push(d);
+        }
+    }
+
+    /// Records a parse error recovered from, unless it comes right after a lexer error
+    /// (which most likely caused it).
+    fn recovered(&mut self, d: Diagnostic) {
+        if !self.lex_error_at.is_some_and(|at| at >= self.prev_end) {
+            self.report(d);
+        }
+    }
+
+    /// Whether the current token is the first on its line.
+    fn starts_line(&self) -> bool {
+        let src = self.lx.source();
+        let mut i = self.tok.span.start as usize;
+        while i > 0 && matches!(src[i - 1], b' ' | b'\t') {
+            i -= 1;
+        }
+        i == 0 || matches!(src[i - 1], b'\n' | b'\r')
+    }
+
+    /// When recovering, whether the current token starts a line (after the statement's first)
+    /// indented no deeper than the statement's, and so most likely starts the next statement:
+    /// the current one is missing something.
+    fn dedented(&self) -> bool {
+        self.recover
+            && self.tok.span.start > self.stmt_start
+            && !matches!(
+                self.tok.kind,
+                TokenKind::Eof
+                    | TokenKind::Punct(Punct::RParen | Punct::RBracket | Punct::RBrace)
+                    | TokenKind::Keyword(
+                        Keyword::End | Keyword::Until | Keyword::Else | Keyword::Elseif
+                    )
+            )
+            && self.starts_line()
+            && self.line_indent(self.tok.span.start) <= self.stmt_indent
+    }
+
+    /// How far the line holding `offset` is indented (spaces and tabs, one column each).
+    fn line_indent(&self, offset: u32) -> usize {
+        let src = self.lx.source();
+        let mut i = (offset as usize).min(src.len());
+        while i > 0 && !matches!(src[i - 1], b'\n' | b'\r') {
+            i -= 1;
+        }
+        src[i..]
+            .iter()
+            .take_while(|&&c| c == b' ' || c == b'\t')
+            .count()
+    }
+
+    /// When recovering, whether the current token shows that the `end` of the block opened on
+    /// a line indented by `opener` is missing: it starts a line no deeper than that one (when
+    /// `indented`, the block's body not being written flush with it), or it starts a function
+    /// definition at the very start of a line.
+    fn block_end_missing(&mut self, opener: usize, indented: bool) -> PResult<bool> {
+        if !self.recover || !self.starts_line() {
+            return Ok(false);
+        }
+        let col = self.line_indent(self.tok.span.start);
+        if indented && col <= opener && !self.is_punct(Punct::ColonColon) {
+            return Ok(true);
+        }
+        Ok(col == 0
+            && match self.tok.kind {
+                TokenKind::Keyword(Keyword::Function) => true,
+                TokenKind::Keyword(Keyword::Local) => {
+                    self.peek()? == TokenKind::Keyword(Keyword::Function)
+                }
+                _ => false,
+            })
+    }
+
+    /// Skips the rest of a broken statement that started at `start`: through a `;`, or a
+    /// block or bracket closed at the end of a line, or up to a word that ends the enclosing
+    /// block, a statement keyword starting a line, a line indented no deeper than the
+    /// statement, or the end of input. Blocks and brackets opened before the error are counted
+    /// (by lexing the statement again). Always moves on at least one token.
+    fn synchronize(&mut self, start: u32) {
+        let mut moved = self.tok.span.start != start;
+        let mut depth = if moved {
+            open_blocks(self.lx.source(), start, self.tok.span.start)
+        } else {
+            0
+        };
+        let indent = self.line_indent(start);
+        loop {
+            if moved && self.starts_line() {
+                let col = self.line_indent(self.tok.span.start);
+                let closer = matches!(
+                    self.tok.kind,
+                    TokenKind::Keyword(Keyword::End | Keyword::Until)
+                        | TokenKind::Punct(Punct::RParen | Punct::RBracket | Punct::RBrace)
+                );
+                if col < indent || col == indent && !closer {
+                    return;
+                }
+            }
+            match self.tok.kind {
+                TokenKind::Eof => return,
+                TokenKind::Punct(Punct::Semi) if depth == 0 => {
+                    let _ = self.advance();
+                    return;
+                }
+                TokenKind::Keyword(
+                    Keyword::End | Keyword::Until | Keyword::Else | Keyword::Elseif,
+                ) if depth == 0 => {
+                    if moved {
+                        return;
+                    }
+                }
+                // Words that can't be part of an expression start a statement anywhere;
+                // `function` and `do` only at the start of a line.
+                TokenKind::Keyword(
+                    Keyword::Local
+                    | Keyword::If
+                    | Keyword::While
+                    | Keyword::For
+                    | Keyword::Repeat
+                    | Keyword::Return
+                    | Keyword::Goto
+                    | Keyword::Break,
+                )
+                | TokenKind::Punct(Punct::ColonColon)
+                    if depth == 0 && moved =>
+                {
+                    return;
+                }
+                TokenKind::Keyword(Keyword::Function | Keyword::Do)
+                    if depth == 0 && moved && self.starts_line() =>
+                {
+                    return;
+                }
+                kind => match block_delta(kind) {
+                    1 => depth += 1,
+                    -1 => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 && kind == TokenKind::Keyword(Keyword::End) {
+                            let _ = self.advance();
+                            if self.starts_line() {
+                                return;
+                            }
+                            continue;
+                        }
+                    }
+                    _ => {}
+                },
+            }
+            // Lexing can't fail while recovering.
+            let _ = self.advance();
+            moved = true;
+        }
+    }
+
+    /// After a construct opened at `open_line` was not closed by `what` where expected (and
+    /// the error is recorded): skips to its closing token and consumes it, unless the input
+    /// shows the closer is missing (the end, a word ending an outer block, a line indented no
+    /// deeper than the opening one, or a function at the start of a line).
+    fn skip_to_close(&mut self, what: TokenKind, open_line: u32) -> PResult<()> {
+        let indent = self.line_indent(self.lx.line_start(open_line));
+        let mut depth = 0u32;
+        loop {
+            if depth == 0 && self.tok.kind == what {
+                return self.advance();
+            }
+            if self.tok.kind == TokenKind::Eof || self.block_end_missing(indent, true)? {
+                return Ok(());
+            }
+            match block_delta(self.tok.kind) {
+                1 => depth += 1,
+                -1 if depth == 0 => return Ok(()),
+                -1 => depth -= 1,
+                _ => {}
+            }
+            self.advance()?;
+        }
+    }
+
     // ---- blocks and statements ----------------------------------------------------------------
 
     fn block_follows(&self) -> bool {
@@ -294,22 +610,77 @@ impl Parser<'_> {
         let start = self.tok.span.start;
         let mut stmts = Vec::new();
         let mut ret = None;
+        // The indentation of the line opening the block, and whether the body doesn't start
+        // on a line of its own that is no deeper (code written flush), to spot a missing `end`
+        // when recovering.
+        let (opener, indented) = if self.recover {
+            let opener = self.line_indent(self.prev_end);
+            let flush = self.starts_line() && self.line_indent(start) <= opener;
+            (opener, self.layout || !flush)
+        } else {
+            (0, false)
+        };
+        let outer = (self.stmt_start, self.stmt_indent);
         while !self.block_follows() {
-            if self.is_kw(Keyword::Return) {
-                ret = Some(self.return_stat()?);
+            if self.depth > 1 && self.block_end_missing(opener, indented)? {
                 break;
             }
-            if let Some(stmt) = self.statement()? {
-                stmts.push(stmt);
+            let start = self.tok.span.start;
+            if self.recover {
+                self.stmt_start = start;
+                self.stmt_indent = self.line_indent(start);
+            }
+            let (depth, funcs, func) = (self.depth, self.funcs.len(), self.func_counts());
+            let result = if self.is_kw(Keyword::Return) {
+                match self.return_stat() {
+                    Ok(r) => {
+                        ret = Some(r);
+                        break;
+                    }
+                    Err(d) => Err(d),
+                }
+            } else {
+                self.statement()
+            };
+            match result {
+                Ok(Some(stmt)) => stmts.push(stmt),
+                Ok(None) => {}
+                Err(d) if self.recover => {
+                    self.depth = depth;
+                    self.funcs.truncate(funcs);
+                    self.restore_func_counts(func);
+                    if !self.lex_error_at.is_some_and(|at| at >= start) {
+                        self.report(d);
+                    }
+                    self.synchronize(start);
+                    stmts.push(Stmt {
+                        kind: StmtKind::Error,
+                        span: span_from(start, self.prev_end),
+                    });
+                }
+                Err(d) => return Err(d),
             }
         }
         self.leave();
         self.func().active = active;
+        (self.stmt_start, self.stmt_indent) = outer;
         Ok(Block {
             stmts,
             ret,
             span: span_from(start, self.prev_end),
         })
+    }
+
+    /// The current function's loop and local counts, to restore after an error.
+    fn func_counts(&mut self) -> (u32, u32) {
+        let f = self.func();
+        (f.loops, f.active)
+    }
+
+    fn restore_func_counts(&mut self, (loops, active): (u32, u32)) {
+        let f = self.func();
+        f.loops = loops;
+        f.active = active;
     }
 
     fn loop_block(&mut self) -> PResult<Block> {
@@ -794,6 +1165,15 @@ impl Parser<'_> {
 
     fn simple_expr(&mut self) -> PResult<Expr> {
         let span = self.tok.span;
+        if self.dedented() {
+            // A missing expression before the next statement, as in `x =` on its own line.
+            let d = self.error_here("unexpected symbol");
+            self.recovered(d);
+            return Ok(Expr {
+                kind: ExprKind::Error,
+                span: Span::new(span.start, span.start),
+            });
+        }
         let kind = match self.tok.kind {
             TokenKind::Int(n) => ExprKind::Int(n),
             TokenKind::Float(x) => ExprKind::Float(x),
@@ -842,6 +1222,26 @@ impl Parser<'_> {
                 Ok(Expr {
                     kind: ExprKind::Paren(Box::new(inner)),
                     span: span_from(span.start, self.prev_end),
+                })
+            }
+            TokenKind::Eof
+            | TokenKind::Punct(
+                Punct::Semi | Punct::Comma | Punct::RParen | Punct::RBracket | Punct::RBrace,
+            )
+            | TokenKind::Keyword(
+                Keyword::End
+                | Keyword::Then
+                | Keyword::Do
+                | Keyword::Else
+                | Keyword::Elseif
+                | Keyword::Until,
+            ) if self.recover => {
+                // A missing expression, as in `local x = )`: what's around it still parses.
+                let d = self.error_here("unexpected symbol");
+                self.recovered(d);
+                Ok(Expr {
+                    kind: ExprKind::Error,
+                    span: Span::new(span.start, span.start),
                 })
             }
             _ => Err(self.error_here("unexpected symbol")),
@@ -918,7 +1318,7 @@ impl Parser<'_> {
             TokenKind::Punct(Punct::LParen) => {
                 let line = self.cur_line();
                 self.advance()?;
-                let args = if self.is_punct(Punct::RParen) {
+                let args = if self.is_punct(Punct::RParen) || self.dedented() {
                     Vec::new()
                 } else {
                     self.expr_list()?
@@ -935,7 +1335,7 @@ impl Parser<'_> {
         let line = self.cur_line();
         self.advance()?;
         let mut fields = Vec::new();
-        while !self.is_punct(Punct::RBrace) {
+        while !self.is_punct(Punct::RBrace) && !self.dedented() {
             fields.push(self.field()?);
             if !self.test_punct(Punct::Comma)? && !self.test_punct(Punct::Semi)? {
                 break;
@@ -967,6 +1367,53 @@ impl Parser<'_> {
             _ => Ok(Field::Positional(self.expr()?)),
         }
     }
+}
+
+/// Whether `src` has an indented line, or no line starting with `end` (see `Parser::layout`).
+fn uses_layout(src: &[u8]) -> bool {
+    let mut flush_end = false;
+    for line in src.split(|&c| c == b'\n') {
+        match line {
+            [b' ' | b'\t', ..] => return true,
+            [b'e', b'n', b'd', rest @ ..] => {
+                flush_end |= !rest
+                    .first()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            }
+            _ => {}
+        }
+    }
+    !flush_end
+}
+
+/// How a token changes the nesting of blocks and brackets: `function`, `if`, `do`, `repeat`
+/// and opening brackets open one (`while` and `for` open theirs with `do`); `end`, `until`
+/// and closing brackets close one.
+fn block_delta(kind: TokenKind) -> i8 {
+    match kind {
+        TokenKind::Keyword(Keyword::Function | Keyword::If | Keyword::Do | Keyword::Repeat)
+        | TokenKind::Punct(Punct::LParen | Punct::LBracket | Punct::LBrace) => 1,
+        TokenKind::Keyword(Keyword::End | Keyword::Until)
+        | TokenKind::Punct(Punct::RParen | Punct::RBracket | Punct::RBrace) => -1,
+        _ => 0,
+    }
+}
+
+/// How many blocks and brackets the source between `start` and `end` leaves open (for error
+/// recovery; lexed again with a throwaway lexer).
+fn open_blocks(src: &[u8], start: u32, end: u32) -> u32 {
+    let mut lx = Lexer::new(&src[..end as usize]);
+    lx.seek(start);
+    let mut depth = 0u32;
+    while let Ok(t) = lx.next_token() {
+        match block_delta(t.kind) {
+            _ if t.kind == TokenKind::Eof => break,
+            1 => depth += 1,
+            -1 => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
 }
 
 /// Whether a `<const>` local initialized with `e` is a compile-time constant, which lua5.5

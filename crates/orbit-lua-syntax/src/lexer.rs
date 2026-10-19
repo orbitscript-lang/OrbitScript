@@ -3,6 +3,7 @@
 //! Written from the reference manual's lexical conventions; error texts match what the reference
 //! interpreter prints.
 
+use crate::ast::{Comment, CommentKind};
 use crate::diag::{Diagnostic, Near};
 use crate::token::{Keyword, Punct, Token, TokenKind};
 use orbit_hir::{Span, StringPool};
@@ -14,6 +15,10 @@ pub struct Lexer<'a> {
     line_starts: Vec<u32>,
     /// Scratch buffer for decoding string literals.
     buf: Vec<u8>,
+    /// Comments seen so far, when asked for ([`Lexer::keep_comments`]).
+    comments: Option<Vec<Comment>>,
+    /// Where the token being lexed starts.
+    tok_start: usize,
 }
 
 impl std::fmt::Debug for Lexer<'_> {
@@ -58,6 +63,8 @@ impl<'a> Lexer<'a> {
             strings,
             line_starts: vec![0],
             buf: Vec::new(),
+            comments: None,
+            tok_start: 0,
         }
     }
 
@@ -97,9 +104,61 @@ impl<'a> Lexer<'a> {
         self.src
     }
 
+    /// Where line `line` (1-based, already lexed) starts.
+    pub fn line_start(&self, line: u32) -> u32 {
+        self.line_starts[(line.max(1) as usize - 1).min(self.line_starts.len() - 1)]
+    }
+
     /// The 1-based line of `offset`. Exact for any offset the lexer has already passed.
     pub fn line_of(&self, offset: u32) -> u32 {
         self.line_starts.partition_point(|&s| s <= offset) as u32
+    }
+
+    /// Record every comment from here on (see [`Lexer::take_comments`]).
+    pub fn keep_comments(&mut self) {
+        self.comments.get_or_insert_with(Vec::new);
+    }
+
+    /// Takes the comments recorded so far, in source order.
+    pub fn take_comments(&mut self) -> Vec<Comment> {
+        self.comments.take().unwrap_or_default()
+    }
+
+    /// After [`Lexer::next_token`] failed, skips the rest of the bad token so lexing can go
+    /// on (for a parse that recovers from errors). A bad string or number gives a stand-in
+    /// token (an empty string, `0`) so the parse around it still works.
+    pub fn skip_bad_token(&mut self) -> Option<Token> {
+        let start = self.tok_start;
+        let Some(&c) = self.src.get(start) else {
+            self.pos = self.src.len();
+            return None;
+        };
+        self.pos = self.pos.max(start + 1);
+        match c {
+            b'"' | b'\'' => {
+                // Up to the closing quote or the end of the line.
+                while let Some(c) = self.cur() {
+                    if is_newline(c) {
+                        break;
+                    }
+                    self.pos += 1;
+                    if c == b'\\' && self.cur().is_some_and(|c| !is_newline(c)) {
+                        self.pos += 1;
+                    } else if c == self.src[start] {
+                        break;
+                    }
+                }
+                let id = self.strings.intern(b"");
+                Some(self.token(TokenKind::Str(id), start))
+            }
+            b'0'..=b'9' | b'.' => {
+                while self.cur().is_some_and(|c| is_name_char(c) || c == b'.') {
+                    self.pos += 1;
+                }
+                Some(self.token(TokenKind::Int(0), start))
+            }
+            _ => None,
+        }
     }
 
     /// The string pool and the line-start table, once lexing is done.
@@ -176,6 +235,7 @@ impl<'a> Lexer<'a> {
     pub fn next_token(&mut self) -> Result<Token, Diagnostic> {
         loop {
             let start = self.pos;
+            self.tok_start = start;
             let Some(c) = self.cur() else {
                 return Ok(self.token(TokenKind::Eof, start));
             };
@@ -296,7 +356,9 @@ impl<'a> Lexer<'a> {
             && let Some(level) = self.long_bracket_level(1)
         {
             let line = self.line_of(start as u32);
-            return self.long_string(start, level, line, true);
+            self.long_string(start, level, line, true)?;
+            self.push_comment(CommentKind::Block, start);
+            return Ok(());
         }
         while let Some(c) = self.cur() {
             if is_newline(c) {
@@ -304,7 +366,26 @@ impl<'a> Lexer<'a> {
             }
             self.pos += 1;
         }
+        if self.comments.is_some() {
+            let doc =
+                self.src.get(start + 2) == Some(&b'-') && self.src.get(start + 3) != Some(&b'-');
+            let kind = if doc {
+                CommentKind::Doc
+            } else {
+                CommentKind::Line
+            };
+            self.push_comment(kind, start);
+        }
         Ok(())
+    }
+
+    fn push_comment(&mut self, kind: CommentKind, start: usize) {
+        if let Some(comments) = &mut self.comments {
+            comments.push(Comment {
+                kind,
+                span: Span::new(start as u32, self.pos as u32),
+            });
+        }
     }
 
     /// Reads a long string or comment whose opening bracket (with `level` `=` signs) starts at

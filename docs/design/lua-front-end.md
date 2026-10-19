@@ -61,7 +61,29 @@ Recursive descent for statements, precedence climbing for expressions.
 - **Statements that start with an expression** (`a.b = 1`, `f(x)`) parse a suffixed expression first. If `=` or `,` follows, it is an assignment and every target must be a name or index (`syntax error near '='` otherwise, as the reference says for `f() = 1`); if not, it must be a call.
 - `return` must be the last statement of a block (`<eof> expected near 'print'` otherwise).
 - **Nesting depth** is limited (default 200 levels of nested blocks, expressions and function bodies, configurable) so deeply nested input can't overflow the Rust stack. The reference reports this as a run-time "C stack overflow"; we report `chunk has too many syntax levels` at compile time.
-- The parser stops at the first error, which is what `load` needs. Error recovery for tools comes later behind an option.
+- The parser stops at the first error, which is what `load` needs. Tools get every error with `parse_recovering` (see below).
+
+`ParseOptions` also has two switches for tools, both off for `load`:
+
+- **`keep_trivia`**: `Ast::comments` holds every comment in source order (`CommentKind::Line`, `Block`, or `Doc` for `---`; `----` is an ordinary comment). The tree itself doesn't change.
+- **`recover`**: parsing goes on after a syntax error. `parse_recovering` returns the AST and every error in source order; `parse_with` ignores the switch and returns the first error, as the reference reports it.
+
+Every `Diagnostic` has a `kind`: `UnexpectedEof` when the error is reported near `<eof>` (an unclosed block, bracket, string or comment, or a construct cut short), which is the reference REPL's test for reading another line; `Other` for the rest.
+
+### Error recovery
+
+`parse_recovering` first parses normally, so a chunk without errors gets exactly the tree `parse_with` gives. Only a chunk with errors is parsed again with recovery, where an error is recorded and the parse picks up where the next thing most likely starts:
+
+- **A missing expression** before a closer (`)`, `]`, `}`, `,`, `;`, `end`, `then`, `do`, `else`, `elseif`, `until`) or the end (`local x = )`) becomes `ExprKind::Error` and the statement around it is kept.
+- **A missing `then` or `do`** is reported and taken as there.
+- **A broken statement** becomes `StmtKind::Error`. The parser skips to a synchronisation point: a `;`, an `end` closing a block the statement opened at the end of a line, a word ending the enclosing block, a word that can't be part of an expression (`local`, `if`, `while`, `for`, `repeat`, `return`, `goto`, `break`, `::`), `function` or `do` starting a line, or a line indented no deeper than the statement. Blocks and brackets opened before the error are counted (by re-lexing the statement) so their closers aren't mistaken for the enclosing block's.
+- **Indentation shows what is missing.** Inside a block, a statement starting a line indented no deeper than the line that opened the block means the block's `end` is missing; in the middle of a statement, such a line means the statement is missing its value or closing bracket. Code written flush (no line indented, and some line starting with `end`) is the exception: there only a function definition at column 0 ends an unclosed block.
+- **Stray tokens after the chunk** (an extra `end`, statements after `return`) are reported as the reference does (`'<eof>' expected`) and skipped, and parsing goes on.
+- **A lexer error** is recorded and the bad token skipped; a bad string or number becomes an empty string or `0`, so `local s = "\q"` still binds `s`. A parse error right after a lexer error isn't reported (it is most likely the same mistake).
+
+Where indentation places a missing `end` earlier than the reference would notice it, that error comes first; otherwise the first error is the reference's. Lowering rejects `Error` nodes ("this code has a syntax error, so it can't run"); the unparser prints them as `--[[syntax error]]`.
+
+`tests/recover.rs` deletes the first or last token of every line of every Lua file in `tests/diff`, `tests/first-light`, `bench` and `examples` (8,892 cases): no top-level declaration before or after the break is ever lost, and 86% of the deletions that break the chunk give exactly one error.
 
 ### Error messages
 
