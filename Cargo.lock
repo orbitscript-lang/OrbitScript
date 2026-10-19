@@ -137,8 +137,10 @@ dependencies = [
 name = "orbit-check"
 version = "0.0.0"
 dependencies = [
+ "orbit",
  "orbit-hir",
  "orbit-orb-syntax",
+ "orbit-std",
 ]
 
 [[package]]

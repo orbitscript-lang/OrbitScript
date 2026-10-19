@@ -1,0 +1,2 @@
+// A stub beside a Lua module describes it.
+pub fn scale(x: int) -> int;

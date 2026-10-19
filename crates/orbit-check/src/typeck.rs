@@ -84,6 +84,7 @@ struct Checker<'a, 'b, 'c> {
     m: &'b mut Module,
     types: &'b mut Types,
     checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
+    prelude: Option<FileId>,
     /// The symbol each name refers to, by its span. The last one recorded at a span wins: for
     /// a shorthand field `{ x }` that is the local.
     refs: HashMap<(u32, u32), SymbolId>,
@@ -109,13 +110,21 @@ fn sk(s: Span) -> (u32, u32) {
 
 /// Checks `ast`, whose names `resolve` recorded in `m`, adding type errors and the types of its
 /// symbols and expressions to `m`.
+/// What checking a module needs from the rest of the workspace.
+pub(crate) struct Deps<'c> {
+    /// Already checked modules, by file.
+    pub checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
+    /// The prelude stub, whose functions (`type`, `error`) some checks recognize.
+    pub prelude: Option<FileId>,
+}
+
 pub(crate) fn check<'a, 'b, 'c>(
     file: FileId,
     ast: &'a ast::Ast,
     defs: &'b Defs<'a>,
     m: &'b mut Module,
     types: &'b mut Types,
-    checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
+    deps: Deps<'c>,
 ) {
     let mut refs = HashMap::new();
     for &(span, id) in &m.refs {
@@ -133,7 +142,8 @@ pub(crate) fn check<'a, 'b, 'c>(
         defs,
         m,
         types,
-        checked,
+        checked: deps.checked,
+        prelude: deps.prelude,
         refs,
         by_span,
         in_progress: HashSet::new(),
@@ -575,7 +585,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             TypeKind::Tuple(ts) if ts.is_empty() => self.types.nil,
             TypeKind::Tuple(_) | TypeKind::Error => any,
             TypeKind::Fn { params, rest, ret } => {
-                let params = params.iter().map(|p| self.lower(p)).collect();
+                let lowered: Vec<TypeId> = params.iter().map(|p| self.lower(p)).collect();
+                let required = self.required(params.iter().map(Some).zip(lowered.iter().copied()));
+                let params = lowered;
                 let rest = rest.as_ref().map(|r| self.lower(r));
                 let results = Some(match ret {
                     Some(r) => self.lower_results(r),
@@ -585,6 +597,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     params,
                     rest,
                     results,
+                    required,
                     method: false,
                     generics: Vec::new(),
                 }))
@@ -593,6 +606,21 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     }
 
     /// A result annotation: `(A, B)` is two results, anything else one.
+    /// How many of these parameters need an argument: up to the last one whose annotation isn't
+    /// `T?` and doesn't otherwise allow nil (`any?` is optional, unannotated and `any` aren't).
+    fn required<'t>(&self, params: impl Iterator<Item = (Option<&'t ast::Type>, TypeId)>) -> usize {
+        let mut n = 0;
+        for (i, (ann, t)) in params.enumerate() {
+            let optional = ann.is_some_and(|a| {
+                matches!(a.kind.as_deref(), Some(TypeKind::Optional(_))) || self.types.may_be_nil(t)
+            });
+            if !optional {
+                n = i + 1;
+            }
+        }
+        n
+    }
+
     fn lower_results(&mut self, t: &ast::Type) -> Vec<TypeId> {
         match t.kind.as_deref() {
             Some(TypeKind::Tuple(ts)) => ts.iter().map(|t| self.lower(t)).collect(),
@@ -696,16 +724,22 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .map(|_| sig.rest_ty.as_ref().map_or(any, |t| self.lower(t)));
         let mut generics: Vec<SymbolId> = owner.map(|o| o.generics.clone()).unwrap_or_default();
         generics.extend(self.m.generics.get(&index).cloned().unwrap_or_default());
-        let results = match (&sig.ret, &decl.body) {
-            (Some(t), _) => Some(self.lower_results(t)),
-            (None, None) => Some(Vec::new()),
-            (None, Some(_)) => None,
-        };
-        let infer = results.is_none();
+        // A stub declaration without `->` has unknown results (each `any`); write `-> ()` for
+        // none.
+        let results = sig.ret.as_ref().map(|t| self.lower_results(t));
+        let infer = results.is_none() && decl.body.is_some();
+        let required = usize::from(method)
+            + self.required(
+                sig.params
+                    .iter()
+                    .map(|p| p.ty.as_ref())
+                    .zip(params[usize::from(method)..].iter().copied()),
+            );
         let mut f = FnTy {
             params,
             rest,
             results,
+            required,
             method,
             generics,
         };
@@ -999,10 +1033,15 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             _ => (Some(cx.returned(Some(body), body.span)), false),
         });
+        let required = params
+            .iter()
+            .rposition(|&p| !self.types.may_be_nil(p))
+            .map_or(0, |i| i + 1);
         self.types.intern(Ty::Fn(FnTy {
             params,
             rest,
             results,
+            required,
             method: false,
             generics: Vec::new(),
         }))
@@ -1656,6 +1695,17 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 }
             },
             Ty::Map(_, v) => v,
+            Ty::Str if self.prelude.is_some() => match self.string_member(text) {
+                Some(m) => self.sym_type(m),
+                None => {
+                    self.error(
+                        span,
+                        Code::NoMember,
+                        format!("string has no field `{text}`"),
+                    );
+                    any
+                }
+            },
             Ty::Int | Ty::Float | Ty::Bool | Ty::Fn(_) | Ty::Function => {
                 let msg = format!("type {} has no field `{text}`", self.show(t));
                 self.error(span, Code::NoMember, msg);
@@ -1855,6 +1905,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let generic = !f.generics.is_empty();
         let mut map: HashMap<SymbolId, TypeId> = HashMap::new();
         let mut params: &[TypeId] = &f.params;
+        let mut params_skipped = 0;
         if let Some(st) = self_arg
             && let Some((&p0, rest)) = params.split_first()
         {
@@ -1862,16 +1913,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.types.unify(p0, st, &mut map);
             }
             params = rest;
+            params_skipped = 1;
         }
         let spread = args
             .last()
             .is_some_and(|a| matches!(a.kind, ExprKind::Spread(_)));
         let n = args.len();
         if !spread {
-            let needed = params
-                .iter()
-                .rposition(|&p| !self.types.may_be_nil(p))
-                .map_or(0, |i| i + 1);
+            let needed = f.required.saturating_sub(params_skipped);
             if n > params.len() && f.rest.is_none() {
                 let msg = format!(
                     "{name} takes {} argument{}, found {n}",
@@ -1995,6 +2044,19 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                         let msg = format!("{} has no method `{text}`", self.show(ot));
                         self.error(name.span, Code::NoMember, msg);
                     }
+                    self.args_any(args);
+                    None
+                }
+            },
+            // Strings take the `string` library's functions as methods.
+            Ty::Str if self.prelude.is_some() => match self.string_member(&text) {
+                Some(m) => {
+                    let mt = self.sym_type(m);
+                    self.call(mt, Some(ot), args, &desc, span, expected)
+                }
+                None => {
+                    let msg = format!("string has no method `{text}`");
+                    self.error(name.span, Code::NoMember, msg);
                     self.args_any(args);
                     None
                 }
@@ -2737,8 +2799,29 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         (yes, no)
     }
 
+    /// The `string` library's function `name`, which strings have as a method.
+    fn string_member(&self, name: &str) -> Option<SymbolId> {
+        let prelude = (self.checked)(self.prelude?)?;
+        let lib = prelude
+            .symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Module && s.name == "string")?
+            .module?;
+        (self.checked)(lib)?.exports.get(name).copied()
+    }
+
+    /// Whether `e` names the prelude's `name` (not a local of the same name).
     fn is_prelude(&self, e: &ast::Expr, name: &str) -> bool {
-        matches!(e.kind, ExprKind::Name(s) if self.ref_at(e.span).is_none() && self.strings.get(s) == name.as_bytes())
+        let ExprKind::Name(s) = e.kind else {
+            return false;
+        };
+        if self.strings.get(s) != name.as_bytes() {
+            return false;
+        }
+        match self.ref_at(e.span) {
+            Some(id) => Some(id.file) == self.prelude,
+            None => self.prelude.is_none(),
+        }
     }
 
     /// `type(x)` or `math::type(x)` (the bool says which): its argument.

@@ -1,6 +1,6 @@
 # `orbit-check`: OrbitScript's optional type checker
 
-Status: **All questions decided** (Tym, 2026-10-18). Implementation started in `crates/orbit-check` (names: PR #181; types: branch `check/types`); the library API is in [api.md](api.md). Answers are in [Questions](#questions-for-tym).
+Status: **All questions decided** (Tym, 2026-10-18). Implemented in `crates/orbit-check` (names: #181; types: #188; stubs, scope completion and recovery: stage 3); the library API is in [api.md](api.md). Answers are in [Questions](#questions-for-tym).
 
 Decided (Tym, 2026-10-18 22:13Z): **T4** no implicit `int` to `float`; `number` is `int | float`, and code that wants one representation narrows to it. **T5** union types `A | B`, yes. **T8** no built-in `Result`: Lua-style results are written `(T?, E?)`, keeping the name free for a user enum and for enum-based results later. **T2** (22:25Z) option B: the shared parser builds type trees behind a `ParseOptions` flag; one parser only, optimize later if the cost shows up. **Everything else** (22:26Z): as recommended, including the two assumptions at the end of the questions table.
 
@@ -88,7 +88,7 @@ Places where the parser drops information the checker needs, all small changes f
 - **Crate `crates/orbit-check`**, a library (the checker, so a language server can reuse it later) with a `[[bin]] orbit-check`. Dependencies: `orbit-orb-syntax`, `orbit-hir`. No external crates; argument parsing hand-written like `orbit-cli`'s.
 - **Not part of `orbit` or `orbitc`.** It doesn't need the runtime at all, so it is a plain static Rust program in either liblua layout, and it doesn't touch the PGO profile (none of the profiled crates change). It is not in `default-members`, so `cargo build --release` at the root still builds only the CLI.
 - **Size.** Probe: a release binary (fat LTO, one codegen unit, `panic = "abort"`, stripped, no PGO) that only parses `.orb` files is **455,688 bytes**; about 350 KiB of that is std's panic and formatting machinery that every Rust binary carries. The checker's own code comes on top. For comparison, `orbit` is 2,103,016 bytes and `orbitc` 1,471,504 (scoreboard 2026-10-15). Measured on the cloud container, Linux x86_64, Ubuntu 24.04, main `cdb2210`; the probe parsed all eleven `.orb` files in `examples/`.
-- **Stdlib stubs** are embedded in the binary (`include_str!`), so the tool is one file. A test in `orbit-testkit` keeps them honest: it loads the real runtime, walks every global and library field, and fails when a stub is missing or names something the runtime doesn't have.
+- **Stdlib stubs** are embedded in the binary (`include_str!`), so the tool is one file. A test in `orbit-check` (`tests/stubs.rs`, with the runtime as a dev-dependency only) keeps them honest: it loads the real runtime, walks every global and library field, and fails when a stub is missing or names something the runtime doesn't have.
 
 ## The type language
 
@@ -202,7 +202,7 @@ fn area(s: Shape) -> float {
 // io.orbi (bundled)
 pub struct File {}
 impl File {
-    pub fn read(self, ...formats: string | int) -> (string | number)?;   // first result only; see note
+    pub fn read(self, ...formats: string | int);   // results unknown; see note
     pub fn write(self, ...parts: string | number) -> (File?, string?);
     pub fn close(self) -> (bool?, string?);
     fn __close(self, err: any);
@@ -211,7 +211,9 @@ pub fn open(path: string, mode: string?) -> (File?, string?);
 pub fn lines(path: string?, ...formats: string | int) -> fn() -> string?;
 ```
 
-  Note: `file:read("l", "n")` returns one value per format, which the type grammar can't say yet. A variadic result `-> ...T` would cover it; until then stubs describe the first result and the rest are `any`.
+  Note: `file:read("l", "n")` returns one value per format, which the type grammar can't say yet. A variadic result `-> ...T` would cover it; until then such a function has no `->`, so its results are unknown (`any`).
+
+  In a stub, a body-less function with no `->` has unknown results (each `any`), which is how stubs write `pcall` or `string.find`, whose result count depends on the arguments; `-> ()` means none.
 
   A stub next to a module (`lunajson.orbi` beside `lunajson.lua`) wins over the module, as `.pyi` does in Python. Body-less `fn ...;` is stub-only syntax: the shared parser accepts it only under a stub option that `orbit-check` sets (T2: one parser), and the runtime never loads `.orbi` files.
 - **Later (not v1):** reading LuaLS-style annotation comments (`---@param x integer`) from `.lua` files, which would type existing annotated Lua libraries with no stub. That needs the Lua lexer to keep comments, a change in the Lua front end.
@@ -243,7 +245,7 @@ flowchart LR
     c1["C1 skeleton<br/>crate, CLI, type parser,<br/>interner, diagnostics, test harness"] --> c2
     c2["C2 one module<br/>locals, functions, numbers,<br/>narrowing, structs, metamethods"] --> c3
     c3["C3 enums, match exhaustiveness,<br/>multiple results, ?"] --> c4
-    c4["C4 modules and stubs<br/>use resolution, stdlib .orbi,<br/>testkit stub check"] --> c5
+    c4["C4 modules and stubs<br/>use resolution, stdlib .orbi,<br/>stub check"] --> c5
     c5["C5 generics, aliases,<br/>records, strict mode, lints"] --> later["Later: language server,<br/>LuaLS comments"]
 ```
 

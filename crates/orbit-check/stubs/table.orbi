@@ -1,0 +1,18 @@
+// The `table` library.
+
+/// The elements `i` to `j` of `list` (strings or numbers), joined with `sep`.
+pub fn concat(list: table, sep: string?, i: int?, j: int?) -> string;
+/// A new table with room for `narr` array elements and `nrec` other fields.
+pub fn create(narr: int, nrec: int?) -> table;
+/// Appends `value` to `list`, or with three arguments inserts `last` at position `value`.
+pub fn insert<T>(list: [T] | table, value: T | int, last: T?) -> ();
+/// Copies `a1[f..e]` into `a2` (default `a1`) starting at `t`; returns `a2`.
+pub fn move(a1: table, f: int, e: int, t: int, a2: table?) -> table;
+/// A table of the arguments, with their count in `n`.
+pub fn pack(...values: any) -> table;
+/// Removes the element at `pos` (default the last) and returns it.
+pub fn remove<T>(list: [T] | table, pos: int?) -> T?;
+/// Sorts `list` in place, with `comp(a, b)` saying whether `a` goes first (default `<`).
+pub fn sort<T>(list: [T] | table, comp: (fn(T, T) -> bool)?) -> ();
+/// The elements `i` (default 1) to `j` (default the length) of `list`.
+pub fn unpack(list: table, i: int?, j: int?);

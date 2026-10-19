@@ -228,18 +228,26 @@ fn editing_a_dependency_rechecks_its_users() {
 }
 
 #[test]
-fn syntax_error_keeps_previous_symbols() {
+fn syntax_error_keeps_the_rest_of_the_module() {
     let mut ws = workspace();
     let lib = ws.add_file(Path::new("/w/lib.orb"));
     assert_eq!(ws.document_symbols(lib).len(), 2);
-    ws.set_source(Path::new("/w/lib.orb"), b"pub fn broken( {".to_vec());
+    let text =
+        "pub fn ok() -> int { 1 }\npub fn broken( {\npub fn after() {}\nlet n: string = ok();\n";
+    ws.set_source(Path::new("/w/lib.orb"), text.as_bytes().to_vec());
     let codes: Vec<_> = ws
         .diagnostics(lib)
         .iter()
         .map(|d| d.code.as_str())
         .collect();
-    assert_eq!(codes, ["T0001"]);
-    assert_eq!(ws.document_symbols(lib).len(), 2);
+    // The broken item is reported, and the code after it is still checked.
+    assert_eq!(codes, ["T0001", "T0201"]);
+    let names: Vec<String> = ws
+        .document_symbols(lib)
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(names, ["ok", "after"]);
 }
 
 #[test]
@@ -268,7 +276,7 @@ fn types_for_hover() {
     );
     assert_eq!(
         at(&mut ws, "pair", 0).as_deref(),
-        Some("fn(int) -> (int, any)")
+        Some("fn(int) -> (int, string)")
     );
     assert_eq!(at(&mut ws, "acc", 0).as_deref(), Some("number"));
 }
@@ -276,9 +284,9 @@ fn types_for_hover() {
 #[test]
 fn editor_queries() {
     let src = "struct V { x: float, y: float }\n\
-               impl V {\n\
-                   fn new(x: float, y: float) -> V { V { x, y } }\n\
-                   fn dot(self, o: V) -> float { self.x * o.x + self.y * o.y }\n\
+               impl V {\n    \
+                   fn new(x: float, y: float) -> V { V { x, y } }\n    \
+                   fn dot(self, o: V) -> float { self.x * o.x + self.y * o.y }\n    \
                    fn __add(a, b) { a }\n\
                }\n\
                let v = V::new(1.0, 2.0);\n\
@@ -332,4 +340,72 @@ fn editor_queries() {
         })
         .collect();
     assert_eq!(shown, ["v: V", "d: float", "e: float", "n: int"]);
+}
+
+#[test]
+fn scope_and_keyword_completion() {
+    let src = "fn helper(a: int) -> int { a }\n\
+               let count = 1;\n\
+               fn run() {\n    \
+                   let inner = 2;\n    \
+                   let later_name = co;\n    \
+                   let after = 3;\n\
+               }\n";
+    let mut ws = Workspace::new(Config::default(), Box::new(Memory(Vec::new())));
+    let f = ws.set_source(Path::new("/m/scope.orb"), src.as_bytes().to_vec());
+    let at = src.find("co;").unwrap() as u32 + 2;
+    let c = ws.completions_at(f, at);
+    assert_eq!(
+        c.replace,
+        orbit_check::Span {
+            start: at - 2,
+            end: at
+        }
+    );
+    let labels: Vec<&str> = c.items.iter().map(|c| c.label.as_str()).collect();
+    for want in [
+        "inner",
+        "count",
+        "helper",
+        "run",
+        "coroutine",
+        "print",
+        "continue",
+        "const",
+    ] {
+        assert!(labels.contains(&want), "{want} missing from {labels:?}");
+    }
+    // Not yet defined, out of scope, or not a name.
+    for unwanted in ["after", "a", "later_name"] {
+        assert!(!labels.contains(&unwanted), "{unwanted} in {labels:?}");
+    }
+    let print = c.items.iter().find(|c| c.label == "print").unwrap();
+    assert_eq!(print.detail.as_deref(), Some("fn(...any)"));
+    assert!(c.items.iter().find(|c| c.label == "const").unwrap().keyword);
+}
+
+#[test]
+fn completion_after_a_bare_separator() {
+    let src = "struct P { x: int }\n\
+               let p = P { x: 1 };\n\
+               let s = \"text\";\n\
+               let a = p.\n\
+               let b = s.\n\
+               let c = math::\n";
+    let mut ws = Workspace::new(Config::default(), Box::new(Memory(Vec::new())));
+    let f = ws.set_source(Path::new("/m/bare.orb"), src.as_bytes().to_vec());
+    let labels = |ws: &mut Workspace, needle: &str| {
+        let at = (src.find(needle).unwrap() + needle.len()) as u32;
+        let c = ws.completions_at(f, at);
+        assert_eq!(c.replace.start, at);
+        c.items.into_iter().map(|c| c.label).collect::<Vec<_>>()
+    };
+    assert_eq!(labels(&mut ws, "p."), ["x"]);
+    let string = labels(&mut ws, "s.");
+    assert!(string.contains(&"upper".to_string()), "{string:?}");
+    let math = labels(&mut ws, "math::");
+    assert!(
+        math.contains(&"sqrt".to_string()) && math.contains(&"pi".to_string()),
+        "{math:?}"
+    );
 }
