@@ -108,6 +108,8 @@ struct Checker<'a, 'b, 'c> {
     /// Whether bindings get inlay hints (not under an annotation).
     hinting: bool,
     strict: bool,
+    /// Errors found so far, counted even while `quiet` (to try an overload).
+    failures: u32,
 }
 
 fn sk(s: Span) -> (u32, u32) {
@@ -162,6 +164,7 @@ pub(crate) fn check<'a, 'b, 'c>(
         self_type: None,
         hinting: true,
         strict: deps.strict,
+        failures: 0,
     };
     let mut variants: Vec<(u32, u32)> = defs
         .defs
@@ -174,6 +177,24 @@ pub(crate) fn check<'a, 'b, 'c>(
     variants.sort();
     for (v, e) in variants {
         c.types.set_variant_enum(c.id(v), c.id(e));
+    }
+
+    // A body-less function declared more than once in a stub is overloaded: a call takes the
+    // first declaration its arguments fit.
+    let mut by_name: HashMap<StrId, Vec<SymbolId>> = HashMap::new();
+    for s in &ast.body.stmts {
+        if let StmtKind::Item(item) = &s.kind
+            && let ItemKind::Fn(f) = &item.kind
+            && f.body.is_none()
+            && let Some(i) = c.local_at(f.name.span)
+        {
+            by_name.entry(f.name.sym).or_default().push(c.id(i));
+        }
+    }
+    for group in by_name.into_values().filter(|g| g.len() > 1) {
+        for id in &group {
+            c.m.overloads.insert(id.index, group.clone());
+        }
     }
 
     c.fns.push(FnCtx {
@@ -219,6 +240,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     // ---- reporting ----------------------------------------------------------------------------
 
     fn error(&mut self, span: Span, code: Code, message: String) {
+        self.failures += 1;
         if self.quiet == 0 {
             self.m
                 .diagnostics
@@ -1829,6 +1851,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 let symbol = self.path_symbol(callee);
                 self.call_site(*args_at, e.span, args, ct, symbol, false);
                 let name = self.describe(callee);
+                if let Some(group) = symbol.and_then(|s| self.overloads_of(s)) {
+                    return self.overloaded_call(&group, args, &name, e.span, expected);
+                }
                 self.call(ct, None, args, &name, e.span, expected)
             }
             ExprKind::MethodCall {
@@ -1853,6 +1878,50 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             _ => None,
         }
+    }
+
+    fn overloads_of(&self, id: SymbolId) -> Option<Vec<SymbolId>> {
+        self.module_of(id.file)?.overloads.get(&id.index).cloned()
+    }
+
+    /// A call of an overloaded stub function: the first declaration the arguments fit, tried
+    /// without reporting anything.
+    fn overloaded_call(
+        &mut self,
+        group: &[SymbolId],
+        args: &'a [ast::Expr],
+        name: &str,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Results {
+        let types: Vec<TypeId> = group.iter().map(|&id| self.sym_type(id)).collect();
+        let fns: Vec<FnTy> = types
+            .iter()
+            .filter_map(|&t| match self.types.get(t) {
+                Ty::Fn(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        for f in &fns {
+            let before = self.failures;
+            self.quiet += 1;
+            self.apply(f, None, args, name, span, expected);
+            self.quiet -= 1;
+            if self.failures == before {
+                return self.apply(f, None, args, name, span, expected);
+            }
+        }
+        let shown: Vec<String> = types
+            .iter()
+            .map(|&t| format!("`{}`", self.types.display(t, self)))
+            .collect();
+        let msg = format!(
+            "no form of {name} takes these arguments; it is one of: {}",
+            shown.join(", ")
+        );
+        self.error(span, Code::Mismatch, msg);
+        self.args_any(args);
+        None
     }
 
     fn call_site(

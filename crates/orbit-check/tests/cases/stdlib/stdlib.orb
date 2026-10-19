@@ -65,3 +65,13 @@ let message: string = problem; //~ T0207
 let i: int = json::int(2.0);
 let s: int = json::string(2); //~ T0201
 let is_null = value == json::null;
+
+// Overloaded stub functions: the first form the arguments fit.
+let die: int = math::random(1, 6);
+let unit: float = math::random();
+let wrong: int = math::random(); //~ T0201
+let no_form = math::random("six"); //~ T0201
+let count: int = select("#", 1, 2);
+let rest = select(2, "a", "b");
+let hex: int? = tonumber("ff", 16);
+let num: number? = tonumber("1.5");

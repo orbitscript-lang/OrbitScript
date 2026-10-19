@@ -171,7 +171,8 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 - A body-less function with no `->` has unknown results (each `any`), for functions whose result count depends on the arguments (`pcall`, `select`, `string.find`). `-> ()` means no results.
 - A parameter written `T?` may be left out; an unannotated or `any` parameter needs an argument.
 - Strings take the `string` stub's functions as methods: `s.upper()` checks as `string::upper(s)`.
-- Lua functions whose result type depends on the arguments' types return the argument's type through a generic (`math::abs<T>(x: T) -> T`), or `any` where nothing simpler is right (`os::date`). Overloads would fix these and are not in the type language yet.
+- A stub may declare a body-less function more than once (overloads): a call takes the first declaration its arguments fit, so `math::random()` is `float` and `math::random(1, 6)` is `int`. When none fits, the error lists every form (T0201). Hover and signature help show the last declaration. Overloads exist only in stubs; OrbitScript code can't declare them.
+- Lua functions whose result type depends on the arguments' types otherwise return the argument's type through a generic (`math::abs<T>(x: T) -> T`), or `any` where nothing simpler is right (`os::date`, whose result depends on the format string's value).
 
 ## Agreed with the language server thread (2026-10-18)
 

@@ -31,8 +31,12 @@ pub fn min<T>(x: T, ...rest: T) -> T;
 pub fn modf(x: number) -> (float, float);
 /// `x` degrees in radians.
 pub fn rad(x: number) -> float;
-/// A float in [0, 1) with no arguments; an integer in [1, m] or [m, n] with them.
-pub fn random(m: int?, n: int?) -> number;
+/// A float in [0, 1).
+pub fn random() -> float;
+/// An integer in [1, m].
+pub fn random(m: int) -> int;
+/// An integer in [m, n].
+pub fn random(m: int, n: int) -> int;
 /// Seeds the generator (randomly with no arguments); returns the two seed parts.
 pub fn randomseed(x: int?, y: int?) -> (int, int);
 pub fn sin(x: number) -> float;
