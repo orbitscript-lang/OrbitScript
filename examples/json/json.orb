@@ -2,7 +2,7 @@
 //
 // Shows decoding a file, `json::null`, integers and floats, `json::object` and
 // `json::array` for empty tables and arrays with holes, `json::number` for exact
-// numerals, `keep_null`, encode's `pretty` and `sort_keys` options, a struct
+// numerals, the scalar conversions, `keep_null`, encode's `pretty` and `sort_keys` options, a struct
 // that encodes as an array through `__tojson`, and the errors `decode` returns and
 // `encode` raises. json.lua is the same program in Lua.
 //
@@ -98,6 +98,9 @@ fn run() {
         order: json::number("90071992547409930001"), total: json::number("44.90"), visits: visits,
     };
     say(json::encode(receipt, #{ sort_keys: true }));
+    // Scalars write as their Lua type; json::int, float, string and bool convert
+    // (as math::tointeger, `+ 0.0` and tostring would), and bool follows conditions.
+    say(json::encode([json::int("3"), json::float(3), json::string(3), json::bool(0), json::bool(json::null)]));
     // With keep_null off, null decodes to nil; the array keeps its length.
     let sparse = json::decode("[1, null, 3, null]", #{ keep_null: false });
     say(f"{sparse[1]} {sparse[2]} {sparse[3]} {sparse[4]} -> {json::encode(sparse)}");

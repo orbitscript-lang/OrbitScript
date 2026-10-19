@@ -57,6 +57,10 @@ natives! {
     MarkObject "json.object" mark_object;
     MarkArray "json.array" mark_array;
     Number "json.number" number;
+    ToInt "json.int" to_int;
+    ToFloat "json.float" to_float;
+    ToString "json.string" to_string;
+    ToBool "json.bool" to_bool;
     NumberToString "json.number.__tostring" number_to_string;
     NullToString "json.null.__tostring" null_to_string;
     NullNewIndex "json.null.__newindex" null_new_index;
@@ -99,6 +103,14 @@ pub(crate) fn open(s: &mut Stack<'_>) -> StackResult<()> {
     s.raw_set_field(lib, b"array")?;
     push_closure::<Number>(s, ups)?;
     s.raw_set_field(lib, b"number")?;
+    push_closure::<ToInt>(s, ups)?;
+    s.raw_set_field(lib, b"int")?;
+    push_closure::<ToFloat>(s, ups)?;
+    s.raw_set_field(lib, b"float")?;
+    push_closure::<ToString>(s, ups)?;
+    s.raw_set_field(lib, b"string")?;
+    push_closure::<ToBool>(s, ups)?;
+    s.raw_set_field(lib, b"bool")?;
     // Leave only the module.
     s.rotate(ups, 1)?;
     s.set_top(ups)
@@ -181,6 +193,66 @@ fn number(s: &mut Stack<'_>) -> StackResult<Return> {
     s.raw_set_index(-2, 1)?;
     s.push_copy(NUMBER_META);
     s.set_metatable(-2)?;
+    Ok(Return::values(1))
+}
+
+// The scalar conversions give plain values: Lua's own types already decide
+// each scalar's JSON type, so `json.int(x)` and `math.tointeger(x)` encode
+// the same way, and either is a fine way to say what to write.
+
+/// `json.int(v)`: an integer, a float with an integral value, or a numeral, as an integer.
+fn to_int(s: &mut Stack<'_>) -> StackResult<Return> {
+    match s.type_at(1) {
+        Type::Number | Type::String => {}
+        _ => return Err(s.type_error(1, "number")),
+    }
+    let Some(n) = s.to_integer(1) else {
+        return Err(s.arg_error(1, "number has no integer representation"));
+    };
+    s.push_integer(n);
+    Ok(Return::values(1))
+}
+
+/// `json.float(v)`: a number or a numeral, as a float.
+fn to_float(s: &mut Stack<'_>) -> StackResult<Return> {
+    let n = match s.type_at(1) {
+        Type::Number | Type::String => s.to_number(1),
+        _ => None,
+    };
+    let Some(n) = n else {
+        return Err(s.type_error(1, "number"));
+    };
+    s.push_number(n);
+    Ok(Return::values(1))
+}
+
+/// `json.string(v)`: a string, number or boolean, or a value with
+/// `__tostring`, as `tostring` writes it.
+fn to_string(s: &mut Stack<'_>) -> StackResult<Return> {
+    let ok = match s.type_at(1) {
+        Type::String => return Ok(Return::values(1)),
+        Type::Number | Type::Boolean => true,
+        _ if s.get_metatable(1) => {
+            s.raw_get_field(-1, b"__tostring")?;
+            let has = s.type_at(-1) != Type::Nil;
+            s.set_top(1)?;
+            has
+        }
+        _ => false,
+    };
+    if !ok {
+        return Err(s.type_error(1, "string, number or boolean"));
+    }
+    s.set_top(1)?;
+    s.to_display_string(1)?;
+    Ok(Return::values(1))
+}
+
+/// `json.bool(v)`: `false` for `nil`, `false` and `json.null`, and `true` for
+/// anything else, as conditions treat values (so `0` and `""` are `true`).
+fn to_bool(s: &mut Stack<'_>) -> StackResult<Return> {
+    let b = s.to_boolean(1) && !s.raw_equal(1, NULL);
+    s.push_boolean(b);
     Ok(Return::values(1))
 }
 
