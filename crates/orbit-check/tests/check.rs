@@ -426,6 +426,10 @@ fn cast_errors_match_the_compiler() {
         "struct S<T> { v: T } let x = y as S<int>;",
         "type Ids = [int]; let x = y as Ids;",
         "fn f(y) { y as Id } type Id = int;",
+        "let x = y as table;",
+        "let x = y as function?;",
+        "let x = y as (int | thread);",
+        "let x = y as userdata;",
     ];
     for src in cases {
         let src = format!("extern y; {src}");
