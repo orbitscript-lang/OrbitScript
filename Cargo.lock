@@ -176,6 +176,7 @@ dependencies = [
  "orbit",
  "orbit-std",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
