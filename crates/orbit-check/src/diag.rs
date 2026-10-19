@@ -80,6 +80,14 @@ pub enum Code {
     UnusedIgnore,
     /// An `orbit-check:` comment that isn't a pragma, or names an unknown code.
     BadPragma,
+    /// `t[0]` on an array, whose first element is `t[1]`.
+    ZeroIndex,
+    /// `for i in 0..#t` reading `t[i]`.
+    ZeroBasedLoop,
+    /// A local that is never read.
+    UnusedLocal,
+    /// A `use`d name that is never used.
+    UnusedImport,
     /// A `match` that misses cases.
     NonExhaustive,
     /// A `pub fn` parameter without a type (strict mode).
@@ -121,6 +129,10 @@ impl Code {
             Code::RecordFieldLikeType => "T0304",
             Code::UnusedIgnore => "T0305",
             Code::BadPragma => "T0306",
+            Code::ZeroIndex => "T0307",
+            Code::ZeroBasedLoop => "T0308",
+            Code::UnusedLocal => "T0309",
+            Code::UnusedImport => "T0310",
             Code::NonExhaustive => "T0401",
             Code::MissingParamType => "T0501",
             Code::MissingResultType => "T0502",
@@ -157,6 +169,10 @@ impl Code {
         Code::RecordFieldLikeType,
         Code::UnusedIgnore,
         Code::BadPragma,
+        Code::ZeroIndex,
+        Code::ZeroBasedLoop,
+        Code::UnusedLocal,
+        Code::UnusedImport,
         Code::NonExhaustive,
         Code::MissingParamType,
         Code::MissingResultType,

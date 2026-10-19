@@ -1,0 +1,2 @@
+pub fn double(x: int) -> int { x * 2 }
+pub fn triple(x: int) -> int { x * 3 }

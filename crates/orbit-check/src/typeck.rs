@@ -10,6 +10,9 @@
 //! once. Symbols of other modules have the types that module's check stored.
 
 mod cast;
+mod lint;
+
+pub(crate) use lint::lints;
 
 use std::collections::{HashMap, HashSet};
 
@@ -1276,7 +1279,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 let ot = self.non_nil_or_report(ot, obj);
                 // Writing `nil` removes the element (`t[#t] = nil` pops).
                 match self.types.get(ot).clone() {
-                    Ty::Array(t) => Some(self.types.optional(t)),
+                    Ty::Array(t) => {
+                        self.zero_index(key);
+                        Some(self.types.optional(t))
+                    }
                     Ty::Map(k, v) => {
                         self.expect(kt, k, key.span, Some("the map key".into()));
                         Some(self.types.optional(v))
@@ -1765,6 +1771,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
+    /// `t[0]` on an array: Lua arrays start at 1.
+    fn zero_index(&mut self, key: &ast::Expr) {
+        if matches!(key.kind, ExprKind::Int(0)) {
+            let msg = "arrays start at 1, so `[0]` is never an element; the first is `[1]`";
+            self.warning(key.span, Code::ZeroIndex, msg.to_string());
+        }
+    }
+
     fn index_type(&mut self, obj: &'a ast::Expr, key: &'a ast::Expr) -> TypeId {
         let any = self.types.any;
         let ot = self.expr(obj, None);
@@ -1775,6 +1789,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let ot = self.non_nil_or_report(ot, obj);
         match self.types.get(ot).clone() {
             Ty::Array(t) => {
+                self.zero_index(key);
                 if matches!(self.types.get(kt), Ty::Str | Ty::Bool) {
                     let msg = format!("arrays are indexed by `int`, found {}", self.show(kt));
                     self.error(key.span, Code::BadOperand, msg);
