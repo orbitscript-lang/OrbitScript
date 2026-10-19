@@ -251,6 +251,8 @@ sequenceDiagram
 - **Scopes**: Locals, Upvalues and Globals; tables expand, with their metatable as `(metatable)`. `evaluate` reads names and dotted fields only.
 - `os.exit` sends `terminated` from a `before_exit` hook.
 
+Cost: `dap` adds 133.6 KiB to the release `orbit` (2,268,384 → 2,405,216 bytes, cloud x86_64, no PGO), of which the engine is 12.3 KiB and `orbit-dap` the rest; `serde_json` is already linked for `std.json`.
+
 Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Attaching to a running process (sockets, D11) and the VS Code extension (D7) come next.
 
 ## Error-message parity
