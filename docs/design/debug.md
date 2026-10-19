@@ -221,9 +221,9 @@ Cost, measured on the cloud x86_64 container without PGO: the feature on and not
 - **`Config::debugger(Debugger::Disabled)`** refuses a debugger for the isolate's whole life (`Vm::disable_debugger`, so the engine enforces it however it is reached): `set_debug_events` fails, breakpoints never resolve and pausing does nothing (D5).
 - **Shared layout**: `IsolateAbi::set_debug_events` and `pause_handle`, `ControlAbi::set_breakpoints`, `set_error_break` and `stop_on_next_line` (on `Control`, so they work both from the host and from inside a stop), the `DebugEventsAbi` callback trait a program implements, `PauseAbi`, and `ConfigAbi::debugger`. A stop hands the program the reporting native's window, with the error in slot 1, so `Paused` is the same code on both backends. A `liborbit` built without its `debugger` feature refuses `set_debug_events`.
 
-### DAP server and `orbit --dap`
+### DAP server and `orbit --debug-server`
 
-`orbit-dap` is the Debug Adapter Protocol server (D4, D5), on the public API only (`orbit::debugger`), so it builds over either backend. `orbit --dap` (CLI feature `dap`, on by default; `build.sh` turns on `orbit-lib/debugger` and `dap` for the shared layout) speaks it over standard input and output: the editor's `launch` request names the script, its arguments and working directory, and the script runs as `orbit <script> <args>` would, with its output and `orbit`'s error reports sent as `output` events.
+`orbit-dap` is the Debug Adapter Protocol server (D4, D5), on the public API only (`orbit::debugger`), so it builds over either backend. `orbit --debug-server` (CLI feature `dap`, on by default; `build.sh` turns on `orbit-lib/debugger` and `dap` for the shared layout) speaks it over standard input and output: the editor's `launch` request names the script, its arguments and working directory, and the script runs as `orbit <script> <args>` would, with its output and `orbit`'s error reports sent as `output` events.
 
 ```mermaid
 sequenceDiagram
@@ -244,7 +244,7 @@ sequenceDiagram
 ```
 
 - **Two threads.** A reader thread takes the editor's messages and answers `threads` and `pause` itself. Anything else is queued for the isolate's thread; while the script runs, the reader pauses it through `PauseHandle` to get it answered (a *service* stop, which the editor never sees as `stopped`), and `disconnect` or `terminate` interrupts it.
-- **One DAP thread per isolate** (D10), id 1 for `orbit --dap`; coroutines show in its call stack.
+- **One DAP thread per isolate** (D10), id 1 for `orbit --debug-server`; coroutines show in its call stack.
 - **Breakpoints** match a chunk by the names a script can be loaded under (`@/abs/path`, `@rel`, `@./rel`, relative to the launch directory) and are reported unverified until their chunk loads, then `breakpoint` changed events say where they landed.
 - **Exception filters**: `uncaught` (errors no `pcall` catches; the CLI's own handler does not count) and `all`.
 - **Frame names** come from the call site, as `debug.getinfo` gives them, or else from the name the function was defined with (`FrameInfo::defined_name`, from the prototype), so a tail-called function still has one.

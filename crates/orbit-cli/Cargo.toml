@@ -58,7 +58,7 @@ repl = []
 line-editing = ["repl"]
 # The debugger engine (ADR-12), without a way in yet.
 debugger = ["orbit/debugger"]
-# `orbit --dap`: run a script under an editor's debugger (ADR-12).
+# `orbit --debug-server`: run a script under an editor's debugger (ADR-12).
 dap = ["debugger", "dep:orbit-dap"]
 
 [lints]

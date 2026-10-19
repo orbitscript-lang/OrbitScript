@@ -20,7 +20,7 @@ flowchart LR
     ext -- "LSP, stdio" --> lsp["orbit-lsp<br/>Rust host + OrbitScript layer"]
     lsp --> check["orbit-check (library)"]
     lsp --> syn["front ends<br/>recovery + trivia"]
-    ext -- "DAP, stdio" --> cli["orbit --dap<br/>orbit --dap-attach &lt;pid&gt;"]
+    ext -- "DAP, stdio" --> cli["orbit --debug-server<br/>orbit --dap-attach &lt;pid&gt;"]
     cli -- "DAP, Unix socket" --> dap["orbit-dap<br/>(in the program or liborbit)"]
     dap --> api["orbit API<br/>Isolate debugger"]
     api --> eng["debug engine<br/>orbit-runtime, feature debugger"]
@@ -55,7 +55,7 @@ flowchart LR
 ### The DAP server and who turns it on
 
 - **`orbit-dap`** is a crate on the public `orbit` API and `serde_json`, with its own I/O (stdio and local sockets). It builds over either backend, like `orbit-std`.
-- **Launch**: `orbit --dap` speaks DAP on stdio and runs the program from the `launch` request in-process. The CLI links `orbit-dap` behind a `dap` feature, on by default.
+- **Launch**: `orbit --debug-server` speaks DAP on stdio and runs the program from the `launch` request in-process. The CLI links `orbit-dap` behind a `dap` feature, on by default.
 - **`liborbit` carries `orbit-dap` too** (D5), behind an `orbit-lib` feature that `build.sh` turns on, so C hosts can be debugged: `orbit_debug_listen(lua_State *L, const char *addr)` for hosts that add a debug option, and `ORBIT_DEBUG=1`, read when a state is created through the C API, for unmodified hosts. Rust programs call `orbit_dap::serve`. Without the feature both C functions still exist, and listening fails.
 - **Suppressed per isolate, at creation only** (D5). Rust: `Config::debugger` on `Runtime::new_isolate`, `Debugger::Allowed` (default), `Debugger::Disabled`, or `Debugger::FromEnv` (only isolates with this read `ORBIT_DEBUG`). C: `orbit_newstate(lua_Alloc f, void *ud, unsigned flags)` with `ORBIT_STATE_NO_DEBUGGER`, exported in the `ORBIT_0` symbol version; `lua_newstate` and `luaL_newstate` behave as `orbit_newstate` with no flags. A disabled isolate has no engine state. There is no process-wide switch and no way to disable it later.
 - **The host decides when the server starts** (D11). The library never opens a socket on its own. The start functions are safe to call from any thread at any time.
@@ -80,11 +80,11 @@ flowchart LR
 
 ### Editor
 
-- **A VS Code extension in this repository**, `editors/vscode` (D7), self-contained so it can move to its own repository later. It starts `orbit-lsp`, `orbit --dap` and `orbit --dap-attach`, and fills its process picker from `orbit --dap-attach --list`.
+- **A VS Code extension in this repository**, `editors/vscode` (D7), self-contained so it can move to its own repository later. It starts `orbit-lsp`, `orbit --debug-server` and `orbit --dap-attach`, and fills its process picker from `orbit --dap-attach --list`.
 
 ### Order
 
-The language server and the debugger are built in parallel (D8). The language server starts with parser recovery and trivia (owned by the front-end threads), then diagnostics and outline, then the checker-backed tiers. The debugger starts with the engine and the `Isolate` API, then `orbit --dap`, then attach.
+The language server and the debugger are built in parallel (D8). The language server starts with parser recovery and trivia (owned by the front-end threads), then diagnostics and outline, then the checker-backed tiers. The debugger starts with the engine and the `Isolate` API, then `orbit --debug-server`, then attach.
 
 ## Not planned
 

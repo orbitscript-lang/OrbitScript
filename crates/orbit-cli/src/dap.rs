@@ -1,4 +1,4 @@
-//! `orbit --dap`: run a script under an editor's debugger, speaking the
+//! `orbit --debug-server`: run a script under an editor's debugger, speaking the
 //! Debug Adapter Protocol over standard input and output (ADR-12).
 //!
 //! The editor's `launch` request names the script and its arguments; the

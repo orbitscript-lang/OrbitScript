@@ -1,4 +1,4 @@
-//! `orbit --dap` end to end: a scripted editor drives the binary over its
+//! `orbit --debug-server` end to end: a scripted editor drives the binary over its
 //! standard input and output. `orbit-dap`'s own tests cover the protocol;
 //! these check what the command line adds (arguments, error reports,
 //! `os.exit`, the script's output).
@@ -22,7 +22,7 @@ struct Editor {
 impl Editor {
     fn launch(program: &Path, extra: Value) -> Editor {
         let mut child = Command::new(env!("CARGO_BIN_EXE_orbit"))
-            .arg("--dap")
+            .arg("--debug-server")
             .env_remove("LUA_INIT")
             .env_remove("LUA_INIT_5_5")
             .stdin(Stdio::piped())

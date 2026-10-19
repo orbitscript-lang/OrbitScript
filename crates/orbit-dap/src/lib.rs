@@ -1,5 +1,5 @@
 //! A Debug Adapter Protocol server for OrbitScript and Lua (ADR-12): what
-//! `orbit --dap` speaks to an editor over standard input and output.
+//! `orbit --debug-server` speaks to an editor over standard input and output.
 //!
 //! It runs on the public `orbit` API only ([`orbit::debugger`]), so it
 //! builds over either backend. The program runs on the host's thread in

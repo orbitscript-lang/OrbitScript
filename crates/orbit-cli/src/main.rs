@@ -205,7 +205,7 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          -         stop handling options and execute stdin\n"
     );
     #[cfg(feature = "dap")]
-    eprintln!("  --dap     (alone) run the script an editor's debugger launches, over stdio");
+    eprintln!("  --debug-server  (alone) run the script an editor's debugger launches, over stdio");
     ExitCode::FAILURE
 }
 
@@ -213,7 +213,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().cloned().unwrap_or_else(|| "orbit".into());
     #[cfg(feature = "dap")]
-    if args.get(1).is_some_and(|a| a == "--dap") {
+    if args.get(1).is_some_and(|a| a == "--debug-server") {
         return dap::main(&prog);
     }
     let cli = match parse(&args) {
@@ -279,7 +279,7 @@ type Report = Box<dyn Fn(&str)>;
 struct Runner {
     iso: Isolate,
     prog: String,
-    /// Where messages go instead of stderr (`--dap`: the editor).
+    /// Where messages go instead of stderr (`--debug-server`: the editor).
     report_to: Option<Report>,
     #[cfg(feature = "repl")]
     #[cfg_attr(not(feature = "line-editing"), allow(dead_code))]
