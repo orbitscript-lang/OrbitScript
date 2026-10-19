@@ -18,6 +18,8 @@
 mod base;
 #[cfg(feature = "io")]
 mod io;
+#[cfg(feature = "json")]
+mod json;
 #[cfg(feature = "os")]
 mod os;
 mod package;
@@ -43,6 +45,9 @@ pub struct Options {
     pub io: bool,
     /// The `os` library (feature `os`).
     pub os: bool,
+    /// The `orbit.json` module (feature `json`), reached through `require`
+    /// only.
+    pub json: bool,
     /// Ignore environment variables (`LUA_PATH`, `LUA_CPATH` and their
     /// versioned forms), as `lua -E` does.
     pub ignore_env: bool,
@@ -54,6 +59,7 @@ impl Default for Options {
             base: true,
             io: cfg!(feature = "io"),
             os: cfg!(feature = "os"),
+            json: cfg!(feature = "json"),
             ignore_env: false,
         }
     }
@@ -78,8 +84,42 @@ pub fn install(iso: &mut Isolate, options: &Options) -> Result<(), Error> {
             let t = open_os(s)?;
             publish(s, "os", t)?;
         }
-        Ok(())
-    })
+        Ok::<(), Error>(())
+    })?;
+    #[cfg(feature = "json")]
+    if options.json {
+        let r = iso.stack(|s| {
+            open_json(s)?;
+            set_loaded(s, b"orbit.json")
+        });
+        // Only running out of memory under a heap limit can fail, and a new
+        // isolate's limit leaves room for one small library.
+        debug_assert!(r.is_ok(), "installing orbit.json raised {r:?}");
+    }
+    Ok(())
+}
+
+/// Push the `orbit.json` module's table: `encode`, `decode`, `null`,
+/// `object` and `array`. [`install`] makes it what `require "orbit.json"`
+/// returns.
+#[cfg(feature = "json")]
+pub fn open_json(s: &mut orbit::stack::Stack<'_>) -> orbit::stack::StackResult<()> {
+    json::open(s)
+}
+
+/// `package.loaded[name] =` the value on top, popped.
+#[cfg(feature = "json")]
+fn set_loaded(s: &mut orbit::stack::Stack<'_>, name: &[u8]) -> orbit::stack::StackResult<()> {
+    use orbit::stack::{REGISTRY_INDEX, Type};
+    if s.raw_get_field(REGISTRY_INDEX, b"_LOADED")? != Type::Table {
+        s.set_top(-2)?;
+        s.create_table(0, 1);
+        s.push_copy(-1);
+        s.raw_set_field(REGISTRY_INDEX, b"_LOADED")?;
+    }
+    s.rotate(-2, 1)?;
+    s.raw_set_field(-2, name)?;
+    s.set_top(-2)
 }
 
 /// Make `lib` the global `name` and what `require(name)` returns.

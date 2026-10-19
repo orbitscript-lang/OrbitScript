@@ -11,6 +11,8 @@ publish = false
 [dependencies]
 orbit = { path = "../orbit", default-features = false }
 orbit-ffi = { path = "../orbit-ffi", optional = true }
+serde = { version = "1", default-features = false, features = ["std"], optional = true }
+serde_json = { version = "1", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 orbit = { path = "../orbit" }
@@ -24,6 +26,9 @@ os = []
 # The `ffi` library: calling C functions in shared libraries (off by
 # default for embedders; a host still opts in with `install_ffi`).
 ffi = ["dep:orbit-ffi"]
+# The `orbit.json` module: JSON encoding and decoding over `serde_json`
+# (ADR-12, D13).
+json = ["dep:serde", "dep:serde_json"]
 # With `ffi`: link the system's shared libffi rather than a static copy built
 # from bundled sources.
 ffi-system-libffi = ["ffi", "orbit-ffi/system-libffi"]
