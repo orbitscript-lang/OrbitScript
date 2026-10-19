@@ -7,7 +7,7 @@ pub fn create(f: function) -> thread;
 /// Whether `co` (default the running coroutine) can yield.
 pub fn isyieldable(co: thread?) -> bool;
 /// Starts or continues `co`: `true` and what it yields or returns, or `false` and the error.
-pub fn resume(co: thread, ...args: any);
+pub fn resume(co: thread, ...args: any) -> (bool, ...any);
 /// The running coroutine, and whether it is the main one.
 pub fn running() -> (thread, bool);
 /// `"running"`, `"suspended"`, `"normal"` or `"dead"`.
@@ -16,4 +16,4 @@ pub fn status(co: thread) -> string;
 pub fn wrap(f: function) -> function;
 /// Suspends the running coroutine; `resume` returns `values`, and this returns what the next
 /// `resume` passes.
-pub fn r#yield(...values: any);
+pub fn r#yield(...values: any) -> ...any;

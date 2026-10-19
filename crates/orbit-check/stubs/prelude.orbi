@@ -3,8 +3,9 @@
 // `error`. Bundled with orbit-check; tests/stubs.rs checks them against the runtime and the
 // front end's own list.
 //
-// A body-less function with no `->` has results the checker doesn't know: each is `any`. That
-// is how stubs write functions whose result count depends on the arguments (`pcall`, `select`).
+// A body-less function with no `->` has results the checker doesn't know: each is `any`.
+// Functions whose result count depends on the arguments say what they can of it with `...T`:
+// `pcall` gives `(bool, ...any)`, `string.byte` gives `...int`.
 
 use coroutine;
 use debug;
@@ -23,7 +24,7 @@ pub fn assert<T>(v: T?, message: any?) -> T;
 pub fn collectgarbage(option: string?, ...args: any) -> any;
 /// Runs the Lua or OrbitScript file `filename` (standard input with none) and returns its
 /// results.
-pub fn dofile(filename: string?);
+pub fn dofile(filename: string?) -> ...any;
 /// Raises `message` as an error; `level` says which caller to blame.
 pub fn error(message: any, level: int?);
 /// `error` under OrbitScript's name for it.
@@ -41,7 +42,7 @@ pub fn next<K, V>(t: #{[K]: V} | table, index: K?) -> (K?, V);
 /// Iterates over every key and value of `t`: `for (k, v) in pairs(t)`.
 pub fn pairs<K, V>(t: #{[K]: V} | table) -> (fn(#{[K]: V}, K?) -> (K?, V), #{[K]: V}, nil);
 /// Calls `f` in protected mode: `true` and its results, or `false` and the error.
-pub fn pcall(f: any, ...args: any);
+pub fn pcall(f: any, ...args: any) -> (bool, ...any);
 /// Writes its arguments to standard output with `tostring`, separated by tabs.
 pub fn print(...args: any) -> ();
 /// Whether `a` and `b` are the same value, without calling `__eq`.
@@ -57,7 +58,7 @@ pub fn require(name: string) -> (any, any);
 /// With `"#"`: how many arguments follow.
 pub fn select(n: string, ...args: any) -> int;
 /// The arguments after the `n`th (counting from the end when negative).
-pub fn select(n: int, ...args: any);
+pub fn select(n: int, ...args: any) -> ...any;
 /// Sets the metatable of the table `t` (removes it with `nil`); returns `t`.
 pub fn setmetatable<T>(t: T, metatable: table?) -> T;
 /// `v` as a number, or `nil` when it isn't one.
@@ -71,7 +72,7 @@ pub fn r#type(v: any) -> string;
 /// Emits a warning made of its arguments; `"@on"` and `"@off"` switch warnings.
 pub fn warn(message: string, ...rest: string) -> ();
 /// `pcall` with a message handler for the error.
-pub fn xpcall(f: any, handler: any, ...args: any);
+pub fn xpcall(f: any, handler: any, ...args: any) -> (bool, ...any);
 
 /// The global environment.
 pub const _G: table;
