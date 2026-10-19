@@ -57,6 +57,7 @@ fn ty(strings: &StringPool, t: &Type) -> String {
                 None => format!("(fn ({ps}))"),
             }
         }
+        TypeKind::Rest(t) => format!("...{}", ty(strings, t)),
         TypeKind::Error => "error".into(),
     }
 }
@@ -124,6 +125,17 @@ fn type_trees() {
         ("type Pair<T> = (T, T);", "(tuple T T)"),
         ("type Id = int | string;", "(| int string)"),
         ("let x = y as int?;", "(? int)"),
+        ("let x: fn() -> ...any;", "(fn () ...any)"),
+        (
+            "let x: fn(int) -> (bool, ...any);",
+            "(fn (int) (tuple bool ...any))",
+        ),
+        ("let x: fn() -> (...string);", "(fn () ...string)"),
+        (
+            "let x: fn() -> (int, ...int?,);",
+            "(fn () (tuple int ...(? int)))",
+        ),
+        ("let x: fn() -> ...(int | nil);", "(fn () ...(| int nil))"),
     ] {
         assert_eq!(parse_type(src), expected, "{src}");
     }
@@ -294,4 +306,33 @@ fn type_only_syntax_runs_unchanged() {
                 let n = (3 as number) * 2 as int + type;
                 fn kind(v) { type(v) }";
     to_hir("t.orb", src, &ParseOptions::default()).unwrap();
+}
+
+#[test]
+fn variadic_results() {
+    // On `fn` items and closures, and nowhere but the end of a result.
+    let ast = parse_with(
+        "t.orb",
+        b"fn f() -> (bool, ...any) { (true, 1) } let g = |x| -> ...int { x };",
+        &ParseOptions {
+            type_trees: true,
+            ..ParseOptions::default()
+        },
+    );
+    if let Err(d) = ast {
+        panic!("{}", d.to_message("t.orb"));
+    }
+    let opts = ParseOptions {
+        type_trees: true,
+        ..ParseOptions::default()
+    };
+    for src in [
+        "let x: (int, ...int);",
+        "let x: fn(...int, int);",
+        "let x: fn() -> (...int, int);",
+        "let x: fn() -> [...int];",
+        "fn f(x: ...int) {}",
+    ] {
+        assert!(parse_with("t.orb", src.as_bytes(), &opts).is_err(), "{src}");
+    }
 }

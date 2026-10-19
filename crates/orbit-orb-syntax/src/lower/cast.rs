@@ -366,6 +366,10 @@ fn write_type(lx: &Lowerer, ty: &ast::Type, s: &mut String) {
                 write_type(lx, r, s);
             }
         }
+        TypeKind::Rest(t) => {
+            s.push_str("...");
+            write_type(lx, t, s);
+        }
         TypeKind::Error => s.push('?'),
     }
 }

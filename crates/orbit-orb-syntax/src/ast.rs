@@ -92,6 +92,9 @@ pub enum TypeKind {
         rest: Option<Type>,
         ret: Option<Type>,
     },
+    /// `...T`: any number of results of type `T`. Only a whole result (`-> ...T`) or the last
+    /// item of a result tuple (`-> (bool, ...any)`).
+    Rest(Type),
     /// A type that failed to parse, in a recovering parse (reserved; never built yet).
     Error,
 }

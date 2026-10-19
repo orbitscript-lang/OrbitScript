@@ -825,7 +825,7 @@ impl<'a> Resolver<'a> {
                     self.m.refs.push((t.span, id));
                 }
             }
-            TypeKind::Optional(t) | TypeKind::Array(t) => self.ty(t),
+            TypeKind::Optional(t) | TypeKind::Array(t) | TypeKind::Rest(t) => self.ty(t),
             TypeKind::Union(ts) | TypeKind::Tuple(ts) => {
                 for t in ts {
                     self.ty(t);
