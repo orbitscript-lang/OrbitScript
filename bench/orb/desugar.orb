@@ -138,7 +138,7 @@ fn loops(n) {
     for i in (0..n).rev() { acc -= i; }
     for i in (0..=n).step_by(3) { acc += i; }
     for (k, v) in ipairs([10, 20, 30]) { acc += k * v; }
-    for (k, v) in pairs(#{ a: 1 }) { acc += v; }
+    for (_k, v) in pairs(#{ a: 1 }) { acc += v; }
     let mut w = 0;
     while w < n { w += 1; if w % 2 == 0 { continue; } acc += 1; }
     'outer: for a in 1..=4 {
