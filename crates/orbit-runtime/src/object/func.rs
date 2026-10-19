@@ -78,6 +78,9 @@ pub struct ProtoCode {
     /// in bit 0 (0 when never checked).
     #[cfg(feature = "debugger")]
     pub debug_mark: StdCell<u32>,
+    /// Compiled code, once the prototype is hot (`jit` feature).
+    #[cfg(feature = "jit")]
+    pub jit: crate::vm::JitSlot,
 }
 
 impl ProtoCode {
@@ -118,6 +121,8 @@ impl ProtoCode {
             refuses_yield: self.refuses_yield,
             #[cfg(feature = "debugger")]
             debug_mark: StdCell::new(0),
+            #[cfg(feature = "jit")]
+            jit: Default::default(),
         }
     }
 }

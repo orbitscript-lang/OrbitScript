@@ -54,6 +54,9 @@ debug = ["hooks"]
 # Per-instruction type-feedback bytes on prototypes, for a future JIT
 # (docs/design/vm.md, "Type feedback").
 type-feedback = []
+# Compile hot functions to machine code through a backend the host
+# installs (`Runtime::jit`); a prototype (planning/jit/).
+jit = []
 # Debug hooks (`debug.sethook`): a second, hooked copy of the dispatch loop.
 hooks = []
 # The debugger engine (ADR-12): breakpoints, stepping, pause and stops on

@@ -1,0 +1,27 @@
+[package]
+name = "orbit-jit"
+description = "A JIT backend for OrbitScript built on Cranelift (prototype)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+cranelift-codegen = { version = "0.134.4", default-features = false, features = ["std", "host-arch"], optional = true }
+cranelift-frontend = { version = "0.134.4", optional = true }
+cranelift-jit = { version = "0.134.4", optional = true }
+cranelift-module = { version = "0.134.4", optional = true }
+cranelift-native = { version = "0.134.4", optional = true }
+dynasm = { version = "5.1.0", optional = true }
+dynasmrt = { version = "5.1.0", optional = true }
+orbit-runtime = { path = "../orbit-runtime", default-features = false, features = ["jit"] }
+
+
+[features]
+default = ["cranelift"]
+# The Cranelift backend.
+cranelift = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-native"]
+# The template backend: x86-64 machine code from templates, through dynasm.
+template = ["dep:dynasm", "dep:dynasmrt"]

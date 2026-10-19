@@ -50,6 +50,9 @@ ffi-system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
 repl = []
 # Line editing, history and Tab completion in interactive mode.
 line-editing = ["repl"]
+# Compile hot functions with Cranelift (a prototype, planning/jit/).
+jit = ["orbit/jit"]
+jit-template = ["orbit/jit-template"]
 # The debugger engine (ADR-12). Nothing uses it yet: `orbit --dap` will.
 debugger = ["orbit/debugger"]
 

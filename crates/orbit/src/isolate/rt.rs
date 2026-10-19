@@ -328,8 +328,33 @@ fn exit_now(ctx: &mut NativeCtx<'_>, code: i32) -> ! {
 
 /// Make `vm` one the API can reach (scopes, handles, host functions), with
 /// both front ends as `load`'s compilers.
+#[cfg(any(feature = "jit", feature = "jit-template"))]
+fn jit_backend() -> Option<Box<dyn orbit_runtime::vm::JitBackend>> {
+    #[cfg(all(feature = "jit-template", target_arch = "x86_64"))]
+    if !cfg!(feature = "jit")
+        || std::env::var_os("ORBIT_JIT_BACKEND").is_some_and(|v| v == "template")
+    {
+        return orbit_jit::Template::new().map(|b| Box::new(b) as _);
+    }
+    #[cfg(feature = "jit")]
+    return orbit_jit::Cranelift::new().map(|b| Box::new(b) as _);
+    #[allow(unreachable_code)]
+    None
+}
+
 pub(crate) fn adopt(vm: &mut Vm) {
     vm.rt.ext.get_or_insert_with(|| Rc::new(Shared::default()));
     vm.rt.compile = Some(compiler::compile_lua);
     vm.rt.compile_orbitscript = Some(compiler::compile_orb);
+    #[cfg(any(feature = "jit", feature = "jit-template"))]
+    if vm.rt.jit.backend.is_none() && std::env::var_os("ORBIT_JIT").is_none_or(|v| v != "0") {
+        vm.rt.jit.backend = jit_backend();
+        if let Some(t) = std::env::var("ORBIT_JIT_THRESHOLD")
+            .ok()
+            .and_then(|t| t.parse().ok())
+        {
+            vm.rt.jit.threshold = t;
+        }
+        vm.rt.jit.trace = std::env::var_os("ORBIT_JIT_TRACE").is_some();
+    }
 }

@@ -1216,6 +1216,8 @@ fn stub_proto(id: NativeId) -> Proto {
             refuses_yield: false,
             #[cfg(feature = "debugger")]
             debug_mark: Default::default(),
+            #[cfg(feature = "jit")]
+            jit: Default::default(),
         }),
         children: Box::new([]),
         captures: Box::new([]),

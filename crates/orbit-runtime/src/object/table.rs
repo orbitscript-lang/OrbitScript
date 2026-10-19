@@ -1327,6 +1327,34 @@ pub enum IntStore {
     Slow,
 }
 
+/// `t[i] = v` when `i` is in the array part and no metatable can see the
+/// store: the case compiled code inlines (`jit` feature). Returns false,
+/// having stored nothing, for every other case.
+#[cfg(feature = "jit")]
+#[inline]
+pub fn store_array(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> bool {
+    let idx = (i as u64).wrapping_sub(1);
+    let tab = heap.get(t);
+    if idx >= tab.array.len() as u64
+        || (tab.meta.is_some() && tab.array.tag(idx as usize) == Tag::Nil)
+    {
+        return false;
+    }
+    if !matches!(
+        v,
+        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+    ) {
+        heap.barrier_back(t);
+    }
+    let tab = heap.get_mut(t);
+    if v.is_nil() {
+        tab.array.set_nil_hinted(idx as usize);
+    } else {
+        tab.array.set(idx as usize, v);
+    }
+    true
+}
+
 /// `t[i] = v` for the interpreter: like [`set_int`], but leaves the store
 /// to the caller when a metatable could intercept it (the key is absent).
 #[inline(always)]

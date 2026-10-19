@@ -21,6 +21,9 @@ use crate::vm::{Catch, Frame, FrameKind, LuaError, Vm};
 /// them.
 const MAX_CALL_CHAIN: usize = 15;
 
+#[cfg(feature = "jit")]
+pub(crate) mod jit;
+
 /// Registers a frame can address: register numbers are `u8`.
 const WINDOW: usize = 256;
 
@@ -1158,6 +1161,22 @@ impl Vm {
                     by_parts!($src, |v| table::store_int(&mut self.heap, $t, $i, v))
                 };
             }
+            // Hand the frame to its compiled code, if it has some (or is
+            // hot enough to get some): at a call's entry, a return's
+            // landing and a backward jump's target.
+            macro_rules! jit_try {
+                () => {
+                    #[cfg(feature = "jit")]
+                    if !HOOKED && let Some(f) = self.rt.jit.entry(&cur) {
+                        self.rt.stack.frames[depth - 1].pc = pc as u32;
+                        match self.jit_run(f) {
+                            None => continue 'reload,
+                            Some(Ok(r)) => return Ok(r),
+                            Some(Err(e)) => return Err(e),
+                        }
+                    }
+                };
+            }
             macro_rules! jump {
                 ($off:expr) => {{
                     pc = (pc as isize + $off as isize) as usize;
@@ -1172,6 +1191,10 @@ impl Vm {
                         self.rt.hooks_touched = true;
                         self.rt.stack.hook.mask |= crate::vm::hook::INTERRUPT;
                         return Ok(Ran::Switch);
+                    }
+                    #[cfg(feature = "jit")]
+                    if $off < 0 {
+                        jit_try!();
                     }
                 }};
             }
@@ -1360,6 +1383,7 @@ impl Vm {
                             pc = 0;
                             switch_code!(c, shape.code_id);
                             w = window!();
+                            jit_try!();
                         }
                         // A native's fast path, when it has one and takes
                         // these arguments: no window, no frame.
@@ -1503,6 +1527,7 @@ impl Vm {
                         closure = c;
                         switch_code!(c, code_id);
                         w = window!();
+                        jit_try!();
                         continue;
                     }
                     flow!(self.do_return(src, n))
@@ -2239,6 +2264,7 @@ impl Vm {
                             closure = c;
                             switch_code!(c, code_id);
                             w = window!();
+                            jit_try!();
                             continue;
                         }
                         lua_return!(base + src as usize, 1)

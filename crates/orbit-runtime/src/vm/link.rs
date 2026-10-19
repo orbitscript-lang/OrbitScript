@@ -153,6 +153,8 @@ pub(crate) fn link(
                     refuses_yield: builtin,
                     #[cfg(feature = "debugger")]
                     debug_mark: Default::default(),
+                    #[cfg(feature = "jit")]
+                    jit: Default::default(),
                 }),
                 children,
                 captures: u.captures.as_slice().into(),

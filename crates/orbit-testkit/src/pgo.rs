@@ -467,6 +467,9 @@ fn build_shared(root: &Path, out: &Path, flag: &str) -> Result<()> {
 fn cargo_build(root: &Path, profile: &str, extra: &[&str]) -> Result<()> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let flags = rustflags_with(extra);
+    // Spike experiments (planning/jit/): extra `orbit-cli` features for the
+    // static build, e.g. `ORBIT_PGO_FEATURES=jit`.
+    let features = std::env::var("ORBIT_PGO_FEATURES").unwrap_or_default();
     let status = Command::new(&cargo)
         .args([
             "build",
@@ -476,6 +479,8 @@ fn cargo_build(root: &Path, profile: &str, extra: &[&str]) -> Result<()> {
             "orbit-cli",
             "--bin",
             "orbit",
+            "--features",
+            &features,
         ])
         .current_dir(root)
         .env_remove("RUSTFLAGS")

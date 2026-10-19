@@ -34,6 +34,11 @@ use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::{CoStatus, WindowSave};
 pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
+#[cfg(feature = "jit")]
+pub use interp::jit::{
+    DEFER, EXIT, HELPERS, HelperFn, Helpers, JitBackend, JitCtx, JitFn, JitSlot, JitState,
+    NO_VALUE, Parts, RET, TAIL, TAKEN, const_parts, exit_at,
+};
 pub use meta::MetaField;
 pub use native::{
     CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn, Operator, ResumeOk,
@@ -581,6 +586,9 @@ pub struct Runtime {
     /// Breakpoints, steps and the host's debug events.
     #[cfg(feature = "debugger")]
     pub(crate) debug: debugger::Debugger,
+    /// The JIT backend and its state (`jit` feature).
+    #[cfg(feature = "jit")]
+    pub jit: JitState,
 }
 
 /// A handle that interrupts a [`Vm`] from another thread (a CLI's Ctrl-C
@@ -800,6 +808,8 @@ impl Vm {
                 interrupt: Default::default(),
                 #[cfg(feature = "debugger")]
                 debug: Default::default(),
+                #[cfg(feature = "jit")]
+                jit: JitState::default(),
             },
         }
     }

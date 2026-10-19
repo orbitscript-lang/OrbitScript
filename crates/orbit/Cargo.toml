@@ -17,6 +17,7 @@ orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 # The liborbit boundary (ADR-10): declared with it under `abi`, crossed with
 # it under `shared`.
 stabby = { version = "72.1.16", optional = true }
+orbit-jit = { path = "../orbit-jit", optional = true, default-features = false }
 
 [dev-dependencies]
 # The verifier tests and the chunk fuzzer measure layer 2 directly.
@@ -46,6 +47,13 @@ verify = ["orbit-runtime/verify"]
 verify-flow = ["orbit-runtime/verify-flow"]
 # The debugger engine (ADR-12), for the runtime backend.
 debugger = ["orbit-runtime/debugger"]
+# Compile hot functions with Cranelift (a prototype, planning/jit/).
+# `ORBIT_JIT=0` turns it off at run time; `ORBIT_JIT_THRESHOLD` sets how many
+# calls and loop iterations make a function hot.
+jit = ["orbit-runtime/jit", "dep:orbit-jit", "orbit-jit/cranelift"]
+# The same with a small x86-64 template backend instead (dynasm). With both
+# features, `ORBIT_JIT_BACKEND=template` picks it.
+jit-template = ["orbit-runtime/jit", "dep:orbit-jit", "orbit-jit/template"]
 
 [lints]
 workspace = true
