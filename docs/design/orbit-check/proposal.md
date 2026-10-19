@@ -1,6 +1,6 @@
 # `orbit-check`: OrbitScript's optional type checker
 
-Status: **All questions decided** (Tym, 2026-10-18). Implementation started in `crates/orbit-check`; the library API is in [api.md](api.md). Answers are in [Questions](#questions-for-tym).
+Status: **All questions decided** (Tym, 2026-10-18). Implementation started in `crates/orbit-check` (names: PR #181; types: branch `check/types`); the library API is in [api.md](api.md). Answers are in [Questions](#questions-for-tym).
 
 Decided (Tym, 2026-10-18 22:13Z): **T4** no implicit `int` to `float`; `number` is `int | float`, and code that wants one representation narrows to it. **T5** union types `A | B`, yes. **T8** no built-in `Result`: Lua-style results are written `(T?, E?)`, keeping the name free for a user enum and for enum-based results later. **T2** (22:25Z) option B: the shared parser builds type trees behind a `ParseOptions` flag; one parser only, optimize later if the cost shows up. **Everything else** (22:26Z): as recommended, including the two assumptions at the end of the questions table.
 
@@ -178,15 +178,15 @@ Field-path narrowing survives calls (TypeScript's trade-off): unsound in theory,
 use geometry::{Vec2, longest};
 
 let v = Vec2::new(3, "4");
-//                   ^^^ error[T0101]: argument 2 of `Vec2::new` expects `float`, found `string`
+//                   ^^^ error[T0201]: argument 2 of `Vec2::new` expects `float`, found `string`
 
 let p = longest(points);          // first result: Vec2?
 print(p.len());
-//    ^ error[T0301]: `p` may be nil (type `Vec2?`); check it with `if p != nil` or use `?`
+//    ^ error[T0207]: `p` may be nil (type `Vec2?`); check it with `!= nil` first, or use `?`
 
 fn area(s: Shape) -> float {
     match s {
-//  ^^^^^ error[T0401]: match is not exhaustive: `Shape::Empty` not covered
+//  ^^^^^ error[T0401]: `match` doesn't cover `Shape::Empty`; add an arm for it or `_`
         Shape::Circle { r } => math::pi * r * r,
         Shape::Rect { w, h } => w * h,
     }
@@ -221,15 +221,15 @@ pub fn lines(path: string?, ...formats: string | int) -> fn() -> string?;
 
 ```text
 $ orbit-check src/
-src/app.orb:12:20: error[T0101]: argument 2 of `Vec2::new` expects `float`, found `string`
-src/app.orb:15:7: error[T0301]: `p` may be nil (type `Vec2?`)
-src/shapes.orb:8:5: warning[T0502]: condition has type `int`, which is always true
+src/app.orb:12:20: error[T0201]: argument 2 of `Vec2::new` expects `float`, found `string`
+src/app.orb:15:7: error[T0207]: `p` may be nil (type `Vec2?`)
+src/shapes.orb:8:5: warning[T0303]: this condition has type `int`, which is always true
 2 errors, 1 warning in 4 files (3 checked, 1 stub)
 ```
 
 - Exit status 1 on errors, 0 otherwise (warnings don't fail unless `--deny-warnings`).
-- Codes are stable (`T0101`), grouped by area, documented in one table, and every message names the expected and found types.
-- **Suppression (T13):** `// orbit-check: ignore` or `// orbit-check: ignore[T0301]` at the end of a line, like mypy's `# type: ignore[code]`. Unused suppressions are a warning in strict mode.
+- Codes are stable (`T0201`), grouped by area, documented in one table ([api.md](api.md#diagnostic-codes)), and every message names the expected and found types.
+- **Suppression (T13):** `// orbit-check: ignore` or `// orbit-check: ignore[T0207]` at the end of a line, like mypy's `# type: ignore[code]`. Unused suppressions are a warning in strict mode.
 - **Strictness (T3, T13):** `--strict` on the command line, or a file pragma `//! orbit-check: strict` (or `off` to skip a file). Strict adds: annotations required on `pub fn` parameters and results, `any` from untyped Lua modules is an error at the point of use, non-`bool` conditions are errors.
 - **Configuration:** command-line flags only in v1 (`--strict`, `--path`, `--stubs`, `--extern`). A config file waits until there is a reason, since a TOML parser is a new dependency.
 - **Lints the earlier proposals assigned to the checker:** `t[0]` on an array and `0..#t` loops that index `t` (indexing report), non-`bool` conditions, and unused locals and imports.
@@ -247,7 +247,7 @@ flowchart LR
     c5["C5 generics, aliases,<br/>records, strict mode, lints"] --> later["Later: language server,<br/>LuaLS comments"]
 ```
 
-- **Tests:** `tests/check/*.orb` files with expected diagnostics written inline (`//~ error[T0101]`), compared exactly; plus "checks clean" runs over `examples/` and the front end's `tests/programs`. A fuzz target feeds parser output to the checker (it must never panic).
+- **Tests:** `tests/check/*.orb` files with expected diagnostics written inline (`//~ T0201`), compared exactly; plus "checks clean" runs over `examples/` and the front end's `tests/programs`. A fuzz target feeds parser output to the checker (it must never panic).
 - **Done for v1:** every `.orb` in the repository checks clean in default mode (adding annotations to the examples where they help), the seeded-error corpus is all caught, and checking `examples/` takes well under 100 ms on the cloud container.
 - **Same rules as the rest of the code:** stable Rust, no `unsafe`, no dependencies, greenfield (designs above are read as published documentation only).
 

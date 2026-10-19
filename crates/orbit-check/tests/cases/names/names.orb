@@ -19,7 +19,7 @@ let len = v.len();
 let z = Vec2::zero(); //~ T0104
 print(undefined_name); //~ T0101
 let p = geo::Vec2 { x: 1.0, y: 2.0 };
-let q = Vec2 { x: 1.0, why: 2.0 }; //~ T0105
+let q = Vec2 { x: 1.0, why: 2.0 }; //~ T0105 T0108
 
 enum Shape {
     Circle { r: float },

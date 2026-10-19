@@ -1,0 +1,52 @@
+// `match` coverage over enums, bool and optional values.
+
+enum Light { Red, Yellow, Green }
+
+fn next(l: Light) -> Light {
+    match l { //~ T0401
+        Light::Red => Light::Green,
+        Light::Green => Light::Yellow,
+    }
+}
+
+fn wild(l: Light) -> int {
+    match l {
+        Light::Red => 1,
+        _ => 2,
+    }
+}
+
+fn guarded(l: Light) -> int {
+    match l { //~ T0401
+        Light::Red if true => 1,
+        Light::Yellow | Light::Green => 2,
+    }
+}
+
+fn flag(b: bool) -> int {
+    match b { //~ T0401
+        true => 1,
+    }
+}
+
+fn opt(x: Light?) -> int {
+    match x { //~ T0401
+        Light::Red => 1,
+        Light::Yellow => 2,
+        Light::Green => 3,
+    }
+}
+
+fn opt_full(x: Light?) -> int {
+    match x {
+        nil => 0,
+        Light::Red | Light::Yellow | Light::Green => 1,
+    }
+}
+
+fn mismatched(x: int) -> int {
+    match x {
+        Light::Red => 1, //~ T0201
+        _ => 0,
+    }
+}

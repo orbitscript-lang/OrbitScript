@@ -1,0 +1,39 @@
+// Arrays, maps, records and type aliases.
+
+type Point3 = #{ x: float, y: float, z: float };
+type Pair<T> = #{ first: T, second: T };
+
+let names: [string] = ["a", "b"];
+let first: string = names[1];
+let bad_names: [string] = ["a", 2]; //~ T0201
+let by_key = names["x"]; //~ T0206
+names[#names] = nil;
+
+let ages: #{[string]: int} = #{ ann: 31, bob: 42 };
+let age: int = ages["ann"];
+let bad_age: #{[string]: int} = #{ ann: "old" }; //~ T0201
+
+let p: Point3 = #{ x: 1.0, y: 2.0, z: 3.0 };
+let px: float = p.x;
+let pw = p.w; //~ T0203
+let missing_z: Point3 = #{ x: 1.0, y: 2.0 }; //~ T0201
+let extra: Point3 = #{ x: 1.0, y: 2.0, z: 3.0, w: 4.0 };
+
+let pair: Pair<int> = #{ first: 1, second: 2 };
+let one: int = pair.first;
+let bad_pair: Pair<int> = #{ first: 1, second: "2" }; //~ T0201
+
+// Literal tables are open: reading a field they don't list is `any`.
+let config = #{ name: "x", size: 3 };
+let size: int = config.size;
+let other = config.other;
+
+// Arrays are invariant: a [int] isn't a [number].
+fn sum(xs: [number]) -> number { 0 }
+let ints = [1, 2, 3];
+let s = sum(ints); //~ T0201
+let direct = sum([1, 2, 3]);
+
+let old_map: #{string: int} = #{}; //~ T0304 T0201
+let cast = (ages as #{[string]: string})["ann"];
+let cast_ok: string = cast;

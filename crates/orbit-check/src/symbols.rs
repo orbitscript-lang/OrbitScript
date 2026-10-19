@@ -41,6 +41,10 @@ pub enum SymbolKind {
     Import,
     /// A global declared with `global` or `extern`.
     Global,
+    /// `type Name = ...;`
+    TypeAlias,
+    /// A generic parameter (`T` in `fn first<T>`).
+    TypeParam,
 }
 
 impl SymbolKind {
@@ -48,7 +52,11 @@ impl SymbolKind {
     pub fn is_item(self) -> bool {
         !matches!(
             self,
-            SymbolKind::Local | SymbolKind::Param | SymbolKind::Module | SymbolKind::Import
+            SymbolKind::Local
+                | SymbolKind::Param
+                | SymbolKind::Module
+                | SymbolKind::Import
+                | SymbolKind::TypeParam
         )
     }
 }
@@ -80,6 +88,20 @@ pub struct DocumentSymbol {
     pub children: Vec<DocumentSymbol>,
 }
 
+/// A call, as signature help needs it.
+#[derive(Clone, Debug)]
+pub(crate) struct CallSite {
+    /// From `(` to the end of the call.
+    pub args: Span,
+    /// Where each argument ends.
+    pub arg_ends: Vec<u32>,
+    /// The called function's type.
+    pub callee: crate::TypeId,
+    pub symbol: Option<SymbolId>,
+    /// `obj.m(...)`: the first parameter is `obj`, not written in the parentheses.
+    pub method: bool,
+}
+
 /// Everything the checker knows about one module after checking it.
 #[derive(Debug, Default)]
 pub(crate) struct Module {
@@ -97,6 +119,22 @@ pub(crate) struct Module {
     pub members: HashMap<u32, HashMap<String, SymbolId>>,
     /// For a struct or variant (by symbol index): its fields.
     pub fields: HashMap<u32, HashMap<String, SymbolId>>,
+    /// For a generic struct, enum, alias or function (by symbol index): its parameters.
+    pub generics: HashMap<u32, Vec<SymbolId>>,
+    /// Each symbol's type, once the checker has computed it (by symbol index).
+    pub sym_types: HashMap<u32, crate::TypeId>,
+    /// The type of each checked expression and name, for hover (sorted by span).
+    pub expr_types: Vec<(Span, crate::TypeId)>,
+    /// Each `.name` (a field or method) with its receiver's type, for member completion.
+    pub members_at: Vec<(Span, crate::TypeId)>,
+    /// Each `base::name` with the symbol `base` names, for completion after `::`.
+    pub paths_at: Vec<(Span, SymbolId)>,
+    /// Each call, for signature help.
+    pub calls: Vec<CallSite>,
+    /// Names bound without an annotation, for inlay hints: where the name ends, and its type.
+    pub hints: Vec<(u32, crate::TypeId)>,
+    /// Each function's parameter names (by symbol index), `self` included.
+    pub param_names: HashMap<u32, Vec<String>>,
     pub diagnostics: Vec<Diagnostic>,
     pub deps: Vec<FileId>,
 }
@@ -111,6 +149,16 @@ impl Module {
             .rev()
             .find(|(s, _)| offset < s.end || (s.start == s.end && s.start == offset))
             .map(|&(_, id)| id)
+    }
+
+    /// The type of the innermost expression or name covering `offset`.
+    pub fn type_at(&self, offset: u32) -> Option<crate::TypeId> {
+        let end = self.expr_types.partition_point(|(s, _)| s.start <= offset);
+        self.expr_types[..end]
+            .iter()
+            .rev()
+            .find(|(s, _)| offset < s.end)
+            .map(|&(_, t)| t)
     }
 
     pub fn outline(&self, file: FileId) -> Vec<DocumentSymbol> {

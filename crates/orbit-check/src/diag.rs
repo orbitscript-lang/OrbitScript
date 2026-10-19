@@ -23,7 +23,8 @@ impl Severity {
 
 /// A stable diagnostic code. Codes never change meaning; retired ones are not reused.
 ///
-/// `T00xx` are syntax and module errors, `T01xx` name resolution. Type errors start at `T02xx`.
+/// `T00xx` are syntax and module errors, `T01xx` names, `T02xx` type errors, `T03xx` warnings
+/// about code that runs but is probably wrong, `T04xx` `match` coverage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Code {
     /// The module doesn't parse.
@@ -40,6 +41,38 @@ pub enum Code {
     NoAssociatedItem,
     /// A struct literal or pattern names a field the struct or variant doesn't declare.
     UnknownField,
+    /// A struct literal leaves out a field.
+    MissingField,
+    /// A type annotation names something that isn't defined.
+    UnknownType,
+    /// A type annotation names a value.
+    NotAType,
+    /// A value of one type where another is expected.
+    Mismatch,
+    /// A call with too many or too few arguments.
+    ArgCount,
+    /// A field or method the value's type doesn't have.
+    NoMember,
+    /// Calling a value that isn't a function.
+    NotCallable,
+    /// `let (a, b) = f()` binding more values than `f` returns.
+    ResultCount,
+    /// An operator on operand types it doesn't accept.
+    BadOperand,
+    /// A possibly-nil value used where nil isn't allowed.
+    MaybeNil,
+    /// `?` in a function whose results can't be `nil, err`.
+    TryResult,
+    /// `==` or `!=` between types that are never equal.
+    AlwaysUnequal,
+    /// A bitwise operator on a float.
+    FloatBitwise,
+    /// A condition whose type is never false.
+    AlwaysTrue,
+    /// A record type field named like a built-in type (`#{string: int}`, the old map spelling).
+    RecordFieldLikeType,
+    /// A `match` that misses cases.
+    NonExhaustive,
 }
 
 impl Code {
@@ -52,6 +85,22 @@ impl Code {
             Code::NoPublicItem => "T0103",
             Code::NoAssociatedItem => "T0104",
             Code::UnknownField => "T0105",
+            Code::UnknownType => "T0106",
+            Code::MissingField => "T0108",
+            Code::NotAType => "T0107",
+            Code::Mismatch => "T0201",
+            Code::ArgCount => "T0202",
+            Code::NoMember => "T0203",
+            Code::NotCallable => "T0204",
+            Code::ResultCount => "T0205",
+            Code::BadOperand => "T0206",
+            Code::MaybeNil => "T0207",
+            Code::TryResult => "T0208",
+            Code::AlwaysUnequal => "T0301",
+            Code::FloatBitwise => "T0302",
+            Code::AlwaysTrue => "T0303",
+            Code::RecordFieldLikeType => "T0304",
+            Code::NonExhaustive => "T0401",
         }
     }
 }
@@ -73,6 +122,18 @@ impl Diagnostic {
             severity: Severity::Error,
             code,
             message: message.into(),
+        }
+    }
+
+    pub(crate) fn warning(
+        file: FileId,
+        span: Span,
+        code: Code,
+        message: impl Into<String>,
+    ) -> Self {
+        Diagnostic {
+            severity: Severity::Warning,
+            ..Diagnostic::error(file, span, code, message)
         }
     }
 }

@@ -9,10 +9,10 @@
 use std::collections::HashMap;
 
 use orbit_hir::{Span, StrId, StringPool};
-use orbit_orb_syntax::ast::{self, ExprKind, ItemKind, PatKind, StmtKind};
+use orbit_orb_syntax::ast::{self, ExprKind, ItemKind, PatKind, StmtKind, TypeKind};
 
 use crate::symbols::{Module, Symbol, SymbolId, SymbolKind};
-use crate::{Code, Diagnostic, FileId};
+use crate::{Code, Diagnostic, FileId, Severity};
 
 /// Globals every module can read without declaring them. The bundled stdlib stubs replace this
 /// list once the parser accepts stub files (proposal T12); until then it must match the front
@@ -58,6 +58,77 @@ pub(crate) const PRELUDE: &[&str] = &[
     "panic",
 ];
 
+/// Type names that need no definition (proposal, "The type language").
+pub(crate) const BUILTIN_TYPES: &[&str] = &[
+    "nil", "bool", "int", "float", "number", "string", "table", "function", "thread", "userdata",
+    "any",
+];
+
+/// Where a symbol of this module was defined, for the type checker to read its annotation or
+/// value. Symbols without an entry get their type while the checker walks the code that binds
+/// them (pattern bindings, closure parameters).
+#[derive(Debug)]
+pub(crate) enum Def<'a> {
+    Fn {
+        decl: &'a ast::FnDecl,
+        owner: Option<Owner<'a>>,
+    },
+    Let {
+        ty: Option<&'a ast::Type>,
+        init: Option<&'a ast::Expr>,
+        mutable: bool,
+        /// The position in `let (a, b) = ...`.
+        slot: Option<usize>,
+    },
+    Param {
+        ty: Option<&'a ast::Type>,
+        rest: bool,
+    },
+    Const {
+        ty: Option<&'a ast::Type>,
+        value: Option<&'a ast::Expr>,
+    },
+    Field {
+        ty: Option<&'a ast::Type>,
+    },
+    Struct,
+    Enum,
+    Variant {
+        enum_: u32,
+    },
+    Alias {
+        ty: &'a ast::Type,
+    },
+    Global {
+        value: Option<&'a ast::Expr>,
+    },
+}
+
+/// The `impl` block a function is in.
+#[derive(Debug)]
+pub(crate) struct Owner<'a> {
+    pub target: SymbolId,
+    pub args: &'a [ast::Type],
+    pub generics: Vec<SymbolId>,
+}
+
+/// A value assigned to a mutable local after its `let`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Assign<'a> {
+    pub value: &'a ast::Expr,
+    /// The position in `(a, b) = ...`.
+    pub slot: Option<usize>,
+    /// For `x op= value`, the operator.
+    pub op: Option<ast::BinOp>,
+}
+
+/// What resolution found, beyond the module's symbols: where each symbol is defined.
+#[derive(Debug, Default)]
+pub(crate) struct Defs<'a> {
+    pub defs: HashMap<u32, Def<'a>>,
+    pub assigns: HashMap<u32, Vec<Assign<'a>>>,
+}
+
 /// What a name or path denotes.
 #[derive(Clone, Copy, Debug)]
 enum Res {
@@ -96,9 +167,10 @@ struct Resolver<'a> {
     /// Symbols created ahead of their definition (items found when a block is entered), by the
     /// start of their name.
     predefined: HashMap<u32, u32>,
+    defs: Defs<'a>,
 }
 
-pub(crate) fn resolve<'a>(file: FileId, ast: &'a ast::Ast, deps: Deps<'a>) -> Module {
+pub(crate) fn resolve<'a>(file: FileId, ast: &'a ast::Ast, deps: Deps<'a>) -> (Module, Defs<'a>) {
     let mut r = Resolver {
         file,
         strings: &ast.strings,
@@ -112,11 +184,12 @@ pub(crate) fn resolve<'a>(file: FileId, ast: &'a ast::Ast, deps: Deps<'a>) -> Mo
         container: None,
         impl_target: None,
         predefined: HashMap::new(),
+        defs: Defs::default(),
     };
     r.block(&ast.body, true);
     r.m.refs
         .sort_by_key(|(s, _)| (s.start, std::cmp::Reverse(s.end)));
-    r.m
+    (r.m, r.defs)
 }
 
 impl<'a> Resolver<'a> {
@@ -238,7 +311,7 @@ impl<'a> Resolver<'a> {
 
     /// Resolves a path expression (`a`, `a::b`, `Self::c`) to what it names, recording the
     /// references. Other expressions are walked and give [`Res::Unknown`].
-    fn path(&mut self, e: &ast::Expr) -> Res {
+    fn path(&mut self, e: &'a ast::Expr) -> Res {
         match &e.kind {
             ExprKind::Name(sym) => self.name_ref(ast::Name {
                 sym: *sym,
@@ -253,7 +326,7 @@ impl<'a> Resolver<'a> {
             },
             ExprKind::Path { base, name } => {
                 let base_res = self.path(base);
-                let res = self.member(base_res, base, *name);
+                let res = self.member(base_res, matches!(base.kind, ExprKind::SelfType), *name);
                 self.reference(name.span, res);
                 res
             }
@@ -265,7 +338,7 @@ impl<'a> Resolver<'a> {
     }
 
     /// `base::name`, where `base` resolved to `base_res`.
-    fn member(&mut self, base_res: Res, base: &ast::Expr, name: ast::Name) -> Res {
+    fn member(&mut self, base_res: Res, self_base: bool, name: ast::Name) -> Res {
         let Res::Sym(base_id) = base_res else {
             return Res::Unknown;
         };
@@ -302,7 +375,7 @@ impl<'a> Resolver<'a> {
                 match found {
                     Some(id) => Res::Sym(id),
                     None => {
-                        let what = if matches!(base.kind, ExprKind::SelfType) {
+                        let what = if self_base {
                             "Self".to_string()
                         } else {
                             type_name
@@ -351,7 +424,7 @@ impl<'a> Resolver<'a> {
 
     // ---- blocks and items ---------------------------------------------------------------------
 
-    fn block(&mut self, b: &ast::Block, module_level: bool) {
+    fn block(&mut self, b: &'a ast::Block, module_level: bool) {
         self.push_scope();
         self.predeclare(&b.stmts, module_level);
         for s in &b.stmts {
@@ -365,23 +438,41 @@ impl<'a> Resolver<'a> {
 
     /// Creates symbols for the block's items before walking it, so later items can be referred
     /// to from functions and `impl` members can be found through their type.
-    fn predeclare(&mut self, stmts: &[ast::Stmt], module_level: bool) {
+    fn predeclare(&mut self, stmts: &'a [ast::Stmt], module_level: bool) {
         let items = || {
             stmts.iter().filter_map(|s| match &s.kind {
-                StmtKind::Item(i) => Some(i),
+                StmtKind::Item(i) => Some(&**i),
                 _ => None,
             })
         };
         for item in items() {
             let is_pub = item.is_pub && module_level;
-            let (name, kind) = match &item.kind {
-                ItemKind::Fn(f) => (f.name, SymbolKind::Function),
-                ItemKind::Const { name, .. } => (*name, SymbolKind::Const),
-                ItemKind::Struct(s) => (s.name, SymbolKind::Struct),
-                ItemKind::Enum(e) => (e.name, SymbolKind::Enum),
+            let (name, kind, def) = match &item.kind {
+                ItemKind::Fn(f) => (
+                    f.name,
+                    SymbolKind::Function,
+                    Def::Fn {
+                        decl: f,
+                        owner: None,
+                    },
+                ),
+                ItemKind::Const { name, ty, value } => (
+                    *name,
+                    SymbolKind::Const,
+                    Def::Const {
+                        ty: ty.as_ref(),
+                        value: value.as_ref(),
+                    },
+                ),
+                ItemKind::Struct(s) => (s.name, SymbolKind::Struct, Def::Struct),
+                ItemKind::Enum(e) => (e.name, SymbolKind::Enum, Def::Enum),
+                ItemKind::TypeAlias { name, ty, .. } => {
+                    (*name, SymbolKind::TypeAlias, Def::Alias { ty })
+                }
                 _ => continue,
             };
             let index = self.add_symbol(name, kind, item.span, is_pub);
+            self.defs.defs.insert(index, def);
             self.predefined.insert(name.span.start, index);
             self.scopes
                 .last_mut()
@@ -397,6 +488,7 @@ impl<'a> Resolver<'a> {
                 ItemKind::Enum(e) => {
                     for v in &e.variants {
                         let vi = self.add_symbol(v.name, SymbolKind::Variant, v.span, is_pub);
+                        self.defs.defs.insert(vi, Def::Variant { enum_: index });
                         let (text, id) = (self.text(v.name.sym), self.id(vi));
                         self.m.members.entry(index).or_default().insert(text, id);
                         if let Some(fields) = &v.fields {
@@ -443,9 +535,10 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn fields(&mut self, owner: u32, fields: &[ast::FieldDecl]) {
+    fn fields(&mut self, owner: u32, fields: &'a [ast::FieldDecl]) {
         for f in fields {
             let fi = self.add_symbol(f.name, SymbolKind::Field, f.name.span, f.is_pub);
+            self.defs.defs.insert(fi, Def::Field { ty: f.ty.as_ref() });
             let (text, id) = (self.text(f.name.sym), self.id(fi));
             self.m.fields.entry(owner).or_default().insert(text, id);
         }
@@ -476,87 +569,188 @@ impl<'a> Resolver<'a> {
         Some(index)
     }
 
-    fn item(&mut self, item: &ast::Item, module_level: bool) {
+    /// Opens a scope binding generic parameters as type symbols; returns their ids.
+    fn generics(&mut self, params: &[ast::GenericParam], owner: Option<u32>) -> Vec<SymbolId> {
+        self.push_scope();
+        let ids: Vec<SymbolId> = params
+            .iter()
+            .map(|g| {
+                let i = self.bind_new(g.name, SymbolKind::TypeParam, g.name.span);
+                self.id(i)
+            })
+            .collect();
+        if let Some(o) = owner
+            && !ids.is_empty()
+        {
+            self.m.generics.insert(o, ids.clone());
+        }
+        ids
+    }
+
+    fn item(&mut self, item: &'a ast::Item, module_level: bool) {
         match &item.kind {
             ItemKind::Fn(f) => {
                 let index = self.define_pending(f.name);
-                self.function(&f.sig, index, |r| {
+                self.function(&f.sig, &f.generics, index, |r| {
                     if let Some(b) = &f.body {
                         r.block(b, false);
                     }
                 });
             }
-            ItemKind::Const { name, value, .. } => {
+            ItemKind::Const { name, value, ty } => {
+                if let Some(t) = ty {
+                    self.ty(t);
+                }
                 if let Some(v) = value {
                     self.expr(v);
                 }
                 self.define_pending(*name);
             }
             ItemKind::Struct(s) => {
-                self.define_pending(s.name);
+                let index = self.define_pending(s.name);
+                self.generics(&s.generics, index);
+                for f in &s.fields {
+                    if let Some(t) = &f.ty {
+                        self.ty(t);
+                    }
+                }
+                self.scopes.pop();
             }
             ItemKind::Enum(e) => {
-                self.define_pending(e.name);
+                let index = self.define_pending(e.name);
+                self.generics(&e.generics, index);
+                for v in e.variants.iter().filter_map(|v| v.fields.as_ref()) {
+                    for f in v {
+                        if let Some(t) = &f.ty {
+                            self.ty(t);
+                        }
+                    }
+                }
+                self.scopes.pop();
+            }
+            ItemKind::TypeAlias { name, generics, ty } => {
+                let index = self.define_pending(*name);
+                self.generics(generics, index);
+                self.ty(ty);
+                self.scopes.pop();
             }
             ItemKind::Impl(imp) => {
                 let target = self.name_ref(imp.target);
-                let outer = std::mem::replace(
-                    &mut self.impl_target,
-                    match target {
-                        Res::Sym(id) => Some(id),
-                        Res::Unknown => None,
-                    },
-                );
+                let generics = self.generics(&imp.generics, None);
+                for a in &imp.target_args {
+                    self.ty(a);
+                }
+                let target = match target {
+                    Res::Sym(id) => Some(id),
+                    Res::Unknown => None,
+                };
+                let outer = std::mem::replace(&mut self.impl_target, target);
                 for member in &imp.members {
                     match &member.kind {
                         ItemKind::Fn(f) => {
                             let index = self.predefined.get(&f.name.span.start).copied();
-                            self.function(&f.sig, index, |r| {
+                            if let (Some(i), Some(t)) = (index, target) {
+                                self.defs.defs.insert(
+                                    i,
+                                    Def::Fn {
+                                        decl: f,
+                                        owner: Some(Owner {
+                                            target: t,
+                                            args: &imp.target_args,
+                                            generics: generics.clone(),
+                                        }),
+                                    },
+                                );
+                            }
+                            self.function(&f.sig, &f.generics, index, |r| {
                                 if let Some(b) = &f.body {
                                     r.block(b, false);
                                 }
                             });
                         }
-                        ItemKind::Const { value: Some(v), .. } => self.expr(v),
+                        ItemKind::Const { name, ty, value } => {
+                            if let Some(&i) = self.predefined.get(&name.span.start) {
+                                self.defs.defs.insert(
+                                    i,
+                                    Def::Const {
+                                        ty: ty.as_ref(),
+                                        value: value.as_ref(),
+                                    },
+                                );
+                            }
+                            if let Some(t) = ty {
+                                self.ty(t);
+                            }
+                            if let Some(v) = value {
+                                self.expr(v);
+                            }
+                        }
                         _ => self.item(member, false),
                     }
                 }
                 self.impl_target = outer;
+                self.scopes.pop();
             }
-            // Type names are resolved once the checker parses with type trees.
-            ItemKind::TypeAlias { .. } => {}
             ItemKind::Use(u) => self.use_decl(u, item.span),
             ItemKind::Error => {}
             ItemKind::Global { name, value } => {
                 self.expr(value);
                 let i = self.bind_new(*name, SymbolKind::Global, item.span);
+                self.defs.defs.insert(i, Def::Global { value: Some(value) });
                 if item.is_pub && module_level {
                     self.m.exports.insert(self.text(name.sym), self.id(i));
                 }
             }
             ItemKind::Extern(names) => {
                 for n in names {
-                    self.bind_new(*n, SymbolKind::Global, n.span);
+                    let i = self.bind_new(*n, SymbolKind::Global, n.span);
+                    self.defs.defs.insert(i, Def::Global { value: None });
                 }
             }
         }
     }
 
-    /// A function body: a new nesting depth with the parameters in scope.
-    fn function(&mut self, sig: &ast::FnSig, item: Option<u32>, body: impl FnOnce(&mut Self)) {
+    /// A function body: a new nesting depth with the generic parameters and parameters in scope.
+    fn function(
+        &mut self,
+        sig: &'a ast::FnSig,
+        generics: &[ast::GenericParam],
+        item: Option<u32>,
+        body: impl FnOnce(&mut Self),
+    ) {
         self.depth += 1;
         let outer = match item {
             Some(i) => self.container.replace(i),
             None => self.container,
         };
-        self.push_scope();
+        self.generics(generics, item);
+        for t in [&sig.self_ty, &sig.rest_ty, &sig.ret].into_iter().flatten() {
+            self.ty(t);
+        }
         for p in &sig.params {
+            if let Some(t) = &p.ty {
+                self.ty(t);
+            }
             if let Some(n) = p.name {
-                self.bind_new(n, SymbolKind::Param, p.span);
+                let i = self.bind_new(n, SymbolKind::Param, p.span);
+                self.defs.defs.insert(
+                    i,
+                    Def::Param {
+                        ty: p.ty.as_ref(),
+                        rest: false,
+                    },
+                );
             }
         }
         if let Some(rest) = sig.rest {
-            self.bind_new(rest, SymbolKind::Param, rest.span);
+            let i = self.bind_new(rest, SymbolKind::Param, rest.span);
+            self.defs.defs.insert(
+                i,
+                Def::Param {
+                    ty: sig.rest_ty.as_ref(),
+                    rest: true,
+                },
+            );
         }
         body(self);
         self.scopes.pop();
@@ -591,8 +785,10 @@ impl<'a> Resolver<'a> {
                             self.bind(field.sym, Res::Sym(id));
                         }
                         Some(Some(id)) => {
+                            // An alias names the same item under another name.
                             self.m.refs.push((field.span, id));
-                            self.bind_new(alias.expect("an alias"), SymbolKind::Import, span);
+                            self.bind(alias.expect("an alias").sym, Res::Sym(id));
+                            self.m.refs.push((alias.expect("an alias").span, id));
                         }
                         Some(None) => {
                             self.error(
@@ -611,34 +807,218 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    // ---- types --------------------------------------------------------------------------------
+
+    fn is_type_symbol(&self, id: SymbolId) -> bool {
+        self.symbol(id).is_some_and(|s| {
+            matches!(
+                s.kind,
+                SymbolKind::Struct
+                    | SymbolKind::Enum
+                    | SymbolKind::Variant
+                    | SymbolKind::TypeAlias
+                    | SymbolKind::TypeParam
+            )
+        })
+    }
+
+    /// Resolves the names in a type annotation (when the parse built type trees).
+    fn ty(&mut self, t: &ast::Type) {
+        let Some(kind) = &t.kind else { return };
+        match &**kind {
+            TypeKind::Path { segments, args } => {
+                self.type_path(segments);
+                for a in args {
+                    self.ty(a);
+                }
+            }
+            TypeKind::Nil | TypeKind::Error => {}
+            TypeKind::SelfType => {
+                if let Some(id) = self.impl_target {
+                    self.m.refs.push((t.span, id));
+                }
+            }
+            TypeKind::Optional(t) | TypeKind::Array(t) => self.ty(t),
+            TypeKind::Union(ts) | TypeKind::Tuple(ts) => {
+                for t in ts {
+                    self.ty(t);
+                }
+            }
+            TypeKind::Map { key, value } => {
+                self.ty(key);
+                self.ty(value);
+            }
+            TypeKind::Record(fields) => {
+                for f in fields {
+                    let text = self.text(f.name.sym);
+                    if BUILTIN_TYPES.contains(&text.as_str()) {
+                        self.m.diagnostics.push(Diagnostic {
+                            file: self.file,
+                            span: f.name.span,
+                            severity: Severity::Warning,
+                            code: Code::RecordFieldLikeType,
+                            message: format!(
+                                "record field named `{text}`, like a type; a map type is written \
+                                 `#{{[{text}]: V}}`"
+                            ),
+                        });
+                    }
+                    self.ty(&f.ty);
+                }
+            }
+            TypeKind::Fn { params, rest, ret } => {
+                for p in params {
+                    self.ty(p);
+                }
+                if let Some(r) = rest {
+                    self.ty(r);
+                }
+                if let Some(r) = ret {
+                    self.ty(r);
+                }
+            }
+        }
+    }
+
+    fn type_path(&mut self, segs: &[ast::Name]) {
+        let first = segs[0];
+        let text = self.text(first.sym);
+        let res = self.lookup_quiet(first.sym);
+        if segs.len() == 1 {
+            match res {
+                Res::Sym(id) if self.is_type_symbol(id) => self.m.refs.push((first.span, id)),
+                _ if BUILTIN_TYPES.contains(&text.as_str()) => {}
+                Res::Sym(id) => {
+                    self.m.refs.push((first.span, id));
+                    self.error(
+                        first.span,
+                        Code::NotAType,
+                        format!("`{text}` is a value, not a type"),
+                    );
+                }
+                Res::Unknown => self.error(
+                    first.span,
+                    Code::UnknownType,
+                    format!("cannot find type `{text}` in this scope"),
+                ),
+            }
+            return;
+        }
+        self.reference(first.span, res);
+        let mut res = res;
+        for &seg in &segs[1..] {
+            res = self.member(res, false, seg);
+            self.reference(seg.span, res);
+        }
+        if let Res::Sym(id) = res
+            && !self.is_type_symbol(id)
+        {
+            let last = segs[segs.len() - 1];
+            let text = self.text(last.sym);
+            self.error(
+                last.span,
+                Code::NotAType,
+                format!("`{text}` is a value, not a type"),
+            );
+        }
+    }
+
     // ---- statements and expressions -----------------------------------------------------------
 
-    fn stmt(&mut self, s: &ast::Stmt, module_level: bool) {
+    fn stmt(&mut self, s: &'a ast::Stmt, module_level: bool) {
         match &s.kind {
             StmtKind::Error => {}
-            StmtKind::Let { pat, value, .. } => {
+            StmtKind::Let { pat, value, ty, .. } => {
+                if let Some(t) = ty {
+                    self.ty(t);
+                }
                 if let Some(v) = value {
                     self.expr(v);
                 }
+                let first = self.m.symbols.len() as u32;
                 self.bind_pat(pat);
+                // Plain names (`let x`, `let (a, b)`) take their type from the annotation or
+                // the value; anything else is typed while checking the pattern.
+                let simple: Vec<(usize, bool)> = match &pat.kind {
+                    PatKind::Bind { mutable, .. } => vec![(0, *mutable)],
+                    PatKind::Tuple(items)
+                        if items
+                            .iter()
+                            .all(|p| matches!(p.kind, PatKind::Bind { .. } | PatKind::Wild)) =>
+                    {
+                        items
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, p)| match p.kind {
+                                PatKind::Bind { mutable, .. } => Some((i, mutable)),
+                                _ => None,
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let tuple = matches!(pat.kind, PatKind::Tuple(_));
+                for (n, (slot, mutable)) in simple.into_iter().enumerate() {
+                    self.defs.defs.insert(
+                        first + n as u32,
+                        Def::Let {
+                            ty: if tuple { None } else { ty.as_ref() },
+                            init: value.as_ref(),
+                            mutable,
+                            slot: tuple.then_some(slot),
+                        },
+                    );
+                }
             }
             StmtKind::Expr(e) => self.expr(e),
             StmtKind::Assign { targets, value } => {
-                for t in targets {
+                for (i, t) in targets.iter().enumerate() {
                     self.expr(t);
+                    if let ExprKind::Name(_) = t.kind
+                        && let Some(id) = self.ref_at(t.span)
+                        && id.file == self.file
+                    {
+                        self.defs.assigns.entry(id.index).or_default().push(Assign {
+                            value,
+                            slot: (targets.len() > 1).then_some(i),
+                            op: None,
+                        });
+                    }
                 }
                 self.expr(value);
             }
-            StmtKind::CompoundAssign { target, value, .. } => {
+            StmtKind::CompoundAssign {
+                target, value, op, ..
+            } => {
                 self.expr(target);
                 self.expr(value);
+                if let ExprKind::Name(_) = target.kind
+                    && let Some(id) = self.ref_at(target.span)
+                    && id.file == self.file
+                {
+                    self.defs.assigns.entry(id.index).or_default().push(Assign {
+                        value,
+                        slot: None,
+                        op: Some(*op),
+                    });
+                }
             }
             StmtKind::Scope(inner) => self.stmt(inner, false),
             StmtKind::Item(item) => self.item(item, module_level),
         }
     }
 
-    fn bind_pat(&mut self, p: &ast::Pat) {
+    /// The symbol most recently recorded at exactly `span`.
+    fn ref_at(&self, span: Span) -> Option<SymbolId> {
+        self.m
+            .refs
+            .iter()
+            .rev()
+            .find(|(s, _)| *s == span)
+            .map(|&(_, id)| id)
+    }
+
+    fn bind_pat(&mut self, p: &'a ast::Pat) {
         match &p.kind {
             PatKind::Wild => {}
             PatKind::Bind { name, .. } => {
@@ -677,13 +1057,13 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn exprs(&mut self, es: &[ast::Expr]) {
+    fn exprs(&mut self, es: &'a [ast::Expr]) {
         for e in es {
             self.expr(e);
         }
     }
 
-    fn expr(&mut self, e: &ast::Expr) {
+    fn expr(&mut self, e: &'a ast::Expr) {
         match &e.kind {
             ExprKind::Nil
             | ExprKind::True
@@ -717,7 +1097,7 @@ impl<'a> Resolver<'a> {
                 self.expr(obj);
                 self.exprs(args);
             }
-            ExprKind::Closure(c) => self.function(&c.sig, None, |r| r.expr(&c.body)),
+            ExprKind::Closure(c) => self.function(&c.sig, &[], None, |r| r.expr(&c.body)),
             ExprKind::Array(items) | ExprKind::Tuple(items) => self.exprs(items),
             ExprKind::Map(entries) => {
                 for entry in entries {
@@ -751,8 +1131,11 @@ impl<'a> Resolver<'a> {
             ExprKind::Unary { expr, .. }
             | ExprKind::Paren(expr)
             | ExprKind::Spread(expr)
-            | ExprKind::Try(expr)
-            | ExprKind::As { expr, .. } => self.expr(expr),
+            | ExprKind::Try(expr) => self.expr(expr),
+            ExprKind::As { expr, ty } => {
+                self.expr(expr);
+                self.ty(ty);
+            }
             ExprKind::Range { start, end, .. } => {
                 self.expr(start);
                 self.expr(end);

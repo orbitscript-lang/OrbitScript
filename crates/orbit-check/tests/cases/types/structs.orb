@@ -1,0 +1,66 @@
+// Structs, methods, enums, metamethods and generics.
+
+pub struct Vec2 { x: float, y: float }
+
+impl Vec2 {
+    pub fn new(x: float, y: float) -> Vec2 { Vec2 { x, y } }
+    pub fn len(self) -> float { math::sqrt(self.x * self.x + self.y * self.y) }
+    pub fn scaled(self, k: float) -> Vec2 { Vec2::new(self.x * k, self.y * k) }
+    fn __add(self, other: Vec2) -> Vec2 { Vec2::new(self.x + other.x, self.y + other.y) }
+    fn __close(self, err) {}
+}
+
+let v = Vec2::new(3.0, 4.0);
+let l: float = v.len();
+let bad_len: string = v.len(); //~ T0201
+let z = v.z; //~ T0203
+let m = v.missing(); //~ T0203
+let n = v.new(1.0, 2.0); //~ T0203
+let sum = v + v;
+let more: Vec2 = sum.scaled(2.0);
+let plus_int = v + 1; //~ T0206
+let lit = Vec2 { x: 1.0 }; //~ T0108
+let wrong = Vec2 { x: 1, y: 2.0 }; //~ T0201
+v.x = "east"; //~ T0201
+let scope closing = Vec2::new(0.0, 0.0);
+let scope not_closing = 3; //~ T0201
+
+pub enum Shape {
+    Circle { r: float },
+    Rect { w: float, h: float },
+    Empty,
+}
+
+fn area(s: Shape) -> float {
+    match s {
+        Shape::Circle { r } => 3.14 * r * r,
+        Shape::Rect { w, h } => w * h,
+        Shape::Empty => 0.0,
+    }
+}
+
+let a = area(Shape::Circle { r: 1.0 });
+let b = area(Shape::Empty);
+let c = area(v); //~ T0201
+let d = Shape::Circle { r: 1.0 }.r;
+
+fn s_radius(s: Shape) -> float {
+    s.r //~ T0203
+}
+
+// Generic structs and functions.
+struct Stack<T> { items: [T] }
+
+impl<T> Stack<T> {
+    fn push(self, item: T) { self.items[#self.items + 1] = item; }
+    fn top(self) -> T? { self.items[#self.items] }
+}
+
+fn first<T>(items: [T]) -> T? { items[1] }
+
+let ints: Stack<int> = Stack { items: [] };
+ints.push(1);
+ints.push("two"); //~ T0201
+let top: int? = ints.top();
+let name: string? = first(["a", "b"]);
+let num: string? = first([1, 2]); //~ T0201
