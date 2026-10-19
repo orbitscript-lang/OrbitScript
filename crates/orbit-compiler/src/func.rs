@@ -321,6 +321,36 @@ impl<'a> FuncState<'a> {
     /// Emits the `Closure` instruction for child `func`. It belongs to the
     /// function's last line, as `debug` line events in the reference
     /// report it.
+    /// `local function name() ... end`. As in the reference, its instructions are on the
+    /// function's last line, and the debug info shows the local only once the closure
+    /// exists (never the register's previous value, or `nil` for a recursive one).
+    pub fn local_function(&mut self, local: LocalId, func: FuncId) -> Result<()> {
+        let r = self.alloc()?;
+        self.active = self.free;
+        let line = std::mem::replace(
+            &mut self.line,
+            end_line(self.chunk, self.chunk.function(func)),
+        );
+        if self.f.local(local).captured {
+            // The cell must exist before the closure, which captures it to recurse.
+            self.emit(Op::LoadNil { dst: r, count: 1 });
+            self.declare(local, r)?;
+            let Slot::Cell(cell) = self.slots[local.index()] else {
+                unreachable!()
+            };
+            self.emit_closure(r, func)?;
+            self.emit(Op::CellSet { cell, src: r });
+            if let Some(&(_, Some(i))) = self.scope.last() {
+                self.debug_locals[i].start_pc = self.code.len() as u32;
+            }
+        } else {
+            self.emit_closure(r, func)?;
+            self.declare(local, r)?;
+        }
+        self.line = line;
+        Ok(())
+    }
+
     pub fn emit_closure(&mut self, dst: u8, func: FuncId) -> Result<()> {
         let proto = self.child(func)?;
         let line = std::mem::replace(

@@ -327,8 +327,8 @@ impl Dump<'_> {
                 self.expr(e);
                 self.out.push(')');
             }
-            ExprKind::As { expr, .. } => {
-                self.out.push_str("(as ");
+            ExprKind::As { expr, optional, .. } => {
+                self.out.push_str(if *optional { "(as? " } else { "(as " });
                 self.expr(expr);
                 self.out.push(')');
             }
@@ -645,6 +645,22 @@ fn literals_and_closures() {
         ),
         ("f\"{t[#{a: 1}.a]}\"", "(f {([] t (. #{a:1} a))})"),
         ("r#\"a\"b\"#", "\"a\\\"b\""),
+    ];
+    for (src, want) in cases {
+        assert_eq!(dump(src), format!("{{tail:{want}}}"), "{src}");
+    }
+}
+
+#[test]
+fn casts() {
+    let cases = [
+        ("x as int", "(as x)"),
+        ("x as? int", "(as? x)"),
+        ("x as int?", "(as x)"),
+        ("(x as int)?", "(paren (as x))?"),
+        ("x as int | 1", "(| (as x) 1)"),
+        ("x as? (int | string) + 1", "(+ (as? x) 1)"),
+        ("-x as int", "(as (- x))"),
     ];
     for (src, want) in cases {
         assert_eq!(dump(src), format!("{{tail:{want}}}"), "{src}");

@@ -282,6 +282,16 @@ impl<S: Space> Heap<S> {
         self.space.arena().handle_at(index)
     }
 
+    /// Call `f` on every object in `T`'s arena, for tools that look objects
+    /// up by content (a debugger finding a source's functions). Objects
+    /// the collector found unreachable but hasn't swept yet are included.
+    pub fn for_each<T>(&self, mut f: impl FnMut(&T))
+    where
+        S: Holds<T>,
+    {
+        self.space.arena().for_each(&mut f);
+    }
+
     /// Erase a handle's type.
     pub fn erase<T>(&self, gc: Gc<T>) -> AnyGc
     where

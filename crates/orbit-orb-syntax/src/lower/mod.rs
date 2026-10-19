@@ -10,6 +10,7 @@
 //! list, results into hidden locals, and earlier operands are spilled first so evaluation
 //! stays left to right. Nothing here needs a new HIR node.
 
+mod cast;
 mod control;
 mod expr;
 mod items;
@@ -46,6 +47,7 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
         last_break_label: None,
         pending_fn_local: None,
         scope_meta: None,
+        generics: Vec::new(),
     };
     let span = body.span;
     let main = lx.begin_function(FunctionName::Main, span);
@@ -186,6 +188,8 @@ struct Scope {
     pending: Vec<PendingItem>,
     /// Locals declared at the top of the block for items used before their definition.
     predeclared: Vec<LocalId>,
+    /// `type` aliases declared in the block (only `as` needs them).
+    aliases: Vec<StrId>,
 }
 
 /// A struct or enum known to this module.
@@ -258,6 +262,8 @@ struct Lowerer {
     /// The main function's hidden local holding the metatable `scope` actions share, once one
     /// needs it.
     scope_meta: Option<LocalId>,
+    /// Type parameters of the `fn` items and `impl` blocks being lowered.
+    generics: Vec<StrId>,
 }
 
 type LResult<T> = Result<T, Diagnostic>;
@@ -487,6 +493,11 @@ impl Lowerer {
                 continue;
             };
             let (sym, tag) = match &item.kind {
+                ast::ItemKind::TypeAlias { name, .. } => {
+                    let scope = self.cur().scopes.last_mut().expect("scope");
+                    scope.aliases.push(name.sym);
+                    continue;
+                }
                 ast::ItemKind::Fn(f) => (f.name.sym, ItemTag::Fn),
                 ast::ItemKind::Const { name, .. } => (name.sym, ItemTag::Const),
                 ast::ItemKind::Struct(st) => {

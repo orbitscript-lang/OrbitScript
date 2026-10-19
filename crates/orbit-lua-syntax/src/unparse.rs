@@ -201,6 +201,7 @@ impl Printer<'_> {
                 self.func_body(func);
             }
             StmtKind::Break => self.w("break"),
+            StmtKind::Error => self.w("--[[syntax error]]"),
             StmtKind::Goto(n) => {
                 self.w("goto ");
                 self.name(n.sym);
@@ -263,6 +264,7 @@ impl Printer<'_> {
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::Nil => self.w("nil"),
+            ExprKind::Error => self.w("nil --[[syntax error]]"),
             ExprKind::True => self.w("true"),
             ExprKind::False => self.w("false"),
             // A negative integer literal comes from a hexadecimal one that wrapped (decimal

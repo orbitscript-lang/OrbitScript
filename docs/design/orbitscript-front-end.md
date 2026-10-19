@@ -62,13 +62,13 @@ Rust rules the parser follows where the proposal doesn't say otherwise:
 - **`stub`**: `.orbi` stubs. `fn` items and `impl` functions may end in `;`, and `const NAME: T;` needs no value. Lowering a stub is an error ("a stub declaration has no body to run").
 - **`doc_comments`**: the lexer records `///` (`CommentKind::Doc`) and `//!` (`InnerDoc`) comments in `Ast::comments`, and each item, `impl` members included, gets the `///` lines just before it in `Item::docs`. `////` is an ordinary comment, as in Rust.
 - **`keep_trivia`**: `Ast::comments` holds every comment (`Line`, `Block`, `Doc`, `InnerDoc`), in source order, for a formatter or an editor. The tree itself doesn't change.
-- **`recover`**: parsing goes on after a syntax error (see below). `parse_recovering` returns the AST and every error; `parse_with` still returns only the first.
+- **`recover`**: parsing goes on after a syntax error (see below). `parse_recovering` returns the AST and every error; `parse_with` ignores the switch and returns only the first.
 
 Every `Diagnostic` has a `kind`: `UnexpectedEof` when the input stops in the middle of something (an unclosed `{`, string, comment or template hole, or a construct cut short), so a REPL can read another line; `Other` for the rest.
 
 ### Error recovery
 
-With `recover`, an error is recorded and the parse picks up where the next thing most likely starts, so an editor gets an AST for everything around the broken line:
+`parse_recovering` first parses normally, so a module without errors gets exactly the tree `parse_with` gives (the layout rules below never see valid code). Only a module with errors is parsed again with recovery, where an error is recorded and the parse picks up where the next thing most likely starts, so an editor gets an AST for everything around the broken line:
 
 - **A missing expression** before `;`, `,`, `)`, `]`, `}` or the end (`let x = ;`, `f(a, )`) becomes `ExprKind::Error` and the construct around it is kept.
 - **A missing `;`** is reported and parsing goes on as if it were there; the rest of the line, if any, is skipped.
@@ -77,7 +77,7 @@ With `recover`, an error is recorded and the parse picks up where the next thing
 - **A lexer error** is recorded and the bad token skipped; a bad string or number becomes an empty string or `0`, so `let s = "\q";` still binds `s`. A parse error right after a lexer error isn't reported (it is most likely the same mistake).
 - **A broken template hole** becomes an `Error` expression inside the template.
 
-Lowering rejects `Error` nodes ("this code has a syntax error, so it can't run"). On every OrbitScript file in the repository, a recovering parse gives exactly the same tree as a normal one, and deleting the first or last token of any line never loses an item before or after the break (`tests/recover.rs`).
+Lowering rejects `Error` nodes ("this code has a syntax error, so it can't run"). Deleting the first or last token of any line of any OrbitScript file in the repository never loses an item before or after the break (`tests/recover.rs`).
 
 Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, `type A<T>`) and the `self: T` and `...rest: T` annotations are always kept. `type` aliases lower to nothing; `e as T` lowers like `(e)`.
 
@@ -112,6 +112,7 @@ flowchart LR
 - A decimal integer literal that overflows `i64` is an error; hex, octal and binary literals wrap, as in Lua.
 - **Templates** become one `string.format` call: text with `%` doubled, `%s` for a plain hole (so `nil`, booleans and `__tostring` work), and a translated conversion for a spec: alignment `<`/`>` and width (`%-8s`, `%8s`), `+`, `#`, `.N` (decimal places, `%.Nf`, or `%.Ne` with `e`/`E`), types `x X o e E`, and `?` for `%q`. A template with no holes is a string constant. The specs the proposal sends to a stdlib helper (zero padding without a numeric type or precision, centering `^`, binary `b`, fill characters other than a space) are compile errors ("not supported yet") until that helper exists.
 - `expr?` lowers to `local v, e = expr; if v == nil then return nil, e end`, then `v`.
+- **`expr as T` and `expr as? T`** are casts checked while the program runs (`docs/design/orbitscript-syntax/runtime-as.md`, decided 2026-10-19). The parser always builds the target's type tree, whatever the parse options. A scalar, struct, enum or variant target (with or without `?`) lowers to one `Cast` node; `any` lowers to the value itself. A union keeps the value in a hidden local and tests each member's type: `local t = e; if not (is A or is B) then t = fail(t) end`, where `fail` raises `cannot cast number to int | string` (or gives `nil` for `as?`). Lowering resolves the target itself: a type parameter of the enclosing `fn` or `impl`, a `type` alias in an enclosing block, generic arguments and structural types are compile errors, a struct or enum of the module shadows a built-in name, and any other path is evaluated like a `match` pattern's path.
 
 ### Control flow
 
@@ -130,7 +131,7 @@ flowchart LR
 ### Items
 
 - **Structs.** `struct P` is one table that is both the instances' metatable and the namespace of associated functions: `{ __index = <methods>, __name = "P" }`. A literal `P { x, y }` is `setmetatable({ x = x, y = y }, P)`.
-- **Enums.** `enum E` is a namespace table. Each data variant `E.V` is a metatable `{ __index = <methods>, __name = "E::V", new = <constructor> }`, so Lua code can build one with `E.V.new{...}`; each unit variant is one shared instance whose metatable refuses writes (`__newindex` raises `cannot modify unit variant E::V`).
+- **Enums.** `enum E` is a namespace table `{ __name = "E" }`. Each data variant `E.V` is a metatable `{ __index = <methods>, __name = "E::V", __enum = E, new = <constructor> }`, so Lua code can build one with `E.V.new{...}`; each unit variant is one shared instance whose metatable refuses writes (`__newindex` raises `cannot modify unit variant E::V`). `__enum` lets `v as E` accept any variant; the namespace's `__name` names the enum in cast errors.
 - **`impl`.** Methods go in the methods table and on the type table (the struct, or the enum's namespace), so `P::method(p)` and `pcall(P::method, p)` work wherever `P` is reachable; associated functions go only on the type table, so instances don't see them. A method and an associated function can't share a name, and an enum method can't be named like a variant. Names starting with `__` (and `const __mode = "k"`) go on the metatable: the struct's table, or every variant's metatable. A user `__index` is wrapped so methods are found first, then the user's function or table. `impl` blocks must be in the module that defines the struct or enum (Rust's rule for inherent impls), so the front end knows every variant metatable a metamethod goes on.
 - **Modules.** `use a::b;` is `local b = require("a.b")`; `use a::b::{x, y};` requires once and copies the fields into locals; `use a::b as c;` renames. When the module has a top-level `pub` item, the chunk builds an exports table and returns it; a top-level `return` in such a module is an error.
 

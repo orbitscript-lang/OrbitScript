@@ -117,6 +117,7 @@ pub enum ExprKind {
     And { lhs: ExprId, rhs: ExprId },
     Or { lhs: ExprId, rhs: ExprId },
     First(ExprId),                            // truncate a multi-value expression to one value
+    Cast { expr: ExprId, ty: Option<ExprId>, cast: Cast },  // OrbitScript's `as`: convert or check
 }
 
 pub enum BinOp { Add, Sub, Mul, Div, IDiv, Mod, Pow, Concat, Eq, Ne, Lt, Le, Gt, Ge }

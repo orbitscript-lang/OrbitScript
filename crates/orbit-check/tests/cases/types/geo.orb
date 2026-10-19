@@ -1,0 +1,12 @@
+// Types used from another module.
+
+pub struct Point { pub x: float, pub y: float }
+
+impl Point {
+    pub fn origin() -> Point { Point { x: 0.0, y: 0.0 } }
+    pub fn dist(self, other: Point) -> float { 0.0 }
+}
+
+pub fn midpoint(a: Point, b: Point) -> Point { Point::origin() }
+
+pub fn guess(a) { a }

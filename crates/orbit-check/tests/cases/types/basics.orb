@@ -1,0 +1,50 @@
+// Numbers, strings, operators and calls; each marked line names the codes expected on it.
+
+fn add(a: int, b: int) -> int { a + b }
+fn half(x: number) -> float { x / 2 }
+fn greet(name: string, greeting: string?) -> string {
+    if greeting != nil { greeting ~ ", " ~ name } else { "hello, " ~ name }
+}
+
+let n = add(1, 2);
+let f = add(1, 2.5); //~ T0201
+let g = add(1); //~ T0202
+let h = add(1, 2, 3); //~ T0202
+let s = greet("ann");
+let t = greet("bob", "hi");
+let u = greet(3); //~ T0201
+let q: int = half(4); //~ T0201
+let r: float = half(4);
+
+// `number` is int | float: an int isn't a float, and a number needs narrowing.
+let w: float = 3; //~ T0201
+let x: number = 3;
+let y: int = x; //~ T0201
+
+let bad = "10" + 1; //~ T0206
+let cat = "n = " ~ n;
+let cmp = n < "3"; //~ T0206
+let bits = 1.5 | 2; //~ T0302
+let never = n == "3"; //~ T0301
+let len = #n; //~ T0206
+
+fn not_callable() {
+    let k = 3;
+    k(); //~ T0204
+    n.len(); //~ T0203
+}
+
+if n { print(n); } //~ T0303
+if s != "" { print(s); }
+
+// Unannotated parameters are `any`; bodies are still checked.
+fn loose(a, b) { a + b }
+let anything = loose("x", #{}).whatever;
+
+// A local takes its initializer's type; a `let mut` everything assigned to it.
+let mut total = 0;
+for i in 1..=10 {
+    total += i / 2;
+}
+let ok: number = total;
+let not_int: int = total; //~ T0201

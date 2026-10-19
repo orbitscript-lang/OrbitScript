@@ -1,0 +1,69 @@
+// Nil checks, type() tests, early exits, match arms and field paths.
+
+struct Node { value: int, next: Node? }
+
+fn find(items: [string], wanted: string) -> int? {
+    for i in 1..=#items {
+        if items[i] == wanted { return i; }
+    }
+    nil
+}
+
+let at = find(["a"], "a");
+let plain: int = at; //~ T0207
+if at != nil {
+    let inside: int = at;
+}
+if at {
+    let truthy: int = at;
+}
+let after: int = at; //~ T0207
+
+fn early(x: int?) -> int {
+    if x == nil { return 0; }
+    x + 1
+}
+
+fn early_error(x: string?) -> string {
+    if x == nil { error("no x"); }
+    x ~ "!"
+}
+
+fn both(x: int?, y: int?) -> int {
+    if x != nil && y != nil { x + y } else { 0 }
+}
+
+fn either(x: int?) -> int {
+    if x == nil || x < 0 { return 0; }
+    x
+}
+
+fn kind(v: int | string) -> string {
+    if type(v) == "string" { v ~ "" } else { tostring(v + 1) }
+}
+
+fn int_part(n: number) -> int {
+    if math::type(n) == "integer" { n } else { 0 }
+}
+
+fn walk(head: Node?) -> int {
+    let mut total = 0;
+    let mut node = head;
+    while node != nil {
+        total += node.value;
+        node = node.next;
+    }
+    total
+}
+
+fn second(head: Node) -> int {
+    if head.next != nil { head.next.value } else { 0 }
+}
+
+fn unsafe_second(head: Node) -> int {
+    head.next.value //~ T0207
+}
+
+let maybe: string? = nil;
+let n = #maybe; //~ T0207
+maybe.upper(); //~ T0207

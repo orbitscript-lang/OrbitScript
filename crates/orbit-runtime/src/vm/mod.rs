@@ -11,6 +11,8 @@
 mod cold;
 mod coro;
 pub mod debug;
+#[cfg(feature = "debugger")]
+pub mod debugger;
 mod gc;
 pub mod hook;
 mod interp;
@@ -576,6 +578,9 @@ pub struct Runtime {
     pub(crate) gc_cycles: u32,
     /// Set by an [`Interrupt`] handle, from any thread.
     pub(crate) interrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Breakpoints, steps and the host's debug events.
+    #[cfg(feature = "debugger")]
+    pub(crate) debug: debugger::Debugger,
 }
 
 /// A handle that interrupts a [`Vm`] from another thread (a CLI's Ctrl-C
@@ -793,6 +798,8 @@ impl Vm {
                 cooling_at: 0,
                 gc_cycles: 0,
                 interrupt: Default::default(),
+                #[cfg(feature = "debugger")]
+                debug: Default::default(),
             },
         }
     }

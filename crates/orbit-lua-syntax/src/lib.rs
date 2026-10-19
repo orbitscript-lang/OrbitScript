@@ -12,9 +12,9 @@ mod parser;
 pub mod token;
 mod unparse;
 
-pub use diag::{Diagnostic, Near};
+pub use diag::{Diagnostic, DiagnosticKind, Near};
 pub use lower::lower;
-pub use parser::{ParseOptions, parse, parse_with};
+pub use parser::{ParseOptions, parse, parse_recovering, parse_with};
 pub use unparse::unparse;
 
 /// Source positions and pools shared with the HIR, re-exported for convenience.

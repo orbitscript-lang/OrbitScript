@@ -199,6 +199,19 @@ Natives called while call or return hooks are on get a `NativeCall` frame, so th
 
 The plain loop's extra work is the two flag loads above and the interrupt check on taken backward jumps. The PR that adds hooks reports the five-benchmark table against `lua5.5` before and after on the cloud container, plus `orbit` binary size with and without the `debug` feature (two loop copies).
 
+## Debugger engine
+
+ADR-12 adds a debugger engine (`orbit-runtime` feature `debugger`, `src/vm/debugger.rs`) beside the hooks: breakpoints by source and line, step in, over and out, pause and stops on errors, reported to a host's `DebugEvents`. It shares the hooked loop but not the hook slot, so a script's `debug.sethook` keeps working while a debugger is attached.
+
+- **Hooked only where it can stop.** `Vm::hooked_here(code, closure, depth)` decides which loop runs: a hook is set, the function has a breakpoint, or a step could stop at this depth. The loops ask at `'reload`, after a native returns, and, while a breakpoint or step is set (`Debugger::watch`), whenever a call or return enters other code. A recursive call or return keeps its loop, so a step keeps its own function hooked at every depth.
+- **Breakpoints resolve lazily.** `set_breakpoints` scans the source's live prototypes (`Heap::for_each`) to move each line to the next one with code, and bumps a generation. Each `ProtoCode` keeps the generation it was last checked against and whether it has a breakpoint (`debug_mark`), so a function is checked once per change, when next entered. Chunks linked later resolve pending breakpoints and report them (`breakpoints_resolved`). No code is patched (D6).
+- **Line events** follow the hook rules (a new line, a backward jump, a function's first instruction), with the engine's own last-seen instruction, reset when the hooked loop reloads. Built-ins and stripped functions have none: stepping in through `table.sort` stops in the comparator.
+- **Stops** run the host's callback from a native under a hook marker frame, as a hook call is made, with Lua hooks and further stops off. The callback sees the stopped program through the debug interface (`Paused::level(0)` is the stopped function) and answers how to go on.
+- **Pause** rides on the interrupt flag: the hooked loop's interrupt check takes a pending pause instead of raising `interrupted!` and stops at the next script instruction.
+- **Errors** stop in `unwind` before anything unwinds, once per error, saying whether a `pcall`, `xpcall` or `coroutine.resume` catches it.
+
+Cost, measured on the cloud x86_64 container without PGO: the feature on and nothing attached changes instruction counts by -1.4% to +1.0% across the benchmarks (callgrind, quick inputs); attached, with a breakpoint in a function the benchmark never calls, run times are 0.96x to 1.06x (`tests/debugger.rs`, `overhead_outside_breakpoints`).
+
 ## Error-message parity
 
 Messages already match the reference for most runtime errors ([VM design](vm.md#error-messages)). What remains for `errors.lua` and `calls.lua` is finished last, as each case unblocks: `global 'x'` versus `field 'x'` for `_ENV` accesses through a local `_ENV`, upvalue and constant names in arithmetic and concatenation, `bad extra argument` for `__call` chains (`extraargs`), `for iterator` naming, and the `(...tail calls...)` lines. Where matching would need bytecode analysis after the fact, the compiler records one more origin instead, as the VM design intends.
@@ -206,6 +219,7 @@ Messages already match the reference for most runtime errors ([VM design](vm.md#
 ## Cargo features
 
 - `orbit-stdlib/debug` (default on): the `debug` table. Enables `orbit-vm/hooks`.
+- `orbit-runtime/debugger`: the debugger engine. Enables `hooks`. Off by default; `orbit` and `orbit-cli` forward it as `debugger`.
 - `orbit-vm/hooks`: hook state, the hooked loop, hook frames. Introspection (`getinfo`, locals, upvalues, tracebacks) is always compiled: tracebacks and `error` levels need it anyway.
 
 ## Interfaces in other threads' areas

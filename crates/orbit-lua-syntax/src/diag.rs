@@ -19,6 +19,19 @@ pub struct Diagnostic {
     pub line: u32,
     pub message: String,
     pub near: Option<Near>,
+    pub kind: DiagnosticKind,
+}
+
+/// What kind of error a [`Diagnostic`] is, for tools that react to some kinds specially.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DiagnosticKind {
+    #[default]
+    Other,
+    /// The chunk ends in the middle of something (the error is `near <eof>`): a REPL reads
+    /// another line, as the reference's does; an editor knows the input is incomplete rather
+    /// than wrong.
+    UnexpectedEof,
 }
 
 impl Diagnostic {
@@ -28,11 +41,16 @@ impl Diagnostic {
         message: impl Into<String>,
         near: Option<Near>,
     ) -> Diagnostic {
+        let kind = match near {
+            Some(Near::Eof) => DiagnosticKind::UnexpectedEof,
+            _ => DiagnosticKind::Other,
+        };
         Diagnostic {
             span,
             line,
             message: message.into(),
             near,
+            kind,
         }
     }
 

@@ -338,6 +338,24 @@ impl Printer<'_> {
             ExprKind::And { lhs, rhs } => format!("({} and {})", self.expr(*lhs), self.expr(*rhs)),
             ExprKind::Or { lhs, rhs } => format!("({} or {})", self.expr(*lhs), self.expr(*rhs)),
             ExprKind::First(e) => format!("first({})", self.expr(*e)),
+            ExprKind::Cast { expr, ty, cast } => {
+                let mut out = format!("cast<{:?}", cast.kind);
+                for (on, flag) in [
+                    (cast.nilable, "?"),
+                    (cast.soft, " soft"),
+                    (cast.test, " test"),
+                ] {
+                    if on {
+                        out.push_str(flag);
+                    }
+                }
+                out.push_str(&format!(">({}", self.expr(*expr)));
+                if let Some(ty) = ty {
+                    out.push_str(&format!(", {}", self.expr(*ty)));
+                }
+                out.push(')');
+                out
+            }
         }
     }
 }
