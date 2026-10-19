@@ -101,4 +101,5 @@ The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass
 
 | Document | Covers |
 |---|---|
+| [orbit-check/proposal.md](orbit-check/proposal.md), [orbit-check/api.md](orbit-check/api.md) | `orbit-check`, the optional type checker: what it checks, the type language, Tym's decisions T1 to T14, and the library API the language server uses |
 | [ffi.md](ffi.md) | The `ffi` library (`orbit-ffi`, ADR-9): binding C functions in shared libraries from Lua and OrbitScript, its types, buffers and raw memory, how calls are made, limits and costs |

@@ -1,0 +1,42 @@
+// Name resolution errors; each marked line names the codes expected on it.
+use geo;
+use geo::{Vec2, missing}; //~ T0103
+use nowhere; //~ T0002
+
+fn uses_later() -> int {
+    later() + LIMIT
+}
+
+let a = later(); //~ T0102
+
+fn later() -> int { 1 }
+const LIMIT = 3;
+
+let v = Vec2::new(1.0, 2.0);
+let w = geo::Vec2::new(3.0, 4.0);
+let bad = geo::nothing; //~ T0103
+let len = v.len();
+let z = Vec2::zero(); //~ T0104
+print(undefined_name); //~ T0101
+let p = geo::Vec2 { x: 1.0, y: 2.0 };
+let q = Vec2 { x: 1.0, why: 2.0 }; //~ T0105
+
+enum Shape {
+    Circle { r: float },
+    Empty,
+}
+
+fn area(s) {
+    match s {
+        Shape::Circle { r } => r * r,
+        Shape::Square { w } => w, //~ T0104
+        Shape::Empty => 0,
+    }
+}
+
+extern HOST;
+print(HOST, Shape::Empty, area);
+{
+    let inner = 1;
+}
+print(inner); //~ T0101
