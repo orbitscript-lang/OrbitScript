@@ -19,7 +19,7 @@
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "dap")]
+#[cfg(all(feature = "dap", unix))]
 mod dap;
 #[cfg(feature = "repl")]
 mod repl;
@@ -204,17 +204,19 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          --        stop handling options\n  \
          -         stop handling options and execute stdin\n"
     );
-    #[cfg(feature = "dap")]
-    eprintln!("  --debug-server  (alone) run the script an editor's debugger launches, over stdio");
+    #[cfg(all(feature = "dap", unix))]
+    eprintln!("  --debug-server  (alone) be an editor's debug adapter, over stdio");
     ExitCode::FAILURE
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().cloned().unwrap_or_else(|| "orbit".into());
-    #[cfg(feature = "dap")]
-    if args.get(1).is_some_and(|a| a == "--debug-server") {
-        return dap::main(&prog);
+    #[cfg(all(feature = "dap", unix))]
+    match args.get(1).map(String::as_str) {
+        Some("--debug-server") => return dap::server(&prog),
+        Some("--debug-connect") => return dap::connect(&prog, &args),
+        _ => {}
     }
     let cli = match parse(&args) {
         Ok(c) => c,

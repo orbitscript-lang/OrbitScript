@@ -1,5 +1,8 @@
-//! A Debug Adapter Protocol server for OrbitScript and Lua (ADR-12): what
-//! `orbit --debug-server` speaks to an editor over standard input and output.
+//! A Debug Adapter Protocol server for OrbitScript and Lua (ADR-12).
+//!
+//! `orbit --debug-server` is the editor's debug adapter ([`adapter`]): it
+//! starts the program as its own process, which debugs itself through a
+//! [`Server`] connected back over a local socket ([`Server::connect`]).
 //!
 //! It runs on the public `orbit` API only ([`orbit::debugger`]), so it
 //! builds over either backend. The program runs on the host's thread in
@@ -11,7 +14,7 @@
 //!
 //! A launching host drives a [`Server`]:
 //!
-//! 1. [`Server::stdio`] starts reading,
+//! 1. [`Server::connect`] (or [`Server::new`]) starts reading,
 //! 2. [`Server::wait_for_launch`] answers `initialize` and gives the
 //!    `launch` request's program and arguments,
 //! 3. the host makes the isolate and [`Server::attach`]es to it, which
@@ -21,7 +24,14 @@
 //!    disconnect.
 
 mod agent;
+#[cfg(unix)]
+mod launcher;
+#[cfg(unix)]
+mod socket;
 mod wire;
+
+#[cfg(unix)]
+pub use launcher::adapter;
 
 use std::collections::VecDeque;
 use std::io::{BufReader, Write};
@@ -44,6 +54,10 @@ pub struct Launch {
     pub stop_on_entry: bool,
     /// Run without debugging (breakpoints are ignored).
     pub no_debug: bool,
+    /// The program has no terminal of its own (`console`
+    /// `"internalConsole"`): its output and error reports go to the
+    /// editor's debug console.
+    pub output_to_editor: bool,
 }
 
 /// The connection to the editor, shared by the reader thread and the
@@ -71,11 +85,23 @@ struct Inbox {
 }
 
 impl Link {
-    fn send(&self, mut msg: Value) {
-        msg["seq"] = json!(self.seq.fetch_add(1, Ordering::Relaxed) + 1);
+    fn new(out: Box<dyn Write + Send>) -> Link {
+        Link {
+            out: Mutex::new(out),
+            seq: AtomicI64::new(0),
+            inbox: Mutex::new(Inbox::default()),
+            arrived: Condvar::new(),
+        }
+    }
+
+    /// Send `msg` with the next sequence number, which it returns.
+    fn send(&self, mut msg: Value) -> i64 {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        msg["seq"] = json!(seq);
         let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
         // A closed editor is noticed by the reader.
         let _ = wire::write(&mut **out, &msg);
+        seq
     }
 
     fn respond(&self, request: &Value, body: Value) {
@@ -197,11 +223,12 @@ impl std::fmt::Debug for Server {
 }
 
 impl Server {
-    /// Speak DAP over this process's standard input and output. Nothing
-    /// else may write to standard output from now on: the program's
-    /// output goes to the editor as `output` events once attached.
-    pub fn stdio() -> Server {
-        Server::new(std::io::stdin(), std::io::stdout())
+    /// Speak DAP over the socket at `path`, where the [`adapter`] that
+    /// started this program waits.
+    #[cfg(unix)]
+    pub fn connect(path: &std::path::Path) -> std::io::Result<Server> {
+        let stream = std::os::unix::net::UnixStream::connect(path)?;
+        Ok(Server::new(stream.try_clone()?, stream))
     }
 
     /// Speak DAP over `input` and `output`.
@@ -209,12 +236,7 @@ impl Server {
         input: impl std::io::Read + Send + 'static,
         output: impl Write + Send + 'static,
     ) -> Server {
-        let link = Arc::new(Link {
-            out: Mutex::new(Box::new(output)),
-            seq: AtomicI64::new(0),
-            inbox: Mutex::new(Inbox::default()),
-            arrived: Condvar::new(),
-        });
+        let link = Arc::new(Link::new(Box::new(output)));
         let reader = Arc::clone(&link);
         std::thread::Builder::new()
             .name("orbit-dap reader".into())
@@ -253,6 +275,10 @@ impl Server {
                         cwd: a["cwd"].as_str().map(str::to_owned),
                         stop_on_entry: a["stopOnEntry"].as_bool().unwrap_or(false),
                         no_debug: a["noDebug"].as_bool().unwrap_or(false),
+                        output_to_editor: !matches!(
+                            a["console"].as_str(),
+                            Some("integratedTerminal" | "externalTerminal")
+                        ),
                     };
                     if launch.program.is_empty() {
                         self.link.fail(&r, "launch needs a 'program'");
@@ -277,12 +303,15 @@ impl Server {
         Some(launch)
     }
 
-    /// Debug `iso`: send its output to the editor, set the editor's
-    /// breakpoints and wait for `configurationDone`. The host runs the
-    /// program next. Fails if the isolate allows no debugger; a
-    /// `noDebug` launch still gets its output.
+    /// Debug `iso`: send its output to the editor (unless it has a
+    /// terminal), set the editor's breakpoints and wait for
+    /// `configurationDone`. The host runs the program next. Fails if the
+    /// isolate allows no debugger; a `noDebug` launch still gets its
+    /// output.
     pub fn attach(&mut self, iso: &mut Isolate) -> Result<(), orbit::Error> {
-        iso.set_stdout(OutputWriter::new(Arc::clone(&self.link), "stdout"));
+        if self.state.borrow().output_to_editor() {
+            iso.set_stdout(OutputWriter::new(Arc::clone(&self.link), "stdout"));
+        }
         let debug = !self.state.borrow().no_debug();
         if debug {
             iso.set_debug_events(Some(Box::new(agent::Events(std::rc::Rc::clone(

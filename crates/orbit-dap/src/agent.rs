@@ -72,6 +72,7 @@ pub(crate) struct State {
     cwd: PathBuf,
     program: Option<PathBuf>,
     no_debug: bool,
+    output_to_editor: bool,
     /// Report the first stop as the program's entry.
     entry: bool,
     files: HashMap<PathBuf, FileBreakpoints>,
@@ -89,6 +90,7 @@ impl State {
             cwd: std::env::current_dir().unwrap_or_default(),
             program: None,
             no_debug: false,
+            output_to_editor: true,
             entry: false,
             files: HashMap::new(),
             next_id: 1,
@@ -103,11 +105,16 @@ impl State {
         }
         self.program = Some(self.absolute(Path::new(&launch.program)));
         self.no_debug = launch.no_debug;
+        self.output_to_editor = launch.output_to_editor;
         self.entry = launch.stop_on_entry && !launch.no_debug;
     }
 
     pub(crate) fn no_debug(&self) -> bool {
         self.no_debug
+    }
+
+    pub(crate) fn output_to_editor(&self) -> bool {
+        self.output_to_editor
     }
 
     fn absolute(&self, path: &Path) -> PathBuf {

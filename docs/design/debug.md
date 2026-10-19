@@ -223,35 +223,38 @@ Cost, measured on the cloud x86_64 container without PGO: the feature on and not
 
 ### DAP server and `orbit --debug-server`
 
-`orbit-dap` is the Debug Adapter Protocol server (D4, D5), on the public API only (`orbit::debugger`), so it builds over either backend. `orbit --debug-server` (CLI feature `dap`, on by default; `build.sh` turns on `orbit-lib/debugger` and `dap` for the shared layout) speaks it over standard input and output: the editor's `launch` request names the script, its arguments and working directory, and the script runs as `orbit <script> <args>` would, with its output and `orbit`'s error reports sent as `output` events.
+`orbit-dap` is the Debug Adapter Protocol server (D4, D5), on the public API only (`orbit::debugger`), so it builds over either backend. `orbit --debug-server` (CLI feature `dap`, on by default; `build.sh` turns on `orbit-lib/debugger` and `dap` for the shared layout) is the editor's debug adapter: it speaks DAP with the editor over standard input and output, but the script never runs in that process. On `launch` it opens a socket (D11: `launch-<pid>-<nonce>.sock`, 0600, in the per-user directory) and starts `orbit --debug-connect <socket> <script> <args>`, which connects back and runs the script as `orbit <script> <args>` would, debugged over the socket. The adapter relays between the two, so the script's standard input and output, and anything native code writes to file descriptors 0 and 1, are never the editor's stream.
 
 ```mermaid
 sequenceDiagram
     participant E as Editor
-    participant R as Reader thread
-    participant H as Isolate's thread
-    E->>R: initialize, launch
-    R->>H: launch (program, args, cwd)
-    H->>H: new isolate, attach, breakpoints
-    E->>R: configurationDone
-    H->>H: run the script
-    E->>R: setBreakpoints (while running)
-    R->>H: pause (unseen by the editor)
-    H-->>E: response, script goes on
-    H-->>E: stopped (breakpoint, step, pause, exception)
-    E->>R: stackTrace, scopes, variables, evaluate, continue
-    H-->>E: exited, terminated
+    participant A as orbit --debug-server
+    participant P as orbit --debug-connect
+    E->>A: initialize
+    A-->>E: capabilities
+    E->>A: launch (program, args, cwd, env, console)
+    A->>A: open the socket
+    A->>E: runInTerminal (or start P itself)
+    E->>P: start in the editor's terminal
+    P->>A: connect
+    A->>P: initialize, launch (replayed)
+    P-->>E: initialized, launch response (relayed)
+    E->>P: setBreakpoints, configurationDone, ... (relayed)
+    P-->>E: stopped, output, exited, terminated (relayed)
 ```
 
-- **Two threads.** A reader thread takes the editor's messages and answers `threads` and `pause` itself. Anything else is queued for the isolate's thread; while the script runs, the reader pauses it through `PauseHandle` to get it answered (a *service* stop, which the editor never sees as `stopped`), and `disconnect` or `terminate` interrupts it.
-- **One DAP thread per isolate** (D10), id 1 for `orbit --debug-server`; coroutines show in its call stack.
+- **Where the script runs** follows the launch's `console`: `"integratedTerminal"` (the default) or `"externalTerminal"` ask the editor to start it in a terminal (DAP's `runInTerminal`), where it reads what is typed and writes there. `"internalConsole"`, or an editor that offers no terminals, makes the adapter start it with no standard input (reads see end of input) and send its output and `orbit`'s error reports to the debug console as `output` events.
+- **The adapter answers `initialize` itself**, then replays it and `launch` to the program and relays everything else both ways, renumbering what it sends the editor. If the program's connection ends without `terminated`, the adapter sends it; if the editor leaves, the program sees its connection close and stops. A program the adapter started itself is killed if it has not exited 2 s after its connection closes.
+- **Unix only for now.** Windows needs the AF_UNIX wrapper (D12), which comes with attach.
+- **Two threads in the program.** A reader thread takes the editor's messages and answers `threads` and `pause` itself. Anything else is queued for the isolate's thread; while the script runs, the reader pauses it through `PauseHandle` to get it answered (a *service* stop, which the editor never sees as `stopped`), and `disconnect` or `terminate` interrupts it.
+- **One DAP thread per isolate** (D10), id 1 for `orbit --debug-connect`; coroutines show in its call stack.
 - **Breakpoints** match a chunk by the names a script can be loaded under (`@/abs/path`, `@rel`, `@./rel`, relative to the launch directory) and are reported unverified until their chunk loads, then `breakpoint` changed events say where they landed.
 - **Exception filters**: `uncaught` (errors no `pcall` catches; the CLI's own handler does not count) and `all`.
 - **Frame names** come from the call site, as `debug.getinfo` gives them, or else from the name the function was defined with (`FrameInfo::defined_name`, from the prototype), so a tail-called function still has one.
 - **Scopes**: Locals, Upvalues and Globals; tables expand, with their metatable as `(metatable)`. `evaluate` reads names and dotted fields only.
 - `os.exit` sends `terminated` from a `before_exit` hook.
 
-Cost: `dap` adds 133.6 KiB to the release `orbit` (2,268,384 → 2,405,216 bytes, cloud x86_64, no PGO), of which the engine is 12.3 KiB and `orbit-dap` the rest; `serde_json` is already linked for `std.json`.
+Cost: `dap` adds 202.5 KiB to the release `orbit` (2,252,064 → 2,459,416 bytes, cloud x86_64, no PGO), of which the engine is 12.3 KiB and `orbit-dap` the rest; `serde_json` is already linked for `std.json`.
 
 Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Attaching to a running process (sockets, D11) and the VS Code extension (D7) come next.
 

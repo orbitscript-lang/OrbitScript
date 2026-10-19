@@ -1,5 +1,5 @@
 //! Whole sessions: a scripted editor on one thread, the host running the
-//! program on this one, as `orbit --debug-server` does.
+//! program on this one, as `orbit --debug-connect` does.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
