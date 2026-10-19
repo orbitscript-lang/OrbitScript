@@ -20,7 +20,7 @@ flowchart LR
     ext -- "LSP, stdio" --> lsp["orbit-lsp<br/>Rust host + OrbitScript layer"]
     lsp --> check["orbit-check (library)"]
     lsp --> syn["front ends<br/>recovery + trivia"]
-    ext -- "DAP, stdio" --> cli["orbit --debug-server<br/>orbit --dap-attach &lt;pid&gt;"]
+    ext -- "DAP, stdio" --> cli["orbit --debug-server<br/>orbit --debug-attach &lt;pid&gt;"]
     cli -- "DAP, Unix socket" --> dap["orbit-dap<br/>(in the program or liborbit)"]
     dap --> api["orbit API<br/>Isolate debugger"]
     api --> eng["debug engine<br/>orbit-runtime, feature debugger"]
@@ -59,17 +59,17 @@ flowchart LR
 - **`liborbit` carries `orbit-dap` too** (D5), behind an `orbit-lib` feature that `build.sh` turns on, so C hosts can be debugged: `orbit_debug_listen(lua_State *L, const char *addr)` for hosts that add a debug option, and `ORBIT_DEBUG=1`, read when a state is created through the C API, for unmodified hosts. Rust programs call `orbit_dap::serve`. Without the feature both C functions still exist, and listening fails.
 - **Suppressed per isolate, at creation only** (D5). Rust: `Config::debugger` on `Runtime::new_isolate`, `Debugger::Allowed` (default), `Debugger::Disabled`, or `Debugger::FromEnv` (only isolates with this read `ORBIT_DEBUG`). C: `orbit_newstate(lua_Alloc f, void *ud, unsigned flags)` with `ORBIT_STATE_NO_DEBUGGER`, exported in the `ORBIT_0` symbol version; `lua_newstate` and `luaL_newstate` behave as `orbit_newstate` with no flags. A disabled isolate has no engine state. There is no process-wide switch and no way to disable it later.
 - **The host decides when the server starts** (D11). The library never opens a socket on its own. The start functions are safe to call from any thread at any time.
-  - The `orbit` CLI owns its process, so `kill -USR1 <pid>` starts the server (its existing `signal-hook` thread handles it). `--dap-listen` starts it at launch and `--no-debug-signal` removes the handler.
+  - The `orbit` CLI owns its process, so `kill -USR1 <pid>` starts the server (its existing `signal-hook` thread handles it). `--debug-listen` starts it at launch and `--no-debug-signal` removes the handler.
   - On Windows the CLI waits on a named event, `Local\orbit-debug-<pid>`, instead.
-  - `orbit --dap-attach` checks that the target is an `orbit` CLI before signalling, since `SIGUSR1` terminates processes that don't handle it.
+  - `orbit --debug-attach` checks that the target is an `orbit` CLI before signalling, since `SIGUSR1` terminates processes that don't handle it.
   - Other hosts use `ORBIT_DEBUG` or call the start function from their own trigger.
 
 ### Transport and attaching
 
 - **Local Unix domain sockets only, no TCP** (D11). The server listens on `$XDG_RUNTIME_DIR/orbit/<pid>-<nonce>.sock`, falling back to `$TMPDIR/orbit-<uid>` or `/tmp/orbit-<uid>` on Linux, `$TMPDIR/orbit` on macOS and `%LOCALAPPDATA%\orbit` on Windows. The directory is 0700 and the socket 0600, so only the same user can connect, with no token. Remote devices are reached by the user forwarding the socket over SSH.
 - **Stale sockets**: a crashed process leaves its socket behind, and on some platforms it survives a reboot. The random nonce means a reused pid never lands on an old name. Clients trust a socket only if its `describe` answer gives the expected pid and process start time. Each server start, and the lister, delete sockets that refuse connections.
-- **Discovery**: `orbit --dap-attach --list` sends each socket one `describe` request (program, arguments, start time, versions, isolates, whether a debugger is attached) before any DAP traffic. It also lists `orbit` CLIs without a running server, found by process name. The runtime writes no discovery files.
-- **The editor connects through a stdio relay**, `orbit --dap-attach <pid>`, which signals the target if needed, connects to its socket and relays DAP over stdio. It works the same on every platform and in every editor, and avoids Node treating Windows socket paths as named pipes.
+- **Discovery**: `orbit --debug-attach --list` sends each socket one `describe` request (program, arguments, start time, versions, isolates, whether a debugger is attached) before any DAP traffic. It also lists `orbit` CLIs without a running server, found by process name. The runtime writes no discovery files.
+- **The editor connects through a stdio relay**, `orbit --debug-attach <pid>`, which signals the target if needed, connects to its socket and relays DAP over stdio. It works the same on every platform and in every editor, and avoids Node treating Windows socket paths as named pipes.
 - **Windows AF_UNIX via our own Winsock wrapper** (D12): `socket`, `bind`, `listen`, `accept`, `recv`, `send` and `closesocket` through `windows-sys` (already a dependency of `orbit-virtmem`), about 150 lines in one file with an `unsafe` exception, which also holds the named-event code. It is deleted when `std`'s Windows Unix sockets (nightly feature `windows_unix_domain_sockets`) are stable. Every supported Windows (10 build 17063 and later) has AF_UNIX.
 
 ### Several isolates in one process
@@ -80,7 +80,7 @@ flowchart LR
 
 ### Editor
 
-- **A VS Code extension in this repository**, `editors/vscode` (D7), self-contained so it can move to its own repository later. It starts `orbit-lsp`, `orbit --debug-server` and `orbit --dap-attach`, and fills its process picker from `orbit --dap-attach --list`.
+- **A VS Code extension in this repository**, `editors/vscode` (D7), self-contained so it can move to its own repository later. It starts `orbit-lsp`, `orbit --debug-server` and `orbit --debug-attach`, and fills its process picker from `orbit --debug-attach --list`.
 
 ### Order
 
