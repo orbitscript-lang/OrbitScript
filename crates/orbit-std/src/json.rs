@@ -16,7 +16,8 @@
 //! A table encodes as an array when its keys are exactly `1..n`, and
 //! otherwise as an object, whose keys must be strings or numbers. Integers
 //! and floats keep their subtype both ways (`1` and `1.0`). A metatable's
-//! `__jsontype` field (`"object"`, `"array"` or `"null"`) overrides the
+//! `__tojson` metamethod gives the value to write instead (tables and
+//! userdata), and a `__jsontype` field (`"object"`, `"array"` or `"null"`) overrides the
 //! shape, as the markers and `null` use.
 
 use std::fmt::Write as _;
@@ -258,10 +259,50 @@ impl Encoder {
                 let bytes = s.string_at(idx).expect("a string");
                 write_string(&mut self.out, bytes)?;
             }
-            Type::Table => self.table(s, idx)?,
+            Type::Table => {
+                if !self.hook(s, idx)? {
+                    self.table(s, idx)?;
+                }
+            }
+            Type::Userdata if self.hook(s, idx)? => {}
             t => return Err(bad(format!("cannot encode a {}", t.name()))),
         }
         Ok(())
+    }
+
+    /// Write what the `__tojson` metamethod of the value at `idx` gives, if it has
+    /// one; false if it hasn't.
+    fn hook(&mut self, s: &mut Stack<'_>, idx: i32) -> Result<bool, Fail> {
+        if !s.get_metatable(idx) {
+            return Ok(false);
+        }
+        let base = s.top() - 1;
+        s.raw_get_field(-1, b"__tojson")?;
+        if s.type_at(-1) != Type::Function {
+            s.set_top(base)?;
+            return Ok(false);
+        }
+        // The value stays open while its replacement is written, so a hook that
+        // gives back the value itself, or a table holding it, is a cycle.
+        let id = s
+            .identity(idx)
+            .expect("a table or userdata has an identity");
+        if self.open.contains(&id) {
+            return Err(bad("cannot encode a table that contains itself"));
+        }
+        if self.open.len() >= MAX_DEPTH {
+            return Err(bad(format!(
+                "cannot encode tables nested over {MAX_DEPTH} deep"
+            )));
+        }
+        s.push_copy(idx);
+        s.call(1, 1)?;
+        self.open.push(id);
+        let r = self.value(s, s.top());
+        self.open.pop();
+        r?;
+        s.set_top(base)?;
+        Ok(true)
     }
 
     fn float(&mut self, f: f64) -> Result<(), Fail> {

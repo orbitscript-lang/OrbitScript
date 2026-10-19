@@ -102,6 +102,38 @@ fn markers_choose_the_shape() {
 }
 
 #[test]
+fn tojson_gives_the_value_to_write() {
+    let src = r#"
+        local Point = {}
+        Point.__index = Point
+        function Point.__tojson(p) return {p.x, p.y} end
+        local p = setmetatable({x = 3, y = 4}, Point)
+        local Wrap = {__tojson = function(w) return w.inner end}
+        return json.encode({p, setmetatable({inner = p}, Wrap)}),
+            json.encode(setmetatable({}, {__tojson = function() return json.null end}))
+    "#;
+    assert_eq!(lua(src).unwrap(), ["[[3,4],[3,4]]", "null"]);
+    // A hook that gives back its own value would never end.
+    let e = lua(
+        "local t = setmetatable({}, {__tojson = function(t) return {t} end}) return json.encode(t)",
+    )
+    .unwrap_err();
+    assert!(
+        e.contains("cannot encode a table that contains itself"),
+        "{e}"
+    );
+    // Its errors are the caller's.
+    let e = lua("return json.encode(setmetatable({}, {__tojson = function() error('no') end}))")
+        .unwrap_err();
+    assert!(e.contains("no"), "{e}");
+    // What it gives must be encodable, and the path says where.
+    let e =
+        lua("return json.encode({a = setmetatable({}, {__tojson = function() return print end})})")
+            .unwrap_err();
+    assert!(e.contains("cannot encode a function at value.a"), "{e}");
+}
+
+#[test]
 fn sort_keys_orders_members_by_bytes() {
     assert_eq!(
         one(

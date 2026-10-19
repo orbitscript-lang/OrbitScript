@@ -33,13 +33,16 @@ It is never a global and never the bare name `json`, so a program that ships its
 
 ```mermaid
 flowchart LR
-    t["table"] --> m{"__jsontype in<br/>its metatable?"}
+    t["table"] --> h{"__tojson in<br/>its metatable?"}
+    h -- "yes" --> r["what it returns"]
+    h -- "no" --> m{"__jsontype in<br/>its metatable?"}
     m -- "object / array / null" --> shape["that shape"]
     m -- "none" --> k{"keys exactly 1..n?"}
     k -- "yes (or empty)" --> arr["array"]
     k -- "no" --> obj["object"]
 ```
 
+- **`__tojson`**: a table or userdata whose metatable has a `__tojson` function is written as whatever that function returns for it, so a type picks its own JSON form (`fn __tojson(self) { [self.x, self.y] }` in an OrbitScript `impl`). Its errors go to `encode`'s caller; giving back the value itself, or a table that holds it, is a cycle error.
 - **Tables**: an array when the keys are exactly `1..n` (an empty table is `[]`), otherwise an object. Object keys are strings, or numbers written as text (`{[1] = "a", [3] = "c"}` is `{"1":"a","3":"c"}`); other key types are an error. A metatable's `__jsontype` field (`"object"`, `"array"` or `"null"`) decides instead, which is what the markers and `json.null` use, and lets a class pick its shape. A table marked as an array whose keys aren't `1..n` is an error.
 - **Numbers** keep their subtype both ways: `1` and `1.0` encode differently and decode back to an integer and a float. A numeral past the 64-bit integers decodes to the nearest float, as Lua reads it. NaN and infinities are an error.
 - **Strings** must be valid UTF-8 to encode; decoding gives UTF-8 with escapes resolved.
@@ -47,7 +50,7 @@ flowchart LR
 - **Empty objects** decode marked as objects, so `{}` round-trips; empty arrays are `[]` anyway.
 - **Limits**: tables nest at most 128 deep both ways (`serde_json`'s decoding limit), and a table that contains itself is an error rather than a hang.
 
-These are the usual Lua JSON library conventions (dkjson's `__jsontype`, lua-cjson's `null` sentinel), observed from their documentation.
+These are the usual Lua JSON library conventions (dkjson's `__jsontype`, lua-cjson's `null` sentinel), observed from their documentation. dkjson's `__tojson` returns JSON text instead; returning a value keeps the hook independent of `encode`'s options and lets the result be checked like any other value.
 
 ## How it's built
 
@@ -63,5 +66,4 @@ Measured 2026-10-19, cloud x86_64, release builds without PGO:
 ## Not yet
 
 - Decoding options (a different value for `null`, keys as integers).
-- `__tojson` metamethods.
 - Streaming (reading from a file without the whole text in memory).

@@ -2,8 +2,8 @@
 --
 -- The Lua twin of json.orb: both print json.expected. Shows decoding a file,
 -- json.null, integers and floats, json.object/json.array for empty tables,
--- encode's pretty and sort_keys options, a class that picks its own shape with
--- __jsontype, and the errors decode returns and encode raises.
+-- encode's pretty and sort_keys options, a class that encodes as an array
+-- through __tojson, and the errors decode returns and encode raises.
 --
 -- Usage: orbit json.lua [rounds]   (rounds > 1 repeats the work, for benchmarking)
 
@@ -46,10 +46,12 @@ local function report(shop)
   return {shop = shop.name, tags = tags, reorder = reorder, stock_value = value}
 end
 
--- A class whose instances encode as an array: [x, y].
-local Point = {__jsontype = "array"}
+-- A table encodes as an object of its fields unless its __tojson metamethod
+-- gives something else to write: here the array [x, y].
+local Point = {}
 Point.__index = Point
-function Point.new(x, y) return setmetatable({x, y}, Point) end
+function Point.new(x, y) return setmetatable({x = x, y = y}, Point) end
+function Point:__tojson() return {self.x, self.y} end
 
 local function run()
   local out = {}
@@ -88,7 +90,7 @@ local function run()
 
   -- Tables with number keys that aren't a sequence become objects.
   say(json.encode({[1] = "a", [3] = "c"}, {sort_keys = true}))
-  -- A class can choose its shape.
+  -- A type can choose what it encodes as.
   say(json.encode({from = Point.new(0, 0), to = Point.new(3, 4)}, {sort_keys = true}))
 
   -- Round trip: decoding what encode wrote gives the same values back.

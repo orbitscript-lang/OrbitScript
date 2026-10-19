@@ -1,8 +1,8 @@
 // json: read, query, build and write JSON with the std.json module.
 //
 // Shows decoding a file, `json::null`, integers and floats, `json::object` and
-// `json::array` for empty tables, encode's `pretty` and `sort_keys` options, a class
-// that picks its own shape with `__jsontype`, and the errors `decode` returns and
+// `json::array` for empty tables, encode's `pretty` and `sort_keys` options, a struct
+// that encodes as an array through `__tojson`, and the errors `decode` returns and
 // `encode` raises. json.lua is the same program in Lua.
 //
 // Usage: orbit json.orb [rounds]   (rounds > 1 repeats the work, for benchmarking)
@@ -49,10 +49,15 @@ fn report(shop) {
     #{ shop: shop.name, tags: tags, reorder: reorder, stock_value: value }
 }
 
-// A class whose instances encode as an array: [x, y].
-let Point = #{ __jsontype: "array" };
-Point.__index = Point;
-fn point(x, y) { setmetatable([x, y], Point) }
+// A struct encodes as an object of its fields unless its `__tojson` metamethod gives
+// something else to write: here the array [x, y].
+struct Point { x, y }
+
+impl Point {
+    pub fn new(x, y) -> Point { Point { x, y } }
+
+    fn __tojson(self) { [self.x, self.y] }
+}
 
 fn run() {
     let out = [];
@@ -90,8 +95,8 @@ fn run() {
 
     // Tables with number keys that aren't a sequence become objects.
     say(json::encode(#{ [1]: "a", [3]: "c" }, #{ sort_keys: true }));
-    // A class can choose its shape.
-    say(json::encode(#{ from: point(0, 0), to: point(3, 4) }, #{ sort_keys: true }));
+    // A type can choose what it encodes as.
+    say(json::encode(#{ from: Point::new(0, 0), to: Point::new(3, 4) }, #{ sort_keys: true }));
 
     // Round trip: decoding what encode wrote gives the same values back.
     let again = json::decode(json::encode(shop));
