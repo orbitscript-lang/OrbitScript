@@ -212,7 +212,11 @@ impl Drop for HeldId {
 }
 
 /// Run `f` on the window the library hands a program object.
-fn on_window<R>(host: &Rc<HostState>, s: StackArg<'_>, f: impl FnOnce(&mut Stack<'_>) -> R) -> R {
+pub(crate) fn on_window<R>(
+    host: &Rc<HostState>,
+    s: StackArg<'_>,
+    f: impl FnOnce(&mut Stack<'_>) -> R,
+) -> R {
     let mut s = s.into_inner();
     let mut stack = Stack::new(&mut s, Rc::clone(host));
     f(&mut stack)
@@ -1275,5 +1279,32 @@ impl<'a> Control<'a> {
 
     pub fn main_thread(&self) -> ThreadRef {
         self.c.main_thread().into()
+    }
+
+    /// [`crate::Isolate::set_breakpoints`], also from inside a stop.
+    #[cfg(feature = "debugger")]
+    pub fn set_breakpoints(
+        &mut self,
+        source: &[u8],
+        lines: &[u32],
+    ) -> Vec<crate::debugger::Breakpoint> {
+        self.c
+            .set_breakpoints(source.into(), lines.into())
+            .iter()
+            .map(|&b| crate::debugger::abi::breakpoint_from(b))
+            .collect()
+    }
+
+    /// [`crate::Isolate::stop_on_next_line`].
+    #[cfg(feature = "debugger")]
+    pub fn stop_on_next_line(&mut self) {
+        self.c.stop_on_next_line()
+    }
+
+    /// [`crate::Isolate::set_error_break`], also from inside a stop.
+    #[cfg(feature = "debugger")]
+    pub fn set_error_break(&mut self, on: crate::debugger::ErrorBreak) {
+        self.c
+            .set_error_break(crate::debugger::abi::error_break_to(on))
     }
 }

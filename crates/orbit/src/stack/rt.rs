@@ -2248,4 +2248,39 @@ impl<'a> Control<'a> {
     pub fn main_thread(&self) -> ThreadRef {
         ThreadRef(self.vm.main_thread())
     }
+
+    /// [`crate::Isolate::set_breakpoints`], also from inside a stop.
+    #[cfg(feature = "debugger")]
+    pub fn set_breakpoints(
+        &mut self,
+        source: &[u8],
+        lines: &[u32],
+    ) -> Vec<crate::debugger::Breakpoint> {
+        self.vm
+            .set_breakpoints(source, lines)
+            .into_iter()
+            .map(|b| crate::debugger::Breakpoint {
+                requested: b.requested,
+                line: b.line,
+            })
+            .collect()
+    }
+
+    /// [`crate::Isolate::stop_on_next_line`].
+    #[cfg(feature = "debugger")]
+    pub fn stop_on_next_line(&mut self) {
+        self.vm.stop_on_next_line()
+    }
+
+    /// [`crate::Isolate::set_error_break`], also from inside a stop.
+    #[cfg(feature = "debugger")]
+    pub fn set_error_break(&mut self, on: crate::debugger::ErrorBreak) {
+        use crate::debugger::ErrorBreak;
+        use orbit_runtime::vm::debugger as engine;
+        self.vm.set_error_break(match on {
+            ErrorBreak::Never => engine::ErrorBreak::Never,
+            ErrorBreak::Uncaught => engine::ErrorBreak::Uncaught,
+            ErrorBreak::All => engine::ErrorBreak::All,
+        })
+    }
 }
