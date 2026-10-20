@@ -376,7 +376,14 @@ impl KindMeta {
     /// colors.
     pub(crate) fn release_page(&mut self, p: u32) {
         debug_assert_eq!(self.pages[p as usize].live, 0);
-        self.pages[p as usize] = PageMeta::default();
+        // Keep the free list's buffer (2 bytes a slot at most), so a page
+        // reused after release doesn't regrow it slot by slot.
+        let mut free = std::mem::take(&mut self.pages[p as usize].free);
+        free.clear();
+        self.pages[p as usize] = PageMeta {
+            free,
+            ..PageMeta::default()
+        };
         self.allocated -= 1;
         self.open.remove(&p);
         if self.cur == Some(p) {
