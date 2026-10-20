@@ -297,12 +297,7 @@ impl Lowerer {
 
     fn begin_function(&mut self, name: FunctionName, span: Span) -> FuncId {
         let parent = self.funcs.last().map(|c| c.id);
-        let id = self
-            .chunk
-            .add_function(hir::Function::new(name, span, parent));
-        let mut f = hir::Function::new(name, span, parent);
-        // `Function::new` gives an empty body block 0; lowering allocates its own blocks.
-        f.blocks.clear();
+        let (id, f) = self.chunk.begin_function(name, span, parent);
         self.funcs.push(FnCtx {
             id,
             f,
@@ -317,7 +312,7 @@ impl Lowerer {
     fn end_function(&mut self, id: FuncId) {
         let ctx = self.funcs.pop().expect("function being lowered");
         debug_assert_eq!(ctx.id, id);
-        self.chunk.functions[id.index()] = ctx.f;
+        self.chunk.finish_function(id, ctx.f);
     }
 
     // The small node builders and helpers below are kept out of line: lowering calls them
