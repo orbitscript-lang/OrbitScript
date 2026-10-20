@@ -13,6 +13,7 @@ mod coro;
 pub mod debug;
 #[cfg(feature = "debugger")]
 pub mod debugger;
+mod dispatch;
 mod gc;
 pub mod hook;
 mod interp;
