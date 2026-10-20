@@ -1807,9 +1807,20 @@ impl Vm {
                         reg!(dst + 1) = Value::Table(t);
                         let tab = self.heap.get(t);
                         let cm = &cur.caches[ic as usize];
-                        let mut m = match tab.find_str_key(&self.heap, &cm.key_for(&self.heap, k)) {
-                            Some(slot) => tab.slot_value(slot),
-                            None => Value::Nil,
+                        // A method in the object itself (a module or a
+                        // singleton object) hits the cache; a class
+                        // instance lacks the key, so the probe proves that.
+                        let mut m = match tab.cached_str(cm.slot.get() as usize, cm.key) {
+                            Some(v) => v,
+                            None => {
+                                match tab.find_str_key(&self.heap, &cm.key_for(&self.heap, k)) {
+                                    Some(slot) => {
+                                        cm.fill(slot);
+                                        tab.slot_value(slot)
+                                    }
+                                    None => Value::Nil,
+                                }
+                            }
                         };
                         if m.is_nil()
                             && let Some(mt) = tab.meta

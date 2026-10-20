@@ -81,3 +81,37 @@ end})
 local acc = {}
 for i = 1, 3 do acc[#acc + 1] = counter:step(i) end
 print(table.concat(acc, ","))
+
+-- Field misses walk __index tables, and a function further up the chain
+-- gets the table whose metatable named it.
+local top = setmetatable({}, {__index = function (t, k) return tostring(rawget(t, "tag")) .. ":" .. k end})
+local mid = setmetatable({tag = "mid"}, {__index = top})
+local base = setmetatable({own = 1}, {__index = mid})
+local obj = setmetatable({}, {__index = base})
+for _ = 1, 3 do print(obj.own, obj.tag, obj.zzz) end
+local loop = setmetatable({}, {})
+getmetatable(loop).__index = loop
+print(pcall(function () return loop.x end))
+
+-- Stores to absent or dead fields of an object whose class has no
+-- __newindex are raw; with one, they go through it.
+local Class = {}
+local inst = setmetatable({}, {__index = Class})
+for i = 1, 3 do inst.link = i; print(inst.link); inst.link = nil; print(inst.link, rawget(inst, "link")) end
+local seen = {}
+local guarded = setmetatable({}, {__index = Class, __newindex = function (t, k, v) seen[#seen + 1] = k; rawset(t, k, v) end})
+for i = 1, 3 do guarded.link = i; guarded.link = nil end
+print(#seen, table.concat(seen, ","))
+
+-- A method in the object itself, and the same call site on class instances.
+local single = {n = 0}
+function single:bump(d) self.n = self.n + d; return self.n end
+local Counter = {bump = function (self, d) return "class" .. d end}
+local objs = {single, setmetatable({}, {__index = Counter}), single}
+for i = 1, 6 do print(objs[(i % 3) + 1]:bump(i)) end
+
+-- Arrays of booleans.
+local flags = {true, false, true, true}
+local n = 0
+for i = 1, 4 do if flags[i] then n = n + 1 end end
+print(n, flags[2], flags[5])

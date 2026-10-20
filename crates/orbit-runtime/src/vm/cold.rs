@@ -874,19 +874,18 @@ pub(crate) fn get_str_miss(
     k: Gc<LuaStr>,
     cache: &FieldCache,
 ) -> Result<Value, Exc> {
-    {
-        let tab = heap.get(t);
-        let v = match tab.find_str_key(heap, &cache.key_for(heap, k)) {
-            Some(slot) => {
-                cache.fill(slot);
-                tab.slot_value(slot)
-            }
-            None => Value::Nil,
-        };
-        if v.is_nil() && tab.meta.is_some() {
-            return meta::index(heap, metas, Value::Table(t), Value::Str(k));
+    let tab = heap.get(t);
+    let key = cache.key_for(heap, k);
+    let v = match tab.find_str_key(heap, &key) {
+        Some(slot) => {
+            cache.fill(slot);
+            tab.slot_value(slot)
         }
-        Ok(v)
+        None => Value::Nil,
+    };
+    match tab.meta {
+        Some(mt) if v.is_nil() => meta::index_str_miss(heap, metas, t, mt, &key),
+        _ => Ok(v),
     }
 }
 
@@ -969,20 +968,30 @@ pub(crate) fn set_str_miss(
 ) -> Result<(), Exc> {
     {
         let key = cache.key_for(heap, k);
-        if heap.get(t).meta.is_some() {
+        let tab = heap.get(t);
+        if let Some(mt) = tab.meta {
             // A key that is present with a value takes a raw store, as
             // `__newindex` only applies to absent keys: fill the cache so
             // the next store hits inline.
-            let tab = heap.get(t);
-            if let Some(slot) = tab.find_str_key(heap, &key)
-                && !tab.slot_value(slot).is_nil()
+            let slot = tab.find_str_key(heap, &key);
+            // An absent key with a `__newindex` goes through it; without
+            // one (an object whose class gives only `__index`), the store
+            // is raw, into the key's dead entry if it has one.
+            let e = MetaField::NewIndex;
+            if slot.is_none_or(|s| tab.slot_value(s).is_nil())
+                && !heap
+                    .get(mt)
+                    .meta_field(heap, e, metas.field_names.name(e))
+                    .is_nil()
             {
+                return meta::new_index(heap, metas, Value::Table(t), Value::Str(k), v);
+            }
+            if let Some(slot) = slot {
                 cache.fill(slot);
                 heap.barrier_back(t);
                 heap.get_mut(t).set_slot(slot, v);
                 return Ok(());
             }
-            return meta::new_index(heap, metas, Value::Table(t), Value::Str(k), v);
         }
         match heap.get(t).find_str_store(heap, &key) {
             Ok(slot) => {
