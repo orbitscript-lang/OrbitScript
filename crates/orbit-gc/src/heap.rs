@@ -215,8 +215,9 @@ impl<S: Space + Default> Default for Heap<S> {
     }
 }
 
+/// The bytes one slot of `T` takes: the slot itself and its color byte.
 #[inline]
-pub(crate) fn slot_size<T>() -> usize {
+pub fn slot_size<T>() -> usize {
     size_of::<Option<T>>() + 1
 }
 
@@ -562,7 +563,7 @@ impl<S: Space> Heap<S> {
             .meta
             .iter()
             .enumerate()
-            .map(|(k, m)| m.allocated * m.page_slots() as usize * (S::slot_bytes(k as u8) + 1))
+            .map(|(k, m)| m.allocated * m.page_slots() as usize * S::slot_bytes(k as u8))
             .sum()
     }
 
@@ -1197,8 +1198,8 @@ impl<S: Space> Heap<S> {
     /// it counts as 1/16 of its size; otherwise an arena that grew and then
     /// emptied would slow every later sweep down to a crawl. Released pages
     /// and never-used slots cost nothing. A page left with no objects is
-    /// released, unless it is its arena's last. Returns true when every arena
-    /// is swept.
+    /// released, unless it is its arena's only allocated page. Returns true
+    /// when every arena is swept.
     fn sweep(&mut self, budget: usize) -> bool {
         let mut credit = budget.saturating_mul(FREE_SLOT_SHARE);
         loop {
@@ -1223,7 +1224,7 @@ impl<S: Space> Heap<S> {
             let shift = meta.shift;
             let end = page.fresh as usize;
             // In 16ths of a byte, like `credit`.
-            let slot_cost = (S::slot_bytes(kind) + 1) * FREE_SLOT_SHARE;
+            let slot_cost = S::slot_bytes(kind) * FREE_SLOT_SHARE;
             let base = (p as u32) << shift;
             let mut o = start;
             while o < end && credit > 0 {

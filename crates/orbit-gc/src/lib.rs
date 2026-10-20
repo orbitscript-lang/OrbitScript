@@ -238,7 +238,7 @@ macro_rules! space {
                 fn slot_bytes(kind: u8) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return ::core::mem::size_of::<::core::option::Option<$ty>>();
+                            return $crate::__private::slot_size::<$ty>();
                         }
                     )+
                     ::core::unreachable!()
@@ -284,12 +284,11 @@ macro_rules! space {
 /// Support for [`space!`]; not a public API.
 #[doc(hidden)]
 pub mod __private {
-    use crate::heap::slot_size;
+    pub use crate::heap::slot_size;
     use crate::{Arena, Liveness, Marker, Space, Trace, WeakMode};
 
-    /// Trace one object. Returns its marking work beyond the references
-    /// it visits: one unit for the object plus one per 16 bytes it owns
-    /// outside its slot, roughly Lua's one unit per slot traversed.
+    /// Trace one object. Returns its size in bytes: its slot (with the
+    /// color byte) plus what it owns outside the slot.
     #[inline]
     pub fn trace<S: Space, T: Trace<S>, const N: usize>(
         a: &Arena<T, N>,
