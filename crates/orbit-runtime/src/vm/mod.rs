@@ -571,8 +571,13 @@ pub struct Runtime {
     /// then (ADR-3): one that leaves this list without being resumed has its
     /// stack shrunk. A ring: `cooling_at` is the oldest entry, which the
     /// next park replaces. Weak: an entry dies with its thread.
-    pub(crate) cooling: [Option<(Gc<Thread>, u32)>; coro::HOT_STACKS],
+    /// It starts with `coro::HOT_STACKS` entries and grows up to
+    /// `coro::MAX_HOT_STACKS` (see `Vm::came_back`).
+    pub(crate) cooling: Vec<Option<(Gc<Thread>, u32)>>,
     pub(crate) cooling_at: usize,
+    /// Suspended parks so far (wrapping), to tell how soon a shrunk stack
+    /// is resumed.
+    pub(crate) parks: u32,
     /// Collections that reached their sweep, to tell whether a parked
     /// stack's dead slots may now refer to freed objects.
     pub(crate) gc_cycles: u32,
@@ -794,8 +799,9 @@ impl Vm {
                 handled: false,
                 unwind_traceback: None,
                 native_protos: Default::default(),
-                cooling: [None; coro::HOT_STACKS],
+                cooling: vec![None; coro::HOT_STACKS],
                 cooling_at: 0,
+                parks: 0,
                 gc_cycles: 0,
                 interrupt: Default::default(),
                 #[cfg(feature = "debugger")]

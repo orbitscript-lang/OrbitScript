@@ -30,10 +30,16 @@ use crate::vm::{Catch, Frame, FrameKind, LuaError, Stack, Vm};
 /// stops).
 pub(crate) const MAX_RESUMES: usize = 196;
 
-/// How many suspended stacks stay at full size (ADR-3): a stack parked
-/// longer ago than the last `HOT_STACKS` parks, and not resumed since, is
-/// shrunk to its live values.
+/// How many suspended stacks stay at full size at first (ADR-3): a stack
+/// parked longer ago than the last `HOT_STACKS` parks, and not resumed
+/// since, is shrunk to its live values.
 pub(crate) const HOT_STACKS: usize = 16;
+
+/// The most suspended stacks kept at full size. The hot set doubles up to
+/// this when stacks it shrank come back soon, as in a pipeline of more
+/// coroutines than it holds, which would otherwise shrink and regrow a
+/// stack on every resume. At 1024 the full-size stacks hold about 4 MiB.
+pub(crate) const MAX_HOT_STACKS: usize = 1024;
 
 /// A thread's status, as `coroutine.status` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +91,8 @@ pub(crate) struct Coroutine {
     parks: u32,
     /// `rt.gc_cycles` when it was parked.
     cycle: u32,
+    /// `rt.parks` when its stack was last shrunk cold, until it is resumed.
+    shrunk_at: Option<u32>,
 }
 
 impl Coroutine {
@@ -109,6 +117,7 @@ impl Coroutine {
             error: None,
             parks: 0,
             cycle: 0,
+            shrunk_at: None,
         }
     }
 
@@ -121,6 +130,7 @@ impl Coroutine {
             bytes: 0,
             parks: 0,
             cycle: 0,
+            shrunk_at: None,
         }
     }
 }
@@ -227,8 +237,9 @@ impl Vm {
             self.heap.adjust_bytes(delta);
         }
         if suspended {
+            self.rt.parks = self.rt.parks.wrapping_add(1);
             let at = self.rt.cooling_at;
-            self.rt.cooling_at = (at + 1) % HOT_STACKS;
+            self.rt.cooling_at = (at + 1) % self.rt.cooling.len();
             let out = self.rt.cooling[at].replace((from, stamp));
             // An older entry of the thread parking now is stale.
             if let Some((cold, stamp)) = out
@@ -239,7 +250,13 @@ impl Vm {
         }
         let c = co_mut(&mut self.heap, to);
         c.status = CoStatus::Running;
-        self.rt.stack.unpark(&mut c.stack, hooks);
+        if let Some(at) = c.shrunk_at.take() {
+            self.rt.stack.unpark(&mut c.stack, hooks);
+            self.came_back(at);
+        } else {
+            self.rt.stack.unpark(&mut c.stack, hooks);
+        }
+        let c = co_mut(&mut self.heap, to);
         if finished {
             // The finished stack goes, leaving `to`'s slot empty.
             c.stack.clear(Default::default());
@@ -269,11 +286,30 @@ impl Vm {
         }
     }
 
+    /// A thread whose stack was shrunk cold at park number `at` is being
+    /// resumed. If fewer parks than twice the hot set have happened since,
+    /// the hot set was too small for the coroutines taking turns: double it.
+    #[cold]
+    #[inline(never)]
+    fn came_back(&mut self, at: u32) {
+        let hot = self.rt.cooling.len();
+        if hot < MAX_HOT_STACKS && (self.rt.parks.wrapping_sub(at) as usize) < 2 * hot {
+            // The new empty entries go in as the oldest, keeping the ring's
+            // order.
+            let at = self.rt.cooling_at;
+            self.rt
+                .cooling
+                .splice(at..at, std::iter::repeat_n(None, hot));
+        }
+    }
+
     /// [`Vm::shrink_parked`]'s copy, for a thread that has gone cold.
     #[cold]
     #[inline(never)]
     fn shrink_parked_stack(&mut self, t: Gc<Thread>) {
+        let parks = self.rt.parks;
         let c = co_mut(&mut self.heap, t);
+        c.shrunk_at = Some(parks);
         let before = c.bytes;
         let s = &mut c.stack;
         s.regs = s.regs[..c.top].to_vec();

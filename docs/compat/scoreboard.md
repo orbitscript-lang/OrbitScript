@@ -71,7 +71,7 @@ Suite: **32 of 32** files pass, 32 of 32 compile. `heavy.lua` now runs and passe
 
 ### Benchmarks against lua5.5
 
-Linux x86_64 cloud container (4 cores), 7 runs each, full inputs. `orbit` is the PGO release build (`cargo build --release`), with the profile retrained on this commit over the full training set. Since #155 that set includes `examples/`. Wall-clock times vary by a few percent between runs, and `coroutines.lua` by more: it measured 0.99 in another run the same hour. Treat small ratios as noise.
+Linux x86_64 cloud container (4 cores), 7 runs each, full inputs. `orbit` is the PGO release build (`./build.sh --static` since #190; `cargo build --release` before), with the profile retrained on this commit over the full training set. Since #155 that set includes `examples/`. Wall-clock times vary by a few percent between runs, and `coroutines.lua` by more: it measured 0.99 in another run the same hour. Treat small ratios as noise.
 
 | Benchmark | lua5.5 time | lua5.5 peak RSS | orbit time | orbit peak RSS | Time ratio |
 |---|---:|---:|---:|---:|---:|
