@@ -15,8 +15,7 @@ use orbit_runtime::vm::{
 };
 
 use crate::isolate::Library;
-use crate::scope::Scope;
-use crate::value::{ThreadStatus, Value};
+use crate::value::ThreadStatus;
 
 use super::{
     ArithOp, CompareOp, Continuation, FrameInfo, GcOp, GcParam, InterruptHandler, MULTRET, Native,
@@ -730,21 +729,6 @@ impl<'s> Stack<'s> {
                 .userdata_mut::<crate::class::Slot<T>>(u)
                 .map(|s| f(&mut s.0)),
             _ => None,
-        }
-    }
-
-    /// Run `f` on argument `arg` (1-based) as the host value of type `T`,
-    /// or raise Lua's type error naming `expected` (also while the value is
-    /// taken out).
-    pub fn check_userdata<T: Any, R>(
-        &mut self,
-        arg: i32,
-        expected: &str,
-        f: impl FnOnce(&mut T) -> R,
-    ) -> StackResult<R> {
-        match self.with_userdata::<T, _>(arg, |cell| cell.as_mut().map(f)) {
-            Some(Some(r)) => Ok(r),
-            _ => Err(self.type_error(arg, expected)),
         }
     }
 
@@ -1735,39 +1719,6 @@ impl<'s> Stack<'s> {
         }
     }
 
-    /// Run `f` with a scope over this window: the typed API, for code that
-    /// builds on it (`orbit-std`'s libraries). What `f` made is dropped
-    /// after.
-    pub fn with_scope<R>(&mut self, f: impl for<'a> FnOnce(&'a Scope<'a>) -> R) -> R {
-        let start = self.top();
-        let scope = Scope::new(self.reborrow());
-        let r = f(&scope);
-        let _ = scope.stack().set_top(start);
-        r
-    }
-
-    /// [`Stack::with_scope`], pushing the value `f` gives, if any.
-    pub fn push_from_scope(
-        &mut self,
-        f: impl for<'a> FnOnce(&'a Scope<'a>) -> Option<Value<'a>>,
-    ) -> bool {
-        let start = self.top();
-        let scope = Scope::new(self.reborrow());
-        let v = f(&scope);
-        let mut stack = scope.stack();
-        let end = match v {
-            Some(v) => {
-                v.push(&mut stack);
-                let r = stack.copy(-1, start + 1);
-                debug_assert!(r.is_ok(), "the slot after the start exists");
-                start + 1
-            }
-            None => start,
-        };
-        let _ = stack.set_top(end);
-        v.is_some()
-    }
-
     /// Keep the value at `idx` alive in a pin slot of its own until
     /// [`Stack::unpin`], and give the slot: for values a host keeps
     /// between calls.
@@ -1901,19 +1852,6 @@ impl<'s> Stack<'s> {
     /// Back to this window's own stack after [`Stack::enter_thread`].
     pub fn leave_thread(&mut self, t: ThreadRef, w: ThreadWindow) {
         self.ctx.leave_thread_window(t.0, w.0);
-    }
-
-    /// Run `f` with `t`'s stack as the window ([`Stack::enter_thread`]).
-    pub fn on_thread<R>(
-        &mut self,
-        t: ThreadRef,
-        base: Option<usize>,
-        f: impl FnOnce(&mut Stack<'s>) -> R,
-    ) -> R {
-        let w = self.enter_thread(t, base);
-        let r = f(self);
-        self.leave_thread(t, w);
-        r
     }
 
     /// Move the top `n` values of thread `from`'s stack to `to`'s (each

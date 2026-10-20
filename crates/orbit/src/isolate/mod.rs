@@ -9,7 +9,11 @@ pub(crate) mod backend;
 
 pub use backend::{Gc, Interrupt, Isolate};
 
+use crate::chunk::Chunk;
 use crate::compiler::Compiler;
+use crate::error::Error;
+use crate::pin::Pinned;
+use crate::value::{Function, Table};
 
 /// The runtime library. Creates isolates and gives the compiler; in a
 /// shared build, this is where `liborbit` gets loaded and checked.
@@ -168,5 +172,23 @@ impl Config {
     pub fn debugger(mut self, debugger: Debugger) -> Config {
         self.debugger = debugger;
         self
+    }
+}
+
+// Built on `Isolate::scope`, the same for both backends.
+impl Isolate {
+    /// Load and run a chunk, dropping its results.
+    pub fn exec(&mut self, chunk: Chunk<'_>) -> Result<(), Error> {
+        self.scope(|s| s.load(chunk)?.call(()).map(drop))
+    }
+
+    /// Load a chunk and keep its main function.
+    pub fn load(&mut self, chunk: Chunk<'_>) -> Result<Pinned<Function<'static>>, Error> {
+        self.scope(|s| Ok(s.load(chunk)?.pin()))
+    }
+
+    /// The global table, pinned.
+    pub fn globals(&mut self) -> Pinned<Table<'static>> {
+        self.scope(|s| s.globals().pin())
     }
 }

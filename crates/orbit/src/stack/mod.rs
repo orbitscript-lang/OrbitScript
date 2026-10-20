@@ -32,6 +32,9 @@ pub(crate) mod backend;
 
 mod typed;
 
+use crate::scope::Scope;
+use crate::value::Value;
+
 pub(crate) use backend::{ContRef, cont_ref};
 pub use backend::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
 pub use typed::{
@@ -324,6 +327,71 @@ pub struct FrameInfo {
 /// `interrupted!`.
 pub trait InterruptHandler: 'static {
     fn handle(c: &mut Control<'_>) -> bool;
+}
+
+// ---- built on the backend's operations, the same for both -------------------------
+
+impl<'s> Stack<'s> {
+    /// Run `f` on argument `arg` (1-based) as the host value of type `T`,
+    /// or raise Lua's type error naming `expected` (also while the value is
+    /// taken out).
+    pub fn check_userdata<T: std::any::Any, R>(
+        &mut self,
+        arg: i32,
+        expected: &str,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> StackResult<R> {
+        match self.with_userdata::<T, _>(arg, |cell| cell.as_mut().map(f)) {
+            Some(Some(r)) => Ok(r),
+            _ => Err(self.type_error(arg, expected)),
+        }
+    }
+
+    /// Run `f` with a scope over this window: the typed API, for code that
+    /// builds on it (`orbit-std`'s libraries). What `f` made is dropped
+    /// after.
+    pub fn with_scope<R>(&mut self, f: impl for<'a> FnOnce(&'a Scope<'a>) -> R) -> R {
+        let start = self.top();
+        let scope = Scope::new(self.reborrow());
+        let r = f(&scope);
+        let _ = scope.stack().set_top(start);
+        r
+    }
+
+    /// [`Stack::with_scope`], pushing the value `f` gives, if any.
+    pub fn push_from_scope(
+        &mut self,
+        f: impl for<'a> FnOnce(&'a Scope<'a>) -> Option<Value<'a>>,
+    ) -> bool {
+        let start = self.top();
+        let scope = Scope::new(self.reborrow());
+        let v = f(&scope);
+        let mut stack = scope.stack();
+        let end = match v {
+            Some(v) => {
+                v.push(&mut stack);
+                let r = stack.copy(-1, start + 1);
+                debug_assert!(r.is_ok(), "the slot after the start exists");
+                start + 1
+            }
+            None => start,
+        };
+        let _ = stack.set_top(end);
+        v.is_some()
+    }
+
+    /// Run `f` with `t`'s stack as the window ([`Stack::enter_thread`]).
+    pub fn on_thread<R>(
+        &mut self,
+        t: ThreadRef,
+        base: Option<usize>,
+        f: impl FnOnce(&mut Stack<'s>) -> R,
+    ) -> R {
+        let w = self.enter_thread(t, base);
+        let r = f(self);
+        self.leave_thread(t, w);
+        r
+    }
 }
 
 #[cfg(test)]

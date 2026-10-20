@@ -21,8 +21,7 @@ use stabby::slice::Slice;
 
 use crate::abi::*;
 use crate::isolate::Library;
-use crate::scope::Scope;
-use crate::value::{ThreadStatus, Value};
+use crate::value::ThreadStatus;
 
 use super::{
     ArithOp, CompareOp, Continuation, FrameInfo, GcOp, GcParam, InterruptHandler, Native, Outcome,
@@ -625,18 +624,6 @@ impl<'s> Stack<'s> {
         values.get_mut::<T>(id).map(f)
     }
 
-    pub fn check_userdata<T: Any, R>(
-        &mut self,
-        arg: i32,
-        expected: &str,
-        f: impl FnOnce(&mut T) -> R,
-    ) -> StackResult<R> {
-        match self.with_userdata::<T, _>(arg, |cell| cell.as_mut().map(f)) {
-            Some(Some(r)) => Ok(r),
-            _ => Err(self.type_error(arg, expected)),
-        }
-    }
-
     pub fn is_host_userdata(&self, idx: i32) -> bool {
         self.w.is_host_userdata(idx)
     }
@@ -1006,35 +993,6 @@ impl<'s> Stack<'s> {
         self.w.open_library(code as u8, ignore_env)
     }
 
-    pub fn with_scope<R>(&mut self, f: impl for<'a> FnOnce(&'a Scope<'a>) -> R) -> R {
-        let start = self.top();
-        let scope = Scope::new(self.reborrow());
-        let r = f(&scope);
-        let _ = scope.stack().set_top(start);
-        r
-    }
-
-    pub fn push_from_scope(
-        &mut self,
-        f: impl for<'a> FnOnce(&'a Scope<'a>) -> Option<Value<'a>>,
-    ) -> bool {
-        let start = self.top();
-        let scope = Scope::new(self.reborrow());
-        let v = f(&scope);
-        let mut stack = scope.stack();
-        let end = match v {
-            Some(v) => {
-                v.push(&mut stack);
-                let r = stack.copy(-1, start + 1);
-                debug_assert!(r.is_ok(), "the slot after the start exists");
-                start + 1
-            }
-            None => start,
-        };
-        let _ = stack.set_top(end);
-        v.is_some()
-    }
-
     pub fn pin(&mut self, idx: i32) -> u32 {
         self.w.pin(idx)
     }
@@ -1126,18 +1084,6 @@ impl<'s> Stack<'s> {
 
     pub fn leave_thread(&mut self, t: ThreadRef, w: ThreadWindow) {
         self.w.leave_thread(t.bits, w.0)
-    }
-
-    pub fn on_thread<R>(
-        &mut self,
-        t: ThreadRef,
-        base: Option<usize>,
-        f: impl FnOnce(&mut Stack<'s>) -> R,
-    ) -> R {
-        let w = self.enter_thread(t, base);
-        let r = f(self);
-        self.leave_thread(t, w);
-        r
     }
 
     pub fn move_values(
