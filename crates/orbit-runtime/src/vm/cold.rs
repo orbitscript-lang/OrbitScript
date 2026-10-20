@@ -1,14 +1,15 @@
 //! The slow and rare halves of instructions.
 //!
-//! The dispatch loop in `run()` is one large function, and every line in it
-//! competes for the same machine registers. So `run()` keeps only each
-//! instruction's common case: decoding, a type check and a few operations
-//! on registers. Everything bigger or rarer (allocation, cache misses,
-//! varargs, concatenation, error messages) is a method here, marked
-//! `#[inline(never)]` so it costs the loop one call instead of its body.
-//! New instructions follow the same split: their fast path goes in `run()`,
-//! the rest here. That keeps the loop's size, and the hot instructions'
-//! register allocation, independent of how many instructions there are.
+//! The dispatch loop (`run_loop` in interp.rs) is one large function, and
+//! every line in it competes for the same machine registers. So the loop
+//! keeps only each instruction's common case: decoding, a type check and a
+//! few operations on registers. Everything bigger or rarer (allocation,
+//! cache misses, varargs, concatenation, error messages) is a method here,
+//! marked `#[inline(never)]` so it costs the loop one call instead of its
+//! body. New instructions follow the same split: their fast path goes in
+//! the loop, the rest here. That keeps the loop's size, and the hot
+//! instructions' register allocation, independent of how many instructions
+//! there are.
 
 use std::borrow::Cow;
 

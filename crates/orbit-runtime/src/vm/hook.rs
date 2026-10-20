@@ -235,8 +235,6 @@ impl Vm {
         Ok(())
     }
 
-    /// Call the hook with `(event, line)` above everything on the stack.
-    /// `transfer` is what `getinfo`'s `r` option reports meanwhile.
     /// The `interrupted!` error, which clears the request. Like the
     /// reference's, it names the position of the interrupted function's
     /// caller.
@@ -250,6 +248,8 @@ impl Vm {
         LuaError::new(self.new_str(msg.as_bytes()))
     }
 
+    /// Call the hook with `(event, line)` above everything on the stack.
+    /// `transfer` is what `getinfo`'s `r` option reports meanwhile.
     pub(crate) fn call_hook(
         &mut self,
         event: &[u8],
