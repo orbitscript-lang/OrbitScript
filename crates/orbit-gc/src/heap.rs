@@ -896,6 +896,12 @@ impl<S: Space> Heap<S> {
             self.barriers = false;
             self.major_due = true;
             self.finish_cycle_at(live);
+            if self.bytes >= self.limit {
+                // Not a whole collection at every safe point.
+                let room = self.past_limit_room();
+                self.threshold = self.bytes.saturating_add(room);
+                self.debt = if self.stress { 0 } else { -(room as isize) };
+            }
         } else {
             self.new_bit = NEW;
             self.barriers = true;
@@ -976,13 +982,25 @@ impl<S: Space> Heap<S> {
         self.schedule_minor();
     }
 
+    /// Generational mode, with the heap past its limit: how much more to
+    /// allocate before the next collection. Each is a whole minor or major
+    /// collection, so one at every safe point (as an incremental heap steps
+    /// there) would crawl while the owner handles the overrun; this keeps
+    /// them a sixteenth of the limit apart at most.
+    fn past_limit_room(&self) -> usize {
+        (self.limit / 16).clamp(1, self.params.minor_min_bytes)
+    }
+
     fn schedule_minor(&mut self) {
         let budget = (self
             .gen_base
             .saturating_mul(self.params.minor_percent as usize)
             / 100)
             .max(self.params.minor_min_bytes)
-            .min(self.limit.saturating_sub(self.bytes).max(1));
+            .min(match self.limit.saturating_sub(self.bytes) {
+                0 => self.past_limit_room(),
+                room => room,
+            });
         self.threshold = self.bytes.saturating_add(budget);
         self.debt = if self.stress {
             0
