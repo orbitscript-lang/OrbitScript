@@ -189,20 +189,27 @@ impl Interned {
 const INTERNER_MIN: usize = 256;
 
 /// The weak set of interned short strings: open addressing with linear
-/// probing, at most 3/4 full. The VM prunes it in
-/// [`Roots::clear_weak`](orbit_gc::Roots::clear_weak) through
-/// [`Interner::clear_dead`].
+/// probing, at most 3/4 full. A host prunes it in
+/// [`Roots::clear_weak`](orbit_gc::Roots::clear_weak), either at once
+/// through [`Interner::clear_dead`] or in steps through
+/// [`Interner::begin_clear_dead`] and [`Interner::sweep_dead`].
 #[derive(Debug, Default)]
 pub struct Interner {
     slots: Vec<Interned>,
     len: usize,
+    /// Pruning in steps: dead strings may still be in the set, and a lookup
+    /// that finds one revives it.
+    cleaning: bool,
+    /// While cleaning: the next slot to check, and how many are left.
+    clean_at: usize,
+    clean_left: usize,
 }
 
 impl Interner {
     pub fn new() -> Self {
         Interner {
             slots: vec![Interned::EMPTY; INTERNER_MIN],
-            len: 0,
+            ..Interner::default()
         }
     }
 
@@ -284,6 +291,9 @@ impl Interner {
                 break;
             }
             if e.hash == hash && heap.get(e.str).as_bytes() == bytes {
+                if self.cleaning {
+                    heap.revive(e.str);
+                }
                 return e.str;
             }
             i = (i + 1) & mask;
@@ -309,10 +319,13 @@ impl Interner {
                 self.place(e);
             }
         }
+        if self.cleaning {
+            // The order changed: check every slot again.
+            self.start_cleaning();
+        }
     }
 
-    /// Remove `gc`, interned with `hash`, closing the gap behind it so
-    /// every later entry stays reachable from its home slot.
+    /// Remove `gc`, interned with `hash`.
     fn remove(&mut self, hash: u32, gc: Gc<LuaStr>) {
         let mask = self.slots.len() - 1;
         let mut i = hash as usize & mask;
@@ -320,6 +333,14 @@ impl Interner {
             debug_assert!(!self.slots[i].is_empty(), "interned string missing");
             i = (i + 1) & mask;
         }
+        self.remove_at(i);
+    }
+
+    /// Empty slot `i`, closing the gap behind it so every later entry stays
+    /// reachable from its home slot. Entries only move back towards `i`,
+    /// never past it.
+    fn remove_at(&mut self, i: usize) {
+        let mask = self.slots.len() - 1;
         self.len -= 1;
         // Backward-shift deletion: move up each following entry whose home
         // slot is at or before the hole (cyclically).
@@ -352,20 +373,15 @@ impl Interner {
         self.slots[i] = e;
     }
 
-    /// Drop the strings the collector found dead. Call from the VM's
-    /// `Roots::clear_weak`.
+    /// Drop the strings the collector found dead, all at once. Call from the
+    /// host's `Roots::clear_weak`.
     ///
     /// The set is rehashed in place, so pruning a large set allocates
     /// nothing; it only moves to a smaller allocation when at most an
     /// quarter of what it would take stays in use.
     pub fn clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
         if live.is_minor() {
-            // Only young strings can die: remove each, leaving the rest.
-            for (gc, s) in live.young_dead::<LuaStr>() {
-                if s.short {
-                    self.remove(s.hash.get(), gc);
-                }
-            }
+            self.clear_young_dead(live);
             return;
         }
         let cap = self.slots.len();
@@ -391,10 +407,7 @@ impl Interner {
             return;
         }
         self.len = kept;
-        let mut target = INTERNER_MIN;
-        while kept * 2 > target {
-            target *= 2;
-        }
+        let target = self.target_cap();
         let Some(start) = start.filter(|_| target * 4 > cap) else {
             // Much smaller now (or, never, full): move to a new set.
             self.resize(target.min(cap));
@@ -409,6 +422,78 @@ impl Interner {
                 self.place(e);
             }
         }
+    }
+
+    /// Like [`Interner::clear_dead`], but after a full marking only start
+    /// pruning: [`Interner::sweep_dead`] does it in steps. For a host that
+    /// calls `sweep_dead` from `Roots::sweep_weak`.
+    pub fn begin_clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
+        if live.is_minor() {
+            self.clear_young_dead(live);
+        } else {
+            self.start_cleaning();
+        }
+    }
+
+    /// Check about `budget` slots for dead strings, removing them. Returns
+    /// true when the whole set is pruned. Call from `Roots::sweep_weak`.
+    pub fn sweep_dead(&mut self, live: &Liveness<'_, LuaSpace>, budget: usize) -> bool {
+        if !self.cleaning {
+            return true;
+        }
+        let mask = self.slots.len() - 1;
+        let mut work = budget;
+        while self.clean_left > 0 && work > 0 {
+            work -= 1;
+            let i = self.clean_at;
+            let e = self.slots[i];
+            if !e.is_empty() && !live.is_live(e.str) {
+                // An entry from later in the scan may move here: check
+                // this slot again. Entries never move back past the scan.
+                self.remove_at(i);
+                continue;
+            }
+            self.clean_at = (i + 1) & mask;
+            self.clean_left -= 1;
+        }
+        if self.clean_left > 0 {
+            return false;
+        }
+        self.cleaning = false;
+        let target = self.target_cap();
+        if target * 4 <= self.slots.len() {
+            self.resize(target);
+        }
+        true
+    }
+
+    /// In a minor collection only young strings can die: remove each,
+    /// leaving the rest.
+    fn clear_young_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
+        for (gc, s) in live.young_dead::<LuaStr>() {
+            if s.short {
+                self.remove(s.hash.get(), gc);
+            }
+        }
+    }
+
+    /// Check every slot for dead strings, in slot order. A removal only moves
+    /// entries the scan has yet to reach, or from the part it has passed
+    /// into the part it has yet to reach, so the scan misses none.
+    fn start_cleaning(&mut self) {
+        self.cleaning = !self.slots.is_empty();
+        self.clean_at = 0;
+        self.clean_left = self.slots.len();
+    }
+
+    /// The smallest capacity that keeps the set at most half full, and at
+    /// least [`INTERNER_MIN`].
+    fn target_cap(&self) -> usize {
+        let mut target = INTERNER_MIN;
+        while self.len * 2 > target {
+            target *= 2;
+        }
+        target
     }
 }
 
@@ -592,6 +677,72 @@ mod tests {
         for (n, &s) in all.iter().enumerate().step_by(300) {
             assert_eq!(i.new_str(&mut heap, format!("s{n}").as_bytes()), s);
         }
+    }
+
+    #[test]
+    fn interner_prunes_in_steps_and_revives_what_it_hands_out() {
+        struct R<'a>(&'a mut Interner, &'a [Gc<LuaStr>]);
+        impl orbit_gc::Roots<LuaSpace> for R<'_> {
+            fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
+                for &s in self.1 {
+                    m.mark(s);
+                }
+            }
+            fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
+                self.0.begin_clear_dead(live);
+            }
+            fn sweep_weak(&mut self, live: &Liveness<'_, LuaSpace>, budget: usize) -> bool {
+                self.0.sweep_dead(live, budget)
+            }
+        }
+        let mut heap = LuaHeap::new();
+        let mut i = Interner::new();
+        let all: Vec<_> = (0..5000)
+            .map(|n| i.new_str(&mut heap, format!("s{n}").as_bytes()))
+            .collect();
+        let mut roots: Vec<_> = all.iter().copied().step_by(2).collect();
+        let kept = roots.len();
+        // Collect in the smallest steps. Halfway through pruning, look up
+        // some dead strings: they come back as they were, and stay.
+        let mut steps = 0;
+        let mut revived = Vec::new();
+        while !heap.step_with(&mut R(&mut i, &roots), 1) {
+            steps += 1;
+            if i.cleaning && i.clean_left < i.slots.len() / 2 && revived.is_empty() {
+                // Dead strings the pruning has not reached yet.
+                let ahead: Vec<_> = i.slots[i.clean_at..]
+                    .iter()
+                    .filter(|e| {
+                        !e.is_empty() && all.iter().position(|&s| s == e.str).unwrap() % 2 == 1
+                    })
+                    .map(|e| e.str)
+                    .take(100)
+                    .collect();
+                for s in ahead {
+                    let bytes = heap.get(s).as_bytes().to_vec();
+                    assert_eq!(i.new_str(&mut heap, &bytes), s);
+                    revived.push(s);
+                }
+                // And intern new ones, which grows nothing but must survive.
+                for n in 0..50 {
+                    roots.push(i.new_str(&mut heap, format!("new{n}").as_bytes()));
+                }
+            }
+        }
+        assert!(
+            revived.len() == 100 && steps > 1000,
+            "pruned in {steps} steps"
+        );
+        assert_eq!(i.len(), kept + revived.len() + 50);
+        for (n, &s) in all.iter().enumerate() {
+            if n % 2 == 0 || revived.contains(&s) {
+                assert_eq!(heap.get(s).as_bytes(), format!("s{n}").as_bytes());
+                assert_eq!(i.new_str(&mut heap, format!("s{n}").as_bytes()), s);
+            }
+        }
+        // The revived strings die in the next cycle, which prunes them.
+        heap.full_collect(&mut R(&mut i, &roots));
+        assert_eq!(i.len(), kept + 50);
     }
 
     #[test]

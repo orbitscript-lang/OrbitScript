@@ -140,6 +140,10 @@ enum State {
 
 /// How many free slots the sweeper skips for the cost of visiting one object.
 const FREE_SLOT_SHARE: usize = 16;
+
+/// The sweep budget, in bytes, that clearing one weak entry outside the heap
+/// costs ([`Roots::sweep_weak`]).
+const WEAK_ENTRY_BYTES: usize = 16;
 /// Bytes of work done by one step in stress mode.
 const STRESS_WORK: usize = 2048;
 /// Generational stress mode: minor collections between major ones. Old
@@ -222,6 +226,10 @@ pub struct Heap<S: Space> {
     /// The major collection in progress is automatic (see
     /// [`Heap::begin_major`]).
     major_adapt: bool,
+    /// From the end of a full marking until [`Roots::sweep_weak`] says it
+    /// is done, before any slot is swept: weak references outside the heap
+    /// are being cleared in steps.
+    sweeping_weak: bool,
 }
 
 impl<S: Space> fmt::Debug for Heap<S> {
@@ -307,6 +315,7 @@ impl<S: Space + Default> Heap<S> {
             card_index: CardIndex::default(),
             major_before: 0,
             major_adapt: false,
+            sweeping_weak: false,
         }
     }
 }
@@ -390,6 +399,29 @@ impl<S: Space> Heap<S> {
         S: Holds<T>,
     {
         self.space.arena().is_occupied(gc)
+    }
+
+    /// Keep an object alive that this cycle found unreachable, for a weak
+    /// reference outside the heap that [`Roots::sweep_weak`] has not cleared
+    /// yet and that the owner hands out again (an intern table's lookup, for
+    /// example). Does nothing at other times, or to a live object.
+    ///
+    /// Only leaf objects can be revived: anything they referred to may be
+    /// gone.
+    #[inline]
+    pub fn revive<T: Trace<S>>(&mut self, gc: Gc<T>)
+    where
+        S: Holds<T>,
+    {
+        const { assert!(T::LEAF, "orbit-gc: only leaf objects can be revived") };
+        if !self.sweeping_weak {
+            return;
+        }
+        let kind = <S as Holds<T>>::KIND;
+        if self.marks.mark_raw(kind, gc.index(), true) {
+            let obj = self.space.arena().get(gc);
+            self.marks.marked_bytes += slot_size::<T>() + obj.extra_bytes();
+        }
     }
 
     /// A handle to the object now in slot `index` of `T`'s arena, for code
@@ -839,7 +871,7 @@ impl<S: Space> Heap<S> {
                     self.finish_marking(roots);
                 }
                 State::Sweep { .. } => {
-                    if self.sweep(work) {
+                    if self.sweep(roots, work) {
                         self.finish_cycle();
                         return true;
                     }
@@ -868,11 +900,11 @@ impl<S: Space> Heap<S> {
             // the partial marking and start over, so a full collection frees
             // everything unreachable now.
             State::Mark => self.unmark_all(),
-            State::Sweep { .. } => while !self.sweep(usize::MAX) {},
+            State::Sweep { .. } => while !self.sweep(roots, usize::MAX) {},
         }
         self.start_marking(roots);
         self.finish_marking(roots);
-        while !self.sweep(usize::MAX) {}
+        while !self.sweep(roots, usize::MAX) {}
         self.finish_cycle();
     }
 
@@ -890,6 +922,7 @@ impl<S: Space> Heap<S> {
         self.weak.clear();
         self.cards.clear();
         self.card_index.clear();
+        self.sweeping_weak = false;
         self.set_state(State::Pause);
     }
 
@@ -1441,6 +1474,7 @@ impl<S: Space> Heap<S> {
         if self.mode == Mode::Generational {
             self.major_marked();
         }
+        self.sweeping_weak = true;
         self.set_state(State::Sweep { kind: 0, at: 0 });
     }
 
@@ -1496,7 +1530,21 @@ impl<S: Space> Heap<S> {
     /// and never-used slots cost nothing. A page left with no objects is
     /// released, unless it is its arena's only allocated page. Returns true
     /// when every arena is swept.
-    fn sweep(&mut self, budget: usize) -> bool {
+    ///
+    /// First, [`Roots::sweep_weak`] clears weak references outside the heap
+    /// in steps; nothing is freed until it is done.
+    fn sweep<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, budget: usize) -> bool {
+        if self.sweeping_weak {
+            let live = Liveness {
+                marks: &self.marks,
+                young: None,
+                _s: PhantomData,
+            };
+            if !roots.sweep_weak(&live, (budget / WEAK_ENTRY_BYTES).max(1)) {
+                return false;
+            }
+            self.sweeping_weak = false;
+        }
         let mut credit = budget.saturating_mul(FREE_SLOT_SHARE);
         loop {
             let State::Sweep { kind, at } = self.state else {

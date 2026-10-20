@@ -770,7 +770,9 @@ impl Roots<LuaSpace> for Runtime {
     }
 
     fn clear_weak(&mut self, live: &Liveness<'_, LuaSpace>) {
-        self.strings.clear_dead(live);
+        // On a big heap, pruning the string table at once was most of the
+        // pause at the end of marking: it is done in steps instead.
+        self.strings.begin_clear_dead(live);
         for e in &mut self.cooling {
             if e.is_some_and(|(t, _)| !live.is_live(t)) {
                 *e = None;
@@ -780,6 +782,10 @@ impl Roots<LuaSpace> for Runtime {
             self.callee = None;
         }
         self.gc_cycles = self.gc_cycles.wrapping_add(1);
+    }
+
+    fn sweep_weak(&mut self, live: &Liveness<'_, LuaSpace>, budget: usize) -> bool {
+        self.strings.sweep_dead(live, budget)
     }
 }
 
