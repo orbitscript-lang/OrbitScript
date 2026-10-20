@@ -688,11 +688,9 @@ impl Op {
             Op::Move { dst, src } => Insn::new(Opcode::Move, dst, src, 0, 0),
             Op::LoadNil { dst, count } => Insn::new(Opcode::LoadNil, dst, count, 0, 0),
             Op::LoadBool { dst, value } => Insn::new(Opcode::LoadBool, dst, value as u8, 0, 0),
-            Op::LoadInt { dst, value } => {
-                Insn::new(Opcode::LoadInt, dst, 0, 0, value as u32 as u32)
-            }
+            Op::LoadInt { dst, value } => Insn::new(Opcode::LoadInt, dst, 0, 0, value as u32),
             Op::LoadConst { dst, k } => Insn::new(Opcode::LoadConst, dst, 0, 0, k as u32),
-            Op::LoadConstX { dst, k } => Insn::new(Opcode::LoadConstX, dst, 0, 0, k as u32),
+            Op::LoadConstX { dst, k } => Insn::new(Opcode::LoadConstX, dst, 0, 0, k),
             Op::CellNew { cell, src } => Insn::new(Opcode::CellNew, cell, src, 0, 0),
             Op::CellGet { dst, cell } => Insn::new(Opcode::CellGet, dst, cell, 0, 0),
             Op::CellSet { cell, src } => Insn::new(Opcode::CellSet, cell, src, 0, 0),
@@ -755,7 +753,7 @@ impl Op {
                 first,
                 count,
                 start,
-            } => Insn::new(Opcode::SetList, table, first, count, start as u32),
+            } => Insn::new(Opcode::SetList, table, first, count, start),
             Op::SelfCall { dst, obj, key, ic } => Insn::new(
                 Opcode::SelfCall,
                 dst,
@@ -794,54 +792,30 @@ impl Op {
             Op::Len { dst, src } => Insn::new(Opcode::Len, dst, src, 0, 0),
             Op::Cast { dst, src, ty, mode } => Insn::new(Opcode::Cast, dst, src, ty, mode as u32),
             Op::Concat { dst, first, count } => Insn::new(Opcode::Concat, dst, first, count, 0),
-            Op::Jump { off } => Insn::new(Opcode::Jump, 0, 0, 0, off as u32 as u32),
-            Op::JumpIfTrue { src, off } => {
-                Insn::new(Opcode::JumpIfTrue, src, 0, 0, off as u32 as u32)
+            Op::Jump { off } => Insn::new(Opcode::Jump, 0, 0, 0, off as u32),
+            Op::JumpIfTrue { src, off } => Insn::new(Opcode::JumpIfTrue, src, 0, 0, off as u32),
+            Op::JumpIfFalse { src, off } => Insn::new(Opcode::JumpIfFalse, src, 0, 0, off as u32),
+            Op::JumpLt { a, b, off } => Insn::new(Opcode::JumpLt, a, b, 0, off as u32),
+            Op::JumpNotLt { a, b, off } => Insn::new(Opcode::JumpNotLt, a, b, 0, off as u32),
+            Op::JumpLe { a, b, off } => Insn::new(Opcode::JumpLe, a, b, 0, off as u32),
+            Op::JumpNotLe { a, b, off } => Insn::new(Opcode::JumpNotLe, a, b, 0, off as u32),
+            Op::JumpEq { a, b, off } => Insn::new(Opcode::JumpEq, a, b, 0, off as u32),
+            Op::JumpNe { a, b, off } => Insn::new(Opcode::JumpNe, a, b, 0, off as u32),
+            Op::JumpEqInt { a, imm, want, off } => {
+                Insn::new(Opcode::JumpEqInt, a, imm as u8, want as u8, off as u32)
             }
-            Op::JumpIfFalse { src, off } => {
-                Insn::new(Opcode::JumpIfFalse, src, 0, 0, off as u32 as u32)
+            Op::JumpLtInt { a, imm, want, off } => {
+                Insn::new(Opcode::JumpLtInt, a, imm as u8, want as u8, off as u32)
             }
-            Op::JumpLt { a, b, off } => Insn::new(Opcode::JumpLt, a, b, 0, off as u32 as u32),
-            Op::JumpNotLt { a, b, off } => Insn::new(Opcode::JumpNotLt, a, b, 0, off as u32 as u32),
-            Op::JumpLe { a, b, off } => Insn::new(Opcode::JumpLe, a, b, 0, off as u32 as u32),
-            Op::JumpNotLe { a, b, off } => Insn::new(Opcode::JumpNotLe, a, b, 0, off as u32 as u32),
-            Op::JumpEq { a, b, off } => Insn::new(Opcode::JumpEq, a, b, 0, off as u32 as u32),
-            Op::JumpNe { a, b, off } => Insn::new(Opcode::JumpNe, a, b, 0, off as u32 as u32),
-            Op::JumpEqInt { a, imm, want, off } => Insn::new(
-                Opcode::JumpEqInt,
-                a,
-                imm as u8,
-                want as u8,
-                off as u32 as u32,
-            ),
-            Op::JumpLtInt { a, imm, want, off } => Insn::new(
-                Opcode::JumpLtInt,
-                a,
-                imm as u8,
-                want as u8,
-                off as u32 as u32,
-            ),
-            Op::JumpLeInt { a, imm, want, off } => Insn::new(
-                Opcode::JumpLeInt,
-                a,
-                imm as u8,
-                want as u8,
-                off as u32 as u32,
-            ),
-            Op::JumpGtInt { a, imm, want, off } => Insn::new(
-                Opcode::JumpGtInt,
-                a,
-                imm as u8,
-                want as u8,
-                off as u32 as u32,
-            ),
-            Op::JumpGeInt { a, imm, want, off } => Insn::new(
-                Opcode::JumpGeInt,
-                a,
-                imm as u8,
-                want as u8,
-                off as u32 as u32,
-            ),
+            Op::JumpLeInt { a, imm, want, off } => {
+                Insn::new(Opcode::JumpLeInt, a, imm as u8, want as u8, off as u32)
+            }
+            Op::JumpGtInt { a, imm, want, off } => {
+                Insn::new(Opcode::JumpGtInt, a, imm as u8, want as u8, off as u32)
+            }
+            Op::JumpGeInt { a, imm, want, off } => {
+                Insn::new(Opcode::JumpGeInt, a, imm as u8, want as u8, off as u32)
+            }
             Op::Call {
                 func,
                 nargs,
@@ -859,23 +833,19 @@ impl Op {
             Op::VarargUnpack { dst, table, count } => {
                 Insn::new(Opcode::VarargUnpack, dst, table, count, 0)
             }
-            Op::ForPrep { base, exit } => {
-                Insn::new(Opcode::ForPrep, base, 0, 0, exit as u32 as u32)
-            }
+            Op::ForPrep { base, exit } => Insn::new(Opcode::ForPrep, base, 0, 0, exit as u32),
             Op::ForPrepExclusive { base, exit } => {
-                Insn::new(Opcode::ForPrepExclusive, base, 0, 0, exit as u32 as u32)
+                Insn::new(Opcode::ForPrepExclusive, base, 0, 0, exit as u32)
             }
-            Op::ForLoop { base, back } => {
-                Insn::new(Opcode::ForLoop, base, 0, 0, back as u32 as u32)
-            }
+            Op::ForLoop { base, back } => Insn::new(Opcode::ForLoop, base, 0, 0, back as u32),
             Op::GenericCall { base, nvars } => Insn::new(Opcode::GenericCall, base, nvars, 0, 0),
             Op::GenericLoop { base, back } => {
-                Insn::new(Opcode::GenericLoop, base, 0, 0, back as u32 as u32)
+                Insn::new(Opcode::GenericLoop, base, 0, 0, back as u32)
             }
             Op::Closure { dst, proto } => Insn::new(Opcode::Closure, dst, 0, 0, proto as u32),
             Op::Tbc { reg } => Insn::new(Opcode::Tbc, reg, 0, 0, 0),
             Op::Close { from } => Insn::new(Opcode::Close, from, 0, 0, 0),
-            Op::NativeEntry { id } => Insn::new(Opcode::NativeEntry, 0, 0, 0, id as u32),
+            Op::NativeEntry { id } => Insn::new(Opcode::NativeEntry, 0, 0, 0, id),
         }
     }
 }
