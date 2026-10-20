@@ -21,6 +21,7 @@ use std::rc::Rc;
 use crate::object::number::{ArithOp, Number};
 use crate::object::table::{self, IntStore};
 use crate::object::{Closure, Gc, LuaHeap, LuaStr, ProtoCode, Table, Value};
+use orbit_bytecode::insn::Opcode;
 use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{MULTI, Op};
 
@@ -591,7 +592,7 @@ impl Vm {
                             flow!(self.do_return(src, n))
                         }};
                     }
-                    let op = code[pc].decode();
+                    let insn = code[pc];
                     pc += 1;
                     if HOOKED {
                         self.rt
@@ -600,7 +601,7 @@ impl Vm {
                             .last_mut()
                             .expect("the running frame")
                             .pc = pc as u32;
-                        if let Err(e) = self.hook_point(pc - 1, op) {
+                        if let Err(e) = self.hook_point(pc - 1, insn.decode()) {
                             throw!(Exc::Lua(e));
                         }
                         #[cfg(feature = "debugger")]
@@ -622,30 +623,44 @@ impl Vm {
                         }
                         w = window!();
                     }
-                    match op {
+                    match insn.op() {
                         // Numbers are copied by parts: the source was usually
                         // just written that way, and a whole 16-byte load would
                         // stall on store forwarding.
-                        Op::Move { dst, src } => match reg!(src) {
-                            Value::Int(x) => reg!(dst) = Value::Int(x),
-                            Value::Float(f) => reg!(dst) = Value::Float(f),
-                            Value::Table(t) => reg!(dst) = Value::Table(t),
-                            Value::Str(x) => reg!(dst) = Value::Str(x),
-                            Value::Closure(c) => reg!(dst) = Value::Closure(c),
-                            Value::Bool(b) => reg!(dst) = Value::Bool(b),
-                            v => reg!(dst) = v,
-                        },
-                        Op::LoadNil { dst, count } => {
+                        Opcode::Move => {
+                            let (dst, src) = (insn.a(), insn.b());
+                            match reg!(src) {
+                                Value::Int(x) => reg!(dst) = Value::Int(x),
+                                Value::Float(f) => reg!(dst) = Value::Float(f),
+                                Value::Table(t) => reg!(dst) = Value::Table(t),
+                                Value::Str(x) => reg!(dst) = Value::Str(x),
+                                Value::Closure(c) => reg!(dst) = Value::Closure(c),
+                                Value::Bool(b) => reg!(dst) = Value::Bool(b),
+                                v => reg!(dst) = v,
+                            }
+                        }
+                        Opcode::LoadNil => {
+                            let (dst, count) = (insn.a(), insn.b());
                             let at = dst as usize;
                             for r in &mut w[at..at + count as usize] {
                                 *r = Value::Nil;
                             }
                         }
-                        Op::LoadBool { dst, value } => reg!(dst) = Value::Bool(value),
-                        Op::LoadInt { dst, value } => reg!(dst) = Value::Int(value as i64),
-                        Op::LoadConst { dst, k } => reg!(dst) = cur.consts[k as usize],
+                        Opcode::LoadBool => {
+                            let (dst, value) = (insn.a(), insn.b() != 0);
+                            reg!(dst) = Value::Bool(value)
+                        }
+                        Opcode::LoadInt => {
+                            let (dst, value) = (insn.a(), insn.sd());
+                            reg!(dst) = Value::Int(value as i64)
+                        }
+                        Opcode::LoadConst => {
+                            let (dst, k) = (insn.a(), insn.dlo());
+                            reg!(dst) = cur.consts[k as usize]
+                        }
 
-                        Op::CellGet { dst, cell } => {
+                        Opcode::CellGet => {
+                            let (dst, cell) = (insn.a(), insn.b());
                             let cell_base = self
                                 .rt
                                 .stack
@@ -656,19 +671,25 @@ impl Vm {
                             let c = self.rt.stack.cells[cell_base + cell as usize];
                             reg!(dst) = self.heap.get(c).value;
                         }
-                        Op::CapGet { dst, cap } => {
+                        Opcode::CapGet => {
+                            let (dst, cap) = (insn.a(), insn.b());
                             let c = self.heap.get(closure).captures[cap as usize];
                             reg!(dst) = self.heap.get(c).value;
                         }
-                        Op::CapSelf { dst } => reg!(dst) = Value::Closure(closure),
-                        Op::CapSet { cap, src } => {
+                        Opcode::CapSelf => {
+                            let dst = insn.a();
+                            reg!(dst) = Value::Closure(closure)
+                        }
+                        Opcode::CapSet => {
+                            let (cap, src) = (insn.a(), insn.b());
                             let c = self.heap.get(closure).captures[cap as usize];
                             self.heap.barrier_back(c);
                             let cell = self.heap.get_mut(c);
                             by_parts!(src, |v| cell.value = v);
                         }
 
-                        Op::GetGlobal { dst, name, ic } => {
+                        Opcode::GetGlobal => {
+                            let (dst, name, ic) = (insn.a(), insn.dlo(), insn.dhi());
                             let env_cell = self.heap.get(closure).captures[0];
                             let v = match self.heap.get(env_cell).value {
                                 Value::Table(t) => {
@@ -695,7 +716,8 @@ impl Vm {
                             reg!(dst) = v;
                         }
 
-                        Op::GetField { dst, obj, key, ic } => {
+                        Opcode::GetField => {
+                            let (dst, obj, key, ic) = (insn.a(), insn.b(), insn.dlo(), insn.dhi());
                             let &Value::Table(t) = &reg!(obj) else {
                                 get_slow!(reg!(obj), cur.consts[key as usize])
                             };
@@ -712,7 +734,8 @@ impl Vm {
                                 }
                             }
                         }
-                        Op::SetField { obj, key, src, ic } => {
+                        Opcode::SetField => {
+                            let (obj, key, src, ic) = (insn.a(), insn.dlo(), insn.b(), insn.dhi());
                             let &Value::Table(t) = &reg!(obj) else {
                                 set_slow!(reg!(obj), cur.consts[key as usize], reg!(src))
                             };
@@ -734,7 +757,8 @@ impl Vm {
                                 safepoint!();
                             }
                         }
-                        Op::GetIndex { dst, obj, key } => {
+                        Opcode::GetIndex => {
+                            let (dst, obj, key) = (insn.a(), insn.b(), insn.c());
                             let &Value::Table(t) = &reg!(obj) else {
                                 get_slow!(reg!(obj), reg!(key))
                             };
@@ -759,7 +783,8 @@ impl Vm {
                                 }
                             }
                         }
-                        Op::SetIndex { obj, key, src } => {
+                        Opcode::SetIndex => {
+                            let (obj, key, src) = (insn.a(), insn.b(), insn.c());
                             let &Value::Table(t) = &reg!(obj) else {
                                 set_slow!(reg!(obj), reg!(key), reg!(src))
                             };
@@ -785,7 +810,8 @@ impl Vm {
                                 }
                             }
                         }
-                        Op::GetIndexInt { dst, obj, key } => {
+                        Opcode::GetIndexInt => {
+                            let (dst, obj, key) = (insn.a(), insn.b(), insn.dlo());
                             let &Value::Table(t) = &reg!(obj) else {
                                 get_slow!(reg!(obj), Value::Int(key as i64))
                             };
@@ -798,7 +824,8 @@ impl Vm {
                                 reg!(dst) = v;
                             }
                         }
-                        Op::SetIndexInt { obj, key, src } => {
+                        Opcode::SetIndexInt => {
+                            let (obj, key, src) = (insn.a(), insn.dlo(), insn.b());
                             let &Value::Table(t) = &reg!(obj) else {
                                 set_slow!(reg!(obj), Value::Int(key as i64), reg!(src))
                             };
@@ -810,7 +837,8 @@ impl Vm {
                                 }
                             }
                         }
-                        Op::SelfCall { dst, obj, key, ic } => {
+                        Opcode::SelfCall => {
+                            let (dst, obj, key, ic) = (insn.a(), insn.b(), insn.dlo(), insn.dhi());
                             let Value::Str(k) = cur.consts[key as usize] else {
                                 unreachable!("method names are strings")
                             };
@@ -831,12 +859,28 @@ impl Vm {
                             }
                         }
 
-                        Op::Add { dst, a, b } => arith!(dst, a, b, Arith::Add, ArithOp::Add),
-                        Op::Sub { dst, a, b } => arith!(dst, a, b, Arith::Sub, ArithOp::Sub),
-                        Op::Mul { dst, a, b } => arith!(dst, a, b, Arith::Mul, ArithOp::Mul),
-                        Op::Div { dst, a, b } => arith!(dst, a, b, Arith::Div, ArithOp::Div),
-                        Op::Mod { dst, a, b } => arith!(dst, a, b, Arith::Mod, ArithOp::Mod),
-                        Op::MulK { dst, a, k } => {
+                        Opcode::Add => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            arith!(dst, a, b, Arith::Add, ArithOp::Add)
+                        }
+                        Opcode::Sub => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            arith!(dst, a, b, Arith::Sub, ArithOp::Sub)
+                        }
+                        Opcode::Mul => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            arith!(dst, a, b, Arith::Mul, ArithOp::Mul)
+                        }
+                        Opcode::Div => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            arith!(dst, a, b, Arith::Div, ArithOp::Div)
+                        }
+                        Opcode::Mod => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            arith!(dst, a, b, Arith::Mod, ArithOp::Mod)
+                        }
+                        Opcode::MulK => {
+                            let (dst, a, k) = (insn.a(), insn.b(), insn.dlo());
                             arith_v!(
                                 dst,
                                 reg!(a),
@@ -845,7 +889,8 @@ impl Vm {
                                 ArithOp::Mul
                             )
                         }
-                        Op::ModK { dst, a, k } => {
+                        Opcode::ModK => {
+                            let (dst, a, k) = (insn.a(), insn.b(), insn.dlo());
                             arith_v!(
                                 dst,
                                 reg!(a),
@@ -854,7 +899,8 @@ impl Vm {
                                 ArithOp::Mod
                             )
                         }
-                        Op::KAdd { dst, k, b } => {
+                        Opcode::KAdd => {
+                            let (dst, k, b) = (insn.a(), insn.dlo(), insn.b());
                             arith_v!(
                                 dst,
                                 cur.consts[k as usize],
@@ -863,7 +909,8 @@ impl Vm {
                                 ArithOp::Add
                             )
                         }
-                        Op::KMul { dst, k, b } => {
+                        Opcode::KMul => {
+                            let (dst, k, b) = (insn.a(), insn.dlo(), insn.b());
                             arith_v!(
                                 dst,
                                 cur.consts[k as usize],
@@ -872,7 +919,8 @@ impl Vm {
                                 ArithOp::Mul
                             )
                         }
-                        Op::KDiv { dst, k, b } => {
+                        Opcode::KDiv => {
+                            let (dst, k, b) = (insn.a(), insn.dlo(), insn.b());
                             arith_v!(
                                 dst,
                                 cur.consts[k as usize],
@@ -881,80 +929,120 @@ impl Vm {
                                 ArithOp::Div
                             )
                         }
-                        Op::AddInt { dst, a, imm } => match reg!(a) {
-                            Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_add(imm as i64)),
-                            Value::Float(f) => reg!(dst) = Value::Float(f + imm as f64),
-                            _ => {
-                                let x = reg!(a);
-                                reg!(dst) = tri!(ops::arith_slow(
-                                    &self.heap,
-                                    &self.rt.metas,
-                                    Arith::Add,
-                                    x,
-                                    Value::Int(imm as i64)
-                                ))
+                        Opcode::AddInt => {
+                            let (dst, a, imm) = (insn.a(), insn.b(), insn.dlo() as i16);
+                            match reg!(a) {
+                                Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_add(imm as i64)),
+                                Value::Float(f) => reg!(dst) = Value::Float(f + imm as f64),
+                                _ => {
+                                    let x = reg!(a);
+                                    reg!(dst) = tri!(ops::arith_slow(
+                                        &self.heap,
+                                        &self.rt.metas,
+                                        Arith::Add,
+                                        x,
+                                        Value::Int(imm as i64)
+                                    ))
+                                }
                             }
-                        },
-                        Op::SubInt { dst, a, imm } => match reg!(a) {
-                            Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_sub(imm as i64)),
-                            // Adding the negated integer, as lua5.5 does: `-0.0 - 0` is `0.0` there.
-                            Value::Float(f) => reg!(dst) = Value::Float(f + (-(imm as i64)) as f64),
-                            _ => {
-                                let x = reg!(a);
-                                reg!(dst) = tri!(ops::arith_slow(
-                                    &self.heap,
-                                    &self.rt.metas,
-                                    Arith::Sub,
-                                    x,
-                                    Value::Int(imm as i64)
-                                ))
+                        }
+                        Opcode::SubInt => {
+                            let (dst, a, imm) = (insn.a(), insn.b(), insn.dlo() as i16);
+                            match reg!(a) {
+                                Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_sub(imm as i64)),
+                                // Adding the negated integer, as lua5.5 does: `-0.0 - 0` is `0.0` there.
+                                Value::Float(f) => {
+                                    reg!(dst) = Value::Float(f + (-(imm as i64)) as f64)
+                                }
+                                _ => {
+                                    let x = reg!(a);
+                                    reg!(dst) = tri!(ops::arith_slow(
+                                        &self.heap,
+                                        &self.rt.metas,
+                                        Arith::Sub,
+                                        x,
+                                        Value::Int(imm as i64)
+                                    ))
+                                }
                             }
-                        },
-                        Op::BAnd { dst, a, b } => bitwise!(dst, a, b, BitOp::And),
-                        Op::BOr { dst, a, b } => bitwise!(dst, a, b, BitOp::Or),
-                        Op::BXor { dst, a, b } => bitwise!(dst, a, b, BitOp::Xor),
-                        Op::Shl { dst, a, b } => bitwise!(dst, a, b, BitOp::Shl),
-                        Op::Shr { dst, a, b } => bitwise!(dst, a, b, BitOp::Shr),
-                        Op::Not { dst, src } => reg!(dst) = Value::Bool(reg!(src).is_falsy()),
-                        Op::Len { dst, src } => {
+                        }
+                        Opcode::BAnd => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            bitwise!(dst, a, b, BitOp::And)
+                        }
+                        Opcode::BOr => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            bitwise!(dst, a, b, BitOp::Or)
+                        }
+                        Opcode::BXor => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            bitwise!(dst, a, b, BitOp::Xor)
+                        }
+                        Opcode::Shl => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            bitwise!(dst, a, b, BitOp::Shl)
+                        }
+                        Opcode::Shr => {
+                            let (dst, a, b) = (insn.a(), insn.b(), insn.c());
+                            bitwise!(dst, a, b, BitOp::Shr)
+                        }
+                        Opcode::Not => {
+                            let (dst, src) = (insn.a(), insn.b());
+                            reg!(dst) = Value::Bool(reg!(src).is_falsy())
+                        }
+                        Opcode::Len => {
+                            let (dst, src) = (insn.a(), insn.b());
                             let x = reg!(src);
                             reg!(dst) = tri!(op_len(&self.heap, &self.rt.metas, x));
                         }
 
-                        Op::Jump { off } => jump!(off),
-                        Op::JumpIfTrue { src, off } => {
+                        Opcode::Jump => {
+                            let off = insn.sd();
+                            jump!(off)
+                        }
+                        Opcode::JumpIfTrue => {
+                            let (src, off) = (insn.a(), insn.sd());
                             if !reg!(src).is_falsy() {
                                 jump!(off);
                             }
                         }
-                        Op::JumpIfFalse { src, off } => {
+                        Opcode::JumpIfFalse => {
+                            let (src, off) = (insn.a(), insn.sd());
                             if reg!(src).is_falsy() {
                                 jump!(off);
                             }
                         }
-                        Op::JumpLt { a, b, off } => {
+                        Opcode::JumpLt => {
+                            let (a, b, off) = (insn.a(), insn.b(), insn.sd());
                             compare_jump!(a, b, off, true, ops::less_than, |x, y| x < y)
                         }
-                        Op::JumpNotLt { a, b, off } => {
+                        Opcode::JumpNotLt => {
+                            let (a, b, off) = (insn.a(), insn.b(), insn.sd());
                             compare_jump!(a, b, off, false, ops::less_than, |x, y| x < y)
                         }
-                        Op::JumpLe { a, b, off } => {
+                        Opcode::JumpLe => {
+                            let (a, b, off) = (insn.a(), insn.b(), insn.sd());
                             compare_jump!(a, b, off, true, ops::less_equal, |x, y| x <= y)
                         }
-                        Op::JumpNotLe { a, b, off } => {
+                        Opcode::JumpNotLe => {
+                            let (a, b, off) = (insn.a(), insn.b(), insn.sd());
                             compare_jump!(a, b, off, false, ops::less_equal, |x, y| x <= y)
                         }
-                        Op::JumpEq { a, b, off } => {
+                        Opcode::JumpEq => {
+                            let (a, b, off) = (insn.a(), insn.b(), insn.sd());
                             if eq_parts!(a, b) {
                                 jump!(off);
                             }
                         }
-                        Op::JumpNe { a, b, off } => {
+                        Opcode::JumpNe => {
+                            let (a, b, off) = (insn.a(), insn.b(), insn.sd());
                             if !eq_parts!(a, b) {
                                 jump!(off);
                             }
                         }
-                        Op::JumpEqInt { a, imm, want, off } => {
+                        Opcode::JumpEqInt => {
+                            let (a, imm, want, off) =
+                                (insn.a(), insn.b() as i8, insn.c() != 0, insn.sd());
                             let c = match reg!(a) {
                                 Value::Int(i) => i == imm as i64,
                                 Value::Float(f) => f == imm as f64,
@@ -964,27 +1052,32 @@ impl Vm {
                                 jump!(off);
                             }
                         }
-                        Op::JumpLtInt { a, imm, want, off } => {
+                        Opcode::JumpLtInt => {
+                            let (a, imm, want, off) =
+                                (insn.a(), insn.b() as i8, insn.c() != 0, insn.sd());
                             compare_int_jump!(a, imm, want, off, |x, k| x < k, less_than(x, k))
                         }
-                        Op::JumpLeInt { a, imm, want, off } => {
+                        Opcode::JumpLeInt => {
+                            let (a, imm, want, off) =
+                                (insn.a(), insn.b() as i8, insn.c() != 0, insn.sd());
                             compare_int_jump!(a, imm, want, off, |x, k| x <= k, less_equal(x, k))
                         }
-                        Op::JumpGtInt { a, imm, want, off } => {
+                        Opcode::JumpGtInt => {
+                            let (a, imm, want, off) =
+                                (insn.a(), insn.b() as i8, insn.c() != 0, insn.sd());
                             compare_int_jump!(a, imm, want, off, |x, k| x > k, less_than(k, x))
                         }
-                        Op::JumpGeInt { a, imm, want, off } => {
+                        Opcode::JumpGeInt => {
+                            let (a, imm, want, off) =
+                                (insn.a(), insn.b() as i8, insn.c() != 0, insn.sd());
                             compare_int_jump!(a, imm, want, off, |x, k| x >= k, less_equal(k, x))
                         }
 
                         // Calls. Each arm works out the callee's register, its
                         // argument count and the results the caller takes;
                         // `call!` enters the callee.
-                        Op::Call {
-                            func,
-                            nargs,
-                            nresults,
-                        } => {
+                        Opcode::Call => {
+                            let (func, nargs, nresults) = (insn.a(), insn.b(), insn.c());
                             let n = if nargs == MULTI {
                                 self.rt.top - (base + func as usize) - 1
                             } else {
@@ -992,12 +1085,14 @@ impl Vm {
                             };
                             call!(func as usize, n, nresults);
                         }
-                        Op::GenericCall { base: b, nvars } => {
+                        Opcode::GenericCall => {
+                            let (b, nvars) = (insn.a(), insn.b());
                             let at = b as usize;
                             w.copy_within(at..at + 3, at + 4);
                             call!(at + 4, 2, nvars);
                         }
-                        Op::TailCall { func, nargs } => {
+                        Opcode::TailCall => {
+                            let (func, nargs) = (insn.a(), insn.b());
                             let fa = base + func as usize;
                             let n = if nargs == MULTI {
                                 self.rt.top - fa - 1
@@ -1010,7 +1105,10 @@ impl Vm {
                             if let Value::Closure(c) = w[func as usize]
                                 && let code = &self.heap.get(c).code
                                 && !code.builtin
-                                && !matches!(code.code.first().map(|i| i.decode()), Some(Op::NativeEntry { .. }))
+                                && !matches!(
+                                    code.code.first().map(|i| i.decode()),
+                                    Some(Op::NativeEntry { .. })
+                                )
                             {
                                 let f = self.rt.stack.frames.pop().expect("frame");
                                 self.rt.stack.cells.truncate(f.cell_base as usize);
@@ -1035,7 +1133,8 @@ impl Vm {
                         // the frame state in place; the caller's window lies
                         // below this frame's, so the stack is already long
                         // enough for its results and its window.
-                        Op::Return { first, count } => {
+                        Opcode::Return => {
+                            let (first, count) = (insn.a(), insn.b());
                             let src = base + first as usize;
                             let n = if count == MULTI {
                                 self.rt.top - src
@@ -1044,8 +1143,11 @@ impl Vm {
                             };
                             lua_return!(src, n);
                         }
-                        Op::Return0 => lua_return!(base, 0),
-                        Op::Return1 { src } => {
+                        Opcode::Return0 => {
+                            lua_return!(base, 0)
+                        }
+                        Opcode::Return1 => {
+                            let src = insn.a();
                             // The common case, one value back to a Lua caller
                             // that wants one, without the general return path.
                             if let [.., caller, f] = &self.rt.stack.frames[..]
@@ -1078,22 +1180,16 @@ impl Vm {
 
                         // Allocating instructions call out anyway; they stay
                         // in the loop so the call is all they pay.
-                        Op::NewTable {
-                            dst,
-                            array_hint,
-                            hash_hint,
-                        } => {
+                        Opcode::NewTable => {
+                            let (dst, array_hint, hash_hint) = (insn.a(), insn.dlo(), insn.dhi());
                             let t = self.op_new_table(array_hint as usize, hash_hint as usize);
                             w = window!();
                             reg!(dst) = Value::Table(t);
                             safepoint!();
                         }
-                        Op::SetList {
-                            table: tr,
-                            first,
-                            count,
-                            start,
-                        } => {
+                        Opcode::SetList => {
+                            let (tr, first, count, start) =
+                                (insn.a(), insn.b(), insn.c(), insn.d());
                             let Value::Table(t) = reg!(tr) else {
                                 unreachable!("SetList on a table")
                             };
@@ -1110,13 +1206,15 @@ impl Vm {
                             }
                             safepoint!();
                         }
-                        Op::Concat { dst, first, count } => {
+                        Opcode::Concat => {
+                            let (dst, first, count) = (insn.a(), insn.b(), insn.c());
                             let v = tri!(self.op_concat(base + first as usize, count as usize));
                             w = window!();
                             reg!(dst) = v;
                             safepoint!();
                         }
-                        Op::Closure { dst, proto } => {
+                        Opcode::Closure => {
+                            let (dst, proto) = (insn.a(), insn.dlo());
                             let cell_base = self
                                 .rt
                                 .stack
@@ -1129,7 +1227,8 @@ impl Vm {
                             reg!(dst) = c;
                             safepoint!();
                         }
-                        Op::CellNew { cell, src } => {
+                        Opcode::CellNew => {
+                            let (cell, src) = (insn.a(), insn.b());
                             let cell_base = self
                                 .rt
                                 .stack
@@ -1142,7 +1241,8 @@ impl Vm {
                             w = window!();
                             safepoint!();
                         }
-                        Op::CellSet { cell, src } => {
+                        Opcode::CellSet => {
+                            let (cell, src) = (insn.a(), insn.b());
                             let cell_base = self
                                 .rt
                                 .stack
@@ -1156,7 +1256,8 @@ impl Vm {
                             self.heap.get_mut(c).value = v;
                         }
 
-                        Op::VarargLen { dst } => {
+                        Opcode::VarargLen => {
+                            let dst = insn.a();
                             let nvarargs = self
                                 .rt
                                 .stack
@@ -1167,7 +1268,8 @@ impl Vm {
                             reg!(dst) = Value::Int(nvarargs as i64);
                         }
 
-                        Op::ForPrep { base: b, exit } => {
+                        Opcode::ForPrep => {
+                            let (b, exit) = (insn.a(), insn.sd());
                             // The common integer loop counting up; the rest
                             // (floats, negative steps, errors) is cold.
                             if let (&Value::Int(i), &Value::Int(lim), &Value::Int(s)) =
@@ -1190,7 +1292,8 @@ impl Vm {
                                 }
                             }
                         }
-                        Op::ForLoop { base: b, back } => {
+                        Opcode::ForLoop => {
+                            let (b, back) = (insn.a(), insn.sd());
                             // One match over the four loop registers: the
                             // integer arm tests each tag once. Update the
                             // counters' payloads in place: their tags are
@@ -1216,7 +1319,8 @@ impl Vm {
                                 _ => unreachable!("loop state"),
                             }
                         }
-                        Op::GenericLoop { base: b, back } => {
+                        Opcode::GenericLoop => {
+                            let (b, back) = (insn.a(), insn.sd());
                             let v = reg!(b + 4);
                             if !v.is_nil() {
                                 reg!(b + 2) = v;
@@ -1228,43 +1332,48 @@ impl Vm {
                         // anyway: run it out of line. The arms are listed so
                         // the match stays exhaustive without a default, which
                         // would put a range check in front of the jump table.
-                        Op::LoadConstX { .. }
-                        | Op::CellClear { .. }
-                        | Op::CheckUndefined { .. }
-                        | Op::SetGlobal { .. }
-                        | Op::Pow { .. }
-                        | Op::IDiv { .. }
-                        | Op::AddK { .. }
-                        | Op::SubK { .. }
-                        | Op::DivK { .. }
-                        | Op::IDivK { .. }
-                        | Op::PowK { .. }
-                        | Op::KSub { .. }
-                        | Op::BNot { .. }
-                        | Op::Neg { .. }
-                        | Op::Cast { .. }
-                        | Op::Vararg { .. }
-                        | Op::VarargTable { .. }
-                        | Op::VarargGet { .. }
-                        | Op::VarargGetInt { .. }
-                        | Op::VarargUnpack { .. }
-                        | Op::ForPrepExclusive { .. }
-                        | Op::NativeEntry { .. }
-                        | Op::Tbc { .. }
-                        | Op::Close { .. } => match self.cold_op(op, &cur, closure, base, pc) {
-                            Ok(Cold::Next {
-                                pc: next,
-                                safepoint,
-                            }) => {
-                                pc = next;
-                                w = window!();
-                                if safepoint {
-                                    safepoint!();
+                        // The verifier admits no opcode byte past the last
+                        // opcode, so a linked chunk never holds one.
+                        Opcode::Invalid => unreachable!("an invalid opcode"),
+                        Opcode::LoadConstX
+                        | Opcode::CellClear
+                        | Opcode::CheckUndefined
+                        | Opcode::SetGlobal
+                        | Opcode::Pow
+                        | Opcode::IDiv
+                        | Opcode::AddK
+                        | Opcode::SubK
+                        | Opcode::DivK
+                        | Opcode::IDivK
+                        | Opcode::PowK
+                        | Opcode::KSub
+                        | Opcode::BNot
+                        | Opcode::Neg
+                        | Opcode::Cast
+                        | Opcode::Vararg
+                        | Opcode::VarargTable
+                        | Opcode::VarargGet
+                        | Opcode::VarargGetInt
+                        | Opcode::VarargUnpack
+                        | Opcode::ForPrepExclusive
+                        | Opcode::NativeEntry
+                        | Opcode::Tbc
+                        | Opcode::Close => {
+                            match self.cold_op(insn.decode(), &cur, closure, base, pc) {
+                                Ok(Cold::Next {
+                                    pc: next,
+                                    safepoint,
+                                }) => {
+                                    pc = next;
+                                    w = window!();
+                                    if safepoint {
+                                        safepoint!();
+                                    }
                                 }
+                                Ok(Cold::Flow(flow)) => flow!(Ok(flow)),
+                                Err(x) => throw!(x),
                             }
-                            Ok(Cold::Flow(flow)) => flow!(Ok(flow)),
-                            Err(x) => throw!(x),
-                        },
+                        }
                     }
                 };
                 // An `__index` request (a raw miss on a table with a
