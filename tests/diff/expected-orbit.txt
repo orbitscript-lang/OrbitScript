@@ -7,6 +7,7 @@ close.lua
 close_unwind.lua
 closures.lua
 co_gc.lua
+co_reuse.lua
 co_yields.lua
 const_operands.lua
 control.lua

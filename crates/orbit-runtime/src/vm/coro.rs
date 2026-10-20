@@ -11,6 +11,7 @@
 //! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::object::table::mark;
@@ -104,13 +105,17 @@ impl Coroutine {
     }
 
     /// A suspended coroutine that will call `f`: `f` sits above the base
-    /// frame, where the first resume calls it.
+    /// frame, where the first resume calls it. Its stack reuses spare
+    /// buffers ([`SpareStacks`]) when there are some, but is charged as a
+    /// stack built from nothing: the rest is charged when it first parks,
+    /// as a stack's growth while running is.
     fn fresh(f: Value) -> Coroutine {
         let mut stack = Stack::default();
+        SpareStacks::take(&mut stack);
         stack.regs.push(f);
         stack.frames.push(base_frame());
         Coroutine {
-            bytes: stack.bytes(),
+            bytes: FRESH_STACK_BYTES,
             stack,
             top: 1,
             status: CoStatus::Suspended,
@@ -258,8 +263,14 @@ impl Vm {
         }
         let c = co_mut(&mut self.heap, to);
         if finished {
-            // The finished stack goes, leaving `to`'s slot empty.
-            c.stack.clear(Default::default());
+            // The finished stack goes, leaving `to`'s slot empty; its
+            // buffers may serve the next new coroutine.
+            let s = &mut c.stack;
+            let regs = std::mem::take(&mut s.regs);
+            let cells = std::mem::take(&mut s.cells);
+            let frames = std::mem::take(&mut s.frames);
+            SpareStacks::keep(regs, cells, frames);
+            s.clear(Default::default());
         }
         self.rt.top = c.top;
         // If a collection swept while it was parked, the dead slots above
@@ -312,13 +323,18 @@ impl Vm {
         c.shrunk_at = Some(parks);
         let before = c.bytes;
         let s = &mut c.stack;
-        s.regs = s.regs[..c.top].to_vec();
-        s.cells = s.cells.to_vec();
-        s.frames = s.frames.to_vec();
+        let regs = std::mem::take(&mut s.regs);
+        let cells = std::mem::take(&mut s.cells);
+        let frames = std::mem::take(&mut s.frames);
+        s.regs = regs[..c.top].to_vec();
+        s.cells = cells.to_vec();
+        s.frames = frames.to_vec();
         s.aux.tbc = s.aux.tbc.to_vec();
         c.bytes = s.bytes();
         let delta = c.bytes as isize - before as isize;
         self.heap.adjust_bytes(delta);
+        // The big buffers may serve a new coroutine.
+        SpareStacks::keep(regs, cells, frames);
     }
 
     /// Push (or reuse) the continuation frame of native `id`, which waits
@@ -755,6 +771,88 @@ impl Vm {
 #[derive(Debug)]
 #[must_use]
 pub struct WindowSave(Option<(usize, usize, usize)>);
+
+/// The bytes a new coroutine's stack is charged: what its function and
+/// base frame take in buffers grown from nothing (four elements each).
+const FRESH_STACK_BYTES: usize =
+    4 * std::mem::size_of::<Value>() + 4 * std::mem::size_of::<Frame>();
+
+/// Finished stacks kept at most in [`SpareStacks`].
+const MAX_SPARE_STACKS: usize = 4;
+
+/// The largest finished stack (in [`Stack::bytes`]) kept in
+/// [`SpareStacks`]: four register windows' worth.
+const MAX_SPARE_BYTES: usize = 4 * crate::vm::interp::WINDOW * std::mem::size_of::<Value>();
+
+/// The emptied register, cell and frame buffers of a few finished
+/// coroutines' stacks, and of suspended ones shrunk when they went cold.
+/// Creating a coroutine and running it to its end otherwise allocates,
+/// grows to a register window and frees these every time. The pool is per
+/// thread, like the table part pool, so it changes nothing in the
+/// [`Runtime`](crate::vm::Runtime) the dispatch loop reads. Pooled buffers
+/// hold no values, so the collector never sees them.
+#[derive(Default)]
+struct SpareStacks(Vec<SpareStack>);
+
+/// One stack's emptied buffers.
+struct SpareStack {
+    regs: Vec<Value>,
+    cells: Vec<Gc<Cell>>,
+    frames: Vec<Frame>,
+}
+
+thread_local! {
+    static SPARE_STACKS: RefCell<SpareStacks> = RefCell::new(SpareStacks::default());
+}
+
+impl SpareStacks {
+    /// Keep the buffers of a stack that is done with them, emptied, if
+    /// there is room and they aren't large; otherwise free them.
+    fn keep(mut regs: Vec<Value>, mut cells: Vec<Gc<Cell>>, mut frames: Vec<Frame>) {
+        let bytes = regs.capacity() * std::mem::size_of::<Value>()
+            + cells.capacity() * std::mem::size_of::<Gc<Cell>>()
+            + frames.capacity() * std::mem::size_of::<Frame>();
+        if bytes > MAX_SPARE_BYTES {
+            return;
+        }
+        regs.clear();
+        cells.clear();
+        frames.clear();
+        let spare = SpareStack {
+            regs,
+            cells,
+            frames,
+        };
+        // While the thread is exiting the pool may be gone: the buffers
+        // are freed.
+        let _ = SPARE_STACKS.try_with(|p| {
+            if let Ok(mut p) = p.try_borrow_mut()
+                && p.0.len() < MAX_SPARE_STACKS
+            {
+                p.0.push(spare);
+            }
+        });
+    }
+
+    /// Give new stack `s` (with empty buffers) a spare stack's buffers, if
+    /// any are kept.
+    fn take(s: &mut Stack) {
+        let spare = SPARE_STACKS
+            .try_with(|p| p.try_borrow_mut().ok()?.0.pop())
+            .ok()
+            .flatten();
+        if let Some(SpareStack {
+            regs,
+            cells,
+            frames,
+        }) = spare
+        {
+            s.regs = regs;
+            s.cells = cells;
+            s.frames = frames;
+        }
+    }
+}
 
 /// A coroutine's base frame, with its body at register 0.
 fn base_frame() -> Frame {
