@@ -22,7 +22,7 @@ use crate::vm::{Catch, Frame, FrameKind, LuaError, Vm};
 const MAX_CALL_CHAIN: usize = 15;
 
 /// Registers a frame can address: register numbers are `u8`.
-const WINDOW: usize = 256;
+pub(crate) const WINDOW: usize = 256;
 
 /// Nils to extend the stack with: a copy from a block compiles to a
 /// `memcpy`, where `resize` fills slot by slot. Natives truncate the stack to

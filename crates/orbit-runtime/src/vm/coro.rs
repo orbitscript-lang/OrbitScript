@@ -103,14 +103,18 @@ impl Coroutine {
         live_end(&self.stack, self.top)
     }
 
-    /// A suspended coroutine that will call `f`: `f` sits above the base
-    /// frame, where the first resume calls it.
-    fn fresh(f: Value) -> Coroutine {
-        let mut stack = Stack::default();
+    /// A suspended coroutine that will call `f` on `stack`, which is empty:
+    /// `f` sits above the base frame, where the first resume calls it.
+    ///
+    /// The coroutine is charged for what its stack holds, not for its
+    /// capacity: `stack` may be a finished coroutine's, with room for
+    /// whole register windows it hasn't used yet. The capacity is charged
+    /// when it first parks, as a running stack's growth is.
+    fn fresh(f: Value, mut stack: Stack) -> Coroutine {
         stack.regs.push(f);
         stack.frames.push(base_frame());
         Coroutine {
-            bytes: stack.bytes(),
+            bytes: stack.held_bytes(),
             stack,
             top: 1,
             status: CoStatus::Suspended,
@@ -258,8 +262,10 @@ impl Vm {
         }
         let c = co_mut(&mut self.heap, to);
         if finished {
-            // The finished stack goes, leaving `to`'s slot empty.
-            c.stack.clear(Default::default());
+            // The finished stack goes, leaving `to`'s slot empty; it may
+            // serve the next new coroutine.
+            let dead = std::mem::take(&mut c.stack);
+            self.rt.spare_stacks.keep(dead);
         }
         self.rt.top = c.top;
         // If a collection swept while it was parked, the dead slots above
@@ -311,14 +317,21 @@ impl Vm {
         let c = co_mut(&mut self.heap, t);
         c.shrunk_at = Some(parks);
         let before = c.bytes;
+        // A copy of the stack, cut to its live values, takes its place; the
+        // old one, with its big buffers, may serve a new coroutine.
+        let mut old = std::mem::take(&mut c.stack);
         let s = &mut c.stack;
-        s.regs = s.regs[..c.top].to_vec();
-        s.cells = s.cells.to_vec();
-        s.frames = s.frames.to_vec();
-        s.aux.tbc = s.aux.tbc.to_vec();
+        std::mem::swap(&mut s.aux, &mut old.aux);
+        s.regs = old.regs[..c.top].to_vec();
+        s.cells = old.cells.clone();
+        s.frames = old.frames.clone();
+        s.aux.tbc.shrink_to_fit();
+        s.hook = old.hook;
+        s.dirty_to = old.dirty_to;
         c.bytes = s.bytes();
         let delta = c.bytes as isize - before as isize;
         self.heap.adjust_bytes(delta);
+        self.rt.spare_stacks.keep(old);
     }
 
     /// Push (or reuse) the continuation frame of native `id`, which waits
@@ -756,6 +769,39 @@ impl Vm {
 #[must_use]
 pub struct WindowSave(Option<(usize, usize, usize)>);
 
+/// Finished stacks kept at most in [`SpareStacks`]: enough for code that
+/// creates coroutines in a loop or keeps a few taking turns.
+const MAX_SPARE_STACKS: usize = 4;
+
+/// The most a stack kept in [`SpareStacks`] may own ([`Stack::bytes`]):
+/// four register windows, a body and a few calls deep. A deeper stack is
+/// freed, so the pool never holds more than 64 KiB.
+const MAX_SPARE_BYTES: usize = 4 * crate::vm::interp::WINDOW * std::mem::size_of::<Value>();
+
+/// The stacks of a few finished coroutines, and of suspended ones shrunk
+/// when they went cold, emptied for new coroutines: creating a coroutine
+/// and running it to its end otherwise allocates its buffers, grows them
+/// to a register window and frees them every time. Kept stacks hold no
+/// values, so the collector never sees them.
+#[derive(Debug, Default)]
+pub(crate) struct SpareStacks(Vec<Stack>);
+
+impl SpareStacks {
+    /// Keep `s`, which no coroutine uses any more, emptied, if there is
+    /// room and it isn't large; otherwise free it.
+    fn keep(&mut self, mut s: Stack) {
+        if self.0.len() < MAX_SPARE_STACKS && s.bytes() <= MAX_SPARE_BYTES {
+            s.empty();
+            self.0.push(s);
+        }
+    }
+
+    /// An empty stack: a kept one if there is one.
+    fn take(&mut self) -> Stack {
+        self.0.pop().unwrap_or_default()
+    }
+}
+
 /// A coroutine's base frame, with its body at register 0.
 fn base_frame() -> Frame {
     Frame {
@@ -832,7 +878,8 @@ impl NativeCtx<'_> {
 
     /// A new suspended coroutine running `f`.
     pub fn new_thread(&mut self, f: Value) -> Gc<Thread> {
-        let mut c = Coroutine::fresh(f);
+        let stack = self.vm.rt.spare_stacks.take();
+        let mut c = Coroutine::fresh(f, stack);
         // A new thread gets its creator's hook mask and count, but not its
         // function (observed from lua5.5: `gethook(co)` is `nil, mask,
         // count` and no events reach a hook).

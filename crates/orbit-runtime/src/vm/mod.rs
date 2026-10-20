@@ -350,6 +350,17 @@ impl Stack {
         }
     }
 
+    /// Drop everything the stack holds but keep its buffers' capacity, for
+    /// another coroutine: no values stay behind for the collector to miss.
+    pub(crate) fn empty(&mut self) {
+        self.regs.clear();
+        self.cells.clear();
+        self.frames.clear();
+        *self.aux = StackAux::default();
+        self.hook = hook::Hook::default();
+        self.dirty_to = 0;
+    }
+
     /// Free everything the stack holds, keeping its box, and give it
     /// `hook`.
     pub(crate) fn clear(&mut self, hook: hook::Hook) {
@@ -483,6 +494,15 @@ impl Stack {
         crate::vm::interp::extend_nil(&mut self.regs, end);
         self.regs[at..end].copy_from_slice(vals);
         end
+    }
+
+    /// Heap bytes the stack's contents take (not its spare capacity).
+    pub(crate) fn held_bytes(&self) -> usize {
+        self.regs.len() * std::mem::size_of::<Value>()
+            + self.cells.len() * std::mem::size_of::<Gc<Cell>>()
+            + self.frames.len() * std::mem::size_of::<Frame>()
+            + self.aux.tbc.len() * std::mem::size_of::<u32>()
+            + self.aux.depth_at.len() * std::mem::size_of::<u32>()
     }
 
     /// Heap bytes the stack owns.
@@ -623,6 +643,8 @@ pub struct Runtime {
     /// `coro::MAX_HOT_STACKS` (see `Vm::came_back`).
     pub(crate) cooling: Vec<Option<(Gc<Thread>, u32)>>,
     pub(crate) cooling_at: usize,
+    /// Emptied stacks of finished coroutines, for new ones.
+    pub(crate) spare_stacks: coro::SpareStacks,
     /// Suspended parks so far (wrapping), to tell how soon a shrunk stack
     /// is resumed.
     pub(crate) parks: u32,
@@ -849,6 +871,7 @@ impl Vm {
                 native_protos: Default::default(),
                 cooling: vec![None; coro::HOT_STACKS],
                 cooling_at: 0,
+                spare_stacks: Default::default(),
                 parks: 0,
                 gc_cycles: 0,
                 interrupt: Default::default(),
