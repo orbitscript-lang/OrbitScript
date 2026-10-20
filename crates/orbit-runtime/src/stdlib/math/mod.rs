@@ -295,30 +295,7 @@ fn ldexp(ctx: &mut NativeCtx<'_>) -> R {
     let m = ctx.check_f64(0)?;
     // The reference takes the exponent as a C `int`, truncating it.
     let e = ctx.check_int(1)? as i32;
-    ctx.ret1(Value::Float(scale(m, e)))
-}
-
-/// `x * 2^n`, rounded once.
-fn scale(mut x: f64, n: i32) -> f64 {
-    let mut n = n.clamp(-2200, 2200);
-    let p = |k: i32| f64::from_bits(((k + 1023) as u64) << 52);
-    while n > 1023 {
-        x *= p(1023);
-        n -= 1023;
-    }
-    // Scale down in steps that stay normal until the last one, so a
-    // subnormal result is rounded only once.
-    while n < -1022 {
-        x *= p(-1022 + 53);
-        n += 1022 - 53;
-        if n >= -1022 {
-            break;
-        }
-    }
-    if n < -1022 {
-        n = -1022;
-    }
-    x * p(n)
+    ctx.ret1(Value::Float(number::ldexp(m, i64::from(e))))
 }
 
 fn less(a: Value, b: Value) -> bool {

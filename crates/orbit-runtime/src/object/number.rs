@@ -288,30 +288,35 @@ fn round_to_f64(mant: u64, exp: i64, sticky: bool) -> f64 {
     if e + 64 - i64::from(m.leading_zeros()) > 1024 {
         return f64::INFINITY;
     }
-    scale(m as f64, e)
+    ldexp(m as f64, e)
 }
 
-/// `x * 2^e` when the result is exactly representable, without double rounding.
-fn scale(mut x: f64, mut e: i64) -> f64 {
-    let pow2 = |k: i64| f64::from_bits(((1023 + k) as u64) << 52);
-    while e > 1000 {
-        x *= pow2(1000);
-        e -= 1000;
+/// `x * 2^n`, rounded once (C's `ldexp`).
+pub fn ldexp(mut x: f64, n: i64) -> f64 {
+    // Past 2200 every finite `x` overflows or underflows anyway.
+    let mut n = n.clamp(-2200, 2200) as i32;
+    let p = |k: i32| f64::from_bits(((k + 1023) as u64) << 52);
+    while n > 1023 {
+        x *= p(1023);
+        n -= 1023;
     }
-    // Stay normal until the last step, so only the final, exact multiply goes subnormal.
-    while e < -1000 && x * pow2(-1000) >= f64::MIN_POSITIVE {
-        x *= pow2(-1000);
-        e += 1000;
+    // Scale down in steps that stay normal until the last one, so a
+    // subnormal result is rounded only once.
+    while n < -1022 {
+        x *= p(-1022 + 53);
+        n += 1022 - 53;
     }
-    while e < -1000 {
-        x *= 0.5;
-        e += 1;
-    }
-    x * pow2(e)
+    x * p(n)
 }
 
 /// Append a float formatted like C's `%.<prec>g`.
 pub fn fmt_g(out: &mut String, x: f64, prec: usize) {
+    fmt_general(out, x, prec, false);
+}
+
+/// Append a float formatted like C's `%.<prec>g`, or `%#.<prec>g` with
+/// `alt`, which keeps trailing zeros and the decimal point.
+pub fn fmt_general(out: &mut String, x: f64, prec: usize, alt: bool) {
     use std::fmt::Write;
     let prec = prec.max(1);
     if x.is_nan() {
@@ -326,7 +331,10 @@ pub fn fmt_g(out: &mut String, x: f64, prec: usize) {
     let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
     let exp: i32 = exp.parse().unwrap_or(0);
     if exp < -4 || exp >= prec as i32 {
-        out.push_str(strip_zeros(mantissa));
+        out.push_str(if alt { mantissa } else { strip_zeros(mantissa) });
+        if alt && prec == 1 {
+            out.push('.');
+        }
         let _ = write!(
             out,
             "e{}{:02}",
@@ -334,8 +342,12 @@ pub fn fmt_g(out: &mut String, x: f64, prec: usize) {
             exp.unsigned_abs()
         );
     } else {
-        let fixed = format!("{:.*}", (prec as i32 - 1 - exp) as usize, x);
-        out.push_str(strip_zeros(&fixed));
+        let digits = (prec as i32 - 1 - exp) as usize;
+        let fixed = format!("{x:.digits$}");
+        out.push_str(if alt { &fixed } else { strip_zeros(&fixed) });
+        if alt && digits == 0 {
+            out.push('.');
+        }
     }
 }
 

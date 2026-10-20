@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use crate::object::{Gc, LuaStr, Value};
+use crate::object::{Gc, LuaStr, Value, number};
 use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
@@ -489,26 +489,8 @@ fn split_exp(x: f64, p: usize) -> (String, i32) {
 
 /// `%g`: `%e` or `%f` by the exponent, trailing zeros removed unless `#`.
 fn general(x: f64, p: usize, alt: bool) -> String {
-    let p = p.max(1);
-    let (_, exp) = split_exp(x, p - 1);
-    let mut s = if exp < -4 || exp >= p as i32 {
-        exponent(x, p - 1, alt)
-    } else {
-        fixed(x, (p as i32 - 1 - exp) as usize, alt)
-    };
-    if !alt {
-        // Drop trailing zeros of the fraction, then a bare point.
-        let (num, tail) = match s.find('e') {
-            Some(at) => (s[..at].to_owned(), s[at..].to_owned()),
-            None => (s.clone(), String::new()),
-        };
-        let num = if num.contains('.') {
-            num.trim_end_matches('0').trim_end_matches('.').to_owned()
-        } else {
-            num
-        };
-        s = num + &tail;
-    }
+    let mut s = String::new();
+    number::fmt_general(&mut s, x, p, alt);
     s
 }
 
