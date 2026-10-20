@@ -92,31 +92,27 @@ impl Lowerer {
 
     fn fn_item(&mut self, item: &ast::Item, f: &ast::FnDecl, out: &mut Vec<StmtId>) -> LResult<()> {
         let body = self.fn_body(f)?;
-        let local = self.define_item(f.name, ItemTag::Fn, out, |lx, local, out| {
+        let local = self.define_item(f.name, ItemTag::Fn, out, |lx, local, early, out| {
             let func = lx.function(
                 &f.sig,
                 FnBody::Block(body),
                 FunctionName::Local(f.name.sym),
                 f.span,
             )?;
-            match local {
+            if early {
                 // Declared early for a use before the definition.
-                Some(local) => {
-                    let c = lx.add_expr(hir::ExprKind::Closure(func), f.span);
-                    lx.push(
-                        out,
-                        hir::StmtKind::Assign {
-                            targets: vec![hir::Place::Local(local)],
-                            values: vec![c].into(),
-                        },
-                        f.span,
-                    );
-                    Ok(None)
-                }
-                None => Ok(Some(hir::StmtKind::LocalFunction {
-                    local: lx.pending_fn_local.take().expect("function local"),
-                    func,
-                })),
+                let c = lx.add_expr(hir::ExprKind::Closure(func), f.span);
+                lx.push(
+                    out,
+                    hir::StmtKind::Assign {
+                        targets: vec![hir::Place::Local(local)],
+                        values: vec![c].into(),
+                    },
+                    f.span,
+                );
+                Ok(None)
+            } else {
+                Ok(Some(hir::StmtKind::LocalFunction { local, func }))
             }
         })?;
         self.export(item, f.name, local, out);
@@ -134,19 +130,15 @@ impl Lowerer {
         );
     }
 
-    /// Defines a function item. `build` gets the local declared early (if a use before the
-    /// definition needed one) and returns the statement to add, if any. The item is in scope
+    /// Defines a function item. `build` gets its local, and whether that was declared early
+    /// (for a use before the definition), and returns the statement to add, if any. The item is in scope
     /// inside its own body, so it can recurse.
     fn define_item(
         &mut self,
         name: ast::Name,
         tag: ItemTag,
         out: &mut Vec<StmtId>,
-        build: impl FnOnce(
-            &mut Self,
-            Option<LocalId>,
-            &mut Vec<StmtId>,
-        ) -> LResult<Option<hir::StmtKind>>,
+        build: impl FnOnce(&mut Self, LocalId, bool, &mut Vec<StmtId>) -> LResult<Option<hir::StmtKind>>,
     ) -> LResult<LocalId> {
         let (tag, early) = self.take_pending(name.sym).unwrap_or((tag, None));
         let local = match early {
@@ -161,10 +153,7 @@ impl Lowerer {
                 item: Some(tag),
             },
         );
-        if early.is_none() {
-            self.pending_fn_local = Some(local);
-        }
-        if let Some(kind) = build(self, early, out)? {
+        if let Some(kind) = build(self, local, early.is_some(), out)? {
             self.push(out, kind, name.span);
         }
         Ok(local)

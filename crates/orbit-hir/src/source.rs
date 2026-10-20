@@ -12,6 +12,13 @@ impl Span {
         Span { start, end }
     }
 
+    /// The offset of the span's last byte (its start when empty): the byte
+    /// whose line is the span's last line.
+    pub const fn last_byte(self) -> u32 {
+        let last = self.end.saturating_sub(1);
+        if last > self.start { last } else { self.start }
+    }
+
     /// The smallest span covering both.
     pub fn to(self, other: Span) -> Span {
         Span {

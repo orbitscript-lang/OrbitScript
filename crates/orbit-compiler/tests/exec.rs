@@ -2,7 +2,7 @@
 //! Rc tables, Rust recursion, no GC) runs compiled snippets, and their output is compared
 //! with what the reference `lua5.5` printed for the same source (recorded inline).
 //!
-//! This is not the VM. It exists so compiler bugs show up without waiting on `orbit-vm`,
+//! This is not the VM. It exists so compiler bugs show up without the runtime (`orbit-runtime`),
 //! and it covers only what the snippets use.
 
 use std::cell::RefCell;

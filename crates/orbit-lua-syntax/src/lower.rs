@@ -474,9 +474,7 @@ impl Lowerer<'_> {
     }
 
     fn end_line_of(&self, span: Span) -> u32 {
-        self.chunk
-            .source
-            .line_of(span.end.saturating_sub(1).max(span.start))
+        self.chunk.source.line_of(span.last_byte())
     }
 
     // ---- goto and labels ----------------------------------------------------------------------
@@ -678,7 +676,7 @@ impl Lowerer<'_> {
         // statement's last line, a numeric `for` the line of `do`, and a generic `for` the
         // line its iterator expressions start on.
         let at = match &s.kind {
-            StmtKind::Local { .. } | StmtKind::Assign { .. } => last_offset(s.span),
+            StmtKind::Local { .. } | StmtKind::Assign { .. } => s.span.last_byte(),
             StmtKind::NumericFor { do_at, .. } => *do_at,
             StmtKind::GenericFor { exprs, .. } => {
                 exprs.first().map_or(s.span.start, |e| e.span.start)
@@ -1040,7 +1038,7 @@ impl Lowerer<'_> {
             ExprKind::Index { obj, key } => {
                 let obj = self.expr(obj)?;
                 let key = self.expr(key)?;
-                at = last_offset(span);
+                at = span.last_byte();
                 hir::ExprKind::Index { obj, key }
             }
             ExprKind::Call {
@@ -1122,7 +1120,7 @@ impl Lowerer<'_> {
                     A::Shr => H::Shr,
                 };
                 at = match op {
-                    H::Eq | H::Ne | H::Lt | H::Le | H::Gt | H::Ge => last_offset(span),
+                    H::Eq | H::Ne | H::Lt | H::Le | H::Gt | H::Ge => span.last_byte(),
                     _ => *op_at,
                 };
                 hir::ExprKind::Binary { op, lhs, rhs }
@@ -1152,9 +1150,4 @@ impl Lowerer<'_> {
         };
         Ok(self.f().add_expr_at(kind, span, at))
     }
-}
-
-/// The offset of the last byte of `span`, which is on its last token's line.
-fn last_offset(span: Span) -> u32 {
-    span.end.saturating_sub(1).max(span.start)
 }

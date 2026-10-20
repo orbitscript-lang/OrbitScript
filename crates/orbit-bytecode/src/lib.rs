@@ -1,11 +1,11 @@
 //! The bytecode the compiler emits and the VM runs ([VM design], ADR-4).
 //!
 //! Everything here is plain `Send` data with no GC handles: the compiler
-//! produces an [`UnlinkedChunk`], and `orbit-vm` links it into a heap
+//! produces an [`UnlinkedChunk`], and `orbit-runtime` links it into a heap
 //! (interning strings, allocating prototypes bottom-up). It is its own crate,
-//! with no dependencies, because three crates need it: `orbit-compiler`
-//! emits it, `orbit-core`'s `Proto` stores it, and `orbit-vm` runs it (and
-//! re-exports it as `orbit_runtime::vm::op`). The compiler thereby stays free of the
+//! with no dependencies, because both need it: `orbit-compiler` emits it,
+//! and `orbit-runtime` stores it in prototypes and runs it (re-exporting it
+//! as `orbit_runtime::vm::op`). The compiler thereby stays free of the
 //! runtime and the GC.
 //!
 //! Notation in the instruction docs: `R[x]` is register `x` of the current
@@ -385,6 +385,39 @@ pub enum Op {
 }
 
 const _: () = assert!(core::mem::size_of::<Op>() == 8);
+
+impl Op {
+    /// Where a jump or loop instruction may go, relative to the next
+    /// instruction; `None` for every other instruction.
+    pub fn jump_offset(mut self) -> Option<Offset> {
+        self.jump_offset_mut().copied()
+    }
+
+    /// [`Op::jump_offset`], to patch.
+    pub fn jump_offset_mut(&mut self) -> Option<&mut Offset> {
+        match self {
+            Op::Jump { off }
+            | Op::JumpIfTrue { off, .. }
+            | Op::JumpIfFalse { off, .. }
+            | Op::JumpLt { off, .. }
+            | Op::JumpNotLt { off, .. }
+            | Op::JumpLe { off, .. }
+            | Op::JumpNotLe { off, .. }
+            | Op::JumpEq { off, .. }
+            | Op::JumpNe { off, .. }
+            | Op::JumpEqInt { off, .. }
+            | Op::JumpLtInt { off, .. }
+            | Op::JumpLeInt { off, .. }
+            | Op::JumpGtInt { off, .. }
+            | Op::JumpGeInt { off, .. }
+            | Op::ForPrep { exit: off, .. }
+            | Op::ForPrepExclusive { exit: off, .. }
+            | Op::ForLoop { back: off, .. }
+            | Op::GenericLoop { back: off, .. } => Some(off),
+            _ => None,
+        }
+    }
+}
 
 /// A constant-pool entry.
 #[derive(Debug, Clone, PartialEq)]
