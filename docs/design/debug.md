@@ -285,7 +285,7 @@ sequenceDiagram
 
 Cost (cloud x86_64, release, no PGO): an attachable run is unchanged in instructions on `fib`, `tables` and `oop` (callgrind, under 0.1%), and startup gains 8.3 k instructions (+0.5%) and a signal thread. `dap` adds 271.0 KiB to the release `orbit` (2,252,064 → 2,529,616 bytes), of which the engine is 12.3 KiB, launching 190.2 KiB and attaching 68.6 KiB; `serde_json` is already linked for `std.json`.
 
-Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Isolates are named by number until `Config` can name them. The VS Code extension (D7) comes next.
+Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Isolates are named by number until `Config` can name them. The VS Code extension (`editors/vscode`, D7) starts both adapters: `launch` through `orbit --debug-server`, `attach` through `orbit --debug-attach <pid>` with a picker over `--list`.
 
 ### Several isolates in one process
 
