@@ -12,3 +12,4 @@ strings.lua        full=500000   quick=20000   # string building, format, patter
 tables.lua         full=1000000  quick=100000  # hash and array tables, sort
 oop.lua            full=2000000  quick=100000  # method calls, metatables, closures
 coroutines.lua     full=4000000  quick=50000   # coroutine switches
+coroutine_chain.lua full=500     quick=20      # 168 coroutines taking turns (more than the hot stack set)
