@@ -1,0 +1,417 @@
+//! What the server answers: the analysis module's results, in LSP's shapes.
+//! Each handler takes the server and the request's params and gives the
+//! result (nil for JSON's `null`).
+
+use std::json;
+use analysis;
+use lsp::rpc;
+use lsp::text::{Text};
+
+/// LSP's `SymbolKind` for each of the analysis module's kinds.
+let SYMBOL_KINDS = #{
+    function: 12, struct: 23, enum: 10, variant: 22, field: 8, method: 6, assoc_fn: 12,
+    const: 14, type_alias: 26, module: 2, global: 13, local: 13, param: 13, import: 13,
+    type_param: 26,
+};
+
+/// LSP's `CompletionItemKind` for each kind.
+let COMPLETION_KINDS = #{
+    function: 3, struct: 22, enum: 13, variant: 20, field: 5, method: 2, assoc_fn: 3,
+    const: 21, type_alias: 7, module: 9, global: 6, local: 6, param: 6, import: 6,
+    type_param: 25, keyword: 14,
+};
+
+/// The highlighting kinds, in the order the legend gives them.
+let TOKEN_TYPES = [
+    "namespace", "type", "enum", "enumMember", "typeParameter", "parameter", "variable",
+    "property", "function", "method", "keyword", "string", "number", "comment",
+];
+
+/// The semantic tokens legend, for `initialize`.
+pub fn token_legend() {
+    #{ tokenTypes: TOKEN_TYPES, tokenModifiers: ["documentation"] }
+}
+
+/// The index of each token type, from 0; doc comments are comments with
+/// the `documentation` modifier.
+let TOKEN_INDEX = #{};
+for (i, name) in ipairs(TOKEN_TYPES) {
+    TOKEN_INDEX[name] = i - 1;
+}
+TOKEN_INDEX["doc"] = TOKEN_INDEX["comment"];
+
+/// Whether the checker handles the file (OrbitScript and its stubs; Lua
+/// files get syntax errors only).
+pub fn checked(path) -> bool {
+    string::match(path, "%.orbi?$") != nil
+}
+
+/// The document the request is about, and the byte offset of its
+/// position, if it has one.
+fn at(server, params) {
+    let doc = server.document(params.textDocument.uri);
+    if doc == nil {
+        return (nil, nil);
+    }
+    let offset = if rpc::present(params.position) { doc.text.offset(params.position) } else { nil };
+    (doc, offset)
+}
+
+/// An LSP `Location` for one of the analysis module's.
+fn location(server, loc) {
+    let text = server.text_of(loc.path);
+    #{ uri: server.uri_of(loc.path), range: text.range(loc.start, loc.end) }
+}
+
+pub fn publish_diagnostics(server, doc) {
+    let list = json::array();
+    for (_, d) in ipairs(analysis::diagnostics(doc.path)) {
+        let severity = match d.severity {
+            "error" => 1,
+            "warning" => 2,
+            _ => 4,
+        };
+        let item = #{
+            range: doc.text.range(d.start, d.end),
+            severity: severity,
+            source: if checked(doc.path) { "orbit-check" } else { "orbit" },
+            message: d.message,
+        };
+        if d.code != nil {
+            item.code = d.code;
+        }
+        list[#list + 1] = item;
+    }
+    rpc::notify("textDocument/publishDiagnostics", #{ uri: doc.uri, version: doc.version, diagnostics: list });
+}
+
+pub fn document_symbol(server, params) {
+    let (doc, _) = at(server, params);
+    if doc == nil || !checked(doc.path) {
+        return json::array();
+    }
+    let convert = |list, convert| {
+        let out = json::array();
+        for (_, s) in ipairs(list) {
+            out[#out + 1] = #{
+                name: s.name,
+                kind: SYMBOL_KINDS[s.kind] || 13,
+                range: doc.text.range(s.full_start, s.full_end),
+                selectionRange: doc.text.range(s.start, s.end),
+                children: convert(s.children, convert),
+            };
+        }
+        out
+    };
+    convert(analysis::symbols(doc.path), convert)
+}
+
+/// Each bracketed block and each run of comments that spans lines folds.
+/// A block folds up to the line before its closing bracket, which stays
+/// in sight.
+pub fn folding_range(server, params) {
+    let (doc, _) = at(server, params);
+    let out = json::array();
+    if doc == nil || !checked(doc.path) {
+        return out;
+    }
+    let folds = analysis::folds(doc.path);
+    let mut i = 1;
+    while i <= #folds {
+        let from = doc.text.position(folds[i]).line;
+        let mut to = doc.text.position(folds[i + 1]).line;
+        let kind = folds[i + 2];
+        if kind == "region" {
+            to = to - 1;
+        }
+        if to > from {
+            let fold = #{ startLine: from, endLine: to };
+            if kind == "comment" {
+                fold.kind = "comment";
+            }
+            out[#out + 1] = fold;
+        }
+        i = i + 3;
+    }
+    out
+}
+
+/// For each position, the spans an "expand selection" grows through: the
+/// token there, the inside of each enclosing bracket pair and then the pair,
+/// and the whole file.
+pub fn selection_range(server, params) {
+    let (doc, _) = at(server, params);
+    let out = json::array();
+    if doc == nil {
+        return out;
+    }
+    let tokens = if checked(doc.path) { analysis::tokens(doc.path) } else { [] };
+    let folds = if checked(doc.path) { analysis::folds(doc.path) } else { [] };
+    for (_, position) in ipairs(params.positions) {
+        let offset = doc.text.offset(position);
+        // Innermost first; each span is [start, end).
+        let spans = [];
+        let mut i = 1;
+        while i <= #tokens {
+            if tokens[i] <= offset && offset <= tokens[i + 1] {
+                spans[#spans + 1] = [tokens[i], tokens[i + 1]];
+                break;
+            }
+            i = i + 3;
+        }
+        // The pairs nest, so sorting by size puts the inner ones first.
+        let pairs = [];
+        i = 1;
+        while i <= #folds {
+            if folds[i + 2] == "region" && folds[i] < offset && offset <= folds[i + 1] {
+                pairs[#pairs + 1] = [folds[i], folds[i + 1] + 1];
+            }
+            i = i + 3;
+        }
+        table::sort(pairs, |a, b| a[2] - a[1] < b[2] - b[1]);
+        for (_, p) in ipairs(pairs) {
+            spans[#spans + 1] = [p[1] + 1, p[2] - 1];
+            spans[#spans + 1] = p;
+        }
+        spans[#spans + 1] = [0, #doc.text.text];
+        // From the outside in, each the parent of the next; drop repeats.
+        let mut node = nil;
+        let mut last = nil;
+        for k in (1..=#spans).rev() {
+            let s = spans[k];
+            if last == nil || s[1] != last[1] || s[2] != last[2] {
+                node = #{ range: doc.text.range(s[1], s[2]), parent: node };
+                last = s;
+            }
+        }
+        out[#out + 1] = node;
+    }
+    out
+}
+
+pub fn semantic_tokens(server, params) {
+    let (doc, _) = at(server, params);
+    let data = json::array();
+    if doc == nil || !checked(doc.path) {
+        return #{ data: data };
+    }
+    let tokens = analysis::tokens(doc.path);
+    let mut line = 0;
+    let mut column = 0;
+    let mut i = 1;
+    while i <= #tokens {
+        let kind = tokens[i + 2];
+        let modifiers = if kind == "doc" { 1 } else { 0 };
+        for (_, piece) in ipairs(doc.text.split_lines(tokens[i], tokens[i + 1])) {
+            let (l, c, len) = (piece[1], piece[2], piece[3]);
+            let delta = if l == line { c - column } else { c };
+            data[#data + 1] = l - line;
+            data[#data + 1] = delta;
+            data[#data + 1] = len;
+            data[#data + 1] = TOKEN_INDEX[kind];
+            data[#data + 1] = modifiers;
+            line = l;
+            column = c;
+        }
+        i += 3;
+    }
+    #{ data: data }
+}
+
+pub fn definition(server, params) {
+    let (doc, offset) = at(server, params);
+    if doc == nil || !checked(doc.path) {
+        return nil;
+    }
+    let loc = analysis::definition(doc.path, offset);
+    if loc == nil { nil } else { location(server, loc) }
+}
+
+pub fn references(server, params) {
+    let (doc, offset) = at(server, params);
+    let out = json::array();
+    if doc == nil || !checked(doc.path) {
+        return out;
+    }
+    let declaration = params.context == nil || params.context.includeDeclaration != false;
+    for (_, r) in ipairs(analysis::references(doc.path, offset) || []) {
+        if declaration || !r.definition {
+            out[#out + 1] = location(server, r);
+        }
+    }
+    out
+}
+
+pub fn document_highlight(server, params) {
+    let (doc, offset) = at(server, params);
+    let out = json::array();
+    if doc == nil || !checked(doc.path) {
+        return out;
+    }
+    for (_, r) in ipairs(analysis::references(doc.path, offset) || []) {
+        if r.path == doc.path {
+            out[#out + 1] = #{ range: doc.text.range(r.start, r.end) };
+        }
+    }
+    out
+}
+
+pub fn prepare_rename(server, params) {
+    let (doc, offset) = at(server, params);
+    if doc == nil || !checked(doc.path) {
+        return nil;
+    }
+    let target = analysis::rename_target(doc.path, offset);
+    if target == nil {
+        return nil;
+    }
+    #{ range: doc.text.range(target.start, target.end), placeholder: target.name }
+}
+
+/// Whether `name` can name a variable.
+fn is_name(name) -> bool {
+    string::match(name, "^[%a_][%w_]*$") != nil
+}
+
+pub fn rename(server, params) {
+    let (doc, offset) = at(server, params);
+    if doc == nil || !checked(doc.path) {
+        return nil;
+    }
+    if !is_name(params.newName) {
+        return (nil, f"'{params.newName}' isn't a name");
+    }
+    if analysis::rename_target(doc.path, offset) == nil {
+        return (nil, "nothing here can be renamed");
+    }
+    let changes = json::object();
+    for (_, r) in ipairs(analysis::references(doc.path, offset) || []) {
+        let l = location(server, r);
+        if changes[l.uri] == nil {
+            changes[l.uri] = json::array();
+        }
+        let edits = changes[l.uri];
+        edits[#edits + 1] = #{ range: l.range, newText: params.newName };
+    }
+    #{ changes: changes }
+}
+
+pub fn hover(server, params) {
+    let (doc, offset) = at(server, params);
+    if doc == nil || !checked(doc.path) {
+        return nil;
+    }
+    let h = analysis::hover(doc.path, offset);
+    if h == nil {
+        return nil;
+    }
+    let mut value = "```orbitscript\n" ~ h.declaration ~ "\n```";
+    if h.docs != nil {
+        value = value ~ "\n\n" ~ h.docs;
+    }
+    let result = #{ contents: #{ kind: "markdown", value: value } };
+    if h.start != nil {
+        result.range = doc.text.range(h.start, h.end);
+    }
+    result
+}
+
+pub fn completion(server, params) {
+    let (doc, offset) = at(server, params);
+    let items = json::array();
+    if doc == nil || !checked(doc.path) {
+        return items;
+    }
+    let c = analysis::completions(doc.path, offset);
+    let range = doc.text.range(c.start, c.end);
+    for (i, item) in ipairs(c.items) {
+        let entry = #{
+            label: item.label,
+            kind: COMPLETION_KINDS[item.kind] || 1,
+            // The checker's order: innermost names first.
+            sortText: string::format("%05d", i),
+            textEdit: #{ range: range, newText: item.label },
+        };
+        if item.detail != nil {
+            entry.detail = item.detail;
+        }
+        items[#items + 1] = entry;
+    }
+    items
+}
+
+pub fn signature_help(server, params) {
+    let (doc, offset) = at(server, params);
+    if doc == nil || !checked(doc.path) {
+        return nil;
+    }
+    let h = analysis::signature(doc.path, offset);
+    if h == nil {
+        return nil;
+    }
+    let label = Text::new(h.label);
+    let parameters = json::array();
+    for (_, p) in ipairs(h.params) {
+        let (from, to) = (label.position(p[1]).character, label.position(p[2]).character);
+        parameters[#parameters + 1] = #{ label: [from, to] };
+    }
+    let signature = #{ label: h.label, parameters: parameters };
+    if h.docs != nil {
+        signature.documentation = #{ kind: "markdown", value: h.docs };
+    }
+    let result = #{ signatures: [signature], activeSignature: 0 };
+    if h.active != nil {
+        result.activeParameter = h.active;
+    }
+    result
+}
+
+pub fn inlay_hint(server, params) {
+    let (doc, _) = at(server, params);
+    let out = json::array();
+    if doc == nil || !checked(doc.path) {
+        return out;
+    }
+    let start = doc.text.offset(params.range.start);
+    let end = doc.text.offset(params.range.end);
+    for (_, h) in ipairs(analysis::inlay_hints(doc.path, start, end)) {
+        out[#out + 1] = #{ position: doc.text.position(h.offset), label: h.label, kind: 1 };
+    }
+    out
+}
+
+/// Whether the letters of `query` appear in `name` in order, ignoring case.
+fn matches(name, query) -> bool {
+    let name = string::lower(name);
+    let mut at = 1;
+    for i in 1..=#query {
+        let c = string::lower(string::sub(query, i, i));
+        let found = string::find(name, c, at, true);
+        if found == nil {
+            return false;
+        }
+        at = found + 1;
+    }
+    true
+}
+
+/// At most this many symbols answer a workspace search.
+const MAX_SYMBOLS: int = 200;
+
+pub fn workspace_symbol(server, params) {
+    let query = params.query || "";
+    let out = json::array();
+    for (_, s) in ipairs(analysis::workspace_symbols()) {
+        if #out >= MAX_SYMBOLS {
+            break;
+        }
+        if matches(s.name, query) {
+            let item = #{ name: s.name, kind: SYMBOL_KINDS[s.kind] || 13, location: location(server, s) };
+            if s.container != nil {
+                item.containerName = s.container;
+            }
+            out[#out + 1] = item;
+        }
+    }
+    out
+}

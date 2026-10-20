@@ -1,0 +1,172 @@
+//! Texts and positions. The analysis module speaks byte offsets (from 0);
+//! the editor speaks lines and columns (from 0), its columns counting
+//! UTF-16 code units unless it agreed to UTF-8 at `initialize`.
+
+/// Columns count UTF-8 bytes (`"utf-8"`) or UTF-16 code units (`"utf-16"`).
+let mut encoding = "utf-16";
+
+pub fn set_encoding(name) {
+    encoding = name;
+}
+
+pub fn current_encoding() {
+    encoding
+}
+
+/// A text with its line starts: an open document, or a file a location
+/// points into.
+pub struct Text { text, lines }
+
+/// The offset each line starts at: `lines[1]` is 0.
+fn line_starts(text) {
+    let starts = [0];
+    let mut at = 1;
+    loop {
+        let nl = string::find(text, "\n", at, true);
+        if nl == nil {
+            break;
+        }
+        starts[#starts + 1] = nl;
+        at = nl + 1;
+    }
+    starts
+}
+
+/// How many columns the bytes `from` to `to` (offsets, `to` excluded) of
+/// `text` take.
+fn columns(text, from, to) {
+    if encoding == "utf-8" || string::find(text, "[\x80-\xff]", from + 1) == nil {
+        return to - from;
+    }
+    let mut n = 0;
+    for i in from + 1..=to {
+        let b = string::byte(text, i);
+        // A lead byte starts a character; four-byte ones take two units.
+        if b < 128 || b >= 192 {
+            n += if b >= 240 { 2 } else { 1 };
+        }
+    }
+    n
+}
+
+impl Text {
+    pub fn new(text) -> Text {
+        Text { text, lines: line_starts(text) }
+    }
+
+    pub fn set(self, text) {
+        self.text = text;
+        self.lines = line_starts(text);
+    }
+
+    /// The line (from 1) holding `offset`.
+    fn line_of(self, offset) -> int {
+        let mut lo = 1;
+        let mut hi = #self.lines;
+        while lo < hi {
+            let mid = (lo + hi + 1) \ 2;
+            if self.lines[mid] <= offset {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    }
+
+    /// Where a line's text ends, before its newline (and a `\r` before that).
+    fn line_end(self, line) -> int {
+        if line >= #self.lines {
+            return #self.text;
+        }
+        let mut end = self.lines[line + 1] - 1;
+        if end > self.lines[line] && string::byte(self.text, end) == 13 {
+            end -= 1;
+        }
+        end
+    }
+
+    /// The editor's position of `offset`.
+    pub fn position(self, offset) {
+        let offset = math::min(math::max(offset, 0), #self.text);
+        let line = self.line_of(offset);
+        #{ line: line - 1, character: columns(self.text, self.lines[line], offset) }
+    }
+
+    pub fn range(self, start, end) {
+        #{ start: self.position(start), end: self.position(end) }
+    }
+
+    /// The offset of the editor's position `pos`, kept inside its line.
+    pub fn offset(self, pos) -> int {
+        let line = pos.line + 1;
+        if line > #self.lines {
+            return #self.text;
+        }
+        let start = self.lines[line];
+        let end = self.line_end(line);
+        if encoding == "utf-8" {
+            return math::min(start + pos.character, end);
+        }
+        let mut units = 0;
+        let mut at = start;
+        while at < end && units < pos.character {
+            let b = string::byte(self.text, at + 1);
+            let len = if b >= 240 { 4 } else if b >= 224 { 3 } else if b >= 192 { 2 } else { 1 };
+            units += if len == 4 { 2 } else { 1 };
+            at += len;
+        }
+        math::min(at, end)
+    }
+
+    /// Apply one of the editor's `contentChanges`: a range and its new
+    /// text, or the whole text.
+    pub fn change(self, change) {
+        if change.range == nil {
+            self.set(change.text);
+            return;
+        }
+        let start = self.offset(change.range.start);
+        let end = math::max(self.offset(change.range.end), start);
+        self.set(string::sub(self.text, 1, start) ~ change.text ~ string::sub(self.text, end + 1));
+    }
+
+    /// The pieces of `start..end` that fit on one line each: `(line, column,
+    /// length)` triples in the editor's units, for highlighting.
+    pub fn split_lines(self, start, end) {
+        let out = [];
+        let mut from = start;
+        let mut line = self.line_of(start);
+        while from < end {
+            let stop = math::min(self.line_end(line), end);
+            if stop > from {
+                let column = columns(self.text, self.lines[line], from);
+                out[#out + 1] = [line - 1, column, columns(self.text, from, stop)];
+            }
+            if line >= #self.lines {
+                break;
+            }
+            line += 1;
+            from = self.lines[line];
+        }
+        out
+    }
+}
+
+/// The path a `file://` URI names, or nil for another scheme.
+pub fn uri_to_path(uri) {
+    let rest = string::match(uri, "^file://[^/]*(/.*)$");
+    if rest == nil {
+        return nil;
+    }
+    let path = string::gsub(rest, "%%(%x%x)", |hex| string::char(tonumber(hex, 16) as int));
+    // Windows: `/C:/dir` is `C:/dir`.
+    if string::match(path, "^/%a:") != nil { string::sub(path, 2) } else { path }
+}
+
+/// The `file://` URI of `path`.
+pub fn path_to_uri(path) {
+    let path = string::gsub(path, "\\", "/");
+    let encoded = string::gsub(path, "[^%w/%._~:%-]", |c| string::format("%%%02X", string::byte(c)));
+    if string::sub(encoded, 1, 1) == "/" { "file://" ~ encoded } else { "file:///" ~ encoded }
+}

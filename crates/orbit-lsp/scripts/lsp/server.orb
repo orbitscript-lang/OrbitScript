@@ -1,0 +1,228 @@
+//! orbit-lsp's main loop: read a message, answer it, until the editor says
+//! `exit`. The documents the editor has open are kept here and given to the
+//! analysis module, which reads every other file from disk.
+
+use std::json;
+use analysis;
+use lsp::rpc;
+use lsp::rpc::{present};
+use lsp::text::{Text, uri_to_path, path_to_uri, set_encoding};
+use lsp::features;
+
+/// A document the editor has open, or one read from disk for a request
+/// (`version` nil).
+struct Document { uri, path, version, text }
+
+/// `documents` by URI and `paths` by path hold the same documents.
+struct Server { documents, paths, initialized, shutdown }
+
+/// The requests answered, by method.
+let REQUESTS = #{
+    ["textDocument/documentSymbol"]: features::document_symbol,
+    ["textDocument/foldingRange"]: features::folding_range,
+    ["textDocument/selectionRange"]: features::selection_range,
+    ["textDocument/semanticTokens/full"]: features::semantic_tokens,
+    ["textDocument/definition"]: features::definition,
+    ["textDocument/references"]: features::references,
+    ["textDocument/documentHighlight"]: features::document_highlight,
+    ["textDocument/prepareRename"]: features::prepare_rename,
+    ["textDocument/rename"]: features::rename,
+    ["textDocument/hover"]: features::hover,
+    ["textDocument/completion"]: features::completion,
+    ["textDocument/signatureHelp"]: features::signature_help,
+    ["textDocument/inlayHint"]: features::inlay_hint,
+    ["workspace/symbol"]: features::workspace_symbol,
+};
+
+impl Server {
+    pub fn new() -> Server {
+        Server { documents: #{}, paths: #{}, initialized: false, shutdown: false }
+    }
+
+    /// The document at `uri`: the editor's if it is open, else the file on
+    /// disk (nil if there is none).
+    pub fn document(self, uri) {
+        let open = self.documents[uri];
+        if open != nil {
+            return open;
+        }
+        let path = uri_to_path(uri);
+        if path == nil {
+            return nil;
+        }
+        let text = analysis::text(path);
+        if text == nil { nil } else { Document { uri, path, version: nil, text: Text::new(text) } }
+    }
+
+    /// The text of the file at `path`: the editor's if it is open.
+    pub fn text_of(self, path) {
+        let doc = self.paths[path];
+        if doc != nil {
+            return doc.text;
+        }
+        Text::new(analysis::text(path) || "")
+    }
+
+    /// The URI of `path`: the editor's own spelling if it is open.
+    pub fn uri_of(self, path) {
+        let doc = self.paths[path];
+        if doc != nil { doc.uri } else { path_to_uri(path) }
+    }
+
+    /// Publish every open document's diagnostics: an edit to one module
+    /// can change what another reports.
+    fn publish_all(self) {
+        for (_, doc) in pairs(self.documents) {
+            features::publish_diagnostics(self, doc);
+        }
+    }
+
+    fn initialize(self, params) {
+        let mut root = nil;
+        if present(params.rootUri) {
+            root = uri_to_path(params.rootUri);
+        } else if present(params.rootPath) {
+            root = params.rootPath;
+        }
+        let options = params.initializationOptions;
+        let search = if present(options) && present(options.searchPath) { options.searchPath } else { [] };
+        analysis::configure(root || ".", search);
+
+        // UTF-8 columns when the editor offers them, else LSP's UTF-16.
+        let mut encoding = "utf-16";
+        let general = present(params.capabilities) && params.capabilities.general;
+        if present(general) && present(general.positionEncodings) {
+            for (_, e) in ipairs(general.positionEncodings) {
+                if e == "utf-8" {
+                    encoding = "utf-8";
+                }
+            }
+        }
+        set_encoding(encoding);
+        #{
+            capabilities: #{
+                positionEncoding: encoding,
+                // Incremental changes.
+                textDocumentSync: #{ openClose: true, change: 2 },
+                documentSymbolProvider: true,
+                foldingRangeProvider: true,
+                selectionRangeProvider: true,
+                semanticTokensProvider: #{ legend: features::token_legend(), full: true },
+                definitionProvider: true,
+                referencesProvider: true,
+                documentHighlightProvider: true,
+                renameProvider: #{ prepareProvider: true },
+                hoverProvider: true,
+                completionProvider: #{ triggerCharacters: [".", ":"] },
+                signatureHelpProvider: #{ triggerCharacters: ["(", ","] },
+                inlayHintProvider: true,
+                workspaceSymbolProvider: true,
+            },
+            serverInfo: #{ name: "orbit-lsp", version: analysis::version },
+        }
+    }
+
+    fn did_open(self, params) {
+        let item = params.textDocument;
+        let path = uri_to_path(item.uri);
+        if path == nil {
+            return;
+        }
+        let doc = Document { uri: item.uri, path, version: item.version, text: Text::new(item.text) };
+        self.documents[item.uri] = doc;
+        self.paths[path] = doc;
+        analysis::open(path, item.text);
+        self.publish_all();
+    }
+
+    fn did_change(self, params) {
+        let doc = self.documents[params.textDocument.uri];
+        if doc == nil {
+            return;
+        }
+        for (_, change) in ipairs(params.contentChanges) {
+            doc.text.change(change);
+        }
+        doc.version = params.textDocument.version;
+        analysis::open(doc.path, doc.text.text);
+        self.publish_all();
+    }
+
+    fn did_close(self, params) {
+        let doc = self.documents[params.textDocument.uri];
+        if doc == nil {
+            return;
+        }
+        self.documents[doc.uri] = nil;
+        self.paths[doc.path] = nil;
+        analysis::close(doc.path);
+        // Its errors go with it; the rest may change without its edits.
+        rpc::notify("textDocument/publishDiagnostics", #{ uri: doc.uri, diagnostics: json::array() });
+        self.publish_all();
+    }
+
+    /// Answer a request, or fail it with the error its handler raised.
+    fn request(self, msg) {
+        let id = msg.id;
+        let method = msg.method;
+        if method == "initialize" {
+            self.initialized = true;
+            return rpc::respond(id, self.initialize(msg.params));
+        }
+        if !self.initialized {
+            return rpc::fail(id, rpc::SERVER_NOT_INITIALIZED, "initialize first");
+        }
+        if method == "shutdown" {
+            self.shutdown = true;
+            return rpc::respond(id, nil);
+        }
+        let handler = REQUESTS[method];
+        if handler == nil {
+            return rpc::fail(id, rpc::METHOD_NOT_FOUND, f"'{method}' isn't supported");
+        }
+        let (ok, result, err) = pcall(handler, self, msg.params);
+        if !ok {
+            rpc::log(f"{method} failed: {result}");
+            rpc::fail(id, rpc::INTERNAL_ERROR, tostring(result));
+        } else if err != nil {
+            rpc::fail(id, rpc::REQUEST_FAILED, err);
+        } else {
+            rpc::respond(id, result);
+        }
+    }
+
+    fn notification(self, msg) {
+        let (ok, err) = pcall(|| match msg.method {
+            "textDocument/didOpen" => self.did_open(msg.params),
+            "textDocument/didChange" => self.did_change(msg.params),
+            "textDocument/didClose" => self.did_close(msg.params),
+            _ => nil,
+        });
+        if !ok {
+            rpc::log(f"{msg.method} failed: {err}");
+        }
+    }
+
+    /// Serve until `exit`; the process's exit status.
+    pub fn run(self) -> int {
+        loop {
+            let msg = rpc::read();
+            if msg == nil {
+                return 1;
+            }
+            if msg.invalid != nil {
+                rpc::log(f"a message that isn't JSON: {msg.invalid}");
+                rpc::send(#{ jsonrpc: "2.0", id: json::null, error: #{ code: rpc::PARSE_ERROR, message: msg.invalid } });
+            } else if msg.method == "exit" {
+                return if self.shutdown { 0 } else { 1 };
+            } else if present(msg.method) && msg.id != nil {
+                self.request(msg);
+            } else if present(msg.method) {
+                self.notification(msg);
+            }
+            // Responses to our own requests: none are sent yet.
+        }
+    }
+}
+
+os::exit(Server::new().run());
