@@ -1,7 +1,7 @@
 //! `orbit-check`: OrbitScript's optional type checker.
 //!
-//! Design: `planning/type-checking/proposal.md` (decisions T1 to T14) and the library API the
-//! language server builds on, `planning/type-checking/api.md`. The checker reads the
+//! Design: `docs/design/orbit-check/proposal.md` (decisions T1 to T14) and the library API the
+//! language server builds on, `docs/design/orbit-check/api.md`. The checker reads the
 //! OrbitScript AST (not the HIR), never touches the runtime, and keeps per-module results so an
 //! editor can recheck one file at a time.
 //!
@@ -388,12 +388,7 @@ impl Workspace {
     fn check_file(&mut self, file: FileId) -> Module {
         let path = self.files[file.0 as usize].path.clone();
         let builtin = self.files[file.0 as usize].builtin;
-        let text = match (&self.files[file.0 as usize].overlay, builtin) {
-            (Some(t), _) => Some(t.clone()),
-            (None, Some(b)) => Some(b.as_bytes().to_vec()),
-            (None, None) => self.sources.read(&path),
-        };
-        let Some(text) = text else {
+        let Some(text) = self.text(file) else {
             return Module::default();
         };
         if is_lua(&path) {
@@ -558,7 +553,8 @@ impl Workspace {
 
     // ---- queries ------------------------------------------------------------------------------
 
-    /// Syntax, module and name errors for `file`, checking it (and what it uses) if needed.
+    /// Every diagnostic for `file` (syntax, module, name and type errors, and lints), checking it
+    /// (and what it uses) if needed.
     pub fn diagnostics(&mut self, file: FileId) -> &[Diagnostic] {
         self.ensure(file);
         &self.files[file.0 as usize].module.diagnostics
@@ -672,7 +668,8 @@ impl Workspace {
         }
     }
 
-    /// The text of `file` as it was last checked.
+    /// The text of `file` now: its overlay, its bundled stub, or what is on disk. A file on disk
+    /// may have changed since it was last checked.
     fn text(&self, file: FileId) -> Option<Vec<u8>> {
         let f = &self.files[file.0 as usize];
         match (&f.overlay, f.builtin) {
@@ -800,16 +797,6 @@ impl Workspace {
                 Some(_) => self.member_completions(id, false, out),
                 None => {}
             },
-        }
-    }
-
-    fn holder(&self, id: SymbolId) -> SymbolId {
-        match self.symbol(id) {
-            Some(s) if s.kind == SymbolKind::Variant => SymbolId {
-                file: id.file,
-                index: s.container.unwrap_or(id.index),
-            },
-            _ => id,
         }
     }
 
@@ -1021,20 +1008,8 @@ impl Workspace {
 }
 
 impl Names for Workspace {
-    fn name(&self, id: SymbolId) -> String {
-        let Some(s) = self.symbol(id) else {
-            return "?".into();
-        };
-        if s.kind == SymbolKind::Variant
-            && let Some(c) = s.container
-            && let Some(e) = self.symbol(SymbolId {
-                file: id.file,
-                index: c,
-            })
-        {
-            return format!("{}::{}", e.name, s.name);
-        }
-        s.name.clone()
+    fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
+        Workspace::symbol(self, id)
     }
 }
 
