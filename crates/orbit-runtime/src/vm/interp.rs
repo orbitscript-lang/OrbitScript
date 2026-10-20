@@ -583,7 +583,7 @@ impl Vm {
             Exc::Lua(e) => e,
             Exc::Plain(m) => LuaError::new(self.new_str(m.as_bytes())),
             Exc::NoMemory => LuaError::new(self.new_str(NoMemory::MESSAGE.as_bytes())),
-            Exc::Meta(_) | Exc::Index { .. } | Exc::NewIndex { .. } => {
+            Exc::Meta(_) | Exc::NewIndex { .. } => {
                 unreachable!("metamethod requests are finished by `raise`")
             }
             Exc::Rt(msg, operand) => {

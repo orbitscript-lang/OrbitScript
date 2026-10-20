@@ -29,10 +29,6 @@ pub(crate) enum Exc {
     /// Not an error: the instruction needs this metamethod call to finish
     /// (see `meta`).
     Meta(MetaCall),
-    /// Not an error: `obj[key]` missed on the inline path and needs
-    /// `__index` (or `obj` isn't a table). Finished by `raise`, out of the
-    /// dispatch loop.
-    Index { obj: Value, key: Value },
     /// Not an error: `obj[key] = v` needs `__newindex`, likewise.
     NewIndex { obj: Value, key: Value, v: Value },
 }

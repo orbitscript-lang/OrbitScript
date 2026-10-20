@@ -34,23 +34,6 @@ impl Vm {
                 Ok(flow) => return Ok(flow),
                 Err(x) => x,
             },
-            Exc::Index { obj, key } => {
-                match crate::vm::meta::index(&self.heap, &self.rt.metas, obj, key) {
-                    Ok(v) => {
-                        let MetaAction::Store { dst } = self.pending_action(0) else {
-                            unreachable!("an indexing instruction")
-                        };
-                        let base = self.rt.stack.frames.last().expect("a frame").base as usize;
-                        self.rt.stack.regs[base + dst as usize] = v;
-                        return Ok(Flow::Reload);
-                    }
-                    Err(Exc::Meta(call)) => match self.call_meta(call) {
-                        Ok(flow) => return Ok(flow),
-                        Err(x) => x,
-                    },
-                    Err(x) => x,
-                }
-            }
             Exc::NewIndex { obj, key, v } => {
                 let mut r = crate::vm::meta::new_index(&mut self.heap, &self.rt.metas, obj, key, v);
                 if matches!(r, Err(Exc::NoMemory)) && !self.rt.gc.finalizing() {

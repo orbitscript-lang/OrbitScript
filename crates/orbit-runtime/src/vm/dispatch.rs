@@ -369,12 +369,15 @@ impl Vm {
             // path can't finish (a raw miss on a table with a metatable, or
             // a value that isn't a table). `raise` finishes the instruction,
             // so the dispatch loop carries no code for it.
+            // `R[dst] = obj[key]` when the inline path can't finish (a raw
+            // miss on a table with a metatable, or a value that isn't a
+            // table): follow `__index` through tables here; a metamethod
+            // call or an error leaves through `raise`, which finishes the
+            // instruction.
             macro_rules! get_slow {
-                ($obj:expr, $key:expr) => {{
-                    throw!(Exc::Index {
-                        obj: $obj,
-                        key: $key
-                    })
+                ($dst:expr, $obj:expr, $key:expr) => {{
+                    let (o, k): (Value, Value) = ($obj, $key);
+                    reg!($dst) = tri!(crate::vm::meta::index(&self.heap, &self.rt.metas, o, k));
                 }};
             }
             macro_rules! set_slow {
@@ -653,7 +656,8 @@ impl Vm {
 
                     Op::GetField { dst, obj, key, ic } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            get_slow!(reg!(obj), cur.consts[key as usize])
+                            get_slow!(dst, reg!(obj), cur.consts[key as usize]);
+                            continue;
                         };
                         let cache = &cur.caches[ic as usize];
                         let tab = self.heap.get(t);
@@ -692,7 +696,8 @@ impl Vm {
                     }
                     Op::GetIndex { dst, obj, key } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            get_slow!(reg!(obj), reg!(key))
+                            get_slow!(dst, reg!(obj), reg!(key));
+                            continue;
                         };
                         let tab = self.heap.get(t);
                         // A nil result in a table with a metatable may
@@ -702,16 +707,19 @@ impl Vm {
                                 if !tab.read_int_present(i, &mut reg!(dst)) {
                                     let v = tab.get_int(i);
                                     if v.is_nil() && tab.meta.is_some() {
-                                        get_slow!(Value::Table(t), Value::Int(i))
+                                        get_slow!(dst, Value::Table(t), Value::Int(i));
+                                        continue;
                                     }
                                     reg!(dst) = v;
                                 }
                             }
                             k => {
-                                reg!(dst) = tab.get(&self.heap, k);
-                                if tab.meta.is_some() && reg!(dst).is_nil() {
-                                    get_slow!(Value::Table(t), k)
+                                let v = tab.get(&self.heap, k);
+                                if v.is_nil() && tab.meta.is_some() {
+                                    get_slow!(dst, Value::Table(t), k);
+                                    continue;
                                 }
+                                reg!(dst) = v;
                             }
                         }
                     }
@@ -743,13 +751,15 @@ impl Vm {
                     }
                     Op::GetIndexInt { dst, obj, key } => {
                         let &Value::Table(t) = &reg!(obj) else {
-                            get_slow!(reg!(obj), Value::Int(key as i64))
+                            get_slow!(dst, reg!(obj), Value::Int(key as i64));
+                            continue;
                         };
                         let tab = self.heap.get(t);
                         if !tab.read_int_present(key as i64, &mut reg!(dst)) {
                             let v = tab.get_int(key as i64);
                             if v.is_nil() && tab.meta.is_some() {
-                                get_slow!(Value::Table(t), Value::Int(key as i64))
+                                get_slow!(dst, Value::Table(t), Value::Int(key as i64));
+                                continue;
                             }
                             reg!(dst) = v;
                         }
@@ -775,15 +785,17 @@ impl Vm {
                         let t = match reg!(obj) {
                             Value::Table(t) => t,
                             o => {
+                                // A string method, usually.
                                 reg!(dst + 1) = o;
-                                get_slow!(o, Value::Str(k))
+                                get_slow!(dst, o, Value::Str(k));
+                                continue;
                             }
                         };
                         reg!(dst + 1) = Value::Table(t);
                         match method_lookup(&self.heap, &self.rt.metas, &cur, ic, k, t) {
                             Some(Value::Closure(c)) => reg!(dst) = Value::Closure(c),
                             Some(m) => reg!(dst) = m,
-                            None => get_slow!(Value::Table(t), Value::Str(k)),
+                            None => get_slow!(dst, Value::Table(t), Value::Str(k)),
                         }
                     }
 
