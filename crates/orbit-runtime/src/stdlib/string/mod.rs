@@ -6,6 +6,7 @@ mod pack;
 pub(crate) mod pattern;
 
 use crate::object::{Gc, LuaStr, Table, Tag, Value, number};
+use crate::stdlib::first_result;
 use crate::vm::{CallOutcome, LuaError, Meta, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
 
 use pattern::{Capture, Captures, Matcher, PatternError};
@@ -501,17 +502,7 @@ fn add_value(
 }
 
 fn gsub_after_call(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let n = match outcome {
-        CallOutcome::Ok(n) => n,
-        CallOutcome::Err(v) => return Err(ctx.error_value(v)),
-    };
-    let first = if n > 0 {
-        ctx.arg(ctx.len() - n)
-    } else {
-        Value::Nil
-    };
-    let len = ctx.len();
-    ctx.truncate(len - n);
+    let first = first_result(ctx, outcome)?;
     let s = str_at(ctx, 0);
     let f = Found {
         start: int_at(ctx, G_MSTART),

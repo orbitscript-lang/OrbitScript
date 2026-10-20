@@ -222,7 +222,5 @@ fn loader_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     }
     let extra = ctx.arg(EXTRA);
     ctx.truncate(0);
-    ctx.push(v);
-    ctx.push(extra);
-    Ok(NativeReturn::Return(2))
+    ctx.ret2(v, extra)
 }

@@ -26,15 +26,8 @@ fn check_thread(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Gc<Thread>, LuaErro
     }
 }
 
-fn check_function(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Value, LuaError> {
-    match ctx.arg(i) {
-        v @ (Value::Closure(_) | Value::Native(_)) => Ok(v),
-        _ => Err(ctx.type_error(i, "function")),
-    }
-}
-
 fn create(ctx: &mut NativeCtx<'_>) -> R {
-    let f = check_function(ctx, 0)?;
+    let f = ctx.check_function(0)?;
     let t = ctx.new_thread(f);
     ctx.ret1(Value::Thread(t))
 }
@@ -59,9 +52,7 @@ fn resume_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         }
         CallOutcome::Err(e) => {
             ctx.truncate(0);
-            ctx.push(Value::Bool(false));
-            ctx.push(e);
-            Ok(NativeReturn::Return(2))
+            ctx.ret2(Value::Bool(false), e)
         }
     }
 }
@@ -95,7 +86,7 @@ fn isyieldable(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn wrap(ctx: &mut NativeCtx<'_>) -> R {
-    let f = check_function(ctx, 0)?;
+    let f = ctx.check_function(0)?;
     let co = ctx.new_thread(f);
     let w = ctx.new_closure("coroutine.wrap()", wrapped, &[Value::Thread(co)]);
     ctx.ret1(w)
@@ -156,11 +147,7 @@ fn close_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     ctx.truncate(0);
     match outcome {
         CallOutcome::Ok(_) => ctx.ret1(Value::Bool(true)),
-        CallOutcome::Err(e) => {
-            ctx.push(Value::Bool(false));
-            ctx.push(e);
-            Ok(NativeReturn::Return(2))
-        }
+        CallOutcome::Err(e) => ctx.ret2(Value::Bool(false), e),
     }
 }
 

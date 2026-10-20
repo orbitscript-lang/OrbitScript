@@ -125,9 +125,7 @@ fn ret_loaded(ctx: &mut NativeCtx<'_>, r: Result<Value, String>) -> R {
         Ok(f) => ctx.ret1(f),
         Err(msg) => {
             let m = ctx.new_str(msg.as_bytes());
-            ctx.push(Value::Nil);
-            ctx.push(m);
-            Ok(NativeReturn::Return(2))
+            ctx.ret2(Value::Nil, m)
         }
     }
 }
@@ -199,9 +197,7 @@ fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         CallOutcome::Ok(n) => n,
         CallOutcome::Err(e) => {
             ctx.truncate(0);
-            ctx.push(Value::Nil);
-            ctx.push(e);
-            return Ok(NativeReturn::Return(2));
+            return ctx.ret2(Value::Nil, e);
         }
     };
     let first = ctx.len() - n;
@@ -228,9 +224,7 @@ fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             let msg = format!("{}reader function must return a string", ctx.where_(1));
             let m = ctx.new_str(msg.as_bytes());
             ctx.truncate(0);
-            ctx.push(Value::Nil);
-            ctx.push(m);
-            return Ok(NativeReturn::Return(2));
+            return ctx.ret2(Value::Nil, m);
         }
     };
     if !done {

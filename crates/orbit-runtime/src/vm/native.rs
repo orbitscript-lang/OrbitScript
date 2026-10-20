@@ -398,6 +398,14 @@ impl NativeCtx<'_> {
         Ok(NativeReturn::Return(1))
     }
 
+    /// Return two values: `nil` or `false` and an error, as failing library
+    /// functions do.
+    pub fn ret2(&mut self, a: Value, b: Value) -> Result<NativeReturn, LuaError> {
+        self.push(a);
+        self.push(b);
+        Ok(NativeReturn::Return(2))
+    }
+
     /// The function value of a native registered under `name`, registering
     /// `f` under that name the first time. For natives that return other
     /// natives (`pairs` returns `next`).
@@ -744,6 +752,14 @@ impl NativeCtx<'_> {
             Ok(default)
         } else {
             self.check_int(i)
+        }
+    }
+
+    /// A function argument.
+    pub fn check_function(&mut self, i: usize) -> Result<Value, LuaError> {
+        match self.arg(i) {
+            f @ (Value::Closure(_) | Value::Native(_)) => Ok(f),
+            _ => Err(self.type_error(i, "function")),
         }
     }
 

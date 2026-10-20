@@ -247,15 +247,8 @@ fn setlocal(ctx: &mut NativeCtx<'_>) -> R {
     Ok(NativeReturn::Return(1))
 }
 
-fn check_function(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Value, LuaError> {
-    match ctx.arg(i) {
-        f @ (Value::Closure(_) | Value::Native(_)) => Ok(f),
-        _ => Err(ctx.type_error(i, "function")),
-    }
-}
-
 fn getupvalue(ctx: &mut NativeCtx<'_>) -> R {
-    let f = check_function(ctx, 0)?;
+    let f = ctx.check_function(0)?;
     let n = ctx.check_int(1)?;
     match ctx.upvalue_of(f, n) {
         Some((name, v)) => {
@@ -269,7 +262,7 @@ fn getupvalue(ctx: &mut NativeCtx<'_>) -> R {
 
 fn setupvalue(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(2)?;
-    let f = check_function(ctx, 0)?;
+    let f = ctx.check_function(0)?;
     let n = ctx.check_int(1)?;
     match ctx.set_upvalue_of(f, n, v) {
         Some(name) => {
@@ -281,7 +274,7 @@ fn setupvalue(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn upvalueid(ctx: &mut NativeCtx<'_>) -> R {
-    let f = check_function(ctx, 0)?;
+    let f = ctx.check_function(0)?;
     let n = ctx.check_int(1)?;
     match ctx.upvalue_cell(f, n) {
         // The cell's handle is its identity while it lives.
@@ -296,7 +289,7 @@ fn upvalueid(ctx: &mut NativeCtx<'_>) -> R {
 /// Argument `i` (a function) and `i + 1` (an upvalue index it has), for
 /// `upvaluejoin`.
 fn check_upvalue(ctx: &mut NativeCtx<'_>, i: usize) -> Result<(Value, usize), LuaError> {
-    let f = check_function(ctx, i)?;
+    let f = ctx.check_function(i)?;
     let n = ctx.check_int(i + 1)?;
     match ctx.upvalue_cell(f, n) {
         Some(_) => Ok((f, n as usize)),
@@ -436,7 +429,7 @@ fn sethook(ctx: &mut NativeCtx<'_>) -> R {
     }
     let mask = ctx.check_str(a + 1)?;
     let count = ctx.opt_int(a + 2, 0)?;
-    let f = check_function(ctx, a)?;
+    let f = ctx.check_function(a)?;
     let mut bits = 0;
     for &c in ctx.bytes(mask) {
         bits |= match c {
