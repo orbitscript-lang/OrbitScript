@@ -1673,11 +1673,11 @@ impl<'s> Stack<'s> {
     /// Switch the collector to `mode` and give the previous one; `None`,
     /// changing nothing, inside a finalizer.
     pub fn set_gc_mode(&mut self, mode: crate::GcMode) -> Option<crate::GcMode> {
-        let gc = &mut self.ctx.vm.rt.gc;
-        if gc.finalizing() {
+        let vm = &mut *self.ctx.vm;
+        if vm.rt.gc.finalizing() {
             return None;
         }
-        Some(match std::mem::replace(&mut gc.mode, mode.raw()) {
+        Some(match vm.rt.gc.set_mode(&mut vm.heap, mode.raw()) {
             vm::GcMode::Generational => crate::GcMode::Generational,
             vm::GcMode::Incremental => crate::GcMode::Incremental,
         })

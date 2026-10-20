@@ -197,6 +197,15 @@ impl Vm {
     }
 }
 
+/// `Return1`'s value while the frame pops, by variant: see there.
+enum Ret1 {
+    Float(f64),
+    Int(i64),
+    Table(Gc<crate::object::Table>),
+    Bool(bool),
+    Other(Value),
+}
+
 /// String constant `k`, for the miss paths of field and global accesses.
 #[inline(always)]
 fn const_str(consts: &[Value], k: u16) -> Gc<crate::object::LuaStr> {
@@ -1149,6 +1158,10 @@ impl Vm {
                             let $v = Value::Float(f);
                             $body
                         }
+                        Value::Bool(b) => {
+                            let $v = Value::Bool(b);
+                            $body
+                        }
                         $v => $body,
                     }
                 };
@@ -1541,6 +1554,7 @@ impl Vm {
                         Value::Table(t) => reg!(dst) = Value::Table(t),
                         Value::Str(x) => reg!(dst) = Value::Str(x),
                         Value::Closure(c) => reg!(dst) = Value::Closure(c),
+                        Value::Bool(b) => reg!(dst) = Value::Bool(b),
                         v => reg!(dst) = v,
                     },
                     Op::LoadNil { dst, count } => {
@@ -2225,13 +2239,16 @@ impl Vm {
                             } = caller.kind
                         {
                             let (func, own_cells) = (f.func as usize, f.cell_base as usize);
-                            // Numbers are copied by parts: the value was
-                            // usually just written that way, and a whole
-                            // 16-byte load would stall on store forwarding.
+                            // Numbers, tables and booleans are copied by
+                            // parts: the value was usually just written that
+                            // way, and a whole 16-byte load would stall on
+                            // store forwarding.
                             let v = match w[src as usize] {
-                                Value::Float(f) => Ok(f),
-                                Value::Int(i) => Err(Ok(i)),
-                                v => Err(Err(v)),
+                                Value::Float(f) => Ret1::Float(f),
+                                Value::Int(i) => Ret1::Int(i),
+                                Value::Table(t) => Ret1::Table(t),
+                                Value::Bool(b) => Ret1::Bool(b),
+                                v => Ret1::Other(v),
                             };
                             base = caller.base as usize;
                             pc = caller.pc as usize;
@@ -2241,9 +2258,11 @@ impl Vm {
                             }
                             let out = &mut self.rt.stack.regs[func];
                             match v {
-                                Ok(f) => *out = Value::Float(f),
-                                Err(Ok(i)) => *out = Value::Int(i),
-                                Err(Err(v)) => *out = v,
+                                Ret1::Float(f) => *out = Value::Float(f),
+                                Ret1::Int(i) => *out = Value::Int(i),
+                                Ret1::Table(t) => *out = Value::Table(t),
+                                Ret1::Bool(b) => *out = Value::Bool(b),
+                                Ret1::Other(v) => *out = v,
                             }
                             self.rt.top = func + 1;
                             depth -= 1;

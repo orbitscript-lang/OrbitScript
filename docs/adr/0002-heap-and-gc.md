@@ -131,3 +131,11 @@ Approved by Tym on 2026-10-11 to eliminate peak RSS overhead from geometric vect
 - **Isolated unsafe logic in `orbit-virtmem`:** All `unsafe` OS virtual memory logic is encapsulated in a dedicated crate `orbit-virtmem`, keeping `orbit-gc` and other runtime crates free of low-level virtual memory pointer arithmetic (ADR-6).
 - **Retention of `memory-trimming`:** `malloc_trim` / `malloc_zone_pressure_relief` remains active and necessary: `VmBuffer` manages arena slot headers, while variable-sized object payloads (`Table.entries`, `ArrayPart.words`, long strings) continue to allocate through libc `malloc`.
 
+## Amendment: a start floor in generational mode (Tym, 2026-10-20)
+
+Approved by Tym on 2026-10-20 (perf thread), with the value tunable through an environment variable.
+
+- **`Params::min_threshold` is a floor under the heap size that starts a cycle.** It stays 0 in `orbit-gc` by default. `Heap::set_min_threshold` changes it; between cycles a higher floor also moves the start of the next cycle up at once.
+- **The VM sets it from the reported mode.** In `"generational"` mode (the CLI's default, as in the standalone `lua5.5`) the floor is 1 MiB, or what `ORBIT_GC_MIN_THRESHOLD` gives (bytes, or `K`, `M`, `G`; `0` turns it off), read when the VM is created. In `"incremental"` mode it is 0, so pacing is exactly `pause` percent of the live heap, which gc.lua's pacing test checks.
+- **Why.** lua5.5's young collections make churn over a small live heap cheap; ours runs a full cycle each time the heap grows 150% past what is live. Creating coroutines over a ~100 KiB live heap ran a full cycle every 14 coroutines, and each cycle costs a fixed amount (roots, the interner, the library tables). The floor stands in for minor collections until there is a generational collector, which may replace it.
+- **The cost.** A program whose live heap is under 1 MiB can hold up to 1 MiB of garbage before collecting.

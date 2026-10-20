@@ -71,6 +71,30 @@ impl GcParam {
     }
 }
 
+/// The default floor under the start of a cycle in generational mode.
+const GC_FLOOR: usize = 1 << 20;
+
+/// [`GC_FLOOR`], or the size `ORBIT_GC_MIN_THRESHOLD` gives (bytes, or with
+/// `K`, `M` or `G`; `0` turns the floor off). An unreadable value keeps the
+/// default.
+fn gc_floor() -> usize {
+    let Some(s) = std::env::var_os("ORBIT_GC_MIN_THRESHOLD") else {
+        return GC_FLOOR;
+    };
+    let s = s.to_str().unwrap_or("");
+    let (digits, shift) = match s.as_bytes().last() {
+        Some(b'K' | b'k') => (&s[..s.len() - 1], 10),
+        Some(b'M' | b'm') => (&s[..s.len() - 1], 20),
+        Some(b'G' | b'g') => (&s[..s.len() - 1], 30),
+        _ => (s, 0),
+    };
+    digits
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_mul(1 << shift))
+        .unwrap_or(GC_FLOOR)
+}
+
 /// How `stepmul` scales to `Params::work_ratio`: our default work ratio of
 /// 800 reads as Lua's default `stepmul` of 200.
 const STEPMUL_SCALE: u32 = 4;
@@ -78,7 +102,11 @@ const STEPMUL_SCALE: u32 = 4;
 /// What `collectgarbage` keeps besides the collector's own state.
 #[derive(Debug)]
 pub struct GcState {
+    /// Set with [`GcState::set_mode`], which also moves the heap's floor.
     pub mode: GcMode,
+    /// The floor under the start of a cycle in generational mode
+    /// ([`gc_floor`]).
+    floor: usize,
     /// The parameters as last set, so they read back exactly. `pause`,
     /// `stepmul` and `stepsize` are also applied to the heap's `Params`.
     params: [i64; 6],
@@ -100,6 +128,7 @@ impl GcState {
         let p = heap.params();
         GcState {
             mode: GcMode::Incremental,
+            floor: gc_floor(),
             params: [
                 i64::from(p.growth) + 100,
                 i64::from(p.work_ratio / STEPMUL_SCALE),
@@ -115,6 +144,21 @@ impl GcState {
             closed: false,
             close_k: None,
         }
+    }
+
+    /// Switch modes and return the old one. Generational mode puts a
+    /// floor under the heap size that starts a cycle: lua5.5's young
+    /// collections make small-heap churn (coroutines, closures) cheap, and
+    /// until there is a generational collector the floor stands in for
+    /// them by not running a full cycle every few kilobytes. Incremental
+    /// mode keeps Lua's pacing exactly (the next cycle starts at `pause`
+    /// percent of the live heap, however small).
+    pub fn set_mode(&mut self, heap: &mut LuaHeap, mode: GcMode) -> GcMode {
+        heap.set_min_threshold(match mode {
+            GcMode::Incremental => 0,
+            GcMode::Generational => self.floor,
+        });
+        std::mem::replace(&mut self.mode, mode)
     }
 
     /// Whether a finalizer is running: `collectgarbage` must do nothing.
