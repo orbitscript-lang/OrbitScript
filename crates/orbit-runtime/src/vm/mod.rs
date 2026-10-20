@@ -300,32 +300,6 @@ pub(crate) struct StackAux {
 }
 
 impl Stack {
-    /// The running frame.
-    #[inline(always)]
-    pub(crate) fn running(&self) -> &Frame {
-        self.frames.last().expect("the running frame")
-    }
-
-    /// The running frame, to update.
-    #[inline(always)]
-    pub(crate) fn running_mut(&mut self) -> &mut Frame {
-        self.frames.last_mut().expect("the running frame")
-    }
-
-    /// The running frame's depth: the frame count, which the dispatch
-    /// loop does not keep a copy of.
-    #[inline(always)]
-    pub(crate) fn depth(&self) -> usize {
-        self.frames.len()
-    }
-
-    /// Record the running frame's `pc`, before anything that may read the
-    /// frame back (a call out of the loop, an error).
-    #[inline(always)]
-    pub(crate) fn save_pc(&mut self, pc: usize) {
-        self.running_mut().pc = pc as u32;
-    }
-
     /// Exchange everything but the hooks with `other`, field by field
     /// (swapping the whole struct is an out-of-line copy loop).
     #[inline(always)]

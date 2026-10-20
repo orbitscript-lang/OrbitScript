@@ -104,7 +104,7 @@ impl Vm {
             if self.rt.stack.hook.armed() != HOOKED {
                 return Ok(Ran::Switch);
             }
-            let frame = self.rt.stack.running();
+            let frame = self.rt.stack.frames.last().expect("the running frame");
             let FrameKind::Lua {
                 mut closure,
                 code_id,
@@ -122,12 +122,12 @@ impl Vm {
             // The debugger decides by function and depth, so it needs the
             // frame's code first.
             #[cfg(feature = "debugger")]
-            if self.hooked_here(&cur, closure, self.rt.stack.depth()) != HOOKED {
+            if self.hooked_here(&cur, closure, self.rt.stack.frames.len()) != HOOKED {
                 return Ok(Ran::Switch);
             }
             #[cfg(feature = "debugger")]
             if HOOKED {
-                self.debug_reloaded(pc, self.rt.stack.depth());
+                self.debug_reloaded(pc, self.rt.stack.frames.len());
             }
             let mut code = &cur.code[..];
             macro_rules! switch_code {
@@ -152,9 +152,9 @@ impl Vm {
                         // every depth.
                         #[cfg(feature = "debugger")]
                         if self.rt.debug.watch
-                            && self.debug_switches(&cur, $closure, self.rt.stack.depth(), HOOKED)
+                            && self.debug_switches(&cur, $closure, self.rt.stack.frames.len(), HOOKED)
                         {
-                            self.rt.stack.save_pc(pc);
+                            self.rt.stack.frames.last_mut().expect("the running frame").pc = pc as u32;
                             return Ok(Ran::Switch);
                         }
                     }
@@ -170,7 +170,7 @@ impl Vm {
             macro_rules! safepoint {
                 () => {
                     if self.heap.should_step() {
-                        self.rt.stack.save_pc(pc);
+                        self.rt.stack.frames.last_mut().expect("the running frame").pc = pc as u32;
                         // Nothing above this frame's window and the last
                         // open results is live; don't let it keep garbage.
                         let live = (base + WINDOW).max(self.rt.top);
@@ -221,7 +221,7 @@ impl Vm {
                     {
                         // An interrupt was requested ([`crate::vm::Interrupt`]): the
                         // hooked loop raises it before the jump's target.
-                        self.rt.stack.save_pc(pc);
+                        self.rt.stack.frames.last_mut().expect("the running frame").pc = pc as u32;
                         self.rt.hooks_touched = true;
                         self.rt.stack.hook.mask |= crate::vm::hook::INTERRUPT;
                         return Ok(Ran::Switch);
@@ -364,7 +364,7 @@ impl Vm {
             // window again and let the collector catch up.
             macro_rules! resumed_here {
                 () => {{
-                    if self.hooked_here(&cur, closure, self.rt.stack.depth()) != HOOKED {
+                    if self.hooked_here(&cur, closure, self.rt.stack.frames.len()) != HOOKED {
                         return Ok(Ran::Switch);
                     }
                     w = Window::take(&mut self.rt.stack.regs, base);
@@ -437,7 +437,7 @@ impl Vm {
                                     ) {
                                         Some(b) => b,
                                         None => {
-                                            self.rt.stack.save_pc(pc);
+                                            self.rt.stack.frames.last_mut().expect("the running frame").pc = pc as u32;
                                             tri!(enter_lua_frame_general(
                                                 &mut self.rt,
                                                 Shape::of(&self.heap.get(c).code),
@@ -476,13 +476,13 @@ impl Vm {
                                 // Any other native, called in place: no frame, and
                                 // a plain return comes straight back to this loop.
                                 Value::Native(id) if !HOOKED => {
-                                    self.rt.stack.save_pc(pc);
+                                    self.rt.stack.frames.last_mut().expect("the running frame").pc = pc as u32;
                                     match self.call_native_in_loop(
                                         fa,
                                         n,
                                         want,
                                         id,
-                                        self.rt.stack.depth(),
+                                        self.rt.stack.frames.len(),
                                     ) {
                                         Ok(NativeStep::Returned) => {
                                             w = Window::take(&mut self.rt.stack.regs, base);
@@ -496,8 +496,8 @@ impl Vm {
                                 // Anything else (a hooked native, a `__call`
                                 // handler) goes through the general entry.
                                 _ => {
-                                    self.rt.stack.save_pc(pc);
-                                    let d = self.rt.stack.depth();
+                                    self.rt.stack.frames.last_mut().expect("the running frame").pc = pc as u32;
+                                    let d = self.rt.stack.frames.len();
                                     match self.call_value(fa, n, want) {
                                         Ok(Flow::Reload) if self.rt.stack.frames.len() == d => {
                                             resumed_here!()
@@ -552,7 +552,7 @@ impl Vm {
                     let insn = code[pc];
                     pc += 1;
                     if HOOKED {
-                        self.rt.stack.save_pc(pc);
+                        self.rt.stack.frames.last_mut().expect("the running frame").pc = pc as u32;
                         if let Err(e) = self.hook_point(pc - 1, insn.decode()) {
                             throw!(Exc::Lua(e));
                         }
@@ -562,10 +562,10 @@ impl Vm {
                         {
                             throw!(Exc::Lua(e));
                         }
-                        if !self.hooked_here(&cur, closure, self.rt.stack.depth()) {
+                        if !self.hooked_here(&cur, closure, self.rt.stack.frames.len()) {
                             // The hook was turned off: run this instruction in
                             // the plain loop.
-                            self.rt.stack.save_pc(pc - 1);
+                            self.rt.stack.frames.last_mut().expect("the running frame").pc = (pc - 1) as u32;
                             return Ok(Ran::Switch);
                         }
                         w = Window::take(&mut self.rt.stack.regs, base);
@@ -1323,7 +1323,7 @@ impl Vm {
             // switch, the running stack isn't the one this loop's frame
             // state describes, so its pc isn't saved.
             if !std::mem::take(&mut self.rt.switched) {
-                self.rt.stack.save_pc(pc);
+                self.rt.stack.frames.last_mut().expect("the running frame").pc = pc as u32;
             }
             match self.raise(exc) {
                 Ok(Flow::Reload | Flow::Switched) => {
@@ -1349,7 +1349,7 @@ impl Vm {
         base: usize,
         pc: usize,
     ) -> Result<Cold, Exc> {
-        let frame = *self.rt.stack.running();
+        let frame = *self.rt.stack.frames.last().expect("the running frame");
         let cell_base = frame.cell_base as usize;
         let nvarargs = frame.nvarargs as usize;
         // A register of the running frame, by number.
