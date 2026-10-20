@@ -45,8 +45,12 @@ enum Cold {
 
 /// What [`Vm::call_native_in_loop`] tells the loop to do next.
 enum NativeStep {
-    /// The native returned into the running frame: take the window again.
+    /// The native returned into the running frame with no hook armed:
+    /// take the window again.
     Returned,
+    /// The native returned into the running frame through the general
+    /// path: it may have set or cleared a hook.
+    Resumed,
     /// The frame stack changed.
     Flow(Flow),
 }
@@ -428,6 +432,143 @@ impl Vm {
                         }
                     };
                 }
+
+                // Enter the callee at register `f` with `n` arguments,
+                // `want` results back to the caller. A Lua callee's frame
+                // entry saves the pc; a native is called in place.
+                macro_rules! call {
+                    ($f:expr, $n:expr, $want:expr) => {{
+                        let (f, n, want): (usize, usize, u8) = ($f, $n, $want);
+                        let fa = base + f;
+                        match w[f] {
+                            Value::Closure(c) => {
+                                // A function calling itself: the running
+                                // frame keeps `closure` alive, so an equal
+                                // handle is the same closure, and its code
+                                // is `cur`.
+                                let shape = if c == closure {
+                                    Shape::of(&cur)
+                                } else {
+                                    Shape::of(&self.heap.get(c).code)
+                                };
+                                let new_base = match enter_lua_frame_fast(
+                                    &mut self.rt,
+                                    &shape,
+                                    c,
+                                    fa,
+                                    n,
+                                    want,
+                                    pc as u32,
+                                ) {
+                                    Some(b) => b,
+                                    None => {
+                                        save_pc!();
+                                        tri!(enter_lua_frame_general(
+                                            &mut self.rt,
+                                            Shape::of(&self.heap.get(c).code),
+                                            c,
+                                            fa,
+                                            n,
+                                            want
+                                        ))
+                                        .base
+                                    }
+                                };
+                                if HOOKED {
+                                    self.rt.stack.hook.call_pending = Some(false);
+                                }
+                                depth += 1;
+                                closure = c;
+                                base = new_base;
+                                pc = 0;
+                                switch_code!(c, shape.code_id);
+                                w = window!();
+                            }
+                            // A native's fast path, when it has one and takes
+                            // these arguments: no window, no frame.
+                            Value::Native(id)
+                                if !HOOKED
+                                    && (want <= 1 || want == MULTI)
+                                    && let Some(fast) = self.rt.natives[id.0 as usize].fast
+                                    && let Some(v) = w
+                                        .get(f + 1..f + 1 + n)
+                                        .and_then(|a| fast(&self.heap, a)) =>
+                            {
+                                if want != 0 {
+                                    w[f] = v;
+                                }
+                                self.rt.top = fa + want.min(1) as usize;
+                            }
+                            // Any other native, called in place: no frame, and
+                            // a plain return comes straight back to this loop.
+                            Value::Native(id) if !HOOKED => {
+                                save_pc!();
+                                match self.call_native_in_loop(fa, n, want, id, depth) {
+                                    Ok(NativeStep::Returned) => {
+                                        w = window!();
+                                        safepoint!();
+                                    }
+                                    Ok(NativeStep::Resumed) => resumed_here!(),
+                                    Ok(NativeStep::Flow(flow)) => flow!(Ok(flow)),
+                                    Err(x) => throw!(x),
+                                }
+                            }
+                            // Anything else (a hooked native, a `__call`
+                            // handler) goes through the general entry.
+                            _ => {
+                                save_pc!();
+                                match self.call_value(fa, n, want) {
+                                    Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
+                                        resumed_here!()
+                                    }
+                                    other => flow!(other),
+                                }
+                            }
+                        }
+                    }};
+                }
+                // Return `n` values from absolute register `src`.
+                macro_rules! lua_return {
+                    ($src:expr, $n:expr) => {{
+                        let (src, n): (usize, usize) = ($src, $n);
+                        if let [.., caller, f] = &self.rt.stack.frames[..]
+                            && let FrameKind::Lua {
+                                closure: c,
+                                code_id,
+                            } = caller.kind
+                        {
+                            let (func, own_cells, want) =
+                                (f.func as usize, f.cell_base as usize, f.want);
+                            base = caller.base as usize;
+                            pc = caller.pc as usize;
+                            self.rt.stack.frames.pop();
+                            if self.rt.stack.cells.len() > own_cells {
+                                self.rt.stack.cells.truncate(own_cells);
+                            }
+                            let regs = &mut self.rt.stack.regs;
+                            if want == MULTI {
+                                regs.copy_within(src..src + n, func);
+                                self.rt.top = func + n;
+                            } else if n == 0 {
+                                let want = want as usize;
+                                regs[func..func + want].fill(Value::Nil);
+                                self.rt.top = func + want;
+                            } else {
+                                let want = want as usize;
+                                let k = n.min(want);
+                                regs.copy_within(src..src + k, func);
+                                regs[func + k..func + want].fill(Value::Nil);
+                                self.rt.top = func + want;
+                            }
+                            depth -= 1;
+                            closure = c;
+                            switch_code!(c, code_id);
+                            w = window!();
+                            continue;
+                        }
+                        flow!(self.do_return(src, n))
+                    }};
+                }
                 let op = code[pc];
                 pc += 1;
                 if HOOKED {
@@ -792,192 +933,104 @@ impl Vm {
                         compare_int_jump!(a, imm, want, off, |x, k| x >= k, less_equal(k, x))
                     }
 
-                    // The one call path. `f` is the callee's register, `n`
-                    // its argument count and `want` the results the caller
-                    // takes.
-                    op @ (Op::Call { .. } | Op::GenericCall { .. } | Op::TailCall { .. }) => {
-                        let (f, n, want): (usize, usize, u8) = match op {
-                            Op::Call {
-                                func,
-                                nargs,
-                                nresults,
-                            } => {
-                                let n = if nargs == MULTI {
-                                    self.rt.top - (base + func as usize) - 1
-                                } else {
-                                    nargs as usize
-                                };
-                                (func as usize, n, nresults)
-                            }
-                            Op::GenericCall { base: b, nvars } => {
-                                let at = b as usize;
-                                w.copy_within(at..at + 3, at + 4);
-                                (at + 4, 2, nvars)
-                            }
-                            Op::TailCall { func, nargs } => {
-                                let fa = base + func as usize;
-                                let n = if nargs == MULTI {
-                                    self.rt.top - fa - 1
-                                } else {
-                                    nargs as usize
-                                };
-                                // A native closure or a built-in in tail position
-                                // is called like a native, keeping this frame, as
-                                // natives are.
-                                if let Value::Closure(c) = w[func as usize]
-                                    && let code = &self.heap.get(c).code
-                                    && !code.builtin
-                                    && !matches!(code.code.first(), Some(Op::NativeEntry { .. }))
-                                {
-                                    let f = self.rt.stack.frames.pop().expect("frame");
-                                    self.rt.stack.cells.truncate(f.cell_base as usize);
-                                    let dst = f.func as usize;
-                                    self.rt.stack.regs.copy_within(fa..fa + 1 + n, dst);
-                                    if let Err(x) = self.push_lua_frame(c, dst, n, f.want) {
-                                        self.rt.stack.frames.push(f);
-                                        throw!(x);
-                                    }
-                                    self.rt.stack.frames.last_mut().expect("frame").tail = true;
-                                    if HOOKED {
-                                        self.rt.stack.hook.call_pending = Some(true);
-                                    }
-                                    continue 'reload;
-                                }
-                                // A native in tail position: an ordinary call whose
-                                // results the following `Return` delivers.
-                                (func as usize, n, MULTI)
-                            }
-                            _ => unreachable!(),
+                    // Calls. Each arm works out the callee's register, its
+                    // argument count and the results the caller takes;
+                    // `call!` enters the callee.
+                    Op::Call {
+                        func,
+                        nargs,
+                        nresults,
+                    } => {
+                        let n = if nargs == MULTI {
+                            self.rt.top - (base + func as usize) - 1
+                        } else {
+                            nargs as usize
                         };
-                        let fa = base + f;
-                        match w[f] {
-                            // A Lua callee's frame entry saves the pc.
-                            Value::Closure(c) => {
-                                // A function calling itself: the running frame
-                                // keeps `closure` alive, so an equal handle is
-                                // the same closure, and its code is `cur`.
-                                let shape = if c == closure {
-                                    Shape::of(&cur)
-                                } else {
-                                    Shape::of(&self.heap.get(c).code)
-                                };
-                                let new_base = match enter_lua_frame_fast(
-                                    &mut self.rt,
-                                    &shape,
-                                    c,
-                                    fa,
-                                    n,
-                                    want,
-                                    pc as u32,
-                                ) {
-                                    Some(b) => b,
-                                    None => {
-                                        save_pc!();
-                                        tri!(enter_lua_frame_general(
-                                            &mut self.rt,
-                                            Shape::of(&self.heap.get(c).code),
-                                            c,
-                                            fa,
-                                            n,
-                                            want
-                                        ))
-                                        .base
-                                    }
-                                };
-                                if HOOKED {
-                                    self.rt.stack.hook.call_pending = Some(false);
-                                }
-                                depth += 1;
-                                closure = c;
-                                base = new_base;
-                                pc = 0;
-                                switch_code!(c, shape.code_id);
-                                w = window!();
+                        call!(func as usize, n, nresults);
+                    }
+                    Op::GenericCall { base: b, nvars } => {
+                        let at = b as usize;
+                        w.copy_within(at..at + 3, at + 4);
+                        call!(at + 4, 2, nvars);
+                    }
+                    Op::TailCall { func, nargs } => {
+                        let fa = base + func as usize;
+                        let n = if nargs == MULTI {
+                            self.rt.top - fa - 1
+                        } else {
+                            nargs as usize
+                        };
+                        // A native closure or a built-in in tail position
+                        // is called like a native, keeping this frame, as
+                        // natives are.
+                        if let Value::Closure(c) = w[func as usize]
+                            && let code = &self.heap.get(c).code
+                            && !code.builtin
+                            && !matches!(code.code.first(), Some(Op::NativeEntry { .. }))
+                        {
+                            let f = self.rt.stack.frames.pop().expect("frame");
+                            self.rt.stack.cells.truncate(f.cell_base as usize);
+                            let dst = f.func as usize;
+                            self.rt.stack.regs.copy_within(fa..fa + 1 + n, dst);
+                            if let Err(x) = self.push_lua_frame(c, dst, n, f.want) {
+                                self.rt.stack.frames.push(f);
+                                throw!(x);
                             }
-                            // A native, called in place: no frame, and a plain
-                            // return comes straight back to this loop.
-                            Value::Native(id) if !HOOKED => {
-                                save_pc!();
-                                match self.call_native_in_loop(fa, n, want, id, depth) {
-                                    Ok(NativeStep::Returned) => resumed_here!(),
-                                    Ok(NativeStep::Flow(flow)) => flow!(Ok(flow)),
-                                    Err(x) => throw!(x),
-                                }
+                            self.rt.stack.frames.last_mut().expect("frame").tail = true;
+                            if HOOKED {
+                                self.rt.stack.hook.call_pending = Some(true);
                             }
-                            // Anything else (a hooked native, a `__call`
-                            // handler) goes through the general entry.
-                            _ => {
-                                save_pc!();
-                                match self.call_value(fa, n, want) {
-                                    Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
-                                        resumed_here!()
-                                    }
-                                    other => flow!(other),
-                                }
-                            }
+                            continue 'reload;
                         }
+                        // A native in tail position: an ordinary call whose
+                        // results the following `Return` delivers.
+                        call!(func as usize, n, MULTI);
                     }
 
-                    // The one return path: `n` values from absolute register
-                    // `src`. Back into a Lua caller it switches the frame
-                    // state in place; the caller's window lies below this
-                    // frame's, so the stack is already long enough for its
-                    // results and its window.
-                    op @ (Op::Return { .. } | Op::Return0 | Op::Return1 { .. }) => {
-                        let (src, n): (usize, usize) = match op {
-                            Op::Return { first, count } => {
-                                let src = base + first as usize;
-                                let n = if count == MULTI {
-                                    self.rt.top - src
-                                } else {
-                                    count as usize
-                                };
-                                (src, n)
-                            }
-                            Op::Return0 => (base, 0),
-                            Op::Return1 { src } => (base + src as usize, 1),
-                            _ => unreachable!(),
+                    // Returns. Back into a Lua caller `lua_return!` switches
+                    // the frame state in place; the caller's window lies
+                    // below this frame's, so the stack is already long
+                    // enough for its results and its window.
+                    Op::Return { first, count } => {
+                        let src = base + first as usize;
+                        let n = if count == MULTI {
+                            self.rt.top - src
+                        } else {
+                            count as usize
                         };
+                        lua_return!(src, n);
+                    }
+                    Op::Return0 => lua_return!(base, 0),
+                    Op::Return1 { src } => {
+                        // The common case, one value back to a Lua caller
+                        // that wants one, without the general return path.
                         if let [.., caller, f] = &self.rt.stack.frames[..]
+                            && f.want == 1
                             && let FrameKind::Lua {
                                 closure: c,
                                 code_id,
                             } = caller.kind
                         {
-                            let (func, own_cells, want) =
-                                (f.func as usize, f.cell_base as usize, f.want);
+                            let (func, own_cells) = (f.func as usize, f.cell_base as usize);
                             base = caller.base as usize;
                             pc = caller.pc as usize;
                             self.rt.stack.frames.pop();
                             if self.rt.stack.cells.len() > own_cells {
                                 self.rt.stack.cells.truncate(own_cells);
                             }
-                            let regs = &mut self.rt.stack.regs;
-                            if want == 1 && n >= 1 {
-                                // The common case, one value to a caller
-                                // that wants one: copied by parts, since the
-                                // value was usually just written that way,
-                                // and a whole 16-byte load would stall on
-                                // store forwarding.
-                                move_by_parts(regs, src, func);
-                                self.rt.top = func + 1;
-                            } else if want == MULTI {
-                                regs.copy_within(src..src + n, func);
-                                self.rt.top = func + n;
-                            } else {
-                                let want = want as usize;
-                                let k = n.min(want);
-                                regs.copy_within(src..src + k, func);
-                                regs[func + k..func + want].fill(Value::Nil);
-                                self.rt.top = func + want;
-                            }
+                            // Read from the window and copied by parts: the
+                            // value was usually just written that way, and
+                            // a whole 16-byte load would stall on store
+                            // forwarding.
+                            by_parts!(src, |v| self.rt.stack.regs[func] = v);
+                            self.rt.top = func + 1;
                             depth -= 1;
                             closure = c;
                             switch_code!(c, code_id);
                             w = window!();
                             continue;
                         }
-                        flow!(self.do_return(src, n))
+                        lua_return!(base + src as usize, 1)
                     }
 
                     Op::VarargLen { dst } => {
@@ -1043,8 +1096,39 @@ impl Vm {
                     }
 
                     // Everything else is rare, or calls out of the loop
-                    // anyway: run it out of line.
-                    _ => match self.cold_op(op, &cur, closure, base, pc) {
+                    // anyway: run it out of line. The arms are listed so
+                    // the match stays exhaustive without a default, which
+                    // would put a range check in front of the jump table.
+                    Op::LoadConstX { .. }
+                    | Op::CellNew { .. }
+                    | Op::CellSet { .. }
+                    | Op::CellClear { .. }
+                    | Op::CheckUndefined { .. }
+                    | Op::SetGlobal { .. }
+                    | Op::NewTable { .. }
+                    | Op::SetList { .. }
+                    | Op::Pow { .. }
+                    | Op::IDiv { .. }
+                    | Op::AddK { .. }
+                    | Op::SubK { .. }
+                    | Op::DivK { .. }
+                    | Op::IDivK { .. }
+                    | Op::PowK { .. }
+                    | Op::KSub { .. }
+                    | Op::BNot { .. }
+                    | Op::Neg { .. }
+                    | Op::Cast { .. }
+                    | Op::Concat { .. }
+                    | Op::Vararg { .. }
+                    | Op::VarargTable { .. }
+                    | Op::VarargGet { .. }
+                    | Op::VarargGetInt { .. }
+                    | Op::VarargUnpack { .. }
+                    | Op::ForPrepExclusive { .. }
+                    | Op::NativeEntry { .. }
+                    | Op::Closure { .. }
+                    | Op::Tbc { .. }
+                    | Op::Close { .. } => match self.cold_op(op, &cur, closure, base, pc) {
                         Ok(Cold::Next {
                             pc: next,
                             safepoint,
@@ -1360,11 +1444,10 @@ impl Vm {
     }
 
     /// Call native `id` at stack index `fa` with `n` arguments from Lua code
-    /// in the frame at `depth`, wanting `want` results: through its fast
-    /// path when it has one and takes these arguments (no window, no frame),
-    /// otherwise in place, with no frame, so a plain return comes straight
-    /// back to the loop. The caller saved its pc.
-    #[inline(never)]
+    /// in the frame at `depth`, wanting `want` results, in place: no frame,
+    /// so a plain return comes straight back to the loop. The caller saved
+    /// its pc and tried the native's fast path.
+    #[inline(always)]
     fn call_native_in_loop(
         &mut self,
         fa: usize,
@@ -1373,21 +1456,6 @@ impl Vm {
         id: crate::object::NativeId,
         depth: usize,
     ) -> Result<NativeStep, Exc> {
-        if (want <= 1 || want == MULTI)
-            && let Some(fast) = self.rt.natives[id.0 as usize].fast
-            && let Some(v) = self
-                .rt
-                .stack
-                .regs
-                .get(fa + 1..fa + 1 + n)
-                .and_then(|a| fast(&self.heap, a))
-        {
-            if want != 0 {
-                self.rt.stack.regs[fa] = v;
-            }
-            self.rt.top = fa + want.min(1) as usize;
-            return Ok(NativeStep::Returned);
-        }
         self.rt.top = fa + 1 + n;
         let nf = self.rt.natives[id.0 as usize].f;
         let mut ctx = NativeCtx {
@@ -1438,28 +1506,12 @@ impl Vm {
                     self.native_return_hook(fa, id, k).map_err(Exc::Lua)?;
                 }
                 match self.native_returned(r, None, fa, want, id)? {
-                    Flow::Reload if self.rt.stack.frames.len() == depth => Ok(NativeStep::Returned),
+                    Flow::Reload if self.rt.stack.frames.len() == depth => Ok(NativeStep::Resumed),
                     flow => Ok(NativeStep::Flow(flow)),
                 }
             }
             Err(e) => Err(self.native_raised(id, fa, e)),
         }
-    }
-}
-
-/// `regs[dst] = regs[src]`, copied by parts for the common variants: the
-/// value was usually just written that way, and a whole 16-byte load would
-/// stall on store forwarding.
-#[inline(always)]
-fn move_by_parts(regs: &mut [Value], src: usize, dst: usize) {
-    let v = regs[src];
-    let out = &mut regs[dst];
-    match v {
-        Value::Float(f) => *out = Value::Float(f),
-        Value::Int(i) => *out = Value::Int(i),
-        Value::Table(t) => *out = Value::Table(t),
-        Value::Bool(b) => *out = Value::Bool(b),
-        v => *out = v,
     }
 }
 
@@ -1522,7 +1574,7 @@ fn method_lookup(
 /// [`method_lookup`] past the first level: the class lacks the method and
 /// its own metatable's `__index` table holds it, through the caches at
 /// `ic + 2` and `ic + 3`; else fill the caches from a full lookup.
-#[inline(never)]
+#[inline(always)]
 fn method_lookup_up(
     heap: &LuaHeap,
     metas: &Metas,
