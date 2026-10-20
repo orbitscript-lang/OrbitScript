@@ -221,8 +221,9 @@ pub trait StackAbi {
     extern "C" fn reserve_memory(&mut self, bytes: usize) -> Res<()>;
     /// Push a function that runs `f`.
     extern "C" fn push_function(&mut self, f: NativeBox);
-    /// Register `f` as the native named `name` (once per isolate), giving
-    /// its index for [`StackAbi::push_native`] and friends.
+    /// Register `f` as a new native, named `name` in messages, giving its
+    /// index for [`StackAbi::push_native`] and friends. The program keeps
+    /// the index, registering each native once per isolate.
     extern "C" fn register_native(&mut self, name: Str<'static>, f: NativeBox) -> u32;
     extern "C" fn push_native(&mut self, native: u32);
     extern "C" fn push_native_closure(&mut self, native: u32, nups: usize, data: u64) -> Res<()>;

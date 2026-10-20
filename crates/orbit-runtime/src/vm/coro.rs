@@ -1173,6 +1173,17 @@ impl NativeCtx<'_> {
         let Value::Native(id) = self.native(name, f) else {
             unreachable!("natives are registered as natives")
         };
+        self.new_native_closure(id, upvals, hidden)
+    }
+
+    /// [`NativeCtx::new_closure_hidden`] for the native already registered
+    /// as `id`, for natives not looked up by name (an embedder's).
+    pub fn new_native_closure(
+        &mut self,
+        id: NativeId,
+        upvals: &[Value],
+        hidden: &[Value],
+    ) -> Value {
         let n = u8::try_from(hidden.len()).expect("few hidden upvalues");
         let native = &mut self.vm.rt.natives[id.0 as usize];
         debug_assert!(

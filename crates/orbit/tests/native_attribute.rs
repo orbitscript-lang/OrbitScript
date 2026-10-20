@@ -87,3 +87,36 @@ fn typed_natives() {
     })
     .unwrap();
 }
+
+/// Natives are told apart by type: one named like a built-in is its own
+/// function, and so are two that share a name.
+mod first {
+    #[orbit::native(name = "tostring")]
+    pub fn close() -> i64 {
+        1
+    }
+}
+
+mod second {
+    #[orbit::native(name = "tostring")]
+    pub fn close() -> i64 {
+        2
+    }
+}
+
+#[test]
+fn natives_sharing_a_name_stay_distinct() {
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    iso.scope(|s| {
+        let g = s.globals();
+        g.set("first", s.create_native::<first::close>())?;
+        g.set("second", s.create_native::<second::close>())?;
+        let src = r##"
+            assert(first ~= tostring and second ~= tostring and first ~= second)
+            assert(first() == 1 and second() == 2 and tostring(3) == "3")
+        "##;
+        s.load(Chunk::new(src).name("=test"))?.call(())?;
+        Ok::<_, orbit::Error>(())
+    })
+    .unwrap();
+}

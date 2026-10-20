@@ -455,7 +455,7 @@ impl StackAbi for Win<'_, '_> {
     }
     extern "C" fn register_native(&mut self, name: Str<'static>, f: NativeBox) -> u32 {
         let name = name.as_str();
-        let id = self.s.native_index_of(name, program_native);
+        let id = self.s.add_native(name, program_native);
         let f = Rc::new(f);
         self.s
             .extension(|p: &mut Programs| p.set_native(id, f, name));
@@ -465,12 +465,7 @@ impl StackAbi for Win<'_, '_> {
         self.s.push_native_index(native)
     }
     extern "C" fn push_native_closure(&mut self, native: u32, nups: usize, data: u64) -> Res<()> {
-        let name = self
-            .s
-            .find_extension(|p: &Programs| p.native(native).map(|n| n.1))
-            .flatten()
-            .expect("program natives are registered through the boundary");
-        let r = self.s.push_closure_of(name, program_native, nups, data);
+        let r = self.s.push_closure_of(native, nups, data);
         self.res(r)
     }
     extern "C" fn register_continuation(&mut self, k: ContinuationBox) -> u32 {

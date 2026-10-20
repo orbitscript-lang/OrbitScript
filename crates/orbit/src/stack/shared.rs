@@ -110,8 +110,8 @@ pub(crate) struct HostState {
     /// Host values whose userdata was collected while `values` was
     /// borrowed, to drop at the next chance.
     dropped: RefCell<Vec<u64>>,
-    /// The natives registered so far, by name: their index.
-    natives: RefCell<HashMap<&'static str, u32>>,
+    /// The natives registered so far, by type: their index.
+    natives: RefCell<HashMap<TypeId, u32>>,
     /// The continuations registered so far: their slot.
     continuations: RefCell<HashMap<TypeId, u32>>,
 }
@@ -494,12 +494,12 @@ impl<'s> Stack<'s> {
 
     /// The index of native `N`, registering it first if it isn't.
     fn native<N: Native>(&mut self) -> u32 {
-        if let Some(&id) = self.host.natives.borrow().get(N::NAME) {
+        if let Some(&id) = self.host.natives.borrow().get(&TypeId::of::<N>()) {
             return id;
         }
         let f = SBox::new(NativeObj::<N>(Rc::clone(&self.host), PhantomData)).into();
         let id = self.w.register_native(N::NAME.into(), f);
-        self.host.natives.borrow_mut().insert(N::NAME, id);
+        self.host.natives.borrow_mut().insert(TypeId::of::<N>(), id);
         id
     }
 
@@ -1213,11 +1213,11 @@ impl<'a> Control<'a> {
     pub fn register_native<N: Native>(&mut self, data: [u64; 2]) -> NativeRef {
         // The boundary registers a program native once, then copies it with
         // `data`, so reuse `N`'s first registration as `Stack::native` does.
-        let cached = self.host.natives.borrow().get(N::NAME).copied();
+        let cached = self.host.natives.borrow().get(&TypeId::of::<N>()).copied();
         let id = cached.unwrap_or_else(|| {
             let f = SBox::new(NativeObj::<N>(Rc::clone(&self.host), PhantomData)).into();
             let id = self.c.register_native(N::NAME.into(), f);
-            self.host.natives.borrow_mut().insert(N::NAME, id);
+            self.host.natives.borrow_mut().insert(TypeId::of::<N>(), id);
             id
         });
         NativeRef(self.c.register_native_data(
