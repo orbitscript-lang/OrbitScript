@@ -18,9 +18,9 @@ use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::Networking::WinSock::{
     AF_UNIX, FIONBIO, FROM_PROTOCOL_INFO, INVALID_SOCKET, SD_BOTH, SD_RECEIVE, SD_SEND,
     SO_RCVTIMEO, SOCK_STREAM, SOCKADDR, SOCKADDR_UN, SOCKET, SOCKET_ERROR, SOL_SOCKET,
-    WSA_FLAG_NO_HANDLE_INHERIT, WSADATA, WSADuplicateSocketW, WSAGetLastError, WSAPROTOCOL_INFOW,
-    WSASocketW, WSAStartup, accept, bind, closesocket, connect, ioctlsocket, listen, recv, send,
-    setsockopt, shutdown,
+    WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED, WSADATA, WSADuplicateSocketW, WSAGetLastError,
+    WSAPROTOCOL_INFOW, WSASocketW, WSAStartup, accept, bind, closesocket, connect, ioctlsocket,
+    listen, recv, send, setsockopt, shutdown,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent, WaitForSingleObject,
@@ -64,7 +64,14 @@ fn address(path: &Path) -> io::Result<(SOCKADDR_UN, i32)> {
     Ok((addr, len as i32))
 }
 
-/// A new AF_UNIX stream socket, not inherited by child processes.
+/// How every socket here is made. Overlapped, as std makes its own: a
+/// socket without it is synchronous, so Windows runs one call at a time on
+/// it and its duplicates (a `send` on a clone waits for a blocked `recv`),
+/// and `SO_RCVTIMEO` is ignored. Calls still block. Not inherited by child
+/// processes.
+const SOCKET_FLAGS: u32 = WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT;
+
+/// A new AF_UNIX stream socket.
 fn new_socket() -> io::Result<Socket> {
     startup();
     // SAFETY: plain arguments; no protocol info.
@@ -75,7 +82,7 @@ fn new_socket() -> io::Result<Socket> {
             0,
             std::ptr::null(),
             0,
-            WSA_FLAG_NO_HANDLE_INHERIT,
+            SOCKET_FLAGS,
         )
     };
     if s == INVALID_SOCKET {
@@ -124,7 +131,7 @@ impl Socket {
                 FROM_PROTOCOL_INFO,
                 &info,
                 0,
-                WSA_FLAG_NO_HANDLE_INHERIT,
+                SOCKET_FLAGS,
             )
         };
         if s == INVALID_SOCKET {
