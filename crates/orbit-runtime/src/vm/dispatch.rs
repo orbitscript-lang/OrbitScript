@@ -424,11 +424,14 @@ impl Vm {
             // which is raised below; calls and returns into other frames
             // `continue 'reload`, and a finished run returns.
             let exc: Exc = 'run: loop {
+                // The instruction loop proper: an instruction's error, or a
+                // metamethod request, ends it.
+                let exc: Exc = 'insn: loop {
                 // An instruction's error (or metamethod request) ends the
                 // instruction loop; the code after it raises.
                 macro_rules! throw {
                     ($x:expr) => {
-                        break 'run $x
+                        break 'insn $x
                     };
                 }
                 macro_rules! tri {
@@ -1257,6 +1260,32 @@ impl Vm {
                         Err(x) => throw!(x),
                     },
                 }
+                };
+                // An `__index` request (a raw miss on a table with a
+                // metatable, or indexing a value that isn't a table):
+                // follow the metatable chain here and finish the
+                // instruction without leaving the loop. A metamethod
+                // call, or an error, still goes out through `raise`.
+                if let Exc::Index { obj, key } = exc {
+                    match crate::vm::meta::index(&self.heap, &self.rt.metas, obj, key) {
+                        Ok(v) => {
+                            let dst = match code[pc - 1] {
+                                Op::GetField { dst, .. }
+                                | Op::GetIndex { dst, .. }
+                                | Op::GetIndexInt { dst, .. }
+                                | Op::SelfCall { dst, .. } => dst,
+                                _ => unreachable!("an indexing instruction"),
+                            };
+                            // The window is retaken: the paths that end the
+                            // instruction loop don't all hold one.
+                            w = window!();
+                            reg!(dst) = v;
+                            continue 'run;
+                        }
+                        Err(e) => break 'run e,
+                    }
+                }
+                break 'run exc;
             };
             // The instruction at `pc - 1` raised `exc`. After a coroutine
             // switch, the running stack isn't the one this loop's frame
