@@ -20,6 +20,9 @@ Runs the benchmarks in bench/manifest.txt. The first interpreter is the
 baseline for ratios. BENCH limits the run (e.g. fib.lua).
 
 options:
+  --suite NAME         run bench/NAME/manifest.txt instead (e.g. apps, the
+                       larger third-party programs; fetch them first with
+                       bench/apps/fetch.sh)
   --quick              use the manifest's small inputs (for CI smoke runs)
   --runs N             timed runs per benchmark and interpreter (default 5)
   --json FILE          write the full results as JSON
@@ -28,14 +31,17 @@ options:
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bench {
+    /// What reports and BENCH arguments call it: `name=` or the file.
+    pub name: String,
     pub file: String,
     pub full: Vec<String>,
     pub quick: Vec<String>,
     pub note: String,
 }
 
-/// Parses `bench/manifest.txt`: `file.lua  full=ARGS  quick=ARGS  # what it stresses`.
-/// ARGS are comma-separated arguments passed to the script.
+/// Parses `bench/manifest.txt`: `file.lua  [name=NAME]  full=ARGS  quick=ARGS  # what it stresses`.
+/// ARGS are comma-separated arguments passed to the script. `name=` tells
+/// apart several entries that run the same driver script.
 pub fn parse_manifest(text: &str) -> Result<Vec<Bench>> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -44,6 +50,7 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Bench>> {
             continue;
         };
         let mut b = Bench {
+            name: file.to_string(),
             file: file.to_string(),
             full: Vec::new(),
             quick: Vec::new(),
@@ -59,6 +66,7 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Bench>> {
             match opt.split_once('=') {
                 Some(("full", v)) => b.full = split(v),
                 Some(("quick", v)) => b.quick = split(v),
+                Some(("name", v)) if !v.is_empty() => b.name = v.to_string(),
                 _ => {
                     return Err(format!(
                         "bench manifest line {}: unknown option {opt:?}",
@@ -96,6 +104,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     let mut markdown: Option<PathBuf> = None;
     let mut timeout = Duration::from_secs(300);
     let mut only = Vec::new();
+    let mut suite: Option<String> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -111,6 +120,7 @@ pub fn main(args: &[String]) -> Result<bool> {
                 interps.push(Interp { name, path, size });
             }
             "--quick" => quick = true,
+            "--suite" => suite = Some(val()?),
             "--runs" => {
                 let v = val()?;
                 runs = v
@@ -138,12 +148,15 @@ pub fn main(args: &[String]) -> Result<bool> {
         return Err(format!("at least one --interp is required\n\n{USAGE}"));
     }
 
-    let dir = util::repo_root().join("bench");
+    let mut dir = util::repo_root().join("bench");
+    if let Some(s) = &suite {
+        dir.push(s);
+    }
     let manifest = dir.join("manifest.txt");
     let text = fs::read_to_string(&manifest).map_err(io_err(manifest.display()))?;
     let benches: Vec<Bench> = parse_manifest(&text)?
         .into_iter()
-        .filter(|b| only.is_empty() || only.contains(&b.file))
+        .filter(|b| only.is_empty() || only.contains(&b.name))
         .collect();
     if benches.is_empty() {
         return Err("no benchmarks selected".to_string());
@@ -248,7 +261,7 @@ fn measure(
 }
 
 fn print_row(b: &Bench, interps: &[Interp], row: &[Measure]) {
-    let mut line = format!("  {:<22}", b.file);
+    let mut line = format!("  {:<22}", b.name);
     for (i, m) in interps.iter().zip(row) {
         let cell = match (&m.error, m.seconds) {
             (Some(_), _) => "error".to_string(),
@@ -336,7 +349,7 @@ fn markdown_report(
     s.push_str(&"---:|---:|".repeat(interps.len()));
     s.push('\n');
     for (b, row) in benches.iter().zip(table) {
-        let _ = write!(s, "| {} |", b.file);
+        let _ = write!(s, "| {} |", b.name);
         for m in row {
             match (&m.error, m.seconds) {
                 (None, Some(t)) => {
@@ -381,7 +394,7 @@ fn json_report(
     }
     s.push_str("  ],\n  \"benchmarks\": [\n");
     for (k, (b, row)) in benches.iter().zip(table).enumerate() {
-        let _ = write!(s, "    {{\"file\": {}, \"results\": [", json_str(&b.file));
+        let _ = write!(s, "    {{\"file\": {}, \"results\": [", json_str(&b.name));
         for (j, (i, m)) in interps.iter().zip(row).enumerate() {
             let _ = write!(
                 s,
@@ -411,6 +424,12 @@ mod tests {
         assert_eq!(m[0].quick, ["20"]);
         assert_eq!(m[0].note, "calls");
         assert!(m[1].full.is_empty());
+        assert_eq!(m[0].name, "fib.lua");
+        let named = parse_manifest("awfy.lua name=Richards full=x,50").unwrap();
+        assert_eq!(
+            (named[0].name.as_str(), named[0].file.as_str()),
+            ("Richards", "awfy.lua")
+        );
         assert!(parse_manifest("x.lua fast=1").is_err());
     }
 
@@ -420,6 +439,20 @@ mod tests {
         let m = parse_manifest(&fs::read_to_string(dir.join("manifest.txt")).unwrap()).unwrap();
         assert!(!m.is_empty());
         for b in m {
+            assert!(dir.join(&b.file).is_file(), "{}", b.file);
+        }
+    }
+
+    #[test]
+    fn the_apps_manifest_names_real_drivers() {
+        let dir = util::repo_root().join("bench").join("apps");
+        let m = parse_manifest(&fs::read_to_string(dir.join("manifest.txt")).unwrap()).unwrap();
+        assert!(!m.is_empty());
+        let mut names: Vec<&str> = m.iter().map(|b| b.name.as_str()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), m.len(), "names must be unique");
+        for b in &m {
             assert!(dir.join(&b.file).is_file(), "{}", b.file);
         }
     }
