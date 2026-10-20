@@ -2,8 +2,8 @@
 
 use crate::arena::{AnyGc, Gc, Gen, Store, page_shift};
 use crate::trace::{
-    BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, NEW, Roots, Space,
-    Trace, WAIT, WHITE, WaitMap, WeakMode,
+    BLACK, COLOR, CardIndex, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, NEW, Roots,
+    Space, Trace, WAIT, WHITE, WaitMap, WeakMode,
 };
 use std::collections::VecDeque;
 use std::fmt;
@@ -64,6 +64,17 @@ pub struct Params {
     /// major ones, paced by [`Params::growth`], until one frees enough.
     /// 50 by default; 0 always goes back to minor collections.
     pub minor_return_percent: u32,
+    /// Generational mode: the most a minor collection's young generation
+    /// may grow to, in bytes, so its pause stays bounded on a big heap.
+    /// 4 MiB by default (a sweep over 44 programs found no cost);
+    /// `usize::MAX` for no limit.
+    pub minor_max_bytes: usize,
+    /// Generational mode: an object whose indexed part has at least this
+    /// many elements is remembered by part ([`Heap::barrier_at`]) instead
+    /// of whole. 1024 by default.
+    pub card_min_len: usize,
+    /// Elements per remembered part (card). 128 by default.
+    pub card_slots: usize,
 }
 
 impl Default for Params {
@@ -79,6 +90,9 @@ impl Default for Params {
             major_percent: 150,
             minor_min_bytes: 64 * 1024,
             minor_return_percent: 50,
+            minor_max_bytes: 4 << 20,
+            card_min_len: 1024,
+            card_slots: 128,
         }
     }
 }
@@ -196,6 +210,12 @@ pub struct Heap<S: Space> {
     majors_only: bool,
     /// Minor collections since the last major.
     minors: u64,
+    /// Generational mode: old objects remembered by part, each with a bit
+    /// per card ([`Params::card_slots`] elements) written since a minor
+    /// collection last found that card free of young objects.
+    cards: Vec<(AnyGc, Vec<u64>)>,
+    /// Each object's position in `cards`.
+    card_index: CardIndex,
     /// The major collection in progress: [`Heap::bytes`] when it started.
     major_before: usize,
     /// The major collection in progress is automatic (see
@@ -282,6 +302,8 @@ impl<S: Space + Default> Heap<S> {
             major_due: false,
             majors_only: false,
             minors: 0,
+            cards: Vec::new(),
+            card_index: CardIndex::default(),
             major_before: 0,
             major_adapt: false,
         }
@@ -433,6 +455,56 @@ impl<S: Space> Heap<S> {
                 });
             }
         }
+    }
+
+    /// [`Heap::barrier_back`] for a store into element `at` of `gc`'s
+    /// indexed part ([`Trace::parts`]). In generational mode,
+    /// between major collections' marking, a big old object then records
+    /// only the part written, and minor collections retrace just those
+    /// parts through [`Trace::trace_part`].
+    #[inline(always)]
+    pub fn barrier_at<T>(&mut self, gc: Gc<T>, at: usize)
+    where
+        S: Holds<T>,
+    {
+        if self.barriers {
+            let kind = <S as Holds<T>>::KIND;
+            let c = self.marks.meta[kind as usize].color[gc.index() as usize];
+            if c & COLOR == BLACK {
+                self.remember_at(kind, gc.index(), at);
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn remember_at(&mut self, kind: u8, index: u32, at: usize) {
+        let len = self.space.slot_parts(kind, index);
+        let c = &mut self.marks.meta[kind as usize].color[index as usize];
+        let g = AnyGc {
+            kind,
+            index,
+            generation: Gen::default(),
+        };
+        if self.state == State::Mark || len < self.params.card_min_len || at >= len || *c & NEW != 0
+        {
+            *c = (*c & !COLOR) | GRAY;
+            self.retrace.push(g);
+            return;
+        }
+        let card = at / self.params.card_slots.max(1);
+        let i = match self.card_index.get(&(kind, index)) {
+            Some(&i) => i,
+            None => {
+                self.card_index.insert((kind, index), self.cards.len());
+                self.cards.push((g, Vec::new()));
+                self.cards.len() - 1
+            }
+        };
+        let bits = &mut self.cards[i].1;
+        if bits.len() <= card / 64 {
+            bits.resize(card / 64 + 1, 0);
+        }
+        bits[card / 64] |= 1 << (card % 64);
     }
 
     /// Call when storing `child` into `owner`. If the collector has already
@@ -816,6 +888,8 @@ impl<S: Space> Heap<S> {
         self.marks.waiting.clear();
         self.retrace.clear();
         self.weak.clear();
+        self.cards.clear();
+        self.card_index.clear();
         self.set_state(State::Pause);
     }
 
@@ -954,6 +1028,7 @@ impl<S: Space> Heap<S> {
         self.marks.marked_bytes = 0;
         self.state = State::Mark;
         self.mark_roots(roots);
+        self.trace_cards();
         let mut young = std::mem::take(&mut self.young);
         self.complete_marking::<true, R>(roots, Some(&young));
         self.state = State::Pause;
@@ -1029,6 +1104,7 @@ impl<S: Space> Heap<S> {
             .saturating_mul(self.params.minor_percent as usize)
             / 100)
             .max(self.params.minor_min_bytes)
+            .min(self.params.minor_max_bytes)
             .min(match self.limit.saturating_sub(self.bytes) {
                 0 => self.past_limit_room(),
                 room => room,
@@ -1157,10 +1233,136 @@ impl<S: Space> Heap<S> {
         }
     }
 
+    /// In a minor collection: trace the written parts of objects remembered
+    /// by part. A part stays remembered while it refers to an object that
+    /// stays young. An object remembered whole meanwhile (gray) is retraced
+    /// in [`Heap::retrace_old`] instead.
+    fn trace_cards(&mut self) {
+        if self.cards.is_empty() {
+            return;
+        }
+        self.card_index.clear();
+        let slots = self.params.card_slots.max(1);
+        for (g, mut bits) in std::mem::take(&mut self.cards) {
+            let c = self.marks.meta[g.kind as usize].color[g.index as usize];
+            if c & COLOR != BLACK {
+                continue;
+            }
+            let mut m = Marker {
+                space: &self.space,
+                marks: &mut self.marks,
+                weak: None,
+                can_register: true,
+            };
+            let mut kept = false;
+            let mut whole = false;
+            'cards: for (w, bits_w) in bits.iter_mut().enumerate() {
+                let mut word = *bits_w;
+                while word != 0 {
+                    let b = word.trailing_zeros() as usize;
+                    word &= word - 1;
+                    let card = w * 64 + b;
+                    m.marks.seen = 0;
+                    let range = card * slots..(card + 1) * slots;
+                    if !self
+                        .space
+                        .trace_slot_part(g.kind, g.index, Some(range), &mut m)
+                    {
+                        whole = true;
+                        break 'cards;
+                    }
+                    if m.marks.seen & NEW == 0 {
+                        *bits_w &= !(1 << b);
+                    } else {
+                        kept = true;
+                    }
+                }
+            }
+            if whole {
+                // Weak now: trace it whole.
+                let c = &mut m.marks.meta[g.kind as usize].color[g.index as usize];
+                *c = (*c & !COLOR) | GRAY;
+                m.marks.gray.push(g);
+            } else if kept {
+                self.card_index.insert((g.kind, g.index), self.cards.len());
+                self.cards.push((g, bits));
+            }
+        }
+    }
+
+    /// In a minor collection: retrace an old object remembered whole. A big
+    /// one ([`Trace::parts`]) is traced by part, and afterwards only the
+    /// parts that refer to objects staying young stay remembered, unless
+    /// the rest of it does too.
+    fn retrace_old(&mut self, g: AnyGc) {
+        let slots = self.params.card_slots.max(1);
+        let mut m = Marker {
+            space: &self.space,
+            marks: &mut self.marks,
+            weak: None,
+            can_register: true,
+        };
+        let parts = self.space.slot_parts(g.kind, g.index);
+        let young = m.marks.meta[g.kind as usize].color[g.index as usize] & NEW != 0;
+        m.marks.seen = 0;
+        if parts < self.params.card_min_len
+            || young
+            || !self.space.trace_slot_part(g.kind, g.index, None, &mut m)
+        {
+            self.blacken::<true>(g);
+            return;
+        }
+        let c = &mut m.marks.meta[g.kind as usize].color[g.index as usize];
+        *c = (*c & !COLOR) | BLACK;
+        let rest_young = m.marks.seen & NEW != 0;
+        let cards = parts.div_ceil(slots);
+        let mut bits = vec![0u64; cards.div_ceil(64)];
+        let mut any = false;
+        for card in 0..cards {
+            m.marks.seen = 0;
+            let range = card * slots..(card + 1) * slots;
+            self.space
+                .trace_slot_part(g.kind, g.index, Some(range), &mut m);
+            if m.marks.seen & NEW != 0 {
+                bits[card / 64] |= 1 << (card % 64);
+                any = true;
+            }
+        }
+        if rest_young {
+            self.keep.push(g);
+        } else if any {
+            match self.card_index.get(&(g.kind, g.index)) {
+                Some(&i) => {
+                    let old = &mut self.cards[i].1;
+                    if old.len() < bits.len() {
+                        old.resize(bits.len(), 0);
+                    }
+                    for (o, b) in old.iter_mut().zip(bits) {
+                        *o |= b;
+                    }
+                }
+                None => {
+                    self.card_index.insert((g.kind, g.index), self.cards.len());
+                    self.cards.push((g, bits));
+                }
+            }
+        }
+    }
+
     /// Trace until nothing is gray, including objects waiting for a retrace.
     fn drain<const MINOR: bool>(&mut self) {
-        while let Some(g) = self.marks.gray.pop().or_else(|| self.retrace.pop()) {
-            self.blacken::<MINOR>(g);
+        loop {
+            if let Some(g) = self.marks.gray.pop() {
+                self.blacken::<MINOR>(g);
+            } else if let Some(g) = self.retrace.pop() {
+                if MINOR {
+                    self.retrace_old(g);
+                } else {
+                    self.blacken::<false>(g);
+                }
+            } else {
+                break;
+            }
         }
     }
 
