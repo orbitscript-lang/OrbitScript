@@ -519,6 +519,10 @@ pub struct Runtime {
     /// The registry (`debug.getregistry()`): key 2 holds the globals, and
     /// `_LOADED` is `package.loaded`.
     pub registry: Gc<Table>,
+    /// How much `load` checks binary chunks, before it is capped at what the
+    /// build can check (`stdlib::checks`). Kept here, not in the registry,
+    /// so scripts can't change it.
+    pub binary_checks: Option<op::verify::Level>,
     pub limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
     pub out: Box<dyn WriteDebug>,
@@ -810,6 +814,7 @@ impl Vm {
                 strings,
                 globals,
                 registry,
+                binary_checks: Some(op::verify::Level::STRONGEST),
                 limits: Limits::default(),
                 out: Box::new(std::io::BufWriter::new(std::io::stdout())),
                 warnings: false,

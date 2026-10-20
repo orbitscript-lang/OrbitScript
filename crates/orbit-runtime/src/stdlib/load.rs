@@ -7,7 +7,7 @@
 //! no front end of its own. Binary chunks (`string.dump` output) start with
 //! [`BINARY_SIGNATURE`].
 
-use crate::object::{LuaHeap, Value};
+use crate::object::Value;
 use crate::vm::op::UnlinkedChunk;
 use crate::vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn, Runtime, Vm};
 
@@ -48,7 +48,7 @@ pub(crate) fn load_chunk(
     mode: &Mode<'_>,
     env: Value,
 ) -> Result<Value, String> {
-    let chunk = unlinked(&mut ctx.vm.heap, &mut ctx.vm.rt, bytes, source, mode)?;
+    let chunk = unlinked(&ctx.vm.rt, bytes, source, mode)?;
     Ok(ctx.link(&chunk, env))
 }
 
@@ -68,14 +68,13 @@ pub fn load_chunk_in(
 /// as a chunk named `source`, with the global table as its `_ENV`, as the
 /// standalone interpreter loads scripts. The function is unrooted.
 pub fn load_buffer(vm: &mut Vm, bytes: &[u8], source: &[u8]) -> Result<Value, String> {
-    let chunk = unlinked(&mut vm.heap, &mut vm.rt, bytes, source, &Mode(b"bt"))?;
+    let chunk = unlinked(&vm.rt, bytes, source, &Mode(b"bt"))?;
     Ok(vm.load(&chunk))
 }
 
 /// Decode (and check) or compile `bytes`.
 fn unlinked(
-    #[allow(unused_variables)] heap: &mut LuaHeap,
-    rt: &mut Runtime,
+    rt: &Runtime,
     bytes: &[u8],
     source: &[u8],
     mode: &Mode<'_>,
@@ -97,7 +96,7 @@ fn unlinked(
             use crate::vm::op::verify;
             let chunk = format::decode(bytes).map_err(|e| bad(&e))?;
             #[cfg(feature = "verify")]
-            if let Some(level) = crate::stdlib::checks::level(heap, rt) {
+            if let Some(level) = crate::stdlib::checks::level(rt) {
                 verify::verify(&chunk, level).map_err(|e| bad(&e))?;
             }
             return Ok(chunk);
