@@ -986,6 +986,18 @@ impl Vm {
             _ => unreachable!("run starts on a Lua frame"),
         };
         'reload: loop {
+            // What comes back through `'reload` (a native closure's return,
+            // an error caught by `pcall`, a metamethod's result) passes no
+            // instruction's safe point, so a loop of such calls would
+            // allocate without ever collecting. Take the step here; the
+            // frame's pc is saved.
+            if self.heap.should_step() {
+                let base = self.rt.stack.frames.last().expect("a frame").base as usize;
+                if self.gc_safepoint((base + WINDOW).max(self.rt.top)) {
+                    // Over the memory limit: `run` raises the error.
+                    return Ok(Ran::Switch);
+                }
+            }
             // The running frame's state. Lua-to-Lua calls and returns switch
             // it in place; everything else comes back through `'reload`.
             #[cfg(not(feature = "debugger"))]
