@@ -34,9 +34,98 @@ pub(crate) fn extend_nil(regs: &mut Vec<Value>, len: usize) {
 /// Extend the stack to cover the window at `base` and return it.
 #[cold]
 #[inline(never)]
-pub(crate) fn grow_window(regs: &mut Vec<Value>, base: usize) -> &mut [Value; WINDOW] {
+fn grow_window(regs: &mut Vec<Value>, base: usize) -> &mut [Value; WINDOW] {
     extend_nil(regs, base + WINDOW);
     <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW]).expect("a full window")
+}
+
+/// The running frame's registers: the [`WINDOW`] stack slots from its
+/// base. Instruction operands are `u8`, so indexing by one needs no bounds
+/// check; `usize` indexes and ranges go through the array.
+///
+/// The window borrows the register stack, so it is dropped before anything
+/// that takes `&mut Vm` and taken again after ([`Window::take`]).
+pub(crate) struct Window<'a>(&'a mut [Value; WINDOW]);
+
+impl<'a> Window<'a> {
+    /// The window at `base`, extending the stack to cover it when it does
+    /// not yet.
+    #[inline(always)]
+    pub(crate) fn take(regs: &'a mut Vec<Value>, base: usize) -> Self {
+        // One length check: the slice below repeats it, and the compiler
+        // drops the repeat.
+        if regs.len() >= base + WINDOW {
+            Window(
+                <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW])
+                    .expect("a full window"),
+            )
+        } else {
+            Window(grow_window(regs, base))
+        }
+    }
+}
+
+impl std::ops::Deref for Window<'_> {
+    type Target = [Value; WINDOW];
+    #[inline(always)]
+    fn deref(&self) -> &[Value; WINDOW] {
+        self.0
+    }
+}
+
+impl std::ops::DerefMut for Window<'_> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [Value; WINDOW] {
+        self.0
+    }
+}
+
+impl std::ops::Index<u8> for Window<'_> {
+    type Output = Value;
+    #[inline(always)]
+    fn index(&self, r: u8) -> &Value {
+        &self.0[r as usize]
+    }
+}
+
+impl std::ops::IndexMut<u8> for Window<'_> {
+    #[inline(always)]
+    fn index_mut(&mut self, r: u8) -> &mut Value {
+        &mut self.0[r as usize]
+    }
+}
+
+// An absolute-in-window `usize` (a call's function slot, a vararg base)
+// and ranges index the array itself. An `Index` impl on the newtype stops
+// auto-deref from supplying these, so they are spelled out.
+impl std::ops::Index<usize> for Window<'_> {
+    type Output = Value;
+    #[inline(always)]
+    fn index(&self, r: usize) -> &Value {
+        &self.0[r]
+    }
+}
+
+impl std::ops::IndexMut<usize> for Window<'_> {
+    #[inline(always)]
+    fn index_mut(&mut self, r: usize) -> &mut Value {
+        &mut self.0[r]
+    }
+}
+
+impl std::ops::Index<std::ops::Range<usize>> for Window<'_> {
+    type Output = [Value];
+    #[inline(always)]
+    fn index(&self, r: std::ops::Range<usize>) -> &[Value] {
+        &self.0[r]
+    }
+}
+
+impl std::ops::IndexMut<std::ops::Range<usize>> for Window<'_> {
+    #[inline(always)]
+    fn index_mut(&mut self, r: std::ops::Range<usize>) -> &mut [Value] {
+        &mut self.0[r]
+    }
 }
 
 /// Where a new Lua frame's state lives, so the dispatch loop can enter it
