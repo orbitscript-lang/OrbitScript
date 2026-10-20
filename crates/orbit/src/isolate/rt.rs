@@ -57,7 +57,7 @@ impl Isolate {
         let mut vm = Vm::new();
         adopt(&mut vm);
         vm.rt.warnings = config.warnings;
-        vm.rt.gc.set_mode(&mut vm.heap, config.gc_mode.raw());
+        vm.set_gc_mode(config.gc_mode.raw());
         let options = stdlib::Options {
             ignore_env: config.ignore_env,
         };
@@ -339,7 +339,7 @@ impl Gc<'_> {
     }
 
     pub fn set_mode(&mut self, mode: GcMode) {
-        self.vm.rt.gc.set_mode(&mut self.vm.heap, mode.raw());
+        self.vm.set_gc_mode(mode.raw());
     }
 
     /// See [`Config::memory_limit`].

@@ -282,9 +282,15 @@ fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
     let config = Config::default()
         .ignore_env(cli.ignore_env)
         .warnings(cli.warnings)
-        // The standalone lua5.5 reports generational mode from the start.
-        // The incremental collector runs underneath either way.
-        .gc_mode(GcMode::Generational)
+        // The standalone lua5.5 starts in generational mode too.
+        // Spike: ORBIT_GC_MODE=incremental starts incremental, to compare.
+        .gc_mode(
+            if std::env::var_os("ORBIT_GC_MODE").is_some_and(|m| m == "incremental") {
+                GcMode::Incremental
+            } else {
+                GcMode::Generational
+            },
+        )
         .memory_limit(memory_limit);
     let mut iso = Runtime::new().new_isolate(config);
     let options = orbit_std::Options {
