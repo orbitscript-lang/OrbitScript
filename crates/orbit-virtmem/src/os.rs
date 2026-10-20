@@ -39,20 +39,6 @@ pub fn align_down(val: usize, align: usize) -> usize {
     val & !(align - 1)
 }
 
-/// Reserves `bytes` of contiguous virtual address space with no access permissions.
-/// Consumes 0 bytes of physical memory or swap.
-///
-/// # Panics
-/// Panics if the operating system refuses the reservation; see
-/// [`try_reserve_address_space`] for a version that reports it instead.
-#[must_use]
-pub fn reserve_address_space(bytes: usize) -> NonNull<u8> {
-    match try_reserve_address_space(bytes) {
-        Some(ptr) => ptr,
-        None => panic!("orbit-virtmem: failed to reserve {bytes} bytes of virtual address space"),
-    }
-}
-
 /// Reserves `bytes` of contiguous virtual address space with no access
 /// permissions, or returns `None` if the operating system refuses, for
 /// example because a process address-space limit (`ulimit -v`) would be
