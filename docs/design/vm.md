@@ -249,6 +249,7 @@ Message forms covered at first light (all checked against `lua5.5`):
 - **Safe points**: after instructions that allocate (`NewTable`, `Closure`, `CellNew`, `Concat`, table stores that grow, native calls that allocated; a store into the array part allocates nothing and skips the check), the loop checks `heap.should_step()` and runs `heap.step(&mut roots)`. At a safe point every live handle is in a register, cell slot, frame or root: the loop itself holds only an `Rc<ProtoCode>` (whose constants the frame's closure keeps alive) and integers. Natives never hold handles across `CallThen`; state they need afterwards goes in their frame's registers.
 - **Barriers**: table stores go through `Heap::update` (two-phase, above); `CellSet`, `CapSet` and `SetGlobal` likewise. The running stack is a root and is rescanned when marking finishes, so register writes need no barrier.
 - **Memory release**: `orbit-gc`'s `memory-trimming` feature returns freed pages to the OS after cycles that release them (calling `malloc_trim` on glibc and `malloc_zone_pressure_relief` on macOS); enabled by default.
+- **Start floor**: in generational mode no cycle starts below 1 MiB of heap; `ORBIT_GC_MIN_THRESHOLD` (bytes, or `K`, `M`, `G`; `0` for none) changes it (ADR-2).
 - **Stress mode**: `ORBIT_GC_STRESS=1` turns on `Heap::set_stress`, collecting at nearly every safe point that follows an allocation; the first-light tests must pass under it.
 
 ## Standard library subset (`orbit-stdlib`)

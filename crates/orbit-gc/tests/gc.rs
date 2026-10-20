@@ -515,6 +515,26 @@ fn pacing_triggers_steps_and_stop_disables_them() {
 }
 
 #[test]
+fn raising_the_floor_between_cycles_moves_the_next_cycle_up() {
+    let mut h = TestHeap::new();
+    obj(&mut h, 0);
+    assert!(h.should_step(), "no floor: the first allocation is due");
+    h.set_min_threshold(256 * 1024);
+    assert!(!h.should_step());
+    let mut n = 1;
+    while !h.should_step() {
+        obj(&mut h, n);
+        n += 1;
+    }
+    assert!(h.bytes() >= 256 * 1024);
+    // Lowering it takes effect when the next cycle ends.
+    h.set_min_threshold(0);
+    while !h.step(&mut ()) {}
+    obj(&mut h, 0);
+    assert!(h.should_step());
+}
+
+#[test]
 fn bigger_explicit_steps_finish_a_cycle_in_fewer_calls() {
     // gc.lua's `dosteps`: `collectgarbage("step", n)` while stopped.
     fn steps(bytes: usize) -> usize {

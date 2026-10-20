@@ -347,6 +347,10 @@ impl Interner {
                 }
             }
         }
+        if kept == self.len {
+            // Nothing died: every probe sequence is as it was.
+            return;
+        }
         self.len = kept;
         let mut target = INTERNER_MIN;
         while kept * 2 > target {

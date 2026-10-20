@@ -492,6 +492,19 @@ impl<S: Space> Heap<S> {
         &mut self.params
     }
 
+    /// Set [`Params::min_threshold`]. Between cycles a higher floor also
+    /// moves the start of the next cycle up at once; a lower one takes
+    /// effect when the next cycle ends.
+    pub fn set_min_threshold(&mut self, bytes: usize) {
+        self.params.min_threshold = bytes;
+        if self.state == State::Pause && bytes > self.threshold {
+            self.threshold = bytes.min(self.limit);
+            if !self.stress {
+                self.debt = (self.bytes as isize - self.threshold as isize).min(0);
+            }
+        }
+    }
+
     /// Cap [`Heap::bytes`] at `limit` (`None`: no cap, the default). The
     /// heap never refuses an allocation itself: it reports. Once `bytes`
     /// passes the limit, [`Heap::should_step`] comes due at the next

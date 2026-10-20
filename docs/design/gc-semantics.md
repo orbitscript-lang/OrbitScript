@@ -57,7 +57,7 @@ flowchart TD
 | `"step", n` | `n` = 0: one basic step. `n` > 0: work as if `n` KiB had been allocated. Runs pending finalizers. Returns true if the step finished a cycle. Works while the collector is stopped and does not restart it. In generational mode it does a whole cycle and returns false (a minor collection collects all young garbage; ours collects all garbage). |
 | `"stop"`, `"restart"` | `Heap::stop` / `restart`. Return `0`. |
 | `"isrunning"` | Not stopped. |
-| `"incremental"`, `"generational"` | Set the reported mode, return the previous one. The incremental collector runs underneath in both (plan decision). The CLI starts in `"generational"`, as the standalone `lua5.5` reports. |
+| `"incremental"`, `"generational"` | Set the reported mode, return the previous one. The incremental collector runs underneath in both (plan decision). The CLI starts in `"generational"`, as the standalone `lua5.5` reports. Generational mode puts a 1 MiB floor under the heap size that starts a cycle (`ORBIT_GC_MIN_THRESHOLD` changes it, `0` turns it off; ADR-2); incremental mode has none. |
 | `"param", name [, value]` | Return the old value; set it when `value` is given and not negative. `pause` maps to `Params::growth` (`pause - 100`, floored at 0), `stepmul` to `Params::work_ratio / 4`, `stepsize` to `Params::step_bytes`; `stepsize` 0 makes every step finish its cycle (stop-the-world). `minormul`, `majorminor` and `minormajor` are stored and reported but unused until there is a real generational mode. Unknown names: `bad argument #2 ... (invalid option 'x')`. |
 | anything else | `bad argument #1 to 'collectgarbage' (invalid option 'x')`. |
 

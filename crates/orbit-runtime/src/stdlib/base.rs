@@ -465,7 +465,8 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             } else {
                 GcMode::Generational
             };
-            let old = std::mem::replace(&mut ctx.vm.rt.gc.mode, mode);
+            let vm = &mut *ctx.vm;
+            let old = vm.rt.gc.set_mode(&mut vm.heap, mode);
             let v = ctx.new_str(old.name().as_bytes());
             ctx.ret1(v)
         }
