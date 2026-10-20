@@ -118,6 +118,8 @@ fn run(seed: u64, ops: usize, stress: bool, modes: Modes) {
     let mut next_id = 0u64;
     let mut finalized = 0usize;
     let mut cycles = 0;
+    // Steps that leave a generational major collection in progress.
+    let mut major_steps = 0;
 
     for _ in 0..ops {
         // Pick an object reachable right now (a root, or one hop away).
@@ -214,6 +216,9 @@ fn run(seed: u64, ops: usize, stress: bool, modes: Modes) {
         if h.should_step() {
             cycles += h.step(&mut roots) as usize;
             check_live(&h, &roots.0, &[]);
+            if h.mode() == orbit_gc::Mode::Generational && h.phase() != orbit_gc::Phase::Pause {
+                major_steps += 1;
+            }
         }
         // Run finalizers: resurrect some permanently, drop the rest.
         while let Some(any) = h.take_finalizable() {
@@ -272,6 +277,9 @@ fn run(seed: u64, ops: usize, stress: bool, modes: Modes) {
     assert_eq!(h.count::<Text>(), 0);
     assert_eq!(h.bytes(), 0, "byte accounting drifted");
     assert!(cycles > 3, "only {cycles} cycles ran");
+    if modes == Modes::Generational {
+        assert!(major_steps > 0, "no major collection ran in steps");
+    }
     assert!(finalized > 0);
 }
 

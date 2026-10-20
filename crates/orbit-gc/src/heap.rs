@@ -196,6 +196,11 @@ pub struct Heap<S: Space> {
     majors_only: bool,
     /// Minor collections since the last major.
     minors: u64,
+    /// The major collection in progress: [`Heap::bytes`] when it started.
+    major_before: usize,
+    /// The major collection in progress is automatic (see
+    /// [`Heap::begin_major`]).
+    major_adapt: bool,
 }
 
 impl<S: Space> fmt::Debug for Heap<S> {
@@ -277,6 +282,8 @@ impl<S: Space + Default> Heap<S> {
             major_due: false,
             majors_only: false,
             minors: 0,
+            major_before: 0,
+            major_adapt: false,
         }
     }
 }
@@ -676,7 +683,7 @@ impl<S: Space> Heap<S> {
     /// Do one increment of collection work, proportional to the allocation
     /// debt. Returns true if this step finished a cycle.
     pub fn step<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) -> bool {
-        if self.mode == Mode::Generational {
+        if self.mode == Mode::Generational && self.state == State::Pause {
             if self.stress {
                 if self.debt <= 0 {
                     return false;
@@ -685,8 +692,12 @@ impl<S: Space> Heap<S> {
                     self.major_due = true;
                 }
             }
-            self.gen_collect(roots);
-            return true;
+            if !self.major_due {
+                self.minor(roots);
+                return true;
+            }
+            // A major collection runs in steps, like an incremental cycle.
+            self.begin_major(roots, true);
         }
         let work = if self.stress {
             // `should_step` stays true in stress mode (testing the flag
@@ -708,9 +719,13 @@ impl<S: Space> Heap<S> {
     /// is [stopped](Heap::stop), and doesn't restart it. Returns true if this
     /// step finished a cycle.
     pub fn step_with<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, bytes: usize) -> bool {
-        if self.mode == Mode::Generational {
-            // A step is one whole collection; true if it was a major one.
-            return self.gen_collect(roots);
+        if self.mode == Mode::Generational && self.state == State::Pause {
+            // A minor collection is one whole step; a major one starts.
+            if !self.major_due {
+                self.minor(roots);
+                return false;
+            }
+            self.begin_major(roots, true);
         }
         let bytes = if bytes == 0 {
             self.params.step_bytes
@@ -853,58 +868,74 @@ impl<S: Space> Heap<S> {
         }
     }
 
-    /// One generational collection: minor, unless a major one is due.
-    /// Returns true if it was a major collection.
-    fn gen_collect<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) -> bool {
-        if self.major_due {
-            self.major(roots, true);
-            true
-        } else {
-            self.minor(roots);
-            false
-        }
+    /// Collect everything at once, leaving every survivor black (old).
+    /// Restarts a major collection in progress.
+    fn major<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, adapt: bool) {
+        self.begin_major(roots, adapt);
+        while !self.step_work(roots, usize::MAX) {}
     }
 
-    /// Collect everything, leaving every survivor black (old). `adapt`
-    /// (automatic collections) decides from what it freed whether minor
-    /// collections come next; otherwise the heap keeps doing what it did.
-    fn major<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, adapt: bool) {
+    /// Start a major collection: whiten everything and mark the roots. It
+    /// then runs as an incremental cycle ([`Heap::step_work`]) whose sweep
+    /// leaves survivors black. Objects made while it marks are white, as in
+    /// incremental mode, and not young: they end it old or freed.
+    ///
+    /// `adapt` (automatic collections) decides from what the collection
+    /// frees whether minor collections come next; otherwise the heap keeps
+    /// doing what it did.
+    fn begin_major<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, adapt: bool) {
         debug_assert_eq!(self.mode, Mode::Generational);
-        let before = self.bytes;
-        let allocated = before.saturating_sub(self.gen_base);
+        self.major_before = self.bytes;
+        self.major_adapt = adapt;
         self.unmark_all();
         self.young.clear();
-        self.start_marking(roots);
-        self.finish_marking(roots);
-        while !self.sweep(usize::MAX) {}
-        self.set_state(State::Pause);
-        self.cycles += 1;
+        self.new_bit = 0;
         self.minors = 0;
         self.major_due = false;
-        let live = self.marks.marked_bytes;
-        self.release_to_os(live);
-        self.gen_base = live;
-        let freed = before.saturating_sub(self.bytes);
-        if adapt {
+        self.start_marking(roots);
+    }
+
+    /// At the end of a major collection's marking: decide what follows it.
+    /// After a growing heap's major collection (it freed less than
+    /// `minor_return_percent` of what was allocated since the last one)
+    /// only major collections run, without barriers or young objects.
+    /// Otherwise objects made from now on are young, and the barrier stays
+    /// on through the sweep so old objects that store them are remembered.
+    fn major_marked(&mut self) {
+        if self.major_adapt {
+            let allocated = self.major_before.saturating_sub(self.gen_base);
+            let freed = self.major_before.saturating_sub(self.marks.marked_bytes);
             self.majors_only = allocated > self.params.minor_min_bytes
                 && freed.saturating_mul(100)
                     < allocated.saturating_mul(self.params.minor_return_percent as usize);
         }
+        self.new_bit = if self.majors_only { 0 } else { NEW };
+    }
+
+    /// The end of a major collection's sweep. Objects made during the sweep
+    /// are the young ones; those the sweep passed are black, so whiten them.
+    fn finish_major(&mut self) {
+        self.set_state(State::Pause);
+        self.cycles += 1;
+        for &g in &self.young {
+            let c = &mut self.marks.meta[g.kind as usize].color[g.index as usize];
+            *c &= !COLOR;
+        }
+        let live = self.marks.marked_bytes;
+        self.release_to_os(live);
+        self.gen_base = live;
         if self.majors_only {
-            // Like an incremental cycle's pacing, all at once.
-            self.new_bit = 0;
-            self.barriers = false;
+            // Paced like an incremental cycle.
             self.major_due = true;
             self.finish_cycle_at(live);
             if self.bytes >= self.limit {
-                // Not a whole collection at every safe point.
+                // Not a new major collection (whitening the heap) at
+                // every safe point.
                 let room = self.past_limit_room();
                 self.threshold = self.bytes.saturating_add(room);
                 self.debt = if self.stress { 0 } else { -(room as isize) };
             }
         } else {
-            self.new_bit = NEW;
-            self.barriers = true;
             self.schedule_minor();
         }
     }
@@ -983,8 +1014,9 @@ impl<S: Space> Heap<S> {
     }
 
     /// Generational mode, with the heap past its limit: how much more to
-    /// allocate before the next collection. Each is a whole minor or major
-    /// collection, so one at every safe point (as an incremental heap steps
+    /// allocate before the next collection. Each is a whole minor collection
+    /// or a major one's start (whitening the heap), so one at every safe
+    /// point (as an incremental heap steps
     /// there) would crawl while the owner handles the overrun; this keeps
     /// them a sixteenth of the limit apart at most.
     fn past_limit_room(&self) -> usize {
@@ -1015,6 +1047,10 @@ impl<S: Space> Heap<S> {
     /// The next cycle starts once the heap grows `growth` percent past what
     /// this one found reachable.
     fn finish_cycle(&mut self) {
+        if self.mode == Mode::Generational {
+            self.finish_major();
+            return;
+        }
         self.set_state(State::Pause);
         self.cycles += 1;
         let live = self.marks.marked_bytes;
@@ -1164,6 +1200,9 @@ impl<S: Space> Heap<S> {
     /// cycle, and resurrected keys keep their ephemeron values.
     fn finish_marking<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) {
         self.complete_marking::<false, R>(roots, None);
+        if self.mode == Mode::Generational {
+            self.major_marked();
+        }
         self.set_state(State::Sweep { kind: 0, at: 0 });
     }
 
