@@ -33,7 +33,7 @@ fn main() {
             println!("cargo:rustc-link-arg-bins=-Wl,--export-dynamic-symbol={pattern}");
         }
     }
-    // `pgo` and `pgo-gen` inherit from `release` and report it here. Debug
+    // Profiles that inherit from `release` report it here too. Debug
     // builds keep one symbol per function for debuggers.
     if var("PROFILE").as_deref() == Ok("release") {
         fold_identical_code(&os);

@@ -11,7 +11,6 @@ mod examples;
 mod fuzz;
 mod libfuzz;
 mod liblua;
-mod pgo;
 mod process;
 mod ratchet;
 mod scoreboard;
@@ -31,7 +30,6 @@ commands:
   scoreboard    the whole Lua 5.5 compatibility picture in one report
   fuzz-syntax   compare compile errors on mutated programs with lua5.5
   fuzz          compare random library calls with the reference lua5.5
-  pgo           build orbit with the committed profile (pgo train: record one)
 
 Run a command with --help for its options.";
 
@@ -51,7 +49,6 @@ fn main() -> ExitCode {
         "fuzz-syntax" => fuzz::main(rest),
         "fuzz" => libfuzz::main(rest),
         "liblua" => liblua::main(rest),
-        "pgo" => pgo::main(rest),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(true)

@@ -55,7 +55,7 @@ A misspelt variant or field is a compile error, and a value no arm matches raise
 
 - `cargo test -p orbit-cli --test examples` runs every entry and twin with `orbit`.
 - `cargo testkit examples --interp target/release/orbit --reference target/reference-lua/bin/lua5.5` does the same and also runs the twins under the reference interpreter, which shows the OrbitScript and Lua versions mean the same thing.
-- `cargo testkit pgo train` runs each entry and twin with its `train=` arguments (a repeat count or size, kept small so the examples don't outweigh the benchmarks; see the manifest), so the committed profile covers the OrbitScript front end and the code its desugaring produces.
+- `./build.sh --pgo-train` runs each entry and twin with its `train=` arguments (a repeat count or size, kept small so the examples don't outweigh the benchmarks; see the manifest), so the committed profile covers the OrbitScript front end and the code its desugaring produces.
 
 Examples must be deterministic: no `pairs` order in the output, no clock, and no `math.random` (`sim` has its own generator).
 
