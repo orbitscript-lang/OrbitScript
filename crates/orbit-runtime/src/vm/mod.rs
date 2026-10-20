@@ -176,18 +176,21 @@ pub(crate) enum Catch {
     Handler,
 }
 
-/// One activation record.
+/// One activation record. `repr(C)` with the fields a Lua call sets to
+/// constants next to each other (`pc` and `nvarargs`; `tail`, `extra` and
+/// `cdepth` beside `want`), so pushing a frame takes fewer stores.
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub(crate) struct Frame {
     pub kind: FrameKind,
+    /// Saved pc: the instruction after the current one.
+    pub pc: u32,
+    pub nvarargs: u32,
     /// Register where the callee was; results go here.
     pub func: u32,
     /// First register (Lua) or first argument (native).
     pub base: u32,
-    /// Saved pc: the instruction after the current one.
-    pub pc: u32,
     pub cell_base: u32,
-    pub nvarargs: u32,
     /// Results the caller wants ([`op::MULTI`] for all).
     pub want: u8,
     /// Entered by a tail call (`debug.getinfo`'s `istailcall`).
@@ -202,6 +205,8 @@ pub(crate) struct Frame {
     /// it from the newest other frame.
     pub cdepth: u8,
 }
+
+const _: () = assert!(std::mem::size_of::<Frame>() == 48);
 
 /// The most calls back into the interpreter that may be open at once,
 /// counting the resumes below the running coroutine (more is "C stack

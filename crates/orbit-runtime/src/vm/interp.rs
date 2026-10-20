@@ -239,6 +239,28 @@ impl Shape {
     }
 }
 
+impl Vm {
+    /// Raise `x` from the dispatch loop running at `pc` in frame `depth`:
+    /// true to reload the loop's state, false when the run is done. Out of
+    /// line so the many raising sites in the loop stay a call and a branch.
+    #[cold]
+    #[inline(never)]
+    fn throw_from(&mut self, x: Exc, pc: usize, depth: usize) -> Result<bool, LuaError> {
+        // After a coroutine switch, the running stack isn't the one the
+        // loop's frame state describes.
+        if !std::mem::take(&mut self.rt.switched) && self.rt.stack.frames.len() == depth {
+            self.rt.stack.frames[depth - 1].pc = pc as u32;
+        }
+        match self.raise(x)? {
+            Flow::Reload | Flow::Switched => {
+                self.rt.switched = false;
+                Ok(true)
+            }
+            Flow::Done => Ok(false),
+        }
+    }
+}
+
 /// Nested message handlers (an error in a handler calls it again) before
 /// the handler gets `C stack overflow` (about where the reference stops).
 const MAX_HANDLERS: usize = 214;
@@ -1091,17 +1113,9 @@ impl Vm {
             macro_rules! throw {
                 ($x:expr) => {{
                     let x = $x;
-                    // After a coroutine switch, the running stack isn't the
-                    // one this loop's frame state describes.
-                    if !std::mem::take(&mut self.rt.switched) {
-                        save_pc!();
-                    }
-                    match self.raise(x) {
-                        Ok(Flow::Reload | Flow::Switched) => {
-                            self.rt.switched = false;
-                            continue 'reload;
-                        }
-                        Ok(Flow::Done) => return Ok(Ran::Done),
+                    match self.throw_from(x, pc, depth) {
+                        Ok(true) => continue 'reload,
+                        Ok(false) => return Ok(Ran::Done),
                         Err(e) => return Err(e),
                     }
                 }};
