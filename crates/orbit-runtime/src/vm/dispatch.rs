@@ -110,9 +110,19 @@ impl Vm {
                     self.rt.stack.frames.len()
                 };
             }
+            // The running closure lives in its frame; the loop keeps no copy
+            // of it, so the register it would occupy stays free.
+            macro_rules! closure {
+                () => {
+                    match self.rt.stack.frames.last().expect("the running frame").kind {
+                        FrameKind::Lua { closure, .. } => closure,
+                        _ => unreachable!("the running frame is a Lua frame"),
+                    }
+                };
+            }
             let frame = self.rt.stack.frames.last().expect("the running frame");
             let FrameKind::Lua {
-                mut closure,
+                closure: start_closure,
                 code_id,
             } = frame.kind
             else {
@@ -123,12 +133,12 @@ impl Vm {
             // Both the frame's code and `cur` are alive, so equal addresses
             // mean the same code.
             if code_id != Rc::as_ptr(&cur) as usize {
-                cur = self.heap.get(closure).code.clone();
+                cur = self.heap.get(start_closure).code.clone();
             }
             // The debugger decides by function and depth, so it needs the
             // frame's code first.
             #[cfg(feature = "debugger")]
-            if self.hooked_here(&cur, closure, depth!()) != HOOKED {
+            if self.hooked_here(&cur, start_closure, depth!()) != HOOKED {
                 return Ok(Ran::Switch);
             }
             #[cfg(feature = "debugger")]
@@ -412,7 +422,7 @@ impl Vm {
             // window again and let the collector catch up.
             macro_rules! resumed_here {
                 () => {{
-                    if self.hooked_here(&cur, closure, depth!()) != HOOKED {
+                    if self.hooked_here(&cur, closure!(), depth!()) != HOOKED {
                         return Ok(Ran::Switch);
                     }
                     w = window!();
@@ -466,7 +476,7 @@ impl Vm {
                                 // frame keeps `closure` alive, so an equal
                                 // handle is the same closure, and its code
                                 // is `cur`.
-                                let shape = if c == closure {
+                                let shape = if c == closure!() {
                                     Shape::of(&cur)
                                 } else {
                                     Shape::of(&self.heap.get(c).code)
@@ -497,7 +507,6 @@ impl Vm {
                                 if HOOKED {
                                     self.rt.stack.hook.call_pending = Some(false);
                                 }
-                                closure = c;
                                 base = new_base;
                                 pc = 0;
                                 switch_code!(c, shape.code_id);
@@ -580,7 +589,6 @@ impl Vm {
                                 regs[func + k..func + want].fill(Value::Nil);
                                 self.rt.top = func + want;
                             }
-                            closure = c;
                             switch_code!(c, code_id);
                             w = window!();
                             continue;
@@ -606,7 +614,7 @@ impl Vm {
                     {
                         throw!(Exc::Lua(e));
                     }
-                    if !self.hooked_here(&cur, closure, depth!()) {
+                    if !self.hooked_here(&cur, closure!(), depth!()) {
                         // The hook was turned off: run this instruction in
                         // the plain loop.
                         self.rt
@@ -654,19 +662,19 @@ impl Vm {
                         reg!(dst) = self.heap.get(c).value;
                     }
                     Op::CapGet { dst, cap } => {
-                        let c = self.heap.get(closure).captures[cap as usize];
+                        let c = self.heap.get(closure!()).captures[cap as usize];
                         reg!(dst) = self.heap.get(c).value;
                     }
-                    Op::CapSelf { dst } => reg!(dst) = Value::Closure(closure),
+                    Op::CapSelf { dst } => reg!(dst) = Value::Closure(closure!()),
                     Op::CapSet { cap, src } => {
-                        let c = self.heap.get(closure).captures[cap as usize];
+                        let c = self.heap.get(closure!()).captures[cap as usize];
                         self.heap.barrier_back(c);
                         let cell = self.heap.get_mut(c);
                         by_parts!(src, |v| cell.value = v);
                     }
 
                     Op::GetGlobal { dst, name, ic } => {
-                        let env_cell = self.heap.get(closure).captures[0];
+                        let env_cell = self.heap.get(closure!()).captures[0];
                         let v = match self.heap.get(env_cell).value {
                             Value::Table(t) => {
                                 let cache = &cur.caches[ic as usize];
@@ -1059,7 +1067,6 @@ impl Vm {
                             // forwarding.
                             by_parts!(src, |v| self.rt.stack.regs[func] = v);
                             self.rt.top = func + 1;
-                            closure = c;
                             switch_code!(c, code_id);
                             w = window!();
                             continue;
@@ -1115,7 +1122,7 @@ impl Vm {
                             .last()
                             .expect("the running frame")
                             .cell_base as usize;
-                        let c = self.op_closure(closure, cell_base, proto as usize);
+                        let c = self.op_closure(closure!(), cell_base, proto as usize);
                         w = window!();
                         reg!(dst) = c;
                         safepoint!();
@@ -1242,7 +1249,7 @@ impl Vm {
                     | Op::ForPrepExclusive { .. }
                     | Op::NativeEntry { .. }
                     | Op::Tbc { .. }
-                    | Op::Close { .. } => match self.cold_op(op, &cur, closure, base, pc) {
+                    | Op::Close { .. } => match self.cold_op(op, &cur, closure!(), base, pc) {
                         Ok(Cold::Next {
                             pc: next,
                             safepoint,
