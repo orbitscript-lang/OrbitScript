@@ -65,9 +65,10 @@ pub struct Params {
     /// 50 by default; 0 always goes back to minor collections.
     pub minor_return_percent: u32,
     /// Generational mode: the most a minor collection's young generation
-    /// may grow to, in bytes, so its pause stays bounded on a big heap.
-    /// 4 MiB by default (a sweep over 44 programs found no cost);
-    /// `usize::MAX` for no limit.
+    /// may grow to, in bytes, which bounds its pause on a big heap. No
+    /// limit (`usize::MAX`) by default: with stores scattered over a big
+    /// old table, a small young generation means more minor collections,
+    /// each retracing most of the table (Tym, 2026-10-20).
     pub minor_max_bytes: usize,
     /// Generational mode: an object whose indexed part has at least this
     /// many elements is remembered by part ([`Heap::barrier_at`]) instead
@@ -90,7 +91,7 @@ impl Default for Params {
             major_percent: 150,
             minor_min_bytes: 64 * 1024,
             minor_return_percent: 50,
-            minor_max_bytes: 4 << 20,
+            minor_max_bytes: usize::MAX,
             card_min_len: 1024,
             card_slots: 128,
         }
