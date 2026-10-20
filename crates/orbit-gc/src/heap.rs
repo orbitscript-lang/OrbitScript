@@ -127,6 +127,10 @@ enum State {
 const FREE_SLOT_SHARE: usize = 16;
 /// Bytes of work done by one step in stress mode.
 const STRESS_WORK: usize = 2048;
+/// Generational stress mode: minor collections between major ones. Old
+/// garbage goes only in a major collection, and a stressed heap that churns
+/// young objects never grows enough to start one on its own.
+const STRESS_MINORS: u64 = 64;
 
 /// A garbage-collected heap over the arenas of space `S`.
 ///
@@ -672,8 +676,13 @@ impl<S: Space> Heap<S> {
     /// debt. Returns true if this step finished a cycle.
     pub fn step<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) -> bool {
         if self.mode == Mode::Generational {
-            if self.stress && self.debt <= 0 {
-                return false;
+            if self.stress {
+                if self.debt <= 0 {
+                    return false;
+                }
+                if self.minors >= STRESS_MINORS {
+                    self.major_due = true;
+                }
             }
             self.gen_collect(roots);
             return true;
