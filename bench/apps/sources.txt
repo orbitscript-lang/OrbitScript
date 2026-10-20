@@ -1,0 +1,12 @@
+# Third-party programs for `cargo testkit bench --suite apps`. Their source
+# is never committed: fetch.sh clones each one at the pinned commit into
+# target/bench-apps/NAME. All are pure Lua and run unmodified on Lua 5.5.
+# name       commit                                    url                                                licence
+awfy         74306fec151070fd07157cefeacf19e7e0bcdc89  https://github.com/smarr/are-we-fast-yet           MIT
+tl           c6b986eaa11135cfc845dc5961197e189061b04f  https://github.com/teal-language/tl                MIT
+luacheck     2f764bdcabe8b7c19deadf0e9bb2adc19df1a4c5  https://github.com/lunarmodules/luacheck          MIT
+penlight     dfa483dddc0d751be1047667f4580dd90319169c  https://github.com/lunarmodules/Penlight          MIT
+libdeflate   afc3b78d12fb3bcfa6b21e5332031ad3d7572e19  https://github.com/SafeteeWoW/LibDeflate          zlib
+plc          9efed4113a1a5dcb12a1f526cd65561756e6d648  https://github.com/philanc/plc                    MIT
+lunajson     e3a9666eb1275741e887e29926b144f8daee3bef  https://github.com/grafi-tt/lunajson               MIT
+luau         9d7748a4f324213a18cb8283fa2a77c330225fa0  https://github.com/luau-lang/luau                 MIT

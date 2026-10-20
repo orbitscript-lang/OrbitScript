@@ -1,0 +1,36 @@
+# Larger third-party Lua programs for `cargo testkit bench --suite apps`.
+# Run ./fetch.sh first. Format as in ../manifest.txt, plus name= to tell
+# apart entries sharing a driver. The first argument of every driver is
+# where fetch.sh put the programs. Full sizes take about 0.5 to 3 s on lua5.5.
+awfy.lua      name=DeltaBlue   full=../../target/bench-apps,DeltaBlue,12000  quick=../../target/bench-apps,DeltaBlue,100   # constraint solver, objects
+awfy.lua      name=Richards    full=../../target/bench-apps,Richards,50      quick=../../target/bench-apps,Richards,1      # scheduler simulation, method calls
+awfy.lua      name=Json        full=../../target/bench-apps,Json,100         quick=../../target/bench-apps,Json,1          # JSON parser, strings
+awfy.lua      name=CD          full=../../target/bench-apps,CD,250           quick=../../target/bench-apps,CD,10           # collision detection, red-black tree
+awfy.lua      name=Havlak      full=../../target/bench-apps,Havlak,150       quick=../../target/bench-apps,Havlak,1        # loop recognition; about 15 s on lua5.5 at any size
+awfy.lua      name=Bounce      full=../../target/bench-apps,Bounce,1500      quick=../../target/bench-apps,Bounce,10       # objects, float fields
+awfy.lua      name=List        full=../../target/bench-apps,List,1500        quick=../../target/bench-apps,List,10         # linked lists, recursion
+awfy.lua      name=Mandelbrot  full=../../target/bench-apps,Mandelbrot,750   quick=../../target/bench-apps,Mandelbrot,1    # float loops
+awfy.lua      name=NBody       full=../../target/bench-apps,NBody,250000     quick=../../target/bench-apps,NBody,1         # float fields
+awfy.lua      name=Permute     full=../../target/bench-apps,Permute,1000     quick=../../target/bench-apps,Permute,10      # recursion, arrays
+awfy.lua      name=Queens      full=../../target/bench-apps,Queens,1000      quick=../../target/bench-apps,Queens,10       # backtracking, arrays
+awfy.lua      name=Sieve       full=../../target/bench-apps,Sieve,3000       quick=../../target/bench-apps,Sieve,10        # boolean arrays
+awfy.lua      name=Storage     full=../../target/bench-apps,Storage,1000     quick=../../target/bench-apps,Storage,10      # allocation, GC
+awfy.lua      name=Towers      full=../../target/bench-apps,Towers,600       quick=../../target/bench-apps,Towers,10       # recursion, objects
+teal.lua      name=teal        full=../../target/bench-apps                  quick=../../target/bench-apps,3               # a compiler: type checking, codegen
+luacheck.lua  name=luacheck    full=../../target/bench-apps                  quick=../../target/bench-apps,10              # a linter: parsing, analysis
+libdeflate.lua name=libdeflate full=../../target/bench-apps,6                quick=../../target/bench-apps,6,32            # compression, integer arithmetic
+plc.lua       name=plc         full=../../target/bench-apps,1024,20          quick=../../target/bench-apps,16,1            # cryptography, bitwise integers
+lunajson.lua  name=lunajson    full=../../target/bench-apps,15000            quick=../../target/bench-apps,500             # JSON encode and decode
+luau.lua      name=typeset     full=../../target/bench-apps,vibemark67/typeset.lua           quick=../../target/bench-apps,vibemark67/typeset.lua           # text layout, 10 k lines
+luau.lua      name=air         full=../../target/bench-apps,zefbench/air.lua                 quick=../../target/bench-apps,zefbench/air.lua                 # 11 k lines, very large functions
+luau.lua      name=compiler-physics full=../../target/bench-apps,vibemark67/compiler-physics.lua quick=../../target/bench-apps,vibemark67/compiler-physics.lua # compiler and physics
+luau.lua      name=luau_interp full=../../target/bench-apps,vibemark67/luau_interp.lua       quick=../../target/bench-apps,vibemark67/luau_interp.lua       # an interpreter in Lua
+luau.lua      name=regex       full=../../target/bench-apps,vibemark67/regex.lua             quick=../../target/bench-apps,vibemark67/regex.lua             # regex engine
+luau.lua      name=http        full=../../target/bench-apps,vibemark67/http.lua              quick=../../target/bench-apps,vibemark67/http.lua              # HTTP parsing and routing
+luau.lua      name=raytrace    full=../../target/bench-apps,vibemark67/raytrace.lua          quick=../../target/bench-apps,vibemark67/raytrace.lua          # ray tracer, float math
+luau.lua      name=basic       full=../../target/bench-apps,zefbench/basic.lua               quick=../../target/bench-apps,zefbench/basic.lua               # a BASIC interpreter
+luau.lua      name=cdx         full=../../target/bench-apps,zefbench/cdx.lua                 quick=../../target/bench-apps,zefbench/cdx.lua                 # collision detection
+luau.lua      name=richards    full=../../target/bench-apps,zefbench/richards.lua            quick=../../target/bench-apps,zefbench/richards.lua            # scheduler simulation
+luau.lua      name=scimark     full=../../target/bench-apps,shootout/scimark.lua             quick=../../target/bench-apps,shootout/scimark.lua             # FFT, SOR, LU, sparse
+luau.lua      name=tictactoe   full=../../target/bench-apps,tictactoe.lua                    quick=../../target/bench-apps,tictactoe.lua                    # game-tree search
+luau.lua      name=sieve-coroutines full=../../target/bench-apps,sieve.lua                   quick=../../target/bench-apps,sieve.lua                        # deeply nested coroutines
