@@ -12,7 +12,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::process::{Child, Stdio};
 use std::rc::{Rc, Weak};
 
-use orbit::{Call, Class, Error, Pinned, Ret, Scope, Table, Userdata, Value};
+use orbit::stack::{Any, Stack};
+use orbit::{Call, Class, Error, Pinned, Ret, Scope, Table, Userdata, Value, native};
 
 use crate::sys::{exit_status, file_error, flush_stdout, os_error_text, os_path, shell};
 
@@ -590,14 +591,13 @@ fn io_tmpfile<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
     }
 }
 
-fn io_type<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    if c.nargs() == 0 {
-        return Err(c.arg_error(0, "value expected"));
-    }
-    match stream_of(c.arg(0)) {
-        Some(s) if s.borrow().is_closed() => c.ret("closed file"),
-        Some(_) => c.ret("file"),
-        None => c.ret(Value::Nil),
+#[native(name = "io.type")]
+fn io_type(s: &mut Stack<'_>, v: Any) -> Option<&'static str> {
+    // A file whose method is running reads as not a file, as before.
+    let closed = s.with_userdata::<LuaFile, _>(v.0, |f| Some(f.as_ref()?.0.borrow().is_closed()));
+    match closed.flatten()? {
+        true => Some("closed file"),
+        false => Some("file"),
     }
 }
 
@@ -1070,7 +1070,7 @@ pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
         let st = state.clone();
         io.raw_set(name, s.create_function(move |c| f(c, &st)))?;
     }
-    io.raw_set("type", s.create_function(io_type))?;
+    io.raw_set("type", s.create_native::<io_type>())?;
     s.before_exit(flush_all);
     Ok(io)
 }

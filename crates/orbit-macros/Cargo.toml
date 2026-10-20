@@ -1,0 +1,22 @@
+[package]
+name = "orbit-macros"
+description = "The #[native] attribute: Rust functions as stack-API natives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+proc-macro = true
+
+# Build time only: a proc macro runs in the compiler, so none of these reach
+# a binary. syn 2 is the version stabby's macros already use.
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "proc-macro", "visit"] }
+
+[lints]
+workspace = true

@@ -660,6 +660,7 @@ impl Workspace {
             replace = Span { start, end };
             match receiver_before(&text, start) {
                 Some((name, sep)) => self.receiver_completions(file, start, &name, sep, &mut out),
+                None if self.missing_field_completions(file, &text, start, &mut out) => {}
                 None => self.scope_completions(file, start, &mut out),
             }
         }
@@ -716,6 +717,52 @@ impl Workspace {
                 keyword: true,
             });
         }
+    }
+
+    /// At a field name in a struct or variant literal (just after `{` or `,`, not inside a
+    /// value): the fields not written yet, in declaration order. Returns whether it applied.
+    fn missing_field_completions(
+        &self,
+        file: FileId,
+        text: &[u8],
+        start: u32,
+        out: &mut Vec<Completion>,
+    ) -> bool {
+        let before = text[..start as usize]
+            .iter()
+            .rev()
+            .find(|b| !b.is_ascii_whitespace());
+        if !matches!(before, Some(b'{' | b',')) {
+            return false;
+        }
+        let m = &self.files[file.0 as usize].module;
+        let inside = |s: &Span| s.start < start && start < s.end;
+        let lit = m
+            .struct_lits
+            .iter()
+            .filter(|l| inside(&l.span))
+            .filter(|l| {
+                !l.fields.iter().any(|(_, name, value)| {
+                    value != name && value.start <= start && start <= value.end
+                })
+            })
+            .min_by_key(|l| l.span.end - l.span.start);
+        let Some(lit) = lit else { return false };
+        // The name being typed may have parsed as a shorthand field: it doesn't count as written.
+        let written: Vec<&str> = lit
+            .fields
+            .iter()
+            .filter(|(_, name, _)| name.start != start)
+            .map(|(n, _, _)| n.as_str())
+            .collect();
+        let mut fields = Vec::new();
+        self.field_completions(lit.target, &mut fields);
+        out.extend(
+            fields
+                .into_iter()
+                .filter(|c| !written.contains(&c.label.as_str())),
+        );
+        true
     }
 
     /// Completion after `name.` or `name::` where the parse has nothing for it (a bare `p.`).

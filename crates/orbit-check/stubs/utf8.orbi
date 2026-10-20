@@ -3,7 +3,7 @@
 /// The UTF-8 encoding of these code points.
 pub fn char(...codes: int) -> string;
 /// The code points of the characters starting between bytes `i` and `j`.
-pub fn codepoint(s: string, i: int?, j: int?, lax: bool?);
+pub fn codepoint(s: string, i: int?, j: int?, lax: bool?) -> ...int;
 /// An iterator over the characters of `s`: `for (pos, code) in utf8::codes(s)`.
 pub fn codes(s: string, lax: bool?) -> (fn(string, int) -> (int?, int), string, int);
 /// The number of characters between bytes `i` and `j`, or `nil` and the first bad byte.

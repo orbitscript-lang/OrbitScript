@@ -91,6 +91,16 @@ pub(crate) fn file_error<'s>(
     e: &io::Error,
     name: Option<&[u8]>,
 ) -> Result<Ret, Error> {
+    let (_, msg, code) = file_failure(e, name);
+    c.ret((orbit::Value::Nil, &msg[..], code))
+}
+
+/// [`file_error`]'s results, for natives on the stack API.
+#[cfg(any(feature = "io", feature = "os"))]
+pub(crate) type FileFailure = (orbit::stack::Nil, Vec<u8>, i64);
+
+#[cfg(any(feature = "io", feature = "os"))]
+pub(crate) fn file_failure(e: &io::Error, name: Option<&[u8]>) -> FileFailure {
     let mut msg = Vec::new();
     if let Some(n) = name {
         msg.extend_from_slice(n);
@@ -98,7 +108,7 @@ pub(crate) fn file_error<'s>(
     }
     msg.extend_from_slice(os_error_text(e).as_bytes());
     let code = i64::from(e.raw_os_error().unwrap_or(0));
-    c.ret((orbit::Value::Nil, &msg[..], code))
+    (orbit::stack::Nil, msg, code)
 }
 
 /// The shell command for `cmd`.
@@ -125,7 +135,17 @@ pub(crate) fn exit_status<'s>(
     c: &'s Call<'s>,
     status: std::process::ExitStatus,
 ) -> Result<Ret, Error> {
-    let (what, code): (&str, i64) = match status.code() {
+    c.ret(exit_results(status))
+}
+
+/// What `os.execute` and `close` on a pipe return for a finished command:
+/// success (`true` or `nil`), `"exit"` or `"signal"`, and the code.
+pub(crate) type ExitResults = (Option<bool>, &'static str, i64);
+
+/// [`exit_status`]'s results, for natives on the stack API.
+#[allow(dead_code, reason = "used by io and os, which are features")]
+pub(crate) fn exit_results(status: std::process::ExitStatus) -> ExitResults {
+    let (what, code): (&'static str, i64) = match status.code() {
         Some(code) => ("exit", i64::from(code)),
         None => {
             #[cfg(unix)]
@@ -136,13 +156,13 @@ pub(crate) fn exit_status<'s>(
         }
     };
     let ok = (what == "exit" && code == 0).then_some(true);
-    c.ret((ok, what, code))
+    (ok, what, code)
 }
 
 /// Flush the output `print` and `io.write` share, so a child process or
 /// the exit doesn't overtake it.
 #[allow(dead_code, reason = "used by io and os, which are features")]
-pub(crate) fn flush_stdout(c: &Call<'_>) {
+pub(crate) fn flush_stdout(c: &orbit::Scope<'_>) {
     c.with_stdout(|out| {
         let _ = out.flush();
     });

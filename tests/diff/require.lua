@@ -73,6 +73,8 @@ show(package.searchpath("x", ";"))
 show(package.searchpath("x", ""))
 show(package.searchpath("--x-", "?", "-", "X"))
 show(package.searchpath("mod_a", dir .. "?.lua") == dir .. "mod_a.lua")
+show(pcall(package.searchpath, {}, {}))
+show(pcall(package.searchpath, "x", "?", {}))
 show(pcall(package.searchpath))
 
 -- No dynamic libraries.

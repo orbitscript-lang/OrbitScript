@@ -25,11 +25,15 @@
 
 mod agent;
 #[cfg(unix)]
+mod attach;
+#[cfg(unix)]
 mod launcher;
 #[cfg(unix)]
 mod socket;
 mod wire;
 
+#[cfg(unix)]
+pub use attach::{About, Service, attach, list, serve};
 #[cfg(unix)]
 pub use launcher::adapter;
 
@@ -82,6 +86,14 @@ struct Inbox {
     user_pause: bool,
     pause: Option<PauseHandle>,
     interrupt: Option<Interrupt>,
+    /// The program runs on its own and debuggers attach to it ([`serve`]):
+    /// a session ending detaches instead of ending the program.
+    attach: bool,
+    /// An editor is connected (attach only).
+    connected: bool,
+    /// Counts the editors that attached, so the isolate's thread sees a
+    /// new one.
+    session: u64,
 }
 
 impl Link {
@@ -163,14 +175,27 @@ impl Link {
     }
 }
 
-/// Read the editor's messages until it closes the stream.
-fn read_loop(link: Arc<Link>, input: impl std::io::Read) {
+/// Read the editor's messages until it closes the stream, starting with
+/// `first` if the caller read it already.
+fn read_loop(link: Arc<Link>, input: impl std::io::Read, first: Option<Value>) {
     let mut input = BufReader::new(input);
-    while let Ok(Some(msg)) = wire::read(&mut input) {
+    let mut first = first;
+    while let Some(msg) = first
+        .take()
+        .or_else(|| wire::read(&mut input).ok().flatten())
+    {
         if msg["type"] != "request" {
             continue;
         }
+        let attach = link.inbox.lock().unwrap_or_else(|e| e.into_inner()).attach;
         match msg["command"].as_str().unwrap_or("") {
+            // Answered here, so a program busy outside script code can
+            // still be attached to.
+            "initialize" if attach => {
+                link.respond(&msg, agent::capabilities());
+                link.event("initialized", json!({}));
+            }
+            "attach" if attach => link.respond(&msg, json!({})),
             // One isolate, one thread (D10).
             "threads" => link.respond(&msg, json!({"threads": [{"id": 1, "name": "main"}]})),
             "pause" => {
@@ -187,9 +212,16 @@ fn read_loop(link: Arc<Link>, input: impl std::io::Read) {
             command => {
                 let mut inbox = link.inbox.lock().unwrap_or_else(|e| e.into_inner());
                 if inbox.running {
-                    if matches!(command, "disconnect" | "terminate")
-                        && let Some(i) = &inbox.interrupt
-                    {
+                    // Ending a session ends a launched program; an
+                    // attached one only when the editor asks.
+                    let ends_program = match command {
+                        "terminate" => true,
+                        "disconnect" => {
+                            !inbox.attach || msg["arguments"]["terminateDebuggee"] == true
+                        }
+                        _ => false,
+                    };
+                    if ends_program && let Some(i) = &inbox.interrupt {
                         i.request();
                     } else if let Some(p) = &inbox.pause {
                         p.request();
@@ -202,10 +234,16 @@ fn read_loop(link: Arc<Link>, input: impl std::io::Read) {
     }
     let mut inbox = link.inbox.lock().unwrap_or_else(|e| e.into_inner());
     inbox.closed = true;
-    if inbox.running
-        && let Some(i) = &inbox.interrupt
-    {
-        i.request();
+    inbox.connected = false;
+    if inbox.running {
+        if inbox.attach {
+            // The program clears the session's breakpoints at the stop.
+            if let Some(p) = &inbox.pause {
+                p.request();
+            }
+        } else if let Some(i) = &inbox.interrupt {
+            i.request();
+        }
     }
     link.arrived.notify_all();
 }
@@ -240,7 +278,7 @@ impl Server {
         let reader = Arc::clone(&link);
         std::thread::Builder::new()
             .name("orbit-dap reader".into())
-            .spawn(move || read_loop(reader, input))
+            .spawn(move || read_loop(reader, input, None))
             .expect("start the DAP reader thread");
         let state = std::rc::Rc::new(std::cell::RefCell::new(agent::State::new(Arc::clone(
             &link,

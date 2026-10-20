@@ -1,3 +1,4 @@
+//! orbit-check: off
 // Every OrbitScript example from planning/orbitscript-syntax/proposal.md, in order.
 // `{ ... }` placeholders there are filled with small bodies here. Parsed, not run.
 

@@ -23,8 +23,11 @@
 
 use std::fmt::Write as _;
 
-use orbit::stack::{Native, Raised, Return, Stack, StackResult, Status, Type, upvalue_index};
-use orbit::{Chunk, Language};
+use orbit::stack::{
+    Any, Native, Raised, Return, Stack, StackResult, Status, TableArg, Type, function,
+    upvalue_index,
+};
+use orbit::{Chunk, Language, native};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
 /// How deep values nest, both ways: `serde_json`'s own limit for decoding.
@@ -45,125 +48,83 @@ const UPVALUES: i32 = 5;
 const CASTS_SOURCE: &[u8] =
     b"return (|v| v as int, |v| v as float, |v| v as string, |v| v as bool);";
 
-macro_rules! natives {
-    ($($native:ident $name:literal $f:ident;)*) => {$(
-        struct $native;
-
-        impl Native for $native {
-            const NAME: &'static str = $name;
-
-            fn call(s: &mut Stack<'_>) -> StackResult<Return> {
-                $f(s)
-            }
-        }
-    )*};
-}
-
-natives! {
-    Encode "json.encode" encode;
-    Decode "json.decode" decode;
-    MarkObject "json.object" mark_object;
-    MarkArray "json.array" mark_array;
-    Number "json.number" number;
-    ToInt "json.int" to_int;
-    ToFloat "json.float" to_float;
-    ToString "json.string" to_string;
-    ToBool "json.bool" to_bool;
-    NumberToString "json.number.__tostring" number_to_string;
-    NullToString "json.null.__tostring" null_to_string;
-    NullNewIndex "json.null.__newindex" null_new_index;
-}
-
 /// Push the module's table.
 pub(crate) fn open(s: &mut Stack<'_>) -> StackResult<()> {
     // The shared upvalues: null, then the object and array markers.
     s.create_table(0, 0);
     s.create_table(0, 3);
-    s.push_bytes(b"null");
-    s.raw_set_field(-2, b"__jsontype")?;
-    s.push_native::<NullToString>();
-    s.raw_set_field(-2, b"__tostring")?;
-    s.push_native::<NullNewIndex>();
-    s.raw_set_field(-2, b"__newindex")?;
+    s.raw_put(-1, b"__jsontype", "null")?;
+    s.raw_put(-1, b"__tostring", function::<null_to_string>())?;
+    s.raw_put(-1, b"__newindex", function::<null_new_index>())?;
     s.set_metatable(-2)?;
-    for shape in [&b"object"[..], b"array"] {
+    for shape in ["object", "array"] {
         s.create_table(0, 1);
-        s.push_bytes(shape);
-        s.raw_set_field(-2, b"__jsontype")?;
+        s.raw_put(-1, b"__jsontype", shape)?;
     }
     s.create_table(0, 2);
-    s.push_bytes(b"number");
-    s.raw_set_field(-2, b"__jsontype")?;
-    s.push_native::<NumberToString>();
-    s.raw_set_field(-2, b"__tostring")?;
+    s.raw_put(-1, b"__jsontype", "number")?;
+    s.raw_put(-1, b"__tostring", function::<number_to_string>())?;
     // Filled on first use: compiling them costs more than the rest of the
     // module's setup.
     s.create_table(4, 0);
     let ups = s.top() - (UPVALUES - 1);
     s.create_table(0, 6);
     let lib = s.top();
-    s.push_copy(ups);
-    s.raw_set_field(lib, b"null")?;
-    push_closure::<Encode>(s, ups)?;
-    s.raw_set_field(lib, b"encode")?;
-    push_closure::<Decode>(s, ups)?;
-    s.raw_set_field(lib, b"decode")?;
-    push_closure::<MarkObject>(s, ups)?;
-    s.raw_set_field(lib, b"object")?;
-    push_closure::<MarkArray>(s, ups)?;
-    s.raw_set_field(lib, b"array")?;
-    push_closure::<Number>(s, ups)?;
-    s.raw_set_field(lib, b"number")?;
-    push_closure::<ToInt>(s, ups)?;
-    s.raw_set_field(lib, b"int")?;
-    push_closure::<ToFloat>(s, ups)?;
-    s.raw_set_field(lib, b"float")?;
-    push_closure::<ToString>(s, ups)?;
-    s.raw_set_field(lib, b"string")?;
-    push_closure::<ToBool>(s, ups)?;
-    s.raw_set_field(lib, b"bool")?;
+    s.raw_put(lib, b"null", Any(ups))?;
+    put_closure::<encode>(s, lib, b"encode", ups)?;
+    put_closure::<decode>(s, lib, b"decode", ups)?;
+    put_closure::<mark_object>(s, lib, b"object", ups)?;
+    put_closure::<mark_array>(s, lib, b"array", ups)?;
+    put_closure::<number>(s, lib, b"number", ups)?;
+    put_closure::<to_int>(s, lib, b"int", ups)?;
+    put_closure::<to_float>(s, lib, b"float", ups)?;
+    put_closure::<to_string>(s, lib, b"string", ups)?;
+    put_closure::<to_bool>(s, lib, b"bool", ups)?;
     // Leave only the module.
     s.rotate(ups, 1)?;
     s.set_top(ups)
 }
 
-/// Push `N` as a closure over the upvalues starting at `ups`.
-fn push_closure<N: Native>(s: &mut Stack<'_>, ups: i32) -> StackResult<()> {
+/// `lib[name] =` native `N` as a closure over the upvalues starting at `ups`.
+fn put_closure<N: Native>(s: &mut Stack<'_>, lib: i32, name: &[u8], ups: i32) -> StackResult<()> {
     for i in 0..UPVALUES {
         s.push_copy(ups + i);
     }
-    s.push_native_closure::<N>(UPVALUES as usize, 0)
+    s.push_native_closure::<N>(UPVALUES as usize, 0)?;
+    s.raw_set_field(lib, name)
 }
 
-fn null_to_string(s: &mut Stack<'_>) -> StackResult<Return> {
-    s.push_bytes(b"null");
-    Ok(Return::values(1))
+#[native(name = "json.null.__tostring")]
+fn null_to_string() -> &'static str {
+    "null"
 }
 
-fn null_new_index(s: &mut Stack<'_>) -> StackResult<Return> {
-    Err(s.error("json.null is read-only"))
+#[native(name = "json.null.__newindex")]
+fn null_new_index() -> Result<(), &'static str> {
+    Err("json.null is read-only")
 }
 
-fn mark_object(s: &mut Stack<'_>) -> StackResult<Return> {
-    mark(s, OBJECT_META)
+#[native(name = "json.object")]
+fn mark_object(s: &mut Stack<'_>, t: Option<TableArg>) -> StackResult<Return> {
+    mark(s, t, OBJECT_META)
 }
 
 /// `json.array([t [, n]])`: with `n`, the array has length `n` and its
 /// missing elements are written as `null`.
-fn mark_array(s: &mut Stack<'_>) -> StackResult<Return> {
-    if matches!(s.type_at(2), Type::None | Type::Nil) {
-        return mark(s, ARRAY_META);
-    }
-    let n = s.check_integer(2)?;
+#[native(name = "json.array")]
+fn mark_array(s: &mut Stack<'_>, t: Option<TableArg>, n: Option<i64>) -> StackResult<Return> {
+    let Some(n) = n else {
+        return mark(s, t, ARRAY_META);
+    };
     if n < 0 {
         return Err(s.arg_error(2, "length must not be negative"));
     }
-    match s.type_at(1) {
-        Type::None | Type::Nil => {
+    match t {
+        None => {
             s.set_top(0)?;
             s.create_table(0, 0);
         }
-        Type::Table => {
+        Some(_) => {
             s.set_top(1)?;
             if s.get_metatable(1) {
                 s.raw_get_field(-1, b"__jsontype")?;
@@ -176,7 +137,6 @@ fn mark_array(s: &mut Stack<'_>) -> StackResult<Return> {
                 s.set_top(1)?;
             }
         }
-        _ => return Err(s.type_error(1, "table")),
     }
     mark_length(s, n)?;
     Ok(Return::values(1))
@@ -194,8 +154,8 @@ fn mark_length(s: &mut Stack<'_>, n: i64) -> StackResult<()> {
 
 /// `json.number(numeral)`: a number written exactly as `numeral`, for values
 /// a Lua number can't hold (20-digit IDs, decimal amounts).
-fn number(s: &mut Stack<'_>) -> StackResult<Return> {
-    let text = s.check_string(1)?.to_vec();
+#[native(name = "json.number")]
+fn number(s: &mut Stack<'_>, text: Vec<u8>) -> StackResult<Return> {
     if !is_numeral(&text) {
         return Err(s.arg_error(1, "not a JSON number"));
     }
@@ -214,9 +174,6 @@ fn number(s: &mut Stack<'_>) -> StackResult<Return> {
 /// `json.int(v)` .. `json.bool(v)`: `v as int` .. `v as bool`, with an
 /// error naming the argument instead of a line of the casts' chunk.
 fn cast(s: &mut Stack<'_>, which: i64) -> StackResult<Return> {
-    if s.type_at(1) == Type::None {
-        return Err(s.arg_error(1, "value expected"));
-    }
     s.set_top(1)?;
     s.raw_get_index(CASTS, which)?;
     if s.type_at(-1) == Type::Nil {
@@ -243,22 +200,27 @@ fn cast(s: &mut Stack<'_>, which: i64) -> StackResult<Return> {
     Err(s.arg_error(1, &message))
 }
 
-fn to_int(s: &mut Stack<'_>) -> StackResult<Return> {
+#[native(name = "json.int")]
+fn to_int(s: &mut Stack<'_>, _: Any) -> StackResult<Return> {
     cast(s, 1)
 }
 
-fn to_float(s: &mut Stack<'_>) -> StackResult<Return> {
+#[native(name = "json.float")]
+fn to_float(s: &mut Stack<'_>, _: Any) -> StackResult<Return> {
     cast(s, 2)
 }
 
-fn to_string(s: &mut Stack<'_>) -> StackResult<Return> {
+#[native(name = "json.string")]
+fn to_string(s: &mut Stack<'_>, _: Any) -> StackResult<Return> {
     cast(s, 3)
 }
 
-fn to_bool(s: &mut Stack<'_>) -> StackResult<Return> {
+#[native(name = "json.bool")]
+fn to_bool(s: &mut Stack<'_>, _: Any) -> StackResult<Return> {
     cast(s, 4)
 }
 
+#[native(name = "json.number.__tostring")]
 fn number_to_string(s: &mut Stack<'_>) -> StackResult<Return> {
     s.raw_get_index(1, 1)?;
     Ok(Return::values(1))
@@ -302,14 +264,14 @@ fn is_numeral(text: &[u8]) -> bool {
     i == text.len()
 }
 
-/// Give the table argument (or a new table) the marker metatable `meta`.
-fn mark(s: &mut Stack<'_>, meta: i32) -> StackResult<Return> {
-    match s.type_at(1) {
-        Type::None | Type::Nil => {
+/// Give the table argument `t` (or a new table) the marker metatable `meta`.
+fn mark(s: &mut Stack<'_>, t: Option<TableArg>, meta: i32) -> StackResult<Return> {
+    match t {
+        None => {
             s.set_top(0)?;
             s.create_table(0, 0);
         }
-        Type::Table => {
+        Some(_) => {
             s.set_top(1)?;
             if s.get_metatable(1) {
                 if s.raw_equal(-1, meta) {
@@ -322,7 +284,6 @@ fn mark(s: &mut Stack<'_>, meta: i32) -> StackResult<Return> {
                 ));
             }
         }
-        _ => return Err(s.type_error(1, "table")),
     }
     s.push_copy(meta);
     s.set_metatable(1)?;
@@ -331,32 +292,23 @@ fn mark(s: &mut Stack<'_>, meta: i32) -> StackResult<Return> {
 
 // ---- encoding -------------------------------------------------------------------------------
 
-fn encode(s: &mut Stack<'_>) -> StackResult<Return> {
-    if s.type_at(1) == Type::None {
-        return Err(s.arg_error(1, "value expected"));
-    }
+#[native(name = "json.encode")]
+fn encode(s: &mut Stack<'_>, _: Any, options: Option<TableArg>) -> StackResult<Vec<u8>> {
     let mut e = Encoder {
         out: Vec::new(),
         pretty: false,
         sort_keys: false,
         open: Vec::new(),
     };
-    match s.type_at(2) {
-        Type::None | Type::Nil => {}
-        Type::Table => {
-            s.raw_get_field(2, b"pretty")?;
-            e.pretty = s.to_boolean(-1);
-            s.raw_get_field(2, b"sort_keys")?;
-            e.sort_keys = s.to_boolean(-1);
-        }
-        _ => return Err(s.type_error(2, "table")),
+    if let Some(TableArg(o)) = options {
+        s.raw_get_field(o, b"pretty")?;
+        e.pretty = s.to_boolean(-1);
+        s.raw_get_field(o, b"sort_keys")?;
+        e.sort_keys = s.to_boolean(-1);
     }
     s.set_top(1)?;
     match e.value(s, 1) {
-        Ok(()) => {
-            s.push_bytes(&e.out);
-            Ok(Return::values(1))
-        }
+        Ok(()) => Ok(e.out),
         Err(Fail::Raised(r)) => Err(r),
         Err(Fail::Bad { message, path }) => {
             let mut at = String::new();
@@ -773,15 +725,14 @@ fn write_string(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Fail> {
 
 // ---- decoding -------------------------------------------------------------------------------
 
-fn decode(s: &mut Stack<'_>) -> StackResult<Return> {
-    let text = s.check_string(1)?.to_vec();
-    let keep_null = match s.type_at(2) {
-        Type::None | Type::Nil => true,
-        Type::Table => {
-            s.raw_get_field(2, b"keep_null")?;
+#[native(name = "json.decode")]
+fn decode(s: &mut Stack<'_>, text: Vec<u8>, options: Option<TableArg>) -> StackResult<Return> {
+    let keep_null = match options {
+        None => true,
+        Some(TableArg(o)) => {
+            s.raw_get_field(o, b"keep_null")?;
             s.type_at(-1) == Type::Nil || s.to_boolean(-1)
         }
-        _ => return Err(s.type_error(2, "table")),
     };
     s.set_top(1)?;
     let mut raised = None;

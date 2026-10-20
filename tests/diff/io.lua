@@ -5,6 +5,7 @@ print(pcall(io.input, "non-existent-file"))
 print(io.close(io.stdin), io.stdout:close())
 print((pcall(io.stdin.close)))
 print(type(io.input()), io.type(io.output()), io.type(8), getmetatable(io.input()).__name)
+print(pcall(io.type), io.type(nil), io.type({}))
 print(io.open('xuxu_nao_existe'))
 print(io.open('/a/b/c/d', 'w'))
 for _, m in ipairs{"rw", "rb+", "r+bk", "", "+", "b"} do print(pcall(io.open, file, m)) end

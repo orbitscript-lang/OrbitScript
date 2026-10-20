@@ -100,6 +100,11 @@ fn repository_programs_check() {
         all.extend(found);
     }
     assert_eq!(all, known, "findings in examples/");
+    // The front end's sample programs (`proposal.orb` opts out with `//! orbit-check: off`).
+    for dir in ["crates/orbit-orb-syntax/tests/programs", "bench/orb"] {
+        let (_, found) = check_dir(&root().join(dir));
+        assert!(found.is_empty(), "findings in {dir}: {found:?}");
+    }
     let (_, found) = check_dir(&root().join("crates/orbit-runtime/src/stdlib/builtins"));
     // The built-ins take their intrinsics from a host module that isn't a file.
     assert!(
@@ -447,6 +452,33 @@ fn completion_after_a_bare_separator() {
         math.contains(&"sqrt".to_string()) && math.contains(&"pi".to_string()),
         "{math:?}"
     );
+}
+
+#[test]
+fn completion_of_missing_struct_fields() {
+    let labels = |src: &str, needle: &str| {
+        let mut ws = Workspace::new(Config::default(), Box::new(Memory(Vec::new())));
+        let f = ws.set_source(Path::new("/m/lit.orb"), src.as_bytes().to_vec());
+        let at = (src.find(needle).unwrap() + needle.len()) as u32;
+        let c = ws.completions_at(f, at);
+        c.items.into_iter().map(|c| c.label).collect::<Vec<_>>()
+    };
+    let decls = "struct V { x: float, y: float, z: float }\n\
+                 enum Shape { Circle { r: float }, Rect { w: float, h: float } }\n";
+    // After `{` or `,`: the fields not written yet, in declaration order.
+    let src = decls.to_string() + "let a = V { x: 1.0, };\nlet b = V { };\n";
+    assert_eq!(labels(&src, "x: 1.0, "), ["y", "z"]);
+    assert_eq!(labels(&src, "b = V { "), ["x", "y", "z"]);
+    // A name being typed (parsed as a shorthand field) still counts as missing.
+    let src = decls.to_string() + "let a = V { y: 1.0, z };\n";
+    assert_eq!(labels(&src, "y: 1.0, z"), ["x", "z"]);
+    // Variants with fields, and a literal missing its `;`.
+    let src = decls.to_string() + "let s = Shape::Rect { w: 1.0, }";
+    assert_eq!(labels(&src, "w: 1.0, "), ["h"]);
+    // Inside a value, completion is the usual names in scope.
+    let src = decls.to_string() + "let n = 1.0;\nlet a = V { x: n, y: math::max(n, ) };\n";
+    let inner = labels(&src, "max(n, ");
+    assert!(inner.contains(&"n".to_string()), "{inner:?}");
 }
 
 /// The language server shows the checker's errors for `.orb` files, so an `as` target the

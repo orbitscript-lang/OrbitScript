@@ -2,9 +2,10 @@
 
 use std::time::Instant;
 
-use orbit::{Call, Error, Ret, Scope, Table, Value};
+use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, TableArg, Type};
+use orbit::{Call, Error, Ret, Scope, Table, native};
 
-use crate::sys::{exit_status, file_error, flush_stdout, os_bytes, os_path, shell};
+use crate::sys::{ExitResults, FileFailure, exit_results, file_failure, os_bytes, os_path, shell};
 use crate::time::{self, Tm};
 use crate::tz;
 
@@ -15,75 +16,93 @@ fn clock<'s>(c: &'s Call<'s>, start: Instant) -> Result<Ret, Error> {
     c.ret(start.elapsed().as_secs_f64())
 }
 
-fn getenv<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let name: Vec<u8> = c.check(0)?;
-    match std::env::var_os(os_path(&name)) {
-        Some(v) => c.ret(&os_bytes(&v)[..]),
-        None => c.ret(Value::Nil),
-    }
+#[native(name = "os.getenv")]
+fn getenv(name: &[u8]) -> Option<Vec<u8>> {
+    std::env::var_os(os_path(name)).map(|v| os_bytes(&v))
 }
 
-fn remove<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let name: Vec<u8> = c.check(0)?;
-    let path = os_path(&name);
+#[native(name = "os.remove")]
+fn remove(name: &[u8]) -> Either<bool, FileFailure> {
+    let path = os_path(name);
     // C's `remove` deletes files and empty directories.
     let r = match std::fs::symlink_metadata(&path) {
         Ok(m) if m.is_dir() => std::fs::remove_dir(&path),
         _ => std::fs::remove_file(&path),
     };
     match r {
-        Ok(()) => c.ret(true),
-        Err(e) => file_error(c, &e, Some(&name)),
+        Ok(()) => Either::Left(true),
+        Err(e) => Either::Right(file_failure(&e, Some(name))),
     }
 }
 
-fn rename<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let from: Vec<u8> = c.check(0)?;
-    let to: Vec<u8> = c.check(1)?;
-    match std::fs::rename(os_path(&from), os_path(&to)) {
-        Ok(()) => c.ret(true),
+#[native(name = "os.rename")]
+fn rename(from: &[u8], to: &[u8]) -> Either<bool, FileFailure> {
+    match std::fs::rename(os_path(from), os_path(to)) {
+        Ok(()) => Either::Left(true),
         // lua5.5 names no file in this message.
-        Err(e) => file_error(c, &e, None),
+        Err(e) => Either::Right(file_failure(&e, None)),
     }
 }
 
-fn tmpname<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
+#[native(name = "os.tmpname")]
+fn tmpname() -> Result<Vec<u8>, &'static str> {
     match crate::sys::temp_file() {
-        Ok((path, _)) => c.ret(&os_bytes(path.as_os_str())[..]),
-        Err(_) => Err(c.error("unable to generate a unique filename")),
+        Ok((path, _)) => Ok(os_bytes(path.as_os_str())),
+        Err(_) => Err("unable to generate a unique filename"),
     }
 }
 
-fn execute<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    if c.arg(0).is_nil() {
-        // Is a shell available?
-        let has_shell = cfg!(windows) || std::path::Path::new("/bin/sh").exists();
-        return c.ret(has_shell);
-    }
-    let cmd: Vec<u8> = c.check(0)?;
-    flush_stdout(c);
-    match shell(os_path(&cmd).as_os_str()).status() {
-        Ok(status) => exit_status(c, status),
-        Err(e) => file_error(c, &e, None),
-    }
-}
-
-fn exit<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let code = match c.arg(0) {
-        Value::Nil | Value::Bool(true) => 0,
-        Value::Bool(false) => 1,
-        _ => c.check::<i64>(0)? as i32,
+/// `os.execute(cmd)`: the shell's exit status, or `nil, message, code`
+/// when it can't run; without `cmd`, whether there is a shell.
+#[native(name = "os.execute")]
+fn execute(
+    s: &mut Stack<'_>,
+    cmd: Option<Vec<u8>>,
+) -> Either<bool, Either<ExitResults, FileFailure>> {
+    let Some(cmd) = cmd else {
+        return Either::Left(cfg!(windows) || std::path::Path::new("/bin/sh").exists());
     };
-    c.exit(code, c.arg(1).truthy())
+    // The child's output mustn't overtake ours.
+    s.with_stdout(|out| {
+        let _ = out.flush();
+    });
+    Either::Right(match shell(os_path(&cmd).as_os_str()).status() {
+        Ok(status) => Either::Left(exit_results(status)),
+        Err(e) => Either::Right(file_failure(&e, None)),
+    })
 }
 
-fn difftime<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let t2: i64 = c.check(0)?;
-    let t1: i64 = c.check(1)?;
-    c.ret(t2 as f64 - t1 as f64)
+/// `os.exit`'s status: `true` or absent is success, `false` failure.
+struct ExitCode(i32);
+
+impl Arg<'_> for ExitCode {
+    type Checked = ExitCode;
+
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<ExitCode> {
+        Ok(ExitCode(match s.type_at(i) {
+            Type::None | Type::Nil => 0,
+            Type::Boolean => i32::from(!s.to_boolean(i)),
+            _ => s.check_integer(i)? as i32,
+        }))
+    }
+
+    fn get(_: &Stack<'_>, _: i32, code: ExitCode) -> ExitCode {
+        code
+    }
 }
 
-fn setlocale<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
+#[native(name = "os.exit")]
+fn exit(code: ExitCode, close: bool) -> Return {
+    Return::exit(code.0, close)
+}
+
+#[native(name = "os.difftime")]
+fn difftime(t2: i64, t1: i64) -> f64 {
+    t2 as f64 - t1 as f64
+}
+
+#[native(name = "os.setlocale")]
+fn setlocale(locale: Option<&[u8]>, category: Option<&[u8]>) -> Result<Option<&'static str>, Fail> {
     const CATEGORIES: [&[u8]; 6] = [
         b"all",
         b"collate",
@@ -92,22 +111,17 @@ fn setlocale<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
         b"numeric",
         b"time",
     ];
-    if !c.arg(1).is_nil() {
-        let cat: Vec<u8> = c.check(1)?;
-        if !CATEGORIES.contains(&&cat[..]) {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(&cat));
-            return Err(c.arg_error(1, msg));
-        }
+    if let Some(cat) = category
+        && !CATEGORIES.contains(&cat)
+    {
+        let msg = format!("invalid option '{}'", String::from_utf8_lossy(cat));
+        return Err(Fail::arg(2, msg));
     }
     // Only the C locale exists: querying or asking for it (by any of its
     // names) gives "C", anything else fails.
-    let ok = match c.arg(0) {
-        Value::Nil => true,
-        _ => matches!(&c.check::<Vec<u8>>(0)?[..], b"" | b"C" | b"POSIX"),
-    };
-    if ok { c.ret("C") } else { c.ret(Value::Nil) }
+    let ok = matches!(locale, None | Some(b"" | b"C" | b"POSIX"));
+    Ok(ok.then_some("C"))
 }
-
 /// The current time in seconds since the epoch.
 fn now() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -121,15 +135,14 @@ fn year_fits(year: i64) -> bool {
     i32::try_from(year - 1900).is_ok()
 }
 
-fn date<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let fmt = c
-        .opt::<Option<Vec<u8>>>(0, None)?
-        .unwrap_or_else(|| b"%c".to_vec());
-    let t = if c.arg(1).is_nil() {
-        now()
-    } else {
-        c.check::<i64>(1)?
-    };
+#[native(name = "os.date")]
+fn date(
+    s: &mut Stack<'_>,
+    fmt: Option<Vec<u8>>,
+    t: Option<i64>,
+) -> Result<Either<Return, Vec<u8>>, Fail> {
+    let fmt = fmt.unwrap_or_else(|| b"%c".to_vec());
+    let t = t.unwrap_or_else(now);
     let (utc, fmt) = match fmt.strip_prefix(b"!") {
         Some(rest) => (true, rest),
         None => (false, &fmt[..]),
@@ -141,106 +154,92 @@ fn date<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
         time::breakdown(t + l.offset, l.offset, l.isdst, &l.zone)
     };
     if !year_fits(tm.year) {
-        return Err(c.error("date result cannot be represented in this installation"));
+        return Err("date result cannot be represented in this installation".into());
     }
     if fmt == b"*t" {
-        let t = c.create_table();
-        set_fields(t, &tm)?;
-        return c.ret(t);
+        s.create_table(0, 9);
+        set_fields(s, -1, &tm)?;
+        return Ok(Either::Left(Return::values(1)));
     }
     match time::strftime(fmt, &tm) {
-        Ok(out) => c.ret(&out[..]),
-        Err(bad) => {
-            let msg = format!(
+        Ok(out) => Ok(Either::Right(out)),
+        Err(bad) => Err(Fail::arg(
+            1,
+            format!(
                 "invalid conversion specifier '{}'",
                 String::from_utf8_lossy(&bad)
-            );
-            Err(c.arg_error(0, msg))
-        }
+            ),
+        )),
     }
 }
 
-/// Fill a date table (`os.date("*t")`, and `os.time` normalizing its
-/// argument).
-fn set_fields(t: Table<'_>, tm: &Tm) -> Result<(), Error> {
-    t.raw_set("year", tm.year)?;
-    t.raw_set("month", tm.month)?;
-    t.raw_set("day", tm.day)?;
-    t.raw_set("hour", tm.hour)?;
-    t.raw_set("min", tm.min)?;
-    t.raw_set("sec", tm.sec)?;
-    t.raw_set("yday", tm.yday)?;
-    t.raw_set("wday", tm.wday + 1)?;
-    t.raw_set("isdst", tm.isdst)
+/// Fill the date table at `t` (`os.date("*t")`, and `os.time` normalizing
+/// its argument).
+fn set_fields(s: &mut Stack<'_>, t: i32, tm: &Tm) -> StackResult<()> {
+    s.raw_put(t, b"year", tm.year)?;
+    s.raw_put(t, b"month", tm.month)?;
+    s.raw_put(t, b"day", tm.day)?;
+    s.raw_put(t, b"hour", tm.hour)?;
+    s.raw_put(t, b"min", tm.min)?;
+    s.raw_put(t, b"sec", tm.sec)?;
+    s.raw_put(t, b"yday", tm.yday)?;
+    s.raw_put(t, b"wday", tm.wday + 1)?;
+    s.raw_put(t, b"isdst", tm.isdst)
 }
 
-/// A float with an exact integer value, as an integer.
-fn float_to_int(f: f64) -> Option<i64> {
-    // 2^63 as a float: the first value past i64's range.
-    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
-    (f.fract() == 0.0 && (-LIMIT..LIMIT).contains(&f)).then_some(f as i64)
-}
-
-/// A date-table field as an integer: `default` when absent (an error when
-/// there is none), and it must fit a C `int` after subtracting `delta`,
-/// as `struct tm` stores it.
-fn get_field<'s>(
-    c: &'s Call<'s>,
-    t: Table<'s>,
+/// A field of the date table at `t` as an integer: `default` when absent
+/// (an error when there is none), and it must fit a C `int` after
+/// subtracting `delta`, as `struct tm` stores it.
+fn get_field(
+    s: &mut Stack<'_>,
+    t: i32,
     name: &str,
     default: Option<i64>,
     delta: i64,
-) -> Result<i64, Error> {
-    let n = match t.raw_get::<Value>(name)? {
-        Value::Nil => match default {
-            Some(d) => return Ok(d),
-            None => return Err(c.error(format!("field '{name}' missing in date table"))),
-        },
-        Value::Int(n) => Some(n),
-        Value::Float(f) => float_to_int(f),
-        Value::Str(s) => match c.parse_number(&s.to_bytes()) {
-            Some(Value::Int(n)) => Some(n),
-            Some(Value::Float(f)) => float_to_int(f),
-            _ => None,
-        },
-        _ => None,
+) -> Result<i64, Fail> {
+    let top = s.top();
+    let n = match s.raw_get_field(t, name.as_bytes())? {
+        Type::Nil => None,
+        // Integral floats and numeric strings convert, as `tonumber` reads them.
+        Type::Number | Type::String => Some(s.to_integer(-1)),
+        _ => Some(None),
     };
-    let Some(n) = n else {
-        return Err(c.error(format!("field '{name}' is not an integer")));
-    };
-    if n.checked_sub(delta)
-        .and_then(|d| i32::try_from(d).ok())
-        .is_none()
-    {
-        return Err(c.error(format!("field '{name}' is out-of-bound")));
+    s.set_top(top)?;
+    match n {
+        None => default.ok_or_else(|| format!("field '{name}' missing in date table").into()),
+        Some(None) => Err(format!("field '{name}' is not an integer").into()),
+        Some(Some(n)) => match n.checked_sub(delta).map(i32::try_from) {
+            Some(Ok(_)) => Ok(n),
+            _ => Err(format!("field '{name}' is out-of-bound").into()),
+        },
     }
-    Ok(n)
 }
 
-fn time_<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    if c.arg(0).is_nil() {
-        return c.ret(now());
-    }
-    let t: Table = c.check(0)?;
-    let year = get_field(c, t, "year", None, 1900)?;
-    let month = get_field(c, t, "month", None, 1)?;
-    let day = get_field(c, t, "day", None, 0)?;
-    let hour = get_field(c, t, "hour", Some(12), 0)?;
-    let min = get_field(c, t, "min", Some(0), 0)?;
-    let sec = get_field(c, t, "sec", Some(0), 0)?;
-    let isdst = match t.raw_get::<Value>("isdst")? {
-        Value::Nil => None,
-        v => Some(v.truthy()),
+#[native(name = "os.time")]
+fn time_(s: &mut Stack<'_>, t: Option<TableArg>) -> Result<i64, Fail> {
+    let Some(TableArg(t)) = t else {
+        return Ok(now());
     };
+    let year = get_field(s, t, "year", None, 1900)?;
+    let month = get_field(s, t, "month", None, 1)?;
+    let day = get_field(s, t, "day", None, 0)?;
+    let hour = get_field(s, t, "hour", Some(12), 0)?;
+    let min = get_field(s, t, "min", Some(0), 0)?;
+    let sec = get_field(s, t, "sec", Some(0), 0)?;
+    let isdst = match s.raw_get_field(t, b"isdst")? {
+        Type::Nil => None,
+        _ => Some(s.to_boolean(-1)),
+    };
+    s.set_top(t)?;
     let local = time::local_seconds(year, month, day, hour, min, sec);
     let utc = tz::from_local(local, isdst);
     let l = tz::at(utc);
     let tm = time::breakdown(utc + l.offset, l.offset, l.isdst, &l.zone);
     if !year_fits(tm.year) {
-        return Err(c.error("time result cannot be represented in this installation"));
+        return Err("time result cannot be represented in this installation".into());
     }
-    set_fields(t, &tm)?;
-    c.ret(utc)
+    set_fields(s, t, &tm)?;
+    Ok(utc)
 }
 
 /// Open the library. Returns the `os` table.
@@ -248,15 +247,15 @@ pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
     let os = s.create_table();
     let start = Instant::now();
     os.raw_set("clock", s.create_function(move |c| clock(c, start)))?;
-    os.raw_set("date", s.create_function(date))?;
-    os.raw_set("difftime", s.create_function(difftime))?;
-    os.raw_set("execute", s.create_function(execute))?;
-    os.raw_set("exit", s.create_function(exit))?;
-    os.raw_set("getenv", s.create_function(getenv))?;
-    os.raw_set("remove", s.create_function(remove))?;
-    os.raw_set("rename", s.create_function(rename))?;
-    os.raw_set("setlocale", s.create_function(setlocale))?;
-    os.raw_set("time", s.create_function(time_))?;
-    os.raw_set("tmpname", s.create_function(tmpname))?;
+    os.raw_set("date", s.create_native::<date>())?;
+    os.raw_set("difftime", s.create_native::<difftime>())?;
+    os.raw_set("execute", s.create_native::<execute>())?;
+    os.raw_set("exit", s.create_native::<exit>())?;
+    os.raw_set("getenv", s.create_native::<getenv>())?;
+    os.raw_set("remove", s.create_native::<remove>())?;
+    os.raw_set("rename", s.create_native::<rename>())?;
+    os.raw_set("setlocale", s.create_native::<setlocale>())?;
+    os.raw_set("time", s.create_native::<time_>())?;
+    os.raw_set("tmpname", s.create_native::<tmpname>())?;
     Ok(os)
 }

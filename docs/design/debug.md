@@ -254,7 +254,36 @@ sequenceDiagram
 - **Scopes**: Locals, Upvalues and Globals; tables expand, with their metatable as `(metatable)`. `evaluate` reads names and dotted fields only.
 - `os.exit` sends `terminated` from a `before_exit` hook.
 
-Cost: `dap` adds 202.5 KiB to the release `orbit` (2,252,064 → 2,459,416 bytes, cloud x86_64, no PGO), of which the engine is 12.3 KiB and `orbit-dap` the rest; `serde_json` is already linked for `std.json`.
+### Attaching to a running program
+
+`orbit_dap::serve(&mut isolate, About { program, args })` makes an isolate debuggable later: it installs the agent (with no breakpoints and no step the engine's `watch` stays off, so the program runs as it would undebugged) and gives a `Service` that is `Send` and `Clone`. `Service::start`, from any thread, opens `<pid>-<nonce>.sock` in the per-user directory (D11), first removing sockets whose program has died. `Service::stop` removes it.
+
+```mermaid
+sequenceDiagram
+    participant E as Editor
+    participant R as orbit --debug-attach pid
+    participant P as Program (listener and reader threads)
+    participant H as Isolate's thread
+    R->>P: SIGUSR1 (an orbit CLI not yet serving)
+    P->>P: Service::start, open the socket
+    R->>P: connect, relay the editor's bytes both ways
+    E->>P: initialize, attach (answered by the reader)
+    E->>P: setBreakpoints, configurationDone
+    P->>H: pause (service stop), breakpoints set
+    H-->>E: stopped, stackTrace, ...
+    E->>P: disconnect
+    P->>H: breakpoints and error stops cleared, program runs on
+```
+
+- **A connection's first message decides what it is.** `describe` gets one answer (`version`, `pid`, `program`, `args`, `startTime`, `runtime`, `isolates`, `attached`) and the connection closes. Anything else starts a DAP session; while one is connected, others are refused.
+- **The reader answers `initialize` and `attach` itself**, so an editor can attach while the program is outside script code; requests that need the isolate wait for its next service stop.
+- **Sessions come and go; the program stays.** `disconnect` (unless `terminateDebuggee`) or an editor that vanishes clears that session's breakpoints and error stops at the next stop, and the program runs on. `terminate` or `terminateDebuggee` interrupts it.
+- **The CLI** serves every normal run: `--debug-listen` starts the socket at launch and `SIGUSR1` starts it later (a `signal-hook` thread), each printing `orbit: debugger listening on <path>` to stderr; `--no-debug-signal` installs no handler. The socket is removed at exit, `os.exit` included.
+- **`orbit --debug-attach <pid>`** is the editor's adapter: it finds the program's socket (checking its `describe` pid), signals an `orbit` program that isn't serving yet, and relays bytes between its stdio and the socket. It only signals a process whose executable is `orbit` and whose `SigCgt` mask shows it catches `SIGUSR1` (Linux), since the signal kills a process that doesn't. Elsewhere a program must be started with `--debug-listen`.
+- **`orbit --debug-attach --list`** prints a JSON array: each serving program's `describe` answer with `"listening": true`, then `orbit` programs that would serve on `SIGUSR1` (`{"pid", "program", "listening": false}`, Linux).
+- **Unix only for now**, like launching; one isolate per process (DAP thread 1) until D10's multi-isolate session.
+
+Cost (cloud x86_64, release, no PGO): an attachable run is unchanged in instructions on `fib`, `tables` and `oop` (callgrind, under 0.1%), and startup gains 8.3 k instructions (+0.5%) and a signal thread. `dap` adds 271.0 KiB to the release `orbit` (2,252,064 → 2,529,616 bytes), of which the engine is 12.3 KiB, launching 190.2 KiB and attaching 68.6 KiB; `serde_json` is already linked for `std.json`.
 
 Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Attaching to a running process (sockets, D11) and the VS Code extension (D7) come next.
 
