@@ -2,7 +2,7 @@
 
 use crate::object::number::{self, float_to_int};
 use crate::object::{Gc, LuaStr, NativeId, Table, Value};
-use orbit_bytecode::{Op, Origin};
+use orbit_bytecode::{Opcode, Origin};
 
 use crate::vm::meta::{self, MetaField};
 use crate::vm::ops::Exc;
@@ -549,14 +549,14 @@ impl NativeCtx<'_> {
             let proto = self.vm.heap.get(self.vm.heap.get(closure).proto);
             let pc = f.pc - 1;
             if matches!(
-                proto.code.code.get(pc as usize),
-                Some(Op::GenericCall { .. })
+                proto.code.code.get(pc as usize).map(|i| i.op()),
+                Some(Opcode::GenericCall)
             ) {
                 return Some(("for iterator".to_owned(), false));
             }
             if matches!(
-                proto.code.code.get(pc as usize),
-                Some(Op::Call { .. } | Op::TailCall { .. })
+                proto.code.code.get(pc as usize).map(|i| i.op()),
+                Some(Opcode::Call | Opcode::TailCall)
             ) && let Some(origin) = proto.debug.origin(pc, 0)
             {
                 let (name, method) = match origin {

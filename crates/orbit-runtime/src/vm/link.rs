@@ -140,7 +140,7 @@ pub(crate) fn link(
                 .collect();
             let proto = Proto {
                 code: Rc::new(ProtoCode {
-                    code: u.code.as_slice().into(),
+                    code: u.code.iter().map(|op| op.encode()).collect(),
                     consts: consts.into(),
                     caches,
                     #[cfg(feature = "type-feedback")]

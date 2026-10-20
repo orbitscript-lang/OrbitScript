@@ -2,7 +2,7 @@
 //! ([`crate::vm::dispatch`]).
 
 use crate::object::{Closure, Gc, NoMemory, ProtoCode, Value};
-use orbit_bytecode::{MULTI, Op, Origin};
+use orbit_bytecode::{MULTI, Opcode, Origin};
 
 use crate::vm::meta::MetaField;
 use crate::vm::native::{CallOutcome, NativeCtx, NativeReturn};
@@ -598,8 +598,8 @@ impl Vm {
                     let pc = f.pc.saturating_sub(1);
                     if op == 0
                         && matches!(
-                            proto.code.code.get(pc as usize),
-                            Some(Op::GenericCall { .. })
+                            proto.code.code.get(pc as usize).map(|i| i.op()),
+                            Some(Opcode::GenericCall)
                         )
                     {
                         text.push_str(" (for iterator 'for iterator')");

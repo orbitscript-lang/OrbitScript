@@ -4,7 +4,7 @@
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
 
-use orbit_bytecode::{CaptureSource, DebugInfo, FunctionName, Op};
+use orbit_bytecode::{CaptureSource, DebugInfo, FunctionName, Insn, Op};
 use orbit_gc::{Gc, Marker, Trace};
 
 use crate::object::table::mark;
@@ -52,7 +52,7 @@ impl Trace<LuaSpace> for Closure {
 /// all of it.
 #[derive(Debug)]
 pub struct ProtoCode {
-    pub code: Box<[Op]>,
+    pub code: Box<[Insn]>,
     /// Kept alive for the collector by the owning [`Proto`], which traces
     /// them.
     pub consts: Box<[Value]>,
@@ -87,9 +87,9 @@ impl ProtoCode {
         let code = self
             .code
             .iter()
-            .map(|&op| match op {
-                Op::CapSelf { dst } => Op::CapGet { dst, cap },
-                op => op,
+            .map(|&i| match i.decode() {
+                Op::CapSelf { dst } => Op::CapGet { dst, cap }.encode(),
+                _ => i,
             })
             .collect();
         self.with_code(code)
@@ -103,7 +103,7 @@ impl ProtoCode {
         }
     }
 
-    fn with_code(&self, code: Box<[Op]>) -> ProtoCode {
+    fn with_code(&self, code: Box<[Insn]>) -> ProtoCode {
         ProtoCode {
             code,
             consts: self.consts.clone(),
@@ -205,7 +205,7 @@ impl Trace<LuaSpace> for Proto {
 
     fn extra_bytes(&self) -> usize {
         let c = &self.code;
-        c.code.len() * std::mem::size_of::<Op>()
+        c.code.len() * std::mem::size_of::<Insn>()
             + c.consts.len() * std::mem::size_of::<Value>()
             + c.caches.len() * std::mem::size_of::<FieldCache>()
     }

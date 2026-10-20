@@ -179,7 +179,7 @@ impl Vm {
         let FrameKind::Lua { closure, .. } = f.kind else {
             unreachable!("metamethods are requested by Lua frames")
         };
-        let op = self.heap.get(closure).code.code[f.pc as usize - 1];
+        let op = self.heap.get(closure).code.code[f.pc as usize - 1].decode();
         match op {
             Op::GetGlobal { dst, .. }
             | Op::GetField { dst, .. }
