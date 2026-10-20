@@ -22,8 +22,9 @@ use crate::object::{LuaHeap, Value};
 
 use crate::vm::{CallOutcome, Continuation, LuaError, NativeCtx, NativeReturn, Runtime, Vm};
 
-/// The collector mode `collectgarbage` reports. The incremental collector
-/// runs underneath in both; generational changes only what `"step"` does.
+/// The collector mode (`collectgarbage("incremental")` and
+/// `collectgarbage("generational")`), applied to the heap by
+/// [`Vm::set_gc_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcMode {
     Incremental,
@@ -50,10 +51,15 @@ pub enum GcParam {
     /// Bytes allocated between steps (`Params::step_bytes`); 0 makes every
     /// step a whole cycle.
     StepSize,
-    /// Generational parameters: stored and reported, unused until there is
-    /// a generational collector.
+    /// Generational: allocation between minor collections, as a percentage
+    /// of the heap the last major collection found reachable
+    /// (`Params::minor_percent`).
     MinorMul,
+    /// Generational: how much a major collection must free to go back to
+    /// minor ones (`Params::minor_return_percent`).
     MajorMinor,
+    /// Generational: heap growth past the last major collection's live
+    /// size that makes the next collection major (`Params::major_percent`).
     MinorMajor,
 }
 
@@ -104,10 +110,9 @@ impl GcState {
                 i64::from(p.growth) + 100,
                 i64::from(p.work_ratio / STEPMUL_SCALE),
                 p.step_bytes as i64,
-                // lua5.5's defaults.
-                20,
-                50,
-                68,
+                i64::from(p.minor_percent),
+                i64::from(p.minor_return_percent),
+                i64::from(p.major_percent),
             ],
             finalizing: false,
             was_stopped: false,
@@ -136,7 +141,9 @@ impl GcState {
             GcParam::Pause => params.growth = u32_of(v.saturating_sub(100).max(0)),
             GcParam::StepMul => params.work_ratio = u32_of(v).saturating_mul(STEPMUL_SCALE),
             GcParam::StepSize => params.step_bytes = usize::try_from(v).unwrap_or(usize::MAX),
-            GcParam::MinorMul | GcParam::MajorMinor | GcParam::MinorMajor => {}
+            GcParam::MinorMul => params.minor_percent = u32_of(v),
+            GcParam::MinorMajor => params.major_percent = u32_of(v),
+            GcParam::MajorMinor => params.minor_return_percent = u32_of(v),
         }
         old
     }
@@ -218,6 +225,20 @@ fn not_callable_message(f: Value) -> Vec<u8> {
 }
 
 impl Vm {
+    /// Switch the collector mode; returns the previous one. Entering
+    /// generational mode collects in full.
+    pub fn set_gc_mode(&mut self, mode: GcMode) -> GcMode {
+        let heap_mode = match mode {
+            GcMode::Incremental => orbit_gc::Mode::Incremental,
+            GcMode::Generational => orbit_gc::Mode::Generational,
+        };
+        // Values above the window are dead.
+        let top = self.rt.top;
+        self.rt.stack.regs.truncate(top);
+        self.heap.set_mode(heap_mode, &mut self.rt);
+        std::mem::replace(&mut self.rt.gc.mode, mode)
+    }
+
     /// Call the `__gc` of every object waiting for finalization. Does
     /// nothing inside a finalizer. Called by the interpreter after an
     /// automatic step that left finalizers pending, and by [`Vm::close`].

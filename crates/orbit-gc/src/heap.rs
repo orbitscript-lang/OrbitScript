@@ -2,8 +2,8 @@
 
 use crate::arena::{AnyGc, Gc, Gen, Store, page_shift};
 use crate::trace::{
-    BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, Roots, Space, Trace,
-    WAIT, WHITE, WaitMap, WeakMode,
+    BLACK, COLOR, FIN, FREE, GRAY, Holds, KindMeta, Liveness, Marker, Marks, NEW, Roots, Space,
+    Trace, WAIT, WHITE, WaitMap, WeakMode,
 };
 use std::collections::VecDeque;
 use std::fmt;
@@ -45,6 +45,25 @@ pub struct Params {
     /// have fallen from its peak, in bytes, before memory is handed back.
     /// 1 MiB by default, so small heaps are left alone.
     pub trim_min_bytes: usize,
+    /// Generational mode: a minor collection is due once this percentage
+    /// of the bytes found reachable by the last major collection has been
+    /// allocated since the last collection. 50 by default.
+    pub minor_percent: u32,
+    /// Generational mode: a major collection is due once the heap, after
+    /// a minor collection, is this percentage larger than what the last
+    /// major collection found reachable. 0 never collects in full on its
+    /// own. 150 by default.
+    pub major_percent: u32,
+    /// Generational mode: the least allocation between minor collections,
+    /// in bytes, so a tiny heap isn't collected after every few objects.
+    pub minor_min_bytes: usize,
+    /// Generational mode: after a major collection, go back to minor ones
+    /// only if it freed at least this percentage of the bytes allocated
+    /// since the major before. Otherwise the heap is growing, minor
+    /// collections would find little garbage, and the collector does only
+    /// major ones, paced by [`Params::growth`], until one frees enough.
+    /// 50 by default; 0 always goes back to minor collections.
+    pub minor_return_percent: u32,
 }
 
 impl Default for Params {
@@ -56,8 +75,30 @@ impl Default for Params {
             min_threshold: 0,
             trim_percent: 50,
             trim_min_bytes: 1 << 20,
+            minor_percent: 50,
+            major_percent: 150,
+            minor_min_bytes: 64 * 1024,
+            minor_return_percent: 50,
         }
     }
+}
+
+/// How the heap collects.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Mode {
+    /// Every cycle marks the whole heap, in steps paced by allocation.
+    #[default]
+    Incremental,
+    /// Frequent minor collections trace and sweep only the objects made
+    /// since the last collection, plus old objects stored into since then.
+    /// Objects that survive one collection become old, and stay until a
+    /// major (full) collection finds them unreachable. Collections are
+    /// atomic.
+    ///
+    /// Old objects stay black between collections, so the backward write
+    /// barrier is always on: a store into an old object turns it gray and
+    /// remembers it for the next minor collection.
+    Generational,
 }
 
 /// Where the collector is in its cycle.
@@ -124,6 +165,33 @@ pub struct Heap<S: Space> {
     stopped: bool,
     /// The most [`Heap::bytes`] the owner wants in use, or `usize::MAX`.
     limit: usize,
+    mode: Mode,
+    /// Whether write barriers do anything: while marking, and always in
+    /// generational mode.
+    barriers: bool,
+    /// Generational mode: objects made since the last collection ([`NEW`]),
+    /// and those that have survived one minor collection. Both are white
+    /// between collections.
+    young: Vec<AnyGc>,
+    /// In a minor collection: old (or now promoted) objects traced in it
+    /// that still refer to young objects afterwards, so they stay
+    /// remembered for the next one.
+    keep: Vec<AnyGc>,
+    /// [`NEW`] in generational mode, else 0: the bit new objects get.
+    new_bit: u8,
+    /// The color the sweep leaves survivors: black (old) in generational
+    /// mode, else white.
+    survivor: u8,
+    /// Generational mode: the bytes the last major collection found
+    /// reachable.
+    gen_base: usize,
+    /// Generational mode: the next collection is a major one.
+    major_due: bool,
+    /// Generational mode: doing only major collections for now. No barriers
+    /// and no young objects then: every major collection traces all.
+    majors_only: bool,
+    /// Minor collections since the last major.
+    minors: u64,
 }
 
 impl<S: Space> fmt::Debug for Heap<S> {
@@ -176,6 +244,7 @@ impl<S: Space + Default> Heap<S> {
                 waiting: WaitMap::default(),
                 scratch: Vec::new(),
                 marked_bytes: 0,
+                seen: 0,
             },
             retrace: Vec::new(),
             state: State::Pause,
@@ -193,6 +262,16 @@ impl<S: Space + Default> Heap<S> {
             stress: false,
             stopped: false,
             limit: usize::MAX,
+            mode: Mode::Incremental,
+            barriers: false,
+            young: Vec::new(),
+            keep: Vec::new(),
+            new_bit: 0,
+            survivor: WHITE,
+            gen_base: 0,
+            major_due: false,
+            majors_only: false,
+            minors: 0,
         }
     }
 }
@@ -214,8 +293,15 @@ impl<S: Space> Heap<S> {
         let state = self.state;
         let meta = &mut self.marks.meta[kind as usize];
         let index = meta.take_slot();
-        meta.color[index as usize] = alloc_color(state, kind, index);
+        meta.color[index as usize] = alloc_color(state, kind, index) | self.new_bit;
         let gc = self.space.arena_mut().put(index, v);
+        if self.new_bit != 0 {
+            self.young.push(AnyGc {
+                kind,
+                index,
+                generation: Gen::new(gc.generation()),
+            });
+        }
         self.charge(size);
         gc
     }
@@ -323,7 +409,7 @@ impl<S: Space> Heap<S> {
     where
         S: Holds<T>,
     {
-        if self.state == State::Mark {
+        if self.barriers {
             let kind = <S as Holds<T>>::KIND;
             let c = &mut self.marks.meta[kind as usize].color[gc.index() as usize];
             if *c & COLOR == BLACK {
@@ -345,10 +431,15 @@ impl<S: Space> Heap<S> {
     where
         S: Holds<T> + Holds<U>,
     {
-        if self.state == State::Mark
+        if self.barriers
             && self.marks.meta[<S as Holds<T>>::KIND as usize].color[owner.index() as usize] & COLOR
                 == BLACK
         {
+            if self.state != State::Mark {
+                // Generational, between collections: `owner` is old.
+                // Remember it, as the backward barrier does.
+                return self.barrier_back(owner);
+            }
             let mut m = Marker {
                 space: &self.space,
                 marks: &mut self.marks,
@@ -565,6 +656,13 @@ impl<S: Space> Heap<S> {
     /// Do one increment of collection work, proportional to the allocation
     /// debt. Returns true if this step finished a cycle.
     pub fn step<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) -> bool {
+        if self.mode == Mode::Generational {
+            if self.stress && self.debt <= 0 {
+                return false;
+            }
+            self.gen_collect(roots);
+            return true;
+        }
         let work = if self.stress {
             // `should_step` stays true in stress mode (testing the flag
             // there keeps the owner's hot check unchanged), so skip here.
@@ -585,6 +683,10 @@ impl<S: Space> Heap<S> {
     /// is [stopped](Heap::stop), and doesn't restart it. Returns true if this
     /// step finished a cycle.
     pub fn step_with<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, bytes: usize) -> bool {
+        if self.mode == Mode::Generational {
+            // A step is one whole collection; true if it was a major one.
+            return self.gen_collect(roots);
+        }
         let bytes = if bytes == 0 {
             self.params.step_bytes
         } else {
@@ -616,7 +718,7 @@ impl<S: Space> Heap<S> {
                             break;
                         };
                         let before = self.marks.marked_bytes;
-                        self.blacken(g);
+                        self.blacken::<false>(g);
                         work = work.saturating_sub((self.marks.marked_bytes - before).max(1));
                     }
                     if !self.marks.gray.is_empty() {
@@ -644,6 +746,10 @@ impl<S: Space> Heap<S> {
     /// Finish any cycle in progress, then run a whole cycle. Lua's
     /// `collectgarbage("collect")`.
     pub fn full_collect<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) {
+        if self.mode == Mode::Generational {
+            self.major(roots, false);
+            return;
+        }
         match self.state {
             State::Pause => {}
             // Objects marked earlier in this cycle may have died since. Drop
@@ -662,7 +768,7 @@ impl<S: Space> Heap<S> {
         for meta in &mut self.marks.meta {
             for c in &mut meta.color {
                 if *c != FREE {
-                    *c &= !(COLOR | WAIT);
+                    *c &= !(COLOR | WAIT | NEW);
                 }
             }
         }
@@ -670,16 +776,207 @@ impl<S: Space> Heap<S> {
         self.marks.waiting.clear();
         self.retrace.clear();
         self.weak.clear();
+        self.set_state(State::Pause);
+    }
+
+    fn set_state(&mut self, state: State) {
+        self.state = state;
+        self.barriers =
+            state == State::Mark || (self.mode == Mode::Generational && !self.majors_only);
+    }
+
+    // ---- generational mode ----------------------------------------------
+
+    /// How the heap collects.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Minor collections since the last major one (generational mode).
+    pub fn minors(&self) -> u64 {
+        self.minors
+    }
+
+    /// Switch modes. Entering generational mode collects in full, so every
+    /// reachable object starts out old; leaving it forgets ages.
+    pub fn set_mode<R: Roots<S> + ?Sized>(&mut self, mode: Mode, roots: &mut R) {
+        if mode == self.mode {
+            return;
+        }
+        match mode {
+            Mode::Generational => {
+                if self.state != State::Pause {
+                    self.full_collect(roots);
+                }
+                self.mode = Mode::Generational;
+                self.survivor = BLACK;
+                self.majors_only = false;
+                self.new_bit = NEW;
+                self.gen_base = self.bytes;
+                self.major(roots, false);
+            }
+            Mode::Incremental => {
+                self.mode = Mode::Incremental;
+                self.new_bit = 0;
+                self.survivor = WHITE;
+                self.young = Vec::new();
+                // Old objects are black (or gray, remembered): whiten them.
+                self.unmark_all();
+                let live = self.bytes;
+                self.finish_cycle_at(live);
+            }
+        }
+    }
+
+    /// One generational collection: minor, unless a major one is due.
+    /// Returns true if it was a major collection.
+    fn gen_collect<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) -> bool {
+        if self.major_due {
+            self.major(roots, true);
+            true
+        } else {
+            self.minor(roots);
+            false
+        }
+    }
+
+    /// Collect everything, leaving every survivor black (old). `adapt`
+    /// (automatic collections) decides from what it freed whether minor
+    /// collections come next; otherwise the heap keeps doing what it did.
+    fn major<R: Roots<S> + ?Sized>(&mut self, roots: &mut R, adapt: bool) {
+        debug_assert_eq!(self.mode, Mode::Generational);
+        let before = self.bytes;
+        let allocated = before.saturating_sub(self.gen_base);
+        self.unmark_all();
+        self.young.clear();
+        self.start_marking(roots);
+        self.finish_marking(roots);
+        while !self.sweep(usize::MAX) {}
+        self.set_state(State::Pause);
+        self.cycles += 1;
+        self.minors = 0;
+        self.major_due = false;
+        let live = self.marks.marked_bytes;
+        self.release_to_os(live);
+        self.gen_base = live;
+        let freed = before.saturating_sub(self.bytes);
+        if adapt {
+            self.majors_only = allocated > self.params.minor_min_bytes
+                && freed.saturating_mul(100)
+                    < allocated.saturating_mul(self.params.minor_return_percent as usize);
+        }
+        if self.majors_only {
+            // Like an incremental cycle's pacing, all at once.
+            self.new_bit = 0;
+            self.barriers = false;
+            self.major_due = true;
+            self.finish_cycle_at(live);
+        } else {
+            self.new_bit = NEW;
+            self.barriers = true;
+            self.schedule_minor();
+        }
+    }
+
+    /// Trace from the roots and the remembered old objects, treating every
+    /// other old object as reachable, and free the young objects found
+    /// unreachable. Of the rest, objects made since the last collection
+    /// stay young for one more; older ones become old.
+    ///
+    /// An old object must never refer to a young one without being
+    /// remembered (gray, in `retrace`): the write barrier sees to that for
+    /// stores, and this for objects traced here, which stay remembered while
+    /// they refer to an object that stays young.
+    fn minor<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) {
+        debug_assert_eq!(self.state, State::Pause);
+        self.marks.marked_bytes = 0;
+        self.state = State::Mark;
+        self.mark_roots(roots);
+        let mut young = std::mem::take(&mut self.young);
+        self.complete_marking::<true, R>(roots, Some(&young));
         self.state = State::Pause;
+        let mut stay = 0;
+        for i in 0..young.len() {
+            let g = young[i];
+            let kind = g.kind;
+            let meta = &mut self.marks.meta[kind as usize];
+            let c = &mut meta.color[g.index as usize];
+            if *c & COLOR != WHITE {
+                if *c & NEW != 0 {
+                    // Survived its first collection: young for one more.
+                    *c &= !(COLOR | NEW);
+                    young[stay] = g;
+                    stay += 1;
+                } else {
+                    *c = (*c & !COLOR) | BLACK;
+                }
+                continue;
+            }
+            meta.free_slot(g.index);
+            let n = self.space.free_slot(kind, g.index);
+            self.bytes = self.bytes.saturating_sub(n);
+            let p = g.index >> meta.shift;
+            let page = &meta.pages[p as usize];
+            if page.live == 0 && page.allocated && meta.allocated > 1 {
+                meta.release_page(p);
+                self.space.release_page(kind, p);
+                self.pages_released += 1;
+            }
+        }
+        young.truncate(stay);
+        self.young = young;
+        for g in std::mem::take(&mut self.keep) {
+            let c = &mut self.marks.meta[g.kind as usize].color[g.index as usize];
+            if *c & COLOR == BLACK {
+                *c = (*c & !COLOR) | GRAY;
+                self.retrace.push(g);
+            }
+        }
+        self.minors += 1;
+        self.cycles += 1;
+        let limit = self.gen_base.saturating_add(
+            self.gen_base
+                .saturating_mul(self.params.major_percent as usize)
+                / 100,
+        );
+        if self.params.major_percent != 0 && self.bytes > limit.max(self.params.minor_min_bytes) {
+            self.major_due = true;
+        }
+        if self.bytes > self.limit {
+            self.major_due = true;
+        }
+        self.schedule_minor();
+    }
+
+    fn schedule_minor(&mut self) {
+        let budget = (self
+            .gen_base
+            .saturating_mul(self.params.minor_percent as usize)
+            / 100)
+            .max(self.params.minor_min_bytes)
+            .min(self.limit.saturating_sub(self.bytes).max(1));
+        self.threshold = self.bytes.saturating_add(budget);
+        self.debt = if self.stress {
+            0
+        } else if self.major_due {
+            // Collect at the next safe point.
+            0
+        } else {
+            -(budget as isize)
+        };
     }
 
     /// The next cycle starts once the heap grows `growth` percent past what
     /// this one found reachable.
     fn finish_cycle(&mut self) {
-        self.state = State::Pause;
+        self.set_state(State::Pause);
         self.cycles += 1;
         let live = self.marks.marked_bytes;
         self.release_to_os(live);
+        self.finish_cycle_at(live);
+    }
+
+    fn finish_cycle_at(&mut self, live: usize) {
         // Never let the heap grow past the limit unchecked: the next cycle
         // starts there at the latest, which is also when the owner sees
         // `over_limit`.
@@ -735,7 +1032,7 @@ impl<S: Space> Heap<S> {
     fn start_marking<R: Roots<S> + ?Sized>(&mut self, roots: &R) {
         self.marks.marked_bytes = 0;
         self.mark_roots(roots);
-        self.state = State::Mark;
+        self.set_state(State::Mark);
     }
 
     fn mark_roots<R: Roots<S> + ?Sized>(&mut self, roots: &R) {
@@ -747,7 +1044,9 @@ impl<S: Space> Heap<S> {
     }
 
     /// Trace one gray object, blacken it, and count its bytes as marked.
-    fn blacken(&mut self, g: AnyGc) {
+    /// In a `MINOR` collection, also note objects that must stay
+    /// remembered.
+    fn blacken<const MINOR: bool>(&mut self, g: AnyGc) {
         let c = &mut self.marks.meta[g.kind as usize].color[g.index as usize];
         *c = (*c & !COLOR) | BLACK;
         let mut m = Marker {
@@ -756,17 +1055,30 @@ impl<S: Space> Heap<S> {
             weak: None,
             can_register: true,
         };
+        if MINOR {
+            m.marks.seen = 0;
+        }
         let size = self.space.trace_slot(g.kind, g.index, &mut m);
-        if let Some(mode) = m.weak {
+        let weak = m.weak;
+        if let Some(mode) = weak {
             self.weak.push((g, mode));
         }
         self.marks.marked_bytes += size;
+        if MINOR {
+            let c = self.marks.meta[g.kind as usize].color[g.index as usize];
+            // An object that ends this collection old (it isn't new) and
+            // refers to a new one, which stays young, stays remembered. So
+            // does one with weak references, which it doesn't report.
+            if c & NEW == 0 && (self.marks.seen & NEW != 0 || weak.is_some()) {
+                self.keep.push(g);
+            }
+        }
     }
 
     /// Trace until nothing is gray, including objects waiting for a retrace.
-    fn drain(&mut self) {
+    fn drain<const MINOR: bool>(&mut self) {
         while let Some(g) = self.marks.gray.pop().or_else(|| self.retrace.pop()) {
-            self.blacken(g);
+            self.blacken::<MINOR>(g);
         }
     }
 
@@ -789,6 +1101,7 @@ impl<S: Space> Heap<S> {
             }
             let live = Liveness {
                 marks: &self.marks,
+                young: None,
                 _s: PhantomData,
             };
             self.space.clear_slot(g.kind, g.index, mode, &live);
@@ -804,9 +1117,23 @@ impl<S: Space> Heap<S> {
     /// so an entry whose key is being finalized survives until the next
     /// cycle, and resurrected keys keep their ephemeron values.
     fn finish_marking<R: Roots<S> + ?Sized>(&mut self, roots: &mut R) {
+        self.complete_marking::<false, R>(roots, None);
+        self.set_state(State::Sweep { kind: 0, at: 0 });
+    }
+
+    /// [`Heap::finish_marking`] up to the sweep. `young` is the young
+    /// objects in a minor collection, for [`Liveness::young_dead`].
+    /// A `MINOR` collection is atomic, so its roots need no rescan.
+    fn complete_marking<const MINOR: bool, R: Roots<S> + ?Sized>(
+        &mut self,
+        roots: &mut R,
+        young: Option<&[AnyGc]>,
+    ) {
         // Roots are rescanned, so writes to them need no barrier.
-        self.mark_roots(roots);
-        self.drain();
+        if !MINOR {
+            self.mark_roots(roots);
+        }
+        self.drain::<MINOR>();
         self.dedup_weak();
         self.clear_weak(true);
         // Keep unreachable finalizable objects alive for their finalizers,
@@ -823,18 +1150,18 @@ impl<S: Space> Heap<S> {
             self.finalize_queue.push_back(g);
             self.marks.mark_raw(g.kind, g.index, false);
         }
-        self.drain();
+        self.drain::<MINOR>();
         // Objects traced for the first time just now registered too.
         self.dedup_weak();
         self.clear_weak(false);
         let live = Liveness {
             marks: &self.marks,
+            young: young.map(|y| (y, &self.space)),
             _s: PhantomData,
         };
         roots.clear_weak(&live);
         self.weak.clear();
         self.marks.clear_waiting();
-        self.state = State::Sweep { kind: 0, at: 0 };
     }
 
     // ---- sweeping -------------------------------------------------------
@@ -927,7 +1254,9 @@ impl<S: Space> Heap<S> {
             let n = self.space.free_slot(kind, index);
             self.bytes = self.bytes.saturating_sub(n);
         } else {
-            *c &= !COLOR;
+            // Black in generational mode: survivors of a major collection
+            // are old.
+            *c = (*c & !COLOR) | self.survivor;
         }
         true
     }

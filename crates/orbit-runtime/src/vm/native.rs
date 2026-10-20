@@ -940,6 +940,14 @@ impl NativeCtx<'_> {
         Ok(())
     }
 
+    /// One generational collection (`collectgarbage("step")`): true if it
+    /// was a major one.
+    pub fn gen_step(&mut self) -> bool {
+        let top = self.vm.rt.top;
+        self.vm.rt.stack.regs.truncate(top);
+        self.vm.heap.step_with(&mut self.vm.rt, 0)
+    }
+
     /// Run a full collection (`collectgarbage("collect")`).
     pub fn full_collect(&mut self) {
         // Values above the window are dead.

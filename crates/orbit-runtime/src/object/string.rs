@@ -311,6 +311,36 @@ impl Interner {
         }
     }
 
+    /// Remove `gc`, interned with `hash`, closing the gap behind it so
+    /// every later entry stays reachable from its home slot.
+    fn remove(&mut self, hash: u32, gc: Gc<LuaStr>) {
+        let mask = self.slots.len() - 1;
+        let mut i = hash as usize & mask;
+        while self.slots[i].str != gc || self.slots[i].is_empty() {
+            debug_assert!(!self.slots[i].is_empty(), "interned string missing");
+            i = (i + 1) & mask;
+        }
+        self.len -= 1;
+        // Backward-shift deletion: move up each following entry whose home
+        // slot is at or before the hole (cyclically).
+        let mut hole = i;
+        let mut j = (i + 1) & mask;
+        loop {
+            let e = self.slots[j];
+            if e.is_empty() {
+                break;
+            }
+            let home = e.hash as usize & mask;
+            // `home` is not in (hole, j]: the entry may move to the hole.
+            if (j.wrapping_sub(home) & mask) >= (j.wrapping_sub(hole) & mask) {
+                self.slots[hole] = e;
+                hole = j;
+            }
+            j = (j + 1) & mask;
+        }
+        self.slots[hole] = Interned::EMPTY;
+    }
+
     /// Put `e` in the first empty slot from its home slot.
     #[inline]
     fn place(&mut self, e: Interned) {
@@ -329,6 +359,15 @@ impl Interner {
     /// nothing; it only moves to a smaller allocation when at most an
     /// quarter of what it would take stays in use.
     pub fn clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
+        if live.is_minor() {
+            // Only young strings can die: remove each, leaving the rest.
+            for (gc, s) in live.young_dead::<LuaStr>() {
+                if s.short {
+                    self.remove(s.hash.get(), gc);
+                }
+            }
+            return;
+        }
         let cap = self.slots.len();
         if cap == 0 {
             return;

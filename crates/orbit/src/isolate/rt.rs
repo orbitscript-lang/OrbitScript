@@ -57,7 +57,7 @@ impl Isolate {
         let mut vm = Vm::new();
         adopt(&mut vm);
         vm.rt.warnings = config.warnings;
-        vm.rt.gc.mode = config.gc_mode.raw();
+        vm.set_gc_mode(config.gc_mode.raw());
         let options = stdlib::Options {
             ignore_env: config.ignore_env,
         };

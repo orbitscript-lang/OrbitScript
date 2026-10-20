@@ -1633,10 +1633,7 @@ impl<'s> Stack<'s> {
                 0
             }
             GcOp::Step(kb) => match c.vm.rt.gc.mode {
-                GcMode::Generational => {
-                    c.full_collect();
-                    0
-                }
+                GcMode::Generational => c.gen_step() as i64,
                 GcMode::Incremental => {
                     let bytes = usize::try_from(kb).unwrap_or(0).saturating_mul(1024);
                     c.vm.heap.step_with(&mut c.vm.rt, bytes) as i64
@@ -1677,7 +1674,7 @@ impl<'s> Stack<'s> {
         if gc.finalizing() {
             return None;
         }
-        Some(match std::mem::replace(&mut gc.mode, mode.raw()) {
+        Some(match self.ctx.vm.set_gc_mode(mode.raw()) {
             vm::GcMode::Generational => crate::GcMode::Generational,
             vm::GcMode::Incremental => crate::GcMode::Incremental,
         })

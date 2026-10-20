@@ -94,7 +94,7 @@ mod os;
 mod trace;
 
 pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, Store};
-pub use heap::{Heap, Params, Phase};
+pub use heap::{Heap, Mode, Params, Phase};
 pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 
 /// Declare a [`Space`]: a struct with one [`Arena`] per object type.
@@ -222,7 +222,10 @@ macro_rules! space {
                     ::core::unreachable!()
                 }
 
-                #[inline]
+                // Always: with a second caller (the minor collection's
+                // sweep) LLVM stopped inlining it into the sweep, which cost
+                // 1% on binary trees.
+                #[inline(always)]
                 fn free_slot(&mut self, kind: u8, index: u32) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
