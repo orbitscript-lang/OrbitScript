@@ -209,10 +209,9 @@ pub fn decommit_pages(base: NonNull<u8>, start_offset: usize, end_offset: usize)
 
 /// Releases the entire virtual address range previously reserved.
 pub fn free_address_space(base: NonNull<u8>, bytes: usize) {
-    let bytes = align_up(bytes, page_size());
-
     #[cfg(unix)]
     {
+        let bytes = align_up(bytes, page_size());
         #[allow(
             unsafe_code,
             reason = "munmap to release reserved virtual address range"
@@ -222,8 +221,10 @@ pub fn free_address_space(base: NonNull<u8>, bytes: usize) {
         }
     }
 
+    // MEM_RELEASE frees the whole reservation and takes no size.
     #[cfg(windows)]
     {
+        let _ = bytes;
         use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
         #[allow(unsafe_code, reason = "VirtualFree to release address range")]
         unsafe {

@@ -10,6 +10,11 @@
  * The auxiliary library (luaL_*) is written here on top of the lua_* API,
  * from the reference manual's description of each function.
  */
+/* MSVC deprecates strerror and fopen in favour of its own _s variants;
+   this file sticks to standard C. */
+#if defined(_MSC_VER)
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <errno.h>
 #include <setjmp.h>
 #include <stdio.h>
@@ -36,6 +41,36 @@ struct lua_State {
   lua_Alloc allocf;     /* the allocator lua_newstate got, unused */
   void *allocud;
 };
+
+/* The atomic accesses lua_sethook's request needs, safe in a signal
+   handler. GCC and Clang (clang-cl too) have the __atomic builtins. MSVC's
+   C compiler has none outside its experimental C11 atomics, so there a
+   relaxed access is a volatile one (an aligned int or pointer is never
+   torn) and an ordered one is an interlocked exchange, a full barrier. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+static int load_int(const int *p) { return *(const volatile int *)p; }
+static void store_int(int *p, int v) { *(volatile int *)p = v; }
+static void store_int_release(int *p, int v) { _InterlockedExchange((volatile long *)p, v); }
+static int exchange_int_acquire(int *p, int v) {
+  return (int)_InterlockedExchange((volatile long *)p, v);
+}
+static lua_Hook load_hook(lua_Hook *p) { return *(lua_Hook volatile *)p; }
+static void store_hook(lua_Hook *p, lua_Hook f) { *(lua_Hook volatile *)p = f; }
+static void store_byte(unsigned char *p, unsigned char v) { *(volatile unsigned char *)p = v; }
+#else
+static int load_int(const int *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static void store_int(int *p, int v) { __atomic_store_n(p, v, __ATOMIC_RELAXED); }
+static void store_int_release(int *p, int v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+static int exchange_int_acquire(int *p, int v) {
+  return __atomic_exchange_n(p, v, __ATOMIC_ACQUIRE);
+}
+static lua_Hook load_hook(lua_Hook *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static void store_hook(lua_Hook *p, lua_Hook f) { __atomic_store_n(p, f, __ATOMIC_RELAXED); }
+static void store_byte(unsigned char *p, unsigned char v) {
+  __atomic_store_n(p, v, __ATOMIC_RELAXED);
+}
+#endif
 
 /* The Rust entry points, handed over by orbit_capi_newstate so none of
    them is an exported symbol. Fields are in name order and match RTable in
@@ -1080,23 +1115,23 @@ LUA_API void lua_sethook(lua_State *L, lua_Hook func, int mask, int count) {
     func = NULL;
     mask = 0;
   }
-  __atomic_store_n(&L->hook, func, __ATOMIC_RELAXED);
-  __atomic_store_n(&L->hookmask, mask, __ATOMIC_RELAXED);
-  __atomic_store_n(&L->hookcount, count, __ATOMIC_RELAXED);
-  __atomic_store_n(&L->hookchanged, 1, __ATOMIC_RELEASE);
-  if (L->wake != NULL) __atomic_store_n(L->wake, 1, __ATOMIC_RELAXED);
+  store_hook(&L->hook, func);
+  store_int(&L->hookmask, mask);
+  store_int(&L->hookcount, count);
+  store_int_release(&L->hookchanged, 1);
+  if (L->wake != NULL) store_byte(L->wake, 1);
 }
 
 LUA_API lua_Hook lua_gethook(lua_State *L) {
-  return __atomic_load_n(&L->hook, __ATOMIC_RELAXED);
+  return load_hook(&L->hook);
 }
 
 LUA_API int lua_gethookmask(lua_State *L) {
-  return __atomic_load_n(&L->hookmask, __ATOMIC_RELAXED);
+  return load_int(&L->hookmask);
 }
 
 LUA_API int lua_gethookcount(lua_State *L) {
-  return __atomic_load_n(&L->hookcount, __ATOMIC_RELAXED);
+  return load_int(&L->hookcount);
 }
 
 /* For Rust: where lua_sethook raises the interrupt flag. */
@@ -1107,10 +1142,10 @@ void orbit_capi_set_wake(lua_State *L, unsigned char *wake) {
 /* For Rust: the hook lua_sethook asked for, if it asked since the last
    call (1), or 0. */
 int orbit_capi_take_hook(lua_State *L, lua_Hook *f, int *mask, int *count) {
-  if (!__atomic_exchange_n(&L->hookchanged, 0, __ATOMIC_ACQUIRE)) return 0;
-  *f = __atomic_load_n(&L->hook, __ATOMIC_RELAXED);
-  *mask = __atomic_load_n(&L->hookmask, __ATOMIC_RELAXED);
-  *count = __atomic_load_n(&L->hookcount, __ATOMIC_RELAXED);
+  if (!exchange_int_acquire(&L->hookchanged, 0)) return 0;
+  *f = load_hook(&L->hook);
+  *mask = load_int(&L->hookmask);
+  *count = load_int(&L->hookcount);
   return 1;
 }
 
