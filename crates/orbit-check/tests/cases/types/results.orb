@@ -33,6 +33,20 @@ fn count() -> int { //~ T0201
     if true { return 1; }
 }
 
+// A labelled `break` from a nested loop leaves the outer loop, so the end is reachable.
+fn nested_break(c: bool) -> int { //~ T0201
+    'outer: loop {
+        while c { break 'outer; }
+    };
+}
+// Breaks that stay inside the nested loop don't.
+fn inner_break(c: bool) -> int {
+    'outer: loop {
+        'inner: while c { break 'inner; }
+        while c { break; }
+    };
+}
+
 // Results inferred from the body.
 fn inferred(x: int) { if x > 0 { x } else { -x } }
 let i: int = inferred(3);
