@@ -29,7 +29,7 @@ use crate::vm::cold::{
     already_defined, env_error, get_str_miss, method_miss, op_cast, op_len, set_str_miss,
 };
 use crate::vm::interp::{
-    Flow, Ran, Shape, WINDOW, const_str, enter_lua_frame_fast, enter_lua_frame_general, grow_window,
+    Flow, Ran, Shape, WINDOW, Window, const_str, enter_lua_frame_fast, enter_lua_frame_general,
 };
 use crate::vm::meta::Metas;
 use crate::vm::native::{NativeCtx, NativeReturn};
@@ -104,14 +104,7 @@ impl Vm {
             if self.rt.stack.hook.armed() != HOOKED {
                 return Ok(Ran::Switch);
             }
-            // The running frame's index is the frame count: the loop
-            // keeps no copy of it.
-            macro_rules! depth {
-                () => {
-                    self.rt.stack.frames.len()
-                };
-            }
-            let frame = self.rt.stack.frames.last().expect("the running frame");
+            let frame = self.rt.stack.running();
             let FrameKind::Lua {
                 mut closure,
                 code_id,
@@ -129,12 +122,12 @@ impl Vm {
             // The debugger decides by function and depth, so it needs the
             // frame's code first.
             #[cfg(feature = "debugger")]
-            if self.hooked_here(&cur, closure, depth!()) != HOOKED {
+            if self.hooked_here(&cur, closure, self.rt.stack.depth()) != HOOKED {
                 return Ok(Ran::Switch);
             }
             #[cfg(feature = "debugger")]
             if HOOKED {
-                self.debug_reloaded(pc, depth!());
+                self.debug_reloaded(pc, self.rt.stack.depth());
             }
             let mut code = &cur.code[..];
             macro_rules! switch_code {
@@ -159,14 +152,9 @@ impl Vm {
                         // every depth.
                         #[cfg(feature = "debugger")]
                         if self.rt.debug.watch
-                            && self.debug_switches(&cur, $closure, depth!(), HOOKED)
+                            && self.debug_switches(&cur, $closure, self.rt.stack.depth(), HOOKED)
                         {
-                            self.rt
-                                .stack
-                                .frames
-                                .last_mut()
-                                .expect("the running frame")
-                                .pc = pc as u32;
+                            self.rt.stack.save_pc(pc);
                             return Ok(Ran::Switch);
                         }
                     }
@@ -178,39 +166,11 @@ impl Vm {
             // window's address stays in a machine register. Anything that may
             // resize the stack (calls, collection steps, errors) ends the
             // borrow; take the window again afterwards.
-            macro_rules! window {
-                () => {{
-                    let regs = &mut self.rt.stack.regs;
-                    // One length check: the slice below repeats it, and the
-                    // compiler drops the repeat.
-                    if regs.len() >= base + WINDOW {
-                        <&mut [Value; WINDOW]>::try_from(&mut regs[base..base + WINDOW])
-                            .expect("a full window")
-                    } else {
-                        grow_window(regs, base)
-                    }
-                }};
-            }
-            let mut w = window!();
-            macro_rules! reg {
-                ($r:expr) => {
-                    w[$r as usize]
-                };
-            }
-            macro_rules! save_pc {
-                () => {
-                    self.rt
-                        .stack
-                        .frames
-                        .last_mut()
-                        .expect("the running frame")
-                        .pc = pc as u32;
-                };
-            }
+            let mut w = Window::take(&mut self.rt.stack.regs, base);
             macro_rules! safepoint {
                 () => {
                     if self.heap.should_step() {
-                        save_pc!();
+                        self.rt.stack.save_pc(pc);
                         // Nothing above this frame's window and the last
                         // open results is live; don't let it keep garbage.
                         let live = (base + WINDOW).max(self.rt.top);
@@ -218,18 +178,18 @@ impl Vm {
                             // Over the memory limit: `run` raises the error.
                             return Ok(Ran::Switch);
                         }
-                        w = window!();
+                        w = Window::take(&mut self.rt.stack.regs, base);
                     }
                 };
             }
-            // Run `$body` with `$v` bound to `reg!($src)`, reading a number
+            // Run `$body` with `$v` bound to `w[$src]`, reading a number
             // by parts. Arithmetic writes its result as a tag store and a
             // payload store, and a whole 16-byte load of that value soon
             // after would stall on store forwarding; with the variant known,
             // `$body` stores it by parts too.
             macro_rules! by_parts {
                 ($src:expr, |$v:ident| $body:expr) => {
-                    match reg!($src) {
+                    match w[$src] {
                         Value::Int(x) => {
                             let $v = Value::Int(x);
                             $body
@@ -261,12 +221,7 @@ impl Vm {
                     {
                         // An interrupt was requested ([`crate::vm::Interrupt`]): the
                         // hooked loop raises it before the jump's target.
-                        self.rt
-                            .stack
-                            .frames
-                            .last_mut()
-                            .expect("the running frame")
-                            .pc = pc as u32;
+                        self.rt.stack.save_pc(pc);
                         self.rt.hooks_touched = true;
                         self.rt.stack.hook.mask |= crate::vm::hook::INTERRUPT;
                         return Ok(Ran::Switch);
@@ -275,7 +230,7 @@ impl Vm {
             }
             macro_rules! arith {
                 ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {
-                    arith_v!($dst, reg!($a), reg!($b), $op, $nop)
+                    arith_v!($dst, w[$a], w[$b], $op, $nop)
                 };
             }
             // `arith!` over two operand places, registers or constants.
@@ -289,8 +244,8 @@ impl Vm {
                     macro_rules! store {
                         ($p:expr, $q:expr) => {
                             match Number::arith($p, $nop, $q) {
-                                Ok(Number::Int(i)) => reg!($dst) = Value::Int(i),
-                                Ok(Number::Float(f)) => reg!($dst) = Value::Float(f),
+                                Ok(Number::Int(i)) => w[$dst] = Value::Int(i),
+                                Ok(Number::Float(f)) => w[$dst] = Value::Float(f),
                                 Err(e) => throw!(Exc::Rt(e.message().into(), None)),
                             }
                         };
@@ -310,33 +265,29 @@ impl Vm {
                         }
                         _ => {
                             let (x, y) = ($x, $y);
-                            reg!($dst) =
-                                tri!(ops::arith_slow(&self.heap, &self.rt.metas, $op, x, y))
+                            w[$dst] = tri!(ops::arith_slow(&self.heap, &self.rt.metas, $op, x, y))
                         }
                     }
                 }};
             }
             macro_rules! bitwise {
                 ($dst:expr, $a:expr, $b:expr, $op:expr) => {{
-                    match (&reg!($a), &reg!($b)) {
-                        (&Value::Int(i), &Value::Int(j)) => {
-                            reg!($dst) = Value::Int($op.apply(i, j))
-                        }
+                    match (&w[$a], &w[$b]) {
+                        (&Value::Int(i), &Value::Int(j)) => w[$dst] = Value::Int($op.apply(i, j)),
                         _ => {
-                            let (x, y) = (reg!($a), reg!($b));
-                            reg!($dst) =
-                                tri!(ops::bitwise_slow(&self.heap, &self.rt.metas, $op, x, y))
+                            let (x, y) = (w[$a], w[$b]);
+                            w[$dst] = tri!(ops::bitwise_slow(&self.heap, &self.rt.metas, $op, x, y))
                         }
                     }
                 }};
             }
             macro_rules! compare_jump {
                 ($a:expr, $b:expr, $off:expr, $want:expr, $slow:path, |$i:ident, $j:ident| $cmp:expr) => {{
-                    let c = match (&reg!($a), &reg!($b)) {
+                    let c = match (&w[$a], &w[$b]) {
                         (&Value::Int($i), &Value::Int($j)) => $cmp,
                         (&Value::Float($i), &Value::Float($j)) => $cmp,
                         _ => {
-                            let (x, y) = (reg!($a), reg!($b));
+                            let (x, y) = (w[$a], w[$b]);
                             tri!($slow(&self.heap, &self.rt.metas, x, y))
                         }
                     };
@@ -350,13 +301,13 @@ impl Vm {
             // load of it would stall on store forwarding.
             macro_rules! eq_parts {
                 ($a:expr, $b:expr) => {
-                    match (&reg!($a), &reg!($b)) {
+                    match (&w[$a], &w[$b]) {
                         (&Value::Int(i), &Value::Int(j)) => i == j,
                         (&Value::Float(f), &Value::Float(g)) => f == g,
                         (&Value::Nil, &Value::Nil) => true,
                         (&Value::Nil, _) | (_, &Value::Nil) => false,
                         _ => {
-                            let (x, y) = (reg!($a), reg!($b));
+                            let (x, y) = (w[$a], w[$b]);
                             tri!(values_equal(&self.heap, &self.rt.metas, x, y))
                         }
                     }
@@ -367,7 +318,7 @@ impl Vm {
                 // with `x` the register and `k` the immediate as values.
                 ($a:expr, $imm:expr, $want:expr, $off:expr, |$x:ident, $k:ident| $cmp:expr,
                  $slow:ident($s1:ident, $s2:ident)) => {{
-                    let c = match reg!($a) {
+                    let c = match w[$a] {
                         Value::Int($x) => {
                             let $k = $imm as i64;
                             $cmp
@@ -413,10 +364,10 @@ impl Vm {
             // window again and let the collector catch up.
             macro_rules! resumed_here {
                 () => {{
-                    if self.hooked_here(&cur, closure, depth!()) != HOOKED {
+                    if self.hooked_here(&cur, closure, self.rt.stack.depth()) != HOOKED {
                         return Ok(Ran::Switch);
                     }
-                    w = window!();
+                    w = Window::take(&mut self.rt.stack.regs, base);
                     safepoint!();
                 }};
             }
@@ -486,7 +437,7 @@ impl Vm {
                                     ) {
                                         Some(b) => b,
                                         None => {
-                                            save_pc!();
+                                            self.rt.stack.save_pc(pc);
                                             tri!(enter_lua_frame_general(
                                                 &mut self.rt,
                                                 Shape::of(&self.heap.get(c).code),
@@ -505,7 +456,7 @@ impl Vm {
                                     base = new_base;
                                     pc = 0;
                                     switch_code!(c, shape.code_id);
-                                    w = window!();
+                                    w = Window::take(&mut self.rt.stack.regs, base);
                                 }
                                 // A native's fast path, when it has one and takes
                                 // these arguments: no window, no frame.
@@ -525,10 +476,16 @@ impl Vm {
                                 // Any other native, called in place: no frame, and
                                 // a plain return comes straight back to this loop.
                                 Value::Native(id) if !HOOKED => {
-                                    save_pc!();
-                                    match self.call_native_in_loop(fa, n, want, id, depth!()) {
+                                    self.rt.stack.save_pc(pc);
+                                    match self.call_native_in_loop(
+                                        fa,
+                                        n,
+                                        want,
+                                        id,
+                                        self.rt.stack.depth(),
+                                    ) {
                                         Ok(NativeStep::Returned) => {
-                                            w = window!();
+                                            w = Window::take(&mut self.rt.stack.regs, base);
                                             safepoint!();
                                         }
                                         Ok(NativeStep::Resumed) => resumed_here!(),
@@ -539,8 +496,8 @@ impl Vm {
                                 // Anything else (a hooked native, a `__call`
                                 // handler) goes through the general entry.
                                 _ => {
-                                    save_pc!();
-                                    let d = depth!();
+                                    self.rt.stack.save_pc(pc);
+                                    let d = self.rt.stack.depth();
                                     match self.call_value(fa, n, want) {
                                         Ok(Flow::Reload) if self.rt.stack.frames.len() == d => {
                                             resumed_here!()
@@ -586,7 +543,7 @@ impl Vm {
                                 }
                                 closure = c;
                                 switch_code!(c, code_id);
-                                w = window!();
+                                w = Window::take(&mut self.rt.stack.regs, base);
                                 continue;
                             }
                             flow!(self.do_return(src, n))
@@ -595,12 +552,7 @@ impl Vm {
                     let insn = code[pc];
                     pc += 1;
                     if HOOKED {
-                        self.rt
-                            .stack
-                            .frames
-                            .last_mut()
-                            .expect("the running frame")
-                            .pc = pc as u32;
+                        self.rt.stack.save_pc(pc);
                         if let Err(e) = self.hook_point(pc - 1, insn.decode()) {
                             throw!(Exc::Lua(e));
                         }
@@ -610,18 +562,13 @@ impl Vm {
                         {
                             throw!(Exc::Lua(e));
                         }
-                        if !self.hooked_here(&cur, closure, depth!()) {
+                        if !self.hooked_here(&cur, closure, self.rt.stack.depth()) {
                             // The hook was turned off: run this instruction in
                             // the plain loop.
-                            self.rt
-                                .stack
-                                .frames
-                                .last_mut()
-                                .expect("the running frame")
-                                .pc = pc as u32 - 1;
+                            self.rt.stack.save_pc(pc - 1);
                             return Ok(Ran::Switch);
                         }
-                        w = window!();
+                        w = Window::take(&mut self.rt.stack.regs, base);
                     }
                     match insn.op() {
                         // Numbers are copied by parts: the source was usually
@@ -629,14 +576,14 @@ impl Vm {
                         // stall on store forwarding.
                         Opcode::Move => {
                             let (dst, src) = (insn.a(), insn.b());
-                            match reg!(src) {
-                                Value::Int(x) => reg!(dst) = Value::Int(x),
-                                Value::Float(f) => reg!(dst) = Value::Float(f),
-                                Value::Table(t) => reg!(dst) = Value::Table(t),
-                                Value::Str(x) => reg!(dst) = Value::Str(x),
-                                Value::Closure(c) => reg!(dst) = Value::Closure(c),
-                                Value::Bool(b) => reg!(dst) = Value::Bool(b),
-                                v => reg!(dst) = v,
+                            match w[src] {
+                                Value::Int(x) => w[dst] = Value::Int(x),
+                                Value::Float(f) => w[dst] = Value::Float(f),
+                                Value::Table(t) => w[dst] = Value::Table(t),
+                                Value::Str(x) => w[dst] = Value::Str(x),
+                                Value::Closure(c) => w[dst] = Value::Closure(c),
+                                Value::Bool(b) => w[dst] = Value::Bool(b),
+                                v => w[dst] = v,
                             }
                         }
                         Opcode::LoadNil => {
@@ -648,15 +595,15 @@ impl Vm {
                         }
                         Opcode::LoadBool => {
                             let (dst, value) = (insn.a(), insn.b() != 0);
-                            reg!(dst) = Value::Bool(value)
+                            w[dst] = Value::Bool(value)
                         }
                         Opcode::LoadInt => {
                             let (dst, value) = (insn.a(), insn.sd());
-                            reg!(dst) = Value::Int(value as i64)
+                            w[dst] = Value::Int(value as i64)
                         }
                         Opcode::LoadConst => {
                             let (dst, k) = (insn.a(), insn.dlo());
-                            reg!(dst) = cur.consts[k as usize]
+                            w[dst] = cur.consts[k as usize]
                         }
 
                         Opcode::CellGet => {
@@ -669,16 +616,16 @@ impl Vm {
                                 .expect("the running frame")
                                 .cell_base as usize;
                             let c = self.rt.stack.cells[cell_base + cell as usize];
-                            reg!(dst) = self.heap.get(c).value;
+                            w[dst] = self.heap.get(c).value;
                         }
                         Opcode::CapGet => {
                             let (dst, cap) = (insn.a(), insn.b());
                             let c = self.heap.get(closure).captures[cap as usize];
-                            reg!(dst) = self.heap.get(c).value;
+                            w[dst] = self.heap.get(c).value;
                         }
                         Opcode::CapSelf => {
                             let dst = insn.a();
-                            reg!(dst) = Value::Closure(closure)
+                            w[dst] = Value::Closure(closure)
                         }
                         Opcode::CapSet => {
                             let (cap, src) = (insn.a(), insn.b());
@@ -713,31 +660,31 @@ impl Vm {
                                 }
                                 other => throw!(env_error(&self.heap, &self.rt.metas, other)),
                             };
-                            reg!(dst) = v;
+                            w[dst] = v;
                         }
 
                         Opcode::GetField => {
                             let (dst, obj, key, ic) = (insn.a(), insn.b(), insn.dlo(), insn.dhi());
-                            let &Value::Table(t) = &reg!(obj) else {
-                                get_slow!(reg!(obj), cur.consts[key as usize])
+                            let &Value::Table(t) = &w[obj] else {
+                                get_slow!(w[obj], cur.consts[key as usize])
                             };
                             let cache = &cur.caches[ic as usize];
                             let tab = self.heap.get(t);
                             match tab.cached_str(cache.slot.get() as usize, cache.key) {
                                 // A dead entry is a miss when `__index` could
                                 // apply.
-                                Some(v) if !v.is_nil() || tab.meta.is_none() => reg!(dst) = v,
+                                Some(v) if !v.is_nil() || tab.meta.is_none() => w[dst] = v,
                                 _ => {
                                     let k = const_str(&cur.consts, key);
-                                    reg!(dst) =
+                                    w[dst] =
                                         tri!(get_str_miss(&self.heap, &self.rt.metas, t, k, cache));
                                 }
                             }
                         }
                         Opcode::SetField => {
                             let (obj, key, src, ic) = (insn.a(), insn.dlo(), insn.b(), insn.dhi());
-                            let &Value::Table(t) = &reg!(obj) else {
-                                set_slow!(reg!(obj), cur.consts[key as usize], reg!(src))
+                            let &Value::Table(t) = &w[obj] else {
+                                set_slow!(w[obj], cur.consts[key as usize], w[src])
                             };
                             let cache = &cur.caches[ic as usize];
                             let slot = cache.slot.get() as usize;
@@ -752,32 +699,32 @@ impl Vm {
                                 by_parts!(src, |v| tab.set_slot(slot, v));
                             } else {
                                 let k = const_str(&cur.consts, key);
-                                let v = reg!(src);
+                                let v = w[src];
                                 tri!(set_str_miss(&mut self.heap, &self.rt.metas, t, k, v, cache));
                                 safepoint!();
                             }
                         }
                         Opcode::GetIndex => {
                             let (dst, obj, key) = (insn.a(), insn.b(), insn.c());
-                            let &Value::Table(t) = &reg!(obj) else {
-                                get_slow!(reg!(obj), reg!(key))
+                            let &Value::Table(t) = &w[obj] else {
+                                get_slow!(w[obj], w[key])
                             };
                             let tab = self.heap.get(t);
                             // A nil result in a table with a metatable may
                             // come from `__index`. `dst` may be `obj` or `key`.
-                            match reg!(key) {
+                            match w[key] {
                                 Value::Int(i) => {
-                                    if !tab.read_int_present(i, &mut reg!(dst)) {
+                                    if !tab.read_int_present(i, &mut w[dst]) {
                                         let v = tab.get_int(i);
                                         if v.is_nil() && tab.meta.is_some() {
                                             get_slow!(Value::Table(t), Value::Int(i))
                                         }
-                                        reg!(dst) = v;
+                                        w[dst] = v;
                                     }
                                 }
                                 k => {
-                                    reg!(dst) = tab.get(&self.heap, k);
-                                    if tab.meta.is_some() && reg!(dst).is_nil() {
+                                    w[dst] = tab.get(&self.heap, k);
+                                    if tab.meta.is_some() && w[dst].is_nil() {
                                         get_slow!(Value::Table(t), k)
                                     }
                                 }
@@ -785,23 +732,23 @@ impl Vm {
                         }
                         Opcode::SetIndex => {
                             let (obj, key, src) = (insn.a(), insn.b(), insn.c());
-                            let &Value::Table(t) = &reg!(obj) else {
-                                set_slow!(reg!(obj), reg!(key), reg!(src))
+                            let &Value::Table(t) = &w[obj] else {
+                                set_slow!(w[obj], w[key], w[src])
                             };
-                            match reg!(key) {
+                            match w[key] {
                                 // A store into the array part allocates
                                 // nothing, so it needs no safe point.
                                 Value::Int(i) => match set_int_parts!(t, i, src) {
                                     IntStore::Array => {}
                                     IntStore::Other => safepoint!(),
                                     IntStore::Slow => {
-                                        set_slow!(reg!(obj), reg!(key), reg!(src))
+                                        set_slow!(w[obj], w[key], w[src])
                                     }
                                 },
                                 k => {
-                                    let v = reg!(src);
+                                    let v = w[src];
                                     if self.heap.get(t).meta.is_some() {
-                                        set_slow!(reg!(obj), k, v)
+                                        set_slow!(w[obj], k, v)
                                     }
                                     if let Err(e) = table::set(&mut self.heap, t, k, v) {
                                         throw!(ops::store_failed(e, t, k, v));
@@ -812,28 +759,28 @@ impl Vm {
                         }
                         Opcode::GetIndexInt => {
                             let (dst, obj, key) = (insn.a(), insn.b(), insn.dlo());
-                            let &Value::Table(t) = &reg!(obj) else {
-                                get_slow!(reg!(obj), Value::Int(key as i64))
+                            let &Value::Table(t) = &w[obj] else {
+                                get_slow!(w[obj], Value::Int(key as i64))
                             };
                             let tab = self.heap.get(t);
-                            if !tab.read_int_present(key as i64, &mut reg!(dst)) {
+                            if !tab.read_int_present(key as i64, &mut w[dst]) {
                                 let v = tab.get_int(key as i64);
                                 if v.is_nil() && tab.meta.is_some() {
                                     get_slow!(Value::Table(t), Value::Int(key as i64))
                                 }
-                                reg!(dst) = v;
+                                w[dst] = v;
                             }
                         }
                         Opcode::SetIndexInt => {
                             let (obj, key, src) = (insn.a(), insn.dlo(), insn.b());
-                            let &Value::Table(t) = &reg!(obj) else {
-                                set_slow!(reg!(obj), Value::Int(key as i64), reg!(src))
+                            let &Value::Table(t) = &w[obj] else {
+                                set_slow!(w[obj], Value::Int(key as i64), w[src])
                             };
                             match set_int_parts!(t, key as i64, src) {
                                 IntStore::Array => {}
                                 IntStore::Other => safepoint!(),
                                 IntStore::Slow => {
-                                    set_slow!(reg!(obj), Value::Int(key as i64), reg!(src))
+                                    set_slow!(w[obj], Value::Int(key as i64), w[src])
                                 }
                             }
                         }
@@ -844,17 +791,17 @@ impl Vm {
                             };
                             // Copied by parts: a whole-value copy also moves the
                             // padding bytes, through overlapping stack slots.
-                            let t = match reg!(obj) {
+                            let t = match w[obj] {
                                 Value::Table(t) => t,
                                 o => {
-                                    reg!(dst + 1) = o;
+                                    w[dst + 1] = o;
                                     get_slow!(o, Value::Str(k))
                                 }
                             };
-                            reg!(dst + 1) = Value::Table(t);
+                            w[dst + 1] = Value::Table(t);
                             match method_lookup(&self.heap, &self.rt.metas, &cur, ic, k, t) {
-                                Some(Value::Closure(c)) => reg!(dst) = Value::Closure(c),
-                                Some(m) => reg!(dst) = m,
+                                Some(Value::Closure(c)) => w[dst] = Value::Closure(c),
+                                Some(m) => w[dst] = m,
                                 None => get_slow!(Value::Table(t), Value::Str(k)),
                             }
                         }
@@ -881,62 +828,32 @@ impl Vm {
                         }
                         Opcode::MulK => {
                             let (dst, a, k) = (insn.a(), insn.b(), insn.dlo());
-                            arith_v!(
-                                dst,
-                                reg!(a),
-                                cur.consts[k as usize],
-                                Arith::Mul,
-                                ArithOp::Mul
-                            )
+                            arith_v!(dst, w[a], cur.consts[k as usize], Arith::Mul, ArithOp::Mul)
                         }
                         Opcode::ModK => {
                             let (dst, a, k) = (insn.a(), insn.b(), insn.dlo());
-                            arith_v!(
-                                dst,
-                                reg!(a),
-                                cur.consts[k as usize],
-                                Arith::Mod,
-                                ArithOp::Mod
-                            )
+                            arith_v!(dst, w[a], cur.consts[k as usize], Arith::Mod, ArithOp::Mod)
                         }
                         Opcode::KAdd => {
                             let (dst, k, b) = (insn.a(), insn.dlo(), insn.b());
-                            arith_v!(
-                                dst,
-                                cur.consts[k as usize],
-                                reg!(b),
-                                Arith::Add,
-                                ArithOp::Add
-                            )
+                            arith_v!(dst, cur.consts[k as usize], w[b], Arith::Add, ArithOp::Add)
                         }
                         Opcode::KMul => {
                             let (dst, k, b) = (insn.a(), insn.dlo(), insn.b());
-                            arith_v!(
-                                dst,
-                                cur.consts[k as usize],
-                                reg!(b),
-                                Arith::Mul,
-                                ArithOp::Mul
-                            )
+                            arith_v!(dst, cur.consts[k as usize], w[b], Arith::Mul, ArithOp::Mul)
                         }
                         Opcode::KDiv => {
                             let (dst, k, b) = (insn.a(), insn.dlo(), insn.b());
-                            arith_v!(
-                                dst,
-                                cur.consts[k as usize],
-                                reg!(b),
-                                Arith::Div,
-                                ArithOp::Div
-                            )
+                            arith_v!(dst, cur.consts[k as usize], w[b], Arith::Div, ArithOp::Div)
                         }
                         Opcode::AddInt => {
                             let (dst, a, imm) = (insn.a(), insn.b(), insn.dlo() as i16);
-                            match reg!(a) {
-                                Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_add(imm as i64)),
-                                Value::Float(f) => reg!(dst) = Value::Float(f + imm as f64),
+                            match w[a] {
+                                Value::Int(i) => w[dst] = Value::Int(i.wrapping_add(imm as i64)),
+                                Value::Float(f) => w[dst] = Value::Float(f + imm as f64),
                                 _ => {
-                                    let x = reg!(a);
-                                    reg!(dst) = tri!(ops::arith_slow(
+                                    let x = w[a];
+                                    w[dst] = tri!(ops::arith_slow(
                                         &self.heap,
                                         &self.rt.metas,
                                         Arith::Add,
@@ -948,15 +865,15 @@ impl Vm {
                         }
                         Opcode::SubInt => {
                             let (dst, a, imm) = (insn.a(), insn.b(), insn.dlo() as i16);
-                            match reg!(a) {
-                                Value::Int(i) => reg!(dst) = Value::Int(i.wrapping_sub(imm as i64)),
+                            match w[a] {
+                                Value::Int(i) => w[dst] = Value::Int(i.wrapping_sub(imm as i64)),
                                 // Adding the negated integer, as lua5.5 does: `-0.0 - 0` is `0.0` there.
                                 Value::Float(f) => {
-                                    reg!(dst) = Value::Float(f + (-(imm as i64)) as f64)
+                                    w[dst] = Value::Float(f + (-(imm as i64)) as f64)
                                 }
                                 _ => {
-                                    let x = reg!(a);
-                                    reg!(dst) = tri!(ops::arith_slow(
+                                    let x = w[a];
+                                    w[dst] = tri!(ops::arith_slow(
                                         &self.heap,
                                         &self.rt.metas,
                                         Arith::Sub,
@@ -988,12 +905,12 @@ impl Vm {
                         }
                         Opcode::Not => {
                             let (dst, src) = (insn.a(), insn.b());
-                            reg!(dst) = Value::Bool(reg!(src).is_falsy())
+                            w[dst] = Value::Bool(w[src].is_falsy())
                         }
                         Opcode::Len => {
                             let (dst, src) = (insn.a(), insn.b());
-                            let x = reg!(src);
-                            reg!(dst) = tri!(op_len(&self.heap, &self.rt.metas, x));
+                            let x = w[src];
+                            w[dst] = tri!(op_len(&self.heap, &self.rt.metas, x));
                         }
 
                         Opcode::Jump => {
@@ -1002,13 +919,13 @@ impl Vm {
                         }
                         Opcode::JumpIfTrue => {
                             let (src, off) = (insn.a(), insn.sd());
-                            if !reg!(src).is_falsy() {
+                            if !w[src].is_falsy() {
                                 jump!(off);
                             }
                         }
                         Opcode::JumpIfFalse => {
                             let (src, off) = (insn.a(), insn.sd());
-                            if reg!(src).is_falsy() {
+                            if w[src].is_falsy() {
                                 jump!(off);
                             }
                         }
@@ -1043,7 +960,7 @@ impl Vm {
                         Opcode::JumpEqInt => {
                             let (a, imm, want, off) =
                                 (insn.a(), insn.b() as i8, insn.c() != 0, insn.sd());
-                            let c = match reg!(a) {
+                            let c = match w[a] {
                                 Value::Int(i) => i == imm as i64,
                                 Value::Float(f) => f == imm as f64,
                                 _ => false,
@@ -1172,7 +1089,7 @@ impl Vm {
                                 self.rt.top = func + 1;
                                 closure = c;
                                 switch_code!(c, code_id);
-                                w = window!();
+                                w = Window::take(&mut self.rt.stack.regs, base);
                                 continue;
                             }
                             lua_return!(base + src as usize, 1)
@@ -1183,14 +1100,14 @@ impl Vm {
                         Opcode::NewTable => {
                             let (dst, array_hint, hash_hint) = (insn.a(), insn.dlo(), insn.dhi());
                             let t = self.op_new_table(array_hint as usize, hash_hint as usize);
-                            w = window!();
-                            reg!(dst) = Value::Table(t);
+                            w = Window::take(&mut self.rt.stack.regs, base);
+                            w[dst] = Value::Table(t);
                             safepoint!();
                         }
                         Opcode::SetList => {
                             let (tr, first, count, start) =
                                 (insn.a(), insn.b(), insn.c(), insn.d());
-                            let Value::Table(t) = reg!(tr) else {
+                            let Value::Table(t) = w[tr] else {
                                 unreachable!("SetList on a table")
                             };
                             let from = base + first as usize;
@@ -1200,7 +1117,7 @@ impl Vm {
                                 count as usize
                             };
                             let stored = self.op_set_list(t, from, n, start as i64);
-                            w = window!();
+                            w = Window::take(&mut self.rt.stack.regs, base);
                             if let Err(e) = stored {
                                 throw!(e.into());
                             }
@@ -1209,8 +1126,8 @@ impl Vm {
                         Opcode::Concat => {
                             let (dst, first, count) = (insn.a(), insn.b(), insn.c());
                             let v = tri!(self.op_concat(base + first as usize, count as usize));
-                            w = window!();
-                            reg!(dst) = v;
+                            w = Window::take(&mut self.rt.stack.regs, base);
+                            w[dst] = v;
                             safepoint!();
                         }
                         Opcode::Closure => {
@@ -1223,8 +1140,8 @@ impl Vm {
                                 .expect("the running frame")
                                 .cell_base as usize;
                             let c = self.op_closure(closure, cell_base, proto as usize);
-                            w = window!();
-                            reg!(dst) = c;
+                            w = Window::take(&mut self.rt.stack.regs, base);
+                            w[dst] = c;
                             safepoint!();
                         }
                         Opcode::CellNew => {
@@ -1236,9 +1153,9 @@ impl Vm {
                                 .last()
                                 .expect("the running frame")
                                 .cell_base as usize;
-                            let v = reg!(src);
+                            let v = w[src];
                             self.op_cell_new(cell_base + cell as usize, v);
-                            w = window!();
+                            w = Window::take(&mut self.rt.stack.regs, base);
                             safepoint!();
                         }
                         Opcode::CellSet => {
@@ -1251,7 +1168,7 @@ impl Vm {
                                 .expect("the running frame")
                                 .cell_base as usize;
                             let c = self.rt.stack.cells[cell_base + cell as usize];
-                            let v = reg!(src);
+                            let v = w[src];
                             self.heap.barrier_back(c);
                             self.heap.get_mut(c).value = v;
                         }
@@ -1265,7 +1182,7 @@ impl Vm {
                                 .last()
                                 .expect("the running frame")
                                 .nvarargs;
-                            reg!(dst) = Value::Int(nvarargs as i64);
+                            w[dst] = Value::Int(nvarargs as i64);
                         }
 
                         Opcode::ForPrep => {
@@ -1273,20 +1190,20 @@ impl Vm {
                             // The common integer loop counting up; the rest
                             // (floats, negative steps, errors) is cold.
                             if let (&Value::Int(i), &Value::Int(lim), &Value::Int(s)) =
-                                (&reg!(b), &reg!(b + 1), &reg!(b + 2))
+                                (&w[b], &w[b + 1], &w[b + 2])
                                 && s > 0
                             {
                                 if i <= lim {
                                     // The iterations left replace the limit.
                                     let count = (lim as u64).wrapping_sub(i as u64) / s as u64;
-                                    reg!(b + 1) = Value::Int(count as i64);
-                                    reg!(b + 3) = Value::Int(i);
+                                    w[b + 1] = Value::Int(count as i64);
+                                    w[b + 3] = Value::Int(i);
                                 } else {
                                     jump!(exit);
                                 }
                             } else {
                                 let runs = tri!(self.op_for_prep(base + b as usize, false));
-                                w = window!();
+                                w = Window::take(&mut self.rt.stack.regs, base);
                                 if !runs {
                                     jump!(exit);
                                 }
@@ -1321,9 +1238,9 @@ impl Vm {
                         }
                         Opcode::GenericLoop => {
                             let (b, back) = (insn.a(), insn.sd());
-                            let v = reg!(b + 4);
+                            let v = w[b + 4];
                             if !v.is_nil() {
-                                reg!(b + 2) = v;
+                                w[b + 2] = v;
                                 jump!(back);
                             }
                         }
@@ -1365,7 +1282,7 @@ impl Vm {
                                     safepoint,
                                 }) => {
                                     pc = next;
-                                    w = window!();
+                                    w = Window::take(&mut self.rt.stack.regs, base);
                                     if safepoint {
                                         safepoint!();
                                     }
@@ -1393,8 +1310,8 @@ impl Vm {
                             };
                             // The window is retaken: the paths that end the
                             // instruction loop don't all hold one.
-                            w = window!();
-                            reg!(dst) = v;
+                            w = Window::take(&mut self.rt.stack.regs, base);
+                            w[dst] = v;
                             continue 'run;
                         }
                         Err(e) => break 'run e,
@@ -1406,7 +1323,7 @@ impl Vm {
             // switch, the running stack isn't the one this loop's frame
             // state describes, so its pc isn't saved.
             if !std::mem::take(&mut self.rt.switched) {
-                save_pc!();
+                self.rt.stack.save_pc(pc);
             }
             match self.raise(exc) {
                 Ok(Flow::Reload | Flow::Switched) => {
@@ -1432,7 +1349,7 @@ impl Vm {
         base: usize,
         pc: usize,
     ) -> Result<Cold, Exc> {
-        let frame = *self.rt.stack.frames.last().expect("the running frame");
+        let frame = *self.rt.stack.running();
         let cell_base = frame.cell_base as usize;
         let nvarargs = frame.nvarargs as usize;
         // A register of the running frame, by number.
