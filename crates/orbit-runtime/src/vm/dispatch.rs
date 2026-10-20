@@ -1033,6 +1033,68 @@ impl Vm {
                         lua_return!(base + src as usize, 1)
                     }
 
+                    // Allocating instructions call out anyway; they stay
+                    // in the loop so the call is all they pay.
+                    Op::NewTable {
+                        dst,
+                        array_hint,
+                        hash_hint,
+                    } => {
+                        let t = self.op_new_table(array_hint as usize, hash_hint as usize);
+                        w = window!();
+                        reg!(dst) = Value::Table(t);
+                        safepoint!();
+                    }
+                    Op::SetList {
+                        table: tr,
+                        first,
+                        count,
+                        start,
+                    } => {
+                        let Value::Table(t) = reg!(tr) else {
+                            unreachable!("SetList on a table")
+                        };
+                        let from = base + first as usize;
+                        let n = if count == MULTI {
+                            self.rt.top - from
+                        } else {
+                            count as usize
+                        };
+                        let stored = self.op_set_list(t, from, n, start as i64);
+                        w = window!();
+                        if let Err(e) = stored {
+                            throw!(e.into());
+                        }
+                        safepoint!();
+                    }
+                    Op::Concat { dst, first, count } => {
+                        let v = tri!(self.op_concat(base + first as usize, count as usize));
+                        w = window!();
+                        reg!(dst) = v;
+                        safepoint!();
+                    }
+                    Op::Closure { dst, proto } => {
+                        let cell_base = self.rt.stack.frames[depth - 1].cell_base as usize;
+                        let c = self.op_closure(closure, cell_base, proto as usize);
+                        w = window!();
+                        reg!(dst) = c;
+                        safepoint!();
+                    }
+                    Op::CellNew { cell, src } => {
+                        let cell_base = self.rt.stack.frames[depth - 1].cell_base as usize;
+                        let v = reg!(src);
+                        self.op_cell_new(cell_base + cell as usize, v);
+                        w = window!();
+                        safepoint!();
+                    }
+                    Op::CellSet { cell, src } => {
+                        let cell_base = self.rt.stack.frames[depth - 1].cell_base as usize;
+                        let c = self.rt.stack.cells[cell_base + cell as usize];
+                        let v = reg!(src);
+                        self.heap.barrier_back(c);
+                        self.heap.get_mut(c).value = v;
+                    }
+
                     Op::VarargLen { dst } => {
                         let nvarargs = self.rt.stack.frames[depth - 1].nvarargs;
                         reg!(dst) = Value::Int(nvarargs as i64);
@@ -1100,13 +1162,9 @@ impl Vm {
                     // the match stays exhaustive without a default, which
                     // would put a range check in front of the jump table.
                     Op::LoadConstX { .. }
-                    | Op::CellNew { .. }
-                    | Op::CellSet { .. }
                     | Op::CellClear { .. }
                     | Op::CheckUndefined { .. }
                     | Op::SetGlobal { .. }
-                    | Op::NewTable { .. }
-                    | Op::SetList { .. }
                     | Op::Pow { .. }
                     | Op::IDiv { .. }
                     | Op::AddK { .. }
@@ -1118,7 +1176,6 @@ impl Vm {
                     | Op::BNot { .. }
                     | Op::Neg { .. }
                     | Op::Cast { .. }
-                    | Op::Concat { .. }
                     | Op::Vararg { .. }
                     | Op::VarargTable { .. }
                     | Op::VarargGet { .. }
@@ -1126,7 +1183,6 @@ impl Vm {
                     | Op::VarargUnpack { .. }
                     | Op::ForPrepExclusive { .. }
                     | Op::NativeEntry { .. }
-                    | Op::Closure { .. }
                     | Op::Tbc { .. }
                     | Op::Close { .. } => match self.cold_op(op, &cur, closure, base, pc) {
                         Ok(Cold::Next {
@@ -1207,17 +1263,6 @@ impl Vm {
         let mut safepoint = false;
         match op {
             Op::LoadConstX { dst, k } => reg!(dst) = cur.consts[k as usize],
-            Op::CellNew { cell, src } => {
-                let v = reg!(src);
-                self.op_cell_new(cell_base + cell as usize, v);
-                safepoint = true;
-            }
-            Op::CellSet { cell, src } => {
-                let c = self.rt.stack.cells[cell_base + cell as usize];
-                let v = reg!(src);
-                self.heap.barrier_back(c);
-                self.heap.get_mut(c).value = v;
-            }
             Op::CellClear { from, count } => {
                 let at = cell_base + from as usize;
                 let dead = self.rt.dead_cell;
@@ -1250,33 +1295,6 @@ impl Vm {
                     }
                     other => return Err(env_error(&self.heap, &self.rt.metas, other)),
                 }
-            }
-            Op::NewTable {
-                dst,
-                array_hint,
-                hash_hint,
-            } => {
-                let t = self.op_new_table(array_hint as usize, hash_hint as usize);
-                reg!(dst) = Value::Table(t);
-                safepoint = true;
-            }
-            Op::SetList {
-                table: tr,
-                first,
-                count,
-                start,
-            } => {
-                let Value::Table(t) = reg!(tr) else {
-                    unreachable!("SetList on a table")
-                };
-                let from = base + first as usize;
-                let n = if count == MULTI {
-                    self.rt.top - from
-                } else {
-                    count as usize
-                };
-                self.op_set_list(t, from, n, start as i64)?;
-                safepoint = true;
             }
 
             Op::Pow { dst, a, b } => arith_k!(dst, reg!(a), reg!(b), Arith::Pow, ArithOp::Pow),
@@ -1367,11 +1385,6 @@ impl Vm {
                     }
                 };
             }
-            Op::Concat { dst, first, count } => {
-                let v = self.op_concat(base + first as usize, count as usize)?;
-                reg!(dst) = v;
-                safepoint = true;
-            }
 
             Op::Vararg { dst, count } => {
                 self.op_vararg(base, nvarargs, dst as usize, count);
@@ -1412,11 +1425,6 @@ impl Vm {
                 return Ok(Cold::Flow(
                     self.native_entry(closure, crate::object::NativeId(id))?,
                 ));
-            }
-            Op::Closure { dst, proto } => {
-                let c = self.op_closure(closure, cell_base, proto as usize);
-                reg!(dst) = c;
-                safepoint = true;
             }
             Op::Tbc { reg } => {
                 if !reg!(reg).is_falsy() {
