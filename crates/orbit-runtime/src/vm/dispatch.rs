@@ -27,6 +27,10 @@ use orbit_bytecode::{MULTI, Op};
 use crate::vm::cold::{
     already_defined, env_error, get_str_miss, method_miss, op_cast, op_len, set_str_miss,
 };
+use crate::vm::fast::{
+    self, Cmp,
+    Src::{K, R},
+};
 use crate::vm::interp::{
     Flow, Ran, Shape, WINDOW, Window, const_str, enter_lua_frame_fast, enter_lua_frame_general,
 };
@@ -181,35 +185,6 @@ impl Vm {
                     }
                 };
             }
-            // Run `$body` with `$v` bound to `w[$src]`, reading a number
-            // by parts. Arithmetic writes its result as a tag store and a
-            // payload store, and a whole 16-byte load of that value soon
-            // after would stall on store forwarding; with the variant known,
-            // `$body` stores it by parts too.
-            macro_rules! by_parts {
-                ($src:expr, |$v:ident| $body:expr) => {
-                    match w[$src] {
-                        Value::Int(x) => {
-                            let $v = Value::Int(x);
-                            $body
-                        }
-                        Value::Float(f) => {
-                            let $v = Value::Float(f);
-                            $body
-                        }
-                        Value::Bool(b) => {
-                            let $v = Value::Bool(b);
-                            $body
-                        }
-                        $v => $body,
-                    }
-                };
-            }
-            macro_rules! set_int_parts {
-                ($t:expr, $i:expr, $src:expr) => {
-                    by_parts!($src, |v| table::store_int(&mut self.heap, $t, $i, v))
-                };
-            }
             macro_rules! jump {
                 ($off:expr) => {{
                     pc = (pc as isize + $off as isize) as usize;
@@ -224,115 +199,6 @@ impl Vm {
                         self.rt.hooks_touched = true;
                         self.rt.stack.hook.mask |= crate::vm::hook::INTERRUPT;
                         return Ok(Ran::Switch);
-                    }
-                }};
-            }
-            macro_rules! arith {
-                ($dst:expr, $a:expr, $b:expr, $op:expr, $nop:expr) => {
-                    arith_v!($dst, w[$a], w[$b], $op, $nop)
-                };
-            }
-            // `arith!` over two operand places, registers or constants.
-            macro_rules! arith_v {
-                ($dst:expr, $x:expr, $y:expr, $op:expr, $nop:expr) => {{
-                    // `Number::arith` owns the integer/float rules; with a
-                    // constant operator it inlines to the one case. Each arm
-                    // stores its own result, so the common cases write a
-                    // known tag and payload instead of copying a merged
-                    // `Value` through the stack.
-                    macro_rules! store {
-                        ($p:expr, $q:expr) => {
-                            match Number::arith($p, $nop, $q) {
-                                Ok(Number::Int(i)) => w[$dst] = Value::Int(i),
-                                Ok(Number::Float(f)) => w[$dst] = Value::Float(f),
-                                Err(e) => throw!(Exc::Rt(e.message().into(), None)),
-                            }
-                        };
-                    }
-                    // One arm per operand pair, so each inlines with both
-                    // subtypes known.
-                    match (&$x, &$y) {
-                        (&Value::Int(i), &Value::Int(j)) => store!(Number::Int(i), Number::Int(j)),
-                        (&Value::Float(f), &Value::Float(g)) => {
-                            store!(Number::Float(f), Number::Float(g))
-                        }
-                        (&Value::Int(i), &Value::Float(g)) => {
-                            store!(Number::Int(i), Number::Float(g))
-                        }
-                        (&Value::Float(f), &Value::Int(j)) => {
-                            store!(Number::Float(f), Number::Int(j))
-                        }
-                        _ => {
-                            let (x, y) = ($x, $y);
-                            w[$dst] = tri!(ops::arith_slow(&self.heap, &self.rt.metas, $op, x, y))
-                        }
-                    }
-                }};
-            }
-            macro_rules! bitwise {
-                ($dst:expr, $a:expr, $b:expr, $op:expr) => {{
-                    match (&w[$a], &w[$b]) {
-                        (&Value::Int(i), &Value::Int(j)) => w[$dst] = Value::Int($op.apply(i, j)),
-                        _ => {
-                            let (x, y) = (w[$a], w[$b]);
-                            w[$dst] = tri!(ops::bitwise_slow(&self.heap, &self.rt.metas, $op, x, y))
-                        }
-                    }
-                }};
-            }
-            macro_rules! compare_jump {
-                ($a:expr, $b:expr, $off:expr, $want:expr, $slow:path, |$i:ident, $j:ident| $cmp:expr) => {{
-                    let c = match (&w[$a], &w[$b]) {
-                        (&Value::Int($i), &Value::Int($j)) => $cmp,
-                        (&Value::Float($i), &Value::Float($j)) => $cmp,
-                        _ => {
-                            let (x, y) = (w[$a], w[$b]);
-                            tri!($slow(&self.heap, &self.rt.metas, x, y))
-                        }
-                    };
-                    if c == $want {
-                        jump!($off);
-                    }
-                }};
-            }
-            // `R[a] == R[b]`, reading the operands by parts: a register
-            // `LoadNil` just wrote holds only its tag, and a whole 16-byte
-            // load of it would stall on store forwarding.
-            macro_rules! eq_parts {
-                ($a:expr, $b:expr) => {
-                    match (&w[$a], &w[$b]) {
-                        (&Value::Int(i), &Value::Int(j)) => i == j,
-                        (&Value::Float(f), &Value::Float(g)) => f == g,
-                        (&Value::Nil, &Value::Nil) => true,
-                        (&Value::Nil, _) | (_, &Value::Nil) => false,
-                        _ => {
-                            let (x, y) = (w[$a], w[$b]);
-                            tri!(values_equal(&self.heap, &self.rt.metas, x, y))
-                        }
-                    }
-                };
-            }
-            macro_rules! compare_int_jump {
-                // `$slow` names an `ops` comparison and its operand order,
-                // with `x` the register and `k` the immediate as values.
-                ($a:expr, $imm:expr, $want:expr, $off:expr, |$x:ident, $k:ident| $cmp:expr,
-                 $slow:ident($s1:ident, $s2:ident)) => {{
-                    let c = match w[$a] {
-                        Value::Int($x) => {
-                            let $k = $imm as i64;
-                            $cmp
-                        }
-                        Value::Float($x) => {
-                            let $k = $imm as f64;
-                            $cmp
-                        }
-                        v => {
-                            let ($x, $k) = (v, Value::Int($imm as i64));
-                            tri!(ops::$slow(&self.heap, &self.rt.metas, $s1, $s2))
-                        }
-                    };
-                    if c == $want {
-                        jump!($off);
                     }
                 }};
             }
@@ -612,7 +478,7 @@ impl Vm {
                             let c = self.heap.get(closure).captures[cap as usize];
                             self.heap.barrier_back(c);
                             let cell = self.heap.get_mut(c);
-                            by_parts!(src, |v| cell.value = v);
+                            fast::by_parts(&w[src], |v| cell.value = v);
                         }
 
                         Op::GetGlobal { dst, name, ic } => {
@@ -673,7 +539,7 @@ impl Vm {
                                 // capacity changes, so no byte accounting.
                                 self.heap.barrier_back(t);
                                 let tab = self.heap.get_mut(t);
-                                by_parts!(src, |v| tab.set_slot(slot, v));
+                                fast::by_parts(&w[src], |v| tab.set_slot(slot, v));
                             } else {
                                 let k = const_str(&cur.consts, key);
                                 let v = w[src];
@@ -713,7 +579,9 @@ impl Vm {
                             match w[key] {
                                 // A store into the array part allocates
                                 // nothing, so it needs no safe point.
-                                Value::Int(i) => match set_int_parts!(t, i, src) {
+                                Value::Int(i) => match fast::by_parts(&w[src], |v| {
+                                    table::store_int(&mut self.heap, t, i, v)
+                                }) {
                                     IntStore::Array => {}
                                     IntStore::Other => safepoint!(),
                                     IntStore::Slow => {
@@ -749,7 +617,9 @@ impl Vm {
                             let &Value::Table(t) = &w[obj] else {
                                 set_slow!(w[obj], Value::Int(key as i64), w[src])
                             };
-                            match set_int_parts!(t, key as i64, src) {
+                            match fast::by_parts(&w[src], |v| {
+                                table::store_int(&mut self.heap, t, key as i64, v)
+                            }) {
                                 IntStore::Array => {}
                                 IntStore::Other => safepoint!(),
                                 IntStore::Slow => {
@@ -778,25 +648,105 @@ impl Vm {
                             }
                         }
 
-                        Op::Add { dst, a, b } => arith!(dst, a, b, Arith::Add, ArithOp::Add),
-                        Op::Sub { dst, a, b } => arith!(dst, a, b, Arith::Sub, ArithOp::Sub),
-                        Op::Mul { dst, a, b } => arith!(dst, a, b, Arith::Mul, ArithOp::Mul),
-                        Op::Div { dst, a, b } => arith!(dst, a, b, Arith::Div, ArithOp::Div),
-                        Op::Mod { dst, a, b } => arith!(dst, a, b, Arith::Mod, ArithOp::Mod),
+                        Op::Add { dst, a, b } => tri!(fast::arith(
+                            &mut w,
+                            dst,
+                            R(a),
+                            R(b),
+                            Arith::Add,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
+                        Op::Sub { dst, a, b } => tri!(fast::arith(
+                            &mut w,
+                            dst,
+                            R(a),
+                            R(b),
+                            Arith::Sub,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
+                        Op::Mul { dst, a, b } => tri!(fast::arith(
+                            &mut w,
+                            dst,
+                            R(a),
+                            R(b),
+                            Arith::Mul,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
+                        Op::Div { dst, a, b } => tri!(fast::arith(
+                            &mut w,
+                            dst,
+                            R(a),
+                            R(b),
+                            Arith::Div,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
+                        Op::Mod { dst, a, b } => tri!(fast::arith(
+                            &mut w,
+                            dst,
+                            R(a),
+                            R(b),
+                            Arith::Mod,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
                         Op::MulK { dst, a, k } => {
-                            arith_v!(dst, w[a], cur.consts[k as usize], Arith::Mul, ArithOp::Mul)
+                            tri!(fast::arith(
+                                &mut w,
+                                dst,
+                                R(a),
+                                K(&cur.consts[k as usize]),
+                                Arith::Mul,
+                                &self.heap,
+                                &self.rt.metas
+                            ))
                         }
                         Op::ModK { dst, a, k } => {
-                            arith_v!(dst, w[a], cur.consts[k as usize], Arith::Mod, ArithOp::Mod)
+                            tri!(fast::arith(
+                                &mut w,
+                                dst,
+                                R(a),
+                                K(&cur.consts[k as usize]),
+                                Arith::Mod,
+                                &self.heap,
+                                &self.rt.metas
+                            ))
                         }
                         Op::KAdd { dst, k, b } => {
-                            arith_v!(dst, cur.consts[k as usize], w[b], Arith::Add, ArithOp::Add)
+                            tri!(fast::arith(
+                                &mut w,
+                                dst,
+                                K(&cur.consts[k as usize]),
+                                R(b),
+                                Arith::Add,
+                                &self.heap,
+                                &self.rt.metas
+                            ))
                         }
                         Op::KMul { dst, k, b } => {
-                            arith_v!(dst, cur.consts[k as usize], w[b], Arith::Mul, ArithOp::Mul)
+                            tri!(fast::arith(
+                                &mut w,
+                                dst,
+                                K(&cur.consts[k as usize]),
+                                R(b),
+                                Arith::Mul,
+                                &self.heap,
+                                &self.rt.metas
+                            ))
                         }
                         Op::KDiv { dst, k, b } => {
-                            arith_v!(dst, cur.consts[k as usize], w[b], Arith::Div, ArithOp::Div)
+                            tri!(fast::arith(
+                                &mut w,
+                                dst,
+                                K(&cur.consts[k as usize]),
+                                R(b),
+                                Arith::Div,
+                                &self.heap,
+                                &self.rt.metas
+                            ))
                         }
                         Op::AddInt { dst, a, imm } => match w[a] {
                             Value::Int(i) => w[dst] = Value::Int(i.wrapping_add(imm as i64)),
@@ -827,11 +777,51 @@ impl Vm {
                                 ))
                             }
                         },
-                        Op::BAnd { dst, a, b } => bitwise!(dst, a, b, BitOp::And),
-                        Op::BOr { dst, a, b } => bitwise!(dst, a, b, BitOp::Or),
-                        Op::BXor { dst, a, b } => bitwise!(dst, a, b, BitOp::Xor),
-                        Op::Shl { dst, a, b } => bitwise!(dst, a, b, BitOp::Shl),
-                        Op::Shr { dst, a, b } => bitwise!(dst, a, b, BitOp::Shr),
+                        Op::BAnd { dst, a, b } => tri!(fast::bitwise(
+                            &mut w,
+                            dst,
+                            a,
+                            b,
+                            BitOp::And,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
+                        Op::BOr { dst, a, b } => tri!(fast::bitwise(
+                            &mut w,
+                            dst,
+                            a,
+                            b,
+                            BitOp::Or,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
+                        Op::BXor { dst, a, b } => tri!(fast::bitwise(
+                            &mut w,
+                            dst,
+                            a,
+                            b,
+                            BitOp::Xor,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
+                        Op::Shl { dst, a, b } => tri!(fast::bitwise(
+                            &mut w,
+                            dst,
+                            a,
+                            b,
+                            BitOp::Shl,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
+                        Op::Shr { dst, a, b } => tri!(fast::bitwise(
+                            &mut w,
+                            dst,
+                            a,
+                            b,
+                            BitOp::Shr,
+                            &self.heap,
+                            &self.rt.metas
+                        )),
                         Op::Not { dst, src } => w[dst] = Value::Bool(w[src].is_falsy()),
                         Op::Len { dst, src } => {
                             let x = w[src];
@@ -850,24 +840,40 @@ impl Vm {
                             }
                         }
                         Op::JumpLt { a, b, off } => {
-                            compare_jump!(a, b, off, true, ops::less_than, |x, y| x < y)
+                            if tri!(fast::compare(&w, a, b, Cmp::Lt, &self.heap, &self.rt.metas))
+                                == true
+                            {
+                                jump!(off);
+                            }
                         }
                         Op::JumpNotLt { a, b, off } => {
-                            compare_jump!(a, b, off, false, ops::less_than, |x, y| x < y)
+                            if tri!(fast::compare(&w, a, b, Cmp::Lt, &self.heap, &self.rt.metas))
+                                == false
+                            {
+                                jump!(off);
+                            }
                         }
                         Op::JumpLe { a, b, off } => {
-                            compare_jump!(a, b, off, true, ops::less_equal, |x, y| x <= y)
+                            if tri!(fast::compare(&w, a, b, Cmp::Le, &self.heap, &self.rt.metas))
+                                == true
+                            {
+                                jump!(off);
+                            }
                         }
                         Op::JumpNotLe { a, b, off } => {
-                            compare_jump!(a, b, off, false, ops::less_equal, |x, y| x <= y)
+                            if tri!(fast::compare(&w, a, b, Cmp::Le, &self.heap, &self.rt.metas))
+                                == false
+                            {
+                                jump!(off);
+                            }
                         }
                         Op::JumpEq { a, b, off } => {
-                            if eq_parts!(a, b) {
+                            if tri!(fast::equal(&w, a, b, &self.heap, &self.rt.metas)) {
                                 jump!(off);
                             }
                         }
                         Op::JumpNe { a, b, off } => {
-                            if !eq_parts!(a, b) {
+                            if !tri!(fast::equal(&w, a, b, &self.heap, &self.rt.metas)) {
                                 jump!(off);
                             }
                         }
@@ -882,16 +888,56 @@ impl Vm {
                             }
                         }
                         Op::JumpLtInt { a, imm, want, off } => {
-                            compare_int_jump!(a, imm, want, off, |x, k| x < k, less_than(x, k))
+                            if tri!(fast::compare_int(
+                                &w,
+                                a,
+                                imm,
+                                Cmp::Lt,
+                                &self.heap,
+                                &self.rt.metas
+                            )) == want
+                            {
+                                jump!(off);
+                            }
                         }
                         Op::JumpLeInt { a, imm, want, off } => {
-                            compare_int_jump!(a, imm, want, off, |x, k| x <= k, less_equal(x, k))
+                            if tri!(fast::compare_int(
+                                &w,
+                                a,
+                                imm,
+                                Cmp::Le,
+                                &self.heap,
+                                &self.rt.metas
+                            )) == want
+                            {
+                                jump!(off);
+                            }
                         }
                         Op::JumpGtInt { a, imm, want, off } => {
-                            compare_int_jump!(a, imm, want, off, |x, k| x > k, less_than(k, x))
+                            if tri!(fast::compare_int(
+                                &w,
+                                a,
+                                imm,
+                                Cmp::Gt,
+                                &self.heap,
+                                &self.rt.metas
+                            )) == want
+                            {
+                                jump!(off);
+                            }
                         }
                         Op::JumpGeInt { a, imm, want, off } => {
-                            compare_int_jump!(a, imm, want, off, |x, k| x >= k, less_equal(k, x))
+                            if tri!(fast::compare_int(
+                                &w,
+                                a,
+                                imm,
+                                Cmp::Ge,
+                                &self.heap,
+                                &self.rt.metas
+                            )) == want
+                            {
+                                jump!(off);
+                            }
                         }
 
                         // Calls. Each arm works out the callee's register, its
@@ -983,7 +1029,11 @@ impl Vm {
                                 // value was usually just written that way, and
                                 // a whole 16-byte load would stall on store
                                 // forwarding.
-                                by_parts!(src, |v| self.rt.stack.regs[func] = v);
+                                fast::move_by_parts(
+                                    &mut self.rt.stack.regs,
+                                    base + src as usize,
+                                    func,
+                                );
                                 self.rt.top = func + 1;
                                 closure = c;
                                 switch_code!(c, code_id);
@@ -1623,13 +1673,4 @@ fn method_lookup_up(
         return Some(v);
     }
     method_miss(heap, metas, Value::Table(t), mt, k, cm, ci, up).ok()
-}
-
-#[inline(always)]
-fn values_equal(heap: &LuaHeap, rt: &Metas, x: Value, y: Value) -> Result<bool, Exc> {
-    match (x, y) {
-        (Value::Int(i), Value::Int(j)) => Ok(i == j),
-        (Value::Float(f), Value::Float(g)) => Ok(f == g),
-        _ => ops::equal(heap, rt, x, y),
-    }
 }
