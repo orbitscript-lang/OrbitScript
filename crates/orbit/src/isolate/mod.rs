@@ -85,11 +85,17 @@ pub enum BinaryChecks {
     Full,
 }
 
-/// The collector's mode.
+/// The collector's mode ([`Config::gc_mode`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GcMode {
-    #[default]
+    /// Every cycle marks the whole heap, in small steps paced by
+    /// allocation: short pauses, more total work.
     Incremental,
+    /// Frequent minor collections of recently made objects, and major ones
+    /// of everything when the heap has grown: less total work for programs
+    /// that make many short-lived objects. Each collection runs to the end
+    /// once started, so a major one is a longer pause.
+    #[default]
     Generational,
 }
 
@@ -116,13 +122,13 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// Every library this build has, no memory limit, the incremental
+    /// Every library this build has, no memory limit, the generational
     /// collector, and warnings off (as in `lua` without `-W`).
     fn default() -> Config {
         Config {
             libraries: Library::ALL.to_vec(),
             memory_limit: None,
-            gc_mode: GcMode::Incremental,
+            gc_mode: GcMode::Generational,
             warnings: false,
             ignore_env: false,
             debugger: Debugger::Allowed,
@@ -145,6 +151,9 @@ impl Config {
         self
     }
 
+    /// The collector's mode at the start (generational by default).
+    /// Scripts can switch with `collectgarbage("incremental")` and
+    /// `collectgarbage("generational")`.
     pub fn gc_mode(mut self, mode: GcMode) -> Config {
         self.gc_mode = mode;
         self

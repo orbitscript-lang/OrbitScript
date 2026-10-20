@@ -24,9 +24,7 @@ mod dap;
 #[cfg(feature = "repl")]
 mod repl;
 
-use orbit::{
-    Call, Chunk, Config, Error, Function, GcMode, Isolate, Ret, Runtime, Scope, Table, Value,
-};
+use orbit::{Call, Chunk, Config, Error, Function, Isolate, Ret, Runtime, Scope, Table, Value};
 
 /// The chunk names `lua` gives command-line code and standard input.
 const COMMAND_LINE: &[u8] = b"=(command line)";
@@ -282,15 +280,6 @@ fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
     let config = Config::default()
         .ignore_env(cli.ignore_env)
         .warnings(cli.warnings)
-        // The standalone lua5.5 starts in generational mode too.
-        // Spike: ORBIT_GC_MODE=incremental starts incremental, to compare.
-        .gc_mode(
-            if std::env::var_os("ORBIT_GC_MODE").is_some_and(|m| m == "incremental") {
-                GcMode::Incremental
-            } else {
-                GcMode::Generational
-            },
-        )
         .memory_limit(memory_limit);
     let mut iso = Runtime::new().new_isolate(config);
     let options = orbit_std::Options {

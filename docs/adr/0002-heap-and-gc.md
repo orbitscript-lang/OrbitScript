@@ -91,7 +91,7 @@ Approved by Tym on 2026-10-07 for milestone C4 (GC semantics design, `docs/desig
 - **Finalization uses a registration list (F1).** `Heap::register_finalizer(gc)` appends to a list and sets the object's FIN bit; an object is registered at most once. When marking ends, registered objects found unreachable move to a queue, newest registration first, and `take_finalizable` hands them out one at a time. A finalized object is unregistered: after its finalizer it is ordinary garbage unless it registers again. `finalize_all` queues every registered object, reachable or not, for closing a state. The spike's alternative (F3: scan the color bytes for FIN objects, ordered by a per-slot number) halves registry memory (4 B instead of 8 B per object) but pays per heap object, not per registered one, on every cycle, and was slower under churn; the list stays.
 - **The collector never calls user code.** `orbit-gc` only queues; the embedder runs finalizers outside collection (in Lua's case `orbit-vm`, with automatic collection stopped while one runs). This is what keeps resurrection safe: a finalizer sees a fully marked, swept heap, and an object it stores somewhere is simply reachable next cycle. boa_gc's resurrection use-after-free cannot happen, because liveness is a mark bit, not a reference count, and freeing happens only in the sweep.
 - **Explicit steps.** `Heap::step_with(roots, bytes)` does the work of `bytes` allocated bytes (`collectgarbage("step", n)`), and `Params::step_bytes == 0` makes every step finish its cycle (stop-the-world pacing).
-- **Generational mode is reported, not implemented**, until P5: `orbit-vm` keeps the mode and the generational parameters for `collectgarbage`, and the incremental collector runs underneath.
+- **Generational mode** was reported but not implemented until the generational-mode amendment below replaced this point.
 
 ## Amendment: an optional heap limit (Proposed)
 
@@ -138,4 +138,19 @@ Approved by Tym on 2026-10-20 (perf thread), with the value tunable through an e
 - **`Params::min_threshold` is a floor under the heap size that starts a cycle.** It stays 0 in `orbit-gc` by default. `Heap::set_min_threshold` changes it; between cycles a higher floor also moves the start of the next cycle up at once.
 - **The VM sets it from the reported mode.** In `"generational"` mode (the CLI's default, as in the standalone `lua5.5`) the floor is 1 MiB, or what `ORBIT_GC_MIN_THRESHOLD` gives (bytes, or `K`, `M`, `G`; `0` turns it off), read when the VM is created. In `"incremental"` mode it is 0, so pacing is exactly `pause` percent of the live heap, which gc.lua's pacing test checks.
 - **Why.** lua5.5's young collections make churn over a small live heap cheap; ours runs a full cycle each time the heap grows 150% past what is live. Creating coroutines over a ~100 KiB live heap ran a full cycle every 14 coroutines, and each cycle costs a fixed amount (roots, the interner, the library tables). The floor stands in for minor collections until there is a generational collector, which may replace it.
-- **The cost.** A program whose live heap is under 1 MiB can hold up to 1 MiB of garbage before collecting.
+- **With the generational collector** (amendment below) the floor applies to major collections only: a major collection waits until the heap passes both `major_percent` growth and the floor, while minor collections keep their own schedule (`minor_min_bytes`). `Heap::set_min_threshold` leaves a scheduled minor collection alone.
+- **The cost.** A program whose live heap is under 1 MiB can hold up to 1 MiB of old garbage before a major collection frees it.
+
+## Amendment: generational mode (Tym, 2026-10-20)
+
+Approved by Tym on 2026-10-20 after the spike in `planning/gc-generational/proposal.md`. It replaces "generational mode is reported, not implemented" from the weak-tables amendment, and narrows the start floor (amendment above) to major collections.
+
+- **Non-moving, with sticky marks.** `orbit-gc` offers `Mode::Generational` alongside `Mode::Incremental` (`Heap::set_mode`). Objects never move. Old objects stay black between collections and the backward barrier stays on, so a store into an old object puts it on the retrace list, which serves as the remembered set.
+- **Minor collections** trace the roots, the remembered objects and the young objects, and free only young ones. Young objects are found through a list of objects made since the last collection (a `NEW` color bit marks them), so a minor collection costs what is young and remembered, not the heap. An object becomes old after surviving two minor collections. An old object that still points at a young one stays remembered, and a weak table stays remembered while it is touched.
+- **Major collections** trace everything. When an automatic major collection frees less than `minor_return_percent` of what was allocated since the one before (a growing heap), the collector does only major collections, without barriers or a young list, until one frees enough.
+- **Pacing.** A minor collection runs after `minor_percent` of the live heap has been allocated (at least `minor_min_bytes`), a major one when the heap has grown `major_percent` past its size after the last major collection. `collectgarbage("param")` maps `minormul`, `minormajor` and `majorminor` to these.
+- **Collections are atomic in this mode** for now; incremental major collections are the follow-up.
+- **Generational is the default.** `orbit::Config::gc_mode` defaults to `GcMode::Generational` for the CLI, the C API and Rust embedders; an embedder can pick `GcMode::Incremental`, and scripts switch with `collectgarbage`. The incremental path costs the same as before.
+- **Stress mode** runs a minor collection at every safe point after an allocation and a major one every 64 minors, so old garbage is still freed.
+- **JIT.** Stores into objects take the backward barrier outside marking too; stores of nil, booleans and numbers skip it.
+
