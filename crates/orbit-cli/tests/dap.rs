@@ -3,19 +3,82 @@
 //! as its own process. `orbit-dap`'s own tests cover the protocol; these
 //! check what the command line adds (the script's process, arguments,
 //! error reports, `os.exit`, the script's input and output).
-#![cfg(all(feature = "dap", unix))]
+#![cfg(feature = "dap")]
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
+/// How long a test waits for any one message or line before it fails,
+/// rather than hanging with its processes still running.
+const PATIENCE: Duration = Duration::from_secs(60);
+
+/// The next item from a reader thread, failing the test after [`PATIENCE`].
+fn next<T>(from: &Receiver<T>, what: &str) -> T {
+    match from.recv_timeout(PATIENCE) {
+        Ok(v) => v,
+        Err(RecvTimeoutError::Timeout) => panic!("no {what} from orbit in {PATIENCE:?}"),
+        Err(RecvTimeoutError::Disconnected) => panic!("orbit closed its {what}"),
+    }
+}
+
+/// The lines `r` gives, read on their own thread.
+fn lines(r: impl Read + Send + 'static) -> Receiver<String> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut r = BufReader::new(r);
+        loop {
+            let mut l = String::new();
+            if !matches!(r.read_line(&mut l), Ok(n) if n > 0) || tx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// The DAP messages `r` gives, read on their own thread.
+fn messages(r: impl Read + Send + 'static) -> Receiver<Value> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut r = BufReader::new(r);
+        loop {
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                if !matches!(r.read_line(&mut line), Ok(n) if n > 0) {
+                    return;
+                }
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some(n) = line.strip_prefix("Content-Length: ") {
+                    length = n.parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            if r.read_exact(&mut body).is_err() {
+                return;
+            }
+            if tx.send(serde_json::from_slice(&body).unwrap()).is_err() {
+                return;
+            }
+        }
+    });
+    rx
+}
+
 struct Editor {
     child: Child,
-    to: ChildStdin,
-    from: BufReader<ChildStdout>,
+    /// The adapter's standard input, until it is closed.
+    to: Option<ChildStdin>,
+    from: Receiver<Value>,
     seq: i64,
     events: VecDeque<Value>,
     /// Whether the editor offers `runInTerminal`.
@@ -41,8 +104,8 @@ impl Editor {
             .spawn()
             .unwrap();
         Editor {
-            to: child.stdin.take().unwrap(),
-            from: BufReader::new(child.stdout.take().unwrap()),
+            to: Some(child.stdin.take().unwrap()),
+            from: messages(child.stdout.take().unwrap()),
             child,
             seq: 0,
             events: VecDeque::new(),
@@ -85,8 +148,9 @@ impl Editor {
 
     fn send(&mut self, msg: &Value) {
         let body = serde_json::to_vec(msg).unwrap();
-        write!(self.to, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
-        self.to.write_all(&body).unwrap();
+        let to = self.to.as_mut().expect("input still open");
+        write!(to, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+        to.write_all(&body).unwrap();
     }
 
     /// The next message, after starting any terminal the adapter asks for.
@@ -122,21 +186,7 @@ impl Editor {
     }
 
     fn read_raw(&mut self) -> Value {
-        let mut length = 0;
-        loop {
-            let mut line = String::new();
-            assert!(self.from.read_line(&mut line).unwrap() > 0, "orbit closed");
-            let line = line.trim_end();
-            if line.is_empty() {
-                break;
-            }
-            if let Some(n) = line.strip_prefix("Content-Length: ") {
-                length = n.parse().unwrap();
-            }
-        }
-        let mut body = vec![0; length];
-        self.from.read_exact(&mut body).unwrap();
-        serde_json::from_slice(&body).unwrap()
+        next(&self.from, "message")
     }
 
     fn request(&mut self, command: &str, arguments: Value) -> Value {
@@ -185,8 +235,20 @@ impl Editor {
     fn disconnect(mut self) -> i32 {
         let r = self.request("disconnect", json!({}));
         assert_eq!(r["success"], true, "{r}");
-        drop(self.to);
+        self.to = None;
         self.child.wait().unwrap().code().unwrap_or(-1)
+    }
+}
+
+/// A test that fails leaves no `orbit` behind.
+impl Drop for Editor {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(t) = &mut self.terminal {
+            let _ = t.kill();
+            let _ = t.wait();
+        }
     }
 }
 
@@ -307,7 +369,7 @@ fn os_exit_ends_the_session() {
     e.request("configurationDone", json!({}));
     e.event("terminated");
     assert_eq!(e.output("stdout"), "bye\n");
-    drop(e.to);
+    e.to = None;
     assert_eq!(e.child.wait().unwrap().code(), Some(3));
 }
 
@@ -342,8 +404,8 @@ print('done', n > 0)
 struct Running {
     child: Child,
     stop: PathBuf,
-    stdout: BufReader<ChildStdout>,
-    stderr: BufReader<std::process::ChildStderr>,
+    stdout: Receiver<String>,
+    stderr: Receiver<String>,
 }
 
 impl Running {
@@ -361,8 +423,8 @@ impl Running {
             .spawn()
             .unwrap();
         let mut r = Running {
-            stdout: BufReader::new(child.stdout.take().unwrap()),
-            stderr: BufReader::new(child.stderr.take().unwrap()),
+            stdout: lines(child.stdout.take().unwrap()),
+            stderr: lines(child.stderr.take().unwrap()),
             child,
             stop,
         };
@@ -371,24 +433,27 @@ impl Running {
     }
 
     fn line(&mut self) -> String {
-        let mut l = String::new();
-        self.stdout.read_line(&mut l).unwrap();
-        l
+        next(&self.stdout, "output")
     }
 
     fn err_line(&mut self) -> String {
-        let mut l = String::new();
-        self.stderr.read_line(&mut l).unwrap();
-        l
+        next(&self.stderr, "error output")
     }
 
     /// End the program; its exit code and the rest of its output.
     fn finish(mut self) -> (i32, String) {
         std::fs::write(&self.stop, "").unwrap();
         let code = self.child.wait().unwrap().code().unwrap_or(-1);
-        let mut out = String::new();
-        self.stdout.read_to_string(&mut out).unwrap();
+        let out = self.stdout.iter().collect();
         (code, out)
+    }
+}
+
+/// A test that fails leaves no program running.
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -443,9 +508,11 @@ fn editors_attach_to_a_running_program_and_leave_it_running() {
 }
 
 #[test]
-fn sigusr1_starts_serving() {
+fn a_debug_request_starts_serving() {
     let mut run = Running::start("signal", &[]);
     let pid = run.child.id();
+    // Elsewhere only programs already serving are listed.
+    #[cfg(target_os = "linux")]
     assert_eq!(listed(pid).unwrap()["listening"], false);
     let mut e = Editor::attach(pid);
     assert!(run.err_line().contains("debugger listening on"));

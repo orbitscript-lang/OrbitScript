@@ -11,7 +11,6 @@
 
 use std::cell::RefCell;
 use std::io::{BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 use orbit::Isolate;
 use serde_json::{Value, json};
 
+use crate::socket::Stream;
 use crate::{Link, agent, read_loop, socket, wire};
 
 /// The version of the `describe` answer.
@@ -101,7 +101,8 @@ impl Service {
         std::thread::Builder::new()
             .name("orbit-dap listener".into())
             .spawn(move || {
-                for stream in listener.incoming() {
+                loop {
+                    let stream = listener.accept();
                     if shared.stopped.load(Ordering::Relaxed) {
                         break;
                     }
@@ -134,14 +135,14 @@ impl Service {
             .take();
         if let Some(b) = bound {
             // Wake the listener so it sees `stopped`.
-            let _ = UnixStream::connect(&b.path);
+            let _ = Stream::connect(&b.path);
         }
     }
 }
 
 impl Shared {
     /// Serve one connection: a `describe`, or a debugging session.
-    fn connection(&self, stream: UnixStream) {
+    fn connection(&self, stream: Stream) {
         let Ok(mut out) = stream.try_clone() else {
             return;
         };
@@ -151,7 +152,7 @@ impl Shared {
             return;
         };
         let _ = input.get_ref().set_read_timeout(None);
-        let reply = |out: &mut UnixStream, body: Value, message: Option<&str>| {
+        let reply = |out: &mut Stream, body: Value, message: Option<&str>| {
             let mut r = json!({
                 "seq": 1,
                 "type": "response",
@@ -234,7 +235,7 @@ fn sockets() -> Vec<(u32, PathBuf)> {
 
 /// Ask the program at `path` what it is; `None` if nothing answers.
 fn ask(path: &Path) -> Option<Value> {
-    let mut s = UnixStream::connect(path).ok()?;
+    let mut s = Stream::connect(path).ok()?;
     s.set_read_timeout(Some(FIRST_MESSAGE_TIMEOUT)).ok()?;
     let request = json!({"seq": 1, "type": "request", "command": "describe"});
     wire::write(&mut s, &request).ok()?;
@@ -245,7 +246,7 @@ fn ask(path: &Path) -> Option<Value> {
 /// Whether nothing listens at `path` any more (its program ended).
 fn dead(path: &Path) -> bool {
     matches!(
-        UnixStream::connect(path),
+        Stream::connect(path),
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
     )
 }
@@ -289,16 +290,14 @@ pub fn list() -> String {
 
 /// Running `orbit` programs other than this one that start their debug
 /// server on `SIGUSR1`, with their command lines (Linux only: elsewhere
-/// they must be started with `--debug-listen`).
+/// they must be started with `--debug-listen` or asked by pid).
+#[cfg(target_os = "linux")]
 fn signallable() -> Vec<(u32, String)> {
-    let mut found = Vec::new();
-    if !cfg!(target_os = "linux") {
-        return found;
-    }
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return found;
+        return Vec::new();
     };
     let me = std::process::id();
+    let mut found = Vec::new();
     for e in entries.flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
             continue;
@@ -316,9 +315,15 @@ fn signallable() -> Vec<(u32, String)> {
     found
 }
 
+#[cfg(not(target_os = "linux"))]
+fn signallable() -> Vec<(u32, String)> {
+    Vec::new()
+}
+
 /// Whether `pid` is an `orbit` program that catches `SIGUSR1`, so the
 /// signal starts its debug server instead of killing it (Linux:
 /// `/proc/<pid>/exe` and the `SigCgt` mask).
+#[cfg(unix)]
 fn catches_debug_signal(pid: u32) -> bool {
     let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
         return false;
@@ -357,17 +362,10 @@ fn socket_of(pid: u32) -> Result<PathBuf, String> {
     if let Some(path) = find() {
         return Ok(path);
     }
-    if !catches_debug_signal(pid) {
+    if !request_debugging(pid)? {
         return Err(format!(
             "process {pid} is not serving debuggers (start it with --debug-listen, or call orbit_dap::serve)"
         ));
-    }
-    let status = std::process::Command::new("kill")
-        .args(["-USR1", &pid.to_string()])
-        .status()
-        .map_err(|e| format!("cannot signal process {pid}: {e}"))?;
-    if !status.success() {
-        return Err(format!("cannot signal process {pid}"));
     }
     let deadline = Instant::now() + SIGNAL_TIMEOUT;
     while Instant::now() < deadline {
@@ -379,13 +377,52 @@ fn socket_of(pid: u32) -> Result<PathBuf, String> {
     Err(format!("process {pid} did not start its debug server"))
 }
 
+/// Ask `pid` to start its debug server: `SIGUSR1` to an `orbit` program
+/// that catches it; `false` if it can't be asked.
+#[cfg(unix)]
+fn request_debugging(pid: u32) -> Result<bool, String> {
+    if !catches_debug_signal(pid) {
+        return Ok(false);
+    }
+    let status = std::process::Command::new("kill")
+        .args(["-USR1", &pid.to_string()])
+        .status()
+        .map_err(|e| format!("cannot signal process {pid}: {e}"))?;
+    if !status.success() {
+        return Err(format!("cannot signal process {pid}"));
+    }
+    Ok(true)
+}
+
+/// Ask `pid` to start its debug server: set its debug-request event
+/// ([`debug_requests`]); `false` if it has none.
+#[cfg(windows)]
+fn request_debugging(pid: u32) -> Result<bool, String> {
+    crate::win::request_debugging(pid).map_err(|e| format!("cannot ask process {pid}: {e}"))
+}
+
+/// Call `on_request` each time `orbit --debug-attach` asks this process to
+/// serve debuggers (Windows, which has no `SIGUSR1`: a named event,
+/// `Local\orbit-debug-<pid>`). A host that never calls it is never asked.
+#[cfg(windows)]
+pub fn debug_requests(mut on_request: impl FnMut() + Send + 'static) -> std::io::Result<()> {
+    let requests = crate::win::DebugRequests::create()?;
+    std::thread::Builder::new()
+        .name("orbit-dap requests".into())
+        .spawn(move || {
+            while requests.wait().is_ok() {
+                on_request();
+            }
+        })?;
+    Ok(())
+}
+
 /// Be an editor's debug adapter for the running program `pid`: connect to
 /// its socket (signalling an `orbit` program to open one) and relay this
 /// process's standard input and output to it until either side closes.
 pub fn attach(pid: u32) -> Result<(), String> {
     let path = socket_of(pid)?;
-    let stream =
-        UnixStream::connect(&path).map_err(|e| format!("cannot reach process {pid}: {e}"))?;
+    let stream = Stream::connect(&path).map_err(|e| format!("cannot reach process {pid}: {e}"))?;
     let mut to_program = stream
         .try_clone()
         .map_err(|e| format!("cannot reach process {pid}: {e}"))?;

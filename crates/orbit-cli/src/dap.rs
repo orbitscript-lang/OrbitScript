@@ -9,7 +9,8 @@
 //!
 //! Every other run can be attached to: it serves debuggers on its own
 //! socket from the start with `--debug-listen`, or once it gets
-//! `SIGUSR1` (unless `--no-debug-signal`). `orbit --debug-attach <pid>` is
+//! `SIGUSR1` (Windows: a named event; unless `--no-debug-signal`).
+//! `orbit --debug-attach <pid>` is
 //! the editor's adapter for it, and `orbit --debug-attach --list` lists
 //! what can be attached to.
 
@@ -111,30 +112,53 @@ pub(crate) fn serve(iso: &mut Isolate, cli: &Cli, args: &[String], prog: &str) -
         let service = service.clone();
         iso.before_exit(move || service.stop());
     }
-    let announce = |s: &Service, prog: &str| match s.start() {
-        Ok(path) => eprintln!("{prog}: debugger listening on {}", path.display()),
-        Err(e) => eprintln!("{prog}: cannot serve debuggers: {e}"),
-    };
     if cli.debug_listen {
         announce(&service, prog);
     }
     if !cli.no_debug_signal {
-        let signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGUSR1]);
-        if let Ok(mut signals) = signals {
-            let service = service.clone();
-            let prog = prog.to_owned();
-            let _ = std::thread::Builder::new()
-                .name("debug signal".into())
-                .spawn(move || {
-                    for _ in signals.forever() {
-                        if service.path().is_none() {
-                            announce(&service, &prog);
-                        }
-                    }
-                });
-        }
+        on_debug_request(&service, prog);
     }
     Some(service)
+}
+
+/// Start serving debuggers when `orbit --debug-attach` asks: `SIGUSR1`.
+#[cfg(unix)]
+fn on_debug_request(service: &Service, prog: &str) {
+    let Ok(mut signals) = signal_hook::iterator::Signals::new([signal_hook::consts::SIGUSR1])
+    else {
+        return;
+    };
+    let service = service.clone();
+    let prog = prog.to_owned();
+    let _ = std::thread::Builder::new()
+        .name("debug signal".into())
+        .spawn(move || {
+            for _ in signals.forever() {
+                if service.path().is_none() {
+                    announce(&service, &prog);
+                }
+            }
+        });
+}
+
+/// Start serving debuggers when `orbit --debug-attach` asks: Windows has
+/// no `SIGUSR1`, so it sets this process's debug-request event.
+#[cfg(windows)]
+fn on_debug_request(service: &Service, prog: &str) {
+    let service = service.clone();
+    let prog = prog.to_owned();
+    let _ = orbit_dap::debug_requests(move || {
+        if service.path().is_none() {
+            announce(&service, &prog);
+        }
+    });
+}
+
+fn announce(s: &Service, prog: &str) {
+    match s.start() {
+        Ok(path) => eprintln!("{prog}: debugger listening on {}", path.display()),
+        Err(e) => eprintln!("{prog}: cannot serve debuggers: {e}"),
+    }
 }
 
 /// `orbit --debug-attach <pid>` and `orbit --debug-attach --list`.
