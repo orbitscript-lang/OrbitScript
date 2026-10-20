@@ -598,7 +598,7 @@ impl Vm {
                     let pc = f.pc.saturating_sub(1);
                     if op == 0
                         && matches!(
-                            proto.code.code.get(pc as usize),
+                            proto.code.code.get(pc as usize).map(|i| i.decode()),
                             Some(Op::GenericCall { .. })
                         )
                     {

@@ -52,7 +52,7 @@ pub(crate) fn unlink(heap: &LuaHeap, root: Gc<Proto>) -> UnlinkedChunk {
             nregs: code.nregs,
             ncells: code.ncells,
             ncaches: code.caches.len() as u16,
-            code: code.code.to_vec(),
+            code: code.code.iter().map(|i| i.decode()).collect(),
             consts: code
                 .consts
                 .iter()

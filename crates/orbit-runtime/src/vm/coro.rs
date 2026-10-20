@@ -1177,8 +1177,8 @@ impl NativeCtx<'_> {
             Value::Native(id) => Some(id),
             Value::Closure(c) => {
                 let p = self.vm.heap.get(self.vm.heap.get(c).proto);
-                match p.code.code.first() {
-                    Some(Op::NativeEntry { id }) => Some(NativeId(*id)),
+                match p.code.code.first().map(|i| i.decode()) {
+                    Some(Op::NativeEntry { id }) => Some(NativeId(id)),
                     _ => None,
                 }
             }
@@ -1239,7 +1239,7 @@ fn stub_proto(id: NativeId) -> Proto {
     let code = [Op::NativeEntry { id: id.0 }];
     Proto {
         code: Rc::new(ProtoCode {
-            code: code.as_slice().into(),
+            code: code.iter().map(|op| op.encode()).collect(),
             consts: Box::new([]),
             caches: Box::new([]),
             #[cfg(feature = "type-feedback")]

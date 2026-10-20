@@ -591,7 +591,7 @@ impl Vm {
                             flow!(self.do_return(src, n))
                         }};
                     }
-                    let op = code[pc];
+                    let op = code[pc].decode();
                     pc += 1;
                     if HOOKED {
                         self.rt
@@ -1010,7 +1010,7 @@ impl Vm {
                             if let Value::Closure(c) = w[func as usize]
                                 && let code = &self.heap.get(c).code
                                 && !code.builtin
-                                && !matches!(code.code.first(), Some(Op::NativeEntry { .. }))
+                                && !matches!(code.code.first().map(|i| i.decode()), Some(Op::NativeEntry { .. }))
                             {
                                 let f = self.rt.stack.frames.pop().expect("frame");
                                 self.rt.stack.cells.truncate(f.cell_base as usize);
@@ -1275,7 +1275,7 @@ impl Vm {
                 if let Exc::Index { obj, key } = exc {
                     match crate::vm::meta::index(&self.heap, &self.rt.metas, obj, key) {
                         Ok(v) => {
-                            let dst = match code[pc - 1] {
+                            let dst = match code[pc - 1].decode() {
                                 Op::GetField { dst, .. }
                                 | Op::GetIndex { dst, .. }
                                 | Op::GetIndexInt { dst, .. }

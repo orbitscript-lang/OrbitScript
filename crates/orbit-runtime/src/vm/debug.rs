@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 
 use crate::object::{Cell, Closure, Gc, LuaHeap, NativeId, Proto, Table, Value};
-use orbit_bytecode::{LocalSlot, Op, Origin};
+use orbit_bytecode::{LocalSlot, Op, Opcode, Origin};
 
 use crate::vm::{FrameKind, Runtime, Stack};
 
@@ -117,8 +117,8 @@ impl Runtime {
     /// function with none would.
     pub(crate) fn hidden_upvalues(&self, heap: &LuaHeap, c: &Closure) -> usize {
         let p = heap.get(c.proto);
-        match p.code.code.first() {
-            Some(Op::NativeEntry { id }) => self.natives[*id as usize].hidden as usize,
+        match p.code.code.first().map(|i| i.decode()) {
+            Some(Op::NativeEntry { id }) => self.natives[id as usize].hidden as usize,
             _ if p.code.builtin => c.captures.len(),
             _ => 0,
         }
@@ -283,7 +283,7 @@ impl Runtime {
             FrameKind::Lua { closure, .. } if caller.pc > 0 && !is_builtin(heap, closure) => {
                 let proto = heap.get(heap.get(closure).proto);
                 let pc = caller.pc - 1;
-                match proto.code.code.get(pc as usize)? {
+                match proto.code.code.get(pc as usize)?.decode() {
                     Op::GenericCall { .. } => named("for iterator", b"for iterator"),
                     Op::Call { .. } | Op::TailCall { .. } => {
                         let (namewhat, name) = match proto.debug.origin(pc, 0)? {
@@ -749,8 +749,12 @@ pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
     match f {
         Value::Closure(c)
             if !matches!(
-                heap.get(heap.get(c).proto).code.code.first(),
-                Some(Op::NativeEntry { .. })
+                heap.get(heap.get(c).proto)
+                    .code
+                    .code
+                    .first()
+                    .map(|i| i.op()),
+                Some(Opcode::NativeEntry)
             ) && !is_builtin(heap, c) =>
         {
             let c = heap.get(c);
@@ -832,7 +836,7 @@ pub(crate) fn before_cell_write(heap: &mut LuaHeap, c: Gc<Cell>) {
 /// Give closure `f` code in which `CapSelf` reads capture `cap`.
 pub(crate) fn deopt_self(heap: &mut LuaHeap, f: Gc<Closure>, cap: u8) {
     let code = &heap.get(f).code;
-    if !code.code.iter().any(|op| matches!(op, Op::CapSelf { .. })) {
+    if !code.code.iter().any(|i| i.op() == Opcode::CapSelf) {
         return;
     }
     let new = code.without_cap_self(cap);
@@ -975,7 +979,13 @@ impl crate::vm::NativeCtx<'_> {
         let cell = c.captures[i];
         let name = match p.debug.capture_names.get(i) {
             // A native closure's upvalues have no names.
-            _ if matches!(p.code.code.first(), Some(Op::NativeEntry { .. })) => Vec::new(),
+            _ if matches!(
+                p.code.code.first().map(|i| i.op()),
+                Some(Opcode::NativeEntry)
+            ) =>
+            {
+                Vec::new()
+            }
             Some(name) if !p.debug.lines.is_empty() => name.to_vec(),
             _ => b"(no name)".to_vec(),
         };
