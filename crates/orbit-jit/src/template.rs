@@ -14,11 +14,12 @@ use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, ExecutableBuffer, dynasm
 use orbit_runtime::object::{ProtoCode, Value};
 use orbit_runtime::vm::op::{MULTI, Op};
 use orbit_runtime::vm::{
-    CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH, CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, EXIT,
-    HelperFn, Helpers, JitBackend, JitFn, NO_VALUE, RET, TAKEN, const_parts,
+    CTX_CELL_ARENA, CTX_CELL_ARENA_LEN, CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH, CTX_INTERRUPT,
+    CTX_TABLES, CTX_TABLES_LEN, EXIT, HelperFn, Helpers, JitBackend, JitFn, NO_VALUE, RET, TAKEN,
+    const_parts,
 };
 
-use crate::layout::{self, Calls, Inline};
+use crate::layout::{self, Calls, Cells, Inline};
 use crate::{entries, jump_target};
 
 const TAG_NIL: i32 = 0;
@@ -72,6 +73,7 @@ impl JitBackend for Template {
             polls: Vec::new(),
             inline: layout::inline(),
             calls: layout::calls(),
+            cells: layout::cells(),
         };
         t.prologue();
         for p in 0..code.code.len() {
@@ -139,6 +141,8 @@ struct Tr<'a> {
     inline: Option<&'static Inline>,
     /// The pinned call layout, when inline Lua-to-Lua calls are on.
     calls: Option<&'static Calls>,
+    /// The pinned cell layout, when inline upvalue reads are on.
+    cells: Option<&'static Cells>,
 }
 
 /// Where a register's tag and payload live, from r14.
@@ -360,7 +364,50 @@ impl Tr<'_> {
         );
         self.fbranch(c, yes, no);
         dynasm!(self.ops ; .arch x64 ; =>slow);
+        if let Cmp::Eq = c {
+            self.eq_fast(a, b, yes, no);
+        }
         self.helper_branch(self.helpers.compare, p, taken);
+    }
+
+    /// Equality the tags settle without the helper (tags in eax as
+    /// `tag(a) << 8 | tag(b)`, not both ints or both floats): different
+    /// tags are unequal unless both are numbers; nils are equal; booleans
+    /// compare their byte; the same reference is equal (no `__eq` runs on
+    /// raw-equal values). Falls through to the helper otherwise.
+    fn eq_fast(&mut self, a: u8, b: u8, yes: DynamicLabel, no: DynamicLabel) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov ecx, eax
+            ; shr ecx, 8
+            ; cmp cl, al
+            ; je >same
+            // Different tags: an int and a float may still be equal.
+            ; cmp cl, TAG_INT as i8
+            ; je >num_a
+            ; cmp cl, TAG_FLOAT as i8
+            ; jne =>no
+            ; num_a:
+            ; cmp al, TAG_INT as i8
+            ; je >helper
+            ; cmp al, TAG_FLOAT as i8
+            ; je >helper
+            ; jmp =>no
+            ; same:
+            ; cmp al, TAG_NIL as i8
+            ; je =>yes
+            ; cmp al, TAG_BOOL as i8
+            ; jne >refs
+            ; movzx ecx, BYTE [r14 + pl(a)]
+            ; cmp cl, BYTE [r14 + pl(b)]
+            ; je =>yes
+            ; jmp =>no
+            ; refs:
+            ; mov rcx, [r14 + pl(a)]
+            ; cmp rcx, [r14 + pl(b)]
+            ; je =>yes
+            ; helper:
+        );
     }
 
     fn cmp_imm_jump(&mut self, p: usize, op: Op, a: u8, imm: i8, c: Cmp, want: bool) {
@@ -666,6 +713,73 @@ impl Tr<'_> {
             ),
         }
         dynasm!(self.ops ; .arch x64 ; je =>miss);
+    }
+
+    /// rax = the arena slot of the cell whose `u32` handle is in eax,
+    /// bounds- and occupancy-checked; `slow` otherwise. Clobbers rcx.
+    fn cell_slot(&mut self, c: &Cells, slow: DynamicLabel) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov rcx, [r13 + CTX_CELL_ARENA_LEN]
+            ; cmp rax, [rcx]
+            ; jae =>slow
+            ; imul rax, rax, c.cell_slot_size as i32
+            ; add rax, [r13 + CTX_CELL_ARENA]
+        );
+        self.occupied(c.empty_at, c.empty_width, c.empty_value, slow);
+    }
+
+    /// `CapGet` (the running closure's capture `cap`) or `CellGet` (the
+    /// frame's cell `cell`) read in place; the `cell` helper otherwise.
+    fn cell_get(&mut self, p: usize, c: &Cells, dst: u8, cap: Option<u8>, cell: Option<u8>) {
+        let slow = self.ops.new_dynamic_label();
+        let next = self.next(p);
+        let l = c.calls;
+        if let Some(cap) = cap {
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov eax, r15d
+                ; mov rcx, [r13 + CTX_CLOSURES_LEN]
+                ; cmp rax, [rcx]
+                ; jae =>slow
+                ; imul rax, rax, l.closure_slot_size as i32
+                ; add rax, [r13 + CTX_CLOSURES]
+            );
+            self.occupied(l.empty_at, l.empty_width, l.empty_value, slow);
+            dynasm!(self.ops
+                ; .arch x64
+                ; cmp QWORD [rax + c.captures_len], cap as i32
+                ; jbe =>slow
+                ; mov rax, [rax + c.captures_ptr]
+                ; mov eax, DWORD [rax + cap as i32 * c.handle_size as i32]
+            );
+        }
+        if let Some(cell) = cell {
+            let fsz = l.frame_size as i32;
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov rax, [r12 + l.frames_len]
+                ; imul rax, rax, fsz
+                ; add rax, [r12 + l.frames_ptr]
+                ; mov eax, DWORD [rax + l.frame_cell_base - fsz]
+                ; add rax, cell as i32
+                ; cmp rax, [r12 + l.cells_len]
+                ; jae =>slow
+                ; mov rcx, [r12 + c.stack_ptr]
+                ; mov eax, DWORD [rcx + rax * 4]
+            );
+        }
+        self.cell_slot(c, slow);
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov rcx, [rax + c.cell_value]
+            ; mov rdx, [rax + c.cell_value + 8]
+            ; mov [r14 + at(dst)], rcx
+            ; mov [r14 + pl(dst)], rdx
+            ; jmp =>next
+            ; =>slow
+        );
+        self.helper_then_next(self.helpers.cell, p);
     }
 
     /// `R[func](args)` for a compiled Lua function with exactly `nargs`
@@ -1307,6 +1421,14 @@ impl Tr<'_> {
             Op::SetGlobal { .. } => self.helper_then_next(h.set_global, p),
             Op::SelfCall { .. } => self.helper_then_next(h.self_call, p),
             Op::NewTable { .. } => self.helper_then_next(h.new_table, p),
+            Op::CapGet { dst, cap } if self.cells.is_some() => {
+                let c = self.cells.expect("cells");
+                self.cell_get(p, c, dst, Some(cap), None)
+            }
+            Op::CellGet { dst, cell } if self.cells.is_some() => {
+                let c = self.cells.expect("cells");
+                self.cell_get(p, c, dst, None, Some(cell))
+            }
             Op::CellNew { .. }
             | Op::CellGet { .. }
             | Op::CellSet { .. }
@@ -1315,6 +1437,12 @@ impl Tr<'_> {
             | Op::CapSet { .. } => self.helper_then_next(h.cell, p),
             Op::Closure { .. } => self.helper_then_next(h.closure, p),
             Op::SetList { .. } => self.helper_then_next(h.set_list, p),
+            Op::Vararg { .. }
+            | Op::VarargLen { .. }
+            | Op::VarargGetInt { .. }
+            | Op::VarargGet { .. }
+            | Op::Tbc { .. }
+            | Op::Close { .. } => self.helper_then_next(h.misc, p),
 
             Op::Call {
                 func,

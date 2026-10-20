@@ -36,9 +36,10 @@ pub use coro::{CoStatus, WindowSave};
 pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 #[cfg(feature = "jit")]
 pub use interp::jit::{
-    CALL_LAYOUT, CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH, CTX_INTERRUPT, CTX_TABLES,
-    CTX_TABLES_LEN, CallLayout, DEFER, EXIT, HELPERS, HelperFn, Helpers, JitBackend, JitCtx, JitFn,
-    JitSlot, JitState, NO_VALUE, Parts, RET, TAIL, TAKEN, const_parts, exit_at,
+    CALL_LAYOUT, CTX_CELL_ARENA, CTX_CELL_ARENA_LEN, CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH,
+    CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, CallLayout, DEFER, EXIT, HELPERS, HelperFn, Helpers,
+    JitBackend, JitCtx, JitFn, JitSlot, JitState, NO_VALUE, Parts, RET, TAIL, TAKEN, const_parts,
+    exit_at,
 };
 pub use meta::MetaField;
 pub use native::{

@@ -25,6 +25,7 @@
 use std::cell::Cell;
 
 use super::*;
+use crate::object::func::Cell as LuaCell;
 use crate::object::{FieldCache, Table};
 use crate::vm::ops::Arith;
 use orbit_bytecode::number::BitOp;
@@ -50,6 +51,9 @@ pub struct JitCtx {
     /// The closure arena's, likewise, for inline calls ([`CALL_LAYOUT`]).
     pub closures: usize,
     pub closures_len: *const usize,
+    /// The cell (captured variable) arena's, for inline upvalue reads.
+    pub cell_arena: usize,
+    pub cell_arena_len: *const usize,
 }
 
 /// Byte offsets of [`JitCtx`]'s fields, for generated code.
@@ -59,6 +63,8 @@ pub const CTX_TABLES_LEN: i32 = std::mem::offset_of!(JitCtx, tables_len) as i32;
 pub const CTX_DEPTH: i32 = std::mem::offset_of!(JitCtx, depth) as i32;
 pub const CTX_CLOSURES: i32 = std::mem::offset_of!(JitCtx, closures) as i32;
 pub const CTX_CLOSURES_LEN: i32 = std::mem::offset_of!(JitCtx, closures_len) as i32;
+pub const CTX_CELL_ARENA: i32 = std::mem::offset_of!(JitCtx, cell_arena) as i32;
+pub const CTX_CELL_ARENA_LEN: i32 = std::mem::offset_of!(JitCtx, cell_arena_len) as i32;
 
 /// Where generated code finds what a Lua-to-Lua call and return touch
 /// (planning/jit): byte offsets into the [`Vm`], a [`Frame`] (pinned by
@@ -95,6 +101,12 @@ pub struct CallLayout {
     /// A closure's arena slot size and its `Rc<ProtoCode>`.
     pub closure_slot_size: usize,
     pub closure_code: usize,
+    /// A closure's captures (`Box<[Gc<Cell>]>`), the size of one handle,
+    /// and a cell's arena slot size and value offset.
+    pub closure_captures: usize,
+    pub handle_size: usize,
+    pub cell_slot_size: usize,
+    pub cell_value: usize,
     /// The compiled entry (`Option<JitFn>`, null when not compiled) and the
     /// frame shape bytes of a `ProtoCode`.
     pub proto_entry: usize,
@@ -125,6 +137,9 @@ struct LuaKindFields {
 }
 
 const _: () = assert!(std::mem::align_of::<FrameKind>() == std::mem::align_of::<LuaKindFields>());
+// A cell's slot is the cell itself (the empty slot is a niche), so the
+// value sits at the same offset in both.
+const _: () = assert!(std::mem::size_of::<Option<LuaCell>>() == std::mem::size_of::<LuaCell>());
 
 pub const CALL_LAYOUT: CallLayout = CallLayout {
     regs: std::mem::offset_of!(Vm, rt.stack.regs),
@@ -150,6 +165,10 @@ pub const CALL_LAYOUT: CallLayout = CallLayout {
     frame_cdepth: std::mem::offset_of!(Frame, cdepth),
     closure_slot_size: std::mem::size_of::<Option<Closure>>(),
     closure_code: std::mem::offset_of!(Closure, code),
+    closure_captures: std::mem::offset_of!(Closure, captures),
+    handle_size: std::mem::size_of::<Gc<LuaCell>>(),
+    cell_slot_size: std::mem::size_of::<Option<LuaCell>>(),
+    cell_value: std::mem::offset_of!(LuaCell, value),
     proto_entry: std::mem::offset_of!(ProtoCode, jit) + std::mem::offset_of!(JitSlot, entry),
     proto_nparams: std::mem::offset_of!(ProtoCode, nparams),
     proto_is_vararg: std::mem::offset_of!(ProtoCode, is_vararg),
@@ -240,6 +259,14 @@ pub trait JitBackend: std::fmt::Debug {
     fn compile(&mut self, code: &ProtoCode, helpers: &Helpers) -> Option<JitFn>;
     /// Bytes of machine code made so far.
     fn code_bytes(&self) -> usize;
+    /// How hot a prototype of `ops` instructions must be before it is
+    /// compiled, as a multiple of the threshold; `None` never compiles it.
+    /// Backends whose compile time grows faster than the code make big
+    /// functions earn their compile.
+    fn hotness_factor(&self, ops: usize) -> Option<u32> {
+        let _ = ops;
+        Some(1)
+    }
 }
 
 /// Per-prototype JIT state.
@@ -304,18 +331,33 @@ impl JitState {
     fn warm(&mut self, code: &ProtoCode) -> Option<JitFn> {
         let backend = self.backend.as_mut()?;
         let hits = code.jit.hits.get();
-        if hits >= self.threshold {
-            // Tried and failed.
+        if hits == u32::MAX {
+            // Tried and failed, or too big.
             return None;
         }
+        let Some(factor) = backend.hotness_factor(code.code.len()) else {
+            code.jit.hits.set(u32::MAX);
+            return None;
+        };
         code.jit.hits.set(hits + 1);
-        if hits + 1 < self.threshold {
+        if hits + 1 < self.threshold.saturating_mul(factor) {
             return None;
         }
+        code.jit.hits.set(u32::MAX);
         if matches!(code.code.first(), Some(Op::NativeEntry { .. })) {
             return None;
         }
-        match backend.compile(code, &HELPERS) {
+        let start = self.trace.then(std::time::Instant::now);
+        let compiled = backend.compile(code, &HELPERS);
+        if let Some(t) = start {
+            eprintln!(
+                "jit: compiled {} ops in {:.2} ms{}",
+                code.code.len(),
+                t.elapsed().as_secs_f64() * 1e3,
+                if compiled.is_some() { "" } else { " (failed)" }
+            );
+        }
+        match compiled {
             Some(f) => {
                 code.jit.entry.set(Some(f));
                 self.compiled += 1;
@@ -378,6 +420,8 @@ pub struct Helpers {
     /// [`RET`]): runs the tail calls a [`TAIL`] asks for, as the `call`
     /// helper does. 0 when the call is done, else the status to return.
     pub finish_call: extern "C" fn(&mut Vm, &mut JitCtx, u64) -> u64,
+    /// The vararg instructions, `Tbc` and `Close`.
+    pub misc: HelperFn,
 }
 
 pub static HELPERS: Helpers = Helpers {
@@ -408,6 +452,7 @@ pub static HELPERS: Helpers = Helpers {
     field_set,
     global_get,
     finish_call,
+    misc,
 };
 
 /// A constant's tag and payload, for code that loads it.
@@ -487,6 +532,8 @@ impl Vm {
             tables_len: self.heap.raw_slots::<Table>().1,
             closures: self.heap.raw_slots::<Closure>().0,
             closures_len: self.heap.raw_slots::<Closure>().1,
+            cell_arena: self.heap.raw_slots::<LuaCell>().0,
+            cell_arena_len: self.heap.raw_slots::<LuaCell>().1,
         };
         let top = self.rt.stack.frames.last().expect("frame");
         let mut pc = top.pc;
@@ -953,11 +1000,38 @@ extern "C" fn self_call(vm: &mut Vm, _: &mut JitCtx, code: &ProtoCode, pc: u32) 
         && let Some(mt) = tab.meta
     {
         let ci = &code.caches[ic as usize + 1];
+        // The class's `__index` table, then (as the interpreter does) its
+        // parent's, through the inline caches.
         let hit = match heap.get(mt).cached_str(ci.slot.get() as usize, ci.key) {
-            Some(Value::Table(c)) => heap
-                .get(c)
-                .cached_str(cm.slot.get() as usize, cm.key)
-                .filter(|v| !v.is_nil()),
+            Some(Value::Table(c)) => {
+                let ctab = heap.get(c);
+                match ctab
+                    .cached_str(cm.slot.get() as usize, cm.key)
+                    .filter(|v| !v.is_nil())
+                {
+                    Some(v) => Some(v),
+                    None => match (
+                        code.caches.get(ic as usize + 2),
+                        code.caches.get(ic as usize + 3),
+                        ctab.meta,
+                    ) {
+                        (Some(ci2), Some(cm2), Some(mt2))
+                            if ctab
+                                .find_str_key(heap, &cm.key_for(heap, k))
+                                .is_none_or(|s| ctab.slot_value(s).is_nil()) =>
+                        {
+                            match heap.get(mt2).cached_str(ci2.slot.get() as usize, ci2.key) {
+                                Some(Value::Table(p)) => heap
+                                    .get(p)
+                                    .cached_str(cm2.slot.get() as usize, cm2.key)
+                                    .filter(|v| !v.is_nil()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    },
+                }
+            }
             _ => None,
         };
         m = match hit {
@@ -1039,6 +1113,57 @@ extern "C" fn cell(vm: &mut Vm, ctx: &mut JitCtx, code: &ProtoCode, pc: u32) -> 
             vm.rt.stack.regs[base + dst as usize] = Value::Closure(closure_of(vm));
         }
         _ => unreachable!("a cell instruction"),
+    }
+    0
+}
+
+extern "C" fn misc(vm: &mut Vm, ctx: &mut JitCtx, code: &ProtoCode, pc: u32) -> u64 {
+    let f = vm.rt.stack.frames.last().expect("frame");
+    let (base, nvarargs) = (f.base as usize, f.nvarargs as usize);
+    match code.code[pc as usize] {
+        Op::Vararg { dst, count } => {
+            vm.op_vararg(base, nvarargs, dst as usize, count);
+            // `op_vararg` may have grown the register stack.
+            ctx.regs = vm.rt.stack.regs[base..].as_mut_ptr();
+        }
+        Op::VarargLen { dst } => {
+            vm.rt.stack.regs[base + dst as usize] = Value::Int(nvarargs as i64);
+        }
+        Op::VarargGetInt { dst, index } => {
+            let i = index as usize;
+            let v = if (1..=nvarargs).contains(&i) {
+                vm.rt.stack.regs[base - nvarargs + i - 1]
+            } else {
+                Value::Nil
+            };
+            vm.rt.stack.regs[base + dst as usize] = v;
+        }
+        Op::VarargGet { dst, key } => {
+            let v = vm.op_vararg_get(base, nvarargs, vm.rt.stack.regs[base + key as usize]);
+            vm.rt.stack.regs[base + dst as usize] = v;
+        }
+        Op::Tbc { reg } => {
+            if !vm.rt.stack.regs[base + reg as usize].is_falsy() {
+                if let Err(x) = vm.op_tbc(base + reg as usize, pc as usize) {
+                    return defer_err(vm, pc, x);
+                }
+                ctx.regs = window_ptr(vm);
+            }
+        }
+        Op::Close { from } => {
+            // Closing runs `__close` handlers through the interpreter.
+            if vm
+                .rt
+                .stack
+                .aux
+                .tbc
+                .last()
+                .is_some_and(|&t| t as usize >= base + from as usize)
+            {
+                return exit_at(pc);
+            }
+        }
+        _ => unreachable!("a vararg or close instruction"),
     }
     0
 }
@@ -1130,9 +1255,18 @@ fn call_at(vm: &mut Vm, ctx: &mut JitCtx, pc: u32, fa: usize, n: usize, want: u8
             let Some(g) = vm.rt.jit.entry(callee) else {
                 return exit_at(pc);
             };
-            let Some(new_base) = enter_lua_frame_fast(&mut vm.rt, &shape, c, fa, n, want, pc + 1)
-            else {
-                return exit_at(pc);
+            let new_base = match enter_lua_frame_fast(&mut vm.rt, &shape, c, fa, n, want, pc + 1) {
+                Some(b) => b,
+                // Varargs or a different argument count: the general entry,
+                // unless it would overflow the stack (the interpreter raises
+                // that error).
+                None => {
+                    vm.rt.stack.frames.last_mut().expect("frame").pc = pc + 1;
+                    match super::enter_lua_frame_general(&mut vm.rt, shape, c, fa, n, want) {
+                        Ok(e) => e.base,
+                        Err(_) => return exit_at(pc),
+                    }
+                }
             };
             let regs = &mut vm.rt.stack.regs;
             if regs.len() < new_base + WINDOW {

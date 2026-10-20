@@ -18,11 +18,12 @@ use cranelift_module::{Linkage, Module, default_libcall_names};
 use orbit_runtime::object::{FieldCache, ProtoCode, Value};
 use orbit_runtime::vm::op::{MULTI, Op};
 
-use crate::layout::{self, Calls, Inline};
+use crate::layout::{self, Calls, Cells, Inline};
 use crate::{entries, jump_target};
 use orbit_runtime::vm::{
-    CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH, CTX_INTERRUPT, CTX_TABLES, CTX_TABLES_LEN, EXIT,
-    HelperFn, Helpers, JitBackend, JitFn, NO_VALUE, RET, TAKEN, const_parts,
+    CTX_CELL_ARENA, CTX_CELL_ARENA_LEN, CTX_CLOSURES, CTX_CLOSURES_LEN, CTX_DEPTH, CTX_INTERRUPT,
+    CTX_TABLES, CTX_TABLES_LEN, EXIT, HelperFn, Helpers, JitBackend, JitFn, NO_VALUE, RET, TAKEN,
+    const_parts,
 };
 
 const TAG_NIL: i64 = 0;
@@ -41,6 +42,10 @@ pub struct Cranelift {
     fctx: FunctionBuilderContext,
     bytes: usize,
     count: usize,
+    /// Larger prototypes stay in the interpreter.
+    max_ops: usize,
+    /// Instructions per extra multiple of the threshold.
+    ops_per_threshold: usize,
 }
 
 impl std::fmt::Debug for Cranelift {
@@ -57,7 +62,18 @@ impl Cranelift {
     /// support it.
     pub fn new() -> Option<Cranelift> {
         let mut flags = settings::builder();
-        flags.set("opt_level", "speed").ok()?;
+        // Spike knobs: ORBIT_JIT_CL_OPT=none|speed, ORBIT_JIT_CL_REGALLOC=backtracking|single_pass.
+        let knob =
+            |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
+        flags
+            .set("opt_level", &knob("ORBIT_JIT_CL_OPT", "speed"))
+            .ok()?;
+        flags
+            .set(
+                "regalloc_algorithm",
+                &knob("ORBIT_JIT_CL_REGALLOC", "backtracking"),
+            )
+            .ok()?;
         flags.set("is_pic", "false").ok()?;
         flags.set("use_colocated_libcalls", "false").ok()?;
         let isa = cranelift_native::builder()
@@ -72,6 +88,15 @@ impl Cranelift {
             fctx: FunctionBuilderContext::new(),
             bytes: 0,
             count: 0,
+            max_ops: std::env::var("ORBIT_JIT_MAX_OPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4000),
+            ops_per_threshold: std::env::var("ORBIT_JIT_OPS_PER_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(500),
         })
     }
 }
@@ -131,6 +156,14 @@ impl JitBackend for Cranelift {
     fn code_bytes(&self) -> usize {
         self.bytes
     }
+
+    /// Cranelift's compile time grows faster than linearly with function
+    /// size (a 20,000-instruction function takes seconds), so a function
+    /// must be hotter in proportion to its size, and huge ones never
+    /// compile. `ORBIT_JIT_MAX_OPS` overrides the cap.
+    fn hotness_factor(&self, ops: usize) -> Option<u32> {
+        (ops <= self.max_ops).then(|| 1 + (ops / self.ops_per_threshold) as u32)
+    }
 }
 
 /// Where an operand comes from.
@@ -176,6 +209,7 @@ struct Tr<'a, 'b> {
     inline: Option<&'static Inline>,
     /// The pinned frame layout, when inline calls are on.
     calls: Option<&'static Calls>,
+    cells: Option<&'static Cells>,
     /// Compiled functions, and [`Helpers::finish_call`].
     jsig: SigRef,
     fsig: SigRef,
@@ -283,6 +317,7 @@ fn translate(
         uflags: MemFlagsData::new().with_notrap(),
         inline: layout::inline(),
         calls: layout::calls(),
+        cells: layout::cells(),
         jsig,
         fsig,
     };
@@ -558,7 +593,61 @@ impl Tr<'_, '_> {
         let c = self.b.ins().fcmp(fcc, f, g);
         self.b.ins().brif(c, yes, &[], no, &[]);
         self.b.switch_to_block(slow);
+        if icc == IntCC::Equal {
+            self.eq_fast(a, b, ta, tb, yes, no);
+        }
         self.helper_branch(self.helpers.compare, p, taken);
+    }
+
+    /// Equality the tags settle without the helper (not both ints or both
+    /// floats): different tags are unequal unless both are numbers; nils
+    /// are equal; booleans compare their byte; the same reference is equal
+    /// (no `__eq` runs on raw-equal values). Leaves the builder in the
+    /// block that needs the helper.
+    fn eq_fast(&mut self, a: u8, b: u8, ta: CValue, tb: CValue, yes: Block, no: Block) {
+        let same = self.b.create_block();
+        let diff = self.b.create_block();
+        let helper = self.b.create_block();
+        let eq = self.b.ins().icmp(IntCC::Equal, ta, tb);
+        self.b.ins().brif(eq, same, &[], diff, &[]);
+        // Different tags: unequal unless both are numbers.
+        self.b.switch_to_block(diff);
+        let num = |s: &mut Self, t: CValue| {
+            let i = s.b.ins().icmp_imm_s(IntCC::Equal, t, TAG_INT);
+            let f = s.b.ins().icmp_imm_s(IntCC::Equal, t, TAG_FLOAT);
+            s.b.ins().bor(i, f)
+        };
+        let na = num(self, ta);
+        let nb = num(self, tb);
+        let both = self.b.ins().band(na, nb);
+        self.b.ins().brif(both, helper, &[], no, &[]);
+        self.b.switch_to_block(same);
+        let is_nil = self.b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_NIL);
+        let not_nil = self.b.create_block();
+        self.b.ins().brif(is_nil, yes, &[], not_nil, &[]);
+        self.b.switch_to_block(not_nil);
+        let is_bool = self.b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_BOOL);
+        let bools = self.b.create_block();
+        let refs = self.b.create_block();
+        self.b.ins().brif(is_bool, bools, &[], refs, &[]);
+        self.b.switch_to_block(bools);
+        let regs = self.regs();
+        let x = self
+            .b
+            .ins()
+            .uload8(types::I64, self.flags, regs, a as i32 * 16 + 8);
+        let y = self
+            .b
+            .ins()
+            .uload8(types::I64, self.flags, regs, b as i32 * 16 + 8);
+        let c = self.b.ins().icmp(IntCC::Equal, x, y);
+        self.b.ins().brif(c, yes, &[], no, &[]);
+        self.b.switch_to_block(refs);
+        let x = self.payload(a, types::I64);
+        let y = self.payload(b, types::I64);
+        let c = self.b.ins().icmp(IntCC::Equal, x, y);
+        self.b.ins().brif(c, yes, &[], helper, &[]);
+        self.b.switch_to_block(helper);
     }
 
     /// `R[a] <op> imm` compare-and-jump.
@@ -858,6 +947,77 @@ impl Tr<'_, '_> {
         let ok = self.b.create_block();
         self.b.ins().brif(empty, miss, &[], ok, &[]);
         self.b.switch_to_block(ok);
+    }
+
+    /// `CapGet` (the running closure's capture `cap`) or `CellGet` (the
+    /// frame's cell `cell`) read in place; the `cell` helper otherwise.
+    fn cell_get(&mut self, p: usize, c: &Cells, dst: u8, cap: Option<u8>, cell: Option<u8>) {
+        let slow = self.b.create_block();
+        let fl_ = self.flags;
+        let l = c.calls;
+        let handle = if let Some(cap) = cap {
+            let cidx = self.b.ins().ireduce(types::I32, self.closure);
+            let cidx = self.b.ins().uextend(types::I64, cidx);
+            let lenp = self
+                .b
+                .ins()
+                .load(types::I64, fl_, self.ctx, CTX_CLOSURES_LEN);
+            let len = self.b.ins().load(types::I64, fl_, lenp, 0);
+            let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, cidx, len);
+            self.guard(inb, slow);
+            let base = self.b.ins().load(types::I64, fl_, self.ctx, CTX_CLOSURES);
+            let off = self.b.ins().imul_imm_s(cidx, l.closure_slot_size);
+            let slot = self.b.ins().iadd(base, off);
+            self.occupied(slot, l.empty_at, l.empty_width, l.empty_value, slow);
+            let n = self.b.ins().load(types::I64, fl_, slot, c.captures_len);
+            let has = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedGreaterThan, n, cap as i64);
+            self.guard(has, slow);
+            let ptr = self.b.ins().load(types::I64, fl_, slot, c.captures_ptr);
+            self.b
+                .ins()
+                .uload32(fl_, ptr, cap as i32 * c.handle_size as i32)
+        } else {
+            let cell = cell.expect("a cap or a cell");
+            let vm = self.vm;
+            let fp = self.b.ins().load(types::I64, fl_, vm, l.frames_ptr);
+            let fln = self.b.ins().load(types::I64, fl_, vm, l.frames_len);
+            let off = self.b.ins().imul_imm_s(fln, l.frame_size);
+            let top = self.b.ins().iadd(fp, off);
+            let cb = self
+                .b
+                .ins()
+                .uload32(fl_, top, l.frame_cell_base - l.frame_size as i32);
+            let at = self.b.ins().iadd_imm_s(cb, cell as i64);
+            let cl = self.b.ins().load(types::I64, fl_, vm, l.cells_len);
+            let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, at, cl);
+            self.guard(inb, slow);
+            let sp = self.b.ins().load(types::I64, fl_, vm, c.stack_ptr);
+            let o = self.b.ins().ishl_imm_u(at, 2);
+            let a = self.b.ins().iadd(sp, o);
+            self.b.ins().uload32(fl_, a, 0)
+        };
+        let lenp = self
+            .b
+            .ins()
+            .load(types::I64, fl_, self.ctx, CTX_CELL_ARENA_LEN);
+        let len = self.b.ins().load(types::I64, fl_, lenp, 0);
+        let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, handle, len);
+        self.guard(inb, slow);
+        let base = self.b.ins().load(types::I64, fl_, self.ctx, CTX_CELL_ARENA);
+        let off = self.b.ins().imul_imm_s(handle, c.cell_slot_size);
+        let slot = self.b.ins().iadd(base, off);
+        self.occupied(slot, c.empty_at, c.empty_width, c.empty_value, slow);
+        let t = self.b.ins().load(types::I64, fl_, slot, c.cell_value);
+        let v = self.b.ins().load(types::I64, fl_, slot, c.cell_value + 8);
+        let regs = self.regs();
+        self.b.ins().store(fl_, t, regs, dst as i32 * 16);
+        self.b.ins().store(fl_, v, regs, dst as i32 * 16 + 8);
+        self.fall(p);
+        self.b.switch_to_block(slow);
+        self.helper_then_next(self.helpers.cell, p);
     }
 
     /// `R[func](args)` for a compiled Lua function with exactly `nargs`
@@ -1499,6 +1659,14 @@ impl Tr<'_, '_> {
             Op::SetGlobal { .. } => self.helper_then_next(h.set_global, p),
             Op::SelfCall { .. } => self.helper_then_next(h.self_call, p),
             Op::NewTable { .. } => self.helper_then_next(h.new_table, p),
+            Op::CapGet { dst, cap } if self.cells.is_some() => {
+                let c = self.cells.expect("cells");
+                self.cell_get(p, c, dst, Some(cap), None)
+            }
+            Op::CellGet { dst, cell } if self.cells.is_some() => {
+                let c = self.cells.expect("cells");
+                self.cell_get(p, c, dst, None, Some(cell))
+            }
             Op::CellNew { .. }
             | Op::CellGet { .. }
             | Op::CellSet { .. }
@@ -1538,6 +1706,12 @@ impl Tr<'_, '_> {
 
             Op::TailCall { .. } => self.helper_then_next(h.tail_call, p),
             Op::SetList { .. } => self.helper_then_next(h.set_list, p),
+            Op::Vararg { .. }
+            | Op::VarargLen { .. }
+            | Op::VarargGetInt { .. }
+            | Op::VarargGet { .. }
+            | Op::Tbc { .. }
+            | Op::Close { .. } => self.helper_then_next(h.misc, p),
             Op::ForPrep { .. } => {
                 let t = self.target(p, op);
                 self.helper_branch(h.for_prep, p, t);

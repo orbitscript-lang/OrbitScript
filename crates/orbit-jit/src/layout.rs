@@ -249,3 +249,51 @@ pub(crate) fn calls() -> Option<&'static Calls> {
         })
         .as_ref()
 }
+
+/// Offsets for inline reads of captured variables (`CapGet`, `CellGet`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Cells {
+    pub calls: &'static Calls,
+    /// A closure's captures: slice pointer and length words.
+    pub captures_ptr: i32,
+    pub captures_len: i32,
+    /// The `Vm`'s cell stack pointer word.
+    pub stack_ptr: i32,
+    pub handle_size: i64,
+    pub cell_slot_size: i64,
+    pub cell_value: i32,
+    pub empty_at: i32,
+    pub empty_width: u8,
+    pub empty_value: u64,
+}
+
+/// The cell layout, or `None` when it can't be pinned (it builds on
+/// [`calls`], so the same switches turn it off).
+pub(crate) fn cells() -> Option<&'static Cells> {
+    static CELLS: OnceLock<Option<Cells>> = OnceLock::new();
+    CELLS
+        .get_or_init(|| {
+            let calls = calls()?;
+            let l = CALL_LAYOUT;
+            if l.handle_size != 4 {
+                return None;
+            }
+            let (ptr_word, len_word) = box_words()?;
+            let (vp, _, _) = vec_words()?;
+            let (empty_at, empty_width, empty_value) =
+                empty_marker::<orbit_runtime::object::Cell>()?;
+            Some(Cells {
+                calls,
+                captures_ptr: (l.closure_captures + ptr_word) as i32,
+                captures_len: (l.closure_captures + len_word) as i32,
+                stack_ptr: (l.cells + vp) as i32,
+                handle_size: l.handle_size as i64,
+                cell_slot_size: l.cell_slot_size as i64,
+                cell_value: l.cell_value as i32,
+                empty_at: empty_at as i32,
+                empty_width,
+                empty_value,
+            })
+        })
+        .as_ref()
+}
