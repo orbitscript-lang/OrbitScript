@@ -4,6 +4,7 @@
 use std::fmt::Write as _;
 
 use crate::object::{Gc, LuaStr, Value, number};
+use crate::stdlib::first_result;
 use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
@@ -106,16 +107,7 @@ pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
 /// After `__tostring` returned: the result replaces the argument, and the
 /// conversion runs again from the start.
 fn format_after_tostring(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let CallOutcome::Ok(got) = outcome else {
-        unreachable!("unprotected call")
-    };
-    let len = ctx.len();
-    let r = if got > 0 {
-        ctx.arg(len - got)
-    } else {
-        Value::Nil
-    };
-    ctx.truncate(len - got);
+    let r = first_result(ctx, outcome)?;
     if !matches!(r, Value::Str(_) | Value::Int(_) | Value::Float(_)) {
         let msg = ctx.new_str(b"'__tostring' must return a string");
         return Err(ctx.error_value(msg));

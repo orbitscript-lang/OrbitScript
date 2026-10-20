@@ -244,12 +244,14 @@ fn pcall(ctx: &mut NativeCtx<'_>) -> R {
     Ok(NativeReturn::CallThenYieldable {
         f,
         nargs: ctx.nargs() - 1,
-        k: pcall_done,
+        k: protected_done,
         protected: true,
     })
 }
 
-fn pcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+/// After `pcall`'s or `xpcall`'s call: `true` (already in the window) and
+/// the results, or `false` and the error.
+fn protected_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     match outcome {
         CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
         CallOutcome::Err(e) => {
@@ -259,18 +261,13 @@ fn pcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
                 e
             };
             ctx.truncate(0);
-            ctx.push(Value::Bool(false));
-            ctx.push(e);
-            Ok(NativeReturn::Return(2))
+            ctx.ret2(Value::Bool(false), e)
         }
     }
 }
 
 fn xpcall(ctx: &mut NativeCtx<'_>) -> R {
-    let h = match ctx.arg(1) {
-        h @ (Value::Closure(_) | Value::Native(_)) => h,
-        _ => return Err(ctx.type_error(1, "function")),
-    };
+    let h = ctx.check_function(1)?;
     let f = ctx.arg(0);
     // Window [f, h, args...] becomes [h, true, args...]: the VM finds the
     // handler in the first slot, and the call's results land after `true`.
@@ -279,25 +276,8 @@ fn xpcall(ctx: &mut NativeCtx<'_>) -> R {
     Ok(NativeReturn::CallHandled {
         f,
         nargs: ctx.nargs() - 2,
-        k: xpcall_done,
+        k: protected_done,
     })
-}
-
-fn xpcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    match outcome {
-        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
-        CallOutcome::Err(e) => {
-            let e = if e.is_nil() {
-                ctx.new_str(b"<no error object>")
-            } else {
-                e
-            };
-            ctx.truncate(0);
-            ctx.push(Value::Bool(false));
-            ctx.push(e);
-            Ok(NativeReturn::Return(2))
-        }
-    }
 }
 
 fn warn(ctx: &mut NativeCtx<'_>) -> R {
