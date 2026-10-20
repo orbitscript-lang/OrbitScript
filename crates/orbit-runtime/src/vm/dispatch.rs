@@ -103,8 +103,14 @@ impl Vm {
             if self.rt.stack.hook.armed() != HOOKED {
                 return Ok(Ran::Switch);
             }
-            let mut depth = self.rt.stack.frames.len();
-            let frame = &self.rt.stack.frames[depth - 1];
+            // The running frame's index is the frame count: the loop
+            // keeps no copy of it.
+            macro_rules! depth {
+                () => {
+                    self.rt.stack.frames.len()
+                };
+            }
+            let frame = self.rt.stack.frames.last().expect("the running frame");
             let FrameKind::Lua {
                 mut closure,
                 code_id,
@@ -122,12 +128,12 @@ impl Vm {
             // The debugger decides by function and depth, so it needs the
             // frame's code first.
             #[cfg(feature = "debugger")]
-            if self.hooked_here(&cur, closure, depth) != HOOKED {
+            if self.hooked_here(&cur, closure, depth!()) != HOOKED {
                 return Ok(Ran::Switch);
             }
             #[cfg(feature = "debugger")]
             if HOOKED {
-                self.debug_reloaded(pc, depth);
+                self.debug_reloaded(pc, depth!());
             }
             let mut code = &cur.code[..];
             macro_rules! switch_code {
@@ -151,9 +157,15 @@ impl Vm {
                         // loop: a step keeps its own function hooked at
                         // every depth.
                         #[cfg(feature = "debugger")]
-                        if self.rt.debug.watch && self.debug_switches(&cur, $closure, depth, HOOKED)
+                        if self.rt.debug.watch
+                            && self.debug_switches(&cur, $closure, depth!(), HOOKED)
                         {
-                            self.rt.stack.frames[depth - 1].pc = pc as u32;
+                            self.rt
+                                .stack
+                                .frames
+                                .last_mut()
+                                .expect("the running frame")
+                                .pc = pc as u32;
                             return Ok(Ran::Switch);
                         }
                     }
@@ -186,9 +198,12 @@ impl Vm {
             }
             macro_rules! save_pc {
                 () => {
-                    if self.rt.stack.frames.len() == depth {
-                        self.rt.stack.frames[depth - 1].pc = pc as u32;
-                    }
+                    self.rt
+                        .stack
+                        .frames
+                        .last_mut()
+                        .expect("the running frame")
+                        .pc = pc as u32;
                 };
             }
             macro_rules! safepoint {
@@ -245,7 +260,12 @@ impl Vm {
                     {
                         // An interrupt was requested ([`crate::vm::Interrupt`]): the
                         // hooked loop raises it before the jump's target.
-                        self.rt.stack.frames[depth - 1].pc = pc as u32;
+                        self.rt
+                            .stack
+                            .frames
+                            .last_mut()
+                            .expect("the running frame")
+                            .pc = pc as u32;
                         self.rt.hooks_touched = true;
                         self.rt.stack.hook.mask |= crate::vm::hook::INTERRUPT;
                         return Ok(Ran::Switch);
@@ -392,7 +412,7 @@ impl Vm {
             // window again and let the collector catch up.
             macro_rules! resumed_here {
                 () => {{
-                    if self.hooked_here(&cur, closure, depth) != HOOKED {
+                    if self.hooked_here(&cur, closure, depth!()) != HOOKED {
                         return Ok(Ran::Switch);
                     }
                     w = window!();
@@ -477,7 +497,6 @@ impl Vm {
                                 if HOOKED {
                                     self.rt.stack.hook.call_pending = Some(false);
                                 }
-                                depth += 1;
                                 closure = c;
                                 base = new_base;
                                 pc = 0;
@@ -503,7 +522,7 @@ impl Vm {
                             // a plain return comes straight back to this loop.
                             Value::Native(id) if !HOOKED => {
                                 save_pc!();
-                                match self.call_native_in_loop(fa, n, want, id, depth) {
+                                match self.call_native_in_loop(fa, n, want, id, depth!()) {
                                     Ok(NativeStep::Returned) => {
                                         w = window!();
                                         safepoint!();
@@ -517,8 +536,9 @@ impl Vm {
                             // handler) goes through the general entry.
                             _ => {
                                 save_pc!();
+                                let d = depth!();
                                 match self.call_value(fa, n, want) {
-                                    Ok(Flow::Reload) if self.rt.stack.frames.len() == depth => {
+                                    Ok(Flow::Reload) if self.rt.stack.frames.len() == d => {
                                         resumed_here!()
                                     }
                                     other => flow!(other),
@@ -560,7 +580,6 @@ impl Vm {
                                 regs[func + k..func + want].fill(Value::Nil);
                                 self.rt.top = func + want;
                             }
-                            depth -= 1;
                             closure = c;
                             switch_code!(c, code_id);
                             w = window!();
@@ -572,7 +591,12 @@ impl Vm {
                 let op = code[pc];
                 pc += 1;
                 if HOOKED {
-                    self.rt.stack.frames[depth - 1].pc = pc as u32;
+                    self.rt
+                        .stack
+                        .frames
+                        .last_mut()
+                        .expect("the running frame")
+                        .pc = pc as u32;
                     if let Err(e) = self.hook_point(pc - 1, op) {
                         throw!(Exc::Lua(e));
                     }
@@ -582,10 +606,15 @@ impl Vm {
                     {
                         throw!(Exc::Lua(e));
                     }
-                    if !self.hooked_here(&cur, closure, depth) {
+                    if !self.hooked_here(&cur, closure, depth!()) {
                         // The hook was turned off: run this instruction in
                         // the plain loop.
-                        self.rt.stack.frames[depth - 1].pc = pc as u32 - 1;
+                        self.rt
+                            .stack
+                            .frames
+                            .last_mut()
+                            .expect("the running frame")
+                            .pc = pc as u32 - 1;
                         return Ok(Ran::Switch);
                     }
                     w = window!();
@@ -614,7 +643,13 @@ impl Vm {
                     Op::LoadConst { dst, k } => reg!(dst) = cur.consts[k as usize],
 
                     Op::CellGet { dst, cell } => {
-                        let cell_base = self.rt.stack.frames[depth - 1].cell_base as usize;
+                        let cell_base = self
+                            .rt
+                            .stack
+                            .frames
+                            .last()
+                            .expect("the running frame")
+                            .cell_base as usize;
                         let c = self.rt.stack.cells[cell_base + cell as usize];
                         reg!(dst) = self.heap.get(c).value;
                     }
@@ -1024,7 +1059,6 @@ impl Vm {
                             // forwarding.
                             by_parts!(src, |v| self.rt.stack.regs[func] = v);
                             self.rt.top = func + 1;
-                            depth -= 1;
                             closure = c;
                             switch_code!(c, code_id);
                             w = window!();
@@ -1074,21 +1108,39 @@ impl Vm {
                         safepoint!();
                     }
                     Op::Closure { dst, proto } => {
-                        let cell_base = self.rt.stack.frames[depth - 1].cell_base as usize;
+                        let cell_base = self
+                            .rt
+                            .stack
+                            .frames
+                            .last()
+                            .expect("the running frame")
+                            .cell_base as usize;
                         let c = self.op_closure(closure, cell_base, proto as usize);
                         w = window!();
                         reg!(dst) = c;
                         safepoint!();
                     }
                     Op::CellNew { cell, src } => {
-                        let cell_base = self.rt.stack.frames[depth - 1].cell_base as usize;
+                        let cell_base = self
+                            .rt
+                            .stack
+                            .frames
+                            .last()
+                            .expect("the running frame")
+                            .cell_base as usize;
                         let v = reg!(src);
                         self.op_cell_new(cell_base + cell as usize, v);
                         w = window!();
                         safepoint!();
                     }
                     Op::CellSet { cell, src } => {
-                        let cell_base = self.rt.stack.frames[depth - 1].cell_base as usize;
+                        let cell_base = self
+                            .rt
+                            .stack
+                            .frames
+                            .last()
+                            .expect("the running frame")
+                            .cell_base as usize;
                         let c = self.rt.stack.cells[cell_base + cell as usize];
                         let v = reg!(src);
                         self.heap.barrier_back(c);
@@ -1096,7 +1148,13 @@ impl Vm {
                     }
 
                     Op::VarargLen { dst } => {
-                        let nvarargs = self.rt.stack.frames[depth - 1].nvarargs;
+                        let nvarargs = self
+                            .rt
+                            .stack
+                            .frames
+                            .last()
+                            .expect("the running frame")
+                            .nvarargs;
                         reg!(dst) = Value::Int(nvarargs as i64);
                     }
 
