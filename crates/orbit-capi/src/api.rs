@@ -96,18 +96,22 @@ pub(crate) fn type_code(t: Type) -> i32 {
     t as i32
 }
 
+// `CompareOp`'s discriminants are lua.h's `LUA_OP*` codes.
+const _: () = assert!(
+    CompareOp::Eq as i32 == abi::OPEQ
+        && CompareOp::Lt as i32 == abi::OPLT
+        && CompareOp::Le as i32 == abi::OPLE
+);
+
 pub(crate) fn compare(c: &mut Stack<'_>, a: i32, b: i32, op: i32) -> Res<bool> {
-    let op = match op {
-        abi::OPEQ => CompareOp::Eq,
-        abi::OPLT => CompareOp::Lt,
-        abi::OPLE => CompareOp::Le,
-        _ => return Err(c.error("C API: invalid comparison option")),
+    let Some(op) = u8::try_from(op).ok().and_then(CompareOp::from_code) else {
+        return Err(c.error("C API: invalid comparison option"));
     };
     c.compare(a, b, op)
 }
 
 pub(crate) fn arith(c: &mut Stack<'_>, op: i32) -> Res<()> {
-    let Some(&op) = usize::try_from(op).ok().and_then(|i| ArithOp::ALL.get(i)) else {
+    let Some(op) = u8::try_from(op).ok().and_then(ArithOp::from_code) else {
         return Err(c.error("C API: invalid arithmetic operator"));
     };
     c.arith(op)
@@ -173,15 +177,8 @@ pub(crate) fn gc(c: &mut Stack<'_>, what: i32, a: i32, b: i32) -> i32 {
             };
         }
         abi::GCPARAM => {
-            // lua.h's LUA_GCP* order.
-            let p = match a {
-                0 => GcParam::MinorMul,
-                1 => GcParam::MajorMinor,
-                2 => GcParam::MinorMajor,
-                3 => GcParam::Pause,
-                4 => GcParam::StepMul,
-                5 => GcParam::StepSize,
-                _ => return -1,
+            let Some(p) = u8::try_from(a).ok().and_then(GcParam::from_code) else {
+                return -1;
             };
             GcOp::Param(p, (b >= 0).then_some(i64::from(b)))
         }

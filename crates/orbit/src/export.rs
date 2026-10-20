@@ -189,14 +189,7 @@ fn gc_op(op: u8, param: u8, value: Option<i64>) -> GcOp {
         5 => GcOp::Step(value.unwrap_or(0) as i32),
         6 => GcOp::IsRunning,
         _ => GcOp::Param(
-            match param {
-                0 => GcParam::MinorMul,
-                1 => GcParam::MajorMinor,
-                2 => GcParam::MinorMajor,
-                3 => GcParam::Pause,
-                4 => GcParam::StepMul,
-                _ => GcParam::StepSize,
-            },
+            GcParam::from_code(param).unwrap_or(GcParam::StepSize),
             value,
         ),
     }
@@ -399,17 +392,13 @@ impl StackAbi for Win<'_, '_> {
         self.s.raw_equal(a, b)
     }
     extern "C" fn compare(&mut self, a: i32, b: i32, op: u8) -> Res<bool> {
-        let op = match op {
-            0 => CompareOp::Eq,
-            1 => CompareOp::Lt,
-            _ => CompareOp::Le,
-        };
+        let op = CompareOp::from_code(op).unwrap_or(CompareOp::Le);
         let r = self.s.compare(a, b, op);
         self.res(r)
     }
 
     extern "C" fn arith(&mut self, op: u8) -> Res<()> {
-        let op = ArithOp::ALL[(op as usize).min(ArithOp::ALL.len() - 1)];
+        let op = ArithOp::from_code(op).unwrap_or(ArithOp::BNot);
         let r = self.s.arith(op);
         self.res(r)
     }

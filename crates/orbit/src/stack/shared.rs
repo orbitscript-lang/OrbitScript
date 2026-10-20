@@ -25,8 +25,8 @@ use crate::scope::Scope;
 use crate::value::{ThreadStatus, Value};
 
 use super::{
-    ArithOp, CompareOp, Continuation, FrameInfo, GcOp, GcParam, InterruptHandler, Native, Outcome,
-    Resumed, Ret, Return, StackResult, Status, Type,
+    ArithOp, CompareOp, Continuation, FrameInfo, GcOp, InterruptHandler, Native, Outcome, Resumed,
+    Ret, Return, StackResult, Status, Type,
 };
 
 /// An error raised in the isolate, to return from a native (an `Err`
@@ -328,29 +328,11 @@ fn res<T: IDeterminantProvider<RaisedId>>(r: Res<T>) -> StackResult<T> {
 }
 
 fn type_of(code: i32) -> Type {
-    match code {
-        0 => Type::Nil,
-        1 => Type::Boolean,
-        2 => Type::LightUserdata,
-        3 => Type::Number,
-        4 => Type::String,
-        5 => Type::Table,
-        6 => Type::Function,
-        7 => Type::Userdata,
-        8 => Type::Thread,
-        _ => Type::None,
-    }
+    Type::from_code(code).unwrap_or(Type::None)
 }
 
 fn status_of(code: i32) -> Status {
-    match code {
-        0 => Status::Ok,
-        1 => Status::Yield,
-        3 => Status::Syntax,
-        4 => Status::Memory,
-        5 => Status::Handler,
-        _ => Status::Runtime,
-    }
+    Status::from_code(code).unwrap_or(Status::Runtime)
 }
 
 fn bytes(v: SOption<stabby::vec::Vec<u8>>) -> Option<Vec<u8>> {
@@ -386,17 +368,7 @@ fn gc_op(op: GcOp) -> (u8, u8, Option<i64>) {
         GcOp::CountRemainder => (4, 0, None),
         GcOp::Step(n) => (5, 0, Some(i64::from(n))),
         GcOp::IsRunning => (6, 0, None),
-        GcOp::Param(p, v) => {
-            let p = match p {
-                GcParam::MinorMul => 0,
-                GcParam::MajorMinor => 1,
-                GcParam::MinorMajor => 2,
-                GcParam::Pause => 3,
-                GcParam::StepMul => 4,
-                GcParam::StepSize => 5,
-            };
-            (7, p, v)
-        }
+        GcOp::Param(p, v) => (7, p as u8, v),
     }
 }
 
@@ -659,22 +631,13 @@ impl<'s> Stack<'s> {
     }
 
     pub fn compare(&mut self, a: i32, b: i32, op: CompareOp) -> StackResult<bool> {
-        let op = match op {
-            CompareOp::Eq => 0,
-            CompareOp::Lt => 1,
-            CompareOp::Le => 2,
-        };
-        res(self.w.compare(a, b, op))
+        res(self.w.compare(a, b, op as u8))
     }
 
     // ---- operators -------------------------------------------------------------------
 
     pub fn arith(&mut self, op: ArithOp) -> StackResult<()> {
-        let code = ArithOp::ALL
-            .iter()
-            .position(|&o| o == op)
-            .expect("every operator is in ALL");
-        res(self.w.arith(code as u8))
+        res(self.w.arith(op as u8))
     }
 
     pub fn concat(&mut self, n: i32) -> StackResult<()> {
