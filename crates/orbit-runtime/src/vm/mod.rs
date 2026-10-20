@@ -229,6 +229,54 @@ pub(crate) struct Stack {
     pub(crate) dirty_to: usize,
 }
 
+/// A cheap hasher for the runtime's maps keyed by native names and ids:
+/// keys come from the host, not from scripts, and creating a native
+/// closure (each `coroutine.wrap`) looks them up, where SipHash shows.
+pub(crate) type CheapHash = std::hash::BuildHasherDefault<CheapHasher>;
+
+#[derive(Default)]
+pub(crate) struct CheapHasher(u64);
+
+impl CheapHasher {
+    #[inline]
+    fn add(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for CheapHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().expect("8 bytes")));
+        }
+        let mut last = [0; 8];
+        last[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
+        self.add(u64::from_le_bytes(last));
+    }
+
+    #[inline]
+    fn write_u8(&mut self, n: u8) {
+        self.add(n.into());
+    }
+
+    #[inline]
+    fn write_u32(&mut self, n: u32) {
+        self.add(n.into());
+    }
+
+    #[inline]
+    fn write_usize(&mut self, n: usize) {
+        self.add(n as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 /// The parts of a [`Stack`] the dispatch loop seldom touches.
 #[derive(Debug, Default)]
 pub(crate) struct StackAux {
@@ -500,7 +548,7 @@ pub struct Runtime {
     /// [`Runtime::compile`].
     pub compile_orbitscript: Option<CompileFn>,
     pub(crate) natives: Vec<Native>,
-    pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId>,
+    pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId, CheapHash>,
     pub(crate) stack: Stack,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
@@ -566,7 +614,7 @@ pub struct Runtime {
     /// before its to-be-closed variables closed (and popped the frames).
     pub(crate) unwind_traceback: Option<String>,
     /// The stub prototype of each native that has native closures.
-    pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>>,
+    pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>, CheapHash>,
     /// The threads parked suspended most recently, with their park count
     /// then (ADR-3): one that leaves this list without being resumed has its
     /// stack shrunk. A ring: `cooling_at` is the oldest entry, which the

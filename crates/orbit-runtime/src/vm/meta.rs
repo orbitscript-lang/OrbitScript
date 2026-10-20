@@ -227,6 +227,52 @@ pub(crate) fn index(heap: &LuaHeap, rt: &Metas, obj: Value, key: Value) -> Resul
     ))
 }
 
+/// [`index`] for table `obj`, whose raw lookup of string key `key` found
+/// nothing and whose metatable is `mt`. Walks a chain of `__index` tables
+/// with the key's known hash; anything else goes to [`index`].
+pub(crate) fn index_str_miss(
+    heap: &LuaHeap,
+    rt: &Metas,
+    obj: Gc<Table>,
+    mt: Gc<Table>,
+    key: &table::Key,
+) -> Result<Value, Exc> {
+    let name = rt.field_names.name(MetaField::Index);
+    let (mut o, mut mt) = (obj, mt);
+    // `obj` itself was the chain's first step.
+    for _ in 1..MAX_CHAIN {
+        let h = heap.get(mt).meta_field(heap, MetaField::Index, name);
+        let Value::Table(t) = h else {
+            if h.is_nil() {
+                return Ok(Value::Nil);
+            }
+            if h.is_function() {
+                return Err(Exc::Meta(MetaCall::new(
+                    h,
+                    MetaField::Index,
+                    &[Value::Table(o), key.value()],
+                )));
+            }
+            return index(heap, rt, h, key.value());
+        };
+        let tab = heap.get(t);
+        if let Some(slot) = tab.find_str_key(heap, key) {
+            let v = tab.slot_value(slot);
+            if !v.is_nil() {
+                return Ok(v);
+            }
+        }
+        match tab.meta {
+            Some(m) => (o, mt) = (t, m),
+            None => return Ok(Value::Nil),
+        }
+    }
+    Err(Exc::Rt(
+        "'__index' chain too long; possible loop".into(),
+        None,
+    ))
+}
+
 /// `obj[key] = v` with `__newindex`.
 #[cold]
 #[inline(never)]

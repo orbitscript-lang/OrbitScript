@@ -638,12 +638,15 @@ impl Table {
         let Some((b, p)) = self.array.live(idx) else {
             return false;
         };
-        // Numbers first, with plain compares on the tag byte: a jump table
-        // over every tag costs an indirect branch on each read.
+        // Numbers and booleans (flag arrays) first, with plain compares on
+        // the tag byte: a jump table over every tag costs an indirect branch
+        // on each read.
         if b == Tag::Int as u8 {
             *out = Value::Int(p.bits() as i64);
         } else if b == Tag::Float as u8 {
             *out = Value::Float(f64::from_bits(p.bits()));
+        } else if b == Tag::Bool as u8 {
+            *out = Value::Bool(p.bits() != 0);
         } else {
             write_other(out, b, p);
         }
