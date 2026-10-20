@@ -106,8 +106,8 @@ fn lua_gc_options() {
     assert_eq!(
         run("gc"),
         "pause: 150\n\
-         gen (was inc): 1\n\
          inc (was gen): 1\n\
+         gen (was inc): 1\n\
          running after stop: 0\n\
          running after restart: 1\n\
          collect: 0\n"
