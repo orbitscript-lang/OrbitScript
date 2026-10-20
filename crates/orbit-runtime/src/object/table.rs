@@ -1306,7 +1306,9 @@ fn write_other(out: &mut Value, b: u8, p: Payload) {
 #[inline(always)]
 pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<bool, NoMemory> {
     let idx = (i as u64).wrapping_sub(1);
-    // Every store path barriers, so do it first and look the table up once.
+    // The array store needs the barrier, so do it first and look the table
+    // up once. `set_key`'s `Heap::update` barriers again, which only checks
+    // the color of a table already remembered.
     heap.barrier_back(t);
     let tab = heap.get_mut(t);
     if idx < tab.array.len() as u64 {

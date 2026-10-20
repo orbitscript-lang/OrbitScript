@@ -1178,6 +1178,20 @@ impl Vm {
                     }
                 };
             }
+            // A store that refers to no object needs no write barrier: with
+            // the value's variant known (`by_parts!`) the test folds away.
+            // In generational mode this keeps number stores into old
+            // objects from remembering them.
+            macro_rules! barrier_for {
+                ($obj:expr, $v:expr) => {
+                    if !matches!(
+                        $v,
+                        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+                    ) {
+                        self.heap.barrier_back($obj);
+                    }
+                };
+            }
             macro_rules! set_int_parts {
                 ($t:expr, $i:expr, $src:expr) => {
                     by_parts!($src, |v| table::store_int(&mut self.heap, $t, $i, v))
@@ -1592,9 +1606,10 @@ impl Vm {
                     }
                     Op::CellSet { cell, src } => {
                         let c = self.rt.stack.cells[cell_base!() + cell as usize];
-                        self.heap.barrier_back(c);
-                        let cell = self.heap.get_mut(c);
-                        by_parts!(src, |v| cell.value = v);
+                        by_parts!(src, |v| {
+                            barrier_for!(c, v);
+                            self.heap.get_mut(c).value = v
+                        });
                     }
                     Op::CellClear { from, count } => {
                         let at = cell_base!() + from as usize;
@@ -1608,9 +1623,10 @@ impl Vm {
                     Op::CapSelf { dst } => reg!(dst) = Value::Closure(closure),
                     Op::CapSet { cap, src } => {
                         let c = self.heap.get(closure).captures[cap as usize];
-                        self.heap.barrier_back(c);
-                        let cell = self.heap.get_mut(c);
-                        by_parts!(src, |v| cell.value = v);
+                        by_parts!(src, |v| {
+                            barrier_for!(c, v);
+                            self.heap.get_mut(c).value = v
+                        });
                     }
 
                     Op::GetGlobal { dst, name, ic } => {
@@ -1650,7 +1666,7 @@ impl Vm {
                                 if matches!(tab.cached_str(slot, cache.key),
                                     Some(v) if tab.meta.is_none() || !v.is_nil())
                                 {
-                                    self.heap.barrier_back(t);
+                                    barrier_for!(t, v);
                                     self.heap.get_mut(t).set_slot(slot, v);
                                 } else {
                                     let k = const_str(&cur.consts, name);
@@ -1708,9 +1724,10 @@ impl Vm {
                         {
                             // The key is there: overwrite its value. No
                             // capacity changes, so no byte accounting.
-                            self.heap.barrier_back(t);
-                            let tab = self.heap.get_mut(t);
-                            by_parts!(src, |v| tab.set_slot(slot, v));
+                            by_parts!(src, |v| {
+                                barrier_for!(t, v);
+                                self.heap.get_mut(t).set_slot(slot, v)
+                            });
                         } else {
                             let k = const_str(&cur.consts, key);
                             let v = reg!(src);
