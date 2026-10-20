@@ -1019,21 +1019,18 @@ impl Vm {
                                 } = caller.kind
                             {
                                 let (func, own_cells) = (f.func as usize, f.cell_base as usize);
+                                let from = base + src as usize;
                                 base = caller.base as usize;
                                 pc = caller.pc as usize;
                                 self.rt.stack.frames.pop();
                                 if self.rt.stack.cells.len() > own_cells {
                                     self.rt.stack.cells.truncate(own_cells);
                                 }
-                                // Read from the window and copied by parts: the
-                                // value was usually just written that way, and
-                                // a whole 16-byte load would stall on store
-                                // forwarding.
-                                fast::move_by_parts(
-                                    &mut self.rt.stack.regs,
-                                    base + src as usize,
-                                    func,
-                                );
+                                // Read from the callee's window and copied by
+                                // parts: the value was usually just written
+                                // that way, and a whole 16-byte load would
+                                // stall on store forwarding.
+                                fast::move_by_parts(&mut self.rt.stack.regs, from, func);
                                 self.rt.top = func + 1;
                                 closure = c;
                                 switch_code!(c, code_id);
