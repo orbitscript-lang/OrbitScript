@@ -269,8 +269,9 @@ fn without_the_debugger_nothing_listens() {
 }
 
 /// A C host with `ORBIT_DEBUG=1`: its debuggable states can be attached
-/// to, and the one made with `ORBIT_STATE_NO_DEBUGGER` can't.
-#[cfg(feature = "debugger")]
+/// to, and the one made with `ORBIT_STATE_NO_DEBUGGER` can't (Unix: the
+/// test talks to the socket through std).
+#[cfg(all(feature = "debugger", unix))]
 #[test]
 fn c_states_are_debugged_through_the_environment_or_the_api() {
     use std::io::{BufRead, BufReader, Read, Write};
