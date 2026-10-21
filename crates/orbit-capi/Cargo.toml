@@ -14,11 +14,15 @@ links = "orbit_capi"
 # and friends open them, and C states are isolates the API can reach.
 orbit = { path = "../orbit", default-features = false, features = ["package"] }
 orbit-std = { path = "../orbit-std" }
+orbit-dap = { path = "../orbit-dap", optional = true }
 
 [features]
 # States created from C (`lua_newstate`, ADR-10): for the shared library
 # that programs embedding Lua link to.
 host = []
+# C states can be debugged (ADR-12, D5): `orbit_debug_listen` and
+# `ORBIT_DEBUG` start the DAP server.
+debugger = ["host", "orbit/debugger", "dep:orbit-dap"]
 
 [build-dependencies]
 cc = "1.2"

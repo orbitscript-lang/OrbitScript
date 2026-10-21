@@ -25,6 +25,7 @@
 #include "lauxlib.h"
 #include "lua.h"
 #include "lualib.h"
+#include "orbit.h"
 
 struct lua_State {
   void *rs;      /* the Rust bridge */
@@ -1232,17 +1233,50 @@ LUALIB_API void luaL_openselectedlibs(lua_State *L, int load, int preload) {
 }
 
 #if defined(ORBIT_CAPI_HOST)
-extern lua_State *orbit_r_newstate(void);
+extern lua_State *orbit_r_newstate(unsigned flags);
+extern int orbit_r_debug_listen(lua_State *L, int announce);
+extern void orbit_r_debug_stop(void);
 
-LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
-  lua_State *L = orbit_r_newstate();
-  (void)seed;
+static void orbit_debug_atexit(void) { orbit_r_debug_stop(); }
+
+/* Listen for debuggers, saying where with `announce`; the socket goes
+   away at exit. */
+static int orbit_listen(lua_State *L, int announce) {
+  int r = orbit_r_debug_listen(L, announce);
+  if (r == 1) atexit(orbit_debug_atexit);
+  return r < 0 ? -1 : 0;
+}
+
+LUA_API int orbit_debug_listen(lua_State *L, const char *addr) {
+  if (addr != NULL) return -1;
+  return orbit_listen(L, 0);
+}
+
+/* A new state, debuggable unless `flags` says not, listening at once
+   when the environment asks (ORBIT_DEBUG=1). */
+static lua_State *orbit_makestate(unsigned flags) {
+  lua_State *L = orbit_r_newstate(flags);
+  const char *debug;
+  if (L == NULL) return NULL;
+  debug = getenv("ORBIT_DEBUG");
+  if (!(flags & ORBIT_STATE_NO_DEBUGGER) && debug != NULL && strcmp(debug, "1") == 0)
+    orbit_listen(L, 1);
+  return L;
+}
+
+LUA_API lua_State *orbit_newstate(lua_Alloc f, void *ud, unsigned flags) {
+  lua_State *L = orbit_makestate(flags);
   if (L == NULL) return NULL;
   L->allocf = f;
   L->allocud = ud;
   /* A plain state has no warning function: warnings are dropped. */
   lua_setwarnf(L, NULL, NULL);
   return L;
+}
+
+LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
+  (void)seed;
+  return orbit_newstate(f, ud, 0);
 }
 
 static int orbit_panic(lua_State *L) {
@@ -1254,7 +1288,7 @@ static int orbit_panic(lua_State *L) {
 }
 
 LUALIB_API lua_State *luaL_newstate(void) {
-  lua_State *L = orbit_r_newstate();
+  lua_State *L = orbit_makestate(0);
   if (L != NULL) lua_atpanic(L, orbit_panic);
   return L;
 }
@@ -1273,6 +1307,19 @@ LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
 
 LUALIB_API lua_State *luaL_newstate(void) {
   return NULL;
+}
+
+LUA_API lua_State *orbit_newstate(lua_Alloc f, void *ud, unsigned flags) {
+  (void)f;
+  (void)ud;
+  (void)flags;
+  return NULL;
+}
+
+LUA_API int orbit_debug_listen(lua_State *L, const char *addr) {
+  (void)L;
+  (void)addr;
+  return -1;
 }
 
 LUA_API void lua_close(lua_State *L) {

@@ -9,6 +9,7 @@
 #include "lauxlib.h"
 #include "lua.h"
 #include "lualib.h"
+#include "orbit.h"
 
 static void run(lua_State *L, const char *code) {
   if (luaL_dostring(L, code) != LUA_OK) {
@@ -462,6 +463,34 @@ static int threads(void) {
   return 0;
 }
 
+/* Debugging (ADR-12): which states may be listened for, then run the
+   script argv[2] in a debuggable state with the remaining arguments. */
+static int debug(int argc, char **argv) {
+  lua_State *open = orbit_newstate(my_alloc, NULL, 0);
+  lua_State *closed = orbit_newstate(my_alloc, NULL, ORBIT_STATE_NO_DEBUGGER);
+  lua_State *plain = luaL_newstate();
+  int i;
+  printf("closed: %d\n", orbit_debug_listen(closed, NULL));
+  printf("address: %d\n", orbit_debug_listen(open, "somewhere"));
+  printf("listen: %d %d\n", orbit_debug_listen(open, NULL), orbit_debug_listen(plain, NULL));
+  fflush(stdout);
+  lua_close(closed);
+  luaL_openlibs(plain);
+  if (luaL_loadfile(plain, argv[2]) != LUA_OK) {
+    printf("error: %s\n", lua_tostring(plain, -1));
+    return 1;
+  }
+  for (i = 3; i < argc; i++) lua_pushstring(plain, argv[i]);
+  if (lua_pcall(plain, argc - 3, 0, 0) != LUA_OK) {
+    printf("error: %s\n", lua_tostring(plain, -1));
+    return 1;
+  }
+  fflush(stdout);
+  lua_close(plain);
+  lua_close(open);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *mode = argc > 1 ? argv[1] : "";
   if (strcmp(mode, "basic") == 0) return basic();
@@ -476,6 +505,7 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "locals") == 0) return locals();
   if (strcmp(mode, "toclose") == 0) return toclose();
   if (strcmp(mode, "threads") == 0) return threads();
+  if (strcmp(mode, "debug") == 0 && argc > 2) return debug(argc, argv);
   fprintf(stderr, "unknown mode %s\n", mode);
   return 2;
 }

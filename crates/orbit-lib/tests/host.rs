@@ -220,3 +220,176 @@ fn threads_from_c() {
          dead\n"
     );
 }
+
+/// Runs until the file named by its argument exists.
+const SPIN: &str = "\
+local stop = ...
+local n = 0
+while true do
+  n = n + 1
+  if n % 1000 == 0 then
+    local f = io.open(stop)
+    if f then f:close() break end
+  end
+end
+print('done')
+";
+
+/// The `debug` mode's script and stop file.
+fn spin(name: &str) -> (PathBuf, PathBuf) {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("chost");
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join(format!("{name}.lua"));
+    std::fs::write(&script, SPIN).unwrap();
+    let stop = dir.join(format!("{name}.stop"));
+    let _ = std::fs::remove_file(&stop);
+    (script, stop)
+}
+
+#[cfg(not(feature = "debugger"))]
+#[test]
+fn without_the_debugger_nothing_listens() {
+    let (exe, dir) = host();
+    let (script, stop) = spin("nodebug");
+    std::fs::write(&stop, "").unwrap();
+    let out = Command::new(exe)
+        .arg("debug")
+        .arg(&script)
+        .arg(&stop)
+        .env("LD_LIBRARY_PATH", dir)
+        .env("ORBIT_DEBUG", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "closed: -1\naddress: -1\nlisten: -1 -1\ndone\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+/// A C host with `ORBIT_DEBUG=1`: its debuggable states can be attached
+/// to, and the one made with `ORBIT_STATE_NO_DEBUGGER` can't (Unix: the
+/// test talks to the socket through std).
+#[cfg(all(feature = "debugger", unix))]
+#[test]
+fn c_states_are_debugged_through_the_environment_or_the_api() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::process::Stdio;
+
+    use serde_json::{Value, json};
+
+    fn send(s: &mut UnixStream, seq: i64, command: &str, arguments: Value) {
+        let msg =
+            json!({"seq": seq, "type": "request", "command": command, "arguments": arguments});
+        let body = serde_json::to_vec(&msg).unwrap();
+        write!(s, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+        s.write_all(&body).unwrap();
+    }
+
+    fn read(r: &mut BufReader<UnixStream>) -> Value {
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            assert!(r.read_line(&mut line).unwrap() > 0, "the program closed");
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(n) = line.strip_prefix("Content-Length: ") {
+                length = n.parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        r.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Read until `want` matches, skipping the rest.
+    fn until(r: &mut BufReader<UnixStream>, want: impl Fn(&Value) -> bool) -> Value {
+        loop {
+            let m = read(r);
+            if want(&m) {
+                return m;
+            }
+        }
+    }
+
+    let (exe, dir) = host();
+    let (script, stop) = spin("debug");
+    let mut child = Command::new(exe)
+        .arg("debug")
+        .arg(&script)
+        .arg(&stop)
+        .env("LD_LIBRARY_PATH", dir)
+        .env("ORBIT_DEBUG", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    let path = line
+        .trim_end()
+        .strip_prefix("liborbit: debugger listening on ")
+        .unwrap_or_else(|| panic!("announced: {line:?}"))
+        .to_owned();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut checks = String::new();
+    for _ in 0..3 {
+        out.read_line(&mut checks).unwrap();
+    }
+    assert_eq!(checks, "closed: -1\naddress: -1\nlisten: 0 0\n");
+
+    // Two debuggable states, one of them closed already.
+    let mut s = UnixStream::connect(&path).unwrap();
+    send(&mut s, 1, "describe", json!({}));
+    let d = read(&mut BufReader::new(s));
+    assert_eq!(d["body"]["isolates"].as_array().unwrap().len(), 2, "{d}");
+    assert!(d["body"]["program"].as_str().unwrap().ends_with("host"));
+
+    let mut s = UnixStream::connect(&path).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .unwrap();
+    let mut r = BufReader::new(s.try_clone().unwrap());
+    send(&mut s, 1, "initialize", json!({"adapterID": "orbit"}));
+    send(&mut s, 2, "attach", json!({}));
+    send(&mut s, 3, "configurationDone", json!({}));
+    send(&mut s, 4, "threads", json!({}));
+    let threads = until(&mut r, |m| m["request_seq"] == 4);
+    let ids: Vec<i64> = threads["body"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2, "{threads}");
+    // The running state is the one made last.
+    let running = ids[1];
+    send(&mut s, 5, "pause", json!({"threadId": running}));
+    let stopped = until(&mut r, |m| m["event"] == "stopped");
+    assert_eq!(stopped["body"]["threadId"], running);
+    send(&mut s, 6, "stackTrace", json!({"threadId": running}));
+    let trace = until(&mut r, |m| m["request_seq"] == 6);
+    let top = &trace["body"]["stackFrames"][0];
+    assert!(
+        top["source"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("debug.lua"),
+        "{trace}"
+    );
+    send(&mut s, 7, "continue", json!({"threadId": running}));
+    until(&mut r, |m| m["request_seq"] == 7);
+    send(&mut s, 8, "disconnect", json!({}));
+    until(&mut r, |m| m["request_seq"] == 8);
+
+    std::fs::write(&stop, "").unwrap();
+    let mut rest = String::new();
+    out.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "done\n");
+    assert!(child.wait().unwrap().success());
+    assert!(!Path::new(&path).exists(), "the socket is removed at exit");
+}

@@ -307,6 +307,19 @@ flowchart LR
 
 Cost: 20.2 KiB in the release `orbit` (2,540,944 → 2,561,600 bytes, cloud x86_64, no PGO); a program that serves one isolate runs as before.
 
+### C hosts
+
+`liborbit` built with its `debugger` feature (as `build.sh` builds it) carries the server for programs that embed it through the C API (D5). `orbit.h` declares OrbitScript's own additions, exported under the symbol version `ORBIT_0`:
+
+- `orbit_newstate(lua_Alloc f, void *ud, unsigned flags)` is `lua_newstate` with flags. `ORBIT_STATE_NO_DEBUGGER` makes a state no debugger can ever reach (`Config::debugger(Disabled)`). `lua_newstate` and `luaL_newstate` are `orbit_newstate` with no flags.
+- Every other state is served when it is made (`orbit_dap::serve`, each a DAP thread in creation order), so it runs as it would undebugged until an editor attaches, and starting the server later needs nothing from the state's thread.
+- `orbit_debug_listen(L, NULL)` opens the process's socket, from any thread, at any time; it returns 0, or -1 if `L` allows no debugger, the library has none, or `addr` is not `NULL` (reserved).
+- `ORBIT_DEBUG=1` in the environment does the same for unmodified hosts when a debuggable state is made, and says `liborbit: debugger listening on <path>` on standard error.
+- The socket is removed at exit (`atexit`, registered by the first listen).
+- Without the feature both functions still exist; listening fails.
+
+Cost (cloud x86_64, release, no PGO): 190.8 KiB in `liborbit.so.0` (2,478,040 → 2,673,392 bytes; the engine was already in), and 4.7 k instructions more to make, open and close a state (20 states: 17,447,443 → 17,541,034, callgrind).
+
 ## Error-message parity
 
 Messages already match the reference for most runtime errors ([VM design](vm.md#error-messages)). What remains for `errors.lua` and `calls.lua` is finished last, as each case unblocks: `global 'x'` versus `field 'x'` for `_ENV` accesses through a local `_ENV`, upvalue and constant names in arithmetic and concatenation, `bad extra argument` for `__call` chains (`extraargs`), `for iterator` naming, and the `(...tail calls...)` lines. Where matching would need bytecode analysis after the fact, the compiler records one more origin instead, as the VM design intends.
