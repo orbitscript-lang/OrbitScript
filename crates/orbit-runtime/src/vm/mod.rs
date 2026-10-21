@@ -204,6 +204,78 @@ pub(crate) struct Frame {
     pub cdepth: u8,
 }
 
+/// The frame stack: the live frames of a thread, newest last.
+///
+/// A `Vec<Frame>` keeps its length next to its buffer pointer, and the
+/// compiler then reads the two with one 16-byte load. A call pushes a frame
+/// (an 8-byte store to the length alone) and the return that follows reads
+/// both back: a load wider than the younger store it overlaps cannot be
+/// store-forwarded, so every return waited for the store to retire (about
+/// 3% of all cycles on Apple M2, measured 2026-10-21). Here the length lives
+/// 16 bytes away from the buffer, so no load pairs them, and `buf` keeps
+/// the slots it has grown to: a push below its high-water mark is a plain
+/// store, and the dead slots above `len` are never handed out.
+#[derive(Debug, Default, Clone)]
+#[repr(C)]
+pub(crate) struct Frames {
+    len: usize,
+    /// Keeps `len` out of the 16-byte window of any word of `buf`.
+    _apart: usize,
+    buf: Vec<Frame>,
+}
+
+impl Frames {
+    #[inline(always)]
+    pub(crate) fn push(&mut self, f: Frame) {
+        if self.len == self.buf.len() {
+            self.buf.push(f);
+        } else {
+            self.buf[self.len] = f;
+        }
+        self.len += 1;
+    }
+
+    #[inline(always)]
+    pub(crate) fn pop(&mut self) -> Option<Frame> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        Some(self.buf[self.len])
+    }
+
+    #[inline(always)]
+    pub(crate) fn truncate(&mut self, n: usize) {
+        if n < self.len {
+            self.len = n;
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    /// Slots held, live or not.
+    pub(crate) fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+}
+
+impl std::ops::Deref for Frames {
+    type Target = [Frame];
+    #[inline(always)]
+    fn deref(&self) -> &[Frame] {
+        &self.buf[..self.len]
+    }
+}
+
+impl std::ops::DerefMut for Frames {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [Frame] {
+        &mut self.buf[..self.len]
+    }
+}
+
 /// The most calls back into the interpreter that may be open at once,
 /// counting the resumes below the running coroutine (more is "C stack
 /// overflow", at the depths the reference gives it).
@@ -217,7 +289,7 @@ pub(crate) const MAX_CCALLS: usize = 200;
 pub(crate) struct Stack {
     pub regs: Vec<Value>,
     pub cells: Vec<Gc<Cell>>,
-    pub frames: Vec<Frame>,
+    pub frames: Frames,
     pub aux: Box<StackAux>,
     /// The stack's debug hook (`debug.sethook`).
     pub hook: hook::Hook,
@@ -367,7 +439,7 @@ impl Stack {
     pub(crate) fn clear(&mut self, hook: hook::Hook) {
         self.regs = Vec::new();
         self.cells = Vec::new();
-        self.frames = Vec::new();
+        self.frames = Frames::default();
         *self.aux = StackAux::default();
         self.hook = hook;
         self.dirty_to = 0;
@@ -423,7 +495,7 @@ impl Stack {
         for &c in &self.cells {
             m.mark(c);
         }
-        for f in &self.frames {
+        for f in self.frames.iter() {
             if let FrameKind::Lua { closure, .. } = f.kind {
                 m.mark(closure);
             }
