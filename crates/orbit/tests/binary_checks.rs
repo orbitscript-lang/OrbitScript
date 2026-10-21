@@ -60,6 +60,17 @@ fn each_level_runs_its_layers() {
 }
 
 #[test]
+fn scripts_cannot_lower_the_level() {
+    let structure = chunk_with(vec![Op::Return1 { src: 200 }]);
+    let mut iso = isolate();
+    iso.set_binary_checks(Some(BinaryChecks::Structure));
+    // The level once lived in the registry under this key.
+    iso.exec(Chunk::new("debug.getregistry()._ORBIT_VERIFY = 0"))
+        .unwrap();
+    assert!(load(&mut iso, &structure).is_err());
+}
+
+#[test]
 fn variables_to_close_stay_balanced() {
     let t = Op::LoadBool {
         dst: 0,

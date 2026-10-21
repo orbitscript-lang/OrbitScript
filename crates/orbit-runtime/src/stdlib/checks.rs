@@ -8,12 +8,8 @@
 //! most the build can do. Without both layers a malformed chunk can make the
 //! VM panic, though never corrupt memory: the VM is safe Rust.
 
-use crate::object::Value;
 use crate::vm::Vm;
 use crate::vm::op::verify::Level;
-
-/// Registry key of the level, stored as [`code`] gives it.
-const KEY: &[u8] = b"_ORBIT_VERIFY";
 
 /// The most this build checks; `None` means binary chunks run unchecked.
 pub fn strongest() -> Option<Level> {
@@ -38,32 +34,11 @@ pub fn from_env() -> Option<Level> {
 /// Set how much `load` checks binary chunks in `vm`, capped at
 /// [`strongest`]. The libraries start at [`from_env`].
 pub fn set_level(vm: &mut Vm, level: Option<Level>) {
-    let k = vm.new_str(KEY);
-    let reg = vm.rt.registry;
-    vm.table_set(reg, k, Value::Int(code(level.min(strongest()))));
+    vm.rt.binary_checks = level.min(strongest());
 }
 
 /// The level `load` uses.
 #[cfg(feature = "verify")]
-pub(crate) fn level(
-    heap: &mut crate::object::LuaHeap,
-    rt: &mut crate::vm::Runtime,
-) -> Option<Level> {
-    use crate::object::table as tbl;
-    let k = Value::Str(rt.strings.new_str(heap, KEY));
-    match tbl::get(heap, rt.registry, k) {
-        Value::Int(0) => None,
-        Value::Int(1) => Some(Level::Structure),
-        _ => strongest(),
-    }
-}
-
-fn code(level: Option<Level>) -> i64 {
-    match level {
-        None => 0,
-        Some(Level::Structure) => 1,
-        // Layer 2, when another crate in the build turned it on.
-        #[allow(unreachable_patterns)]
-        Some(_) => 2,
-    }
+pub(crate) fn level(rt: &crate::vm::Runtime) -> Option<Level> {
+    rt.binary_checks.min(strongest())
 }
