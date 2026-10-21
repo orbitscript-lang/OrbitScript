@@ -148,9 +148,7 @@ fn next_searcher(ctx: &mut NativeCtx<'_>) -> R {
         msg.extend_from_slice(ctx.bytes(name));
         msg.extend_from_slice(b"' not found:");
         msg.extend_from_slice(ctx.bytes(msgs));
-        let text = String::from_utf8_lossy(&msg).into_owned();
-        let where_ = ctx.where_(1);
-        let m = ctx.new_str(format!("{where_}{text}").as_bytes());
+        let m = ctx.positioned(&msg);
         return Err(ctx.error_value(m));
     }
     ctx.set(NEXT, Value::Int(i + 1));

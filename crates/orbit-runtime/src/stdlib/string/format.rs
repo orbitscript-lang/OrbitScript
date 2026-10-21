@@ -113,12 +113,8 @@ fn format_after_tostring(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         return Err(ctx.error_value(msg));
     }
     let base = ctx.len() - STATE_SLOTS;
-    let int = |v: Value| match v {
-        Value::Int(n) => n as usize,
-        _ => 0,
-    };
-    let i = int(ctx.arg(base + S_POS));
-    let arg = int(ctx.arg(base + S_ARG));
+    let i = ctx.saved_usize(base + S_POS);
+    let arg = ctx.saved_usize(base + S_ARG);
     let mut out = ctx.take_buf();
     if let Value::Str(s) = ctx.arg(base + S_OUT) {
         out.extend_from_slice(ctx.bytes(s));

@@ -221,8 +221,7 @@ fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         }
         _ => {
             // Level 1 is load's caller, from its continuations too.
-            let msg = format!("{}reader function must return a string", ctx.where_(1));
-            let m = ctx.new_str(msg.as_bytes());
+            let m = ctx.positioned(b"reader function must return a string");
             ctx.truncate(0);
             return ctx.ret([Value::Nil, m]);
         }
