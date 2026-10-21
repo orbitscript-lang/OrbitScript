@@ -99,7 +99,7 @@ fn outline(text: Text, symbols: [analysis::Symbol]) -> table {
     for (_, s) in ipairs(symbols) {
         out[#out + 1] = #{
             name: s.name,
-            kind: SYMBOL_KINDS[s.kind] || 13,
+            kind: SYMBOL_KINDS[s.kind] || SYMBOL_KINDS.local,
             range: text.range(s.full_start, s.full_end),
             selectionRange: text.range(s.start, s.end),
             children: outline(text, s.children),
@@ -416,7 +416,7 @@ pub fn workspace_symbol(docs: Documents, params: any) -> (any, string?) {
             break;
         }
         if matches(s.name, query) {
-            let item = #{ name: s.name, kind: SYMBOL_KINDS[s.kind] || 13, location: location(docs, s.path, s.start, s.end) };
+            let item = #{ name: s.name, kind: SYMBOL_KINDS[s.kind] || SYMBOL_KINDS.local, location: location(docs, s.path, s.start, s.end) };
             if s.container != nil {
                 item.containerName = s.container;
             }
