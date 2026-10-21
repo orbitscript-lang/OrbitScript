@@ -220,6 +220,16 @@ impl NativeCtx<'_> {
         }
     }
 
+    /// A count or position a native saved in window slot `i` as an
+    /// integer, for its continuation to pick up; 0 if the slot holds
+    /// anything else.
+    pub fn saved_usize(&self, i: usize) -> usize {
+        match self.arg(i) {
+            Value::Int(n) => n as usize,
+            _ => 0,
+        }
+    }
+
     /// Overwrite window slot `i`, growing the window with nils if needed.
     #[inline]
     pub fn set(&mut self, i: usize, v: Value) {
@@ -509,8 +519,19 @@ impl NativeCtx<'_> {
     /// An error with a message, positioned at the caller (like
     /// `luaL_error`).
     pub fn error(&mut self, msg: impl AsRef<str>) -> LuaError {
-        let text = format!("{}{}", self.where_(1), msg.as_ref());
-        LuaError::new(self.new_str(text.as_bytes()))
+        let m = self.positioned(msg.as_ref().as_bytes());
+        LuaError::new(m)
+    }
+
+    /// `msg` as a string with the caller's position in front, as
+    /// [`Self::error`] raises it. The bytes are kept as they are.
+    // Out of line: inlined into each `error` instantiation it adds about
+    // 12 KB of code.
+    #[inline(never)]
+    pub fn positioned(&mut self, msg: &[u8]) -> Value {
+        let mut text = self.where_(1).into_bytes();
+        text.extend_from_slice(msg);
+        self.new_str_owned(text)
     }
 
     /// Lua's "not enough memory" error, which has no position.

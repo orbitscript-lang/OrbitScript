@@ -357,13 +357,6 @@ fn gsub(ctx: &mut NativeCtx<'_>) -> R {
     gsub_resume(ctx, false, out)
 }
 
-fn int_at(ctx: &NativeCtx<'_>, i: usize) -> usize {
-    match ctx.arg(i) {
-        Value::Int(n) => n as usize,
-        _ => 0,
-    }
-}
-
 fn str_at(ctx: &NativeCtx<'_>, i: usize) -> Gc<LuaStr> {
     match ctx.arg(i) {
         Value::Str(s) => s,
@@ -389,12 +382,12 @@ fn gsub_resume(ctx: &mut NativeCtx<'_>, after_match: bool, mut out: Vec<u8>) -> 
     };
     let anchored = ctx.bytes(p).first() == Some(&b'^');
     let pstart = usize::from(anchored);
-    let mut pos = int_at(ctx, G_POS);
+    let mut pos = ctx.saved_usize(G_POS);
     let mut last = match ctx.arg(G_LAST) {
         Value::Int(n) => Some(n as usize),
         _ => None,
     };
-    let mut count = int_at(ctx, G_COUNT) as i64;
+    let mut count = ctx.saved_usize(G_COUNT) as i64;
     let len = ctx.bytes(s).len();
     // Start of the unmatched bytes not yet copied to `out`.
     let mut gap_start = pos;
@@ -505,8 +498,8 @@ fn gsub_after_call(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     let first = first_result(ctx, outcome)?;
     let s = str_at(ctx, 0);
     let f = Found {
-        start: int_at(ctx, G_MSTART),
-        end: int_at(ctx, G_MEND),
+        start: ctx.saved_usize(G_MSTART),
+        end: ctx.saved_usize(G_MEND),
     };
     let mut out = ctx.take_buf();
     replacement_result(ctx, s, &f, first, &mut out)?;

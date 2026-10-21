@@ -316,8 +316,8 @@ fn extreme(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
     ctx.check_any(0)?;
     let n = ctx.nargs();
     ctx.truncate(n);
-    ctx.push(Value::Int(1));
-    ctx.push(Value::Int(0));
+    ctx.push(Value::Int(1)); // NEXT
+    ctx.push(Value::Int(0)); // BEST
     extreme_run(ctx, want_max)
 }
 
@@ -326,17 +326,14 @@ fn extreme_nargs(ctx: &NativeCtx<'_>) -> usize {
     ctx.len() - 2
 }
 
-fn slot(ctx: &NativeCtx<'_>, i: usize) -> usize {
-    match ctx.arg(i) {
-        Value::Int(n) => n as usize,
-        _ => 0,
-    }
-}
+/// Where `extreme`'s two state slots sit, counted from its argument count.
+const NEXT: usize = 0;
+const BEST: usize = 1;
 
 fn extreme_run(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
     let n = extreme_nargs(ctx);
     loop {
-        let (i, best) = (slot(ctx, n), slot(ctx, n + 1));
+        let (i, best) = (ctx.saved_usize(n + NEXT), ctx.saved_usize(n + BEST));
         if i >= n {
             let v = ctx.arg(best);
             return ctx.ret([v]);
@@ -363,11 +360,11 @@ fn extreme_run(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
 /// Record one comparison: the candidate wins if `better`.
 fn extreme_step(ctx: &mut NativeCtx<'_>, better: bool) {
     let n = extreme_nargs(ctx);
-    let i = slot(ctx, n);
+    let i = ctx.saved_usize(n + NEXT);
     if better {
-        ctx.set(n + 1, Value::Int(i as i64));
+        ctx.set(n + BEST, Value::Int(i as i64));
     }
-    ctx.set(n, Value::Int(i as i64 + 1));
+    ctx.set(n + NEXT, Value::Int(i as i64 + 1));
 }
 
 fn max_after_lt(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> R {
