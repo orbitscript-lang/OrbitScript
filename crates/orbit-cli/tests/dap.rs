@@ -492,7 +492,12 @@ fn editors_attach_to_a_running_program_and_leave_it_running() {
             "setBreakpoints",
             json!({"source": {"path": p.display().to_string()}, "breakpoints": [{"line": 5}]}),
         );
-        assert_eq!(r["body"]["breakpoints"][0]["verified"], true, "{r}");
+        // The session answers for every isolate; this one then reports
+        // where it put the breakpoint.
+        let id = r["body"]["breakpoints"][0]["id"].clone();
+        let changed = e.event("breakpoint");
+        assert_eq!(changed["body"]["breakpoint"]["id"], id, "{changed}");
+        assert_eq!(changed["body"]["breakpoint"]["verified"], true);
         e.request("configurationDone", json!({}));
         let stop = e.event("stopped");
         assert_eq!(stop["body"]["reason"], "breakpoint");

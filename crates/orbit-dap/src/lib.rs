@@ -63,11 +63,69 @@ pub struct Launch {
     pub output_to_editor: bool,
 }
 
-/// The connection to the editor, shared by the reader thread and the
-/// isolate's thread.
-struct Link {
+/// The sending half of the connection to the editor, shared by every
+/// isolate in the session.
+struct Wire {
     out: Mutex<Box<dyn Write + Send>>,
     seq: AtomicI64,
+}
+
+impl Wire {
+    fn new(out: Box<dyn Write + Send>) -> Wire {
+        Wire {
+            out: Mutex::new(out),
+            seq: AtomicI64::new(0),
+        }
+    }
+
+    /// Send `msg` with the next sequence number, which it returns.
+    fn send(&self, mut msg: Value) -> i64 {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        msg["seq"] = json!(seq);
+        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
+        // A closed editor is noticed by the reader.
+        let _ = wire::write(&mut **out, &msg);
+        seq
+    }
+
+    /// Send what follows to `out`, numbering from 1 again.
+    fn redirect(&self, out: Box<dyn Write + Send>) {
+        let mut old = self.out.lock().unwrap_or_else(|e| e.into_inner());
+        *old = out;
+        self.seq.store(0, Ordering::Relaxed);
+    }
+
+    fn respond(&self, request: &Value, body: Value) {
+        self.send(json!({
+            "type": "response",
+            "request_seq": request["seq"],
+            "command": request["command"],
+            "success": true,
+            "body": body,
+        }));
+    }
+
+    fn fail(&self, request: &Value, message: &str) {
+        self.send(json!({
+            "type": "response",
+            "request_seq": request["seq"],
+            "command": request["command"],
+            "success": false,
+            "message": message,
+        }));
+    }
+
+    fn event(&self, event: &str, body: Value) {
+        self.send(json!({"type": "event", "event": event, "body": body}));
+    }
+}
+
+/// One isolate's side of the connection, shared by the reader thread and
+/// the isolate's thread.
+struct Link {
+    wire: Arc<Wire>,
+    /// The isolate's DAP thread id.
+    thread: i64,
     inbox: Mutex<Inbox>,
     arrived: Condvar,
 }
@@ -96,47 +154,25 @@ struct Inbox {
 }
 
 impl Link {
-    fn new(out: Box<dyn Write + Send>) -> Link {
+    fn new(wire: Arc<Wire>, thread: i64) -> Link {
         Link {
-            out: Mutex::new(out),
-            seq: AtomicI64::new(0),
+            wire,
+            thread,
             inbox: Mutex::new(Inbox::default()),
             arrived: Condvar::new(),
         }
     }
 
-    /// Send `msg` with the next sequence number, which it returns.
-    fn send(&self, mut msg: Value) -> i64 {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
-        msg["seq"] = json!(seq);
-        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
-        // A closed editor is noticed by the reader.
-        let _ = wire::write(&mut **out, &msg);
-        seq
-    }
-
     fn respond(&self, request: &Value, body: Value) {
-        self.send(json!({
-            "type": "response",
-            "request_seq": request["seq"],
-            "command": request["command"],
-            "success": true,
-            "body": body,
-        }));
+        self.wire.respond(request, body);
     }
 
     fn fail(&self, request: &Value, message: &str) {
-        self.send(json!({
-            "type": "response",
-            "request_seq": request["seq"],
-            "command": request["command"],
-            "success": false,
-            "message": message,
-        }));
+        self.wire.fail(request, message);
     }
 
     fn event(&self, event: &str, body: Value) {
-        self.send(json!({"type": "event", "event": event, "body": body}));
+        self.wire.event(event, body);
     }
 
     fn output(&self, category: &str, text: &str) {
@@ -172,79 +208,79 @@ impl Link {
         inbox.running = false;
         std::mem::take(&mut inbox.user_pause)
     }
+
+    /// The editor asked the program to pause.
+    fn pause(&self) {
+        let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
+        if inbox.running
+            && let Some(p) = inbox.pause.clone()
+        {
+            inbox.user_pause = true;
+            p.request();
+        }
+    }
+
+    /// Queue `msg` for the isolate's thread, pausing a running program so
+    /// it is answered.
+    fn deliver(&self, msg: Value) {
+        let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
+        if inbox.running {
+            // Ending a session ends a launched program; an attached one
+            // only when the editor asks.
+            let ends_program = match msg["command"].as_str().unwrap_or("") {
+                "terminate" => true,
+                "disconnect" => !inbox.attach || msg["arguments"]["terminateDebuggee"] == true,
+                _ => false,
+            };
+            if ends_program && let Some(i) = &inbox.interrupt {
+                i.request();
+            } else if let Some(p) = &inbox.pause {
+                p.request();
+            }
+        }
+        inbox.queue.push_back(msg);
+        self.arrived.notify_all();
+    }
+
+    /// The editor has gone.
+    fn close(&self) {
+        let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
+        inbox.closed = true;
+        inbox.connected = false;
+        if inbox.running {
+            if inbox.attach {
+                // The program clears the session's breakpoints at the stop.
+                if let Some(p) = &inbox.pause {
+                    p.request();
+                }
+            } else if let Some(i) = &inbox.interrupt {
+                i.request();
+            }
+        }
+        self.arrived.notify_all();
+    }
 }
 
-/// Read the editor's messages until it closes the stream, starting with
-/// `first` if the caller read it already.
-fn read_loop(link: Arc<Link>, input: impl std::io::Read, first: Option<Value>) {
+/// Read a launched program's editor's messages until it closes the stream.
+fn read_loop(link: Arc<Link>, input: impl std::io::Read) {
     let mut input = BufReader::new(input);
-    let mut first = first;
-    while let Some(msg) = first
-        .take()
-        .or_else(|| wire::read(&mut input).ok().flatten())
-    {
+    while let Ok(Some(msg)) = wire::read(&mut input) {
         if msg["type"] != "request" {
             continue;
         }
-        let attach = link.inbox.lock().unwrap_or_else(|e| e.into_inner()).attach;
         match msg["command"].as_str().unwrap_or("") {
-            // Answered here, so a program busy outside script code can
-            // still be attached to.
-            "initialize" if attach => {
-                link.respond(&msg, agent::capabilities());
-                link.event("initialized", json!({}));
-            }
-            "attach" if attach => link.respond(&msg, json!({})),
-            // One isolate, one thread (D10).
-            "threads" => link.respond(&msg, json!({"threads": [{"id": 1, "name": "main"}]})),
+            "threads" => link.respond(
+                &msg,
+                json!({"threads": [{"id": link.thread, "name": "main"}]}),
+            ),
             "pause" => {
-                let mut inbox = link.inbox.lock().unwrap_or_else(|e| e.into_inner());
-                if inbox.running
-                    && let Some(p) = inbox.pause.clone()
-                {
-                    inbox.user_pause = true;
-                    p.request();
-                }
-                drop(inbox);
+                link.pause();
                 link.respond(&msg, json!({}));
             }
-            command => {
-                let mut inbox = link.inbox.lock().unwrap_or_else(|e| e.into_inner());
-                if inbox.running {
-                    // Ending a session ends a launched program; an
-                    // attached one only when the editor asks.
-                    let ends_program = match command {
-                        "terminate" => true,
-                        "disconnect" => {
-                            !inbox.attach || msg["arguments"]["terminateDebuggee"] == true
-                        }
-                        _ => false,
-                    };
-                    if ends_program && let Some(i) = &inbox.interrupt {
-                        i.request();
-                    } else if let Some(p) = &inbox.pause {
-                        p.request();
-                    }
-                }
-                inbox.queue.push_back(msg);
-                link.arrived.notify_all();
-            }
+            _ => link.deliver(msg),
         }
     }
-    let mut inbox = link.inbox.lock().unwrap_or_else(|e| e.into_inner());
-    inbox.closed = true;
-    inbox.connected = false;
-    if inbox.running {
-        if inbox.attach {
-            // The program clears the session's breakpoints at the stop.
-            if let Some(p) = &inbox.pause {
-                p.request();
-            }
-        } else if let Some(i) = &inbox.interrupt {
-            i.request();
-        }
-    }
-    link.arrived.notify_all();
+    link.close();
 }
 
 /// A DAP session with one editor.
@@ -272,11 +308,11 @@ impl Server {
         input: impl std::io::Read + Send + 'static,
         output: impl Write + Send + 'static,
     ) -> Server {
-        let link = Arc::new(Link::new(Box::new(output)));
+        let link = Arc::new(Link::new(Arc::new(Wire::new(Box::new(output))), 1));
         let reader = Arc::clone(&link);
         std::thread::Builder::new()
             .name("orbit-dap reader".into())
-            .spawn(move || read_loop(reader, input, None))
+            .spawn(move || read_loop(reader, input))
             .expect("start the DAP reader thread");
         let state = std::rc::Rc::new(std::cell::RefCell::new(agent::State::new(Arc::clone(
             &link,
@@ -350,7 +386,7 @@ impl Server {
         }
         let debug = !self.state.borrow().no_debug();
         if debug {
-            iso.set_debug_events(Some(Box::new(agent::Events(std::rc::Rc::clone(
+            iso.set_debug_events(Some(Box::new(agent::Events::new(std::rc::Rc::clone(
                 &self.state,
             )))))?;
         }

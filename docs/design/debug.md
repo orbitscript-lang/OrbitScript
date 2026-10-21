@@ -282,11 +282,30 @@ sequenceDiagram
 - **`orbit --debug-attach <pid>`** is the editor's adapter: it finds the program's socket (checking its `describe` pid), signals an `orbit` program that isn't serving yet, and relays bytes between its stdio and the socket. It only signals a process whose executable is `orbit` and whose `SigCgt` mask shows it catches `SIGUSR1` (Linux), since the signal kills a process that doesn't. Elsewhere a program must be started with `--debug-listen`.
 - **`orbit --debug-attach --list`** prints a JSON array: each serving program's `describe` answer with `"listening": true`, then `orbit` programs that would serve on `SIGUSR1` (`{"pid", "program", "listening": false}`, Linux).
 - **On Windows**, which has no `SIGUSR1`, the CLI waits on a named event, `Local\orbit-debug-<pid>` (`orbit_dap::debug_requests`), and `--debug-attach` sets it; a process without the event isn't asked, so nothing is ever killed. `--list` shows only programs already serving there.
-- One isolate per process (DAP thread 1) until D10's multi-isolate session.
 
 Cost (cloud x86_64, release, no PGO): an attachable run is unchanged in instructions on `fib`, `tables` and `oop` (callgrind, under 0.1%), and startup gains 8.3 k instructions (+0.5%) and a signal thread. `dap` adds 271.0 KiB to the release `orbit` (2,252,064 → 2,529,616 bytes), of which the engine is 12.3 KiB, launching 190.2 KiB and attaching 68.6 KiB; `serde_json` is already linked for `std.json`.
 
-Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Attaching to a running process (sockets, D11) and the VS Code extension (D7) come next.
+Known limits: a service stop during a step loses the step; a child process (`os.execute`) inherits standard output and can write into the protocol. Isolates are named by number until `Config` can name them. The VS Code extension (D7) comes next.
+
+### Several isolates in one process
+
+Every isolate a process serves shares one server and one socket (D10). The first `serve` makes it (its `About` describes the program); later ones join it, from any thread, and each isolate is a DAP thread of its own, `isolate 1`, `isolate 2` and so on in the order they were served. `describe` lists them.
+
+```mermaid
+flowchart LR
+    E[Editor] <-->|one socket| S["Session (reader thread)"]
+    S -->|"threadId, or the thread bits<br/>of a frame or variables id"| L1["isolate 1's agent"]
+    S --> L2["isolate 2's agent"]
+    L1 & L2 -->|"stopped, output, events<br/>(one shared wire)"| E
+```
+
+- **The session answers what concerns every isolate itself**: `initialize`, `attach`, `configurationDone`, `threads`, `setBreakpoints` and `setExceptionBreakpoints`. Breakpoints are numbered by the session and answered unverified; each isolate applies them to whatever it has loaded and sends a `breakpoint` changed event for each one it placed.
+- **Everything else goes to one isolate**: `pause`, `continue`, the steps and `stackTrace` by `threadId`; `scopes`, `variables` and `evaluate` by the isolate's thread in the top bits (above 24) of the frame id or variables reference. An `evaluate` with no frame goes to the first isolate. A request for a thread that isn't there fails.
+- **Isolates stop on their own** (`allThreadsStopped: false`, `allThreadsContinued: false`): one at a breakpoint leaves the others running.
+- **Isolates come and go.** One served while an editor is attached gets the session's breakpoints and error stops and a `thread` started event; one that closes sends `thread` exited, and requests it hadn't answered fail. `disconnect` and `terminate` reach every isolate.
+- `Service::stop` stops the process's server, for every isolate.
+
+Cost: 20.2 KiB in the release `orbit` (2,540,944 → 2,561,600 bytes, cloud x86_64, no PGO); a program that serves one isolate runs as before.
 
 ## Error-message parity
 
