@@ -120,12 +120,13 @@ print(v:len(), tostring(v + v))   --> 5.0   (6.0, 8.0)
 | Doc comment | none | `///` and `//!`, kept for tooling, ignored by the compiler |
 | String | `"a\n"`, `'a'` | `"a\n"` only; escapes as Rust: `\n \t \\ \" \0 \x41 \u{1F600}` |
 | Long / raw string | `[[ ... ]]`, `[==[ ... ]==]` | `r"..."`, `r#"..."#` |
+| Byte | `string.byte("a")` | `b'a'` (the integer 97; see [Strings](#strings)) |
 | Interpolation | none | `f"x = {x}"` (see [Strings](#strings)) |
 | Numbers | `10 0xff 1e3 3.0` | same, plus `1_000_000`, `0b1010`, `0o17` |
 | Statement end | optional `;` | `;` required, except after a block-bodied item and on a block's final expression |
 | Labels | `::name::` | `'name:` on a loop (Rust's loop-label form) |
 
-Single quotes are not strings: they are taken by loop labels, as in Rust. There is no char type (Lua has none); `"a"` is a one-byte string.
+Single quotes are not strings: they are taken by loop labels, as in Rust. There is no char type (Lua has none); `"a"` is a one-byte string, and `b'a'` is the byte 97 as an integer.
 
 Keywords: `fn let mut const pub use struct enum impl for in while loop if else match break continue return self Self nil true false as`, plus `scope` as a contextual keyword (so `scope` stays usable as a variable name). `global` and `extern` are reserved (see [Names and globals](#names-and-globals)).
 
@@ -444,6 +445,8 @@ Speed is not the issue: either choice is one op with the same fast paths.
 ## Strings
 
 `"..."` and raw strings `r"..."`/`r#"..."#`. Strings are Lua byte strings (ADR-5); `\u{...}` encodes UTF-8.
+
+A byte literal `b'a'` is an `int` constant: the value `string::byte` gives for that byte, so `string::byte(s, i) == b'\r'` and `match c { b'0'..=b'9' => ... }` read as what they mean (Tym, 2026-10-21; Rust's spelling, which can't be mistaken for a loop label). It holds one printable ASCII character or one escape that gives one byte: `\n \r \t \\ \0 \' \" \xHH`, where `\xHH` takes any byte. A raw tab or line break, `\u{...}` and a non-ASCII character are errors (`b'é'` would be two bytes in UTF-8; the error suggests `"é"` or `\xc3\xa9`).
 
 ### Interpolation: `f"..."` (Q14)
 

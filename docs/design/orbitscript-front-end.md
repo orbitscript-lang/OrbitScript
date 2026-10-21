@@ -25,7 +25,7 @@ flowchart LR
 
 ## Lexer
 
-Hand-written and pull-based, like the Lua lexer. Rust's spelling throughout: `//` and nesting `/* */` comments (`///` and `//!` are ordinary comments for now), `"..."` with Rust's escapes (`\xHH` takes any byte, since strings are byte strings), `r"..."`/`r#"..."#`, `1_000`, `0b`, `0o`, `0x`. Line numbers come from `SourceInfo::new` over the whole source, so they're exact everywhere, including inside templates.
+Hand-written and pull-based, like the Lua lexer. Rust's spelling throughout: `//` and nesting `/* */` comments (`///` and `//!` are ordinary comments for now), `"..."` with Rust's escapes (`\xHH` takes any byte, since strings are byte strings), `r"..."`/`r#"..."#`, `1_000`, `0b`, `0o`, `0x`. A byte literal `b'a'` lexes straight to an integer token, so the parser, patterns and `orbit-check` treat it as any other integer literal. Line numbers come from `SourceInfo::new` over the whole source, so they're exact everywhere, including inside templates.
 
 Where the proposal is silent, the lexer chooses:
 
@@ -33,7 +33,7 @@ Where the proposal is silent, the lexer chooses:
 - **No leading-dot floats** (`.5`), as in Rust; `1..10` lexes as a range.
 - **Raw names.** `r#name` is an identifier token even when `name` is a keyword (`r#match`); `r#_`, `r#self` and `r#Self` are errors. Inside a template hole, `r#` followed by a letter is a raw name, not a raw string.
 - **`#!` first line** is skipped, as the standalone Lua interpreter does for scripts.
-- **Templates** (`f"..."`) are split by the lexer into literal text and holes. A hole's expression is kept as a source range, and the parser parses it in place (so spans and lines are right). Brackets nest inside a hole and strings inside it are skipped whole, so `{t[#{a: 1}.a]}` and `{m["}"]}` work. The format spec starts at the first `:` at bracket depth 0 that isn't part of `::`.
+- **Templates** (`f"..."`) are split by the lexer into literal text and holes. A hole's expression is kept as a source range, and the parser parses it in place (so spans and lines are right). Brackets nest inside a hole and strings and byte literals inside it are skipped whole, so `{t[#{a: 1}.a]}`, `{m["}"]}` and `{b'}'}` work. The format spec starts at the first `:` at bracket depth 0 that isn't part of `::`.
 
 ## Parser
 
@@ -74,7 +74,7 @@ Every `Diagnostic` has a `kind`: `UnexpectedEof` when the input stops in the mid
 - **A missing `;`** is reported and parsing goes on as if it were there; the rest of the line, if any, is skipped.
 - **A broken statement** becomes `StmtKind::Error`, a broken `impl` member `ItemKind::Error`, and a broken match arm is dropped. The parser skips to a synchronisation point: a `;` (a `,` for an arm), a `}` closing a block the statement opened at the end of a line, the enclosing block's `}`, a statement keyword starting a line, or a line indented no deeper than the statement. Brackets opened before the error are counted (by re-lexing the statement) so their closers aren't mistaken for the block's.
 - **A missing `}`** is assumed where an item keyword (`fn`, `pub`, `struct`, `enum`, `impl`, `use`, `const`, `global`, `extern`) starts a line at column 0 inside a block, `impl`, struct or enum, or where `;`, `let` or an item keyword appears where a match arm should start.
-- **A lexer error** is recorded and the bad token skipped; a bad string or number becomes an empty string or `0`, so `let s = "\q";` still binds `s`. A parse error right after a lexer error isn't reported (it is most likely the same mistake).
+- **A lexer error** is recorded and the bad token skipped; a bad string or number becomes an empty string or `0` (a bad byte literal also becomes `0`), so `let s = "\q";` still binds `s`. A parse error right after a lexer error isn't reported (it is most likely the same mistake).
 - **A broken template hole** becomes an `Error` expression inside the template.
 
 Lowering rejects `Error` nodes ("this code has a syntax error, so it can't run"). Deleting the first or last token of any line of any OrbitScript file in the repository never loses an item before or after the break (`tests/recover.rs`).
