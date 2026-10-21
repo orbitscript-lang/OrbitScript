@@ -116,8 +116,6 @@ fn sk(s: Span) -> (u32, u32) {
     (s.start, s.end)
 }
 
-/// Checks `ast`, whose names `resolve` recorded in `m`, adding type errors and the types of its
-/// symbols and expressions to `m`.
 /// What checking a module needs from the rest of the workspace.
 pub(crate) struct Deps<'c> {
     /// Already checked modules, by file.
@@ -128,6 +126,8 @@ pub(crate) struct Deps<'c> {
     pub strict: bool,
 }
 
+/// Checks `ast`, whose names `resolve` recorded in `m`, adding type errors and the types of its
+/// symbols and expressions to `m`.
 pub(crate) fn check<'a, 'b, 'c>(
     file: FileId,
     ast: &'a ast::Ast,
@@ -219,20 +219,8 @@ pub(crate) fn check<'a, 'b, 'c>(
 }
 
 impl Names for Checker<'_, '_, '_> {
-    fn name(&self, id: SymbolId) -> String {
-        let Some(s) = self.symbol(id) else {
-            return "?".into();
-        };
-        if s.kind == SymbolKind::Variant
-            && let Some(c) = s.container
-            && let Some(e) = self.symbol(SymbolId {
-                file: id.file,
-                index: c,
-            })
-        {
-            return format!("{}::{}", e.name, s.name);
-        }
-        s.name.clone()
+    fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
+        Checker::symbol(self, id)
     }
 }
 
@@ -388,20 +376,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .and_then(|m| m.generics.get(&id.index))
             .cloned()
             .unwrap_or_default()
-    }
-
-    /// The struct or enum whose members `id` (a struct, enum or variant) has.
-    fn holder(&self, id: SymbolId) -> SymbolId {
-        match self.symbol(id) {
-            Some(s) if s.kind == SymbolKind::Variant => match s.container {
-                Some(c) => SymbolId {
-                    file: id.file,
-                    index: c,
-                },
-                None => id,
-            },
-            _ => id,
-        }
     }
 
     fn field_sym(&self, owner: SymbolId, name: &str) -> Option<SymbolId> {
@@ -637,7 +611,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    /// A result annotation: `(A, B)` is two results, anything else one.
     /// How many of these parameters need an argument: up to the last one whose annotation isn't
     /// `T?` and doesn't otherwise allow nil (`any?` is optional, unannotated and `any` aren't).
     fn required<'t>(&self, params: impl Iterator<Item = (Option<&'t ast::Type>, TypeId)>) -> usize {
@@ -653,6 +626,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         n
     }
 
+    /// A result annotation: `(A, B)` is two results, anything else one.
     fn lower_results(&mut self, t: &ast::Type) -> Vec<TypeId> {
         match t.kind.as_deref() {
             Some(TypeKind::Tuple(ts)) => ts.iter().map(|t| self.lower_result(t)).collect(),
@@ -1412,18 +1386,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             ItemKind::Impl(imp) => {
                 for member in &imp.members {
-                    match &member.kind {
-                        ItemKind::Fn(f) => {
-                            self.fn_item(f);
-                            if member.is_pub {
-                                self.strict_signature(f);
-                            }
-                        }
-                        ItemKind::Const { name, ty, value } => {
-                            self.const_item(*name, ty.as_ref(), value.as_ref())
-                        }
-                        _ => self.item(member),
-                    }
+                    self.item(member);
                 }
             }
             ItemKind::Global { name, value } => {

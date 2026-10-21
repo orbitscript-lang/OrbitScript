@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use crate::SymbolId;
+use crate::symbols::{Symbol, SymbolKind};
 
 /// An interned type. Equal ids are equal types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -65,8 +66,37 @@ pub struct FnTy {
 }
 
 /// Names for the symbols that nominal types and generic parameters refer to, for display.
+/// Symbol lookups shared by the checker and the workspace, which both can find any symbol.
 pub(crate) trait Names {
-    fn name(&self, id: SymbolId) -> String;
+    fn symbol(&self, id: SymbolId) -> Option<&Symbol>;
+
+    /// How `id` is shown in messages: its name, or `Enum::Variant` for a variant.
+    fn name(&self, id: SymbolId) -> String {
+        let Some(s) = self.symbol(id) else {
+            return "?".into();
+        };
+        if s.kind == SymbolKind::Variant
+            && let Some(c) = s.container
+            && let Some(e) = self.symbol(SymbolId {
+                file: id.file,
+                index: c,
+            })
+        {
+            return format!("{}::{}", e.name, s.name);
+        }
+        s.name.clone()
+    }
+
+    /// The struct or enum whose members `id` (a struct, enum or variant) has.
+    fn holder(&self, id: SymbolId) -> SymbolId {
+        match self.symbol(id) {
+            Some(s) if s.kind == SymbolKind::Variant => SymbolId {
+                file: id.file,
+                index: s.container.unwrap_or(id.index),
+            },
+            _ => id,
+        }
+    }
 }
 
 #[derive(Debug)]

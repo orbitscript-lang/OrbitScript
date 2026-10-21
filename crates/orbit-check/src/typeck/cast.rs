@@ -9,7 +9,7 @@ use orbit_orb_syntax::ast::{self, TypeKind};
 use super::Checker;
 use crate::Code;
 use crate::symbols::{SymbolId, SymbolKind};
-use crate::types::{Ty, TypeId};
+use crate::types::{Names, Ty, TypeId};
 
 /// One member of a cast target (not a union or optional).
 #[derive(Clone, Copy, PartialEq, Eq)]
