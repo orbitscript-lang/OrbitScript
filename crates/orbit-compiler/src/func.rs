@@ -374,6 +374,11 @@ impl<'a> FuncState<'a> {
         }
     }
 
+    /// The error for a function or expression that runs out of registers.
+    pub fn too_many_registers(&self) -> CompileError {
+        self.error("function or expression needs too many registers")
+    }
+
     /// Instructions emitted from now on are attributed to the line of `span`.
     pub fn at(&mut self, span: Span) {
         self.line = self.chunk.source.line_of(span.start);
@@ -562,7 +567,7 @@ impl<'a> FuncState<'a> {
         let r = self.free;
         self.free += 1;
         if self.free > MAX_REGS {
-            return Err(self.error("function or expression needs too many registers"));
+            return Err(self.too_many_registers());
         }
         self.nregs = self.nregs.max(self.free);
         Ok(r as u8)
@@ -573,7 +578,7 @@ impl<'a> FuncState<'a> {
     #[inline(never)]
     pub fn reserve_to(&mut self, top: usize) -> Result<()> {
         if top > MAX_REGS {
-            return Err(self.error("function or expression needs too many registers"));
+            return Err(self.too_many_registers());
         }
         self.nregs = self.nregs.max(top);
         Ok(())
@@ -744,7 +749,8 @@ impl<'a> FuncState<'a> {
         } else if local.captured {
             let cell = self.free_cell;
             self.free_cell += 1;
-            if self.free_cell > u8::MAX as usize + 1 {
+            // `ncells` is a `u8`, so cells are numbered 0..=254.
+            if self.free_cell > u8::MAX as usize {
                 return Err(self.error("too many captured local variables"));
             }
             self.cell_hw = self.cell_hw.max(self.free_cell);

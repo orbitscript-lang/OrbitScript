@@ -589,7 +589,7 @@ impl FuncState<'_> {
         // R[base+3]: the closing value, closed when the loop ends.
         self.mark_tbc(hidden[3], base + 3);
         let Ok(nvars) = u8::try_from(vars.len()) else {
-            return Err(self.error("function or expression needs too many registers"));
+            return Err(self.too_many_registers());
         };
         for _ in vars {
             self.alloc()?;

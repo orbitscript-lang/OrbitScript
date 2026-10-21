@@ -392,7 +392,7 @@ impl FuncState<'_> {
                 }
                 parts.push(rest);
                 let Ok(count) = u8::try_from(parts.len()) else {
-                    return Err(self.error("function or expression needs too many registers"));
+                    return Err(self.too_many_registers());
                 };
                 let first = self.free as u8;
                 let mut origins = Vec::with_capacity(parts.len());
@@ -703,7 +703,7 @@ impl FuncState<'_> {
             Some(n) => u8::try_from(n + extra)
                 .ok()
                 .filter(|&n| n != MULTI)
-                .ok_or_else(|| self.error("function or expression needs too many registers"))?,
+                .ok_or_else(|| self.too_many_registers())?,
         })
     }
 
@@ -730,7 +730,7 @@ impl FuncState<'_> {
                 Want::Exact(n) if last && self.is_multi(item) => {
                     let r = self.alloc()?;
                     let Some(count) = u8::try_from(n - i).ok().filter(|&c| c != MULTI) else {
-                        return Err(self.error("function or expression needs too many registers"));
+                        return Err(self.too_many_registers());
                     };
                     self.multi(item, r, count)?;
                     self.free = first + n;
