@@ -44,8 +44,6 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
         impls: Vec::new(),
         syms,
         exports: None,
-        last_break_label: None,
-        pending_fn_local: None,
         scope_meta: None,
         generics: Vec::new(),
     };
@@ -255,10 +253,6 @@ struct Lowerer {
     syms: Syms,
     /// The main function's export table, when the module has `pub` items.
     exports: Option<LocalId>,
-    /// The break label of the `for` body just lowered, placed after the loop.
-    last_break_label: Option<LabelId>,
-    /// The local a function item is being defined into (see `define_item`).
-    pending_fn_local: Option<LocalId>,
     /// The main function's hidden local holding the metatable `scope` actions share, once one
     /// needs it.
     scope_meta: Option<LocalId>,

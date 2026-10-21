@@ -431,7 +431,7 @@ impl Lowerer {
             }
         };
 
-        let kind = match header {
+        let (kind, brk) = match header {
             Some(h) => {
                 let mut parts = vec![Part::Expr(h.start), Part::Expr(h.end)];
                 if let Some(s) = h.step {
@@ -483,14 +483,16 @@ impl Lowerer {
                 let body = self.for_body(label, body);
                 let mut none = Vec::new();
                 self.close_scope(&mut none, span);
-                hir::StmtKind::NumericFor {
+                let (body, brk) = body?;
+                let kind = hir::StmtKind::NumericFor {
                     var,
                     start,
                     limit,
                     step,
                     exclusive: !h.inclusive && !h.rev,
-                    body: body?,
-                }
+                    body,
+                };
+                (kind, brk)
             }
             None => {
                 let iter = self.values(iter, out)?;
@@ -515,22 +517,29 @@ impl Lowerer {
                 let body = self.for_body(label, body);
                 let mut none = Vec::new();
                 self.close_scope(&mut none, span);
-                hir::StmtKind::GenericFor {
+                let (body, brk) = body?;
+                let kind = hir::StmtKind::GenericFor {
                     vars,
                     iter,
                     hidden,
-                    body: body?,
-                }
+                    body,
+                };
+                (kind, brk)
             }
         };
         self.push(out, kind, span);
-        if let Some(brk) = self.last_break_label.take() {
+        if let Some(brk) = brk {
             self.push(out, hir::StmtKind::Label(brk), span);
         }
         Ok(())
     }
 
-    fn for_body(&mut self, label: Option<ast::Name>, body: &ast::Block) -> LResult<BlockId> {
+    /// A `for` loop's body, and the label its `break`s jump to, which goes after the loop.
+    fn for_body(
+        &mut self,
+        label: Option<ast::Name>,
+        body: &ast::Block,
+    ) -> LResult<(BlockId, Option<LabelId>)> {
         self.cur().loops.push(LoopCtx {
             label: label.map(|l| l.sym),
             is_loop: false,
@@ -540,10 +549,12 @@ impl Lowerer {
         });
         let inner = self.block(body, &Dest::Discard);
         let ctx = self.cur().loops.pop().expect("loop");
-        self.last_break_label = ctx.brk;
         let inner = inner?;
         let mut pre = Vec::new();
-        Ok(self.loop_body(inner, ctx.cont, &mut pre, body.span))
+        Ok((
+            self.loop_body(inner, ctx.cont, &mut pre, body.span),
+            ctx.brk,
+        ))
     }
 
     /// Recognises a numeric `for` header.

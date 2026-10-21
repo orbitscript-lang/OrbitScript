@@ -74,7 +74,7 @@ pub struct Function {
     pub is_vararg: bool,
     /// A named vararg (`...t` in Lua 5.5): the read-only local bound to a table of the extra
     /// arguments, `{n = count, ...}`, declared after the parameters. OrbitScript's rest
-    /// parameter would map onto it.
+    /// parameter lowers to it too.
     pub vararg_table: Option<LocalId>,
     /// Set by analysis when every use of `vararg_table` became a [`ExprKind::VarargIndex`],
     /// so the table is never built.
@@ -255,8 +255,7 @@ pub enum LocalKind {
     /// Read-only, and closed when it goes out of scope by any exit (`<close>` in Lua): its
     /// value's `__close` metamethod runs, unless the value is nil or false. Every exit from
     /// its scope (falling through, `break`, `goto`, `return`, an error) closes it; the HIR has
-    /// no explicit close statements. OrbitScript would use it for a `defer`- or `with`-style
-    /// scoped resource.
+    /// no explicit close statements. OrbitScript's `let scope` and `scope` statement lower to it.
     Close,
 }
 
@@ -355,15 +354,15 @@ pub enum StmtKind {
         body: BlockId,
     },
     /// Defines globals: like `Assign`, but each store first reads its target and raises
-    /// "global 'x' already defined" unless it is nil. Lua's `global x = v`; OrbitScript would
-    /// use it for a module-level definition that must not silently replace an existing one.
+    /// "global 'x' already defined" unless it is nil. Lua's `global x = v`; OrbitScript uses
+    /// it for module-level definitions, which must not silently replace an existing global.
     Define {
         targets: Vec<Place>,
         values: ExprList,
     },
     Break,
     /// Jumps to a label in this function, in the current block or an enclosing one. Lua's
-    /// `goto`; OrbitScript would use it for labelled `break` and `continue`.
+    /// `goto`; OrbitScript lowers labelled `break` and `continue`, and `match` arms, to it.
     Goto(LabelId),
     /// Places a label.
     Label(LabelId),

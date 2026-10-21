@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use orbit_bytecode::{Constant, FunctionName, LocalSlot, Op, Origin, UnlinkedChunk};
+use orbit_bytecode::{Constant, FunctionName, LocalSlot, Origin, UnlinkedChunk};
 
 fn text(bytes: &[u8]) -> String {
     format!("{:?}", String::from_utf8_lossy(bytes))
@@ -64,27 +64,7 @@ pub fn disassemble(chunk: &UnlinkedChunk) -> String {
         }
         for (pc, op) in p.code.iter().enumerate() {
             let mut line = format!("  {pc:>4} [{:>3}] {op:?}", p.debug.line(pc as u32));
-            let target = match *op {
-                Op::Jump { off }
-                | Op::JumpIfTrue { off, .. }
-                | Op::JumpIfFalse { off, .. }
-                | Op::JumpLt { off, .. }
-                | Op::JumpNotLt { off, .. }
-                | Op::JumpLe { off, .. }
-                | Op::JumpNotLe { off, .. }
-                | Op::JumpEq { off, .. }
-                | Op::JumpNe { off, .. }
-                | Op::JumpEqInt { off, .. }
-                | Op::JumpLtInt { off, .. }
-                | Op::JumpLeInt { off, .. }
-                | Op::JumpGtInt { off, .. }
-                | Op::JumpGeInt { off, .. }
-                | Op::ForPrep { exit: off, .. }
-                | Op::ForPrepExclusive { exit: off, .. }
-                | Op::ForLoop { back: off, .. }
-                | Op::GenericLoop { back: off, .. } => Some(pc as i64 + 1 + off as i64),
-                _ => None,
-            };
+            let target = op.jump_offset().map(|off| pc as i64 + 1 + off as i64);
             if let Some(t) = target {
                 let _ = write!(line, " -> {t}");
             }

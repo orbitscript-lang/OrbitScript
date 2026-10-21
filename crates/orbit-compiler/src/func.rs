@@ -215,9 +215,7 @@ impl<'a> FuncState<'a> {
             let line = if f.parent.is_none() {
                 body.stmts.last().map_or(1, |&s| {
                     let span = f.stmt(s).span;
-                    self.chunk
-                        .source
-                        .line_of(span.end.saturating_sub(1).max(span.start))
+                    self.chunk.source.line_of(span.last_byte())
                 })
             } else {
                 self.last_line()
@@ -318,9 +316,6 @@ impl<'a> FuncState<'a> {
         end_line(self.chunk, self.f)
     }
 
-    /// Emits the `Closure` instruction for child `func`. It belongs to the
-    /// function's last line, as `debug` line events in the reference
-    /// report it.
     /// `local function name() ... end`. As in the reference, its instructions are on the
     /// function's last line, and the debug info shows the local only once the closure
     /// exists (never the register's previous value, or `nil` for a recursive one).
@@ -351,6 +346,9 @@ impl<'a> FuncState<'a> {
         Ok(())
     }
 
+    /// Emits the `Closure` instruction for child `func`. It belongs to the
+    /// function's last line, as `debug` line events in the reference
+    /// report it.
     pub fn emit_closure(&mut self, dst: u8, func: FuncId) -> Result<()> {
         let proto = self.child(func)?;
         let line = std::mem::replace(
@@ -822,25 +820,15 @@ impl<'a> FuncState<'a> {
 }
 
 fn set_offset(op: &mut Op, new: Offset) {
-    match op {
-        Op::Jump { off }
-        | Op::JumpIfTrue { off, .. }
-        | Op::JumpIfFalse { off, .. }
-        | Op::JumpLt { off, .. }
-        | Op::JumpNotLt { off, .. }
-        | Op::JumpLe { off, .. }
-        | Op::JumpNotLe { off, .. }
-        | Op::JumpEq { off, .. }
-        | Op::JumpNe { off, .. }
-        | Op::JumpEqInt { off, .. }
-        | Op::JumpLtInt { off, .. }
-        | Op::JumpLeInt { off, .. }
-        | Op::JumpGtInt { off, .. }
-        | Op::JumpGeInt { off, .. } => *off = new,
-        Op::ForPrep { exit, .. } | Op::ForPrepExclusive { exit, .. } => *exit = new,
-        Op::ForLoop { back, .. } | Op::GenericLoop { back, .. } => *back = new,
-        _ => unreachable!("not a jump: {op:?}"),
+    match op.jump_offset_mut() {
+        Some(off) => *off = new,
+        None => unreachable!("not a jump: {op:?}"),
     }
+}
+
+/// The line holding the end of `f`'s source.
+fn end_line(chunk: &Chunk, f: &Function) -> u32 {
+    chunk.source.line_of(f.span.last_byte())
 }
 
 /// The capture of `id` that always holds `id`'s own closure: the one for `local`, which a
@@ -848,13 +836,6 @@ fn set_offset(op: &mut Op, new: Offset) {
 /// The statement stores the closure in the local's cell before anything can call it, so reading
 /// the capture is the same as reading the running closure, and `CapSelf` does that without
 /// going through the closure's captures and the cell.
-/// The line holding the end of `f`'s source.
-fn end_line(chunk: &Chunk, f: &Function) -> u32 {
-    chunk
-        .source
-        .line_of(f.span.end.saturating_sub(1).max(f.span.start))
-}
-
 fn self_capture(chunk: &Chunk, id: FuncId, local: LocalId) -> Option<CaptureId> {
     let parent = chunk.function(chunk.function(id).parent?);
     if parent.locals[local.index()].reassigned {
