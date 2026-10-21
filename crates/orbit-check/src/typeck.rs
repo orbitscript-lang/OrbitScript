@@ -443,7 +443,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 // The walk hasn't reached the `let` (a function defined earlier refers to it).
                 let init = *init;
                 let (mutable, slot) = (*mutable, *slot);
-                self.quietly(|c| {
+                self.muted_unnarrowed(|c| {
                     let t = match init {
                         Some(e) => c.value_at(e, slot),
                         None => c.types.nil,
@@ -466,7 +466,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             Def::Const { ty: None, value } | Def::Global { value } => match value {
                 Some(v) => {
                     let v = *v;
-                    self.quietly(|c| c.expr(v, None))
+                    self.muted_unnarrowed(|c| c.expr(v, None))
                 }
                 None => any,
             },
@@ -480,13 +480,48 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    /// Runs `f` without reporting anything, with no narrowing in effect.
-    fn quietly<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+    /// Runs `f` without reporting anything, keeping narrowing.
+    fn muted<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         self.quiet += 1;
-        let env = std::mem::take(&mut self.env);
         let r = f(self);
-        self.env = env;
         self.quiet -= 1;
+        r
+    }
+
+    /// Runs `f` without reporting anything and with no narrowing in effect, as when typing
+    /// a value before the walk reaches it.
+    fn muted_unnarrowed<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let env = std::mem::take(&mut self.env);
+        let r = self.muted(f);
+        self.env = env;
+        r
+    }
+
+    /// Runs `f` reporting as usual, even inside [`Self::muted`]: a function body is checked
+    /// once, wherever the walk first needs its type.
+    fn unmuted<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let quiet = std::mem::replace(&mut self.quiet, 0);
+        let r = f(self);
+        self.quiet = quiet;
+        r
+    }
+
+    /// Runs `f` with `Self` meaning `owner`'s type, when there is an owner.
+    fn with_owner<T>(&mut self, owner: Option<&Owner<'a>>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.self_type;
+        if let Some(o) = owner {
+            self.self_type = Some(self.owner_type(o));
+        }
+        let r = f(self);
+        self.self_type = saved;
+        r
+    }
+
+    /// Runs `f` with inlay hints for new bindings on or off.
+    fn hinting<T>(&mut self, on: bool, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::replace(&mut self.hinting, on);
+        let r = f(self);
+        self.hinting = saved;
         r
     }
 
@@ -507,30 +542,28 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let Some(assigns) = defs.assigns.get(&index) else {
             return init;
         };
-        let mut t = init;
-        self.quiet += 1;
-        let env = std::mem::take(&mut self.env);
-        // A value can depend on the local itself (`n = n + 1`): repeat until it settles.
-        for _ in 0..3 {
-            self.m.sym_types.insert(index, t);
-            let mut parts = vec![init];
-            for a in assigns {
-                let v = self.value_at(a.value, a.slot);
-                let v = match a.op {
-                    Some(op) => self.arith(op, t, v, a.value.span),
-                    None => v,
-                };
-                parts.push(v);
+        self.muted_unnarrowed(|c| {
+            let mut t = init;
+            // A value can depend on the local itself (`n = n + 1`): repeat until it settles.
+            for _ in 0..3 {
+                c.m.sym_types.insert(index, t);
+                let mut parts = vec![init];
+                for a in assigns {
+                    let v = c.value_at(a.value, a.slot);
+                    let v = match a.op {
+                        Some(op) => c.binary_op(op, t, v, a.value.span),
+                        None => v,
+                    };
+                    parts.push(v);
+                }
+                let next = c.types.union(&parts);
+                if next == t {
+                    break;
+                }
+                t = next;
             }
-            let next = self.types.union(&parts);
-            if next == t {
-                break;
-            }
-            t = next;
-        }
-        self.env = env;
-        self.quiet -= 1;
-        t
+            t
+        })
     }
 
     // ---- type annotations ---------------------------------------------------------------------
@@ -709,11 +742,17 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     }
 
     fn fn_type(&mut self, index: u32, decl: &'a ast::FnDecl, owner: Option<&Owner<'a>>) -> TypeId {
+        self.with_owner(owner, |c| c.fn_signature(index, decl, owner))
+    }
+
+    /// [`Self::fn_type`] once `Self` means the owner's type.
+    fn fn_signature(
+        &mut self,
+        index: u32,
+        decl: &'a ast::FnDecl,
+        owner: Option<&Owner<'a>>,
+    ) -> TypeId {
         let any = self.types.any;
-        let saved = self.self_type;
-        if let Some(o) = owner {
-            self.self_type = Some(self.owner_type(o));
-        }
         let sig = &decl.sig;
         let method = sig.self_param.is_some();
         let mut params = Vec::new();
@@ -767,7 +806,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             f.results = self.fn_body(index, decl, t);
             t = self.types.intern(Ty::Fn(f));
         }
-        self.self_type = saved;
         t
     }
 
@@ -786,12 +824,11 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .ret
             .is_some()
             .then(|| f.results.unwrap_or_default());
-        let quiet = std::mem::replace(&mut self.quiet, 0);
-        let r = self.run_fn(annotated, self_value, decl.name.span, Env::new(), |c| {
-            c.fn_block(body)
-        });
-        self.quiet = quiet;
-        r
+        self.unmuted(|c| {
+            c.run_fn(annotated, self_value, decl.name.span, Env::new(), |c| {
+                c.fn_block(body)
+            })
+        })
     }
 
     /// Runs a function body (`body` gives the tail's values and whether the end is reached)
@@ -969,11 +1006,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let defs = self.defs;
         let Some(index) = self.local_at(f.name.span) else {
             // A function no symbol was made for (an `impl` of an unknown type).
-            let quiet = std::mem::replace(&mut self.quiet, 0);
             if let Some(b) = &f.body {
-                self.run_fn(None, None, f.name.span, Env::new(), |c| c.fn_block(b));
+                self.unmuted(|c| c.run_fn(None, None, f.name.span, Env::new(), |c| c.fn_block(b)));
             }
-            self.quiet = quiet;
             return;
         };
         let t = self.sym_type(self.id(index));
@@ -985,12 +1020,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             Some(Def::Fn { owner, .. }) => owner.as_ref(),
             _ => None,
         };
-        let saved = self.self_type;
-        if let Some(o) = owner {
-            self.self_type = Some(self.owner_type(o));
-        }
-        self.fn_body(index, f, t);
-        self.self_type = saved;
+        self.with_owner(owner, |c| c.fn_body(index, f, t));
     }
 
     /// Strict mode: a `pub fn` annotates its parameters, and its results when it has any.
@@ -1134,21 +1164,13 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             } => {
                 let tt = self.expr(target, None);
                 let vt = self.expr(value, None);
-                let r = self.arith(*op, tt, vt, s.span);
+                let r = self.binary_op(*op, tt, vt, s.span);
                 let declared = self.muted(|c| c.target_type(target));
                 self.store(target, declared, r, s.span);
             }
             StmtKind::Scope(inner) => self.stmt(inner),
             StmtKind::Item(item) => self.item(item),
         }
-    }
-
-    /// Runs `f` without reporting anything, keeping narrowing.
-    fn muted<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        self.quiet += 1;
-        let r = f(self);
-        self.quiet -= 1;
-        r
     }
 
     fn let_stmt(
@@ -1187,9 +1209,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                         nil
                     }
                 };
-                let hinting = std::mem::replace(&mut self.hinting, d.is_none());
-                self.pat(item, t);
-                self.hinting = hinting;
+                self.hinting(d.is_none(), |c| c.pat(item, t));
             }
             if short && let (Some(vs), Some(v)) = (&vals, value) {
                 let msg = format!(
@@ -1220,9 +1240,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         if scope {
             self.check_close(t, pat.span);
         }
-        let hinting = std::mem::replace(&mut self.hinting, ty.is_none());
-        self.pat(pat, t);
-        self.hinting = hinting;
+        self.hinting(ty.is_none(), |c| c.pat(pat, t));
     }
 
     /// `let scope x = v` needs a `v` with `__close` (or `nil`).
@@ -1546,7 +1564,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             ExprKind::Binary { op, lhs, rhs, .. } => {
                 let l = self.expr(lhs, None);
                 let r = self.expr(rhs, None);
-                self.arith(*op, l, r, e.span)
+                self.binary_op(*op, l, r, e.span)
             }
             ExprKind::Unary {
                 op: UnOp::Not,
@@ -1885,9 +1903,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .collect();
         for f in &fns {
             let before = self.failures;
-            self.quiet += 1;
-            self.apply(f, None, args, name, span, expected);
-            self.quiet -= 1;
+            self.muted(|c| c.apply(f, None, args, name, span, expected));
             if self.failures == before {
                 return self.apply(f, None, args, name, span, expected);
             }
@@ -2652,7 +2668,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     }
 
     /// The type of `l op r` (not `&&` or `||`), reporting operands it doesn't accept.
-    fn arith(&mut self, op: BinOp, l: TypeId, r: TypeId, span: Span) -> TypeId {
+    fn binary_op(&mut self, op: BinOp, l: TypeId, r: TypeId, span: Span) -> TypeId {
         use BinOp::*;
         let t = &*self.types;
         let (any, bool_, int, float, str_) = (t.any, t.bool, t.int, t.float, t.str);
