@@ -763,7 +763,7 @@ fn errors() {
         ),
         (
             "let x = 'a';",
-            "t.orb:1: single quotes start a loop label such as `'outer`; strings use `\"`",
+            "t.orb:1: single quotes start a loop label such as `'outer`; strings use `\"`, bytes `b'a'`",
         ),
         (
             "fn f() {\n  g()\n  h()\n}",

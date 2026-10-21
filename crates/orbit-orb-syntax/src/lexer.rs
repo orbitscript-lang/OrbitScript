@@ -300,6 +300,16 @@ impl<'a> Lexer<'a> {
             return None;
         }
         let c = self.src[start];
+        if c == b'b' && self.src.get(start + 1) == Some(&b'\'') {
+            // Up to the closing quote on this line, if any.
+            let rest = &self.src[start + 2..self.limit];
+            let end = rest
+                .iter()
+                .position(|&c| c == b'\'' || c == b'\n')
+                .map_or(rest.len(), |i| i + usize::from(rest[i] == b'\''));
+            self.pos = self.pos.max(start + 2 + end).min(self.limit);
+            return Some(self.token(TokenKind::Int(0), start));
+        }
         let quote = c == b'"' || matches!(c, b'r' | b'f') && self.src.get(start + 1) == Some(&b'"');
         self.pos = self
             .pos
@@ -432,13 +442,17 @@ impl<'a> Lexer<'a> {
                 }));
                 self.token(TokenKind::Template(index), start)
             }
+            b'b' if n1 == Some(b'\'') => {
+                let byte = self.byte_literal(start)?;
+                self.token(TokenKind::Int(byte.into()), start)
+            }
             b'\'' => {
                 self.pos += 1;
                 if !self.cur().is_some_and(is_ident_start) {
                     return Err(self.error_at(
                         start,
                         self.pos,
-                        "single quotes start a loop label such as `'outer`; strings use `\"`",
+                        "single quotes start a loop label such as `'outer`; strings use `\"`, bytes `b'a'`",
                     ));
                 }
                 let name_start = self.pos;
@@ -449,7 +463,7 @@ impl<'a> Lexer<'a> {
                     return Err(self.error_at(
                         start,
                         self.pos + 1,
-                        "single quotes start a loop label such as `'outer`; strings use `\"`",
+                        "single quotes start a loop label such as `'outer`; strings use `\"`, bytes `b'a'`",
                     ));
                 }
                 let id = self.strings.intern(&self.src[name_start..self.pos]);
@@ -730,6 +744,93 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
+    /// `b'a'`: one byte as an integer. The byte is a printable ASCII character or an escape
+    /// that gives exactly one byte (`\n`, `\xff`, but not `\u{...}`).
+    fn byte_literal(&mut self, start: usize) -> Result<u8, Diagnostic> {
+        self.pos = start + 2;
+        let Some(c) = self.cur() else {
+            return Err(self
+                .error_at(start, self.pos, "unterminated byte literal")
+                .at_eof());
+        };
+        let byte = match c {
+            b'\\' if self.at(1) == Some(b'u') => {
+                return Err(self.error_at(
+                    self.pos,
+                    self.pos + 2,
+                    "a byte literal can't use `\\u{...}`; write the byte as `\\xHH`",
+                ));
+            }
+            b'\\' => {
+                self.buf.clear();
+                self.escape()?;
+                // Only a backslash before a line break gives no byte.
+                let [b] = self.buf[..] else {
+                    return Err(self.error_at(start, self.pos, "a byte literal holds one byte"));
+                };
+                b
+            }
+            b'\'' => {
+                return Err(self.error_at(start, self.pos + 1, "empty byte literal"));
+            }
+            b'\n' | b'\r' | b'\t' => {
+                let esc = match c {
+                    b'\n' => "\\n",
+                    b'\r' => "\\r",
+                    _ => "\\t",
+                };
+                return Err(self.error_at(
+                    start,
+                    self.pos + 1,
+                    format!("write this byte as `b'{esc}'`"),
+                ));
+            }
+            0x80.. => {
+                let len = utf8_len(&self.src[self.pos..self.limit]);
+                let text =
+                    String::from_utf8_lossy(&self.src[self.pos..self.pos + len]).into_owned();
+                let hex: String = self.src[self.pos..self.pos + len]
+                    .iter()
+                    .map(|b| format!("\\x{b:02x}"))
+                    .collect();
+                let msg = if len > 1 && text.chars().count() == 1 {
+                    format!(
+                        "`{text}` is {len} bytes in UTF-8; a byte literal holds one byte \
+                         (use the string \"{text}\", or `{hex}` byte by byte)"
+                    )
+                } else {
+                    format!("a byte literal holds ASCII only; write the byte as `{hex}`")
+                };
+                return Err(self.error_at(start, self.pos + len, msg));
+            }
+            _ => {
+                self.pos += 1;
+                c
+            }
+        };
+        match self.cur() {
+            Some(b'\'') => {
+                self.pos += 1;
+                Ok(byte)
+            }
+            None => Err(self
+                .error_at(start, self.pos, "unterminated byte literal")
+                .at_eof()),
+            Some(_) => {
+                // Find the end on this line, to underline the whole literal.
+                let end = self.src[self.pos..self.limit]
+                    .iter()
+                    .position(|&c| c == b'\'' || c == b'\n')
+                    .map_or(self.pos, |i| self.pos + i + 1);
+                Err(self.error_at(
+                    start,
+                    end,
+                    "a byte literal holds one byte; use a string `\"...\"` for more",
+                ))
+            }
+        }
+    }
+
     /// `r"..."` or `r#"..."#` (any number of `#`), kept verbatim in `buf`.
     fn raw_string(&mut self, start: usize) -> Result<(), Diagnostic> {
         self.pos += 1;
@@ -854,6 +955,15 @@ impl<'a> Lexer<'a> {
                         expr,
                         spec: Some(spec),
                     });
+                }
+                b'b' if self.at(1) == Some(b'\'')
+                    && (self.pos == expr_start || !is_ident_char(self.src[self.pos - 1])) =>
+                {
+                    // A byte literal may hold a quote or a brace: `{b'"'}`, `{b'}'}`.
+                    let saved = std::mem::take(&mut self.buf);
+                    let result = self.byte_literal(self.pos);
+                    self.buf = saved;
+                    result?;
                 }
                 b'"' | b'r' | b'f' => {
                     // Skip a nested string literal whole, using a throwaway decode.
@@ -992,6 +1102,38 @@ mod tests {
         assert!(err(r#""\q""#).contains("unknown escape `\\q`"));
         assert!(err("'a'").contains("loop label"));
         assert!(err("\"abc").contains("unterminated string"));
+    }
+
+    #[test]
+    fn byte_literals() {
+        use TokenKind::Int;
+        assert_eq!(
+            kinds(r#"b'a' b'0' b' ' b'\n' b'\r' b'\t' b'\0' b'\\' b'\'' b'"' b'\x7f' b'\xFF'"#),
+            [97, 48, 32, 10, 13, 9, 0, 92, 39, 34, 127, 255].map(Int)
+        );
+        // `b` alone is still a name, and a label still follows one.
+        assert!(matches!(
+            kinds("b 'a")[..],
+            [TokenKind::Ident(_), TokenKind::Label(_)]
+        ));
+        assert!(err("b''").contains("empty byte literal"));
+        assert!(err("b'ab'").contains("holds one byte"));
+        assert!(err("b'é'").contains("2 bytes in UTF-8"));
+        assert!(err(r"b'\u{41}'").contains("`\\xHH`"));
+        assert!(err("b'\t'").contains(r"b'\t'"));
+        assert!(err(r"b'\q'").contains("unknown escape"));
+        assert!(err("b'a").contains("unterminated byte literal"));
+        assert!(err("'1'").contains("bytes `b'a'`"));
+    }
+
+    #[test]
+    fn byte_literals_in_templates() {
+        let mut lx = Lexer::new("t", br#"f"{b'"'}{b'}'}{b'{'}""#.as_slice());
+        assert!(matches!(
+            lx.next_token().unwrap().kind,
+            TokenKind::Template(_)
+        ));
+        assert_eq!(lx.next_token().unwrap().kind, TokenKind::Eof);
     }
 
     #[test]

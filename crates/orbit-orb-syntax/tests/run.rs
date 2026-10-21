@@ -855,6 +855,7 @@ fn tour() {
 3	nil	no b
 true	nil	3
  orbit|7  |0005|0.333|"s"
+true	10	lower
 6	big	true
 4
 release	a"#,
@@ -1050,5 +1051,27 @@ print(Shape::area(Shape::Sq { s: 3 }), Shape::area(Shape::Empty), Shape::Empty.a
     assert_eq!(
         compile_error("struct P {}\nimpl P { fn f() {} }\nimpl P {\n  fn f(self) {}\n}"),
         "test:4: `f` is already defined for this type"
+    );
+}
+
+#[test]
+fn byte_literals() {
+    check(
+        r#"
+fn kind(b: int) -> string {
+    match b {
+        b'0'..=b'9' => "digit",
+        b'a'..=b'z' | b'A'..=b'Z' => "letter",
+        b' ' | b'\t' | b'\r' | b'\n' => "space",
+        _ => "other",
+    }
+}
+let s = "a1 \r";
+let mut kinds = [];
+for i in 1..=#s { kinds[i] = kind(string::byte(s, i)); }
+print(table::concat(kinds, ","), b'a', math::type(b'\xff'), b'\xff');
+print(string::byte("\r") == b'\r', string::char(b'h', b'i'), f"{b'}'}");
+"#,
+        "letter,digit,space,space\t97\tinteger\t255\ntrue\thi\t125",
     );
 }
