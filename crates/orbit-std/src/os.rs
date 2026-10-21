@@ -114,8 +114,7 @@ fn setlocale(locale: Option<&[u8]>, category: Option<&[u8]>) -> Result<Option<&'
     if let Some(cat) = category
         && !CATEGORIES.contains(&cat)
     {
-        let msg = format!("invalid option '{}'", String::from_utf8_lossy(cat));
-        return Err(Fail::arg(2, msg));
+        return Err(Fail::arg(2, [b"invalid option '", cat, b"'"].concat()));
     }
     // Only the C locale exists: querying or asking for it (by any of its
     // names) gives "C", anything else fails.
@@ -165,10 +164,7 @@ fn date(
         Ok(out) => Ok(Either::Right(out)),
         Err(bad) => Err(Fail::arg(
             1,
-            format!(
-                "invalid conversion specifier '{}'",
-                String::from_utf8_lossy(&bad)
-            ),
+            [b"invalid conversion specifier '", &bad[..], b"'"].concat(),
         )),
     }
 }

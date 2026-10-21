@@ -195,9 +195,11 @@ fn cast(s: &mut Stack<'_>, which: i64) -> StackResult<Return> {
         return Ok(Return::values(1));
     }
     let message = s.string_at(-1).unwrap_or_default();
-    let message = String::from_utf8_lossy(message.strip_prefix(b"std.json:1: ").unwrap_or(message))
-        .into_owned();
-    Err(s.arg_error(1, &message))
+    let message = message
+        .strip_prefix(b"std.json:1: ")
+        .unwrap_or(message)
+        .to_vec();
+    Err(s.arg_error(1, message))
 }
 
 #[native(name = "json.int")]

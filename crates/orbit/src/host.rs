@@ -116,7 +116,7 @@ impl<'s> Call<'s> {
 
     /// A runtime error with `message`, positioned at the caller as Lua's
     /// `error` does at level 1 (`chunk:line: message`).
-    pub fn error(&self, message: impl AsRef<str>) -> Error {
+    pub fn error(&self, message: impl AsRef<[u8]>) -> Error {
         let mut stack = self.stack();
         let e = stack.error(message);
         self.error_of(&mut stack, e)
@@ -153,7 +153,7 @@ impl<'s> Call<'s> {
 
     /// Lua's argument error: `bad argument #2 to 'f' (message)`, positioned
     /// at the caller. `i` is 0-based, like [`Call::arg`].
-    pub fn arg_error(&self, i: usize, message: impl AsRef<str>) -> Error {
+    pub fn arg_error(&self, i: usize, message: impl AsRef<[u8]>) -> Error {
         let mut stack = self.stack();
         let e = stack.arg_error(i as i32 + 1, message.as_ref());
         self.error_of(&mut stack, e)

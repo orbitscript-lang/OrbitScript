@@ -645,12 +645,12 @@ impl StackAbi for Win<'_, '_> {
         let e = self.s.error_from_top();
         self.raise(e)
     }
-    extern "C" fn error<'b>(&mut self, message: Str<'b>) -> RaisedId {
-        let e = self.s.error(message.as_str());
+    extern "C" fn error<'b>(&mut self, message: Slice<'b, u8>) -> RaisedId {
+        let e = self.s.error(message.as_slice());
         self.raise(e)
     }
-    extern "C" fn arg_error<'b>(&mut self, arg: i32, message: Str<'b>) -> RaisedId {
-        let e = self.s.arg_error(arg, message.as_str());
+    extern "C" fn arg_error<'b>(&mut self, arg: i32, message: Slice<'b, u8>) -> RaisedId {
+        let e = self.s.arg_error(arg, message.as_slice());
         self.raise(e)
     }
     extern "C" fn type_error<'b>(&mut self, arg: i32, expected: Str<'b>) -> RaisedId {

@@ -133,7 +133,7 @@ fn main() -> ExitCode {
         let path = (input != "-").then_some(input.as_str());
         let result = match orbit_std::read_chunk_file(path.map(str::as_bytes)) {
             Ok((bytes, source)) => run(&cli, &bytes, &source),
-            Err(e) => Err(e),
+            Err(e) => Err(String::from_utf8_lossy(&e).into_owned()),
         };
         if let Err(m) = result {
             eprintln!("{prog}: {m}");

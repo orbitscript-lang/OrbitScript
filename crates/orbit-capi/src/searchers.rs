@@ -120,7 +120,7 @@ fn ret_fail(s: &mut Stack<'_>, msg: &[u8], when: &[u8]) -> R {
 }
 
 /// The error for a module file that was found but can't be loaded.
-fn load_error(s: &mut Stack<'_>, name: &[u8], file: &[u8], why: &str) -> orbit::stack::Raised {
+fn load_error(s: &mut Stack<'_>, name: &[u8], file: &[u8], why: &[u8]) -> orbit::stack::Raised {
     s.error(orbit_std::load_error(name, file, why))
 }
 
@@ -214,7 +214,7 @@ fn search_c_for(s: &mut Stack<'_>, name: &[u8], file_name: &[u8], croot: bool) -
             s,
             name,
             &file,
-            "dynamic libraries not enabled; check your Lua installation",
+            b"dynamic libraries not enabled; check your Lua installation",
         ));
     };
     // `luaopen_` and the name with dots as underscores, without any suffix
@@ -235,7 +235,7 @@ fn search_c_for(s: &mut Stack<'_>, name: &[u8], file_name: &[u8], croot: bool) -
             msg.push(b'\'');
             ret_msg(s, &msg)
         }
-        Err((why, _)) => Err(load_error(s, name, &file, &why)),
+        Err((why, _)) => Err(load_error(s, name, &file, why.as_bytes())),
     }
 }
 

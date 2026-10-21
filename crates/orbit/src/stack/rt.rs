@@ -1501,13 +1501,13 @@ impl<'s> Stack<'s> {
 
     /// A runtime error with `message`, positioned at the caller as Lua's
     /// `error` does at level 1.
-    pub fn error(&mut self, message: impl AsRef<str>) -> Raised {
+    pub fn error(&mut self, message: impl AsRef<[u8]>) -> Raised {
         Raised(self.ctx.error(message))
     }
 
     /// Lua's argument error for argument `arg` (1-based): `bad argument #1
     /// to 'f' (message)`.
-    pub fn arg_error(&mut self, arg: i32, message: &str) -> Raised {
+    pub fn arg_error(&mut self, arg: i32, message: impl AsRef<[u8]>) -> Raised {
         Raised(self.ctx.arg_error((arg.max(1) - 1) as usize, message))
     }
 

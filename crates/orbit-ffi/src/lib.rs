@@ -272,8 +272,8 @@ fn type_arg(s: &mut Stack<'_>, arg: i32) -> StackResult<Ty> {
     if let Some(t) = Ty::parse(name) {
         return Ok(t);
     }
-    let name = String::from_utf8_lossy(name).into_owned();
-    Err(s.arg_error(arg, &format!("unknown C type '{name}'")))
+    let msg = [b"unknown C type '", name, b"'"].concat();
+    Err(s.arg_error(arg, msg))
 }
 
 /// Whether argument `arg` is nil or absent.
@@ -295,8 +295,9 @@ fn ffi_open(s: &mut Stack<'_>) -> StackResult<Return> {
             Ok(Return::values(1))
         }
         Err(e) => {
-            let name = String::from_utf8_lossy(name.as_deref().unwrap_or_default()).into_owned();
-            Err(s.error(format!("cannot open library '{name}': {e}")))
+            let name = name.as_deref().unwrap_or_default();
+            let why = e.to_string();
+            Err(s.error([b"cannot open library '", name, b"': ", why.as_bytes()].concat()))
         }
     }
 }
@@ -322,8 +323,15 @@ fn ffi_bind(s: &mut Stack<'_>) -> StackResult<Return> {
     let addr = match sys::symbol(handle, &name) {
         Ok(a) => a,
         Err(e) => {
-            let name = String::from_utf8_lossy(&name).into_owned();
-            return Err(s.error(format!("cannot find C function '{name}': {e}")));
+            let why = e.to_string();
+            let msg = [
+                b"cannot find C function '",
+                &name[..],
+                b"': ",
+                why.as_bytes(),
+            ]
+            .concat();
+            return Err(s.error(msg));
         }
     };
     let index = match s.extension(|st: &mut State| signature(st, ret, &args)) {

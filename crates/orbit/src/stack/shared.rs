@@ -877,12 +877,12 @@ impl<'s> Stack<'s> {
         Raised(self.w.error_from_top())
     }
 
-    pub fn error(&mut self, message: impl AsRef<str>) -> Raised {
+    pub fn error(&mut self, message: impl AsRef<[u8]>) -> Raised {
         Raised(self.w.error(message.as_ref().into()))
     }
 
-    pub fn arg_error(&mut self, arg: i32, message: &str) -> Raised {
-        Raised(self.w.arg_error(arg, message.into()))
+    pub fn arg_error(&mut self, arg: i32, message: impl AsRef<[u8]>) -> Raised {
+        Raised(self.w.arg_error(arg, message.as_ref().into()))
     }
 
     pub fn type_error(&mut self, arg: i32, expected: &str) -> Raised {

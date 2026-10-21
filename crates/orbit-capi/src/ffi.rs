@@ -1304,7 +1304,7 @@ extern "C" fn orbit_r_gc(l: *mut LState, what: c_int, a: c_int, b: c_int) -> c_i
 
 extern "C" fn orbit_r_argerror(l: *mut LState, arg: c_int, msg: *const c_char) {
     // SAFETY: C passes a NUL-terminated message, or NULL.
-    let msg = String::from_utf8_lossy(unsafe { cbytes(msg) }).into_owned();
+    let msg = unsafe { cbytes(msg) }.to_vec();
     entry!(l, (), |_b, c| Err(c.arg_error(arg, &msg)))
 }
 

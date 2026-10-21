@@ -513,12 +513,9 @@ fn open_file(name: &[u8], mode: &[u8]) -> Option<io::Result<Stream>> {
 }
 
 /// The message `io.lines` and `io.input` raise for a file they can't open.
-fn cannot_open(name: &[u8], e: &io::Error) -> String {
-    format!(
-        "cannot open file '{}' ({})",
-        String::from_utf8_lossy(name),
-        os_error_text(e)
-    )
+fn cannot_open(name: &[u8], e: &io::Error) -> Vec<u8> {
+    let why = os_error_text(e);
+    [b"cannot open file '", name, b"' (", why.as_bytes(), b")"].concat()
 }
 
 /// Argument `i` as a string, or `default` when nil or absent.
@@ -727,8 +724,7 @@ fn f_seek<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
         b"cur" => SeekFrom::Current(off),
         b"end" => SeekFrom::End(off),
         _ => {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(&whence));
-            return Err(c.arg_error(1, msg));
+            return Err(c.arg_error(1, [b"invalid option '", &whence[..], b"'"].concat()));
         }
     };
     let r = c.with_stdout(|out| s.borrow_mut().seek(from, out));
@@ -747,8 +743,7 @@ fn f_setvbuf<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
         b"line" => Buffering::Line(size),
         b"full" => Buffering::Full(size),
         _ => {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(&mode));
-            return Err(c.arg_error(1, msg));
+            return Err(c.arg_error(1, [b"invalid option '", &mode[..], b"'"].concat()));
         }
     };
     let r = c.with_stdout(|out| {

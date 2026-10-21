@@ -58,7 +58,7 @@ impl FormatError {
                 ctx.error(format!("integral size ({n}) out of limits [1,16]"))
             }
             FormatError::InvalidOption(c) => {
-                ctx.error(format!("invalid format option '{}'", c as char))
+                ctx.error([b"invalid format option '", &[c][..], b"'"].concat())
             }
             FormatError::MissingSize => ctx.error("missing size for format option 'c'"),
             FormatError::NotPowerOfTwo => {
