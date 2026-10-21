@@ -26,8 +26,12 @@ local opause = collectgarbage("param", "pause", 100)
 local ostepmul = collectgarbage("param", "stepmul", 100)
 print(collectgarbage("param", "pause"), collectgarbage("param", "stepmul"))
 print(collectgarbage("param", "pause", 7), collectgarbage("param", "pause", -1), collectgarbage("param", "pause"))
+-- The generational defaults are our collector's own (DEVIATIONS.md), so
+-- print only what setting and restoring them returns.
 for _, p in ipairs{"minormul", "majorminor", "minormajor"} do
-  print(p, collectgarbage("param", p), collectgarbage("param", p, 100), collectgarbage("param", p))
+  local old = collectgarbage("param", p, 100)
+  print(p, math.type(old), collectgarbage("param", p),
+    collectgarbage("param", p, old), collectgarbage("param", p) == old)
 end
 local t = {0, 2, 10, 90, 500, 5000, 30000}
 for i = 1, #t do
