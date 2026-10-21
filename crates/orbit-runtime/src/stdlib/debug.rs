@@ -280,9 +280,9 @@ fn upvalueid(ctx: &mut NativeCtx<'_>) -> R {
         // The cell's handle is its identity while it lives.
         Some((_, cell)) => {
             let id = LightUserData::new(cell.to_bits() | 1 << 63);
-            ctx.ret1(Value::LightUserData(id))
+            ctx.ret([Value::LightUserData(id)])
         }
-        None => ctx.ret1(Value::Nil),
+        None => ctx.ret([Value::Nil]),
     }
 }
 
@@ -313,7 +313,7 @@ fn upvaluejoin(ctx: &mut NativeCtx<'_>) -> R {
 fn getmetatable(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(0)?;
     let mt = ctx.metatable(v).map_or(Value::Nil, Value::Table);
-    ctx.ret1(mt)
+    ctx.ret([mt])
 }
 
 fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
@@ -338,7 +338,7 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
 fn getuservalue(ctx: &mut NativeCtx<'_>) -> R {
     let n = ctx.opt_int(1, 1)?;
     let Value::UserData(u) = ctx.arg(0) else {
-        return ctx.ret1(Value::Nil);
+        return ctx.ret([Value::Nil]);
     };
     if n != 1 {
         ctx.push(Value::Nil);
@@ -358,7 +358,7 @@ fn setuservalue(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(1)?;
     let n = ctx.opt_int(2, 1)?;
     if n != 1 {
-        return ctx.ret1(Value::Nil);
+        return ctx.ret([Value::Nil]);
     }
     ctx.vm.heap.update(u, |u| u.user_value = v);
     ctx.truncate(1);
@@ -367,7 +367,7 @@ fn setuservalue(ctx: &mut NativeCtx<'_>) -> R {
 
 fn getregistry(ctx: &mut NativeCtx<'_>) -> R {
     let r = ctx.vm.rt.registry;
-    ctx.ret1(Value::Table(r))
+    ctx.ret([Value::Table(r)])
 }
 
 fn traceback(ctx: &mut NativeCtx<'_>) -> R {
@@ -381,7 +381,7 @@ fn traceback(ctx: &mut NativeCtx<'_>) -> R {
             let s = ctx.check_str(a)?;
             Some(ctx.bytes(s).to_vec())
         }
-        v => return ctx.ret1(v),
+        v => return ctx.ret([v]),
     };
     let level = match ctx.arg(a + 1) {
         Value::Nil => None,
@@ -399,7 +399,7 @@ fn traceback(ctx: &mut NativeCtx<'_>) -> R {
     });
     out.extend_from_slice(trace.as_bytes());
     let s = ctx.new_str_owned(out);
-    ctx.ret1(s)
+    ctx.ret([s])
 }
 
 /// The `debug` table's open hook: also reserves the registry's

@@ -242,7 +242,7 @@ mod concat {
                         ctx.display(ctx.arg(slot), &mut out);
                     }
                     let r = ctx.new_str_owned(out);
-                    return ctx.ret1(r);
+                    return ctx.ret([r]);
                 }
             }
         }
@@ -362,7 +362,7 @@ mod move_ {
             ctx.arg(A1)
         };
         if e < f {
-            return ctx.ret1(a2);
+            return ctx.ret([a2]);
         }
         if !(f > 0 || e < i64::MAX.wrapping_add(f)) {
             return Err(ctx.arg_error(2, "too many elements to move"));
@@ -447,7 +447,7 @@ mod move_ {
                         set_int(ctx, PHASE, P_GET);
                     }
                 }
-                _ => return ctx.ret1(a2),
+                _ => return ctx.ret([a2]),
             }
         }
     }

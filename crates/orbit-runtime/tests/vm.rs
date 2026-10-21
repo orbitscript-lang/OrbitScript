@@ -140,7 +140,7 @@ fn try_(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
 
 fn try_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> Result<NativeReturn, LuaError> {
     let ok = matches!(outcome, CallOutcome::Ok(_));
-    ctx.ret1(Value::Bool(ok))
+    ctx.ret([Value::Bool(ok)])
 }
 
 /// `main` calls native `name(double, 21)`; `double` returns `x + x`, or

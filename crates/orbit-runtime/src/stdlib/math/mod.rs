@@ -127,7 +127,7 @@ fn floor(ctx: &mut NativeCtx<'_>) -> R {
         v @ Value::Int(_) => v,
         _ => int_if_fits(ctx.check_f64(0)?.floor()),
     };
-    ctx.ret1(v)
+    ctx.ret([v])
 }
 
 fn ceil(ctx: &mut NativeCtx<'_>) -> R {
@@ -135,7 +135,7 @@ fn ceil(ctx: &mut NativeCtx<'_>) -> R {
         v @ Value::Int(_) => v,
         _ => int_if_fits(ctx.check_f64(0)?.ceil()),
     };
-    ctx.ret1(v)
+    ctx.ret([v])
 }
 
 /// Integer-typed values keep integer arithmetic; anything else (including
@@ -145,7 +145,7 @@ fn abs(ctx: &mut NativeCtx<'_>) -> R {
         Value::Int(i) => Value::Int(i.wrapping_abs()),
         _ => Value::Float(ctx.check_f64(0)?.abs()),
     };
-    ctx.ret1(v)
+    ctx.ret([v])
 }
 
 fn fmod(ctx: &mut NativeCtx<'_>) -> R {
@@ -163,7 +163,7 @@ fn fmod(ctx: &mut NativeCtx<'_>) -> R {
             Value::Float(a % d)
         }
     };
-    ctx.ret1(v)
+    ctx.ret([v])
 }
 
 fn modf(ctx: &mut NativeCtx<'_>) -> R {
@@ -192,18 +192,18 @@ fn tointeger(ctx: &mut NativeCtx<'_>) -> R {
         },
         _ => Value::Nil,
     };
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn ult(ctx: &mut NativeCtx<'_>) -> R {
     let a = ctx.check_int(0)?;
     let b = ctx.check_int(1)?;
-    ctx.ret1(Value::Bool((a as u64) < (b as u64)))
+    ctx.ret([Value::Bool((a as u64) < (b as u64))])
 }
 
 fn float_fn(ctx: &mut NativeCtx<'_>, f: fn(f64) -> f64) -> R {
     let x = ctx.check_f64(0)?;
-    ctx.ret1(Value::Float(f(x)))
+    ctx.ret([Value::Float(f(x))])
 }
 
 fn exp(ctx: &mut NativeCtx<'_>) -> R {
@@ -245,7 +245,7 @@ fn atan(ctx: &mut NativeCtx<'_>) -> R {
     } else {
         ctx.check_f64(1)?
     };
-    ctx.ret1(Value::Float(y.atan2(x)))
+    ctx.ret([Value::Float(y.atan2(x))])
 }
 
 fn log(ctx: &mut NativeCtx<'_>) -> R {
@@ -262,7 +262,7 @@ fn log(ctx: &mut NativeCtx<'_>) -> R {
             x.ln() / base.ln()
         }
     };
-    ctx.ret1(Value::Float(r))
+    ctx.ret([Value::Float(r)])
 }
 
 fn frexp(ctx: &mut NativeCtx<'_>) -> R {
@@ -295,7 +295,7 @@ fn ldexp(ctx: &mut NativeCtx<'_>) -> R {
     let m = ctx.check_f64(0)?;
     // The reference takes the exponent as a C `int`, truncating it.
     let e = ctx.check_int(1)? as i32;
-    ctx.ret1(Value::Float(number::ldexp(m, i64::from(e))))
+    ctx.ret([Value::Float(number::ldexp(m, i64::from(e)))])
 }
 
 fn less(a: Value, b: Value) -> bool {
@@ -339,7 +339,7 @@ fn extreme_run(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
         let (i, best) = (slot(ctx, n), slot(ctx, n + 1));
         if i >= n {
             let v = ctx.arg(best);
-            return ctx.ret1(v);
+            return ctx.ret([v]);
         }
         let (a, b) = if want_max {
             (ctx.arg(best), ctx.arg(i))
@@ -401,13 +401,13 @@ fn random(ctx: &mut NativeCtx<'_>) -> R {
     let (low, up) = match ctx.nargs() {
         0 => {
             let x = rng(ctx).next_f64();
-            return ctx.ret1(Value::Float(x));
+            return ctx.ret([Value::Float(x)]);
         }
         1 => {
             let up = ctx.check_int(0)?;
             if up == 0 {
                 let r = rng(ctx).next_u64();
-                return ctx.ret1(Value::Int(r as i64));
+                return ctx.ret([Value::Int(r as i64)]);
             }
             (1, up)
         }
@@ -418,7 +418,7 @@ fn random(ctx: &mut NativeCtx<'_>) -> R {
         return Err(ctx.arg_error(0, "interval is empty"));
     }
     let r = rng(ctx).project(up.wrapping_sub(low) as u64);
-    ctx.ret1(Value::Int(low.wrapping_add(r as i64)))
+    ctx.ret([Value::Int(low.wrapping_add(r as i64))])
 }
 
 fn randomseed(ctx: &mut NativeCtx<'_>) -> R {
@@ -437,7 +437,7 @@ fn randomseed(ctx: &mut NativeCtx<'_>) -> R {
 
 fn sqrt(ctx: &mut NativeCtx<'_>) -> R {
     let x = ctx.check_f64(0)?;
-    ctx.ret1(Value::Float(x.sqrt()))
+    ctx.ret([Value::Float(x.sqrt())])
 }
 
 fn type_(ctx: &mut NativeCtx<'_>) -> R {
@@ -447,5 +447,5 @@ fn type_(ctx: &mut NativeCtx<'_>) -> R {
         Value::Float(_) => ctx.new_str(b"float"),
         _ => Value::Nil,
     };
-    ctx.ret1(r)
+    ctx.ret([r])
 }

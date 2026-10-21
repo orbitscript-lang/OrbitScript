@@ -298,7 +298,7 @@ fn format_from(
         }
     }
     let r = ctx.new_str_buf(out);
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 /// Save the formatting state and call `__tostring` on a `%s` argument.

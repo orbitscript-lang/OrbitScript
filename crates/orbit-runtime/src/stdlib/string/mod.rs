@@ -64,7 +64,7 @@ pub(crate) fn end_pos(pos: i64, len: usize) -> usize {
 fn len(ctx: &mut NativeCtx<'_>) -> R {
     let s = ctx.check_str(0)?;
     let n = ctx.bytes(s).len() as i64;
-    ctx.ret1(Value::Int(n))
+    ctx.ret([Value::Int(n)])
 }
 
 fn sub(ctx: &mut NativeCtx<'_>) -> R {
@@ -78,7 +78,7 @@ fn sub(ctx: &mut NativeCtx<'_>) -> R {
     } else {
         ctx.new_str(b"")
     };
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn rep(ctx: &mut NativeCtx<'_>) -> R {
@@ -91,7 +91,7 @@ fn rep(ctx: &mut NativeCtx<'_>) -> R {
     };
     if n <= 0 {
         let e = ctx.new_str(b"");
-        return ctx.ret1(e);
+        return ctx.ret([e]);
     }
     let piece = ctx.bytes(s).len() + sep.map_or(0, |g| ctx.bytes(g).len());
     let total = piece.checked_mul(n as usize).filter(|&t| t <= MAX_STR);
@@ -113,7 +113,7 @@ fn rep(ctx: &mut NativeCtx<'_>) -> R {
         out.extend_from_slice(body);
     }
     let r = ctx.new_str_owned(out);
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn byte(ctx: &mut NativeCtx<'_>) -> R {
@@ -142,7 +142,7 @@ fn char(ctx: &mut NativeCtx<'_>) -> R {
         out.push(c as u8);
     }
     let r = ctx.new_str_buf(out);
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 /// A string made by `f` from the bytes of argument 1 (`f` appends to the
@@ -152,7 +152,7 @@ fn map_bytes(ctx: &mut NativeCtx<'_>, f: impl Fn(&[u8], &mut Vec<u8>)) -> R {
     let mut out = ctx.take_buf();
     f(ctx.bytes(s), &mut out);
     let r = ctx.new_str_buf(out);
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn reverse(ctx: &mut NativeCtx<'_>) -> R {
@@ -219,7 +219,7 @@ fn find_aux(ctx: &mut NativeCtx<'_>, find: bool) -> R {
     let len = ctx.bytes(s).len();
     let init = start_pos(ctx.opt_int(2, 1)?, len) - 1;
     if init > len {
-        return ctx.ret1(Value::Nil);
+        return ctx.ret([Value::Nil]);
     }
     if find && (!ctx.arg(3).is_falsy() || pattern::is_plain(ctx.bytes(p))) {
         return match pattern::find_plain(ctx.bytes(s), ctx.bytes(p), init) {
@@ -229,13 +229,13 @@ fn find_aux(ctx: &mut NativeCtx<'_>, find: bool) -> R {
                 ctx.push(Value::Int((at + plen) as i64));
                 Ok(NativeReturn::Return(2))
             }
-            None => ctx.ret1(Value::Nil),
+            None => ctx.ret([Value::Nil]),
         };
     }
     let mut caps = Captures::new();
     let (a, b) = match pattern::search(ctx.bytes(s), ctx.bytes(p), init, &mut caps) {
         Ok(Some(m)) => m,
-        Ok(None) => return ctx.ret1(Value::Nil),
+        Ok(None) => return ctx.ret([Value::Nil]),
         Err(e) => return Err(pattern_error(ctx, e)),
     };
     // `find` returns only real captures; `match` falls back to the whole
@@ -278,7 +278,7 @@ fn gmatch(ctx: &mut NativeCtx<'_>) -> R {
             Value::Nil,
         ],
     );
-    ctx.ret1(it)
+    ctx.ret([it])
 }
 
 fn gmatch_step(ctx: &mut NativeCtx<'_>) -> R {

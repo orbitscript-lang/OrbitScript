@@ -73,13 +73,13 @@ fn tostring_result(ctx: &mut NativeCtx<'_>, got: usize, at: usize) -> Result<Val
 pub(crate) fn type_(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(0)?;
     let s = ctx.new_str(v.type_name().as_bytes());
-    ctx.ret1(s)
+    ctx.ret([s])
 }
 
 fn tostring(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(0)?;
     if matches!(v, Value::Str(_)) {
-        return ctx.ret1(v);
+        return ctx.ret([v]);
     }
     let h = ctx.metamethod(v, MetaField::ToString);
     if !h.is_nil() {
@@ -95,7 +95,7 @@ fn tostring(ctx: &mut NativeCtx<'_>) -> R {
     let mut out = Vec::new();
     ctx.display(v, &mut out);
     let s = ctx.new_str_owned(out);
-    ctx.ret1(s)
+    ctx.ret([s])
 }
 
 fn tostring_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
@@ -103,19 +103,19 @@ fn tostring_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         unreachable!("unprotected call")
     };
     let r = tostring_result(ctx, got, 1)?;
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn getmetatable(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(0)?;
     let Some(mt) = ctx.metatable(v) else {
-        return ctx.ret1(Value::Nil);
+        return ctx.ret([Value::Nil]);
     };
     let protected = ctx.metamethod(v, MetaField::Metatable);
     if !protected.is_nil() {
-        return ctx.ret1(protected);
+        return ctx.ret([protected]);
     }
-    ctx.ret1(Value::Table(mt))
+    ctx.ret([Value::Table(mt)])
 }
 
 fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
@@ -132,7 +132,7 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
         return Err(ctx.error("cannot change a protected metatable"));
     }
     crate::object::gc::set_metatable(&mut ctx.vm.heap, Value::Table(t), mt);
-    ctx.ret1(Value::Table(t))
+    ctx.ret([Value::Table(t)])
 }
 
 fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
@@ -143,7 +143,7 @@ fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
             Value::Str(s) => str_to_number(ctx.bytes(s)).unwrap_or(Value::Nil),
             _ => Value::Nil,
         };
-        return ctx.ret1(r);
+        return ctx.ret([r]);
     }
     let base = ctx.check_int(1)?;
     let s = match ctx.arg(0) {
@@ -154,7 +154,7 @@ fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
         return Err(ctx.arg_error(1, "base out of range"));
     }
     let r = parse_in_base(ctx.bytes(s), base as u32).map_or(Value::Nil, Value::Int);
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn parse_in_base(s: &[u8], base: u32) -> Option<i64> {
@@ -189,7 +189,7 @@ pub(crate) fn next(ctx: &mut NativeCtx<'_>) -> R {
             ctx.push(v);
             Ok(NativeReturn::Return(2))
         }
-        Ok(None) => ctx.ret1(Value::Nil),
+        Ok(None) => ctx.ret([Value::Nil]),
         // Raised by the table itself, so like lua5.5 it carries no position.
         Err(_) => {
             let msg = ctx.new_str(b"invalid key to 'next'");
@@ -203,7 +203,7 @@ fn select(ctx: &mut NativeCtx<'_>) -> R {
     if let Value::Str(s) = ctx.arg(0)
         && ctx.bytes(s) == b"#"
     {
-        return ctx.ret1(Value::Int(n - 1));
+        return ctx.ret([Value::Int(n - 1)]);
     }
     let i = ctx.check_int(0)?;
     let from = if i < 0 {
@@ -261,7 +261,7 @@ fn protected_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
                 e
             };
             ctx.truncate(0);
-            ctx.ret2(Value::Bool(false), e)
+            ctx.ret([Value::Bool(false), e])
         }
     }
 }
@@ -335,14 +335,14 @@ fn rawequal(ctx: &mut NativeCtx<'_>) -> R {
     let a = ctx.check_any(0)?;
     let b = ctx.check_any(1)?;
     let eq = raw_eq(&ctx.vm.heap, a, b);
-    ctx.ret1(Value::Bool(eq))
+    ctx.ret([Value::Bool(eq)])
 }
 
 fn rawget(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_table(0)?;
     let k = ctx.check_any(1)?;
     let v = tbl::get(&ctx.vm.heap, t, k);
-    ctx.ret1(v)
+    ctx.ret([v])
 }
 
 fn rawset(ctx: &mut NativeCtx<'_>) -> R {
@@ -354,7 +354,7 @@ fn rawset(ctx: &mut NativeCtx<'_>) -> R {
         Err(tbl::StoreError::NoMemory) => return Err(ctx.no_memory()),
         Err(e) => return Err(ctx.error(e.message())),
     }
-    ctx.ret1(Value::Table(t))
+    ctx.ret([Value::Table(t)])
 }
 
 fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
@@ -363,7 +363,7 @@ fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
         Value::Str(s) => ctx.bytes(s).len() as i64,
         _ => return Err(ctx.type_error(0, "table or string")),
     };
-    ctx.ret1(Value::Int(n))
+    ctx.ret([Value::Int(n)])
 }
 
 /// `collectgarbage` ([GC semantics design]). Inside a finalizer it does
@@ -400,7 +400,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         } else {
             Value::Nil
         };
-        return ctx.ret1(v);
+        return ctx.ret([v]);
     }
     match &opt[..] {
         b"collect" => {
@@ -409,7 +409,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         }
         b"count" => {
             let kb = ctx.vm.heap.bytes() as f64 / 1024.0;
-            ctx.ret1(Value::Float(kb))
+            ctx.ret([Value::Float(kb)])
         }
         b"step" => {
             let kb = ctx.opt_int(1, 0)?;
@@ -425,15 +425,15 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         }
         b"stop" => {
             ctx.vm.heap.stop();
-            ctx.ret1(Value::Int(0))
+            ctx.ret([Value::Int(0)])
         }
         b"restart" => {
             ctx.vm.heap.restart();
-            ctx.ret1(Value::Int(0))
+            ctx.ret([Value::Int(0)])
         }
         b"isrunning" => {
             let running = !ctx.vm.heap.is_stopped();
-            ctx.ret1(Value::Bool(running))
+            ctx.ret([Value::Bool(running)])
         }
         b"incremental" | b"generational" => {
             let mode = if &opt[..] == b"incremental" {
@@ -443,7 +443,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             };
             let old = ctx.vm.set_gc_mode(mode);
             let v = ctx.new_str(old.name().as_bytes());
-            ctx.ret1(v)
+            ctx.ret([v])
         }
         _ => {
             let name = ctx.check_str(1)?;
@@ -460,7 +460,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             } else {
                 ctx.vm.rt.gc.param(p)
             };
-            ctx.ret1(Value::Int(old))
+            ctx.ret([Value::Int(old)])
         }
     }
 }

@@ -105,7 +105,7 @@ fn char(ctx: &mut NativeCtx<'_>) -> R {
         encode(&mut out, c as u32);
     }
     let r = ctx.new_str_owned(out);
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn subject(ctx: &mut NativeCtx<'_>) -> Result<(Gc<LuaStr>, usize), LuaError> {
@@ -165,7 +165,7 @@ fn len(ctx: &mut NativeCtx<'_>) -> R {
         }
         n += 1;
     }
-    ctx.ret1(Value::Int(n))
+    ctx.ret([Value::Int(n)])
 }
 
 fn offset(ctx: &mut NativeCtx<'_>) -> R {
@@ -207,7 +207,7 @@ fn offset(ctx: &mut NativeCtx<'_>) -> R {
         }
     }
     if n != 0 {
-        return ctx.ret1(Value::Nil);
+        return ctx.ret([Value::Nil]);
     }
     if cont(pos) {
         return Err(ctx.error("initial position is a continuation byte"));
