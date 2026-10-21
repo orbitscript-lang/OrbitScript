@@ -1,0 +1,196 @@
+//! Texts and positions. The analysis module speaks byte offsets (from 0);
+//! the editor speaks lines and columns (from 0), its columns counting
+//! UTF-16 code units unless it agreed to UTF-8 at `initialize`.
+//! orbit-check: strict
+
+/// A place in a text as the editor gives it: line and column from 0.
+pub type Position = #{ line: int, character: int };
+
+/// A span of a text as the editor gives it, `end` excluded.
+pub type Range = #{ start: Position, end: Position };
+
+/// One of the editor's `contentChanges`: a range and its new text, or the
+/// whole text when `range` is missing.
+pub type Change = #{ range: Range?, text: string };
+
+/// Columns count UTF-8 bytes (`"utf-8"`) or UTF-16 code units (`"utf-16"`).
+let mut encoding: string = "utf-16";
+
+pub fn set_encoding(name: string) {
+    encoding = name;
+}
+
+pub fn current_encoding() -> string {
+    encoding
+}
+
+/// A text with its line starts: an open document, or a file a location
+/// points into.
+pub struct Text { text: string, lines: [int] }
+
+/// The offset each line starts at: `lines[1]` is 0.
+fn line_starts(text: string) -> [int] {
+    let starts = [0];
+    let mut at = 1;
+    loop {
+        let nl = string::find(text, "\n", at, true);
+        if nl == nil {
+            break;
+        }
+        starts[#starts + 1] = nl;
+        at = nl + 1;
+    }
+    starts
+}
+
+/// The byte `\r`.
+const CR: int = 0x0D;
+
+/// How many bytes the UTF-8 character that byte `b` starts takes: 0 for a
+/// continuation byte (`0b10xxxxxx`), which starts none.
+fn utf8_length(b: int) -> int {
+    if b < 0x80 { 1 } else if b < 0xC0 { 0 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+}
+
+/// How many UTF-16 code units a UTF-8 character of `len` bytes takes: two
+/// for the four-byte ones, outside the Basic Multilingual Plane.
+fn utf16_units(len: int) -> int {
+    if len == 4 { 2 } else { 1 }
+}
+
+/// How many columns the bytes `from` to `to` (offsets, `to` excluded) of
+/// `text` take.
+fn columns(text: string, from: int, to: int) -> int {
+    if encoding == "utf-8" || string::find(text, "[\x80-\xff]", from + 1) == nil {
+        return to - from;
+    }
+    let mut n = 0;
+    for i in from + 1..=to {
+        let len = utf8_length(string::byte(text, i));
+        if len > 0 {
+            n += utf16_units(len);
+        }
+    }
+    n
+}
+
+impl Text {
+    pub fn new(text: string) -> Text {
+        Text { text, lines: line_starts(text) }
+    }
+
+    pub fn set(self, text: string) {
+        self.text = text;
+        self.lines = line_starts(text);
+    }
+
+    /// The line (from 1) holding `offset`.
+    fn line_of(self, offset: int) -> int {
+        let mut lo = 1;
+        let mut hi = #self.lines;
+        while lo < hi {
+            let mid = (lo + hi + 1) \ 2;
+            if self.lines[mid] <= offset {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    }
+
+    /// Where a line's text ends, before its newline (and a `\r` before that).
+    fn line_end(self, line: int) -> int {
+        if line >= #self.lines {
+            return #self.text;
+        }
+        let mut end = self.lines[line + 1] - 1;
+        if end > self.lines[line] && string::byte(self.text, end) == CR {
+            end -= 1;
+        }
+        end
+    }
+
+    /// The editor's position of `offset`.
+    pub fn position(self, offset: int) -> Position {
+        let offset = math::min(math::max(offset, 0), #self.text);
+        let line = self.line_of(offset);
+        #{ line: line - 1, character: columns(self.text, self.lines[line], offset) }
+    }
+
+    pub fn range(self, start: int, end: int) -> Range {
+        #{ start: self.position(start), end: self.position(end) }
+    }
+
+    /// The offset of the editor's position `pos`, kept inside its line.
+    pub fn offset(self, pos: Position) -> int {
+        let line = pos.line + 1;
+        if line > #self.lines {
+            return #self.text;
+        }
+        let start = self.lines[line];
+        let end = self.line_end(line);
+        if encoding == "utf-8" {
+            return math::min(start + pos.character, end);
+        }
+        let mut units = 0;
+        let mut at = start;
+        while at < end && units < pos.character {
+            // A stray continuation byte counts as a character of its own.
+            let len = math::max(utf8_length(string::byte(self.text, at + 1)), 1);
+            units += utf16_units(len);
+            at += len;
+        }
+        math::min(at, end)
+    }
+
+    /// Apply one of the editor's `contentChanges`.
+    pub fn change(self, change: Change) {
+        if change.range == nil {
+            self.set(change.text);
+            return;
+        }
+        let start = self.offset(change.range.start);
+        let end = math::max(self.offset(change.range.end), start);
+        self.set(string::sub(self.text, 1, start) ~ change.text ~ string::sub(self.text, end + 1));
+    }
+
+    /// The pieces of `start..end` that fit on one line each: `(line, column,
+    /// length)` triples in the editor's units, for highlighting.
+    pub fn split_lines(self, start: int, end: int) -> [[int]] {
+        let out = [];
+        let mut from = start;
+        let mut line = self.line_of(start);
+        while from < end {
+            let stop = math::min(self.line_end(line), end);
+            if stop > from {
+                let column = columns(self.text, self.lines[line], from);
+                out[#out + 1] = [line - 1, column, columns(self.text, from, stop)];
+            }
+            if line >= #self.lines {
+                break;
+            }
+            line += 1;
+            from = self.lines[line];
+        }
+        out
+    }
+}
+
+/// The path a `file://` URI names, or nil for another scheme.
+pub fn uri_to_path(uri: string) -> string? {
+    let rest = string::match(uri, "^file://[^/]*(/.*)$");
+    if rest == nil {
+        return nil;
+    }
+    let path = string::gsub(rest, "%%(%x%x)", |hex| string::char(tonumber(hex, 16) as int));
+    // Windows: `/C:/dir` is `C:/dir`.
+    if string::match(path, "^/%a:") != nil { string::sub(path, 2) } else { path }
+}
+
+/// The `file://` URI of `path`.
+pub fn path_to_uri(path: string) -> string {
+    let path = string::gsub(path, "\\", "/");
+    let encoded = string::gsub(path, "[^%w/%._~:%-]", |c| string::format("%%%02X", string::byte(c)));
+    if string::sub(encoded, 1, 1) == "/" { "file://" ~ encoded } else { "file:///" ~ encoded }
+}

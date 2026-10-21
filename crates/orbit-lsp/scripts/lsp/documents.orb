@@ -1,0 +1,89 @@
+//! The documents the editor has open, kept here and given to the analysis
+//! module, which reads every other file from disk.
+//! orbit-check: strict
+
+use analysis;
+use lsp::text::{Text, uri_to_path, path_to_uri};
+
+/// A document the editor has open, or one read from disk for a request
+/// (`version` nil).
+pub struct Document { uri: string, path: string, version: int?, text: Text }
+
+/// The open documents: `by_uri` and `by_path` hold the same ones.
+pub struct Documents { by_uri: #{[string]: Document}, by_path: #{[string]: Document} }
+
+impl Documents {
+    pub fn new() -> Documents {
+        Documents { by_uri: #{}, by_path: #{} }
+    }
+
+    /// The editor opened `uri` with `text`; false for a URI that names no
+    /// file.
+    pub fn open(self, uri: string, version: int?, text: string) -> bool {
+        let path = uri_to_path(uri);
+        if path == nil {
+            return false;
+        }
+        let doc = Document { uri, path, version, text: Text::new(text) };
+        self.by_uri[uri] = doc;
+        self.by_path[path] = doc;
+        analysis::open(path, text);
+        true
+    }
+
+    /// The editor changed `doc`'s text.
+    pub fn changed(self, doc: Document) {
+        analysis::open(doc.path, doc.text.text);
+    }
+
+    /// The editor closed `doc`: the file on disk counts again.
+    pub fn close(self, doc: Document) {
+        self.by_uri[doc.uri] = nil;
+        self.by_path[doc.path] = nil;
+        analysis::close(doc.path);
+    }
+
+    /// The document the editor has open at `uri`.
+    pub fn opened(self, uri: string) -> Document? {
+        self.by_uri[uri]
+    }
+
+    /// The document at `uri`: the editor's if it is open, else the file on
+    /// disk (nil if there is none).
+    pub fn document(self, uri: string) -> Document? {
+        let open: Document? = self.by_uri[uri];
+        if open != nil {
+            return open;
+        }
+        let path = uri_to_path(uri);
+        if path == nil {
+            return nil;
+        }
+        let text = analysis::text(path);
+        if text == nil { nil } else { Document { uri, path, version: nil, text: Text::new(text) } }
+    }
+
+    /// The text of the file at `path`: the editor's if it is open.
+    pub fn text_of(self, path: string) -> Text {
+        let doc: Document? = self.by_path[path];
+        if doc != nil {
+            return doc.text;
+        }
+        Text::new(analysis::text(path) || "")
+    }
+
+    /// The URI of `path`: the editor's own spelling if it is open.
+    pub fn uri_of(self, path: string) -> string {
+        let doc: Document? = self.by_path[path];
+        if doc != nil { doc.uri } else { path_to_uri(path) }
+    }
+
+    /// Every open document.
+    pub fn all(self) -> [Document] {
+        let out: [Document] = [];
+        for (_, doc) in pairs(self.by_uri) {
+            out[#out + 1] = doc;
+        }
+        out
+    }
+}

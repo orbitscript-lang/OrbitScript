@@ -1,0 +1,32 @@
+[package]
+name = "orbit-lsp"
+description = "The language server for OrbitScript and Lua (ADR-12): a small host on the orbit API whose protocol layer is OrbitScript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "orbit-lsp"
+path = "src/main.rs"
+
+[dependencies]
+orbit = { path = "../orbit", default-features = false }
+orbit-std = { path = "../orbit-std", features = ["json"] }
+orbit-check = { path = "../orbit-check" }
+orbit-orb-syntax = { path = "../orbit-orb-syntax" }
+orbit-lua-syntax = { path = "../orbit-lua-syntax" }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+[features]
+default = ["runtime"]
+# The runtime linked into the program, as `orbit` has it.
+runtime = ["orbit/default"]
+# The runtime in liborbit instead (ADR-10), for `build.sh`'s package:
+# `--no-default-features --features shared`.
+shared = ["orbit/shared"]
+
+[lints]
+workspace = true

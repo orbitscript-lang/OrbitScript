@@ -1,0 +1,66 @@
+// The `analysis` module orbit-lsp's host gives its scripts (src/analysis.rs): what the
+// checker knows, by path, with byte offsets from 0. This stub is for checking the scripts.
+
+/// A place in a file. A stub of the standard library is named by its copy in the cache.
+pub struct Location { path: string, start: int, end: int }
+
+/// A reference, and whether it is the definition.
+pub struct Reference { path: string, start: int, end: int, definition: bool }
+
+pub struct Diagnostic { start: int, end: int, severity: string, code: string?, message: string }
+
+/// One entry of a file's outline; `start` and `end` cover the name, `full_start` and
+/// `full_end` the whole item.
+pub struct Symbol {
+    name: string, kind: string, start: int, end: int, full_start: int, full_end: int,
+    children: [Symbol],
+}
+
+/// The symbol under the cursor: how it is declared, and its doc comment.
+pub struct Hover {
+    name: string?, kind: string?, declaration: string, docs: string?, start: int?, end: int?,
+}
+
+pub struct Completion { label: string, kind: string, detail: string? }
+
+/// What completion offers, and the span the items replace.
+pub struct Completions { start: int, end: int, items: [Completion] }
+
+/// A call's signature; each parameter is a `[start, end]` byte range of `label`.
+pub struct Signature { label: string, params: [[int]], active: int?, docs: string? }
+
+pub struct InlayHint { offset: int, label: string }
+
+pub struct RenameTarget { start: int, end: int, name: string }
+
+/// An item anywhere in the workspace.
+pub struct WorkspaceSymbol {
+    path: string, start: int, end: int, name: string, kind: string, container: string?,
+}
+
+/// orbit-lsp's version.
+pub const version: string;
+
+/// A fresh workspace rooted at `root`, with `search_path` tried before the default
+/// `package.path` templates.
+pub fn configure(root: string, search_path: [string]);
+/// The editor's text of `path`, which wins over the file on disk.
+pub fn open(path: string, text: string);
+/// Go back to the file on disk.
+pub fn close(path: string);
+/// A file's text: the editor's, a stub's, or the file's on disk.
+pub fn text(path: string) -> string?;
+pub fn diagnostics(path: string) -> [Diagnostic];
+pub fn symbols(path: string) -> [Symbol];
+pub fn definition(path: string, offset: int) -> Location?;
+pub fn references(path: string, offset: int) -> [Reference]?;
+pub fn rename_target(path: string, offset: int) -> RenameTarget?;
+pub fn hover(path: string, offset: int) -> Hover?;
+pub fn completions(path: string, offset: int) -> Completions;
+pub fn signature(path: string, offset: int) -> Signature?;
+pub fn inlay_hints(path: string, start: int, end: int) -> [InlayHint];
+/// Start, end and kind of each token, flat.
+pub fn tokens(path: string) -> [any];
+/// Start, end and kind (`region` or `comment`) of what can fold, flat.
+pub fn folds(path: string) -> [any];
+pub fn workspace_symbols() -> [WorkspaceSymbol];

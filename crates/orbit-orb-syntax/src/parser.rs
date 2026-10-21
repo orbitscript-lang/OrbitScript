@@ -2349,6 +2349,13 @@ impl Parser<'_> {
                     self.advance()?;
                     MapEntry::Named(sym, span, self.expr()?)
                 }
+                // A keyword key (`struct: 1`) cut off before its `:`: more input may follow.
+                TokenKind::Keyword(_)
+                    if self.peek()? == TokenKind::Eof && self.lx.at_source_end() =>
+                {
+                    let d = self.error(self.tok.span, "expected `:` after the key");
+                    return Err(d.at_eof());
+                }
                 _ => {
                     let e = self.expr()?;
                     if self.eat(Punct::Colon)? {

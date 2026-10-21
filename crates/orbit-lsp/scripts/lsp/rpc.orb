@@ -1,0 +1,80 @@
+//! JSON-RPC 2.0 over standard input and output, each message framed by a
+//! `Content-Length` header, as LSP sends it. Messages are JSON as
+//! `std.json` decodes it, so their contents are `any`.
+//! orbit-check: strict
+
+use std::json;
+
+/// Whether `v` is there: neither missing nor JSON's `null`.
+pub fn present(v: any) -> bool {
+    v != nil && v != json::null
+}
+
+/// The next message, or nil at the end of the input. A body that isn't
+/// JSON comes back as `#{ invalid: message }`.
+pub fn read() -> any {
+    loop {
+        let mut length: int? = nil;
+        loop {
+            let line = io::read("l");
+            if line == nil {
+                return nil;
+            }
+            let line = string::gsub(line, "\r$", "");
+            if line == "" {
+                break;
+            }
+            let n = string::match(line, "^[Cc]ontent%-[Ll]ength:%s*(%d+)");
+            if n != nil {
+                length = math::tointeger(n);
+            }
+        }
+        // Headers without a length frame nothing: wait for the next ones.
+        if length != nil {
+            let body = io::read(length);
+            if body == nil {
+                return nil;
+            }
+            let (msg, err) = json::decode(body);
+            if msg == nil {
+                return #{ invalid: err };
+            }
+            return msg;
+        }
+    }
+}
+
+/// Send `msg` with its header.
+pub fn send(msg: table) {
+    let body = json::encode(msg);
+    io::stdout.write(f"Content-Length: {#body}\r\n\r\n", body);
+    io::stdout.flush();
+}
+
+/// Answer request `id` with `result` (nil sends JSON's `null`).
+pub fn respond(id: any, result: any) {
+    send(#{ jsonrpc: "2.0", id: id, result: if result == nil { json::null } else { result } });
+}
+
+/// Answer request `id` with an error.
+pub fn fail(id: any, code: int, message: string) {
+    send(#{ jsonrpc: "2.0", id: id, error: #{ code: code, message: message } });
+}
+
+pub fn notify(method: string, params: table) {
+    send(#{ jsonrpc: "2.0", method: method, params: params });
+}
+
+/// A line in the editor's log of the server (standard error).
+pub fn log(text: string) {
+    io::stderr.write("orbit-lsp: ", text, "\n");
+}
+
+// JSON-RPC's error codes.
+pub const PARSE_ERROR: int = -32700;
+pub const INVALID_REQUEST: int = -32600;
+pub const METHOD_NOT_FOUND: int = -32601;
+pub const INVALID_PARAMS: int = -32602;
+pub const INTERNAL_ERROR: int = -32603;
+pub const SERVER_NOT_INITIALIZED: int = -32002;
+pub const REQUEST_FAILED: int = -32803;
