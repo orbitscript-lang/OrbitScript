@@ -43,9 +43,6 @@ fn line_starts(text: string) -> [int] {
     starts
 }
 
-/// The byte `\r`.
-const CR: int = 0x0D;
-
 /// How many bytes the UTF-8 character that byte `b` starts takes: 0 for a
 /// continuation byte (`0b10xxxxxx`), which starts none.
 fn utf8_length(b: int) -> int {
@@ -105,7 +102,7 @@ impl Text {
             return #self.text;
         }
         let mut end = self.lines[line + 1] - 1;
-        if end > self.lines[line] && string::byte(self.text, end) == CR {
+        if end > self.lines[line] && string::byte(self.text, end) == b'\r' {
             end -= 1;
         }
         end
