@@ -70,9 +70,9 @@ pub struct Params {
     /// old table, a small young generation means more minor collections,
     /// each retracing most of the table (Tym, 2026-10-20).
     pub minor_max_bytes: usize,
-    /// Generational mode: an object whose indexed part has at least this
-    /// many elements is remembered by part ([`Heap::barrier_at`]) instead
-    /// of whole. 1024 by default.
+    /// An object whose indexed part has at least this many elements is
+    /// remembered by part ([`Heap::barrier_at`]) instead of whole. 1024 by
+    /// default.
     pub card_min_len: usize,
     /// Elements per remembered part (card). 128 by default.
     pub card_slots: usize,
@@ -459,9 +459,9 @@ impl<S: Space> Heap<S> {
     }
 
     /// [`Heap::barrier_back`] for a store into element `at` of `gc`'s
-    /// indexed part ([`Trace::parts`]). In generational mode,
-    /// between major collections' marking, a big old object then records
-    /// only the part written, and minor collections retrace just those
+    /// indexed part ([`Trace::parts`]). A big object already traced then
+    /// records only the part written, and the end of marking (or, in
+    /// generational mode, the next minor collection) retraces just those
     /// parts through [`Trace::trace_part`].
     #[inline(always)]
     pub fn barrier_at<T>(&mut self, gc: Gc<T>, at: usize)
@@ -486,8 +486,7 @@ impl<S: Space> Heap<S> {
             index,
             generation: Gen::default(),
         };
-        if self.state == State::Mark || len < self.params.card_min_len || at >= len || *c & NEW != 0
-        {
+        if len < self.params.card_min_len || at >= len || *c & NEW != 0 {
             *c = (*c & !COLOR) | GRAY;
             self.retrace.push(g);
             return;
@@ -1291,6 +1290,42 @@ impl<S: Space> Heap<S> {
         }
     }
 
+    /// At the end of marking: trace the parts of black objects written
+    /// since they were traced. Weak ones are traced whole.
+    fn trace_marked_cards(&mut self) {
+        self.card_index.clear();
+        let slots = self.params.card_slots.max(1);
+        for (g, bits) in std::mem::take(&mut self.cards) {
+            let c = self.marks.meta[g.kind as usize].color[g.index as usize];
+            if c & COLOR != BLACK {
+                continue;
+            }
+            let mut m = Marker {
+                space: &self.space,
+                marks: &mut self.marks,
+                weak: None,
+                can_register: true,
+            };
+            'cards: for (w, &word) in bits.iter().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let card = w * 64 + word.trailing_zeros() as usize;
+                    word &= word - 1;
+                    let range = card * slots..(card + 1) * slots;
+                    if !self
+                        .space
+                        .trace_slot_part(g.kind, g.index, Some(range), &mut m)
+                    {
+                        let c = &mut m.marks.meta[g.kind as usize].color[g.index as usize];
+                        *c = (*c & !COLOR) | GRAY;
+                        m.marks.gray.push(g);
+                        break 'cards;
+                    }
+                }
+            }
+        }
+    }
+
     /// In a minor collection: retrace an old object remembered whole. A big
     /// one ([`Trace::parts`]) is traced by part, and afterwards only the
     /// parts that refer to objects staying young stay remembered, unless
@@ -1420,6 +1455,7 @@ impl<S: Space> Heap<S> {
         // Roots are rescanned, so writes to them need no barrier.
         if !MINOR {
             self.mark_roots(roots);
+            self.trace_marked_cards();
         }
         self.drain::<MINOR>();
         self.dedup_weak();

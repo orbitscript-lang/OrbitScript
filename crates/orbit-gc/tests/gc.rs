@@ -826,3 +826,32 @@ fn stress_mode_steps_only_after_allocating() {
     }
     assert!(h.cycles() > 1);
 }
+
+#[test]
+fn a_part_written_after_tracing_is_retraced_at_the_end_of_marking() {
+    let mut roots = Stack(Vec::new());
+    let mut h = TestHeap::with_params(orbit_gc::Params {
+        card_min_len: 8,
+        card_slots: 4,
+        ..Default::default()
+    });
+    for i in 0..200 {
+        let o = obj(&mut h, 1000 + i);
+        roots.0.push(Ref::Obj(o));
+    }
+    let big = obj(&mut h, 1);
+    for i in 0..16 {
+        let f = obj(&mut h, 100 + i);
+        link(&mut h, big, Ref::Obj(f));
+    }
+    // Last root, so the first one traced.
+    roots.0.push(Ref::Obj(big));
+    h.step_with(&mut roots, 1);
+    assert_eq!(h.phase(), Phase::Mark);
+    let late = obj(&mut h, 2);
+    set_strong(&mut h, big, 9, Ref::Obj(late));
+    while h.phase() != Phase::Pause {
+        h.step_with(&mut roots, 1);
+    }
+    assert!(h.is_live(late), "stored after its owner was traced");
+}
