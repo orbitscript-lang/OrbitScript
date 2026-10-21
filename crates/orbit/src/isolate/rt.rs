@@ -6,13 +6,9 @@ use orbit_runtime::object as raw;
 use orbit_runtime::stdlib::{self, Lib};
 use orbit_runtime::vm::{self, CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn, Vm};
 
-use crate::chunk::Chunk;
 use crate::compiler;
-use crate::error::Error;
-use crate::pin::Pinned;
 use crate::scope::{Scope, Shared};
 use crate::stack::{Control, Stack};
-use crate::value::{Function, Table};
 
 #[cfg(feature = "verify")]
 use super::BinaryChecks;
@@ -111,21 +107,6 @@ impl Isolate {
     /// Send standard output (`print`, `io.stdout`) to `out`.
     pub fn set_stdout(&mut self, out: impl std::io::Write + std::fmt::Debug + 'static) {
         self.vm.rt.out = Box::new(out);
-    }
-
-    /// Load and run a chunk, dropping its results.
-    pub fn exec(&mut self, chunk: Chunk<'_>) -> Result<(), Error> {
-        self.scope(|s| s.load(chunk)?.call(()).map(drop))
-    }
-
-    /// Load a chunk and keep its main function.
-    pub fn load(&mut self, chunk: Chunk<'_>) -> Result<Pinned<Function<'static>>, Error> {
-        self.scope(|s| Ok(s.load(chunk)?.pin()))
-    }
-
-    /// The global table, pinned.
-    pub fn globals(&mut self) -> Pinned<Table<'static>> {
-        self.scope(|s| s.globals().pin())
     }
 
     /// The collector.
