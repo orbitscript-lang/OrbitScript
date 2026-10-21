@@ -77,6 +77,23 @@ pub enum Type {
 }
 
 impl Type {
+    /// The type with Lua's code `code`.
+    pub fn from_code(code: i32) -> Option<Type> {
+        Some(match code {
+            -1 => Type::None,
+            0 => Type::Nil,
+            1 => Type::Boolean,
+            2 => Type::LightUserdata,
+            3 => Type::Number,
+            4 => Type::String,
+            5 => Type::Table,
+            6 => Type::Function,
+            7 => Type::Userdata,
+            8 => Type::Thread,
+            _ => return None,
+        })
+    }
+
     /// The name `type` gives (`"no value"` for [`Type::None`]).
     pub fn name(self) -> &'static str {
         match self {
@@ -108,16 +125,45 @@ pub enum Status {
     Handler = 5,
 }
 
-/// A comparison for [`Stack::compare`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompareOp {
-    Eq,
-    Lt,
-    Le,
+impl Status {
+    /// The status with Lua's code `code`.
+    pub fn from_code(code: i32) -> Option<Status> {
+        Some(match code {
+            0 => Status::Ok,
+            1 => Status::Yield,
+            2 => Status::Runtime,
+            3 => Status::Syntax,
+            4 => Status::Memory,
+            5 => Status::Handler,
+            _ => return None,
+        })
+    }
 }
 
-/// An operator for [`Stack::arith`], in Lua's `LUA_OP*` order.
+/// A comparison for [`Stack::compare`], with Lua's `LUA_OP*` codes as
+/// discriminants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CompareOp {
+    Eq = 0,
+    Lt = 1,
+    Le = 2,
+}
+
+impl CompareOp {
+    /// All of them, by Lua's code.
+    pub const ALL: [CompareOp; 3] = [CompareOp::Eq, CompareOp::Lt, CompareOp::Le];
+
+    /// The comparison with Lua's code `code`.
+    pub fn from_code(code: u8) -> Option<CompareOp> {
+        CompareOp::ALL.get(usize::from(code)).copied()
+    }
+}
+
+/// An operator for [`Stack::arith`], in Lua's `LUA_OP*` order, so its
+/// discriminant is Lua's code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ArithOp {
     Add,
     Sub,
@@ -154,14 +200,21 @@ impl ArithOp {
         ArithOp::BNot,
     ];
 
+    /// The operator with Lua's code `code`.
+    pub fn from_code(code: u8) -> Option<ArithOp> {
+        ArithOp::ALL.get(usize::from(code)).copied()
+    }
+
     #[cfg(runtime_backend)]
     fn unary(self) -> bool {
         matches!(self, ArithOp::Unm | ArithOp::BNot)
     }
 }
 
-/// A collector parameter for [`GcOp::Param`], in Lua's `LUA_GCP*` order.
+/// A collector parameter for [`GcOp::Param`], in Lua's `LUA_GCP*` order,
+/// so its discriminant is Lua's code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum GcParam {
     MinorMul,
     MajorMinor,
@@ -169,6 +222,23 @@ pub enum GcParam {
     Pause,
     StepMul,
     StepSize,
+}
+
+impl GcParam {
+    /// All of them, by Lua's code.
+    pub const ALL: [GcParam; 6] = [
+        GcParam::MinorMul,
+        GcParam::MajorMinor,
+        GcParam::MinorMajor,
+        GcParam::Pause,
+        GcParam::StepMul,
+        GcParam::StepSize,
+    ];
+
+    /// The parameter with Lua's code `code`.
+    pub fn from_code(code: u8) -> Option<GcParam> {
+        GcParam::ALL.get(usize::from(code)).copied()
+    }
 }
 
 /// What [`Stack::gc`] does (Lua's `lua_gc` options).
