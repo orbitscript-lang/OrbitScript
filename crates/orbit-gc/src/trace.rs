@@ -173,6 +173,18 @@ pub trait Roots<S: Space> {
     fn clear_weak(&mut self, live: &Liveness<'_, S>) {
         let _ = live;
     }
+
+    /// Optionally, do part of [`Roots::clear_weak`]'s work later, in steps.
+    /// After a full marking (not [minor](Liveness::is_minor)), the collector
+    /// calls this with about `budget` entries' worth of work per step,
+    /// until it returns true, and frees nothing before then. So a weak
+    /// reference to an unreachable object stays valid until this drops it;
+    /// one handed out again meanwhile must be
+    /// [revived](crate::Heap::revive).
+    fn sweep_weak(&mut self, live: &Liveness<'_, S>, budget: usize) -> bool {
+        let _ = (live, budget);
+        true
+    }
 }
 
 impl<S: Space, F: Fn(&mut Marker<'_, S>)> Roots<S> for F {
@@ -364,7 +376,14 @@ impl KindMeta {
     /// colors.
     pub(crate) fn release_page(&mut self, p: u32) {
         debug_assert_eq!(self.pages[p as usize].live, 0);
-        self.pages[p as usize] = PageMeta::default();
+        // Keep the free list's buffer (2 bytes a slot at most), so a page
+        // reused after release doesn't regrow it slot by slot.
+        let mut free = std::mem::take(&mut self.pages[p as usize].free);
+        free.clear();
+        self.pages[p as usize] = PageMeta {
+            free,
+            ..PageMeta::default()
+        };
         self.allocated -= 1;
         self.open.remove(&p);
         if self.cur == Some(p) {
