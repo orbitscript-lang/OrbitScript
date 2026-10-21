@@ -1265,8 +1265,15 @@ impl<'a> Control<'a> {
     }
 
     pub fn register_native<N: Native>(&mut self, data: [u64; 2]) -> NativeRef {
-        let f = SBox::new(NativeObj::<N>(Rc::clone(&self.host), PhantomData)).into();
-        let id = self.c.register_native(N::NAME.into(), f);
+        // The boundary registers a program native once, then copies it with
+        // `data`, so reuse `N`'s first registration as `Stack::native` does.
+        let cached = self.host.natives.borrow().get(N::NAME).copied();
+        let id = cached.unwrap_or_else(|| {
+            let f = SBox::new(NativeObj::<N>(Rc::clone(&self.host), PhantomData)).into();
+            let id = self.c.register_native(N::NAME.into(), f);
+            self.host.natives.borrow_mut().insert(N::NAME, id);
+            id
+        });
         NativeRef(self.c.register_native_data(
             id,
             Pair {
