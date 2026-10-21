@@ -145,3 +145,44 @@ fn switching_modes_keeps_reachable_objects() {
     h.full_collect(&mut roots);
     assert_eq!(h.bytes(), 0);
 }
+
+#[test]
+fn a_big_old_object_is_remembered_by_part() {
+    let mut roots = Stack(Vec::new());
+    let mut h = TestHeap::with_params(orbit_gc::Params {
+        card_min_len: 8,
+        card_slots: 4,
+        ..Default::default()
+    });
+    h.set_mode(Mode::Generational, &mut roots);
+    let big = obj(&mut h, 1);
+    let fillers: Vec<_> = (0..16).map(|i| obj(&mut h, 100 + i)).collect();
+    for &f in &fillers {
+        link(&mut h, big, Ref::Obj(f));
+    }
+    roots.0.push(Ref::Obj(big));
+    minor(&mut h, &mut roots);
+    minor(&mut h, &mut roots);
+    // `big` and its elements are old. Overwrite two elements in different
+    // parts with young objects reachable only through them.
+    let a = obj(&mut h, 2);
+    let b = obj(&mut h, 3);
+    set_strong(&mut h, big, 1, Ref::Obj(a));
+    set_strong(&mut h, big, 13, Ref::Obj(b));
+    for _ in 0..4 {
+        minor(&mut h, &mut roots);
+        assert!(
+            h.is_live(a) && h.is_live(b),
+            "young objects in written parts kept"
+        );
+    }
+    // Promoted now: overwriting them leaves old garbage for a major.
+    let c = obj(&mut h, 4);
+    set_strong(&mut h, big, 1, Ref::Obj(c));
+    minor(&mut h, &mut roots);
+    assert!(h.is_live(c));
+    assert!(h.is_live(a), "old garbage waits for a major collection");
+    h.full_collect(&mut roots);
+    assert!(!h.is_live(a));
+    assert!(h.is_live(b) && h.is_live(c));
+}

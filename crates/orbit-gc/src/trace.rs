@@ -35,6 +35,16 @@ pub trait Space: Sized {
     #[doc(hidden)]
     fn trace_slot(&self, kind: u8, index: u32, m: &mut Marker<'_, Self>) -> usize;
     #[doc(hidden)]
+    fn slot_parts(&self, kind: u8, index: u32) -> usize;
+    #[doc(hidden)]
+    fn trace_slot_part(
+        &self,
+        kind: u8,
+        index: u32,
+        range: Option<core::ops::Range<usize>>,
+        m: &mut Marker<'_, Self>,
+    ) -> bool;
+    #[doc(hidden)]
     fn clear_slot(&mut self, kind: u8, index: u32, mode: WeakMode, live: &Liveness<'_, Self>);
     #[doc(hidden)]
     fn free_slot(&mut self, kind: u8, index: u32) -> usize;
@@ -71,6 +81,30 @@ pub trait Trace<S: Space>: Sized {
 
     /// Report the handles this object holds.
     fn trace(&self, m: &mut Marker<'_, S>);
+
+    /// How many elements the object's indexed part (a Lua table's array
+    /// part) has, if it may be traced in parts; 0, the default, if not.
+    /// Called on stores, so keep it cheap.
+    ///
+    /// A generational collector retraces a big old object that refers to
+    /// young objects by part: only the parts that do, and the parts
+    /// written since ([`Heap::barrier_at`](crate::Heap::barrier_at)), plus
+    /// the rest of the object when an ordinary barrier remembered it. So
+    /// every store into the indexed part must go through `barrier_at`, and
+    /// every other store through the ordinary barriers.
+    fn parts(&self) -> usize {
+        0
+    }
+
+    /// With [`Trace::parts`] above 0: report the handles in `range` of the
+    /// indexed part (it may extend past the end), or with `None` every
+    /// handle outside it. The two together must report what
+    /// [`Trace::trace`] does. Return false, reporting nothing, when the
+    /// object must be traced whole this time (a weak table, say).
+    fn trace_part(&self, m: &mut Marker<'_, S>, range: Option<core::ops::Range<usize>>) -> bool {
+        let _ = (m, range);
+        false
+    }
 
     /// Bytes this object owns outside its arena slot (a `Vec`'s buffer, a
     /// string's bytes), for pacing and [`Heap::bytes`](crate::Heap::bytes).
@@ -416,6 +450,9 @@ impl Hasher for SlotHasher {
         self.0
     }
 }
+
+/// Card sets by object slot.
+pub(crate) type CardIndex = HashMap<(u8, u32), usize, BuildHasherDefault<SlotHasher>>;
 
 /// Ephemeron values by the slot of the unmarked key they wait on.
 pub(crate) type WaitMap = HashMap<(u8, u32), WaitList, BuildHasherDefault<SlotHasher>>;

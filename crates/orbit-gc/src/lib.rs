@@ -205,6 +205,32 @@ macro_rules! space {
                     ::core::unreachable!()
                 }
 
+                fn slot_parts(&self, kind: u8, index: u32) -> usize {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return $crate::__private::parts::<Self, $ty, _>(&self.$field, index);
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
+                fn trace_slot_part(
+                    &self,
+                    kind: u8,
+                    index: u32,
+                    range: ::core::option::Option<::core::ops::Range<usize>>,
+                    m: &mut $crate::Marker<'_, Self>,
+                ) -> bool {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return $crate::__private::trace_part::<Self, $ty, _>(
+                                &self.$field, index, range, m,
+                            );
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
                 fn clear_slot(
                     &mut self,
                     kind: u8,
@@ -298,6 +324,21 @@ pub mod __private {
         let obj = a.get_slot(index);
         obj.trace(m);
         slot_size::<T>() + obj.extra_bytes()
+    }
+
+    #[inline]
+    pub fn parts<S: Space, T: Trace<S>, const N: usize>(a: &Arena<T, N>, index: u32) -> usize {
+        a.get_slot(index).parts()
+    }
+
+    #[inline]
+    pub fn trace_part<S: Space, T: Trace<S>, const N: usize>(
+        a: &Arena<T, N>,
+        index: u32,
+        range: Option<core::ops::Range<usize>>,
+        m: &mut Marker<'_, S>,
+    ) -> bool {
+        a.get_slot(index).trace_part(m, range)
     }
 
     pub fn clear<S: Space, T: Trace<S>, const N: usize>(

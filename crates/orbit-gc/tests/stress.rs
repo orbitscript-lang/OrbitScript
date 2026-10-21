@@ -108,6 +108,8 @@ fn run(seed: u64, ops: usize, stress: bool, modes: Modes) {
         step_bytes: 64,
         min_threshold: 4096,
         minor_min_bytes: 512,
+        card_min_len: 3,
+        card_slots: 2,
         ..Default::default()
     });
     h.set_stress(stress);
@@ -173,7 +175,11 @@ fn run(seed: u64, ops: usize, stress: bool, modes: Modes) {
                 // Store one reachable object into another (cycles included).
                 if let (Some(a), Some(b)) = (pick(&mut rng, &h, &roots), pick(&mut rng, &h, &roots))
                 {
-                    if rng.below(2) == 0 {
+                    let n = h.get(a).strong.len();
+                    if n > 0 && rng.below(3) == 0 {
+                        // Overwrite an element: remembered by part.
+                        set_strong(&mut h, a, rng.below(n), Ref::Obj(b));
+                    } else if rng.below(2) == 0 {
                         link(&mut h, a, Ref::Obj(b));
                     } else {
                         let c = pick(&mut rng, &h, &roots).unwrap();
