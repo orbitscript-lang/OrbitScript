@@ -73,7 +73,7 @@ fn package_field(ctx: &mut NativeCtx<'_>, field: &[u8]) -> Value {
 /// Return one message string from a searcher.
 fn ret_msg(ctx: &mut NativeCtx<'_>, msg: Vec<u8>) -> R {
     let m = ctx.new_str_owned(msg);
-    ctx.ret1(m)
+    ctx.ret([m])
 }
 
 fn search_preload(ctx: &mut NativeCtx<'_>) -> R {
@@ -118,7 +118,7 @@ fn require(ctx: &mut NativeCtx<'_>) -> R {
     let loaded = loaded_table(ctx)?;
     let v = tbl::get(&ctx.vm.heap, loaded, Value::Str(s));
     if !v.is_falsy() {
-        return ctx.ret1(v);
+        return ctx.ret([v]);
     }
     let Value::Table(searchers) = package_field(ctx, b"searchers") else {
         return Err(ctx.error("'package.searchers' must be a table"));
@@ -222,5 +222,5 @@ fn loader_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     }
     let extra = ctx.arg(EXTRA);
     ctx.truncate(0);
-    ctx.ret2(v, extra)
+    ctx.ret([v, extra])
 }

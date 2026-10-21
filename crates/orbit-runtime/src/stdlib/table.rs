@@ -95,7 +95,7 @@ fn concat(ctx: &mut NativeCtx<'_>) -> R {
         k += 1;
     }
     let r = ctx.new_str_owned(out);
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn unpack(ctx: &mut NativeCtx<'_>) -> R {
@@ -174,7 +174,7 @@ fn move_(ctx: &mut NativeCtx<'_>) -> R {
             }
         }
     }
-    ctx.ret1(Value::Table(a2))
+    ctx.ret([Value::Table(a2)])
 }
 
 fn create(ctx: &mut NativeCtx<'_>) -> R {
@@ -197,5 +197,5 @@ fn create(ctx: &mut NativeCtx<'_>) -> R {
         return Err(ctx.no_memory());
     };
     let t = ctx.new_table(t);
-    ctx.ret1(Value::Table(t))
+    ctx.ret([Value::Table(t)])
 }

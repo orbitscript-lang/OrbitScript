@@ -256,9 +256,9 @@ fn checkint(ctx: &mut NativeCtx<'_>) -> R {
         _ => None,
     };
     match num {
-        Some(Value::Int(i)) => ctx.ret1(Value::Int(i)),
+        Some(Value::Int(i)) => ctx.ret([Value::Int(i)]),
         Some(Value::Float(f)) => match float_to_int(f) {
-            Some(i) => ctx.ret1(Value::Int(i)),
+            Some(i) => ctx.ret([Value::Int(i)]),
             None => Err(ctx.builtin_arg_error(n, "number has no integer representation")),
         },
         _ => Err(ctx.builtin_type_error(n, "number", Some(v))),
@@ -282,9 +282,9 @@ fn lenint(ctx: &mut NativeCtx<'_>) -> R {
         _ => Some(v),
     };
     match n {
-        Some(Value::Int(n)) => ctx.ret1(Value::Int(n)),
+        Some(Value::Int(n)) => ctx.ret([Value::Int(n)]),
         Some(Value::Float(f)) if float_to_int(f).is_some() => {
-            ctx.ret1(Value::Int(float_to_int(f).unwrap_or(0)))
+            ctx.ret([Value::Int(float_to_int(f).unwrap_or(0))])
         }
         _ => Err(ctx.builtin_error("object length is not an integer")),
     }
@@ -301,9 +301,9 @@ fn lenint_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
 /// `ult(a, b)`: unsigned `a < b` for integers.
 fn ult(ctx: &mut NativeCtx<'_>) -> R {
     let (Value::Int(a), Value::Int(b)) = (ctx.arg(0), ctx.arg(1)) else {
-        return ctx.ret1(Value::Bool(false));
+        return ctx.ret([Value::Bool(false)]);
     };
-    ctx.ret1(Value::Bool((a as u64) < (b as u64)))
+    ctx.ret([Value::Bool((a as u64) < (b as u64))])
 }
 
 fn ult_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
@@ -326,7 +326,7 @@ fn newarray(ctx: &mut NativeCtx<'_>) -> R {
         return Err(ctx.no_memory());
     };
     let t = ctx.new_table(t);
-    ctx.ret1(Value::Table(t))
+    ctx.ret([Value::Table(t)])
 }
 
 /// `metafield(v, name)`: field `name` of `v`'s metatable, raw, or nil.
@@ -336,7 +336,7 @@ fn metafield(ctx: &mut NativeCtx<'_>) -> R {
         (Some(mt), k @ Value::Str(_)) => ctx.vm.heap.get(mt).get(&ctx.vm.heap, k),
         _ => Value::Nil,
     };
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 /// `plainlen(t)`: `#t` for a table without a metatable, so nothing can
@@ -349,7 +349,7 @@ fn plainlen(ctx: &mut NativeCtx<'_>) -> R {
         }
         _ => Value::Nil,
     };
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 fn plainlen_fast(heap: &LuaHeap, args: &[Value]) -> Option<Value> {
@@ -366,7 +366,7 @@ fn plainlen_fast(heap: &LuaHeap, args: &[Value]) -> Option<Value> {
 /// equal elements (`1` and `1.0`) keep their order either way.
 fn sortprim(ctx: &mut NativeCtx<'_>) -> R {
     let (Value::Table(a), Value::Int(n)) = (ctx.arg(0), ctx.arg(1)) else {
-        return ctx.ret1(Value::Bool(false));
+        return ctx.ret([Value::Bool(false)]);
     };
     let heap = &ctx.vm.heap;
     let tab = heap.get(a);
@@ -378,7 +378,7 @@ fn sortprim(ctx: &mut NativeCtx<'_>) -> R {
     });
     let strings = !numbers && values.iter().all(|v| matches!(v, Value::Str(_)));
     if !numbers && !strings {
-        return ctx.ret1(Value::Bool(false));
+        return ctx.ret([Value::Bool(false)]);
     }
     let mut values = values;
     values.sort_by(|&x, &y| {
@@ -395,7 +395,7 @@ fn sortprim(ctx: &mut NativeCtx<'_>) -> R {
         crate::object::table::set_int(&mut ctx.vm.heap, a, i as i64 + 1, v)
             .map_err(|_| ctx.no_memory())?;
     }
-    ctx.ret1(Value::Bool(true))
+    ctx.ret([Value::Bool(true)])
 }
 
 /// `require(name)` inside a built-in module, which `use` calls: only
@@ -413,5 +413,5 @@ fn require(ctx: &mut NativeCtx<'_>) -> R {
     if found.is_nil() {
         return Err(ctx.builtin_error("built-in modules can only use 'intrinsics'"));
     }
-    ctx.ret1(found)
+    ctx.ret([found])
 }

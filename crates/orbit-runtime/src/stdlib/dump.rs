@@ -26,7 +26,7 @@ fn dump(ctx: &mut NativeCtx<'_>) -> R {
     let chunk = unlink(&ctx.vm.heap, root);
     let bytes = format::encode(&chunk, strip);
     let s = ctx.new_str_owned(bytes);
-    ctx.ret1(s)
+    ctx.ret([s])
 }
 
 /// Rebuild the plain-data chunk whose main function is `root`. Prototypes

@@ -113,7 +113,7 @@ fn arith(ctx: &mut NativeCtx<'_>, op: Op) -> R {
     };
     if let Some(r) = r {
         let r = r.map_err(|e| ctx.error(e.message()))?;
-        return ctx.ret1(Value::from(r));
+        return ctx.ret([Value::from(r)]);
     }
     // The second operand's own metamethod gets a turn, unless it is a
     // string (whose metamethod is this one).
@@ -144,5 +144,5 @@ fn arith(ctx: &mut NativeCtx<'_>, op: Op) -> R {
 /// Return the first value the other operand's metamethod returned.
 fn forward(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> R {
     let v = crate::stdlib::first_result(ctx, out)?;
-    ctx.ret1(v)
+    ctx.ret([v])
 }

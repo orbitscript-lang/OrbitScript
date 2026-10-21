@@ -122,10 +122,10 @@ fn unlinked(
 /// Return the function, or nil and the message.
 fn ret_loaded(ctx: &mut NativeCtx<'_>, r: Result<Value, String>) -> R {
     match r {
-        Ok(f) => ctx.ret1(f),
+        Ok(f) => ctx.ret([f]),
         Err(msg) => {
             let m = ctx.new_str(msg.as_bytes());
-            ctx.ret2(Value::Nil, m)
+            ctx.ret([Value::Nil, m])
         }
     }
 }
@@ -197,7 +197,7 @@ fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         CallOutcome::Ok(n) => n,
         CallOutcome::Err(e) => {
             ctx.truncate(0);
-            return ctx.ret2(Value::Nil, e);
+            return ctx.ret([Value::Nil, e]);
         }
     };
     let first = ctx.len() - n;
@@ -224,7 +224,7 @@ fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             let msg = format!("{}reader function must return a string", ctx.where_(1));
             let m = ctx.new_str(msg.as_bytes());
             ctx.truncate(0);
-            return ctx.ret2(Value::Nil, m);
+            return ctx.ret([Value::Nil, m]);
         }
     };
     if !done {

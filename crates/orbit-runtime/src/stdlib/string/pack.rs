@@ -345,7 +345,7 @@ pub(crate) fn pack(ctx: &mut NativeCtx<'_>) -> R {
         }
     }
     let r = ctx.new_str_owned(out);
-    ctx.ret1(r)
+    ctx.ret([r])
 }
 
 pub(crate) fn packsize(ctx: &mut NativeCtx<'_>) -> R {
@@ -366,7 +366,7 @@ pub(crate) fn packsize(ctx: &mut NativeCtx<'_>) -> R {
             _ => return Err(ctx.arg_error(0, "format result too large")),
         }
     }
-    ctx.ret1(Value::Int(total as i64))
+    ctx.ret([Value::Int(total as i64)])
 }
 
 pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {

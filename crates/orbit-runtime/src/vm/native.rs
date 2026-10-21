@@ -391,19 +391,14 @@ impl NativeCtx<'_> {
         }
     }
 
-    /// Return one value.
+    /// Return `N` values, as in `ctx.ret([v])` or, for failing library
+    /// functions, `ctx.ret([Value::Nil, msg])`.
     #[inline]
-    pub fn ret1(&mut self, v: Value) -> Result<NativeReturn, LuaError> {
-        self.push(v);
-        Ok(NativeReturn::Return(1))
-    }
-
-    /// Return two values: `nil` or `false` and an error, as failing library
-    /// functions do.
-    pub fn ret2(&mut self, a: Value, b: Value) -> Result<NativeReturn, LuaError> {
-        self.push(a);
-        self.push(b);
-        Ok(NativeReturn::Return(2))
+    pub fn ret<const N: usize>(&mut self, vals: [Value; N]) -> Result<NativeReturn, LuaError> {
+        for v in &vals {
+            self.push(*v);
+        }
+        Ok(NativeReturn::Return(N))
     }
 
     /// The function value of a native registered under `name`, registering
