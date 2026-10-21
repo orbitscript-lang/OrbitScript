@@ -1,12 +1,15 @@
 //! The native-function interface (ADR-3's continuation style).
 
-use crate::object::number::{self, float_to_int};
-use crate::object::{Gc, LuaStr, NativeId, Table, Value};
-use orbit_bytecode::{Op, Origin};
+use std::rc::Rc;
 
+use crate::object::number::{self, float_to_int};
+use crate::object::{Cell, Closure, Gc, LuaStr, NativeId, Proto, ProtoCode, Table, Value};
+use orbit_bytecode::{FunctionName, Op, Origin};
+
+use crate::vm::interp::Flow;
 use crate::vm::meta::{self, MetaField};
 use crate::vm::ops::Exc;
-use crate::vm::{FrameKind, LuaError, ops};
+use crate::vm::{FrameKind, LuaError, Vm, ops};
 
 /// The outcome of an operation that may need a metamethod: either the
 /// answer, or a function to call. For [`Meta::Call`] the arguments are
@@ -415,19 +418,10 @@ impl NativeCtx<'_> {
     /// `f` under that name the first time. For natives that return other
     /// natives (`pairs` returns `next`).
     pub fn native(&mut self, name: &'static str, f: NativeFn) -> Value {
-        if let Some(&id) = self.vm.rt.native_ids.get(name) {
-            return Value::Native(id);
+        match self.vm.rt.native_ids.get(name) {
+            Some(&id) => Value::Native(id),
+            None => self.vm.register_native(name, f),
         }
-        let id = NativeId(self.vm.rt.natives.len() as u32);
-        self.vm.rt.natives.push(crate::vm::Native {
-            name,
-            f,
-            fast: None,
-            hidden: 0,
-            data: [0; 2],
-        });
-        self.vm.rt.native_ids.insert(name, id);
-        Value::Native(id)
     }
 
     /// A string value (allocated, unrooted until stored in the window).
@@ -496,6 +490,152 @@ impl NativeCtx<'_> {
     /// `tostring` without metamethods, appended to `out`.
     pub fn display(&self, v: Value, out: &mut Vec<u8>) {
         ops::display(&self.vm.heap, &self.vm.rt, v, out);
+    }
+
+    // ---- native closures -------------------------------------------------
+
+    /// A function value that runs native `f` (registered as `name`) with
+    /// `upvals` as its upvalues ([`NativeCtx::upvalue`]). It is a closure
+    /// whose prototype is a one-instruction stub, so calling it is an
+    /// ordinary Lua call.
+    pub fn new_closure(
+        &mut self,
+        name: &'static str,
+        f: crate::vm::NativeFn,
+        upvals: &[Value],
+    ) -> Value {
+        self.new_closure_hidden(name, f, upvals, &[])
+    }
+
+    /// [`NativeCtx::new_closure`], plus `hidden` upvalues that scripts can't
+    /// see or change through the debug library, for state a native must be
+    /// able to trust ([`NativeCtx::hidden_upvalue`]). Every closure of `f`
+    /// has the same number of hidden upvalues.
+    pub fn new_closure_hidden(
+        &mut self,
+        name: &'static str,
+        f: crate::vm::NativeFn,
+        upvals: &[Value],
+        hidden: &[Value],
+    ) -> Value {
+        let Value::Native(id) = self.native(name, f) else {
+            unreachable!("natives are registered as natives")
+        };
+        self.new_native_closure(id, upvals, hidden)
+    }
+
+    /// [`NativeCtx::new_closure_hidden`] for the native already registered
+    /// as `id`, for natives not looked up by name (an embedder's).
+    pub fn new_native_closure(
+        &mut self,
+        id: NativeId,
+        upvals: &[Value],
+        hidden: &[Value],
+    ) -> Value {
+        let n = u8::try_from(hidden.len()).expect("few hidden upvalues");
+        let native = &mut self.vm.rt.natives[id.0 as usize];
+        debug_assert!(
+            native.hidden == n || !self.vm.rt.native_protos.contains_key(&id),
+            "every closure of a native has the same hidden upvalues"
+        );
+        native.hidden = n;
+        let proto = match self.vm.rt.native_protos.get(&id) {
+            Some(&p) => p,
+            None => {
+                let p = self.vm.heap.alloc(stub_proto(id));
+                self.vm.rt.native_protos.insert(id, p);
+                p
+            }
+        };
+        // Hidden upvalues go last, so visible ones keep their indices.
+        let captures: Box<[Gc<Cell>]> = upvals
+            .iter()
+            .chain(hidden)
+            .map(|&value| self.vm.heap.alloc(Cell { value }))
+            .collect();
+        let code = self.vm.heap.get(proto).code.clone();
+        Value::Closure(self.vm.heap.alloc(Closure {
+            proto,
+            code,
+            captures,
+        }))
+    }
+
+    /// Hidden upvalue `i` of the native closure being called (nil outside
+    /// one); see [`NativeCtx::new_closure_hidden`].
+    #[inline]
+    pub fn hidden_upvalue(&self, i: usize) -> Value {
+        let Some(c) = self.upvals else {
+            return Value::Nil;
+        };
+        let caps = &self.vm.heap.get(c).captures;
+        let hidden = self.vm.rt.natives[self.id.0 as usize].hidden as usize;
+        match (i < hidden).then(|| caps[caps.len() - hidden + i]) {
+            Some(cell) => self.vm.heap.get(cell).value,
+            None => Value::Nil,
+        }
+    }
+
+    /// The native behind function `f`: `f` itself, or the native a native
+    /// closure runs. `None` for Lua functions and other values.
+    pub fn native_of(&self, f: Value) -> Option<NativeId> {
+        match f {
+            Value::Native(id) => Some(id),
+            Value::Closure(c) => {
+                let p = self.vm.heap.get(self.vm.heap.get(c).proto);
+                match p.code.code.first() {
+                    Some(Op::NativeEntry { id }) => Some(NativeId(*id)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Hidden upvalue `i` of native closure `f` (nil if it has none).
+    pub fn hidden_upvalue_of(&self, f: Value, i: usize) -> Value {
+        let Value::Closure(c) = f else {
+            return Value::Nil;
+        };
+        let closure = self.vm.heap.get(c);
+        let hidden = self.vm.rt.hidden_upvalues(&self.vm.heap, closure);
+        let caps = &closure.captures;
+        match (i < hidden).then(|| caps[caps.len() - hidden + i]) {
+            Some(cell) => self.vm.heap.get(cell).value,
+            None => Value::Nil,
+        }
+    }
+
+    /// How many visible upvalues the native closure being called has.
+    pub fn upvalue_count(&self) -> usize {
+        match self.upvals {
+            Some(c) => {
+                self.vm.heap.get(c).captures.len()
+                    - self.vm.rt.natives[self.id.0 as usize].hidden as usize
+            }
+            None => 0,
+        }
+    }
+
+    /// Upvalue `i` of the native closure being called, or whose
+    /// continuation is running (nil outside one).
+    pub fn upvalue(&self, i: usize) -> Value {
+        match self.upvals {
+            Some(c) => match self.vm.heap.get(c).captures.get(i) {
+                Some(&cell) => self.vm.heap.get(cell).value,
+                None => Value::Nil,
+            },
+            None => Value::Nil,
+        }
+    }
+
+    /// Set upvalue `i` of the native closure being called.
+    pub fn set_upvalue(&mut self, i: usize, v: Value) {
+        if let Some(c) = self.upvals
+            && let Some(&cell) = self.vm.heap.get(c).captures.get(i)
+        {
+            self.vm.heap.update(cell, |cell| cell.value = v);
+        }
     }
 
     // ---- errors ---------------------------------------------------------
@@ -986,5 +1126,72 @@ impl NativeCtx<'_> {
         let top = self.vm.rt.top;
         self.vm.rt.stack.regs.truncate(top);
         self.vm.heap.full_collect(&mut self.vm.rt);
+    }
+}
+
+/// The prototype of native `id`'s closures: `NativeEntry` and nothing else,
+/// taking any number of arguments.
+fn stub_proto(id: NativeId) -> Proto {
+    let code = [Op::NativeEntry { id: id.0 }];
+    Proto {
+        code: Rc::new(ProtoCode {
+            code: code.as_slice().into(),
+            consts: Box::new([]),
+            caches: Box::new([]),
+            #[cfg(feature = "type-feedback")]
+            feedback: Box::new([std::cell::Cell::new(0)]),
+            nparams: 0,
+            is_vararg: true,
+            nregs: 0,
+            ncells: 0,
+            builtin: false,
+            refuses_yield: false,
+            #[cfg(feature = "debugger")]
+            debug_mark: Default::default(),
+        }),
+        children: Box::new([]),
+        captures: Box::new([]),
+        name: FunctionName::Anonymous,
+        line_defined: 0,
+        last_line: 0,
+        chunk: "[C]".into(),
+        source: Rc::from(b"=[C]".as_slice()),
+        debug: Rc::default(),
+        self_capture: None,
+    }
+}
+
+impl Vm {
+    /// `NativeEntry`: the running frame is native closure `c`'s stub. Pop it
+    /// and run the native in its place, with the frame's arguments.
+    #[inline(never)]
+    pub(crate) fn native_entry(&mut self, c: Gc<Closure>, id: NativeId) -> Result<Flow, Exc> {
+        // Its fields one by one, as in `deliver`.
+        let f = self.rt.stack.frames.last().expect("the stub's frame");
+        let (func, nargs, want) = (f.func as usize, f.nvarargs as usize, f.want);
+        let depth = self.rt.stack.frames.len() - 1;
+        self.rt.stack.frames.truncate(depth);
+        self.rt.top = func + 1 + nargs;
+        let nf = self.rt.natives[id.0 as usize].f;
+        let mut ctx = NativeCtx {
+            vm: self,
+            base: func + 1,
+            nargs,
+            id,
+            upvals: Some(c),
+        };
+        let r = nf(&mut ctx);
+        // A wrapped coroutine's function resumes it: switch at once, from
+        // the fields alone (see `deliver`).
+        if let Ok(NativeReturn::Resume { co, nargs, k, ok }) = r {
+            return self.resume(co, nargs, k, ok, None, func, want, id);
+        }
+        let r = r?;
+        if let NativeReturn::Return(n) = r
+            && self.rt.stack.hook.wants(crate::vm::hook::RETURN)
+        {
+            self.native_return_hook(func, id, n).map_err(Exc::Lua)?;
+        }
+        self.native_returned(r, None, func, want, id)
     }
 }
