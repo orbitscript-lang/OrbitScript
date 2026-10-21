@@ -815,11 +815,15 @@ impl FormatArg {
     }
 }
 
+/// 2^63 as a float: the first float above every `i64`.
+const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+
 fn format<'s>(c: &'s Call<'s>, v: &FormatArg, arg: usize) -> Result<Format, Error> {
     let count = |n: i64| Format::Count(usize::try_from(n).unwrap_or(0));
     match *v {
         FormatArg::Int(n) => Ok(count(n)),
-        FormatArg::Float(f) if f.fract() == 0.0 && (-9.3e18..9.3e18).contains(&f) => {
+        // Only floats with an `i64` value, as Lua's integer arguments.
+        FormatArg::Float(f) if f.fract() == 0.0 && (-TWO_63..TWO_63).contains(&f) => {
             Ok(count(f as i64))
         }
         FormatArg::Float(_) => Err(c.arg_error(arg, "number has no integer representation")),

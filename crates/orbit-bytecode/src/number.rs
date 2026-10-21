@@ -167,6 +167,15 @@ pub fn shift_left(a: i64, n: i64) -> i64 {
     }
 }
 
+/// 2^63 as a float: the first float above every `i64`.
+pub const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+
+/// The integer a float represents exactly, if any.
+#[inline]
+pub fn float_to_int(f: f64) -> Option<i64> {
+    (f.floor() == f && (-TWO_63..TWO_63).contains(&f)).then_some(f as i64)
+}
+
 impl Number {
     /// The value as an integer for a bitwise operator: an integer, or a float with an exact
     /// integer value in `i64` range.
@@ -174,10 +183,7 @@ impl Number {
     pub fn to_int_exact(self) -> Option<i64> {
         match self {
             Number::Int(i) => Some(i),
-            Number::Float(f) => {
-                const TWO_63: f64 = 9_223_372_036_854_775_808.0;
-                (f.floor() == f && (-TWO_63..TWO_63).contains(&f)).then_some(f as i64)
-            }
+            Number::Float(f) => float_to_int(f),
         }
     }
 }

@@ -4,22 +4,11 @@
 
 use crate::object::Value;
 
+use orbit_bytecode::number::TWO_63;
 pub use orbit_bytecode::number::{
-    ArithError, ArithOp, Number, float_arith, float_idiv, float_mod, int_idiv, int_mod,
+    ArithError, ArithOp, Number, float_arith, float_idiv, float_mod, float_to_int, int_idiv,
+    int_mod,
 };
-
-/// 2^63 as a float: the first float above every `i64`.
-const TWO_63: f64 = 9_223_372_036_854_775_808.0;
-
-/// The integer a float represents exactly, if any.
-#[inline]
-pub fn float_to_int(f: f64) -> Option<i64> {
-    if f.floor() == f && (-TWO_63..TWO_63).contains(&f) {
-        Some(f as i64)
-    } else {
-        None
-    }
-}
 
 /// `i == f` mathematically.
 #[inline]
@@ -75,14 +64,20 @@ fn is_space(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
+/// `s` without Lua's whitespace (C's `isspace`) at either end; `None` if
+/// nothing else is left.
+pub fn trim_space(s: &[u8]) -> Option<&[u8]> {
+    let start = s.iter().position(|&b| !is_space(b))?;
+    let end = s.iter().rposition(|&b| !is_space(b))? + 1;
+    Some(&s[start..end])
+}
+
 /// Convert a string to a number as Lua's `tonumber` and arithmetic
 /// coercion do: decimal and hexadecimal integers and floats, surrounded by
 /// optional whitespace. Decimal integers that overflow become floats;
 /// hexadecimal ones wrap.
 pub fn str_to_number(s: &[u8]) -> Option<Value> {
-    let start = s.iter().position(|&b| !is_space(b))?;
-    let end = s.iter().rposition(|&b| !is_space(b))? + 1;
-    let s = &s[start..end];
+    let s = trim_space(s)?;
     let (neg, body) = match s.first() {
         Some(b'-') => (true, &s[1..]),
         Some(b'+') => (false, &s[1..]),

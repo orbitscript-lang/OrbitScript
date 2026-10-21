@@ -724,6 +724,21 @@ impl NativeCtx<'_> {
         }
     }
 
+    /// The integer `v` converts to, as Lua's integer arguments convert: an
+    /// integer, a float with an integral value, or a string that reads as
+    /// either.
+    pub fn to_integer(&self, v: Value) -> Option<i64> {
+        let n = match v {
+            Value::Str(s) => number::str_to_number(self.vm.heap.get(s).as_bytes())?,
+            _ => v,
+        };
+        match n {
+            Value::Int(i) => Some(i),
+            Value::Float(f) => float_to_int(f),
+            _ => None,
+        }
+    }
+
     /// A float argument.
     pub fn check_f64(&mut self, i: usize) -> Result<f64, LuaError> {
         Ok(self.check_number(i)?.as_f64().unwrap_or(0.0))
