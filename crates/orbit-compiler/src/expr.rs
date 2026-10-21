@@ -107,21 +107,26 @@ impl FuncState<'_> {
     /// allocated or which is a live local. Returns where the value came from, for messages.
     pub(crate) fn expr_to(&mut self, e: ExprId, dst: u8) -> Result<Option<Origin>> {
         let expr = self.f.expr(e);
-        let at = expr.at;
         self.at(expr.span);
         if (dst as usize) < self.active && self.writes_dst_early(e) {
-            let mark = self.free;
-            let (t, origin) = self.expr_temp(e)?;
-            self.emit(Op::Move { dst, src: t });
-            self.free = mark;
-            return Ok(origin);
+            return self.with_temps(|c| {
+                let (t, origin) = c.expr_temp(e)?;
+                c.emit(Op::Move { dst, src: t });
+                Ok(origin)
+            });
         }
         if let Some(v) = self.const_of(e) {
             // A `<const>` local that folds to a string keeps its name as a constant; other
             // folded values have no name to report.
             return self.load_const(v, dst);
         }
-        let mark = self.free;
+        self.with_temps(|c| c.expr_kind_to(e, dst))
+    }
+
+    /// [`Self::expr_to`] by the expression's kind, leaving its temporaries allocated.
+    fn expr_kind_to(&mut self, e: ExprId, dst: u8) -> Result<Option<Origin>> {
+        let expr = self.f.expr(e);
+        let at = expr.at;
         let origin = match &expr.kind {
             ExprKind::Nil
             | ExprKind::Bool(_)
@@ -195,12 +200,13 @@ impl FuncState<'_> {
                 } else {
                     // `_ENV` is capture 0 wherever a global is read.
                     self.emit(Op::CapGet { dst, cap: 0 });
-                    let mark = self.free;
-                    let key = self.alloc()?;
-                    self.load_str(key, name)?;
-                    let pc = self.emit(Op::GetIndex { dst, obj: dst, key });
-                    self.origin(pc, 0, Some(Origin::Upvalue(b"_ENV".as_slice().into())));
-                    self.free = mark;
+                    self.with_temps(|c| {
+                        let key = c.alloc()?;
+                        c.load_str(key, name)?;
+                        let pc = c.emit(Op::GetIndex { dst, obj: dst, key });
+                        c.origin(pc, 0, Some(Origin::Upvalue(b"_ENV".as_slice().into())));
+                        Ok(())
+                    })?;
                 }
                 Some(Origin::Global(self.name_bytes(name)))
             }
@@ -277,7 +283,6 @@ impl FuncState<'_> {
                 None
             }
         };
-        self.free = mark;
         Ok(origin)
     }
 
@@ -542,28 +547,27 @@ impl FuncState<'_> {
                         }
                     }
                 }
-                TableEntry::Keyed(k, v) => {
-                    let mark = self.free;
-                    let short_key = match self.const_of(k) {
-                        Some(ConstVal::Str(s)) => self.str_key(s)?,
+                TableEntry::Keyed(k, v) => self.with_temps(|c| {
+                    let short_key = match c.const_of(k) {
+                        Some(ConstVal::Str(s)) => c.str_key(s)?,
                         _ => None,
                     };
                     if let Some(key) = short_key {
-                        let (src, _) = self.expr_any(v)?;
-                        let ic = self.cache();
-                        self.emit(Op::SetField {
+                        let (src, _) = c.expr_any(v)?;
+                        let ic = c.cache();
+                        c.emit(Op::SetField {
                             obj: dst,
                             key,
                             src,
                             ic,
                         });
                     } else {
-                        let (key, _) = self.expr_any(k)?;
-                        let (src, _) = self.expr_any(v)?;
-                        self.emit(Op::SetIndex { obj: dst, key, src });
+                        let (key, _) = c.expr_any(k)?;
+                        let (src, _) = c.expr_any(v)?;
+                        c.emit(Op::SetIndex { obj: dst, key, src });
                     }
-                    self.free = mark;
-                }
+                    Ok(())
+                })?,
             }
         }
         if pending > 0 {
@@ -592,19 +596,19 @@ impl FuncState<'_> {
             self.emit(Op::Vararg { dst, count });
             return Ok(());
         };
-        let mark = self.free;
-        let table = match self.slots[t.index()] {
-            Slot::Reg(r) => r,
-            Slot::Cell(cell) => {
-                let r = self.alloc()?;
-                self.emit(Op::CellGet { dst: r, cell });
-                r
-            }
-            _ => return Err(self.error("internal error: vararg table out of scope")),
-        };
-        self.emit(Op::VarargUnpack { dst, table, count });
-        self.free = mark;
-        Ok(())
+        self.with_temps(|c| {
+            let table = match c.slots[t.index()] {
+                Slot::Reg(r) => r,
+                Slot::Cell(cell) => {
+                    let r = c.alloc()?;
+                    c.emit(Op::CellGet { dst: r, cell });
+                    r
+                }
+                _ => return Err(c.error("internal error: vararg table out of scope")),
+            };
+            c.emit(Op::VarargUnpack { dst, table, count });
+            Ok(())
+        })
     }
 
     /// Evaluates a call or `...` at the top of the stack (`base == self.free - 1`), leaving
@@ -718,14 +722,14 @@ impl FuncState<'_> {
             match want {
                 Want::Exact(n) if i >= n => {
                     // Evaluated for side effects only.
-                    let mark = self.free;
-                    if self.is_multi(item) {
-                        let r = self.alloc()?;
-                        self.multi(item, r, 0)?;
-                    } else {
-                        self.expr_temp(item)?;
-                    }
-                    self.free = mark;
+                    self.with_temps(|c| {
+                        if c.is_multi(item) {
+                            let r = c.alloc()?;
+                            c.multi(item, r, 0)
+                        } else {
+                            c.expr_temp(item).map(|_| ())
+                        }
+                    })?;
                 }
                 Want::Exact(n) if last && self.is_multi(item) => {
                     let r = self.alloc()?;
@@ -810,18 +814,16 @@ impl FuncState<'_> {
                 lhs,
                 rhs,
             } => self.compare_jump(op, lhs, rhs, expr.at, jump_if, target),
-            _ => {
-                let mark = self.free;
-                let (src, _) = self.expr_any(e)?;
+            _ => self.with_temps(|c| {
+                let (src, _) = c.expr_any(e)?;
                 let op = if jump_if {
                     Op::JumpIfTrue { src, off: 0 }
                 } else {
                     Op::JumpIfFalse { src, off: 0 }
                 };
-                self.jump(op, target);
-                self.free = mark;
+                c.jump(op, target);
                 Ok(())
-            }
+            }),
         }
     }
 
@@ -836,7 +838,19 @@ impl FuncState<'_> {
         jump_if: bool,
         target: Label,
     ) -> Result<()> {
-        let mark = self.free;
+        self.with_temps(|c| c.compare_jump_in(op, lhs, rhs, at, jump_if, target))
+    }
+
+    /// [`Self::compare_jump`]'s instructions, leaving its temporaries allocated.
+    fn compare_jump_in(
+        &mut self,
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        at: u32,
+        jump_if: bool,
+        target: Label,
+    ) -> Result<()> {
         // A small integer literal on either side uses an immediate form.
         let small = |c: Option<ConstVal>| match c {
             Some(ConstVal::Int(k)) => i8::try_from(k).ok(),
@@ -878,7 +892,6 @@ impl FuncState<'_> {
                 _ => unreachable!("not a comparison"),
             };
             self.jump(jump, target);
-            self.free = mark;
             return Ok(());
         }
         let (x, _) = self.expr_any(lhs)?;
@@ -899,7 +912,6 @@ impl FuncState<'_> {
             _ => unreachable!("not a comparison"),
         };
         self.jump(jump, target);
-        self.free = mark;
         Ok(())
     }
 }

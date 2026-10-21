@@ -562,6 +562,16 @@ impl<'a> FuncState<'a> {
 
     // ---- registers ----
 
+    /// Runs `f`, then frees the registers it allocated.
+    // Always inlined: left out of line, compiling runs about 0.1% more instructions.
+    #[inline(always)]
+    pub fn with_temps<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let mark = self.free;
+        let r = f(self)?;
+        self.free = mark;
+        Ok(r)
+    }
+
     #[inline(never)]
     pub fn alloc(&mut self) -> Result<u8> {
         let r = self.free;
