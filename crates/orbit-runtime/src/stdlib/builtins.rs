@@ -49,31 +49,47 @@ pub(crate) static BASE: Module =
 pub(crate) static TABLE: Module =
     Module::new(include_bytes!(concat!(env!("OUT_DIR"), "/table.orbc")));
 
+/// An intrinsic's name in the natives table: never shown, since a
+/// built-in's errors name the built-in.
+macro_rules! native_name {
+    ($name:ident) => {
+        concat!("(intrinsic ", stringify!($name), ")")
+    };
+}
+
+/// An intrinsic: its name in the intrinsics table, its name in the natives
+/// table, and the native.
+macro_rules! intrinsic {
+    ($name:ident) => {
+        (stringify!($name), native_name!($name), $name as NativeFn)
+    };
+}
+
 /// The intrinsics a built-in module takes with `use intrinsics::{...}`,
 /// copying each once when the module loads. Its other globals are `next`
 /// and `type`, the base library's own functions.
-const INTRINSICS: &[(&str, NativeFn)] = &[
-    ("argerror", argerror),
-    ("typeerror", typeerror),
-    ("raise", raise),
-    ("checktab", checktab),
-    ("checkint", checkint),
-    ("lenint", lenint),
-    ("ult", ult),
-    ("newarray", newarray),
-    ("metafield", metafield),
-    ("plainlen", plainlen),
-    ("sortprim", sortprim),
+const INTRINSICS: &[(&str, &str, NativeFn)] = &[
+    intrinsic!(argerror),
+    intrinsic!(typeerror),
+    intrinsic!(raise),
+    intrinsic!(checktab),
+    intrinsic!(checkint),
+    intrinsic!(lenint),
+    intrinsic!(ult),
+    intrinsic!(newarray),
+    intrinsic!(metafield),
+    intrinsic!(plainlen),
+    intrinsic!(sortprim),
 ];
 
 /// Fast paths for the intrinsics built-ins call on every call (see
 /// [`FastFn`]): a call through one skips the native's context, which costs
 /// more than the intrinsic's own work.
 const FAST_INTRINSICS: &[(&str, FastFn)] = &[
-    ("checkint", checkint_fast),
-    ("lenint", lenint_fast),
-    ("ult", ult_fast),
-    ("plainlen", plainlen_fast),
+    (native_name!(checkint), checkint_fast),
+    (native_name!(lenint), lenint_fast),
+    (native_name!(ult), ult_fast),
+    (native_name!(plainlen), plainlen_fast),
 ];
 
 /// Where a module's environment keeps the intrinsics table for
@@ -96,15 +112,15 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
     let Value::Table(intrinsics_t) = intrinsics else {
         unreachable!("a new table")
     };
-    for &(name, f) in INTRINSICS {
-        let v = vm.native_named(name, f);
+    for &(name, native, f) in INTRINSICS {
+        let v = vm.native_named(native, f);
         vm.raw_set_str(intrinsics_t, name, v);
     }
-    for &(name, fast) in FAST_INTRINSICS {
-        vm.set_native_fast_path(intrinsic_name(name), fast);
+    for &(native, fast) in FAST_INTRINSICS {
+        vm.set_native_fast_path(native, fast);
     }
     vm.raw_set_str(env_t, INTRINSICS_KEY, intrinsics);
-    let require = vm.native_named("require", require);
+    let require = vm.native_named(native_name!(require), require);
     vm.raw_set_str(env_t, "require", require);
     let shared: [(&'static str, NativeFn); 2] =
         [("next", super::base::next), ("type", super::base::type_)];
@@ -141,33 +157,13 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
     exports
 }
 
-/// Intrinsic names, as the natives table knows them: never shown, since a
-/// built-in's errors name the built-in.
-fn intrinsic_name(name: &str) -> &'static str {
-    match name {
-        "argerror" => "(intrinsic argerror)",
-        "typeerror" => "(intrinsic typeerror)",
-        "raise" => "(intrinsic raise)",
-        "checktab" => "(intrinsic checktab)",
-        "checkint" => "(intrinsic checkint)",
-        "lenint" => "(intrinsic lenint)",
-        "ult" => "(intrinsic ult)",
-        "newarray" => "(intrinsic newarray)",
-        "metafield" => "(intrinsic metafield)",
-        "plainlen" => "(intrinsic plainlen)",
-        "sortprim" => "(intrinsic sortprim)",
-        "require" => "(intrinsic require)",
-        _ => "(intrinsic)",
-    }
-}
-
 impl Vm {
     fn new_table_value(&mut self) -> Value {
         Value::Table(self.heap.alloc(Table::new()))
     }
 
-    fn native_named(&mut self, name: &str, f: NativeFn) -> Value {
-        let name = intrinsic_name(name);
+    /// The native registered as `name`, registering `f` under it the first time.
+    fn native_named(&mut self, name: &'static str, f: NativeFn) -> Value {
         match self.rt.native_ids.get(name) {
             Some(&id) => Value::Native(id),
             None => self.register_native(name, f),
