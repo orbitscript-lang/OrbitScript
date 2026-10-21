@@ -5,7 +5,9 @@
 //! Because the base address never moves, it completely eliminates vector
 //! reallocation spikes and element copying on growth.
 
-pub mod os;
+// Private: these take raw base pointers and would let safe code unmap or remap
+// memory it doesn't own. `VmBuffer` is the only caller.
+mod os;
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};

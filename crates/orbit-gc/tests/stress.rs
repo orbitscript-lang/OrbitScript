@@ -88,7 +88,16 @@ fn check_live(h: &TestHeap, roots: &[Ref], queued: &[Gc<Obj>]) -> HashSet<Ref> {
     seen
 }
 
-fn run(seed: u64, ops: usize, stress: bool) {
+/// How a run picks the collector mode.
+#[derive(Clone, Copy, PartialEq)]
+enum Modes {
+    Incremental,
+    Generational,
+    /// Switch now and then.
+    Both,
+}
+
+fn run(seed: u64, ops: usize, stress: bool, modes: Modes) {
     let mut rng = Rng(seed);
     // Without stress mode: small steps and no growth allowance, so many cycles
     // run incrementally. Tiny pages, so pages are released and reallocated
@@ -98,13 +107,21 @@ fn run(seed: u64, ops: usize, stress: bool) {
         work_ratio: 800,
         step_bytes: 64,
         min_threshold: 4096,
+        minor_min_bytes: 512,
+        card_min_len: 3,
+        card_slots: 2,
         ..Default::default()
     });
     h.set_stress(stress);
     let mut roots = Stack(Vec::new());
+    if modes == Modes::Generational {
+        h.set_mode(orbit_gc::Mode::Generational, &mut roots);
+    }
     let mut next_id = 0u64;
     let mut finalized = 0usize;
     let mut cycles = 0;
+    // Steps that leave a generational major collection in progress.
+    let mut major_steps = 0;
 
     for _ in 0..ops {
         // Pick an object reachable right now (a root, or one hop away).
@@ -158,7 +175,11 @@ fn run(seed: u64, ops: usize, stress: bool) {
                 // Store one reachable object into another (cycles included).
                 if let (Some(a), Some(b)) = (pick(&mut rng, &h, &roots), pick(&mut rng, &h, &roots))
                 {
-                    if rng.below(2) == 0 {
+                    let n = h.get(a).strong.len();
+                    if n > 0 && rng.below(3) == 0 {
+                        // Overwrite an element: remembered by part.
+                        set_strong(&mut h, a, rng.below(n), Ref::Obj(b));
+                    } else if rng.below(2) == 0 {
                         link(&mut h, a, Ref::Obj(b));
                     } else {
                         let c = pick(&mut rng, &h, &roots).unwrap();
@@ -190,9 +211,20 @@ fn run(seed: u64, ops: usize, stress: bool) {
             }
         }
 
+        if modes == Modes::Both && rng.below(300) == 0 {
+            let m = match h.mode() {
+                orbit_gc::Mode::Incremental => orbit_gc::Mode::Generational,
+                orbit_gc::Mode::Generational => orbit_gc::Mode::Incremental,
+            };
+            h.set_mode(m, &mut roots);
+            check_live(&h, &roots.0, &[]);
+        }
         if h.should_step() {
             cycles += h.step(&mut roots) as usize;
             check_live(&h, &roots.0, &[]);
+            if h.mode() == orbit_gc::Mode::Generational && h.phase() != orbit_gc::Phase::Pause {
+                major_steps += 1;
+            }
         }
         // Run finalizers: resurrect some permanently, drop the rest.
         while let Some(any) = h.take_finalizable() {
@@ -251,6 +283,9 @@ fn run(seed: u64, ops: usize, stress: bool) {
     assert_eq!(h.count::<Text>(), 0);
     assert_eq!(h.bytes(), 0, "byte accounting drifted");
     assert!(cycles > 3, "only {cycles} cycles ran");
+    if modes == Modes::Generational {
+        assert!(major_steps > 0, "no major collection ran in steps");
+    }
     assert!(finalized > 0);
 }
 
@@ -258,7 +293,44 @@ fn run(seed: u64, ops: usize, stress: bool) {
 fn random_programs_incremental() {
     let seeds: u64 = std::env::var("ORBIT_GC_SEEDS").map_or(8, |s| s.parse().unwrap());
     for seed in 1..=seeds {
-        run(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 4000, false);
+        run(
+            seed.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            4000,
+            false,
+            Modes::Incremental,
+        );
+    }
+}
+
+#[test]
+fn random_programs_generational() {
+    let seeds: u64 = std::env::var("ORBIT_GC_SEEDS").map_or(8, |s| s.parse().unwrap());
+    for seed in 1..=seeds {
+        run(
+            seed.wrapping_mul(0xA24B_AED4_963E_E407),
+            4000,
+            false,
+            Modes::Generational,
+        );
+        run(
+            seed.wrapping_mul(0x9FB2_1C65_1E98_DF25),
+            4000,
+            false,
+            Modes::Both,
+        );
+    }
+}
+
+#[test]
+fn random_programs_generational_stress_mode() {
+    let seeds: u64 = std::env::var("ORBIT_GC_SEEDS").map_or(4, |s| s.parse().unwrap());
+    for seed in 1..=seeds {
+        run(
+            seed.wrapping_mul(0xC2B2_AE3D_27D4_EB4F),
+            3000,
+            true,
+            Modes::Generational,
+        );
     }
 }
 
@@ -266,6 +338,11 @@ fn random_programs_incremental() {
 fn random_programs_stress_mode() {
     let seeds: u64 = std::env::var("ORBIT_GC_SEEDS").map_or(4, |s| s.parse().unwrap());
     for seed in 1..=seeds {
-        run(seed.wrapping_mul(0xD1B5_4A32_D192_ED03), 3000, true);
+        run(
+            seed.wrapping_mul(0xD1B5_4A32_D192_ED03),
+            3000,
+            true,
+            Modes::Incremental,
+        );
     }
 }

@@ -22,7 +22,7 @@ use crate::vm::{Catch, Frame, FrameKind, LuaError, Vm};
 const MAX_CALL_CHAIN: usize = 15;
 
 /// Registers a frame can address: register numbers are `u8`.
-const WINDOW: usize = 256;
+pub(crate) const WINDOW: usize = 256;
 
 /// Nils to extend the stack with: a copy from a block compiles to a
 /// `memcpy`, where `resize` fills slot by slot. Natives truncate the stack to
@@ -986,6 +986,18 @@ impl Vm {
             _ => unreachable!("run starts on a Lua frame"),
         };
         'reload: loop {
+            // What comes back through `'reload` (a native closure's return,
+            // an error caught by `pcall`, a metamethod's result) passes no
+            // instruction's safe point, so a loop of such calls would
+            // allocate without ever collecting. Take the step here; the
+            // frame's pc is saved.
+            if self.heap.should_step() {
+                let base = self.rt.stack.frames.last().expect("a frame").base as usize;
+                if self.gc_safepoint((base + WINDOW).max(self.rt.top)) {
+                    // Over the memory limit: `run` raises the error.
+                    return Ok(Ran::Switch);
+                }
+            }
             // The running frame's state. Lua-to-Lua calls and returns switch
             // it in place; everything else comes back through `'reload`.
             #[cfg(not(feature = "debugger"))]
@@ -1163,6 +1175,20 @@ impl Vm {
                             $body
                         }
                         $v => $body,
+                    }
+                };
+            }
+            // A store that refers to no object needs no write barrier: with
+            // the value's variant known (`by_parts!`) the test folds away.
+            // In generational mode this keeps number stores into old
+            // objects from remembering them.
+            macro_rules! barrier_for {
+                ($obj:expr, $v:expr) => {
+                    if !matches!(
+                        $v,
+                        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+                    ) {
+                        self.heap.barrier_back($obj);
                     }
                 };
             }
@@ -1580,9 +1606,10 @@ impl Vm {
                     }
                     Op::CellSet { cell, src } => {
                         let c = self.rt.stack.cells[cell_base!() + cell as usize];
-                        self.heap.barrier_back(c);
-                        let cell = self.heap.get_mut(c);
-                        by_parts!(src, |v| cell.value = v);
+                        by_parts!(src, |v| {
+                            barrier_for!(c, v);
+                            self.heap.get_mut(c).value = v
+                        });
                     }
                     Op::CellClear { from, count } => {
                         let at = cell_base!() + from as usize;
@@ -1596,9 +1623,10 @@ impl Vm {
                     Op::CapSelf { dst } => reg!(dst) = Value::Closure(closure),
                     Op::CapSet { cap, src } => {
                         let c = self.heap.get(closure).captures[cap as usize];
-                        self.heap.barrier_back(c);
-                        let cell = self.heap.get_mut(c);
-                        by_parts!(src, |v| cell.value = v);
+                        by_parts!(src, |v| {
+                            barrier_for!(c, v);
+                            self.heap.get_mut(c).value = v
+                        });
                     }
 
                     Op::GetGlobal { dst, name, ic } => {
@@ -1638,7 +1666,7 @@ impl Vm {
                                 if matches!(tab.cached_str(slot, cache.key),
                                     Some(v) if tab.meta.is_none() || !v.is_nil())
                                 {
-                                    self.heap.barrier_back(t);
+                                    barrier_for!(t, v);
                                     self.heap.get_mut(t).set_slot(slot, v);
                                 } else {
                                     let k = const_str(&cur.consts, name);
@@ -1696,9 +1724,10 @@ impl Vm {
                         {
                             // The key is there: overwrite its value. No
                             // capacity changes, so no byte accounting.
-                            self.heap.barrier_back(t);
-                            let tab = self.heap.get_mut(t);
-                            by_parts!(src, |v| tab.set_slot(slot, v));
+                            by_parts!(src, |v| {
+                                barrier_for!(t, v);
+                                self.heap.get_mut(t).set_slot(slot, v)
+                            });
                         } else {
                             let k = const_str(&cur.consts, key);
                             let v = reg!(src);

@@ -41,3 +41,26 @@ fn no_cap_by_default() {
         .unwrap();
     assert!(ok);
 }
+
+/// Calls that come back to the interpreter outside an instruction's safe
+/// point, a host function's return and an error caught by `pcall`, still
+/// let the collector run: a loop of them allocating garbage stays small.
+#[test]
+fn garbage_from_host_calls_and_caught_errors_is_collected() {
+    const N: usize = 200_000;
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    iso.scope(|s| {
+        // A long string (not interned) on every call.
+        s.globals()
+            .set("long", s.create_function(|c| c.ret("x".repeat(64))))?;
+        s.load(Chunk::new(&format!(
+            "for _ = 1, {N} do long() end \
+             for _ = 1, {N} do pcall(string.rep) end"
+        )))?
+        .call(())?;
+        Ok::<_, orbit::Error>(())
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let used = iso.gc().used_bytes();
+    assert!(used < 4 << 20, "{used} bytes in use");
+}

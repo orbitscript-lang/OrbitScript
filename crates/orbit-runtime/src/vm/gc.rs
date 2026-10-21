@@ -22,8 +22,9 @@ use crate::object::{LuaHeap, Value};
 
 use crate::vm::{CallOutcome, Continuation, LuaError, NativeCtx, NativeReturn, Runtime, Vm};
 
-/// The collector mode `collectgarbage` reports. The incremental collector
-/// runs underneath in both; generational changes only what `"step"` does.
+/// The collector mode (`collectgarbage("incremental")` and
+/// `collectgarbage("generational")`), applied to the heap by
+/// [`Vm::set_gc_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcMode {
     Incremental,
@@ -50,10 +51,15 @@ pub enum GcParam {
     /// Bytes allocated between steps (`Params::step_bytes`); 0 makes every
     /// step a whole cycle.
     StepSize,
-    /// Generational parameters: stored and reported, unused until there is
-    /// a generational collector.
+    /// Generational: allocation between minor collections, as a percentage
+    /// of the heap the last major collection found reachable
+    /// (`Params::minor_percent`).
     MinorMul,
+    /// Generational: how much a major collection must free to go back to
+    /// minor ones (`Params::minor_return_percent`).
     MajorMinor,
+    /// Generational: heap growth past the last major collection's live
+    /// size that makes the next collection major (`Params::major_percent`).
     MinorMajor,
 }
 
@@ -102,7 +108,7 @@ const STEPMUL_SCALE: u32 = 4;
 /// What `collectgarbage` keeps besides the collector's own state.
 #[derive(Debug)]
 pub struct GcState {
-    /// Set with [`GcState::set_mode`], which also moves the heap's floor.
+    /// Set with [`Vm::set_gc_mode`], which also moves the heap's floor.
     pub mode: GcMode,
     /// The floor under the start of a cycle in generational mode
     /// ([`gc_floor`]).
@@ -133,10 +139,9 @@ impl GcState {
                 i64::from(p.growth) + 100,
                 i64::from(p.work_ratio / STEPMUL_SCALE),
                 p.step_bytes as i64,
-                // lua5.5's defaults.
-                20,
-                50,
-                68,
+                i64::from(p.minor_percent),
+                i64::from(p.minor_return_percent),
+                i64::from(p.major_percent),
             ],
             finalizing: false,
             was_stopped: false,
@@ -146,14 +151,13 @@ impl GcState {
         }
     }
 
-    /// Switch modes and return the old one. Generational mode puts a
-    /// floor under the heap size that starts a cycle: lua5.5's young
-    /// collections make small-heap churn (coroutines, closures) cheap, and
-    /// until there is a generational collector the floor stands in for
-    /// them by not running a full cycle every few kilobytes. Incremental
-    /// mode keeps Lua's pacing exactly (the next cycle starts at `pause`
-    /// percent of the live heap, however small).
-    pub fn set_mode(&mut self, heap: &mut LuaHeap, mode: GcMode) -> GcMode {
+    /// Record the mode and move the heap's floor; [`Vm::set_gc_mode`]
+    /// switches the heap too. Generational mode puts a floor under the heap
+    /// size that starts a major collection, so small programs don't run a
+    /// full collection every few kilobytes (minor collections keep their
+    /// own schedule). Incremental mode keeps Lua's pacing exactly (the next
+    /// cycle starts at `pause` percent of the live heap, however small).
+    pub(crate) fn set_mode(&mut self, heap: &mut LuaHeap, mode: GcMode) -> GcMode {
         heap.set_min_threshold(match mode {
             GcMode::Incremental => 0,
             GcMode::Generational => self.floor,
@@ -180,7 +184,9 @@ impl GcState {
             GcParam::Pause => params.growth = u32_of(v.saturating_sub(100).max(0)),
             GcParam::StepMul => params.work_ratio = u32_of(v).saturating_mul(STEPMUL_SCALE),
             GcParam::StepSize => params.step_bytes = usize::try_from(v).unwrap_or(usize::MAX),
-            GcParam::MinorMul | GcParam::MajorMinor | GcParam::MinorMajor => {}
+            GcParam::MinorMul => params.minor_percent = u32_of(v),
+            GcParam::MinorMajor => params.major_percent = u32_of(v),
+            GcParam::MajorMinor => params.minor_return_percent = u32_of(v),
         }
         old
     }
@@ -262,6 +268,22 @@ fn not_callable_message(f: Value) -> Vec<u8> {
 }
 
 impl Vm {
+    /// Switch the collector mode; returns the previous one. Entering
+    /// generational mode collects in full.
+    pub fn set_gc_mode(&mut self, mode: GcMode) -> GcMode {
+        let heap_mode = match mode {
+            GcMode::Incremental => orbit_gc::Mode::Incremental,
+            GcMode::Generational => orbit_gc::Mode::Generational,
+        };
+        // The floor first, so a switch to incremental paces without it.
+        let old = self.rt.gc.set_mode(&mut self.heap, mode);
+        // Values above the window are dead.
+        let top = self.rt.top;
+        self.rt.stack.regs.truncate(top);
+        self.heap.set_mode(heap_mode, &mut self.rt);
+        old
+    }
+
     /// Call the `__gc` of every object waiting for finalization. Does
     /// nothing inside a finalizer. Called by the interpreter after an
     /// automatic step that left finalizers pending, and by [`Vm::close`].

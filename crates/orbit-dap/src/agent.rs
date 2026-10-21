@@ -111,7 +111,6 @@ impl State {
 
     /// The state of a program debuggers attach to: no editor yet, and the
     /// program keeps its own output.
-    #[cfg(unix)]
     pub(crate) fn attached(link: Arc<Link>) -> State {
         State {
             output_to_editor: false,

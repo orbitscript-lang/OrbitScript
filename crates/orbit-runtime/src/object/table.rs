@@ -340,6 +340,48 @@ impl Trace<LuaSpace> for Table {
         }
     }
 
+    /// The array part traces in parts, for a big table the generational
+    /// collector remembers by part (array stores go through
+    /// [`Heap::barrier_at`](orbit_gc::Heap::barrier_at)). A weak table is
+    /// traced whole.
+    fn parts(&self) -> usize {
+        self.array.len()
+    }
+
+    fn trace_part(
+        &self,
+        m: &mut Marker<'_, LuaSpace>,
+        range: Option<std::ops::Range<usize>>,
+    ) -> bool {
+        if let Some(meta) = self.meta
+            && gc::weak_mode(m.get(meta), |s| m.get(s)).is_some()
+        {
+            return false;
+        }
+        let Some(range) = range else {
+            if let Some(meta) = self.meta {
+                m.mark(meta);
+            }
+            if self.used > 0 {
+                for e in self.entries.iter() {
+                    mark(m, e.key());
+                    mark(m, e.value());
+                }
+            }
+            return true;
+        };
+        for i in range.start..range.end.min(self.array.len()) {
+            let t = self.array.tag(i);
+            if matches!(
+                t,
+                Tag::Str | Tag::Table | Tag::Closure | Tag::UserData | Tag::Thread
+            ) {
+                mark(m, self.array.get(i));
+            }
+        }
+        true
+    }
+
     fn extra_bytes(&self) -> usize {
         self.array.bytes() + self.entries.len() * std::mem::size_of::<Entry>()
     }
@@ -1306,8 +1348,10 @@ fn write_other(out: &mut Value, b: u8, p: Payload) {
 #[inline(always)]
 pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<bool, NoMemory> {
     let idx = (i as u64).wrapping_sub(1);
-    // Every store path barriers, so do it first and look the table up once.
-    heap.barrier_back(t);
+    // The array store needs the barrier, so do it first and look the table
+    // up once. `set_key`'s `Heap::update` barriers again, which only
+    // checks the color of a table already remembered.
+    heap.barrier_at(t, idx as usize);
     let tab = heap.get_mut(t);
     if idx < tab.array.len() as u64 {
         tab.array.set(idx as usize, v);
@@ -1344,7 +1388,7 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
         v,
         Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
     ) {
-        heap.barrier_back(t);
+        heap.barrier_at(t, idx as usize);
     }
     let tab = heap.get_mut(t);
     if idx < tab.array.len() as u64 {

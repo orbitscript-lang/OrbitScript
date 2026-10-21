@@ -105,6 +105,34 @@ impl Trace<TestSpace> for Obj {
         m.weak(mode);
     }
 
+    /// The strong half traces in parts. Objects with a weak map are traced
+    /// whole, so their weak entries are cleared.
+    fn parts(&self) -> usize {
+        self.strong.len()
+    }
+
+    fn trace_part(
+        &self,
+        m: &mut Marker<'_, TestSpace>,
+        range: Option<std::ops::Range<usize>>,
+    ) -> bool {
+        if self.mode.is_some() {
+            return false;
+        }
+        let Some(range) = range else {
+            for &(k, v) in &self.map {
+                k.mark(m);
+                v.mark(m);
+            }
+            return true;
+        };
+        let end = range.end.min(self.strong.len());
+        for r in &self.strong[range.start.min(end)..end] {
+            r.mark(m);
+        }
+        true
+    }
+
     fn extra_bytes(&self) -> usize {
         self.strong.capacity() * size_of::<Ref>() + self.map.capacity() * size_of::<(Ref, Ref)>()
     }
@@ -147,6 +175,12 @@ pub fn text(h: &mut TestHeap, s: &str) -> Gc<Text> {
 
 pub fn link(h: &mut TestHeap, from: Gc<Obj>, to: Ref) {
     h.update(from, |o| o.strong.push(to));
+}
+
+/// Overwrite an element of the strong half, remembering only that part.
+pub fn set_strong(h: &mut TestHeap, o: Gc<Obj>, i: usize, to: Ref) {
+    h.barrier_at(o, i);
+    h.get_mut(o).strong[i] = to;
 }
 
 pub fn put(h: &mut TestHeap, t: Gc<Obj>, k: Ref, v: Ref) {

@@ -434,12 +434,8 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         b"step" => {
             let kb = ctx.opt_int(1, 0)?;
             let done = match ctx.vm.rt.gc.mode {
-                // A minor collection collects all young garbage; ours
-                // collects all garbage.
-                GcMode::Generational => {
-                    ctx.full_collect();
-                    false
-                }
+                // A whole minor (or a due major) collection; true if major.
+                GcMode::Generational => ctx.gen_step(),
                 GcMode::Incremental => {
                     let bytes = usize::try_from(kb).unwrap_or(0).saturating_mul(1024);
                     ctx.vm.heap.step_with(&mut ctx.vm.rt, bytes)
@@ -465,8 +461,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             } else {
                 GcMode::Generational
             };
-            let vm = &mut *ctx.vm;
-            let old = vm.rt.gc.set_mode(&mut vm.heap, mode);
+            let old = ctx.vm.set_gc_mode(mode);
             let v = ctx.new_str(old.name().as_bytes());
             ctx.ret1(v)
         }

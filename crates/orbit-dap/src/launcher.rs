@@ -13,13 +13,13 @@
 
 use std::ffi::OsString;
 use std::io::{BufReader, Read};
-use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::socket::Stream;
 use crate::{Link, agent, socket, wire};
 
 /// How long a starting program has to connect back.
@@ -73,7 +73,7 @@ pub fn adapter(child: &[OsString]) -> i32 {
 
 /// A started program, connected.
 struct Program {
-    stream: UnixStream,
+    stream: Stream,
     /// The process, when the adapter started it itself (not in a
     /// terminal).
     process: Option<Child>,
@@ -180,13 +180,13 @@ fn start(
 
 /// Wait for the program's connection, giving up if it exits first or
 /// takes too long.
-fn accept(bound: &socket::Bound, mut process: Option<&mut Child>) -> Result<UnixStream, String> {
+fn accept(bound: &socket::Bound, mut process: Option<&mut Child>) -> Result<Stream, String> {
     let fail = |e: std::io::Error| format!("cannot wait for the program: {e}");
     bound.listener.set_nonblocking(true).map_err(fail)?;
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     loop {
         match bound.listener.accept() {
-            Ok((stream, _)) => {
+            Ok(stream) => {
                 stream.set_nonblocking(false).map_err(fail)?;
                 return Ok(stream);
             }

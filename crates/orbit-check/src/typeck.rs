@@ -3484,26 +3484,41 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             ExprKind::Match { arms, .. } => {
                 !arms.is_empty() && arms.iter().all(|a| self.expr_diverges(&a.body))
             }
-            ExprKind::Loop { body, .. } => !contains_break(body),
+            ExprKind::Loop { label, body } => !contains_break(body, label.as_ref().map(|l| l.sym)),
             ExprKind::Paren(e) => self.expr_diverges(e),
             _ => false,
         }
     }
 }
 
-/// Whether a `break` leaves this loop body (not one in a nested loop or function).
-fn contains_break(body: &ast::Block) -> bool {
+/// Whether a `break` leaves the loop with this body and `label`: an unlabelled `break`
+/// outside any nested loop, or a `break` naming `label` at any depth (not inside a function).
+fn contains_break(body: &ast::Block, label: Option<StrId>) -> bool {
+    breaks_out(body, label, true)
+}
+
+/// Like [`contains_break`]; `unlabelled` says whether a bare `break` here leaves the loop,
+/// which stops being true inside a nested loop.
+fn breaks_out(body: &ast::Block, label: Option<StrId>, unlabelled: bool) -> bool {
     let mut found = false;
     walk_block(body, &mut |n| match n {
-        Node::Expr(e) => match e.kind {
-            ExprKind::Break { .. } => {
-                found = true;
+        Node::Expr(e) => match &e.kind {
+            ExprKind::Break { label: l, .. } => {
+                found |= match l {
+                    None => unlabelled,
+                    Some(l) => label == Some(l.sym),
+                };
+                !found
+            }
+            ExprKind::Loop { body, .. }
+            | ExprKind::While { body, .. }
+            | ExprKind::For { body, .. } => {
+                // A nested loop's own breaks are its business, but one naming our label
+                // still leaves us. (Its header is not searched.)
+                found = found || (label.is_some() && breaks_out(body, label, false));
                 false
             }
-            ExprKind::Loop { .. }
-            | ExprKind::While { .. }
-            | ExprKind::For { .. }
-            | ExprKind::Closure(_) => false,
+            ExprKind::Closure(_) => false,
             _ => !found,
         },
         Node::Stmt(s) => !matches!(s.kind, StmtKind::Item(_)),

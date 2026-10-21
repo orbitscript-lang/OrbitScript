@@ -94,7 +94,7 @@ mod os;
 mod trace;
 
 pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, Store};
-pub use heap::{Heap, Params, Phase};
+pub use heap::{Heap, Mode, Params, Phase};
 pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 
 /// Declare a [`Space`]: a struct with one [`Arena`] per object type.
@@ -205,6 +205,32 @@ macro_rules! space {
                     ::core::unreachable!()
                 }
 
+                fn slot_parts(&self, kind: u8, index: u32) -> usize {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return $crate::__private::parts::<Self, $ty, _>(&self.$field, index);
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
+                fn trace_slot_part(
+                    &self,
+                    kind: u8,
+                    index: u32,
+                    range: ::core::option::Option<::core::ops::Range<usize>>,
+                    m: &mut $crate::Marker<'_, Self>,
+                ) -> bool {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return $crate::__private::trace_part::<Self, $ty, _>(
+                                &self.$field, index, range, m,
+                            );
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
                 fn clear_slot(
                     &mut self,
                     kind: u8,
@@ -222,7 +248,10 @@ macro_rules! space {
                     ::core::unreachable!()
                 }
 
-                #[inline]
+                // Always: with a second caller (the minor collection's
+                // sweep) LLVM stopped inlining it into the sweep, which cost
+                // 1% on binary trees.
+                #[inline(always)]
                 fn free_slot(&mut self, kind: u8, index: u32) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
@@ -235,7 +264,7 @@ macro_rules! space {
                 fn slot_bytes(kind: u8) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return ::core::mem::size_of::<::core::option::Option<$ty>>();
+                            return $crate::__private::slot_size::<$ty>();
                         }
                     )+
                     ::core::unreachable!()
@@ -281,12 +310,11 @@ macro_rules! space {
 /// Support for [`space!`]; not a public API.
 #[doc(hidden)]
 pub mod __private {
-    use crate::heap::slot_size;
+    pub use crate::heap::slot_size;
     use crate::{Arena, Liveness, Marker, Space, Trace, WeakMode};
 
-    /// Trace one object. Returns its marking work beyond the references
-    /// it visits: one unit for the object plus one per 16 bytes it owns
-    /// outside its slot, roughly Lua's one unit per slot traversed.
+    /// Trace one object. Returns its size in bytes: its slot (with the
+    /// color byte) plus what it owns outside the slot.
     #[inline]
     pub fn trace<S: Space, T: Trace<S>, const N: usize>(
         a: &Arena<T, N>,
@@ -296,6 +324,21 @@ pub mod __private {
         let obj = a.get_slot(index);
         obj.trace(m);
         slot_size::<T>() + obj.extra_bytes()
+    }
+
+    #[inline]
+    pub fn parts<S: Space, T: Trace<S>, const N: usize>(a: &Arena<T, N>, index: u32) -> usize {
+        a.get_slot(index).parts()
+    }
+
+    #[inline]
+    pub fn trace_part<S: Space, T: Trace<S>, const N: usize>(
+        a: &Arena<T, N>,
+        index: u32,
+        range: Option<core::ops::Range<usize>>,
+        m: &mut Marker<'_, S>,
+    ) -> bool {
+        a.get_slot(index).trace_part(m, range)
     }
 
     pub fn clear<S: Space, T: Trace<S>, const N: usize>(

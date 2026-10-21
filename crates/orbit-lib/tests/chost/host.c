@@ -130,8 +130,9 @@ static int gc(void) {
   luaL_openlibs(L);
   lua_gc(L, LUA_GCPARAM, LUA_GCPPAUSE, 150);
   printf("pause: %d\n", lua_gc(L, LUA_GCPARAM, LUA_GCPPAUSE, -1));
-  printf("gen (was inc): %d\n", lua_gc(L, LUA_GCGEN) == LUA_GCINC);
+  /* States start generational (ADR-2). */
   printf("inc (was gen): %d\n", lua_gc(L, LUA_GCINC) == LUA_GCGEN);
+  printf("gen (was inc): %d\n", lua_gc(L, LUA_GCGEN) == LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
   printf("running after stop: %d\n", lua_gc(L, LUA_GCISRUNNING));
   lua_gc(L, LUA_GCRESTART);
