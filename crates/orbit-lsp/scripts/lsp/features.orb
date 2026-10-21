@@ -1,40 +1,44 @@
 //! What the server answers: the analysis module's results, in LSP's shapes.
-//! Each handler takes the server and the request's params and gives the
-//! result (nil for JSON's `null`).
+//! Each handler takes the documents and the request's params (JSON, so
+//! `any`) and gives the result (nil for JSON's `null`), or nil and why the
+//! request failed.
+//! orbit-check: strict
 
 use std::json;
 use analysis;
 use lsp::rpc;
 use lsp::text::{Text};
+use lsp::documents::{Document, Documents};
+
 
 /// LSP's `SymbolKind` for each of the analysis module's kinds.
-let SYMBOL_KINDS = #{
+let SYMBOL_KINDS: #{[string]: int} = #{
     function: 12, struct: 23, enum: 10, variant: 22, field: 8, method: 6, assoc_fn: 12,
     const: 14, type_alias: 26, module: 2, global: 13, local: 13, param: 13, import: 13,
     type_param: 26,
 };
 
 /// LSP's `CompletionItemKind` for each kind.
-let COMPLETION_KINDS = #{
+let COMPLETION_KINDS: #{[string]: int} = #{
     function: 3, struct: 22, enum: 13, variant: 20, field: 5, method: 2, assoc_fn: 3,
     const: 21, type_alias: 7, module: 9, global: 6, local: 6, param: 6, import: 6,
     type_param: 25, keyword: 14,
 };
 
 /// The highlighting kinds, in the order the legend gives them.
-let TOKEN_TYPES = [
+let TOKEN_TYPES: [string] = [
     "namespace", "type", "enum", "enumMember", "typeParameter", "parameter", "variable",
     "property", "function", "method", "keyword", "string", "number", "comment",
 ];
 
 /// The semantic tokens legend, for `initialize`.
-pub fn token_legend() {
+pub fn token_legend() -> table {
     #{ tokenTypes: TOKEN_TYPES, tokenModifiers: ["documentation"] }
 }
 
 /// The index of each token type, from 0; doc comments are comments with
 /// the `documentation` modifier.
-let TOKEN_INDEX = #{};
+let TOKEN_INDEX: #{[string]: int} = #{};
 for (i, name) in ipairs(TOKEN_TYPES) {
     TOKEN_INDEX[name] = i - 1;
 }
@@ -42,28 +46,32 @@ TOKEN_INDEX["doc"] = TOKEN_INDEX["comment"];
 
 /// Whether the checker handles the file (OrbitScript and its stubs; Lua
 /// files get syntax errors only).
-pub fn checked(path) -> bool {
+pub fn checked(path: string) -> bool {
     string::match(path, "%.orbi?$") != nil
 }
 
+/// The document the request is about.
+fn document(docs: Documents, params: any) -> Document? {
+    docs.document(params.textDocument.uri)
+}
+
 /// The document the request is about, and the byte offset of its
-/// position, if it has one.
-fn at(server, params) {
-    let doc = server.document(params.textDocument.uri);
+/// position (0 without a document).
+fn at(docs: Documents, params: any) -> (Document?, int) {
+    let doc = document(docs, params);
     if doc == nil {
-        return (nil, nil);
+        return (nil, 0);
     }
-    let offset = if rpc::present(params.position) { doc.text.offset(params.position) } else { nil };
-    (doc, offset)
+    (doc, doc.text.offset(params.position))
 }
 
-/// An LSP `Location` for one of the analysis module's.
-fn location(server, loc) {
-    let text = server.text_of(loc.path);
-    #{ uri: server.uri_of(loc.path), range: text.range(loc.start, loc.end) }
+/// An LSP `Location` for the span `start..end` of the file at `path`.
+fn location(docs: Documents, path: string, start: int, end: int) -> table {
+    let text = docs.text_of(path);
+    #{ uri: docs.uri_of(path), range: text.range(start, end) }
 }
 
-pub fn publish_diagnostics(server, doc) {
+pub fn publish_diagnostics(doc: Document) {
     let list = json::array();
     for (_, d) in ipairs(analysis::diagnostics(doc.path)) {
         let severity = match d.severity {
@@ -85,32 +93,34 @@ pub fn publish_diagnostics(server, doc) {
     rpc::notify("textDocument/publishDiagnostics", #{ uri: doc.uri, version: doc.version, diagnostics: list });
 }
 
-pub fn document_symbol(server, params) {
-    let (doc, _) = at(server, params);
+/// LSP's `DocumentSymbol`s for `symbols`, in `text`.
+fn outline(text: Text, symbols: [analysis::Symbol]) -> table {
+    let out = json::array();
+    for (_, s) in ipairs(symbols) {
+        out[#out + 1] = #{
+            name: s.name,
+            kind: SYMBOL_KINDS[s.kind] || 13,
+            range: text.range(s.full_start, s.full_end),
+            selectionRange: text.range(s.start, s.end),
+            children: outline(text, s.children),
+        };
+    }
+    out
+}
+
+pub fn document_symbol(docs: Documents, params: any) -> (any, string?) {
+    let doc = document(docs, params);
     if doc == nil || !checked(doc.path) {
         return json::array();
     }
-    let convert = |list, convert| {
-        let out = json::array();
-        for (_, s) in ipairs(list) {
-            out[#out + 1] = #{
-                name: s.name,
-                kind: SYMBOL_KINDS[s.kind] || 13,
-                range: doc.text.range(s.full_start, s.full_end),
-                selectionRange: doc.text.range(s.start, s.end),
-                children: convert(s.children, convert),
-            };
-        }
-        out
-    };
-    convert(analysis::symbols(doc.path), convert)
+    outline(doc.text, analysis::symbols(doc.path))
 }
 
 /// Each bracketed block and each run of comments that spans lines folds.
 /// A block folds up to the line before its closing bracket, which stays
 /// in sight.
-pub fn folding_range(server, params) {
-    let (doc, _) = at(server, params);
+pub fn folding_range(docs: Documents, params: any) -> (any, string?) {
+    let doc = document(docs, params);
     let out = json::array();
     if doc == nil || !checked(doc.path) {
         return out;
@@ -139,8 +149,8 @@ pub fn folding_range(server, params) {
 /// For each position, the spans an "expand selection" grows through: the
 /// token there, the inside of each enclosing bracket pair and then the pair,
 /// and the whole file.
-pub fn selection_range(server, params) {
-    let (doc, _) = at(server, params);
+pub fn selection_range(docs: Documents, params: any) -> (any, string?) {
+    let doc = document(docs, params);
     let out = json::array();
     if doc == nil {
         return out;
@@ -189,8 +199,8 @@ pub fn selection_range(server, params) {
     out
 }
 
-pub fn semantic_tokens(server, params) {
-    let (doc, _) = at(server, params);
+pub fn semantic_tokens(docs: Documents, params: any) -> (any, string?) {
+    let doc = document(docs, params);
     let data = json::array();
     if doc == nil || !checked(doc.path) {
         return #{ data: data };
@@ -218,17 +228,17 @@ pub fn semantic_tokens(server, params) {
     #{ data: data }
 }
 
-pub fn definition(server, params) {
-    let (doc, offset) = at(server, params);
+pub fn definition(docs: Documents, params: any) -> (any, string?) {
+    let (doc, offset) = at(docs, params);
     if doc == nil || !checked(doc.path) {
         return nil;
     }
     let loc = analysis::definition(doc.path, offset);
-    if loc == nil { nil } else { location(server, loc) }
+    if loc == nil { nil } else { location(docs, loc.path, loc.start, loc.end) }
 }
 
-pub fn references(server, params) {
-    let (doc, offset) = at(server, params);
+pub fn references(docs: Documents, params: any) -> (any, string?) {
+    let (doc, offset) = at(docs, params);
     let out = json::array();
     if doc == nil || !checked(doc.path) {
         return out;
@@ -236,14 +246,14 @@ pub fn references(server, params) {
     let declaration = params.context == nil || params.context.includeDeclaration != false;
     for (_, r) in ipairs(analysis::references(doc.path, offset) || []) {
         if declaration || !r.definition {
-            out[#out + 1] = location(server, r);
+            out[#out + 1] = location(docs, r.path, r.start, r.end);
         }
     }
     out
 }
 
-pub fn document_highlight(server, params) {
-    let (doc, offset) = at(server, params);
+pub fn document_highlight(docs: Documents, params: any) -> (any, string?) {
+    let (doc, offset) = at(docs, params);
     let out = json::array();
     if doc == nil || !checked(doc.path) {
         return out;
@@ -256,8 +266,8 @@ pub fn document_highlight(server, params) {
     out
 }
 
-pub fn prepare_rename(server, params) {
-    let (doc, offset) = at(server, params);
+pub fn prepare_rename(docs: Documents, params: any) -> (any, string?) {
+    let (doc, offset) = at(docs, params);
     if doc == nil || !checked(doc.path) {
         return nil;
     }
@@ -269,12 +279,12 @@ pub fn prepare_rename(server, params) {
 }
 
 /// Whether `name` can name a variable.
-fn is_name(name) -> bool {
+fn is_name(name: string) -> bool {
     string::match(name, "^[%a_][%w_]*$") != nil
 }
 
-pub fn rename(server, params) {
-    let (doc, offset) = at(server, params);
+pub fn rename(docs: Documents, params: any) -> (any, string?) {
+    let (doc, offset) = at(docs, params);
     if doc == nil || !checked(doc.path) {
         return nil;
     }
@@ -286,7 +296,7 @@ pub fn rename(server, params) {
     }
     let changes = json::object();
     for (_, r) in ipairs(analysis::references(doc.path, offset) || []) {
-        let l = location(server, r);
+        let l = location(docs, r.path, r.start, r.end);
         if changes[l.uri] == nil {
             changes[l.uri] = json::array();
         }
@@ -296,8 +306,8 @@ pub fn rename(server, params) {
     #{ changes: changes }
 }
 
-pub fn hover(server, params) {
-    let (doc, offset) = at(server, params);
+pub fn hover(docs: Documents, params: any) -> (any, string?) {
+    let (doc, offset) = at(docs, params);
     if doc == nil || !checked(doc.path) {
         return nil;
     }
@@ -310,14 +320,14 @@ pub fn hover(server, params) {
         value = value ~ "\n\n" ~ h.docs;
     }
     let result = #{ contents: #{ kind: "markdown", value: value } };
-    if h.start != nil {
+    if h.start != nil && h.end != nil {
         result.range = doc.text.range(h.start, h.end);
     }
     result
 }
 
-pub fn completion(server, params) {
-    let (doc, offset) = at(server, params);
+pub fn completion(docs: Documents, params: any) -> (any, string?) {
+    let (doc, offset) = at(docs, params);
     let items = json::array();
     if doc == nil || !checked(doc.path) {
         return items;
@@ -340,8 +350,8 @@ pub fn completion(server, params) {
     items
 }
 
-pub fn signature_help(server, params) {
-    let (doc, offset) = at(server, params);
+pub fn signature_help(docs: Documents, params: any) -> (any, string?) {
+    let (doc, offset) = at(docs, params);
     if doc == nil || !checked(doc.path) {
         return nil;
     }
@@ -366,8 +376,8 @@ pub fn signature_help(server, params) {
     result
 }
 
-pub fn inlay_hint(server, params) {
-    let (doc, _) = at(server, params);
+pub fn inlay_hint(docs: Documents, params: any) -> (any, string?) {
+    let doc = document(docs, params);
     let out = json::array();
     if doc == nil || !checked(doc.path) {
         return out;
@@ -381,7 +391,7 @@ pub fn inlay_hint(server, params) {
 }
 
 /// Whether the letters of `query` appear in `name` in order, ignoring case.
-fn matches(name, query) -> bool {
+fn matches(name: string, query: string) -> bool {
     let name = string::lower(name);
     let mut at = 1;
     for i in 1..=#query {
@@ -398,7 +408,7 @@ fn matches(name, query) -> bool {
 /// At most this many symbols answer a workspace search.
 const MAX_SYMBOLS: int = 200;
 
-pub fn workspace_symbol(server, params) {
+pub fn workspace_symbol(docs: Documents, params: any) -> (any, string?) {
     let query = params.query || "";
     let out = json::array();
     for (_, s) in ipairs(analysis::workspace_symbols()) {
@@ -406,7 +416,7 @@ pub fn workspace_symbol(server, params) {
             break;
         }
         if matches(s.name, query) {
-            let item = #{ name: s.name, kind: SYMBOL_KINDS[s.kind] || 13, location: location(server, s) };
+            let item = #{ name: s.name, kind: SYMBOL_KINDS[s.kind] || 13, location: location(docs, s.path, s.start, s.end) };
             if s.container != nil {
                 item.containerName = s.container;
             }

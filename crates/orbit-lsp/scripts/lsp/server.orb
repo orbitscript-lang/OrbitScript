@@ -1,23 +1,22 @@
 //! orbit-lsp's main loop: read a message, answer it, until the editor says
-//! `exit`. The documents the editor has open are kept here and given to the
-//! analysis module, which reads every other file from disk.
+//! `exit`. Messages and their params are JSON, so `any`.
+//! orbit-check: strict
 
 use std::json;
 use analysis;
 use lsp::rpc;
 use lsp::rpc::{present};
-use lsp::text::{Text, uri_to_path, path_to_uri, set_encoding};
+use lsp::text::{uri_to_path, set_encoding};
+use lsp::documents::{Documents};
 use lsp::features;
 
-/// A document the editor has open, or one read from disk for a request
-/// (`version` nil).
-struct Document { uri, path, version, text }
+struct Server { docs: Documents, initialized: bool, shutdown: bool }
 
-/// `documents` by URI and `paths` by path hold the same documents.
-struct Server { documents, paths, initialized, shutdown }
+/// A request's handler: the result, or nil and why the request failed.
+type Handler = fn(Documents, any) -> (any, string?);
 
 /// The requests answered, by method.
-let REQUESTS = #{
+let REQUESTS: #{[string]: Handler} = #{
     ["textDocument/documentSymbol"]: features::document_symbol,
     ["textDocument/foldingRange"]: features::folding_range,
     ["textDocument/selectionRange"]: features::selection_range,
@@ -36,49 +35,19 @@ let REQUESTS = #{
 
 impl Server {
     pub fn new() -> Server {
-        Server { documents: #{}, paths: #{}, initialized: false, shutdown: false }
-    }
-
-    /// The document at `uri`: the editor's if it is open, else the file on
-    /// disk (nil if there is none).
-    pub fn document(self, uri) {
-        let open = self.documents[uri];
-        if open != nil {
-            return open;
-        }
-        let path = uri_to_path(uri);
-        if path == nil {
-            return nil;
-        }
-        let text = analysis::text(path);
-        if text == nil { nil } else { Document { uri, path, version: nil, text: Text::new(text) } }
-    }
-
-    /// The text of the file at `path`: the editor's if it is open.
-    pub fn text_of(self, path) {
-        let doc = self.paths[path];
-        if doc != nil {
-            return doc.text;
-        }
-        Text::new(analysis::text(path) || "")
-    }
-
-    /// The URI of `path`: the editor's own spelling if it is open.
-    pub fn uri_of(self, path) {
-        let doc = self.paths[path];
-        if doc != nil { doc.uri } else { path_to_uri(path) }
+        Server { docs: Documents::new(), initialized: false, shutdown: false }
     }
 
     /// Publish every open document's diagnostics: an edit to one module
     /// can change what another reports.
     fn publish_all(self) {
-        for (_, doc) in pairs(self.documents) {
-            features::publish_diagnostics(self, doc);
+        for (_, doc) in ipairs(self.docs.all()) {
+            features::publish_diagnostics(doc);
         }
     }
 
-    fn initialize(self, params) {
-        let mut root = nil;
+    fn initialize(self, params: any) -> table {
+        let mut root: string? = nil;
         if present(params.rootUri) {
             root = uri_to_path(params.rootUri);
         } else if present(params.rootPath) {
@@ -89,7 +58,7 @@ impl Server {
         analysis::configure(root || ".", search);
 
         // UTF-8 columns when the editor offers them, else LSP's UTF-16.
-        let mut encoding = "utf-16";
+        let mut encoding: string = "utf-16";
         let general = present(params.capabilities) && params.capabilities.general;
         if present(general) && present(general.positionEncodings) {
             for (_, e) in ipairs(general.positionEncodings) {
@@ -122,21 +91,15 @@ impl Server {
         }
     }
 
-    fn did_open(self, params) {
+    fn did_open(self, params: any) {
         let item = params.textDocument;
-        let path = uri_to_path(item.uri);
-        if path == nil {
-            return;
+        if self.docs.open(item.uri, item.version, item.text) {
+            self.publish_all();
         }
-        let doc = Document { uri: item.uri, path, version: item.version, text: Text::new(item.text) };
-        self.documents[item.uri] = doc;
-        self.paths[path] = doc;
-        analysis::open(path, item.text);
-        self.publish_all();
     }
 
-    fn did_change(self, params) {
-        let doc = self.documents[params.textDocument.uri];
+    fn did_change(self, params: any) {
+        let doc = self.docs.opened(params.textDocument.uri);
         if doc == nil {
             return;
         }
@@ -144,25 +107,23 @@ impl Server {
             doc.text.change(change);
         }
         doc.version = params.textDocument.version;
-        analysis::open(doc.path, doc.text.text);
+        self.docs.changed(doc);
         self.publish_all();
     }
 
-    fn did_close(self, params) {
-        let doc = self.documents[params.textDocument.uri];
+    fn did_close(self, params: any) {
+        let doc = self.docs.opened(params.textDocument.uri);
         if doc == nil {
             return;
         }
-        self.documents[doc.uri] = nil;
-        self.paths[doc.path] = nil;
-        analysis::close(doc.path);
+        self.docs.close(doc);
         // Its errors go with it; the rest may change without its edits.
         rpc::notify("textDocument/publishDiagnostics", #{ uri: doc.uri, diagnostics: json::array() });
         self.publish_all();
     }
 
     /// Answer a request, or fail it with the error its handler raised.
-    fn request(self, msg) {
+    fn request(self, msg: any) {
         let id = msg.id;
         let method = msg.method;
         if method == "initialize" {
@@ -176,11 +137,11 @@ impl Server {
             self.shutdown = true;
             return rpc::respond(id, nil);
         }
-        let handler = REQUESTS[method];
+        let handler: Handler? = REQUESTS[method];
         if handler == nil {
             return rpc::fail(id, rpc::METHOD_NOT_FOUND, f"'{method}' isn't supported");
         }
-        let (ok, result, err) = pcall(handler, self, msg.params);
+        let (ok, result, err) = pcall(handler, self.docs, msg.params);
         if !ok {
             rpc::log(f"{method} failed: {result}");
             rpc::fail(id, rpc::INTERNAL_ERROR, tostring(result));
@@ -191,7 +152,7 @@ impl Server {
         }
     }
 
-    fn notification(self, msg) {
+    fn notification(self, msg: any) {
         let (ok, err) = pcall(|| match msg.method {
             "textDocument/didOpen" => self.did_open(msg.params),
             "textDocument/didChange" => self.did_change(msg.params),

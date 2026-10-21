@@ -416,12 +416,14 @@ fn protocol_errors() {
     assert_eq!(s.child.wait().unwrap().code(), Some(1));
 }
 
-/// The bundled scripts pass the checker, against the host module's stub.
+/// The bundled scripts pass the checker in strict mode, against the host
+/// module's stub.
 #[test]
 fn scripts_check_clean() {
     let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts");
     let config = Config {
         root: scripts.clone(),
+        strict: true,
         ..Config::default()
     };
     let mut ws = Workspace::new(config, Box::new(DiskSources));

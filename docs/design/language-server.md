@@ -47,7 +47,7 @@ A request at the position right after a name (where the cursor usually is) answe
 
 ## Documents, files and modules
 
-- **Open documents** are kept by the scripts (`Server.documents`) and their text is given to the checker (`analysis.open`), which uses it in place of the file on disk. Edits are incremental (`textDocumentSync.change = 2`); each change is applied in order. After every open, change and close the server publishes the diagnostics of every open document, because an edit to one module can change what another reports.
+- **Open documents** are kept by the scripts (`lsp::documents`) and their text is given to the checker (`analysis.open`), which uses it in place of the file on disk. Edits are incremental (`textDocumentSync.change = 2`); each change is applied in order. After every open, change and close the server publishes the diagnostics of every open document, because an edit to one module can change what another reports.
 - **Files that aren't open** can still be asked about (an outline of a file the editor shows from a search, say): the server reads them from disk for that request.
 - **Modules.** The root is the editor's folder (`rootUri`, else `rootPath`). `use a::b` is found the way `package.path` would find it: the `searchPath` initialization option first (a list of templates), then `LUA_PATH_5_5` or `LUA_PATH` if set (`;;` stands for the defaults), else the defaults `?.orb;?/init.orb;?.lua;?/init.lua`. A Lua module with a `.orbi` stub beside it is checked through the stub.
 - **The standard library's stubs** are bundled in the checker. So that go to definition can open them, the server copies each one it points at to the cache directory (`$XDG_CACHE_HOME`, else `%LOCALAPPDATA%`, else `~/.cache`, then `orbit-lsp/<version>/builtin/`).
@@ -106,7 +106,7 @@ To add module paths, pass `initializationOptions = { searchPath = { "lib/?.orb" 
 
 ## Testing
 
-`crates/orbit-lsp/tests/session.rs` runs the binary as an editor would, over pipes, against a small workspace: diagnostics on open and after incremental edits with wide characters before them, every request in the table above, UTF-8 positions when offered, Lua files, and the protocol's error cases. One test runs the checker over the bundled scripts against `scripts/analysis.orbi`, the typed stub of the host module, so the scripts stay checker-clean.
+`crates/orbit-lsp/tests/session.rs` runs the binary as an editor would, over pipes, against a small workspace: diagnostics on open and after incremental edits with wide characters before them, every request in the table above, UTF-8 positions when offered, Lua files, and the protocol's error cases. The scripts are fully annotated and marked `//! orbit-check: strict`; one test runs the checker over them in strict mode against `scripts/analysis.orbi`, the typed stub of the host module, so they stay checker-clean.
 
 ## Not yet
 

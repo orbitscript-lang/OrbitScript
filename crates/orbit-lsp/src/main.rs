@@ -19,6 +19,10 @@ const SCRIPTS: &[(&str, &str)] = &[
     ("lsp.server", include_str!("../scripts/lsp/server.orb")),
     ("lsp.rpc", include_str!("../scripts/lsp/rpc.orb")),
     ("lsp.text", include_str!("../scripts/lsp/text.orb")),
+    (
+        "lsp.documents",
+        include_str!("../scripts/lsp/documents.orb"),
+    ),
     ("lsp.features", include_str!("../scripts/lsp/features.orb")),
 ];
 
