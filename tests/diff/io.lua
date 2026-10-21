@@ -55,5 +55,11 @@ print(fr:read("all"))
 f = io.open(file, "a") f:setvbuf("line") f:write("y") fr:seek("set") print(fr:read("a")) f:write("\n") fr:seek("set") print(fr:read("a")) f:close() fr:close()
 print(io.lines(file, "L")())
 local t = {} for i = 1, 251 do t[i] = 1 end print(pcall(io.lines, file, table.unpack(t)))
+-- Each format is checked when its turn comes: none after a failed read.
+local t = io.tmpfile() t:write("abc\n12\n")
+for _, fmts in ipairs{{"n", "x"}, {"l", "x"}, {"n", {}}, {"l", 1.5}, {"x", "l"}} do
+  t:seek("set") print(pcall(t.read, t, table.unpack(fmts)))
+end
+t:close()
 os.remove(file)
 io.write("end\n")

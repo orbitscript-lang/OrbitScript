@@ -849,22 +849,22 @@ fn append(into: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
 
 /// Read with formats `fmts` (none: one line) from `s`: one value per
 /// format, stopping after the first that fails (nil). `arg` is the
-/// argument index of the first format, for messages.
+/// argument index of the first format, for messages. As in lua5.5, each
+/// format is checked when its turn comes, so formats after a failed read
+/// are never looked at.
 fn read_values<'s>(
     c: &'s Call<'s>,
     s: &Shared,
     fmts: &[FormatArg],
     arg: usize,
 ) -> Result<io::Result<Vec<Value<'s>>>, Error> {
-    let mut parsed = Vec::with_capacity(fmts.len().max(1));
-    for (i, f) in fmts.iter().enumerate() {
-        parsed.push(format(c, f, arg + i)?);
-    }
-    if parsed.is_empty() {
-        parsed.push(Format::Line { keep: false });
-    }
-    let mut values = Vec::with_capacity(parsed.len());
-    for fmt in parsed {
+    let n = fmts.len().max(1);
+    let mut values = Vec::with_capacity(n);
+    for i in 0..n {
+        let fmt = match fmts.get(i) {
+            Some(f) => format(c, f, arg + i)?,
+            None => Format::Line { keep: false },
+        };
         match read_one(c, s, fmt) {
             Ok(v) => {
                 let failed = v.is_nil();
