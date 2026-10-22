@@ -88,6 +88,12 @@ jobs:
     env:
       NAME: orbitscript-${{ needs.version.outputs.version }}-${{ matrix.target }}
     steps:
+      # Windows runners check text files out with CRLF line ends: the tests
+      # compare programs' output with .expected files, and the programs
+      # embed .orb sources, so build from the same bytes as everywhere else.
+      - name: Check out with LF line ends
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG || github.ref }}
@@ -101,6 +107,8 @@ jobs:
         run: tools/set-version.sh "$TAG"
       # Every target the release ships runs the whole test suite first.
       - name: cargo test
+        # A hung test fails the job instead of holding the runner for hours.
+        timeout-minutes: 45
         run: cargo test --workspace --locked --no-fail-fast
       - name: Install cargo-pgo and llvm-tools
         if: env.PGO == 'train'

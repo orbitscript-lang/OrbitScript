@@ -167,7 +167,10 @@ fn definition_and_references_across_modules() {
     let at = APP.find("helper();").unwrap() as u32;
     let id = ws.symbol_at(app, at).expect("a symbol");
     let def = ws.definition(id).unwrap();
-    assert_eq!(ws.path(def.file), Path::new("/w/lib.orb"));
+    assert_eq!(
+        ws.path(def.file),
+        std::path::absolute("/w/lib.orb").unwrap()
+    );
     assert_eq!(
         &LIB[def.span.start as usize..def.span.end as usize],
         "helper"
