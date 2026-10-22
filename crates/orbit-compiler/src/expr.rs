@@ -1,7 +1,9 @@
 //! Expressions: values into registers, multiple results, calls and conditions.
 
 use orbit_bytecode::{Const, Constant, MULTI, Op, Origin, cast};
-use orbit_hir::{BinOp, Cast, CastKind, ExprId, ExprKind, ExprList, TableEntry, UnOp};
+use orbit_hir::{
+    BinOp, CaptureId, Cast, CastKind, ExprId, ExprKind, ExprList, LocalId, StrId, TableEntry, UnOp,
+};
 
 use crate::consts::{self, ConstVal};
 use crate::func::{FuncState, Label, Result, Slot};
@@ -123,167 +125,198 @@ impl FuncState<'_> {
         self.with_temps(|c| c.expr_kind_to(e, dst))
     }
 
-    /// [`Self::expr_to`] by the expression's kind, leaving its temporaries allocated.
+    /// [`Self::expr_to`] by the expression's kind, leaving its temporaries allocated. The
+    /// larger kinds are compiled out of line so that this frame, which every level of a nested
+    /// expression passes through, stays small (in debug builds especially).
     fn expr_kind_to(&mut self, e: ExprId, dst: u8) -> Result<Option<Origin>> {
         let expr = self.f.expr(e);
         let at = expr.at;
-        let origin = match &expr.kind {
+        match expr.kind {
             ExprKind::Nil
             | ExprKind::Bool(_)
             | ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Str(_) => unreachable!("literals fold"),
-            ExprKind::Vararg => {
-                self.vararg(dst, 1)?;
-                None
-            }
-            &ExprKind::VarargIndex(key) => {
-                let name: Box<[u8]> = match self.const_of(key) {
-                    Some(ConstVal::Str(s)) => self.name_bytes(s),
-                    // Lua names no integer key of a vararg table.
-                    _ => b"?".as_slice().into(),
-                };
-                match self.const_of(key) {
-                    Some(ConstVal::Str(_)) if &*name == b"n" => {
-                        self.emit(Op::VarargLen { dst });
-                    }
-                    Some(ConstVal::Int(i @ 1..=255)) => {
-                        self.emit(Op::VarargGetInt {
-                            dst,
-                            index: i as u8,
-                        });
-                    }
-                    _ => {
-                        let (k, _) = self.operand(key, dst)?;
-                        self.emit(Op::VarargGet { dst, key: k });
-                    }
-                }
-                Some(Origin::Field(name))
-            }
-            &ExprKind::Local(l) => {
-                match self.slots[l.index()] {
-                    Slot::Reg(r) => {
-                        if r != dst {
-                            self.emit(Op::Move { dst, src: r });
-                        }
-                    }
-                    Slot::Cell(cell) => {
-                        self.emit(Op::CellGet { dst, cell });
-                    }
-                    Slot::Const(_) => unreachable!("consts fold"),
-                    Slot::Unset => {
-                        return Err(self.error("internal error: local used out of scope"));
-                    }
-                }
-                self.local_origin(l)
-            }
-            &ExprKind::Capture(c) => {
-                if self.self_capture == Some(c) {
-                    self.emit(Op::CapSelf { dst });
-                } else {
-                    self.emit(Op::CapGet {
-                        dst,
-                        cap: c.0 as u8,
-                    });
-                }
-                Some(Origin::Upvalue(self.name_bytes(self.f.capture(c).name)))
-            }
-            ExprKind::Outer { .. } => return Err(self.error("internal error: HIR not analysed")),
+            ExprKind::Vararg => self.vararg(dst, 1).map(|()| None),
+            ExprKind::VarargIndex(key) => self.vararg_index_to(dst, key),
+            ExprKind::Local(l) => self.local_to(dst, l),
+            ExprKind::Capture(c) => self.capture_to(dst, c),
+            ExprKind::Outer { .. } => Err(self.error("internal error: HIR not analysed")),
             ExprKind::Env => {
                 self.emit(Op::CapGet { dst, cap: 0 });
-                Some(Origin::Upvalue(b"_ENV".as_slice().into()))
+                Ok(Some(Origin::Upvalue(b"_ENV".as_slice().into())))
             }
-            &ExprKind::Global(name) => {
-                if let Some(k) = self.str_key(name)? {
-                    let ic = self.cache();
-                    self.emit(Op::GetGlobal { dst, name: k, ic });
-                } else {
-                    // `_ENV` is capture 0 wherever a global is read.
-                    self.emit(Op::CapGet { dst, cap: 0 });
-                    self.with_temps(|c| {
-                        let key = c.alloc()?;
-                        c.load_str(key, name)?;
-                        let pc = c.emit(Op::GetIndex { dst, obj: dst, key });
-                        c.origin(pc, 0, Some(Origin::Upvalue(b"_ENV".as_slice().into())));
-                        Ok(())
-                    })?;
-                }
-                Some(Origin::Global(self.name_bytes(name)))
-            }
-            &ExprKind::Index { obj, key } => self.index(dst, obj, key, at)?,
-            ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
-                // Reuse `dst` as the call's base when it is the top temporary.
-                let func = if dst as usize + 1 == self.free && dst as usize >= self.active {
-                    self.free = dst as usize;
-                    self.alloc()?
-                } else {
-                    self.alloc()?
-                };
-                self.call(e, func, 1, false)?;
-                if func != dst {
-                    self.emit(Op::Move { dst, src: func });
-                }
-                None
-            }
-            &ExprKind::Closure(func) => {
-                self.emit_closure(dst, func)?;
-                None
-            }
-            ExprKind::Table(entries) => {
-                self.table(dst, entries)?;
-                None
-            }
-            &ExprKind::Binary { op, lhs, rhs } => self.binary(dst, op, lhs, rhs, at)?,
-            &ExprKind::Unary { op, expr: inner } => {
-                let (src, origin) = self.operand(inner, dst)?;
-                self.at_offset(at);
-                let pc = match op {
-                    UnOp::Neg => self.emit(Op::Neg { dst, src }),
-                    UnOp::Not => self.emit(Op::Not { dst, src }),
-                    UnOp::Len => self.emit(Op::Len { dst, src }),
-                    UnOp::BNot => self.emit(Op::BNot { dst, src }),
-                };
-                if op != UnOp::Not {
-                    self.origin(pc, 0, origin);
-                }
-                None
-            }
-            &ExprKind::And { lhs, rhs } | &ExprKind::Or { lhs, rhs } => {
-                let is_and = matches!(expr.kind, ExprKind::And { .. });
-                let end = self.label();
-                self.expr_to(lhs, dst)?;
-                let jump = if is_and {
-                    Op::JumpIfFalse { src: dst, off: 0 }
-                } else {
-                    Op::JumpIfTrue { src: dst, off: 0 }
-                };
-                self.jump(jump, end);
-                self.expr_to(rhs, dst)?;
-                self.place(end);
-                None
-            }
-            &ExprKind::First(inner) => self.expr_to(inner, dst)?,
-            &ExprKind::Cast {
+            ExprKind::Global(name) => self.global_to(dst, name),
+            ExprKind::Index { obj, key } => self.index(dst, obj, key, at),
+            ExprKind::Call { .. } | ExprKind::MethodCall { .. } => self.call_to(e, dst),
+            ExprKind::Closure(func) => self.emit_closure(dst, func).map(|()| None),
+            ExprKind::Table(ref entries) => self.table(dst, entries).map(|()| None),
+            ExprKind::Binary { op, lhs, rhs } => self.binary(dst, op, lhs, rhs, at),
+            ExprKind::Unary { op, expr: inner } => self.unary_to(dst, op, inner, at),
+            ExprKind::And { lhs, rhs } => self.and_or_to(dst, true, lhs, rhs),
+            ExprKind::Or { lhs, rhs } => self.and_or_to(dst, false, lhs, rhs),
+            ExprKind::First(inner) => self.expr_to(inner, dst),
+            ExprKind::Cast {
                 expr: inner,
                 ty,
                 cast,
-            } => {
-                let (src, _) = self.operand(inner, dst)?;
-                let ty = match ty {
-                    Some(ty) => self.expr_any(ty)?.0,
-                    None => 0,
-                };
-                self.at_offset(at);
-                self.emit(Op::Cast {
-                    dst,
-                    src,
-                    ty,
-                    mode: cast_mode(cast),
-                });
-                None
-            }
+            } => self.cast_to(dst, inner, ty, cast, at),
+        }
+    }
+
+    /// `R[dst] = ...[key]`, a field of the vararg table.
+    fn vararg_index_to(&mut self, dst: u8, key: ExprId) -> Result<Option<Origin>> {
+        let name: Box<[u8]> = match self.const_of(key) {
+            Some(ConstVal::Str(s)) => self.name_bytes(s),
+            // Lua names no integer key of a vararg table.
+            _ => b"?".as_slice().into(),
         };
-        Ok(origin)
+        match self.const_of(key) {
+            Some(ConstVal::Str(_)) if &*name == b"n" => {
+                self.emit(Op::VarargLen { dst });
+            }
+            Some(ConstVal::Int(i @ 1..=255)) => {
+                self.emit(Op::VarargGetInt {
+                    dst,
+                    index: i as u8,
+                });
+            }
+            _ => {
+                let (k, _) = self.operand(key, dst)?;
+                self.emit(Op::VarargGet { dst, key: k });
+            }
+        }
+        Ok(Some(Origin::Field(name)))
+    }
+
+    /// `R[dst] = l`.
+    fn local_to(&mut self, dst: u8, l: LocalId) -> Result<Option<Origin>> {
+        match self.slots[l.index()] {
+            Slot::Reg(r) => {
+                if r != dst {
+                    self.emit(Op::Move { dst, src: r });
+                }
+            }
+            Slot::Cell(cell) => {
+                self.emit(Op::CellGet { dst, cell });
+            }
+            Slot::Const(_) => unreachable!("consts fold"),
+            Slot::Unset => {
+                return Err(self.error("internal error: local used out of scope"));
+            }
+        }
+        Ok(self.local_origin(l))
+    }
+
+    /// `R[dst] = c`.
+    fn capture_to(&mut self, dst: u8, c: CaptureId) -> Result<Option<Origin>> {
+        if self.self_capture == Some(c) {
+            self.emit(Op::CapSelf { dst });
+        } else {
+            self.emit(Op::CapGet {
+                dst,
+                cap: c.0 as u8,
+            });
+        }
+        Ok(Some(Origin::Upvalue(
+            self.name_bytes(self.f.capture(c).name),
+        )))
+    }
+
+    /// `R[dst] = name`, a global.
+    fn global_to(&mut self, dst: u8, name: StrId) -> Result<Option<Origin>> {
+        if let Some(k) = self.str_key(name)? {
+            let ic = self.cache();
+            self.emit(Op::GetGlobal { dst, name: k, ic });
+        } else {
+            // `_ENV` is capture 0 wherever a global is read.
+            self.emit(Op::CapGet { dst, cap: 0 });
+            self.with_temps(|c| {
+                let key = c.alloc()?;
+                c.load_str(key, name)?;
+                let pc = c.emit(Op::GetIndex { dst, obj: dst, key });
+                c.origin(pc, 0, Some(Origin::Upvalue(b"_ENV".as_slice().into())));
+                Ok(())
+            })?;
+        }
+        Ok(Some(Origin::Global(self.name_bytes(name))))
+    }
+
+    /// `R[dst] =` the first result of the call `e`.
+    fn call_to(&mut self, e: ExprId, dst: u8) -> Result<Option<Origin>> {
+        // Reuse `dst` as the call's base when it is the top temporary.
+        let func = if dst as usize + 1 == self.free && dst as usize >= self.active {
+            self.free = dst as usize;
+            self.alloc()?
+        } else {
+            self.alloc()?
+        };
+        self.call(e, func, 1, false)?;
+        if func != dst {
+            self.emit(Op::Move { dst, src: func });
+        }
+        Ok(None)
+    }
+
+    /// `R[dst] = op inner`.
+    fn unary_to(&mut self, dst: u8, op: UnOp, inner: ExprId, at: u32) -> Result<Option<Origin>> {
+        let (src, origin) = self.operand(inner, dst)?;
+        self.at_offset(at);
+        let pc = match op {
+            UnOp::Neg => self.emit(Op::Neg { dst, src }),
+            UnOp::Not => self.emit(Op::Not { dst, src }),
+            UnOp::Len => self.emit(Op::Len { dst, src }),
+            UnOp::BNot => self.emit(Op::BNot { dst, src }),
+        };
+        if op != UnOp::Not {
+            self.origin(pc, 0, origin);
+        }
+        Ok(None)
+    }
+
+    /// `R[dst] = lhs and rhs` (`is_and`) or `R[dst] = lhs or rhs`.
+    fn and_or_to(
+        &mut self,
+        dst: u8,
+        is_and: bool,
+        lhs: ExprId,
+        rhs: ExprId,
+    ) -> Result<Option<Origin>> {
+        let end = self.label();
+        self.expr_to(lhs, dst)?;
+        let jump = if is_and {
+            Op::JumpIfFalse { src: dst, off: 0 }
+        } else {
+            Op::JumpIfTrue { src: dst, off: 0 }
+        };
+        self.jump(jump, end);
+        self.expr_to(rhs, dst)?;
+        self.place(end);
+        Ok(None)
+    }
+
+    /// `R[dst] = inner as ty`.
+    fn cast_to(
+        &mut self,
+        dst: u8,
+        inner: ExprId,
+        ty: Option<ExprId>,
+        cast: Cast,
+        at: u32,
+    ) -> Result<Option<Origin>> {
+        let (src, _) = self.operand(inner, dst)?;
+        let ty = match ty {
+            Some(ty) => self.expr_any(ty)?.0,
+            None => 0,
+        };
+        self.at_offset(at);
+        self.emit(Op::Cast {
+            dst,
+            src,
+            ty,
+            mode: cast_mode(cast),
+        });
+        Ok(None)
     }
 
     /// Whether `e` is a variable named `_ENV`, whose fields Lua calls globals in messages.
@@ -643,36 +676,7 @@ impl FuncState<'_> {
                 name,
                 ref args,
             } => {
-                self.free = func as usize;
-                let (o, obj_origin) = self.expr_any(obj)?;
-                self.free = func as usize;
-                self.alloc()?;
-                self.alloc()?;
-                let pc = if let Some(key) = self.str_key(name)? {
-                    self.at_offset(expr.at);
-                    let ic = self.caches(4);
-                    self.emit(Op::SelfCall {
-                        dst: func,
-                        obj: o,
-                        key,
-                        ic,
-                    })
-                } else {
-                    // A name past the `Const` operands' range: `SelfCall`'s
-                    // two steps, the method name going through `func`.
-                    self.emit(Op::Move {
-                        dst: func + 1,
-                        src: o,
-                    });
-                    self.load_str(func, name)?;
-                    self.at_offset(expr.at);
-                    self.emit(Op::GetIndex {
-                        dst: func,
-                        obj: func + 1,
-                        key: func,
-                    })
-                };
-                self.origin(pc, 0, obj_origin);
+                self.method_callee(func, obj, name, expr.at)?;
                 (
                     self.args(args, 1)?,
                     Some(Origin::Method(self.name_bytes(name))),
@@ -698,6 +702,42 @@ impl FuncState<'_> {
         Ok(())
     }
 
+    /// Puts `obj`'s method `name` in `func` and `obj` in `func + 1`, for a method call. Out
+    /// of line, to keep `call`'s frame, which nested calls repeat, small.
+    fn method_callee(&mut self, func: u8, obj: ExprId, name: StrId, at: u32) -> Result<()> {
+        self.free = func as usize;
+        let (o, obj_origin) = self.expr_any(obj)?;
+        self.free = func as usize;
+        self.alloc()?;
+        self.alloc()?;
+        let pc = if let Some(key) = self.str_key(name)? {
+            self.at_offset(at);
+            let ic = self.caches(4);
+            self.emit(Op::SelfCall {
+                dst: func,
+                obj: o,
+                key,
+                ic,
+            })
+        } else {
+            // A name past the `Const` operands' range: `SelfCall`'s
+            // two steps, the method name going through `func`.
+            self.emit(Op::Move {
+                dst: func + 1,
+                src: o,
+            });
+            self.load_str(func, name)?;
+            self.at_offset(at);
+            self.emit(Op::GetIndex {
+                dst: func,
+                obj: func + 1,
+                key: func,
+            })
+        };
+        self.origin(pc, 0, obj_origin);
+        Ok(())
+    }
+
     /// Evaluates call arguments above the function (and `self`, `extra` of them), returning
     /// the `nargs` operand.
     fn args(&mut self, args: &ExprList, extra: usize) -> Result<u8> {
@@ -720,26 +760,9 @@ impl FuncState<'_> {
         for (i, &item) in items.iter().enumerate() {
             let last = i + 1 == items.len();
             match want {
-                Want::Exact(n) if i >= n => {
-                    // Evaluated for side effects only.
-                    self.with_temps(|c| {
-                        if c.is_multi(item) {
-                            let r = c.alloc()?;
-                            c.multi(item, r, 0)
-                        } else {
-                            c.expr_temp(item).map(|_| ())
-                        }
-                    })?;
-                }
+                Want::Exact(n) if i >= n => self.discard(item)?,
                 Want::Exact(n) if last && self.is_multi(item) => {
-                    let r = self.alloc()?;
-                    let Some(count) = u8::try_from(n - i).ok().filter(|&c| c != MULTI) else {
-                        return Err(self.too_many_registers());
-                    };
-                    self.multi(item, r, count)?;
-                    self.free = first + n;
-                    self.reserve_to(self.free)?;
-                    return Ok(Some(n));
+                    return self.multi_exact(item, first, i, n);
                 }
                 Want::All if last && self.is_multi(item) => {
                     let r = self.alloc()?;
@@ -753,20 +776,57 @@ impl FuncState<'_> {
             }
         }
         match want {
-            Want::Exact(n) => {
-                if items.len() < n {
-                    let dst = (first + items.len()) as u8;
-                    let count = (n - items.len()) as u8;
-                    self.free = first + n;
-                    self.reserve_to(self.free)?;
-                    self.emit(Op::LoadNil { dst, count });
-                }
-                self.free = first + n;
-                self.reserve_to(self.free)?;
-                Ok(Some(n))
-            }
+            Want::Exact(n) => self.fill_exact(first, items.len(), n),
             Want::All => Ok(Some(items.len())),
         }
+    }
+
+    // The rarer parts of `expr_list`, out of line to keep its frame, which nested calls
+    // repeat, small.
+
+    /// Evaluates `item`, a list entry past the values wanted, for its side effects only.
+    fn discard(&mut self, item: ExprId) -> Result<()> {
+        self.with_temps(|c| {
+            if c.is_multi(item) {
+                let r = c.alloc()?;
+                c.multi(item, r, 0)
+            } else {
+                c.expr_temp(item).map(|_| ())
+            }
+        })
+    }
+
+    /// Evaluates `item`, entry `i` of a list (starting at register `first`) that must give
+    /// exactly `n` values, when it's the last entry and gives several.
+    fn multi_exact(
+        &mut self,
+        item: ExprId,
+        first: usize,
+        i: usize,
+        n: usize,
+    ) -> Result<Option<usize>> {
+        let r = self.alloc()?;
+        let Some(count) = u8::try_from(n - i).ok().filter(|&c| c != MULTI) else {
+            return Err(self.too_many_registers());
+        };
+        self.multi(item, r, count)?;
+        self.free = first + n;
+        self.reserve_to(self.free)?;
+        Ok(Some(n))
+    }
+
+    /// Pads the `len` values of a list starting at register `first` with nils to `n`.
+    fn fill_exact(&mut self, first: usize, len: usize, n: usize) -> Result<Option<usize>> {
+        if len < n {
+            let dst = (first + len) as u8;
+            let count = (n - len) as u8;
+            self.free = first + n;
+            self.reserve_to(self.free)?;
+            self.emit(Op::LoadNil { dst, count });
+        }
+        self.free = first + n;
+        self.reserve_to(self.free)?;
+        Ok(Some(n))
     }
 
     /// Jumps to `target` if `e` is truthy (`jump_if`) or falsy (`!jump_if`), without

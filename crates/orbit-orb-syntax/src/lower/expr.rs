@@ -217,6 +217,8 @@ impl Lowerer {
 
     /// Lowers an expression to one HIR expression (a call may still give several values;
     /// see [`Lowerer::single`]), emitting any statements it needs into `out`.
+    /// Lowers `e`. The larger kinds are lowered out of line so that this frame, which every
+    /// level of a nested expression passes through, stays small (in debug builds especially).
     pub(super) fn expr(&mut self, e: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
         let span = e.span;
         let kind = match &e.kind {
@@ -228,109 +230,35 @@ impl Lowerer {
             K::Str(s) => hir::ExprKind::Str(*s),
             K::Error => return Err(self.unparsed(span)),
             K::Template(pieces) => return self.template(pieces, span, out),
-            K::Name(sym) => {
-                return self.name_expr(ast::Name { sym: *sym, span });
-            }
-            K::SelfValue => {
-                let name = ast::Name {
-                    sym: self.syms.self_,
-                    span,
-                };
-                if !self.is_bound(self.syms.self_) {
-                    return Err(self.error(span, "`self` is only available in methods"));
-                }
-                return self.name_expr(name);
-            }
+            K::Name(sym) => return self.name_expr(ast::Name { sym: *sym, span }),
+            K::SelfValue => return self.self_value(span),
             K::SelfType => return self.self_type(span),
             K::Path { base, name } | K::Field { obj: base, name } => {
-                let obj = self.expr(base, out)?;
-                let obj = self.first(obj);
-                return Ok(self.field(obj, name.sym, span));
+                return self.field_expr(base, name, span, out);
             }
-            K::Index { obj, key } => {
-                let (ids, _) = self.parts(&[Part::Expr(obj), Part::Expr(key)], out)?;
-                let obj = self.first(ids[0]);
-                let key = self.first(ids[1]);
-                hir::ExprKind::Index { obj, key }
-            }
+            K::Index { obj, key } => return self.index_expr(obj, key, span, out),
             K::Call {
                 callee,
                 args,
                 args_at,
-            } => {
-                let mut parts = vec![Part::Expr(callee)];
-                parts.extend(
-                    args.iter()
-                        .enumerate()
-                        .map(|(i, a)| Part::Item(a, i + 1 == args.len())),
-                );
-                let (mut ids, _) = self.parts(&parts, out)?;
-                let callee = self.first(ids.remove(0));
-                return Ok(self.add_expr_at(
-                    hir::ExprKind::Call {
-                        callee,
-                        args: ids.into(),
-                    },
-                    span,
-                    *args_at,
-                ));
-            }
+            } => return self.call_expr(callee, None, args, span, *args_at, out),
             K::MethodCall {
                 obj,
                 name,
                 args,
                 args_at,
-            } => {
-                let mut parts = vec![Part::Expr(obj)];
-                parts.extend(
-                    args.iter()
-                        .enumerate()
-                        .map(|(i, a)| Part::Item(a, i + 1 == args.len())),
-                );
-                let (mut ids, _) = self.parts(&parts, out)?;
-                let obj = self.first(ids.remove(0));
-                return Ok(self.add_expr_at(
-                    hir::ExprKind::MethodCall {
-                        obj,
-                        name: name.sym,
-                        args: ids.into(),
-                    },
-                    span,
-                    *args_at,
-                ));
-            }
-            K::Closure(c) => {
-                let func = self.function(
-                    &c.sig,
-                    super::items::FnBody::Expr(&c.body),
-                    hir::FunctionName::Anonymous,
-                    c.span,
-                )?;
-                hir::ExprKind::Closure(func)
-            }
-            K::Array(items) => hir::ExprKind::Table(
-                self.list(items, out)?
-                    .items
-                    .into_iter()
-                    .map(hir::TableEntry::Positional)
-                    .collect(),
-            ),
+            } => return self.call_expr(obj, Some(name), args, span, *args_at, out),
+            K::Closure(c) => return self.closure(c, span),
+            K::Array(items) => return self.array(items, span, out),
             K::Map(entries) => return self.map(entries, span, out),
             K::StructLit { path, fields } => return self.struct_lit(path, fields, span, out),
             K::Binary {
-                op: ast::BinOp::And | ast::BinOp::Or,
+                op: op @ (ast::BinOp::And | ast::BinOp::Or),
                 op_at,
                 lhs,
                 rhs,
-                ..
             } => {
-                let is_and = matches!(
-                    e.kind,
-                    K::Binary {
-                        op: ast::BinOp::And,
-                        ..
-                    }
-                );
+                let is_and = *op == ast::BinOp::And;
                 return self.logical(is_and, lhs, rhs, span, *op_at, out);
             }
             K::Binary {
@@ -342,30 +270,8 @@ impl Lowerer {
                 op_at,
                 lhs,
                 rhs,
-            } => {
-                let (ids, _) = self.parts(&[Part::Expr(lhs), Part::Expr(rhs)], out)?;
-                let lhs = self.first(ids[0]);
-                let rhs = self.first(ids[1]);
-                return Ok(self.add_expr_at(
-                    hir::ExprKind::Binary {
-                        op: bin_op(*op),
-                        lhs,
-                        rhs,
-                    },
-                    span,
-                    *op_at,
-                ));
-            }
-            K::Unary { op, expr } => {
-                let inner = self.single(expr, out)?;
-                let op = match op {
-                    ast::UnOp::Neg => hir::UnOp::Neg,
-                    ast::UnOp::Not => hir::UnOp::Not,
-                    ast::UnOp::Len => hir::UnOp::Len,
-                    ast::UnOp::BNot => hir::UnOp::BNot,
-                };
-                hir::ExprKind::Unary { op, expr: inner }
-            }
+            } => return self.binary(*op, lhs, rhs, span, *op_at, out),
+            K::Unary { op, expr } => return self.unary(*op, expr, span, out),
             K::Paren(inner) => return self.single(inner, out),
             K::As { expr, ty, optional } => return self.cast(expr, ty, *optional, span, out),
             K::Tuple(_) => {
@@ -387,22 +293,164 @@ impl Lowerer {
                 ));
             }
             K::Try(inner) => return self.try_(inner, span, out),
-            K::If { .. } | K::Match { .. } | K::Block(_) | K::Loop { .. } => {
-                let local = self.temp(None, span, out);
-                self.tail(e, &Dest::Locals(vec![local]), out)?;
-                return Ok(self.local_expr(local, span));
-            }
-            K::While { .. }
+            K::If { .. }
+            | K::Match { .. }
+            | K::Block(_)
+            | K::Loop { .. }
+            | K::While { .. }
             | K::For { .. }
             | K::Return(_)
             | K::Break { .. }
-            | K::Continue { .. } => {
-                // Statements whose value, if any is used, is nil.
-                self.tail(e, &Dest::Discard, out)?;
-                hir::ExprKind::Nil
-            }
+            | K::Continue { .. } => return self.control_value(e, out),
         };
         Ok(self.add_expr(kind, span))
+    }
+
+    /// `self`.
+    fn self_value(&mut self, span: Span) -> LResult<ExprId> {
+        if !self.is_bound(self.syms.self_) {
+            return Err(self.error(span, "`self` is only available in methods"));
+        }
+        self.name_expr(ast::Name {
+            sym: self.syms.self_,
+            span,
+        })
+    }
+
+    /// `base.name` or `base::name`.
+    fn field_expr(
+        &mut self,
+        base: &ast::Expr,
+        name: &ast::Name,
+        span: Span,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<ExprId> {
+        let obj = self.expr(base, out)?;
+        let obj = self.first(obj);
+        Ok(self.field(obj, name.sym, span))
+    }
+
+    /// `obj[key]`.
+    fn index_expr(
+        &mut self,
+        obj: &ast::Expr,
+        key: &ast::Expr,
+        span: Span,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<ExprId> {
+        let (ids, _) = self.parts(&[Part::Expr(obj), Part::Expr(key)], out)?;
+        let obj = self.first(ids[0]);
+        let key = self.first(ids[1]);
+        Ok(self.add_expr(hir::ExprKind::Index { obj, key }, span))
+    }
+
+    /// `callee(args)`, or the method call `callee.name(args)` when `method` is given.
+    fn call_expr(
+        &mut self,
+        callee: &ast::Expr,
+        method: Option<&ast::Name>,
+        args: &[ast::Expr],
+        span: Span,
+        args_at: u32,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<ExprId> {
+        let mut parts = vec![Part::Expr(callee)];
+        parts.extend(
+            args.iter()
+                .enumerate()
+                .map(|(i, a)| Part::Item(a, i + 1 == args.len())),
+        );
+        let (mut ids, _) = self.parts(&parts, out)?;
+        let callee = self.first(ids.remove(0));
+        let kind = match method {
+            None => hir::ExprKind::Call {
+                callee,
+                args: ids.into(),
+            },
+            Some(name) => hir::ExprKind::MethodCall {
+                obj: callee,
+                name: name.sym,
+                args: ids.into(),
+            },
+        };
+        Ok(self.add_expr_at(kind, span, args_at))
+    }
+
+    /// `|params| body`.
+    fn closure(&mut self, c: &ast::Closure, span: Span) -> LResult<ExprId> {
+        let func = self.function(
+            &c.sig,
+            super::items::FnBody::Expr(&c.body),
+            hir::FunctionName::Anonymous,
+            c.span,
+        )?;
+        Ok(self.add_expr(hir::ExprKind::Closure(func), span))
+    }
+
+    /// `[a, b, ...]`.
+    fn array(&mut self, items: &[ast::Expr], span: Span, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+        let entries = self
+            .list(items, out)?
+            .items
+            .into_iter()
+            .map(hir::TableEntry::Positional)
+            .collect();
+        Ok(self.add_expr(hir::ExprKind::Table(entries), span))
+    }
+
+    /// `lhs op rhs`, for the operators that map to one HIR operator.
+    fn binary(
+        &mut self,
+        op: ast::BinOp,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        span: Span,
+        op_at: u32,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<ExprId> {
+        let (ids, _) = self.parts(&[Part::Expr(lhs), Part::Expr(rhs)], out)?;
+        let lhs = self.first(ids[0]);
+        let rhs = self.first(ids[1]);
+        Ok(self.add_expr_at(
+            hir::ExprKind::Binary {
+                op: bin_op(op),
+                lhs,
+                rhs,
+            },
+            span,
+            op_at,
+        ))
+    }
+
+    /// `op expr`.
+    fn unary(
+        &mut self,
+        op: ast::UnOp,
+        expr: &ast::Expr,
+        span: Span,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<ExprId> {
+        let inner = self.single(expr, out)?;
+        let op = match op {
+            ast::UnOp::Neg => hir::UnOp::Neg,
+            ast::UnOp::Not => hir::UnOp::Not,
+            ast::UnOp::Len => hir::UnOp::Len,
+            ast::UnOp::BNot => hir::UnOp::BNot,
+        };
+        Ok(self.add_expr(hir::ExprKind::Unary { op, expr: inner }, span))
+    }
+
+    /// A block, `if`, `match` or loop used as a value; or `while`, `for`, `return`, `break`
+    /// or `continue`, statements whose value, if any is used, is nil.
+    fn control_value(&mut self, e: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+        let span = e.span;
+        if let K::If { .. } | K::Match { .. } | K::Block(_) | K::Loop { .. } = e.kind {
+            let local = self.temp(None, span, out);
+            self.tail(e, &Dest::Locals(vec![local]), out)?;
+            return Ok(self.local_expr(local, span));
+        }
+        self.tail(e, &Dest::Discard, out)?;
+        Ok(self.add_expr(hir::ExprKind::Nil, span))
     }
 
     fn is_bound(&self, sym: hir::StrId) -> bool {

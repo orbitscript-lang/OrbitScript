@@ -11,5 +11,9 @@ publish = false
 [dependencies]
 orbit-hir = { path = "../orbit-hir" }
 
+[dev-dependencies]
+# The nesting tests compile what they lower, since the compiler recurses too.
+orbit-compiler = { path = "../orbit-compiler" }
+
 [lints]
 workspace = true

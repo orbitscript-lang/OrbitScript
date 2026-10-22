@@ -652,13 +652,7 @@ impl Parser<'_> {
             match kind {
                 TokenKind::Punct(Punct::RBrace) if open.is_some() => return Ok((stmts, None)),
                 TokenKind::Eof => {
-                    if let Some(open) = open {
-                        let d = self.unclosed(open);
-                        if !self.recover {
-                            return Err(d);
-                        }
-                        self.recovered(d);
-                    }
+                    self.block_at_eof(open)?;
                     return Ok((stmts, None));
                 }
                 TokenKind::Punct(Punct::Semi) => self.advance()?,
@@ -670,54 +664,88 @@ impl Parser<'_> {
                 _ => {
                     let start = self.tok.span.start;
                     let depth = self.depth;
-                    let err = match self.statement() {
-                        Ok(StmtOrTail::Stmt(s)) => {
-                            stmts.push(s);
-                            continue;
-                        }
-                        Ok(StmtOrTail::Tail(e)) => {
-                            let at_end = match open {
-                                Some(_) => self.is(Punct::RBrace),
-                                None => self.tok.kind == TokenKind::Eof,
-                            };
-                            if at_end {
-                                return Ok((stmts, Some(Box::new(e))));
-                            }
-                            let d = self.expected("`;`");
-                            if self.recover && self.tok.span.start != start {
-                                // A missing `;`: keep the expression and go on.
-                                self.recovered(d);
-                                let span = e.span;
-                                stmts.push(Stmt {
-                                    kind: StmtKind::Expr(e),
-                                    span,
-                                });
-                                continue;
-                            }
-                            d
-                        }
-                        Err(d) => d,
-                    };
-                    if !self.recover {
-                        return Err(err);
+                    let parsed = self.statement();
+                    if let Some(tail) =
+                        self.add_statement(parsed, open, start, depth, &mut stmts)?
+                    {
+                        return Ok((stmts, Some(tail)));
                     }
-                    self.depth = depth;
-                    self.report_in(err, start);
-                    self.synchronize(start, open.is_some(), Sync::Statement);
-                    stmts.push(Stmt {
-                        kind: StmtKind::Error,
-                        span: self.span_from(start),
-                    });
                 }
             }
         }
     }
 
+    /// The end of input where a block (`open` is its `{`) or the module ends.
+    #[cold]
+    fn block_at_eof(&mut self, open: Option<u32>) -> PResult<()> {
+        if let Some(open) = open {
+            let d = self.unclosed(open);
+            if !self.recover {
+                return Err(d);
+            }
+            self.recovered(d);
+        }
+        Ok(())
+    }
+
+    /// Adds what [`Self::statement`] parsed (from `start`, at nesting `depth`) to `stmts`, or
+    /// gives the block's tail expression when the block ends after it. Out of line, to keep
+    /// `block_body`'s frame, which nested blocks repeat, small.
+    fn add_statement(
+        &mut self,
+        parsed: PResult<StmtOrTail>,
+        open: Option<u32>,
+        start: u32,
+        depth: u32,
+        stmts: &mut Vec<Stmt>,
+    ) -> PResult<Option<Box<Expr>>> {
+        let err = match parsed {
+            Ok(StmtOrTail::Stmt(s)) => {
+                stmts.push(s);
+                return Ok(None);
+            }
+            Ok(StmtOrTail::Tail(e)) => {
+                let at_end = match open {
+                    Some(_) => self.is(Punct::RBrace),
+                    None => self.tok.kind == TokenKind::Eof,
+                };
+                if at_end {
+                    return Ok(Some(Box::new(e)));
+                }
+                let d = self.expected("`;`");
+                if self.recover && self.tok.span.start != start {
+                    // A missing `;`: keep the expression and go on.
+                    self.recovered(d);
+                    let span = e.span;
+                    stmts.push(Stmt {
+                        kind: StmtKind::Expr(e),
+                        span,
+                    });
+                    return Ok(None);
+                }
+                d
+            }
+            Err(d) => d,
+        };
+        if !self.recover {
+            return Err(err);
+        }
+        self.depth = depth;
+        self.report_in(err, start);
+        self.synchronize(start, open.is_some(), Sync::Statement);
+        stmts.push(Stmt {
+            kind: StmtKind::Error,
+            span: self.span_from(start),
+        });
+        Ok(None)
+    }
+
+    /// One statement, or a block's tail expression. Each kind is parsed out of line so that
+    /// this frame, which every level of nested blocks passes through, stays small.
     fn statement(&mut self) -> PResult<StmtOrTail> {
-        let start = self.tok.span.start;
         let kind = self.tok.kind;
         match kind {
-            TokenKind::Keyword(Keyword::Let) => return self.let_stmt().map(StmtOrTail::Stmt),
+            TokenKind::Keyword(Keyword::Let) => self.let_stmt().map(StmtOrTail::Stmt),
             TokenKind::Keyword(
                 Keyword::Fn
                 | Keyword::Pub
@@ -728,66 +756,75 @@ impl Parser<'_> {
                 | Keyword::Const
                 | Keyword::Global
                 | Keyword::Extern,
-            ) => {
-                let item = self.item()?;
-                return Ok(StmtOrTail::Stmt(Stmt {
-                    span: item.span,
-                    kind: StmtKind::Item(Box::new(item)),
-                }));
-            }
+            ) => self.item_stmt(),
             TokenKind::Ident(_) if self.is_type_keyword() && self.type_is_keyword()? => {
-                let item = self.item()?;
-                return Ok(StmtOrTail::Stmt(Stmt {
-                    span: item.span,
-                    kind: StmtKind::Item(Box::new(item)),
-                }));
+                self.item_stmt()
             }
-            TokenKind::Ident(_) if self.is_scope() && self.scope_is_keyword()? => {
-                self.advance()?;
-                let inner = if self.is(Punct::LBrace) {
-                    let block = self.block()?;
-                    let span = block.span;
-                    Stmt {
-                        kind: StmtKind::Expr(Expr {
-                            kind: ExprKind::Block(block),
-                            span,
-                        }),
-                        span,
-                    }
-                } else {
-                    match self.statement()? {
-                        StmtOrTail::Stmt(s) => s,
-                        StmtOrTail::Tail(_) => return Err(self.expected("`;`")),
-                    }
-                };
-                if matches!(inner.kind, StmtKind::Let { .. } | StmtKind::Item(_)) {
-                    return Err(self.error(
-                        inner.span,
-                        "`scope` takes a statement to run at scope exit; to close a value, write `let scope name = value;`",
-                    ));
-                }
-                return Ok(StmtOrTail::Stmt(Stmt {
-                    kind: StmtKind::Scope(Box::new(inner)),
-                    span: self.span_from(start),
-                }));
-            }
-            _ => {}
+            TokenKind::Ident(_) if self.is_scope() && self.scope_is_keyword()? => self.scope_stmt(),
+            _ if self.starts_block_like() => self.block_like_stmt(),
+            _ => self.expr_stmt(),
         }
+    }
 
-        // A block-like expression at the start of a statement ends there.
-        if self.starts_block_like() {
-            let e = self.primary(Ctx::Normal)?;
-            if self.eat(Punct::Semi)? || !self.is(Punct::RBrace) && self.tok.kind != TokenKind::Eof
-            {
-                let span = e.span;
-                return Ok(StmtOrTail::Stmt(Stmt {
-                    kind: StmtKind::Expr(e),
+    /// An item declared in a block.
+    fn item_stmt(&mut self) -> PResult<StmtOrTail> {
+        // Through `map`, to keep the item off this frame, which nested functions repeat.
+        self.item().map(|item| {
+            StmtOrTail::Stmt(Stmt {
+                span: item.span,
+                kind: StmtKind::Item(Box::new(item)),
+            })
+        })
+    }
+
+    /// `scope stmt` or `scope { ... }`, at `scope`.
+    fn scope_stmt(&mut self) -> PResult<StmtOrTail> {
+        let start = self.tok.span.start;
+        self.advance()?;
+        let inner = if self.is(Punct::LBrace) {
+            let block = self.block()?;
+            let span = block.span;
+            Stmt {
+                kind: StmtKind::Expr(Expr {
+                    kind: ExprKind::Block(block),
                     span,
-                }));
+                }),
+                span,
             }
-            return Ok(StmtOrTail::Tail(e));
+        } else {
+            match self.statement()? {
+                StmtOrTail::Stmt(s) => s,
+                StmtOrTail::Tail(_) => return Err(self.expected("`;`")),
+            }
+        };
+        if matches!(inner.kind, StmtKind::Let { .. } | StmtKind::Item(_)) {
+            return Err(self.error(
+                inner.span,
+                "`scope` takes a statement to run at scope exit; to close a value, write `let scope name = value;`",
+            ));
         }
+        Ok(StmtOrTail::Stmt(Stmt {
+            kind: StmtKind::Scope(Box::new(inner)),
+            span: self.span_from(start),
+        }))
+    }
 
+    /// A block-like expression at the start of a statement, which ends the statement.
+    fn block_like_stmt(&mut self) -> PResult<StmtOrTail> {
+        let e = self.primary(Ctx::Normal)?;
+        if self.eat(Punct::Semi)? || !self.is(Punct::RBrace) && self.tok.kind != TokenKind::Eof {
+            let span = e.span;
+            return Ok(StmtOrTail::Stmt(Stmt {
+                kind: StmtKind::Expr(e),
+                span,
+            }));
+        }
+        Ok(StmtOrTail::Tail(e))
+    }
+
+    /// An expression statement, an assignment, or a block's tail expression.
+    fn expr_stmt(&mut self) -> PResult<StmtOrTail> {
+        let start = self.tok.span.start;
         let e = self.expr()?;
         let e = match self.assignment(start, e)? {
             Ok(assign) => {
@@ -946,46 +983,58 @@ impl Parser<'_> {
         let start = self.tok.span.start;
         let docs = self.item_docs();
         let is_pub = self.eat_kw(Keyword::Pub)?;
+        // Each kind is parsed out of line so that this frame, which every level of nested
+        // functions passes through, stays small.
         let kind = match self.tok.kind {
-            TokenKind::Ident(_) if self.is_type_keyword() => self.type_alias()?,
-            TokenKind::Keyword(Keyword::Fn) => ItemKind::Fn(self.fn_decl(false)?),
-            TokenKind::Keyword(Keyword::Struct) => ItemKind::Struct(self.struct_decl()?),
-            TokenKind::Keyword(Keyword::Enum) => ItemKind::Enum(self.enum_decl()?),
-            TokenKind::Keyword(Keyword::Impl) if !is_pub => ItemKind::Impl(self.impl_decl()?),
-            TokenKind::Keyword(Keyword::Use) if !is_pub => ItemKind::Use(self.use_decl()?),
-            TokenKind::Keyword(Keyword::Const) => {
-                self.advance()?;
-                let name = self.name()?;
-                self.const_rest(name)?
-            }
-            TokenKind::Keyword(Keyword::Global) if !is_pub => {
-                self.advance()?;
-                let name = self.name()?;
-                self.expect(Punct::Assign)?;
-                let value = self.expr()?;
-                self.semi()?;
-                ItemKind::Global { name, value }
-            }
-            TokenKind::Keyword(Keyword::Extern) if !is_pub => {
-                self.advance()?;
-                let mut names = vec![self.name()?];
-                while self.eat(Punct::Comma)? {
-                    names.push(self.name()?);
-                }
-                self.semi()?;
-                ItemKind::Extern(names)
-            }
+            TokenKind::Ident(_) if self.is_type_keyword() => self.type_alias(),
+            TokenKind::Keyword(Keyword::Fn) => self.fn_decl(false).map(ItemKind::Fn),
+            TokenKind::Keyword(Keyword::Struct) => self.struct_decl().map(ItemKind::Struct),
+            TokenKind::Keyword(Keyword::Enum) => self.enum_decl().map(ItemKind::Enum),
+            TokenKind::Keyword(Keyword::Impl) if !is_pub => self.impl_decl().map(ItemKind::Impl),
+            TokenKind::Keyword(Keyword::Use) if !is_pub => self.use_decl().map(ItemKind::Use),
+            TokenKind::Keyword(Keyword::Const) => self.const_decl(),
+            TokenKind::Keyword(Keyword::Global) if !is_pub => self.global_decl(),
+            TokenKind::Keyword(Keyword::Extern) if !is_pub => self.extern_decl(),
             _ if is_pub => {
-                return Err(self.expected("`fn`, `struct`, `enum`, `const` or `type` after `pub`"));
+                Err(self.expected("`fn`, `struct`, `enum`, `const` or `type` after `pub`"))
             }
-            _ => return Err(self.expected("an item")),
+            _ => Err(self.expected("an item")),
         };
-        Ok(Item {
+        // Through `map`, to keep the item kind off this frame.
+        kind.map(|kind| Item {
             is_pub,
             kind,
             span: self.span_from(start),
             docs,
         })
+    }
+
+    /// `const NAME[: T] = value;`.
+    fn const_decl(&mut self) -> PResult<ItemKind> {
+        self.advance()?;
+        let name = self.name()?;
+        self.const_rest(name)
+    }
+
+    /// `global NAME = value;`.
+    fn global_decl(&mut self) -> PResult<ItemKind> {
+        self.advance()?;
+        let name = self.name()?;
+        self.expect(Punct::Assign)?;
+        let value = self.expr()?;
+        self.semi()?;
+        Ok(ItemKind::Global { name, value })
+    }
+
+    /// `extern a, b;`.
+    fn extern_decl(&mut self) -> PResult<ItemKind> {
+        self.advance()?;
+        let mut names = vec![self.name()?];
+        while self.eat(Punct::Comma)? {
+            names.push(self.name()?);
+        }
+        self.semi()?;
+        Ok(ItemKind::Extern(names))
     }
 
     /// `[: T] = value;` after `const NAME`; a stub may write `: T;` with no value.
@@ -1041,6 +1090,18 @@ impl Parser<'_> {
 
     /// `fn name(...) { ... }`; a `member` (a function in `impl`) may be named by a keyword.
     fn fn_decl(&mut self, member: bool) -> PResult<FnDecl> {
+        // The header is parsed out of line, to keep this frame, which nested functions
+        // repeat, small.
+        let mut decl = self.fn_header(member)?;
+        if !(self.stub && self.eat(Punct::Semi)?) {
+            decl.body = Some(self.block()?);
+        }
+        decl.span = self.span_from(decl.span.start);
+        Ok(decl)
+    }
+
+    /// `fn name<generics>(params) [-> T]`, as a declaration with no body yet.
+    fn fn_header(&mut self, member: bool) -> PResult<FnDecl> {
         let start = self.tok.span.start;
         self.advance()?; // fn
         let name = if member {
@@ -1050,16 +1111,11 @@ impl Parser<'_> {
         };
         let generics = self.generics()?;
         let sig = self.fn_params()?;
-        let body = if self.stub && self.eat(Punct::Semi)? {
-            None
-        } else {
-            Some(self.block()?)
-        };
         Ok(FnDecl {
             name,
             generics,
             sig,
-            body,
+            body: None,
             span: self.span_from(start),
         })
     }
@@ -1780,19 +1836,25 @@ impl Parser<'_> {
         let start = self.tok.span.start;
         let lhs = self.binary(0, ctx)?;
         if self.is(Punct::DotDot) || self.is(Punct::DotDotEq) {
-            let inclusive = self.is(Punct::DotDotEq);
-            self.advance()?;
-            let end = self.binary(0, ctx)?;
-            return Ok(Expr {
-                kind: ExprKind::Range {
-                    start: Box::new(lhs),
-                    end: Box::new(end),
-                    inclusive,
-                },
-                span: self.span_from(start),
-            });
+            return self.range(start, lhs, ctx);
         }
         Ok(lhs)
+    }
+
+    /// `lhs..end` or `lhs..=end`, at the operator. Out of line, like the other rare parts of
+    /// the expression functions, to keep the frames that nested expressions repeat small.
+    fn range(&mut self, start: u32, lhs: Expr, ctx: Ctx) -> PResult<Expr> {
+        let inclusive = self.is(Punct::DotDotEq);
+        self.advance()?;
+        let end = self.binary(0, ctx)?;
+        Ok(Expr {
+            kind: ExprKind::Range {
+                start: Box::new(lhs),
+                end: Box::new(end),
+                inclusive,
+            },
+            span: self.span_from(start),
+        })
     }
 
     fn binop(&self) -> Option<BinOp> {
@@ -1847,32 +1909,42 @@ impl Parser<'_> {
             }
             if op.is_comparison() {
                 if let Some(prev) = last_cmp {
-                    return Err(self.error(
-                        self.tok.span,
-                        format!(
-                            "comparison operators cannot be chained: `{}` after `{}`; use `&&`",
-                            op.as_str(),
-                            prev.as_str()
-                        ),
-                    ));
+                    return Err(self.chained_comparison(op, prev));
                 }
                 last_cmp = Some(op);
             }
-            let op_at = self.tok.span.start;
-            self.advance()?;
-            let rhs = self.binary(r, ctx)?;
-            lhs = Expr {
-                kind: ExprKind::Binary {
-                    op,
-                    op_at,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                },
-                span: self.span_from(start),
-            };
+            lhs = self.binary_rhs(start, lhs, op, r, ctx)?;
         }
         self.leave();
         Ok(lhs)
+    }
+
+    #[cold]
+    fn chained_comparison(&self, op: BinOp, prev: BinOp) -> Diagnostic {
+        self.error(
+            self.tok.span,
+            format!(
+                "comparison operators cannot be chained: `{}` after `{}`; use `&&`",
+                op.as_str(),
+                prev.as_str()
+            ),
+        )
+    }
+
+    /// `lhs op rhs`, at `op`, where `rhs` binds at `r`.
+    fn binary_rhs(&mut self, start: u32, lhs: Expr, op: BinOp, r: u8, ctx: Ctx) -> PResult<Expr> {
+        let op_at = self.tok.span.start;
+        self.advance()?;
+        let rhs = self.binary(r, ctx)?;
+        Ok(Expr {
+            kind: ExprKind::Binary {
+                op,
+                op_at,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            span: self.span_from(start),
+        })
     }
 
     /// `lhs as T` or `lhs as? T`, at `as`. Out of line, to keep `binary`'s frame small for
@@ -1907,111 +1979,141 @@ impl Parser<'_> {
             _ => None,
         };
         if let Some(op) = op {
-            self.advance()?;
-            let expr = self.binary(UNARY_POWER, ctx)?;
-            return Ok(Expr {
-                kind: ExprKind::Unary {
-                    op,
-                    expr: Box::new(expr),
-                },
-                span: self.span_from(start),
-            });
+            return self.prefix_op(start, op, ctx);
         }
         if self.is(Punct::DotDotDot) {
-            self.advance()?;
-            let expr = self.unary(ctx)?;
-            return Ok(Expr {
-                kind: ExprKind::Spread(Box::new(expr)),
-                span: self.span_from(start),
-            });
+            return self.spread(start, ctx);
         }
         let e = self.primary(ctx)?;
         self.postfix(e, ctx)
     }
 
+    /// `op expr`, at the operator.
+    fn prefix_op(&mut self, start: u32, op: UnOp, ctx: Ctx) -> PResult<Expr> {
+        self.advance()?;
+        let expr = self.binary(UNARY_POWER, ctx)?;
+        Ok(Expr {
+            kind: ExprKind::Unary {
+                op,
+                expr: Box::new(expr),
+            },
+            span: self.span_from(start),
+        })
+    }
+
+    /// `...expr`, at `...`.
+    fn spread(&mut self, start: u32, ctx: Ctx) -> PResult<Expr> {
+        self.advance()?;
+        let expr = self.unary(ctx)?;
+        Ok(Expr {
+            kind: ExprKind::Spread(Box::new(expr)),
+            span: self.span_from(start),
+        })
+    }
+
+    /// Field and method accesses, paths, calls, indexing and `?` after `e`. Each suffix is
+    /// parsed out of line to keep this frame, which nested calls repeat, small.
     fn postfix(&mut self, mut e: Expr, ctx: Ctx) -> PResult<Expr> {
-        let start = e.span.start;
         loop {
-            match self.tok.kind {
-                TokenKind::Punct(Punct::Dot) => {
-                    self.advance()?;
-                    let name = self.member_name()?;
-                    if self.is(Punct::LParen) {
-                        let args_at = self.tok.span.start;
-                        let args = self.call_args()?;
-                        e = Expr {
-                            kind: ExprKind::MethodCall {
-                                obj: Box::new(e),
-                                name,
-                                args,
-                                args_at,
-                            },
-                            span: self.span_from(start),
-                        };
-                    } else {
-                        e = Expr {
-                            kind: ExprKind::Field {
-                                obj: Box::new(e),
-                                name,
-                            },
-                            span: self.span_from(start),
-                        };
-                    }
-                }
-                TokenKind::Punct(Punct::ColonColon) => {
-                    self.advance()?;
-                    if self.is(Punct::Lt) {
-                        return Err(self.error(
-                            self.tok.span,
-                            "generic arguments are only allowed in type annotations",
-                        ));
-                    }
-                    let name = self.member_name()?;
-                    e = Expr {
-                        kind: ExprKind::Path {
-                            base: Box::new(e),
-                            name,
-                        },
-                        span: self.span_from(start),
-                    };
-                    if self.is(Punct::LBrace) && ctx == Ctx::Normal {
-                        e = self.struct_lit(e)?;
-                    }
-                }
-                TokenKind::Punct(Punct::LParen) => {
-                    let args_at = self.tok.span.start;
-                    let args = self.call_args()?;
-                    e = Expr {
-                        kind: ExprKind::Call {
-                            callee: Box::new(e),
-                            args,
-                            args_at,
-                        },
-                        span: self.span_from(start),
-                    };
-                }
-                TokenKind::Punct(Punct::LBracket) => {
-                    self.advance()?;
-                    let key = self.expr()?;
-                    self.expect(Punct::RBracket)?;
-                    e = Expr {
-                        kind: ExprKind::Index {
-                            obj: Box::new(e),
-                            key: Box::new(key),
-                        },
-                        span: self.span_from(start),
-                    };
-                }
-                TokenKind::Punct(Punct::Question) => {
-                    self.advance()?;
-                    e = Expr {
-                        kind: ExprKind::Try(Box::new(e)),
-                        span: self.span_from(start),
-                    };
-                }
+            e = match self.tok.kind {
+                TokenKind::Punct(Punct::Dot) => self.member_suffix(e),
+                TokenKind::Punct(Punct::ColonColon) => self.path_suffix(e, ctx),
+                TokenKind::Punct(Punct::LParen) => self.call_suffix(e),
+                TokenKind::Punct(Punct::LBracket) => self.index_suffix(e),
+                TokenKind::Punct(Punct::Question) => self.try_suffix(e),
                 _ => return Ok(e),
-            }
+            }?;
         }
+    }
+
+    /// `e?`, at `?`.
+    fn try_suffix(&mut self, e: Expr) -> PResult<Expr> {
+        self.advance()?;
+        Ok(Expr {
+            span: self.span_from(e.span.start),
+            kind: ExprKind::Try(Box::new(e)),
+        })
+    }
+
+    /// `e.name` or `e.name(args)`, at `.`.
+    fn member_suffix(&mut self, e: Expr) -> PResult<Expr> {
+        let start = e.span.start;
+        self.advance()?;
+        let name = self.member_name()?;
+        if self.is(Punct::LParen) {
+            let args_at = self.tok.span.start;
+            let args = self.call_args()?;
+            return Ok(Expr {
+                kind: ExprKind::MethodCall {
+                    obj: Box::new(e),
+                    name,
+                    args,
+                    args_at,
+                },
+                span: self.span_from(start),
+            });
+        }
+        Ok(Expr {
+            kind: ExprKind::Field {
+                obj: Box::new(e),
+                name,
+            },
+            span: self.span_from(start),
+        })
+    }
+
+    /// `e::name`, or the struct literal `e::name { ... }`, at `::`.
+    fn path_suffix(&mut self, e: Expr, ctx: Ctx) -> PResult<Expr> {
+        let start = e.span.start;
+        self.advance()?;
+        if self.is(Punct::Lt) {
+            return Err(self.error(
+                self.tok.span,
+                "generic arguments are only allowed in type annotations",
+            ));
+        }
+        let name = self.member_name()?;
+        let e = Expr {
+            kind: ExprKind::Path {
+                base: Box::new(e),
+                name,
+            },
+            span: self.span_from(start),
+        };
+        if self.is(Punct::LBrace) && ctx == Ctx::Normal {
+            return self.struct_lit(e);
+        }
+        Ok(e)
+    }
+
+    /// `e(args)`, at `(`.
+    fn call_suffix(&mut self, e: Expr) -> PResult<Expr> {
+        let start = e.span.start;
+        let args_at = self.tok.span.start;
+        let args = self.call_args()?;
+        Ok(Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(e),
+                args,
+                args_at,
+            },
+            span: self.span_from(start),
+        })
+    }
+
+    /// `e[key]`, at `[`.
+    fn index_suffix(&mut self, e: Expr) -> PResult<Expr> {
+        let start = e.span.start;
+        self.advance()?;
+        let key = self.expr()?;
+        self.expect(Punct::RBracket)?;
+        Ok(Expr {
+            kind: ExprKind::Index {
+                obj: Box::new(e),
+                key: Box::new(key),
+            },
+            span: self.span_from(start),
+        })
     }
 
     fn call_args(&mut self) -> PResult<Vec<Expr>> {
@@ -2056,8 +2158,34 @@ impl Parser<'_> {
         })
     }
 
+    /// A primary expression. Each kind is parsed out of line so that this frame, which every
+    /// level of a nested expression passes through, stays small (in debug builds especially).
     fn primary(&mut self, ctx: Ctx) -> PResult<Expr> {
         self.enter()?;
+        let e = match self.tok.kind {
+            TokenKind::Punct(Punct::LParen) => self.paren_expr(),
+            TokenKind::Punct(Punct::LBracket) => self.array_expr(),
+            TokenKind::Punct(Punct::HashBrace) => self.map_literal(),
+            TokenKind::Punct(Punct::LBrace) => self.block_expr(),
+            TokenKind::Punct(Punct::Pipe | Punct::PipePipe) => self.closure(),
+            TokenKind::Keyword(Keyword::If) => self.if_expr(),
+            TokenKind::Keyword(Keyword::Match) => self.match_expr(),
+            TokenKind::Keyword(Keyword::Loop | Keyword::While | Keyword::For) => {
+                self.loop_expr(None)
+            }
+            TokenKind::Label(_) => self.labeled_loop(),
+            TokenKind::Keyword(Keyword::Return | Keyword::Break | Keyword::Continue) => {
+                self.jump_expr()
+            }
+            _ => self.atom(ctx),
+        }?;
+        self.leave();
+        Ok(e)
+    }
+
+    /// A literal, a name, `self`, `Self` or a template; or the error for a token that can't
+    /// start an expression.
+    fn atom(&mut self, ctx: Ctx) -> PResult<Expr> {
         let start = self.tok.span.start;
         let simple = |p: &mut Self, kind: ExprKind| -> PResult<Expr> {
             p.advance()?;
@@ -2066,7 +2194,7 @@ impl Parser<'_> {
                 span: p.span_from(start),
             })
         };
-        let e = match self.tok.kind {
+        Ok(match self.tok.kind {
             TokenKind::Int(v) => simple(self, ExprKind::Int(v))?,
             TokenKind::Float(v) => simple(self, ExprKind::Float(v))?,
             TokenKind::Str(s) => simple(self, ExprKind::Str(s))?,
@@ -2101,110 +2229,6 @@ impl Parser<'_> {
                     e
                 }
             }
-            TokenKind::Punct(Punct::LParen) => {
-                self.advance()?;
-                let mut items = Vec::new();
-                let mut trailing_comma = false;
-                while !self.is(Punct::RParen) {
-                    items.push(self.expr()?);
-                    trailing_comma = self.eat(Punct::Comma)?;
-                    if !trailing_comma {
-                        break;
-                    }
-                }
-                self.expect(Punct::RParen)?;
-                let span = self.span_from(start);
-                match items.len() {
-                    0 => {
-                        return Err(self.error(span, "`()` is not a value; use `nil`"));
-                    }
-                    1 if !trailing_comma => Expr {
-                        kind: ExprKind::Paren(Box::new(items.pop().expect("one item"))),
-                        span,
-                    },
-                    _ => Expr {
-                        kind: ExprKind::Tuple(items),
-                        span,
-                    },
-                }
-            }
-            TokenKind::Punct(Punct::LBracket) => {
-                self.advance()?;
-                let mut items = Vec::new();
-                while !self.is(Punct::RBracket) {
-                    items.push(self.expr()?);
-                    if !self.eat(Punct::Comma)? {
-                        break;
-                    }
-                }
-                self.expect(Punct::RBracket)?;
-                Expr {
-                    kind: ExprKind::Array(items),
-                    span: self.span_from(start),
-                }
-            }
-            TokenKind::Punct(Punct::HashBrace) => self.map_literal()?,
-            TokenKind::Punct(Punct::LBrace) => {
-                let block = self.block()?;
-                Expr {
-                    span: block.span,
-                    kind: ExprKind::Block(block),
-                }
-            }
-            TokenKind::Punct(Punct::Pipe | Punct::PipePipe) => self.closure()?,
-            TokenKind::Keyword(Keyword::If) => self.if_expr()?,
-            TokenKind::Keyword(Keyword::Match) => self.match_expr()?,
-            TokenKind::Keyword(Keyword::Loop | Keyword::While | Keyword::For) => {
-                self.loop_expr(None)?
-            }
-            TokenKind::Label(sym) => {
-                let label = Name {
-                    sym,
-                    span: self.tok.span,
-                };
-                self.advance()?;
-                self.expect(Punct::Colon)?;
-                if !matches!(
-                    self.tok.kind,
-                    TokenKind::Keyword(Keyword::Loop | Keyword::While | Keyword::For)
-                ) {
-                    return Err(self.expected("`loop`, `while` or `for` after a label"));
-                }
-                self.loop_expr(Some(label))?
-            }
-            TokenKind::Keyword(Keyword::Return) => {
-                self.advance()?;
-                let value = if self.starts_expr() {
-                    Some(Box::new(self.expr()?))
-                } else {
-                    None
-                };
-                Expr {
-                    kind: ExprKind::Return(value),
-                    span: self.span_from(start),
-                }
-            }
-            TokenKind::Keyword(Keyword::Break) => {
-                self.advance()?;
-                let label = self.loop_label()?;
-                let value = if self.starts_expr() {
-                    Some(Box::new(self.expr()?))
-                } else {
-                    None
-                };
-                Expr {
-                    kind: ExprKind::Break { label, value },
-                    span: self.span_from(start),
-                }
-            }
-            TokenKind::Keyword(Keyword::Continue) => {
-                self.advance()?;
-                let label = self.loop_label()?;
-                Expr {
-                    kind: ExprKind::Continue { label },
-                    span: self.span_from(start),
-                }
-            }
             TokenKind::Keyword(Keyword::Let) => {
                 return Err(self.error(
                     self.tok.span,
@@ -2224,9 +2248,115 @@ impl Parser<'_> {
                 }
             }
             _ => return Err(self.expected("an expression")),
+        })
+    }
+
+    /// `(e)`, or a tuple `(a, b)` / `(a,)`.
+    fn paren_expr(&mut self) -> PResult<Expr> {
+        let start = self.tok.span.start;
+        self.advance()?;
+        let mut items = Vec::new();
+        let mut trailing_comma = false;
+        while !self.is(Punct::RParen) {
+            items.push(self.expr()?);
+            trailing_comma = self.eat(Punct::Comma)?;
+            if !trailing_comma {
+                break;
+            }
+        }
+        self.expect(Punct::RParen)?;
+        let span = self.span_from(start);
+        match items.len() {
+            0 => Err(self.error(span, "`()` is not a value; use `nil`")),
+            1 if !trailing_comma => Ok(Expr {
+                kind: ExprKind::Paren(Box::new(items.pop().expect("one item"))),
+                span,
+            }),
+            _ => Ok(Expr {
+                kind: ExprKind::Tuple(items),
+                span,
+            }),
+        }
+    }
+
+    /// `[a, b, ...]`.
+    fn array_expr(&mut self) -> PResult<Expr> {
+        let start = self.tok.span.start;
+        self.advance()?;
+        let mut items = Vec::new();
+        while !self.is(Punct::RBracket) {
+            items.push(self.expr()?);
+            if !self.eat(Punct::Comma)? {
+                break;
+            }
+        }
+        self.expect(Punct::RBracket)?;
+        Ok(Expr {
+            kind: ExprKind::Array(items),
+            span: self.span_from(start),
+        })
+    }
+
+    /// A block used as an expression.
+    fn block_expr(&mut self) -> PResult<Expr> {
+        let block = self.block()?;
+        Ok(Expr {
+            span: block.span,
+            kind: ExprKind::Block(block),
+        })
+    }
+
+    /// `'label: loop`, `'label: while ...` or `'label: for ...`.
+    fn labeled_loop(&mut self) -> PResult<Expr> {
+        let TokenKind::Label(sym) = self.tok.kind else {
+            unreachable!("called at a label");
         };
-        self.leave();
-        Ok(e)
+        let label = Name {
+            sym,
+            span: self.tok.span,
+        };
+        self.advance()?;
+        self.expect(Punct::Colon)?;
+        if !matches!(
+            self.tok.kind,
+            TokenKind::Keyword(Keyword::Loop | Keyword::While | Keyword::For)
+        ) {
+            return Err(self.expected("`loop`, `while` or `for` after a label"));
+        }
+        self.loop_expr(Some(label))
+    }
+
+    /// `return [value]`, `break ['label] [value]` or `continue ['label]`.
+    fn jump_expr(&mut self) -> PResult<Expr> {
+        let start = self.tok.span.start;
+        let kw = self.tok.kind;
+        self.advance()?;
+        let kind = match kw {
+            TokenKind::Keyword(Keyword::Return) => {
+                let value = if self.starts_expr() {
+                    Some(Box::new(self.expr()?))
+                } else {
+                    None
+                };
+                ExprKind::Return(value)
+            }
+            TokenKind::Keyword(Keyword::Break) => {
+                let label = self.loop_label()?;
+                let value = if self.starts_expr() {
+                    Some(Box::new(self.expr()?))
+                } else {
+                    None
+                };
+                ExprKind::Break { label, value }
+            }
+            _ => ExprKind::Continue {
+                label: self.loop_label()?,
+            },
+        };
+        Ok(Expr {
+            kind,
+            span: self.span_from(start),
+        })
     }
 
     fn loop_label(&mut self) -> PResult<Option<Name>> {
