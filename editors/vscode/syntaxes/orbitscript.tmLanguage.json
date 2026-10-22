@@ -1,0 +1,278 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "OrbitScript",
+  "scopeName": "source.orbitscript",
+  "fileTypes": [
+    "orb",
+    "orbi"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#items"
+    },
+    {
+      "include": "#expressions"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.orbitscript",
+          "match": "//[/!](?!/).*$"
+        },
+        {
+          "name": "comment.line.double-slash.orbitscript",
+          "match": "//.*$"
+        },
+        {
+          "include": "#block-comment"
+        }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.orbitscript",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [
+        {
+          "include": "#block-comment"
+        }
+      ]
+    },
+    "items": {
+      "patterns": [
+        {
+          "comment": "fn name",
+          "match": "\\b(fn)\\s+((?:r#)?[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.function.orbitscript"
+            },
+            "2": {
+              "name": "entity.name.function.orbitscript"
+            }
+          }
+        },
+        {
+          "comment": "struct, enum and type names",
+          "match": "\\b(struct|enum|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.type.orbitscript"
+            },
+            "2": {
+              "name": "entity.name.type.orbitscript"
+            }
+          }
+        },
+        {
+          "comment": "impl Name",
+          "match": "\\b(impl)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.impl.orbitscript"
+            },
+            "2": {
+              "name": "entity.name.type.orbitscript"
+            }
+          }
+        }
+      ]
+    },
+    "expressions": {
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "include": "#keywords"
+        },
+        {
+          "include": "#labels"
+        },
+        {
+          "include": "#calls"
+        },
+        {
+          "include": "#types"
+        },
+        {
+          "include": "#operators"
+        },
+        {
+          "include": "#names"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.orbitscript",
+          "match": "\\b(if|else|match|for|in|while|loop|break|continue|return)\\b"
+        },
+        {
+          "name": "keyword.other.orbitscript",
+          "match": "\\b(fn|let|mut|const|pub|use|struct|enum|impl|type|extern|global|as|scope)\\b"
+        },
+        {
+          "name": "constant.language.orbitscript",
+          "match": "\\b(nil|true|false)\\b"
+        },
+        {
+          "name": "variable.language.self.orbitscript",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "storage.type.self.orbitscript",
+          "match": "\\bSelf\\b"
+        }
+      ]
+    },
+    "labels": {
+      "name": "entity.name.label.orbitscript",
+      "match": "'[A-Za-z_][A-Za-z0-9_]*\\b"
+    },
+    "strings": {
+      "patterns": [
+        {
+          "comment": "r#\"...\"#, any number of #",
+          "name": "string.quoted.raw.orbitscript",
+          "begin": "\\br(#*)\"",
+          "end": "\"\\1"
+        },
+        {
+          "name": "string.interpolated.orbitscript",
+          "begin": "\\bf\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "include": "#escapes"
+            },
+            {
+              "name": "constant.character.escape.brace.orbitscript",
+              "match": "\\{\\{|\\}\\}"
+            },
+            {
+              "name": "meta.interpolation.orbitscript",
+              "begin": "\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.orbitscript"
+                }
+              },
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.orbitscript"
+                }
+              },
+              "patterns": [
+                {
+                  "include": "#expressions"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.orbitscript",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "include": "#escapes"
+            }
+          ]
+        }
+      ]
+    },
+    "escapes": {
+      "name": "constant.character.escape.orbitscript",
+      "match": "\\\\(?:[nrt0\\\\'\"abfv]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|z|\\n)"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.orbitscript",
+          "match": "\\b0[xX][0-9A-Fa-f_]+(?:\\.[0-9A-Fa-f_]*)?(?:[pP][+-]?[0-9_]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.orbitscript",
+          "match": "\\b[0-9][0-9_]*(?:\\.(?![.A-Za-z_])[0-9_]*)?(?:[eE][+-]?[0-9_]+)?\\b"
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "comment": "a::b( and x.method(",
+          "match": "\\b((?:r#)?[a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.call.orbitscript"
+            }
+          }
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.orbitscript",
+          "match": "(?<=: |:|-> |\\[|<|\\| |\\?)\\b(int|float|number|string|bool|any|table|function|thread|userdata)\\b(?!\\s*::)"
+        },
+        {
+          "comment": "Capitalized names are types and variants by convention",
+          "name": "entity.name.type.orbitscript",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.namespace.orbitscript",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.arrow.orbitscript",
+          "match": "->|=>"
+        },
+        {
+          "name": "keyword.operator.range.orbitscript",
+          "match": "\\.\\.=?|\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.logical.orbitscript",
+          "match": "&&|\\|\\||!(?!=)"
+        },
+        {
+          "name": "keyword.operator.comparison.orbitscript",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.assignment.orbitscript",
+          "match": "[-+*/%~^&|]?="
+        },
+        {
+          "name": "keyword.operator.orbitscript",
+          "match": "[-+*/\\\\%^~&|#?]|<<|>>"
+        }
+      ]
+    },
+    "names": {
+      "name": "variable.other.orbitscript",
+      "match": "\\b(?:r#)?[a-z_][A-Za-z0-9_]*\\b"
+    }
+  }
+}

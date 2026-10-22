@@ -1,0 +1,42 @@
+// SYNTAX TEST "source.orbitscript" "OrbitScript highlighting"
+
+/// A point.
+// <--- comment.line.documentation.orbitscript
+pub struct Vec2 { x: float, y: float }
+// <--- keyword.other.orbitscript
+//  ^^^^^^ keyword.declaration.type.orbitscript
+//         ^^^^ entity.name.type.orbitscript
+//                   ^^^^^ support.type.primitive.orbitscript
+
+impl Vec2 {
+// <---- keyword.declaration.impl.orbitscript
+//   ^^^^ entity.name.type.orbitscript
+    pub fn len(self) -> float { math::sqrt(self.x * self.x) }
+//      ^^ keyword.declaration.function.orbitscript
+//         ^^^ entity.name.function.orbitscript
+//             ^^^^ variable.language.self.orbitscript
+//                   ^^ keyword.operator.arrow.orbitscript
+//                      ^^^^^ support.type.primitive.orbitscript
+//                                    ^^^^ entity.name.function.call.orbitscript
+}
+
+let mut n = 0x1F + 1.5e3 \ 2;
+// <--- keyword.other.orbitscript
+//  ^^^ keyword.other.orbitscript
+//          ^^^^ constant.numeric.hex.orbitscript
+//                 ^^^^^ constant.numeric.decimal.orbitscript
+let s = f"n is {n ~ "!"} \n";
+//      ^^ string.interpolated.orbitscript
+//              ^ meta.interpolation.orbitscript variable.other.orbitscript
+//                  ^^^ meta.interpolation.orbitscript string.quoted.double.orbitscript
+//                       ^^ string.interpolated.orbitscript constant.character.escape.orbitscript
+let raw = r#"no \n "escape""#;
+//        ^^^^^^^^^^^^^^^^^^^ string.quoted.raw.orbitscript
+for i in 1..=10 { if i == nil || !done { break; } }
+// <--- keyword.control.orbitscript
+//        ^^^ keyword.operator.range.orbitscript
+//                        ^^^ constant.language.orbitscript
+/* a /* nested */ comment */ let x = string::len("ok");
+// <-------------------------- comment.block.orbitscript
+//                                   ^^^^^^ variable.other.orbitscript
+//                                           ^^^ entity.name.function.call.orbitscript

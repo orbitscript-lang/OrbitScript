@@ -1,0 +1,183 @@
+{
+  "name": "orbitscript",
+  "displayName": "OrbitScript",
+  "description": "OrbitScript and Lua 5.5: highlighting, the orbit-lsp language server and the orbit debugger",
+  "version": "0.0.1",
+  "publisher": "orbitscript",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tymlipari/OrbitScript",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": ["Programming Languages", "Debuggers"],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:lua",
+    "onDebugResolve:orbit",
+    "onDebugDynamicConfigurations:orbit"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "orbitscript",
+        "aliases": ["OrbitScript", "orbitscript"],
+        "extensions": [".orb", ".orbi"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "orbitscript",
+        "scopeName": "source.orbitscript",
+        "path": "./syntaxes/orbitscript.tmLanguage.json"
+      }
+    ],
+    "breakpoints": [{ "language": "orbitscript" }, { "language": "lua" }],
+    "commands": [
+      { "command": "orbit.restartServer", "title": "Restart Language Server", "category": "OrbitScript" }
+    ],
+    "configuration": {
+      "title": "OrbitScript",
+      "properties": {
+        "orbit.server.path": {
+          "type": "string",
+          "default": "orbit-lsp",
+          "markdownDescription": "The `orbit-lsp` program: a path, or a name found on `PATH`."
+        },
+        "orbit.server.searchPath": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Module templates tried before `package.path`'s, as `package.path` writes them (`lib/?.orb`), relative to the workspace folder."
+        },
+        "orbit.server.lua": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Also use `orbit-lsp` for Lua files (syntax errors only). Off by default so it doesn't compete with a Lua extension."
+        },
+        "orbit.debug.orbitPath": {
+          "type": "string",
+          "default": "orbit",
+          "markdownDescription": "The `orbit` program the debugger runs (`orbit --debug-server`, `orbit --debug-attach`)."
+        },
+        "orbit.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Log the messages between VS Code and orbit-lsp in the OrbitScript output."
+        }
+      }
+    },
+    "debuggers": [
+      {
+        "type": "orbit",
+        "label": "OrbitScript",
+        "languages": ["orbitscript", "lua"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "The script to run.",
+                "default": "${file}"
+              },
+              "args": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Arguments for the script (its `arg` table).",
+                "default": []
+              },
+              "cwd": {
+                "type": "string",
+                "description": "The script's working directory.",
+                "default": "${workspaceFolder}"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": { "type": ["string", "null"] },
+                "description": "Environment variables to set (a string) or remove (null).",
+                "default": {}
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop at the script's first line.",
+                "default": false
+              },
+              "console": {
+                "type": "string",
+                "enum": ["integratedTerminal", "externalTerminal", "internalConsole"],
+                "description": "Where the script's input and output go.",
+                "default": "integratedTerminal"
+              }
+            }
+          },
+          "attach": {
+            "required": ["pid"],
+            "properties": {
+              "pid": {
+                "type": ["number", "string"],
+                "description": "The process to attach to.",
+                "default": "${command:pickProcess}"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "orbit",
+            "request": "launch",
+            "name": "Run the current file",
+            "program": "${file}"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "OrbitScript: Launch",
+            "description": "Run a script under the debugger",
+            "body": {
+              "type": "orbit",
+              "request": "launch",
+              "name": "Launch",
+              "program": "^\"\\${workspaceFolder}/main.orb\""
+            }
+          },
+          {
+            "label": "OrbitScript: Attach",
+            "description": "Attach to a running orbit program",
+            "body": {
+              "type": "orbit",
+              "request": "attach",
+              "name": "Attach",
+              "pid": "^\"\\${command:pickProcess}\""
+            }
+          }
+        ],
+        "variables": {
+          "pickProcess": "orbit.pickProcess"
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "test": "tsc -p . && node --test 'out/test/*.test.js' && vscode-tmgrammar-test -g syntaxes/orbitscript.tmLanguage.json 'test/grammar/*.orb'",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "10.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/vscode": "1.91.0",
+    "@vscode/vsce": "3.9.2",
+    "typescript": "5.9.3",
+    "vscode-tmgrammar-test": "0.1.3"
+  }
+}
