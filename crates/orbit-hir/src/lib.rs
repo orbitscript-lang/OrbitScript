@@ -49,6 +49,25 @@ impl Chunk {
         id
     }
 
+    /// Starts a function a front end lowers: reserves its id, so its children can name it as
+    /// their parent, and returns it with no blocks yet. [`Chunk::finish_function`] stores it.
+    pub fn begin_function(
+        &mut self,
+        name: FunctionName,
+        span: Span,
+        parent: Option<FuncId>,
+    ) -> (FuncId, Function) {
+        let mut f = Function::new(name, span, parent);
+        f.blocks.clear();
+        let id = self.add_function(Function::new(name, span, parent));
+        (id, f)
+    }
+
+    /// Stores a function started with [`Chunk::begin_function`].
+    pub fn finish_function(&mut self, id: FuncId, f: Function) {
+        self.functions[id.index()] = f;
+    }
+
     pub fn function(&self, id: FuncId) -> &Function {
         &self.functions[id.index()]
     }
