@@ -1,5 +1,7 @@
-//! Slow paths: everything the interpreter's inline fast paths don't handle
-//! (mixed numbers, string coercion, errors). Metamethods will plug in here.
+//! Operator semantics the interpreter's inline fast paths don't cover:
+//! mixed int/float arithmetic, string coercion, comparisons, concatenation
+//! pieces and `for` limits, and the errors or metamethod requests ([`Exc`])
+//! they end in.
 
 use std::io::Write as _;
 

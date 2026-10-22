@@ -478,7 +478,6 @@ impl Stack {
         top + 1
     }
 
-    /// Write `vals` at `at`, growing the stack if needed; returns their end.
     /// [`Stack::write`] of one value.
     #[inline]
     pub(crate) fn write1(&mut self, at: usize, v: Value) -> usize {
@@ -488,6 +487,7 @@ impl Stack {
         at + 1
     }
 
+    /// Write `vals` at `at`, growing the stack if needed; returns their end.
     pub(crate) fn write(&mut self, at: usize, vals: &[Value]) -> usize {
         let end = at + vals.len();
         self.dirty_to = self.dirty_to.max(end);
@@ -584,12 +584,6 @@ pub struct Runtime {
     /// machine register. A cache, not part of any thread's stack, so it
     /// stays across coroutine switches.
     pub(crate) prev_code: Option<std::rc::Rc<crate::object::ProtoCode>>,
-    /// The last Lua function called from a frame other than itself, with
-    /// what entering it needs, so calling it again skips looking it up.
-    /// Weak, as nothing a script can see may keep a function alive: it is
-    /// dropped when its closure dies, before the handle can be reused. Like
-    /// `prev_code`, it belongs to no thread and stays across switches.
-    pub(crate) callee: Option<(Gc<Closure>, crate::vm::interp::Shape)>,
     /// Placeholder for cell slots not yet initialised by `CellNew`.
     pub(crate) dead_cell: Gc<Cell>,
     /// Extra roots: values the embedder or loader holds.
@@ -785,9 +779,6 @@ impl Roots<LuaSpace> for Runtime {
                 *e = None;
             }
         }
-        if self.callee.is_some_and(|(c, _)| !live.is_live(c)) {
-            self.callee = None;
-        }
         self.gc_cycles = self.gc_cycles.wrapping_add(1);
     }
 
@@ -861,7 +852,6 @@ impl Vm {
                 native_types: Vec::new(),
                 stack: Stack::default(),
                 prev_code: None,
-                callee: None,
                 dead_cell,
                 pinned: Vec::new(),
                 pin_slots: PinSlots::default(),

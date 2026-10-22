@@ -603,7 +603,6 @@ impl Runtime {
     }
 }
 
-/// Whether a frame of this kind is a level of its own.
 /// A meta frame below a `__close` handler that an unwinding error runs.
 fn unwinding_close(k: FrameKind) -> bool {
     matches!(
@@ -628,6 +627,7 @@ fn catches(k: FrameKind) -> bool {
     )
 }
 
+/// Whether a frame of this kind is a level of its own.
 fn is_activation(k: FrameKind) -> bool {
     match k {
         FrameKind::Lua { .. } | FrameKind::Native { .. } | FrameKind::NativeCall { .. } => true,
@@ -668,9 +668,6 @@ fn pc_line(proto: &Proto, pc: u32) -> i64 {
     }
 }
 
-/// The named locals live at `pc`, in declaration order (parameters first),
-/// with their slots. A vararg function's hidden vararg table follows its
-/// parameters, as in the reference.
 /// For the locals in scope at `pc`: how many there are, and the register
 /// of the first temporary. Every local reserves a register from the bottom
 /// of the window, even one kept in a cell, so the first temporary is past
@@ -714,6 +711,9 @@ impl Runtime {
     }
 }
 
+/// The named locals live at `pc`, in declaration order (parameters first),
+/// with their slots. A vararg function's hidden vararg table follows its
+/// parameters, as in the reference.
 fn active_locals(
     proto: &Proto,
     pc: u32,
