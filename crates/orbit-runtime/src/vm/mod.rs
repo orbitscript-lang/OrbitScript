@@ -954,14 +954,7 @@ impl Vm {
     /// (`"print"`, `"string.rep"`), used in messages when the call site
     /// doesn't name it.
     pub fn register_native(&mut self, name: &'static str, f: NativeFn) -> Value {
-        let id = NativeId(self.rt.natives.len() as u32);
-        self.rt.natives.push(Native {
-            name,
-            f,
-            fast: None,
-            hidden: 0,
-            data: [0; 2],
-        });
+        let id = self.add_native(name, f, [0; 2]);
         self.rt.native_ids.insert(name, id);
         Value::Native(id)
     }
@@ -978,6 +971,12 @@ impl Vm {
         f: NativeFn,
         data: [u64; 2],
     ) -> Value {
+        Value::Native(self.add_native(name, f, data))
+    }
+
+    /// Add native `f` to the table natives are called through, without
+    /// making it findable by `name`.
+    fn add_native(&mut self, name: &'static str, f: NativeFn, data: [u64; 2]) -> NativeId {
         let id = NativeId(self.rt.natives.len() as u32);
         self.rt.natives.push(Native {
             name,
@@ -986,7 +985,7 @@ impl Vm {
             hidden: 0,
             data,
         });
-        Value::Native(id)
+        id
     }
 
     /// The native registered for type `ty`, registering `f` as `name` for
@@ -1001,9 +1000,7 @@ impl Vm {
         match self.rt.native_types.binary_search_by_key(&ty, |&(t, _)| t) {
             Ok(i) => self.rt.native_types[i].1,
             Err(i) => {
-                let Value::Native(id) = self.register_native_with_data(name, f, [0; 2]) else {
-                    unreachable!("natives are registered as natives")
-                };
+                let id = self.add_native(name, f, [0; 2]);
                 self.rt.native_types.insert(i, (ty, id));
                 id
             }
