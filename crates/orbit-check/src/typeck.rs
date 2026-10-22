@@ -5,12 +5,16 @@
 //! literals and closures, flow narrowing on locals and field paths, nominal structs and enums,
 //! operators through metamethods, `?`, and `match` coverage.
 //!
-//! A function's unannotated results come from its body, which is checked the first time the
-//! function's type is needed (possibly before the walk reaches it), so each body is checked
-//! once. Symbols of other modules have the types that module's check stored.
+//! The declare pass (`declare.rs`) runs first and gives the module's top-level declarations the
+//! types written for them. Then the walk types every expression. A function's unannotated
+//! results come from its body, which is checked the first time the function's type is needed
+//! (possibly before the walk reaches it), so each body is checked once. Symbols of other modules
+//! have the types that module's check stored.
 
 mod cast;
+mod declare;
 mod lint;
+mod lower;
 mod report;
 mod view;
 
@@ -19,14 +23,13 @@ pub(crate) use lint::lints;
 use std::collections::{HashMap, HashSet};
 
 use orbit_hir::{Span, StrId, StringPool};
-use orbit_orb_syntax::ast::{
-    self, BinOp, ExprKind, ItemKind, MapEntry, PatKind, StmtKind, TypeKind, UnOp,
-};
+use orbit_orb_syntax::ast::{self, BinOp, ExprKind, ItemKind, MapEntry, PatKind, StmtKind, UnOp};
 
 use crate::resolve::{Def, Defs, Owner};
 use crate::symbols::{Module, StructLit, SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
 use crate::{Code, FileId};
+use lower::Lowering;
 use report::Reporter;
 use view::SymbolView;
 
@@ -96,6 +99,8 @@ struct Checker<'a, 'b, 'c> {
     sym_types: HashMap<u32, TypeId>,
     /// Each function's parameter names, for signature help.
     param_names: HashMap<u32, Vec<String>>,
+    /// Signatures from the declare pass whose results the function's body gives.
+    pending_fns: HashMap<u32, FnTy>,
     in_progress: HashSet<u32>,
     /// Functions whose bodies have been checked.
     bodies_done: HashSet<u32>,
@@ -133,37 +138,9 @@ pub(crate) fn check<'a, 'b, 'c>(
     deps: Deps<'c>,
 ) {
     let id = |index| SymbolId { file, index };
-    let mut variants: Vec<(u32, u32)> = defs
-        .defs
-        .iter()
-        .filter_map(|(&i, d)| match d {
-            Def::Variant { enum_ } => Some((i, *enum_)),
-            _ => None,
-        })
-        .collect();
-    variants.sort();
-    for (v, e) in variants {
-        types.set_variant_enum(id(v), id(e));
-    }
-
-    // A body-less function declared more than once in a stub is overloaded: a call takes the
-    // first declaration its arguments fit.
+    declare::variants(file, defs, types);
     let by_span = SymbolView::by_span(m);
-    let mut by_name: HashMap<StrId, Vec<SymbolId>> = HashMap::new();
-    for s in &ast.body.stmts {
-        if let StmtKind::Item(item) = &s.kind
-            && let ItemKind::Fn(f) = &item.kind
-            && f.body.is_none()
-            && let Some(&i) = by_span.get(&sk(f.name.span))
-        {
-            by_name.entry(f.name.sym).or_default().push(id(i));
-        }
-    }
-    for group in by_name.into_values().filter(|g| g.len() > 1) {
-        for id in &group {
-            m.overloads.insert(id.index, group.clone());
-        }
-    }
+    declare::overloads(file, &ast.body.stmts, &by_span, &mut m.overloads);
 
     let report = Reporter::take(file, m);
     let sym_types = std::mem::take(&mut m.sym_types);
@@ -176,6 +153,7 @@ pub(crate) fn check<'a, 'b, 'c>(
         types,
         sym_types,
         param_names,
+        pending_fns: HashMap::new(),
         in_progress: HashSet::new(),
         bodies_done: HashSet::new(),
         env: Env::new(),
@@ -184,6 +162,10 @@ pub(crate) fn check<'a, 'b, 'c>(
         hinting: true,
         strict: deps.strict,
     };
+    let declared = declare::types(&ast.body.stmts, &mut c.lowering());
+    c.pending_fns = declared.pending;
+    c.param_names.extend(declared.param_names);
+
     c.fns.push(FnCtx {
         results: None,
         returns: Vec::new(),
@@ -408,7 +390,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn with_owner<T>(&mut self, owner: Option<&Owner<'a>>, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved = self.self_type;
         if let Some(o) = owner {
-            self.self_type = Some(self.owner_type(o));
+            self.self_type = Some(self.lowering().owner_type(o));
         }
         let r = f(self);
         self.self_type = saved;
@@ -466,158 +448,25 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     // ---- type annotations ---------------------------------------------------------------------
 
+    /// Lowers annotations with what the walk knows (`Self`).
+    fn lowering(&mut self) -> Lowering<'_, 'a, 'b, 'c> {
+        Lowering {
+            types: self.types,
+            syms: &self.syms,
+            defs: self.defs,
+            strings: self.strings,
+            sym_types: &mut self.sym_types,
+            in_progress: &mut self.in_progress,
+            self_type: self.self_type,
+        }
+    }
+
     fn lower(&mut self, t: &ast::Type) -> TypeId {
-        let any = self.types.any;
-        let Some(kind) = &t.kind else {
-            return any;
-        };
-        match &**kind {
-            TypeKind::Path { segments, args } => {
-                let last = segments[segments.len() - 1];
-                let args: Vec<TypeId> = args.iter().map(|a| self.lower(a)).collect();
-                if let Some(id) = self.syms.ref_at(last.span)
-                    && let Some(k) = self.syms.kind(id)
-                {
-                    return self.named_type(id, k, args);
-                }
-                if segments.len() == 1 {
-                    let name = self.text(last.sym);
-                    self.builtin(&name)
-                } else {
-                    any
-                }
-            }
-            TypeKind::Nil => self.types.nil,
-            TypeKind::SelfType => self.self_type.unwrap_or(any),
-            TypeKind::Optional(t) => {
-                let t = self.lower(t);
-                self.types.optional(t)
-            }
-            TypeKind::Union(ts) => {
-                let ts: Vec<TypeId> = ts.iter().map(|t| self.lower(t)).collect();
-                self.types.union(&ts)
-            }
-            TypeKind::Array(t) => {
-                let t = self.lower(t);
-                self.types.intern(Ty::Array(t))
-            }
-            TypeKind::Map { key, value } => {
-                let (k, v) = (self.lower(key), self.lower(value));
-                self.types.intern(Ty::Map(k, v))
-            }
-            TypeKind::Record(fields) => {
-                let mut fs: Vec<(String, TypeId)> = fields
-                    .iter()
-                    .map(|f| (self.text(f.name.sym), self.lower(&f.ty)))
-                    .collect();
-                fs.sort_by(|a, b| a.0.cmp(&b.0));
-                fs.dedup_by(|a, b| a.0 == b.0);
-                self.types.intern(Ty::Record {
-                    fields: fs,
-                    inferred: false,
-                })
-            }
-            TypeKind::Tuple(ts) if ts.len() == 1 => self.lower(&ts[0]),
-            TypeKind::Tuple(ts) if ts.is_empty() => self.types.nil,
-            // Several values, or `...T`, only make sense as results (`lower_results`).
-            TypeKind::Tuple(_) | TypeKind::Rest(_) | TypeKind::Error => any,
-            TypeKind::Fn { params, rest, ret } => {
-                let lowered: Vec<TypeId> = params.iter().map(|p| self.lower(p)).collect();
-                let required = self.required(params.iter().map(Some).zip(lowered.iter().copied()));
-                let params = lowered;
-                let rest = rest.as_ref().map(|r| self.lower(r));
-                let results = Some(match ret {
-                    Some(r) => self.lower_results(r),
-                    None => Vec::new(),
-                });
-                self.types.intern(Ty::Fn(FnTy {
-                    params,
-                    rest,
-                    results,
-                    required,
-                    method: false,
-                    generics: Vec::new(),
-                }))
-            }
-        }
+        self.lowering().lower(t)
     }
 
-    /// How many of these parameters need an argument: up to the last one whose annotation isn't
-    /// `T?` and doesn't otherwise allow nil (`any?` is optional, unannotated and `any` aren't).
-    fn required<'t>(&self, params: impl Iterator<Item = (Option<&'t ast::Type>, TypeId)>) -> usize {
-        let mut n = 0;
-        for (i, (ann, t)) in params.enumerate() {
-            let optional = ann.is_some_and(|a| {
-                matches!(a.kind.as_deref(), Some(TypeKind::Optional(_))) || self.types.may_be_nil(t)
-            });
-            if !optional {
-                n = i + 1;
-            }
-        }
-        n
-    }
-
-    /// A result annotation: `(A, B)` is two results, anything else one.
     fn lower_results(&mut self, t: &ast::Type) -> Vec<TypeId> {
-        match t.kind.as_deref() {
-            Some(TypeKind::Tuple(ts)) => ts.iter().map(|t| self.lower_result(t)).collect(),
-            _ => vec![self.lower_result(t)],
-        }
-    }
-
-    /// One result: `...T` (the parser allows it only last) is any number of `T`.
-    fn lower_result(&mut self, t: &ast::Type) -> TypeId {
-        match t.kind.as_deref() {
-            Some(TypeKind::Rest(e)) => {
-                let e = self.lower(e);
-                self.types.intern(Ty::Rest(e))
-            }
-            _ => self.lower(t),
-        }
-    }
-
-    fn builtin(&mut self, name: &str) -> TypeId {
-        let t = &*self.types;
-        match name {
-            "nil" => t.nil,
-            "bool" => t.bool,
-            "int" => t.int,
-            "float" => t.float,
-            "number" => t.number,
-            "string" => t.str,
-            "table" => t.table,
-            "function" => t.function,
-            "thread" => self.types.intern(Ty::Thread),
-            "userdata" => self.types.intern(Ty::Userdata),
-            _ => t.any,
-        }
-    }
-
-    fn fit(&self, mut args: Vec<TypeId>, n: usize) -> Vec<TypeId> {
-        args.resize(n, self.types.any);
-        args
-    }
-
-    fn named_type(&mut self, id: SymbolId, kind: SymbolKind, args: Vec<TypeId>) -> TypeId {
-        match kind {
-            SymbolKind::Struct | SymbolKind::Enum => {
-                let args = self.fit(args, self.syms.generics_of(id).len());
-                self.types.intern(Ty::Nominal(id, args))
-            }
-            SymbolKind::Variant => {
-                let args = self.fit(args, self.syms.generics_of(self.syms.holder(id)).len());
-                self.types.intern(Ty::Variant(id, args))
-            }
-            SymbolKind::TypeAlias => {
-                let t = self.sym_type(id);
-                let gens = self.syms.generics_of(id);
-                let args = self.fit(args, gens.len());
-                let map = gens.into_iter().zip(args).collect();
-                self.types.subst(t, &map)
-            }
-            SymbolKind::TypeParam => self.types.intern(Ty::Param(id)),
-            _ => self.types.any,
-        }
+        self.lowering().lower_results(t)
     }
 
     /// `t` (a member's type in `owner`) for an `owner` instantiated with `args`.
@@ -626,18 +475,12 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         if gens.is_empty() {
             return t;
         }
-        let args = self.fit(args.to_vec(), gens.len());
+        let args = self.types.fit(args.to_vec(), gens.len());
         let map = gens.into_iter().zip(args).collect();
         self.types.subst(t, &map)
     }
 
     // ---- functions ----------------------------------------------------------------------------
-
-    fn owner_type(&mut self, o: &Owner<'a>) -> TypeId {
-        let args: Vec<TypeId> = o.args.iter().map(|a| self.lower(a)).collect();
-        let args = self.fit(args, self.syms.generics_of(o.target).len());
-        self.types.intern(Ty::Nominal(o.target, args))
-    }
 
     fn fn_type(&mut self, index: u32, decl: &'a ast::FnDecl, owner: Option<&Owner<'a>>) -> TypeId {
         self.with_owner(owner, |c| c.fn_signature(index, decl, owner))
@@ -650,53 +493,15 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         decl: &'a ast::FnDecl,
         owner: Option<&Owner<'a>>,
     ) -> TypeId {
-        let any = self.types.any;
-        let sig = &decl.sig;
-        let method = sig.self_param.is_some();
-        let mut params = Vec::new();
-        if method {
-            let t = match &sig.self_ty {
-                Some(t) => self.lower(t),
-                None => self.self_type.unwrap_or(any),
-            };
-            params.push(t);
-        }
-        let mut names: Vec<String> = Vec::new();
-        if method {
-            names.push("self".into());
-        }
-        for p in &sig.params {
-            params.push(p.ty.as_ref().map_or(any, |t| self.lower(t)));
-            names.push(p.name.map_or("_".into(), |n| self.text(n.sym)));
-        }
-        if let Some(r) = sig.rest {
-            names.push(self.text(r.sym));
-        }
-        self.param_names.insert(index, names);
-        let rest = sig
-            .rest
-            .map(|_| sig.rest_ty.as_ref().map_or(any, |t| self.lower(t)));
-        let mut generics: Vec<SymbolId> = owner.map(|o| o.generics.clone()).unwrap_or_default();
-        generics.extend(self.syms.generics_of(self.syms.id(index)));
-        // A stub declaration without `->` has unknown results (each `any`); write `-> ()` for
-        // none.
-        let results = sig.ret.as_ref().map(|t| self.lower_results(t));
-        let infer = results.is_none() && decl.body.is_some();
-        let required = usize::from(method)
-            + self.required(
-                sig.params
-                    .iter()
-                    .map(|p| p.ty.as_ref())
-                    .zip(params[usize::from(method)..].iter().copied()),
-            );
-        let mut f = FnTy {
-            params,
-            rest,
-            results,
-            required,
-            method,
-            generics,
+        let mut f = match self.pending_fns.remove(&index) {
+            Some(f) => f,
+            None => {
+                let (f, names) = self.lowering().signature(index, decl, owner);
+                self.param_names.insert(index, names);
+                f
+            }
         };
+        let infer = f.results.is_none() && decl.body.is_some();
         let mut t = self.types.intern(Ty::Fn(f.clone()));
         if infer && !self.bodies_done.contains(&index) {
             // Calls in the body (recursion) see this signature with unknown results.
@@ -2912,7 +2717,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 (true, _) => any,
                 (false, "number") => self.types.number,
                 (false, "boolean") => self.types.bool,
-                (false, other) => self.builtin(other),
+                (false, other) => self.types.builtin(other),
             };
         }
         let kept: Vec<TypeId> = self
