@@ -118,6 +118,10 @@ impl Default for Config {
     }
 }
 
+/// The smallest number of types `Workspace::compact_types` lets the store reach before
+/// rebuilding it.
+const MIN_TYPES_LIMIT: usize = 1 << 12;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Stale,
@@ -148,6 +152,8 @@ pub struct Workspace {
     by_path: HashMap<PathBuf, FileId>,
     /// Shared by every module, so a type means the same in each.
     types: Types,
+    /// When `types` holds more than this, the next edit rebuilds it (see `compact_types`).
+    types_limit: usize,
     /// Loaded with the first module checked.
     prelude: Option<Prelude>,
 }
@@ -240,6 +246,7 @@ impl Workspace {
             files: Vec::new(),
             by_path: HashMap::new(),
             types: Types::new(),
+            types_limit: MIN_TYPES_LIMIT,
             prelude: None,
         }
     }
@@ -312,6 +319,12 @@ impl Workspace {
         self.prelude = Some(Prelude { file, names });
     }
 
+    /// How many types the workspace holds (to test that edits don't grow it without bound).
+    #[doc(hidden)]
+    pub fn type_count(&self) -> usize {
+        self.types.len()
+    }
+
     /// Adds a file to check, read through `Sources`.
     pub fn add_file(&mut self, path: &Path) -> FileId {
         self.intern_path(path)
@@ -319,6 +332,7 @@ impl Workspace {
 
     /// Adds or replaces a module's text (the language server calls this on open and change).
     pub fn set_source(&mut self, path: &Path, text: Vec<u8>) -> FileId {
+        self.compact_types();
         let id = self.intern_path(path);
         self.files[id.0 as usize].overlay = Some(text);
         self.invalidate(id);
@@ -327,8 +341,36 @@ impl Workspace {
 
     /// Forgets text set with [`Workspace::set_source`]; the file is read from `Sources` again.
     pub fn remove(&mut self, file: FileId) {
+        self.compact_types();
         self.files[file.0 as usize].overlay = None;
         self.invalidate(file);
+    }
+
+    /// Types are interned and never freed one by one, and an edit that shifts a module's symbols
+    /// makes new types for everything that mentions them. So a long editing session (the
+    /// language server keeps one workspace) would grow `types` without bound. Once it holds
+    /// twice what the last rebuild needed, this starts it afresh and rechecks the modules that
+    /// were up to date, which drops the types nothing uses any more. It runs before an edit
+    /// marks anything stale, so the rebuilt store measures everything in use.
+    fn compact_types(&mut self) {
+        if self.types.len() <= self.types_limit {
+            return;
+        }
+        let done: Vec<FileId> = (0..self.files.len())
+            .filter(|&i| self.files[i].state == State::Done)
+            .map(|i| FileId(i as u32))
+            .collect();
+        self.types = Types::new();
+        self.prelude = None;
+        for f in &mut self.files {
+            // Old results name types that no longer exist: drop them, not just mark them stale.
+            f.module = Module::default();
+            f.state = State::Stale;
+        }
+        for f in done {
+            self.ensure(f);
+        }
+        self.types_limit = (2 * self.types.len()).max(MIN_TYPES_LIMIT);
     }
 
     /// Marks `file` and everything that depends on it, directly or not, for rechecking.

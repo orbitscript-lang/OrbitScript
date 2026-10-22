@@ -150,6 +150,10 @@ impl Types {
         t
     }
 
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
     pub fn intern(&mut self, ty: Ty) -> TypeId {
         if let Some(&id) = self.map.get(&ty) {
             return id;
