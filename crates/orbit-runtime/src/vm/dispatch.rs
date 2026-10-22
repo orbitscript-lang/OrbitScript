@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use crate::object::number::{ArithOp, Number};
 use crate::object::table::{self, IntStore};
-use crate::object::{Closure, Gc, LuaHeap, LuaStr, ProtoCode, Table, Value};
+use crate::object::{Closure, Gc, LuaHeap, LuaSpace, LuaStr, ProtoCode, Table, Value};
 use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{MULTI, Op};
 
@@ -34,6 +34,23 @@ use crate::vm::meta::Metas;
 use crate::vm::native::{NativeCtx, NativeReturn};
 use crate::vm::ops::{self, Arith, Exc};
 use crate::vm::{FrameKind, LuaError, Vm};
+
+/// The write barrier for storing `v` into `obj`. A store that refers to no
+/// object needs none: with the value's variant known (`by_parts!`) the test
+/// folds away. In generational mode this keeps number stores into old
+/// objects from remembering them.
+#[inline(always)]
+fn barrier_for<T>(heap: &mut LuaHeap, obj: Gc<T>, v: Value)
+where
+    LuaSpace: orbit_gc::Holds<T>,
+{
+    if !matches!(
+        v,
+        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+    ) {
+        heap.barrier_back(obj);
+    }
+}
 
 /// What [`Vm::cold_op`] tells the loop to do next.
 enum Cold {
@@ -675,9 +692,10 @@ impl Vm {
                         Op::CapSelf { dst } => reg!(dst) = Value::Closure(closure),
                         Op::CapSet { cap, src } => {
                             let c = self.heap.get(closure).captures[cap as usize];
-                            self.heap.barrier_back(c);
-                            let cell = self.heap.get_mut(c);
-                            by_parts!(src, |v| cell.value = v);
+                            by_parts!(src, |v| {
+                                barrier_for(&mut self.heap, c, v);
+                                self.heap.get_mut(c).value = v
+                            });
                         }
 
                         Op::GetGlobal { dst, name, ic } => {
@@ -736,9 +754,10 @@ impl Vm {
                             {
                                 // The key is there: overwrite its value. No
                                 // capacity changes, so no byte accounting.
-                                self.heap.barrier_back(t);
-                                let tab = self.heap.get_mut(t);
-                                by_parts!(src, |v| tab.set_slot(slot, v));
+                                by_parts!(src, |v| {
+                                    barrier_for(&mut self.heap, t, v);
+                                    self.heap.get_mut(t).set_slot(slot, v)
+                                });
                             } else {
                                 let k = const_str(&cur.consts, key);
                                 let v = reg!(src);
@@ -1164,7 +1183,7 @@ impl Vm {
                                 .cell_base as usize;
                             let c = self.rt.stack.cells[cell_base + cell as usize];
                             let v = reg!(src);
-                            self.heap.barrier_back(c);
+                            barrier_for(&mut self.heap, c, v);
                             self.heap.get_mut(c).value = v;
                         }
 
@@ -1390,7 +1409,7 @@ impl Vm {
                         if matches!(tab.cached_str(slot, cache.key),
                             Some(v) if tab.meta.is_none() || !v.is_nil())
                         {
-                            self.heap.barrier_back(t);
+                            barrier_for(&mut self.heap, t, v);
                             self.heap.get_mut(t).set_slot(slot, v);
                         } else {
                             let k = const_str(&cur.consts, name);
