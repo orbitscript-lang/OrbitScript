@@ -244,7 +244,8 @@ lay_out() {
                 *) machine=X64 ;;
             esac
             if link=$(msvc_link); then
-                "$link" /NOLOGO /DLL /NOENTRY "/MACHINE:$machine" \
+                # Git Bash would turn the /OPTIONS into paths.
+                MSYS2_ARG_CONV_EXCL='*' "$link" /NOLOGO /DLL /NOENTRY "/MACHINE:$machine" \
                     "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/lua55.dll")"
             else
                 "${CC:-gcc}" -shared -nostdlib -o "$dir/bin/lua55.dll" "$def"
