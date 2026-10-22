@@ -111,5 +111,5 @@ To add module paths, pass `initializationOptions = { searchPath = { "lib/?.orb" 
 ## Not yet
 
 - Lua files get syntax errors only; definitions and completion for Lua need name resolution in the checker's Lua path.
-- `semanticTokens/range` and `/delta`, code actions, formatting (L3, after `orbit-fmt`), and pull diagnostics.
+- `semanticTokens/range` and `/delta`, code actions, formatting (L3, with [`orbit-fmt`](formatter.md)), and pull diagnostics.
 - The checker never forgets a type it has made (noted in its design), which a session open for days will notice.
