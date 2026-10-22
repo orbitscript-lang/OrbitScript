@@ -572,7 +572,10 @@ pub struct Runtime {
     /// [`Runtime::compile`].
     pub compile_orbitscript: Option<CompileFn>,
     pub(crate) natives: Vec<Native>,
+    /// The runtime's own natives, by name, so each is registered once.
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId, CheapHash>,
+    /// An embedder's natives, by type, sorted ([`Vm::native_for_type`]).
+    pub(crate) native_types: Vec<(std::any::TypeId, NativeId)>,
     pub(crate) stack: Stack,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
@@ -855,6 +858,7 @@ impl Vm {
                 compile_orbitscript: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
+                native_types: Vec::new(),
                 stack: Stack::default(),
                 prev_code: None,
                 callee: None,
@@ -993,6 +997,27 @@ impl Vm {
             data,
         });
         Value::Native(id)
+    }
+
+    /// The native registered for type `ty`, registering `f` as `name` for
+    /// it the first time. For an embedder's natives, which are told apart by
+    /// type rather than by name: one named `tostring` is not the built-in.
+    pub fn native_for_type(
+        &mut self,
+        ty: std::any::TypeId,
+        name: &'static str,
+        f: NativeFn,
+    ) -> NativeId {
+        match self.rt.native_types.binary_search_by_key(&ty, |&(t, _)| t) {
+            Ok(i) => self.rt.native_types[i].1,
+            Err(i) => {
+                let Value::Native(id) = self.register_native_with_data(name, f, [0; 2]) else {
+                    unreachable!("natives are registered as natives")
+                };
+                self.rt.native_types.insert(i, (ty, id));
+                id
+            }
+        }
     }
 
     /// Give the native registered under `name` a [`FastFn`]: calls that want

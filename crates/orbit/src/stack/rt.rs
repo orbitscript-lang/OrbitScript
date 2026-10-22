@@ -1,6 +1,6 @@
 //! The stack API over the runtime linked into this program.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::ffi::c_void;
 
 use orbit_runtime::object::number::{float_to_int, fmt_number, str_to_number};
@@ -782,14 +782,26 @@ impl<'s> Stack<'s> {
     /// The data word of the closure of native `N` at `idx`
     /// ([`Stack::push_native_closure`]); `None` if it isn't one.
     pub fn closure_data_of<N: Native>(&mut self, idx: i32) -> Option<u64> {
-        let id = self.native_index_of(N::NAME, native_entry::<N>);
+        let id = self.native_index::<N>();
         self.closure_data_of_index(idx, id)
     }
 
-    /// The index the native `f` is registered under as `name`, registering
-    /// it first if it isn't.
-    pub(crate) fn native_index_of(&mut self, name: &'static str, f: vm::NativeFn) -> u32 {
-        let RawValue::Native(id) = self.ctx.native(name, f) else {
+    /// The index native `N` is registered under, registering it first if it
+    /// isn't. Natives are told apart by type, not by `NAME`, so an
+    /// embedder's `tostring` is not the built-in one.
+    #[inline]
+    fn native_index<N: Native>(&mut self) -> u32 {
+        let ty = TypeId::of::<N>();
+        self.ctx
+            .vm
+            .native_for_type(ty, N::NAME, native_entry::<N>)
+            .0
+    }
+
+    /// A fresh native running `f`, named `name` in messages: its index.
+    #[cfg(feature = "abi")]
+    pub(crate) fn add_native(&mut self, name: &'static str, f: vm::NativeFn) -> u32 {
+        let RawValue::Native(id) = self.ctx.vm.register_native_with_data(name, f, [0; 2]) else {
             unreachable!("natives are registered as natives")
         };
         id.0
@@ -972,38 +984,32 @@ impl<'s> Stack<'s> {
     /// Push native `N` as a function value.
     #[inline]
     pub fn push_native<N: Native>(&mut self) {
-        self.push_native_fn(N::NAME, native_entry::<N>);
+        self.push_native_fn(TypeId::of::<N>(), N::NAME, native_entry::<N>);
     }
 
     /// The non-generic half of [`Stack::push_native`], so each native
     /// doesn't carry its own copy of the registry lookup.
     #[inline(never)]
-    fn push_native_fn(&mut self, name: &'static str, f: vm::NativeFn) {
-        let f = self.ctx.native(name, f);
-        self.ctx.push(f);
+    fn push_native_fn(&mut self, ty: TypeId, name: &'static str, f: vm::NativeFn) {
+        let id = self.ctx.vm.native_for_type(ty, name, f);
+        self.ctx.push(RawValue::Native(id));
     }
 
     /// Push a closure of native `N` over the top `nups` values (popped),
     /// which it reads at [`upvalue_index`], and over `data`, a word scripts
     /// can neither see nor change ([`Stack::closure_data`]).
     pub fn push_native_closure<N: Native>(&mut self, nups: usize, data: u64) -> StackResult<()> {
-        self.push_closure_of(N::NAME, native_entry::<N>, nups, data)
+        let id = self.native_index::<N>();
+        self.push_closure_of(id, nups, data)
     }
 
-    /// [`Stack::push_native_closure`] for the native `f`, registered as
-    /// `name`.
-    pub(crate) fn push_closure_of(
-        &mut self,
-        name: &'static str,
-        f: vm::NativeFn,
-        nups: usize,
-        data: u64,
-    ) -> StackResult<()> {
+    /// [`Stack::push_native_closure`] for the native with index `id`.
+    pub(crate) fn push_closure_of(&mut self, id: u32, nups: usize, data: u64) -> StackResult<()> {
         self.need(nups)?;
         let len = self.ctx.len();
         let ups = self.ctx.window()[len - nups..].to_vec();
         let hidden = [RawValue::LightUserData(LightUserData::new(data))];
-        let v = self.ctx.new_closure_hidden(name, f, &ups, &hidden);
+        let v = self.ctx.new_native_closure(NativeId(id), &ups, &hidden);
         self.ctx.truncate(len - nups);
         self.ctx.push(v);
         Ok(())

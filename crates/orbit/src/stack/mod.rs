@@ -264,9 +264,8 @@ pub type StackResult<T> = Result<T, Raised>;
 /// A native function written against the stack API. Its window starts
 /// with its arguments; it ends with a [`Return`].
 pub trait Native: 'static {
-    /// The name the native is registered under, used in messages when the
-    /// call site doesn't name it. It identifies the native: two natives
-    /// must not share one.
+    /// The native's name in messages, when the call site doesn't name it.
+    /// Natives are told apart by type, so two may share a name.
     const NAME: &'static str;
 
     fn call(s: &mut Stack<'_>) -> StackResult<Return>;
