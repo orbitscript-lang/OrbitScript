@@ -158,10 +158,7 @@ fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn parse_in_base(s: &[u8], base: u32) -> Option<i64> {
-    let is_space = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
-    let start = s.iter().position(|b| !is_space(b))?;
-    let end = s.iter().rposition(|b| !is_space(b))? + 1;
-    let mut s = &s[start..end];
+    let mut s = crate::object::number::trim_space(s)?;
     let neg = s.first() == Some(&b'-');
     if neg || s.first() == Some(&b'+') {
         s = &s[1..];

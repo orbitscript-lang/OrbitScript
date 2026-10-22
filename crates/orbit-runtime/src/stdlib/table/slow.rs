@@ -8,7 +8,7 @@
 //! its own phase, so after a call the machine resumes exactly where it
 //! stopped.
 
-use crate::object::{Value, number};
+use crate::object::Value;
 use crate::vm::{CallOutcome, Continuation, LuaError, Meta, MetaField, NativeCtx, NativeReturn};
 
 pub(super) use crate::stdlib::first_result;
@@ -62,17 +62,9 @@ pub(super) fn len(ctx: &mut NativeCtx<'_>, t: Value, k: Continuation) -> Result<
 /// A length as the table functions take it: an integer, a float with an
 /// integral value, or a string that converts to one.
 pub(super) fn len_int(ctx: &mut NativeCtx<'_>, v: Value) -> Result<i64, LuaError> {
-    let n = match v {
-        Value::Str(s) => number::str_to_number(ctx.bytes(s)),
-        _ => Some(v),
-    };
-    match n {
-        Some(Value::Int(n)) => Ok(n),
-        Some(Value::Float(f)) => match number::float_to_int(f) {
-            Some(n) => Ok(n),
-            None => Err(ctx.error("object length is not an integer")),
-        },
-        _ => Err(ctx.error("object length is not an integer")),
+    match ctx.to_integer(v) {
+        Some(n) => Ok(n),
+        None => Err(ctx.error("object length is not an integer")),
     }
 }
 

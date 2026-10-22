@@ -5,7 +5,7 @@
 
 use std::io::Write as _;
 
-use crate::object::number::{self, ArithError, ArithOp, Number, float_to_int};
+use crate::object::number::{self, ArithError, ArithOp, float_to_int};
 use crate::object::table::StoreError;
 use crate::object::value::raw_eq;
 use crate::object::{LuaHeap, NoMemory, Value};
@@ -216,7 +216,7 @@ pub(crate) const NO_INTEGER_REP: &str = "number has no integer representation";
 fn bit_operand(v: Value) -> Option<Option<i64>> {
     match v {
         Value::Int(i) => Some(Some(i)),
-        Value::Float(f) => Some(Number::Float(f).to_int_exact()),
+        Value::Float(f) => Some(float_to_int(f)),
         _ => None,
     }
 }

@@ -276,17 +276,9 @@ fn checkint_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
 /// `lenint(len)`: a length (`#t`, which may come from `__len`) as an
 /// integer.
 fn lenint(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.arg(0);
-    let n = match v {
-        Value::Str(s) => number::str_to_number(ctx.bytes(s)),
-        _ => Some(v),
-    };
-    match n {
-        Some(Value::Int(n)) => ctx.ret([Value::Int(n)]),
-        Some(Value::Float(f)) if float_to_int(f).is_some() => {
-            ctx.ret([Value::Int(float_to_int(f).unwrap_or(0))])
-        }
-        _ => Err(ctx.builtin_error("object length is not an integer")),
+    match ctx.to_integer(ctx.arg(0)) {
+        Some(n) => ctx.ret([Value::Int(n)]),
+        None => Err(ctx.builtin_error("object length is not an integer")),
     }
 }
 

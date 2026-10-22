@@ -258,7 +258,7 @@ fn format_from(
             }
             b'a' | b'A' | b'e' | b'E' | b'f' | b'g' | b'G' => {
                 let x = ctx.check_f64(arg)?;
-                fmt_float(&mut out, &spec, conv, x);
+                printf_float(&mut out, &spec, conv, x);
             }
             b'p' => {
                 let v = ctx.arg(arg);
@@ -408,7 +408,7 @@ fn fmt_int(out: &mut Vec<u8>, spec: &Spec, prefix: &[u8], digits: &[u8], octal_a
     pad_zeros(out, spec, prefix, zeros, digits, spec.precision.is_none());
 }
 /// `%a %e %f %g` and their upper-case forms.
-pub(crate) fn fmt_float(out: &mut Vec<u8>, spec: &Spec, conv: u8, x: f64) {
+pub(crate) fn printf_float(out: &mut Vec<u8>, spec: &Spec, conv: u8, x: f64) {
     let upper = conv.is_ascii_uppercase();
     let s = sign(spec, x.is_sign_negative());
     if !x.is_finite() {
@@ -557,7 +557,7 @@ fn quote(ctx: &mut NativeCtx<'_>, arg: usize, out: &mut Vec<u8>) -> Result<(), L
                 out.extend_from_slice(if x > 0.0 { b"1e9999" } else { b"-1e9999" });
             } else {
                 let spec = Spec::default();
-                fmt_float(out, &spec, b'a', x);
+                printf_float(out, &spec, b'a', x);
             }
         }
         v @ (Value::Nil | Value::Bool(_)) => ctx.display(v, out),
@@ -598,7 +598,7 @@ mod tests {
         let (flags, p) = grammar(conv).unwrap();
         let spec = parse_spec(spec.as_bytes(), flags, p).unwrap();
         let mut out = Vec::new();
-        fmt_float(&mut out, &spec, conv, x);
+        printf_float(&mut out, &spec, conv, x);
         String::from_utf8(out).unwrap()
     }
 

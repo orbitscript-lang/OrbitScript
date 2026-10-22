@@ -2,7 +2,7 @@
 
 mod rng;
 
-use crate::object::number::{self, float_to_int, str_to_number};
+use crate::object::number::{self, float_to_int};
 use crate::object::{Gc, LuaHeap, Table, Value};
 use crate::vm::{CallOutcome, FastFn, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
 
@@ -182,16 +182,7 @@ fn modf(ctx: &mut NativeCtx<'_>) -> R {
 
 fn tointeger(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(0)?;
-    let r = match v {
-        Value::Int(_) => v,
-        Value::Float(f) => float_to_int(f).map_or(Value::Nil, Value::Int),
-        Value::Str(s) => match str_to_number(ctx.bytes(s)) {
-            Some(Value::Int(i)) => Value::Int(i),
-            Some(Value::Float(f)) => float_to_int(f).map_or(Value::Nil, Value::Int),
-            _ => Value::Nil,
-        },
-        _ => Value::Nil,
-    };
+    let r = ctx.to_integer(v).map_or(Value::Nil, Value::Int);
     ctx.ret([r])
 }
 
