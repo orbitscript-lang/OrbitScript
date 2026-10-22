@@ -131,11 +131,12 @@ fn findings(ws: &mut Workspace, file: orbit_check::FileId) -> Vec<orbit_check::D
 struct Memory(Vec<(&'static str, &'static str)>);
 
 impl Sources for Memory {
+    /// `path` comes made absolute, as the workspace keeps paths: `/w/lib.orb` is
+    /// `D:\w\lib.orb` on Windows, so the names are made absolute the same way.
     fn read(&self, path: &Path) -> Option<Vec<u8>> {
-        let p = path.to_string_lossy();
         self.0
             .iter()
-            .find(|(name, _)| *name == p)
+            .find(|(name, _)| std::path::absolute(name).is_ok_and(|name| name == path))
             .map(|(_, text)| text.as_bytes().to_vec())
     }
 }

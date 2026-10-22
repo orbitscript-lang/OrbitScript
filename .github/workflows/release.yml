@@ -101,7 +101,7 @@ jobs:
         run: tools/set-version.sh "$TAG"
       # Every target the release ships runs the whole test suite first.
       - name: cargo test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
       - name: Install cargo-pgo and llvm-tools
         if: env.PGO == 'train'
         run: |
