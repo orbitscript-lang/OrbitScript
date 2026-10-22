@@ -11,6 +11,8 @@
 
 mod cast;
 mod lint;
+mod report;
+mod view;
 
 pub(crate) use lint::lints;
 
@@ -22,9 +24,11 @@ use orbit_orb_syntax::ast::{
 };
 
 use crate::resolve::{Def, Defs, Owner};
-use crate::symbols::{Module, StructLit, Symbol, SymbolId, SymbolKind};
+use crate::symbols::{Module, StructLit, SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
-use crate::{Code, Diagnostic, FileId};
+use crate::{Code, FileId};
+use report::Reporter;
+use view::SymbolView;
 
 /// A function's results: `None` when unknown (any number of `any`).
 type Results = Option<Vec<TypeId>>;
@@ -83,33 +87,25 @@ enum Node<'a> {
 }
 
 struct Checker<'a, 'b, 'c> {
-    file: FileId,
     strings: &'a StringPool,
     defs: &'b Defs<'a>,
-    m: &'b mut Module,
+    syms: SymbolView<'b, 'c>,
+    report: Reporter,
     types: &'b mut Types,
-    checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
-    prelude: Option<FileId>,
-    /// The symbol each name refers to, by its span. The last one recorded at a span wins: for
-    /// a shorthand field `{ x }` that is the local.
-    refs: HashMap<(u32, u32), SymbolId>,
-    /// This module's symbols by the span of their name.
-    by_span: HashMap<(u32, u32), u32>,
+    /// The types of this module's symbols, as far as they are known.
+    sym_types: HashMap<u32, TypeId>,
+    /// Each function's parameter names, for signature help.
+    param_names: HashMap<u32, Vec<String>>,
     in_progress: HashSet<u32>,
     /// Functions whose bodies have been checked.
     bodies_done: HashSet<u32>,
     env: Env,
     fns: Vec<FnCtx>,
-    /// Above zero while computing a type out of order (a local's value before the walk reaches
-    /// it): nothing is reported or recorded.
-    quiet: u32,
     /// What `Self` means in type annotations.
     self_type: Option<TypeId>,
     /// Whether bindings get inlay hints (not under an annotation).
     hinting: bool,
     strict: bool,
-    /// Errors found so far, counted even while `quiet` (to try an overload).
-    failures: u32,
 }
 
 fn sk(s: Span) -> (u32, u32) {
@@ -136,36 +132,7 @@ pub(crate) fn check<'a, 'b, 'c>(
     types: &'b mut Types,
     deps: Deps<'c>,
 ) {
-    let mut refs = HashMap::new();
-    for &(span, id) in &m.refs {
-        refs.insert(sk(span), id);
-    }
-    let by_span = m
-        .symbols
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (sk(s.span), i as u32))
-        .collect();
-    let mut c = Checker {
-        file,
-        strings: &ast.strings,
-        defs,
-        m,
-        types,
-        checked: deps.checked,
-        prelude: deps.prelude,
-        refs,
-        by_span,
-        in_progress: HashSet::new(),
-        bodies_done: HashSet::new(),
-        env: Env::new(),
-        fns: Vec::new(),
-        quiet: 0,
-        self_type: None,
-        hinting: true,
-        strict: deps.strict,
-        failures: 0,
-    };
+    let id = |index| SymbolId { file, index };
     let mut variants: Vec<(u32, u32)> = defs
         .defs
         .iter()
@@ -176,27 +143,47 @@ pub(crate) fn check<'a, 'b, 'c>(
         .collect();
     variants.sort();
     for (v, e) in variants {
-        c.types.set_variant_enum(c.id(v), c.id(e));
+        types.set_variant_enum(id(v), id(e));
     }
 
     // A body-less function declared more than once in a stub is overloaded: a call takes the
     // first declaration its arguments fit.
+    let by_span = SymbolView::by_span(m);
     let mut by_name: HashMap<StrId, Vec<SymbolId>> = HashMap::new();
     for s in &ast.body.stmts {
         if let StmtKind::Item(item) = &s.kind
             && let ItemKind::Fn(f) = &item.kind
             && f.body.is_none()
-            && let Some(i) = c.local_at(f.name.span)
+            && let Some(&i) = by_span.get(&sk(f.name.span))
         {
-            by_name.entry(f.name.sym).or_default().push(c.id(i));
+            by_name.entry(f.name.sym).or_default().push(id(i));
         }
     }
     for group in by_name.into_values().filter(|g| g.len() > 1) {
         for id in &group {
-            c.m.overloads.insert(id.index, group.clone());
+            m.overloads.insert(id.index, group.clone());
         }
     }
 
+    let report = Reporter::take(file, m);
+    let sym_types = std::mem::take(&mut m.sym_types);
+    let param_names = std::mem::take(&mut m.param_names);
+    let mut c = Checker {
+        strings: &ast.strings,
+        defs,
+        syms: SymbolView::new(file, m, deps.checked, deps.prelude, by_span),
+        report,
+        types,
+        sym_types,
+        param_names,
+        in_progress: HashSet::new(),
+        bodies_done: HashSet::new(),
+        env: Env::new(),
+        fns: Vec::new(),
+        self_type: None,
+        hinting: true,
+        strict: deps.strict,
+    };
     c.fns.push(FnCtx {
         results: None,
         returns: Vec::new(),
@@ -212,46 +199,27 @@ pub(crate) fn check<'a, 'b, 'c>(
     let mut all: Vec<u32> = defs.defs.keys().copied().collect();
     all.sort();
     for i in all {
-        c.sym_type(c.id(i));
+        c.sym_type(id(i));
     }
-    c.m.expr_types
+    let Checker {
+        mut report,
+        sym_types,
+        param_names,
+        ..
+    } = c;
+    report
+        .expr_types
         .sort_by_key(|(s, _)| (s.start, std::cmp::Reverse(s.end)));
-}
-
-impl Names for Checker<'_, '_, '_> {
-    fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
-        Checker::symbol(self, id)
-    }
+    report.finish(m);
+    m.sym_types = sym_types;
+    m.param_names = param_names;
 }
 
 impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     // ---- reporting ----------------------------------------------------------------------------
 
-    fn error(&mut self, span: Span, code: Code, message: String) {
-        self.failures += 1;
-        if self.quiet == 0 {
-            self.m
-                .diagnostics
-                .push(Diagnostic::error(self.file, span, code, message));
-        }
-    }
-
-    fn warning(&mut self, span: Span, code: Code, message: String) {
-        if self.quiet == 0 {
-            self.m
-                .diagnostics
-                .push(Diagnostic::warning(self.file, span, code, message));
-        }
-    }
-
-    fn record(&mut self, span: Span, t: TypeId) {
-        if self.quiet == 0 {
-            self.m.expr_types.push((span, t));
-        }
-    }
-
     fn show(&self, t: TypeId) -> String {
-        format!("`{}`", self.types.display(t, self))
+        format!("`{}`", self.types.display(t, &self.syms))
     }
 
     fn text(&self, sym: StrId) -> String {
@@ -274,10 +242,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.show(expected),
                 self.show(t)
             );
-            self.error(span, Code::MaybeNil, msg);
+            self.report.error(span, Code::MaybeNil, msg);
         } else {
             let msg = format!("{what} {}, found {}", self.show(expected), self.show(t));
-            self.error(span, Code::Mismatch, msg);
+            self.report.error(span, Code::Mismatch, msg);
         }
     }
 
@@ -316,13 +284,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             let mut ls = Vec::new();
             leaves(e, &mut ls);
             for l in ls {
-                let recorded = self
-                    .m
-                    .expr_types
-                    .iter()
-                    .rev()
-                    .find(|(s, _)| *s == l.span)
-                    .map(|&(_, t)| t);
+                let recorded = self.report.recorded(l.span);
                 if let Some(lt) = recorded
                     && !self.types.assignable(lt, expected)
                 {
@@ -338,82 +300,18 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    // ---- symbols ------------------------------------------------------------------------------
-
-    fn id(&self, index: u32) -> SymbolId {
-        SymbolId {
-            file: self.file,
-            index,
-        }
-    }
-
-    fn module_of(&self, file: FileId) -> Option<&Module> {
-        if file == self.file {
-            Some(&*self.m)
-        } else {
-            (self.checked)(file)
-        }
-    }
-
-    fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
-        self.module_of(id.file)?.symbols.get(id.index as usize)
-    }
-
-    fn kind(&self, id: SymbolId) -> Option<SymbolKind> {
-        self.symbol(id).map(|s| s.kind)
-    }
-
-    fn ref_at(&self, span: Span) -> Option<SymbolId> {
-        self.refs.get(&sk(span)).copied()
-    }
-
-    fn local_at(&self, span: Span) -> Option<u32> {
-        self.by_span.get(&sk(span)).copied()
-    }
-
-    fn generics_of(&self, id: SymbolId) -> Vec<SymbolId> {
-        self.module_of(id.file)
-            .and_then(|m| m.generics.get(&id.index))
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    fn field_sym(&self, owner: SymbolId, name: &str) -> Option<SymbolId> {
-        self.module_of(owner.file)?
-            .fields
-            .get(&owner.index)?
-            .get(name)
-            .copied()
-    }
-
-    fn member_sym(&self, owner: SymbolId, name: &str) -> Option<SymbolId> {
-        self.module_of(owner.file)?
-            .members
-            .get(&owner.index)?
-            .get(name)
-            .copied()
-    }
-
-    /// The variants of an enum, in declaration order.
-    fn variants(&self, enum_: SymbolId) -> Vec<SymbolId> {
-        let mut out: Vec<SymbolId> = self
-            .module_of(enum_.file)
-            .and_then(|m| m.members.get(&enum_.index))
-            .map(|ms| ms.values().copied().collect())
-            .unwrap_or_default();
-        out.retain(|&v| self.kind(v) == Some(SymbolKind::Variant));
-        out.sort_by_key(|v| v.index);
-        out
-    }
+    // ---- symbol types -------------------------------------------------------------------------
 
     fn sym_type(&mut self, id: SymbolId) -> TypeId {
         let any = self.types.any;
-        if id.file != self.file {
-            return (self.checked)(id.file)
+        if id.file != self.syms.file {
+            return self
+                .syms
+                .module_of(id.file)
                 .and_then(|m| m.sym_types.get(&id.index).copied())
                 .unwrap_or(any);
         }
-        if let Some(&t) = self.m.sym_types.get(&id.index) {
+        if let Some(&t) = self.sym_types.get(&id.index) {
             return t;
         }
         if !self.in_progress.insert(id.index) {
@@ -421,7 +319,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
         let t = self.compute(id);
         self.in_progress.remove(&id.index);
-        self.m.sym_types.insert(id.index, t);
+        self.sym_types.insert(id.index, t);
         t
     }
 
@@ -473,7 +371,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             Def::Field { ty } => ty.map_or(any, |t| self.lower(t)),
             Def::Struct | Def::Enum => any,
             Def::Variant { enum_ } => {
-                let n = self.m.generics.get(enum_).map_or(0, Vec::len);
+                let n = self.syms.generics_of(self.syms.id(*enum_)).len();
                 self.types.intern(Ty::Variant(id, vec![any; n]))
             }
             Def::Alias { ty } => self.lower(ty),
@@ -482,9 +380,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     /// Runs `f` without reporting anything, keeping narrowing.
     fn muted<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        self.quiet += 1;
+        self.report.mute();
         let r = f(self);
-        self.quiet -= 1;
+        self.report.unmute();
         r
     }
 
@@ -500,9 +398,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     /// Runs `f` reporting as usual, even inside [`Self::muted`]: a function body is checked
     /// once, wherever the walk first needs its type.
     fn unmuted<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let quiet = std::mem::replace(&mut self.quiet, 0);
+        let muted = self.report.force_on();
         let r = f(self);
-        self.quiet = quiet;
+        self.report.restore(muted);
         r
     }
 
@@ -546,7 +444,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             let mut t = init;
             // A value can depend on the local itself (`n = n + 1`): repeat until it settles.
             for _ in 0..3 {
-                c.m.sym_types.insert(index, t);
+                c.sym_types.insert(index, t);
                 let mut parts = vec![init];
                 for a in assigns {
                     let v = c.value_at(a.value, a.slot);
@@ -577,8 +475,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             TypeKind::Path { segments, args } => {
                 let last = segments[segments.len() - 1];
                 let args: Vec<TypeId> = args.iter().map(|a| self.lower(a)).collect();
-                if let Some(id) = self.ref_at(last.span)
-                    && let Some(k) = self.kind(id)
+                if let Some(id) = self.syms.ref_at(last.span)
+                    && let Some(k) = self.syms.kind(id)
                 {
                     return self.named_type(id, k, args);
                 }
@@ -703,16 +601,16 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn named_type(&mut self, id: SymbolId, kind: SymbolKind, args: Vec<TypeId>) -> TypeId {
         match kind {
             SymbolKind::Struct | SymbolKind::Enum => {
-                let args = self.fit(args, self.generics_of(id).len());
+                let args = self.fit(args, self.syms.generics_of(id).len());
                 self.types.intern(Ty::Nominal(id, args))
             }
             SymbolKind::Variant => {
-                let args = self.fit(args, self.generics_of(self.holder(id)).len());
+                let args = self.fit(args, self.syms.generics_of(self.syms.holder(id)).len());
                 self.types.intern(Ty::Variant(id, args))
             }
             SymbolKind::TypeAlias => {
                 let t = self.sym_type(id);
-                let gens = self.generics_of(id);
+                let gens = self.syms.generics_of(id);
                 let args = self.fit(args, gens.len());
                 let map = gens.into_iter().zip(args).collect();
                 self.types.subst(t, &map)
@@ -724,7 +622,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     /// `t` (a member's type in `owner`) for an `owner` instantiated with `args`.
     fn inst(&mut self, t: TypeId, owner: SymbolId, args: &[TypeId]) -> TypeId {
-        let gens = self.generics_of(owner);
+        let gens = self.syms.generics_of(owner);
         if gens.is_empty() {
             return t;
         }
@@ -737,7 +635,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn owner_type(&mut self, o: &Owner<'a>) -> TypeId {
         let args: Vec<TypeId> = o.args.iter().map(|a| self.lower(a)).collect();
-        let args = self.fit(args, self.generics_of(o.target).len());
+        let args = self.fit(args, self.syms.generics_of(o.target).len());
         self.types.intern(Ty::Nominal(o.target, args))
     }
 
@@ -774,12 +672,12 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         if let Some(r) = sig.rest {
             names.push(self.text(r.sym));
         }
-        self.m.param_names.insert(index, names);
+        self.param_names.insert(index, names);
         let rest = sig
             .rest
             .map(|_| sig.rest_ty.as_ref().map_or(any, |t| self.lower(t)));
         let mut generics: Vec<SymbolId> = owner.map(|o| o.generics.clone()).unwrap_or_default();
-        generics.extend(self.m.generics.get(&index).cloned().unwrap_or_default());
+        generics.extend(self.syms.generics_of(self.syms.id(index)));
         // A stub declaration without `->` has unknown results (each `any`); write `-> ()` for
         // none.
         let results = sig.ret.as_ref().map(|t| self.lower_results(t));
@@ -802,7 +700,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let mut t = self.types.intern(Ty::Fn(f.clone()));
         if infer && !self.bodies_done.contains(&index) {
             // Calls in the body (recursion) see this signature with unknown results.
-            self.m.sym_types.insert(index, t);
+            self.sym_types.insert(index, t);
             f.results = self.fn_body(index, decl, t);
             t = self.types.intern(Ty::Fn(f));
         }
@@ -861,7 +759,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                         "this function returns {}, but it can reach its end without a value",
                         self.show(r)
                     );
-                    self.error(name_span, Code::Mismatch, msg);
+                    self.report.error(name_span, Code::Mismatch, msg);
                 }
                 Some(rs)
             }
@@ -932,7 +830,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 && !self.types.may_be_nil(r)
             {
                 let msg = format!("expected a value of type {}, found none", self.show(r));
-                self.error(span, Code::Mismatch, msg);
+                self.report.error(span, Code::Mismatch, msg);
             }
             return Some(Vec::new());
         };
@@ -958,7 +856,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                         (Some(v), Some(r)) => self.expect(v, r, e.span, None),
                         (None, Some(r)) if !self.types.may_be_nil(r) => {
                             let msg = format!("missing result {} (result {})", self.show(r), i + 1);
-                            self.error(e.span, Code::Mismatch, msg);
+                            self.report.error(e.span, Code::Mismatch, msg);
                         }
                         _ => {}
                     }
@@ -986,33 +884,36 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 items.len(),
                 self.results_text(&rs)
             );
-            self.error(e.span, Code::Mismatch, msg);
+            self.report.error(e.span, Code::Mismatch, msg);
         }
         for (i, &r) in rs.iter().enumerate().skip(items.len()) {
             if !self.types.may_be_nil(r) {
                 let msg = format!("missing result {} (result {})", self.show(r), i + 1);
-                self.error(e.span, Code::Mismatch, msg);
+                self.report.error(e.span, Code::Mismatch, msg);
             }
         }
         Some(out)
     }
 
     fn results_text(&self, rs: &[TypeId]) -> String {
-        let parts: Vec<String> = rs.iter().map(|&r| self.types.display(r, self)).collect();
+        let parts: Vec<String> = rs
+            .iter()
+            .map(|&r| self.types.display(r, &self.syms))
+            .collect();
         format!("`({})`", parts.join(", "))
     }
 
     fn fn_item(&mut self, f: &'a ast::FnDecl) {
         let defs = self.defs;
-        let Some(index) = self.local_at(f.name.span) else {
+        let Some(index) = self.syms.local_at(f.name.span) else {
             // A function no symbol was made for (an `impl` of an unknown type).
             if let Some(b) = &f.body {
                 self.unmuted(|c| c.run_fn(None, None, f.name.span, Env::new(), |c| c.fn_block(b)));
             }
             return;
         };
-        let t = self.sym_type(self.id(index));
-        self.record(f.name.span, t);
+        let t = self.sym_type(self.syms.id(index));
+        self.report.record(f.name.span, t);
         if self.bodies_done.contains(&index) {
             return;
         }
@@ -1035,18 +936,19 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 None => "parameter `_`".to_string(),
             };
             let msg = format!("{what} of public function `{name}` needs a type (strict mode)");
-            self.error(p.span, Code::MissingParamType, msg);
+            self.report.error(p.span, Code::MissingParamType, msg);
         }
         if let (Some(rest), None) = (f.sig.rest, &f.sig.rest_ty) {
             let msg = format!(
                 "parameter `...{}` of public function `{name}` needs a type (strict mode)",
                 self.text(rest.sym)
             );
-            self.error(rest.span, Code::MissingParamType, msg);
+            self.report.error(rest.span, Code::MissingParamType, msg);
         }
         let t = self
+            .syms
             .local_at(f.name.span)
-            .map(|i| self.sym_type(self.id(i)));
+            .map(|i| self.sym_type(self.syms.id(i)));
         if f.sig.ret.is_none()
             && let Some(t) = t
             && let Ty::Fn(ft) = self.types.get(t).clone()
@@ -1056,7 +958,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 "public function `{name}` returns {} but has no result type (strict mode)",
                 self.results_text(&rs)
             );
-            self.error(f.name.span, Code::MissingResultType, msg);
+            self.report.error(f.name.span, Code::MissingResultType, msg);
         }
     }
 
@@ -1081,10 +983,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     .unwrap_or(any),
             };
             if let Some(n) = p.name
-                && let Some(index) = self.local_at(n.span)
+                && let Some(index) = self.syms.local_at(n.span)
             {
-                self.m.sym_types.insert(index, t);
-                self.record(n.span, t);
+                self.sym_types.insert(index, t);
+                self.report.record(n.span, t);
                 if p.ty.is_none() {
                     self.hint(n.span, t);
                 }
@@ -1096,9 +998,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 Some(t) => self.lower(t),
                 None => exp.as_ref().and_then(|f| f.rest).unwrap_or(any),
             };
-            if let Some(index) = self.local_at(n.span) {
+            if let Some(index) = self.syms.local_at(n.span) {
                 let arr = self.types.intern(Ty::Array(t));
-                self.m.sym_types.insert(index, arr);
+                self.sym_types.insert(index, arr);
             }
             t
         });
@@ -1110,7 +1012,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .env
             .iter()
             .filter(|(k, _)| match &k.base {
-                Base::Sym(id) => id.file != self.file || !defs.assigns.contains_key(&id.index),
+                Base::Sym(id) => id.file != self.syms.file || !defs.assigns.contains_key(&id.index),
                 Base::SelfValue => true,
             })
             .map(|(k, &t)| (k.clone(), t))
@@ -1219,7 +1121,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     vs.len(),
                     if vs.len() == 1 { "" } else { "s" }
                 );
-                self.error(pat.span, Code::ResultCount, msg);
+                self.report.error(pat.span, Code::ResultCount, msg);
             }
             return;
         }
@@ -1247,9 +1149,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn check_close(&mut self, t: TypeId, span: Span) {
         for m in self.types.members(t) {
             let ok = match self.types.get(m).clone() {
-                Ty::Nominal(id, _) | Ty::Variant(id, _) => {
-                    self.member_sym(self.holder(id), "__close").is_some()
-                }
+                Ty::Nominal(id, _) | Ty::Variant(id, _) => self
+                    .syms
+                    .member_sym(self.syms.holder(id), "__close")
+                    .is_some(),
                 Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Fn(_) | Ty::Function => false,
                 _ => true,
             };
@@ -1258,7 +1161,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     "`let scope` needs a value with a `__close` method, but {} has none",
                     self.show(m)
                 );
-                self.error(span, Code::Mismatch, msg);
+                self.report.error(span, Code::Mismatch, msg);
                 return;
             }
         }
@@ -1287,8 +1190,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn target_type(&mut self, target: &'a ast::Expr) -> Option<TypeId> {
         match &target.kind {
             ExprKind::Name(_) => {
-                let id = self.ref_at(target.span)?;
-                if id.file != self.file {
+                let id = self.syms.ref_at(target.span)?;
+                if id.file != self.syms.file {
                     return None;
                 }
                 let defs = self.defs;
@@ -1333,14 +1236,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn field_write_type(&mut self, ot: TypeId, text: &str, span: Span) -> Option<TypeId> {
         match self.types.get(ot).clone() {
             Ty::Nominal(id, args) | Ty::Variant(id, args) => {
-                if let Some(f) = self.field_sym(id, text) {
+                if let Some(f) = self.syms.field_sym(id, text) {
                     let ft = self.sym_type(f);
-                    return Some(self.inst(ft, self.holder(id), &args));
+                    return Some(self.inst(ft, self.syms.holder(id), &args));
                 }
-                let holder = self.holder(id);
-                if self.member_sym(holder, "__newindex").is_none() {
+                let holder = self.syms.holder(id);
+                if self.syms.member_sym(holder, "__newindex").is_none() {
                     let msg = format!("{} has no field `{text}`", self.show(ot));
-                    self.error(span, Code::NoMember, msg);
+                    self.report.error(span, Code::NoMember, msg);
                 }
                 None
             }
@@ -1409,10 +1312,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             ItemKind::Global { name, value } => {
                 let t = self.expr(value, None);
-                if let Some(i) = self.local_at(name.span) {
-                    self.m.sym_types.insert(i, t);
+                if let Some(i) = self.syms.local_at(name.span) {
+                    self.sym_types.insert(i, t);
                 }
-                self.record(name.span, t);
+                self.report.record(name.span, t);
             }
             _ => {}
         }
@@ -1433,15 +1336,15 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 None => t = Some(vt),
             }
         }
-        if let Some(i) = self.local_at(name.span) {
+        if let Some(i) = self.syms.local_at(name.span) {
             let t = match t {
                 Some(t) => {
-                    self.m.sym_types.insert(i, t);
+                    self.sym_types.insert(i, t);
                     t
                 }
-                None => self.sym_type(self.id(i)),
+                None => self.sym_type(self.syms.id(i)),
             };
-            self.record(name.span, t);
+            self.report.record(name.span, t);
         }
     }
 
@@ -1455,7 +1358,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue { .. }
             )
         {
-            self.record(e.span, t);
+            self.report.record(e.span, t);
         }
         t
     }
@@ -1466,7 +1369,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
                 let rs = self.call_expr(e, expected);
                 let first = self.first(&rs);
-                self.record(e.span, first);
+                self.report.record(e.span, first);
                 rs
             }
             ExprKind::Tuple(items) => Some(items.iter().map(|i| self.expr(i, None)).collect()),
@@ -1521,21 +1424,21 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             ExprKind::SelfType => any,
             ExprKind::Path { base, name } => {
-                if self.quiet == 0
-                    && let Some(b) = self.path_symbol(base)
+                if self.report.on()
+                    && let Some(b) = self.syms.path_symbol(base)
                 {
-                    self.m.paths_at.push((name.span, b));
+                    self.report.paths_at.push((name.span, b));
                 }
-                match self.ref_at(name.span) {
+                match self.syms.ref_at(name.span) {
                     Some(id) => self.sym_type(id),
                     None => any,
                 }
             }
             ExprKind::Field { obj, name } => {
                 let ot = self.expr(obj, None);
-                if self.quiet == 0 {
+                if self.report.on() {
                     let receiver = self.types.non_nil(ot);
-                    self.m.members_at.push((name.span, receiver));
+                    self.report.members_at.push((name.span, receiver));
                 }
                 if let Some(k) = self.key_of(e)
                     && let Some(&t) = self.env.get(&k)
@@ -1641,10 +1544,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     /// The type of the name at `span`, narrowed.
     fn name_ref_type(&mut self, span: Span) -> TypeId {
-        let Some(id) = self.ref_at(span) else {
+        let Some(id) = self.syms.ref_at(span) else {
             return self.types.any;
         };
-        if self.kind(id) == Some(SymbolKind::Field) {
+        if self.syms.kind(id) == Some(SymbolKind::Field) {
             return self.types.any;
         }
         let key = Key {
@@ -1661,9 +1564,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn key_of(&self, e: &ast::Expr) -> Option<Key> {
         match &e.kind {
             ExprKind::Name(_) => {
-                let id = self.ref_at(e.span)?;
+                let id = self.syms.ref_at(e.span)?;
                 matches!(
-                    self.kind(id)?,
+                    self.syms.kind(id)?,
                     SymbolKind::Local | SymbolKind::Param | SymbolKind::Global
                 )
                 .then(|| Key {
@@ -1717,14 +1620,15 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
         let d = self.describe(e);
         if t == self.types.nil {
-            self.error(e.span, Code::MaybeNil, format!("{d} is nil"));
+            self.report
+                .error(e.span, Code::MaybeNil, format!("{d} is nil"));
             return self.types.any;
         }
         let msg = format!(
             "{d} may be nil (type {}); check it with `!= nil` first, or use `?`",
             self.show(t)
         );
-        self.error(e.span, Code::MaybeNil, msg);
+        self.report.error(e.span, Code::MaybeNil, msg);
         self.types.non_nil(t)
     }
 
@@ -1747,17 +1651,17 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let any = self.types.any;
         match self.types.get(t).clone() {
             Ty::Nominal(id, args) | Ty::Variant(id, args) => {
-                let holder = self.holder(id);
-                if let Some(f) = self.field_sym(id, text) {
+                let holder = self.syms.holder(id);
+                if let Some(f) = self.syms.field_sym(id, text) {
                     let ft = self.sym_type(f);
                     return self.inst(ft, holder, &args);
                 }
-                if let Some(m) = self.member_sym(holder, text) {
+                if let Some(m) = self.syms.member_sym(holder, text) {
                     return self.sym_type(m);
                 }
-                if self.member_sym(holder, "__index").is_none() {
+                if self.syms.member_sym(holder, "__index").is_none() {
                     let msg = format!("{} has no field `{text}`", self.show(t));
-                    self.error(span, Code::NoMember, msg);
+                    self.report.error(span, Code::NoMember, msg);
                 }
                 any
             }
@@ -1766,16 +1670,16 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 None => {
                     if !inferred {
                         let msg = format!("{} has no field `{text}`", self.show(t));
-                        self.error(span, Code::NoMember, msg);
+                        self.report.error(span, Code::NoMember, msg);
                     }
                     any
                 }
             },
             Ty::Map(_, v) => v,
-            Ty::Str if self.prelude.is_some() => match self.string_member(text) {
+            Ty::Str if self.syms.prelude.is_some() => match self.syms.string_member(text) {
                 Some(m) => self.sym_type(m),
                 None => {
-                    self.error(
+                    self.report.error(
                         span,
                         Code::NoMember,
                         format!("string has no field `{text}`"),
@@ -1785,7 +1689,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             },
             Ty::Int | Ty::Float | Ty::Bool | Ty::Fn(_) | Ty::Function => {
                 let msg = format!("type {} has no field `{text}`", self.show(t));
-                self.error(span, Code::NoMember, msg);
+                self.report.error(span, Code::NoMember, msg);
                 any
             }
             _ => any,
@@ -1796,7 +1700,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn zero_index(&mut self, key: &ast::Expr) {
         if matches!(key.kind, ExprKind::Int(0)) {
             let msg = "arrays start at 1, so `[0]` is never an element; the first is `[1]`";
-            self.warning(key.span, Code::ZeroIndex, msg.to_string());
+            self.report
+                .warning(key.span, Code::ZeroIndex, msg.to_string());
         }
     }
 
@@ -1813,7 +1718,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.zero_index(key);
                 if matches!(self.types.get(kt), Ty::Str | Ty::Bool) {
                     let msg = format!("arrays are indexed by `int`, found {}", self.show(kt));
-                    self.error(key.span, Code::BadOperand, msg);
+                    self.report.error(key.span, Code::BadOperand, msg);
                 }
                 t
             }
@@ -1830,7 +1735,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             },
             Ty::Int | Ty::Float | Ty::Bool | Ty::Fn(_) | Ty::Function => {
                 let msg = format!("a value of type {} can't be indexed", self.show(ot));
-                self.error(obj.span, Code::BadOperand, msg);
+                self.report.error(obj.span, Code::BadOperand, msg);
                 any
             }
             _ => any,
@@ -1847,10 +1752,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 args_at,
             } => {
                 let ct = self.expr(callee, None);
-                let symbol = self.path_symbol(callee);
+                let symbol = self.syms.path_symbol(callee);
                 self.call_site(*args_at, e.span, args, ct, symbol, false);
                 let name = self.describe(callee);
-                if let Some(group) = symbol.and_then(|s| self.overloads_of(s)) {
+                if let Some(group) = symbol.and_then(|s| self.syms.overloads_of(s)) {
                     return self.overloaded_call(&group, args, &name, e.span, expected);
                 }
                 self.call(ct, None, args, &name, e.span, expected)
@@ -1862,12 +1767,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 args_at,
             } => {
                 let ot = self.expr(obj, None);
-                if self.quiet == 0 {
+                if self.report.on() {
                     let receiver = self.types.non_nil(ot);
-                    self.m.members_at.push((name.span, receiver));
+                    self.report.members_at.push((name.span, receiver));
                     if let Ty::Nominal(id, _) | Ty::Variant(id, _) =
                         self.types.get(receiver).clone()
-                        && let Some(m) = self.member_sym(self.holder(id), &self.text(name.sym))
+                        && let Some(m) = self
+                            .syms
+                            .member_sym(self.syms.holder(id), &self.text(name.sym))
                     {
                         let mt = self.sym_type(m);
                         self.call_site(*args_at, e.span, args, mt, Some(m), true);
@@ -1877,10 +1784,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             _ => None,
         }
-    }
-
-    fn overloads_of(&self, id: SymbolId) -> Option<Vec<SymbolId>> {
-        self.module_of(id.file)?.overloads.get(&id.index).cloned()
     }
 
     /// A call of an overloaded stub function: the first declaration the arguments fit, tried
@@ -1902,21 +1805,21 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             })
             .collect();
         for f in &fns {
-            let before = self.failures;
+            let before = self.report.errors();
             self.muted(|c| c.apply(f, None, args, name, span, expected));
-            if self.failures == before {
+            if self.report.errors() == before {
                 return self.apply(f, None, args, name, span, expected);
             }
         }
         let shown: Vec<String> = types
             .iter()
-            .map(|&t| format!("`{}`", self.types.display(t, self)))
+            .map(|&t| format!("`{}`", self.types.display(t, &self.syms)))
             .collect();
         let msg = format!(
             "no form of {name} takes these arguments; it is one of: {}",
             shown.join(", ")
         );
-        self.error(span, Code::Mismatch, msg);
+        self.report.error(span, Code::Mismatch, msg);
         self.args_any(args);
         None
     }
@@ -1930,8 +1833,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         symbol: Option<SymbolId>,
         method: bool,
     ) {
-        if self.quiet == 0 && matches!(self.types.get(callee), Ty::Fn(_)) {
-            self.m.calls.push(crate::symbols::CallSite {
+        if self.report.on() && matches!(self.types.get(callee), Ty::Fn(_)) {
+            self.report.calls.push(crate::symbols::CallSite {
                 args: Span {
                     start: args_at,
                     end: span.end,
@@ -1963,13 +1866,13 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let mut ct = ct;
         if ct != any && self.types.may_be_nil(ct) {
             let msg = format!("{name} may be nil (type {})", self.show(ct));
-            self.error(span, Code::MaybeNil, msg);
+            self.report.error(span, Code::MaybeNil, msg);
             ct = self.types.non_nil(ct);
         }
         match self.types.get(ct).clone() {
             Ty::Fn(f) => self.apply(&f, self_arg, args, name, span, expected),
             Ty::Nominal(id, _) | Ty::Variant(id, _) => {
-                match self.member_sym(self.holder(id), "__call") {
+                match self.syms.member_sym(self.syms.holder(id), "__call") {
                     Some(m) => {
                         let mt = self.sym_type(m);
                         match self.types.get(mt).clone() {
@@ -1982,7 +1885,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     }
                     None => {
                         let msg = format!("{name} is not a function (type {})", self.show(ct));
-                        self.error(span, Code::NotCallable, msg);
+                        self.report.error(span, Code::NotCallable, msg);
                         self.args_any(args);
                         None
                     }
@@ -1990,7 +1893,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Nil => {
                 let msg = format!("{name} is not a function (type {})", self.show(ct));
-                self.error(span, Code::NotCallable, msg);
+                self.report.error(span, Code::NotCallable, msg);
                 self.args_any(args);
                 None
             }
@@ -2058,13 +1961,13 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     params.len(),
                     if params.len() == 1 { "" } else { "s" }
                 );
-                self.error(span, Code::ArgCount, msg);
+                self.report.error(span, Code::ArgCount, msg);
             } else if n < needed {
                 let msg = format!(
                     "{name} needs {needed} argument{}, found {n}",
                     if needed == 1 { "" } else { "s" }
                 );
-                self.error(span, Code::ArgCount, msg);
+                self.report.error(span, Code::ArgCount, msg);
             }
         }
         let mut checks = Vec::new();
@@ -2141,29 +2044,29 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let ot = self.non_nil_or_report(ot, obj);
         match self.types.get(ot).clone() {
             Ty::Nominal(id, targs) | Ty::Variant(id, targs) => {
-                let holder = self.holder(id);
-                if let Some(m) = self.member_sym(holder, &text) {
-                    if self.kind(m) == Some(SymbolKind::AssocFn) {
-                        let tn = self.name(holder);
+                let holder = self.syms.holder(id);
+                if let Some(m) = self.syms.member_sym(holder, &text) {
+                    if self.syms.kind(m) == Some(SymbolKind::AssocFn) {
+                        let tn = self.syms.name(holder);
                         let msg = format!(
                             "`{tn}::{text}` is an associated function, not a method; call it as \
                              `{tn}::{text}(...)`"
                         );
-                        self.error(name.span, Code::NoMember, msg);
+                        self.report.error(name.span, Code::NoMember, msg);
                         self.args_any(args);
                         return None;
                     }
                     let mt = self.sym_type(m);
                     return self.call(mt, Some(ot), args, &desc, span, expected);
                 }
-                if let Some(f) = self.field_sym(id, &text) {
+                if let Some(f) = self.syms.field_sym(id, &text) {
                     let ft = self.sym_type(f);
                     let ft = self.inst(ft, holder, &targs);
                     return self.call(ft, Some(ot), args, &desc, span, expected);
                 }
-                if self.member_sym(holder, "__index").is_none() {
+                if self.syms.member_sym(holder, "__index").is_none() {
                     let msg = format!("{} has no method `{text}`", self.show(ot));
-                    self.error(name.span, Code::NoMember, msg);
+                    self.report.error(name.span, Code::NoMember, msg);
                 }
                 self.args_any(args);
                 None
@@ -2173,28 +2076,28 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 None => {
                     if !inferred {
                         let msg = format!("{} has no method `{text}`", self.show(ot));
-                        self.error(name.span, Code::NoMember, msg);
+                        self.report.error(name.span, Code::NoMember, msg);
                     }
                     self.args_any(args);
                     None
                 }
             },
             // Strings take the `string` library's functions as methods.
-            Ty::Str if self.prelude.is_some() => match self.string_member(&text) {
+            Ty::Str if self.syms.prelude.is_some() => match self.syms.string_member(&text) {
                 Some(m) => {
                     let mt = self.sym_type(m);
                     self.call(mt, Some(ot), args, &desc, span, expected)
                 }
                 None => {
                     let msg = format!("string has no method `{text}`");
-                    self.error(name.span, Code::NoMember, msg);
+                    self.report.error(name.span, Code::NoMember, msg);
                     self.args_any(args);
                     None
                 }
             },
             Ty::Int | Ty::Float | Ty::Bool | Ty::Fn(_) | Ty::Function => {
                 let msg = format!("type {} has no method `{text}`", self.show(ot));
-                self.error(name.span, Code::NoMember, msg);
+                self.report.error(name.span, Code::NoMember, msg);
                 self.args_any(args);
                 None
             }
@@ -2220,7 +2123,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let results = self.fns.last().map(|f| f.results.clone());
         match results {
             Some(Some(fr)) => match fr.first() {
-                None => self.error(
+                None => self.report.error(
                     span,
                     Code::TryResult,
                     "`?` returns `nil` and the error, but this function has no results; \
@@ -2233,7 +2136,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                          be nil",
                         self.show(r0)
                     );
-                    self.error(span, Code::TryResult, msg);
+                    self.report.error(span, Code::TryResult, msg);
                 }
                 Some(_) => {
                     if rs.len() >= 2 {
@@ -2245,7 +2148,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                                     self.show(err),
                                     self.show(r1)
                                 );
-                                self.error(span, Code::TryResult, msg);
+                                self.report.error(span, Code::TryResult, msg);
                             }
                             Some(_) => {}
                             None => {
@@ -2254,7 +2157,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                                      result to return it in",
                                     self.show(err)
                                 );
-                                self.error(span, Code::TryResult, msg);
+                                self.report.error(span, Code::TryResult, msg);
                             }
                         }
                     }
@@ -2398,8 +2301,12 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         expected: Option<TypeId>,
     ) -> TypeId {
         let any = self.types.any;
-        let target = self.path_symbol(path).and_then(|id| {
-            matches!(self.kind(id)?, SymbolKind::Struct | SymbolKind::Variant).then_some(id)
+        let target = self.syms.path_symbol(path).and_then(|id| {
+            matches!(
+                self.syms.kind(id)?,
+                SymbolKind::Struct | SymbolKind::Variant
+            )
+            .then_some(id)
         });
         let Some(id) = target else {
             for f in fields {
@@ -2409,13 +2316,13 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     }
                     None => {
                         let t = self.name_ref_type(f.name.span);
-                        self.record(f.name.span, t);
+                        self.report.record(f.name.span, t);
                     }
                 }
             }
             return any;
         };
-        if self.quiet == 0 {
+        if self.report.on() {
             let fields = fields
                 .iter()
                 .map(|f| {
@@ -2423,19 +2330,19 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     (self.text(f.name.sym), f.name.span, value)
                 })
                 .collect();
-            self.m.struct_lits.push(StructLit {
+            self.report.struct_lits.push(StructLit {
                 span,
                 target: id,
                 fields,
             });
         }
-        let holder = self.holder(id);
-        let gens = self.generics_of(holder);
+        let holder = self.syms.holder(id);
+        let gens = self.syms.generics_of(holder);
         let mut map: HashMap<SymbolId, TypeId> = HashMap::new();
         if let Some(exp) = expected {
             for m in self.types.members(exp) {
                 if let Ty::Nominal(e, args) | Ty::Variant(e, args) = self.types.get(m)
-                    && self.holder(*e) == holder
+                    && self.syms.holder(*e) == holder
                 {
                     map.extend(gens.iter().copied().zip(args.iter().copied()));
                 }
@@ -2445,7 +2352,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let mut checks = Vec::new();
         for f in fields {
             let text = self.text(f.name.sym);
-            let ft = self.field_sym(id, &text).map(|s| self.sym_type(s));
+            let ft = self.syms.field_sym(id, &text).map(|s| self.sym_type(s));
             let exp = ft.map(|ft| {
                 let mut known = map.clone();
                 for g in &gens {
@@ -2457,7 +2364,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 Some(v) => (self.expr(v, exp), v.span),
                 None => {
                     let t = self.name_ref_type(f.name.span);
-                    self.record(f.name.span, t);
+                    self.report.record(f.name.span, t);
                     (t, f.name.span)
                 }
             };
@@ -2473,7 +2380,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             map.entry(*g).or_insert(any);
         }
         let args: Vec<TypeId> = gens.iter().map(|g| map[g]).collect();
-        let t = if self.kind(id) == Some(SymbolKind::Variant) {
+        let t = if self.syms.kind(id) == Some(SymbolKind::Variant) {
             self.types.intern(Ty::Variant(id, args))
         } else {
             self.types.intern(Ty::Nominal(id, args))
@@ -2484,6 +2391,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             self.expect(vt, ft, span, Some(what));
         }
         let mut declared: Vec<(String, SymbolId)> = self
+            .syms
             .module_of(id.file)
             .and_then(|m| m.fields.get(&id.index))
             .map(|fs| fs.iter().map(|(n, &s)| (n.clone(), s)).collect())
@@ -2496,21 +2404,12 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             let ft = self.sym_type(s);
             // The compiler requires every field of a struct it can see; a field from another
             // module is only missing if it can't be nil.
-            if id.file == self.file || !self.types.may_be_nil(ft) {
+            if id.file == self.syms.file || !self.types.may_be_nil(ft) {
                 let msg = format!("missing field `{name}` in {}", self.show(t));
-                self.error(path.span, Code::MissingField, msg);
+                self.report.error(path.span, Code::MissingField, msg);
             }
         }
         t
-    }
-
-    /// The symbol a path expression (`Point`, `Shape::Circle`, `Self`) names.
-    fn path_symbol(&self, path: &ast::Expr) -> Option<SymbolId> {
-        match &path.kind {
-            ExprKind::Path { name, .. } => self.ref_at(name.span),
-            ExprKind::Name(_) | ExprKind::SelfType => self.ref_at(path.span),
-            _ => None,
-        }
     }
 
     // ---- operators ----------------------------------------------------------------------------
@@ -2541,7 +2440,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             UnOp::Neg => self.types.is_numeric(t),
             UnOp::BNot => {
                 if self.types.is_numeric(t) && self.types.members(t).contains(&self.types.float) {
-                    self.warning(
+                    self.report.warning(
                         inner.span,
                         Code::FloatBitwise,
                         "`~` on a float: Lua converts only floats with an integral value".into(),
@@ -2567,7 +2466,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         };
         if !ok {
             let msg = format!("`{}` can't be applied to {}", op.as_str(), self.show(t));
-            self.error(inner.span, Code::BadOperand, msg);
+            self.report.error(inner.span, Code::BadOperand, msg);
             return any;
         }
         match op {
@@ -2581,7 +2480,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let (Ty::Nominal(id, _) | Ty::Variant(id, _)) = self.types.get(t).clone() else {
             return None;
         };
-        let m = self.member_sym(self.holder(id), name)?;
+        let m = self.syms.member_sym(self.syms.holder(id), name)?;
         let mt = self.sym_type(m);
         Some(self.fn_first_result(mt))
     }
@@ -2636,7 +2535,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             let (Ty::Nominal(id, _) | Ty::Variant(id, _)) = self.types.get(t).clone() else {
                 continue;
             };
-            let Some(m) = self.member_sym(self.holder(id), name) else {
+            let Some(m) = self.syms.member_sym(self.syms.holder(id), name) else {
                 continue;
             };
             let mt = self.sym_type(m);
@@ -2650,11 +2549,11 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     op.as_str(),
                     self.show(l),
                     self.show(r),
-                    self.name(self.holder(id)),
+                    self.syms.name(self.syms.holder(id)),
                     self.show(f.params[0]),
                     self.show(f.params[1])
                 );
-                self.error(span, Code::BadOperand, msg);
+                self.report.error(span, Code::BadOperand, msg);
                 return Some(self.types.any);
             }
             let res = self.fn_first_result(mt);
@@ -2707,7 +2606,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     op.as_str(),
                     self.show(*side)
                 );
-                self.error(span, Code::MaybeNil, msg);
+                self.report.error(span, Code::MaybeNil, msg);
                 *side = self.types.non_nil(*side);
             }
         }
@@ -2725,7 +2624,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                         "`{}` on a float: Lua converts only floats with an integral value",
                         op.as_str()
                     );
-                    self.warning(span, Code::FloatBitwise, msg);
+                    self.report.warning(span, Code::FloatBitwise, msg);
                 }
                 num
             }
@@ -2738,7 +2637,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.show(l),
                 self.show(r)
             );
-            self.error(span, Code::BadOperand, msg);
+            self.report.error(span, Code::BadOperand, msg);
             return fallback;
         }
         match op {
@@ -2796,7 +2695,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.show(l),
                 self.show(r)
             );
-            self.warning(span, Code::AlwaysUnequal, msg);
+            self.report.warning(span, Code::AlwaysUnequal, msg);
         }
     }
 
@@ -2834,7 +2733,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         match &e.kind {
             ExprKind::Paren(inner) => {
                 let r = self.cond(inner);
-                self.record(e.span, r.0);
+                self.report.record(e.span, r.0);
                 r
             }
             ExprKind::Unary {
@@ -2842,7 +2741,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 expr,
             } => {
                 let (_, yes, no) = self.cond(expr);
-                self.record(e.span, bool_);
+                self.report.record(e.span, bool_);
                 (bool_, no, yes)
             }
             ExprKind::Binary {
@@ -2866,7 +2765,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     }
                     (false, None) => lt,
                 };
-                self.record(e.span, t);
+                self.report.record(e.span, t);
                 if and {
                     let no = self.merge(l_no, r_no);
                     (t, r_yes, no)
@@ -2945,17 +2844,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         (yes, no)
     }
 
-    /// The `string` library's function `name`, which strings have as a method.
-    fn string_member(&self, name: &str) -> Option<SymbolId> {
-        let prelude = (self.checked)(self.prelude?)?;
-        let lib = prelude
-            .symbols
-            .iter()
-            .find(|s| s.kind == SymbolKind::Module && s.name == "string")?
-            .module?;
-        (self.checked)(lib)?.exports.get(name).copied()
-    }
-
     /// Whether `e` names the prelude's `name` (not a local of the same name).
     fn is_prelude(&self, e: &ast::Expr, name: &str) -> bool {
         let ExprKind::Name(s) = e.kind else {
@@ -2964,9 +2852,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         if self.strings.get(s) != name.as_bytes() {
             return false;
         }
-        match self.ref_at(e.span) {
-            Some(id) => Some(id.file) == self.prelude,
-            None => self.prelude.is_none(),
+        match self.syms.ref_at(e.span) {
+            Some(id) => Some(id.file) == self.syms.prelude,
+            None => self.syms.prelude.is_none(),
         }
     }
 
@@ -3059,7 +2947,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     "this condition has type {}, not `bool` (strict mode); {hint}",
                     self.show(t)
                 );
-                self.error(span, Code::NotBool, msg);
+                self.report.error(span, Code::NotBool, msg);
                 return;
             }
         }
@@ -3074,7 +2962,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 "this condition has type {}, which is always true",
                 self.show(t)
             );
-            self.warning(span, Code::AlwaysTrue, msg);
+            self.report.warning(span, Code::AlwaysTrue, msg);
         }
     }
 
@@ -3124,10 +3012,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 for (t, x) in [(s, start), (e, end)] {
                     if t != any && !self.types.is_numeric(t) {
                         let msg = format!("a range bound must be a number, found {}", self.show(t));
-                        self.error(x.span, Code::BadOperand, msg);
+                        self.report.error(x.span, Code::BadOperand, msg);
                     }
                 }
-                self.record(iter.span, any);
+                self.report.record(iter.span, any);
                 let t = if self.types.members(s).iter().all(|&m| m == self.types.int) && s != any {
                     self.types.int
                 } else if s == self.types.float {
@@ -3256,14 +3144,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     let ft = match target {
                         Some((id, tt)) => {
                             let text = self.text(f.name.sym);
-                            match self.field_sym(id, &text) {
+                            match self.syms.field_sym(id, &text) {
                                 Some(fs) => {
                                     let ft = self.sym_type(fs);
                                     let args = match self.types.get(tt) {
                                         Ty::Nominal(_, a) | Ty::Variant(_, a) => a.clone(),
                                         _ => Vec::new(),
                                     };
-                                    self.inst(ft, self.holder(id), &args)
+                                    self.inst(ft, self.syms.holder(id), &args)
                                 }
                                 None => any,
                             }
@@ -3285,14 +3173,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     /// The struct or variant a pattern names, and its type given the matched value's type.
     fn pattern_target(&mut self, path: &'a ast::Expr, t: TypeId) -> Option<(SymbolId, TypeId)> {
-        let id = self.path_symbol(path)?;
-        let kind = self.kind(id)?;
-        let holder = self.holder(id);
-        let n = self.generics_of(holder).len();
+        let id = self.syms.path_symbol(path)?;
+        let kind = self.syms.kind(id)?;
+        let holder = self.syms.holder(id);
+        let n = self.syms.generics_of(holder).len();
         let mut args = vec![self.types.any; n];
         for m in self.types.members(t) {
             if let Ty::Nominal(e, a) | Ty::Variant(e, a) = self.types.get(m)
-                && self.holder(*e) == holder
+                && self.syms.holder(*e) == holder
             {
                 args = a.clone();
             }
@@ -3308,14 +3196,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.show(tt),
                 self.show(t)
             );
-            self.error(path.span, Code::Mismatch, msg);
+            self.report.error(path.span, Code::Mismatch, msg);
         }
-        self.record(path.span, tt);
+        self.report.record(path.span, tt);
         Some((id, tt))
     }
 
     fn bind_local(&mut self, name: ast::Name, t: TypeId) {
-        let Some(index) = self.local_at(name.span) else {
+        let Some(index) = self.syms.local_at(name.span) else {
             return;
         };
         let defs = self.defs;
@@ -3327,18 +3215,18 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }) => self.with_assigns(index, t),
             _ => t,
         };
-        self.m.sym_types.insert(index, t);
+        self.sym_types.insert(index, t);
         self.kill(&Key {
-            base: Base::Sym(self.id(index)),
+            base: Base::Sym(self.syms.id(index)),
             fields: Vec::new(),
         });
-        self.record(name.span, t);
+        self.report.record(name.span, t);
         self.hint(name.span, t);
     }
 
     fn hint(&mut self, name: Span, t: TypeId) {
-        if self.hinting && self.quiet == 0 && t != self.types.any {
-            self.m.hints.push((name.end, t));
+        if self.hinting && self.report.on() && t != self.types.any {
+            self.report.hints.push((name.end, t));
         }
     }
 
@@ -3350,8 +3238,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let mut needed = Vec::new();
         for m in self.types.members(st) {
             match self.types.get(m).clone() {
-                Ty::Nominal(id, _) if self.kind(id) == Some(SymbolKind::Enum) => {
-                    needed.extend(self.variants(id).into_iter().map(Case::Variant));
+                Ty::Nominal(id, _) if self.syms.kind(id) == Some(SymbolKind::Enum) => {
+                    needed.extend(self.syms.variants(id).into_iter().map(Case::Variant));
                 }
                 Ty::Variant(id, _) => needed.push(Case::Variant(id)),
                 Ty::Bool => needed.extend([Case::True, Case::False]),
@@ -3372,7 +3260,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .iter()
             .filter(|c| !covered.contains(c))
             .map(|c| match c {
-                Case::Variant(v) => format!("`{}`", self.name(*v)),
+                Case::Variant(v) => format!("`{}`", self.syms.name(*v)),
                 Case::True => "`true`".into(),
                 Case::False => "`false`".into(),
                 Case::Nil => "`nil`".into(),
@@ -3388,7 +3276,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     "arms for them"
                 }
             );
-            self.error(span, Code::NonExhaustive, msg);
+            self.report.error(span, Code::NonExhaustive, msg);
         }
     }
 
@@ -3413,8 +3301,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 all
             }
             PatKind::Path(e) => {
-                if let Some(id) = self.path_symbol(e)
-                    && self.kind(id) == Some(SymbolKind::Variant)
+                if let Some(id) = self.syms.path_symbol(e)
+                    && self.syms.kind(id) == Some(SymbolKind::Variant)
                 {
                     out.push(Case::Variant(id));
                 }
@@ -3427,8 +3315,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                         .is_none_or(|p| matches!(p.kind, PatKind::Wild | PatKind::Bind { .. }))
                 });
                 if irrefutable
-                    && let Some(id) = self.path_symbol(path)
-                    && self.kind(id) == Some(SymbolKind::Variant)
+                    && let Some(id) = self.syms.path_symbol(path)
+                    && self.syms.kind(id) == Some(SymbolKind::Variant)
                 {
                     out.push(Case::Variant(id));
                 }
