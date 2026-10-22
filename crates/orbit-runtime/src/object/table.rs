@@ -805,10 +805,33 @@ impl Table {
         }
     }
 
+    /// [`Table::cached_str`] as the stored tag and payload, for a reader
+    /// that writes the value straight to its destination with
+    /// [`Value::write_unpacked`]: a merged `Value` leaves the bytes a short
+    /// payload doesn't write to the compiler, which carries them along as
+    /// a live value.
+    #[inline(always)]
+    pub fn cached_str_packed(&self, slot: usize, s: Gc<LuaStr>) -> Option<(Tag, Payload)> {
+        match self.entries.get(slot) {
+            Some(e) if e.key_tag == Tag::Str && e.key_payload == Value::Str(s).pack().1 => {
+                Some((e.value_tag, e.value_payload))
+            }
+            _ => None,
+        }
+    }
+
     /// The value in hash slot `slot` (from [`Table::find_str`]).
     #[inline(always)]
     pub fn slot_value(&self, slot: usize) -> Value {
         self.entries[slot].value()
+    }
+
+    /// [`Table::slot_value`] as the stored tag and payload (see
+    /// [`Table::cached_str_packed`]).
+    #[inline(always)]
+    pub fn slot_packed(&self, slot: usize) -> (Tag, Payload) {
+        let e = &self.entries[slot];
+        (e.value_tag, e.value_payload)
     }
 
     /// Store into hash slot `slot`, which must hold a key (from
