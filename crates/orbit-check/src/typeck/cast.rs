@@ -64,7 +64,7 @@ impl<'a> Checker<'a, '_, '_> {
                         self.show(src),
                         self.truth_hint(src)
                     );
-                    self.error(span, Code::ImpossibleCast, msg);
+                    self.report.error(span, Code::ImpossibleCast, msg);
                 }
             } else {
                 let fits = self.types.members(src).into_iter().any(|m| {
@@ -77,7 +77,7 @@ impl<'a> Checker<'a, '_, '_> {
                         self.show(src),
                         self.show(lowered)
                     );
-                    self.error(span, Code::ImpossibleCast, msg);
+                    self.report.error(span, Code::ImpossibleCast, msg);
                 }
             }
         }
@@ -120,15 +120,15 @@ impl<'a> Checker<'a, '_, '_> {
             TypeKind::Error => Some(Target::Any),
             TypeKind::Path { segments, args } if args.is_empty() => {
                 let last = segments[segments.len() - 1];
-                let sym = self.ref_at(last.span);
-                match sym.and_then(|id| self.kind(id)) {
+                let sym = self.syms.ref_at(last.span);
+                match sym.and_then(|id| self.syms.kind(id)) {
                     Some(SymbolKind::TypeParam) => return self.uncheckable(ty),
                     Some(SymbolKind::TypeAlias) => {
                         let msg = format!(
                             "`as` can't use the type alias `{}`; name the type it stands for",
                             self.text(last.sym)
                         );
-                        self.error(ty.span, Code::UncheckableCast, msg);
+                        self.report.error(ty.span, Code::UncheckableCast, msg);
                         return None;
                     }
                     Some(SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Variant) => {
@@ -159,7 +159,7 @@ impl<'a> Checker<'a, '_, '_> {
         let msg = format!(
             "`as` can't check `{text}` while the program runs; give the value a type annotation instead"
         );
-        self.error(ty.span, Code::UncheckableCast, msg);
+        self.report.error(ty.span, Code::UncheckableCast, msg);
         None
     }
 
@@ -183,16 +183,17 @@ impl<'a> Checker<'a, '_, '_> {
             Target::Str if union => *ty == Ty::Str,
             Target::Str => match ty {
                 Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Userdata => true,
-                Ty::Nominal(id, _) | Ty::Variant(id, _) => {
-                    self.member_sym(self.holder(*id), "__tostring").is_some()
-                }
+                Ty::Nominal(id, _) | Ty::Variant(id, _) => self
+                    .syms
+                    .member_sym(self.syms.holder(*id), "__tostring")
+                    .is_some(),
                 _ => table,
             },
             Target::Bool => *ty == Ty::Bool || !union,
             Target::Nil => *ty == Ty::Nil,
             Target::Named(id) => match ty {
-                Ty::Nominal(n, _) => *n == id || *n == self.holder(id),
-                Ty::Variant(v, _) => *v == id || self.holder(*v) == id,
+                Ty::Nominal(n, _) => *n == id || *n == self.syms.holder(id),
+                Ty::Variant(v, _) => *v == id || self.syms.holder(*v) == id,
                 _ => table,
             },
         }
