@@ -65,12 +65,12 @@ LSP counts columns in UTF-16 code units unless both sides agree otherwise. The s
 
 ## Building and packaging
 
-`orbit-lsp` is a workspace member but not a default member, so a root `cargo build --release` (and the PGO profile) are unchanged. `cargo build --release -p orbit-lsp` gives a self-contained binary (feature `runtime`, the default). Built with `--no-default-features --features shared` it uses the runtime in `liborbit` instead (ADR-10), which is how a package that ships `liborbit` should build it.
+`orbit-lsp` is a workspace member but not a default member, so a root `cargo build --release` (and the PGO profile) are unchanged. `cargo build --release -p orbit-lsp` gives a self-contained binary (feature `runtime`, the default). Built with `--no-default-features --features shared` it uses the runtime in `liborbit` instead (ADR-10) and finds it through its run path (`../lib`, then its own directory), as `orbit` does. `./build.sh` puts it in both layouts as `bin/orbit-lsp`: the shared one beside `orbit` and `orbitc` over `liborbit`, and the static one (`--static`) as a third self-contained program. It is built with the same PGO profile, which covers its runtime.
 
-| Build (cloud x86_64, release, no PGO, 2026-10-20) | Size |
+| Build (cloud x86_64, release, no PGO, `./build.sh --no-pgo`, 2026-10-22) | Size |
 |---|---|
-| `orbit-lsp`, runtime linked in | 2,564,504 bytes (2.45 MiB) |
-| `orbit-lsp` with `shared`, beside `liborbit` | 1,533,800 bytes (1.46 MiB): the checker, both front ends, `orbit-std` and the scripts |
+| `orbit-lsp`, runtime linked in (`--static`) | 2,597,040 bytes (2.48 MiB) |
+| `orbit-lsp` with `shared`, beside `liborbit` | 1,546,952 bytes (1.48 MiB): the checker, both front ends, `orbit-std` and the scripts |
 
 ## Using it from an editor
 

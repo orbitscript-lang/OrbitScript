@@ -48,4 +48,4 @@ npm run package     # orbitscript-<version>.vsix
 code --install-extension orbitscript-*.vsix
 ```
 
-Build `orbit-lsp` and `orbit` from the repository root (`cargo build --release -p orbit-lsp -p orbit-cli`) and put them on `PATH`, or point the settings at them.
+Build `orbit-lsp` and `orbit` from the repository root, either with `./build.sh` (both land in `target/package/out/bin`) or with `cargo build --release -p orbit-lsp -p orbit-cli`, and put them on `PATH`, or point the settings at them.

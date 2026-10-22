@@ -5,8 +5,8 @@
 #   ./build.sh [options]
 #
 #   --target TRIPLE   the target to build for (default: this machine's)
-#   --static          lay out the static `orbit` and `orbitc` instead of the
-#                     shared layout
+#   --static          lay out the static `orbit`, `orbitc` and `orbit-lsp`
+#                     instead of the shared layout
 #   --out DIR         where to lay it out (default target/package/out)
 #   --profile NAME    the cargo profile (default release)
 #   --pgo FILE        optimize with the profile FILE (default
@@ -19,21 +19,22 @@
 #   --pgo-check       instead of laying anything out, list the functions of
 #                     our crates the profile no longer covers; fails if any
 #
-# The shared layout (ADR-10): liborbit holds the runtime once, `orbit` and
-# `orbitc` are built with `orbit`'s `shared` feature and find it through
-# their run path, and Lua 5.5's library names are aliases of it, so programs
-# built for Lua 5.5 use it too.
-#   Linux:   bin/orbit, bin/orbitc
+# The shared layout (ADR-10): liborbit holds the runtime once, `orbit`,
+# `orbitc` and the language server `orbit-lsp` are built with `orbit`'s
+# `shared` feature and find it through their run path, and Lua 5.5's library
+# names are aliases of it, so programs built for Lua 5.5 use it too.
+#   Linux:   bin/orbit, bin/orbitc, bin/orbit-lsp
 #            lib/liborbit.so.0, and liborbit.so, liblua5.5.so.0 (Debian),
 #                liblua-5.5.so (Fedora), liblua.so.5.5 (upstream) linking to it
-#   macOS:   bin/orbit, bin/orbitc
+#   macOS:   bin/orbit, bin/orbitc, bin/orbit-lsp
 #            lib/liborbit.0.dylib, and liborbit.dylib, liblua.5.5.dylib,
 #                liblua5.5.dylib linking to it
-#   Windows: bin/orbit.exe, orbitc.exe, orbit_lib.dll, and lua55.dll, which
-#                forwards Lua's names to orbit_lib.dll (a copy would be a
-#                second runtime in the process); run from Git Bash or MSYS2
+#   Windows: bin/orbit.exe, orbitc.exe, orbit-lsp.exe, orbit_lib.dll, and
+#                lua55.dll, which forwards Lua's names to orbit_lib.dll (a
+#                copy would be a second runtime in the process); run from
+#                Git Bash or MSYS2
 #   all:     include/lua.h, luaconf.h, lualib.h, lauxlib.h, orbit.h
-# The static layout: bin/orbit and bin/orbitc, one file each.
+# The static layout: bin/orbit, bin/orbitc and bin/orbit-lsp, one file each.
 #
 # Builds always name the target (`cargo build --target`), as cargo-pgo's do:
 # rustflags then reach only the target's code, not build scripts, and symbol
@@ -120,8 +121,11 @@ build() {
 }
 
 # The static `orbit` and `orbitc`, and the shared build: liborbit first, as
-# the programs link against it.
+# the programs link against it. The language server is built after them,
+# with the same profile (only its runtime is profiled).
 static_args="-p orbit-cli"
+lsp_static_args="-p orbit-lsp"
+lsp_shared_args="-p orbit-lsp --no-default-features --features shared"
 lib_args="-p orbit-lib --features debugger"
 shared_args="-p orbit-cli --no-default-features --features shared,line-editing,dap"
 
@@ -216,6 +220,13 @@ lay_out() {
     done
 }
 
+# Adds the language server to the layout lay_out last wrote (PGO training
+# lays out only the programs it runs).
+lay_out_lsp() {
+    cp "$built/orbit-lsp$exe" "$dir/bin/"
+    files="$files bin/orbit-lsp$exe"
+}
+
 if [ "$train" = yes ]; then
     command -v cargo-pgo > /dev/null 2>&1 || {
         echo "build.sh: --pgo-train needs cargo-pgo: cargo install cargo-pgo" >&2
@@ -290,13 +301,18 @@ fi
 if [ "$layout" = static ]; then
     # shellcheck disable=SC2086 # plain words
     $run $static_args
+    # shellcheck disable=SC2086 # plain words
+    $run $lsp_static_args
 else
     # shellcheck disable=SC2086 # plain words
     $run $lib_args
     # shellcheck disable=SC2086 # plain words
     $run $shared_args
+    # shellcheck disable=SC2086 # plain words
+    $run $lsp_shared_args
 fi
 lay_out "$layout" "$out"
+lay_out_lsp
 out=$(cd "$out" && pwd)
 
 total=0
