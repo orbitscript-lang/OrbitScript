@@ -8,7 +8,7 @@
 //! `orbit-capi`, which installs itself after this library.
 
 use orbit::stack::{Any, Either, Nil, Stack, StackResult, Status, Type};
-use orbit::{Chunk, Error, Scope, Table, Value, native};
+use orbit::{Chunk, Error, OrbitString, Scope, Table, Value, native};
 
 use crate::base::read_chunk_file;
 use crate::sys::os_path;
@@ -136,12 +136,14 @@ pub fn path_field<'s>(s: &'s Scope<'s>, field: &str) -> Result<Vec<u8>, String> 
 }
 
 /// The error for a module file that was found but can't be loaded.
-pub fn load_error(name: &[u8], file: &[u8], why: &str) -> String {
-    format!(
-        "error loading module '{}' from file '{}':\n\t{why}",
-        String::from_utf8_lossy(name),
-        String::from_utf8_lossy(file)
-    )
+pub fn load_error(name: &[u8], file: &[u8], why: &[u8]) -> OrbitString {
+    let mut msg = OrbitString::from("error loading module '");
+    msg.push(name);
+    msg.push("' from file '");
+    msg.push(file);
+    msg.push("':\n\t");
+    msg.push(why);
+    msg
 }
 
 /// A searcher's loader (the function at its index) and the file it read.
@@ -151,7 +153,7 @@ type Loaded = (Any, Vec<u8>);
 /// `package.path` (`DEFAULT_PATH`), and the loader picks the compiler by the
 /// file name.
 #[native(name = "package.searchers[2]")]
-fn search_lua(s: &mut Stack<'_>, name: Vec<u8>) -> Result<Either<Vec<u8>, Loaded>, String> {
+fn search_lua(s: &mut Stack<'_>, name: Vec<u8>) -> Result<Either<Vec<u8>, Loaded>, OrbitString> {
     let path = s.with_scope(|sc| path_field(sc, "path"))?;
     let file = match search_path(&name, &path, b".", DIRSEP.as_bytes()) {
         Ok(f) => f,
@@ -162,7 +164,7 @@ fn search_lua(s: &mut Stack<'_>, name: Vec<u8>) -> Result<Either<Vec<u8>, Loaded
     match s.load_chunk(&Chunk::new(&bytes).name(&source), 0) {
         Status::Ok => Ok(Either::Right((Any(s.top()), file))),
         _ => {
-            let why = String::from_utf8_lossy(s.string_at(-1).unwrap_or_default()).into_owned();
+            let why = s.string_at(-1).unwrap_or_default().to_vec();
             Err(load_error(&name, &file, &why))
         }
     }

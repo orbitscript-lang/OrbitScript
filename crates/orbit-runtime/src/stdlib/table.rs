@@ -82,7 +82,7 @@ fn concat(ctx: &mut NativeCtx<'_>) -> R {
         match v {
             Value::Str(_) | Value::Int(_) | Value::Float(_) => ctx.display(v, &mut out),
             _ => {
-                return Err(ctx.error(format!(
+                return Err(ctx.error(&format!(
                     "invalid value ({}) at index {k} in table for 'concat'",
                     v.type_name()
                 )));

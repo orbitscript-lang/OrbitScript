@@ -63,6 +63,10 @@ pub use value::{
     ThreadStatus, Userdata, Value,
 };
 
+/// Byte strings for natives and embedders (ADR-5): Lua strings need not be
+/// UTF-8.
+pub use orbit_runtime::object::{OrbitStr, OrbitString};
+
 /// Compiled chunks, as [`Compiler`] returns them: plain data to save
 /// (`orbitc`) or inspect.
 pub use orbit_compiler::bytecode::UnlinkedChunk;

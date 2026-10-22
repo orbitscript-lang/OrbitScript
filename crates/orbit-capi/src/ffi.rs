@@ -12,11 +12,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
 
-use orbit::ThreadStatus;
 use orbit::stack::{
     Continuation, Control, InterruptHandler, Native, NativeRef, Outcome, Raised, Return, Stack,
     Status, ThreadRef, ThreadWindow, Type,
 };
+use orbit::{OrbitString, ThreadStatus};
 
 use crate::api::{self, CStrCopy, Res, Shared, abi};
 
@@ -1304,7 +1304,7 @@ extern "C" fn orbit_r_gc(l: *mut LState, what: c_int, a: c_int, b: c_int) -> c_i
 
 extern "C" fn orbit_r_argerror(l: *mut LState, arg: c_int, msg: *const c_char) {
     // SAFETY: C passes a NUL-terminated message, or NULL.
-    let msg = String::from_utf8_lossy(unsafe { cbytes(msg) }).into_owned();
+    let msg = OrbitString::from(unsafe { cbytes(msg) });
     entry!(l, (), |_b, c| Err(c.arg_error(arg, &msg)))
 }
 
@@ -1522,7 +1522,7 @@ extern "C" fn orbit_r_unsupported(l: *mut LState, what: *const c_char) {
     // SAFETY: NUL-terminated.
     let what = String::from_utf8_lossy(unsafe { cbytes(what) }).into_owned();
     entry!(l, (), |_b, c| Err(
-        c.error(format!("{what} is not supported by OrbitScript yet"))
+        c.error(&format!("{what} is not supported by OrbitScript yet"))
     ))
 }
 

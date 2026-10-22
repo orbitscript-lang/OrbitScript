@@ -21,6 +21,7 @@ debug_local_function.lua
 debug_locals.lua
 debug_setmetatable_gc.lua
 dump.lua
+error_bytes.lua
 errors.lua
 exit_close.lua
 exit_close_tbc.lua

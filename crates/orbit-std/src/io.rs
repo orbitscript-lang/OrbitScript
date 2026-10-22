@@ -13,7 +13,7 @@ use std::process::{Child, Stdio};
 use std::rc::{Rc, Weak};
 
 use orbit::stack::{Any, Stack};
-use orbit::{Call, Class, Error, Pinned, Ret, Scope, Table, Userdata, Value, native};
+use orbit::{Call, Class, Error, OrbitString, Pinned, Ret, Scope, Table, Userdata, Value, native};
 
 use crate::sys::{exit_status, file_error, flush_stdout, os_error_text, os_path, shell};
 
@@ -470,7 +470,7 @@ fn default_file<'s>(
     let d = if input { &st.input } else { &st.output };
     if d.stream.borrow().is_closed() {
         let what = if input { "input" } else { "output" };
-        return Err(c.error(format!("default {what} file is closed")));
+        return Err(c.error(&format!("default {what} file is closed")));
     }
     Ok((d.file.get(c)?, d.stream.clone()))
 }
@@ -513,12 +513,9 @@ fn open_file(name: &[u8], mode: &[u8]) -> Option<io::Result<Stream>> {
 }
 
 /// The message `io.lines` and `io.input` raise for a file they can't open.
-fn cannot_open(name: &[u8], e: &io::Error) -> String {
-    format!(
-        "cannot open file '{}' ({})",
-        String::from_utf8_lossy(name),
-        os_error_text(e)
-    )
+fn cannot_open(name: &[u8], e: &io::Error) -> OrbitString {
+    let why = os_error_text(e);
+    OrbitString::concat(&[b"cannot open file '", name, b"' (", why.as_bytes(), b")"])
 }
 
 /// Argument `i` as a string, or `default` when nil or absent.
@@ -610,7 +607,7 @@ fn set_default<'s>(c: &'s Call<'s>, state: &State, input: bool) -> Result<Ret, E
             let mode: &[u8] = if input { b"r" } else { b"w" };
             match open_file(&name, mode).expect("valid mode") {
                 Ok(stream) => Some(new_file(c, &state.borrow().class, stream)?),
-                Err(e) => return Err(c.error(cannot_open(&name, &e))),
+                Err(e) => return Err(c.error(&cannot_open(&name, &e))),
             }
         }
         v => {
@@ -727,8 +724,8 @@ fn f_seek<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
         b"cur" => SeekFrom::Current(off),
         b"end" => SeekFrom::End(off),
         _ => {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(&whence));
-            return Err(c.arg_error(1, msg));
+            let msg = OrbitString::concat(&[b"invalid option '", &whence, b"'"]);
+            return Err(c.arg_error(1, &msg));
         }
     };
     let r = c.with_stdout(|out| s.borrow_mut().seek(from, out));
@@ -747,8 +744,8 @@ fn f_setvbuf<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
         b"line" => Buffering::Line(size),
         b"full" => Buffering::Full(size),
         _ => {
-            let msg = format!("invalid option '{}'", String::from_utf8_lossy(&mode));
-            return Err(c.arg_error(1, msg));
+            let msg = OrbitString::concat(&[b"invalid option '", &mode, b"'"]);
+            return Err(c.arg_error(1, &msg));
         }
     };
     let r = c.with_stdout(|out| {
@@ -937,7 +934,7 @@ fn io_lines<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
                 let (f, s) = new_file(c, &state.borrow().class, stream)?;
                 (f, s, true)
             }
-            Err(e) => return Err(c.error(cannot_open(&name, &e))),
+            Err(e) => return Err(c.error(&cannot_open(&name, &e))),
         }
     };
     let iter = lines_iterator(c, file, stream, 1, close)?;
@@ -983,7 +980,7 @@ fn lines_iterator<'s>(
                 }
                 c.ret(())
             }
-            Err(e) => Err(c.error(os_error_text(&e))),
+            Err(e) => Err(c.error(&os_error_text(&e))),
         }
     }))
 }

@@ -388,8 +388,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         b"param",
     ];
     if !OPTIONS.contains(&&opt[..]) {
-        let msg = format!("invalid option '{}'", String::from_utf8_lossy(&opt));
-        return Err(ctx.arg_error(0, msg));
+        return Err(ctx.arg_error(0, &[b"invalid option '", &opt[..], b"'"].concat()));
     }
     if ctx.vm.rt.gc.finalizing() {
         let v = if &opt[..] == b"param" {
@@ -445,11 +444,8 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         _ => {
             let name = ctx.check_str(1)?;
             let Some(p) = GcParam::from_name(ctx.bytes(name)) else {
-                let msg = format!(
-                    "invalid option '{}'",
-                    String::from_utf8_lossy(ctx.bytes(name))
-                );
-                return Err(ctx.arg_error(1, msg));
+                let msg = [b"invalid option '", ctx.bytes(name), b"'"].concat();
+                return Err(ctx.arg_error(1, &msg));
             };
             let v = ctx.opt_int(2, -1)?;
             let old = if v >= 0 {

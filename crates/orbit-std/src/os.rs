@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, TableArg, Type};
-use orbit::{Call, Error, Ret, Scope, Table, native};
+use orbit::{Call, Error, OrbitString, Ret, Scope, Table, native};
 
 use crate::sys::{ExitResults, FileFailure, exit_results, file_failure, os_bytes, os_path, shell};
 use crate::time::{self, Tm};
@@ -114,8 +114,10 @@ fn setlocale(locale: Option<&[u8]>, category: Option<&[u8]>) -> Result<Option<&'
     if let Some(cat) = category
         && !CATEGORIES.contains(&cat)
     {
-        let msg = format!("invalid option '{}'", String::from_utf8_lossy(cat));
-        return Err(Fail::arg(2, msg));
+        return Err(Fail::arg(
+            2,
+            OrbitString::concat(&[b"invalid option '", cat, b"'"]),
+        ));
     }
     // Only the C locale exists: querying or asking for it (by any of its
     // names) gives "C", anything else fails.
@@ -165,10 +167,7 @@ fn date(
         Ok(out) => Ok(Either::Right(out)),
         Err(bad) => Err(Fail::arg(
             1,
-            format!(
-                "invalid conversion specifier '{}'",
-                String::from_utf8_lossy(&bad)
-            ),
+            OrbitString::concat(&[b"invalid conversion specifier '", &bad, b"'"]),
         )),
     }
 }

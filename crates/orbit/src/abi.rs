@@ -287,8 +287,8 @@ pub trait StackAbi {
     ) -> i32;
 
     extern "C" fn error_from_top(&mut self) -> RaisedId;
-    extern "C" fn error<'b>(&mut self, message: Str<'b>) -> RaisedId;
-    extern "C" fn arg_error<'b>(&mut self, arg: i32, message: Str<'b>) -> RaisedId;
+    extern "C" fn error<'b>(&mut self, message: Slice<'b, u8>) -> RaisedId;
+    extern "C" fn arg_error<'b>(&mut self, arg: i32, message: Slice<'b, u8>) -> RaisedId;
     extern "C" fn type_error<'b>(&mut self, arg: i32, expected: Str<'b>) -> RaisedId;
     extern "C" fn check_string<'a>(&'a mut self, arg: i32) -> Res<Slice<'a, u8>>;
     extern "C" fn check_integer(&mut self, arg: i32) -> Res<i64>;

@@ -123,7 +123,7 @@ fn arith(ctx: &mut NativeCtx<'_>, op: Op) -> R {
         ctx.metamethod(b, op.field)
     };
     if h.is_nil() {
-        return Err(ctx.error(format!(
+        return Err(ctx.error(&format!(
             "attempt to {} a '{}' with a '{}'",
             op.field.short_name(),
             a.type_name(),

@@ -15,6 +15,7 @@
 //! dispatch, no `Value` handles.
 
 use super::{Raised, Return, Stack, StackResult, Type};
+use crate::{OrbitStr, OrbitString};
 
 /// A type a native's parameter can have: how to read argument `i`
 /// (1-based) as one, raising Lua's argument error when it can't.
@@ -292,6 +293,20 @@ impl Push for String {
     }
 }
 
+impl Push for OrbitString {
+    #[inline(always)]
+    fn push(self, s: &mut Stack<'_>) {
+        s.push_bytes(&self);
+    }
+}
+
+impl Push for OrbitStr<'_> {
+    #[inline(always)]
+    fn push(self, s: &mut Stack<'_>) {
+        s.push_bytes(&self);
+    }
+}
+
 /// `None` is nil.
 impl<T: Push> Push for Option<T> {
     #[inline(always)]
@@ -428,7 +443,15 @@ impl IntoRaised for &str {
 impl IntoRaised for String {
     #[inline(always)]
     fn into_raised(self, s: &mut Stack<'_>) -> Raised {
-        s.error(self)
+        s.error(&self)
+    }
+}
+
+/// A message that need not be UTF-8, such as one quoting a script's string.
+impl IntoRaised for OrbitString {
+    #[inline(always)]
+    fn into_raised(self, s: &mut Stack<'_>) -> Raised {
+        s.error(&self)
     }
 }
 
@@ -447,16 +470,16 @@ pub enum Fail {
     /// Already raised.
     Raised(Raised),
     /// A runtime error with this message, positioned at the caller.
-    Message(String),
+    Message(OrbitString),
     /// `bad argument #i to 'f' (message)`.
-    Arg(i32, String),
+    Arg(i32, OrbitString),
     /// `bad argument #i to 'f' (T expected, got U)`.
     Type(i32, &'static str),
 }
 
 impl Fail {
     /// `bad argument #i to 'f' (message)`.
-    pub fn arg(i: i32, message: impl Into<String>) -> Fail {
+    pub fn arg(i: i32, message: impl Into<OrbitString>) -> Fail {
         Fail::Arg(i, message.into())
     }
 
@@ -465,7 +488,7 @@ impl Fail {
     fn raise(self, s: &mut Stack<'_>) -> Raised {
         match self {
             Fail::Raised(r) => r,
-            Fail::Message(m) => s.error(m),
+            Fail::Message(m) => s.error(&m),
             Fail::Arg(i, m) => s.arg_error(i, &m),
             Fail::Type(i, t) => s.type_error(i, t),
         }
@@ -480,13 +503,19 @@ impl From<Raised> for Fail {
 
 impl From<String> for Fail {
     fn from(m: String) -> Fail {
-        Fail::Message(m)
+        Fail::Message(m.into())
     }
 }
 
 impl From<&str> for Fail {
     fn from(m: &str) -> Fail {
-        Fail::Message(m.to_owned())
+        Fail::Message(m.into())
+    }
+}
+
+impl From<OrbitString> for Fail {
+    fn from(m: OrbitString) -> Fail {
+        Fail::Message(m)
     }
 }
 

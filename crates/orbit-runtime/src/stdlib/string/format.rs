@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use crate::object::{Gc, LuaStr, Value, number};
+use crate::object::{Gc, LuaStr, OrbitString, Value, number};
 use crate::stdlib::first_result;
 use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn};
 
@@ -123,9 +123,21 @@ fn format_after_tostring(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     format_from(ctx, base, i, arg, out)
 }
 
-/// The text of the conversion at `fmt[start..end]`, for error messages.
-fn spec_text(ctx: &NativeCtx<'_>, fmt: Gc<LuaStr>, start: usize, end: usize) -> String {
-    String::from_utf8_lossy(&ctx.bytes(fmt)[start..end]).into_owned()
+/// An error quoting the conversion at `fmt[start..end]` between `before`
+/// and `after`, byte for byte.
+fn spec_error(
+    ctx: &mut NativeCtx<'_>,
+    fmt: Gc<LuaStr>,
+    (start, end): (usize, usize),
+    before: &str,
+    after: &str,
+) -> LuaError {
+    let msg = OrbitString::concat(&[
+        before.as_bytes(),
+        &ctx.bytes(fmt)[start..end],
+        after.as_bytes(),
+    ]);
+    ctx.error(&msg)
 }
 
 /// Format from byte `i` of the format with `arg` of the `nargs` arguments
@@ -179,13 +191,25 @@ fn format_from(
             return Err(ctx.error("invalid format (too long)"));
         }
         let Some(conv) = conv else {
-            let text = spec_text(ctx, fmt, conv_start, i);
-            return Err(ctx.error(format!("invalid conversion '{text}' to 'format'")));
+            let at = (conv_start, i);
+            return Err(spec_error(
+                ctx,
+                fmt,
+                at,
+                "invalid conversion '",
+                "' to 'format'",
+            ));
         };
         i += 1;
         let Some((flags, precision_ok)) = grammar(conv) else {
-            let text = spec_text(ctx, fmt, conv_start, i);
-            return Err(ctx.error(format!("invalid conversion '{text}' to 'format'")));
+            let at = (conv_start, i);
+            return Err(spec_error(
+                ctx,
+                fmt,
+                at,
+                "invalid conversion '",
+                "' to 'format'",
+            ));
         };
         let body = &body_buf[..blen];
         if conv == b'q' {
@@ -206,8 +230,14 @@ fn format_from(
             _ => 0,
         };
         let Some(spec) = parse_spec(body, flags, precision_ok) else {
-            let text = spec_text(ctx, fmt, conv_start, i);
-            return Err(ctx.error(format!("invalid conversion specification: '{text}'")));
+            let at = (conv_start, i);
+            return Err(spec_error(
+                ctx,
+                fmt,
+                at,
+                "invalid conversion specification: '",
+                "'",
+            ));
         };
         match conv {
             b'd' | b'i' => {
