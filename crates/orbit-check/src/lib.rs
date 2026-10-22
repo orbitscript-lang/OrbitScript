@@ -120,7 +120,7 @@ impl Default for Config {
 
 /// The smallest number of types `Workspace::compact_types` lets the store reach before
 /// rebuilding it.
-const MIN_TYPES_LIMIT: usize = 1 << 14;
+const MIN_TYPES_LIMIT: usize = 1 << 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
