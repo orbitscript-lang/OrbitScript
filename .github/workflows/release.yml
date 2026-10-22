@@ -4,10 +4,11 @@ name: Release
 # packaging path, and the VS Code extension, then drafts a GitHub Release
 # with them. docs/releasing.md describes how to cut one.
 #
-# - Pushing a tag vX.Y.Z (vX.Y.Z-rc.N for a prerelease) builds it and drafts
-#   its release, which stays a draft until someone publishes it by hand. The
-#   tag must match the workspace version in Cargo.toml and the extension's
-#   version in editors/vscode/package.json.
+# - Pushing a tag vX.Y.Z builds it and drafts its release, which stays a
+#   draft until someone publishes it by hand. A tag with a suffix (v0.1.0-rc,
+#   v0.1.0-rc.2) is a prerelease. Every job first stamps the tag's version
+#   into Cargo.toml and the VS Code extension (tools/set-version.sh), so the
+#   programs report it; the repository keeps placeholder versions.
 # - Running it by hand from the Actions tab builds the chosen branch or tag
 #   and keeps the archives as workflow artifacts only: a dry run. Name an
 #   existing tag in `release-tag` to draft its release as well.
@@ -17,13 +18,16 @@ on:
   workflow_dispatch:
     inputs:
       release-tag:
-        description: Draft the release of this existing tag (vX.Y.Z); empty for a dry run
+        description: Draft the release of this existing tag (vX.Y.Z or vX.Y.Z-rc); empty for a dry run
         required: false
         default: ''
       pgo:
-        description: 'PGO: train a profile on each runner, use the committed pgo/<target>.profdata where there is one, or none'
+        # Not the committed pgo/<target>.profdata: the stamped version is part
+        # of every symbol's hash, so a profile from another version matches
+        # nothing.
+        description: 'PGO: train a profile on each runner, or build without one'
         type: choice
-        options: [train, committed, none]
+        options: [train, none]
         default: train
 
 permissions:
@@ -42,7 +46,7 @@ defaults:
 
 jobs:
   version:
-    name: check the version
+    name: version
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -51,21 +55,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG || github.ref }}
-      - name: Compare the tag with Cargo.toml and package.json
+      - name: Stamp the tag's version
+        if: env.TAG != ''
+        run: tools/set-version.sh "$TAG"
+      - name: Read the version
         id: version
         run: |
-          cargo=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-          vsix=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' editors/vscode/package.json)
-          echo "Cargo.toml: $cargo, package.json: $vsix, tag: ${TAG:-none}"
-          if [ -n "$TAG" ]; then
-            for v in "$cargo" "$vsix"; do
-              if [ "v$v" != "$TAG" ]; then
-                echo "::error::tag $TAG doesn't match version $v (Cargo.toml $cargo, editors/vscode/package.json $vsix)"
-                exit 1
-              fi
-            done
-          fi
-          echo "version=$cargo" >> "$GITHUB_OUTPUT"
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "version $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   test:
     name: cargo test
@@ -74,6 +72,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG || github.ref }}
+      - name: Stamp the tag's version
+        if: env.TAG != ''
+        run: tools/set-version.sh "$TAG"
       - run: rustup show
       - run: cargo test --workspace --locked
 
@@ -108,6 +109,9 @@ jobs:
           rustup show
           rustc -vV
           [ "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}" ]
+      - name: Stamp the tag's version
+        if: env.TAG != ''
+        run: tools/set-version.sh "$TAG"
       - name: Install cargo-pgo and llvm-tools
         if: env.PGO == 'train'
         run: |
@@ -120,7 +124,6 @@ jobs:
         run: |
           case "$PGO" in
             train) pgo=(--pgo "$RUNNER_TEMP/release.profdata") ;;
-            committed) pgo=() ;;
             none) pgo=(--no-pgo) ;;
           esac
           ./build.sh "${pgo[@]}" --out "$RUNNER_TEMP/out/$NAME"
@@ -169,6 +172,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Stamp the tag's version
+        if: env.TAG != ''
+        working-directory: .
+        run: tools/set-version.sh "$TAG"
       - run: npm ci
       - run: npm test
       - run: npx vsce package -o "$RUNNER_TEMP/orbitscript-${{ needs.version.outputs.version }}.vsix"

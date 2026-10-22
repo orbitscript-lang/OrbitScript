@@ -4,17 +4,18 @@
 
 ## Steps
 
-1. In a pull request against `main`, set the new version in both places that carry it, and merge it:
-   - `version` under `[workspace.package]` in `Cargo.toml` (every crate inherits it; `orbit -v` and `orbit-lsp --version` print it);
-   - `version` in `editors/vscode/package.json`, then `npm install --package-lock-only` in `editors/vscode` so the lockfile agrees.
-2. Tag the merge commit and push the tag:
+1. Tag the commit on `main` to release and push the tag:
    ```sh
    git tag -a v0.1.0 -m "OrbitScript 0.1.0"
    git push origin v0.1.0
    ```
-   A tag with a suffix (`v0.1.0-rc.1`) becomes a prerelease. The workflow fails at once if the tag doesn't match both versions.
-3. The workflow runs `cargo test`, builds every target, packages the VS Code extension and drafts the release with the archives, the `.vsix`, `SHA256SUMS` and notes generated from the merged pull requests.
-4. Read the draft on the repository's Releases page, edit the notes, and publish it. Nothing is public until then.
+   The tag is `v` followed by a [semantic version](https://semver.org). A tag with a prerelease suffix (`v0.1.0-rc`, `v0.1.0-rc.2`) builds the same way and is marked as a prerelease on GitHub.
+2. The workflow stamps the tag's version into the build (below), runs `cargo test`, builds every target, packages the VS Code extension and drafts the release with the archives, the `.vsix`, `SHA256SUMS` and notes generated from the merged pull requests.
+3. Read the draft on the repository's Releases page, edit the notes, and publish it. Nothing is public until then.
+
+## Versions
+
+The tag is the only place a release's version is written. The repository keeps placeholder versions (`0.0.0`; the extension `0.0.1`), and every job of the workflow first runs `tools/set-version.sh <tag>`, which writes the version into its own checkout, never into a commit: the `[workspace.package]` version in `Cargo.toml`, which every crate inherits (so `orbit -v`, `orbitc -v` and `orbit-lsp --version` print it), the VS Code extension's `package.json`, and both lockfiles. It refuses a tag that isn't `v` followed by a semantic version. Run it locally to build a release's version by hand, and `git checkout Cargo.toml Cargo.lock editors/vscode` afterwards.
 
 To try the workflow without a release, run it by hand from the Actions tab (Release, "Run workflow") on a branch: it builds everything and keeps the archives as workflow artifacts. Naming an existing tag in `release-tag` drafts that tag's release instead, for example to redo a release whose run failed (delete the old draft first).
 
@@ -22,7 +23,7 @@ To try the workflow without a release, run it by hand from the Actions tab (Rele
 
 ```mermaid
 flowchart LR
-    tag["tag vX.Y.Z"] --> version["check the version"]
+    tag["tag vX.Y.Z"] --> version["stamp the version"]
     version --> build["build, per target"]
     version --> vscode["VS Code extension"]
     tag --> test["cargo test"]
@@ -50,7 +51,7 @@ Plus `orbitscript-<version>.vsix`, the VS Code extension, and `SHA256SUMS`.
 
 ## Profiles
 
-By default each runner trains a profile for its target (`./build.sh --pgo-train`, written to the runner's temporary directory, never committed) and builds both layouts with it, so a release is never built with a stale profile and every target gets one, not only those with a profile in `pgo/`. A run started by hand can instead use the committed `pgo/<target>.profdata` where there is one (`committed`), or build without a profile (`none`).
+Each runner trains a profile for its target (`./build.sh --pgo-train`, written to the runner's temporary directory, never committed) and builds both layouts with it, so a release is never built with a stale profile and every target gets one, not only those with a profile in `pgo/`. The committed profiles couldn't serve a release anyway: the version is part of every symbol's hash, so a profile trained at `0.0.0` matches nothing in a `0.1.0` build. A run started by hand can build without a profile (`none`).
 
 ## Not done yet
 
