@@ -8,7 +8,7 @@
 //! `orbit-capi`, which installs itself after this library.
 
 use orbit::stack::{Any, Either, Nil, Stack, StackResult, Status, Type};
-use orbit::{Chunk, Error, OrbitString, Scope, Table, Value, native};
+use orbit::{Chunk, Error, OrbitStr, OrbitString, Scope, Table, Value, native};
 
 use crate::base::read_chunk_file;
 use crate::sys::os_path;
@@ -59,24 +59,29 @@ fn env_path(versioned: &str, plain: &str, default: &str, ignore_env: bool) -> St
 /// Look for `name` along `path`: each `;`-separated template with `?`
 /// replaced by `name` (after replacing `sep` in `name` with `rep`). Returns
 /// the first readable file, or the `no file '...'` lines.
-pub fn search_path(name: &[u8], path: &[u8], sep: &[u8], rep: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+pub fn search_path(
+    name: &[u8],
+    path: &[u8],
+    sep: &[u8],
+    rep: &[u8],
+) -> Result<OrbitString, OrbitString> {
     let name = if sep.is_empty() {
         name.to_vec()
     } else {
         replace(name, sep, rep)
     };
-    let mut msg = Vec::new();
+    let mut msg = OrbitString::new();
     for template in path.split(|&b| b == b';') {
         let file = replace(template, b"?", &name);
         if std::fs::File::open(os_path(&file)).is_ok() && !file.contains(&0) {
-            return Ok(file);
+            return Ok(file.into());
         }
         if !msg.is_empty() {
-            msg.extend_from_slice(b"\n\t");
+            msg.push("\n\t");
         }
-        msg.extend_from_slice(b"no file '");
-        msg.extend_from_slice(&file);
-        msg.push(b'\'');
+        msg.push("no file '");
+        msg.push(&file);
+        msg.push("'");
     }
     Err(msg)
 }
@@ -97,10 +102,10 @@ fn replace(s: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
 }
 
 /// `nil` and the `no file` lines.
-type NotFound = (Nil, Vec<u8>);
+type NotFound = (Nil, OrbitString);
 
 #[native(name = "package.searchpath")]
-fn searchpath(s: &mut Stack<'_>) -> StackResult<Either<Vec<u8>, NotFound>> {
+fn searchpath(s: &mut Stack<'_>) -> StackResult<Either<OrbitString, NotFound>> {
     // By hand rather than as parameters: lua5.5 checks the path first.
     let path = s.check_string(2)?.to_vec();
     let name = s.check_string(1)?.to_vec();
@@ -147,13 +152,16 @@ pub fn load_error(name: &[u8], file: &[u8], why: &[u8]) -> OrbitString {
 }
 
 /// A searcher's loader (the function at its index) and the file it read.
-type Loaded = (Any, Vec<u8>);
+type Loaded = (Any, OrbitString);
 
 /// The Lua searcher. It also finds `.orb` modules: they are on
 /// `package.path` (`DEFAULT_PATH`), and the loader picks the compiler by the
 /// file name.
 #[native(name = "package.searchers[2]")]
-fn search_lua(s: &mut Stack<'_>, name: Vec<u8>) -> Result<Either<Vec<u8>, Loaded>, OrbitString> {
+fn search_lua(
+    s: &mut Stack<'_>,
+    name: OrbitString,
+) -> Result<Either<OrbitString, Loaded>, OrbitString> {
     let path = s.with_scope(|sc| path_field(sc, "path"))?;
     let file = match search_path(&name, &path, b".", DIRSEP.as_bytes()) {
         Ok(f) => f,
@@ -174,7 +182,7 @@ fn search_lua(s: &mut Stack<'_>, name: Vec<u8>) -> Result<Either<Vec<u8>, Loaded
 /// `package.loadlib`: a native's name identifies it, and `orbit-capi`'s
 /// working one has that name.
 #[native(name = "loadlib")]
-fn loadlib_absent(_lib: &[u8], _func: &[u8]) -> (Nil, &'static str, &'static str) {
+fn loadlib_absent(_lib: OrbitStr<'_>, _func: OrbitStr<'_>) -> (Nil, &'static str, &'static str) {
     (
         Nil,
         "dynamic libraries not enabled; check your Lua installation",

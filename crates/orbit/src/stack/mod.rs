@@ -32,6 +32,7 @@ pub(crate) mod backend;
 
 mod typed;
 
+use crate::OrbitString;
 use crate::scope::Scope;
 use crate::value::Value;
 
@@ -370,10 +371,10 @@ pub struct Resumed {
 /// (`lua_getinfo`).
 #[derive(Debug, Default)]
 pub struct FrameInfo {
-    pub name: Option<Vec<u8>>,
+    pub name: Option<OrbitString>,
     pub namewhat: &'static str,
     pub what: &'static str,
-    pub source: Vec<u8>,
+    pub source: OrbitString,
     pub short_src: String,
     pub currentline: i32,
     pub linedefined: i32,
@@ -387,7 +388,7 @@ pub struct FrameInfo {
     /// `function t.f`, `fn f`), from its source rather than the call:
     /// for a debugger to show where `name` is unknown, such as a tail
     /// call. Not part of `debug.getinfo`.
-    pub defined_name: Option<Vec<u8>>,
+    pub defined_name: Option<OrbitString>,
 }
 
 /// Runs when the isolate's interrupt flag is raised
@@ -544,7 +545,7 @@ mod tests {
             assert_eq!(s.pcall(0, MULTRET, 0).unwrap(), Status::Ok);
             assert_eq!(s.top(), 7);
             assert_eq!(s.to_integer(1), Some(5));
-            assert_eq!(s.string_at(2), Some(&b"v"[..]));
+            assert_eq!(s.string_at(2), Some("v".into()));
             // The first yield passes 1 out; 10 + 1 goes in again; 20 + 1
             // comes back.
             assert_eq!(
@@ -554,7 +555,7 @@ mod tests {
             assert!(!s.to_boolean(6));
             assert_eq!(
                 s.string_at(7),
-                Some(&b"bad argument #1 to 'add' (integers expected)"[..])
+                Some("bad argument #1 to 'add' (integers expected)".into())
             );
         });
     }

@@ -3,13 +3,13 @@
 use std::any::{Any, TypeId};
 use std::ffi::c_void;
 
-use orbit_runtime::object::OrbitStr;
 use orbit_runtime::object::number::{float_to_int, fmt_number, str_to_number};
 use orbit_runtime::object::table as tbl;
 use orbit_runtime::object::value::raw_eq;
 use orbit_runtime::object::{
     self as raw, Gc, LightUserData, LuaStr, NativeId, NoMemory, Table, gc,
 };
+use orbit_runtime::object::{OrbitStr, OrbitString};
 use orbit_runtime::stdlib;
 use orbit_runtime::vm::{
     self, CallOutcome, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn, Operator, Vm,
@@ -645,7 +645,7 @@ impl<'s> Stack<'s> {
 
     /// The string at `idx`, converting a number in place (`lua_tolstring`);
     /// `None` for other types.
-    pub fn to_str(&mut self, idx: i32) -> StackResult<Option<&[u8]>> {
+    pub fn to_str(&mut self, idx: i32) -> StackResult<Option<OrbitStr<'_>>> {
         let s = match self.get(idx) {
             RawValue::Str(s) => s,
             v @ (RawValue::Int(_) | RawValue::Float(_)) => {
@@ -661,12 +661,12 @@ impl<'s> Stack<'s> {
             }
             _ => return Ok(None),
         };
-        Ok(Some(self.ctx.bytes(s)))
+        Ok(Some(self.ctx.bytes(s).into()))
     }
 
     /// The string at `idx`, without converting numbers.
-    pub fn string_at(&self, idx: i32) -> Option<&[u8]> {
-        self.bytes_of(self.get(idx))
+    pub fn string_at(&self, idx: i32) -> Option<OrbitStr<'_>> {
+        self.bytes_of(self.get(idx)).map(OrbitStr::from)
     }
 
     /// The number at `idx` as Lua prints it, or `None` if it isn't one.
@@ -913,7 +913,12 @@ impl<'s> Stack<'s> {
 
     /// Push the number `text` spells, as `tonumber` reads it, and give its
     /// length plus one; 0, pushing nothing, if it isn't a numeral.
-    pub fn push_numeral(&mut self, text: &[u8]) -> usize {
+    pub fn push_numeral<'t>(&mut self, text: impl Into<OrbitStr<'t>>) -> usize {
+        self.push_numeral_str(text.into())
+    }
+
+    fn push_numeral_str(&mut self, text: OrbitStr<'_>) -> usize {
+        let text = text.as_bytes();
         match str_to_number(text) {
             Some(v) => {
                 self.ctx.push(v);
@@ -942,9 +947,14 @@ impl<'s> Stack<'s> {
     }
 
     /// Push a string with these bytes, and give its bytes as stored.
-    pub fn push_bytes(&mut self, bytes: &[u8]) -> &[u8] {
+    pub fn push_bytes<'b>(&mut self, bytes: impl Into<OrbitStr<'b>>) -> OrbitStr<'_> {
+        self.push_bytes_str(bytes.into())
+    }
+
+    fn push_bytes_str(&mut self, bytes: OrbitStr<'_>) -> OrbitStr<'_> {
+        let bytes = bytes.as_bytes();
         let s = self.push_str_value(bytes);
-        self.ctx.bytes(s)
+        self.ctx.bytes(s).into()
     }
 
     pub fn push_light_userdata(&mut self, p: usize) {
@@ -1056,7 +1066,12 @@ impl<'s> Stack<'s> {
     }
 
     /// Push `t[k]` for the value at `idx` and string key `k`.
-    pub fn get_field(&mut self, idx: i32, k: &[u8]) -> StackResult<Type> {
+    pub fn get_field<'k>(&mut self, idx: i32, k: impl Into<OrbitStr<'k>>) -> StackResult<Type> {
+        self.get_field_str(idx, k.into())
+    }
+
+    fn get_field_str(&mut self, idx: i32, k: OrbitStr<'_>) -> StackResult<Type> {
+        let k = k.as_bytes();
         let obj = self.get(idx);
         let key = self.ctx.new_str(k);
         self.get_with(obj, key)
@@ -1069,7 +1084,12 @@ impl<'s> Stack<'s> {
     }
 
     /// Push the global `name`.
-    pub fn get_global(&mut self, name: &[u8]) -> StackResult<Type> {
+    pub fn get_global<'n>(&mut self, name: impl Into<OrbitStr<'n>>) -> StackResult<Type> {
+        self.get_global_str(name.into())
+    }
+
+    fn get_global_str(&mut self, name: OrbitStr<'_>) -> StackResult<Type> {
+        let name = name.as_bytes();
         let g = RawValue::Table(self.ctx.vm.rt.globals);
         let k = self.ctx.new_str(name);
         self.get_with(g, k)
@@ -1102,7 +1122,12 @@ impl<'s> Stack<'s> {
     }
 
     /// Push `t[k]` for string key `k`, with no metamethods.
-    pub fn raw_get_field(&mut self, idx: i32, k: &[u8]) -> StackResult<Type> {
+    pub fn raw_get_field<'k>(&mut self, idx: i32, k: impl Into<OrbitStr<'k>>) -> StackResult<Type> {
+        self.raw_get_field_str(idx, k.into())
+    }
+
+    fn raw_get_field_str(&mut self, idx: i32, k: OrbitStr<'_>) -> StackResult<Type> {
+        let k = k.as_bytes();
         let key = self.ctx.new_str(k);
         self.raw_get_with(idx, key)
     }
@@ -1232,7 +1257,12 @@ impl<'s> Stack<'s> {
     }
 
     /// `t[k] = top` (popped) for the value at `idx` and string key `k`.
-    pub fn set_field(&mut self, idx: i32, k: &[u8]) -> StackResult<()> {
+    pub fn set_field<'k>(&mut self, idx: i32, k: impl Into<OrbitStr<'k>>) -> StackResult<()> {
+        self.set_field_str(idx, k.into())
+    }
+
+    fn set_field_str(&mut self, idx: i32, k: OrbitStr<'_>) -> StackResult<()> {
+        let k = k.as_bytes();
         let obj = self.get(idx);
         let key = self.ctx.new_str(k);
         self.set_popping(obj, key)
@@ -1245,7 +1275,12 @@ impl<'s> Stack<'s> {
     }
 
     /// Pop the top value into global `name`.
-    pub fn set_global(&mut self, name: &[u8]) -> StackResult<()> {
+    pub fn set_global<'n>(&mut self, name: impl Into<OrbitStr<'n>>) -> StackResult<()> {
+        self.set_global_str(name.into())
+    }
+
+    fn set_global_str(&mut self, name: OrbitStr<'_>) -> StackResult<()> {
+        let name = name.as_bytes();
         let g = RawValue::Table(self.ctx.vm.rt.globals);
         let key = self.ctx.new_str(name);
         self.set_popping(g, key)
@@ -1285,7 +1320,12 @@ impl<'s> Stack<'s> {
     }
 
     /// `t[k] = top` (popped) for string key `k`, with no metamethods.
-    pub fn raw_set_field(&mut self, idx: i32, k: &[u8]) -> StackResult<()> {
+    pub fn raw_set_field<'k>(&mut self, idx: i32, k: impl Into<OrbitStr<'k>>) -> StackResult<()> {
+        self.raw_set_field_str(idx, k.into())
+    }
+
+    fn raw_set_field_str(&mut self, idx: i32, k: OrbitStr<'_>) -> StackResult<()> {
+        let k = k.as_bytes();
         let key = self.ctx.new_str(k);
         self.raw_set_with(idx, key)
     }
@@ -1438,7 +1478,18 @@ impl<'s> Stack<'s> {
     /// Compile (or decode) `bytes` as a chunk named `name`, with the global
     /// table as its `_ENV`, and push its function, or the message.
     /// `mode` is `load`'s: `b"t"`, `b"b"` or `b"bt"`.
-    pub fn load(&mut self, bytes: &[u8], name: &[u8], mode: &[u8]) -> Status {
+    pub fn load<'n, 'm>(
+        &mut self,
+        bytes: &[u8],
+        name: impl Into<OrbitStr<'n>>,
+        mode: impl Into<OrbitStr<'m>>,
+    ) -> Status {
+        self.load_str(bytes, name.into(), mode.into())
+    }
+
+    fn load_str(&mut self, bytes: &[u8], name: OrbitStr<'_>, mode: OrbitStr<'_>) -> Status {
+        let name = name.as_bytes();
+        let mode = mode.as_bytes();
         let env = RawValue::Table(self.ctx.vm.rt.globals);
         match stdlib::load_chunk_in(&mut self.ctx, bytes, name, mode, env) {
             Ok(f) => {
@@ -1520,9 +1571,9 @@ impl<'s> Stack<'s> {
 
     /// Argument `arg` (1-based) as a string (numbers convert), or Lua's
     /// argument error.
-    pub fn check_string(&mut self, arg: i32) -> StackResult<&[u8]> {
+    pub fn check_string(&mut self, arg: i32) -> StackResult<OrbitStr<'_>> {
         let s = self.ctx.check_str((arg.max(1) - 1) as usize)?;
-        Ok(self.ctx.bytes(s))
+        Ok(self.ctx.bytes(s).into())
     }
 
     /// Argument `arg` (1-based) as an integer (floats with an exact integer
@@ -1562,10 +1613,10 @@ impl<'s> Stack<'s> {
     }
 
     /// The value at `idx` as `tostring` shows it without metamethods.
-    pub fn display(&self, idx: i32) -> Vec<u8> {
+    pub fn display(&self, idx: i32) -> OrbitString {
         let mut out = Vec::new();
         self.ctx.display(self.get(idx), &mut out);
-        out
+        out.into()
     }
 
     /// Push `chunk:line:` for the function at `level` (1 is the caller),
@@ -1577,10 +1628,10 @@ impl<'s> Stack<'s> {
 
     /// Push `message` (if any), a newline, and the traceback from `level`
     /// on, as one string (`luaL_traceback` on the running thread).
-    pub fn push_traceback(&mut self, message: Option<&[u8]>, level: i32) {
+    pub fn push_traceback(&mut self, message: Option<OrbitStr<'_>>, level: i32) {
         let mut out = Vec::new();
         if let Some(m) = message {
-            out.extend_from_slice(m);
+            out.extend_from_slice(&m);
             out.push(b'\n');
         }
         out.extend_from_slice(self.ctx.traceback(level.max(0) as usize).as_bytes());
@@ -1589,7 +1640,7 @@ impl<'s> Stack<'s> {
 
     /// Push the value at `idx` as `tostring` converts it (`__tostring`,
     /// then `__name`), and give the string's bytes.
-    pub fn to_display_string(&mut self, idx: i32) -> StackResult<&[u8]> {
+    pub fn to_display_string(&mut self, idx: i32) -> StackResult<OrbitStr<'_>> {
         let v = self.get(idx);
         let mm = self.ctx.metamethod(v, MetaField::ToString);
         if !mm.is_nil() {
@@ -1673,7 +1724,12 @@ impl<'s> Stack<'s> {
 
     /// Emit a warning piece (`lua_warning`): pieces join until one with
     /// `more` false. A one-piece `@on` or `@off` switches warnings.
-    pub fn warn(&mut self, msg: &[u8], more: bool) {
+    pub fn warn<'m>(&mut self, msg: impl Into<OrbitStr<'m>>, more: bool) {
+        self.warn_str(msg.into(), more)
+    }
+
+    fn warn_str(&mut self, msg: OrbitStr<'_>, more: bool) {
+        let msg = msg.as_bytes();
         let rt = &mut self.ctx.vm.rt;
         if let Some(hook) = &mut rt.warn_hook {
             (hook.0)(msg, more);
@@ -1697,7 +1753,9 @@ impl<'s> Stack<'s> {
 
     /// Send warning pieces to `hook` (the piece, and whether more follow)
     /// instead of showing them (`lua_setwarnf`).
-    pub fn set_warn_hook(&mut self, hook: impl FnMut(&[u8], bool) + 'static) {
+    pub fn set_warn_hook(&mut self, hook: impl FnMut(OrbitStr<'_>, bool) + 'static) {
+        let mut hook = hook;
+        let hook = move |msg: &[u8], more| hook(msg.into(), more);
         self.ctx.vm.rt.warn_hook = Some(vm::WarnHook(Box::new(hook)));
     }
 
@@ -1989,7 +2047,7 @@ impl<'s> Stack<'s> {
         let fi = c.func_info(func);
         let mut out = FrameInfo {
             what: fi.what,
-            source: fi.source,
+            source: fi.source.into(),
             short_src: fi.short_src,
             linedefined: fi.line_defined as i32,
             lastlinedefined: fi.last_line as i32,
@@ -1998,7 +2056,7 @@ impl<'s> Stack<'s> {
             isvararg: fi.is_vararg,
             currentline: -1,
             namewhat: "",
-            defined_name: fi.defined_name,
+            defined_name: fi.defined_name.map(OrbitString::from),
             ..FrameInfo::default()
         };
         if let Some(l) = at {
@@ -2007,7 +2065,7 @@ impl<'s> Stack<'s> {
             out.extraargs = c.extra_args(l);
             if let Some(n) = c.level_name(l) {
                 out.namewhat = n.namewhat;
-                out.name = Some(n.name);
+                out.name = Some(n.name.into());
             }
         }
         out
@@ -2035,23 +2093,23 @@ impl<'s> Stack<'s> {
 
     /// Local `n` of activation `level`: its name, its value pushed; `None`,
     /// pushing nothing, if there is no such local.
-    pub fn get_local(&mut self, level: usize, n: i32) -> Option<Vec<u8>> {
+    pub fn get_local(&mut self, level: usize, n: i32) -> Option<OrbitString> {
         let l = self.ctx.level(level)?;
         let (name, v) = self.ctx.get_local(l, n.into())?;
         self.ctx.push(v);
-        Some(name)
+        Some(name.into())
     }
 
     /// The name of parameter `n` of the script function on top, pushing
     /// nothing.
-    pub fn param_name(&mut self, n: i32) -> Option<Vec<u8>> {
+    pub fn param_name(&mut self, n: i32) -> Option<OrbitString> {
         let f = self.ctx.arg(self.ctx.len().checked_sub(1)?);
-        self.ctx.param_name(f, n.into())
+        self.ctx.param_name(f, n.into()).map(OrbitString::from)
     }
 
     /// Pop the top value into local `n` of activation `level` and give its
     /// name; with no such local, pop nothing.
-    pub fn set_local(&mut self, level: usize, n: i32) -> StackResult<Option<Vec<u8>>> {
+    pub fn set_local(&mut self, level: usize, n: i32) -> StackResult<Option<OrbitString>> {
         self.need(1)?;
         let len = self.ctx.len();
         let v = self.ctx.arg(len - 1);
@@ -2062,28 +2120,28 @@ impl<'s> Stack<'s> {
         if name.is_some() {
             self.ctx.truncate(len - 1);
         }
-        Ok(name)
+        Ok(name.map(OrbitString::from))
     }
 
     /// Upvalue `n` (1-based) of the function at `func`: its name, its value
     /// pushed.
-    pub fn get_upvalue(&mut self, func: i32, n: i32) -> Option<Vec<u8>> {
+    pub fn get_upvalue(&mut self, func: i32, n: i32) -> Option<OrbitString> {
         let f = self.get(func);
         let (name, v) = self.ctx.upvalue_of(f, n as i64)?;
         self.ctx.push(v);
-        Some(name)
+        Some(name.into())
     }
 
     /// Pop the top value into upvalue `n` of the function at `func` and
     /// give its name.
-    pub fn set_upvalue(&mut self, func: i32, n: i32) -> StackResult<Option<Vec<u8>>> {
+    pub fn set_upvalue(&mut self, func: i32, n: i32) -> StackResult<Option<OrbitString>> {
         self.need(1)?;
         let f = self.get(func);
         let len = self.ctx.len();
         let v = self.ctx.arg(len - 1);
         let r = self.ctx.set_upvalue_of(f, n as i64, v);
         self.ctx.truncate(len - 1);
-        Ok(r)
+        Ok(r.map(OrbitString::from))
     }
 
     /// An identity for upvalue `n` of the function at `func` (shared

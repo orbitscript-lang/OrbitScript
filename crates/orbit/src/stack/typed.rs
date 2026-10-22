@@ -78,8 +78,9 @@ owned_arg! {
     f64 => |s, i| s.check_number(i);
     // Lua's truthiness, as `lua_toboolean`: any value (or none) is a bool.
     bool => |s, i| Ok(s.to_boolean(i));
-    Vec<u8> => |s, i| s.check_string(i).map(<[u8]>::to_vec);
-    String => |s, i| s.check_string(i).map(|b| String::from_utf8_lossy(b).into_owned());
+    OrbitString => |s, i| s.check_string(i).map(OrbitStr::to_owned_string);
+    Vec<u8> => |s, i| s.check_string(i).map(|b| b.to_vec());
+    String => |s, i| s.check_string(i).map(|b| b.to_string_lossy().into_owned());
     // Any value at all, by its index (`luaL_checkany`).
     Rest => |s, i| Ok(Rest { first: i, count: (s.top() - i + 1).max(0) as usize });
 }
@@ -166,6 +167,22 @@ fn not_utf8(s: &mut Stack<'_>, i: i32) -> Raised {
     s.arg_error(i, "invalid UTF-8")
 }
 
+/// A string argument (numbers convert), borrowed from the stack.
+impl<'a> Arg<'a> for OrbitStr<'a> {
+    type Checked = ();
+
+    #[inline(always)]
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<()> {
+        s.check_string(i).map(drop)
+    }
+
+    #[inline(always)]
+    fn get(s: &'a Stack<'_>, i: i32, (): ()) -> OrbitStr<'a> {
+        // `check` left a string there.
+        s.string_at(i).unwrap_or_default()
+    }
+}
+
 impl<'a> Arg<'a> for &'a [u8] {
     type Checked = ();
 
@@ -177,7 +194,7 @@ impl<'a> Arg<'a> for &'a [u8] {
     #[inline(always)]
     fn get(s: &'a Stack<'_>, i: i32, (): ()) -> &'a [u8] {
         // `check` left a string there.
-        s.string_at(i).unwrap_or_default()
+        s.string_at(i).unwrap_or_default().as_bytes()
     }
 }
 
@@ -186,13 +203,16 @@ impl<'a> Arg<'a> for &'a str {
 
     #[inline(always)]
     fn check(s: &mut Stack<'_>, i: i32) -> StackResult<()> {
-        let ok = std::str::from_utf8(s.check_string(i)?).is_ok();
+        let ok = s.check_string(i)?.to_str().is_ok();
         if ok { Ok(()) } else { Err(not_utf8(s, i)) }
     }
 
     #[inline(always)]
     fn get(s: &'a Stack<'_>, i: i32, (): ()) -> &'a str {
-        std::str::from_utf8(s.string_at(i).unwrap_or_default()).unwrap_or_default()
+        s.string_at(i)
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default()
     }
 }
 
@@ -303,7 +323,7 @@ impl Push for OrbitString {
 impl Push for OrbitStr<'_> {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
-        s.push_bytes(&self);
+        s.push_bytes(self);
     }
 }
 

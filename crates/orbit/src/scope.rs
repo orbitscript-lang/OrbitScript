@@ -273,7 +273,7 @@ impl<'s> Scope<'s> {
             }
             _ => {
                 let message =
-                    String::from_utf8_lossy(stack.string_at(-1).unwrap_or_default()).into_owned();
+                    String::from_utf8_lossy(&stack.string_at(-1).unwrap_or_default()).into_owned();
                 let _ = stack.set_top(-2);
                 Err(Error::syntax(message))
             }

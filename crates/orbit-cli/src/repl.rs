@@ -82,7 +82,7 @@ impl Runner {
         };
         let prompt = self.iso.scope(|s| match s.globals().get::<Value>(name) {
             Ok(Value::Nil) | Err(_) => default.as_bytes().to_vec(),
-            Ok(v) => v.to_display().unwrap_or_default(),
+            Ok(v) => v.to_display().unwrap_or_default().into_bytes(),
         });
         self.iso.flush();
         if let Some(line) = self.edit_line(&prompt) {

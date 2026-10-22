@@ -75,7 +75,7 @@ fn print(s: &mut Stack<'_>, args: Rest) -> StackResult<()> {
             line.push(b'\t');
         }
         let top = s.top();
-        line.extend_from_slice(s.to_display_string(i)?);
+        line.extend_from_slice(&s.to_display_string(i)?);
         s.set_top(top)?;
     }
     line.push(b'\n');
@@ -125,10 +125,10 @@ fn load_file(
 #[native]
 fn loadfile(
     s: &mut Stack<'_>,
-    path: Option<Vec<u8>>,
-    mode: Option<Vec<u8>>,
+    path: Option<OrbitString>,
+    mode: Option<OrbitString>,
 ) -> Either<Return, (Nil, OrbitString)> {
-    let mode = mode.unwrap_or_else(|| b"bt".to_vec());
+    let mode = mode.unwrap_or_else(|| "bt".into());
     // An `env` argument, even nil, replaces the globals.
     let env = if s.top() >= 3 { 3 } else { 0 };
     match load_file(s, path.as_deref(), &mode, env) {
@@ -138,7 +138,7 @@ fn loadfile(
 }
 
 #[native]
-fn dofile(s: &mut Stack<'_>, path: Option<Vec<u8>>) -> Result<Return, OrbitString> {
+fn dofile(s: &mut Stack<'_>, path: Option<OrbitString>) -> Result<Return, OrbitString> {
     load_file(s, path.as_deref(), b"bt", 0)?;
     // lua5.5 lets the chunk yield across `dofile`.
     Ok(Return::tail_call(0))
@@ -171,7 +171,7 @@ fn debug_lines<'s>(c: &'s Scope<'s>) {
             // The message as `tostring` would give it.
             let text = match e.value().map(|v| v.get(c)) {
                 Some(Ok(v)) => v.to_display().unwrap_or_else(|e| e.message().into()),
-                _ => e.message().as_bytes().to_vec(),
+                _ => e.message().into(),
             };
             let mut err = std::io::stderr().lock();
             let _ = err.write_all(&text);

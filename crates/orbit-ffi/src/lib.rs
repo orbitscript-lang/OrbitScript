@@ -270,10 +270,10 @@ fn push_object<T: std::any::Any>(s: &mut Stack<'_>, data: T, meta: &str) -> Stac
 
 fn type_arg(s: &mut Stack<'_>, arg: i32) -> StackResult<Ty> {
     let name = s.check_string(arg)?;
-    if let Some(t) = Ty::parse(name) {
+    if let Some(t) = Ty::parse(&name) {
         return Ok(t);
     }
-    let msg = OrbitString::concat(&[b"unknown C type '", name, b"'"]);
+    let msg = OrbitString::concat(&[b"unknown C type '", &name, b"'"]);
     Err(s.arg_error(arg, &msg))
 }
 
@@ -523,13 +523,13 @@ fn call_with_strings(
             bytes.as_ptr() as u64
         } else if used + bytes.len() < stack.len() {
             let at = used;
-            stack[at..at + bytes.len()].copy_from_slice(bytes);
+            stack[at..at + bytes.len()].copy_from_slice(&bytes);
             stack[at + bytes.len()] = 0;
             used += bytes.len() + 1;
             stack[at..].as_ptr() as u64
         } else {
             let mut v = Vec::with_capacity(bytes.len() + 1);
-            v.extend_from_slice(bytes);
+            v.extend_from_slice(&bytes);
             v.push(0);
             let p = v.as_ptr() as u64;
             long.push(v);

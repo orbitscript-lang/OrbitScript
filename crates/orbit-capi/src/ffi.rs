@@ -16,7 +16,7 @@ use orbit::stack::{
     Continuation, Control, InterruptHandler, Native, NativeRef, Outcome, Raised, Return, Stack,
     Status, ThreadRef, ThreadWindow, Type,
 };
-use orbit::{OrbitString, ThreadStatus};
+use orbit::{OrbitStr, OrbitString, ThreadStatus};
 
 use crate::api::{self, CStrCopy, Res, Shared, abi};
 
@@ -519,7 +519,7 @@ impl Native for CHook {
 
     fn call(s: &mut Stack<'_>) -> Res<Return> {
         let f = s.native_data()[0] as usize;
-        let event = match s.string_at(1) {
+        let event = match s.string_at(1).as_deref() {
             Some(b"call") => abi::HOOKCALL,
             Some(b"return") => abi::HOOKRET,
             Some(b"line") => abi::HOOKLINE,
@@ -1017,7 +1017,7 @@ extern "C" fn orbit_r_toboolean(l: *mut LState, idx: c_int) -> c_int {
 extern "C" fn orbit_r_tolstring(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
         Ok(match c.to_str(idx)? {
-            Some(s) => hand_out_value(&b.st, s, len),
+            Some(s) => hand_out_value(&b.st, &s, len),
             None => {
                 if !len.is_null() {
                     // SAFETY: C passed a pointer to a size_t.
@@ -1091,7 +1091,7 @@ extern "C" fn orbit_r_pushlstring(l: *mut LState, s: *const c_char, len: usize) 
             unsafe { std::slice::from_raw_parts(s as *const u8, len) }
         };
         let st = c.push_bytes(bytes);
-        Ok(hand_out_value(&b.st, st, std::ptr::null_mut()))
+        Ok(hand_out_value(&b.st, &st, std::ptr::null_mut()))
     })
 }
 
@@ -1324,7 +1324,7 @@ extern "C" fn orbit_r_where(l: *mut LState, lvl: c_int) {
 extern "C" fn orbit_r_tolstringmeta(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
     entry!(l, std::ptr::null(), |b, c| {
         let s = c.to_display_string(idx)?;
-        Ok(hand_out_value(&b.st, s, len))
+        Ok(hand_out_value(&b.st, &s, len))
     })
 }
 
@@ -1394,7 +1394,7 @@ extern "C" fn orbit_r_warning(l: *mut LState, msg: *const c_char, tocont: c_int)
 extern "C" fn orbit_r_traceback(l: *mut LState, msg: *const c_char, level: c_int) {
     // SAFETY: NUL-terminated or NULL.
     let text = unsafe { cbytes(msg) };
-    let msg = (!msg.is_null()).then_some(text);
+    let msg = (!msg.is_null()).then_some(OrbitStr::from(text));
     entry!(l, (), |b, c| {
         c.push_traceback(msg, lua_level(b, level));
         Ok(())
@@ -1834,7 +1834,7 @@ type WarnFn = unsafe extern "C" fn(ud: *mut c_void, msg: *const c_char, tocont: 
 /// `lua_setwarnf`: warnings go to `f` from now on; a null `f` drops them.
 extern "C" fn orbit_r_setwarnf(l: *mut LState, f: Option<WarnFn>, ud: *mut c_void) {
     entry!(l, (), |_b, c| {
-        c.set_warn_hook(move |msg: &[u8], tocont: bool| {
+        c.set_warn_hook(move |msg: OrbitStr<'_>, tocont: bool| {
             let Some(f) = f else { return };
             let mut text = Vec::with_capacity(msg.len() + 1);
             text.extend(msg.iter().map(|&b| if b == 0 { b'?' } else { b }));

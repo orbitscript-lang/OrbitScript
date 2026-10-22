@@ -2,6 +2,7 @@
 //! `require` (ADR-8). `orbit-std` adds `package.cpath` and the Lua
 //! searcher; [`install_searchers`] adds these after it.
 
+use orbit::OrbitString;
 use orbit::stack::{Native, REGISTRY_INDEX, Return, Stack, StackResult, Type};
 
 use orbit_std::{DIRSEP, search_path};
@@ -90,7 +91,7 @@ fn push_package(s: &mut Stack<'_>) -> StackResult<bool> {
 }
 
 /// `package.cpath`, which must be a string (numbers convert).
-fn cpath_field(s: &mut Stack<'_>) -> StackResult<Vec<u8>> {
+fn cpath_field(s: &mut Stack<'_>) -> StackResult<OrbitString> {
     let top = s.top();
     if push_package(s)? {
         s.raw_get_field(-1, b"cpath")?;
@@ -203,7 +204,7 @@ impl Native for LoadLib {
 fn search_c_for(s: &mut Stack<'_>, name: &[u8], file_name: &[u8], croot: bool) -> R {
     let cpath = match locked_cpath(s) {
         Some(cpath) => cpath,
-        None => cpath_field(s)?,
+        None => cpath_field(s)?.into_bytes(),
     };
     let file = match search_path(file_name, &cpath, b".", DIRSEP.as_bytes()) {
         Ok(file) => file,
