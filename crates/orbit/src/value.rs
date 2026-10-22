@@ -216,10 +216,10 @@ impl<'s> Value<'s> {
     }
 
     /// The text `tostring` gives: `__tostring` and `__name` are honoured.
-    pub fn to_display(&self) -> Result<Vec<u8>, Error> {
+    pub fn to_display(&self) -> Result<OrbitString, Error> {
         let mut out = Vec::new();
         self.write_display(&mut out)?;
-        Ok(out)
+        Ok(out.into())
     }
 
     /// Append the text `tostring` gives to `out`, as [`to_display`] does
@@ -244,7 +244,7 @@ impl<'s> Value<'s> {
         let at = stack.top();
         let r = stack
             .to_display_string(idx)
-            .map(|b| out.extend_from_slice(b));
+            .map(|b| out.extend_from_slice(&b));
         let r = r.map_err(|e| s.error_of(&mut stack, e));
         let _ = stack.set_top(at);
         r
@@ -354,12 +354,19 @@ impl<'s> Str<'s> {
     pub fn as_bytes(&self) -> Ref<'_, [u8]> {
         let idx = self.idx;
         Ref::map(self.s.stack_ref(), |stack| {
-            stack.string_at(idx).expect("a Str handle holds a string")
+            stack
+                .string_at(idx)
+                .expect("a Str handle holds a string")
+                .as_bytes()
         })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
         self.as_bytes().to_vec()
+    }
+
+    pub fn to_orbit_string(&self) -> OrbitString {
+        OrbitString::from(&*self.as_bytes())
     }
 
     /// The text, if the bytes are UTF-8.
@@ -597,7 +604,7 @@ impl Native for TracebackHandler {
 
     fn call(s: &mut Stack<'_>) -> StackResult<Return> {
         s.push_traceback(None, 1);
-        let tb = String::from_utf8_lossy(s.string_at(-1).unwrap_or_default()).into_owned();
+        let tb = String::from_utf8_lossy(&s.string_at(-1).unwrap_or_default()).into_owned();
         s.set_top(-2)?;
         s.extension(|p: &mut PendingTraceback| p.0 = Some(tb));
         s.push_copy(1);
@@ -959,7 +966,7 @@ impl<'s> IntoValue<'s> for OrbitString {
 
 impl<'s> IntoValue<'s> for OrbitStr<'_> {
     fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
-        s.stack().push_bytes(&self);
+        s.stack().push_bytes(self);
         Ok(())
     }
 }

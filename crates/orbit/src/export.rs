@@ -30,7 +30,8 @@ use crate::stack::{
     ThreadRef, ThreadWindow,
 };
 use crate::{
-    Chunk, Config, Error, GcMode, Isolate, Language, Library, Mode, Runtime, ThreadStatus,
+    Chunk, Config, Error, GcMode, Isolate, Language, Library, Mode, OrbitStr, OrbitString, Runtime,
+    ThreadStatus,
 };
 
 type NativeResult = Result<NativeReturn, LuaError>;
@@ -156,8 +157,13 @@ fn opt<T: IDeterminantProvider<()>>(o: Option<T>) -> SOption<T> {
     o.into()
 }
 
-fn bytes(v: Option<Vec<u8>>) -> SOption<SVec<u8>> {
-    opt(v.map(|v| v.as_slice().into()))
+fn bytes(v: Option<OrbitString>) -> SOption<SVec<u8>> {
+    opt(v.map(|v| v.as_bytes().into()))
+}
+
+/// A byte string lent across the boundary.
+fn slice(s: OrbitStr<'_>) -> Slice<'_, u8> {
+    s.as_bytes().into()
 }
 
 fn frame_info(f: FrameInfo) -> FrameInfoAbi {
@@ -165,7 +171,7 @@ fn frame_info(f: FrameInfo) -> FrameInfoAbi {
         name: bytes(f.name),
         namewhat: f.namewhat.into(),
         what: f.what.into(),
-        source: f.source.as_slice().into(),
+        source: f.source.as_bytes().into(),
         short_src: f.short_src.as_str().into(),
         currentline: f.currentline,
         linedefined: f.linedefined,
@@ -356,10 +362,10 @@ impl StackAbi for Win<'_, '_> {
         self.s.to_boolean(idx)
     }
     extern "C" fn to_str<'a>(&'a mut self, idx: i32) -> Res<SOption<Slice<'a, u8>>> {
-        res_slice!(self, self.s.to_str(idx).map(|b| opt(b.map(Slice::from))))
+        res_slice!(self, self.s.to_str(idx).map(|b| opt(b.map(slice))))
     }
     extern "C" fn string_at<'a>(&'a self, idx: i32) -> SOption<Slice<'a, u8>> {
-        opt(self.s.string_at(idx).map(Slice::from))
+        opt(self.s.string_at(idx).map(slice))
     }
     extern "C" fn number_text(&self, idx: i32) -> SOption<SString> {
         opt(self.s.number_text(idx).map(|t| t.as_str().into()))
@@ -411,7 +417,7 @@ impl StackAbi for Win<'_, '_> {
         self.res(r)
     }
     extern "C" fn push_numeral<'b>(&mut self, text: Slice<'b, u8>) -> usize {
-        self.s.push_numeral(&text)
+        self.s.push_numeral(text.as_slice())
     }
 
     extern "C" fn push_nil(&mut self) {
@@ -427,7 +433,7 @@ impl StackAbi for Win<'_, '_> {
         self.s.push_number(n)
     }
     extern "C" fn push_bytes<'a, 'b>(&'a mut self, bytes: Slice<'b, u8>) -> Slice<'a, u8> {
-        self.s.push_bytes(&bytes).into()
+        slice(self.s.push_bytes(bytes.as_slice()))
     }
     extern "C" fn push_light_userdata(&mut self, p: usize) {
         self.s.push_light_userdata(p)
@@ -484,7 +490,7 @@ impl StackAbi for Win<'_, '_> {
         self.res(r)
     }
     extern "C" fn get_field<'b>(&mut self, idx: i32, k: Slice<'b, u8>) -> Res<i32> {
-        let r = self.s.get_field(idx, &k).map(type_code);
+        let r = self.s.get_field(idx, k.as_slice()).map(type_code);
         self.res(r)
     }
     extern "C" fn get_index(&mut self, idx: i32, n: i64) -> Res<i32> {
@@ -492,7 +498,7 @@ impl StackAbi for Win<'_, '_> {
         self.res(r)
     }
     extern "C" fn get_global<'b>(&mut self, name: Slice<'b, u8>) -> Res<i32> {
-        let r = self.s.get_global(&name).map(type_code);
+        let r = self.s.get_global(name.as_slice()).map(type_code);
         self.res(r)
     }
     extern "C" fn raw_get(&mut self, idx: i32) -> Res<i32> {
@@ -508,7 +514,7 @@ impl StackAbi for Win<'_, '_> {
         self.res(r)
     }
     extern "C" fn raw_get_field<'b>(&mut self, idx: i32, k: Slice<'b, u8>) -> Res<i32> {
-        let r = self.s.raw_get_field(idx, &k).map(type_code);
+        let r = self.s.raw_get_field(idx, k.as_slice()).map(type_code);
         self.res(r)
     }
     extern "C" fn create_table(&mut self, narr: i32, nrec: i32) {
@@ -533,7 +539,7 @@ impl StackAbi for Win<'_, '_> {
         self.res(r)
     }
     extern "C" fn set_field<'b>(&mut self, idx: i32, k: Slice<'b, u8>) -> Res<()> {
-        let r = self.s.set_field(idx, &k);
+        let r = self.s.set_field(idx, k.as_slice());
         self.res(r)
     }
     extern "C" fn set_index_int(&mut self, idx: i32, n: i64) -> Res<()> {
@@ -541,7 +547,7 @@ impl StackAbi for Win<'_, '_> {
         self.res(r)
     }
     extern "C" fn set_global<'b>(&mut self, name: Slice<'b, u8>) -> Res<()> {
-        let r = self.s.set_global(&name);
+        let r = self.s.set_global(name.as_slice());
         self.res(r)
     }
     extern "C" fn raw_set(&mut self, idx: i32) -> Res<()> {
@@ -557,7 +563,7 @@ impl StackAbi for Win<'_, '_> {
         self.res(r)
     }
     extern "C" fn raw_set_field<'b>(&mut self, idx: i32, k: Slice<'b, u8>) -> Res<()> {
-        let r = self.s.raw_set_field(idx, &k);
+        let r = self.s.raw_set_field(idx, k.as_slice());
         self.res(r)
     }
     extern "C" fn set_metatable(&mut self, idx: i32) -> Res<()> {
@@ -614,7 +620,7 @@ impl StackAbi for Win<'_, '_> {
         name: Slice<'b, u8>,
         mode: Slice<'b, u8>,
     ) -> i32 {
-        self.s.load(&bytes, &name, &mode) as i32
+        self.s.load(&bytes, name.as_slice(), mode.as_slice()) as i32
     }
     extern "C" fn load_chunk<'b>(
         &mut self,
@@ -658,7 +664,7 @@ impl StackAbi for Win<'_, '_> {
         self.raise(e)
     }
     extern "C" fn check_string<'a>(&'a mut self, arg: i32) -> Res<Slice<'a, u8>> {
-        res_slice!(self, self.s.check_string(arg).map(Slice::from))
+        res_slice!(self, self.s.check_string(arg).map(slice))
     }
     extern "C" fn check_integer(&mut self, arg: i32) -> Res<i64> {
         let r = self.s.check_integer(arg);
@@ -673,17 +679,18 @@ impl StackAbi for Win<'_, '_> {
         self.res(r)
     }
     extern "C" fn display(&self, idx: i32) -> SVec<u8> {
-        self.s.display(idx).as_slice().into()
+        self.s.display(idx).as_bytes().into()
     }
     extern "C" fn push_where(&mut self, level: i32) {
         self.s.push_where(level)
     }
     extern "C" fn push_traceback<'b>(&mut self, message: SOption<Slice<'b, u8>>, level: i32) {
         let message = Option::<Slice<'b, u8>>::from(message);
-        self.s.push_traceback(message.as_deref(), level)
+        self.s
+            .push_traceback(message.map(|m| m.as_slice().into()), level)
     }
     extern "C" fn to_display_string<'a>(&'a mut self, idx: i32) -> Res<Slice<'a, u8>> {
-        res_slice!(self, self.s.to_display_string(idx).map(Slice::from))
+        res_slice!(self, self.s.to_display_string(idx).map(slice))
     }
 
     extern "C" fn gc(&mut self, op: u8, param: u8, value: SOption<i64>) -> SOption<i64> {
@@ -693,11 +700,11 @@ impl StackAbi for Win<'_, '_> {
         opt(self.s.set_gc_mode(gc_mode(mode)).map(|m| m as u8))
     }
     extern "C" fn warn<'b>(&mut self, message: Slice<'b, u8>, more: bool) {
-        self.s.warn(&message, more)
+        self.s.warn(message.as_slice(), more)
     }
     extern "C" fn set_warn_hook(&mut self, mut hook: WarnHookBox) {
         self.s
-            .set_warn_hook(move |m: &[u8], more| hook.warn(m.into(), more))
+            .set_warn_hook(move |m: OrbitStr<'_>, more| hook.warn(slice(m), more))
     }
     extern "C" fn open_library(&mut self, lib: u8, ignore_env: bool) -> bool {
         match Library::ALL.get(lib as usize) {

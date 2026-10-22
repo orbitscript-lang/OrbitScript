@@ -173,7 +173,7 @@ impl<'s> Call<'s> {
     pub fn traceback(&self, level: usize) -> String {
         let mut stack = self.stack();
         stack.push_traceback(None, level as i32);
-        let tb = String::from_utf8_lossy(stack.string_at(-1).unwrap_or_default()).into_owned();
+        let tb = String::from_utf8_lossy(&stack.string_at(-1).unwrap_or_default()).into_owned();
         let _ = stack.set_top(-2);
         tb
     }

@@ -353,7 +353,7 @@ fn msghandler<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
     let e = c.arg(0);
     let text = match e {
         Value::Str(_) | Value::Int(_) | Value::Float(_) => {
-            String::from_utf8_lossy(&e.to_display()?).into_owned()
+            e.to_display()?.to_string_lossy().into_owned()
         }
         _ => {
             let has_tostring = e
@@ -361,7 +361,7 @@ fn msghandler<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
                 .and_then(|mt| mt.raw_get::<Value>("__tostring").ok())
                 .is_some_and(|f| !f.is_nil());
             if has_tostring && let Ok(t) = e.to_display() {
-                return c.ret(t.as_slice());
+                return c.ret(t);
             }
             format!("(error object is a {} value)", e.type_name())
         }

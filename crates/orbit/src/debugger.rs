@@ -29,6 +29,7 @@
 //! assert_eq!(*seen.borrow(), [2, 3]);
 //! ```
 
+use crate::OrbitString;
 use crate::error::Error;
 use crate::pin::Pinned;
 use crate::scope::Scope;
@@ -116,7 +117,7 @@ impl PauseHandle {
 /// A local variable or upvalue of a stopped function.
 #[derive(Debug)]
 pub struct Variable {
-    pub name: Vec<u8>,
+    pub name: OrbitString,
     /// Its number for [`Paused::set_local`] (locals) or `debug.getupvalue`
     /// (upvalues), counting from 1.
     pub index: i32,

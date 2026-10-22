@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, TableArg, Type};
-use orbit::{Call, Error, OrbitString, Ret, Scope, Table, native};
+use orbit::{Call, Error, OrbitStr, OrbitString, Ret, Scope, Table, native};
 
 use crate::sys::{ExitResults, FileFailure, exit_results, file_failure, os_bytes, os_path, shell};
 use crate::time::{self, Tm};
@@ -17,13 +17,13 @@ fn clock<'s>(c: &'s Call<'s>, start: Instant) -> Result<Ret, Error> {
 }
 
 #[native(name = "os.getenv")]
-fn getenv(name: &[u8]) -> Option<Vec<u8>> {
-    std::env::var_os(os_path(name)).map(|v| os_bytes(&v))
+fn getenv(name: OrbitStr<'_>) -> Option<OrbitString> {
+    std::env::var_os(os_path(&name)).map(|v| os_bytes(&v).into())
 }
 
 #[native(name = "os.remove")]
-fn remove(name: &[u8]) -> Either<bool, FileFailure> {
-    let path = os_path(name);
+fn remove(name: OrbitStr<'_>) -> Either<bool, FileFailure> {
+    let path = os_path(&name);
     // C's `remove` deletes files and empty directories.
     let r = match std::fs::symlink_metadata(&path) {
         Ok(m) if m.is_dir() => std::fs::remove_dir(&path),
@@ -31,13 +31,13 @@ fn remove(name: &[u8]) -> Either<bool, FileFailure> {
     };
     match r {
         Ok(()) => Either::Left(true),
-        Err(e) => Either::Right(file_failure(&e, Some(name))),
+        Err(e) => Either::Right(file_failure(&e, Some(&name))),
     }
 }
 
 #[native(name = "os.rename")]
-fn rename(from: &[u8], to: &[u8]) -> Either<bool, FileFailure> {
-    match std::fs::rename(os_path(from), os_path(to)) {
+fn rename(from: OrbitStr<'_>, to: OrbitStr<'_>) -> Either<bool, FileFailure> {
+    match std::fs::rename(os_path(&from), os_path(&to)) {
         Ok(()) => Either::Left(true),
         // lua5.5 names no file in this message.
         Err(e) => Either::Right(file_failure(&e, None)),
@@ -45,9 +45,9 @@ fn rename(from: &[u8], to: &[u8]) -> Either<bool, FileFailure> {
 }
 
 #[native(name = "os.tmpname")]
-fn tmpname() -> Result<Vec<u8>, &'static str> {
+fn tmpname() -> Result<OrbitString, &'static str> {
     match crate::sys::temp_file() {
-        Ok((path, _)) => Ok(os_bytes(path.as_os_str())),
+        Ok((path, _)) => Ok(os_bytes(path.as_os_str()).into()),
         Err(_) => Err("unable to generate a unique filename"),
     }
 }
@@ -57,7 +57,7 @@ fn tmpname() -> Result<Vec<u8>, &'static str> {
 #[native(name = "os.execute")]
 fn execute(
     s: &mut Stack<'_>,
-    cmd: Option<Vec<u8>>,
+    cmd: Option<OrbitString>,
 ) -> Either<bool, Either<ExitResults, FileFailure>> {
     let Some(cmd) = cmd else {
         return Either::Left(cfg!(windows) || std::path::Path::new("/bin/sh").exists());
@@ -102,7 +102,10 @@ fn difftime(t2: i64, t1: i64) -> f64 {
 }
 
 #[native(name = "os.setlocale")]
-fn setlocale(locale: Option<&[u8]>, category: Option<&[u8]>) -> Result<Option<&'static str>, Fail> {
+fn setlocale(
+    locale: Option<OrbitStr<'_>>,
+    category: Option<OrbitStr<'_>>,
+) -> Result<Option<&'static str>, Fail> {
     const CATEGORIES: [&[u8]; 6] = [
         b"all",
         b"collate",
@@ -112,16 +115,16 @@ fn setlocale(locale: Option<&[u8]>, category: Option<&[u8]>) -> Result<Option<&'
         b"time",
     ];
     if let Some(cat) = category
-        && !CATEGORIES.contains(&cat)
+        && !CATEGORIES.contains(&cat.as_bytes())
     {
         return Err(Fail::arg(
             2,
-            OrbitString::concat(&[b"invalid option '", cat, b"'"]),
+            OrbitString::concat(&[b"invalid option '", &cat, b"'"]),
         ));
     }
     // Only the C locale exists: querying or asking for it (by any of its
     // names) gives "C", anything else fails.
-    let ok = matches!(locale, None | Some(b"" | b"C" | b"POSIX"));
+    let ok = matches!(locale.as_deref(), None | Some(b"" | b"C" | b"POSIX"));
     Ok(ok.then_some("C"))
 }
 /// The current time in seconds since the epoch.
@@ -140,10 +143,10 @@ fn year_fits(year: i64) -> bool {
 #[native(name = "os.date")]
 fn date(
     s: &mut Stack<'_>,
-    fmt: Option<Vec<u8>>,
+    fmt: Option<OrbitString>,
     t: Option<i64>,
-) -> Result<Either<Return, Vec<u8>>, Fail> {
-    let fmt = fmt.unwrap_or_else(|| b"%c".to_vec());
+) -> Result<Either<Return, OrbitString>, Fail> {
+    let fmt = fmt.unwrap_or_else(|| "%c".into());
     let t = t.unwrap_or_else(now);
     let (utc, fmt) = match fmt.strip_prefix(b"!") {
         Some(rest) => (true, rest),
@@ -164,7 +167,7 @@ fn date(
         return Ok(Either::Left(Return::values(1)));
     }
     match time::strftime(fmt, &tm) {
-        Ok(out) => Ok(Either::Right(out)),
+        Ok(out) => Ok(Either::Right(out.into())),
         Err(bad) => Err(Fail::arg(
             1,
             OrbitString::concat(&[b"invalid conversion specifier '", &bad, b"'"]),

@@ -241,6 +241,30 @@ eq_bytes! {
     OrbitStr<'_>, OrbitString;
 }
 
+impl<const N: usize> PartialEq<[u8; N]> for OrbitString {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_bytes() == other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for OrbitString {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_bytes() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for OrbitStr<'_> {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.0 == other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for OrbitStr<'_> {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.0 == *other
+    }
+}
+
 // ---- formatting ----
 
 impl fmt::Display for OrbitString {

@@ -19,10 +19,10 @@ use stabby::boxed::Box as SBox;
 use stabby::option::Option as SOption;
 use stabby::slice::Slice;
 
-use crate::OrbitStr;
 use crate::abi::*;
 use crate::isolate::Library;
 use crate::value::ThreadStatus;
+use crate::{OrbitStr, OrbitString};
 
 use super::{
     ArithOp, CompareOp, Continuation, FrameInfo, GcOp, InterruptHandler, Native, Outcome, Resumed,
@@ -290,9 +290,9 @@ pub(crate) fn hook(f: impl Fn() + 'static) -> HookBox {
 
 struct WarnObj<F>(F);
 
-impl<F: FnMut(&[u8], bool) + 'static> WarnHook for WarnObj<F> {
+impl<F: FnMut(OrbitStr<'_>, bool) + 'static> WarnHook for WarnObj<F> {
     extern "C" fn warn<'b>(&mut self, message: Slice<'b, u8>, more: bool) {
-        (self.0)(message.as_slice(), more)
+        (self.0)(str_of(message), more)
     }
 }
 
@@ -335,8 +335,13 @@ fn status_of(code: i32) -> Status {
     Status::from_code(code).unwrap_or(Status::Runtime)
 }
 
-fn bytes(v: SOption<stabby::vec::Vec<u8>>) -> Option<Vec<u8>> {
-    Option::from(v).map(|v: stabby::vec::Vec<u8>| v.to_vec())
+fn bytes(v: SOption<stabby::vec::Vec<u8>>) -> Option<OrbitString> {
+    Option::from(v).map(|v: stabby::vec::Vec<u8>| OrbitString::from(&v[..]))
+}
+
+/// A byte string the boundary lends.
+fn str_of(s: Slice<'_, u8>) -> OrbitStr<'_> {
+    OrbitStr::from(s.as_slice())
 }
 
 fn frame_info(f: FrameInfoAbi) -> FrameInfo {
@@ -344,7 +349,7 @@ fn frame_info(f: FrameInfoAbi) -> FrameInfo {
         name: bytes(f.name),
         namewhat: f.namewhat.as_str(),
         what: f.what.as_str(),
-        source: f.source.to_vec(),
+        source: f.source.to_vec().into(),
         short_src: f.short_src.to_string(),
         currentline: f.currentline,
         linedefined: f.linedefined,
@@ -562,12 +567,12 @@ impl<'s> Stack<'s> {
         self.w.to_boolean(idx)
     }
 
-    pub fn to_str(&mut self, idx: i32) -> StackResult<Option<&[u8]>> {
-        res(self.w.to_str(idx)).map(|s| Option::from(s).map(Slice::as_slice))
+    pub fn to_str(&mut self, idx: i32) -> StackResult<Option<OrbitStr<'_>>> {
+        res(self.w.to_str(idx)).map(|s| Option::from(s).map(str_of))
     }
 
-    pub fn string_at(&self, idx: i32) -> Option<&[u8]> {
-        Option::from(self.w.string_at(idx)).map(Slice::as_slice)
+    pub fn string_at(&self, idx: i32) -> Option<OrbitStr<'_>> {
+        Option::from(self.w.string_at(idx)).map(str_of)
     }
 
     pub fn number_text(&self, idx: i32) -> Option<String> {
@@ -636,7 +641,8 @@ impl<'s> Stack<'s> {
         res(self.w.len(idx))
     }
 
-    pub fn push_numeral(&mut self, text: &[u8]) -> usize {
+    pub fn push_numeral<'t>(&mut self, text: impl Into<OrbitStr<'t>>) -> usize {
+        let text = text.into().as_bytes();
         self.w.push_numeral(text.into())
     }
 
@@ -658,8 +664,9 @@ impl<'s> Stack<'s> {
         self.w.push_number(n)
     }
 
-    pub fn push_bytes(&mut self, bytes: &[u8]) -> &[u8] {
-        self.w.push_bytes(bytes.into()).as_slice()
+    pub fn push_bytes<'b>(&mut self, bytes: impl Into<OrbitStr<'b>>) -> OrbitStr<'_> {
+        let bytes = bytes.into().as_bytes();
+        str_of(self.w.push_bytes(bytes.into()))
     }
 
     pub fn push_light_userdata(&mut self, p: usize) {
@@ -713,7 +720,8 @@ impl<'s> Stack<'s> {
         res(self.w.get_table(idx)).map(type_of)
     }
 
-    pub fn get_field(&mut self, idx: i32, k: &[u8]) -> StackResult<Type> {
+    pub fn get_field<'k>(&mut self, idx: i32, k: impl Into<OrbitStr<'k>>) -> StackResult<Type> {
+        let k = k.into().as_bytes();
         res(self.w.get_field(idx, k.into())).map(type_of)
     }
 
@@ -721,7 +729,8 @@ impl<'s> Stack<'s> {
         res(self.w.get_index(idx, n)).map(type_of)
     }
 
-    pub fn get_global(&mut self, name: &[u8]) -> StackResult<Type> {
+    pub fn get_global<'n>(&mut self, name: impl Into<OrbitStr<'n>>) -> StackResult<Type> {
+        let name = name.into().as_bytes();
         res(self.w.get_global(name.into())).map(type_of)
     }
 
@@ -737,7 +746,8 @@ impl<'s> Stack<'s> {
         res(self.w.raw_get_light(idx, p)).map(type_of)
     }
 
-    pub fn raw_get_field(&mut self, idx: i32, k: &[u8]) -> StackResult<Type> {
+    pub fn raw_get_field<'k>(&mut self, idx: i32, k: impl Into<OrbitStr<'k>>) -> StackResult<Type> {
+        let k = k.into().as_bytes();
         res(self.w.raw_get_field(idx, k.into())).map(type_of)
     }
 
@@ -765,7 +775,8 @@ impl<'s> Stack<'s> {
         res(self.w.set_table(idx))
     }
 
-    pub fn set_field(&mut self, idx: i32, k: &[u8]) -> StackResult<()> {
+    pub fn set_field<'k>(&mut self, idx: i32, k: impl Into<OrbitStr<'k>>) -> StackResult<()> {
+        let k = k.into().as_bytes();
         res(self.w.set_field(idx, k.into()))
     }
 
@@ -773,7 +784,8 @@ impl<'s> Stack<'s> {
         res(self.w.set_index_int(idx, n))
     }
 
-    pub fn set_global(&mut self, name: &[u8]) -> StackResult<()> {
+    pub fn set_global<'n>(&mut self, name: impl Into<OrbitStr<'n>>) -> StackResult<()> {
+        let name = name.into().as_bytes();
         res(self.w.set_global(name.into()))
     }
 
@@ -789,7 +801,8 @@ impl<'s> Stack<'s> {
         res(self.w.raw_set_light(idx, p))
     }
 
-    pub fn raw_set_field(&mut self, idx: i32, k: &[u8]) -> StackResult<()> {
+    pub fn raw_set_field<'k>(&mut self, idx: i32, k: impl Into<OrbitStr<'k>>) -> StackResult<()> {
+        let k = k.into().as_bytes();
         res(self.w.raw_set_field(idx, k.into()))
     }
 
@@ -841,7 +854,14 @@ impl<'s> Stack<'s> {
         Raised(self.w.memory_error())
     }
 
-    pub fn load(&mut self, bytes: &[u8], name: &[u8], mode: &[u8]) -> Status {
+    pub fn load<'n, 'm>(
+        &mut self,
+        bytes: &[u8],
+        name: impl Into<OrbitStr<'n>>,
+        mode: impl Into<OrbitStr<'m>>,
+    ) -> Status {
+        let name = name.into().as_bytes();
+        let mode = mode.into().as_bytes();
         status_of(self.w.load(bytes.into(), name.into(), mode.into()))
     }
 
@@ -890,8 +910,8 @@ impl<'s> Stack<'s> {
         Raised(self.w.type_error(arg, expected.into()))
     }
 
-    pub fn check_string(&mut self, arg: i32) -> StackResult<&[u8]> {
-        res(self.w.check_string(arg)).map(Slice::as_slice)
+    pub fn check_string(&mut self, arg: i32) -> StackResult<OrbitStr<'_>> {
+        res(self.w.check_string(arg)).map(str_of)
     }
 
     pub fn check_integer(&mut self, arg: i32) -> StackResult<i64> {
@@ -906,21 +926,21 @@ impl<'s> Stack<'s> {
         res(self.w.check_number(arg))
     }
 
-    pub fn display(&self, idx: i32) -> Vec<u8> {
-        self.w.display(idx).to_vec()
+    pub fn display(&self, idx: i32) -> OrbitString {
+        OrbitString::from(&self.w.display(idx)[..])
     }
 
     pub fn push_where(&mut self, level: i32) {
         self.w.push_where(level)
     }
 
-    pub fn push_traceback(&mut self, message: Option<&[u8]>, level: i32) {
+    pub fn push_traceback(&mut self, message: Option<OrbitStr<'_>>, level: i32) {
         self.w
-            .push_traceback(message.map(Slice::from).into(), level)
+            .push_traceback(message.map(|m| Slice::from(m.as_bytes())).into(), level)
     }
 
-    pub fn to_display_string(&mut self, idx: i32) -> StackResult<&[u8]> {
-        res(self.w.to_display_string(idx)).map(Slice::as_slice)
+    pub fn to_display_string(&mut self, idx: i32) -> StackResult<OrbitStr<'_>> {
+        res(self.w.to_display_string(idx)).map(str_of)
     }
 
     // ---- the isolate -----------------------------------------------------------------
@@ -941,11 +961,12 @@ impl<'s> Stack<'s> {
         })
     }
 
-    pub fn warn(&mut self, msg: &[u8], more: bool) {
+    pub fn warn<'m>(&mut self, msg: impl Into<OrbitStr<'m>>, more: bool) {
+        let msg = msg.into().as_bytes();
         self.w.warn(msg.into(), more)
     }
 
-    pub fn set_warn_hook(&mut self, hook: impl FnMut(&[u8], bool) + 'static) {
+    pub fn set_warn_hook(&mut self, hook: impl FnMut(OrbitStr<'_>, bool) + 'static) {
         self.w.set_warn_hook(SBox::new(WarnObj(hook)).into())
     }
 
@@ -1103,23 +1124,23 @@ impl<'s> Stack<'s> {
         self.w.push_level_function(level)
     }
 
-    pub fn get_local(&mut self, level: usize, n: i32) -> Option<Vec<u8>> {
+    pub fn get_local(&mut self, level: usize, n: i32) -> Option<OrbitString> {
         bytes(self.w.get_local(level, n))
     }
 
-    pub fn param_name(&mut self, n: i32) -> Option<Vec<u8>> {
+    pub fn param_name(&mut self, n: i32) -> Option<OrbitString> {
         bytes(self.w.param_name(n))
     }
 
-    pub fn set_local(&mut self, level: usize, n: i32) -> StackResult<Option<Vec<u8>>> {
+    pub fn set_local(&mut self, level: usize, n: i32) -> StackResult<Option<OrbitString>> {
         res(self.w.set_local(level, n)).map(bytes)
     }
 
-    pub fn get_upvalue(&mut self, func: i32, n: i32) -> Option<Vec<u8>> {
+    pub fn get_upvalue(&mut self, func: i32, n: i32) -> Option<OrbitString> {
         bytes(self.w.get_upvalue(func, n))
     }
 
-    pub fn set_upvalue(&mut self, func: i32, n: i32) -> StackResult<Option<Vec<u8>>> {
+    pub fn set_upvalue(&mut self, func: i32, n: i32) -> StackResult<Option<OrbitString>> {
         res(self.w.set_upvalue(func, n)).map(bytes)
     }
 

@@ -128,7 +128,7 @@ fn mark_array(s: &mut Stack<'_>, t: Option<TableArg>, n: Option<i64>) -> StackRe
             s.set_top(1)?;
             if s.get_metatable(1) {
                 s.raw_get_field(-1, b"__jsontype")?;
-                if s.string_at(-1) != Some(b"array") {
+                if s.string_at(-1).as_deref() != Some(b"array") {
                     return Err(s.arg_error(
                         1,
                         "table already has a metatable (set its __jsontype field instead)",
@@ -155,7 +155,7 @@ fn mark_length(s: &mut Stack<'_>, n: i64) -> StackResult<()> {
 /// `json.number(numeral)`: a number written exactly as `numeral`, for values
 /// a Lua number can't hold (20-digit IDs, decimal amounts).
 #[native(name = "json.number")]
-fn number(s: &mut Stack<'_>, text: Vec<u8>) -> StackResult<Return> {
+fn number(s: &mut Stack<'_>, text: OrbitString) -> StackResult<Return> {
     if !is_numeral(&text) {
         return Err(s.arg_error(1, "not a JSON number"));
     }
@@ -195,7 +195,7 @@ fn cast(s: &mut Stack<'_>, which: i64) -> StackResult<Return> {
         return Ok(Return::values(1));
     }
     let message = s.string_at(-1).unwrap_or_default();
-    let message = OrbitString::from(message.strip_prefix(b"std.json:1: ").unwrap_or(message));
+    let message = OrbitString::from(message.strip_prefix(b"std.json:1: ").unwrap_or(&message));
     Err(s.arg_error(1, &message))
 }
 
@@ -292,7 +292,7 @@ fn mark(s: &mut Stack<'_>, t: Option<TableArg>, meta: i32) -> StackResult<Return
 // ---- encoding -------------------------------------------------------------------------------
 
 #[native(name = "json.encode")]
-fn encode(s: &mut Stack<'_>, _: Any, options: Option<TableArg>) -> StackResult<Vec<u8>> {
+fn encode(s: &mut Stack<'_>, _: Any, options: Option<TableArg>) -> StackResult<OrbitString> {
     let mut e = Encoder {
         out: Vec::new(),
         pretty: false,
@@ -307,7 +307,7 @@ fn encode(s: &mut Stack<'_>, _: Any, options: Option<TableArg>) -> StackResult<V
     }
     s.set_top(1)?;
     match e.value(s, 1) {
-        Ok(()) => Ok(e.out),
+        Ok(()) => Ok(e.out.into()),
         Err(Fail::Raised(r)) => Err(r),
         Err(Fail::Bad { message, path }) => {
             let mut at = String::new();
@@ -397,7 +397,7 @@ impl Encoder {
             }
             Type::String => {
                 let bytes = s.string_at(idx).expect("a string");
-                write_string(&mut self.out, bytes)?;
+                write_string(&mut self.out, &bytes)?;
             }
             Type::Table => {
                 if !self.hook(s, idx)? {
@@ -471,7 +471,7 @@ impl Encoder {
             Shape::Number => {
                 s.raw_get_index(t, 1)?;
                 match s.string_at(-1) {
-                    Some(n) if is_numeral(n) => self.out.extend_from_slice(n),
+                    Some(n) if is_numeral(&n) => self.out.extend_from_slice(&n),
                     _ => return Err(bad("cannot encode a json.number that holds no numeral")),
                 }
                 s.set_top(-2)?;
@@ -644,7 +644,7 @@ fn shape(s: &mut Stack<'_>, t: i32) -> StackResult<Shape> {
         return Ok(Shape::Any);
     }
     s.raw_get_field(-1, b"__jsontype")?;
-    let shape = match s.string_at(-1) {
+    let shape = match s.string_at(-1).as_deref() {
         Some(b"object") => Shape::Object,
         Some(b"array") => {
             s.raw_get_field(-2, b"__jsonlength")?;
@@ -665,7 +665,7 @@ fn key_text(s: &mut Stack<'_>, k: i32) -> Result<String, Fail> {
     match s.type_at(k) {
         Type::String => {
             let bytes = s.string_at(k).expect("a string");
-            match std::str::from_utf8(bytes) {
+            match bytes.to_str() {
                 Ok(text) => Ok(text.to_owned()),
                 Err(_) => Err(bad("cannot encode a key that isn't valid UTF-8")),
             }
@@ -725,7 +725,7 @@ fn write_string(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Fail> {
 // ---- decoding -------------------------------------------------------------------------------
 
 #[native(name = "json.decode")]
-fn decode(s: &mut Stack<'_>, text: Vec<u8>, options: Option<TableArg>) -> StackResult<Return> {
+fn decode(s: &mut Stack<'_>, text: OrbitString, options: Option<TableArg>) -> StackResult<Return> {
     let keep_null = match options {
         None => true,
         Some(TableArg(o)) => {
