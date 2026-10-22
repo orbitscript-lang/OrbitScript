@@ -7,7 +7,7 @@ This folder is self-contained: its own `package.json`, no build coupling to Carg
 ## What it does
 
 - **Highlighting** for OrbitScript from a TextMate grammar, refined by the server's semantic tokens. Lua keeps VS Code's own grammar.
-- **The language server** (`orbit-lsp`, see [docs/design/language-server.md](../../docs/design/language-server.md)) for `.orb` files. It gives errors as you type, outline, go to definition, references, rename, hover, completion, signature help, inlay hints and workspace symbols. With `orbit.server.lua` on, Lua files get syntax errors from it too.
+- **The language server** (`orbit-lsp`, see [docs/design/language-server.md](../../docs/design/language-server.md)) for `.orb` files. It gives errors as you type, outline, go to definition, references, rename, hover, completion, signature help, inlay hints, workspace symbols and formatting (`orbit-fmt`'s style, see [docs/design/formatter.md](../../docs/design/formatter.md)). OrbitScript files are formatted on save; set `editor.formatOnSave` to `false` under `[orbitscript]` to turn that off. With `orbit.server.lua` on, Lua files get syntax errors from it too, but they aren't formatted.
 - **Debugging** with the `orbit` debug type:
   - `launch` runs a script through `orbit --debug-server`.
   - `attach` connects to a running program through `orbit --debug-attach <pid>`.

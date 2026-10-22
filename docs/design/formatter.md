@@ -4,7 +4,7 @@
 
 ## Summary
 
-`orbit-fmt` gives OrbitScript one canonical layout, close to `rustfmt` with its default options. It is a library, which the language server will use for `textDocument/formatting` and `rangeFormatting`, and a command:
+`orbit-fmt` gives OrbitScript one canonical layout, close to `rustfmt` with its default options. It is a library, which the language server uses for `textDocument/formatting` and `rangeFormatting` (the VS Code extension formats on save), and a command:
 
 ```sh
 orbit-fmt FILE|DIR...          # formats .orb and .orbi files in place

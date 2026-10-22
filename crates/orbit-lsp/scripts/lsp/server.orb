@@ -30,6 +30,8 @@ let REQUESTS: #{[string]: Handler} = #{
     ["textDocument/completion"]: features::completion,
     ["textDocument/signatureHelp"]: features::signature_help,
     ["textDocument/inlayHint"]: features::inlay_hint,
+    ["textDocument/formatting"]: features::formatting,
+    ["textDocument/rangeFormatting"]: features::range_formatting,
     ["workspace/symbol"]: features::workspace_symbol,
 };
 
@@ -85,6 +87,8 @@ impl Server {
                 completionProvider: #{ triggerCharacters: [".", ":"] },
                 signatureHelpProvider: #{ triggerCharacters: ["(", ","] },
                 inlayHintProvider: true,
+                documentFormattingProvider: true,
+                documentRangeFormattingProvider: true,
                 workspaceSymbolProvider: true,
             },
             serverInfo: #{ name: "orbit-lsp", version: analysis::version },
