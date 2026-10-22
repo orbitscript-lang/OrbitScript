@@ -45,6 +45,46 @@ enum ConstKey {
     Str(Box<[u8]>),
 }
 
+/// The function's constant table, each value in it once.
+#[derive(Default)]
+struct ConstPool {
+    list: Vec<Constant>,
+    index: HashMap<ConstKey, u32>,
+}
+
+impl ConstPool {
+    /// `c`'s index, adding it if it is new; `None` when the table is full.
+    fn index_of(&mut self, c: Constant) -> Option<u32> {
+        let key = match &c {
+            Constant::Int(i) => ConstKey::Int(*i),
+            Constant::Float(x) => ConstKey::Float(x.to_bits()),
+            Constant::Str(s) => ConstKey::Str(s.clone()),
+        };
+        if let Some(&k) = self.index.get(&key) {
+            return Some(k);
+        }
+        if self.list.len() >= MAX_CONSTS {
+            return None;
+        }
+        let k = self.list.len() as u32;
+        self.list.push(c);
+        self.index.insert(key, k);
+        Some(k)
+    }
+}
+
+/// What the compiler tracks for one HIR `goto` label.
+#[derive(Default, Clone)]
+struct GotoTarget {
+    /// Its jump target, made on first use.
+    label: Option<Label>,
+    /// Once it is placed: the to-be-closed locals open at it.
+    open_tbc: Option<Vec<LocalId>>,
+    /// Until it is placed: the `Close` placeholders of the gotos aimed at it, with the
+    /// to-be-closed locals open at each goto.
+    pending_closes: Vec<GotoClose>,
+}
+
 /// What compiling one function produces.
 pub(crate) struct Compiled {
     pub proto: UnlinkedProto,
@@ -55,64 +95,71 @@ pub(crate) struct Compiled {
 }
 
 pub(crate) struct FuncState<'a> {
+    // What is being compiled.
     pub chunk: &'a Chunk,
     pub id: FuncId,
     pub f: &'a Function,
     /// `<const>` values of every function's locals, for folding captured constants too.
     pub const_locals: &'a [Vec<Option<ConstVal>>],
+    /// The capture that always holds the running closure, if any (see [`self_capture`]).
+    pub self_capture: Option<CaptureId>,
+
+    // The prototype being built.
     code: Vec<Op>,
-    lines: Vec<(u32, u32)>,
-    pub(crate) line: u32,
-    consts: Vec<Constant>,
-    const_map: HashMap<ConstKey, u32>,
+    consts: ConstPool,
+    /// Inline-cache slots handed out so far.
     ncaches: u32,
     pub children: Vec<FuncId>,
     /// Each child's index in `children`.
     child_index: HashMap<FuncId, u16>,
-    pub slots: Vec<Slot>,
-    cell_of: Vec<Option<u8>>,
-    /// A captured local's home: the register its initial value was computed in, which
-    /// stays reserved for it while it is in scope.
-    pub home: Vec<Option<u8>>,
+
+    // Debug info.
+    /// The line instructions emitted from now on belong to.
+    pub(crate) line: u32,
+    /// (first pc, line) for each run of instructions on one line.
+    lines: Vec<(u32, u32)>,
+    /// A `CellClear` whose line is still to be set to the next instruction's.
+    clear_pending: Option<usize>,
+    origins: Vec<OperandOrigin>,
+    debug_locals: Vec<LocalInfo>,
+
+    // Registers.
     /// Next free register.
     pub free: usize,
     /// Registers below this belong to live locals (or loop state); above are temporaries.
     pub active: usize,
+    /// The frame size: the most registers in use at once.
     nregs: usize,
+
+    // Cell slots, for captured locals.
+    /// Next free cell slot.
     free_cell: usize,
-    ncells: usize,
     /// The most cell slots in use at once since the innermost open scope started.
     cell_hw: usize,
-    /// A `CellClear` whose line is still to be set to the next instruction's.
-    clear_pending: Option<usize>,
-    labels: Vec<LabelState>,
-    /// The compiler label for each HIR `goto` label, made on first use.
-    goto_labels: Vec<Option<Label>>,
-    /// Break targets of the enclosing loops, with how many to-be-closed locals were open
-    /// when each loop started.
-    pub loops: Vec<(Label, usize)>,
-    /// The open to-be-closed locals (`<close>` locals and generic-for closing values) and
-    /// their registers, oldest first.
-    pub tbc: Vec<(LocalId, u8)>,
-    /// For each placed HIR label, the to-be-closed locals open at it.
-    label_tbc: Vec<Option<Vec<LocalId>>>,
-    /// For each HIR label not yet placed, the `Close` placeholders of the gotos aimed at it,
-    /// with the to-be-closed locals open at each goto.
-    goto_closes: Vec<Vec<GotoClose>>,
-    origins: Vec<OperandOrigin>,
-    debug_locals: Vec<LocalInfo>,
+    /// The most cell slots in use at once in the whole function.
+    ncells: usize,
+
+    // Locals and scopes, indexed by `LocalId`.
+    pub slots: Vec<Slot>,
+    /// The cell slot each captured local was given.
+    cell_of: Vec<Option<u8>>,
+    /// A captured local's home: the register its initial value was computed in, which
+    /// stays reserved for it while it is in scope.
+    pub home: Vec<Option<u8>>,
     /// Locals declared in the open scopes, with their `debug_locals` index.
     /// Hidden loop state has no `LocalId`.
     scope: Vec<(Option<LocalId>, Option<usize>)>,
-    /// The capture that always holds the running closure, if any (see [`self_capture`]).
-    pub self_capture: Option<CaptureId>,
-}
+    /// The open to-be-closed locals (`<close>` locals and generic-for closing values) and
+    /// their registers, oldest first.
+    pub tbc: Vec<(LocalId, u8)>,
 
-impl ScopeMark {
-    /// How many to-be-closed locals were open when the scope started.
-    pub fn tbc(&self) -> usize {
-        self.tbc
-    }
+    // Control flow.
+    labels: Vec<LabelState>,
+    /// One for each HIR label.
+    goto_targets: Vec<GotoTarget>,
+    /// Break targets of the enclosing loops, with how many to-be-closed locals were open
+    /// when each loop started.
+    pub loops: Vec<(Label, usize)>,
 }
 
 /// A goto's `Close` placeholder (its pc) and the to-be-closed locals open at the goto.
@@ -126,6 +173,13 @@ pub(crate) struct ScopeMark {
     free_cell: usize,
     cell_hw: usize,
     tbc: usize,
+}
+
+impl ScopeMark {
+    /// How many to-be-closed locals were open when the scope started.
+    pub fn tbc(&self) -> usize {
+        self.tbc
+    }
 }
 
 impl<'a> FuncState<'a> {
@@ -143,34 +197,31 @@ impl<'a> FuncState<'a> {
             id,
             f,
             const_locals,
+            self_capture: self_local.and_then(|l| self_capture(chunk, id, l)),
             code: Vec::new(),
-            lines: Vec::new(),
-            line: chunk.source.line_of(f.span.start),
-            consts: Vec::new(),
-            const_map: HashMap::new(),
+            consts: ConstPool::default(),
             ncaches: 0,
             children: Vec::new(),
             child_index: HashMap::new(),
-            slots: vec![Slot::Unset; f.locals.len()],
-            cell_of: vec![None; f.locals.len()],
-            home: vec![None; f.locals.len()],
+            line: chunk.source.line_of(f.span.start),
+            lines: Vec::new(),
+            clear_pending: None,
+            origins: Vec::new(),
+            debug_locals: Vec::new(),
             free: 0,
             active: 0,
             nregs: 0,
             free_cell: 0,
-            ncells: 0,
             cell_hw: 0,
-            clear_pending: None,
-            labels: Vec::new(),
-            goto_labels: vec![None; f.labels.len()],
-            loops: Vec::new(),
-            tbc: Vec::new(),
-            label_tbc: vec![None; f.labels.len()],
-            goto_closes: vec![Vec::new(); f.labels.len()],
-            origins: Vec::new(),
-            debug_locals: Vec::new(),
+            ncells: 0,
+            slots: vec![Slot::Unset; f.locals.len()],
+            cell_of: vec![None; f.locals.len()],
+            home: vec![None; f.locals.len()],
             scope: Vec::new(),
-            self_capture: self_local.and_then(|l| self_capture(chunk, id, l)),
+            tbc: Vec::new(),
+            labels: Vec::new(),
+            goto_targets: vec![GotoTarget::default(); f.labels.len()],
+            loops: Vec::new(),
         }
     }
 
@@ -274,7 +325,7 @@ impl<'a> FuncState<'a> {
             ncells: self.ncells as u8,
             ncaches: self.ncaches.min(u16::MAX as u32) as u16,
             code: self.code,
-            consts: self.consts,
+            consts: self.consts.list,
             children: Vec::new(),
             captures: Vec::new(),
             self_capture: self.self_capture.map(|c| c.index() as u8),
@@ -465,11 +516,11 @@ impl<'a> FuncState<'a> {
 
     /// The jump target for HIR label `l`.
     pub fn goto_label(&mut self, l: orbit_hir::LabelId) -> Label {
-        if let Some(label) = self.goto_labels[l.index()] {
+        if let Some(label) = self.goto_targets[l.index()].label {
             return label;
         }
         let label = self.label();
-        self.goto_labels[l.index()] = Some(label);
+        self.goto_targets[l.index()].label = Some(label);
         label
     }
 
@@ -500,7 +551,7 @@ impl<'a> FuncState<'a> {
         if self.tbc.is_empty() {
             return;
         }
-        match &self.label_tbc[l.index()] {
+        match &self.goto_targets[l.index()].open_tbc {
             Some(at_label) => {
                 let depth = common_prefix(&self.tbc, at_label);
                 self.emit_close(depth);
@@ -508,7 +559,7 @@ impl<'a> FuncState<'a> {
             None => {
                 let pc = self.emit(Op::Close { from: 0 });
                 let open = self.tbc.clone();
-                self.goto_closes[l.index()].push((pc, open));
+                self.goto_targets[l.index()].pending_closes.push((pc, open));
             }
         }
     }
@@ -518,7 +569,8 @@ impl<'a> FuncState<'a> {
         let label = self.goto_label(l);
         self.place(label);
         let at_label: Vec<LocalId> = self.tbc.iter().map(|&(id, _)| id).collect();
-        for (pc, open) in std::mem::take(&mut self.goto_closes[l.index()]) {
+        let pending = std::mem::take(&mut self.goto_targets[l.index()].pending_closes);
+        for (pc, open) in pending {
             let depth = common_prefix(&open, &at_label);
             self.code[pc] = match open.get(depth) {
                 Some(&(_, from)) => Op::Close { from },
@@ -526,7 +578,7 @@ impl<'a> FuncState<'a> {
                 None => Op::Jump { off: 0 },
             };
         }
-        self.label_tbc[l.index()] = Some(at_label);
+        self.goto_targets[l.index()].open_tbc = Some(at_label);
     }
 
     /// A label placed at the current position (a backward jump target).
@@ -600,21 +652,10 @@ impl<'a> FuncState<'a> {
     /// range; [`Self::short_constant`] is for the other instructions.
     #[inline(never)]
     pub fn constant(&mut self, c: Constant) -> Result<u32> {
-        let key = match &c {
-            Constant::Int(i) => ConstKey::Int(*i),
-            Constant::Float(x) => ConstKey::Float(x.to_bits()),
-            Constant::Str(s) => ConstKey::Str(s.clone()),
-        };
-        if let Some(&k) = self.const_map.get(&key) {
-            return Ok(k);
+        match self.consts.index_of(c) {
+            Some(k) => Ok(k),
+            None => Err(self.error("too many constants")),
         }
-        if self.consts.len() >= MAX_CONSTS {
-            return Err(self.error("too many constants"));
-        }
-        let k = self.consts.len() as u32;
-        self.consts.push(c);
-        self.const_map.insert(key, k);
-        Ok(k)
     }
 
     /// Constant `c`'s index if an instruction's `Const` operand can hold
