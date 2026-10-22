@@ -125,7 +125,7 @@ fn getinfo(ctx: &mut NativeCtx<'_>) -> R {
         } else {
             "invalid option".to_string()
         };
-        return Err(ctx.arg_error(a + 1, msg));
+        return Err(ctx.arg_error(a + 1, &msg));
     }
     let func = act.func;
     let t = Value::Table(ctx.new_table(Table::new()));

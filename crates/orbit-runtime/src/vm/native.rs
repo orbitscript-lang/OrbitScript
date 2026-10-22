@@ -3,7 +3,9 @@
 use std::rc::Rc;
 
 use crate::object::number::{self, float_to_int};
-use crate::object::{Cell, Closure, Gc, LuaStr, NativeId, Proto, ProtoCode, Table, Value};
+use crate::object::{
+    Cell, Closure, Gc, LuaStr, NativeId, OrbitStr, OrbitString, Proto, ProtoCode, Table, Value,
+};
 use orbit_bytecode::{FunctionName, Op, Origin};
 
 use crate::vm::interp::Flow;
@@ -657,10 +659,10 @@ impl NativeCtx<'_> {
     }
 
     /// An error with a message, positioned at the caller (like
-    /// `luaL_error`). The message is bytes, so names a script gave keep
-    /// bytes that aren't UTF-8.
-    pub fn error(&mut self, msg: impl AsRef<[u8]>) -> LuaError {
-        let m = self.positioned(msg.as_ref());
+    /// `luaL_error`). The message is a byte string, so names a script gave
+    /// keep bytes that aren't UTF-8.
+    pub fn error<'m>(&mut self, msg: impl Into<OrbitStr<'m>>) -> LuaError {
+        let m = self.positioned(msg.into().as_bytes());
         LuaError::new(m)
     }
 
@@ -776,28 +778,32 @@ impl NativeCtx<'_> {
 
     /// An error with a message, positioned at the caller of the built-in
     /// calling this intrinsic: `luaL_error` from that built-in.
-    pub(crate) fn builtin_error(&mut self, msg: impl AsRef<[u8]>) -> LuaError {
-        self.builtin_error_bytes(msg.as_ref())
+    pub(crate) fn builtin_error<'m>(&mut self, msg: impl Into<OrbitStr<'m>>) -> LuaError {
+        self.builtin_error_str(msg.into())
     }
 
     // One out-of-line body for every message type.
     #[inline(never)]
-    fn builtin_error_bytes(&mut self, msg: &[u8]) -> LuaError {
+    fn builtin_error_str(&mut self, msg: OrbitStr<'_>) -> LuaError {
         let mut text = self.where_(2).into_bytes();
-        text.extend_from_slice(msg);
+        text.extend_from_slice(&msg);
         LuaError::new(self.new_str_owned(text))
     }
 
     /// `bad argument #n to 'name' (msg)` for argument `n` (1-based) of the
     /// built-in calling this intrinsic, named as [`NativeCtx::call_name`]
     /// names a native.
-    pub(crate) fn builtin_arg_error(&mut self, n: usize, msg: impl AsRef<[u8]>) -> LuaError {
-        self.builtin_arg_error_bytes(n, msg.as_ref())
+    pub(crate) fn builtin_arg_error<'m>(
+        &mut self,
+        n: usize,
+        msg: impl Into<OrbitStr<'m>>,
+    ) -> LuaError {
+        self.builtin_arg_error_str(n, msg.into())
     }
 
     // One out-of-line body for every message type.
     #[inline(never)]
-    fn builtin_arg_error_bytes(&mut self, n: usize, msg: &[u8]) -> LuaError {
+    fn builtin_arg_error_str(&mut self, n: usize, msg: OrbitStr<'_>) -> LuaError {
         let frames = &self.vm.rt.stack.frames;
         let named = self.builtin_frame().and_then(|i| {
             let f = frames[i];
@@ -814,7 +820,7 @@ impl NativeCtx<'_> {
         });
         let (name, method) = named.unwrap_or_else(|| (b"?".to_vec(), false));
         let text = bad_argument(&name, method, n, msg);
-        self.builtin_error_bytes(&text)
+        self.builtin_error_str(text.as_orbit_str())
     }
 
     /// `bad argument` for a wrong type: `v` is the argument, `None` when it
@@ -830,17 +836,17 @@ impl NativeCtx<'_> {
             Some(Value::LightUserData(_)) => "light userdata".into(),
             Some(v) => self.vm.rt.metas.type_name(&self.vm.heap, v),
         };
-        self.builtin_arg_error(n, format!("{expected} expected, got {got}"))
+        self.builtin_arg_error(n, &format!("{expected} expected, got {got}"))
     }
 
     /// `bad argument #i to 'name' (msg)`, for 0-based argument `i`.
-    pub fn arg_error(&mut self, i: usize, msg: impl AsRef<[u8]>) -> LuaError {
-        self.arg_error_bytes(i, msg.as_ref())
+    pub fn arg_error<'m>(&mut self, i: usize, msg: impl Into<OrbitStr<'m>>) -> LuaError {
+        self.arg_error_str(i, msg.into())
     }
 
     // One out-of-line body for every message type.
     #[inline(never)]
-    fn arg_error_bytes(&mut self, i: usize, msg: &[u8]) -> LuaError {
+    fn arg_error_str(&mut self, i: usize, msg: OrbitStr<'_>) -> LuaError {
         let (name, method) = self.call_name();
         let text = bad_argument(&name, method, i + 1, msg);
         LuaError::new(self.positioned(&text))
@@ -856,7 +862,7 @@ impl NativeCtx<'_> {
                 v => self.vm.rt.metas.type_name(&self.vm.heap, v),
             }
         };
-        self.arg_error(i, format!("{expected} expected, got {got}"))
+        self.arg_error(i, &format!("{expected} expected, got {got}"))
     }
 
     /// Any value (`value expected` if absent).
@@ -982,7 +988,7 @@ impl NativeCtx<'_> {
                     nargs: n,
                 })
             }
-            Err(Exc::Rt(msg, _)) => Err(self.error(msg)),
+            Err(Exc::Rt(msg, _)) => Err(self.error(&msg)),
             Err(Exc::Plain(msg)) => Err(LuaError::new(self.new_str(msg.as_bytes()))),
             Err(Exc::NoMemory) => Err(self.no_memory()),
             Err(Exc::Lua(e)) => Err(e),
@@ -1081,7 +1087,7 @@ impl NativeCtx<'_> {
                 "attempt to concatenate a {} value",
                 self.vm.rt.metas.type_name(heap, bad)
             );
-            return Err(self.error(msg));
+            return Err(self.error(&msg));
         }
         self.meta_result(Err(Exc::Meta(meta::MetaCall::new(
             h,
@@ -1227,19 +1233,19 @@ impl Vm {
 /// `bad argument #n to 'name' (msg)` for argument `n` (1-based, counting
 /// `self`), or `calling 'name' on bad self (msg)` when a method call's
 /// `self` is the bad one.
-fn bad_argument(name: &[u8], method: bool, n: usize, msg: &[u8]) -> Vec<u8> {
-    let mut text = Vec::with_capacity(name.len() + msg.len() + 32);
+fn bad_argument(name: &[u8], method: bool, n: usize, msg: OrbitStr<'_>) -> OrbitString {
+    let mut text = OrbitString::new();
     if method && n == 1 {
-        text.extend_from_slice(b"calling '");
-        text.extend_from_slice(name);
-        text.extend_from_slice(b"' on bad self (");
+        text.push("calling '");
+        text.push(name);
+        text.push("' on bad self (");
     } else {
         let n = if method { n - 1 } else { n };
-        text.extend_from_slice(format!("bad argument #{n} to '").as_bytes());
-        text.extend_from_slice(name);
-        text.extend_from_slice(b"' (");
+        text.push(format!("bad argument #{n} to '"));
+        text.push(name);
+        text.push("' (");
     }
-    text.extend_from_slice(msg);
-    text.push(b')');
+    text.push(msg);
+    text.push(")");
     text
 }

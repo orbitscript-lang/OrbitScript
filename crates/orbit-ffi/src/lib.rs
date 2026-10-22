@@ -22,6 +22,7 @@ mod sys;
 use std::cell::Cell;
 use std::rc::Rc;
 
+use orbit::OrbitString;
 use orbit::stack::{
     Native, NativeRef, REGISTRY_INDEX, RIDX_GLOBALS, Return, Stack, StackResult, Type,
 };
@@ -272,8 +273,8 @@ fn type_arg(s: &mut Stack<'_>, arg: i32) -> StackResult<Ty> {
     if let Some(t) = Ty::parse(name) {
         return Ok(t);
     }
-    let msg = [b"unknown C type '", name, b"'"].concat();
-    Err(s.arg_error(arg, msg))
+    let msg = OrbitString::concat(&[b"unknown C type '", name, b"'"]);
+    Err(s.arg_error(arg, &msg))
 }
 
 /// Whether argument `arg` is nil or absent.
@@ -297,7 +298,9 @@ fn ffi_open(s: &mut Stack<'_>) -> StackResult<Return> {
         Err(e) => {
             let name = name.as_deref().unwrap_or_default();
             let why = e.to_string();
-            Err(s.error([b"cannot open library '", name, b"': ", why.as_bytes()].concat()))
+            let msg =
+                OrbitString::concat(&[b"cannot open library '", name, b"': ", why.as_bytes()]);
+            Err(s.error(&msg))
         }
     }
 }
@@ -324,19 +327,14 @@ fn ffi_bind(s: &mut Stack<'_>) -> StackResult<Return> {
         Ok(a) => a,
         Err(e) => {
             let why = e.to_string();
-            let msg = [
-                b"cannot find C function '",
-                &name[..],
-                b"': ",
-                why.as_bytes(),
-            ]
-            .concat();
-            return Err(s.error(msg));
+            let msg =
+                OrbitString::concat(&[b"cannot find C function '", &name, b"': ", why.as_bytes()]);
+            return Err(s.error(&msg));
         }
     };
     let index = match s.extension(|st: &mut State| signature(st, ret, &args)) {
         Ok(i) => i,
-        Err(e) => return Err(s.error(e)),
+        Err(e) => return Err(s.error(&e)),
     };
     let data = [addr, index as u64];
     let known = s.extension(|st: &mut State| {

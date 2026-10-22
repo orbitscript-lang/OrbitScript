@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use crate::object::{Gc, LuaStr, Value, number};
+use crate::object::{Gc, LuaStr, OrbitString, Value, number};
 use crate::stdlib::first_result;
 use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn};
 
@@ -132,13 +132,12 @@ fn spec_error(
     before: &str,
     after: &str,
 ) -> LuaError {
-    let msg = [
+    let msg = OrbitString::concat(&[
         before.as_bytes(),
         &ctx.bytes(fmt)[start..end],
         after.as_bytes(),
-    ]
-    .concat();
-    ctx.error(msg)
+    ]);
+    ctx.error(&msg)
 }
 
 /// Format from byte `i` of the format with `arg` of the `nargs` arguments

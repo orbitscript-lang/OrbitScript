@@ -209,7 +209,7 @@ fn argerror(ctx: &mut NativeCtx<'_>) -> R {
     let n = arg_number(ctx, 0);
     let mut msg = Vec::new();
     ctx.display(ctx.arg(1), &mut msg);
-    Err(ctx.builtin_arg_error(n, msg))
+    Err(ctx.builtin_arg_error(n, &msg))
 }
 
 /// `typeerror(n, expected, v)`: `bad argument #n to 'f' (expected
@@ -226,7 +226,7 @@ fn typeerror(ctx: &mut NativeCtx<'_>) -> R {
 fn raise(ctx: &mut NativeCtx<'_>) -> R {
     let mut msg = Vec::new();
     ctx.display(ctx.arg(0), &mut msg);
-    Err(ctx.builtin_error(msg))
+    Err(ctx.builtin_error(&msg))
 }
 
 /// `checktab(t)`: argument 1 is a table, or has `__index` and `__newindex`

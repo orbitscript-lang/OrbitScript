@@ -10,6 +10,7 @@ use crate::error::Error;
 use crate::pin::Pinned;
 use crate::scope::Scope;
 use crate::stack::{Continuation, Native, Outcome, Return, Stack, StackResult, Type};
+use crate::{OrbitStr, OrbitString};
 
 /// Any script value. Handles ([`Str`], [`Table`], ...) live as long as the
 /// scope they came from.
@@ -837,6 +838,13 @@ impl<'s> FromValue<'s> for Vec<u8> {
     }
 }
 
+impl<'s> FromValue<'s> for OrbitString {
+    /// [`Vec<u8>`]'s conversion.
+    fn from_value(v: Value<'s>) -> Result<Self, FromValueError> {
+        Vec::<u8>::from_value(v).map(OrbitString::from)
+    }
+}
+
 impl<'s> FromValue<'s> for String {
     /// [`Vec<u8>`]'s conversion, for UTF-8 text.
     fn from_value(v: Value<'s>) -> Result<Self, FromValueError> {
@@ -938,6 +946,20 @@ impl<'s> IntoValue<'s> for String {
 impl<'s> IntoValue<'s> for &[u8] {
     fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
         s.stack().push_bytes(self);
+        Ok(())
+    }
+}
+
+impl<'s> IntoValue<'s> for OrbitString {
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        s.stack().push_bytes(&self);
+        Ok(())
+    }
+}
+
+impl<'s> IntoValue<'s> for OrbitStr<'_> {
+    fn push_onto(self, s: &'s Scope<'s>) -> Result<(), Error> {
+        s.stack().push_bytes(&self);
         Ok(())
     }
 }

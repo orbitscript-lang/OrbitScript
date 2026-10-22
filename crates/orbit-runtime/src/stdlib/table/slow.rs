@@ -204,7 +204,7 @@ mod concat {
                 P_GOT => {
                     let (i, v) = (int(ctx, I), ctx.arg(RESULT));
                     if !matches!(v, Value::Str(_) | Value::Int(_) | Value::Float(_)) {
-                        return Err(ctx.error(format!(
+                        return Err(ctx.error(&format!(
                             "invalid value ({}) at index {i} in table for 'concat'",
                             v.type_name()
                         )));

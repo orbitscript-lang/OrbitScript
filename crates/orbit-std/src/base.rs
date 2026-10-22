@@ -4,7 +4,7 @@
 use std::io::{BufRead, Read, Write};
 
 use orbit::stack::{Either, Nil, Rest, Return, Stack, StackResult, Status};
-use orbit::{Chunk, Error, Mode, Scope, Table, native};
+use orbit::{Chunk, Error, Mode, OrbitString, Scope, Table, native};
 
 use crate::sys::{os_error_text, os_path};
 
@@ -19,23 +19,29 @@ const BINARY_SIGNATURE: u8 = 0x1b;
 /// line break, so line numbers stay right, and dropping it too when a
 /// binary chunk follows). Returns the bytes and the chunk's source name
 /// (`@path`, or `=stdin`), or the message `loadfile` gives.
-pub fn read_chunk_file(path: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), Vec<u8>> {
+pub fn read_chunk_file(path: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), OrbitString> {
     let (mut bytes, source) = match path {
         None => {
             let mut b = Vec::new();
             std::io::stdin()
                 .read_to_end(&mut b)
-                .map_err(|_| b"cannot read stdin".to_vec())?;
+                .map_err(|_| OrbitString::from("cannot read stdin"))?;
             (b, STDIN.to_vec())
         }
         Some(p) => {
             let mut f = std::fs::File::open(os_path(p)).map_err(|e| {
-                let why = os_error_text(&e);
-                [b"cannot open ", p, b": ", why.as_bytes()].concat()
+                let mut msg = OrbitString::from("cannot open ");
+                msg.push(p);
+                msg.push(": ");
+                msg.push(os_error_text(&e));
+                msg
             })?;
             let mut b = Vec::new();
-            f.read_to_end(&mut b)
-                .map_err(|_| [b"cannot read ", p].concat())?;
+            f.read_to_end(&mut b).map_err(|_| {
+                let mut msg = OrbitString::from("cannot read ");
+                msg.push(p);
+                msg
+            })?;
             let mut source = b"@".to_vec();
             source.extend_from_slice(p);
             (b, source)
@@ -84,7 +90,12 @@ fn print(s: &mut Stack<'_>, args: Rest) -> StackResult<()> {
 /// Load the file `path` names (`None`: standard input) with `mode`
 /// (`load`'s mode string) and the value at `env` as its `_ENV` (0: the
 /// globals): push the function, or give the message.
-fn load_file(s: &mut Stack<'_>, path: Option<&[u8]>, mode: &[u8], env: i32) -> Result<(), Vec<u8>> {
+fn load_file(
+    s: &mut Stack<'_>,
+    path: Option<&[u8]>,
+    mode: &[u8],
+    env: i32,
+) -> Result<(), OrbitString> {
     let (bytes, source) = read_chunk_file(path)?;
     let binary = bytes.first() == Some(&BINARY_SIGNATURE);
     let (want, what) = if binary {
@@ -93,20 +104,18 @@ fn load_file(s: &mut Stack<'_>, path: Option<&[u8]>, mode: &[u8], env: i32) -> R
         (b't', &b"text"[..])
     };
     if !mode.contains(&want) {
-        return Err([
-            b"attempt to load a ",
-            what,
-            b" chunk (mode is '",
-            mode,
-            b"')",
-        ]
-        .concat());
+        let mut msg = OrbitString::from("attempt to load a ");
+        msg.push(what);
+        msg.push(" chunk (mode is '");
+        msg.push(mode);
+        msg.push("')");
+        return Err(msg);
     }
     let chunk = Chunk::new(&bytes).name(&source).mode(Mode::Both);
     match s.load_chunk(&chunk, env) {
         Status::Ok => Ok(()),
         _ => {
-            let msg = s.string_at(-1).unwrap_or_default().to_vec();
+            let msg = OrbitString::from(s.string_at(-1).unwrap_or_default());
             let _ = s.set_top(-2);
             Err(msg)
         }
@@ -118,7 +127,7 @@ fn loadfile(
     s: &mut Stack<'_>,
     path: Option<Vec<u8>>,
     mode: Option<Vec<u8>>,
-) -> Either<Return, (Nil, Vec<u8>)> {
+) -> Either<Return, (Nil, OrbitString)> {
     let mode = mode.unwrap_or_else(|| b"bt".to_vec());
     // An `env` argument, even nil, replaces the globals.
     let env = if s.top() >= 3 { 3 } else { 0 };
@@ -129,7 +138,7 @@ fn loadfile(
 }
 
 #[native]
-fn dofile(s: &mut Stack<'_>, path: Option<Vec<u8>>) -> Result<Return, Vec<u8>> {
+fn dofile(s: &mut Stack<'_>, path: Option<Vec<u8>>) -> Result<Return, OrbitString> {
     load_file(s, path.as_deref(), b"bt", 0)?;
     // lua5.5 lets the chunk yield across `dofile`.
     Ok(Return::tail_call(0))

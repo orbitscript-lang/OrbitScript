@@ -3,6 +3,7 @@
 use std::any::{Any, TypeId};
 use std::ffi::c_void;
 
+use orbit_runtime::object::OrbitStr;
 use orbit_runtime::object::number::{float_to_int, fmt_number, str_to_number};
 use orbit_runtime::object::table as tbl;
 use orbit_runtime::object::value::raw_eq;
@@ -1501,13 +1502,13 @@ impl<'s> Stack<'s> {
 
     /// A runtime error with `message`, positioned at the caller as Lua's
     /// `error` does at level 1.
-    pub fn error(&mut self, message: impl AsRef<[u8]>) -> Raised {
+    pub fn error<'m>(&mut self, message: impl Into<OrbitStr<'m>>) -> Raised {
         Raised(self.ctx.error(message))
     }
 
     /// Lua's argument error for argument `arg` (1-based): `bad argument #1
     /// to 'f' (message)`.
-    pub fn arg_error(&mut self, arg: i32, message: impl AsRef<[u8]>) -> Raised {
+    pub fn arg_error<'m>(&mut self, arg: i32, message: impl Into<OrbitStr<'m>>) -> Raised {
         Raised(self.ctx.arg_error((arg.max(1) - 1) as usize, message))
     }
 

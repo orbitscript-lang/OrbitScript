@@ -27,7 +27,7 @@ use orbit::stack::{
     Any, Native, Raised, Return, Stack, StackResult, Status, TableArg, Type, function,
     upvalue_index,
 };
-use orbit::{Chunk, Language, native};
+use orbit::{Chunk, Language, OrbitString, native};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
 /// How deep values nest, both ways: `serde_json`'s own limit for decoding.
@@ -195,11 +195,8 @@ fn cast(s: &mut Stack<'_>, which: i64) -> StackResult<Return> {
         return Ok(Return::values(1));
     }
     let message = s.string_at(-1).unwrap_or_default();
-    let message = message
-        .strip_prefix(b"std.json:1: ")
-        .unwrap_or(message)
-        .to_vec();
-    Err(s.arg_error(1, message))
+    let message = OrbitString::from(message.strip_prefix(b"std.json:1: ").unwrap_or(message));
+    Err(s.arg_error(1, &message))
 }
 
 #[native(name = "json.int")]
@@ -322,7 +319,7 @@ fn encode(s: &mut Stack<'_>, _: Any, options: Option<TableArg>) -> StackResult<V
             } else {
                 format!("{message} at value{at}")
             };
-            Err(s.error(message))
+            Err(s.error(&message))
         }
     }
 }

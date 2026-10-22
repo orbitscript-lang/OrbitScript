@@ -168,7 +168,7 @@ impl<'a, T: 'static> Taken<'a, T> {
         let taken = call.stack().with_userdata::<T, _>(1, Option::take);
         match taken {
             None => Err(call.type_error(0, class)),
-            Some(None) => Err(call.error(format!(
+            Some(None) => Err(call.error(&format!(
                 "{class} object is already in use by a running method"
             ))),
             Some(Some(value)) => Ok(Taken {

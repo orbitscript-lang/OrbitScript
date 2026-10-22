@@ -3,6 +3,7 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
+use crate::OrbitStr;
 use crate::error::Error;
 use crate::scope::Scope;
 use crate::stack::{Return, Stack, StackResult};
@@ -116,7 +117,7 @@ impl<'s> Call<'s> {
 
     /// A runtime error with `message`, positioned at the caller as Lua's
     /// `error` does at level 1 (`chunk:line: message`).
-    pub fn error(&self, message: impl AsRef<[u8]>) -> Error {
+    pub fn error<'m>(&self, message: impl Into<OrbitStr<'m>>) -> Error {
         let mut stack = self.stack();
         let e = stack.error(message);
         self.error_of(&mut stack, e)
@@ -153,9 +154,9 @@ impl<'s> Call<'s> {
 
     /// Lua's argument error: `bad argument #2 to 'f' (message)`, positioned
     /// at the caller. `i` is 0-based, like [`Call::arg`].
-    pub fn arg_error(&self, i: usize, message: impl AsRef<[u8]>) -> Error {
+    pub fn arg_error<'m>(&self, i: usize, message: impl Into<OrbitStr<'m>>) -> Error {
         let mut stack = self.stack();
-        let e = stack.arg_error(i as i32 + 1, message.as_ref());
+        let e = stack.arg_error(i as i32 + 1, message);
         self.error_of(&mut stack, e)
     }
 

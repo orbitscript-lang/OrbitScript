@@ -55,10 +55,10 @@ impl FormatError {
     fn raise(self, ctx: &mut NativeCtx<'_>) -> LuaError {
         match self {
             FormatError::SizeOutOfLimits(n) => {
-                ctx.error(format!("integral size ({n}) out of limits [1,16]"))
+                ctx.error(&format!("integral size ({n}) out of limits [1,16]"))
             }
             FormatError::InvalidOption(c) => {
-                ctx.error([b"invalid format option '", &[c][..], b"'"].concat())
+                ctx.error(&[b"invalid format option '", &[c][..], b"'"].concat())
             }
             FormatError::MissingSize => ctx.error("missing size for format option 'c'"),
             FormatError::NotPowerOfTwo => {
@@ -241,7 +241,7 @@ fn get_int(data: &[u8], little: bool, signed: bool) -> Result<i64, usize> {
 /// a missing value as `nil` here.
 fn value_error(ctx: &mut NativeCtx<'_>, arg: usize, expected: &str) -> LuaError {
     if arg >= ctx.nargs() {
-        ctx.arg_error(arg, format!("{expected} expected, got nil"))
+        ctx.arg_error(arg, &format!("{expected} expected, got nil"))
     } else {
         ctx.type_error(arg, expected)
     }
@@ -398,9 +398,9 @@ pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
                 match r {
                     Ok(v) => Value::Int(v),
                     Err(size) => {
-                        return Err(
-                            ctx.error(format!("{size}-byte integer does not fit into Lua Integer"))
-                        );
+                        return Err(ctx.error(&format!(
+                            "{size}-byte integer does not fit into Lua Integer"
+                        )));
                     }
                 }
             }
@@ -429,9 +429,9 @@ pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
                 let strlen = match r {
                     Ok(v) => v as u64,
                     Err(size) => {
-                        return Err(
-                            ctx.error(format!("{size}-byte integer does not fit into Lua Integer"))
-                        );
+                        return Err(ctx.error(&format!(
+                            "{size}-byte integer does not fit into Lua Integer"
+                        )));
                     }
                 };
                 let start = pos + item.size;

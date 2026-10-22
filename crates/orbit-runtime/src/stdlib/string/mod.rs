@@ -174,7 +174,7 @@ fn lower(ctx: &mut NativeCtx<'_>) -> R {
 // ---- patterns ------------------------------------------------------------
 
 fn pattern_error(ctx: &mut NativeCtx<'_>, e: PatternError) -> LuaError {
-    ctx.error(e.to_string())
+    ctx.error(&e.to_string())
 }
 
 /// The value of one capture.
@@ -522,7 +522,7 @@ fn replacement_result(
             ctx.set(G_CHANGED, Value::Bool(true));
         }
         _ => {
-            return Err(ctx.error(format!("invalid replacement value (a {})", v.type_name())));
+            return Err(ctx.error(&format!("invalid replacement value (a {})", v.type_name())));
         }
     }
     Ok(())

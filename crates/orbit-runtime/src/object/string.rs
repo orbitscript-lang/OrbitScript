@@ -1,14 +1,12 @@
 //! Lua strings (ADR-5): immutable byte strings in the heap, short ones
-//! interned, plus the `OrbitString` / `OrbitStr` types natives and embedders
-//! use.
+//! interned. The types natives and embedders use are in `orbit_str.rs`.
 
 use std::cell::Cell as StdCell;
-use std::fmt;
 use std::sync::OnceLock;
 
 use orbit_gc::{Gc, Liveness, Marker, Trace};
 
-use crate::object::{LuaHeap, LuaSpace};
+use crate::object::{LuaHeap, LuaSpace, OrbitStr};
 
 /// Strings up to this many bytes are interned, so equal short strings are
 /// the same handle.
@@ -108,7 +106,7 @@ impl LuaStr {
     }
 
     pub fn as_orbit_str(&self) -> OrbitStr<'_> {
-        OrbitStr(self.as_bytes())
+        OrbitStr::from(self.as_bytes())
     }
 }
 
@@ -497,98 +495,6 @@ impl Interner {
     }
 }
 
-/// An owned byte string, for natives and embedders (ADR-5). Converts to and
-/// from `String` and `&str` easily; Lua strings need not be UTF-8.
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OrbitString(Vec<u8>);
-
-impl OrbitString {
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.0
-    }
-
-    pub fn as_orbit_str(&self) -> OrbitStr<'_> {
-        OrbitStr(&self.0)
-    }
-
-    /// The text, if it is UTF-8.
-    pub fn to_str(&self) -> Option<&str> {
-        std::str::from_utf8(&self.0).ok()
-    }
-}
-
-impl From<&str> for OrbitString {
-    fn from(s: &str) -> Self {
-        OrbitString(s.as_bytes().to_vec())
-    }
-}
-
-impl From<String> for OrbitString {
-    fn from(s: String) -> Self {
-        OrbitString(s.into_bytes())
-    }
-}
-
-impl From<Vec<u8>> for OrbitString {
-    fn from(b: Vec<u8>) -> Self {
-        OrbitString(b)
-    }
-}
-
-impl From<&[u8]> for OrbitString {
-    fn from(b: &[u8]) -> Self {
-        OrbitString(b.to_vec())
-    }
-}
-
-impl fmt::Display for OrbitString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.as_orbit_str().fmt(f)
-    }
-}
-
-/// A borrowed byte string (ADR-5), `Copy`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OrbitStr<'a>(pub &'a [u8]);
-
-impl<'a> OrbitStr<'a> {
-    pub fn as_bytes(self) -> &'a [u8] {
-        self.0
-    }
-
-    /// The text, if it is UTF-8.
-    pub fn to_str(self) -> Option<&'a str> {
-        std::str::from_utf8(self.0).ok()
-    }
-
-    pub fn to_orbit_string(self) -> OrbitString {
-        OrbitString(self.0.to_vec())
-    }
-}
-
-impl<'a> From<&'a str> for OrbitStr<'a> {
-    fn from(s: &'a str) -> Self {
-        OrbitStr(s.as_bytes())
-    }
-}
-
-impl<'a> From<&'a [u8]> for OrbitStr<'a> {
-    fn from(b: &'a [u8]) -> Self {
-        OrbitStr(b)
-    }
-}
-
-impl fmt::Display for OrbitStr<'_> {
-    /// Lossy for bytes that aren't UTF-8.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&String::from_utf8_lossy(self.0), f)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,13 +649,5 @@ mod tests {
         // The revived strings die in the next cycle, which prunes them.
         heap.full_collect(&mut R(&mut i, &roots));
         assert_eq!(i.len(), kept + 50);
-    }
-
-    #[test]
-    fn orbit_string_conversions() {
-        let s = OrbitString::from("héllo");
-        assert_eq!(s.to_str(), Some("héllo"));
-        assert_eq!(s.as_orbit_str().to_string(), "héllo");
-        assert_eq!(OrbitStr::from(&b"\xff"[..]).to_str(), None);
     }
 }

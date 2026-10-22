@@ -121,7 +121,7 @@ fn ret_fail(s: &mut Stack<'_>, msg: &[u8], when: &[u8]) -> R {
 
 /// The error for a module file that was found but can't be loaded.
 fn load_error(s: &mut Stack<'_>, name: &[u8], file: &[u8], why: &[u8]) -> orbit::stack::Raised {
-    s.error(orbit_std::load_error(name, file, why))
+    s.error(&orbit_std::load_error(name, file, why))
 }
 
 /// Add the C searchers after the ones there (preload, and `orbit-std`'s

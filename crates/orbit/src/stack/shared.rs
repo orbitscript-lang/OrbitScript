@@ -19,6 +19,7 @@ use stabby::boxed::Box as SBox;
 use stabby::option::Option as SOption;
 use stabby::slice::Slice;
 
+use crate::OrbitStr;
 use crate::abi::*;
 use crate::isolate::Library;
 use crate::value::ThreadStatus;
@@ -877,12 +878,12 @@ impl<'s> Stack<'s> {
         Raised(self.w.error_from_top())
     }
 
-    pub fn error(&mut self, message: impl AsRef<[u8]>) -> Raised {
-        Raised(self.w.error(message.as_ref().into()))
+    pub fn error<'m>(&mut self, message: impl Into<OrbitStr<'m>>) -> Raised {
+        Raised(self.w.error(message.into().as_bytes().into()))
     }
 
-    pub fn arg_error(&mut self, arg: i32, message: impl AsRef<[u8]>) -> Raised {
-        Raised(self.w.arg_error(arg, message.as_ref().into()))
+    pub fn arg_error<'m>(&mut self, arg: i32, message: impl Into<OrbitStr<'m>>) -> Raised {
+        Raised(self.w.arg_error(arg, message.into().as_bytes().into()))
     }
 
     pub fn type_error(&mut self, arg: i32, expected: &str) -> Raised {

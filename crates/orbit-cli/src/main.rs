@@ -485,7 +485,6 @@ impl Runner {
         let (bytes, source) = match read_chunk_file(path.map(str::as_bytes)) {
             Ok(r) => r,
             Err(m) => {
-                let m = String::from_utf8_lossy(&m);
                 self.report(&format!("{}: {m}", self.prog));
                 return false;
             }
