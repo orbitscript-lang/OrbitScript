@@ -20,7 +20,9 @@ use std::rc::Rc;
 
 use crate::object::number::{ArithOp, Number};
 use crate::object::table::{self, IntStore};
-use crate::object::{Closure, Gc, LuaHeap, LuaSpace, LuaStr, ProtoCode, Table, Value};
+use crate::object::{
+    Closure, FieldCache, Gc, LuaHeap, LuaSpace, LuaStr, Payload, ProtoCode, Table, Tag, Value,
+};
 use orbit_bytecode::number::BitOp;
 use orbit_bytecode::{MULTI, Op};
 
@@ -721,29 +723,32 @@ impl Vm {
 
                         Op::GetGlobal { dst, name, ic } => {
                             let env_cell = self.heap.get(closure).captures[0];
-                            let v = match self.heap.get(env_cell).value {
+                            match self.heap.get(env_cell).value {
                                 Value::Table(t) => {
                                     let cache = &cur.caches[ic as usize];
                                     let tab = self.heap.get(t);
-                                    match tab.cached_str(cache.slot.get() as usize, cache.key) {
+                                    match tab
+                                        .cached_str_packed(cache.slot.get() as usize, cache.key)
+                                    {
                                         // A dead entry is a miss when `__index`
                                         // could apply.
-                                        Some(v) if !v.is_nil() || tab.meta.is_none() => v,
+                                        Some((tag, p)) if tag != Tag::Nil || tab.meta.is_none() => {
+                                            Value::write_unpacked(&mut reg!(dst), tag, p)
+                                        }
                                         _ => {
                                             let k = const_str(&cur.consts, name);
-                                            tri!(get_str_miss(
+                                            reg!(dst) = tri!(get_str_miss(
                                                 &self.heap,
                                                 &self.rt.metas,
                                                 t,
                                                 k,
                                                 cache
-                                            ))
+                                            ));
                                         }
                                     }
                                 }
                                 other => throw!(env_error(&self.heap, &self.rt.metas, other)),
-                            };
-                            reg!(dst) = v;
+                            }
                         }
 
                         Op::GetField { dst, obj, key, ic } => {
@@ -752,10 +757,12 @@ impl Vm {
                             };
                             let cache = &cur.caches[ic as usize];
                             let tab = self.heap.get(t);
-                            match tab.cached_str(cache.slot.get() as usize, cache.key) {
+                            match tab.cached_str_packed(cache.slot.get() as usize, cache.key) {
                                 // A dead entry is a miss when `__index` could
                                 // apply.
-                                Some(v) if !v.is_nil() || tab.meta.is_none() => reg!(dst) = v,
+                                Some((tag, p)) if tag != Tag::Nil || tab.meta.is_none() => {
+                                    Value::write_unpacked(&mut reg!(dst), tag, p)
+                                }
                                 _ => {
                                     let k = const_str(&cur.consts, key);
                                     reg!(dst) =
@@ -770,8 +777,8 @@ impl Vm {
                             let cache = &cur.caches[ic as usize];
                             let slot = cache.slot.get() as usize;
                             let tab = self.heap.get(t);
-                            if matches!(tab.cached_str(slot, cache.key),
-                            Some(v) if tab.meta.is_none() || !v.is_nil())
+                            if matches!(tab.cached_str_packed(slot, cache.key),
+                            Some((tag, _)) if tab.meta.is_none() || tag != Tag::Nil)
                             {
                                 // The key is there: overwrite its value. No
                                 // capacity changes, so no byte accounting.
@@ -877,8 +884,7 @@ impl Vm {
                             };
                             reg!(dst + 1) = Value::Table(t);
                             match method_lookup(&self.heap, &self.rt.metas, &cur, ic, k, t) {
-                                Some(Value::Closure(c)) => reg!(dst) = Value::Closure(c),
-                                Some(m) => reg!(dst) = m,
+                                Some((tag, p)) => Value::write_unpacked(&mut reg!(dst), tag, p),
                                 None => get_slow!(Value::Table(t), Value::Str(k)),
                             }
                         }
@@ -1427,8 +1433,8 @@ impl Vm {
                         let cache = &cur.caches[ic as usize];
                         let slot = cache.slot.get() as usize;
                         let tab = self.heap.get(t);
-                        if matches!(tab.cached_str(slot, cache.key),
-                            Some(v) if tab.meta.is_none() || !v.is_nil())
+                        if matches!(tab.cached_str_packed(slot, cache.key),
+                            Some((tag, _)) if tab.meta.is_none() || tag != Tag::Nil)
                         {
                             barrier_for(&mut self.heap, t, v);
                             self.heap.get_mut(t).set_slot(slot, v);
@@ -1691,37 +1697,48 @@ fn method_lookup(
     ic: u16,
     k: Gc<LuaStr>,
     t: Gc<Table>,
-) -> Option<Value> {
+) -> Option<(Tag, Payload)> {
     let tab = heap.get(t);
     let cm = &cur.caches[ic as usize];
     // A method in the object itself (a module or a singleton object) hits
     // the cache; a class instance lacks the key, so the probe proves that.
-    let m = match tab.cached_str(cm.slot.get() as usize, cm.key) {
-        Some(v) => v,
+    let m = match tab.cached_str_packed(cm.slot.get() as usize, cm.key) {
+        Some(m) => m,
         None => match tab.find_str_key(heap, &cm.key_for(heap, k)) {
             Some(slot) => {
                 cm.fill(slot);
-                tab.slot_value(slot)
+                tab.slot_packed(slot)
             }
-            None => Value::Nil,
+            None => (Tag::Nil, Payload::from_bits(0)),
         },
     };
-    if !m.is_nil() {
+    if m.0 != Tag::Nil {
         return Some(m);
     }
     let mt = tab.meta?;
     // The usual class layout: the metatable's `__index` is a table holding
     // the method.
     let ci = &cur.caches[ic as usize + 1];
-    if let Some(Value::Table(c)) = heap.get(mt).cached_str(ci.slot.get() as usize, ci.key)
-        && let Some(v) = heap
+    if let Some(c) = cached_table(heap.get(mt), ci)
+        && let Some(m) = heap
             .get(c)
-            .cached_str(cm.slot.get() as usize, cm.key)
-            .filter(|v| !v.is_nil())
+            .cached_str_packed(cm.slot.get() as usize, cm.key)
+            .filter(|m| m.0 != Tag::Nil)
     {
-        return Some(v);
+        return Some(m);
     }
     method_lookup_up(heap, metas, cur, ic, k, t, mt)
+}
+
+/// The table in `cache`'s slot of `tab`, when the cache hits and the value
+/// is a table. Read packed: a merged `Value` would leave the handle's upper
+/// payload bytes to the compiler (see [`Table::cached_str_packed`]).
+#[inline(always)]
+fn cached_table(tab: &Table, cache: &FieldCache) -> Option<Gc<Table>> {
+    match tab.cached_str_packed(cache.slot.get() as usize, cache.key) {
+        Some((Tag::Table, p)) => Some(Gc::from_bits(p.bits())),
+        _ => None,
+    }
 }
 
 /// [`method_lookup`] past the first level: the class lacks the method and
@@ -1736,26 +1753,28 @@ fn method_lookup_up(
     k: Gc<LuaStr>,
     t: Gc<Table>,
     mt: Gc<Table>,
-) -> Option<Value> {
+) -> Option<(Tag, Payload)> {
     let cm = &cur.caches[ic as usize];
     let ci = &cur.caches[ic as usize + 1];
     let up = cur
         .caches
         .get(ic as usize + 2)
         .zip(cur.caches.get(ic as usize + 3));
-    if let Some(Value::Table(c)) = heap.get(mt).cached_str(ci.slot.get() as usize, ci.key)
+    if let Some(c) = cached_table(heap.get(mt), ci)
         && let ctab = heap.get(c)
         && let (Some((ci2, cm2)), Some(mt2)) = (up, ctab.meta)
         && ctab
             .find_str_key(heap, &cm.key_for(heap, k))
             .is_none_or(|s| ctab.slot_value(s).is_nil())
-        && let Some(Value::Table(p)) = heap.get(mt2).cached_str(ci2.slot.get() as usize, ci2.key)
-        && let Some(v) = heap
+        && let Some(p) = cached_table(heap.get(mt2), ci2)
+        && let Some(m) = heap
             .get(p)
-            .cached_str(cm2.slot.get() as usize, cm2.key)
-            .filter(|v| !v.is_nil())
+            .cached_str_packed(cm2.slot.get() as usize, cm2.key)
+            .filter(|m| m.0 != Tag::Nil)
     {
-        return Some(v);
+        return Some(m);
     }
-    method_miss(heap, metas, Value::Table(t), mt, k, cm, ci, up).ok()
+    method_miss(heap, metas, Value::Table(t), mt, k, cm, ci, up)
+        .ok()
+        .map(Value::pack)
 }
