@@ -103,5 +103,6 @@ The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass
 | Document | Covers |
 |---|---|
 | [language-server.md](language-server.md) | `orbit-lsp`, the language server (ADR-12 D2, D9): the OrbitScript protocol layer over the checker, what it answers, positions, modules, editor setup |
+| [formatter.md](formatter.md) | `orbit-fmt`, OrbitScript's formatter (ADR-12 L3): the style (Tym's decisions F1 to F12), how comments are kept, and how it checks its own output |
 | [orbit-check/proposal.md](orbit-check/proposal.md), [orbit-check/api.md](orbit-check/api.md) | `orbit-check`, the optional type checker: what it checks, the type language, Tym's decisions T1 to T14, and the library API the language server uses |
 | [ffi.md](ffi.md) | The `ffi` library (`orbit-ffi`, ADR-9): binding C functions in shared libraries from Lua and OrbitScript, its types, buffers and raw memory, how calls are made, limits and costs |

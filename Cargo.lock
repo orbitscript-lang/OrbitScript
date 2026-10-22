@@ -189,6 +189,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit-fmt"
+version = "0.0.0"
+dependencies = [
+ "orbit-hir",
+ "orbit-orb-syntax",
+]
+
+[[package]]
 name = "orbit-gc"
 version = "0.0.0"
 dependencies = [

@@ -39,7 +39,7 @@ cargo build --release -p orbit-lib
 cargo testkit liblua --c-libs target/reference-lua/libs --expect tests/lua-5.5/expected-liblua.txt
 ```
 
-`./build.sh` builds the shared layout of ADR-10 into `target/package/out`: `liborbit.so.0` with Lua's library names as aliases, `orbit`, `orbitc` and the language server `orbit-lsp` built with `orbit`'s `shared` feature, and the C headers. Its builds use their own target directory, so the static `target/release/orbit` is left alone; `./build.sh --static` builds the static programs the same way, profile-guided (see below). Run the suite through the packaged `orbit` the same way as the static one (`--interp target/package/out/bin/orbit`), and `cargo testkit liblua --lib target/package/out/lib/liblua5.5.so.0`.
+`./build.sh` builds the shared layout of ADR-10 into `target/package/out`: `liborbit.so.0` with Lua's library names as aliases, `orbit`, `orbitc` and the language server `orbit-lsp` built with `orbit`'s `shared` feature, the formatter `orbit-fmt`, and the C headers. Its builds use their own target directory, so the static `target/release/orbit` is left alone; `./build.sh --static` builds the static programs the same way, profile-guided (see below). Run the suite through the packaged `orbit` the same way as the static one (`--interp target/package/out/bin/orbit`), and `cargo testkit liblua --lib target/package/out/lib/liblua5.5.so.0`.
 
 `cargo test -p orbit-lib` also builds a small C host (`crates/orbit-lib/tests/chost/host.c`) against the library and checks states, libraries, panics, warnings, strings and the collector from C.
 
@@ -59,7 +59,7 @@ A mismatch prints the call, both outputs and the `--seed` that reproduces the ba
 
 ```sh
 ./build.sh                       # shared layout for this machine, into target/package/out
-./build.sh --static              # the static orbit, orbitc and orbit-lsp
+./build.sh --static              # the static orbit, orbitc, orbit-lsp and orbit-fmt
 ./build.sh --target aarch64-unknown-linux-gnu --pgo device.profdata   # cross-compile with a profile from the device
 ./build.sh --no-pgo              # no profile
 ```
