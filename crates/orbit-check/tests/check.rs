@@ -602,3 +602,75 @@ fn strict_messages() {
         ]
     );
 }
+
+/// The language server keeps one workspace for a whole editing session. Each edit that shifts a
+/// module's symbols makes new types for everything naming them; the store must not keep them all.
+#[test]
+fn long_editing_sessions_keep_the_type_store_bounded() {
+    let mut body = String::new();
+    for i in 0..40 {
+        body += &format!(
+            "struct S{i}<T> {{ a: int, b: T }}\n\
+             impl<T> S{i}<T> {{\n    fn get(self) -> T {{ self.b }}\n    \
+             fn pair(self, o: S{i}<int>) -> (int, T) {{ (o.a, self.b) }}\n}}\n\
+             let v{i} = S{i} {{ a: 1, b: \"x\" }};\nlet w{i}: int = v{i}.get();\n"
+        );
+    }
+    let geo = "pub struct Vec2 { x: float, y: float }\n\
+               impl Vec2 { pub fn new(x: float, y: float) -> Vec2 { Vec2 { x, y } } }\n";
+    let main = |lines: usize| {
+        let top: String = (0..lines).map(|i| format!("let n{i} = {i};\n")).collect();
+        format!("use geo::{{Vec2}};\n{top}let p = Vec2::new(1.0, 2.0);\n{body}")
+    };
+    let config = || Config {
+        root: PathBuf::from("/w"),
+        ..Config::default()
+    };
+    let mut ws = Workspace::new(config(), Box::new(Memory(Vec::new())));
+    ws.set_source(Path::new("/w/geo.orb"), geo.as_bytes().to_vec());
+    let mut most = 0;
+    let mut grew_past_first_edit = false;
+    let mut first = None;
+    for lines in 0..250 {
+        let f = ws.set_source(Path::new("/w/main.orb"), main(lines).into_bytes());
+        ws.check_all();
+        ws.type_at(f, 30);
+        let n = ws.type_count();
+        most = most.max(n);
+        let first = *first.get_or_insert(n);
+        grew_past_first_edit |= n > 4 * first;
+    }
+    // Without rebuilding, these edits leave about 30000 types.
+    assert!(
+        grew_past_first_edit,
+        "the edits should make garbage to drop"
+    );
+    assert!(most < 20_000, "the type store reached {most} types");
+    // What the workspace answers after rebuilds matches a fresh one.
+    let text = main(249);
+    let mut fresh = Workspace::new(config(), Box::new(Memory(Vec::new())));
+    fresh.set_source(Path::new("/w/geo.orb"), geo.as_bytes().to_vec());
+    let answers = |ws: &mut Workspace| {
+        let f = ws.set_source(Path::new("/w/main.orb"), text.clone().into_bytes());
+        let diags: Vec<String> = ws
+            .diagnostics(f)
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        let types: Vec<Option<String>> = ["p = ", "v39 = ", "w12"]
+            .iter()
+            .map(|n| ws.type_at(f, text.find(n).unwrap() as u32))
+            .collect();
+        let hints = ws
+            .inlay_hints(
+                f,
+                orbit_check::Span {
+                    start: 0,
+                    end: text.len() as u32,
+                },
+            )
+            .len();
+        (diags, types, hints)
+    };
+    assert_eq!(answers(&mut ws), answers(&mut fresh));
+}
