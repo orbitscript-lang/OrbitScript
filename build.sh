@@ -154,6 +154,18 @@ built_dir() {
     esac
 }
 
+# Windows: `orbit`'s shared backend links with `orbit_lib.lib`, while Cargo
+# names a cdylib's import library `orbit_lib.dll.lib`. Copies it, next to
+# it, under the name the linker looks for.
+import_lib() {
+    case "$triple" in
+        *-windows-msvc)
+            lib_dir=$(built_dir)
+            cp "$lib_dir/orbit_lib.dll.lib" "$lib_dir/orbit_lib.lib"
+            ;;
+    esac
+}
+
 # The function or variable each LUA_API, LUALIB_API and LUAMOD_API
 # declaration in our headers names, one per line.
 headers="$root/crates/orbit-capi/csrc/include"
@@ -292,6 +304,7 @@ if [ "$train" = yes ]; then
     workload "$target/pgo-train/static/bin/orbit"
     echo "== training liborbit"
     instrument "$lib_args" --keep-profiles
+    import_lib
     instrument "$shared_args" --keep-profiles
     lay_out shared "$target/pgo-train/shared"
     workload "$target/pgo-train/shared/bin/orbit"
@@ -342,6 +355,7 @@ if [ "$layout" = static ]; then
 else
     # shellcheck disable=SC2086 # plain words
     $run $lib_args
+    import_lib
     # shellcheck disable=SC2086 # plain words
     $run $shared_args
     # shellcheck disable=SC2086 # plain words
