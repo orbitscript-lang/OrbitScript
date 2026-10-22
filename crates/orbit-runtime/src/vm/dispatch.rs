@@ -30,7 +30,7 @@ use crate::vm::cold::{
 use crate::vm::interp::{
     Flow, Ran, Shape, WINDOW, const_str, enter_lua_frame_fast, enter_lua_frame_general, grow_window,
 };
-use crate::vm::meta::Metas;
+use crate::vm::meta::{MetaField, Metas};
 use crate::vm::native::{NativeCtx, NativeReturn};
 use crate::vm::ops::{self, Arith, Exc};
 use crate::vm::{FrameKind, LuaError, Vm};
@@ -358,14 +358,31 @@ impl Vm {
                     }
                 }};
             }
+            // `$op` is `Lt` or `Le`. Other operand kinds go to `ops`, which
+            // answers `None` when a metamethod (or an error) decides; that
+            // request is built out of line.
+            macro_rules! compare_slow {
+                ($op:ident, $x:expr, $y:expr) => {
+                    match ops::compare_raw(&self.heap, MetaField::$op, $x, $y) {
+                        Some(c) => c,
+                        None => throw!(ops::compare_meta(
+                            &self.heap,
+                            &self.rt.metas,
+                            MetaField::$op,
+                            $x,
+                            $y
+                        )),
+                    }
+                };
+            }
             macro_rules! compare_jump {
-                ($a:expr, $b:expr, $off:expr, $want:expr, $slow:path, |$i:ident, $j:ident| $cmp:expr) => {{
+                ($a:expr, $b:expr, $off:expr, $want:expr, $op:ident, |$i:ident, $j:ident| $cmp:expr) => {{
                     let c = match (&reg!($a), &reg!($b)) {
                         (&Value::Int($i), &Value::Int($j)) => $cmp,
                         (&Value::Float($i), &Value::Float($j)) => $cmp,
                         _ => {
                             let (x, y) = (reg!($a), reg!($b));
-                            tri!($slow(&self.heap, &self.rt.metas, x, y))
+                            compare_slow!($op, x, y)
                         }
                     };
                     if c == $want {
@@ -385,16 +402,20 @@ impl Vm {
                         (&Value::Nil, _) | (_, &Value::Nil) => false,
                         _ => {
                             let (x, y) = (reg!($a), reg!($b));
-                            tri!(values_equal(&self.heap, &self.rt.metas, x, y))
+                            match ops::equal_raw(&self.heap, x, y) {
+                                Some(c) => c,
+                                None => tri!(ops::equal_meta(&self.heap, &self.rt.metas, x, y)),
+                            }
                         }
                     }
                 };
             }
             macro_rules! compare_int_jump {
-                // `$slow` names an `ops` comparison and its operand order,
-                // with `x` the register and `k` the immediate as values.
+                // `$op($s1, $s2)` names the comparison (`Lt` or `Le`) and its
+                // operand order, with `x` the register and `k` the immediate
+                // as values.
                 ($a:expr, $imm:expr, $want:expr, $off:expr, |$x:ident, $k:ident| $cmp:expr,
-                 $slow:ident($s1:ident, $s2:ident)) => {{
+                 $op:ident($s1:ident, $s2:ident)) => {{
                     let c = match reg!($a) {
                         Value::Int($x) => {
                             let $k = $imm as i64;
@@ -406,7 +427,7 @@ impl Vm {
                         }
                         v => {
                             let ($x, $k) = (v, Value::Int($imm as i64));
-                            tri!(ops::$slow(&self.heap, &self.rt.metas, $s1, $s2))
+                            compare_slow!($op, $s1, $s2)
                         }
                     };
                     if c == $want {
@@ -964,16 +985,16 @@ impl Vm {
                             }
                         }
                         Op::JumpLt { a, b, off } => {
-                            compare_jump!(a, b, off, true, ops::less_than, |x, y| x < y)
+                            compare_jump!(a, b, off, true, Lt, |x, y| x < y)
                         }
                         Op::JumpNotLt { a, b, off } => {
-                            compare_jump!(a, b, off, false, ops::less_than, |x, y| x < y)
+                            compare_jump!(a, b, off, false, Lt, |x, y| x < y)
                         }
                         Op::JumpLe { a, b, off } => {
-                            compare_jump!(a, b, off, true, ops::less_equal, |x, y| x <= y)
+                            compare_jump!(a, b, off, true, Le, |x, y| x <= y)
                         }
                         Op::JumpNotLe { a, b, off } => {
-                            compare_jump!(a, b, off, false, ops::less_equal, |x, y| x <= y)
+                            compare_jump!(a, b, off, false, Le, |x, y| x <= y)
                         }
                         Op::JumpEq { a, b, off } => {
                             if eq_parts!(a, b) {
@@ -996,16 +1017,16 @@ impl Vm {
                             }
                         }
                         Op::JumpLtInt { a, imm, want, off } => {
-                            compare_int_jump!(a, imm, want, off, |x, k| x < k, less_than(x, k))
+                            compare_int_jump!(a, imm, want, off, |x, k| x < k, Lt(x, k))
                         }
                         Op::JumpLeInt { a, imm, want, off } => {
-                            compare_int_jump!(a, imm, want, off, |x, k| x <= k, less_equal(x, k))
+                            compare_int_jump!(a, imm, want, off, |x, k| x <= k, Le(x, k))
                         }
                         Op::JumpGtInt { a, imm, want, off } => {
-                            compare_int_jump!(a, imm, want, off, |x, k| x > k, less_than(k, x))
+                            compare_int_jump!(a, imm, want, off, |x, k| x > k, Lt(k, x))
                         }
                         Op::JumpGeInt { a, imm, want, off } => {
-                            compare_int_jump!(a, imm, want, off, |x, k| x >= k, less_equal(k, x))
+                            compare_int_jump!(a, imm, want, off, |x, k| x >= k, Le(k, x))
                         }
 
                         // Calls. Each arm works out the callee's register, its
@@ -1737,13 +1758,4 @@ fn method_lookup_up(
         return Some(v);
     }
     method_miss(heap, metas, Value::Table(t), mt, k, cm, ci, up).ok()
-}
-
-#[inline(always)]
-fn values_equal(heap: &LuaHeap, rt: &Metas, x: Value, y: Value) -> Result<bool, Exc> {
-    match (x, y) {
-        (Value::Int(i), Value::Int(j)) => Ok(i == j),
-        (Value::Float(f), Value::Float(g)) => Ok(f == g),
-        _ => ops::equal(heap, rt, x, y),
-    }
 }

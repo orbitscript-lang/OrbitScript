@@ -290,33 +290,66 @@ fn bitwise_type_error(heap: &LuaHeap, rt: &Metas, v: Value, operand: u8) -> Exc 
 
 /// `a < b` for everything but two integers or two floats.
 pub(crate) fn less_than(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Exc> {
-    use Value::{Float, Int, Str};
-    match (a, b) {
-        (Int(x), Int(y)) => Ok(x < y),
-        (Float(x), Float(y)) => Ok(x < y),
-        (Int(x), Float(y)) => Ok(number::int_lt_float(x, y)),
-        (Float(x), Int(y)) => Ok(number::float_lt_int(x, y)),
-        (Str(x), Str(y)) => Ok(heap.get(x).as_bytes() < heap.get(y).as_bytes()),
-        _ => Err(compare_meta(heap, rt, MetaField::Lt, a, b)),
+    match less_than_raw(heap, a, b) {
+        Some(c) => Ok(c),
+        None => Err(compare_meta(heap, rt, MetaField::Lt, a, b)),
     }
 }
 
 /// `a <= b` for everything but two integers or two floats.
 pub(crate) fn less_equal(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Exc> {
+    match less_equal_raw(heap, a, b) {
+        Some(c) => Ok(c),
+        None => Err(compare_meta(heap, rt, MetaField::Le, a, b)),
+    }
+}
+
+// The comparisons the interpreter loop inlines answer with an `Option`:
+// `None` means a metamethod (or an error) decides, which the caller fetches
+// out of line. A `Result<bool, Exc>` here would leave the loop carrying the
+// error variant's unwritten bytes as a live value around every instruction.
+
+/// `a < b` without metamethods: `None` when `__lt` decides.
+#[inline]
+pub(crate) fn less_than_raw(heap: &LuaHeap, a: Value, b: Value) -> Option<bool> {
     use Value::{Float, Int, Str};
     match (a, b) {
-        (Int(x), Int(y)) => Ok(x <= y),
-        (Float(x), Float(y)) => Ok(x <= y),
-        (Int(x), Float(y)) => Ok(number::int_le_float(x, y)),
-        (Float(x), Int(y)) => Ok(number::float_le_int(x, y)),
-        (Str(x), Str(y)) => Ok(heap.get(x).as_bytes() <= heap.get(y).as_bytes()),
-        _ => Err(compare_meta(heap, rt, MetaField::Le, a, b)),
+        (Int(x), Int(y)) => Some(x < y),
+        (Float(x), Float(y)) => Some(x < y),
+        (Int(x), Float(y)) => Some(number::int_lt_float(x, y)),
+        (Float(x), Int(y)) => Some(number::float_lt_int(x, y)),
+        (Str(x), Str(y)) => Some(heap.get(x).as_bytes() < heap.get(y).as_bytes()),
+        _ => None,
+    }
+}
+
+/// `a <= b` without metamethods: `None` when `__le` decides.
+#[inline]
+pub(crate) fn less_equal_raw(heap: &LuaHeap, a: Value, b: Value) -> Option<bool> {
+    use Value::{Float, Int, Str};
+    match (a, b) {
+        (Int(x), Int(y)) => Some(x <= y),
+        (Float(x), Float(y)) => Some(x <= y),
+        (Int(x), Float(y)) => Some(number::int_le_float(x, y)),
+        (Float(x), Int(y)) => Some(number::float_le_int(x, y)),
+        (Str(x), Str(y)) => Some(heap.get(x).as_bytes() <= heap.get(y).as_bytes()),
+        _ => None,
+    }
+}
+
+/// `a < b` or `a <= b` by `op` (`Lt` or `Le`) without metamethods; with
+/// `op` a constant the choice folds away.
+#[inline(always)]
+pub(crate) fn compare_raw(heap: &LuaHeap, op: MetaField, a: Value, b: Value) -> Option<bool> {
+    match op {
+        MetaField::Le => less_equal_raw(heap, a, b),
+        _ => less_than_raw(heap, a, b),
     }
 }
 
 /// `__lt` or `__le` for operands that aren't two numbers or two strings.
 #[cold]
-fn compare_meta(heap: &LuaHeap, rt: &Metas, e: MetaField, a: Value, b: Value) -> Exc {
+pub(crate) fn compare_meta(heap: &LuaHeap, rt: &Metas, e: MetaField, a: Value, b: Value) -> Exc {
     let h = meta::binary_handler(heap, rt, e, a, b);
     if h.is_nil() {
         compare_error(heap, rt, a, b)
@@ -339,20 +372,29 @@ fn compare_error(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Exc {
 /// then `__eq` between two tables or two userdata.
 #[inline]
 pub(crate) fn equal(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Exc> {
-    if raw_eq(heap, a, b) {
-        return Ok(true);
-    }
-    match (a, b) {
-        (Value::Table(_), Value::Table(_)) | (Value::UserData(_), Value::UserData(_)) => {
-            equal_meta(heap, rt, a, b)
-        }
-        _ => Ok(false),
+    match equal_raw(heap, a, b) {
+        Some(c) => Ok(c),
+        None => equal_meta(heap, rt, a, b),
     }
 }
 
+/// `a == b` without metamethods: `None` when `__eq` may decide (two
+/// tables or two userdata that aren't the same object).
+#[inline]
+pub(crate) fn equal_raw(heap: &LuaHeap, a: Value, b: Value) -> Option<bool> {
+    if raw_eq(heap, a, b) {
+        return Some(true);
+    }
+    match (a, b) {
+        (Value::Table(_), Value::Table(_)) | (Value::UserData(_), Value::UserData(_)) => None,
+        _ => Some(false),
+    }
+}
+
+/// `__eq` between two tables or two userdata.
 #[cold]
 #[inline(never)]
-fn equal_meta(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Exc> {
+pub(crate) fn equal_meta(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Exc> {
     let h = meta::binary_handler(heap, rt, MetaField::Eq, a, b);
     if h.is_nil() {
         Ok(false)
