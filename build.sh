@@ -84,7 +84,8 @@ if [ "$train" = yes ] && [ "$triple" != "$host" ]; then
     exit 2
 fi
 if [ -n "$pgo" ]; then
-    case "$pgo" in /*) ;; *) pgo="$(pwd)/$pgo" ;; esac
+    # Absolute already: /x, or C:\x and C:/x on Windows.
+    case "$pgo" in /* | [A-Za-z]:[\\/]*) ;; *) pgo="$(pwd)/$pgo" ;; esac
 elif [ "$no_pgo" = no ]; then
     pgo="$root/pgo/$triple.profdata"
 fi
