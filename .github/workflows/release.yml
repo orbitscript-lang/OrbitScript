@@ -65,21 +65,8 @@ jobs:
           echo "version $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  test:
-    name: cargo test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG || github.ref }}
-      - name: Stamp the tag's version
-        if: env.TAG != ''
-        run: tools/set-version.sh "$TAG"
-      - run: rustup show
-      - run: cargo test --workspace --locked
-
   build:
-    name: build (${{ matrix.target }})
+    name: test and build (${{ matrix.target }})
     needs: version
     strategy:
       fail-fast: false
@@ -112,6 +99,9 @@ jobs:
       - name: Stamp the tag's version
         if: env.TAG != ''
         run: tools/set-version.sh "$TAG"
+      # Every target the release ships runs the whole test suite first.
+      - name: cargo test
+        run: cargo test --workspace --locked
       - name: Install cargo-pgo and llvm-tools
         if: env.PGO == 'train'
         run: |
@@ -188,7 +178,7 @@ jobs:
   release:
     name: draft the release
     if: needs.version.outputs.tag != ''
-    needs: [version, test, build, vscode]
+    needs: [version, build, vscode]
     runs-on: ubuntu-latest
     permissions:
       contents: write

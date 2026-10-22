@@ -10,7 +10,7 @@
    git push origin v0.1.0
    ```
    The tag is `v` followed by a [semantic version](https://semver.org). A tag with a prerelease suffix (`v0.1.0-rc`, `v0.1.0-rc.2`) builds the same way and is marked as a prerelease on GitHub.
-2. The workflow stamps the tag's version into the build (below), runs `cargo test`, builds every target, packages the VS Code extension and drafts the release with the archives, the `.vsix`, `SHA256SUMS` and notes generated from the merged pull requests.
+2. The workflow stamps the tag's version into the build (below), runs `cargo test` on every target and builds it, packages the VS Code extension and drafts the release with the archives, the `.vsix`, `SHA256SUMS` and notes generated from the merged pull requests.
 3. Read the draft on the repository's Releases page, edit the notes, and publish it. Nothing is public until then.
 
 ## Versions
@@ -24,15 +24,13 @@ To try the workflow without a release, run it by hand from the Actions tab (Rele
 ```mermaid
 flowchart LR
     tag["tag vX.Y.Z"] --> version["stamp the version"]
-    version --> build["build, per target"]
+    version --> build["cargo test and build, per target"]
     version --> vscode["VS Code extension"]
-    tag --> test["cargo test"]
     build --> release["draft release"]
     vscode --> release
-    test --> release
 ```
 
-Each target is built on a runner of its own architecture, so it can train its own profile:
+Each target is tested and built on a runner of its own architecture, so `cargo test` runs on every platform a release ships for and each target can train its own profile:
 
 | Target | Runner |
 |---|---|
