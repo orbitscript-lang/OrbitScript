@@ -546,11 +546,9 @@ fn catches(mask: &str, signal: u32) -> bool {
     u64::from_str_radix(mask, 16).is_ok_and(|m| m & (1 << (signal - 1)) != 0)
 }
 
-/// `SIGUSR1`'s number: 10 on Linux, 30 on macOS and the BSDs.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-const SIGUSR1: u32 = 10;
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-const SIGUSR1: u32 = 30;
+/// `SIGUSR1`'s number, which differs between Unixes.
+#[cfg(unix)]
+const SIGUSR1: u32 = libc::SIGUSR1 as u32;
 
 /// Running `orbit` programs other than this one that start their debug
 /// server on `SIGUSR1`, with their command lines.
@@ -789,6 +787,7 @@ mod tests {
         assert_eq!(parse_ps_line("garbage"), None);
         // macOS: SIGUSR1 is 30, bit 29.
         assert!(catches("20000000", 30));
+        assert!(catches(&format!("{:x}", 1u64 << (SIGUSR1 - 1)), SIGUSR1));
         assert!(!catches("00004000", 30));
         // Linux's `SigCgt`: SIGUSR1 is 10, bit 9.
         assert!(catches("0000000000000200", 10));

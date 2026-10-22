@@ -12,6 +12,11 @@ publish = false
 orbit = { path = "../orbit", default-features = false, features = ["debugger"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 
+[target.'cfg(unix)'.dependencies]
+# SIGUSR1's number on each Unix (a constant: no unsafe); already in the tree
+# for orbit-virtmem and signal-hook.
+libc = { version = "0.2", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 # AF_UNIX sockets and the debug-request event until std's Windows Unix
 # sockets are stable (D12); already in the tree for orbit-virtmem.
