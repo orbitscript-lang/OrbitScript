@@ -158,13 +158,20 @@ impl Server {
     }
 }
 
+/// The `file://` URI of `file` in `dir`, as an editor writes it: forward
+/// slashes, and on Windows the drive after a third slash (`file:///C:/dir`).
 fn uri(dir: &Path, file: &str) -> String {
     let path = if file.is_empty() {
         dir.to_path_buf()
     } else {
         dir.join(file)
     };
-    format!("file://{}", path.display())
+    let path = path.display().to_string().replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
 }
 
 fn at(uri: &str, line: u32, character: u32) -> Value {
