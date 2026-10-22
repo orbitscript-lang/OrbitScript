@@ -49,7 +49,7 @@ Plus `orbitscript-<version>.vsix`, the VS Code extension, and `SHA256SUMS`.
 
 ## Profiles
 
-Each runner trains a profile for its target (`./build.sh --pgo-train`, written to the runner's temporary directory, never committed) and builds both layouts with it, so a release is never built with a stale profile and every target gets one, not only those with a profile in `pgo/`. The committed profiles couldn't serve a release anyway: the version is part of every symbol's hash, so a profile trained at `0.0.0` matches nothing in a `0.1.0` build. A run started by hand can build without a profile (`none`).
+Each runner but Windows ARM64 trains a profile for its target (`./build.sh --pgo-train`, written to the runner's temporary directory, never committed) and builds both layouts with it, so a release is never built with a stale profile and every target gets one, not only those with a profile in `pgo/`. The committed profiles couldn't serve a release anyway: the version is part of every symbol's hash, so a profile trained at `0.0.0` matches nothing in a `0.1.0` build. Windows ARM64 builds without one: there LLVM's profiling runtime writes malformed counts and the instrumented `orbit` crashes at random, so no profile can be trained. A run started by hand can build every target without a profile (`none`).
 
 ## Not done yet
 

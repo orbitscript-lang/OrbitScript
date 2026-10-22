@@ -82,11 +82,16 @@ jobs:
             os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-2025
+          # No profile: LLVM's profiling runtime writes malformed counts on
+          # aarch64-pc-windows-msvc ("symbol name is empty"), and the
+          # instrumented orbit crashes at random there.
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
+            pgo: none
     runs-on: ${{ matrix.os }}
     env:
       NAME: orbitscript-${{ needs.version.outputs.version }}-${{ matrix.target }}
+      PGO: ${{ matrix.pgo || inputs.pgo || 'train' }}
     steps:
       # Windows runners check text files out with CRLF line ends: the tests
       # compare programs' output with .expected files, and the programs
