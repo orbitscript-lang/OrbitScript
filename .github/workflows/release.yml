@@ -1,0 +1,204 @@
+name: Release
+
+# Builds the release archives for every target with ./build.sh, the only
+# packaging path, and the VS Code extension, then drafts a GitHub Release
+# with them. docs/releasing.md describes how to cut one.
+#
+# - Pushing a tag vX.Y.Z (vX.Y.Z-rc.N for a prerelease) builds it and drafts
+#   its release, which stays a draft until someone publishes it by hand. The
+#   tag must match the workspace version in Cargo.toml and the extension's
+#   version in editors/vscode/package.json.
+# - Running it by hand from the Actions tab builds the chosen branch or tag
+#   and keeps the archives as workflow artifacts only: a dry run. Name an
+#   existing tag in `release-tag` to draft its release as well.
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Draft the release of this existing tag (vX.Y.Z); empty for a dry run
+        required: false
+        default: ''
+      pgo:
+        description: 'PGO: train a profile on each runner, use the committed pgo/<target>.profdata where there is one, or none'
+        type: choice
+        options: [train, committed, none]
+        default: train
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The tag being released, empty on a dry run.
+  TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release-tag }}
+  # Tag pushes have no inputs: they train.
+  PGO: ${{ inputs.pgo || 'train' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    name: check the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ env.TAG }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+      - name: Compare the tag with Cargo.toml and package.json
+        id: version
+        run: |
+          cargo=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          vsix=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' editors/vscode/package.json)
+          echo "Cargo.toml: $cargo, package.json: $vsix, tag: ${TAG:-none}"
+          if [ -n "$TAG" ]; then
+            for v in "$cargo" "$vsix"; do
+              if [ "v$v" != "$TAG" ]; then
+                echo "::error::tag $TAG doesn't match version $v (Cargo.toml $cargo, editors/vscode/package.json $vsix)"
+                exit 1
+              fi
+            done
+          fi
+          echo "version=$cargo" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+      - run: rustup show
+      - run: cargo test --workspace --locked
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds on the oldest supported Ubuntu, so the binaries need
+          # only its glibc (2.35).
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    env:
+      NAME: orbitscript-${{ needs.version.outputs.version }}-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+      - name: Install Rust
+        run: |
+          rustup show
+          rustc -vV
+          [ "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}" ]
+      - name: Install cargo-pgo and llvm-tools
+        if: env.PGO == 'train'
+        run: |
+          rustup component add llvm-tools
+          cargo install cargo-pgo --version 0.3.0 --locked
+      - name: Train a PGO profile
+        if: env.PGO == 'train'
+        run: ./build.sh --pgo-train --pgo "$RUNNER_TEMP/release.profdata"
+      - name: Build both layouts
+        run: |
+          case "$PGO" in
+            train) pgo=(--pgo "$RUNNER_TEMP/release.profdata") ;;
+            committed) pgo=() ;;
+            none) pgo=(--no-pgo) ;;
+          esac
+          ./build.sh "${pgo[@]}" --out "$RUNNER_TEMP/out/$NAME"
+          ./build.sh "${pgo[@]}" --static --out "$RUNNER_TEMP/out/$NAME-static"
+          for d in "$NAME" "$NAME-static"; do
+            cp LICENSE README.md "$RUNNER_TEMP/out/$d/"
+          done
+      - name: Smoke test
+        working-directory: ${{ runner.temp }}/out
+        run: |
+          for d in "$NAME" "$NAME-static"; do
+            "$d/bin/orbit" -v
+            "$d/bin/orbit" -e 'print(("orbit"):upper(), 6 * 7)'
+            "$d/bin/orbitc" -v
+            "$d/bin/orbit-lsp" --version
+          done
+      - name: Archive
+        working-directory: ${{ runner.temp }}/out
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          for d in "$NAME" "$NAME-static"; do
+            if [ "$RUNNER_OS" = Windows ]; then
+              pwsh -NoProfile -Command "Compress-Archive -Path '$d' -DestinationPath '$RUNNER_TEMP/dist/$d.zip'"
+            else
+              tar -czf "$RUNNER_TEMP/dist/$d.tar.gz" "$d"
+            fi
+          done
+          ls -l "$RUNNER_TEMP/dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  vscode:
+    name: VS Code extension
+    needs: version
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+      - run: npx vsce package -o "$RUNNER_TEMP/orbitscript-${{ needs.version.outputs.version }}.vsix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbitscript-vsix
+          path: ${{ runner.temp }}/*.vsix
+          if-no-files-found: error
+
+  release:
+    name: draft the release
+    if: needs.version.outputs.tag != ''
+    needs: [version, test, build, vscode]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" dist/* --draft --verify-tag "${prerelease[@]}" \
+            --title "OrbitScript ${TAG#v}" --generate-notes

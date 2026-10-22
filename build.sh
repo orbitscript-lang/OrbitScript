@@ -163,6 +163,29 @@ api_names() {
         sort -u
 }
 
+# MSVC's `link`: the one on the path, unless that is another program of the
+# same name (Git Bash's own `link`), else the newest Visual Studio's, which
+# vswhere finds. Fails when there is none.
+msvc_link() {
+    if command -v link.exe > /dev/null 2>&1 && link.exe /? 2>&1 | grep -q Microsoft; then
+        echo link.exe
+        return
+    fi
+    vswhere="$(cygpath -u 'C:\Program Files (x86)')/Microsoft Visual Studio/Installer/vswhere.exe"
+    [ -x "$vswhere" ] || return 1
+    vs=$("$vswhere" -latest -products '*' -property installationPath | tr -d '\r')
+    [ -n "$vs" ] || return 1
+    vs=$(cygpath -u "$vs")
+    version=$(tr -d '\r' < "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt") || return 1
+    case "$host" in
+        aarch64-*) arch=arm64 ;;
+        *) arch=x64 ;;
+    esac
+    link="$vs/VC/Tools/MSVC/$version/bin/Host$arch/$arch/link.exe"
+    [ -x "$link" ] || return 1
+    echo "$link"
+}
+
 # Lays out the last build of layout $1 (static or shared) in $2, and sets
 # $files to the files it copied, relative to $2.
 lay_out() {
@@ -201,10 +224,16 @@ lay_out() {
                 api_names | sed 's/.*/  & = orbit_lib.&/'
             } > "$def"
             # A DLL with no code, only forwarded exports, linked with the
-            # toolchain's linker: MSVC's `link` where it is on the path, else
-            # MinGW's gcc.
-            if command -v link.exe > /dev/null 2>&1 && link.exe /? 2>&1 | grep -q Microsoft; then
-                link.exe /NOLOGO /DLL /NOENTRY "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/lua55.dll")"
+            # toolchain's linker: MSVC's `link` where there is one, else
+            # MinGW's gcc. With no object files `link` can't tell the
+            # machine, so it is named.
+            case "$triple" in
+                aarch64-*) machine=ARM64 ;;
+                *) machine=X64 ;;
+            esac
+            if link=$(msvc_link); then
+                "$link" /NOLOGO /DLL /NOENTRY "/MACHINE:$machine" \
+                    "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/lua55.dll")"
             else
                 "${CC:-gcc}" -shared -nostdlib -o "$dir/bin/lua55.dll" "$def"
             fi
