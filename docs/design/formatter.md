@@ -27,7 +27,7 @@ flowchart LR
 ```
 
 - **It prints from the AST.** Literals, names and comments are copied from the source as written, so no string, number or comment is ever rewritten (F8). Type annotations are re-spaced token by token from the source, so parentheses the type tree flattens stay.
-- **Each node first tries one line.** When that is wider than 100 columns (F1), or can't be one line (a block body, a comment inside it), it breaks the way its kind does: lists one entry per line with a trailing comma (F5), operator chains before each operator of the loosest kind, method chains of two or more calls before each `.`. A call whose last argument is a closure or a table literal keeps the earlier arguments on its line and breaks inside the last one (`f(a, #{` ... `})`).
+- **Each node first tries one line.** When that is wider than 100 columns (F1), or can't be one line (a block body, a comment inside it), it breaks the way its kind does: lists one entry per line with a trailing comma (F5), operator chains before each operator of the loosest kind, method chains of two or more calls before each `.`. A call whose last argument is a closure, a table literal, a `match` or a string written over several lines, or whose only argument is another call, keeps the earlier arguments on its line and breaks inside the last one (`f(a, #{` ... `})`, `say(string::format(` ... `))`), as rustfmt does.
 - **Comments are placed between entries**: statements, items, list entries, fields, variants, `match` arms, parameters and `use` names. A comment on an entry's last line stays at the end of that line, a comment on its own line goes with the entry after it, and a comment after an opening `{`, `(` or `[` stays there. A comment anywhere else (inside an expression, say `1 + /* x */ 2`) can't be placed yet, and the module is refused.
 - **It refuses rather than breaks.** A module with a syntax error is not formatted. The printer's output is parsed again and compared with the input: each top-level statement's AST is dumped without spans, with names written out, and the comments are compared as text. Any difference is an internal error and the input is left alone.
 
@@ -49,4 +49,4 @@ flowchart LR
 
 ## Testing
 
-`crates/orbit-fmt/tests/format.rs` has hand-written cases for each rule, and formats every `.orb` and `.orbi` file in the repository twice: the first pass must succeed and the second must change nothing.
+`crates/orbit-fmt/tests/format.rs` has hand-written cases for each rule, and formats every `.orb` and `.orbi` file in the repository twice: the first pass must succeed and the second must change nothing. The repository's own files are kept formatted (F12), except `editors/vscode/test/grammar/sample.orb`, whose assertion comments point at columns of the line above them.

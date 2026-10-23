@@ -90,6 +90,30 @@ fn long_lines_break() {
 }
 
 #[test]
+fn a_match_or_an_only_call_breaks_from_the_call_line() {
+    let args = "a_fairly_long_argument_name";
+    case(
+        &format!("say(string::format(\"%s %s %s\", {args}, {args}, {args}));"),
+        &format!(
+            "say(string::format(\n    \"%s %s %s\",\n    {args},\n    {args},\n    {args},\n));\n"
+        ),
+    );
+    case(
+        "print(map.name.byte(1) == b'o', b'\\n', match map.name.byte(2) { b'a'..=b'z' => \"lower\", _ => \"other\" });",
+        "print(map.name.byte(1) == b'o', b'\\n', match map.name.byte(2) {\n    b'a'..=b'z' => \"lower\",\n    _ => \"other\",\n});\n",
+    );
+}
+
+#[test]
+fn strings_over_several_lines_stay_in_their_call() {
+    case(
+        "let g = Grid::parse(r#\"\n.#.\n..#\n\"#);",
+        "let g = Grid::parse(r#\"\n.#.\n..#\n\"#);\n",
+    );
+    case("f(a,   \"one\ntwo\");", "f(a, \"one\ntwo\");\n");
+}
+
+#[test]
 fn comments_stay_where_they_are() {
     case(
         "// lead\nlet a = 1; // trail\n\n\n/* block */\nlet b = 2;\n// end\n",
