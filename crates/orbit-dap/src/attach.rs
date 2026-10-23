@@ -538,12 +538,10 @@ fn is_orbit(exe: &Path) -> bool {
         .is_some_and(|n| n == "orbit" || n.starts_with("orbit "))
 }
 
-/// Whether bit `signal` is set in a caught-signals mask written in hex.
+/// Whether bit `signal - 1` is set in a caught-signals mask.
 #[cfg(unix)]
-fn catches(mask: &str, signal: u32) -> bool {
-    let mask = mask.trim();
-    let mask = mask.strip_prefix("0x").unwrap_or(mask);
-    u64::from_str_radix(mask, 16).is_ok_and(|m| m & (1 << (signal - 1)) != 0)
+fn catches(mask: u64, signal: u32) -> bool {
+    mask & (1 << (signal - 1)) != 0
 }
 
 /// `SIGUSR1`'s number, which differs between Unixes.
@@ -577,67 +575,25 @@ fn signallable() -> Vec<(u32, String)> {
 }
 
 /// Running `orbit` programs other than this one that start their debug
-/// server on `SIGUSR1`, with their command lines (macOS and the BSDs,
-/// which have no `/proc`: from `ps`).
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+/// server on `SIGUSR1`, with their command lines.
+#[cfg(target_os = "macos")]
 fn signallable() -> Vec<(u32, String)> {
     let me = std::process::id();
-    ps(&["-A"])
+    crate::process::pids()
         .into_iter()
-        .filter(|(pid, caught, exe)| {
-            *pid != me && catches(caught, SIGUSR1) && is_orbit(Path::new(exe))
-        })
-        .map(|(pid, _, exe)| {
-            let args = ps_field(pid, "args=").unwrap_or(exe);
-            (pid, args)
+        .filter(|&pid| pid != me && catches_debug_signal(pid))
+        .map(|pid| {
+            let args = crate::process::args(pid).unwrap_or_default();
+            (pid, args.join(" "))
         })
         .collect()
 }
 
-#[cfg(windows)]
+/// Elsewhere programs can't be asked to serve: they must be started with
+/// `--debug-listen` (or, on Windows, set up with [`debug_requests`]).
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
 fn signallable() -> Vec<(u32, String)> {
     Vec::new()
-}
-
-/// `ps` with `selection` (`-A`, or `-p <pid>`): each process's pid, its
-/// caught-signals mask and its executable.
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-fn ps(selection: &[&str]) -> Vec<(u32, String, String)> {
-    let Ok(out) = std::process::Command::new("ps")
-        .args(selection)
-        .args(["-o", "pid=", "-o", "caught=", "-o", "comm="])
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(parse_ps_line)
-        .collect()
-}
-
-/// A `pid caught comm` line of `ps`; the executable may hold spaces.
-#[cfg(any(
-    all(test, unix),
-    all(unix, not(any(target_os = "linux", target_os = "android")))
-))]
-fn parse_ps_line(line: &str) -> Option<(u32, String, String)> {
-    let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
-    let (caught, exe) = rest.trim_start().split_once(char::is_whitespace)?;
-    Some((pid.parse().ok()?, caught.to_owned(), exe.trim().to_owned()))
-}
-
-/// One `ps` field (`args=`) of `pid`.
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-fn ps_field(pid: u32, field: &str) -> Option<String> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", field, "-p", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    (!text.is_empty()).then_some(text)
 }
 
 /// Whether `pid` is an `orbit` program that catches `SIGUSR1`, so the
@@ -657,17 +613,25 @@ fn catches_debug_signal(pid: u32) -> bool {
     status
         .lines()
         .find_map(|l| l.strip_prefix("SigCgt:"))
+        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
         .is_some_and(|mask| catches(mask, SIGUSR1))
 }
 
 /// Whether `pid` is an `orbit` program that catches `SIGUSR1`, so the
-/// signal starts its debug server instead of killing it (macOS and the
-/// BSDs: `ps`'s executable and caught-signals mask).
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+/// signal starts its debug server instead of killing it (macOS: libproc's
+/// executable path and the kernel's caught-signals mask).
+#[cfg(target_os = "macos")]
 fn catches_debug_signal(pid: u32) -> bool {
-    ps(&["-p", &pid.to_string()])
-        .into_iter()
-        .any(|(p, caught, exe)| p == pid && catches(&caught, SIGUSR1) && is_orbit(Path::new(&exe)))
+    crate::process::executable(pid).is_some_and(|exe| is_orbit(&exe))
+        && crate::process::caught_signals(pid).is_some_and(|mask| catches(mask.into(), SIGUSR1))
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
+fn catches_debug_signal(_pid: u32) -> bool {
+    false
 }
 
 /// How long a signalled program has to open its socket.
@@ -708,13 +672,8 @@ fn request_debugging(pid: u32) -> Result<bool, String> {
     if !catches_debug_signal(pid) {
         return Ok(false);
     }
-    let status = std::process::Command::new("kill")
-        .args(["-USR1", &pid.to_string()])
-        .status()
+    crate::process::send_debug_signal(pid)
         .map_err(|e| format!("cannot signal process {pid}: {e}"))?;
-    if !status.success() {
-        return Err(format!("cannot signal process {pid}"));
-    }
     Ok(true)
 }
 
@@ -775,23 +734,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ps_lines_and_signal_masks() {
-        assert_eq!(
-            parse_ps_line("  4242     20004207 /Users/me/My Tools/orbit"),
-            Some((
-                4242,
-                "20004207".to_owned(),
-                "/Users/me/My Tools/orbit".to_owned()
-            ))
-        );
-        assert_eq!(parse_ps_line("garbage"), None);
-        // macOS: SIGUSR1 is 30, bit 29.
-        assert!(catches("20000000", 30));
-        assert!(catches(&format!("{:x}", 1u64 << (SIGUSR1 - 1)), SIGUSR1));
-        assert!(!catches("00004000", 30));
-        // Linux's `SigCgt`: SIGUSR1 is 10, bit 9.
-        assert!(catches("0000000000000200", 10));
-        assert!(!catches("not hex", 10));
+    fn signal_masks() {
+        assert!(catches(1 << (SIGUSR1 - 1), SIGUSR1));
+        // macOS: SIGUSR1 is 30, bit 29. Linux: 10, bit 9.
+        assert!(catches(0x2000_0000, 30));
+        assert!(!catches(0x4000, 30));
+        assert!(catches(0x200, 10));
         assert!(is_orbit(Path::new("/usr/local/bin/orbit")));
         assert!(!is_orbit(Path::new("/usr/bin/orbitc")));
     }

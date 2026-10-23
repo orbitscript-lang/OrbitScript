@@ -26,6 +26,8 @@
 mod agent;
 mod attach;
 mod launcher;
+#[cfg(unix)]
+mod process;
 mod socket;
 #[cfg(windows)]
 mod win;
