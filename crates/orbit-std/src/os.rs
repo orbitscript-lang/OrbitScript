@@ -114,13 +114,13 @@ fn setlocale(
         b"numeric",
         b"time",
     ];
-    if let Some(cat) = category
-        && !CATEGORIES.contains(&cat.as_bytes())
-    {
-        return Err(Fail::arg(
-            2,
-            OrbitString::concat(&[b"invalid option '", &cat, b"'"]),
-        ));
+    if let Some(cat) = category {
+        if !CATEGORIES.contains(&cat.as_bytes()) {
+            return Err(Fail::arg(
+                2,
+                OrbitString::concat(&[b"invalid option '", &cat, b"'"]),
+            ));
+        }
     }
     // Only the C locale exists: querying or asking for it (by any of its
     // names) gives "C", anything else fails.

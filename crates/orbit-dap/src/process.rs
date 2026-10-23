@@ -6,6 +6,7 @@
 #![allow(unsafe_code)]
 
 use std::io;
+use std::mem::size_of;
 
 /// Send `SIGUSR1` to `pid`.
 pub(crate) fn send_debug_signal(pid: u32) -> io::Result<()> {

@@ -227,23 +227,24 @@ impl FuncState<'_> {
     fn assign(&mut self, targets: &[Place], values: &ExprList, at: u32) -> Result<()> {
         if let ([target], [value]) = (targets, values.items.as_slice()) {
             // One target: evaluate straight into a local's register where possible.
-            if let Place::Local(l) = *target
-                && let Slot::Reg(r) = self.slots[l.index()]
-            {
-                self.expr_to(*value, r)?;
-                return Ok(());
+            if let Place::Local(l) = *target {
+                if let Slot::Reg(r) = self.slots[l.index()] {
+                    self.expr_to(*value, r)?;
+                    return Ok(());
+                }
             }
             // A captured local's new value goes through its home register too, so the
             // register stops holding the old one (which would keep it alive) and
             // `debug.getlocal` on stripped code reads the current value.
-            if let Place::Local(l) = *target
-                && let Slot::Cell(cell) = self.slots[l.index()]
-                && let Some(r) = self.cell_home(l)
-            {
-                self.expr_to(*value, r)?;
-                self.at_offset(at);
-                self.emit(Op::CellSet { cell, src: r });
-                return Ok(());
+            if let Place::Local(l) = *target {
+                if let Slot::Cell(cell) = self.slots[l.index()] {
+                    if let Some(r) = self.cell_home(l) {
+                        self.expr_to(*value, r)?;
+                        self.at_offset(at);
+                        self.emit(Op::CellSet { cell, src: r });
+                        return Ok(());
+                    }
+                }
             }
             let t = self.target(target, &[])?;
             let (src, _) = self.expr_any(*value)?;
@@ -289,35 +290,38 @@ impl FuncState<'_> {
         // - otherwise into a new temporary, stored once every value is computed.
         let mut srcs: Vec<Option<u8>> = Vec::with_capacity(items.len());
         for (i, (&value, t)) in items.iter().zip(&evaluated).enumerate() {
-            if let (Target::Reg(r), Place::Local(l)) = (t, &targets[i])
-                && assigned.iter().filter(|&&a| a == *r).count() == 1
-                && !items[i + 1..]
-                    .iter()
-                    .any(|&later| self.reads_local(later, *l))
-            {
-                self.expr_to(value, *r)?;
-                srcs.push(None);
-                continue;
+            if let (Target::Reg(r), Place::Local(l)) = (t, &targets[i]) {
+                if assigned.iter().filter(|&&a| a == *r).count() == 1
+                    && !items[i + 1..]
+                        .iter()
+                        .any(|&later| self.reads_local(later, *l))
+                {
+                    self.expr_to(value, *r)?;
+                    srcs.push(None);
+                    continue;
+                }
             }
             // A captured local assigned once: its value goes straight into its home register
             // (values read the local through its cell, which changes only at the store).
-            if let (Target::Cell(_, Some(h)), Place::Local(l)) = (t, &targets[i])
-                && targets
+            if let (Target::Cell(_, Some(h)), Place::Local(l)) = (t, &targets[i]) {
+                if targets
                     .iter()
                     .filter(|&t| matches!(t, Place::Local(x) if x == l))
                     .count()
                     == 1
-            {
-                self.expr_to(value, *h)?;
-                srcs.push(Some(*h));
-                continue;
+                {
+                    self.expr_to(value, *h)?;
+                    srcs.push(Some(*h));
+                    continue;
+                }
             }
-            if let ExprKind::Local(src) = self.f.expr(value).kind
-                && let Slot::Reg(r) = self.slots[src.index()]
-                && !assigned.contains(&r)
-            {
-                srcs.push(Some(r));
-                continue;
+            if let ExprKind::Local(src) = self.f.expr(value).kind {
+                if let Slot::Reg(r) = self.slots[src.index()] {
+                    if !assigned.contains(&r) {
+                        srcs.push(Some(r));
+                        continue;
+                    }
+                }
             }
             let r = self.alloc()?;
             self.expr_to(value, r)?;
@@ -437,9 +441,7 @@ impl FuncState<'_> {
                         key,
                         origin,
                     }
-                } else if let Some(ConstVal::Int(k)) = self.const_of(key)
-                    && let Ok(key) = u16::try_from(k)
-                {
+                } else if let Some(key) = self.const_of(key).and_then(ConstVal::u16_key) {
                     Target::IndexInt {
                         obj: o,
                         key,
@@ -471,10 +473,10 @@ impl FuncState<'_> {
             }
             Target::Cell(cell, home) => {
                 // Keep the home register from holding the old value alive.
-                if let Some(h) = home
-                    && h != src
-                {
-                    self.emit(Op::Move { dst: h, src });
+                if let Some(h) = home {
+                    if h != src {
+                        self.emit(Op::Move { dst: h, src });
+                    }
                 }
                 self.emit(Op::CellSet { cell, src });
             }

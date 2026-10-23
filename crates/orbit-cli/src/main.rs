@@ -360,8 +360,10 @@ fn msghandler<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
                 .metatable()
                 .and_then(|mt| mt.raw_get::<Value>("__tostring").ok())
                 .is_some_and(|f| !f.is_nil());
-            if has_tostring && let Ok(t) = e.to_display() {
-                return c.ret(t);
+            if has_tostring {
+                if let Ok(t) = e.to_display() {
+                    return c.ret(t);
+                }
             }
             format!("(error object is a {} value)", e.type_name())
         }
@@ -399,10 +401,10 @@ impl Runner {
                 return false;
             }
         }
-        if let Some(i) = cli.script
-            && !self.run_script(&args[i])
-        {
-            return false;
+        if let Some(i) = cli.script {
+            if !self.run_script(&args[i]) {
+                return false;
+            }
         }
         #[cfg(feature = "repl")]
         if cli.interactive {

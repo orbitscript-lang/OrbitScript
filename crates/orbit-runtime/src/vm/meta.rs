@@ -85,10 +85,10 @@ impl Metas {
     /// (lua5.5 ignores `__name` in the shared metatables of other types.)
     #[cold]
     pub(crate) fn type_name(&self, heap: &LuaHeap, v: Value) -> Cow<'static, str> {
-        if let Value::Table(_) | Value::UserData(_) = v
-            && let Value::Str(s) = self.metamethod(heap, v, MetaField::Name)
-        {
-            return Cow::Owned(String::from_utf8_lossy(heap.get(s).as_bytes()).into_owned());
+        if let Value::Table(_) | Value::UserData(_) = v {
+            if let Value::Str(s) = self.metamethod(heap, v, MetaField::Name) {
+                return Cow::Owned(String::from_utf8_lossy(heap.get(s).as_bytes()).into_owned());
+            }
         }
         Cow::Borrowed(v.type_name())
     }

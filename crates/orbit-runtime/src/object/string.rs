@@ -123,7 +123,8 @@ impl Trace<LuaSpace> for LuaStr {
 fn seed() -> u64 {
     static SEED: OnceLock<u64> = OnceLock::new();
     *SEED.get_or_init(|| {
-        use std::hash::{BuildHasher, RandomState};
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
         RandomState::new().hash_one(0x6f72_6269_7473_6372_u64) | 1
     })
 }

@@ -107,7 +107,7 @@ impl Socket {
         let (addr, len) = address(path)?;
         let s = new_socket()?;
         // SAFETY: `addr` is a valid SOCKADDR_UN of `len` bytes.
-        let r = unsafe { connect(s.0, (&raw const addr).cast::<SOCKADDR>(), len) };
+        let r = unsafe { connect(s.0, (std::ptr::addr_of!(addr)).cast::<SOCKADDR>(), len) };
         if r == SOCKET_ERROR {
             return Err(last_error());
         }
@@ -149,7 +149,7 @@ impl Socket {
                 self.0,
                 SOL_SOCKET,
                 SO_RCVTIMEO,
-                (&raw const ms).cast(),
+                (std::ptr::addr_of!(ms)).cast(),
                 std::mem::size_of::<u32>() as i32,
             )
         };
@@ -233,7 +233,8 @@ impl Listener {
         let (addr, len) = address(path)?;
         let s = new_socket()?;
         // SAFETY: `addr` is a valid SOCKADDR_UN of `len` bytes.
-        if unsafe { bind(s.0, (&raw const addr).cast::<SOCKADDR>(), len) } == SOCKET_ERROR {
+        if unsafe { bind(s.0, (std::ptr::addr_of!(addr)).cast::<SOCKADDR>(), len) } == SOCKET_ERROR
+        {
             return Err(last_error());
         }
         // SAFETY: a bound socket.

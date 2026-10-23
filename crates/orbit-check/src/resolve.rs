@@ -565,10 +565,10 @@ impl<'a> Resolver<'a> {
                 self.id(i)
             })
             .collect();
-        if let Some(o) = owner
-            && !ids.is_empty()
-        {
-            self.m.generics.insert(o, ids.clone());
+        if let Some(o) = owner {
+            if !ids.is_empty() {
+                self.m.generics.insert(o, ids.clone());
+            }
         }
         ids
     }
@@ -897,16 +897,16 @@ impl<'a> Resolver<'a> {
             res = self.member(res, false, seg);
             self.reference(seg.span, res);
         }
-        if let Res::Sym(id) = res
-            && !self.is_type_symbol(id)
-        {
-            let last = segs[segs.len() - 1];
-            let text = self.text(last.sym);
-            self.error(
-                last.span,
-                Code::NotAType,
-                format!("`{text}` is a value, not a type"),
-            );
+        if let Res::Sym(id) = res {
+            if !self.is_type_symbol(id) {
+                let last = segs[segs.len() - 1];
+                let text = self.text(last.sym);
+                self.error(
+                    last.span,
+                    Code::NotAType,
+                    format!("`{text}` is a value, not a type"),
+                );
+            }
         }
     }
 
@@ -964,15 +964,16 @@ impl<'a> Resolver<'a> {
             StmtKind::Assign { targets, value } => {
                 for (i, t) in targets.iter().enumerate() {
                     self.expr(t);
-                    if let ExprKind::Name(_) = t.kind
-                        && let Some(id) = self.ref_at(t.span)
-                        && id.file == self.file
-                    {
-                        self.defs.assigns.entry(id.index).or_default().push(Assign {
-                            value,
-                            slot: (targets.len() > 1).then_some(i),
-                            op: None,
-                        });
+                    if let ExprKind::Name(_) = t.kind {
+                        if let Some(id) = self.ref_at(t.span) {
+                            if id.file == self.file {
+                                self.defs.assigns.entry(id.index).or_default().push(Assign {
+                                    value,
+                                    slot: (targets.len() > 1).then_some(i),
+                                    op: None,
+                                });
+                            }
+                        }
                     }
                 }
                 self.expr(value);
@@ -982,15 +983,16 @@ impl<'a> Resolver<'a> {
             } => {
                 self.expr(target);
                 self.expr(value);
-                if let ExprKind::Name(_) = target.kind
-                    && let Some(id) = self.ref_at(target.span)
-                    && id.file == self.file
-                {
-                    self.defs.assigns.entry(id.index).or_default().push(Assign {
-                        value,
-                        slot: None,
-                        op: Some(*op),
-                    });
+                if let ExprKind::Name(_) = target.kind {
+                    if let Some(id) = self.ref_at(target.span) {
+                        if id.file == self.file {
+                            self.defs.assigns.entry(id.index).or_default().push(Assign {
+                                value,
+                                slot: None,
+                                op: Some(*op),
+                            });
+                        }
+                    }
                 }
             }
             StmtKind::Scope(inner) => self.stmt(inner, false),

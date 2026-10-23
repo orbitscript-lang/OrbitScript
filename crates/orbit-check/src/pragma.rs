@@ -113,10 +113,9 @@ impl Pragmas {
                 return true;
             }
             let line = source.line_of(d.span.start);
-            let hit = self
-                .ignores
-                .iter_mut()
-                .find(|i| i.line == line && i.codes.as_ref().is_none_or(|cs| cs.contains(&d.code)));
+            let hit = self.ignores.iter_mut().find(|i| {
+                i.line == line && i.codes.as_ref().map_or(true, |cs| cs.contains(&d.code))
+            });
             match hit {
                 Some(i) => {
                     i.used = true;

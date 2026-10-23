@@ -99,9 +99,11 @@ impl<'a> Checker<'a, '_, '_> {
         } else {
             self.types.union(&kept)
         };
-        if !soft && let Some(key) = self.key_of(inner) {
-            self.kill(&key);
-            self.env.insert(key, t);
+        if !soft {
+            if let Some(key) = self.key_of(inner) {
+                self.kill(&key);
+                self.env.insert(key, t);
+            }
         }
         result(self, t)
     }

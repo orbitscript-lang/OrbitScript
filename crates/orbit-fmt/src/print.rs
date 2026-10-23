@@ -853,10 +853,10 @@ impl<'a> Printer<'a> {
     /// `e` starting at column `col`, its later lines indented from `ind`.
     fn expr(&mut self, e: &'a Expr, ind: usize, col: usize) -> String {
         let reserve = std::mem::take(&mut self.reserve);
-        if let Some(flat) = self.flat(e)
-            && col + width(&flat) + reserve <= WIDTH
-        {
-            return flat;
+        if let Some(flat) = self.flat(e) {
+            if col + width(&flat) + reserve <= WIDTH {
+                return flat;
+            }
         }
         match &e.kind {
             ExprKind::Call {
@@ -1077,32 +1077,33 @@ impl<'a> Printer<'a> {
                 return head + &one;
             }
         }
-        if let Some(last) = args.last()
-            && (overflows(last)
+        if let Some(last) = args.last() {
+            if (overflows(last)
                 || self.multiline_string(last)
                 || (args.len() == 1 && matches!(last.kind, ExprKind::Call { .. })))
-            && !self.has_comment(region)
-        {
-            let firsts: Option<Vec<String>> = args[..args.len() - 1]
-                .iter()
-                .map(|a| self.flat(a))
-                .collect();
-            if let Some(firsts) = firsts {
-                let mut prefix = "(".to_owned();
-                for f in &firsts {
-                    prefix.push_str(f);
-                    prefix.push_str(", ");
-                }
-                let c = at + width(&prefix);
-                if c < WIDTH {
-                    let saved = self.used.clone();
-                    self.reserve = reserve + 1;
-                    let tail = self.expr(last, ind, c);
-                    let first_line = tail.split('\n').next().unwrap_or("");
-                    if tail.contains('\n') && c + width(first_line) <= WIDTH {
-                        return head + &prefix + &tail + ")";
+                && !self.has_comment(region)
+            {
+                let firsts: Option<Vec<String>> = args[..args.len() - 1]
+                    .iter()
+                    .map(|a| self.flat(a))
+                    .collect();
+                if let Some(firsts) = firsts {
+                    let mut prefix = "(".to_owned();
+                    for f in &firsts {
+                        prefix.push_str(f);
+                        prefix.push_str(", ");
                     }
-                    self.used = saved;
+                    let c = at + width(&prefix);
+                    if c < WIDTH {
+                        let saved = self.used.clone();
+                        self.reserve = reserve + 1;
+                        let tail = self.expr(last, ind, c);
+                        let first_line = tail.split('\n').next().unwrap_or("");
+                        if tail.contains('\n') && c + width(first_line) <= WIDTH {
+                            return head + &prefix + &tail + ")";
+                        }
+                        self.used = saved;
+                    }
                 }
             }
         }
@@ -1213,22 +1214,23 @@ impl<'a> Printer<'a> {
             // `if c {\n..\n} else {\n..\n} * 2`: after a first operand that ends in a
             // closing brace of its own, the rest stays on that line when it fits.
             let closer = out.rsplit('\n').next().is_some_and(|l| l.trim() == "}");
-            if n == 1
-                && closer
-                && let Some(flat) = self.flat(operand)
-                && end_col(col, &out)
-                    + op.len()
-                    + 2
-                    + width(&flat)
-                    + if n + 1 == count { reserve } else { 0 }
-                    <= WIDTH
-            {
-                self.reserve = 0;
-                out.push(' ');
-                out.push_str(op);
-                out.push(' ');
-                out.push_str(&flat);
-                continue;
+            if n == 1 && closer {
+                if let Some(flat) = self.flat(operand) {
+                    if end_col(col, &out)
+                        + op.len()
+                        + 2
+                        + width(&flat)
+                        + if n + 1 == count { reserve } else { 0 }
+                        <= WIDTH
+                    {
+                        self.reserve = 0;
+                        out.push(' ');
+                        out.push_str(op);
+                        out.push(' ');
+                        out.push_str(&flat);
+                        continue;
+                    }
+                }
             }
             out.push('\n');
             out.push_str(&spaces(inner));
@@ -1578,10 +1580,10 @@ impl<'a> Printer<'a> {
                 break;
             }
             let piece = &text[tok.span.start as usize..tok.span.end as usize];
-            if let Some(p) = prev
-                && space_between(p, tok.kind)
-            {
-                out.push(' ');
+            if let Some(p) = prev {
+                if space_between(p, tok.kind) {
+                    out.push(' ');
+                }
             }
             out.push_str(piece);
             prev = Some(tok.kind);

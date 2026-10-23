@@ -478,7 +478,7 @@ fn call(s: &mut Stack<'_>) -> StackResult<Return> {
     if sig.has_strings {
         return call_with_strings(s, addr, &sig, slots);
     }
-    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(&sig.args)) {
+    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(sig.args.iter())) {
         *slot = arg_value(s, arg, t)?;
     }
     let r = sig.cif.call(addr, slots);
@@ -496,7 +496,7 @@ fn call_with_strings(
     // First every check and conversion, which may allocate (a number
     // passed as a string becomes one) and so move short strings; then,
     // with nothing left to allocate in the heap, the string pointers.
-    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(&sig.args)) {
+    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(sig.args.iter())) {
         if let Ty::CStr | Ty::Bytes = t {
             let Some(bytes) = s.to_str(arg)? else {
                 return Err(s.type_error(arg, "string"));
@@ -514,7 +514,7 @@ fn call_with_strings(
     let mut stack = [0u8; 256];
     let mut used = 0;
     let mut long: Vec<Vec<u8>> = Vec::new();
-    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(&sig.args)) {
+    for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(sig.args.iter())) {
         if !matches!(t, Ty::CStr | Ty::Bytes) {
             continue;
         }
@@ -610,13 +610,14 @@ fn place(s: &mut Stack<'_>, arg: i32) -> StackResult<(u64, Option<usize>)> {
 /// against a buffer's length for `len` bytes.
 fn at(s: &mut Stack<'_>, arg: i32, base: (u64, Option<usize>), len: usize) -> StackResult<u64> {
     let off = s.opt_integer(arg, 0)?;
-    if let Some(size) = base.1
-        && (off < 0
+    if let Some(size) = base.1 {
+        if (off < 0
             || (off as u64)
                 .checked_add(len as u64)
-                .is_none_or(|e| e > size as u64))
-    {
-        return Err(s.arg_error(arg, "out of the buffer's bounds"));
+                .map_or(true, |e| e > size as u64))
+        {
+            return Err(s.arg_error(arg, "out of the buffer's bounds"));
+        }
     }
     Ok(base.0.wrapping_add(off as u64))
 }

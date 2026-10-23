@@ -633,10 +633,10 @@ impl NativeCtx<'_> {
 
     /// Set upvalue `i` of the native closure being called.
     pub fn set_upvalue(&mut self, i: usize, v: Value) {
-        if let Some(c) = self.upvals
-            && let Some(&cell) = self.vm.heap.get(c).captures.get(i)
-        {
-            self.vm.heap.update(cell, |cell| cell.value = v);
+        if let Some(c) = self.upvals {
+            if let Some(&cell) = self.vm.heap.get(c).captures.get(i) {
+                self.vm.heap.update(cell, |cell| cell.value = v);
+            }
         }
     }
 
@@ -711,33 +711,34 @@ impl NativeCtx<'_> {
     /// How `caller`'s call instruction names `me`, or else the name a loaded
     /// module gives it.
     fn name_at(&self, caller: Option<crate::vm::Frame>, me: Value) -> Option<(Vec<u8>, bool)> {
-        if let Some(f) = caller
-            && let FrameKind::Lua { closure, .. } = f.kind
-            && f.pc > 0
-            && !crate::vm::debug::is_builtin(&self.vm.heap, closure)
-        {
-            let proto = self.vm.heap.get(self.vm.heap.get(closure).proto);
-            let pc = f.pc - 1;
-            if matches!(
-                proto.code.code.get(pc as usize),
-                Some(Op::GenericCall { .. })
-            ) {
-                return Some((b"for iterator".to_vec(), false));
-            }
-            if matches!(
-                proto.code.code.get(pc as usize),
-                Some(Op::Call { .. } | Op::TailCall { .. })
-            ) && let Some(origin) = proto.debug.origin(pc, 0)
-            {
-                let (name, method) = match origin {
-                    Origin::Global(n)
-                    | Origin::Field(n)
-                    | Origin::Local(n)
-                    | Origin::Upvalue(n) => (n, false),
-                    Origin::Method(n) => (n, true),
-                    Origin::Constant(n) => (n, false),
-                };
-                return Some((name.to_vec(), method));
+        if let Some(f) = caller {
+            if let FrameKind::Lua { closure, .. } = f.kind {
+                if f.pc > 0 && !crate::vm::debug::is_builtin(&self.vm.heap, closure) {
+                    let proto = self.vm.heap.get(self.vm.heap.get(closure).proto);
+                    let pc = f.pc - 1;
+                    if matches!(
+                        proto.code.code.get(pc as usize),
+                        Some(Op::GenericCall { .. })
+                    ) {
+                        return Some((b"for iterator".to_vec(), false));
+                    }
+                    if matches!(
+                        proto.code.code.get(pc as usize),
+                        Some(Op::Call { .. } | Op::TailCall { .. })
+                    ) {
+                        if let Some(origin) = proto.debug.origin(pc, 0) {
+                            let (name, method) = match origin {
+                                Origin::Global(n)
+                                | Origin::Field(n)
+                                | Origin::Local(n)
+                                | Origin::Upvalue(n) => (n, false),
+                                Origin::Method(n) => (n, true),
+                                Origin::Constant(n) => (n, false),
+                            };
+                            return Some((name.to_vec(), method));
+                        }
+                    }
+                }
             }
         }
         // As the reference does, a function with no name at its call site is
@@ -1221,10 +1222,10 @@ impl Vm {
             return self.resume(co, nargs, k, ok, None, func, want, id);
         }
         let r = r?;
-        if let NativeReturn::Return(n) = r
-            && self.rt.stack.hook.wants(crate::vm::hook::RETURN)
-        {
-            self.native_return_hook(func, id, n).map_err(Exc::Lua)?;
+        if let NativeReturn::Return(n) = r {
+            if self.rt.stack.hook.wants(crate::vm::hook::RETURN) {
+                self.native_return_hook(func, id, n).map_err(Exc::Lua)?;
+            }
         }
         self.native_returned(r, None, func, want, id)
     }

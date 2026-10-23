@@ -139,8 +139,10 @@ fn install_in(s: &mut Stack<'_>, lock: bool) -> StackResult<()> {
     if !push_package(s)? {
         return Ok(());
     }
-    if lock && let Ok(cpath) = cpath_field(s) {
-        lock_cpath(s, &cpath);
+    if lock {
+        if let Ok(cpath) = cpath_field(s) {
+            lock_cpath(s, &cpath);
+        }
     }
     // [package]
     s.push_native::<LoadLib>();
@@ -181,14 +183,14 @@ impl Native for LoadLib {
                 b"absent",
             );
         };
-        if let Some(cpath) = locked_cpath(s)
-            && !cpath_allows(&cpath, &path)
-        {
-            return ret_fail(
-                s,
-                b"library path not allowed: the C module path is locked",
-                b"open",
-            );
+        if let Some(cpath) = locked_cpath(s) {
+            if !cpath_allows(&cpath, &path) {
+                return ret_fail(
+                    s,
+                    b"library path not allowed: the C module path is locked",
+                    b"open",
+                );
+            }
         }
         match load(s, &path, &sym) {
             Ok(()) => Ok(Return::values(1)),

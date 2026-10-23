@@ -9,6 +9,7 @@
 //! cleared when taken, and the collector never sees them.
 
 use std::cell::RefCell;
+use std::mem::size_of_val;
 
 use super::Entry;
 use super::array::Slot;

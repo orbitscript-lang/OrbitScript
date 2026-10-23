@@ -19,7 +19,7 @@ use super::BinaryChecks;
 use super::{Config, GcMode, Library};
 
 #[stabby::import(name = "orbit_lib")]
-unsafe extern "C" {
+extern "C" {
     pub fn orbit_check(hash: u64) -> stabby::result::Result<(), stabby::string::String>;
     pub fn orbit_new_isolate(config: crate::abi::ConfigAbi) -> crate::abi::IsolateBox;
 }

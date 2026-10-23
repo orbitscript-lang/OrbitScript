@@ -119,14 +119,14 @@ fn expand(f: &ItemFn, name: Option<LitStr>) -> syn::Result<proc_macro2::TokenStr
     }
     // Borrowed arguments are read through a shared borrow of the stack, so
     // the body can't also have the stack mutably.
-    if types.iter().any(|t| is_stack(t))
-        && let Some(t) = types.iter().find(|t| !is_stack(t) && borrows(t))
-    {
-        return Err(Error::new(
-            t.span(),
-            "this function takes the stack, so its arguments can't borrow from it: \
+    if types.iter().any(|t| is_stack(t)) {
+        if let Some(t) = types.iter().find(|t| !is_stack(t) && borrows(t)) {
+            return Err(Error::new(
+                t.span(),
+                "this function takes the stack, so its arguments can't borrow from it: \
              use an owned type (`Vec<u8>`, `String`) or an index (`Any`)",
-        ));
+            ));
+        }
     }
 
     let ident = &sig.ident;

@@ -75,14 +75,15 @@ pub(crate) trait Names {
         let Some(s) = self.symbol(id) else {
             return "?".into();
         };
-        if s.kind == SymbolKind::Variant
-            && let Some(c) = s.container
-            && let Some(e) = self.symbol(SymbolId {
-                file: id.file,
-                index: c,
-            })
-        {
-            return format!("{}::{}", e.name, s.name);
+        if s.kind == SymbolKind::Variant {
+            if let Some(c) = s.container {
+                if let Some(e) = self.symbol(SymbolId {
+                    file: id.file,
+                    index: c,
+                }) {
+                    return format!("{}::{}", e.name, s.name);
+                }
+            }
         }
         s.name.clone()
     }

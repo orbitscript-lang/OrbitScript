@@ -32,7 +32,9 @@ pub fn compiler_next_to(interp: &Path) -> PathBuf {
 /// Makes `path` absolute against the current directory without touching the
 /// filesystem, because subprocesses run with a different working directory.
 pub fn absolute(path: &Path) -> Result<PathBuf> {
-    std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))
+    std::env::current_dir()
+        .map(|d| d.join(path))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Recursively copies a directory tree.

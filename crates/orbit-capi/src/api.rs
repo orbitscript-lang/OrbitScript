@@ -119,7 +119,7 @@ pub(crate) fn arith(c: &mut Stack<'_>, op: i32) -> Res<()> {
 
 /// A registry key no module can make: the address of a static of ours.
 fn private_key(key: &'static u8) -> usize {
-    std::ptr::from_ref(key) as usize
+    key as *const u8 as usize
 }
 
 static C_FUNCTIONS: u8 = 0;

@@ -33,12 +33,13 @@ pub(crate) use imp::{RELEASES, release_memory};
 mod imp {
     use std::ffi::c_int;
 
-    #[allow(unsafe_code, reason = "glibc FFI, ADR-2 and ADR-6")]
-    unsafe extern "C" {
+    // glibc FFI, ADR-2 and ADR-6
+    #[allow(unsafe_code)]
+    extern "C" {
         /// Frees memory at the top of the main heap and, since glibc 2.8,
         /// whole free pages anywhere in every arena, leaving `pad` bytes at
         /// the top. Returns 1 if it released anything.
-        safe fn malloc_trim(pad: usize) -> c_int;
+        fn malloc_trim(pad: usize) -> c_int;
     }
 
     /// Whether this build can hand memory back to the OS.
@@ -47,7 +48,11 @@ mod imp {
     /// Ask the allocator to return free memory to the OS.
     #[inline]
     pub(crate) fn release_memory() {
-        malloc_trim(0);
+        // SAFETY: malloc_trim only walks glibc's own heap; it takes no pointers.
+        #[allow(unsafe_code)]
+        unsafe {
+            malloc_trim(0);
+        }
     }
 }
 
@@ -56,13 +61,14 @@ mod imp {
 mod imp {
     use std::ffi::c_void;
 
-    #[allow(unsafe_code, reason = "macOS libmalloc FFI, ADR-2 and ADR-6")]
-    unsafe extern "C" {
+    // macOS libmalloc FFI, ADR-2 and ADR-6
+    #[allow(unsafe_code)]
+    extern "C" {
         /// Advises the malloc subsystem that the process is under memory
         /// pressure, requesting freed memory to be returned to the OS.
         /// Passing NULL for zone inspects all zones, and 0 for goal asks
         /// to relieve as much pressure as possible.
-        safe fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
+        fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
     }
 
     /// Whether this build can hand memory back to the OS.
@@ -71,7 +77,11 @@ mod imp {
     /// Ask the allocator to return free memory to the OS.
     #[inline]
     pub(crate) fn release_memory() {
-        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        // SAFETY: a null zone means every zone; libmalloc reads no memory of ours.
+        #[allow(unsafe_code)]
+        unsafe {
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
     }
 }
 

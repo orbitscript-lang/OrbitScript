@@ -132,7 +132,7 @@ impl<R: Read> Input<'_, R> {
             0x19 => Key::Yank,
             0x1a => Key::Suspend,
             0x1b => self.escape()?,
-            0..0x20 => Key::Ignore,
+            0..=0x1f => Key::Ignore,
             _ => Key::Insert(self.utf8(b)?),
         }))
     }
@@ -193,7 +193,7 @@ impl<R: Read> Input<'_, R> {
     /// The character that starts with byte `b`.
     fn utf8(&mut self, b: u8) -> io::Result<char> {
         let len = match b {
-            0..0x80 => return Ok(char::from(b)),
+            0..=0x7f => return Ok(char::from(b)),
             0xc2..=0xdf => 2,
             0xe0..=0xef => 3,
             0xf0..=0xf4 => 4,
@@ -560,15 +560,15 @@ impl Line<'_> {
             }
             Key::Search => {
                 // Look further back; with no older match, stay on this one.
-                if let Some((i, _)) = s.found
-                    && i > 0
-                {
-                    let before = s.found;
-                    self.find(i - 1);
-                    if let Some(s) = &mut self.search
-                        && s.found.is_none()
-                    {
-                        s.found = before;
+                if let Some((i, _)) = s.found {
+                    if i > 0 {
+                        let before = s.found;
+                        self.find(i - 1);
+                        if let Some(s) = &mut self.search {
+                            if s.found.is_none() {
+                                s.found = before;
+                            }
+                        }
                     }
                 }
             }
@@ -602,7 +602,7 @@ impl Editor {
     /// Remember a line for Up and Ctrl-R. Empty lines and repeats of the
     /// last line aren't kept.
     pub fn add_history(&mut self, line: &[u8]) {
-        if line.trim_ascii().is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             return;
         }
         let line = to_chars(line);
@@ -839,7 +839,7 @@ impl Editor {
                 text.extend_from_slice(b"\r\n");
             } else {
                 let pad = width - n.chars().count();
-                text.extend(std::iter::repeat_n(b' ', pad));
+                text.extend(std::iter::repeat(b' ').take(pad));
             }
         }
         out.write_all(&text)?;

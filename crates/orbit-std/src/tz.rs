@@ -84,10 +84,10 @@ impl Zone {
     fn at(&self, t: i64) -> Kind {
         let i = self.transitions.partition_point(|&(at, _)| at <= t);
         if i == 0 {
-            if self.transitions.is_empty()
-                && let Some(r) = &self.rule
-            {
-                return r.at(t);
+            if self.transitions.is_empty() {
+                if let Some(r) = &self.rule {
+                    return r.at(t);
+                }
             }
             // Before the first transition: the first standard-time type.
             return self
@@ -98,10 +98,10 @@ impl Zone {
                 .cloned()
                 .unwrap_or_else(utc_kind);
         }
-        if i == self.transitions.len()
-            && let Some(r) = &self.rule
-        {
-            return r.at(t);
+        if i == self.transitions.len() {
+            if let Some(r) = &self.rule {
+                return r.at(t);
+            }
         }
         self.kinds[self.transitions[i - 1].1].clone()
     }
@@ -452,7 +452,7 @@ fn with_zone<T>(f: impl FnOnce(&Zone) -> T) -> T {
     let tz = std::env::var_os("TZ");
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        if c.as_ref().is_none_or(|(key, _)| *key != tz) {
+        if c.as_ref().map_or(true, |(key, _)| *key != tz) {
             let zone = load(tz.as_ref());
             *c = Some((tz, zone));
         }
@@ -529,15 +529,15 @@ impl Zone {
     /// The kind of time with `isdst` in force nearest to `t`, if the zone
     /// has one.
     fn nearest(&self, t: i64, isdst: bool) -> Option<Kind> {
-        if let Some(r) = &self.rule
-            && (self.transitions.is_empty() || t >= self.transitions.last()?.0)
-        {
-            match &r.dst {
-                Some((d, ..)) if isdst => return Some(d.clone()),
-                Some(_) => return Some(r.std.clone()),
-                None if !isdst => return Some(r.std.clone()),
-                None if self.transitions.is_empty() => return None,
-                None => {}
+        if let Some(r) = &self.rule {
+            if (self.transitions.is_empty() || t >= self.transitions.last()?.0) {
+                match &r.dst {
+                    Some((d, ..)) if isdst => return Some(d.clone()),
+                    Some(_) => return Some(r.std.clone()),
+                    None if !isdst => return Some(r.std.clone()),
+                    None if self.transitions.is_empty() => return None,
+                    None => {}
+                }
             }
         }
         let i = self.transitions.partition_point(|&(at, _)| at <= t);

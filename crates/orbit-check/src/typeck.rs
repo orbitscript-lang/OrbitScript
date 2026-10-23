@@ -265,10 +265,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             leaves(e, &mut ls);
             for l in ls {
                 let recorded = self.report.recorded(l.span);
-                if let Some(lt) = recorded
-                    && !self.types.assignable(lt, expected)
-                {
-                    found.push((l.span, lt));
+                if let Some(lt) = recorded {
+                    if !self.types.assignable(lt, expected) {
+                        found.push((l.span, lt));
+                    }
                 }
             }
         }
@@ -542,16 +542,16 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         self.env = saved;
         match annotated {
             Some(rs) => {
-                if tail.is_none()
-                    && !diverges
-                    && let Some(&r) = rs.first()
-                    && !self.types.may_be_nil(r)
-                {
-                    let msg = format!(
-                        "this function returns {}, but it can reach its end without a value",
-                        self.show(r)
-                    );
-                    self.report.error(name_span, Code::Mismatch, msg);
+                if tail.is_none() && !diverges {
+                    if let Some(&r) = rs.first() {
+                        if !self.types.may_be_nil(r) {
+                            let msg = format!(
+                                "this function returns {}, but it can reach its end without a value",
+                                self.show(r)
+                            );
+                            self.report.error(name_span, Code::Mismatch, msg);
+                        }
+                    }
                 }
                 Some(rs)
             }
@@ -617,12 +617,13 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn returned(&mut self, e: Option<&'a ast::Expr>, span: Span) -> Results {
         let annotated = self.fns.last().and_then(|f| f.results.clone());
         let Some(e) = e else {
-            if let Some(rs) = &annotated
-                && let Some(&r) = rs.first()
-                && !self.types.may_be_nil(r)
-            {
-                let msg = format!("expected a value of type {}, found none", self.show(r));
-                self.report.error(span, Code::Mismatch, msg);
+            if let Some(rs) = &annotated {
+                if let Some(&r) = rs.first() {
+                    if !self.types.may_be_nil(r) {
+                        let msg = format!("expected a value of type {}, found none", self.show(r));
+                        self.report.error(span, Code::Mismatch, msg);
+                    }
+                }
             }
             return Some(Vec::new());
         };
@@ -633,31 +634,32 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             ExprKind::Tuple(items) => items.iter().collect(),
             _ => vec![e],
         };
-        if let [one] = items[..]
-            && matches!(
+        if let [one] = items[..] {
+            if matches!(
                 one.kind,
                 ExprKind::Call { .. } | ExprKind::MethodCall { .. } | ExprKind::Spread(_)
-            )
-        {
-            let vals = self.expr_multi(one, self.types.result_at(&rs, 0));
-            if let Some(vs) = &vals {
-                let (fixed, rest) = self.types.split_results(&rs);
-                let (vs_fixed, vs_rest) = self.types.split_results(vs);
-                for i in 0..fixed.len().max(vs_fixed.len()) {
-                    match (self.types.result_at(vs, i), self.types.result_at(&rs, i)) {
-                        (Some(v), Some(r)) => self.expect(v, r, e.span, None),
-                        (None, Some(r)) if !self.types.may_be_nil(r) => {
-                            let msg = format!("missing result {} (result {})", self.show(r), i + 1);
-                            self.report.error(e.span, Code::Mismatch, msg);
+            ) {
+                let vals = self.expr_multi(one, self.types.result_at(&rs, 0));
+                if let Some(vs) = &vals {
+                    let (fixed, rest) = self.types.split_results(&rs);
+                    let (vs_fixed, vs_rest) = self.types.split_results(vs);
+                    for i in 0..fixed.len().max(vs_fixed.len()) {
+                        match (self.types.result_at(vs, i), self.types.result_at(&rs, i)) {
+                            (Some(v), Some(r)) => self.expect(v, r, e.span, None),
+                            (None, Some(r)) if !self.types.may_be_nil(r) => {
+                                let msg =
+                                    format!("missing result {} (result {})", self.show(r), i + 1);
+                                self.report.error(e.span, Code::Mismatch, msg);
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                    }
+                    if let (Some(v), Some(r)) = (vs_rest, rest) {
+                        self.expect(v, r, e.span, None);
                     }
                 }
-                if let (Some(v), Some(r)) = (vs_rest, rest) {
-                    self.expect(v, r, e.span, None);
-                }
+                return vals;
             }
-            return vals;
         }
         let mut out = Vec::new();
         for (i, item) in items.iter().enumerate() {
@@ -699,10 +701,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let defs = self.defs;
         let Some(index) = self.syms.local_at(f.name.span) else {
             // A function no symbol was made for (an `impl` of an unknown type).
-            if let Some(b) = &f.body
-                && self.report.on()
-            {
-                self.run_fn(None, None, f.name.span, Env::new(), |c| c.fn_block(b));
+            if let Some(b) = &f.body {
+                if self.report.on() {
+                    self.run_fn(None, None, f.name.span, Env::new(), |c| c.fn_block(b));
+                }
             }
             return;
         };
@@ -744,16 +746,18 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .syms
             .local_at(f.name.span)
             .map(|i| self.sym_type(self.syms.id(i)));
-        if f.sig.ret.is_none()
-            && let Some(t) = t
-            && let Ty::Fn(ft) = self.types.get(t).clone()
-            && let Some(rs) = ft.results.filter(|rs| !rs.is_empty())
-        {
-            let msg = format!(
-                "public function `{name}` returns {} but has no result type (strict mode)",
-                self.results_text(&rs)
-            );
-            self.report.error(f.name.span, Code::MissingResultType, msg);
+        if f.sig.ret.is_none() {
+            if let Some(t) = t {
+                if let Ty::Fn(ft) = self.types.get(t).clone() {
+                    if let Some(rs) = ft.results.filter(|rs| !rs.is_empty()) {
+                        let msg = format!(
+                            "public function `{name}` returns {} but has no result type (strict mode)",
+                            self.results_text(&rs)
+                        );
+                        self.report.error(f.name.span, Code::MissingResultType, msg);
+                    }
+                }
+            }
         }
     }
 
@@ -777,13 +781,13 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     .and_then(|f| f.params.get(i).copied())
                     .unwrap_or(any),
             };
-            if let Some(n) = p.name
-                && let Some(index) = self.syms.local_at(n.span)
-            {
-                self.sym_types.insert(index, t);
-                self.report.record(n.span, t);
-                if p.ty.is_none() {
-                    self.hint(n.span, t);
+            if let Some(n) = p.name {
+                if let Some(index) = self.syms.local_at(n.span) {
+                    self.sym_types.insert(index, t);
+                    self.report.record(n.span, t);
+                    if p.ty.is_none() {
+                        self.hint(n.span, t);
+                    }
                 }
             }
             params.push(t);
@@ -908,15 +912,17 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 };
                 self.hinting(d.is_none(), |c| c.pat(item, t));
             }
-            if short && let (Some(vs), Some(v)) = (&vals, value) {
-                let msg = format!(
-                    "`let` binds {} names, but {} gives {} value{}",
-                    items.len(),
-                    self.describe(v),
-                    vs.len(),
-                    if vs.len() == 1 { "" } else { "s" }
-                );
-                self.report.error(pat.span, Code::ResultCount, msg);
+            if short {
+                if let (Some(vs), Some(v)) = (&vals, value) {
+                    let msg = format!(
+                        "`let` binds {} names, but {} gives {} value{}",
+                        items.len(),
+                        self.describe(v),
+                        vs.len(),
+                        if vs.len() == 1 { "" } else { "s" }
+                    );
+                    self.report.error(pat.span, Code::ResultCount, msg);
+                }
             }
             return;
         }
@@ -1219,10 +1225,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             ExprKind::SelfType => any,
             ExprKind::Path { base, name } => {
-                if self.report.on()
-                    && let Some(b) = self.syms.path_symbol(base)
-                {
-                    self.report.paths_at.push((name.span, b));
+                if self.report.on() {
+                    if let Some(b) = self.syms.path_symbol(base) {
+                        self.report.paths_at.push((name.span, b));
+                    }
                 }
                 match self.syms.ref_at(name.span) {
                     Some(id) => self.sym_type(id),
@@ -1235,10 +1241,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     let receiver = self.types.non_nil(ot);
                     self.report.members_at.push((name.span, receiver));
                 }
-                if let Some(k) = self.key_of(e)
-                    && let Some(&t) = self.env.get(&k)
-                {
-                    return t;
+                if let Some(k) = self.key_of(e) {
+                    if let Some(&t) = self.env.get(&k) {
+                        return t;
+                    }
                 }
                 self.field_type(ot, *name, obj)
             }
@@ -1567,12 +1573,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     self.report.members_at.push((name.span, receiver));
                     if let Ty::Nominal(id, _) | Ty::Variant(id, _) =
                         self.types.get(receiver).clone()
-                        && let Some(m) = self
+                    {
+                        if let Some(m) = self
                             .syms
                             .member_sym(self.syms.holder(id), &self.text(name.sym))
-                    {
-                        let mt = self.sym_type(m);
-                        self.call_site(*args_at, e.span, args, mt, Some(m), true);
+                        {
+                            let mt = self.sym_type(m);
+                            self.call_site(*args_at, e.span, args, mt, Some(m), true);
+                        }
                     }
                 }
                 self.method_call(ot, obj, *name, args, e.span, expected)
@@ -1735,14 +1743,14 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let mut map: HashMap<SymbolId, TypeId> = HashMap::new();
         let mut params: &[TypeId] = &f.params;
         let mut params_skipped = 0;
-        if let Some(st) = self_arg
-            && let Some((&p0, rest)) = params.split_first()
-        {
-            if generic {
-                self.types.unify(p0, st, &mut map);
+        if let Some(st) = self_arg {
+            if let Some((&p0, rest)) = params.split_first() {
+                if generic {
+                    self.types.unify(p0, st, &mut map);
+                }
+                params = rest;
+                params_skipped = 1;
             }
-            params = rest;
-            params_skipped = 1;
         }
         let spread = args
             .last()
@@ -1800,10 +1808,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
         }
         if generic {
-            if let (Some(exp), Some(rs)) = (expected, &f.results)
-                && let Some(r0) = self.types.result_at(rs, 0)
-            {
-                self.types.unify(r0, exp, &mut map);
+            if let (Some(exp), Some(rs)) = (expected, &f.results) {
+                if let Some(r0) = self.types.result_at(rs, 0) {
+                    self.types.unify(r0, exp, &mut map);
+                }
             }
             for g in &f.generics {
                 map.entry(*g).or_insert(any);
@@ -1906,10 +1914,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn try_expr(&mut self, inner: &'a ast::Expr, span: Span) -> TypeId {
         let nil = self.types.nil;
         let Some(rs) = self.expr_multi(inner, None) else {
-            if let Some(ctx) = self.fns.last_mut()
-                && ctx.results.is_none()
-            {
-                ctx.returns.push(None);
+            if let Some(ctx) = self.fns.last_mut() {
+                if ctx.results.is_none() {
+                    ctx.returns.push(None);
+                }
             }
             return self.types.any;
         };
@@ -2136,10 +2144,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let mut map: HashMap<SymbolId, TypeId> = HashMap::new();
         if let Some(exp) = expected {
             for m in self.types.members(exp) {
-                if let Ty::Nominal(e, args) | Ty::Variant(e, args) = self.types.get(m)
-                    && self.syms.holder(*e) == holder
-                {
-                    map.extend(gens.iter().copied().zip(args.iter().copied()));
+                if let Ty::Nominal(e, args) | Ty::Variant(e, args) = self.types.get(m) {
+                    if self.syms.holder(*e) == holder {
+                        map.extend(gens.iter().copied().zip(args.iter().copied()));
+                    }
                 }
             }
         }
@@ -2226,10 +2234,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             UnOp::BNot => Some("__bnot"),
             UnOp::Not => None,
         };
-        if let Some(name) = mm
-            && let Some(r) = self.metamethod_result(t, name)
-        {
-            return r;
+        if let Some(name) = mm {
+            if let Some(r) = self.metamethod_result(t, name) {
+                return r;
+            }
         }
         let ok = match op {
             UnOp::Neg => self.types.is_numeric(t),
@@ -2334,22 +2342,24 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 continue;
             };
             let mt = self.sym_type(m);
-            if let Ty::Fn(f) = self.types.get(mt).clone()
-                && f.params.len() >= 2
-                && f.generics.is_empty()
-                && !(self.types.assignable(a, f.params[0]) && self.types.assignable(b, f.params[1]))
-            {
-                let msg = format!(
-                    "`{}` on {} and {}: `{}::{name}` takes {} and {}",
-                    op.as_str(),
-                    self.show(l),
-                    self.show(r),
-                    self.syms.name(self.syms.holder(id)),
-                    self.show(f.params[0]),
-                    self.show(f.params[1])
-                );
-                self.report.error(span, Code::BadOperand, msg);
-                return Some(self.types.any);
+            if let Ty::Fn(f) = self.types.get(mt).clone() {
+                if f.params.len() >= 2
+                    && f.generics.is_empty()
+                    && !(self.types.assignable(a, f.params[0])
+                        && self.types.assignable(b, f.params[1]))
+                {
+                    let msg = format!(
+                        "`{}` on {} and {}: `{}::{name}` takes {} and {}",
+                        op.as_str(),
+                        self.show(l),
+                        self.show(r),
+                        self.syms.name(self.syms.holder(id)),
+                        self.show(f.params[0]),
+                        self.show(f.params[1])
+                    );
+                    self.report.error(span, Code::BadOperand, msg);
+                    return Some(self.types.any);
+                }
             }
             let res = self.fn_first_result(mt);
             return Some(if op.is_comparison() {
@@ -2612,28 +2622,29 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let mut yes = self.env.clone();
         let mut no = self.env.clone();
         for (a, b) in [(lhs, rhs), (rhs, lhs)] {
-            if matches!(b.kind, ExprKind::Nil)
-                && let Some(k) = self.key_of(a)
-            {
-                let cur = self.path_type(&k, a);
-                if cur == self.types.any || self.types.may_be_nil(cur) {
-                    yes.insert(k.clone(), self.types.nil);
+            if matches!(b.kind, ExprKind::Nil) {
+                if let Some(k) = self.key_of(a) {
+                    let cur = self.path_type(&k, a);
+                    if cur == self.types.any || self.types.may_be_nil(cur) {
+                        yes.insert(k.clone(), self.types.nil);
+                    }
+                    let nn = self.types.non_nil(cur);
+                    no.insert(k, nn);
+                    break;
                 }
-                let nn = self.types.non_nil(cur);
-                no.insert(k, nn);
-                break;
             }
-            if let ExprKind::Str(s) = b.kind
-                && let Some((arg, math)) = self.type_call(a)
-                && let Some(k) = self.key_of(arg)
-            {
-                let name = self.text(s);
-                let cur = self.path_type(&k, arg);
-                let y = self.filter_type_name(cur, &name, math, true);
-                let n = self.filter_type_name(cur, &name, math, false);
-                yes.insert(k.clone(), y);
-                no.insert(k, n);
-                break;
+            if let ExprKind::Str(s) = b.kind {
+                if let Some((arg, math)) = self.type_call(a) {
+                    if let Some(k) = self.key_of(arg) {
+                        let name = self.text(s);
+                        let cur = self.path_type(&k, arg);
+                        let y = self.filter_type_name(cur, &name, math, true);
+                        let n = self.filter_type_name(cur, &name, math, false);
+                        yes.insert(k.clone(), y);
+                        no.insert(k, n);
+                        break;
+                    }
+                }
             }
         }
         (yes, no)
@@ -2662,11 +2673,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         if self.is_prelude(callee, "type") {
             return Some((arg, false));
         }
-        if let ExprKind::Path { base, name } = &callee.kind
-            && self.is_prelude(base, "math")
-            && self.strings.get(name.sym) == b"type"
-        {
-            return Some((arg, true));
+        if let ExprKind::Path { base, name } = &callee.kind {
+            if self.is_prelude(base, "math") && self.strings.get(name.sym) == b"type" {
+                return Some((arg, true));
+            }
         }
         None
     }
@@ -2876,10 +2886,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let mut tys = Vec::new();
         for arm in arms {
             self.env = start.clone();
-            if let Some(n) = self.pat(&arm.pat, st)
-                && let Some(k) = &key
-            {
-                self.env.insert(k.clone(), n);
+            if let Some(n) = self.pat(&arm.pat, st) {
+                if let Some(k) = &key {
+                    self.env.insert(k.clone(), n);
+                }
             }
             if let Some(g) = &arm.guard {
                 let (_, yes, _) = self.cond(g);
@@ -2974,10 +2984,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let n = self.syms.generics_of(holder).len();
         let mut args = vec![self.types.any; n];
         for m in self.types.members(t) {
-            if let Ty::Nominal(e, a) | Ty::Variant(e, a) = self.types.get(m)
-                && self.syms.holder(*e) == holder
-            {
-                args = a.clone();
+            if let Ty::Nominal(e, a) | Ty::Variant(e, a) = self.types.get(m) {
+                if self.syms.holder(*e) == holder {
+                    args = a.clone();
+                }
             }
         }
         let tt = match kind {
@@ -3096,24 +3106,25 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 all
             }
             PatKind::Path(e) => {
-                if let Some(id) = self.syms.path_symbol(e)
-                    && self.syms.kind(id) == Some(SymbolKind::Variant)
-                {
-                    out.push(Case::Variant(id));
+                if let Some(id) = self.syms.path_symbol(e) {
+                    if self.syms.kind(id) == Some(SymbolKind::Variant) {
+                        out.push(Case::Variant(id));
+                    }
                 }
                 false
             }
             PatKind::Struct { path, fields, .. } => {
                 let irrefutable = fields.iter().all(|f| {
-                    f.pat
-                        .as_ref()
-                        .is_none_or(|p| matches!(p.kind, PatKind::Wild | PatKind::Bind { .. }))
+                    f.pat.as_ref().map_or(true, |p| {
+                        matches!(p.kind, PatKind::Wild | PatKind::Bind { .. })
+                    })
                 });
-                if irrefutable
-                    && let Some(id) = self.syms.path_symbol(path)
-                    && self.syms.kind(id) == Some(SymbolKind::Variant)
-                {
-                    out.push(Case::Variant(id));
+                if irrefutable {
+                    if let Some(id) = self.syms.path_symbol(path) {
+                        if self.syms.kind(id) == Some(SymbolKind::Variant) {
+                            out.push(Case::Variant(id));
+                        }
+                    }
                 }
                 false
             }

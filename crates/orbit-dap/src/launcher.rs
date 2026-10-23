@@ -196,10 +196,10 @@ fn accept(bound: &socket::Bound, mut process: Option<&mut Child>) -> Result<Stre
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => return Err(fail(e)),
         }
-        if let Some(p) = process.as_deref_mut()
-            && let Ok(Some(status)) = p.try_wait()
-        {
-            return Err(format!("the program exited before it started ({status})"));
+        if let Some(p) = process.as_deref_mut() {
+            if let Ok(Some(status)) = p.try_wait() {
+                return Err(format!("the program exited before it started ({status})"));
+            }
         }
         if Instant::now() > deadline {
             return Err("the program did not start".into());

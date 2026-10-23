@@ -13,7 +13,7 @@ orbit = { path = "../orbit", default-features = false }
 # Makes the calls (ADR-9). By default it builds libffi from its bundled
 # sources and links it statically, which needs a C compiler, `sh` and `make`
 # (MSVC targets use only the C compiler).
-libffi-sys = { version = "4.2", default-features = false }
+libffi-sys = { version = ">=2.3, <5", default-features = false }
 
 [features]
 # Link the system's shared libffi instead of building the bundled copy

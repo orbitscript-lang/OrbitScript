@@ -737,8 +737,15 @@ impl fmt::Debug for Extensions {
 }
 
 /// `Write` that can be printed with `{:?}`.
-pub trait WriteDebug: Write + fmt::Debug {}
-impl<T: Write + fmt::Debug> WriteDebug for T {}
+pub trait WriteDebug: Write + fmt::Debug {
+    /// `self` as a plain writer (trait upcasting is stable only from Rust 1.86).
+    fn as_write(&mut self) -> &mut dyn Write;
+}
+impl<T: Write + fmt::Debug> WriteDebug for T {
+    fn as_write(&mut self) -> &mut dyn Write {
+        self
+    }
+}
 
 impl Roots<LuaSpace> for Runtime {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {

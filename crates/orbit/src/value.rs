@@ -52,7 +52,8 @@ macro_rules! handle {
                 $name { s, idx }
             }
 
-            #[allow(dead_code, reason = "not every kind of handle needs it")]
+            // not every kind of handle needs it
+            #[allow(dead_code)]
             pub(crate) fn slot(&self) -> i32 {
                 self.idx
             }
@@ -416,10 +417,8 @@ impl<'s> Table<'s> {
     }
 
     /// `#t`, with `__len`.
-    #[allow(
-        clippy::len_without_is_empty,
-        reason = "`#t` is a border, not a count, so `#t == 0` isn't emptiness"
-    )]
+    // `#t` is a border, not a count, so `#t == 0` isn't emptiness
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> Result<i64, Error> {
         self.s.run(|st| st.len(self.idx))?;
         self.s.top().get()

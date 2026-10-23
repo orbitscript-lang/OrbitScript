@@ -53,7 +53,7 @@ fn fold_identical_code(os: &str) {
         // functions unless told `-no_deduplicate`.
         return;
     }
-    if target == "x86_64-unknown-linux-gnu" {
+    if target == "x86_64-unknown-linux-gnu" && rustc_defaults_to_lld() {
         // rustc links this target with its bundled lld.
         println!("cargo:rustc-link-arg-bins=-Wl,--icf=all");
         return;
@@ -113,4 +113,19 @@ fn links_with_lld(linker: &str, prefix: Option<&Path>) -> bool {
         .is_ok_and(|out| {
             out.status.success() && String::from_utf8_lossy(&out.stdout).contains("LLD")
         })
+}
+
+/// Whether this rustc links x86_64 Linux with its bundled lld by default
+/// (Rust 1.90 and later).
+fn rustc_defaults_to_lld() -> bool {
+    let rustc = var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
+    let Ok(out) = Command::new(rustc).arg("--version").output() else {
+        return false;
+    };
+    let v = String::from_utf8_lossy(&out.stdout);
+    let minor = v
+        .split(['.', ' '])
+        .nth(2)
+        .and_then(|m| m.parse::<u32>().ok());
+    minor.map_or(false, |m| m >= 90)
 }

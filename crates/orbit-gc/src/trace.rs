@@ -366,7 +366,7 @@ impl KindMeta {
     fn reopen(&mut self, p: usize) {
         self.pages[p].open = true;
         self.open.insert(p as u32);
-        if self.cur.is_none_or(|c| (p as u32) < c) {
+        if self.cur.map_or(true, |c| (p as u32) < c) {
             self.cur = Some(p as u32);
         }
     }
@@ -541,8 +541,10 @@ impl Marks {
             let waited = *c & WAIT != 0;
             *c = (*c & !(COLOR | WAIT)) | GRAY;
             self.gray.push(v);
-            if waited && let Some(more) = self.waiting.remove(&(v.kind, v.index)) {
-                more.drain_into(&mut todo);
+            if waited {
+                if let Some(more) = self.waiting.remove(&(v.kind, v.index)) {
+                    more.drain_into(&mut todo);
+                }
             }
         }
         self.scratch = todo;

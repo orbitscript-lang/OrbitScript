@@ -321,8 +321,10 @@ impl<'a, 'c> Matcher<'a, 'c> {
             let here = s < self.src.len() && self.single(self.src[s], p, end);
             match pat.get(end) {
                 Some(b'?') => {
-                    if here && let Some(e) = self.go(s + 1, end + 1)? {
-                        return Ok(Some(e));
+                    if here {
+                        if let Some(e) = self.go(s + 1, end + 1)? {
+                            return Ok(Some(e));
+                        }
                     }
                     p = end + 1;
                 }
@@ -411,10 +413,10 @@ impl<'a, 'c> Matcher<'a, 'c> {
         };
         let next = self.must_match_next(end + 1);
         for k in (0..=run).rev() {
-            if let Some(it) = next
-                && !src.get(s + k).is_some_and(|&c| self.matches(it, c))
-            {
-                continue;
+            if let Some(it) = next {
+                if !src.get(s + k).is_some_and(|&c| self.matches(it, c)) {
+                    continue;
+                }
             }
             if let Some(e) = self.go(s + k, end + 1)? {
                 return Ok(Some(e));
@@ -433,8 +435,10 @@ impl<'a, 'c> Matcher<'a, 'c> {
                 Some(n) => src.get(s).is_some_and(|&c| self.matches(n, c)),
                 None => true,
             };
-            if try_here && let Some(e) = self.go(s, end + 1)? {
-                return Ok(Some(e));
+            if try_here {
+                if let Some(e) = self.go(s, end + 1)? {
+                    return Ok(Some(e));
+                }
             }
             if s < src.len() && self.matches(it, src[s]) {
                 s += 1;

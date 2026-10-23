@@ -182,38 +182,41 @@ impl Lowerer {
 
     /// The test for an arm's pattern (`None` if it always matches).
     fn arm_test(&mut self, pat: &ast::Pat, subjects: &[LocalId]) -> LResult<Option<ExprId>> {
-        if let ast::PatKind::Or(alts) = &pat.kind
-            && alts
+        if let ast::PatKind::Or(alts) = &pat.kind {
+            if alts
                 .iter()
                 .any(|a| matches!(a.kind, ast::PatKind::Tuple(_)))
-        {
-            // `(0, _) | (_, 0)`: alternatives over all the subjects.
-            let mut test: Option<ExprId> = None;
-            for alt in alts {
-                let mut binds = Vec::new();
-                match &alt.kind {
-                    ast::PatKind::Tuple(items) => {
-                        for (item, &s) in items.iter().zip(subjects) {
-                            self.pattern_binds(item, &Access::Local(s), &mut binds)?;
+            {
+                // `(0, _) | (_, 0)`: alternatives over all the subjects.
+                let mut test: Option<ExprId> = None;
+                for alt in alts {
+                    let mut binds = Vec::new();
+                    match &alt.kind {
+                        ast::PatKind::Tuple(items) => {
+                            for (item, &s) in items.iter().zip(subjects) {
+                                self.pattern_binds(item, &Access::Local(s), &mut binds)?;
+                            }
                         }
+                        _ => self.pattern_binds(alt, &Access::Local(subjects[0]), &mut binds)?,
                     }
-                    _ => self.pattern_binds(alt, &Access::Local(subjects[0]), &mut binds)?,
+                    if !binds.is_empty() {
+                        return Err(self.error(
+                            alt.span,
+                            "bindings inside `|` patterns are not supported yet",
+                        ));
+                    }
+                    let Some(t) = self.arm_test(alt, subjects)? else {
+                        return Ok(None);
+                    };
+                    test = Some(match test {
+                        None => t,
+                        Some(prev) => {
+                            self.add_expr(hir::ExprKind::Or { lhs: prev, rhs: t }, pat.span)
+                        }
+                    });
                 }
-                if !binds.is_empty() {
-                    return Err(self.error(
-                        alt.span,
-                        "bindings inside `|` patterns are not supported yet",
-                    ));
-                }
-                let Some(t) = self.arm_test(alt, subjects)? else {
-                    return Ok(None);
-                };
-                test = Some(match test {
-                    None => t,
-                    Some(prev) => self.add_expr(hir::ExprKind::Or { lhs: prev, rhs: t }, pat.span),
-                });
+                return Ok(test);
             }
-            return Ok(test);
         }
         if let ast::PatKind::Tuple(items) = &pat.kind {
             let mut test = None;
@@ -565,24 +568,26 @@ impl Lowerer {
         if let K::MethodCall {
             obj, name, args, ..
         } = &e.kind
-            && name.sym == self.syms.step_by
         {
-            if args.len() != 1 {
-                return Err(self.error(e.span, "`step_by` takes one step"));
+            if name.sym == self.syms.step_by {
+                if args.len() != 1 {
+                    return Err(self.error(e.span, "`step_by` takes one step"));
+                }
+                step = Some(&args[0]);
+                e = obj;
             }
-            step = Some(&args[0]);
-            e = obj;
         }
         if let K::MethodCall {
             obj, name, args, ..
         } = &e.kind
-            && name.sym == self.syms.rev
         {
-            if !args.is_empty() {
-                return Err(self.error(e.span, "`rev` takes no arguments"));
+            if name.sym == self.syms.rev {
+                if !args.is_empty() {
+                    return Err(self.error(e.span, "`rev` takes no arguments"));
+                }
+                rev = true;
+                e = obj;
             }
-            rev = true;
-            e = obj;
         }
         if let K::Paren(inner) = &e.kind {
             e = inner;

@@ -33,9 +33,12 @@ pub(crate) fn same_comments(src: &[u8], before: &Ast, out: &[u8], after: &Ast) -
             .comments
             .iter()
             .map(|c| {
-                src[c.span.start as usize..c.span.end as usize]
-                    .trim_ascii_end()
-                    .to_vec()
+                let s = &src[c.span.start as usize..c.span.end as usize];
+                let end = s
+                    .iter()
+                    .rposition(|b| !b.is_ascii_whitespace())
+                    .map_or(0, |i| i + 1);
+                s[..end].to_vec()
             })
             .collect();
         v.sort();

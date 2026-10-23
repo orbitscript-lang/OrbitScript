@@ -1803,7 +1803,7 @@ impl<'s> Stack<'s> {
     /// Write to the isolate's standard output, the stream `print` and
     /// `io.stdout` share. `f` must not reach the isolate.
     pub fn with_stdout<R>(&mut self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
-        f(&mut *self.ctx.vm.rt.out)
+        f(self.ctx.vm.rt.out.as_write())
     }
 
     /// Run `hook` when a script ends the process ([`Return::exit`],

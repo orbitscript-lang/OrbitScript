@@ -40,15 +40,17 @@ pub(super) fn overloads(
 ) {
     let mut by_name: HashMap<StrId, Vec<SymbolId>> = HashMap::new();
     for s in stmts {
-        if let StmtKind::Item(item) = &s.kind
-            && let ItemKind::Fn(f) = &item.kind
-            && f.body.is_none()
-            && let Some(&index) = by_span.get(&sk(f.name.span))
-        {
-            by_name
-                .entry(f.name.sym)
-                .or_default()
-                .push(SymbolId { file, index });
+        if let StmtKind::Item(item) = &s.kind {
+            if let ItemKind::Fn(f) = &item.kind {
+                if f.body.is_none() {
+                    if let Some(&index) = by_span.get(&sk(f.name.span)) {
+                        by_name
+                            .entry(f.name.sym)
+                            .or_default()
+                            .push(SymbolId { file, index });
+                    }
+                }
+            }
         }
     }
     for group in by_name.into_values().filter(|g| g.len() > 1) {
@@ -142,15 +144,15 @@ fn fields<'a>(fs: &'a [ast::FieldDecl], lw: &mut Lowering<'_, 'a, '_, '_>) {
 
 /// A variant's type, with `any` for its enum's generic arguments.
 fn variant(v: &ast::Variant, lw: &mut Lowering<'_, '_, '_, '_>) {
-    if let Some(index) = lw.syms.local_at(v.name.span)
-        && let Some(&Def::Variant { enum_ }) = lw.defs.defs.get(&index)
-    {
-        let n = lw.syms.generics_of(lw.syms.id(enum_)).len();
-        let any = lw.types.any;
-        let t = lw
-            .types
-            .intern(Ty::Variant(lw.syms.id(index), vec![any; n]));
-        lw.sym_types.insert(index, t);
+    if let Some(index) = lw.syms.local_at(v.name.span) {
+        if let Some(&Def::Variant { enum_ }) = lw.defs.defs.get(&index) {
+            let n = lw.syms.generics_of(lw.syms.id(enum_)).len();
+            let any = lw.types.any;
+            let t = lw
+                .types
+                .intern(Ty::Variant(lw.syms.id(index), vec![any; n]));
+            lw.sym_types.insert(index, t);
+        }
     }
 }
 
