@@ -208,7 +208,7 @@ fn threads_from_c() {
          call continued: OK ctx 7 top 2\n\
          callk outside\t1\tplain\n\
          yield outside\tfalse\tattempt to yield from outside a coroutine\n\
-         closethread after error: ERRRUN (null)\n\
+         closethread after error: ERRRUN\n\
          after close: status OK, top 0\n\
          resume: YIELD nres 1: from-c | status YIELD, top 1\n\
          continued: YIELD ctx 42 with 1 values\n\
@@ -216,6 +216,7 @@ fn threads_from_c() {
          resume: YIELD nres 1: holding | status YIELD, top 1\n\
          closed with\tnil\n\
          closethread: OK, top 0\n\
+         closethread with error object: ERRRUN -> ERRRUN closing\n\
          false\ttable\n\
          dead\n"
     );

@@ -366,6 +366,7 @@ static int c_isyieldable(lua_State *L) {
 
 static int threads(void) {
   lua_State *L = luaL_newstate(), *co, *co2;
+  int status, nres;
   luaL_openlibs(L);
   lua_register(L, "c_yield", c_yield);
   lua_register(L, "c_yieldk", c_yieldk);
@@ -436,8 +437,9 @@ static int threads(void) {
          "print('callk outside', c_call(function(a) return a, 'plain' end, 1))\n"
          "print('yield outside', pcall(c_yield, 1))");
 
-  /* A thread stopped by an error is reset by closing it. */
-  printf("closethread after error: %s %s\n", status_name(lua_closethread(co, L)), lua_tostring(co, -1));
+  /* A thread stopped by an error is reset by closing it. resume_print emptied its stack, so
+     there is no error object to look at (the reference liblua leaves a stale slot there). */
+  printf("closethread after error: %s\n", status_name(lua_closethread(co, L)));
   lua_settop(co, 0);
   printf("after close: status %s, top %d\n", status_name(lua_status(co)), lua_gettop(co));
 
@@ -454,7 +456,17 @@ static int threads(void) {
          "end");
   lua_getglobal(co, "closer");
   resume_print(L, co, 0);
-  printf("closethread: %s, top %d\n", status_name(lua_closethread(co, L)), lua_gettop(co));
+  status = lua_closethread(co, L);
+  printf("closethread: %s, top %d\n", status_name(status), lua_gettop(co));
+
+  /* Closing a thread with its error object still on the stack leaves that object on top. */
+  co2 = lua_newthread(L);
+  luaL_loadstring(co2, "error('closing', 0)");
+  status = lua_resume(co2, L, 0, &nres);
+  printf("closethread with error object: %s", status_name(status));
+  status = lua_closethread(co2, L);
+  printf(" -> %s %s\n", status_name(status), lua_tostring(co2, -1));
+  lua_pop(L, 1);
   run(L, "local co = coroutine.create(function() error({}) end)\n"
          "local ok, e = coroutine.resume(co)\n"
          "print(ok, type(e))\n"
