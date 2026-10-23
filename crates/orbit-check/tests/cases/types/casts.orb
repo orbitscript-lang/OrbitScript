@@ -1,12 +1,25 @@
 // `as` runs while the program does: scalars convert, named types and unions are checked.
 
-struct Point { x: float, y: float }
-struct Line { a: Point, b: Point }
-struct Name { text: string }
-impl Name {
-    fn __tostring(self) -> string { self.text }
+struct Point {
+    x: float,
+    y: float,
 }
-enum Shape { Circle { r: float }, Square { side: float } }
+struct Line {
+    a: Point,
+    b: Point,
+}
+struct Name {
+    text: string,
+}
+impl Name {
+    fn __tostring(self) -> string {
+        self.text
+    }
+}
+enum Shape {
+    Circle { r: float },
+    Square { side: float },
+}
 type Ids = [int];
 
 fn scalars(f: float, n: number, s: string, flag: bool, maybe: int?, any_value) {

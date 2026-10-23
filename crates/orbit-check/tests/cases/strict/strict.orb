@@ -1,27 +1,53 @@
 //! orbit-check: strict
 // Strict mode: typed public signatures, `bool` conditions, no untyped Lua modules.
 
-use untyped; //~ T0504
 use typed;
+use untyped; //~ T0504
 
-pub fn add(a: int, b) -> int { a + b } //~ T0501
-pub fn twice(n: int) { n * 2 } //~ T0502
-pub fn log(msg: string) { print(msg); }
-fn private(a, b) { a + b }
+pub fn add(a: int, b) -> int { //~ T0501
+    a + b
+}
+pub fn twice(n: int) { //~ T0502
+    n * 2
+}
+pub fn log(msg: string) {
+    print(msg);
+}
+fn private(a, b) {
+    a + b
+}
 
-pub struct Counter { n: int }
+pub struct Counter {
+    n: int,
+}
 impl Counter {
-    pub fn bump(self, by) { self.n += by; } //~ T0501
-    fn helper(self, x) { x }
+    pub fn bump(self, by) { //~ T0501
+        self.n += by;
+    }
+    fn helper(self, x) {
+        x
+    }
 }
 
 fn conditions(n: int, maybe: string?, flag: bool, value) {
-    if n { print(n); } //~ T0503
-    if maybe { print(maybe); } //~ T0503
-    if maybe != nil { print(maybe); }
-    if flag { print(flag); }
-    if value { print(value); }
-    while n > 0 { break; }
+    if n { //~ T0503
+        print(n);
+    }
+    if maybe { //~ T0503
+        print(maybe);
+    }
+    if maybe != nil {
+        print(maybe);
+    }
+    if flag {
+        print(flag);
+    }
+    if value {
+        print(value);
+    }
+    while n > 0 {
+        break;
+    }
 }
 
 let t: int = typed::scale(2);

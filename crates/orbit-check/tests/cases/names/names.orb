@@ -9,7 +9,9 @@ fn uses_later() -> int {
 
 let a = later(); //~ T0102
 
-fn later() -> int { 1 }
+fn later() -> int {
+    1
+}
 const LIMIT = 3;
 
 let v = Vec2::new(1.0, 2.0);

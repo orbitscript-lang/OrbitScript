@@ -1,6 +1,10 @@
 // `match` coverage over enums, bool and optional values.
 
-enum Light { Red, Yellow, Green }
+enum Light {
+    Red,
+    Yellow,
+    Green,
+}
 
 fn next(l: Light) -> Light {
     match l { //~ T0401

@@ -1,9 +1,17 @@
 // Numbers, strings, operators and calls; each marked line names the codes expected on it.
 
-fn add(a: int, b: int) -> int { a + b }
-fn half(x: number) -> float { x / 2 }
+fn add(a: int, b: int) -> int {
+    a + b
+}
+fn half(x: number) -> float {
+    x / 2
+}
 fn greet(name: string, greeting: string?) -> string {
-    if greeting != nil { greeting ~ ", " ~ name } else { "hello, " ~ name }
+    if greeting != nil {
+        greeting ~ ", " ~ name
+    } else {
+        "hello, " ~ name
+    }
 }
 
 let n = add(1, 2);
@@ -34,11 +42,17 @@ fn not_callable() {
     n.len(); //~ T0203
 }
 
-if n { print(n); } //~ T0303
-if s != "" { print(s); }
+if n { //~ T0303
+    print(n);
+}
+if s != "" {
+    print(s);
+}
 
 // Unannotated parameters are `any`; bodies are still checked.
-fn loose(a, b) { a + b }
+fn loose(a, b) {
+    a + b
+}
 let anything = loose("x", #{}).whatever;
 
 // A local takes its initializer's type; a `let mut` everything assigned to it.

@@ -9,9 +9,9 @@ let bad_names: [string] = ["a", 2]; //~ T0201
 let by_key = names["x"]; //~ T0206
 names[#names] = nil;
 
-let ages: #{[string]: int} = #{ ann: 31, bob: 42 };
+let ages: #{ [string]: int } = #{ ann: 31, bob: 42 };
 let age: int = ages["ann"];
-let bad_age: #{[string]: int} = #{ ann: "old" }; //~ T0201
+let bad_age: #{ [string]: int } = #{ ann: "old" }; //~ T0201
 
 let p: Point3 = #{ x: 1.0, y: 2.0, z: 3.0 };
 let px: float = p.x;
@@ -29,11 +29,13 @@ let size: int = config.size;
 let other = config.other;
 
 // Arrays are invariant: a [int] isn't a [number].
-fn sum(xs: [number]) -> number { 0 }
+fn sum(xs: [number]) -> number {
+    0
+}
 let ints = [1, 2, 3];
 let s = sum(ints); //~ T0201
 let direct = sum([1, 2, 3]);
 
-let old_map: #{string: int} = #{}; //~ T0304 T0201
-let cast = (ages as #{[string]: string})["ann"]; //~ T0210
+let old_map: #{ string: int } = #{}; //~ T0304 T0201
+let cast = (ages as #{ [string]: string })["ann"]; //~ T0210
 let cast_ok: string = cast;

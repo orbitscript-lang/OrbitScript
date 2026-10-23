@@ -18,7 +18,7 @@ for (i, v) in ipairs(xs) {
     let a: int = i + v;
     let b: string = v; //~ T0201
 }
-let counts: #{[string]: int} = #{};
+let counts: #{ [string]: int } = #{};
 for (k, v) in pairs(counts) {
     let a: string = k;
     let b: string = v; //~ T0201

@@ -16,7 +16,9 @@ const OPEN_MINUTES = 120;
 const LOG_LINES = 12;
 
 /// A linear congruential generator (the classic C library constants).
-struct Random { state }
+struct Random {
+    state,
+}
 
 impl Random {
     pub fn new(seed) -> Random {
@@ -37,16 +39,34 @@ enum Request {
     Release,
 }
 
-struct Event { time, seq, process }
+struct Event {
+    time,
+    seq,
+    process,
+}
 
 impl Event {
     // Earlier events first; events at the same minute in the order they were scheduled.
     fn __lt(a, b) {
-        if a.time != b.time { a.time < b.time } else { a.seq < b.seq }
+        if a.time != b.time {
+            a.time < b.time
+        } else {
+            a.seq < b.seq
+        }
     }
 }
 
-struct Shop { now, seq, events, free, queue, served, total_wait, max_wait, log }
+struct Shop {
+    now,
+    seq,
+    events,
+    free,
+    queue,
+    served,
+    total_wait,
+    max_wait,
+    log,
+}
 
 impl Shop {
     pub fn new(verbose) -> Shop {
@@ -149,7 +169,9 @@ for round in 1..=rounds {
     shop.run();
     if round == rounds {
         print("   ...");
-        print(f"closed at minute {shop.now}: {shop.served} customers served by {BARISTAS} baristas");
+        print(
+            f"closed at minute {shop.now}: {shop.served} customers served by {BARISTAS} baristas",
+        );
         print(f"average wait {shop.total_wait / shop.served:.2} min, longest {shop.max_wait} min");
     }
 }

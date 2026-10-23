@@ -37,7 +37,11 @@ fn top(counts, n) {
     }
     // Most frequent first; ties in alphabetical order, so the output is stable.
     table::sort(entries, |a, b| {
-        if a.count != b.count { a.count > b.count } else { a.word < b.word }
+        if a.count != b.count {
+            a.count > b.count
+        } else {
+            a.word < b.word
+        }
     });
     let best = [];
     for i in 1..=math::min(n, #entries) {

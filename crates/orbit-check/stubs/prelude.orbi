@@ -34,13 +34,18 @@ pub fn getmetatable(object: any) -> any;
 /// Iterates over the array part of `t`: `for (i, v) in ipairs(t)`.
 pub fn ipairs<T>(t: [T] | table) -> (fn([T], int) -> (int?, T), [T], int);
 /// Compiles a chunk from a string, or from a function that returns its pieces.
-pub fn load(chunk: string | function, chunkname: string?, mode: string?, env: table?) -> (function?, string?);
+pub fn load(
+    chunk: string | function,
+    chunkname: string?,
+    mode: string?,
+    env: table?,
+) -> (function?, string?);
 /// Compiles the file `filename` (standard input with none) without running it.
 pub fn loadfile(filename: string?, mode: string?, env: table?) -> (function?, string?);
 /// The key after `index` in `t` and its value, or `nil` after the last.
-pub fn next<K, V>(t: #{[K]: V} | table, index: K?) -> (K?, V);
+pub fn next<K, V>(t: #{ [K]: V } | table, index: K?) -> (K?, V);
 /// Iterates over every key and value of `t`: `for (k, v) in pairs(t)`.
-pub fn pairs<K, V>(t: #{[K]: V} | table) -> (fn(#{[K]: V}, K?) -> (K?, V), #{[K]: V}, nil);
+pub fn pairs<K, V>(t: #{ [K]: V } | table) -> (fn(#{ [K]: V }, K?) -> (K?, V), #{ [K]: V }, nil);
 /// Calls `f` in protected mode: `true` and its results, or `false` and the error.
 pub fn pcall(f: any, ...args: any) -> (bool, ...any);
 /// Writes its arguments to standard output with `tostring`, separated by tabs.
@@ -79,4 +84,4 @@ pub const _G: table;
 /// The running version, `"Lua 5.5"`.
 pub const _VERSION: string;
 /// The command line, in the standalone interpreter: the script at 0, its arguments after it.
-pub const arg: #{[int]: string};
+pub const arg: #{ [int]: string };

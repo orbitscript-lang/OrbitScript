@@ -1,7 +1,9 @@
 // Multiple results, `?`, closures and inferred results.
 
 fn open(path: string) -> (string?, string?) {
-    if path == "" { return (nil, "empty path"); }
+    if path == "" {
+        return (nil, "empty path");
+    }
     (path, nil)
 }
 
@@ -25,37 +27,57 @@ let (c, d, e) = open("x"); //~ T0205
 let one = open("x");
 let as_string: string = one; //~ T0207
 
-fn pair() -> (int, string) { (1, "one") }
-fn wrong_pair() -> (int, string) { ("one", 1) } //~ T0201 T0201
-fn short_pair() -> (int, string) { 1 } //~ T0201
+fn pair() -> (int, string) {
+    (1, "one")
+}
+fn wrong_pair() -> (int, string) {
+    ("one", 1) //~ T0201 T0201
+}
+fn short_pair() -> (int, string) {
+    1 //~ T0201
+}
 
 fn count() -> int { //~ T0201
-    if true { return 1; }
+    if true {
+        return 1;
+    }
 }
 
 // A labelled `break` from a nested loop leaves the outer loop, so the end is reachable.
 fn nested_break(c: bool) -> int { //~ T0201
     'outer: loop {
-        while c { break 'outer; }
+        while c {
+            break 'outer;
+        }
     };
 }
 // Breaks that stay inside the nested loop don't.
 fn inner_break(c: bool) -> int {
     'outer: loop {
-        'inner: while c { break 'inner; }
-        while c { break; }
+        'inner: while c {
+            break 'inner;
+        }
+        while c {
+            break;
+        }
     };
 }
 
 // Results inferred from the body.
-fn inferred(x: int) { if x > 0 { x } else { -x } }
+fn inferred(x: int) {
+    if x > 0 { x } else { -x }
+}
 let i: int = inferred(3);
 let not_s: string = inferred(3); //~ T0201
-fn rec(n: int) { if n == 0 { 0 } else { rec(n - 1) } }
+fn rec(n: int) {
+    if n == 0 { 0 } else { rec(n - 1) }
+}
 let r: string = rec(3);
 
 // Closures take parameter types from what they're passed to.
-fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+fn apply(f: fn(int) -> int, x: int) -> int {
+    f(x)
+}
 let doubled = apply(|n| n * 2, 3);
 let bad = apply(|n| n ~ "!", 3); //~ T0201
 let lifted = |x: int| x + 1;

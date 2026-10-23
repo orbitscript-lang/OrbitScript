@@ -44,11 +44,20 @@ enum Command {
     Simple { line, words },
 }
 
-struct Ledger { balances, verbose, depth }
+struct Ledger {
+    balances,
+    verbose,
+    depth,
+}
 
 /// A transaction guard: it snapshots the balances and puts them back when it goes out of
 /// scope without `commit()`.
-struct Tx { ledger, saved, label, done }
+struct Tx {
+    ledger,
+    saved,
+    label,
+    done,
+}
 
 impl Tx {
     pub fn begin(ledger, label) -> Tx {
@@ -69,7 +78,11 @@ impl Tx {
         }
         self.ledger.balances = self.saved;
         if self.label != nil {
-            let why = if err != nil { f" after error: {err}" } else { "" };
+            let why = if err != nil {
+                f" after error: {err}"
+            } else {
+                ""
+            };
             self.ledger.say(f"rolled back {self.label}{why}");
         }
     }

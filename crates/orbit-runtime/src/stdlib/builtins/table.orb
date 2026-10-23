@@ -6,7 +6,16 @@
 // library. As in the reference, nothing may yield across them.
 
 use intrinsics::{
-    argerror, typeerror, raise, checktab, checkint, lenint, ult, newarray, plainlen, sortprim,
+    argerror,
+    checkint,
+    checktab,
+    lenint,
+    newarray,
+    plainlen,
+    raise,
+    sortprim,
+    typeerror,
+    ult,
 };
 
 // The largest array `sort` accepts (a C `int`).
@@ -93,7 +102,11 @@ pub fn sort(t, ...rest) {
         let mut lo = 1;
         while lo <= n {
             let mid = if lo + width <= n { lo + width } else { n + 1 };
-            let hi = if lo + 2 * width <= n { lo + 2 * width } else { n + 1 };
+            let hi = if lo + 2 * width <= n {
+                lo + 2 * width
+            } else {
+                n + 1
+            };
             let mut i = lo;
             let mut j = mid;
             let mut k = lo;
@@ -127,7 +140,11 @@ pub fn sort(t, ...rest) {
     // A comparator or `__lt` must be a strict order: no neighbour may come
     // out smaller than the one before it.
     for i in 2..=n {
-        let bad = if lt == nil { src[i] < src[i - 1] } else { lt(src[i], src[i - 1]) };
+        let bad = if lt == nil {
+            src[i] < src[i - 1]
+        } else {
+            lt(src[i], src[i - 1])
+        };
         if bad {
             raise("invalid order function for sorting");
         }

@@ -1,12 +1,23 @@
 // Structs, methods, enums, metamethods and generics.
 
-pub struct Vec2 { x: float, y: float }
+pub struct Vec2 {
+    x: float,
+    y: float,
+}
 
 impl Vec2 {
-    pub fn new(x: float, y: float) -> Vec2 { Vec2 { x, y } }
-    pub fn len(self) -> float { math::sqrt(self.x * self.x + self.y * self.y) }
-    pub fn scaled(self, k: float) -> Vec2 { Vec2::new(self.x * k, self.y * k) }
-    fn __add(self, other: Vec2) -> Vec2 { Vec2::new(self.x + other.x, self.y + other.y) }
+    pub fn new(x: float, y: float) -> Vec2 {
+        Vec2 { x, y }
+    }
+    pub fn len(self) -> float {
+        math::sqrt(self.x * self.x + self.y * self.y)
+    }
+    pub fn scaled(self, k: float) -> Vec2 {
+        Vec2::new(self.x * k, self.y * k)
+    }
+    fn __add(self, other: Vec2) -> Vec2 {
+        Vec2::new(self.x + other.x, self.y + other.y)
+    }
     fn __close(self, err) {}
 }
 
@@ -49,14 +60,22 @@ fn s_radius(s: Shape) -> float {
 }
 
 // Generic structs and functions.
-struct Stack<T> { items: [T] }
-
-impl<T> Stack<T> {
-    fn push(self, item: T) { self.items[#self.items + 1] = item; }
-    fn top(self) -> T? { self.items[#self.items] }
+struct Stack<T> {
+    items: [T],
 }
 
-fn first<T>(items: [T]) -> T? { items[1] }
+impl<T> Stack<T> {
+    fn push(self, item: T) {
+        self.items[#self.items + 1] = item;
+    }
+    fn top(self) -> T? {
+        self.items[#self.items]
+    }
+}
+
+fn first<T>(items: [T]) -> T? {
+    items[1]
+}
 
 let ints: Stack<int> = Stack { items: [] };
 ints.push(1);

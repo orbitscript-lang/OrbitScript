@@ -85,10 +85,15 @@ fn tokenize(src) {
 let binding_power = #{ "+": 10, "-": 10, "*": 20, "/": 20, "%": 20, "^": 30 };
 const NEG_POWER = 25;
 
-struct Parser { tokens, pos }
+struct Parser {
+    tokens,
+    pos,
+}
 
 impl Parser {
-    fn peek(self) { self.tokens[self.pos] }
+    fn peek(self) {
+        self.tokens[self.pos]
+    }
 
     fn advance(self) {
         let t = self.tokens[self.pos];
@@ -253,7 +258,13 @@ for round in 1..=rounds {
         let (result, err) = run_line(line, env);
         if round == rounds {
             print(f"> {line}");
-            print(if result != nil { result } else { f"error: {err}" });
+            print(
+                if result != nil {
+                    result
+                } else {
+                    f"error: {err}"
+                },
+            );
         }
     }
 }
