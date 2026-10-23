@@ -359,16 +359,22 @@ impl Vm {
                     // Pick the loop's state up after a call or a return
                     // ([`Frames`]): the frame to run, and whether the
                     // window, the collector or the hook check come first.
+                    // Switch the loop's state to a Lua frame, the callee of
+                    // a call or the caller of a return.
+                    macro_rules! enter {
+                        ($f:expr) => {{
+                            let f: LuaFrame = $f;
+                            closure = f.closure;
+                            base = f.base;
+                            pc = f.pc;
+                            switch_code!(f.closure, f.code_id);
+                            w = Window::take(&mut self.rt.stack.regs, base);
+                        }};
+                    }
                     macro_rules! frames {
                         ($e:expr) => {
                             match $e {
-                                Ok(Frames::Lua(f)) => {
-                                    closure = f.closure;
-                                    base = f.base;
-                                    pc = f.pc;
-                                    switch_code!(f.closure, f.code_id);
-                                    w = Window::take(&mut self.rt.stack.regs, base);
-                                }
+                                Ok(Frames::Lua(f)) => enter!(f),
                                 Ok(Frames::Same) => {
                                     w = Window::take(&mut self.rt.stack.regs, base);
                                 }
@@ -925,32 +931,32 @@ impl Vm {
                             } else {
                                 nargs as usize
                             };
-                            let callee = w[func];
-                            frames!(self.call_from_loop::<HOOKED>(
-                                callee,
-                                closure,
-                                &cur,
-                                base,
-                                pc,
-                                func as usize,
-                                n,
-                                nresults
-                            ));
+                            let fa = base + func as usize;
+                            match w[func] {
+                                Value::Closure(c) => enter!(tri!(self.enter_lua_call::<HOOKED>(
+                                    c, closure, &cur, pc, fa, n, nresults
+                                ))),
+                                callee => {
+                                    frames!(self.call_other_from_loop::<HOOKED>(
+                                        callee, pc, fa, n, nresults
+                                    ))
+                                }
+                            }
                         }
                         Op::GenericCall { base: b, nvars } => {
                             let at = b as usize;
                             w.copy_within(at..at + 3, at + 4);
-                            let callee = w[at + 4];
-                            frames!(self.call_from_loop::<HOOKED>(
-                                callee,
-                                closure,
-                                &cur,
-                                base,
-                                pc,
-                                at + 4,
-                                2,
-                                nvars
-                            ));
+                            let (fa, n) = (base + at + 4, 2);
+                            match w[at + 4] {
+                                Value::Closure(c) => {
+                                    enter!(tri!(self.enter_lua_call::<HOOKED>(
+                                        c, closure, &cur, pc, fa, n, nvars
+                                    )))
+                                }
+                                callee => frames!(
+                                    self.call_other_from_loop::<HOOKED>(callee, pc, fa, n, nvars)
+                                ),
+                            }
                         }
                         Op::TailCall { func, nargs } => {
                             let fa = base + func as usize;
@@ -983,17 +989,16 @@ impl Vm {
                             }
                             // A native in tail position: an ordinary call whose
                             // results the following `Return` delivers.
-                            let callee = w[func];
-                            frames!(self.call_from_loop::<HOOKED>(
-                                callee,
-                                closure,
-                                &cur,
-                                base,
-                                pc,
-                                func as usize,
-                                n,
-                                MULTI
-                            ));
+                            match w[func] {
+                                Value::Closure(c) => {
+                                    enter!(tri!(self.enter_lua_call::<HOOKED>(
+                                        c, closure, &cur, pc, fa, n, MULTI
+                                    )))
+                                }
+                                callee => frames!(
+                                    self.call_other_from_loop::<HOOKED>(callee, pc, fa, n, MULTI)
+                                ),
+                            }
                         }
 
                         // Returns. Back into a Lua caller the loop switches
@@ -1025,7 +1030,7 @@ impl Vm {
                                 // stall on store forwarding.
                                 fast::move_by_parts(&mut self.rt.stack.regs, from, func);
                                 self.rt.top = func + 1;
-                                frames!(Ok::<_, Exc>(Frames::Lua(caller)));
+                                enter!(caller);
                             } else {
                                 frames!(self.return_from_loop(from, 1));
                             }
@@ -1265,65 +1270,74 @@ impl Vm {
         }
     }
 
-    /// Enter `callee`, read from register `f` of the frame at `base`, with `n`
-    /// arguments and `want` results back to the caller. A Lua callee's
-    /// frame is entered (its entry saves the pc) and handed to the loop;
-    /// a native runs here, in place.
+    /// Enter the Lua closure `c`, called from absolute register `fa` of
+    /// the running frame (`closure`, `cur`, at `pc`) with `n` arguments
+    /// and `want` results: its frame is pushed (the entry saves the pc)
+    /// and handed to the loop.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn call_from_loop<const HOOKED: bool>(
+    fn enter_lua_call<const HOOKED: bool>(
         &mut self,
-        callee: Value,
+        c: Gc<Closure>,
         closure: Gc<Closure>,
         cur: &Rc<ProtoCode>,
-        base: usize,
         pc: usize,
-        f: usize,
+        fa: usize,
+        n: usize,
+        want: u8,
+    ) -> Result<LuaFrame, Exc> {
+        // A function calling itself: the running frame keeps `closure`
+        // alive, so an equal handle is the same closure, and its code is
+        // `cur`.
+        let shape = if c == closure {
+            Shape::of(cur)
+        } else {
+            Shape::of(&self.heap.get(c).code)
+        };
+        let new_base = match enter_lua_frame_fast(&mut self.rt, &shape, c, fa, n, want, pc as u32) {
+            Some(b) => b,
+            None => {
+                self.rt
+                    .stack
+                    .frames
+                    .last_mut()
+                    .expect("the running frame")
+                    .pc = pc as u32;
+                enter_lua_frame_general(
+                    &mut self.rt,
+                    Shape::of(&self.heap.get(c).code),
+                    c,
+                    fa,
+                    n,
+                    want,
+                )?
+                .base
+            }
+        };
+        if HOOKED {
+            self.rt.stack.hook.call_pending = Some(false);
+        }
+        Ok(LuaFrame {
+            closure: c,
+            base: new_base,
+            pc: 0,
+            code_id: shape.code_id,
+        })
+    }
+
+    /// Call `callee`, anything but a Lua closure, from absolute register
+    /// `fa` of the running frame (at `pc`) with `n` arguments and `want`
+    /// results. A native runs here, in place.
+    #[inline(always)]
+    fn call_other_from_loop<const HOOKED: bool>(
+        &mut self,
+        callee: Value,
+        pc: usize,
+        fa: usize,
         n: usize,
         want: u8,
     ) -> Result<Frames, Exc> {
-        let fa = base + f;
         match callee {
-            Value::Closure(c) => {
-                // A function calling itself: the running frame keeps
-                // `closure` alive, so an equal handle is the same closure,
-                // and its code is `cur`.
-                let shape = if c == closure {
-                    Shape::of(cur)
-                } else {
-                    Shape::of(&self.heap.get(c).code)
-                };
-                let new_base =
-                    match enter_lua_frame_fast(&mut self.rt, &shape, c, fa, n, want, pc as u32) {
-                        Some(b) => b,
-                        None => {
-                            self.rt
-                                .stack
-                                .frames
-                                .last_mut()
-                                .expect("the running frame")
-                                .pc = pc as u32;
-                            enter_lua_frame_general(
-                                &mut self.rt,
-                                Shape::of(&self.heap.get(c).code),
-                                c,
-                                fa,
-                                n,
-                                want,
-                            )?
-                            .base
-                        }
-                    };
-                if HOOKED {
-                    self.rt.stack.hook.call_pending = Some(false);
-                }
-                Ok(Frames::Lua(LuaFrame {
-                    closure: c,
-                    base: new_base,
-                    pc: 0,
-                    code_id: shape.code_id,
-                }))
-            }
             // A native's fast path, when it has one and takes these
             // arguments: no window, no frame.
             Value::Native(id)
