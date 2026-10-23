@@ -1,15 +1,31 @@
 // A runnable tour of OrbitScript: lowered, compiled and run by tests/run.rs, and the seed
 // for its mutation test.
 
-struct Vec2 { x: number, y: number }
+struct Vec2 {
+    x: number,
+    y: number,
+}
 
 impl Vec2 {
-    pub fn new(x, y) -> Vec2 { Vec2 { x, y } }
-    pub fn len(self) -> float { math::sqrt(self.x * self.x + self.y * self.y) }
-    pub fn translate(self, dx, dy) { self.x += dx; self.y += dy; }
-    fn __add(self, other) { Vec2::new(self.x + other.x, self.y + other.y) }
-    fn __eq(self, other) { self.x == other.x && self.y == other.y }
-    fn __tostring(self) { f"({self.x}, {self.y})" }
+    pub fn new(x, y) -> Vec2 {
+        Vec2 { x, y }
+    }
+    pub fn len(self) -> float {
+        math::sqrt(self.x * self.x + self.y * self.y)
+    }
+    pub fn translate(self, dx, dy) {
+        self.x += dx;
+        self.y += dy;
+    }
+    fn __add(self, other) {
+        Vec2::new(self.x + other.x, self.y + other.y)
+    }
+    fn __eq(self, other) {
+        self.x == other.x && self.y == other.y
+    }
+    fn __tostring(self) {
+        f"({self.x}, {self.y})"
+    }
 }
 
 enum Shape {
@@ -43,25 +59,41 @@ fn label(n) {
     }
 }
 
-fn get(t, k) { if t[k] == nil { (nil, f"no {k}") } else { t[k] } }
+fn get(t, k) {
+    if t[k] == nil { (nil, f"no {k}") } else { t[k] }
+}
 fn both(t) {
     let a = get(t, "a")?;
     let b = get(t, "b")?;
     a + b
 }
 
-fn divmod(a: int, b: int) -> (int, int) { (a \ b, a % b) }
-fn log(fmt: string, ...args) { print(fmt.format(...args)); }
-fn is_even(n) { if n == 0 { true } else { is_odd(n - 1) } }
-fn is_odd(n) { if n == 0 { false } else { is_even(n - 1) } }
+fn divmod(a: int, b: int) -> (int, int) {
+    (a \ b, a % b)
+}
+fn log(fmt: string, ...args) {
+    print(fmt.format(...args));
+}
+fn is_even(n) {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+fn is_odd(n) {
+    if n == 0 { false } else { is_even(n - 1) }
+}
 
-struct Lock { name }
+struct Lock {
+    name,
+}
 impl Lock {
-    fn __close(self, err) { print("release", self.name); }
+    fn __close(self, err) {
+        print("release", self.name);
+    }
 }
 
 let mut out = [];
-fn push(t, v) { t[#t + 1] = v; }
+fn push(t, v) {
+    t[#t + 1] = v;
+}
 
 let p = Vec2::new(3, 4);
 p.translate(1, 1);
@@ -70,17 +102,38 @@ print(p.len(), p, p + Vec2 { x: 1, y: 1 }, p == Vec2::new(4, 5));
 for (_, s) in ipairs([Shape::Circle { r: 2 }, Shape::Rect { w: 2, h: 5 }, Shape::Empty]) {
     push(out, s.area());
 }
-for i in 1..=LIMIT { push(out, label(i * 3 - 3)); }
-for i in (1..=3).rev() { push(out, i); }
-for i in (0..=10).step_by(5) { push(out, i); }
+for i in 1..=LIMIT {
+    push(out, label(i * 3 - 3));
+}
+for i in (1..=3).rev() {
+    push(out, i);
+}
+for i in (0..=10).step_by(5) {
+    push(out, i);
+}
 let mut i = 0;
-while i < 3 { i += 1; if i == 2 { continue; } push(out, f"w{i}"); }
-let found = loop { i += 1; if i > 5 { break i * 10; } };
+while i < 3 {
+    i += 1;
+    if i == 2 {
+        continue;
+    }
+    push(out, f"w{i}");
+}
+let found = loop {
+    i += 1;
+    if i > 5 {
+        break i * 10;
+    }
+};
 push(out, found);
 'outer: for a in 1..=3 {
     for b in 1..=3 {
-        if b == 2 { continue 'outer; }
-        if a == 3 { break 'outer; }
+        if b == 2 {
+            continue 'outer;
+        }
+        if a == 3 {
+            break 'outer;
+        }
         push(out, f"{a}{b}");
     }
 }
@@ -93,10 +146,23 @@ print(is_even(10), HOST, LIMIT);
 hits += 1;
 let map = #{ name: "orbit", "two words": true, [q]: 5, 7 };
 print(f"{map.name:>6}|{map[1]:<3}|{map[3]:04x}|{1/3:.3}|{"s":?}");
-print(map.name.byte(1) == b'o', b'\n', match map.name.byte(2) { b'a'..=b'z' => "lower", _ => "other" });
-let total = { let mut s = 0; for (_, n) in ipairs([1, 2, 3]) { s += n; } s };
+print(map.name.byte(1) == b'o', b'\n', match map.name.byte(2) {
+    b'a'..=b'z' => "lower",
+    _ => "other",
+});
+let total = {
+    let mut s = 0;
+    for (_, n) in ipairs([1, 2, 3]) {
+        s += n;
+    }
+    s
+};
 let pick = if total > 5 { "big" } else { "small" };
-let any = total == 0 || match pick { "big" => true, _ => false };
+let any = total == 0
+    || match pick {
+        "big" => true,
+        _ => false,
+    };
 print(total, pick, any);
 {
     let scope a = Lock { name: "a" };
