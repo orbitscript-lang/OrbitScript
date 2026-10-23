@@ -16,6 +16,8 @@
 //! `orbit-capi`, which builds on this crate.
 
 mod base;
+#[cfg(windows)]
+mod crt;
 #[cfg(feature = "io")]
 mod io;
 #[cfg(feature = "json")]

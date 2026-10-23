@@ -272,6 +272,7 @@ dependencies = [
 name = "orbit-std"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "orbit",
  "orbit-ffi",
  "serde",

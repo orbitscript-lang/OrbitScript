@@ -14,6 +14,9 @@ orbit-ffi = { path = "../orbit-ffi", optional = true }
 serde = { version = "1", default-features = false, features = ["std"], optional = true }
 serde_json = { version = "1", default-features = false, features = ["std"], optional = true }
 
+[target.'cfg(windows)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 orbit = { path = "../orbit" }
 
@@ -33,5 +36,13 @@ json = ["dep:serde", "dep:serde_json"]
 # from bundled sources.
 ffi-system-libffi = ["ffi", "orbit-ffi/system-libffi"]
 
-[lints]
-workspace = true
+# The workspace lints, except that `unsafe_code` is denied rather than
+# forbidden, so `src/crt.rs` can allow its Windows `strerror` call
+# (ADR-6). Keep the rest in step with the workspace `Cargo.toml`.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
