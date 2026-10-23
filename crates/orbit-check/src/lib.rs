@@ -542,13 +542,11 @@ impl Workspace {
                 checked: &checked,
                 prelude,
                 strict,
+                lint_text: (builtin.is_none() && !is_stub(&path)).then_some(&text[..]),
             },
         );
         drop(defs);
         diagnostics.append(&mut m.diagnostics);
-        if builtin.is_none() && !is_stub(&path) {
-            diagnostics.extend(typeck::lints(file, &ast, &text, &m));
-        }
         if mode == pragma::Mode::Off {
             diagnostics.retain(|d| d.code == Code::Syntax);
         }

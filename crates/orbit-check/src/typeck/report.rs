@@ -82,13 +82,6 @@ impl Reporter {
         }
     }
 
-    pub fn warning(&mut self, span: Span, code: Code, message: String) {
-        if self.on() {
-            self.diagnostics
-                .push(Diagnostic::warning(self.file, span, code, message));
-        }
-    }
-
     /// Records the type of the expression at `span`.
     pub fn record(&mut self, span: Span, t: TypeId) {
         if self.on() {
