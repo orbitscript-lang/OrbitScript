@@ -393,6 +393,75 @@ fn lua_files_get_syntax_errors() {
     assert_eq!(s.stop(), 0);
 }
 
+/// `text` with LSP `edits` applied; positions are bytes, as the text is ASCII.
+fn apply(text: &str, edits: &Value) -> String {
+    let offset = |p: &Value| {
+        let line = p["line"].as_u64().unwrap() as usize;
+        let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
+        start + p["character"].as_u64().unwrap() as usize
+    };
+    let mut out = text.to_owned();
+    let mut edits = edits.as_array().unwrap().clone();
+    edits.sort_by_key(|e| std::cmp::Reverse(offset(&e["range"]["start"])));
+    for e in &edits {
+        let (start, end) = (offset(&e["range"]["start"]), offset(&e["range"]["end"]));
+        out.replace_range(start..end, e["newText"].as_str().unwrap());
+    }
+    out
+}
+
+#[test]
+fn formatting() {
+    let (mut s, dir) = Server::start("lsp-format");
+    let init = s.initialize(&dir, &[]);
+    assert_eq!(init["capabilities"]["documentFormattingProvider"], true);
+    assert_eq!(
+        init["capabilities"]["documentRangeFormattingProvider"],
+        true
+    );
+    let file = uri(&dir, "fmt.orb");
+    let text = "let  a=1;\nfn f() { g(); }\n";
+    s.open(&file, "orbitscript", text);
+    let doc = json!({"uri": file});
+    let edits = s.call(
+        "textDocument/formatting",
+        json!({"textDocument": doc, "options": {}}),
+    );
+    assert_eq!(apply(text, &edits), "let a = 1;\nfn f() {\n    g();\n}\n");
+    // Only the item the range touches.
+    let range = json!({"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}});
+    let edits = s.call(
+        "textDocument/rangeFormatting",
+        json!({"textDocument": doc, "range": range, "options": {}}),
+    );
+    assert_eq!(apply(text, &edits), "let  a=1;\nfn f() {\n    g();\n}\n");
+
+    // A file mid-edit gets no edits; one the formatter can't format, an error.
+    let broken = uri(&dir, "broken.orb");
+    s.open(&broken, "orbitscript", "let x = ;\n");
+    let params = json!({"textDocument": {"uri": broken}, "options": {}});
+    assert_eq!(s.call("textDocument/formatting", params), json!([]));
+    let odd = uri(&dir, "odd.orb");
+    s.open(&odd, "orbitscript", "let x = 1 + /* why */ 2;\n");
+    let r = s.request(
+        "textDocument/formatting",
+        json!({"textDocument": {"uri": odd}, "options": {}}),
+    );
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("orbit-fmt"),
+        "{r}"
+    );
+    // Lua isn't formatted.
+    let lua = uri(&dir, "x.lua");
+    s.open(&lua, "lua", "local   x=1\n");
+    let params = json!({"textDocument": {"uri": lua}, "options": {}});
+    assert_eq!(s.call("textDocument/formatting", params), json!([]));
+    assert_eq!(s.stop(), 0);
+}
+
 #[test]
 fn protocol_errors() {
     let (mut s, dir) = Server::start("lsp-errors");

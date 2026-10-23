@@ -624,6 +624,62 @@ fn cache_dir() -> PathBuf {
         .join("builtin")
 }
 
+/// `text` formatted (all of it, or the top-level items `range` touches), as
+/// `{ edits = [{ start, end, text }], error }`: at most one edit, covering
+/// only what changes. A file with a syntax error gets no edits and no error,
+/// as it is usually mid-edit; one the formatter can't format gets an error.
+fn format(path: &str, text: &[u8], range: Option<(u32, u32)>) -> Json {
+    let options = orbit_fmt::Options {
+        stub: path.ends_with(".orbi"),
+    };
+    let result = match range {
+        None => orbit_fmt::format(text, options).map(|out| Some((0, text.len(), out))),
+        Some((start, end)) => orbit_fmt::format_range(text, Span::new(start, end), options)
+            .map(|edit| edit.map(|e| (e.span.start as usize, e.span.end as usize, e.text))),
+    };
+    let (start, end, new) = match result {
+        Ok(Some(edit)) => edit,
+        Ok(None) => return json!({ "edits": [] }),
+        Err(e) if !e.internal => return json!({ "edits": [] }),
+        Err(e) => {
+            return json!({ "edits": [], "error": format!("orbit-fmt: line {}: {}", e.line, e.message) });
+        }
+    };
+    let edits = match minimal_edit(&text[start..end], new.as_bytes()) {
+        Some((s, e, t)) => json!([{ "start": start + s, "end": start + e, "text": t }]),
+        None => json!([]),
+    };
+    json!({ "edits": edits })
+}
+
+/// The one edit that turns `old` into `new`: the bytes between their common
+/// start and end, on character boundaries, or `None` when they're equal.
+fn minimal_edit(old: &[u8], new: &[u8]) -> Option<(usize, usize, String)> {
+    if old == new {
+        return None;
+    }
+    let mut prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    while prefix > 0
+        && (old.get(prefix).is_some_and(|b| b & 0xC0 == 0x80)
+            || new.get(prefix).is_some_and(|b| b & 0xC0 == 0x80))
+    {
+        prefix -= 1;
+    }
+    let max = old.len().min(new.len()) - prefix;
+    let mut suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(max)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while suffix > 0 && old[old.len() - suffix] & 0xC0 == 0x80 {
+        suffix -= 1;
+    }
+    let text = String::from_utf8_lossy(&new[prefix..new.len() - suffix]).into_owned();
+    Some((prefix, old.len() - suffix, text))
+}
+
 /// `v` as a script value.
 fn to_value<'s>(c: &'s Call<'s>, v: &Json) -> Result<Value<'s>, Error> {
     Ok(match v {
@@ -758,6 +814,16 @@ pub(crate) fn install(iso: &mut Isolate) -> Result<(), Error> {
         add(s, &t, &shared, "folds", |a, c| {
             Ok(a.folds(&c.check::<String>(0)?))
         })?;
+        // format(path, text [, start, end]): edits that format the text,
+        // or the top-level items in `start..end`.
+        add(s, &t, &shared, "format", |_, c| {
+            let (path, text): (String, Vec<u8>) = (c.check(0)?, c.check(1)?);
+            let range = match c.arg(2) {
+                Value::Nil => None,
+                _ => Some((offset(c, 2)?, offset(c, 3)?)),
+            };
+            Ok(format(&path, &text, range))
+        })?;
         add(s, &t, &shared, "workspace_symbols", |a, _| {
             Ok(a.workspace_symbols())
         })?;
@@ -770,6 +836,18 @@ pub(crate) fn install(iso: &mut Isolate) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimal_edits_keep_characters_whole() {
+        assert_eq!(minimal_edit(b"same", b"same"), None);
+        assert_eq!(
+            minimal_edit(b"let  a=1;", b"let a = 1;"),
+            Some((4, 7, "a = ".to_string()))
+        );
+        // `é` and `è` share their first byte; the edit takes the whole character.
+        let (old, new) = ("x é y".as_bytes(), "x è y".as_bytes());
+        assert_eq!(minimal_edit(old, new), Some((2, 4, "è".to_string())));
+    }
 
     #[test]
     fn lua_path_splices_the_defaults() {

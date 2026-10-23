@@ -278,6 +278,39 @@ pub fn prepare_rename(docs: Documents, params: any) -> (any, string?) {
     #{ range: doc.text.range(target.start, target.end), placeholder: target.name }
 }
 
+/// LSP `TextEdit`s that format the document, or the top-level items in
+/// `start..end` with both given.
+fn format(doc: Document, start: int?, end: int?) -> (any, string?) {
+    let out = json::array();
+    if !checked(doc.path) {
+        return out;
+    }
+    let result = analysis::format(doc.path, doc.text.text, start, end);
+    if result.error != nil {
+        return (nil, result.error);
+    }
+    for (_, e) in ipairs(result.edits) {
+        out[#out + 1] = #{ range: doc.text.range(e.start, e.end), newText: e.text };
+    }
+    out
+}
+
+pub fn formatting(docs: Documents, params: any) -> (any, string?) {
+    let doc = document(docs, params);
+    if doc == nil {
+        return json::array();
+    }
+    format(doc, nil, nil)
+}
+
+pub fn range_formatting(docs: Documents, params: any) -> (any, string?) {
+    let doc = document(docs, params);
+    if doc == nil {
+        return json::array();
+    }
+    format(doc, doc.text.offset(params.range.start), doc.text.offset(params.range.end))
+}
+
 /// Whether `name` can name a variable.
 fn is_name(name: string) -> bool {
     string::match(name, "^[%a_][%w_]*$") != nil

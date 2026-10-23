@@ -16,6 +16,7 @@ path = "src/main.rs"
 orbit = { path = "../orbit", default-features = false }
 orbit-std = { path = "../orbit-std", features = ["json"] }
 orbit-check = { path = "../orbit-check" }
+orbit-fmt = { path = "../orbit-fmt" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 serde_json = { version = "1", default-features = false, features = ["std"] }

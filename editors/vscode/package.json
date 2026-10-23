@@ -73,6 +73,12 @@
         }
       }
     },
+    "configurationDefaults": {
+      "[orbitscript]": {
+        "editor.defaultFormatter": "orbitscript.orbitscript",
+        "editor.formatOnSave": true
+      }
+    },
     "debuggers": [
       {
         "type": "orbit",

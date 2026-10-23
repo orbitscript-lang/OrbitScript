@@ -42,6 +42,7 @@ flowchart LR
 | `signatureHelp` | The call's signature and the active parameter | none | L2 |
 | `inlayHint` | Types of `let` bindings without an annotation | none | L2 |
 | `workspace/symbol` | Items in every `.orb` file under the root (up to 2,000 files), fuzzy-matched | none | L1 |
+| `formatting`, `rangeFormatting` | `orbit-fmt`'s layout ([formatter.md](formatter.md)), as one edit covering only what changes; a range formats the whole top-level items it touches. A file with a syntax error gets no edits; one the formatter can't format yet (a comment inside an expression) fails the request with the line | none | L3 |
 
 A request at the position right after a name (where the cursor usually is) answers for that name.
 
@@ -111,5 +112,5 @@ To add module paths, pass `initializationOptions = { searchPath = { "lib/?.orb" 
 ## Not yet
 
 - Lua files get syntax errors only; definitions and completion for Lua need name resolution in the checker's Lua path.
-- `semanticTokens/range` and `/delta`, code actions, formatting (L3, with [`orbit-fmt`](formatter.md)), and pull diagnostics.
+- `semanticTokens/range` and `/delta`, code actions (L3), and pull diagnostics.
 - The checker never forgets a type it has made (noted in its design), which a session open for days will notice.

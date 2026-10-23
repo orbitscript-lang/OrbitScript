@@ -38,6 +38,13 @@ pub struct WorkspaceSymbol {
     path: string, start: int, end: int, name: string, kind: string, container: string?,
 }
 
+/// Replace `start..end` with `text`.
+pub struct TextEdit { start: int, end: int, text: string }
+
+/// What formatting gives: the edits (none when the file has a syntax error), or why the
+/// formatter can't format the file.
+pub struct Formatted { edits: [TextEdit], error: string? }
+
 /// orbit-lsp's version.
 pub const version: string;
 
@@ -63,4 +70,7 @@ pub fn inlay_hints(path: string, start: int, end: int) -> [InlayHint];
 pub fn tokens(path: string) -> [any];
 /// Start, end and kind (`region` or `comment`) of what can fold, flat.
 pub fn folds(path: string) -> [any];
+/// Edits that format `text`, the editor's text of `path`: all of it, or with `start` and
+/// `end` the top-level items that overlap them.
+pub fn format(path: string, text: string, start: int?, end: int?) -> Formatted;
 pub fn workspace_symbols() -> [WorkspaceSymbol];
