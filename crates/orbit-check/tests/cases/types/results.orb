@@ -54,6 +54,23 @@ let not_s: string = inferred(3); //~ T0201
 fn rec(n: int) { if n == 0 { 0 } else { rec(n - 1) } }
 let r: string = rec(3);
 
+// In its own body, a recursive call has the results inferred from that body.
+fn depth(n: int) {
+    if n == 0 { return 0; }
+    let below: string = depth(n - 1); //~ T0201
+    1
+}
+fn is_even(n: int) {
+    if n == 0 { return true; }
+    let from_odd: int = is_odd(n - 1); //~ T0201
+    false
+}
+fn is_odd(n: int) {
+    if n == 0 { return false; }
+    let from_even: int = is_even(n - 1); //~ T0201
+    true
+}
+
 // Closures take parameter types from what they're passed to.
 fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
 let doubled = apply(|n| n * 2, 3);

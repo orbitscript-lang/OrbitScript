@@ -6,10 +6,11 @@
 //! operators through metamethods, `?`, and `match` coverage.
 //!
 //! The declare pass (`declare.rs`) runs first and gives the module's top-level declarations the
-//! types written for them. Then the walk types every expression. A function's unannotated
-//! results come from its body, which is checked the first time the function's type is needed
-//! (possibly before the walk reaches it), so each body is checked once. Symbols of other modules
-//! have the types that module's check stored.
+//! types written for them. Then the walk types every expression in order and is the only part
+//! that reports. A type needed before the walk reaches the code that gives it (a function's
+//! unannotated results, a local used by a function defined earlier) is worked out muted and
+//! kept, and the walk checks that code again when it gets there. Symbols of other modules have
+//! the types that module's check stored.
 
 mod cast;
 mod declare;
@@ -102,8 +103,6 @@ struct Checker<'a, 'b, 'c> {
     /// Signatures from the declare pass whose results the function's body gives.
     pending_fns: HashMap<u32, FnTy>,
     in_progress: HashSet<u32>,
-    /// Functions whose bodies have been checked.
-    bodies_done: HashSet<u32>,
     env: Env,
     fns: Vec<FnCtx>,
     /// What `Self` means in type annotations.
@@ -155,7 +154,6 @@ pub(crate) fn check<'a, 'b, 'c>(
         param_names,
         pending_fns: HashMap::new(),
         in_progress: HashSet::new(),
-        bodies_done: HashSet::new(),
         env: Env::new(),
         fns: Vec::new(),
         self_type: None,
@@ -377,15 +375,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         r
     }
 
-    /// Runs `f` reporting as usual, even inside [`Self::muted`]: a function body is checked
-    /// once, wherever the walk first needs its type.
-    fn unmuted<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let muted = self.report.force_on();
-        let r = f(self);
-        self.report.restore(muted);
-        r
-    }
-
     /// Runs `f` with `Self` meaning `owner`'s type, when there is an owner.
     fn with_owner<T>(&mut self, owner: Option<&Owner<'a>>, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved = self.self_type;
@@ -503,18 +492,18 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         };
         let infer = f.results.is_none() && decl.body.is_some();
         let mut t = self.types.intern(Ty::Fn(f.clone()));
-        if infer && !self.bodies_done.contains(&index) {
-            // Calls in the body (recursion) see this signature with unknown results.
+        if infer {
+            // Calls in the body (recursion) see this signature with unknown results. The walk
+            // checks the body again, reporting, when it reaches the function.
             self.sym_types.insert(index, t);
-            f.results = self.fn_body(index, decl, t);
+            f.results = self.muted(|c| c.fn_body(decl, t));
             t = self.types.intern(Ty::Fn(f));
         }
         t
     }
 
-    /// Checks a function item's body; returns its results.
-    fn fn_body(&mut self, index: u32, decl: &'a ast::FnDecl, fn_ty: TypeId) -> Results {
-        self.bodies_done.insert(index);
+    /// Walks a function item's body; returns its results.
+    fn fn_body(&mut self, decl: &'a ast::FnDecl, fn_ty: TypeId) -> Results {
         let Some(body) = &decl.body else {
             return Some(Vec::new());
         };
@@ -527,10 +516,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .ret
             .is_some()
             .then(|| f.results.unwrap_or_default());
-        self.unmuted(|c| {
-            c.run_fn(annotated, self_value, decl.name.span, Env::new(), |c| {
-                c.fn_block(body)
-            })
+        self.run_fn(annotated, self_value, decl.name.span, Env::new(), |c| {
+            c.fn_block(body)
         })
     }
 
@@ -712,21 +699,24 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let defs = self.defs;
         let Some(index) = self.syms.local_at(f.name.span) else {
             // A function no symbol was made for (an `impl` of an unknown type).
-            if let Some(b) = &f.body {
-                self.unmuted(|c| c.run_fn(None, None, f.name.span, Env::new(), |c| c.fn_block(b)));
+            if let Some(b) = &f.body
+                && self.report.on()
+            {
+                self.run_fn(None, None, f.name.span, Env::new(), |c| c.fn_block(b));
             }
             return;
         };
         let t = self.sym_type(self.syms.id(index));
         self.report.record(f.name.span, t);
-        if self.bodies_done.contains(&index) {
+        // Typing code out of order (muted) needs only the function's type.
+        if !self.report.on() {
             return;
         }
         let owner = match defs.defs.get(&index) {
             Some(Def::Fn { owner, .. }) => owner.as_ref(),
             _ => None,
         };
-        self.with_owner(owner, |c| c.fn_body(index, f, t));
+        self.with_owner(owner, |c| c.fn_body(f, t));
     }
 
     /// Strict mode: a `pub fn` annotates its parameters, and its results when it has any.
