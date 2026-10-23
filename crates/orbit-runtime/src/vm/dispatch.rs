@@ -925,7 +925,9 @@ impl Vm {
                             } else {
                                 nargs as usize
                             };
+                            let callee = w[func];
                             frames!(self.call_from_loop::<HOOKED>(
+                                callee,
                                 closure,
                                 &cur,
                                 base,
@@ -938,7 +940,9 @@ impl Vm {
                         Op::GenericCall { base: b, nvars } => {
                             let at = b as usize;
                             w.copy_within(at..at + 3, at + 4);
+                            let callee = w[at + 4];
                             frames!(self.call_from_loop::<HOOKED>(
+                                callee,
                                 closure,
                                 &cur,
                                 base,
@@ -979,7 +983,9 @@ impl Vm {
                             }
                             // A native in tail position: an ordinary call whose
                             // results the following `Return` delivers.
+                            let callee = w[func];
                             frames!(self.call_from_loop::<HOOKED>(
+                                callee,
                                 closure,
                                 &cur,
                                 base,
@@ -1259,7 +1265,7 @@ impl Vm {
         }
     }
 
-    /// Enter the callee at register `f` of the frame at `base`, with `n`
+    /// Enter `callee`, read from register `f` of the frame at `base`, with `n`
     /// arguments and `want` results back to the caller. A Lua callee's
     /// frame is entered (its entry saves the pc) and handed to the loop;
     /// a native runs here, in place.
@@ -1267,6 +1273,7 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     fn call_from_loop<const HOOKED: bool>(
         &mut self,
+        callee: Value,
         closure: Gc<Closure>,
         cur: &Rc<ProtoCode>,
         base: usize,
@@ -1276,7 +1283,7 @@ impl Vm {
         want: u8,
     ) -> Result<Frames, Exc> {
         let fa = base + f;
-        match self.rt.stack.regs[fa] {
+        match callee {
             Value::Closure(c) => {
                 // A function calling itself: the running frame keeps
                 // `closure` alive, so an equal handle is the same closure,
