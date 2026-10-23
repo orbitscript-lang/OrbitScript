@@ -12,11 +12,18 @@
 //! kept, and the walk checks that code again when it gets there. Symbols of other modules have
 //! the types that module's check stored. Last, the passes (`passes.rs`) read the typed module
 //! for warnings that need only the types the walk found, and for the lints.
+//!
+//! The walk is [`Typer`], in this file. What it uses that doesn't need the walk has its own type:
+//! symbol lookups (`view.rs`), annotations (`lower.rs`), narrowing (`env.rs`), operators
+//! (`ops.rs`), a call's generics (`generics.rs`), casts (`cast.rs`) and reporting (`report.rs`).
 
 mod cast;
 mod declare;
+mod env;
+mod generics;
 mod lint;
 mod lower;
+mod ops;
 mod passes;
 mod report;
 mod view;
@@ -25,13 +32,19 @@ mod walk;
 use std::collections::{HashMap, HashSet};
 
 use orbit_hir::{Span, StrId, StringPool};
-use orbit_orb_syntax::ast::{self, BinOp, ExprKind, ItemKind, MapEntry, PatKind, StmtKind, UnOp};
+use orbit_orb_syntax::ast::{
+    self, BinOp, ExprKind, ItemKind, MapEntry, PatKind, StmtKind, TypeKind, UnOp,
+};
 
 use crate::resolve::{Def, Defs, Owner};
 use crate::symbols::{Module, StructLit, SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
 use crate::{Code, FileId};
+use cast::{CastRules, Target, strip_optional};
+use env::{Base, Env, Key, falsy_part, filter_type_name};
+use generics::Generics;
 use lower::Lowering;
+use ops::OpRules;
 use passes::Typed;
 use report::Reporter;
 use view::SymbolView;
@@ -39,28 +52,6 @@ use walk::{Node, walk_block};
 
 /// A function's results: `None` when unknown (any number of `any`).
 type Results = Option<Vec<TypeId>>;
-
-/// What narrowing applies to: a local, parameter or global, or `self`, then field names.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Base {
-    Sym(SymbolId),
-    SelfValue,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Key {
-    base: Base,
-    fields: Vec<String>,
-}
-
-impl Key {
-    fn starts_with(&self, prefix: &Key) -> bool {
-        self.base == prefix.base && self.fields.starts_with(&prefix.fields)
-    }
-}
-
-/// Narrowed types at a point in the code. A path without an entry has its declared type.
-type Env = HashMap<Key, TypeId>;
 
 struct FnCtx {
     /// The annotated results, if any.
@@ -70,17 +61,9 @@ struct FnCtx {
     self_value: Option<TypeId>,
 }
 
-/// How `type()` or `math::type()` describes a type.
-#[derive(PartialEq)]
-enum TypeName {
-    Is(&'static str),
-    /// `math::type` of something that isn't a number: never equal to a name.
-    Never,
-    /// `any` or a generic parameter: could be anything.
-    Unknown,
-}
-
-struct Checker<'a, 'b, 'c> {
+/// The walk: types each statement and expression in order, narrowing as it goes, and reports
+/// type errors. Its methods call each other recursively, so they stay on one type.
+struct Typer<'a, 'b, 'c> {
     strings: &'a StringPool,
     defs: &'b Defs<'a>,
     syms: SymbolView<'b, 'c>,
@@ -136,7 +119,7 @@ pub(crate) fn check<'a, 'b, 'c>(
     let report = Reporter::take(file, m);
     let sym_types = std::mem::take(&mut m.sym_types);
     let param_names = std::mem::take(&mut m.param_names);
-    let mut c = Checker {
+    let mut c = Typer {
         strings: &ast.strings,
         defs,
         syms: SymbolView::new(file, m, deps.checked, deps.prelude, by_span),
@@ -146,7 +129,7 @@ pub(crate) fn check<'a, 'b, 'c>(
         param_names,
         pending_fns: HashMap::new(),
         in_progress: HashSet::new(),
-        env: Env::new(),
+        env: Env::default(),
         fns: Vec::new(),
         self_type: None,
         hinting: true,
@@ -173,7 +156,7 @@ pub(crate) fn check<'a, 'b, 'c>(
     for i in all {
         c.sym_type(id(i));
     }
-    let Checker {
+    let Typer {
         syms,
         mut report,
         types,
@@ -204,7 +187,7 @@ pub(crate) fn check<'a, 'b, 'c>(
     m.param_names = param_names;
 }
 
-impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
+impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
     // ---- reporting ----------------------------------------------------------------------------
 
     fn show(&self, t: TypeId) -> String {
@@ -238,7 +221,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    /// Like [`Checker::expect`] for the value of `e`, but for an `if`, `match` or block reports
+    /// Like [`Typer::expect`] for the value of `e`, but for an `if`, `match` or block reports
     /// the branches that give a wrong value rather than the whole expression.
     fn expect_at(&mut self, e: &ast::Expr, t: TypeId, expected: TypeId, what: Option<String>) {
         if self.types.assignable(t, expected) {
@@ -447,6 +430,19 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     // ---- type annotations ---------------------------------------------------------------------
 
     /// Lowers annotations with what the walk knows (`Self`).
+    fn casts(&self) -> CastRules<'_, 'b, 'c> {
+        CastRules {
+            types: self.types,
+            syms: &self.syms,
+            strings: self.strings,
+            self_type: self.self_type,
+        }
+    }
+
+    fn ops(&mut self) -> OpRules<'_> {
+        OpRules { types: self.types }
+    }
+
     fn lowering(&mut self) -> Lowering<'_, 'a, 'b, 'c> {
         Lowering {
             types: self.types,
@@ -525,7 +521,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             .ret
             .is_some()
             .then(|| f.results.unwrap_or_default());
-        self.run_fn(annotated, self_value, decl.name.span, Env::new(), |c| {
+        self.run_fn(annotated, self_value, decl.name.span, Env::default(), |c| {
             c.fn_block(body)
         })
     }
@@ -711,7 +707,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             if let Some(b) = &f.body
                 && self.report.on()
             {
-                self.run_fn(None, None, f.name.span, Env::new(), |c| c.fn_block(b));
+                self.run_fn(None, None, f.name.span, Env::default(), |c| c.fn_block(b));
             }
             return;
         };
@@ -812,15 +808,12 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let self_value = self.fns.last().and_then(|f| f.self_value);
         // Narrowing of captured paths holds inside, unless something assigns the local.
         let defs = self.defs;
-        let env: Env = self
-            .env
-            .iter()
-            .filter(|(k, _)| match &k.base {
-                Base::Sym(id) => id.file != self.syms.file || !defs.assigns.contains_key(&id.index),
-                Base::SelfValue => true,
-            })
-            .map(|(k, &t)| (k.clone(), t))
-            .collect();
+        let file = self.syms.file;
+        let mut env = self.env.clone();
+        env.retain(|base| match base {
+            Base::Sym(id) => id.file != file || !defs.assigns.contains_key(&id.index),
+            Base::SelfValue => true,
+        });
         let body = &c.body;
         let results = self.run_fn(annotated, self_value, c.span, env, |cx| match &body.kind {
             ExprKind::Block(b) => cx.fn_block(b),
@@ -1031,17 +1024,13 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             self.expect(t, d, span, None);
         }
         if let Some(key) = self.key_of(target) {
-            self.kill(&key);
+            self.env.kill(&key);
             let narrowed = match declared {
                 Some(d) if !self.types.assignable(t, d) => d,
                 _ => t,
             };
             self.env.insert(key, narrowed);
         }
-    }
-
-    fn kill(&mut self, prefix: &Key) {
-        self.env.retain(|k, _| !k.starts_with(prefix));
     }
 
     /// Ends narrowing on everything `body` assigns, before a loop runs it again.
@@ -1059,7 +1048,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         });
         for t in targets {
             if let Some(k) = self.key_of(t) {
-                self.kill(&k);
+                self.env.kill(&k);
             }
         }
     }
@@ -1182,16 +1171,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.types.str
             }
             ExprKind::Name(_) => self.name_ref_type(e.span),
-            ExprKind::SelfValue => {
-                let key = Key {
-                    base: Base::SelfValue,
-                    fields: Vec::new(),
-                };
-                match self.env.get(&key) {
-                    Some(&t) => t,
-                    None => self.fns.last().and_then(|f| f.self_value).unwrap_or(any),
-                }
-            }
+            ExprKind::SelfValue => match self.env.get(&Key::self_value()) {
+                Some(t) => t,
+                None => self.fns.last().and_then(|f| f.self_value).unwrap_or(any),
+            },
             ExprKind::SelfType => any,
             ExprKind::Path { base, name } => {
                 if self.report.on()
@@ -1211,7 +1194,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                     self.report.members_at.push((name.span, receiver));
                 }
                 if let Some(k) = self.key_of(e)
-                    && let Some(&t) = self.env.get(&k)
+                    && let Some(t) = self.env.get(&k)
                 {
                     return t;
                 }
@@ -1231,7 +1214,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 ..
             } => {
                 let (t, yes, no) = self.cond(e);
-                self.env = self.merge(yes, no);
+                self.env = Env::merge(yes, no, self.types);
                 t
             }
             ExprKind::Binary { op, lhs, rhs, .. } => {
@@ -1319,47 +1302,19 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         if self.syms.kind(id) == Some(SymbolKind::Field) {
             return self.types.any;
         }
-        let key = Key {
-            base: Base::Sym(id),
-            fields: Vec::new(),
-        };
-        if let Some(&t) = self.env.get(&key) {
+        if let Some(t) = self.env.get(&Key::sym(id)) {
             return t;
         }
         self.sym_type(id)
     }
 
-    /// The path narrowing tracks for `e`: a local, `self`, or fields of one.
     fn key_of(&self, e: &ast::Expr) -> Option<Key> {
-        match &e.kind {
-            ExprKind::Name(_) => {
-                let id = self.syms.ref_at(e.span)?;
-                matches!(
-                    self.syms.kind(id)?,
-                    SymbolKind::Local | SymbolKind::Param | SymbolKind::Global
-                )
-                .then(|| Key {
-                    base: Base::Sym(id),
-                    fields: Vec::new(),
-                })
-            }
-            ExprKind::SelfValue => Some(Key {
-                base: Base::SelfValue,
-                fields: Vec::new(),
-            }),
-            ExprKind::Field { obj, name } => {
-                let mut k = self.key_of(obj)?;
-                k.fields.push(self.text(name.sym));
-                Some(k)
-            }
-            ExprKind::Paren(inner) => self.key_of(inner),
-            _ => None,
-        }
+        Key::of(e, &self.syms, self.strings)
     }
 
     /// How messages name `e`: `` `p` ``, `` `self.next` ``, or "this value".
     fn describe(&self, e: &ast::Expr) -> String {
-        fn path(c: &Checker<'_, '_, '_>, e: &ast::Expr) -> Option<String> {
+        fn path(c: &Typer<'_, '_, '_>, e: &ast::Expr) -> Option<String> {
             Some(match &e.kind {
                 ExprKind::Name(s) => c.text(*s),
                 ExprKind::SelfValue => "self".into(),
@@ -1663,27 +1618,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    /// Whether `t` mentions any of the generic parameters `gens`.
-    fn mentions(&self, t: TypeId, gens: &[SymbolId]) -> bool {
-        match self.types.get(t) {
-            Ty::Param(p) => gens.contains(p),
-            Ty::Union(ts) | Ty::Nominal(_, ts) | Ty::Variant(_, ts) => {
-                ts.iter().any(|&t| self.mentions(t, gens))
-            }
-            Ty::Array(e) => self.mentions(*e, gens),
-            Ty::Map(k, v) => self.mentions(*k, gens) || self.mentions(*v, gens),
-            Ty::Record { fields, .. } => fields.iter().any(|f| self.mentions(f.1, gens)),
-            Ty::Fn(f) => {
-                f.params
-                    .iter()
-                    .chain(f.rest.iter())
-                    .any(|&t| self.mentions(t, gens))
-                    || f.results.iter().flatten().any(|&t| self.mentions(t, gens))
-            }
-            _ => false,
-        }
-    }
-
     /// Checks a call of `f`; `self_arg` is the receiver passed as its first parameter.
     fn apply(
         &mut self,
@@ -1694,17 +1628,13 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         span: Span,
         expected: Option<TypeId>,
     ) -> Results {
-        let any = self.types.any;
-        let generic = !f.generics.is_empty();
-        let mut map: HashMap<SymbolId, TypeId> = HashMap::new();
+        let mut gens = Generics::of(f);
         let mut params: &[TypeId] = &f.params;
         let mut params_skipped = 0;
         if let Some(st) = self_arg
             && let Some((&p0, rest)) = params.split_first()
         {
-            if generic {
-                self.types.unify(p0, st, &mut map);
-            }
+            gens.bind(self.types, p0, st);
             params = rest;
             params_skipped = 1;
         }
@@ -1736,50 +1666,27 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 continue;
             }
             let p = params.get(i).copied().or(f.rest);
-            // A parameter that still mentions unbound generics guides a closure (its parameter
-            // types) but not other arguments, whose own types bind the generics.
-            let exp = match p {
-                Some(p) if generic => {
-                    let bound = self.types.subst(p, &map);
-                    if !self.mentions(bound, &f.generics) {
-                        Some(bound)
-                    } else if matches!(a.kind, ExprKind::Closure(_)) {
-                        let mut known = map.clone();
-                        for g in &f.generics {
-                            known.entry(*g).or_insert(any);
-                        }
-                        Some(self.types.subst(p, &known))
-                    } else {
-                        None
-                    }
-                }
-                p => p,
-            };
+            let closure = matches!(a.kind, ExprKind::Closure(_));
+            let exp = p.and_then(|p| gens.guide(self.types, p, closure));
             let t = self.expr(a, exp);
             if let Some(p) = p {
-                if generic {
-                    self.types.unify(p, t, &mut map);
-                }
+                gens.bind(self.types, p, t);
                 checks.push((i, a, t, p));
             }
         }
-        if generic {
-            if let (Some(exp), Some(rs)) = (expected, &f.results)
-                && let Some(r0) = self.types.result_at(rs, 0)
-            {
-                self.types.unify(r0, exp, &mut map);
-            }
-            for g in &f.generics {
-                map.entry(*g).or_insert(any);
-            }
+        if let (Some(exp), Some(rs)) = (expected, &f.results)
+            && let Some(r0) = self.types.result_at(rs, 0)
+        {
+            gens.bind(self.types, r0, exp);
         }
+        gens.finish(self.types);
         for (i, a, t, p) in checks {
-            let p = self.types.subst(p, &map);
+            let p = gens.apply(self.types, p);
             self.expect_at(a, t, p, Some(format!("argument {} of {name}", i + 1)));
         }
         f.results
             .as_ref()
-            .map(|rs| rs.iter().map(|&r| self.types.subst(r, &map)).collect())
+            .map(|rs| rs.iter().map(|&r| gens.apply(self.types, r)).collect())
     }
 
     fn method_call(
@@ -2175,53 +2082,20 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn unary(&mut self, op: UnOp, inner: &'a ast::Expr) -> TypeId {
         let t = self.expr(inner, None);
-        let (any, int) = (self.types.any, self.types.int);
-        if t == any {
-            return if matches!(op, UnOp::Len | UnOp::BNot) {
-                int
-            } else {
-                any
-            };
+        if t == self.types.any {
+            return self.ops().unary_unknown(op);
         }
         let t = self.non_nil_or_report(t, inner);
-        let mm = match op {
-            UnOp::Neg => Some("__unm"),
-            UnOp::Len => Some("__len"),
-            UnOp::BNot => Some("__bnot"),
-            UnOp::Not => None,
-        };
-        if let Some(name) = mm
+        if let Some(name) = OpRules::unary_metamethod(op)
             && let Some(r) = self.metamethod_result(t, name)
         {
             return r;
         }
-        let ok = match op {
-            UnOp::Neg | UnOp::BNot => self.types.is_numeric(t),
-            UnOp::Len => self.types.members(t).iter().all(|&m| {
-                matches!(
-                    self.types.get(m),
-                    Ty::Str
-                        | Ty::Table
-                        | Ty::Array(_)
-                        | Ty::Map(..)
-                        | Ty::Record { .. }
-                        | Ty::Nominal(..)
-                        | Ty::Variant(..)
-                        | Ty::Userdata
-                        | Ty::Any
-                )
-            }),
-            UnOp::Not => true,
-        };
-        if !ok {
+        self.ops().unary(op, t).unwrap_or_else(|| {
             let msg = format!("`{}` can't be applied to {}", op.as_str(), self.show(t));
             self.report.error(inner.span, Code::BadOperand, msg);
-            return any;
-        }
-        match op {
-            UnOp::Neg => t,
-            _ => int,
-        }
+            self.types.any
+        })
     }
 
     /// The first result of `t`'s metamethod `name`, if it has one.
@@ -2245,31 +2119,9 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    fn metamethod_name(op: BinOp) -> Option<&'static str> {
-        use BinOp::*;
-        Some(match op {
-            Add => "__add",
-            Sub => "__sub",
-            Mul => "__mul",
-            Div => "__div",
-            Mod => "__mod",
-            Pow => "__pow",
-            IDiv => "__idiv",
-            BAnd => "__band",
-            BOr => "__bor",
-            BXor => "__bxor",
-            Shl => "__shl",
-            Shr => "__shr",
-            Concat => "__concat",
-            Lt | Gt => "__lt",
-            Le | Ge => "__le",
-            Eq | Ne | And | Or => return None,
-        })
-    }
-
     /// `l op r` through a metamethod of either operand, if one is a struct or enum.
     fn binary_metamethod(&mut self, op: BinOp, l: TypeId, r: TypeId, span: Span) -> Option<TypeId> {
-        let name = Self::metamethod_name(op)?;
+        let name = OpRules::binary_metamethod(op)?;
         // `a > b` runs `b < a`.
         let (a, b) = if matches!(op, BinOp::Gt | BinOp::Ge) {
             (r, l)
@@ -2317,31 +2169,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     /// The type of `l op r` (not `&&` or `||`), reporting operands it doesn't accept.
     fn binary_op(&mut self, op: BinOp, l: TypeId, r: TypeId, span: Span) -> TypeId {
-        use BinOp::*;
-        let t = &*self.types;
-        let (any, bool_, int, float, str_) = (t.any, t.bool, t.int, t.float, t.str);
-        match op {
-            And | Or => return self.types.union(&[l, r]),
-            Eq | Ne => return bool_,
-            _ => {}
-        }
-        let fallback = match op {
-            Concat => str_,
-            Lt | Le | Gt | Ge => bool_,
-            BAnd | BOr | BXor | Shl | Shr => int,
-            Div | Pow => float,
-            _ => any,
-        };
-        if l == any || r == any {
-            return if matches!(op, Div | Pow)
-                && (self.types.is_numeric(l) || self.types.is_numeric(r))
-            {
-                float
-            } else if matches!(op, Div | Pow | Add | Sub | Mul | Mod | IDiv) {
-                any
-            } else {
-                fallback
-            };
+        if let Some(t) = self.ops().binary_unchecked(op, l, r) {
+            return t;
         }
         let mut l = l;
         let mut r = r;
@@ -2359,15 +2188,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         if let Some(t) = self.binary_metamethod(op, l, r, span) {
             return t;
         }
-        let num = self.types.is_numeric(l) && self.types.is_numeric(r);
-        let ok = match op {
-            Add | Sub | Mul | Mod | IDiv | Div | Pow => num,
-            Concat => self.concat_ok(l) && self.concat_ok(r),
-            Lt | Le | Gt | Ge => num || (l == str_ && r == str_),
-            BAnd | BOr | BXor | Shl | Shr => num,
-            Eq | Ne | And | Or => true,
-        };
-        if !ok {
+        self.ops().binary(op, l, r).unwrap_or_else(|| {
             let msg = format!(
                 "`{}` can't be applied to {} and {}",
                 op.as_str(),
@@ -2375,57 +2196,91 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.show(r)
             );
             self.report.error(span, Code::BadOperand, msg);
-            return fallback;
-        }
-        match op {
-            Add | Sub | Mul | Mod | IDiv => {
-                let all =
-                    |c: &Self, t: TypeId, k: TypeId| c.types.members(t).iter().all(|&m| m == k);
-                if all(self, l, int) && all(self, r, int) {
-                    int
-                } else if all(self, l, float) || all(self, r, float) {
-                    float
-                } else {
-                    self.types.number
-                }
-            }
-            _ => fallback,
-        }
+            self.ops().fallback(op)
+        })
     }
 
-    fn concat_ok(&self, t: TypeId) -> bool {
-        self.types
-            .members(t)
-            .iter()
-            .all(|&m| matches!(self.types.get(m), Ty::Str | Ty::Int | Ty::Float))
+    // ---- casts ------------------------------------------------------------------------------
+
+    /// `e as T` and `e as? T` (`soft`): the cast runs while the program does. See `cast.rs`.
+    fn cast(&mut self, inner: &'a ast::Expr, ty: &ast::Type, soft: bool, span: Span) -> TypeId {
+        let src = self.expr(inner, None);
+        let lowered = self.lower(ty);
+        let result = |c: &mut Self, t| if soft { c.types.optional(t) } else { t };
+
+        let (target, mut nilable) = strip_optional(ty);
+        let union = matches!(target.kind.as_deref(), Some(TypeKind::Union(_)));
+        let members: Vec<&ast::Type> = match target.kind.as_deref() {
+            Some(TypeKind::Union(ms)) => ms.iter().collect(),
+            _ => vec![target],
+        };
+        let mut targets = Vec::new();
+        for m in members {
+            let (m, opt) = strip_optional(m);
+            nilable |= opt;
+            match self.casts().target(m) {
+                Ok(Target::Any) => return result(self, self.types.any),
+                Ok(t) => targets.push(t),
+                Err(msg) => {
+                    self.report.error(m.span, Code::UncheckableCast, msg);
+                    // The cast still has the type it names.
+                    return result(self, lowered);
+                }
+            }
+        }
+
+        if src != self.types.any {
+            if targets == [Target::Bool] {
+                if falsy_part(self.types, src).is_none() {
+                    let msg = format!(
+                        "a value of type {} is never false, so `as bool` is always `true`; {}",
+                        self.show(src),
+                        self.casts().truth_hint(src)
+                    );
+                    self.report.error(span, Code::ImpossibleCast, msg);
+                }
+            } else {
+                let rules = self.casts();
+                let fits = self.types.members(src).into_iter().any(|m| {
+                    (nilable && *self.types.get(m) == Ty::Nil)
+                        || targets.iter().any(|&t| rules.accepts(m, t, union))
+                });
+                if !fits {
+                    let msg = format!(
+                        "this cast can never succeed: a value of type {} is never {}",
+                        self.show(src),
+                        self.show(lowered)
+                    );
+                    self.report.error(span, Code::ImpossibleCast, msg);
+                }
+            }
+        }
+
+        // A single scalar target converts; anything else checks the value and passes it through,
+        // so the value keeps what it knew that fits the target, and a plain local narrows to it.
+        let scalar = !union && !matches!(targets[0], Target::Named(_));
+        if scalar {
+            return result(self, lowered);
+        }
+        let kept: Vec<TypeId> = self
+            .types
+            .members(src)
+            .into_iter()
+            .filter(|&m| m != self.types.any && self.types.assignable(m, lowered))
+            .collect();
+        let t = if kept.is_empty() {
+            lowered
+        } else {
+            self.types.union(&kept)
+        };
+        if !soft && let Some(key) = self.key_of(inner) {
+            self.env.kill(&key);
+            self.env.insert(key, t);
+        }
+        result(self, t)
     }
 
     // ---- narrowing ----------------------------------------------------------------------------
-
-    fn merge(&mut self, a: Env, b: Env) -> Env {
-        let mut out = Env::new();
-        for (k, ta) in a {
-            if let Some(&tb) = b.get(&k) {
-                let t = self.types.union(&[ta, tb]);
-                out.insert(k, t);
-            }
-        }
-        out
-    }
-
-    /// The part of `t` that can be false: `nil` and `bool`. `None` if it's always true.
-    fn falsy_part(&mut self, t: TypeId) -> Option<TypeId> {
-        if t == self.types.any {
-            return Some(t);
-        }
-        let ms: Vec<TypeId> = self
-            .types
-            .members(t)
-            .into_iter()
-            .filter(|&m| matches!(self.types.get(m), Ty::Nil | Ty::Bool | Ty::Param(_)))
-            .collect();
-        (!ms.is_empty()).then(|| self.types.union(&ms))
-    }
 
     /// Checks a condition; returns its type and the narrowing where it is true and where false.
     /// `self.env` is left as it was.
@@ -2457,7 +2312,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 self.env = if and { l_yes.clone() } else { l_no.clone() };
                 let (rt, r_yes, r_no) = self.cond(rhs);
                 self.env = start;
-                let t = match (and, self.falsy_part(lt)) {
+                let t = match (and, falsy_part(self.types, lt)) {
                     (true, Some(f)) => self.types.union(&[f, rt]),
                     (true, None) => rt,
                     (false, Some(_)) => {
@@ -2468,10 +2323,10 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 };
                 self.report.record(e.span, t);
                 if and {
-                    let no = self.merge(l_no, r_no);
+                    let no = Env::merge(l_no, r_no, self.types);
                     (t, r_yes, no)
                 } else {
-                    let yes = self.merge(l_yes, r_yes);
+                    let yes = Env::merge(l_yes, r_yes, self.types);
                     (t, yes, r_no)
                 }
             }
@@ -2496,7 +2351,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 if let Some(k) = self.key_of(e) {
                     let truthy = self.types.non_nil(t);
                     yes.insert(k.clone(), truthy);
-                    if let Some(f) = self.falsy_part(t) {
+                    if let Some(f) = falsy_part(self.types, t) {
                         no.insert(k, f);
                     }
                 }
@@ -2508,7 +2363,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     /// The current (narrowed) type of the path `k`, which is `e`.
     fn path_type(&mut self, k: &Key, e: &'a ast::Expr) -> TypeId {
         match self.env.get(k) {
-            Some(&t) => t,
+            Some(t) => t,
             None => self.muted(|c| c.expr(e, None)),
         }
     }
@@ -2535,8 +2390,8 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             {
                 let name = self.text(s);
                 let cur = self.path_type(&k, arg);
-                let y = self.filter_type_name(cur, &name, math, true);
-                let n = self.filter_type_name(cur, &name, math, false);
+                let y = filter_type_name(self.types, cur, &name, math, true);
+                let n = filter_type_name(self.types, cur, &name, math, false);
                 yes.insert(k.clone(), y);
                 no.insert(k, n);
                 break;
@@ -2577,61 +2432,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         None
     }
 
-    fn type_name(&self, t: TypeId, math: bool) -> TypeName {
-        match self.types.get(t) {
-            Ty::Any | Ty::Param(_) | Ty::Rest(_) => TypeName::Unknown,
-            Ty::Int if math => TypeName::Is("integer"),
-            Ty::Float if math => TypeName::Is("float"),
-            _ if math => TypeName::Never,
-            Ty::Nil => TypeName::Is("nil"),
-            Ty::Bool => TypeName::Is("boolean"),
-            Ty::Int | Ty::Float => TypeName::Is("number"),
-            Ty::Str => TypeName::Is("string"),
-            Ty::Fn(_) | Ty::Function => TypeName::Is("function"),
-            Ty::Thread => TypeName::Is("thread"),
-            Ty::Userdata => TypeName::Is("userdata"),
-            Ty::Table
-            | Ty::Array(_)
-            | Ty::Map(..)
-            | Ty::Record { .. }
-            | Ty::Nominal(..)
-            | Ty::Variant(..) => TypeName::Is("table"),
-            Ty::Union(_) => TypeName::Unknown,
-        }
-    }
-
-    /// `t` where `type(x) == name` holds (`keep`) or doesn't.
-    fn filter_type_name(&mut self, t: TypeId, name: &str, math: bool, keep: bool) -> TypeId {
-        let any = self.types.any;
-        if t == any {
-            if !keep {
-                return any;
-            }
-            return match (math, name) {
-                (true, "integer") => self.types.int,
-                (true, "float") => self.types.float,
-                (true, _) => any,
-                (false, "number") => self.types.number,
-                (false, "boolean") => self.types.bool,
-                (false, other) => self.types.builtin(other),
-            };
-        }
-        let kept: Vec<TypeId> = self
-            .types
-            .members(t)
-            .into_iter()
-            .filter(|&m| match self.type_name(m, math) {
-                TypeName::Unknown => true,
-                TypeName::Never => !keep,
-                TypeName::Is(n) => (n == name) == keep,
-            })
-            .collect();
-        if kept.is_empty() {
-            return t;
-        }
-        self.types.union(&kept)
-    }
-
     fn if_expr(
         &mut self,
         cond: &'a ast::Expr,
@@ -2654,7 +2454,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         self.env = match (then_out, else_out) {
             (true, _) => after_else,
             (false, true) => after_then,
-            (false, false) => self.merge(after_then, after_else),
+            (false, false) => Env::merge(after_then, after_else, self.types),
         };
         let mut parts = Vec::new();
         if !then_out {
@@ -2765,7 +2565,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         for o in outs {
             env = Some(match env {
                 None => o,
-                Some(e) => self.merge(e, o),
+                Some(e) => Env::merge(e, o, self.types),
             });
         }
         self.env = env.unwrap_or(start);
@@ -2880,7 +2680,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             _ => t,
         };
         self.sym_types.insert(index, t);
-        self.kill(&Key {
+        self.env.kill(&Key {
             base: Base::Sym(self.syms.id(index)),
             fields: Vec::new(),
         });
