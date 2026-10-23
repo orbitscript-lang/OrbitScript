@@ -14,6 +14,7 @@ pub mod debug;
 #[cfg(feature = "debugger")]
 pub mod debugger;
 mod dispatch;
+mod fast;
 mod gc;
 pub mod hook;
 mod interp;

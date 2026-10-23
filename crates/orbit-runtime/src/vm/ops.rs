@@ -124,7 +124,7 @@ impl Arith {
 
 impl Arith {
     /// The binary operator, or `None` for `Neg`.
-    fn number_op(self) -> Option<ArithOp> {
+    pub(crate) fn number_op(self) -> Option<ArithOp> {
         Some(match self {
             Arith::Add => ArithOp::Add,
             Arith::Sub => ArithOp::Sub,
