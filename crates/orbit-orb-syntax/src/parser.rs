@@ -291,7 +291,7 @@ impl Parser<'_> {
     /// Records a parse error recovered from, unless it comes right after a lexer error
     /// (which most likely caused it).
     fn recovered(&mut self, d: Diagnostic) {
-        if !self.lex_error_at.is_some_and(|at| at >= self.prev_end) {
+        if self.lex_error_at.is_none_or(|at| at < self.prev_end) {
             self.report(d);
         }
     }
@@ -299,7 +299,7 @@ impl Parser<'_> {
     /// Records the error that ended a statement or member starting at `start`, unless it
     /// follows a lexer error in the same statement (it is most likely caused by it).
     fn report_in(&mut self, d: Diagnostic, start: u32) {
-        if !self.lex_error_at.is_some_and(|at| at >= start) {
+        if self.lex_error_at.is_none_or(|at| at < start) {
             self.report(d);
         }
     }

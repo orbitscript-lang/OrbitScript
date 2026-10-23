@@ -419,7 +419,7 @@ impl Parser<'_> {
     /// Records a parse error recovered from, unless it comes right after a lexer error
     /// (which most likely caused it).
     fn recovered(&mut self, d: Diagnostic) {
-        if !self.lex_error_at.is_some_and(|at| at >= self.prev_end) {
+        if self.lex_error_at.is_none_or(|at| at < self.prev_end) {
             self.report(d);
         }
     }
@@ -649,7 +649,7 @@ impl Parser<'_> {
                     self.depth = depth;
                     self.funcs.truncate(funcs);
                     self.restore_func_counts(func);
-                    if !self.lex_error_at.is_some_and(|at| at >= start) {
+                    if self.lex_error_at.is_none_or(|at| at < start) {
                         self.report(d);
                     }
                     self.synchronize(start);
