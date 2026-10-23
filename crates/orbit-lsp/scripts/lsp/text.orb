@@ -181,8 +181,13 @@ pub fn uri_to_path(uri: string) -> string? {
         return nil;
     }
     let path = string::gsub(rest, "%%(%x%x)", |hex| string::char(tonumber(hex, 16) as int));
-    // Windows: `/C:/dir` is `C:/dir`.
-    if string::match(path, "^/%a:") != nil { string::sub(path, 2) } else { path }
+    if string::match(path, "^/%a:") == nil {
+        return path;
+    }
+    // Windows: `/C:/dir` is `C:\dir`, with the separator the workspace's own paths
+    // (`root.join(..)`) use, so the two name a file the same way.
+    let native = string::gsub(string::sub(path, 2), "/", "\\");
+    native
 }
 
 /// The `file://` URI of `path`.

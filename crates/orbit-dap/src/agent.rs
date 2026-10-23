@@ -453,25 +453,32 @@ impl State {
         }
     }
 
+    /// Answer a request that resumes the program. It is marked running
+    /// first, so a `pause` the editor sends once it has the answer reaches
+    /// the program rather than finding it still stopped.
+    fn resume(&self, r: &Json, body: Json) {
+        self.go_on();
+        self.link.respond(r, body);
+    }
+
     /// Answer a request while stopped; the resume it asks for, if any.
     fn request(&mut self, p: &mut Paused<'_, '_>, r: &Json) -> Option<Resume> {
         let a = &r["arguments"];
         let resume = match r["command"].as_str().unwrap_or("") {
             "continue" => {
-                self.link
-                    .respond(r, json!({"allThreadsContinued": !self.attach}));
+                self.resume(r, json!({"allThreadsContinued": !self.attach}));
                 Resume::Continue
             }
             "next" => {
-                self.link.respond(r, json!({}));
+                self.resume(r, json!({}));
                 Resume::StepOver
             }
             "stepIn" => {
-                self.link.respond(r, json!({}));
+                self.resume(r, json!({}));
                 Resume::StepIn
             }
             "stepOut" => {
-                self.link.respond(r, json!({}));
+                self.resume(r, json!({}));
                 Resume::StepOut
             }
             command @ ("disconnect" | "terminate") => {
