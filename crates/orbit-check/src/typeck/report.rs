@@ -74,15 +74,6 @@ impl Reporter {
         self.muted -= 1;
     }
 
-    /// Reports again until [`Reporter::restore`], even inside a mute; returns what to restore.
-    pub fn force_on(&mut self) -> u32 {
-        std::mem::replace(&mut self.muted, 0)
-    }
-
-    pub fn restore(&mut self, muted: u32) {
-        self.muted = muted;
-    }
-
     pub fn error(&mut self, span: Span, code: Code, message: String) {
         self.errors += 1;
         if self.on() {
