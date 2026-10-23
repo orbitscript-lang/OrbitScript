@@ -1043,8 +1043,16 @@ impl<'a> Printer<'a> {
         i as u32
     }
 
+    /// Whether `e` is a string written over several lines, which stays as written: a call
+    /// whose last argument it is keeps its parentheses around it (`f(r#"` ... `"#)`).
+    fn multiline_string(&self, e: &Expr) -> bool {
+        matches!(e.kind, ExprKind::Str(_) | ExprKind::Template(_))
+            && self.text(e.span).contains('\n')
+    }
+
     /// `head(args)`: on one line; or with every argument but the last on the line and the
-    /// last (a closure or a table) broken from there; or one argument per line.
+    /// last (a closure, a table, a `match`, a string over several lines, or a call that is
+    /// the only argument) broken from there; or one argument per line.
     #[allow(clippy::too_many_arguments)]
     fn call_args(
         &mut self,
@@ -1070,7 +1078,9 @@ impl<'a> Printer<'a> {
             }
         }
         if let Some(last) = args.last()
-            && overflows(last)
+            && (overflows(last)
+                || self.multiline_string(last)
+                || (args.len() == 1 && matches!(last.kind, ExprKind::Call { .. })))
             && !self.has_comment(region)
         {
             let firsts: Option<Vec<String>> = args[..args.len() - 1]
@@ -1609,11 +1619,16 @@ fn chain_calls(e: &Expr) -> usize {
     }
 }
 
-/// Whether a last argument may break from the call's line: `f(a, |x| {` or `f(#{`.
+/// Whether a last argument may break from the call's line: `f(a, |x| {`, `f(#{` or
+/// `f(a, match x {`.
 fn overflows(e: &Expr) -> bool {
     matches!(
         e.kind,
-        ExprKind::Closure(_) | ExprKind::Map(_) | ExprKind::Array(_) | ExprKind::StructLit { .. }
+        ExprKind::Closure(_)
+            | ExprKind::Map(_)
+            | ExprKind::Array(_)
+            | ExprKind::StructLit { .. }
+            | ExprKind::Match { .. }
     )
 }
 

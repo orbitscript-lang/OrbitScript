@@ -3,14 +3,22 @@
 //! orbit-check: strict
 
 use analysis;
-use lsp::text::{Text, uri_to_path, path_to_uri};
+use lsp::text::{Text, path_to_uri, uri_to_path};
 
 /// A document the editor has open, or one read from disk for a request
 /// (`version` nil).
-pub struct Document { uri: string, path: string, version: int?, text: Text }
+pub struct Document {
+    uri: string,
+    path: string,
+    version: int?,
+    text: Text,
+}
 
 /// The open documents: `by_uri` and `by_path` hold the same ones.
-pub struct Documents { by_uri: #{[string]: Document}, by_path: #{[string]: Document} }
+pub struct Documents {
+    by_uri: #{ [string]: Document },
+    by_path: #{ [string]: Document },
+}
 
 impl Documents {
     pub fn new() -> Documents {
@@ -60,7 +68,11 @@ impl Documents {
             return nil;
         }
         let text = analysis::text(path);
-        if text == nil { nil } else { Document { uri, path, version: nil, text: Text::new(text) } }
+        if text == nil {
+            nil
+        } else {
+            Document { uri, path, version: nil, text: Text::new(text) }
+        }
     }
 
     /// The text of the file at `path`: the editor's if it is open.
@@ -75,7 +87,11 @@ impl Documents {
     /// The URI of `path`: the editor's own spelling if it is open.
     pub fn uri_of(self, path: string) -> string {
         let doc: Document? = self.by_path[path];
-        if doc != nil { doc.uri } else { path_to_uri(path) }
+        if doc != nil {
+            doc.uri
+        } else {
+            path_to_uri(path)
+        }
     }
 
     /// Every open document.

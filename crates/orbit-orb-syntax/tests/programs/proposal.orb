@@ -3,7 +3,10 @@
 // `{ ... }` placeholders there are filled with small bodies here. Parsed, not run.
 
 // A taste: geometry.orb
-pub struct Vec2 { x: float, y: float }
+pub struct Vec2 {
+    x: float,
+    y: float,
+}
 
 impl Vec2 {
     pub fn new(x: float, y: float) -> Vec2 {
@@ -39,49 +42,65 @@ pub fn longest(points: [Vec2]) -> (Vec2?, float) {
 
 // Bindings and mutability
 let mut x = 1;
-let y = 2;          // immutable, like Rust: assigning it is a compile error
-x += 1;             // compound assignment
-let (q, r) = divmod(7, 2);   // destructuring multiple results
-let x = "shadowed";          // shadowing is allowed, as in Rust
+let y = 2; // immutable, like Rust: assigning it is a compile error
+x += 1; // compound assignment
+let (q, r) = divmod(7, 2); // destructuring multiple results
+let x = "shadowed"; // shadowing is allowed, as in Rust
 
 // Functions and closures
-fn add(a: int, b: int) -> int { a + b }      // last expression is the result
-let sq = |x| x * x;                          // closure
+fn add(a: int, b: int) -> int {
+    a + b
+} // last expression is the result
+let sq = |x| x * x; // closure
 let clamp = |x, lo, hi| {
-    if x < lo { return lo; }
+    if x < lo {
+        return lo;
+    }
     if x > hi { hi } else { x }
 };
-fn log(fmt: string, ...args) {               // named varargs (Lua 5.5 `...t`)
-    print(fmt.format(...args));              // `...e` spreads all values
+fn log(fmt: string, ...args) { // named varargs (Lua 5.5 `...t`)
+    print(fmt.format(...args)); // `...e` spreads all values
 }
 
 // Tables, arrays and maps
 let arr = [10, 20, 30];
 let map = #{ name: "orbit", "two words": true, [k]: v };
-let mixed = #{ 10, 20, tag: "x" };           // positional and keyed together
+let mixed = #{ 10, 20, tag: "x" }; // positional and keyed together
 print(#arr, arr[1], map.name);
 
 // Structs and impl
-pub struct Point { x: float, y: float }
+pub struct Point {
+    x: float,
+    y: float,
+}
 
 impl Point {
-    pub fn new(x, y) -> Point { Point { x, y } }     // associated fn: no self
-    pub fn dist(self, other: Point) -> float {       // method: explicit self
+    pub fn new(x, y) -> Point {
+        Point { x, y }
+    } // associated fn: no self
+    pub fn dist(self, other: Point) -> float { // method: explicit self
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         math::sqrt(dx * dx + dy * dy)
     }
-    pub fn translate(self, dx, dy) { self.x += dx; self.y += dy; }  // fields are mutable through any binding
+    pub fn translate(self, dx, dy) {
+        self.x += dx;
+        self.y += dy;
+    } // fields are mutable through any binding
 }
 
-let p = Point::new(1, 2);    // path call: Point.new(1, 2)
+let p = Point::new(1, 2); // path call: Point.new(1, 2)
 let q = Point { x: 4, y: 6 };
-print(p.dist(q));            // method call: p:dist(q)
+print(p.dist(q)); // method call: p:dist(q)
 
 // Operators and metamethods
 impl Vec2 {
-    fn __eq(self, other) { self.x == other.x && self.y == other.y }
-    fn __close(self, err) { self.release(); }
+    fn __eq(self, other) {
+        self.x == other.x && self.y == other.y
+    }
+    fn __close(self, err) {
+        self.release();
+    }
     const __mode = "k";
 }
 
@@ -111,24 +130,44 @@ let label = match n {
 };
 
 // Control flow
-if x > 0 { a() } else if x < 0 { b() } else { c() }   // no parentheses, braces required
-let sign = if x >= 0 { 1 } else { -1 };              // if is an expression
+if x > 0 {
+    a()
+} else if x < 0 {
+    b()
+} else {
+    c()
+} // no parentheses, braces required
+let sign = if x >= 0 { 1 } else { -1 }; // if is an expression
 
-while i < n { i += 1; }
-loop { if done() { break; } }                       // `loop` = while true
-let found = loop { if let_me_out() { break 42; } };  // break with a value
+while i < n {
+    i += 1;
+}
+loop {
+    if done() {
+        break;
+    }
+} // `loop` = while true
+let found = loop {
+    if let_me_out() {
+        break 42;
+    }
+}; // break with a value
 
-for i in 1..=10 { }          // numeric for, inclusive
-for i in 0..n { }            // exclusive end
-for i in (1..=10).rev() { }  // step -1
-for i in (0..100).step_by(5) { }
-for (i, v) in ipairs(t) { }  // generic for
-for k in pairs(t) { }        // extra iterator results are ignored, as in Lua
+for i in 1..=10 {} // numeric for, inclusive
+for i in 0..n {} // exclusive end
+for i in (1..=10).rev() {} // step -1
+for i in (0..100).step_by(5) {}
+for (i, v) in ipairs(t) {} // generic for
+for k in pairs(t) {} // extra iterator results are ignored, as in Lua
 
 'outer: for i in 1..=n {
     for j in 1..=n {
-        if j == i { continue; }
-        if grid[i][j] == 0 { break 'outer; }
+        if j == i {
+            continue;
+        }
+        if grid[i][j] == 0 {
+            break 'outer;
+        }
     }
 }
 
@@ -136,24 +175,24 @@ for k in pairs(t) { }        // extra iterator results are ignored, as in Lua
 let name = "orbit";
 let n = 3;
 let pct = 41.666;
-print(f"{name} has {n} items");          // orbit has 3 items
-print(f"{name} is {pct:.1}% done");      // orbit is 41.7% done
-print(f"{n:>4}|{n:<4}|{n:04}|{255:x}");  // "   3|3   |0003|ff"
+print(f"{name} has {n} items"); // orbit has 3 items
+print(f"{name} is {pct:.1}% done"); // orbit is 41.7% done
+print(f"{n:>4}|{n:<4}|{n:04}|{255:x}"); // "   3|3   |0003|ff"
 print(f"total: {a + b}, first: {t[1]}"); // any expression
-print(f"{{literal braces}}");            // {literal braces}
-print(f"{p}");                           // uses __tostring if p has one
-print(f"{nil} {true}");                  // nil true  (no error, unlike Lua's ..)
+print(f"{{literal braces}}"); // {literal braces}
+print(f"{p}"); // uses __tostring if p has one
+print(f"{nil} {true}"); // nil true  (no error, unlike Lua's ..)
 let s = f"{name} has {n} items ({pct:.1}%)";
 
 // Errors and `?`
 fn read_config(path: string) -> string? {
-    let f = io::open(path)?;          // nil, err -> return nil, err
+    let f = io::open(path)?; // nil, err -> return nil, err
     scope f.close();
     f.read("a")
 }
 
-let (ok, err) = pcall(risky, 1, 2);   // raising errors: unchanged
-panic(f"bad state {s}");              // alias of error(), Rust's name
+let (ok, err) = pcall(risky, 1, 2); // raising errors: unchanged
+panic(f"bad state {s}"); // alias of error(), Rust's name
 
 // Scoped cleanup
 fn copy(src, dst) {
@@ -169,27 +208,40 @@ fn copy(src, dst) {
 
 let scope f = io::open(path)?;
 
-pub struct Lock { name: string }
+pub struct Lock {
+    name: string,
+}
 
 impl Lock {
-    pub fn acquire(name) -> Lock { take(name); Lock { name } }
-    fn __close(self, err) { release(self.name); }
+    pub fn acquire(name) -> Lock {
+        take(name);
+        Lock { name }
+    }
+    fn __close(self, err) {
+        release(self.name);
+    }
 }
 
 fn update() {
     let scope guard = Lock::acquire("db");
-    write_rows()?;        // early return still releases the lock
+    write_rows()?; // early return still releases the lock
 }
 
 // Modules
-use json;                        // let json = require("json")
-use app::util::{trim, split};    // one require, then local copies of the fields
+use app::util::{split, trim}; // one require, then local copies of the fields
 use app::util as u;
+use json; // let json = require("json")
 
-pub fn parse(s) { json::decode(s) }  // exported
-fn helper() { nil }                  // module-private local
-pub struct Config { path: string }   // exported
-pub const VERSION = "1.2";           // exported constant
+pub fn parse(s) {
+    json::decode(s)
+} // exported
+fn helper() {
+    nil
+} // module-private local
+pub struct Config {
+    path: string,
+} // exported
+pub const VERSION = "1.2"; // exported constant
 
 // Names and globals
 extern HOST_API;
@@ -198,10 +250,16 @@ global x = v;
 // Optional types
 let n: int = 3;
 let names: [string] = ["a", "b"];
-let ages: #{[string]: int} = #{};
-fn find(t: [Vec2], pred: fn(Vec2) -> bool) -> Vec2? { nil }
-fn divmod(a: int, b: int) -> (int, int) { (a \ b, a % b) }
-fn first<T>(t: [T]) -> T? { t[1] }
+let ages: #{ [string]: int } = #{};
+fn find(t: [Vec2], pred: fn(Vec2) -> bool) -> Vec2? {
+    nil
+}
+fn divmod(a: int, b: int) -> (int, int) {
+    (a \ b, a % b)
+}
+fn first<T>(t: [T]) -> T? {
+    t[1]
+}
 
 // Interop
 let v = geometry::Vec2::new(1, 2);

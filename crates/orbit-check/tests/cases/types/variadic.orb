@@ -1,13 +1,25 @@
 // Variadic results: `-> ...T` and `-> (A, ...T)`.
 
-fn digits(s: string) -> ...int { string::byte(s, 1, -1) }
-fn tagged(s: string) -> (string, ...int) { (s, 1, 2, 3) }
-fn none() -> ...int { }
-fn wrong() -> ...int { ("a", "b") } //~ T0201
-fn mixed() -> (string, ...int) { ("a", 1, "b") } //~ T0201
-fn short() -> (string, ...int) { } //~ T0201
-fn forward(s: string) -> ...int { digits(s) }
-fn bad_forward(s: string) -> ...string { digits(s) } //~ T0201
+fn digits(s: string) -> ...int {
+    string::byte(s, 1, -1)
+}
+fn tagged(s: string) -> (string, ...int) {
+    (s, 1, 2, 3)
+}
+fn none() -> ...int {}
+fn wrong() -> ...int {
+    ("a", "b") //~ T0201
+}
+fn mixed() -> (string, ...int) {
+    ("a", 1, "b") //~ T0201
+}
+fn short() -> (string, ...int) {} //~ T0201
+fn forward(s: string) -> ...int {
+    digits(s)
+}
+fn bad_forward(s: string) -> ...string {
+    digits(s) //~ T0201
+}
 
 // Each name a `let` binds from `...T` gets `T`, with no count error.
 let (a, b, c) = digits("abc");
@@ -21,7 +33,9 @@ let wrong_first: string = digits("a"); //~ T0201
 
 // Inferred results join a `...T` way out with the others.
 fn either(n: int) {
-    if n > 0 { return digits("a"); }
+    if n > 0 {
+        return digits("a");
+    }
     (n, n)
 }
 let (e1, e2, e3) = either(1);
@@ -43,4 +57,6 @@ let okb: bool = ok;
 let oks: string = ok; //~ T0201
 let (resumed, value) = coroutine::resume(coroutine::create(print));
 let rs: string = resumed; //~ T0201
-for (i, code) in ipairs([string::byte("ab", 1, 2)]) { let ci: int = code; }
+for (i, code) in ipairs([string::byte("ab", 1, 2)]) {
+    let ci: int = code;
+}

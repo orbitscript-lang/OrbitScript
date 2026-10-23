@@ -9,27 +9,60 @@ global calls = 0;
 
 // ---- structs, impl, metamethods -------------------------------------------------------
 
-struct Vec2 { x: number, y: number }
-
-impl Vec2 {
-    pub fn new(x, y) -> Vec2 { Vec2 { x, y } }
-    pub fn dot(self, o) -> number { self.x * o.x + self.y * o.y }
-    pub fn scale(self, k) { self.x *= k; self.y *= k; }
-    fn __add(self, o) { Vec2::new(self.x + o.x, self.y + o.y) }
-    fn __sub(self, o) { Vec2 { x: self.x - o.x, y: self.y - o.y } }
-    fn __eq(self, o) { self.x == o.x && self.y == o.y }
-    fn __lt(self, o) { self.dot(self) < o.dot(o) }
-    fn __len(self) { 2 }
-    fn __tostring(self) { f"({self.x}, {self.y})" }
+struct Vec2 {
+    x: number,
+    y: number,
 }
 
-struct Counter { n: int }
+impl Vec2 {
+    pub fn new(x, y) -> Vec2 {
+        Vec2 { x, y }
+    }
+    pub fn dot(self, o) -> number {
+        self.x * o.x + self.y * o.y
+    }
+    pub fn scale(self, k) {
+        self.x *= k;
+        self.y *= k;
+    }
+    fn __add(self, o) {
+        Vec2::new(self.x + o.x, self.y + o.y)
+    }
+    fn __sub(self, o) {
+        Vec2 { x: self.x - o.x, y: self.y - o.y }
+    }
+    fn __eq(self, o) {
+        self.x == o.x && self.y == o.y
+    }
+    fn __lt(self, o) {
+        self.dot(self) < o.dot(o)
+    }
+    fn __len(self) {
+        2
+    }
+    fn __tostring(self) {
+        f"({self.x}, {self.y})"
+    }
+}
+
+struct Counter {
+    n: int,
+}
 
 impl Counter {
-    pub fn new() -> Counter { Counter { n: 0 } }
-    pub fn bump(self, by) -> int { self.n += by; self.n }
-    fn __index(self, key) { if key == "double" { self.n * 2 } else { nil } }
-    fn __call(self, v) { self.bump(v) }
+    pub fn new() -> Counter {
+        Counter { n: 0 }
+    }
+    pub fn bump(self, by) -> int {
+        self.n += by;
+        self.n
+    }
+    fn __index(self, key) {
+        if key == "double" { self.n * 2 } else { nil }
+    }
+    fn __call(self, v) {
+        self.bump(v)
+    }
 }
 
 // ---- enums and match ------------------------------------------------------------------
@@ -92,7 +125,13 @@ fn pair_kind(a, b) {
 
 // ---- `?`, tuples and spreads ----------------------------------------------------------
 
-fn lookup(t, k) { if t[k] == nil { (nil, f"missing {k}") } else { t[k] } }
+fn lookup(t, k) {
+    if t[k] == nil {
+        (nil, f"missing {k}")
+    } else {
+        t[k]
+    }
+}
 
 fn sum3(t) {
     let a = lookup(t, "a")?;
@@ -101,10 +140,18 @@ fn sum3(t) {
     a + b + c
 }
 
-fn divmod(a: int, b: int) -> (int, int) { (a \ b, a % b) }
-fn count(...rest) { select("#", ...rest) }
-fn first_of(...rest) { rest[1] }
-fn spread_all(t) { count(...table::unpack(t)) }
+fn divmod(a: int, b: int) -> (int, int) {
+    (a \ b, a % b)
+}
+fn count(...rest) {
+    select("#", ...rest)
+}
+fn first_of(...rest) {
+    rest[1]
+}
+fn spread_all(t) {
+    count(...table::unpack(t))
+}
 
 // ---- templates and concatenation ------------------------------------------------------
 
@@ -115,16 +162,41 @@ fn render(i, v) {
 
 // ---- hoisting: block, if, match and loop expressions as values ------------------------
 
-fn note(log, v) { log[#log + 1] = v; v }
+fn note(log, v) {
+    log[#log + 1] = v;
+    v
+}
 
 fn hoisted(i) {
     let log = [];
-    let a = note(log, 1) + { let t = note(log, 2); t * 10 } + note(log, 3);
-    let b = if i % 2 == 0 { note(log, 4) } else { note(log, 5) } * 2;
-    let c = match i % 3 { 0 => "a", 1 => "b", _ => "c" } ~ note(log, "x");
+    let a = note(log, 1)
+        + {
+            let t = note(log, 2);
+            t * 10
+        }
+        + note(log, 3);
+    let b = if i % 2 == 0 {
+        note(log, 4)
+    } else {
+        note(log, 5)
+    } * 2;
+    let c = match i % 3 {
+        0 => "a",
+        1 => "b",
+        _ => "c",
+    } ~ note(log, "x");
     let mut j = 0;
-    let d = loop { j += 1; if j > 3 { break j * 2; } };
-    let e = i > 2 && { let z = i * 2; z > 5 } || false;
+    let d = loop {
+        j += 1;
+        if j > 3 {
+            break j * 2;
+        }
+    };
+    let e = i > 2
+        && {
+            let z = i * 2;
+            z > 5
+        } || false;
     a + b + #c + d + #log + if e { 1 } else { 0 }
 }
 
@@ -132,19 +204,43 @@ fn hoisted(i) {
 
 fn loops(n) {
     let mut acc = 0;
-    for i in 1..=n { acc += i; }
-    for i in 0..n { acc += i; }
-    for i in (1..=n).rev() { acc -= i; }
-    for i in (0..n).rev() { acc -= i; }
-    for i in (0..=n).step_by(3) { acc += i; }
-    for (k, v) in ipairs([10, 20, 30]) { acc += k * v; }
-    for (_k, v) in pairs(#{ a: 1 }) { acc += v; }
+    for i in 1..=n {
+        acc += i;
+    }
+    for i in 0..n {
+        acc += i;
+    }
+    for i in (1..=n).rev() {
+        acc -= i;
+    }
+    for i in (0..n).rev() {
+        acc -= i;
+    }
+    for i in (0..=n).step_by(3) {
+        acc += i;
+    }
+    for (k, v) in ipairs([10, 20, 30]) {
+        acc += k * v;
+    }
+    for (_k, v) in pairs(#{ a: 1 }) {
+        acc += v;
+    }
     let mut w = 0;
-    while w < n { w += 1; if w % 2 == 0 { continue; } acc += 1; }
+    while w < n {
+        w += 1;
+        if w % 2 == 0 {
+            continue;
+        }
+        acc += 1;
+    }
     'outer: for a in 1..=4 {
         for b in 1..=4 {
-            if b == 3 { continue 'outer; }
-            if a == 4 { break 'outer; }
+            if b == 3 {
+                continue 'outer;
+            }
+            if a == 4 {
+                break 'outer;
+            }
             acc += a * b;
         }
     }
@@ -153,9 +249,13 @@ fn loops(n) {
 
 // ---- closures, scoped cleanup and forward references ----------------------------------
 
-struct Guard { log }
+struct Guard {
+    log,
+}
 impl Guard {
-    fn __close(self, err) { self.log[#self.log + 1] = "closed"; }
+    fn __close(self, err) {
+        self.log[#self.log + 1] = "closed";
+    }
 }
 
 fn cleanup(i) {
@@ -175,8 +275,12 @@ fn cleanup(i) {
     #log
 }
 
-fn is_even(n) { if n == 0 { true } else { is_odd(n - 1) } }
-fn is_odd(n) { if n == 0 { false } else { is_even(n - 1) } }
+fn is_even(n) {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+fn is_odd(n) {
+    if n == 0 { false } else { is_even(n - 1) }
+}
 
 // ---- maps, arrays, compound assignment, operators -------------------------------------
 
@@ -203,22 +307,52 @@ fn round(i) {
     let c = Counter::new();
     c(i);
     c.bump(1);
-    let shapes = [Shape::Circle { r: i % 5 }, Shape::Rect { w: i % 3, h: 2 },
-                  Shape::Tri { a: 3, b: 4, c: 5 }, Shape::Empty];
+    let shapes = [
+        Shape::Circle { r: i % 5 },
+        Shape::Rect { w: i % 3, h: 2 },
+        Shape::Tri { a: 3, b: 4, c: 5 },
+        Shape::Empty,
+    ];
     let mut area = 0;
-    for (_, s) in ipairs(shapes) { area += s.area(); if s.kind() == "boxy" { area += 1; } }
+    for (_, s) in ipairs(shapes) {
+        area += s.area();
+        if s.kind() == "boxy" {
+            area += 1;
+        }
+    }
     let (q, r) = divmod(i + 7, 3);
     let missing = sum3(#{ a: 1, b: 2 }) == nil;
     let s = sum3(#{ a: i, b: 1, c: 2 });
     let text = render(i, i / 7);
-    p.dot(p) + c.double + area + q + r + s + #text + hoisted(i) + loops(i % 10 + 1)
-        + cleanup(i) + tables(i) + #classify(i % 120 - 10) + pair_kind(i % 3, i % 2)
-        + count(...table::unpack([1, 2, i])) + first_of(i, 2) + spread_all([1, 2, 3])
-        + if missing { 1 } else { 0 } + if is_even(i % 20) { 1 } else { 0 }
-        + if p < Vec2::new(100, 100) { 1 } else { 0 } + #p
+    p.dot(p)
+        + c.double
+        + area
+        + q
+        + r
+        + s
+        + #text
+        + hoisted(i)
+        + loops(i % 10 + 1)
+        + cleanup(i)
+        + tables(i)
+        + #classify(i % 120 - 10)
+        + pair_kind(i % 3, i % 2)
+        + count(...table::unpack([1, 2, i]))
+        + first_of(i, 2)
+        + spread_all([1, 2, 3])
+        + if missing { 1 } else { 0 }
+        + if is_even(i % 20) { 1 } else { 0 }
+        + if p < Vec2::new(100, 100) { 1 } else { 0 }
+        + #p
 }
 
-let n = if arg != nil && arg[1] != nil { math::tointeger(arg[1]) as int } else { ROUNDS };
+let n = if arg != nil && arg[1] != nil {
+    math::tointeger(arg[1]) as int
+} else {
+    ROUNDS
+};
 let mut total = 0;
-for i in 1..=n { total += round(i); }
+for i in 1..=n {
+    total += round(i);
+}
 print(f"desugar: {n} rounds, checksum {total:.6}, calls {calls}");

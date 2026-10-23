@@ -1,7 +1,9 @@
 // heap: a binary min-heap, ordered by `<` (so items may define `__lt`).
 // sim.orb loads it with `use heap::{Heap};`.
 
-pub struct Heap { items }
+pub struct Heap {
+    items,
+}
 
 impl Heap {
     pub fn new() -> Heap {

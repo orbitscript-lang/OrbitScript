@@ -75,7 +75,9 @@ fn server_port(settings) {
 fn describe(path) {
     let settings = read_config(path)?;
     let port = server_port(settings)?;
-    let mut lines = [f"{path}: {settings[""].name || "(unnamed)"} on {settings.server.host}:{port}"];
+    let mut lines = [
+        f"{path}: {settings[""].name || "(unnamed)"} on {settings.server.host}:{port}",
+    ];
     let sections = [];
     for name in pairs(settings) {
         sections[#sections + 1] = name;

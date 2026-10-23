@@ -45,7 +45,9 @@ impl Shape {
 
 /// A triangle built from geometry.lua's points.
 pub fn triangle(ax, ay, bx, by, cx, cy) -> Shape {
-    Shape::Polygon { points: [geometry::point(ax, ay), geometry::point(bx, by), geometry::point(cx, cy)] }
+    Shape::Polygon {
+        points: [geometry::point(ax, ay), geometry::point(bx, by), geometry::point(cx, cy)],
+    }
 }
 
 /// Adds up the areas of a list of shapes, whichever language built them.

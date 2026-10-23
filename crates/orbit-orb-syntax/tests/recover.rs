@@ -128,6 +128,18 @@ fn a_missing_close_brace_before_an_item_at_column_zero() {
     assert_eq!(top_items(&ast), ["fn a", "fn b", "impl P", "struct Q"]);
 }
 
+#[test]
+fn a_type_alias_at_column_zero_ends_an_unclosed_body() {
+    // `type` is only a keyword before a name: `type(x)` at column zero is a call.
+    let src = "struct S {\n    a: int,\n\ntype T = int;\nfn f() {\n    let x = 1;\ntype(x);\n}\n";
+    let (ast, errors) = recovering(src);
+    assert_eq!(
+        errors,
+        ["t.orb:4: expected `}` to close the `{` at line 1, found `type`"]
+    );
+    assert_eq!(top_items(&ast), ["struct S", "type T", "fn f"]);
+}
+
 /// Valid code written flush (items at column 0 inside blocks) parses as it does without
 /// recovery: only a module with errors goes through the layout heuristics.
 #[test]

@@ -2,48 +2,105 @@
 // checker knows, by path, with byte offsets from 0. This stub is for checking the scripts.
 
 /// A place in a file. A stub of the standard library is named by its copy in the cache.
-pub struct Location { path: string, start: int, end: int }
+pub struct Location {
+    path: string,
+    start: int,
+    end: int,
+}
 
 /// A reference, and whether it is the definition.
-pub struct Reference { path: string, start: int, end: int, definition: bool }
+pub struct Reference {
+    path: string,
+    start: int,
+    end: int,
+    definition: bool,
+}
 
-pub struct Diagnostic { start: int, end: int, severity: string, code: string?, message: string }
+pub struct Diagnostic {
+    start: int,
+    end: int,
+    severity: string,
+    code: string?,
+    message: string,
+}
 
 /// One entry of a file's outline; `start` and `end` cover the name, `full_start` and
 /// `full_end` the whole item.
 pub struct Symbol {
-    name: string, kind: string, start: int, end: int, full_start: int, full_end: int,
+    name: string,
+    kind: string,
+    start: int,
+    end: int,
+    full_start: int,
+    full_end: int,
     children: [Symbol],
 }
 
 /// The symbol under the cursor: how it is declared, and its doc comment.
 pub struct Hover {
-    name: string?, kind: string?, declaration: string, docs: string?, start: int?, end: int?,
+    name: string?,
+    kind: string?,
+    declaration: string,
+    docs: string?,
+    start: int?,
+    end: int?,
 }
 
-pub struct Completion { label: string, kind: string, detail: string? }
+pub struct Completion {
+    label: string,
+    kind: string,
+    detail: string?,
+}
 
 /// What completion offers, and the span the items replace.
-pub struct Completions { start: int, end: int, items: [Completion] }
+pub struct Completions {
+    start: int,
+    end: int,
+    items: [Completion],
+}
 
 /// A call's signature; each parameter is a `[start, end]` byte range of `label`.
-pub struct Signature { label: string, params: [[int]], active: int?, docs: string? }
+pub struct Signature {
+    label: string,
+    params: [[int]],
+    active: int?,
+    docs: string?,
+}
 
-pub struct InlayHint { offset: int, label: string }
+pub struct InlayHint {
+    offset: int,
+    label: string,
+}
 
-pub struct RenameTarget { start: int, end: int, name: string }
+pub struct RenameTarget {
+    start: int,
+    end: int,
+    name: string,
+}
 
 /// An item anywhere in the workspace.
 pub struct WorkspaceSymbol {
-    path: string, start: int, end: int, name: string, kind: string, container: string?,
+    path: string,
+    start: int,
+    end: int,
+    name: string,
+    kind: string,
+    container: string?,
 }
 
 /// Replace `start..end` with `text`.
-pub struct TextEdit { start: int, end: int, text: string }
+pub struct TextEdit {
+    start: int,
+    end: int,
+    text: string,
+}
 
 /// What formatting gives: the edits (none when the file has a syntax error), or why the
 /// formatter can't format the file.
-pub struct Formatted { edits: [TextEdit], error: string? }
+pub struct Formatted {
+    edits: [TextEdit],
+    error: string?,
+}
 
 /// orbit-lsp's version.
 pub const version: string;

@@ -409,10 +409,12 @@ impl Parser<'_> {
 
     /// When recovering, whether the current token starts an item at the very start of a
     /// line: inside a block that means its `}` is most likely missing.
-    fn item_at_line_start(&self) -> bool {
+    fn item_at_line_start(&mut self) -> bool {
         let at = self.tok.span.start as usize;
-        self.recover
-            && matches!(
+        if !self.recover || (at != 0 && self.lx.src()[at - 1] != b'\n') {
+            return false;
+        }
+        matches!(
                 self.tok.kind,
                 TokenKind::Keyword(
                     Keyword::Fn
@@ -426,7 +428,8 @@ impl Parser<'_> {
                         | Keyword::Extern
                 )
             )
-            && (at == 0 || self.lx.src()[at - 1] == b'\n')
+            // `type Name`, not `type` as a name.
+            || (self.is_type_keyword() && self.type_is_keyword().unwrap_or(false))
     }
 
     /// When recovering, whether the `{` at `open` is missing its `}` because an item starts
@@ -645,7 +648,8 @@ impl Parser<'_> {
     fn block_body(&mut self, open: Option<u32>) -> PResult<(Vec<Stmt>, Option<Box<Expr>>)> {
         let mut stmts = Vec::new();
         loop {
-            match self.tok.kind {
+            let kind = self.tok.kind;
+            match kind {
                 TokenKind::Punct(Punct::RBrace) if open.is_some() => return Ok((stmts, None)),
                 TokenKind::Eof => {
                     if let Some(open) = open {

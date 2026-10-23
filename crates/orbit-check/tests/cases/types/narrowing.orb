@@ -1,10 +1,15 @@
 // Nil checks, type() tests, early exits, match arms and field paths.
 
-struct Node { value: int, next: Node? }
+struct Node {
+    value: int,
+    next: Node?,
+}
 
 fn find(items: [string], wanted: string) -> int? {
     for i in 1..=#items {
-        if items[i] == wanted { return i; }
+        if items[i] == wanted {
+            return i;
+        }
     }
     nil
 }
@@ -20,12 +25,16 @@ if at {
 let after: int = at; //~ T0207
 
 fn early(x: int?) -> int {
-    if x == nil { return 0; }
+    if x == nil {
+        return 0;
+    }
     x + 1
 }
 
 fn early_error(x: string?) -> string {
-    if x == nil { error("no x"); }
+    if x == nil {
+        error("no x");
+    }
     x ~ "!"
 }
 
@@ -34,12 +43,18 @@ fn both(x: int?, y: int?) -> int {
 }
 
 fn either(x: int?) -> int {
-    if x == nil || x < 0 { return 0; }
+    if x == nil || x < 0 {
+        return 0;
+    }
     x
 }
 
 fn kind(v: int | string) -> string {
-    if type(v) == "string" { v ~ "" } else { tostring(v + 1) }
+    if type(v) == "string" {
+        v ~ ""
+    } else {
+        tostring(v + 1)
+    }
 }
 
 fn int_part(n: number) -> int {

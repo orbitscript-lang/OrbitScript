@@ -7,7 +7,11 @@
 
 extern arg;
 
-struct Grid { rows, cols, cells }
+struct Grid {
+    rows,
+    cols,
+    cells,
+}
 
 impl Grid {
     pub fn parse(picture) -> Grid {

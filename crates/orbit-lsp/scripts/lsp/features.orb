@@ -4,31 +4,67 @@
 //! request failed.
 //! orbit-check: strict
 
-use std::json;
 use analysis;
+use lsp::documents::{Document, Documents};
 use lsp::rpc;
 use lsp::text::{Text};
-use lsp::documents::{Document, Documents};
-
+use std::json;
 
 /// LSP's `SymbolKind` for each of the analysis module's kinds.
-let SYMBOL_KINDS: #{[string]: int} = #{
-    function: 12, struct: 23, enum: 10, variant: 22, field: 8, method: 6, assoc_fn: 12,
-    const: 14, type_alias: 26, module: 2, global: 13, local: 13, param: 13, import: 13,
+let SYMBOL_KINDS: #{ [string]: int } = #{
+    function: 12,
+    struct: 23,
+    enum: 10,
+    variant: 22,
+    field: 8,
+    method: 6,
+    assoc_fn: 12,
+    const: 14,
+    type_alias: 26,
+    module: 2,
+    global: 13,
+    local: 13,
+    param: 13,
+    import: 13,
     type_param: 26,
 };
 
 /// LSP's `CompletionItemKind` for each kind.
-let COMPLETION_KINDS: #{[string]: int} = #{
-    function: 3, struct: 22, enum: 13, variant: 20, field: 5, method: 2, assoc_fn: 3,
-    const: 21, type_alias: 7, module: 9, global: 6, local: 6, param: 6, import: 6,
-    type_param: 25, keyword: 14,
+let COMPLETION_KINDS: #{ [string]: int } = #{
+    function: 3,
+    struct: 22,
+    enum: 13,
+    variant: 20,
+    field: 5,
+    method: 2,
+    assoc_fn: 3,
+    const: 21,
+    type_alias: 7,
+    module: 9,
+    global: 6,
+    local: 6,
+    param: 6,
+    import: 6,
+    type_param: 25,
+    keyword: 14,
 };
 
 /// The highlighting kinds, in the order the legend gives them.
 let TOKEN_TYPES: [string] = [
-    "namespace", "type", "enum", "enumMember", "typeParameter", "parameter", "variable",
-    "property", "function", "method", "keyword", "string", "number", "comment",
+    "namespace",
+    "type",
+    "enum",
+    "enumMember",
+    "typeParameter",
+    "parameter",
+    "variable",
+    "property",
+    "function",
+    "method",
+    "keyword",
+    "string",
+    "number",
+    "comment",
 ];
 
 /// The semantic tokens legend, for `initialize`.
@@ -38,7 +74,7 @@ pub fn token_legend() -> table {
 
 /// The index of each token type, from 0; doc comments are comments with
 /// the `documentation` modifier.
-let TOKEN_INDEX: #{[string]: int} = #{};
+let TOKEN_INDEX: #{ [string]: int } = #{};
 for (i, name) in ipairs(TOKEN_TYPES) {
     TOKEN_INDEX[name] = i - 1;
 }
@@ -82,7 +118,11 @@ pub fn publish_diagnostics(doc: Document) {
         let item = #{
             range: doc.text.range(d.start, d.end),
             severity: severity,
-            source: if checked(doc.path) { "orbit-check" } else { "orbit" },
+            source: if checked(doc.path) {
+                "orbit-check"
+            } else {
+                "orbit"
+            },
             message: d.message,
         };
         if d.code != nil {
@@ -90,7 +130,11 @@ pub fn publish_diagnostics(doc: Document) {
         }
         list[#list + 1] = item;
     }
-    rpc::notify("textDocument/publishDiagnostics", #{ uri: doc.uri, version: doc.version, diagnostics: list });
+    rpc::notify("textDocument/publishDiagnostics", #{
+        uri: doc.uri,
+        version: doc.version,
+        diagnostics: list,
+    });
 }
 
 /// LSP's `DocumentSymbol`s for `symbols`, in `text`.
@@ -155,8 +199,16 @@ pub fn selection_range(docs: Documents, params: any) -> (any, string?) {
     if doc == nil {
         return out;
     }
-    let tokens = if checked(doc.path) { analysis::tokens(doc.path) } else { [] };
-    let folds = if checked(doc.path) { analysis::folds(doc.path) } else { [] };
+    let tokens = if checked(doc.path) {
+        analysis::tokens(doc.path)
+    } else {
+        []
+    };
+    let folds = if checked(doc.path) {
+        analysis::folds(doc.path)
+    } else {
+        []
+    };
     for (_, position) in ipairs(params.positions) {
         let offset = doc.text.offset(position);
         // Innermost first; each span is [start, end).
@@ -234,7 +286,11 @@ pub fn definition(docs: Documents, params: any) -> (any, string?) {
         return nil;
     }
     let loc = analysis::definition(doc.path, offset);
-    if loc == nil { nil } else { location(docs, loc.path, loc.start, loc.end) }
+    if loc == nil {
+        nil
+    } else {
+        location(docs, loc.path, loc.start, loc.end)
+    }
 }
 
 pub fn references(docs: Documents, params: any) -> (any, string?) {
@@ -449,7 +505,11 @@ pub fn workspace_symbol(docs: Documents, params: any) -> (any, string?) {
             break;
         }
         if matches(s.name, query) {
-            let item = #{ name: s.name, kind: SYMBOL_KINDS[s.kind] || SYMBOL_KINDS.local, location: location(docs, s.path, s.start, s.end) };
+            let item = #{
+                name: s.name,
+                kind: SYMBOL_KINDS[s.kind] || SYMBOL_KINDS.local,
+                location: location(docs, s.path, s.start, s.end),
+            };
             if s.container != nil {
                 item.containerName = s.container;
             }

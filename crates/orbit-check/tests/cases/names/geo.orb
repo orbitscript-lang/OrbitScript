@@ -1,8 +1,15 @@
-pub struct Vec2 { x: float, y: float }
+pub struct Vec2 {
+    x: float,
+    y: float,
+}
 
 impl Vec2 {
-    pub fn new(x: float, y: float) -> Vec2 { Vec2 { x, y } }
-    pub fn len(self) -> float { math::sqrt(self.x * self.x + self.y * self.y) }
+    pub fn new(x: float, y: float) -> Vec2 {
+        Vec2 { x, y }
+    }
+    pub fn len(self) -> float {
+        math::sqrt(self.x * self.x + self.y * self.y)
+    }
 }
 
 fn private_helper() {}

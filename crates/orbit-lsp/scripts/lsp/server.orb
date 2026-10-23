@@ -2,21 +2,25 @@
 //! `exit`. Messages and their params are JSON, so `any`.
 //! orbit-check: strict
 
-use std::json;
 use analysis;
-use lsp::rpc;
-use lsp::rpc::{present};
-use lsp::text::{uri_to_path, set_encoding};
 use lsp::documents::{Documents};
 use lsp::features;
+use lsp::rpc;
+use lsp::rpc::{present};
+use lsp::text::{set_encoding, uri_to_path};
+use std::json;
 
-struct Server { docs: Documents, initialized: bool, shutdown: bool }
+struct Server {
+    docs: Documents,
+    initialized: bool,
+    shutdown: bool,
+}
 
 /// A request's handler: the result, or nil and why the request failed.
 type Handler = fn(Documents, any) -> (any, string?);
 
 /// The requests answered, by method.
-let REQUESTS: #{[string]: Handler} = #{
+let REQUESTS: #{ [string]: Handler } = #{
     ["textDocument/documentSymbol"]: features::document_symbol,
     ["textDocument/foldingRange"]: features::folding_range,
     ["textDocument/selectionRange"]: features::selection_range,
@@ -56,7 +60,11 @@ impl Server {
             root = params.rootPath;
         }
         let options = params.initializationOptions;
-        let search = if present(options) && present(options.searchPath) { options.searchPath } else { [] };
+        let search = if present(options) && present(options.searchPath) {
+            options.searchPath
+        } else {
+            []
+        };
         analysis::configure(root || ".", search);
 
         // UTF-8 columns when the editor offers them, else LSP's UTF-16.
@@ -122,7 +130,10 @@ impl Server {
         }
         self.docs.close(doc);
         // Its errors go with it; the rest may change without its edits.
-        rpc::notify("textDocument/publishDiagnostics", #{ uri: doc.uri, diagnostics: json::array() });
+        rpc::notify("textDocument/publishDiagnostics", #{
+            uri: doc.uri,
+            diagnostics: json::array(),
+        });
         self.publish_all();
     }
 
@@ -177,7 +188,11 @@ impl Server {
             }
             if msg.invalid != nil {
                 rpc::log(f"a message that isn't JSON: {msg.invalid}");
-                rpc::send(#{ jsonrpc: "2.0", id: json::null, error: #{ code: rpc::PARSE_ERROR, message: msg.invalid } });
+                rpc::send(#{
+                    jsonrpc: "2.0",
+                    id: json::null,
+                    error: #{ code: rpc::PARSE_ERROR, message: msg.invalid },
+                });
             } else if msg.method == "exit" {
                 return if self.shutdown { 0 } else { 1 };
             } else if present(msg.method) && msg.id != nil {

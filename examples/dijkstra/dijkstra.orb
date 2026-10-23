@@ -20,7 +20,10 @@ Eastgate Fenwick   9
 Gorse    Hollow    3
 "#;
 
-struct Graph { names, edges }
+struct Graph {
+    names,
+    edges,
+}
 
 impl Graph {
     pub fn parse(text) -> Graph {

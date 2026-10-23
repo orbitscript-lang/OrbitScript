@@ -82,7 +82,7 @@ fn cases() {
 #[test]
 fn repository_programs_check() {
     // `rounds` comes from the command line and may be 0, which leaves `dist` nil.
-    let known: BTreeSet<_> = [("dijkstra.orb", 97, "T0207")]
+    let known: BTreeSet<_> = [("dijkstra.orb", 100, "T0207")]
         .into_iter()
         .map(|(f, l, c)| (f.to_string(), l, c.to_string()))
         .collect();

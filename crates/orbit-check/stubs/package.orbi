@@ -6,13 +6,13 @@ pub const config: string;
 /// Where `require` looks for C modules.
 pub const cpath: string;
 /// The modules already loaded, by name.
-pub const loaded: #{[string]: any};
+pub const loaded: #{ [string]: any };
 /// Loads the C library `path` and returns its function `funcname`.
 pub fn loadlib(path: string, funcname: string) -> (function?, string?, string?);
 /// Where `require` looks for Lua and OrbitScript modules (`?.lua`, `?.orb`).
 pub const path: string;
 /// Loaders for modules by name, tried first.
-pub const preload: #{[string]: function};
+pub const preload: #{ [string]: function };
 /// The functions `require` calls to find a module.
 pub const searchers: [function];
 /// The first file `path` gives for `name` that can be opened, or `nil` and the files tried.

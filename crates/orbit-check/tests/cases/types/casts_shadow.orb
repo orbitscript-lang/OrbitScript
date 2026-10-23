@@ -1,6 +1,8 @@
 // A struct of the module shadows a built-in type name, in `as` as elsewhere.
 
-struct table { n: int }
+struct table {
+    n: int,
+}
 
 fn shadowed(any_value) {
     let a: table = any_value as table;
