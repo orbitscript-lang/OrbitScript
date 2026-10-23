@@ -70,6 +70,11 @@ impl<'m, 'c> SymbolView<'m, 'c> {
         }
     }
 
+    /// The module being checked.
+    pub fn module(&self) -> &'m Module {
+        self.m
+    }
+
     pub fn module_of(&self, file: FileId) -> Option<&Module> {
         if file == self.file {
             Some(self.m)

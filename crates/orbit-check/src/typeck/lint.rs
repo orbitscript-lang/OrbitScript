@@ -1,33 +1,31 @@
 //! Lints from the proposal ("Diagnostics and use"): warnings about code that runs but is probably
-//! wrong. `t[0]` on an array is reported while typing (it needs the array's type); these need
-//! only the AST and the resolved names.
+//! wrong, and that need only the AST and the resolved names. They skip stubs and bundled
+//! modules.
 
 use std::collections::HashSet;
 
 use orbit_hir::Span;
 use orbit_orb_syntax::ast::{self, ExprKind, ItemKind, PatKind, StmtKind, UnOp, UseTail};
 
-use super::{Node, walk_block};
-use crate::symbols::{Module, SymbolId, SymbolKind};
-use crate::{Code, Diagnostic, FileId};
-
-pub(crate) fn lints(file: FileId, ast: &ast::Ast, text: &[u8], m: &Module) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
-    zero_based_loops(file, &ast.body, text, &mut out);
-    unused(file, ast, m, &mut out);
-    out
-}
+use super::passes::{Pass, Typed};
+use super::walk::{Node, walk_block};
+use crate::symbols::{SymbolId, SymbolKind};
+use crate::{Code, Diagnostic};
 
 /// `for i in 0..#t { ... t[i] ... }` visits `t[0]`, which is never set, and misses `t[#t]`.
-fn zero_based_loops(file: FileId, body: &ast::Block, text: &[u8], out: &mut Vec<Diagnostic>) {
-    let src = |s: Span| &text[s.start as usize..s.end as usize];
-    walk_block(body, &mut |n| {
-        let Node::Expr(e) = n else { return true };
+pub(super) struct ZeroBasedLoops;
+
+impl Pass for ZeroBasedLoops {
+    #[inline]
+    fn node(&self, m: &Typed<'_, '_, '_>, n: Node<'_>, out: &mut Vec<Diagnostic>) {
+        let Some(text) = m.lint_text else { return };
+        let src = |s: Span| &text[s.start as usize..s.end as usize];
+        let Node::Expr(e) = n else { return };
         let ExprKind::For {
             pat, iter, body, ..
         } = &e.kind
         else {
-            return true;
+            return;
         };
         let (
             PatKind::Bind { name, .. },
@@ -38,7 +36,7 @@ fn zero_based_loops(file: FileId, body: &ast::Block, text: &[u8], out: &mut Vec<
             },
         ) = (&pat.kind, &iter.kind)
         else {
-            return true;
+            return;
         };
         let (
             ExprKind::Int(0),
@@ -48,7 +46,7 @@ fn zero_based_loops(file: FileId, body: &ast::Block, text: &[u8], out: &mut Vec<
             },
         ) = (&start.kind, &end.kind)
         else {
-            return true;
+            return;
         };
         let mut indexes = false;
         walk_block(body, &mut |n| {
@@ -64,7 +62,7 @@ fn zero_based_loops(file: FileId, body: &ast::Block, text: &[u8], out: &mut Vec<
         if indexes {
             let arr = String::from_utf8_lossy(src(arr.span));
             out.push(Diagnostic::warning(
-                file,
+                m.file,
                 iter.span,
                 Code::ZeroBasedLoop,
                 format!(
@@ -73,13 +71,23 @@ fn zero_based_loops(file: FileId, body: &ast::Block, text: &[u8], out: &mut Vec<
                 ),
             ));
         }
-        true
-    });
+    }
 }
 
 /// Locals that are never read, and `use`d names that are never used. A name starting with `_`
 /// is exempt, as is a `let scope` binding (it is there to be closed).
-fn unused(file: FileId, ast: &ast::Ast, m: &Module, out: &mut Vec<Diagnostic>) {
+pub(super) struct Unused;
+
+impl Pass for Unused {
+    fn module(&self, m: &Typed<'_, '_, '_>, out: &mut Vec<Diagnostic>) {
+        if m.lint_text.is_some() {
+            unused(m, out);
+        }
+    }
+}
+
+fn unused(t: &Typed<'_, '_, '_>, out: &mut Vec<Diagnostic>) {
+    let (file, ast, m) = (t.file, t.ast, t.syms.module());
     let id = |index: usize| SymbolId {
         file,
         index: index as u32,
@@ -141,7 +149,7 @@ fn unused(file: FileId, ast: &ast::Ast, m: &Module, out: &mut Vec<Diagnostic>) {
             SymbolKind::Local if !scoped.contains(&sym.span) => Code::UnusedLocal,
             // A module that wasn't found, or a member it lacks, is reported already.
             SymbolKind::Module if sym.module.is_none() => continue,
-            SymbolKind::Import if m.diagnostics.iter().any(|d| d.span == sym.span) => continue,
+            SymbolKind::Import if t.diagnostics.iter().any(|d| d.span == sym.span) => continue,
             SymbolKind::Module | SymbolKind::Import
                 if uses.iter().any(|&(u, public)| {
                     !public && u.start <= sym.span.start && sym.span.end <= u.end

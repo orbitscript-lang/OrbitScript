@@ -4,6 +4,8 @@ use helpers::{double, triple}; //~ T0310
 use helpers; //~ T0310
 use luamod;
 use luamod as unused_lua; //~ T0310
+// A name the module lacks is reported as missing, not also as unused.
+use helpers::{quadruple}; //~ T0103
 
 fn first(xs: [int]) -> int {
     let zero = xs[0]; //~ T0307 T0309

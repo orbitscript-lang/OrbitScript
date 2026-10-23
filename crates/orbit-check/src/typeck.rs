@@ -10,16 +10,17 @@
 //! that reports. A type needed before the walk reaches the code that gives it (a function's
 //! unannotated results, a local used by a function defined earlier) is worked out muted and
 //! kept, and the walk checks that code again when it gets there. Symbols of other modules have
-//! the types that module's check stored.
+//! the types that module's check stored. Last, the passes (`passes.rs`) read the typed module
+//! for warnings that need only the types the walk found, and for the lints.
 
 mod cast;
 mod declare;
 mod lint;
 mod lower;
+mod passes;
 mod report;
 mod view;
-
-pub(crate) use lint::lints;
+mod walk;
 
 use std::collections::{HashMap, HashSet};
 
@@ -31,8 +32,10 @@ use crate::symbols::{Module, StructLit, SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
 use crate::{Code, FileId};
 use lower::Lowering;
+use passes::Typed;
 use report::Reporter;
 use view::SymbolView;
+use walk::{Node, walk_block};
 
 /// A function's results: `None` when unknown (any number of `any`).
 type Results = Option<Vec<TypeId>>;
@@ -77,19 +80,6 @@ enum TypeName {
     Unknown,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Case {
-    Variant(SymbolId),
-    True,
-    False,
-    Nil,
-}
-
-enum Node<'a> {
-    Stmt(&'a ast::Stmt),
-    Expr(&'a ast::Expr),
-}
-
 struct Checker<'a, 'b, 'c> {
     strings: &'a StringPool,
     defs: &'b Defs<'a>,
@@ -124,6 +114,8 @@ pub(crate) struct Deps<'c> {
     pub prelude: Option<FileId>,
     /// Strict mode (proposal T13): annotated `pub fn`s and `bool` conditions.
     pub strict: bool,
+    /// The module's text, when it gets lints (it isn't a stub or a bundled module).
+    pub lint_text: Option<&'c [u8]>,
 }
 
 /// Checks `ast`, whose names `resolve` recorded in `m`, adding type errors and the types of its
@@ -182,7 +174,9 @@ pub(crate) fn check<'a, 'b, 'c>(
         c.sym_type(id(i));
     }
     let Checker {
+        syms,
         mut report,
+        types,
         sym_types,
         param_names,
         ..
@@ -190,6 +184,21 @@ pub(crate) fn check<'a, 'b, 'c>(
     report
         .expr_types
         .sort_by_key(|(s, _)| (s.start, std::cmp::Reverse(s.end)));
+    let mut found = Vec::new();
+    passes::run(
+        &Typed {
+            file,
+            ast,
+            syms: &syms,
+            types,
+            strict: deps.strict,
+            lint_text: deps.lint_text,
+            diagnostics: &report.diagnostics,
+            expr_types: &report.expr_types,
+        },
+        &mut found,
+    );
+    report.diagnostics.extend(found);
     report.finish(m);
     m.sym_types = sym_types;
     m.param_names = param_names;
@@ -846,12 +855,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
     fn stmt(&mut self, s: &'a ast::Stmt) {
         match &s.kind {
             StmtKind::Error => {}
-            StmtKind::Let {
-                scope,
-                pat,
-                ty,
-                value,
-            } => self.let_stmt(*scope, pat, ty.as_ref(), value.as_ref()),
+            StmtKind::Let { pat, ty, value, .. } => self.let_stmt(pat, ty.as_ref(), value.as_ref()),
             StmtKind::Expr(e) => {
                 self.expr(e, None);
             }
@@ -872,7 +876,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
 
     fn let_stmt(
         &mut self,
-        scope: bool,
         pat: &'a ast::Pat,
         ty: Option<&'a ast::Type>,
         value: Option<&'a ast::Expr>,
@@ -934,32 +937,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             None => declared.unwrap_or(nil),
         };
-        if scope {
-            self.check_close(t, pat.span);
-        }
         self.hinting(ty.is_none(), |c| c.pat(pat, t));
-    }
-
-    /// `let scope x = v` needs a `v` with `__close` (or `nil`).
-    fn check_close(&mut self, t: TypeId, span: Span) {
-        for m in self.types.members(t) {
-            let ok = match self.types.get(m).clone() {
-                Ty::Nominal(id, _) | Ty::Variant(id, _) => self
-                    .syms
-                    .member_sym(self.syms.holder(id), "__close")
-                    .is_some(),
-                Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Fn(_) | Ty::Function => false,
-                _ => true,
-            };
-            if !ok {
-                let msg = format!(
-                    "`let scope` needs a value with a `__close` method, but {} has none",
-                    self.show(m)
-                );
-                self.report.error(span, Code::Mismatch, msg);
-                return;
-            }
-        }
     }
 
     fn assign(&mut self, targets: &'a [ast::Expr], value: &'a ast::Expr) {
@@ -1009,10 +987,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
                 let ot = self.non_nil_or_report(ot, obj);
                 // Writing `nil` removes the element (`t[#t] = nil` pops).
                 match self.types.get(ot).clone() {
-                    Ty::Array(t) => {
-                        self.zero_index(key);
-                        Some(self.types.optional(t))
-                    }
+                    Ty::Array(t) => Some(self.types.optional(t)),
                     Ty::Map(k, v) => {
                         self.expect(kt, k, key.span, Some("the map key".into()));
                         Some(self.types.optional(v))
@@ -1302,8 +1277,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             }
             ExprKind::While { cond, body, .. } => {
                 self.kill_assigned(body);
-                let (ct, yes, no) = self.cond(cond);
-                self.condition_warning(ct, cond.span);
+                let (_, yes, no) = self.cond(cond);
                 self.env = yes;
                 self.block(body, None);
                 self.env = no;
@@ -1491,15 +1465,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    /// `t[0]` on an array: Lua arrays start at 1.
-    fn zero_index(&mut self, key: &ast::Expr) {
-        if matches!(key.kind, ExprKind::Int(0)) {
-            let msg = "arrays start at 1, so `[0]` is never an element; the first is `[1]`";
-            self.report
-                .warning(key.span, Code::ZeroIndex, msg.to_string());
-        }
-    }
-
     fn index_type(&mut self, obj: &'a ast::Expr, key: &'a ast::Expr) -> TypeId {
         let any = self.types.any;
         let ot = self.expr(obj, None);
@@ -1510,7 +1475,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let ot = self.non_nil_or_report(ot, obj);
         match self.types.get(ot).clone() {
             Ty::Array(t) => {
-                self.zero_index(key);
                 if matches!(self.types.get(kt), Ty::Str | Ty::Bool) {
                     let msg = format!("arrays are indexed by `int`, found {}", self.show(kt));
                     self.report.error(key.span, Code::BadOperand, msg);
@@ -2232,17 +2196,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             return r;
         }
         let ok = match op {
-            UnOp::Neg => self.types.is_numeric(t),
-            UnOp::BNot => {
-                if self.types.is_numeric(t) && self.types.members(t).contains(&self.types.float) {
-                    self.report.warning(
-                        inner.span,
-                        Code::FloatBitwise,
-                        "`~` on a float: Lua converts only floats with an integral value".into(),
-                    );
-                }
-                self.types.is_numeric(t)
-            }
+            UnOp::Neg | UnOp::BNot => self.types.is_numeric(t),
             UnOp::Len => self.types.members(t).iter().all(|&m| {
                 matches!(
                     self.types.get(m),
@@ -2368,10 +2322,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         let (any, bool_, int, float, str_) = (t.any, t.bool, t.int, t.float, t.str);
         match op {
             And | Or => return self.types.union(&[l, r]),
-            Eq | Ne => {
-                self.eq_warning(l, r, span);
-                return bool_;
-            }
+            Eq | Ne => return bool_,
             _ => {}
         }
         let fallback = match op {
@@ -2413,16 +2364,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             Add | Sub | Mul | Mod | IDiv | Div | Pow => num,
             Concat => self.concat_ok(l) && self.concat_ok(r),
             Lt | Le | Gt | Ge => num || (l == str_ && r == str_),
-            BAnd | BOr | BXor | Shl | Shr => {
-                if num && (self.has_float(l) || self.has_float(r)) {
-                    let msg = format!(
-                        "`{}` on a float: Lua converts only floats with an integral value",
-                        op.as_str()
-                    );
-                    self.report.warning(span, Code::FloatBitwise, msg);
-                }
-                num
-            }
+            BAnd | BOr | BXor | Shl | Shr => num,
             Eq | Ne | And | Or => true,
         };
         if !ok {
@@ -2451,47 +2393,11 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    fn has_float(&self, t: TypeId) -> bool {
-        self.types.members(t).contains(&self.types.float)
-    }
-
     fn concat_ok(&self, t: TypeId) -> bool {
         self.types
             .members(t)
             .iter()
             .all(|&m| matches!(self.types.get(m), Ty::Str | Ty::Int | Ty::Float))
-    }
-
-    /// Lua's type families, as bits: values from different families are never equal.
-    fn families(&self, t: TypeId) -> u32 {
-        match self.types.get(t) {
-            Ty::Any | Ty::Param(_) | Ty::Rest(_) => u32::MAX,
-            Ty::Nil => 1,
-            Ty::Bool => 2,
-            Ty::Int | Ty::Float => 4,
-            Ty::Str => 8,
-            Ty::Table
-            | Ty::Array(_)
-            | Ty::Map(..)
-            | Ty::Record { .. }
-            | Ty::Nominal(..)
-            | Ty::Variant(..) => 16,
-            Ty::Fn(_) | Ty::Function => 32,
-            Ty::Thread => 64,
-            Ty::Userdata => 128,
-            Ty::Union(ms) => ms.iter().fold(0, |acc, &m| acc | self.families(m)),
-        }
-    }
-
-    fn eq_warning(&mut self, l: TypeId, r: TypeId, span: Span) {
-        if self.families(l) & self.families(r) == 0 {
-            let msg = format!(
-                "this compares {} with {}, which are never equal",
-                self.show(l),
-                self.show(r)
-            );
-            self.report.warning(span, Code::AlwaysUnequal, msg);
-        }
     }
 
     // ---- narrowing ----------------------------------------------------------------------------
@@ -2726,41 +2632,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         self.types.union(&kept)
     }
 
-    fn condition_warning(&mut self, t: TypeId, span: Span) {
-        if self.strict {
-            let ms = self.types.members(t);
-            let not_bool = ms
-                .iter()
-                .any(|&m| !matches!(self.types.get(m), Ty::Any | Ty::Bool));
-            if not_bool {
-                let hint = if ms.iter().any(|&m| *self.types.get(m) == Ty::Nil) {
-                    "compare it, such as `x != nil`"
-                } else {
-                    "compare it, such as `n > 0`"
-                };
-                let msg = format!(
-                    "this condition has type {}, not `bool` (strict mode); {hint}",
-                    self.show(t)
-                );
-                self.report.error(span, Code::NotBool, msg);
-                return;
-            }
-        }
-        let always = self.types.members(t).iter().all(|&m| {
-            !matches!(
-                self.types.get(m),
-                Ty::Any | Ty::Nil | Ty::Bool | Ty::Param(_)
-            )
-        });
-        if always {
-            let msg = format!(
-                "this condition has type {}, which is always true",
-                self.show(t)
-            );
-            self.report.warning(span, Code::AlwaysTrue, msg);
-        }
-    }
-
     fn if_expr(
         &mut self,
         cond: &'a ast::Expr,
@@ -2769,8 +2640,7 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         expected: Option<TypeId>,
     ) -> TypeId {
         let nil = self.types.nil;
-        let (ct, yes, no) = self.cond(cond);
-        self.condition_warning(ct, cond.span);
+        let (_, yes, no) = self.cond(cond);
         self.env = yes;
         let tv = self.block(then, expected);
         let then_out = self.block_diverges(then);
@@ -2899,7 +2769,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
             });
         }
         self.env = env.unwrap_or(start);
-        self.coverage(st, arms, scrutinee.span);
         self.types.union(&tys)
     }
 
@@ -3025,102 +2894,6 @@ impl<'a, 'b, 'c> Checker<'a, 'b, 'c> {
         }
     }
 
-    /// Reports a `match` on an enum, `bool` or optional value that misses cases.
-    fn coverage(&mut self, st: TypeId, arms: &'a [ast::Arm], span: Span) {
-        if st == self.types.any {
-            return;
-        }
-        let mut needed = Vec::new();
-        for m in self.types.members(st) {
-            match self.types.get(m).clone() {
-                Ty::Nominal(id, _) if self.syms.kind(id) == Some(SymbolKind::Enum) => {
-                    needed.extend(self.syms.variants(id).into_iter().map(Case::Variant));
-                }
-                Ty::Variant(id, _) => needed.push(Case::Variant(id)),
-                Ty::Bool => needed.extend([Case::True, Case::False]),
-                Ty::Nil => needed.push(Case::Nil),
-                _ => {}
-            }
-        }
-        if needed.is_empty() {
-            return;
-        }
-        let mut covered = Vec::new();
-        for arm in arms {
-            if arm.guard.is_none() && self.covers(&arm.pat, &mut covered) {
-                return;
-            }
-        }
-        let missing: Vec<String> = needed
-            .iter()
-            .filter(|c| !covered.contains(c))
-            .map(|c| match c {
-                Case::Variant(v) => format!("`{}`", self.syms.name(*v)),
-                Case::True => "`true`".into(),
-                Case::False => "`false`".into(),
-                Case::Nil => "`nil`".into(),
-            })
-            .collect();
-        if !missing.is_empty() {
-            let msg = format!(
-                "`match` doesn't cover {}; add {} or `_`",
-                missing.join(", "),
-                if missing.len() == 1 {
-                    "an arm for it"
-                } else {
-                    "arms for them"
-                }
-            );
-            self.report.error(span, Code::NonExhaustive, msg);
-        }
-    }
-
-    /// Adds the cases `p` covers to `out`; true if it matches everything.
-    fn covers(&self, p: &ast::Pat, out: &mut Vec<Case>) -> bool {
-        match &p.kind {
-            PatKind::Wild | PatKind::Bind { .. } => true,
-            PatKind::Lit(e) => {
-                match e.kind {
-                    ExprKind::True => out.push(Case::True),
-                    ExprKind::False => out.push(Case::False),
-                    ExprKind::Nil => out.push(Case::Nil),
-                    _ => {}
-                }
-                false
-            }
-            PatKind::Or(alts) => {
-                let mut all = false;
-                for a in alts {
-                    all |= self.covers(a, out);
-                }
-                all
-            }
-            PatKind::Path(e) => {
-                if let Some(id) = self.syms.path_symbol(e)
-                    && self.syms.kind(id) == Some(SymbolKind::Variant)
-                {
-                    out.push(Case::Variant(id));
-                }
-                false
-            }
-            PatKind::Struct { path, fields, .. } => {
-                let irrefutable = fields.iter().all(|f| {
-                    f.pat
-                        .as_ref()
-                        .is_none_or(|p| matches!(p.kind, PatKind::Wild | PatKind::Bind { .. }))
-                });
-                if irrefutable
-                    && let Some(id) = self.syms.path_symbol(path)
-                    && self.syms.kind(id) == Some(SymbolKind::Variant)
-                {
-                    out.push(Case::Variant(id));
-                }
-                false
-            }
-            PatKind::Range { .. } | PatKind::Tuple(_) => false,
-        }
-    }
-
     // ---- control flow -------------------------------------------------------------------------
 
     fn block_diverges(&self, b: &ast::Block) -> bool {
@@ -3186,166 +2959,4 @@ fn breaks_out(body: &ast::Block, label: Option<StrId>, unlabelled: bool) -> bool
         Node::Stmt(s) => !matches!(s.kind, StmtKind::Item(_)),
     });
     found
-}
-
-/// Visits the statements and expressions in `b`, depth first. `f` says whether to go into a
-/// node's children.
-fn walk_block<'a>(b: &'a ast::Block, f: &mut dyn FnMut(Node<'a>) -> bool) {
-    for s in &b.stmts {
-        walk_stmt(s, f);
-    }
-    if let Some(t) = &b.tail {
-        walk_expr(t, f);
-    }
-}
-
-fn walk_stmt<'a>(s: &'a ast::Stmt, f: &mut dyn FnMut(Node<'a>) -> bool) {
-    if !f(Node::Stmt(s)) {
-        return;
-    }
-    match &s.kind {
-        StmtKind::Error => {}
-        StmtKind::Let { value, .. } => {
-            if let Some(v) = value {
-                walk_expr(v, f);
-            }
-        }
-        StmtKind::Expr(e) => walk_expr(e, f),
-        StmtKind::Assign { targets, value } => {
-            for t in targets {
-                walk_expr(t, f);
-            }
-            walk_expr(value, f);
-        }
-        StmtKind::CompoundAssign { target, value, .. } => {
-            walk_expr(target, f);
-            walk_expr(value, f);
-        }
-        StmtKind::Scope(inner) => walk_stmt(inner, f),
-        StmtKind::Item(item) => walk_item(item, f),
-    }
-}
-
-fn walk_item<'a>(item: &'a ast::Item, f: &mut dyn FnMut(Node<'a>) -> bool) {
-    match &item.kind {
-        ItemKind::Fn(d) => {
-            if let Some(b) = &d.body {
-                walk_block(b, f);
-            }
-        }
-        ItemKind::Impl(imp) => {
-            for m in &imp.members {
-                walk_item(m, f);
-            }
-        }
-        ItemKind::Const { value: Some(v), .. } | ItemKind::Global { value: v, .. } => {
-            walk_expr(v, f)
-        }
-        _ => {}
-    }
-}
-
-fn walk_expr<'a>(e: &'a ast::Expr, f: &mut dyn FnMut(Node<'a>) -> bool) {
-    if !f(Node::Expr(e)) {
-        return;
-    }
-    match &e.kind {
-        ExprKind::Nil
-        | ExprKind::Error
-        | ExprKind::True
-        | ExprKind::False
-        | ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::Str(_)
-        | ExprKind::Name(_)
-        | ExprKind::SelfValue
-        | ExprKind::SelfType
-        | ExprKind::Continue { .. } => {}
-        ExprKind::Template(pieces) => {
-            for p in pieces {
-                if let ast::TemplatePiece::Hole { expr, .. } = p {
-                    walk_expr(expr, f);
-                }
-            }
-        }
-        ExprKind::Path { base: x, .. }
-        | ExprKind::Field { obj: x, .. }
-        | ExprKind::Unary { expr: x, .. }
-        | ExprKind::Paren(x)
-        | ExprKind::Spread(x)
-        | ExprKind::Try(x)
-        | ExprKind::As { expr: x, .. } => walk_expr(x, f),
-        ExprKind::Index { obj: a, key: b }
-        | ExprKind::Binary { lhs: a, rhs: b, .. }
-        | ExprKind::Range {
-            start: a, end: b, ..
-        } => {
-            walk_expr(a, f);
-            walk_expr(b, f);
-        }
-        ExprKind::Call {
-            callee: x, args, ..
-        }
-        | ExprKind::MethodCall { obj: x, args, .. } => {
-            walk_expr(x, f);
-            for a in args {
-                walk_expr(a, f);
-            }
-        }
-        ExprKind::Closure(c) => walk_expr(&c.body, f),
-        ExprKind::Array(items) | ExprKind::Tuple(items) => {
-            for i in items {
-                walk_expr(i, f);
-            }
-        }
-        ExprKind::Map(entries) => {
-            for entry in entries {
-                match entry {
-                    MapEntry::Positional(v) | MapEntry::Named(_, _, v) => walk_expr(v, f),
-                    MapEntry::Keyed(k, v) => {
-                        walk_expr(k, f);
-                        walk_expr(v, f);
-                    }
-                }
-            }
-        }
-        ExprKind::StructLit { path, fields } => {
-            walk_expr(path, f);
-            for fi in fields {
-                if let Some(v) = &fi.value {
-                    walk_expr(v, f);
-                }
-            }
-        }
-        ExprKind::If { cond, then, else_ } => {
-            walk_expr(cond, f);
-            walk_block(then, f);
-            if let Some(e) = else_ {
-                walk_expr(e, f);
-            }
-        }
-        ExprKind::Match { scrutinee, arms } => {
-            walk_expr(scrutinee, f);
-            for a in arms {
-                if let Some(g) = &a.guard {
-                    walk_expr(g, f);
-                }
-                walk_expr(&a.body, f);
-            }
-        }
-        ExprKind::Block(b) | ExprKind::Loop { body: b, .. } => walk_block(b, f),
-        ExprKind::While { cond, body, .. } => {
-            walk_expr(cond, f);
-            walk_block(body, f);
-        }
-        ExprKind::For { iter, body, .. } => {
-            walk_expr(iter, f);
-            walk_block(body, f);
-        }
-        ExprKind::Break { value, .. } | ExprKind::Return(value) => {
-            if let Some(v) = value {
-                walk_expr(v, f);
-            }
-        }
-    }
 }
