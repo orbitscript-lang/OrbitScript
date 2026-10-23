@@ -205,6 +205,29 @@ impl Types {
         self.variant_of.get(&v).copied()
     }
 
+    /// The built-in type a name stands for (`int`, `string`, ...); `any` for other names.
+    pub fn builtin(&mut self, name: &str) -> TypeId {
+        match name {
+            "nil" => self.nil,
+            "bool" => self.bool,
+            "int" => self.int,
+            "float" => self.float,
+            "number" => self.number,
+            "string" => self.str,
+            "table" => self.table,
+            "function" => self.function,
+            "thread" => self.intern(Ty::Thread),
+            "userdata" => self.intern(Ty::Userdata),
+            _ => self.any,
+        }
+    }
+
+    /// `args` for something with `n` generic parameters: extra ones dropped, missing ones `any`.
+    pub fn fit(&self, mut args: Vec<TypeId>, n: usize) -> Vec<TypeId> {
+        args.resize(n, self.any);
+        args
+    }
+
     pub fn optional(&mut self, t: TypeId) -> TypeId {
         let nil = self.nil;
         self.union(&[t, nil])
