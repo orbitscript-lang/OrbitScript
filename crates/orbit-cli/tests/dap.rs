@@ -516,8 +516,8 @@ fn editors_attach_to_a_running_program_and_leave_it_running() {
 fn a_debug_request_starts_serving() {
     let mut run = Running::start("signal", &[]);
     let pid = run.child.id();
-    // Elsewhere only programs already serving are listed.
-    #[cfg(target_os = "linux")]
+    // On Windows only programs already serving are listed.
+    #[cfg(unix)]
     assert_eq!(listed(pid).unwrap()["listening"], false);
     let mut e = Editor::attach(pid);
     assert!(run.err_line().contains("debugger listening on"));

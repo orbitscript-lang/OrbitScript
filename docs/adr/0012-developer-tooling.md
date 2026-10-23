@@ -61,7 +61,7 @@ flowchart LR
 - **The host decides when the server starts** (D11). The library never opens a socket on its own. The start functions are safe to call from any thread at any time.
   - The `orbit` CLI owns its process, so `kill -USR1 <pid>` starts the server (its existing `signal-hook` thread handles it). `--debug-listen` starts it at launch and `--no-debug-signal` removes the handler.
   - On Windows the CLI waits on a named event, `Local\orbit-debug-<pid>`, instead.
-  - `orbit --debug-attach` checks that the target is an `orbit` CLI before signalling, since `SIGUSR1` terminates processes that don't handle it.
+  - `orbit --debug-attach` checks that the target is an `orbit` CLI that catches `SIGUSR1` before signalling, since the signal terminates processes that don't handle it. On macOS, which has no `/proc`, it asks the kernel through libproc and `sysctl` (amended 2026-10-23, Tym: no `ps` process).
   - Other hosts use `ORBIT_DEBUG` or call the start function from their own trigger.
 
 ### Transport and attaching
@@ -104,6 +104,6 @@ The language server and the debugger are built in parallel (D8). The language se
 - `liborbit` grows by the DAP server, a few tens of KiB to be measured, unused unless a host turns it on. A debug connection can run any code, so it is protected by file permissions and the documentation says not to ship it enabled.
 - `orbit-runtime` stays free of JSON and I/O. `orbit-std` (feature `json`), `orbit-dap` and `orbit-lsp`'s host take `serde_json`, recorded in `DEPS.md`.
 - Scripts gain a standard `json` module, an Orbit extension beyond Lua's standard library.
-- One more `unsafe` exception, the Windows socket and event wrapper, until `std` covers it.
+- One more `unsafe` exception, the Windows socket and event wrapper, until `std` covers it. A second (amended 2026-10-23): `orbit-dap/src/process.rs`, `libc` calls that send `SIGUSR1` and, on macOS, list processes and read their executable, arguments and caught-signals mask, since no crate exposes the mask.
 - The debugger ABI is added to `orbit::abi` in a single change, so `liborbit` and its programs are rebuilt once.
 - A known front-end bug shows up in the debugger: OrbitScript items visible in the whole block are reported live before they are assigned, so they show a stale register value. It needs fixing in the compiler or lowering before the debugger ships.

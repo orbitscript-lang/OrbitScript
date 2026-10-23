@@ -11,7 +11,7 @@ This folder is self-contained: its own `package.json`, no build coupling to Carg
 - **Debugging** with the `orbit` debug type:
   - `launch` runs a script through `orbit --debug-server`.
   - `attach` connects to a running program through `orbit --debug-attach <pid>`.
-  - The process picker lists what `orbit --debug-attach --list` finds. On Linux any `orbit` program can be attached; elsewhere, start it with `orbit --debug-listen`.
+  - The process picker lists what `orbit --debug-attach --list` finds. On Linux and macOS that is every `orbit` program; on Windows only those started with `orbit --debug-listen` (others can still be attached by pid).
 
 ## Settings
 

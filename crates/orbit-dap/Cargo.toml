@@ -12,6 +12,12 @@ publish = false
 orbit = { path = "../orbit", default-features = false, features = ["debugger"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 
+[target.'cfg(unix)'.dependencies]
+# Signalling a program to serve debuggers, and on macOS finding the programs
+# that would (src/process.rs); already in the tree for orbit-virtmem and
+# signal-hook.
+libc = { version = "0.2", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 # AF_UNIX sockets and the debug-request event until std's Windows Unix
 # sockets are stable (D12); already in the tree for orbit-virtmem.
@@ -27,7 +33,7 @@ orbit = { path = "../orbit", features = ["debugger"] }
 orbit-std = { path = "../orbit-std" }
 
 # Not the workspace lints: unsafe is denied rather than forbidden, and
-# allowed only in src/win.rs (ADR-12, D12).
+# allowed only in src/win.rs and src/process.rs (ADR-12, D12).
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
