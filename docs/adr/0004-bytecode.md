@@ -13,7 +13,7 @@ Status: Accepted (Tym, 2026-09-28)
 
 ## Spike S0 results
 
-From [`spike/README.md`](../../spike/README.md), on the arena VM (gc-arena showed the same pattern):
+From [`docs/design/s0-spike.md`](../design/s0-spike.md), on the arena VM (gc-arena showed the same pattern):
 
 | dispatch | fib | loop | gc churn |
 |---|---|---|---|

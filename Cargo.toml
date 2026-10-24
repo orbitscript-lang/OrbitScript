@@ -7,8 +7,6 @@ members = ["crates/*"]
 # a PGO profile would miss its functions and LLVM would compile them as cold
 # code. `--workspace` still builds and tests everything.
 default-members = ["crates/orbit-cli"]
-# spike/ is its own throwaway workspace (stream S0).
-exclude = ["spike"]
 
 [workspace.package]
 version = "0.0.0"
