@@ -60,11 +60,12 @@ fn require_finds_orb_modules() {
         ],
     );
     let mut iso = isolate();
+    // Long brackets, so a Windows path's backslashes aren't escapes.
     let d = dir.display();
     let out = exec_str(
         &mut iso,
         &format!(
-            "package.path = '{d}/?.lua;{d}/?.orb'
+            "package.path = [[{d}/?.lua;{d}/?.orb]]
              local app = require('app')
              return app.run(), #package.searchers, package.loaded['geo.vec'].Vec2.__name"
         ),
@@ -108,9 +109,9 @@ fn loadfile_and_dofile_pick_the_language_by_name() {
     let out = exec_str(
         &mut iso,
         &format!(
-            "local f = assert(loadfile('{d}/a.orb'))
-             local g, err = loadfile('{d}/b.orb')
-             return f(), dofile('{d}/c.lua'), tostring(g), err"
+            "local f = assert(loadfile([[{d}/a.orb]]))
+             local g, err = loadfile([[{d}/b.orb]])
+             return f(), dofile([[{d}/c.lua]]), tostring(g), err"
         ),
     );
     assert_eq!(out[..3], ["3!", "lua", "nil"]);

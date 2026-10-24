@@ -249,12 +249,12 @@ impl CheapHasher {
 impl std::hash::Hasher for CheapHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for c in &mut chunks {
-            self.add(u64::from_le_bytes(c.try_into().expect("8 bytes")));
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for c in chunks {
+            self.add(u64::from_le_bytes(*c));
         }
         let mut last = [0; 8];
-        last[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
+        last[..rest.len()].copy_from_slice(rest);
         self.add(u64::from_le_bytes(last));
     }
 
