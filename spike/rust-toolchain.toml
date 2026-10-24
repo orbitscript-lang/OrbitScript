@@ -1,4 +1,0 @@
-# gc-arena 0.7.0 needs Rust 1.95 (ptr::as_ref_unchecked), still stable.
-[toolchain]
-channel = "1.95.0"
-components = ["rustfmt", "clippy"]

@@ -30,7 +30,7 @@ This ADR then records the choice. Switching later means touching every heap type
 
 ## Spike S0 results
 
-Full numbers, method and caveats: [`spike/README.md`](../../spike/README.md). Summary against PUC Lua 5.5 (lower is better):
+Full numbers, method and caveats: [`docs/design/s0-spike.md`](../design/s0-spike.md). Summary against PUC Lua 5.5 (lower is better):
 
 | | fib | loop | str | gc churn | bytes/table | bytes/closure |
 |---|---|---|---|---|---|---|
@@ -44,7 +44,7 @@ The boa_gc row comes from a second, noisier run; in that run the arena was 1.62x
 - gc-arena interprets 10 to 20% faster (direct pointers). The arena is about 40% faster on allocation churn and uses half the memory per table or closure (no per-object header or `malloc`).
 - gc-arena paces by object count, not bytes; has no generational mode; can't allocate runtime-sized objects (inline strings) without `unsafe`; and makes collection possible only between `mutate` calls, so all Rust code that calls back into Lua must be resumable.
 - gc-arena 0.7.0 needs Rust 1.95 (MSRV bump from 1.94).
-- boa_gc (round two) has the simplest embedding story: roots are reference-counted, so Rust code can hold `Gc` values anywhere with no lifetime or rooting API. But resurrecting an object from its finalizer, which Lua's `__gc` requires, corrupts its children's reference counts and leads to a use-after-free from safe code (reproduced in `spike/vm-boagc/examples/resurrection_uaf.rs`). We can't fix that without `unsafe`. It is also stop-the-world only, paces by boxed size only, shares one heap per thread, and is the slowest and largest of the three.
+- boa_gc (round two) has the simplest embedding story: roots are reference-counted, so Rust code can hold `Gc` values anywhere with no lifetime or rooting API. But resurrecting an object from its finalizer, which Lua's `__gc` requires, corrupts its children's reference counts and leads to a use-after-free from safe code (reproduced in `spike/vm-boagc/examples/resurrection_uaf.rs`, in git history at `403fdb6`). We can't fix that without `unsafe`. It is also stop-the-world only, paces by boxed size only, shares one heap per thread, and is the slowest and largest of the three.
 - crossbeam-epoch and sdd are epoch-based reclamation for concurrent data structures, not tracing collectors. They can't collect cycles, so they weren't built.
 - None of the options gets near PUC's RAM on large string-keyed tables yet. That's table and string layout (stream B), not the GC.
 
@@ -58,7 +58,7 @@ Accepted by Tym on 2026-09-28: we build our own garbage collector instead of dep
 - **It lives in its own crate, `orbit-gc`, independent of the rest of the runtime.** `orbit-gc` knows nothing about Lua values, tables, strings or the VM. It provides the arenas, handles, marking, sweeping, barriers, pacing, weak and ephemeron support and finalization queues. The object types it manages plug in through a tracing trait. `orbit-core` depends on `orbit-gc` and defines the Lua object types on top of it. Nothing in `orbit-gc` depends on another `orbit-*` crate.
 - `orbit-gc` takes no runtime dependencies, like `orbit-core`.
 - **`unsafe` for returning memory to the OS** (Tym, 2026-09-30, updated 2026-10-11). `orbit-gc` may call the system allocator to hand freed memory back to the OS, which needs FFI and so `unsafe`. This is enabled by default via the `memory-trimming` feature in `src/os.rs`; the crate denies `unsafe_code` instead of forbidding it and allows it only there (ADR-6). Supported targets are glibc via `malloc_trim(0)` and macOS via `malloc_zone_pressure_relief(NULL, 0)`. This logic stays inside `orbit-gc`: support for other allocators or systems is added here, not through a hook for hosts. What the crate exposes is tuning (`Params::trim_percent`, `Params::trim_min_bytes`).
-- **Not decided here.** The exact shape of the tracing trait and root API, and how per-kind storage is flattened to cut handle cost, are left to `orbit-gc`'s first PR. The borrow-checked embedding layer prototyped in `spike/embed/` sits on top, in `orbit`, and is not part of `orbit-gc`.
+- **Not decided here.** The exact shape of the tracing trait and root API, and how per-kind storage is flattened to cut handle cost, are left to `orbit-gc`'s first PR. The borrow-checked embedding layer prototyped in the spike (`spike/embed/`) sits on top, in `orbit`, and is not part of `orbit-gc`.
 
 ## Amendment: fixed slots per page (Tym, 2026-10-04)
 

@@ -1,6 +1,8 @@
 # Spike S0: GC and dispatch
 
-Throwaway code. It exists to decide ADR-2 (heap and GC) and ADR-4 (dispatch) with numbers. Nothing here is imported by the product crates, and `spike/` is its own Cargo workspace (excluded from the root one) so gc-arena never reaches them.
+Status: Done (2026-09-28). It decided ADR-2 (heap and GC) and ADR-4 (dispatch) with numbers.
+
+The spike's code was throwaway: its own Cargo workspace on Rust 1.95, never imported by the product crates, so gc-arena and boa_gc never reached them. It was removed before the first release and stays in git history under `spike/` at commit `403fdb6` (`git checkout 403fdb6 -- spike` restores it). Paths below are relative to that directory.
 
 ## What was built
 
