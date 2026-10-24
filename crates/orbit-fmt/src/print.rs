@@ -1,5 +1,5 @@
 //! The printer: a module's AST and its comments back to text, in the canonical layout
-//! (planning/dev-tooling/formatter.md).
+//! (docs/design/formatter.md).
 //!
 //! Every node first tries its one-line form ([`Printer::flat`]); when that is too wide, or
 //! can't be one line (a block body, a comment inside), it breaks in the way its kind does:

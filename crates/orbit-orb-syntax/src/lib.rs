@@ -1,6 +1,6 @@
 //! OrbitScript front end: lexer, parser, AST and lowering to HIR.
 //!
-//! The syntax is the locked proposal in `planning/orbitscript-syntax/proposal.md` (a
+//! The syntax is the locked proposal in `docs/design/orbitscript-syntax/proposal.md` (a
 //! Rust-like spelling of Lua's runtime semantics). OrbitScript lowers to the same HIR as the
 //! Lua front end (`orbit-hir`), so code in either language can call the other. Every stage
 //! works on plain owned data and never touches the VM or the GC heap.

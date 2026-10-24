@@ -58,10 +58,6 @@ pub struct ProtoCode {
     pub consts: Box<[Value]>,
     /// Inline caches, indexed by the `ic` operands.
     pub caches: Box<[FieldCache]>,
-    /// Per-instruction type feedback (`type-feedback` feature): bits for the
-    /// operand types each instruction has seen.
-    #[cfg(feature = "type-feedback")]
-    pub feedback: Box<[StdCell<u8>]>,
     pub nparams: u8,
     pub is_vararg: bool,
     pub nregs: u8,
@@ -108,8 +104,6 @@ impl ProtoCode {
             code,
             consts: self.consts.clone(),
             caches: self.caches.clone(),
-            #[cfg(feature = "type-feedback")]
-            feedback: self.feedback.clone(),
             nparams: self.nparams,
             is_vararg: self.is_vararg,
             nregs: self.nregs,

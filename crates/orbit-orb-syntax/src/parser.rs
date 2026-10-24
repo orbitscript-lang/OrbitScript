@@ -1,7 +1,7 @@
 //! Recursive-descent parser for items and statements, precedence climbing for expressions.
 //!
 //! Parsing is purely syntactic: names stay unresolved until lowering. The grammar follows the
-//! locked proposal (`planning/orbitscript-syntax/proposal.md`) and, where it is silent, Rust:
+//! locked proposal (`docs/design/orbitscript-syntax/proposal.md`) and, where it is silent, Rust:
 //! struct literals are not allowed in `if`/`while`/`match`/`for` headers, a block-like
 //! expression at the start of a statement ends the statement, comparisons don't chain.
 

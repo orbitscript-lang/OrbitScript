@@ -27,8 +27,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked
       # The shared backend (`liborbit` through stabby): `--workspace` always picks `runtime`.
       - run: cargo clippy -p orbit --no-default-features --features shared --all-targets --locked
-      # Features no workspace build turns on, so nothing else compiles them.
-      - run: cargo clippy -p orbit-runtime --features type-feedback --all-targets --locked
 
   test:
     name: test (${{ matrix.os }})

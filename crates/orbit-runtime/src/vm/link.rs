@@ -143,8 +143,6 @@ pub(crate) fn link(
                     code: u.code.as_slice().into(),
                     consts: consts.into(),
                     caches,
-                    #[cfg(feature = "type-feedback")]
-                    feedback: (0..u.code.len()).map(|_| std::cell::Cell::new(0)).collect(),
                     nparams: u.nparams,
                     is_vararg: u.is_vararg,
                     nregs: u.nregs,
