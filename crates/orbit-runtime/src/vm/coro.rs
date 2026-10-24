@@ -10,8 +10,6 @@
 //!
 //! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
-use std::any::Any;
-
 use crate::object::table::mark;
 use crate::object::{Gc, LuaHeap, LuaSpace, NativeId, Thread, ThreadState, Value};
 use orbit_bytecode::MULTI;
@@ -159,14 +157,6 @@ impl ThreadState for Coroutine {
     fn extra_bytes(&self) -> usize {
         self.bytes
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
 }
 
 /// Where the live registers of parked stack `s`, whose top is `top`, end:
@@ -176,13 +166,17 @@ fn live_end(s: &Stack, top: usize) -> usize {
 }
 
 fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
-    let state: &dyn Any = heap.get(t).state.as_any();
-    state.downcast_ref().expect("threads hold VM coroutines")
+    heap.get(t)
+        .state
+        .downcast_ref()
+        .expect("threads hold VM coroutines")
 }
 
 fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
-    let state: &mut dyn Any = heap.get_mut(t).state.as_any_mut();
-    state.downcast_mut().expect("threads hold VM coroutines")
+    heap.get_mut(t)
+        .state
+        .downcast_mut()
+        .expect("threads hold VM coroutines")
 }
 
 /// The continuation a yielding coroutine waits in: the values the next

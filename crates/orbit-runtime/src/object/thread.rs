@@ -20,30 +20,57 @@ pub trait ThreadState: Any + fmt::Debug {
     /// this changes, the owner reports the difference
     /// ([`Heap::adjust_bytes`](orbit_gc::Heap::adjust_bytes)).
     fn extra_bytes(&self) -> usize;
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 /// A thread (coroutine) value.
-#[derive(Debug)]
+///
+/// The state is kept as `dyn Any`, so the VM reaches it with one type check
+/// on every switch, with [`ThreadState`]'s methods beside it for the
+/// collector. (A `Box<dyn ThreadState>` would need trait upcasting, Rust
+/// 1.86, to downcast without an extra indirect call.)
 pub struct Thread {
-    pub state: Box<dyn ThreadState>,
+    pub state: Box<dyn Any>,
+    trace: fn(&dyn Any, &mut Marker<'_, LuaSpace>),
+    extra_bytes: fn(&dyn Any) -> usize,
+    debug: fn(&dyn Any, &mut fmt::Formatter<'_>) -> fmt::Result,
 }
 
 impl Thread {
-    pub fn new(state: impl ThreadState) -> Self {
+    pub fn new<S: ThreadState>(state: S) -> Self {
+        fn get<S: ThreadState>(a: &dyn Any) -> &S {
+            a.downcast_ref().expect("a thread's state keeps its type")
+        }
         Thread {
             state: Box::new(state),
+            trace: |a, m| get::<S>(a).trace(m),
+            extra_bytes: |a| get::<S>(a).extra_bytes(),
+            debug: |a, f| fmt::Debug::fmt(get::<S>(a), f),
         }
+    }
+}
+
+impl fmt::Debug for Thread {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Thread")
+            .field("state", &DebugState(self))
+            .finish()
+    }
+}
+
+struct DebugState<'a>(&'a Thread);
+
+impl fmt::Debug for DebugState<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (self.0.debug)(&*self.0.state, f)
     }
 }
 
 impl Trace<LuaSpace> for Thread {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        self.state.trace(m);
+        (self.trace)(&*self.state, m);
     }
 
     fn extra_bytes(&self) -> usize {
-        self.state.extra_bytes()
+        (self.extra_bytes)(&*self.state)
     }
 }
