@@ -1,41 +1,41 @@
 # ADR-5: Strings
 
-Status: Accepted (Tym, 2026-09-28)
+Status: Accepted
+
+## Context
+
+Lua strings are immutable byte strings, not UTF-8. Embedders and native functions need to pass them to and from Rust without losing bytes or copying more than necessary.
 
 ## Decision
 
-### Representation inside the VM
-- Lua strings are immutable byte strings, not UTF-8. They're stored as `[u8]` inside the GC heap, never as Rust `String`.
-- Short strings (up to 40 bytes, as in PUC Lua) are interned in a hash set with a per-state random seed, so equality is pointer equality.
-- Long strings are hashed lazily on first use as a table key.
-- Strings up to 22 bytes keep their bytes inside the heap slot; longer ones keep them in a separate allocation (amended by Tym with the inline short strings PR, perf round 2026-10). The slot is 32 bytes, so a string's bytes have no stable address: they move when the arena grows.
-- The string metatable and `string` library operate on bytes. `utf8` is a separate library, as in Lua.
-- Float-to-string conversion reproduces Lua 5.5's output byte for byte (round-trip digits). Stream D writes and tests this early.
+### Inside the VM
+- Strings are `[u8]` in the GC heap, never Rust `String`.
+- **Short strings** (up to 40 bytes) are interned in a hash set with a per-state random seed, so equality is handle equality. Long strings are hashed lazily, on first use as a table key.
+- **Strings up to 22 bytes keep their bytes inside the 32-byte heap slot**; longer ones keep them in a separate allocation. A string's bytes have no stable address and carry no trailing NUL; the C API makes NUL-terminated copies (ADR-8, ADR-10).
+- The `string` library and the string metatable work on bytes. `utf8` is a separate library, as in Lua.
+- Float-to-string conversion reproduces Lua 5.5's output byte for byte (round-trip digits).
 
-### The string types embedders and native functions use
-Script strings are arbitrary bytes, so Rust's `String`/`&str` can't represent them all. Embedders and native (Rust) functions instead get a pair of wrapper types, conceptually like `OsString`/`OsStr`: byte strings that convert to and from Rust strings easily and only fail when the bytes aren't valid UTF-8.
+### For embedders and native functions
+Script strings are arbitrary bytes, so Rust's `String` and `&str` can't hold them all. Two wrapper types, like `OsString` and `&OsStr`, convert easily and fail only when the bytes aren't valid UTF-8:
 
-- **`OrbitString`**: owned, like `OsString`. It lives outside the GC heap, so it can be stored, sent between threads and outlive the VM state.
-- **`OrbitStr<'a>`**: a borrowed view, like `&OsStr`. Native functions receive string arguments as `OrbitStr` borrowed straight from the GC heap, so reading an argument doesn't copy it.
-
-Conversions:
+- **`OrbitString`**: owned, outside the GC heap, so it can be stored, sent between threads and outlive the VM.
+- **`OrbitStr<'a>`**: a borrowed `Copy` view holding `&'a [u8]`. Natives receive string arguments as `OrbitStr` borrowed from the GC heap, without a copy. It is a struct rather than an unsized type used as `&OrbitStr`, because making a reference to a custom unsized type from `&[u8]` needs an `unsafe` cast.
 
 | From | To | How |
 |---|---|---|
 | `&str`, `String`, `&[u8]`, `Vec<u8>` | `OrbitString` | `From` (infallible) |
-| `OrbitString` | `String` | `into_string() -> Result<String, OrbitString>` (gives the bytes back on failure) |
+| `OrbitString` | `String` | `into_string() -> Result<String, OrbitString>` |
 | `OrbitStr` | `&str` | `to_str() -> Result<&str, Utf8Error>` |
-| `OrbitStr` / `OrbitString` | text for display | `to_string_lossy() -> Cow<str>`, plus `Display` (lossy) |
-| `OrbitStr` / `OrbitString` | bytes | `as_bytes() -> &[u8]`, `into_bytes() -> Vec<u8>` |
-| `OrbitStr` | `OrbitString` | `to_owned_string()` / `From` |
+| either | display text | `to_string_lossy() -> Cow<str>`, `Display` (lossy) |
+| either | bytes | `as_bytes()`, `into_bytes()` |
+| `OrbitStr` | `OrbitString` | `to_owned_string()`, `From` |
 
-Other behavior:
-- `PartialEq` against `str`, `[u8]` and each other, so `if name == "print"` works without converting. `Eq`, `Ord` (byte-wise, which is what Lua's C-locale comparison does) and `Hash` all use the bytes.
-- `Debug` prints Lua-style escapes, so non-UTF-8 bytes stay visible.
-- Values returned to scripts accept anything `Into<OrbitString>` (including `&str` and `String`), and the conversion into a GC string (and interning) happens at that boundary.
+- `PartialEq` against `str`, `[u8]` and each other. `Eq`, `Ord` (byte-wise, matching Lua's C-locale comparison) and `Hash` use the bytes. `Debug` prints Lua-style escapes.
+- Values returned to scripts accept anything `Into<OrbitString>`; conversion into a GC string, and interning, happen at that boundary.
+- Both types live in `orbit-runtime` with no dependencies, and `orbit` re-exports them.
+- Conversion to and from `OsString` and `Path` is left to the `io` and `os` libraries, since Windows paths are UTF-16.
 
-Placement: both types live in `orbit-core` with no dependencies, and the `orbit` embedding crate re-exports them.
+## Consequences
 
-Why `OrbitStr<'a>` is a small `Copy` struct holding `&'a [u8]`, not an unsized `OrbitStr` used as `&OrbitStr` like `OsStr`: turning a `&[u8]` into a reference to a custom unsized type needs a pointer cast, which is `unsafe`. The struct gives the same ergonomics in safe Rust. `OrbitString` implements `Deref<Target = [u8]>` and `as_orbit_str()`.
-
-Out of scope for now: conversion to and from `OsString`/`Path`. It's easy on Unix (`OsStrExt`), but Windows paths are UTF-16. The `io` and `os` libraries decide this when they're written.
+- Equality of short strings is one compare, and table lookups by short-string key hash once.
+- Code that needs a stable pointer to a string's bytes (the C API) keeps its own copy.

@@ -1,21 +1,41 @@
 # ADR-1: Value representation
 
-Status: Accepted (Tym, 2026-09-28); amended 2026-09-30 to pin the layout for a JIT (Tym); amended 2026-10-03 to put a table's array part in one allocation (Tym); amended 2026-10-14 to store that allocation as 9-byte slots (Tym); amended 2026-10-05 to add light userdata (tag 10), accepted by Tym 2026-10-10 (ADR-8)
+Status: Accepted
 
 ## Context
-Lua values are nil, booleans, 64-bit integers, 64-bit floats, strings, tables, functions, userdata and coroutines. The representation drives RAM use, interpreter speed and what a JIT can do. The code must be safe Rust on 64-bit targets.
+
+Lua values are nil, booleans, 64-bit integers, 64-bit floats, strings, tables, functions, userdata and coroutines. Their representation drives RAM use, interpreter speed and what a JIT can do. The code is safe Rust on 64-bit targets.
 
 ## Decision
-- `Value` is a 16-byte `Copy` Rust enum: `Nil | Bool | Int(i64) | Float(f64) | Str(..) | Table(..) | Function(..) | UserData(..) | Thread(..)`. Object references are GC pointers or 32-bit handles per ADR-2; both fit the 8-byte payload.
-- Table array parts store tags and payloads separately (a byte per tag, 8 bytes per payload), as Lua 5.5's compact arrays do. That's 9 bytes per slot instead of 16. Both live in **one allocation** (amended 2026-10-03, Tym). Compared with two vectors this saves a `malloc` and 16 bytes of header per table; on binary_trees, peak RSS went from 69.9 to 52.5 MiB and time from 4.94 to 4.16 s (cloud x86_64). The allocation is a run of **9-byte slots** (amended 2026-10-14, Tym; this replaced `cap` payload words followed by the tag bytes packed eight to a word): slot `i` is its 8-byte payload followed by its tag byte, at byte offset `9 * i` (`#[repr(C)] struct Slot { payload: [u8; 8], tag: u8 }`, size asserted at 9). Every capacity takes the same or fewer bytes than before (2 slots: 18 B instead of 24; the collector is charged the size rounded up to 8 bytes). A read or store needs one bounds check on the slot index and no capacity load, where the old layout needed two. Growing appends nil slots and never moves one, and the tags of slots from `len` up are nil (integer reads rely on it). Payload loads are unaligned: about one slot in nine straddles a cache line, which cost nothing measurable on x86_64 (a 16-byte aligned control ran the same instructions, was no faster, and used 78% more memory for array parts); x86-64 and aarch64 both load unaligned words in one instruction, so a JIT emits plain unaligned loads. Measured on cloud x86_64: fannkuch -8.3% instructions without a profile and -8.9% with PGO, tables -3.8% and -3.5%; peak RSS unchanged. Rejected: groups of 8 payloads followed by their 8 tags (also one bounds check, but the smallest part grows to 72 bytes and binary_trees peak RSS went from 54.7 to 70.5 MiB), and shorter first groups (the extra test cancels the gain). Code outside the array part sees only `Value`s, typed `Tag`s and opaque `Payload`s.
-- **The layout is pinned** (amended 2026-09-30, Tym), so a future JIT can read and write values directly: `#[repr(C, u8)]` with explicit discriminants, a tag byte at offset 0 and an 8-byte payload at offset 8. Tag numbers: `Nil = 0`, `Bool = 1`, `Int = 2`, `Float = 3`, `Str = 4`, `Table = 5`, `Closure = 6` (Lua function), `Native = 7` (Rust function), `UserData = 8`, `Thread = 9`, `LightUserData = 10` (proposed 2026-10-05). Table array parts use the same tag bytes. A `const` assertion keeps the size at 16 bytes. Both attributes are safe Rust.
-- Rust code outside `orbit-core` still uses `Value`'s API, not its layout. Only generated code (the future `orbit-jit`) relies on the layout, so changing tag numbers or offsets is an amendment to this ADR, made together with the JIT.
 
-## Rejected
-- **NaN-boxing (8-byte values):** can't hold a full `i64` without boxing large integers, and relies on bit tricks that fight the safe-Rust goal.
-- **Boxed trait objects:** pointer chasing and allocation per value.
+- **`Value` is a 16-byte `Copy` enum** with a pinned layout: `#[repr(C, u8)]`, a tag byte at offset 0 and an 8-byte payload at offset 8. A `const` assertion keeps the size at 16 bytes.
 
-- **Light userdata** (amended 2026-10-05, accepted by Tym 2026-10-10): `LightUserData(LightUserData)`, tag 10, an opaque 8-byte token (`LightUserData::new(u64)` / `get()`) with identity semantics and no GC object behind it. `type` reports `userdata`, argument errors say `light userdata`, and all light userdata share one per-type metatable, as in the reference. `debug.upvalueid` needs it: it must return a value that is equal for the same upvalue cell and different otherwise, and `errors.lua:264` checks its type name ([debug design](../design/debug.md#upvalueid-and-light-userdata)). Embedders also get an allocation-free token to use as a table key. Size and layout are unchanged; no hot-path `match` gains an arm.
+  | Tag | Variant | Payload |
+  |---|---|---|
+  | 0 | `Nil` | none |
+  | 1 | `Bool` | `bool` |
+  | 2 | `Int` | `i64` |
+  | 3 | `Float` | `f64` |
+  | 4 | `Str` | GC handle |
+  | 5 | `Table` | GC handle |
+  | 6 | `Closure` (Lua function) | GC handle |
+  | 7 | `Native` (Rust function) | `NativeId`, an index into the VM's native registry |
+  | 8 | `UserData` | GC handle |
+  | 9 | `Thread` | GC handle |
+  | 10 | `LightUserData` | an opaque `u64` token |
 
-## Open
-- Light C functions: answered at first light by `Native(NativeId)` (a registry index, no allocation).
+- **Rust code uses `Value`'s API, not its layout.** Only generated code (a JIT) may rely on the tag numbers and offsets, so changing them is an amendment to this ADR made together with the JIT.
+- **Table array parts store tags apart from payloads**, as Lua 5.5's compact arrays do: 9 bytes per element instead of 16. The array part is one allocation of 9-byte slots, `#[repr(C)] struct Slot { payload: [u8; 8], tag: u8 }`, with slot `i` at byte offset `9 * i`. A read or store is one bounds check on the slot index. Growing appends nil slots and never moves one, and slots from `len` up hold nil. Payload loads are unaligned, which x86-64 and aarch64 do in one instruction. Code outside the array part sees only `Value`s, typed `Tag`s and opaque `Payload`s.
+- **Light userdata** is an opaque 8-byte token with identity semantics and no GC object behind it. `type` reports `userdata`, argument errors say `light userdata`, and all light userdata share one per-type metatable, as in Lua. It carries C pointers for the C API (ADR-8), gives `debug.upvalueid` an identity value, and gives embedders an allocation-free table key.
+
+## Alternatives rejected
+
+- **NaN-boxing (8-byte values).** It can't hold a full `i64` without boxing large integers, and it relies on bit tricks that work against safe Rust.
+- **Boxed trait objects.** A pointer chase and an allocation per value.
+- **Two vectors for an array part (tags, payloads).** One more `malloc` and 16 bytes of header per table, and two bounds checks per access.
+- **Groups of 8 payloads followed by their 8 tags.** One bounds check too, but the smallest array part grows to 72 bytes, which raised peak RSS on table-heavy programs by about 30%.
+
+## Consequences
+
+- Values and array elements are close to PUC Lua's size (16 and 9 bytes).
+- A JIT can read and write values and array slots directly.
