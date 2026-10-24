@@ -246,4 +246,4 @@ The spike also found that every native call refilled a 4 KiB window with `nil`. 
 
 1. C2 PR: `UserData`, type metatables, event names, `Exc::Meta` and meta frames, every metamethod, base library pieces, the string metatable, error-message origins for metamethods. Exit: `tests/diff/metatables.lua` (with thread 1's `<close>` gate lifted) and C2 corpus programs, plain and under `ORBIT_GC_STRESS=1`.
 2. ADR-3 spike, then C3 PR: `Thread`, boundary frames, the `coroutine` library, yields across everything, `Tbc`/`Close` and unwinding, `xpcall`, `warn`. Exit: `cstack.lua` and the C3 corpus, plain and stressed.
-3. The proposed ADR-3 resolution, as edits to the ADR, for Tym.
+3. The proposed ADR-3 resolution, as edits to the ADR, for a maintainer to accept.

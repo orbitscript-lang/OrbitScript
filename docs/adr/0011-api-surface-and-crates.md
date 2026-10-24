@@ -1,6 +1,6 @@
 # ADR-11: Public API surface and crate layout
 
-Status: Accepted (Tym, 2026-10-24); proposed 2026-10-18. Tym asked on 2026-10-18 (00:34Z) to define the public embedding API as an object model before choosing how it crosses the `liborbit` boundary, and approved the design and the crate layout below between 01:12Z and 02:35Z. Accepting this record supersedes ADR-10's `orbit-abi`/`orbit-api` split and its choice of `stabby` (the boundary is chosen again once the new API exists), and changes the crate table in `CLAUDE.md`.
+Status: Proposed (2026-10-18). Tym asked on 2026-10-18 (00:34Z) to define the public embedding API as an object model before choosing how it crosses the `liborbit` boundary, and approved the design and the crate layout below between 01:12Z and 02:35Z. Accepting this record supersedes ADR-10's `orbit-abi`/`orbit-api` split and its choice of `stabby` (the boundary is chosen again once the new API exists), and changes the crate table in `CLAUDE.md`.
 
 ## Context
 

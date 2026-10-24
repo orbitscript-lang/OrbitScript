@@ -76,7 +76,7 @@ lua5.5 raises `invalid order function for sorting` when the comparator is incons
 
 `sort` also checks the length against `INT_MAX`-style limits (`array too big`), and a length below 2 compares nothing.
 
-**Yielding from a comparator.** ADR-3 (Proposed) says sort comparators are yieldable, but the suite requires the opposite: errors.lua:401 and coroutine.lua:344 expect `table.sort({1,2,3}, coroutine.yield)` to fail with `attempt to yield across a C-call boundary`. Built-in frames refuse yields, so the comparator calls are non-yieldable. The project rule is to match lua5.5's yieldability exactly, so `gsub` callbacks and metamethods called from these libraries are non-yieldable too; making any of them yieldable later would be an extension recorded in `tests/lua-5.5/DEVIATIONS.md` with Tym's OK.
+**Yielding from a comparator.** ADR-3 (Proposed) says sort comparators are yieldable, but the suite requires the opposite: errors.lua:401 and coroutine.lua:344 expect `table.sort({1,2,3}, coroutine.yield)` to fail with `attempt to yield across a C-call boundary`. Built-in frames refuse yields, so the comparator calls are non-yieldable. The project rule is to match lua5.5's yieldability exactly, so `gsub` callbacks and metamethods called from these libraries are non-yieldable too; making any of them yieldable later would be an extension recorded in `tests/lua-5.5/DEVIATIONS.md` with a maintainer's approval.
 
 `table.create(n, m)` preallocates the array and hash parts (sort.lua measures the memory), checking `out of range` against `INT_MAX` and `table overflow` for the hash part.
 

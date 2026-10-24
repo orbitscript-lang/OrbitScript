@@ -137,14 +137,14 @@ The whole `dump` feature (format, verifier, `string.dump`) adds 48 KiB to the re
 
 **Proposal: B.** It reaches zero panics without touching the VM. A would have to turn six sites in thread 2's interpreter loop into errors, three of them on the `MULTI` call and return paths, and the next VM invariant would need another such change. B keeps the VM's assumptions written down in one place, costs 4 KB and under 2 ms per 86 KB of bytecode, and only runs on binary loads.
 
-**Decided (Tym, 2026-10-06):** B, with both layers configurable so embedders and users can trade correctness for load time:
+**Decided:** B, with both layers configurable so embedders and users can trade correctness for load time:
 
 - **Cargo features.** `orbit-stdlib` (and `orbit`, which forwards them) has `verify` for layer 1 and `verify-flow` for both layers, on by default. Layer 2 lives in `orbit_bytecode::verify::flow` behind `orbit-bytecode`'s own `verify-flow` feature, so a build without it doesn't carry the code. Release sizes of the `orbit` CLI (cloud x86_64): no verifier 1,036,504 bytes, layer 1 1,041,928, both layers 1,047,160.
 - **Environment.** `ORBIT_VERIFY=full`, `structure` or `none` lowers the level at run time; anything else keeps the most the build has. A host can also call `orbit::checks::set_level` per VM.
 
 Below both layers, a malformed chunk can make the VM panic (and abort the process, with `panic = "abort"`), but never corrupt memory. The compiler's debug-build self-check always runs the strongest level the build has.
 
-**To-be-closed variables (2026-10-07).** `Tbc` and `Close` (from `<close>`, merged after the spike) add one fact to layer 2: the set of registers marked to be closed. Every path into an instruction must carry the same set, a `Tbc` must be above every open one (`Close` closes newest first, down to its register), nothing may write a marked register, and no `Return`, `Return0`, `Return1` or `TailCall` may run with one still open. Otherwise a chunk could leave a stale entry on the VM's to-be-closed stack after its frame is gone. `Close` keeps the open results of the instruction before it, as the VM does. Everything the compiler produces from `tests/` and `bench/` passes, and a 3,000-mutant fuzz run (seed 7) still has no panics at the full level.
+**To-be-closed variables.** `Tbc` and `Close` (from `<close>`, merged after the spike) add one fact to layer 2: the set of registers marked to be closed. Every path into an instruction must carry the same set, a `Tbc` must be above every open one (`Close` closes newest first, down to its register), nothing may write a marked register, and no `Return`, `Return0`, `Return1` or `TailCall` may run with one still open. Otherwise a chunk could leave a stale entry on the VM's to-be-closed stack after its frame is gone. `Close` keeps the open results of the instruction before it, as the VM does. Everything the compiler produces from `tests/` and `bench/` passes, and a 3,000-mutant fuzz run (seed 7) still has no panics at the full level.
 
 Every new instruction needs an encode, a decode and a verify arm. The matches are exhaustive, so adding an `Op` without them doesn't compile.
 
@@ -167,7 +167,7 @@ File handles are userdata with a shared `FILE*` metatable (`__index` methods, `_
 - **Local time.** `os.date` without `!`, `os.date("*t")` and `os.time{...}` work in the local time zone, which `std` can't read. Options for the spike: (a) our own reader for the `TZ` variable's POSIX rules and TZif files under `/usr/share/zoneinfo` (Unix only, a few hundred lines, no dependency; Windows would need another source); (b) a small dependency such as `tz-rs` (pure Rust, the same approach already written); (c) a larger one such as `jiff` or `chrono` with `iana-time-zone` (Windows support, much more code); (d) UTC everywhere, recorded as a deviation. The spike compares binary size and agreement with `lua5.5` over a sweep of timestamps in several zones.
 - **CPU time.** `os.clock` is wall time since start today. Options: (a) `/proc/self/stat` on Linux (no dependency, 10 ms ticks); (b) `getrusage` or `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` through `nix`, already used by the testkit (Unix only); (c) a `cpu-time`-style crate covering Windows; (d) keep wall time as a deviation. The suite only checks that `os.clock` is a number that doesn't go backwards, so this is about honesty more than tests.
 
-Both are dependency decisions under ADR-7. **Decided (Tym, 2026-10-05):** our own zone reader for local time, and no dependency for CPU time, so `os.clock` stays wall time. Both gaps (wall-time `os.clock`, UTC on Windows) are in `tests/lua-5.5/DEVIATIONS.md`. `strftime` formatting itself is our own code: every conversion the C99 and POSIX `strftime` define, with `invalid conversion specifier` for the rest, as `files.lua` checks.
+Both are dependency decisions under ADR-7. **Decided:** our own zone reader for local time, and no dependency for CPU time, so `os.clock` stays wall time. Both gaps (wall-time `os.clock`, UTC on Windows) are in `tests/lua-5.5/DEVIATIONS.md`. `strftime` formatting itself is our own code: every conversion the C99 and POSIX `strftime` define, with `invalid conversion specifier` for the rest, as `files.lua` checks.
 
 ## The command line
 
@@ -183,7 +183,7 @@ The compiler stages (`--ast`, `--hir` and the `-l` listing) live in a separate `
 
 ## Deliberate differences
 
-Candidates, each to go in `tests/lua-5.5/DEVIATIONS.md` for Tym's approval in the PR that introduces it:
+Candidates, each to go in `tests/lua-5.5/DEVIATIONS.md` for a maintainer's approval in the PR that introduces it:
 
 - Binary chunks are our own format: PUC's don't load in `orbit` and ours don't load in `lua`.
 - `lua5.5` appends a traceback to the message `load` returns when a reader function raises an error. We return the message alone, since the traceback describes the reader's stack rather than the chunk.

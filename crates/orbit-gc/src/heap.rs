@@ -69,7 +69,7 @@ pub struct Params {
     /// may grow to, in bytes, which bounds its pause on a big heap. No
     /// limit (`usize::MAX`) by default: with stores scattered over a big
     /// old table, a small young generation means more minor collections,
-    /// each retracing most of the table (Tym, 2026-10-20).
+    /// each retracing most of the table.
     pub minor_max_bytes: usize,
     /// An object whose indexed part has at least this many elements is
     /// remembered by part ([`Heap::barrier_at`]) instead of whole. 1024 by

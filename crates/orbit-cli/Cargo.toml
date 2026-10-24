@@ -41,9 +41,9 @@ runtime = ["orbit/default"]
 # `--no-default-features --features shared,line-editing`; `runtime` wins
 # when both are on.
 shared = ["orbit/shared"]
-# Load C modules (on by default in the CLI, Tym 2026-10-09).
+# Load C modules (on by default in the CLI).
 c-modules = ["dep:orbit-capi"]
-# The `ffi` library, on unless `--no-ffi` is given (Tym 2026-10-14, ADR-9).
+# The `ffi` library, on unless `--no-ffi` is given (ADR-9).
 ffi = ["orbit-std/ffi"]
 # The `std.json` module (ADR-12, D13).
 json = ["orbit-std/json"]

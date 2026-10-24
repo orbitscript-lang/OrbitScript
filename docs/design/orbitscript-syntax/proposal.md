@@ -1,8 +1,8 @@
 # OrbitScript syntax proposal
 
-Status: **Decided and implemented.** Proposed 2026-10-13; Tym's decisions are in the Decisions table, and `orbit-orb-syntax` implements it ([orbitscript-front-end.md](../orbitscript-front-end.md)).
+Status: **Decided and implemented.** The decisions are in the Decisions table, and `orbit-orb-syntax` implements it ([orbitscript-front-end.md](../orbitscript-front-end.md)).
 
-Round 4 (2026-10-13 23:15Z): every question is decided; see [Decisions](#decisions-tym-2026-10-13). The document follows them. Indexing background: [indexing-report.md](indexing-report.md).
+Every question is decided; see [Decisions](#decisions). The document follows them. Indexing background: [indexing-report.md](indexing-report.md).
 
 ## Goals and constraints
 
@@ -130,7 +130,7 @@ Single quotes are not strings: they are taken by loop labels, as in Rust. There 
 
 Keywords: `fn let mut const pub use struct enum impl for in while loop if else match break continue return self Self nil true false as`, plus `scope` as a contextual keyword (so `scope` stays usable as a variable name). `global` and `extern` are reserved (see [Names and globals](#names-and-globals)).
 
-Keywords are still names where nothing else could be meant: after `.` and `::` (`string::match(s, p)`, `t.loop`), as field names in struct definitions, struct literals, struct patterns and `#{ key: value }`, as variant names, and as the names of functions and constants in `impl`. Anywhere a keyword-named local would be bound or read (`let`, parameters, shorthand fields such as `P { match }`, the last segment of `use`), it is written as a raw name, `r#match`, as in Rust. `r#name` is always a name, so it can also be used just to be explicit, including `r#scope`; `r#_`, `r#self` and `r#Self` are errors. (Tym, 2026-10-14.)
+Keywords are still names where nothing else could be meant: after `.` and `::` (`string::match(s, p)`, `t.loop`), as field names in struct definitions, struct literals, struct patterns and `#{ key: value }`, as variant names, and as the names of functions and constants in `impl`. Anywhere a keyword-named local would be bound or read (`let`, parameters, shorthand fields such as `P { match }`, the last segment of `use`), it is written as a raw name, `r#match`, as in Rust. `r#name` is always a name, so it can also be used just to be explicit, including `r#scope`; `r#_`, `r#self` and `r#Self` are errors.
 
 ## Bindings and mutability
 
@@ -259,7 +259,7 @@ Lowering, with no new HIR:
 - `struct Point { x, y }` creates one table `Point` that is both the metatable of every instance and the namespace for associated functions. Its `__index` is a separate `methods` table, so instances see methods but not associated functions (`p.new(1, 2)` is an error, as in Rust). `__name` is set so `tostring` and error messages say `Point`.
 - `Point { x: 4, y: 6 }` is `setmetatable(#{ x: 4, y: 6 }, Point)`. Every field must be given (shorthand `Point { x, y }` takes locals of the same name); a missing or unknown field is a compile error when the struct is visible at compile time.
   **[cost]** As a library call that is a native call per construction. The struct literal has a fixed, known shape, so a fused `NewObject { dst, meta, hash_hint }` op (one new bytecode op, no ADR change) would make it cheaper than Lua's `setmetatable({...}, mt)`. Q19.
-- Methods in `impl` blocks go into `methods`; associated functions (no `self`) go into `Point`. Methods also go into `Point` (Tym, 2026-10-14), so `Point::dist(p, q)` and `pcall(Point::dist, p, q)` work from any module, and from Lua as `Point.dist(p, q)`; instances still see only `methods`. A method and an associated function can't share a name. An enum's methods likewise go on its namespace table, and a method named like a variant is an error. Several `impl` blocks for one struct may appear in the same module.
+- Methods in `impl` blocks go into `methods`; associated functions (no `self`) go into `Point`. Methods also go into `Point`, so `Point::dist(p, q)` and `pcall(Point::dist, p, q)` work from any module, and from Lua as `Point.dist(p, q)`; instances still see only `methods`. A method and an associated function can't share a name. An enum's methods likewise go on its namespace table, and a method named like a variant is an error. Several `impl` blocks for one struct may appear in the same module.
 - Fields are public at runtime (they are table fields). A non-`pub` field is a privacy rule for `orbit-check`, not the VM.
 - No inheritance, as in Rust. Composition and traits-as-documentation only (Q18).
 
@@ -399,7 +399,7 @@ All of these lower to the existing `BinOp`/`UnOp`/`And`/`Or` nodes. Integer over
 
 ### Concatenation (Q6)
 
-`++` was clunky (Tym), and `..` stays reserved for ranges. The candidates:
+`++` was clunky, and `..` stays reserved for ranges. The candidates:
 
 | Operator | Precedent | Problem |
 |---|---|---|
@@ -428,7 +428,7 @@ Further problems with a type-dependent `/`:
 
 Speed is not the issue: either choice is one op with the same fast paths.
 
-**Recommendation:** keep `/` as float division (Lua's meaning) and keep a distinct floor-division operator. `math::floor(a / b)` is not a substitute, because it goes through a float and loses precision above 2^53. Tym agreed (round 3) but wants a symbol: `div` would be the only spelled-out arithmetic operator.
+**Recommendation:** keep `/` as float division (Lua's meaning) and keep a distinct floor-division operator. `math::floor(a / b)` is not a substitute, because it goes through a float and loses precision above 2^53. Agreed, but with a symbol: `div` would be the only spelled-out arithmetic operator.
 
 | Symbol | Precedent | Problem |
 |---|---|---|
@@ -446,7 +446,7 @@ Speed is not the issue: either choice is one op with the same fast paths.
 
 `"..."` and raw strings `r"..."`/`r#"..."#`. Strings are Lua byte strings (ADR-5); `\u{...}` encodes UTF-8.
 
-A byte literal `b'a'` is an `int` constant: the value `string::byte` gives for that byte, so `string::byte(s, i) == b'\r'` and `match c { b'0'..=b'9' => ... }` read as what they mean (Tym, 2026-10-21; Rust's spelling, which can't be mistaken for a loop label). It holds one printable ASCII character or one escape that gives one byte: `\n \r \t \\ \0 \' \" \xHH`, where `\xHH` takes any byte. A raw tab or line break, `\u{...}` and a non-ASCII character are errors (`b'é'` would be two bytes in UTF-8; the error suggests `"é"` or `\xc3\xa9`).
+A byte literal `b'a'` is an `int` constant: the value `string::byte` gives for that byte, so `string::byte(s, i) == b'\r'` and `match c { b'0'..=b'9' => ... }` read as what they mean (Rust's spelling, which can't be mistaken for a loop label). It holds one printable ASCII character or one escape that gives one byte: `\n \r \t \\ \0 \' \" \xHH`, where `\xHH` takes any byte. A raw tab or line break, `\u{...}` and a non-ASCII character are errors (`b'é'` would be two bytes in UTF-8; the error suggests `"é"` or `\xc3\xa9`).
 
 ### Interpolation: `f"..."` (Q14)
 
@@ -534,7 +534,7 @@ fn copy(src, dst) {
 
 `scope stmt;` (or `scope { ... }`) runs when the enclosing block exits by any route: fall-through, `return`, `break`, `continue`, or an error. Several run in reverse order, interleaved with scoped bindings. A scoped action can read locals in scope where it is written; `return`, `break` and `continue` inside it are compile errors.
 
-**[HIR]** Decided (Q13, changed by Tym on 2026-10-14): lowered in the front end, with no new HIR or bytecode. The action becomes a closure boxed in a table whose shared metatable's `__close` calls it, held in a `<close>` local, so it reuses Lua's to-be-closed machinery as is. It costs a closure and a table per run. The earlier plan, a `Defer { body: BlockId }` HIR statement compiled to inline code, turned out to need new unwinder states and can still come later without changing any program.
+**[HIR]** Decided (Q13, changed later): lowered in the front end, with no new HIR or bytecode. The action becomes a closure boxed in a table whose shared metatable's `__close` calls it, held in a `<close>` local, so it reuses Lua's to-be-closed machinery as is. It costs a closure and a table per run. The earlier plan, a `Defer { body: BlockId }` HIR statement compiled to inline code, turned out to need new unwinder states and can still come later without changing any program.
 
 ### Scoped bindings: `let scope name = expr;`
 
@@ -640,10 +640,10 @@ struct Stack<T> { items: [T] }
 let n = decode(s) as int;
 ```
 
-- Built-in type names follow Lua's runtime types, lower case: `nil bool int float number string table function thread userdata any`. `T?` is `T | nil`. `[T]` is an array table, `#{[K]: V}` a map table, `#{ name: T, size: U }` a record (a table with those fields, others allowed), `A | B` a union, `(A, B)` multiple results, `fn(A) -> R` a function type, `-> ...T` any number of `T` results and `-> (A, ...T)` an `A` followed by any number of `T`s (a rest is allowed only at the end of a result); struct and enum names are types. Record and map spelling mirrors table literals, where `name: v` is a named key and `[k]: v` a computed one (Tym, 2026-10-18, type checker T5/T6; maps were `#{K: V}` before).
+- Built-in type names follow Lua's runtime types, lower case: `nil bool int float number string table function thread userdata any`. `T?` is `T | nil`. `[T]` is an array table, `#{[K]: V}` a map table, `#{ name: T, size: U }` a record (a table with those fields, others allowed), `A | B` a union, `(A, B)` multiple results, `fn(A) -> R` a function type, `-> ...T` any number of `T` results and `-> (A, ...T)` an `A` followed by any number of `T`s (a rest is allowed only at the end of a result); struct and enum names are types. Record and map spelling mirrors table literals, where `name: v` is a named key and `[k]: v` a computed one (type checker T5/T6).
 - The parser accepts them in every Rust position and the compiler ignores them (vm.md: annotations are never trusted for code generation). `orbit-check` reads them from the AST (type checker T1/T2). Generics (`fn first<T>(t: [T]) -> T?`, `struct Stack<T>`, `enum`, `impl<T> Stack<T>`) parse but are only meaningful to `orbit-check`; there are no bounds, since there are no traits. Between a closure's `|...|`, a union parameter type needs parentheses: `|x: (int | nil)| ...`.
 - `type Name<T> = T;` declares an alias for `orbit-check`; it does nothing at run time. `type` is a keyword only at the start of an item followed by a name, so `type(x)` and a local named `type` keep working (T7).
-- `expr as T` is a cast checked while the program runs: it converts to a scalar (`2.0 as int`, `1 as string`) or checks a struct or enum (`v as Point`), and raises when it can't; `expr as? T` gives `nil` instead. `runtime-as.md` has the rules (Tym, 2026-10-19; this replaces T9's checker-only assertion). It binds tighter than `*` and looser than prefix operators, as in Rust, and its type takes no top-level union (`x as (int | nil)`).
+- `expr as T` is a cast checked while the program runs: it converts to a scalar (`2.0 as int`, `1 as string`) or checks a struct or enum (`v as Point`), and raises when it can't; `expr as? T` gives `nil` instead. `runtime-as.md` has the rules (this replaces T9's checker-only assertion). It binds tighter than `*` and looser than prefix operators, as in Rust, and its type takes no top-level union (`x as (int | nil)`).
 - Stubs (`.orbi`, T12) describe Lua and C modules for `orbit-check`: the same syntax, with body-less `fn f(x: int) -> int;` and value-less `const N: int;`. Only `orbit-check` parses them; the runtime never loads `.orbi` files.
 
 ## Coroutines
@@ -682,7 +682,7 @@ Everything not listed here lowers onto existing HIR nodes and bytecode.
 |---|---|---|---|
 | Expression `if`/`match`/blocks | Front-end hoisting into hidden locals | `ExprKind::Block` | HIR node (not recommended now) |
 | Exclusive range `0..n` | Ints only via `n - 1` | `NumericFor { exclusive }` (decided, Q15) | HIR field + for-prep op variant |
-| `scope stmt;` | Closure + wrapper table per run | none: a boxed closure in a `Close` local (Q13, 2026-10-14) | none |
+| `scope stmt;` | Closure + wrapper table per run | none: a boxed closure in a `Close` local (Q13) | none |
 | `let scope` | Already `LocalKind::Close` | none | none |
 | Struct literal | `setmetatable` native call | `NewObject` op | One bytecode op, if it measurably helps (Q19) |
 | Enum `match` | `getmetatable` native call per arm | `TestMeta` op | One bytecode op; tag-field alternative to be measured (Q9) |
@@ -703,7 +703,7 @@ flowchart LR
 
 Same safety and toolchain rules as the Lua front end: safe Rust, no new dependencies, spans everywhere, a fuzz target, golden HIR dumps (`orbitc --hir file.orb`).
 
-## Decisions (Tym, 2026-10-13)
+## Decisions
 
 | # | Topic | Decision |
 |---|---|---|
@@ -719,7 +719,7 @@ Same safety and toolchain rules as the Lua front end: safe Rust, no new dependen
 | Q10 | Operator overloading | Raw metamethod names (`fn __add`) only, no trait names |
 | Q11 | Globals | No implicit globals |
 | Q12 | `?` operator | On `nil, err` returns as proposed; revisit later how to support `pcall`-style errors |
-| Q13 | Scoped actions | Yes, keyword `scope` (round 3) instead of `defer`. Lowered in the front end to a closure boxed in a `<close>` local, with no new HIR or VM support (changed 2026-10-14) |
+| Q13 | Scoped actions | Yes, keyword `scope` (round 3) instead of `defer`. Lowered in the front end to a closure boxed in a `<close>` local, with no new HIR or VM support (changed later) |
 | Q14 | Interpolation | `f"..."` as described in [Interpolation](#interpolation-f-q14) |
 | Q15 | Exclusive ranges | `exclusive` flag on `NumericFor` |
 | Q16 | File extension | `.orb` |
@@ -728,4 +728,4 @@ Same safety and toolchain rules as the Lua front end: safe Rust, no new dependen
 | Q19 | New ops | Add one when it measurably improves performance |
 | Q20 | Crate name | `orbit-orb-syntax` (matches the file extension) |
 | Q21 | Scoped bindings | `let scope f = ...` and `scope stmt;` for actions (not attributes; attributes get a language-wide design later) |
-| Q22 | Keywords as names (2026-10-14) | Allowed where unambiguous (after `.` and `::`, field and member names); `r#name` elsewhere, or to be explicit |
+| Q22 | Keywords as names | Allowed where unambiguous (after `.` and `::`, field and member names); `r#name` elsewhere, or to be explicit |

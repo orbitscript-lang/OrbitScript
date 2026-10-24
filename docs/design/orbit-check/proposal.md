@@ -1,15 +1,15 @@
 # `orbit-check`: OrbitScript's optional type checker
 
-Status: **All questions decided** (Tym, 2026-10-18). Implemented in `crates/orbit-check` (names: #181; types: #188; stubs, scope completion and recovery: stage 3); the library API is in [api.md](api.md). Answers are in [Questions](#questions-for-tym).
+Status: **All questions decided**. Implemented in `crates/orbit-check` (names: #181; types: #188; stubs, scope completion and recovery: stage 3); the library API is in [api.md](api.md). Answers are in [Questions](#questions).
 
-Decided (Tym, 2026-10-18 22:13Z): **T4** no implicit `int` to `float`; `number` is `int | float`, and code that wants one representation narrows to it. **T5** union types `A | B`, yes. **T8** no built-in `Result`: Lua-style results are written `(T?, E?)`, keeping the name free for a user enum and for enum-based results later. **T2** (22:25Z) option B: the shared parser builds type trees behind a `ParseOptions` flag; one parser only, optimize later if the cost shows up. **Everything else** (22:26Z): as recommended, including the two assumptions at the end of the questions table.
+Decided: **T4** no implicit `int` to `float`; `number` is `int | float`, and code that wants one representation narrows to it. **T5** union types `A | B`, yes. **T8** no built-in `Result`: Lua-style results are written `(T?, E?)`, keeping the name free for a user enum and for enum-based results later. **T2** option B: the shared parser builds type trees behind a `ParseOptions` flag; one parser only, optimize later if the cost shows up. **Everything else**: as recommended, including the two assumptions at the end of the questions table.
 
 Already decided, and assumed throughout: OrbitScript's types are optional, erased, and never enforced at run time; a separate mypy-like tool checks them (plan, "Interop model"; syntax proposal, "Optional types"). The syntax proposal's Decisions table is authoritative, and nothing here changes it without a question below.
 
 ## Summary
 
 - **One new crate and binary, `orbit-check`**, built only on `orbit-orb-syntax` (plus `orbit-hir` for spans and string pools). It never links the VM, GC or standard library, so `orbit` and `orbitc` don't change size, and it fits either liblua layout unchanged. A parse-only probe of that floor is 445 KiB stripped (Linux x86_64 cloud container), against 2,054 KiB for `orbit`.
-- **It checks the OrbitScript AST, not the HIR.** Lowering removes exactly what a checker needs (structs, enums, `impl`, `match`, `?`, `use`), and anything added to the HIR ships in the runtime. That reverses the plan's "orbit-check reads TypeIds in the HIR" line (T1, agreed 2026-10-18).
+- **It checks the OrbitScript AST, not the HIR.** Lowering removes exactly what a checker needs (structs, enums, `impl`, `match`, `?`, `use`), and anything added to the HIR ships in the runtime. That reverses the plan's "orbit-check reads TypeIds in the HIR" line (T1).
 - **Gradual typing in the mypy, TypeScript and Luau family:** `any` at the edges, local inference inside function bodies, flow-sensitive narrowing for `nil`, `match` and `type()`, nominal structs and enums, exhaustiveness on `match`, and operator typing from `__add`-style metamethods.
 - **Lua code isn't checked in v1.** Lua modules and the standard library are typed through stub files (`.orbi`, like Python's `.pyi`); with no stub, a Lua module's exports are `any`.
 - **The type grammar needs a few additions** before the checker is useful on real code: unions, record shapes for plain tables, type aliases, Each changes the language's surface, so each is a question.
@@ -70,9 +70,9 @@ The runtime parser already parses every type annotation (to reject bad ones) and
 | New type syntax | Runtime accepts and skips it; checker parses it | One change in the shared parser |
 | Cargo feature instead of a flag | n/a | Would remove the code from `orbit`, but a workspace-wide build unifies features and turns it on for `orbit` too (the same trap that makes workspace release builds miss the PGO profile), so not recommended |
 
-**Decided (Tym, 2026-10-18): B.** One parser to maintain; whether and how to trim its cost in `orbit` is looked at once it exists.
+**Decided: B.** One parser to maintain; whether and how to trim its cost in `orbit` is looked at once it exists.
 
-Since then (Tym, 2026-10-18, dev tooling thread, D3), error recovery and trivia go into the shared parsers behind options that `load` leaves off. B fits that pattern: building type trees becomes one more tooling option on the same parser, and a recovering parse can then hand the checker type trees with error nodes in them, which option A would have to reproduce in its own parser.
+Since then (dev tooling, D3), error recovery and trivia go into the shared parsers behind options that `load` leaves off. B fits that pattern: building type trees becomes one more tooling option on the same parser, and a recovering parse can then hand the checker type trees with error nodes in them, which option A would have to reproduce in its own parser.
 
 Places where the parser drops information the checker needs, all small changes for the front-end thread:
 
@@ -109,10 +109,10 @@ Places where the parser drops information the checker needs, all small changes f
 ### Gaps that change the surface (questions)
 
 - **Unions (T5).** Only `T?` exists. Lua APIs need `string | number` (`tostring`, `string::rep`), and enums don't cover values from Lua. Proposed: `A | B` in type position. In patterns `|` already means alternatives, and `|x| ...` closures don't appear in types, so there is no clash.
-- **Record shapes for plain tables (T6).** Lua modules return plain tables (`#{ name: "x", size: 3 }`), and JSON decoders produce them. Today the only way to describe one is a map type, which can't say "has a `name: string` and a `size: int`". The natural spelling mirrors table literals, where `name: v` is a named key and `[k]: v` a computed one: `#{ name: string, size: int }` is a record and `#{ [string]: int }` a map. That changes today's map spelling `#{string: int}` (used once, in `tests/programs/proposal.orb`), so it needs Tym. Records are structural and open (extra fields allowed), as tables are; structs stay nominal and closed.
+- **Record shapes for plain tables (T6).** Lua modules return plain tables (`#{ name: "x", size: 3 }`), and JSON decoders produce them. Today the only way to describe one is a map type, which can't say "has a `name: string` and a `size: int`". The natural spelling mirrors table literals, where `name: v` is a named key and `[k]: v` a computed one: `#{ name: string, size: int }` is a record and `#{ [string]: int }` a map. That changes today's map spelling `#{string: int}` (used once, in `tests/programs/proposal.orb`), so it needs a maintainer's decision. Records are structural and open (extra fields allowed), as tables are; structs stay nominal and closed.
 - **Type aliases (T7).** `type Point3 = #{ x: float, y: float, z: float };` and `type Pair<T> = (T, T);`. Needs `type` as a contextual keyword, as `scope` is.
-- **Lua's `nil, err` convention (T8, decided: no `Result`).** `io::open` returns a file, or `nil` and a message, written `(File?, string?)`. Tym rejected a built-in `Result<T, E>`: it would collide with a user's own `Result` enum, OrbitScript has no `Ok(...)` form so the parallel with Rust breaks down, and enum-based results stay possible later. The cost is that the checker doesn't know the two results are linked: after `let (f, err) = io::open(p); if f == nil { ... }`, `err` is still `string?`. `?` is unaffected (it only looks at the first result).
-- **`as` (T9).** ~~Checker-only assertion~~ Superseded 2026-10-19: Tym adopted runtime casts (docs/design/orbitscript-syntax/runtime-as.md). Scalars convert and named types and unions are checked while the program runs, `as?` gives `nil` instead of raising. The checker types `v as T` as T (`T?` for `as?`), accepts wider sources, reports a source that can never pass (T0209) and a target the runtime can't check (T0210), and narrows a plain local after a checked (non-scalar) cast. `as any` is the unchecked escape hatch.
+- **Lua's `nil, err` convention (T8, decided: no `Result`).** `io::open` returns a file, or `nil` and a message, written `(File?, string?)`. A built-in `Result<T, E>` was rejected: it would collide with a user's own `Result` enum, OrbitScript has no `Ok(...)` form so the parallel with Rust breaks down, and enum-based results stay possible later. The cost is that the checker doesn't know the two results are linked: after `let (f, err) = io::open(p); if f == nil { ... }`, `err` is still `string?`. `?` is unaffected (it only looks at the first result).
+- **`as` (T9).** ~~Checker-only assertion~~ Superseded: `as` became a runtime cast (docs/design/orbitscript-syntax/runtime-as.md). Scalars convert and named types and unions are checked while the program runs, `as?` gives `nil` instead of raising. The checker types `v as T` as T (`T?` for `as?`), accepts wider sources, reports a source that can never pass (T0209) and a target the runtime can't check (T0210), and narrows a plain local after a checked (non-scalar) cast. `as any` is the unchecked escape hatch.
 - **Generic structs and enums (T10).** The parser already accepts and skips `struct Stack<T> { items: [T] }`. Since there are no traits (Q18), generics are unconstrained: fine for containers, `Option`-like enums and callbacks. Recommended: yes, as parse-only syntax that the checker reads.
 
 Not proposed for v1: interfaces or protocols (they would be traits, deferred by Q18; record shapes cover most structural needs), literal types (`"r" | "w"`), `never`, variance annotations, overloads.
@@ -217,7 +217,7 @@ pub fn lines(path: string?, ...formats: string | int) -> fn() -> string?;
 
   A stub next to a module (`lunajson.orbi` beside `lunajson.lua`) wins over the module, as `.pyi` does in Python. Body-less `fn ...;` is stub-only syntax: the shared parser accepts it only under a stub option that `orbit-check` sets (T2: one parser), and the runtime never loads `.orbi` files.
 - **Later (not v1):** reading LuaLS-style annotation comments (`---@param x integer`) from `.lua` files, which would type existing annotated Lua libraries with no stub. That needs the Lua lexer to keep comments, a change in the Lua front end.
-- **FFI.** `ffi.open(...)` and `lib:bind(...)` give `any`. Once `extern fn` sugar exists (Tym, 2026-10-15: later), its declared signature types the function.
+- **FFI.** `ffi.open(...)` and `lib:bind(...)` give `any`. Once `extern fn` sugar exists (later), its declared signature types the function.
 
 ## Diagnostics and use
 
@@ -235,7 +235,7 @@ src/shapes.orb:8:5: warning[T0303]: this condition has type `int`, which is alwa
 - **Strictness (T3, T13):** `--strict` on the command line, or a file pragma `//! orbit-check: strict` (or `off` to skip a file). Strict adds: annotations required on `pub fn` parameters and results, `use` of an untyped Lua module (no `.orbi` stub) is an error (implemented at the `use`, once per module, rather than at each use of its values), non-`bool` conditions are errors. Implemented as described in [api.md](api.md#pragmas-and-strict-mode-t13).
 - **Configuration:** command-line flags only in v1 (`--strict`, `--path`, `--stubs`, `--extern`). A config file waits until there is a reason, since a TOML parser is a new dependency.
 - **Lints the earlier proposals assigned to the checker:** `t[0]` on an array and `0..#t` loops that index `t` (indexing report), non-`bool` conditions, and unused locals and imports. Implemented as T0307-T0310 (non-`bool` conditions are strict mode's T0503); see [api.md](api.md#diagnostic-codes).
-- **Editor support (Tym, 2026-10-18, dev tooling thread, D1/D2):** the language server is its own binary but reuses the checker in full (its crate, or the `orbit-check` binary). So the `orbit-check` library API, not just its command line, is the product: it takes source text per module, accepts the AST that the shared parser's recovery mode produces (error nodes typed as `any`, with no cascading errors), keeps results per module so one edited file and its dependents can be rechecked, and answers position queries: type at an offset, definition of a name, members of a value for completion, and signature at a call. These queries need the checker to keep a span-to-type table, which the command-line path can skip.
+- **Editor support (dev tooling, D1/D2):** the language server is its own binary but reuses the checker in full (its crate, or the `orbit-check` binary). So the `orbit-check` library API, not just its command line, is the product: it takes source text per module, accepts the AST that the shared parser's recovery mode produces (error nodes typed as `any`, with no cascading errors), keeps results per module so one edited file and its dependents can be rechecked, and answers position queries: type at an offset, definition of a name, members of a value for completion, and signature at a call. These queries need the checker to keep a span-to-type table, which the command-line path can skip.
 
 ## Implementation plan (later, not part of this ask)
 
@@ -253,25 +253,25 @@ flowchart LR
 - **Done for v1:** every `.orb` in the repository checks clean in default mode (adding annotations to the examples where they help), the seeded-error corpus is all caught, and checking `examples/` takes well under 100 ms on the cloud container.
 - **Same rules as the rest of the code:** stable Rust, no `unsafe`, no dependencies, greenfield (designs above are read as published documentation only).
 
-## Questions for Tym
+## Questions
 
-All answered by Tym on 2026-10-18.
+All answered.
 
 | # | Question | Decision |
 |---|---|---|
-| T1 | Should the checker read the AST and the HIR drop its unused `TypeId` fields? | **Decided 2026-10-18: AST, drop them** |
-| T2 | Where are type annotations turned into trees? | **Decided 2026-10-18: shared parser behind a `ParseOptions` flag** (one parser; optimize later if needed) |
-| T3 | What are unannotated parameters by default? | **Decided 2026-10-18: `any`, bodies still checked** |
-| T4 | May an `int` be passed where a `float` is expected? | **Decided 2026-10-18: no.** `number` = `int \| float`; narrow to one explicitly |
-| T5 | Add union types `A \| B`? | **Decided 2026-10-18: yes** |
-| T6 | Record shapes for plain tables, with maps respelled `#{[K]: V}`? | **Decided 2026-10-18: Yes** |
-| T7 | Type aliases with a contextual `type` keyword? | **Decided 2026-10-18: Yes** |
-| T8 | Built-in `Result<T, E>` for Lua's `nil, err` results? | **Decided 2026-10-18: no**, write `(T?, E?)`; keeps room for enum-based results later |
-| T9 | Checker-only `expr as T` assertion, no runtime effect? | **Decided 2026-10-18: Yes; superseded 2026-10-19 by runtime `as` (runtime-as.md)** |
-| T10 | Generic structs and enums (`struct Stack<T>`)? | **Decided 2026-10-18: Yes** |
-| T11 | Check Lua files? | **Decided 2026-10-18: No in v1, stubs only** |
-| T12 | Stub files as `.orbi` with body-less declarations? | **Decided 2026-10-18: Yes** |
-| T13 | Comment pragmas `// orbit-check: ignore[...]` and `//! orbit-check: strict`? | **Decided 2026-10-18: Yes** |
-| T14 | Ship as its own `orbit-check` binary, outside `orbit` and `orbitc`? | **Decided 2026-10-18: Yes** |
+| T1 | Should the checker read the AST and the HIR drop its unused `TypeId` fields? | **Decided: AST, drop them** |
+| T2 | Where are type annotations turned into trees? | **Decided: shared parser behind a `ParseOptions` flag** (one parser; optimize later if needed) |
+| T3 | What are unannotated parameters by default? | **Decided: `any`, bodies still checked** |
+| T4 | May an `int` be passed where a `float` is expected? | **Decided: no.** `number` = `int \| float`; narrow to one explicitly |
+| T5 | Add union types `A \| B`? | **Decided: yes** |
+| T6 | Record shapes for plain tables, with maps respelled `#{[K]: V}`? | **Decided: Yes** |
+| T7 | Type aliases with a contextual `type` keyword? | **Decided: Yes** |
+| T8 | Built-in `Result<T, E>` for Lua's `nil, err` results? | **Decided: no**, write `(T?, E?)`; keeps room for enum-based results later |
+| T9 | Checker-only `expr as T` assertion, no runtime effect? | **Decided: Yes; superseded by runtime `as` (runtime-as.md)** |
+| T10 | Generic structs and enums (`struct Stack<T>`)? | **Decided: Yes** |
+| T11 | Check Lua files? | **Decided: No in v1, stubs only** |
+| T12 | Stub files as `.orbi` with body-less declarations? | **Decided: Yes** |
+| T13 | Comment pragmas `// orbit-check: ignore[...]` and `//! orbit-check: strict`? | **Decided: Yes** |
+| T14 | Ship as its own `orbit-check` binary, outside `orbit` and `orbitc`? | **Decided: Yes** |
 
-Also agreed (2026-10-18): array indexing `t[i]` on `[T]` gives `T`, not `T?` (TypeScript's default; `T?` would make every array read need a check), and structs are closed (assigning an undeclared field is an error).
+Also agreed: array indexing `t[i]` on `[T]` gives `T`, not `T?` (TypeScript's default; `T?` would make every array read need a check), and structs are closed (assigning an undeclared field is an error).

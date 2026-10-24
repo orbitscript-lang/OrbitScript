@@ -78,7 +78,7 @@ ADR-2 accepted the shape (value waits on key, registration list) without measure
 - **Ephemerons:** waiting map (current) against the classic convergence approach (rescan ephemeron tables until nothing new is marked), on weak-keyed caches with live and dead keys, adversarial key-value chains (quadratic for rescanning), and heaps with no ephemerons.
 - **Finalizers:** the registration list (current) against scanning color bytes for the FIN bit at the end of marking, on registration cost, atomic pause with 1k and 1M registered live objects, and churn.
 
-The results and the proposed ADR-2 amendment (accept as is, or exact edits) go to Tym with the implementation PR.
+The results and the proposed ADR-2 amendment (accept as is, or exact edits) go to a maintainer with the implementation PR.
 
 ## Tests
 

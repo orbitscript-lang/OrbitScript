@@ -1,6 +1,6 @@
 # The `ffi` library
 
-Status: Accepted (with ADR-9, 2026-10-18). Crate `orbit-ffi`; `orbit-std` feature `ffi`.
+Status: Accepted (with ADR-9). Crate `orbit-ffi`; `orbit-std` feature `ffi`.
 
 The `ffi` library lets Lua and OrbitScript code call C functions in shared libraries directly, without writing a C module. A script opens a library, binds a function by name with its C signature, and calls the result like any other function:
 

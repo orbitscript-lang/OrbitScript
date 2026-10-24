@@ -1,10 +1,10 @@
 # Runtime `as` casts in OrbitScript
 
-Status: **decided** by Tym 2026-10-19 05:45Z: option B with every recommendation in the table below, and Option 3 for `as bool`. Implemented in the OrbitScript front end, the compiler and the VM; the type checker's part (T0209, T0210, narrowing) is `orbit-check`'s.
+Status: **decided**: option B with every recommendation in the table below, and Option 3 for `as bool`. Implemented in the OrbitScript front end, the compiler and the VM; the type checker's part (T0209, T0210, narrowing) is `orbit-check`'s.
 
 ## The problem
 
-Before this design, `expr as T` was a type assertion only `orbit-check` read: the front end lowered it to `(expr)` (decision T9, following TypeScript). So `2.0 as int` type-checked as an `int` but was still the float `2.0` when it ran, and `v as Point` on a plain table was accepted with no check. The checker then believed something the program didn't do, which is the bug class Tym flagged. No `.orb` file in the repository used `as` yet (only `use ... as` aliases, which are unrelated), so either way was cheap to change.
+Before this design, `expr as T` was a type assertion only `orbit-check` read: the front end lowered it to `(expr)` (decision T9, following TypeScript). So `2.0 as int` type-checked as an `int` but was still the float `2.0` when it ran, and `v as Point` on a plain table was accepted with no check. The checker then believed something the program didn't do, which is the bug class to avoid. No `.orb` file in the repository used `as` yet (only `use ... as` aliases, which are unrelated), so either way was cheap to change.
 
 Two consistent choices: drop `as`, or make every `as` do something real at run time: either convert the value or fail loudly. A cast that leaves a value of another type behind is never allowed.
 
@@ -166,7 +166,7 @@ How they compare:
   - There is no explicit, checked downcast.
   - The escape hatch is invisible at the use site.
 
-## Decisions for Tym
+## Decisions
 
 | # | Question | Recommendation |
 |---|---|---|

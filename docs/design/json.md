@@ -1,6 +1,6 @@
 # The `std.json` module
 
-Status: Implemented. Tym decided that JSON is a standard library module backed by `serde_json` (2026-10-18, ADR-12 D13); the API below is the one built.
+Status: Implemented. JSON is a standard library module backed by `serde_json` (ADR-12 D13); the API below is the one built.
 
 `orbit-std` has it behind the `json` feature, which the `orbit` CLI (feature `json`, on by default) and `liborbit` turn on. It uses only the public `orbit` API (the stack layer), so `orbit-runtime` takes no JSON dependency (D4).
 
@@ -26,12 +26,12 @@ It is never a global and never the bare name `json`, so a program that ships its
 | `json.decode(text [, options])` | The value, or `nil` and `serde_json`'s message (`expected value at line 1 column 7`) |
 | `json.null` | Stands for JSON's `null`, so it survives inside tables; `tostring` gives `null`, and it can't be changed |
 | `json.object([t])`, `json.array([t [, n]])` | `t` (or a new table) marked to encode as an object or an array whatever its keys. A marked array may have holes, written as `null`; with `n` it has length `n` |
-| `json.int(v)`, `json.float(v)`, `json.string(v)`, `json.bool(v)` | `v` converted by the rules of OrbitScript's runtime `as` (Tym 2026-10-19): `int` takes integers and integral floats; `float` numbers (numerals are `tonumber`'s job); `string` strings, numbers, booleans and values with `__tostring` (as `tostring` writes them); `bool` is `false` for `nil` and `false`, `true` otherwise (`json.null` included), as conditions treat values. They run OrbitScript's casts themselves (a four-function chunk compiled on first use, since compiling it at install added 11% to `orbit -e ''`'s instructions), so the rules can't drift; an error names the argument (`bad argument #1 to 'int' (cannot cast string to int)`). They give plain values, so `math.tointeger(x)`, `x + 0.0` or `tostring(x)` say the same thing |
+| `json.int(v)`, `json.float(v)`, `json.string(v)`, `json.bool(v)` | `v` converted by the rules of OrbitScript's runtime `as`: `int` takes integers and integral floats; `float` numbers (numerals are `tonumber`'s job); `string` strings, numbers, booleans and values with `__tostring` (as `tostring` writes them); `bool` is `false` for `nil` and `false`, `true` otherwise (`json.null` included), as conditions treat values. They run OrbitScript's casts themselves (a four-function chunk compiled on first use, since compiling it at install added 11% to `orbit -e ''`'s instructions), so the rules can't drift; an error names the argument (`bad argument #1 to 'int' (cannot cast string to int)`). They give plain values, so `math.tointeger(x)`, `x + 0.0` or `tostring(x)` say the same thing |
 | `json.number(numeral)` | A value written exactly as `numeral` (`json.number("19.90")`, a 20-digit ID): for numbers a Lua integer or float can't hold. The numeral must be valid JSON; `tostring` gives it back |
 
 `encode`'s options are a table: `pretty = true` writes one member per line indented by two spaces, and `sort_keys = true` writes object keys in byte order, for output that diffs and tests well. Without it members come in `next` order. `decode`'s option `keep_null = false` decodes `null` as `nil`: object members go away, and an array with holes is marked with its length, so it encodes back with its `null`s.
 
-Lua's own types already decide each scalar's JSON type (`1`, `1.0` and `"1"` all write differently), so the scalar helpers are conversions that give plain values (Tym 2026-10-19: a plain cast is as good a way to say what to write). The markers cover what a plain value can't say: an empty table's shape, an array's holes and length, and a numeral beyond Lua's numbers.
+Lua's own types already decide each scalar's JSON type (`1`, `1.0` and `"1"` all write differently), so the scalar helpers are conversions that give plain values (a plain cast is as good a way to say what to write). The markers cover what a plain value can't say: an empty table's shape, an array's holes and length, and a numeral beyond Lua's numbers.
 
 ## Values
 

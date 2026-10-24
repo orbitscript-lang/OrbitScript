@@ -1,6 +1,6 @@
 # Formatter (`orbit-fmt`)
 
-**Status: Proposed.** The formatter of tier L3 in the [developer tooling plan](../adr/0012-developer-tooling.md) (ADR-12). The style rules are Tym's decisions F1 to F12 (2026-10-22).
+**Status: Proposed.** The formatter of tier L3 in the [developer tooling plan](../adr/0012-developer-tooling.md) (ADR-12). The style rules are decisions F1 to F12.
 
 ## Summary
 

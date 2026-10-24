@@ -1,6 +1,6 @@
 # `orbit-check` library API (draft for the language server)
 
-Status: **Agreed with the language server thread** (2026-10-18). Names (stage 1), types (stage 2) and the bundled stubs (stage 3) are implemented in `crates/orbit-check`. Tym decided the language server links this library (dev tooling D1), so this API, not the command line, is the checker's main interface. Design background: [proposal.md](proposal.md).
+Status: **Agreed with the language server design**. Names (stage 1), types (stage 2) and the bundled stubs (stage 3) are implemented in `crates/orbit-check`. The language server links this library (dev tooling D1), so this API, not the command line, is the checker's main interface. Design background: [proposal.md](proposal.md).
 
 ## Shape
 
@@ -175,7 +175,7 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 - A stub may declare a body-less function more than once (overloads): a call takes the first declaration its arguments fit, so `math::random()` is `float` and `math::random(1, 6)` is `int`. When none fits, the error lists every form (T0201). Hover and signature help show the last declaration. Overloads exist only in stubs; OrbitScript code can't declare them.
 - Lua functions whose result type depends on the arguments' types otherwise return the argument's type through a generic (`math::abs<T>(x: T) -> T`), or `any` where nothing simpler is right (`os::date`, whose result depends on the format string's value).
 
-## Agreed with the language server thread (2026-10-18)
+## Agreed with the language server design
 
 - The workspace owns a `Box<dyn Sources>`; open buffers go through `set_source`.
 - No cancellation in v1: the server drops stale requests, and checks are per module.

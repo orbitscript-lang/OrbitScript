@@ -168,7 +168,7 @@ Lowering walks the AST once and builds one `hir::Function` per function body.
 
 ## Parallel and async front end
 
-Tym has suggested a parallel front end built on Rust async as the kind of improvement the greenfield rule allows. How the first-light design keeps that open without paying for it yet:
+A parallel front end built on Rust async is the kind of improvement the greenfield rule allows. How the first-light design keeps that open without paying for it yet:
 
 - **Every stage is a pure function over owned data.** `parse(&SourceFile) -> Ast`, `lower(Ast) -> hir::Chunk`, `hir::analyze(&mut Chunk)`, `compile(&hir::Function) -> UnlinkedProto`. None of them touches the VM, and all their outputs are `Send`. Only the last step, linking the compiled prototypes into a VM heap (interning constant strings, allocating GC objects), needs the VM.
 - **Per-function work is independent after lowering.** A `hir::Chunk` stores functions in a flat vector and the capture pass runs before compilation, so each function compiles without looking at its siblings. A large chunk can compile its functions on several threads with `std::thread::scope`, no dependency needed.
