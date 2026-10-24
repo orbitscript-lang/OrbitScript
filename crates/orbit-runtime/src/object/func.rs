@@ -36,7 +36,7 @@ pub struct Closure {
 impl Trace<LuaSpace> for Closure {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         m.mark(self.proto);
-        for &c in &self.captures {
+        for &c in self.captures.iter() {
             m.mark(c);
         }
     }
@@ -198,7 +198,7 @@ impl Trace<LuaSpace> for Proto {
         for &k in self.code.consts.iter() {
             mark(m, k);
         }
-        for &c in &self.children {
+        for &c in self.children.iter() {
             m.mark(c);
         }
     }

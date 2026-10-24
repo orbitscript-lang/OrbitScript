@@ -156,10 +156,10 @@ impl Stream {
         let n = self.rbuf.len() - self.rpos;
         self.rbuf.clear();
         self.rpos = 0;
-        if n > 0
-            && let Kind::File(f) = &mut self.kind
-        {
-            f.seek(SeekFrom::Current(-(n as i64)))?;
+        if n > 0 {
+            if let Kind::File(f) = &mut self.kind {
+                f.seek(SeekFrom::Current(-(n as i64)))?;
+            }
         }
         Ok(())
     }

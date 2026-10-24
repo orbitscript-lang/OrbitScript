@@ -21,10 +21,10 @@ pub(crate) fn read(r: &mut impl BufRead) -> io::Result<Option<Value>> {
             }
             continue;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.trim().eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse::<usize>().ok();
+        if let Some((name, value)) = header.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse::<usize>().ok();
+            }
         }
     }
     let mut body = vec![0; length.unwrap_or(0)];

@@ -45,10 +45,10 @@ fn run_child(path: &Path, level: &str) {
         "structure" => Some(Level::Structure),
         _ => Some(Level::Full),
     };
-    if let Some(l) = level
-        && verify(&chunk, l).is_err()
-    {
-        std::process::exit(3);
+    if let Some(l) = level {
+        if verify(&chunk, l).is_err() {
+            std::process::exit(3);
+        }
     }
     let mut iso = orbit::Runtime::new().new_isolate(orbit::Config::default());
     iso.scope(|s| {

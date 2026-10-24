@@ -210,7 +210,9 @@ impl State {
 
     fn absolute(&self, path: &Path) -> PathBuf {
         let joined = self.cwd.join(path);
-        std::path::absolute(&joined).unwrap_or(joined)
+        std::env::current_dir()
+            .map(|d| d.join(&joined))
+            .unwrap_or(joined)
     }
 
     /// The names a file may be loaded under: `@` and its absolute path, or
@@ -446,10 +448,10 @@ impl State {
     fn go_on(&self) {
         let mut inbox = self.link.inbox.lock().unwrap_or_else(|e| e.into_inner());
         inbox.running = true;
-        if !inbox.queue.is_empty()
-            && let Some(p) = &inbox.pause
-        {
-            p.request();
+        if !inbox.queue.is_empty() {
+            if let Some(p) = &inbox.pause {
+                p.request();
+            }
         }
     }
 
@@ -492,8 +494,10 @@ impl State {
                     self.clear(p);
                 }
                 let inbox = self.link.inbox.lock().unwrap_or_else(|e| e.into_inner());
-                if ends_program && let Some(i) = &inbox.interrupt {
-                    i.request();
+                if ends_program {
+                    if let Some(i) = &inbox.interrupt {
+                        i.request();
+                    }
                 }
                 Resume::Continue
             }

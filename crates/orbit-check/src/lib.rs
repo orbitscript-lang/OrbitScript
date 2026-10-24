@@ -170,7 +170,9 @@ impl std::fmt::Debug for Workspace {
 /// Makes `path` absolute (against the current directory) and folds `.` and `..` lexically, so
 /// one file has one id however it was reached. No file system access: the file needn't exist.
 fn normalize(path: &Path) -> PathBuf {
-    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = std::env::current_dir()
+        .map(|d| d.join(path))
+        .unwrap_or_else(|_| path.to_path_buf());
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {
@@ -576,10 +578,10 @@ impl Workspace {
                 vec![path]
             };
             for path in candidates {
-                if let Some(&id) = self.by_path.get(&path)
-                    && self.files[id.0 as usize].overlay.is_some()
-                {
-                    return Some(id);
+                if let Some(&id) = self.by_path.get(&path) {
+                    if self.files[id.0 as usize].overlay.is_some() {
+                        return Some(id);
+                    }
                 }
                 if self.sources.read(&path).is_some() {
                     return Some(self.intern_path(&path));

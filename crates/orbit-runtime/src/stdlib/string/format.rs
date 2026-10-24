@@ -526,33 +526,31 @@ pub(crate) fn hex_float(x: f64, precision: Option<usize>, alt: bool) -> (&'stati
     };
     // 13 hex digits of fraction; round to the precision, nearest-even.
     let mut ndigits = 13usize;
-    if let Some(p) = precision
-        && p < 13
-    {
-        let drop = (13 - p) * 4;
-        let mut keep = frac >> drop;
-        let rest = frac & ((1u64 << drop) - 1);
-        let half = 1u64 << (drop - 1);
-        let odd = if p == 0 { lead & 1 } else { keep & 1 };
-        if rest > half || (rest == half && odd == 1) {
-            keep += 1;
-            if keep >> (p * 4) != 0 {
-                // Carry into the leading digit.
-                keep &= (1u64 << (p * 4)) - 1;
-                lead += 1;
+    if let Some(p) = precision {
+        if p < 13 {
+            let drop = (13 - p) * 4;
+            let mut keep = frac >> drop;
+            let rest = frac & ((1u64 << drop) - 1);
+            let half = 1u64 << (drop - 1);
+            let odd = if p == 0 { lead & 1 } else { keep & 1 };
+            if rest > half || (rest == half && odd == 1) {
+                keep += 1;
+                if keep >> (p * 4) != 0 {
+                    // Carry into the leading digit.
+                    keep &= (1u64 << (p * 4)) - 1;
+                    lead += 1;
+                }
             }
+            frac = keep << drop;
+            ndigits = p;
         }
-        frac = keep << drop;
-        ndigits = p;
     }
     let mut digits = format!("{frac:013x}");
     digits.truncate(ndigits);
     if precision.is_none() {
         let trimmed = digits.trim_end_matches('0').len();
         digits.truncate(trimmed);
-    } else if let Some(p) = precision
-        && p > 13
-    {
+    } else if let Some(p) = precision.filter(|&p| p > 13) {
         digits.push_str(&"0".repeat(p - 13));
     }
     let mut s = lead.to_string();

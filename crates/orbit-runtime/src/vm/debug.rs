@@ -550,12 +550,12 @@ impl Runtime {
             let t = heap.get(module);
             let mut k = Value::Nil;
             while let Ok(Some((key, v))) = t.next(heap, k) {
-                if v.same(f)
-                    && let Value::Str(s) = key
-                {
-                    let mut name = prefix.to_vec();
-                    name.extend_from_slice(heap.get(s).as_bytes());
-                    return Some(name);
+                if v.same(f) {
+                    if let Value::Str(s) = key {
+                        let mut name = prefix.to_vec();
+                        name.extend_from_slice(heap.get(s).as_bytes());
+                        return Some(name);
+                    }
                 }
                 k = key;
             }
@@ -592,10 +592,10 @@ impl Runtime {
         let reg = heap.get(self.registry);
         let mut k = Value::Nil;
         while let Ok(Some((key, v))) = reg.next(heap, k) {
-            if let Value::Str(s) = key
-                && heap.get(s).as_bytes() == name
-            {
-                return v;
+            if let Value::Str(s) = key {
+                if heap.get(s).as_bytes() == name {
+                    return v;
+                }
             }
             k = key;
         }
@@ -821,10 +821,10 @@ pub(crate) fn active_lines(heap: &LuaHeap, f: Gc<Closure>) -> Vec<u32> {
 pub(crate) fn before_cell_write(heap: &mut LuaHeap, c: Gc<Cell>) {
     if let Value::Closure(f) = heap.get(c).value {
         let closure = heap.get(f);
-        if let Some(s) = heap.get(closure.proto).self_capture
-            && closure.captures.get(s as usize) == Some(&c)
-        {
-            deopt_self(heap, f, s);
+        if let Some(s) = heap.get(closure.proto).self_capture {
+            if closure.captures.get(s as usize) == Some(&c) {
+                deopt_self(heap, f, s);
+            }
         }
     }
 }

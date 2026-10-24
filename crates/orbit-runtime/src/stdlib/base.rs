@@ -197,10 +197,10 @@ pub(crate) fn next(ctx: &mut NativeCtx<'_>) -> R {
 
 fn select(ctx: &mut NativeCtx<'_>) -> R {
     let n = ctx.nargs() as i64;
-    if let Value::Str(s) = ctx.arg(0)
-        && ctx.bytes(s) == b"#"
-    {
-        return ctx.ret([Value::Int(n - 1)]);
+    if let Value::Str(s) = ctx.arg(0) {
+        if ctx.bytes(s) == b"#" {
+            return ctx.ret([Value::Int(n - 1)]);
+        }
     }
     let i = ctx.check_int(0)?;
     let from = if i < 0 {
@@ -219,15 +219,15 @@ fn select(ctx: &mut NativeCtx<'_>) -> R {
 fn error(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.arg(0);
     let level = ctx.opt_int(1, 1)?;
-    if let Value::Str(s) = v
-        && level > 0
-    {
-        let prefix = ctx.where_(level as usize);
-        if !prefix.is_empty() {
-            let mut text = prefix.into_bytes();
-            text.extend_from_slice(ctx.bytes(s));
-            let msg = ctx.new_str_owned(text);
-            return Err(ctx.error_value(msg));
+    if let Value::Str(s) = v {
+        if level > 0 {
+            let prefix = ctx.where_(level as usize);
+            if !prefix.is_empty() {
+                let mut text = prefix.into_bytes();
+                text.extend_from_slice(ctx.bytes(s));
+                let msg = ctx.new_str_owned(text);
+                return Err(ctx.error_value(msg));
+            }
         }
     }
     Err(ctx.error_value(v))
@@ -294,15 +294,15 @@ fn warn(ctx: &mut NativeCtx<'_>) -> R {
     }
     // A single message starting with `@` is a control message; unknown ones
     // are ignored.
-    if let [msg] = parts[..]
-        && let [b'@', control @ ..] = ctx.bytes(msg)
-    {
-        match control {
-            b"on" => ctx.vm.rt.warnings = true,
-            b"off" => ctx.vm.rt.warnings = false,
-            _ => {}
+    if let [msg] = parts[..] {
+        if let [b'@', control @ ..] = ctx.bytes(msg) {
+            match control {
+                b"on" => ctx.vm.rt.warnings = true,
+                b"off" => ctx.vm.rt.warnings = false,
+                _ => {}
+            }
+            return Ok(NativeReturn::Return(0));
         }
-        return Ok(NativeReturn::Return(0));
     }
     if ctx.vm.rt.warnings {
         let mut text = Vec::new();

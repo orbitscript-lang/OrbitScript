@@ -38,11 +38,11 @@ fn stub_names(text: &str) -> BTreeSet<String> {
 fn stub_methods(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for line in text.lines() {
-        if let Some(r) = line.trim_start().strip_prefix("pub fn ")
-            && line.starts_with("    ")
-        {
-            let end = r.find('(').unwrap_or(r.len());
-            out.insert(r[..end].to_string());
+        if let Some(r) = line.trim_start().strip_prefix("pub fn ") {
+            if line.starts_with("    ") {
+                let end = r.find('(').unwrap_or(r.len());
+                out.insert(r[..end].to_string());
+            }
         }
     }
     out

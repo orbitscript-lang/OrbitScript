@@ -22,7 +22,8 @@ pub(crate) fn os_path(bytes: &[u8]) -> PathBuf {
 }
 
 /// The bytes of an OS string (lossy outside Unix).
-#[allow(dead_code, reason = "not every feature set reads OS strings")]
+// not every feature set reads OS strings
+#[allow(dead_code)]
 pub(crate) fn os_bytes(s: &OsStr) -> Vec<u8> {
     #[cfg(unix)]
     {
@@ -66,7 +67,8 @@ pub(crate) fn os_error_code(e: &io::Error) -> i64 {
 /// Create a new, empty file with a unique name in the temporary directory
 /// (`os.tmpname`, `io.tmpfile`). Creating it, rather than only picking a
 /// name, means no other process can take the name first.
-#[allow(dead_code, reason = "used by io and os, which are features")]
+// used by io and os, which are features
+#[allow(dead_code)]
 pub(crate) fn temp_file() -> io::Result<(PathBuf, std::fs::File)> {
     use std::hash::{BuildHasher, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -129,7 +131,8 @@ pub(crate) fn file_failure(e: &io::Error, name: Option<&[u8]>) -> FileFailure {
 }
 
 /// The shell command for `cmd`.
-#[allow(dead_code, reason = "used by io and os, which are features")]
+// used by io and os, which are features
+#[allow(dead_code)]
 pub(crate) fn shell(cmd: &OsStr) -> std::process::Command {
     #[cfg(windows)]
     {
@@ -147,7 +150,8 @@ pub(crate) fn shell(cmd: &OsStr) -> std::process::Command {
 
 /// `true|nil, "exit"|"signal", code` for a finished child, as
 /// `os.execute` and a popen file's `close` return it.
-#[allow(dead_code, reason = "used by io and os, which are features")]
+// used by io and os, which are features
+#[allow(dead_code)]
 pub(crate) fn exit_status<'s>(
     c: &'s Call<'s>,
     status: std::process::ExitStatus,
@@ -160,7 +164,8 @@ pub(crate) fn exit_status<'s>(
 pub(crate) type ExitResults = (Option<bool>, &'static str, i64);
 
 /// [`exit_status`]'s results, for natives on the stack API.
-#[allow(dead_code, reason = "used by io and os, which are features")]
+// used by io and os, which are features
+#[allow(dead_code)]
 pub(crate) fn exit_results(status: std::process::ExitStatus) -> ExitResults {
     let (what, code): (&'static str, i64) = match status.code() {
         Some(code) => ("exit", i64::from(code)),
@@ -178,7 +183,8 @@ pub(crate) fn exit_results(status: std::process::ExitStatus) -> ExitResults {
 
 /// Flush the output `print` and `io.write` share, so a child process or
 /// the exit doesn't overtake it.
-#[allow(dead_code, reason = "used by io and os, which are features")]
+// used by io and os, which are features
+#[allow(dead_code)]
 pub(crate) fn flush_stdout(c: &orbit::Scope<'_>) {
     c.with_stdout(|out| {
         let _ = out.flush();

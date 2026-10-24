@@ -253,10 +253,10 @@ impl Vm {
                     Ok(r) => r,
                     Err(e) => return Err(self.native_raised(id, func, e)),
                 };
-                if let NativeReturn::Return(n) = r
-                    && self.rt.stack.hook.wants(crate::vm::hook::RETURN)
-                {
-                    self.native_return_hook(func, id, n).map_err(Exc::Lua)?;
+                if let NativeReturn::Return(n) = r {
+                    if self.rt.stack.hook.wants(crate::vm::hook::RETURN) {
+                        self.native_return_hook(func, id, n).map_err(Exc::Lua)?;
+                    }
                 }
                 self.native_returned(r, None, func, want, id)
             }
@@ -427,10 +427,10 @@ pub(crate) fn enter_lua_frame_general(
         (func + 1, 0)
     };
     let end = base + nregs.max(np);
-    if end > rt.limits.max_stack
-        && let Some(x) = overflow(rt, end)
-    {
-        return Err(x);
+    if end > rt.limits.max_stack {
+        if let Some(x) = overflow(rt, end) {
+            return Err(x);
+        }
     }
     let regs = &mut rt.stack.regs;
     if regs.len() < base + WINDOW {
@@ -678,41 +678,44 @@ impl Vm {
             Exc::Rt(msg, operand) => {
                 let mut text = self.rt.error_where(&self.heap, 1);
                 text.push_str(&msg);
-                if let Some(op) = operand
-                    && let Some(f) = self.rt.stack.frames.last()
-                    && let FrameKind::Lua { closure, .. } = f.kind
-                    && !crate::vm::debug::is_builtin(&self.heap, closure)
-                {
-                    let proto = self.heap.get(self.heap.get(closure).proto);
-                    let pc = f.pc.saturating_sub(1);
-                    if op == 0
-                        && matches!(
-                            proto.code.code.get(pc as usize),
-                            Some(Op::GenericCall { .. })
-                        )
-                    {
-                        text.push_str(" (for iterator 'for iterator')");
-                    } else if let Some(origin) = proto.debug.origin(pc, op) {
-                        let (kind, name) = match origin {
-                            Origin::Local(n) => ("local", n),
-                            Origin::Global(n) => ("global", n),
-                            Origin::Field(n) => ("field", n),
-                            Origin::Upvalue(n) => ("upvalue", n),
-                            Origin::Method(n) => ("method", n),
-                            Origin::Constant(n) => ("constant", n),
-                        };
-                        let described = format!(" ({kind} '{}')", String::from_utf8_lossy(name));
-                        // `number (local 'x') has no integer representation`: the name goes
-                        // after the subject, not at the end.
-                        match msg.strip_prefix("number ") {
-                            Some(rest) if msg == ops::NO_INTEGER_REP => {
-                                text.truncate(text.len() - msg.len());
-                                text.push_str("number");
-                                text.push_str(&described);
-                                text.push(' ');
-                                text.push_str(rest);
+                if let Some(op) = operand {
+                    if let Some(f) = self.rt.stack.frames.last() {
+                        if let FrameKind::Lua { closure, .. } = f.kind {
+                            if !crate::vm::debug::is_builtin(&self.heap, closure) {
+                                let proto = self.heap.get(self.heap.get(closure).proto);
+                                let pc = f.pc.saturating_sub(1);
+                                if op == 0
+                                    && matches!(
+                                        proto.code.code.get(pc as usize),
+                                        Some(Op::GenericCall { .. })
+                                    )
+                                {
+                                    text.push_str(" (for iterator 'for iterator')");
+                                } else if let Some(origin) = proto.debug.origin(pc, op) {
+                                    let (kind, name) = match origin {
+                                        Origin::Local(n) => ("local", n),
+                                        Origin::Global(n) => ("global", n),
+                                        Origin::Field(n) => ("field", n),
+                                        Origin::Upvalue(n) => ("upvalue", n),
+                                        Origin::Method(n) => ("method", n),
+                                        Origin::Constant(n) => ("constant", n),
+                                    };
+                                    let described =
+                                        format!(" ({kind} '{}')", String::from_utf8_lossy(name));
+                                    // `number (local 'x') has no integer representation`: the name goes
+                                    // after the subject, not at the end.
+                                    match msg.strip_prefix("number ") {
+                                        Some(rest) if msg == ops::NO_INTEGER_REP => {
+                                            text.truncate(text.len() - msg.len());
+                                            text.push_str("number");
+                                            text.push_str(&described);
+                                            text.push(' ');
+                                            text.push_str(rest);
+                                        }
+                                        _ => text.push_str(&described),
+                                    }
+                                }
                             }
-                            _ => text.push_str(&described),
                         }
                     }
                 }
@@ -803,23 +806,24 @@ impl Vm {
                 FrameKind::Native { call_at, .. } => call_at,
                 _ => f.func,
             };
-            if closes
-                && let Some(&t) = self.rt.stack.aux.tbc.last()
-                && t >= limit
-            {
-                if matches!(
-                    f.kind,
-                    FrameKind::Boundary { native: false, .. } | FrameKind::Hook
-                ) && e.traceback.is_none()
-                    && self.rt.unwind_traceback.is_none()
-                {
-                    self.rt.unwind_traceback = Some(self.rt.traceback(&self.heap, None, 1));
-                }
-                match self.start_close(e.value, idx, closing) {
-                    Ok(flow) => return Ok(flow),
-                    Err(x) => {
-                        e = self.make_error(x);
-                        continue;
+            if closes {
+                if let Some(&t) = self.rt.stack.aux.tbc.last() {
+                    if t >= limit {
+                        if matches!(
+                            f.kind,
+                            FrameKind::Boundary { native: false, .. } | FrameKind::Hook
+                        ) && e.traceback.is_none()
+                            && self.rt.unwind_traceback.is_none()
+                        {
+                            self.rt.unwind_traceback = Some(self.rt.traceback(&self.heap, None, 1));
+                        }
+                        match self.start_close(e.value, idx, closing) {
+                            Ok(flow) => return Ok(flow),
+                            Err(x) => {
+                                e = self.make_error(x);
+                                continue;
+                            }
+                        }
                     }
                 }
             }

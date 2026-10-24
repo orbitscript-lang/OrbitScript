@@ -5,6 +5,7 @@ mod common;
 
 use common::*;
 use orbit_gc::{Phase, WeakMode};
+use std::mem::size_of;
 
 #[test]
 fn unreachable_objects_and_cycles_are_collected() {

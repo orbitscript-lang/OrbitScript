@@ -11,6 +11,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
+use std::mem::size_of;
 
 use orbit::stack::{
     Continuation, Control, InterruptHandler, Native, NativeRef, Outcome, Raised, Return, Stack,
@@ -35,7 +36,7 @@ type CFn = unsafe extern "C" fn(*mut LState) -> c_int;
 /// `lua_KFunction`.
 type KFn = unsafe extern "C" fn(*mut LState, c_int, isize) -> c_int;
 
-unsafe extern "C" {
+extern "C" {
     fn orbit_capi_newstate(rs: *const c_void, table: *const RTable) -> *mut LState;
     fn orbit_capi_table_size() -> usize;
     fn orbit_capi_freestate(l: *mut LState);
@@ -443,11 +444,11 @@ fn thread_base(b: &Bridge, t: ThreadRef) -> Option<usize> {
 
 /// Set what [`ThreadState`] keeps for `t` after a resume or close.
 fn set_thread(b: &Bridge, t: ThreadRef, base: Option<usize>, status: c_int) {
-    if let Some(e) = b.threads.borrow_mut().get_mut(&t.slot())
-        && e.thread == t
-    {
-        e.base = base;
-        e.status = status;
+    if let Some(e) = b.threads.borrow_mut().get_mut(&t.slot()) {
+        if e.thread == t {
+            e.base = base;
+            e.status = status;
+        }
     }
 }
 
@@ -1222,17 +1223,17 @@ extern "C" fn orbit_r_callk(
     k: Option<KFn>,
 ) {
     let req = entry!(l, None, |b, c| {
-        if let Some(k) = k
-            && can_continue(b, c, l)
-        {
-            let nargs = c.check_call(nargs)?;
-            return Ok(Some(Request::Call {
-                nargs,
-                nresults,
-                protected: false,
-                k,
-                kctx,
-            }));
+        if let Some(k) = k {
+            if can_continue(b, c, l) {
+                let nargs = c.check_call(nargs)?;
+                return Ok(Some(Request::Call {
+                    nargs,
+                    nresults,
+                    protected: false,
+                    k,
+                    kctx,
+                }));
+            }
         }
         c.call(nargs, nresults).map(|()| None)
     });
@@ -1252,18 +1253,17 @@ extern "C" fn orbit_r_pcallk(
     k: Option<KFn>,
 ) -> c_int {
     let req = entry!(l, Err(abi::ERRRUN), |b, c| {
-        if let Some(k) = k
-            && errfunc == 0
-            && can_continue(b, c, l)
-        {
-            let nargs = c.check_call(nargs)?;
-            return Ok(Ok(Request::Call {
-                nargs,
-                nresults,
-                protected: true,
-                k,
-                kctx,
-            }));
+        if let Some(k) = k {
+            if errfunc == 0 && can_continue(b, c, l) {
+                let nargs = c.check_call(nargs)?;
+                return Ok(Ok(Request::Call {
+                    nargs,
+                    nresults,
+                    protected: true,
+                    k,
+                    kctx,
+                }));
+            }
         }
         c.pcall(nargs, nresults, errfunc).map(|s| Err(s as c_int))
     });
@@ -1608,19 +1608,19 @@ extern "C" fn orbit_r_setlocal(l: *mut LState, ar: *const LuaDebug, n: c_int) ->
 /// A static C string for one of `getinfo`'s fixed words.
 fn word(w: &str) -> *const c_char {
     let s: &'static std::ffi::CStr = match w {
-        "Lua" => c"Lua",
-        "C" => c"C",
-        "main" => c"main",
-        "global" => c"global",
-        "local" => c"local",
-        "method" => c"method",
-        "field" => c"field",
-        "upvalue" => c"upvalue",
-        "constant" => c"constant",
-        "for iterator" => c"for iterator",
-        "metamethod" => c"metamethod",
-        "hook" => c"hook",
-        _ => c"",
+        "Lua" => cstr(b"Lua\0"),
+        "C" => cstr(b"C\0"),
+        "main" => cstr(b"main\0"),
+        "global" => cstr(b"global\0"),
+        "local" => cstr(b"local\0"),
+        "method" => cstr(b"method\0"),
+        "field" => cstr(b"field\0"),
+        "upvalue" => cstr(b"upvalue\0"),
+        "constant" => cstr(b"constant\0"),
+        "for iterator" => cstr(b"for iterator\0"),
+        "metamethod" => cstr(b"metamethod\0"),
+        "hook" => cstr(b"hook\0"),
+        _ => cstr(b"\0"),
     };
     s.as_ptr()
 }
@@ -1746,7 +1746,7 @@ mod dl {
     pub const RTLD_GLOBAL: c_int = 0x8;
     pub const RTLD_LOCAL: c_int = 0;
 
-    unsafe extern "C" {
+    extern "C" {
         pub fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
         pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         pub fn dlerror() -> *const c_char;
@@ -1849,7 +1849,7 @@ extern "C" fn orbit_r_setwarnf(l: *mut LState, f: Option<WarnFn>, ud: *mut c_voi
 }
 
 #[cfg(feature = "host")]
-unsafe extern "C" {
+extern "C" {
     fn orbit_capi_write_stdout(p: *const c_char, n: usize) -> usize;
     fn orbit_capi_flush_stdout() -> c_int;
 }
@@ -1889,7 +1889,7 @@ const STATE_NO_DEBUGGER: std::ffi::c_uint = 1;
 /// the host's window ([`orbit::Isolate::host_stack`]). Null if memory runs
 /// out.
 #[cfg(feature = "host")]
-#[unsafe(no_mangle)]
+#[no_mangle]
 extern "C" fn orbit_r_newstate(flags: std::ffi::c_uint) -> *mut LState {
     let allowed = flags & STATE_NO_DEBUGGER == 0;
     let debugger = if allowed {
@@ -1922,7 +1922,7 @@ extern "C" fn orbit_r_newstate(flags: std::ffi::c_uint) -> *mut LState {
 /// to attach to `l` and the program's other states, as
 /// [`crate::debug::listen`] answers; -1 if `l` allows no debugger.
 #[cfg(feature = "host")]
-#[unsafe(no_mangle)]
+#[no_mangle]
 extern "C" fn orbit_r_debug_listen(l: *mut LState, announce: c_int) -> c_int {
     // SAFETY: `l` is a live state; its bridge lives as long as it does.
     let b = unsafe { &*((*l).rs as *const Bridge) };
@@ -1934,7 +1934,7 @@ extern "C" fn orbit_r_debug_listen(l: *mut LState, announce: c_int) -> c_int {
 
 /// The program is exiting: remove the debug server's socket.
 #[cfg(feature = "host")]
-#[unsafe(no_mangle)]
+#[no_mangle]
 extern "C" fn orbit_r_debug_stop() {
     crate::debug::stop();
 }
@@ -1962,4 +1962,9 @@ extern "C" fn orbit_r_close(l: *mut LState) {
         drop(Box::from_raw(host));
         drop(Box::from_raw(iso));
     }
+}
+
+/// A C string literal (`c"..."` literals are stable only from Rust 1.77).
+fn cstr(bytes: &'static [u8]) -> &'static std::ffi::CStr {
+    std::ffi::CStr::from_bytes_with_nul(bytes).expect("one NUL, at the end")
 }

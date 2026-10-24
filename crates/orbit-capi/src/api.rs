@@ -26,8 +26,13 @@ pub(crate) mod abi {
     pub const YIELD: i32 = 1;
     pub const ERRRUN: i32 = 2;
     pub const ERRSYNTAX: i32 = 3;
+    // Read only by the `CompareOp` check below, which older rustc (1.75)
+    // doesn't count as a use.
+    #[allow(dead_code)]
     pub const OPEQ: i32 = 0;
+    #[allow(dead_code)]
     pub const OPLT: i32 = 1;
+    #[allow(dead_code)]
     pub const OPLE: i32 = 2;
     pub const GCSTOP: i32 = 0;
     pub const GCRESTART: i32 = 1;
@@ -119,7 +124,7 @@ pub(crate) fn arith(c: &mut Stack<'_>, op: i32) -> Res<()> {
 
 /// A registry key no module can make: the address of a static of ours.
 fn private_key(key: &'static u8) -> usize {
-    std::ptr::from_ref(key) as usize
+    key as *const u8 as usize
 }
 
 static C_FUNCTIONS: u8 = 0;

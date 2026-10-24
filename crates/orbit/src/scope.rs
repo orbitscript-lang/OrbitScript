@@ -136,11 +136,11 @@ impl<'s> Scope<'s> {
     /// An API error, as the VM raises it: its value when it came from a
     /// script, otherwise its message.
     pub(crate) fn raise(&self, stack: &mut Stack<'_>, e: Error) -> Raised {
-        if let Some(p) = e.value()
-            && let Some(slot) = p.slot_in(&self.shared)
-        {
-            stack.push_pinned(slot);
-            return stack.error_from_top();
+        if let Some(p) = e.value() {
+            if let Some(slot) = p.slot_in(&self.shared) {
+                stack.push_pinned(slot);
+                return stack.error_from_top();
+            }
         }
         if e.kind() == ErrorKind::Memory {
             return stack.memory_error();

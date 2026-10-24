@@ -66,7 +66,7 @@ mod macos {
         let pid = c_int::try_from(pid).ok()?;
         let info = sysctl(&mut [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid])?;
         let at = std::mem::offset_of!(ExternProc, p_sigcatch);
-        let mask = info.get(at..at + size_of::<libc::sigset_t>())?;
+        let mask = info.get(at..at + std::mem::size_of::<libc::sigset_t>())?;
         Some(libc::sigset_t::from_ne_bytes(mask.try_into().ok()?))
     }
 

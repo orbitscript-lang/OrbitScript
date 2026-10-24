@@ -1,3 +1,8 @@
+# Newer cargo picks dependency versions that still support our MSRV
+# (`rust-version` in Cargo.toml) when it resolves; cargo 1.75 ignores this.
+[resolver]
+incompatible-rust-versions = "fallback"
+
 [alias]
 # `cargo testkit conformance --interp target/release/orbit`, see tests/README.md
 testkit = "run --quiet --release -p orbit-testkit --"

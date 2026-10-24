@@ -10,14 +10,16 @@ pub fn page_size() -> usize {
     *PAGE_SIZE.get_or_init(|| {
         #[cfg(unix)]
         {
-            #[allow(unsafe_code, reason = "sysconf FFI to query OS page size")]
+            // sysconf FFI to query OS page size
+            #[allow(unsafe_code)]
             let sz = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
             if sz > 0 { sz as usize } else { 4096 }
         }
         #[cfg(windows)]
         {
             use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
-            #[allow(unsafe_code, reason = "GetSystemInfo FFI to query OS page size")]
+            // GetSystemInfo FFI to query OS page size
+            #[allow(unsafe_code)]
             unsafe {
                 let mut info = std::mem::zeroed::<SYSTEM_INFO>();
                 GetSystemInfo(&mut info);
@@ -50,7 +52,8 @@ pub fn try_reserve_address_space(bytes: usize) -> Option<NonNull<u8>> {
 
     #[cfg(unix)]
     {
-        #[allow(unsafe_code, reason = "mmap to reserve address space with PROT_NONE")]
+        // mmap to reserve address space with PROT_NONE
+        #[allow(unsafe_code)]
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -70,10 +73,8 @@ pub fn try_reserve_address_space(bytes: usize) -> Option<NonNull<u8>> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Memory::{MEM_RESERVE, PAGE_NOACCESS, VirtualAlloc};
-        #[allow(
-            unsafe_code,
-            reason = "VirtualAlloc to reserve address space with PAGE_NOACCESS"
-        )]
+        // VirtualAlloc to reserve address space with PAGE_NOACCESS
+        #[allow(unsafe_code)]
         let ptr = unsafe { VirtualAlloc(std::ptr::null_mut(), bytes, MEM_RESERVE, PAGE_NOACCESS) };
         NonNull::new(ptr.cast::<u8>())
     }
@@ -90,7 +91,8 @@ pub fn address_space_limit() -> Option<usize> {
             rlim_cur: 0,
             rlim_max: 0,
         };
-        #[allow(unsafe_code, reason = "getrlimit FFI to read the address-space limit")]
+        // getrlimit FFI to read the address-space limit
+        #[allow(unsafe_code)]
         let res = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut lim) };
         if res != 0 || lim.rlim_cur == libc::RLIM_INFINITY {
             return None;
@@ -114,12 +116,14 @@ pub fn commit_pages(base: NonNull<u8>, start_offset: usize, end_offset: usize) {
     let start_aligned = align_down(start_offset, ps);
     let end_aligned = align_up(end_offset, ps);
     let len = end_aligned - start_aligned;
-    #[allow(unsafe_code, reason = "pointer arithmetic within reserved range")]
+    // pointer arithmetic within reserved range
+    #[allow(unsafe_code)]
     let ptr = unsafe { base.as_ptr().add(start_aligned) };
 
     #[cfg(unix)]
     {
-        #[allow(unsafe_code, reason = "mprotect to commit read/write pages")]
+        // mprotect to commit read/write pages
+        #[allow(unsafe_code)]
         let res = unsafe {
             libc::mprotect(
                 ptr as *mut libc::c_void,
@@ -135,10 +139,8 @@ pub fn commit_pages(base: NonNull<u8>, start_offset: usize, end_offset: usize) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Memory::{MEM_COMMIT, PAGE_READWRITE, VirtualAlloc};
-        #[allow(
-            unsafe_code,
-            reason = "VirtualAlloc to commit pages with PAGE_READWRITE"
-        )]
+        // VirtualAlloc to commit pages with PAGE_READWRITE
+        #[allow(unsafe_code)]
         let res = unsafe { VirtualAlloc(ptr as *mut _, len, MEM_COMMIT, PAGE_READWRITE) };
         if res.is_null() {
             panic!("orbit-virtmem: failed to commit {len} bytes of virtual memory");
@@ -159,15 +161,14 @@ pub fn decommit_pages(base: NonNull<u8>, start_offset: usize, end_offset: usize)
         return;
     }
     let len = end_aligned - start_aligned;
-    #[allow(unsafe_code, reason = "pointer arithmetic within reserved range")]
+    // pointer arithmetic within reserved range
+    #[allow(unsafe_code)]
     let ptr = unsafe { base.as_ptr().add(start_aligned) };
 
     #[cfg(unix)]
     {
-        #[allow(
-            unsafe_code,
-            reason = "mmap MAP_FIXED with PROT_NONE to immediately decommit physical pages"
-        )]
+        // mmap MAP_FIXED with PROT_NONE to immediately decommit physical pages
+        #[allow(unsafe_code)]
         unsafe {
             let res = libc::mmap(
                 ptr as *mut libc::c_void,
@@ -186,7 +187,8 @@ pub fn decommit_pages(base: NonNull<u8>, start_offset: usize, end_offset: usize)
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Memory::{MEM_DECOMMIT, VirtualFree};
-        #[allow(unsafe_code, reason = "VirtualFree to decommit pages")]
+        // VirtualFree to decommit pages
+        #[allow(unsafe_code)]
         unsafe {
             VirtualFree(ptr as *mut _, len, MEM_DECOMMIT);
         }
@@ -198,10 +200,8 @@ pub fn free_address_space(base: NonNull<u8>, bytes: usize) {
     #[cfg(unix)]
     {
         let bytes = align_up(bytes, page_size());
-        #[allow(
-            unsafe_code,
-            reason = "munmap to release reserved virtual address range"
-        )]
+        // munmap to release reserved virtual address range
+        #[allow(unsafe_code)]
         unsafe {
             libc::munmap(base.as_ptr() as *mut libc::c_void, bytes);
         }
@@ -212,7 +212,8 @@ pub fn free_address_space(base: NonNull<u8>, bytes: usize) {
     {
         let _ = bytes;
         use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
-        #[allow(unsafe_code, reason = "VirtualFree to release address range")]
+        // VirtualFree to release address range
+        #[allow(unsafe_code)]
         unsafe {
             VirtualFree(base.as_ptr() as *mut _, 0, MEM_RELEASE);
         }

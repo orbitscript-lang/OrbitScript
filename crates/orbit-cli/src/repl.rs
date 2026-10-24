@@ -110,8 +110,10 @@ impl Runner {
     /// values. There's no readline to load, so `LUA_READLINELIB` names a library that can't be
     /// loaded.
     pub(crate) fn repl(&mut self, ignore_env: bool) {
-        if !ignore_env && let Ok(lib) = std::env::var("LUA_READLINELIB") {
-            self.warn(&format!("unable to load readline library '{lib}'"));
+        if !ignore_env {
+            if let Ok(lib) = std::env::var("LUA_READLINELIB") {
+                self.warn(&format!("unable to load readline library '{lib}'"));
+            }
         }
         self.start_editor();
         while let Some(line) = self.read_line(false) {
@@ -147,12 +149,12 @@ impl Runner {
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    if msg.ends_with("<eof>")
-                        && let Some(more) = self.read_line(true)
-                    {
-                        buf.push(b'\n');
-                        buf.extend_from_slice(&more);
-                        continue;
+                    if msg.ends_with("<eof>") {
+                        if let Some(more) = self.read_line(true) {
+                            buf.push(b'\n');
+                            buf.extend_from_slice(&more);
+                            continue;
+                        }
                     }
                     self.add_history(&buf);
                     self.report(&msg);
@@ -278,7 +280,10 @@ impl Runner {
 /// Whether an interactive line declares a local, which the next line can't
 /// see.
 fn starts_with_local(line: &[u8]) -> bool {
-    let rest = line.trim_ascii_start();
+    let rest = &line[line
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(line.len())..];
     rest.strip_prefix(b"local").is_some_and(|r| {
         !r.first()
             .is_some_and(|&c| c == b'_' || c.is_ascii_alphanumeric())

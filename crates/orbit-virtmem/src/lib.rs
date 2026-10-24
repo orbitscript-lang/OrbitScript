@@ -134,10 +134,8 @@ impl<T> VmBuffer<T> {
 
         if new_len > self.len {
             for i in self.len..new_len {
-                #[allow(
-                    unsafe_code,
-                    reason = "initializing slot within committed virtual memory"
-                )]
+                // initializing slot within committed virtual memory
+                #[allow(unsafe_code)]
                 unsafe {
                     std::ptr::write(self.base.as_ptr().add(i), f());
                 }
@@ -153,7 +151,8 @@ impl<T> VmBuffer<T> {
     pub fn truncate(&mut self, new_len: usize) {
         if new_len < self.len {
             for i in new_len..self.len {
-                #[allow(unsafe_code, reason = "dropping elements in truncated range")]
+                // dropping elements in truncated range
+                #[allow(unsafe_code)]
                 unsafe {
                     std::ptr::drop_in_place(self.base.as_ptr().add(i));
                 }
@@ -188,7 +187,8 @@ impl<T> Deref for VmBuffer<T> {
 
     #[inline(always)]
     fn deref(&self) -> &[T] {
-        #[allow(unsafe_code, reason = "converting initialized range into slice")]
+        // converting initialized range into slice
+        #[allow(unsafe_code)]
         unsafe {
             std::slice::from_raw_parts(self.base.as_ptr(), self.len)
         }
@@ -198,10 +198,8 @@ impl<T> Deref for VmBuffer<T> {
 impl<T> DerefMut for VmBuffer<T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut [T] {
-        #[allow(
-            unsafe_code,
-            reason = "converting initialized range into mutable slice"
-        )]
+        // converting initialized range into mutable slice
+        #[allow(unsafe_code)]
         unsafe {
             std::slice::from_raw_parts_mut(self.base.as_ptr(), self.len)
         }
@@ -235,8 +233,10 @@ impl<T> Drop for VmBuffer<T> {
     }
 }
 
-#[allow(unsafe_code, reason = "VmBuffer owns its virtual memory buffer")]
+// VmBuffer owns its virtual memory buffer
+#[allow(unsafe_code)]
 unsafe impl<T: Send> Send for VmBuffer<T> {}
 
-#[allow(unsafe_code, reason = "VmBuffer derefs to &[T]")]
+// VmBuffer derefs to &[T]
+#[allow(unsafe_code)]
 unsafe impl<T: Sync> Sync for VmBuffer<T> {}

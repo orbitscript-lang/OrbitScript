@@ -362,7 +362,7 @@ fn broken_files_keep_the_declarations_around_the_break() {
                 StmtKind::Local { names, .. } => names.len(),
                 _ => 1,
             };
-            item_spans.extend(std::iter::repeat_n(s, n));
+            item_spans.extend(std::iter::repeat(s).take(n));
         }
         let toks = tokens(&src);
         for (i, &(line, start, end)) in toks.iter().enumerate() {

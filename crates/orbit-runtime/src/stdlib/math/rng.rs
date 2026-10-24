@@ -4,7 +4,8 @@
 //! starts as `{n1, 0xff, n2, 0}` and the first 16 outputs are discarded
 //! (see docs/design/stdlib-string-table-math.md for how this was found).
 
-use std::hash::{BuildHasher, Hasher, RandomState};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]

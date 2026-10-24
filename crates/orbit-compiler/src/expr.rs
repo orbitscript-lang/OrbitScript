@@ -43,10 +43,10 @@ impl FuncState<'_> {
     /// Evaluates `e` into some register: an uncaptured local's own register, or a new
     /// temporary on top of the stack.
     pub(crate) fn expr_any(&mut self, e: ExprId) -> Result<(u8, Option<Origin>)> {
-        if let ExprKind::Local(l) = self.f.expr(e).kind
-            && let Slot::Reg(r) = self.slots[l.index()]
-        {
-            return Ok((r, self.local_origin(l)));
+        if let ExprKind::Local(l) = self.f.expr(e).kind {
+            if let Slot::Reg(r) = self.slots[l.index()] {
+                return Ok((r, self.local_origin(l)));
+            }
         }
         let r = self.alloc()?;
         let origin = self.expr_to(e, r)?;
@@ -356,9 +356,7 @@ impl FuncState<'_> {
                     Origin::Field(self.name_bytes(s))
                 },
             )
-        } else if let Some(ConstVal::Int(k)) = key_const
-            && let Ok(key) = u16::try_from(k)
-        {
+        } else if let Some(key) = key_const.and_then(ConstVal::u16_key) {
             let name: &[u8] = if vararg_table { b"?" } else { b"integer index" };
             self.at_offset(at);
             (
@@ -460,19 +458,19 @@ impl FuncState<'_> {
             }
             _ => {
                 // `k op x` with a numeric literal on the left reads it from the constant table.
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
-                    && let Some(k) = self.number_operand(lhs)?
-                {
-                    let (b, b_origin) = self.expr_any(rhs)?;
-                    self.at_offset(at);
-                    let pc = self.emit(match op {
-                        BinOp::Add => Op::KAdd { dst, k, b },
-                        BinOp::Sub => Op::KSub { dst, k, b },
-                        BinOp::Mul => Op::KMul { dst, k, b },
-                        _ => Op::KDiv { dst, k, b },
-                    });
-                    self.origin(pc, 1, b_origin);
-                    return Ok(None);
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                    if let Some(k) = self.number_operand(lhs)? {
+                        let (b, b_origin) = self.expr_any(rhs)?;
+                        self.at_offset(at);
+                        let pc = self.emit(match op {
+                            BinOp::Add => Op::KAdd { dst, k, b },
+                            BinOp::Sub => Op::KSub { dst, k, b },
+                            BinOp::Mul => Op::KMul { dst, k, b },
+                            _ => Op::KDiv { dst, k, b },
+                        });
+                        self.origin(pc, 1, b_origin);
+                        return Ok(None);
+                    }
                 }
                 let from = self.next_pc();
                 let (a, a_origin) = self.operand(lhs, dst)?;
@@ -502,20 +500,21 @@ impl FuncState<'_> {
                         | BinOp::IDiv
                         | BinOp::Mod
                         | BinOp::Pow
-                ) && let Some(k) = self.number_operand(rhs)?
-                {
-                    self.at_offset(at);
-                    let pc = self.emit(match op {
-                        BinOp::Add => Op::AddK { dst, a, k },
-                        BinOp::Sub => Op::SubK { dst, a, k },
-                        BinOp::Mul => Op::MulK { dst, a, k },
-                        BinOp::Div => Op::DivK { dst, a, k },
-                        BinOp::IDiv => Op::IDivK { dst, a, k },
-                        BinOp::Mod => Op::ModK { dst, a, k },
-                        _ => Op::PowK { dst, a, k },
-                    });
-                    self.origin(pc, 0, a_origin);
-                    return Ok(None);
+                ) {
+                    if let Some(k) = self.number_operand(rhs)? {
+                        self.at_offset(at);
+                        let pc = self.emit(match op {
+                            BinOp::Add => Op::AddK { dst, a, k },
+                            BinOp::Sub => Op::SubK { dst, a, k },
+                            BinOp::Mul => Op::MulK { dst, a, k },
+                            BinOp::Div => Op::DivK { dst, a, k },
+                            BinOp::IDiv => Op::IDivK { dst, a, k },
+                            BinOp::Mod => Op::ModK { dst, a, k },
+                            _ => Op::PowK { dst, a, k },
+                        });
+                        self.origin(pc, 0, a_origin);
+                        return Ok(None);
+                    }
                 }
                 let (b, b_origin) = self.expr_any(rhs)?;
                 self.at_offset(at);

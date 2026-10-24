@@ -2,17 +2,18 @@
 //! features in Cargo.toml) and hashes the boundary's declarations, which
 //! the program and `liborbit` compare before anything crosses (ADR-10):
 //! stabby checks method names, not their signatures.
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 fn main() {
-    println!("cargo::rustc-check-cfg=cfg(runtime_backend)");
-    println!("cargo::rustc-check-cfg=cfg(shared_backend)");
+    println!("cargo:rustc-check-cfg=cfg(runtime_backend)");
+    println!("cargo:rustc-check-cfg=cfg(shared_backend)");
     let runtime = std::env::var_os("CARGO_FEATURE_RUNTIME").is_some();
     let shared = std::env::var_os("CARGO_FEATURE_SHARED").is_some();
     if runtime {
-        println!("cargo::rustc-cfg=runtime_backend");
+        println!("cargo:rustc-cfg=runtime_backend");
     } else if shared {
-        println!("cargo::rustc-cfg=shared_backend");
+        println!("cargo:rustc-cfg=shared_backend");
         // `orbit-lib` builds the library into the same profile directory
         // (OUT_DIR is <profile>/build/orbit-<hash>/out); `build.sh` builds
         // it first.
@@ -20,11 +21,11 @@ fn main() {
             .map(std::path::PathBuf::from)
             .and_then(|p| p.ancestors().nth(3).map(|d| d.to_path_buf()))
         {
-            println!("cargo::rustc-link-search=native={}", dir.display());
+            println!("cargo:rustc-link-search=native={}", dir.display());
         }
     }
 
-    println!("cargo::rerun-if-changed=src/abi.rs");
+    println!("cargo:rerun-if-changed=src/abi.rs");
     let source = std::fs::read("src/abi.rs").unwrap_or_default();
     // DefaultHasher's algorithm is fixed within one Rust release, and the
     // program and the library come from one build.

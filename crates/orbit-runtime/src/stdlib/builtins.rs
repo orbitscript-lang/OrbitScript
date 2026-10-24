@@ -148,10 +148,10 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
         })
         .collect();
     for (name, v) in &exports {
-        if let Value::Closure(c) = *v
-            && YIELDING.iter().any(|y| y.as_bytes() == name.as_slice())
-        {
-            vm.allow_yields(c);
+        if let Value::Closure(c) = *v {
+            if YIELDING.iter().any(|y| y.as_bytes() == name.as_slice()) {
+                vm.allow_yields(c);
+            }
         }
     }
     exports

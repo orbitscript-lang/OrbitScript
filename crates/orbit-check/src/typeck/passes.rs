@@ -103,15 +103,24 @@ struct ZeroIndex;
 impl Pass for ZeroIndex {
     #[inline]
     fn node(&self, m: &Typed<'_, '_, '_>, n: Node<'_>, out: &mut Vec<Diagnostic>) {
-        if let Node::Expr(e) = n
-            && let ExprKind::Index { obj, key } = &e.kind
-            && matches!(key.kind, ExprKind::Int(0))
-            && let Some(t) = m.type_of(obj)
-            && let [a] = m.non_nil_members(t)[..]
-            && matches!(m.types.get(a), Ty::Array(_))
-        {
-            let msg = "arrays start at 1, so `[0]` is never an element; the first is `[1]`";
-            out.push(Diagnostic::warning(m.file, key.span, Code::ZeroIndex, msg));
+        if let Node::Expr(e) = n {
+            if let ExprKind::Index { obj, key } = &e.kind {
+                if matches!(key.kind, ExprKind::Int(0)) {
+                    if let Some(t) = m.type_of(obj) {
+                        if let [a] = m.non_nil_members(t)[..] {
+                            if matches!(m.types.get(a), Ty::Array(_)) {
+                                let msg = "arrays start at 1, so `[0]` is never an element; the first is `[1]`";
+                                out.push(Diagnostic::warning(
+                                    m.file,
+                                    key.span,
+                                    Code::ZeroIndex,
+                                    msg,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -206,27 +215,30 @@ impl NeverEqual {
 impl Pass for NeverEqual {
     #[inline]
     fn node(&self, m: &Typed<'_, '_, '_>, n: Node<'_>, out: &mut Vec<Diagnostic>) {
-        if let Node::Expr(e) = n
-            && let ExprKind::Binary {
+        if let Node::Expr(e) = n {
+            if let ExprKind::Binary {
                 op: BinOp::Eq | BinOp::Ne,
                 lhs,
                 rhs,
                 ..
             } = &e.kind
-            && let (Some(l), Some(r)) = (m.type_of(lhs), m.type_of(rhs))
-            && Self::families(m.types, l) & Self::families(m.types, r) == 0
-        {
-            let msg = format!(
-                "this compares {} with {}, which are never equal",
-                m.show(l),
-                m.show(r)
-            );
-            out.push(Diagnostic::warning(
-                m.file,
-                e.span,
-                Code::AlwaysUnequal,
-                msg,
-            ));
+            {
+                if let (Some(l), Some(r)) = (m.type_of(lhs), m.type_of(rhs)) {
+                    if Self::families(m.types, l) & Self::families(m.types, r) == 0 {
+                        let msg = format!(
+                            "this compares {} with {}, which are never equal",
+                            m.show(l),
+                            m.show(r)
+                        );
+                        out.push(Diagnostic::warning(
+                            m.file,
+                            e.span,
+                            Code::AlwaysUnequal,
+                            msg,
+                        ));
+                    }
+                }
+            }
         }
     }
 }
@@ -270,11 +282,12 @@ impl Conditions {
 impl Pass for Conditions {
     #[inline]
     fn node(&self, m: &Typed<'_, '_, '_>, n: Node<'_>, out: &mut Vec<Diagnostic>) {
-        if let Node::Expr(e) = n
-            && let ExprKind::If { cond, .. } | ExprKind::While { cond, .. } = &e.kind
-            && let Some(t) = m.type_of(cond)
-        {
-            out.extend(Self::check(m, t, cond.span));
+        if let Node::Expr(e) = n {
+            if let ExprKind::If { cond, .. } | ExprKind::While { cond, .. } = &e.kind {
+                if let Some(t) = m.type_of(cond) {
+                    out.extend(Self::check(m, t, cond.span));
+                }
+            }
         }
     }
 }
@@ -367,24 +380,25 @@ impl Coverage {
                 all
             }
             PatKind::Path(e) => {
-                if let Some(id) = syms.path_symbol(e)
-                    && syms.kind(id) == Some(SymbolKind::Variant)
-                {
-                    out.push(Case::Variant(id));
+                if let Some(id) = syms.path_symbol(e) {
+                    if syms.kind(id) == Some(SymbolKind::Variant) {
+                        out.push(Case::Variant(id));
+                    }
                 }
                 false
             }
             PatKind::Struct { path, fields, .. } => {
                 let irrefutable = fields.iter().all(|f| {
-                    f.pat
-                        .as_ref()
-                        .is_none_or(|p| matches!(p.kind, PatKind::Wild | PatKind::Bind { .. }))
+                    f.pat.as_ref().map_or(true, |p| {
+                        matches!(p.kind, PatKind::Wild | PatKind::Bind { .. })
+                    })
                 });
-                if irrefutable
-                    && let Some(id) = syms.path_symbol(path)
-                    && syms.kind(id) == Some(SymbolKind::Variant)
-                {
-                    out.push(Case::Variant(id));
+                if irrefutable {
+                    if let Some(id) = syms.path_symbol(path) {
+                        if syms.kind(id) == Some(SymbolKind::Variant) {
+                            out.push(Case::Variant(id));
+                        }
+                    }
                 }
                 false
             }
@@ -396,11 +410,12 @@ impl Coverage {
 impl Pass for Coverage {
     #[inline]
     fn node(&self, m: &Typed<'_, '_, '_>, n: Node<'_>, out: &mut Vec<Diagnostic>) {
-        if let Node::Expr(e) = n
-            && let ExprKind::Match { scrutinee, arms } = &e.kind
-            && let Some(st) = m.type_of(scrutinee)
-        {
-            out.extend(Self::check(m, st, arms, scrutinee.span));
+        if let Node::Expr(e) = n {
+            if let ExprKind::Match { scrutinee, arms } = &e.kind {
+                if let Some(st) = m.type_of(scrutinee) {
+                    out.extend(Self::check(m, st, arms, scrutinee.span));
+                }
+            }
         }
     }
 }

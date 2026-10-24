@@ -214,11 +214,11 @@ impl Link {
     /// The editor asked the program to pause.
     fn pause(&self) {
         let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
-        if inbox.running
-            && let Some(p) = inbox.pause.clone()
-        {
-            inbox.user_pause = true;
-            p.request();
+        if inbox.running {
+            if let Some(p) = inbox.pause.clone() {
+                inbox.user_pause = true;
+                p.request();
+            }
         }
     }
 
@@ -234,7 +234,7 @@ impl Link {
                 "disconnect" => !inbox.attach || msg["arguments"]["terminateDebuggee"] == true,
                 _ => false,
             };
-            if ends_program && let Some(i) = &inbox.interrupt {
+            if let Some(i) = inbox.interrupt.as_ref().filter(|_| ends_program) {
                 i.request();
             } else if let Some(p) = &inbox.pause {
                 p.request();
