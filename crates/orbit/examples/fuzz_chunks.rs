@@ -1,5 +1,5 @@
 //! Mutation fuzzer for binary chunks and the verifier (a dev tool for the
-//! verifier spike in docs/design/chunks-io-os-cli.md; not shipped).
+//! verifier in docs/design/chunks-io-os-cli.md; not shipped).
 //!
 //! ```sh
 //! cargo run --example fuzz_chunks -- [mutants] [seed]

@@ -1,5 +1,5 @@
 //! `orbit-fmt`: OrbitScript's formatter. It prints a module in one canonical layout
-//! (planning/dev-tooling/formatter.md) from its AST plus every comment.
+//! (docs/design/formatter.md) from its AST plus every comment.
 //!
 //! It refuses rather than breaks: a module with a syntax error, or one the printer can't
 //! reproduce exactly (the re-parsed output's AST differs from the input's, or a comment went

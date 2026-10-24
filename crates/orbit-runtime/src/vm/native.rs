@@ -1173,8 +1173,6 @@ fn stub_proto(id: NativeId) -> Proto {
             code: code.as_slice().into(),
             consts: Box::new([]),
             caches: Box::new([]),
-            #[cfg(feature = "type-feedback")]
-            feedback: Box::new([std::cell::Cell::new(0)]),
             nparams: 0,
             is_vararg: true,
             nregs: 0,

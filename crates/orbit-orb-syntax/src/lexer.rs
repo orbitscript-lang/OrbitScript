@@ -1,7 +1,7 @@
 //! A hand-written, pull-based lexer for OrbitScript.
 //!
 //! Comments, strings and numbers follow Rust's spelling (`//`, nesting `/* */`, `r#"..."#`,
-//! `1_000`, `0b1010`); see `planning/orbitscript-syntax/proposal.md`, "Lexical structure".
+//! `1_000`, `0b1010`); see `docs/design/orbitscript-syntax/proposal.md`, "Lexical structure".
 
 use crate::ast::{Comment, CommentKind};
 use crate::diag::Diagnostic;

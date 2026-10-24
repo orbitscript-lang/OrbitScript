@@ -1,5 +1,5 @@
 //! orbit-check: off
-// Every OrbitScript example from planning/orbitscript-syntax/proposal.md, in order.
+// Every OrbitScript example from docs/design/orbitscript-syntax/proposal.md, in order.
 // `{ ... }` placeholders there are filled with small bodies here. Parsed, not run.
 
 // A taste: geometry.orb

@@ -1,5 +1,5 @@
-//! The Lua 5.5 C API, for loading C modules into OrbitScript (spike; see
-//! `planning/c-modules/proposal.md` in the project files).
+//! The Lua 5.5 C API, for loading C modules into OrbitScript (ADR-8,
+//! `docs/adr/0008-c-modules.md`).
 //!
 //! Modules compiled against the reference `lua.h` load unchanged: the
 //! headers in `csrc/include` are OrbitScript's own but match the reference

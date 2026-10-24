@@ -378,6 +378,7 @@ impl Vm {
     }
 
     /// Whether the top frame must run in the hooked loop.
+    #[cfg(feature = "hooks")]
     #[inline(always)]
     pub(crate) fn top_hooked(&self) -> bool {
         self.rt.stack.hook.armed()
