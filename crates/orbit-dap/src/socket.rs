@@ -113,14 +113,15 @@ pub(crate) fn dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// The directory the sockets go in: `%LOCALAPPDATA%\orbit`, which only its
-/// user can reach.
+/// The directory the sockets go in: `orbit` in the user's temporary
+/// directory (`%TEMP%`, normally `%LOCALAPPDATA%\Temp`), which only its
+/// user can reach. Not `%LOCALAPPDATA%` itself: a process started from a
+/// packaged (MSIX) app sees a virtualized copy of it, where an AF_UNIX
+/// socket can be bound but never connected to (WSAEINVAL) or removed;
+/// `%TEMP%` isn't virtualized.
 #[cfg(windows)]
 pub(crate) fn dir() -> io::Result<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .filter(|d| !d.is_empty())
-        .ok_or_else(|| io::Error::other("LOCALAPPDATA is not set"))?;
-    let dir = PathBuf::from(base).join("orbit");
+    let dir = std::env::temp_dir().join("orbit");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
