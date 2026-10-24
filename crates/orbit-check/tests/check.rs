@@ -130,12 +130,17 @@ fn findings(ws: &mut Workspace, file: orbit_check::FileId) -> Vec<orbit_check::D
 /// In-memory sources, as the language server's open buffers would be.
 struct Memory(Vec<(&'static str, &'static str)>);
 
+/// `name` against the current directory, as the workspace keeps paths.
+fn absolute(name: &str) -> PathBuf {
+    std::env::current_dir().unwrap().join(name)
+}
+
 impl Sources for Memory {
+    /// `path` comes made absolute: `/w/lib.orb` is `D:\w\lib.orb` on Windows.
     fn read(&self, path: &Path) -> Option<Vec<u8>> {
-        let p = path.to_string_lossy();
         self.0
             .iter()
-            .find(|(name, _)| *name == p)
+            .find(|(name, _)| absolute(name) == path)
             .map(|(_, text)| text.as_bytes().to_vec())
     }
 }
@@ -166,7 +171,7 @@ fn definition_and_references_across_modules() {
     let at = APP.find("helper();").unwrap() as u32;
     let id = ws.symbol_at(app, at).expect("a symbol");
     let def = ws.definition(id).unwrap();
-    assert_eq!(ws.path(def.file), Path::new("/w/lib.orb"));
+    assert_eq!(ws.path(def.file), absolute("/w/lib.orb"));
     assert_eq!(
         &LIB[def.span.start as usize..def.span.end as usize],
         "helper"

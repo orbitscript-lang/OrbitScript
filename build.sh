@@ -84,7 +84,8 @@ if [ "$train" = yes ] && [ "$triple" != "$host" ]; then
     exit 2
 fi
 if [ -n "$pgo" ]; then
-    case "$pgo" in /*) ;; *) pgo="$(pwd)/$pgo" ;; esac
+    # Absolute already: /x, or C:\x and C:/x on Windows.
+    case "$pgo" in /* | [A-Za-z]:[\\/]*) ;; *) pgo="$(pwd)/$pgo" ;; esac
 elif [ "$no_pgo" = no ]; then
     pgo="$root/pgo/$triple.profdata"
 fi
@@ -154,6 +155,18 @@ built_dir() {
     esac
 }
 
+# Windows: `orbit`'s shared backend links with `orbit_lib.lib`, while Cargo
+# names a cdylib's import library `orbit_lib.dll.lib`. Copies it, next to
+# it, under the name the linker looks for.
+import_lib() {
+    case "$triple" in
+        *-windows-msvc)
+            lib_dir=$(built_dir)
+            cp "$lib_dir/orbit_lib.dll.lib" "$lib_dir/orbit_lib.lib"
+            ;;
+    esac
+}
+
 # The function or variable each LUA_API, LUALIB_API and LUAMOD_API
 # declaration in our headers names, one per line.
 headers="$root/crates/orbit-capi/csrc/include"
@@ -161,6 +174,29 @@ api_names() {
     grep -hE '^(LUA_API|LUALIB_API|LUAMOD_API) ' "$headers/lua.h" "$headers/lauxlib.h" "$headers/lualib.h" |
         awk '{ if (match($0, /(lua|luaL|luaopen)_[a-z][A-Za-z0-9_]*/)) print substr($0, RSTART, RLENGTH) }' |
         sort -u
+}
+
+# MSVC's `link`: the one on the path, unless that is another program of the
+# same name (Git Bash's own `link`), else the newest Visual Studio's, which
+# vswhere finds. Fails when there is none.
+msvc_link() {
+    if command -v link.exe > /dev/null 2>&1 && link.exe /? 2>&1 | grep -q Microsoft; then
+        echo link.exe
+        return
+    fi
+    vswhere="$(cygpath -u 'C:\Program Files (x86)')/Microsoft Visual Studio/Installer/vswhere.exe"
+    [ -x "$vswhere" ] || return 1
+    vs=$("$vswhere" -latest -products '*' -property installationPath | tr -d '\r')
+    [ -n "$vs" ] || return 1
+    vs=$(cygpath -u "$vs")
+    version=$(tr -d '\r' < "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt") || return 1
+    case "$host" in
+        aarch64-*) arch=arm64 ;;
+        *) arch=x64 ;;
+    esac
+    link="$vs/VC/Tools/MSVC/$version/bin/Host$arch/$arch/link.exe"
+    [ -x "$link" ] || return 1
+    echo "$link"
 }
 
 # Lays out the last build of layout $1 (static or shared) in $2, and sets
@@ -201,10 +237,17 @@ lay_out() {
                 api_names | sed 's/.*/  & = orbit_lib.&/'
             } > "$def"
             # A DLL with no code, only forwarded exports, linked with the
-            # toolchain's linker: MSVC's `link` where it is on the path, else
-            # MinGW's gcc.
-            if command -v link.exe > /dev/null 2>&1 && link.exe /? 2>&1 | grep -q Microsoft; then
-                link.exe /NOLOGO /DLL /NOENTRY "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/lua55.dll")"
+            # toolchain's linker: MSVC's `link` where there is one, else
+            # MinGW's gcc. With no object files `link` can't tell the
+            # machine, so it is named.
+            case "$triple" in
+                aarch64-*) machine=ARM64 ;;
+                *) machine=X64 ;;
+            esac
+            if link=$(msvc_link); then
+                # Git Bash would turn the /OPTIONS into paths.
+                MSYS2_ARG_CONV_EXCL='*' "$link" /NOLOGO /DLL /NOENTRY "/MACHINE:$machine" \
+                    "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/lua55.dll")"
             else
                 "${CC:-gcc}" -shared -nostdlib -o "$dir/bin/lua55.dll" "$def"
             fi
@@ -263,6 +306,7 @@ if [ "$train" = yes ]; then
     workload "$target/pgo-train/static/bin/orbit"
     echo "== training liborbit"
     instrument "$lib_args" --keep-profiles
+    import_lib
     instrument "$shared_args" --keep-profiles
     lay_out shared "$target/pgo-train/shared"
     workload "$target/pgo-train/shared/bin/orbit"
@@ -313,6 +357,7 @@ if [ "$layout" = static ]; then
 else
     # shellcheck disable=SC2086 # plain words
     $run $lib_args
+    import_lib
     # shellcheck disable=SC2086 # plain words
     $run $shared_args
     # shellcheck disable=SC2086 # plain words
