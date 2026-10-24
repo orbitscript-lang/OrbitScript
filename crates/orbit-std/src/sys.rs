@@ -36,12 +36,30 @@ pub(crate) fn os_bytes(s: &OsStr) -> Vec<u8> {
 }
 
 /// The C library's text for an I/O error (`No such file or directory`),
-/// without the ` (os error 2)` that Rust appends.
+/// without the ` (os error 2)` that Rust appends. On Windows, where Rust
+/// gives the system's own message ("The system cannot find the file
+/// specified."), it is the C runtime's text for the error, as Lua reports it.
 pub fn os_error_text(e: &io::Error) -> String {
+    #[cfg(windows)]
+    if e.raw_os_error().is_some() {
+        return crate::crt::errno_text(crate::crt::errno(e));
+    }
     let s = e.to_string();
     match s.rfind(" (os error ") {
         Some(i) => s[..i].to_string(),
         None => s,
+    }
+}
+
+/// The C library's `errno` for an I/O error, the code Lua's file functions
+/// return (0 when the error didn't come from the OS).
+pub(crate) fn os_error_code(e: &io::Error) -> i64 {
+    match e.raw_os_error() {
+        #[cfg(windows)]
+        Some(_) => i64::from(crate::crt::errno(e)),
+        #[cfg(not(windows))]
+        Some(code) => i64::from(code),
+        None => 0,
     }
 }
 
@@ -107,8 +125,7 @@ pub(crate) fn file_failure(e: &io::Error, name: Option<&[u8]>) -> FileFailure {
         msg.extend_from_slice(b": ");
     }
     msg.extend_from_slice(os_error_text(e).as_bytes());
-    let code = i64::from(e.raw_os_error().unwrap_or(0));
-    (orbit::stack::Nil, msg, code)
+    (orbit::stack::Nil, msg, os_error_code(e))
 }
 
 /// The shell command for `cmd`.
@@ -166,4 +183,28 @@ pub(crate) fn flush_stdout(c: &orbit::Scope<'_>) {
     c.with_stdout(|out| {
         let _ = out.flush();
     });
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::{os_error_code, os_error_text};
+    use std::io::Error;
+
+    #[test]
+    fn windows_errors_read_as_the_c_runtime_gives_them() {
+        // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND
+        for code in [2, 3] {
+            let e = Error::from_raw_os_error(code);
+            assert_eq!(
+                (os_error_code(&e), os_error_text(&e).as_str()),
+                (2, "No such file or directory")
+            );
+        }
+        // ERROR_SHARING_VIOLATION
+        let e = Error::from_raw_os_error(32);
+        assert_eq!(
+            (os_error_code(&e), os_error_text(&e).as_str()),
+            (13, "Permission denied")
+        );
+    }
 }

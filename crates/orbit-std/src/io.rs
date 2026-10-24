@@ -15,7 +15,9 @@ use std::rc::{Rc, Weak};
 use orbit::stack::{Any, Stack};
 use orbit::{Call, Class, Error, OrbitString, Pinned, Ret, Scope, Table, Userdata, Value, native};
 
-use crate::sys::{exit_status, file_error, flush_stdout, os_error_text, os_path, shell};
+use crate::sys::{
+    exit_status, file_error, flush_stdout, os_error_code, os_error_text, os_path, shell,
+};
 
 /// The C library's `BUFSIZ`, the default buffer size.
 const BUFSIZ: usize = 8192;
@@ -702,8 +704,7 @@ fn write<'s>(c: &'s Call<'s>, s: &Shared, file: Value<'s>, first: usize) -> Resu
         let r = c.with_stdout(|out| s.borrow_mut().write(&bytes, out));
         if let Err(e) = r {
             let msg = os_error_text(&e);
-            let code = i64::from(e.raw_os_error().unwrap_or(0));
-            return c.ret((Value::Nil, msg, code, written as i64));
+            return c.ret((Value::Nil, msg, os_error_code(&e), written as i64));
         }
         written += bytes.len();
     }
