@@ -3,17 +3,16 @@
 //! is fine, a source that can never pass is T0209, and a target the runtime can't check is T0210,
 //! worded as lowering words it.
 
-use orbit_hir::Span;
+use orbit_hir::{StrId, StringPool};
 use orbit_orb_syntax::ast::{self, TypeKind};
 
-use super::Checker;
-use crate::Code;
+use super::view::SymbolView;
 use crate::symbols::{SymbolId, SymbolKind};
-use crate::types::{Names, Ty, TypeId};
+use crate::types::{Names, Ty, TypeId, Types};
 
 /// One member of a cast target (not a union or optional).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Target {
+pub(super) enum Target {
     /// `any`, or a target the checker can't classify (a name from a Lua module).
     Any,
     Int,
@@ -26,146 +25,78 @@ enum Target {
     Named(SymbolId),
 }
 
-impl<'a> Checker<'a, '_, '_> {
-    pub(super) fn cast(
-        &mut self,
-        inner: &'a ast::Expr,
-        ty: &ast::Type,
-        soft: bool,
-        span: Span,
-    ) -> TypeId {
-        let src = self.expr(inner, None);
-        let lowered = self.lower(ty);
-        let result = |c: &mut Self, t| if soft { c.types.optional(t) } else { t };
+/// What casts need to know: the type store, the names, and what `Self` is.
+pub(super) struct CastRules<'x, 'm, 'c> {
+    pub types: &'x Types,
+    pub syms: &'x SymbolView<'m, 'c>,
+    pub strings: &'x StringPool,
+    pub self_type: Option<TypeId>,
+}
 
-        let (target, mut nilable) = strip_optional(ty);
-        let union = matches!(target.kind.as_deref(), Some(TypeKind::Union(_)));
-        let members: Vec<&ast::Type> = match target.kind.as_deref() {
-            Some(TypeKind::Union(ms)) => ms.iter().collect(),
-            _ => vec![target],
-        };
-        let mut targets = Vec::new();
-        for m in members {
-            let (m, opt) = strip_optional(m);
-            nilable |= opt;
-            match self.cast_target(m) {
-                Some(Target::Any) => return result(self, self.types.any),
-                Some(t) => targets.push(t),
-                // Reported; the cast still has the type it names.
-                None => return result(self, lowered),
-            }
-        }
-
-        if src != self.types.any {
-            if targets == [Target::Bool] {
-                if self.falsy_part(src).is_none() {
-                    let msg = format!(
-                        "a value of type {} is never false, so `as bool` is always `true`; {}",
-                        self.show(src),
-                        self.truth_hint(src)
-                    );
-                    self.report.error(span, Code::ImpossibleCast, msg);
-                }
-            } else {
-                let fits = self.types.members(src).into_iter().any(|m| {
-                    (nilable && *self.types.get(m) == Ty::Nil)
-                        || targets.iter().any(|&t| self.accepts(m, t, union))
-                });
-                if !fits {
-                    let msg = format!(
-                        "this cast can never succeed: a value of type {} is never {}",
-                        self.show(src),
-                        self.show(lowered)
-                    );
-                    self.report.error(span, Code::ImpossibleCast, msg);
-                }
-            }
-        }
-
-        // A single scalar target converts; anything else checks the value and passes it through,
-        // so the value keeps what it knew that fits the target, and a plain local narrows to it.
-        let scalar = !union && !matches!(targets[0], Target::Named(_));
-        if scalar {
-            return result(self, lowered);
-        }
-        let kept: Vec<TypeId> = self
-            .types
-            .members(src)
-            .into_iter()
-            .filter(|&m| m != self.types.any && self.types.assignable(m, lowered))
-            .collect();
-        let t = if kept.is_empty() {
-            lowered
-        } else {
-            self.types.union(&kept)
-        };
-        if !soft && let Some(key) = self.key_of(inner) {
-            self.kill(&key);
-            self.env.insert(key, t);
-        }
-        result(self, t)
+impl CastRules<'_, '_, '_> {
+    fn text(&self, sym: StrId) -> String {
+        self.strings.display(sym).into_owned()
     }
 
-    /// Classifies a target member as lowering does, reporting the ones it rejects (T0210).
-    fn cast_target(&mut self, ty: &ast::Type) -> Option<Target> {
+    /// Classifies a target member as lowering does. A target it rejects (T0210) gives the
+    /// message to report at the member.
+    pub fn target(&self, ty: &ast::Type) -> Result<Target, String> {
         let Some(kind) = ty.kind.as_deref() else {
-            return Some(Target::Any);
+            return Ok(Target::Any);
         };
         match kind {
-            TypeKind::Nil => Some(Target::Nil),
-            TypeKind::SelfType => match self.self_type.map(|t| self.types.get(t).clone()) {
-                Some(Ty::Nominal(id, _)) => Some(Target::Named(id)),
-                _ => Some(Target::Any),
+            TypeKind::Nil => Ok(Target::Nil),
+            TypeKind::SelfType => match self.self_type.map(|t| self.types.get(t)) {
+                Some(Ty::Nominal(id, _)) => Ok(Target::Named(*id)),
+                _ => Ok(Target::Any),
             },
-            TypeKind::Error => Some(Target::Any),
+            TypeKind::Error => Ok(Target::Any),
             TypeKind::Path { segments, args } if args.is_empty() => {
                 let last = segments[segments.len() - 1];
                 let sym = self.syms.ref_at(last.span);
                 match sym.and_then(|id| self.syms.kind(id)) {
-                    Some(SymbolKind::TypeParam) => return self.uncheckable(ty),
+                    Some(SymbolKind::TypeParam) => return Err(self.uncheckable(ty)),
                     Some(SymbolKind::TypeAlias) => {
-                        let msg = format!(
+                        return Err(format!(
                             "`as` can't use the type alias `{}`; name the type it stands for",
                             self.text(last.sym)
-                        );
-                        self.report.error(ty.span, Code::UncheckableCast, msg);
-                        return None;
+                        ));
                     }
                     Some(SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Variant) => {
-                        return sym.map(Target::Named);
+                        if let Some(id) = sym {
+                            return Ok(Target::Named(id));
+                        }
                     }
                     _ => {}
                 }
                 if segments.len() > 1 {
-                    return Some(Target::Any);
+                    return Ok(Target::Any);
                 }
                 match &*self.text(last.sym) {
-                    "int" => Some(Target::Int),
-                    "float" => Some(Target::Float),
-                    "number" => Some(Target::Number),
-                    "string" => Some(Target::Str),
-                    "bool" => Some(Target::Bool),
-                    "table" | "function" | "thread" | "userdata" => self.uncheckable(ty),
-                    _ => Some(Target::Any),
+                    "int" => Ok(Target::Int),
+                    "float" => Ok(Target::Float),
+                    "number" => Ok(Target::Number),
+                    "string" => Ok(Target::Str),
+                    "bool" => Ok(Target::Bool),
+                    "table" | "function" | "thread" | "userdata" => Err(self.uncheckable(ty)),
+                    _ => Ok(Target::Any),
                 }
             }
-            _ => self.uncheckable(ty),
+            _ => Err(self.uncheckable(ty)),
         }
     }
 
-    fn uncheckable(&mut self, ty: &ast::Type) -> Option<Target> {
+    fn uncheckable(&self, ty: &ast::Type) -> String {
         let mut text = String::new();
         self.write_type(ty, &mut text);
-        let msg = format!(
+        format!(
             "`as` can't check `{text}` while the program runs; give the value a type annotation instead"
-        );
-        self.report.error(ty.span, Code::UncheckableCast, msg);
-        None
+        )
     }
 
     /// Whether a value of type `m` (not a union) can pass a cast to `target`. In a union,
     /// scalar members test the value's type rather than converting it.
-    fn accepts(&self, m: TypeId, target: Target, union: bool) -> bool {
+    pub fn accepts(&self, m: TypeId, target: Target, union: bool) -> bool {
         let ty = self.types.get(m);
         if matches!(ty, Ty::Any | Ty::Param(_)) {
             return true;
@@ -200,7 +131,7 @@ impl<'a> Checker<'a, '_, '_> {
     }
 
     /// What to write instead of `as bool` on a value that is never false.
-    fn truth_hint(&self, t: TypeId) -> &'static str {
+    pub fn truth_hint(&self, t: TypeId) -> &'static str {
         let ms = self.types.members(t);
         let all = |f: fn(&Ty) -> bool| ms.iter().all(|&m| f(self.types.get(m)));
         if all(|t| matches!(t, Ty::Int | Ty::Float)) {
@@ -320,7 +251,7 @@ impl<'a> Checker<'a, '_, '_> {
 }
 
 /// `T??` is `T` with `nil` allowed.
-fn strip_optional(mut ty: &ast::Type) -> (&ast::Type, bool) {
+pub(super) fn strip_optional(mut ty: &ast::Type) -> (&ast::Type, bool) {
     let mut nilable = false;
     while let Some(TypeKind::Optional(inner)) = ty.kind.as_deref() {
         ty = inner;
