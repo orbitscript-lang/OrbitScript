@@ -14,6 +14,7 @@ pub mod debug;
 #[cfg(feature = "debugger")]
 pub mod debugger;
 mod dispatch;
+mod fast;
 mod gc;
 pub mod hook;
 mod interp;
@@ -300,6 +301,19 @@ pub(crate) struct StackAux {
 }
 
 impl Stack {
+    /// The running frame.
+    #[inline(always)]
+    pub(crate) fn running(&self) -> &Frame {
+        self.frames.last().expect("the running frame")
+    }
+
+    /// The running frame's depth: the frame count, which the dispatch
+    /// loop does not keep a copy of.
+    #[inline(always)]
+    pub(crate) fn depth(&self) -> usize {
+        self.frames.len()
+    }
+
     /// Exchange everything but the hooks with `other`, field by field
     /// (swapping the whole struct is an out-of-line copy loop).
     #[inline(always)]

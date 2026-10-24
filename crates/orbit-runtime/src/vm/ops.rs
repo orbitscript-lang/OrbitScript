@@ -39,6 +39,23 @@ pub(crate) enum Exc {
     NewIndex { obj: Value, key: Value, v: Value },
 }
 
+impl Exc {
+    /// `R[dst] = obj[key]` through the metatable, when the dispatch loop's
+    /// inline path can't finish (a raw miss on a table with a metatable,
+    /// or a value that isn't a table). `raise` finishes the instruction,
+    /// so the loop carries no code for it.
+    #[inline(always)]
+    pub(crate) fn index(obj: Value, key: Value) -> Exc {
+        Exc::Index { obj, key }
+    }
+
+    /// `obj[key] = v` through the metatable, likewise.
+    #[inline(always)]
+    pub(crate) fn new_index(obj: Value, key: Value, v: Value) -> Exc {
+        Exc::NewIndex { obj, key, v }
+    }
+}
+
 impl From<crate::vm::LuaError> for Exc {
     fn from(e: crate::vm::LuaError) -> Self {
         Exc::Lua(e)
@@ -124,7 +141,7 @@ impl Arith {
 
 impl Arith {
     /// The binary operator, or `None` for `Neg`.
-    fn number_op(self) -> Option<ArithOp> {
+    pub(crate) fn number_op(self) -> Option<ArithOp> {
         Some(match self {
             Arith::Add => ArithOp::Add,
             Arith::Sub => ArithOp::Sub,
