@@ -47,46 +47,67 @@ impl Gen {
     }
 }
 
-/// The generations of one page's slots, plus the floor a page starts from
-/// when it is allocated again after being released, so a handle made before
-/// the release can never match a slot of the new page.
+/// A page's state for generation checks: whether it is allocated, and the
+/// floor its slots start from when it is allocated again after being
+/// released, so a handle made before the release can never match a slot of
+/// the new page.
 #[cfg(any(debug_assertions, feature = "checked-handles"))]
-#[derive(Default)]
-struct PageGens {
-    gens: Box<[u32]>,
+#[derive(Clone, Copy, Default)]
+struct PageGen {
+    open: bool,
     floor: u32,
 }
 
+/// Every slot's generation, in one buffer indexed like the slots. Not one
+/// allocation per page: those would sit between the objects' own heap
+/// blocks and outlive them, so the allocator could not return the memory
+/// a collection freed.
 #[cfg(any(debug_assertions, feature = "checked-handles"))]
 #[derive(Default)]
-struct Gens(Vec<PageGens>);
+struct Gens {
+    pages: Vec<PageGen>,
+    slots: Vec<u32>,
+}
 
 #[cfg(any(debug_assertions, feature = "checked-handles"))]
 impl Gens {
     #[inline(always)]
-    fn of(&self, page: usize, slot: usize) -> Option<Gen> {
-        self.0.get(page)?.gens.get(slot).map(|&g| Gen(g))
+    fn of(&self, page: usize, i: usize) -> Option<Gen> {
+        if !self.pages.get(page)?.open {
+            return None;
+        }
+        self.slots.get(i).map(|&g| Gen(g))
     }
     fn on_new_page(&mut self, page: usize, slots: usize) {
-        if page == self.0.len() {
-            self.0.push(PageGens::default());
+        if page >= self.pages.len() {
+            self.pages.resize(page + 1, PageGen::default());
         }
-        let p = &mut self.0[page];
-        p.gens = vec![p.floor; slots].into_boxed_slice();
+        let p = &mut self.pages[page];
+        p.open = true;
+        let end = (page + 1) * slots;
+        if self.slots.len() < end {
+            self.slots.resize(end, 0);
+        }
+        self.slots[page * slots..end].fill(p.floor);
     }
-    fn on_release(&mut self, page: usize) {
-        let p = &mut self.0[page];
-        p.floor = p
-            .gens
+    fn on_release(&mut self, page: usize, slots: usize) {
+        let p = &mut self.pages[page];
+        let gens = &self.slots[page * slots..(page + 1) * slots];
+        p.floor = gens
             .iter()
             .copied()
             .max()
             .unwrap_or(p.floor)
             .wrapping_add(1);
-        p.gens = Box::default();
+        p.open = false;
     }
-    fn on_take(&mut self, page: usize, slot: usize) {
-        let g = &mut self.0[page].gens[slot];
+    /// Pages from `pages` on are released: forget their slots, keeping
+    /// their floors.
+    fn truncate(&mut self, pages: usize, slots: usize) {
+        self.slots.truncate(pages * slots);
+    }
+    fn on_take(&mut self, i: usize) {
+        let g = &mut self.slots[i];
         *g = g.wrapping_add(1);
     }
 }
@@ -104,9 +125,11 @@ impl Gens {
     #[inline(always)]
     fn on_new_page(&mut self, _: usize, _: usize) {}
     #[inline(always)]
-    fn on_release(&mut self, _: usize) {}
+    fn on_release(&mut self, _: usize, _: usize) {}
     #[inline(always)]
-    fn on_take(&mut self, _: usize, _: usize) {}
+    fn truncate(&mut self, _: usize, _: usize) {}
+    #[inline(always)]
+    fn on_take(&mut self, _: usize) {}
 }
 
 /// Slots per arena page, unless a [`space!`](crate::space) sets its own
@@ -187,8 +210,8 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
     #[inline(always)]
     #[track_caller]
     fn check(&self, gc: Gc<T>) {
-        let (p, o) = Self::split(gc.index);
-        if self.gens.of(p, o) != Some(gc.generation) {
+        let (p, _) = Self::split(gc.index);
+        if self.gens.of(p, gc.index as usize) != Some(gc.generation) {
             stale(gc.index)
         }
     }
@@ -214,8 +237,7 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
     }
 
     pub(crate) fn take(&mut self, i: u32) -> T {
-        let (p, o) = Self::split(i);
-        self.gens.on_take(p, o);
+        self.gens.on_take(i as usize);
         match self.slots.get_mut(i as usize).and_then(Option::take) {
             Some(v) => v,
             None => stale(i),
@@ -256,11 +278,12 @@ impl<T, const SLOTS: usize> Arena<T, SLOTS> {
                 .all(Option::is_none)
         );
         self.live[p] = false;
-        self.gens.on_release(p);
+        self.gens.on_release(p, SLOTS);
         let keep = self.live.iter().rposition(|&l| l).map_or(0, |q| q + 1);
         if keep < self.live.len() {
             self.live.truncate(keep);
             self.slots.truncate(keep * SLOTS);
+            self.gens.truncate(keep, SLOTS);
             // Decommit trailing virtual memory pages back to the OS.
             // Unlike Vec, shrinking VmBuffer never moves live slots or reallocates.
             self.slots.shrink_to_fit();
@@ -303,8 +326,8 @@ impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
 
     #[track_caller]
     fn handle_at(&self, i: u32) -> Gc<T> {
-        let (p, o) = Self::split(i);
-        match self.gens.of(p, o) {
+        let (p, _) = Self::split(i);
+        match self.gens.of(p, i as usize) {
             Some(generation) => Gc {
                 index: i,
                 generation,
@@ -315,8 +338,8 @@ impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
     }
 
     fn is_occupied(&self, gc: Gc<T>) -> bool {
-        let (p, o) = Self::split(gc.index);
-        self.gens.of(p, o) == Some(gc.generation)
+        let (p, _) = Self::split(gc.index);
+        self.gens.of(p, gc.index as usize) == Some(gc.generation)
             && matches!(self.slots.get(gc.index as usize), Some(Some(_)))
     }
 
