@@ -1,6 +1,6 @@
 # ADR-3: Call frames and coroutines
 
-Status: Proposed (resolution proposed with the C3 PR: accept as amended below)
+Status: Accepted as amended below (Tym, 2026-10-24; resolution proposed with the C3 PR, option D)
 
 ## Context
 Lua lets code yield from inside `pcall`, metamethods, iterators and native functions, and scripts can recurse deeply. A VM that maps Lua calls onto Rust calls makes both hard: the Rust stack can overflow, and Rust frames can't be suspended.

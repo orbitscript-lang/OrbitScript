@@ -1,6 +1,6 @@
 # VM semantics: metatables, userdata, coroutines and to-be-closed variables
 
-Status: Proposed. Milestones C2 and C3 of the Lua 5.5 compatibility plan. Crates: `orbit-core` (objects), `orbit-vm` (interpreter), `orbit-compiler` and `orbit-bytecode` (two new instructions), `orbit-stdlib` (base and `coroutine` libraries). Owns [ADR-3](../adr/0003-frames-and-coroutines.md).
+Status: Implemented. Milestones C2 and C3 of the Lua 5.5 compatibility plan. Crates: `orbit-runtime::object` (objects), `orbit-runtime::vm` (interpreter), `orbit-compiler` and `orbit-bytecode` (two new instructions), `orbit-runtime::stdlib` (base and `coroutine` libraries). Owns [ADR-3](../adr/0003-frames-and-coroutines.md).
 
 This extends the [VM design](vm.md). It keeps that document's two structural rules: the interpreter is stackless (no Lua call, metamethod or coroutine switch recurses on the Rust stack), and every instruction keeps its common case inline in `run()` with everything else in a cold function. All behaviour here was checked against the reference `lua5.5` binary and the manual; nothing is taken from PUC Lua's sources.
 

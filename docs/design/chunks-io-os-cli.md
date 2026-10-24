@@ -1,6 +1,6 @@
 # Chunks, modules, IO, OS and the CLI
 
-Status: **Proposed** (compatibility thread 4, milestones C5b, C5c and the CLI part of C6)
+Status: Implemented (compatibility thread 4, milestones C5b, C5c and the CLI part of C6)
 
 This covers the parts of Lua 5.5 that move code and data across the VM's edge: loading chunks (`load`, `loadfile`, `dofile`), modules (`require` and `package`), binary chunks (`string.dump` and loading its output), the `io` and `os` libraries, and the `orbit` command line. Everything here is observable behaviour taken from the manual, the reference `lua5.5` binary and the official suite. Nothing is learned from PUC Lua's sources.
 
@@ -167,7 +167,7 @@ File handles are userdata with a shared `FILE*` metatable (`__index` methods, `_
 - **Local time.** `os.date` without `!`, `os.date("*t")` and `os.time{...}` work in the local time zone, which `std` can't read. Options for the spike: (a) our own reader for the `TZ` variable's POSIX rules and TZif files under `/usr/share/zoneinfo` (Unix only, a few hundred lines, no dependency; Windows would need another source); (b) a small dependency such as `tz-rs` (pure Rust, the same approach already written); (c) a larger one such as `jiff` or `chrono` with `iana-time-zone` (Windows support, much more code); (d) UTC everywhere, recorded as a deviation. The spike compares binary size and agreement with `lua5.5` over a sweep of timestamps in several zones.
 - **CPU time.** `os.clock` is wall time since start today. Options: (a) `/proc/self/stat` on Linux (no dependency, 10 ms ticks); (b) `getrusage` or `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` through `nix`, already used by the testkit (Unix only); (c) a `cpu-time`-style crate covering Windows; (d) keep wall time as a deviation. The suite only checks that `os.clock` is a number that doesn't go backwards, so this is about honesty more than tests.
 
-Both are dependency decisions under ADR-7. **Decided (Tym, 2026-10-05):** our own zone reader for local time, and no dependency for CPU time, so `os.clock` stays wall time. Both gaps (wall-time `os.clock`, UTC on Windows) are in `tests/lua-5.5/DEVIATIONS.md`. Spike numbers: `planning/os-time-spike.md`. `strftime` formatting itself is our own code: every conversion the C99 and POSIX `strftime` define, with `invalid conversion specifier` for the rest, as `files.lua` checks.
+Both are dependency decisions under ADR-7. **Decided (Tym, 2026-10-05):** our own zone reader for local time, and no dependency for CPU time, so `os.clock` stays wall time. Both gaps (wall-time `os.clock`, UTC on Windows) are in `tests/lua-5.5/DEVIATIONS.md`. `strftime` formatting itself is our own code: every conversion the C99 and POSIX `strftime` define, with `invalid conversion specifier` for the rest, as `files.lua` checks.
 
 ## The command line
 

@@ -1,6 +1,6 @@
 # The first-light subset of Lua 5.5
 
-Status: Proposed
+Status: Implemented
 
 "First light" is the first time a new telescope sees the sky. For OrbitScript it is the first time a Lua program runs end to end through our own front end, HIR, compiler and VM. This document fixes which part of Lua 5.5 that first run covers. The [front end](lua-front-end.md), [HIR](hir.md) and [VM](vm.md) designs are scoped to it, and the [end-to-end demo](README.md#end-to-end-demo) proves it.
 

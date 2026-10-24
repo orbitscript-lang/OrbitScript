@@ -1,36 +1,38 @@
 # Roadmap
 
-One semantic core, two syntaxes: the Lua 5.5 and OrbitScript front ends both lower to a shared HIR. Everything after that (compiler, VM, GC, stdlib, JIT) is shared.
+One semantic core, two syntaxes: the Lua 5.5 and OrbitScript front ends both lower to a shared HIR, and everything after that (compiler, VM, GC, standard library) is shared.
 
-## Phases
+## Where we are (0.1.0)
 
-| Phase | Goal | Exit criterion |
-|---|---|---|
-| **P0 Foundations** | Workspace, CI, ADR-1..7, reference `lua5.5` for differential testing, **spike S0** (the same micro-VM on gc-arena and on our own safe arena, benchmarked against PUC Lua 5.5) | ADRs accepted with S0's numbers behind them |
-| **P1 Lua front end** | Lexer, parser, AST and diagnostics for all of Lua 5.5 | Parses every file in the official 5.5 test suite; fuzzing clean |
-| **P2 Runtime core** | Value, heap and GC, strings, tables (hybrid array/hash, split-tag arrays), closures, upvalues, userdata, metatables | Unit tests pass; GC stress mode (collect on every allocation) is clean |
-| **P3 Compiler + VM** | HIR, bytecode, interpreter, varargs (named too), `<close>`, errors and `pcall`, coroutines, all metamethods | Hand-written conformance tests pass; differential tests against `lua5.5` agree |
-| **P4 Stdlib + conformance** (Milestone 1) | base, string, table, math, utf8, coroutine, os, io, package, a practical `debug` subset | Official Lua 5.5 test suite passes, minus C-API and internal (`T`) parts, each skip documented |
-| **P5 Optimization tuning** | With the interpreter complete and correct, profile it and cut the overhead safe Rust adds: bounds checks on register, constant and code access (hoisted checks, fixed-size windows, iterator and slice-pattern forms, checked with codegen inspection), `Result` propagation, instruction encoding size, and allocation patterns. Plus generational GC, inline caches, superinstructions chosen from profiles, and RAM profiling on x86_64 and aarch64 | At least 1.0x PUC Lua (geometric mean) with comparable or lower peak RAM; each change measured against the benchmark suite |
-| **P6 OrbitScript** | Language spec, front end, lowering, cross-language tests; later an `orbit-check` type analyzer | Either language can `require` and call the other |
-| **P7 JIT** | Backend study, spike, then build if go (Cargo feature) | Decision memo; if built, measurable wins with no conformance regressions |
+The first release covers:
 
-## First light
+- **Lua 5.5.** The full language and standard library. The official 5.5 test suite passes, minus its internal (`T`) and C-library parts; every skip is in [`tests/lua-5.5/SKIPS.md`](../tests/lua-5.5/SKIPS.md) and every known difference in [`tests/lua-5.5/DEVIATIONS.md`](../tests/lua-5.5/DEVIATIONS.md).
+- **OrbitScript.** The language in [the syntax proposal](design/orbitscript-syntax/proposal.md), calling and called from Lua, with the optional type checker `orbit-check` and the formatter `orbit-fmt`.
+- **Runtime.** Our own garbage collector (`orbit-gc`, incremental with a generational mode), a stackless interpreter with coroutines that can yield across anything Lua allows, `std.json`, C modules built for Lua 5.5 (ADR-8) and the `ffi` library (ADR-9).
+- **Embedding.** The Rust API in the `orbit` crate (ADR-11), and `liborbit`, which also stands in for Lua 5.5's shared library (ADR-10).
+- **Tooling.** The language server, the debugger (DAP) and the VS Code extension (ADR-12).
+- **Releases** for Linux (x86_64, ARM64), macOS (Apple silicon) and Windows (x64, ARM64), built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) ([`releasing.md`](releasing.md)).
 
-Before the full P1 to P4 scope, a small Lua 5.5 subset runs end to end through our own front end, HIR, compiler and VM. The subset and the designs for each stage are in [`docs/design/`](design/README.md); the demo programs are in `tests/first-light/`.
+```mermaid
+flowchart LR
+    rc["0.1.0 release candidates"] --> v010["0.1.0"]
+    v010 --> perf["Performance at PUC Lua's level"]
+    v010 --> dist["Distribution: signing, registries"]
+    v010 --> open["Open source"]
+    perf --> jit["Optional JIT"]
+```
 
-## Work streams
+## Before 0.1.0
 
-| Stream | Owns | Starts |
-|---|---|---|
-| S0 GC and performance spike | throwaway `spike/` crate | P0 |
-| A Lua front end | `orbit-lua-syntax` | P0 |
-| B Runtime core | `orbit-gc`, `orbit-core` | After ADR-1, 2, 5 are accepted |
-| C Compiler + VM | `orbit-hir`, `orbit-compiler`, `orbit-vm` | After ADR-3, 4 are accepted |
-| D Stdlib | `orbit-stdlib` | Pure pieces early (Lua patterns, `string.format`, `pack`, float formatting); the rest after C's native-function API |
-| E Test, perf and size infra | conformance harness, differential fuzzer, benchmarks, size and RSS tracking | P0 |
-| F OrbitScript design | spec, later `orbit-syntax` and `orbit-check` | After Lua parity |
-| G JIT study | memo, later `orbit-jit` | After ADR-3, 4 drafts |
+- Release candidates (`v0.1.0-rc...`) until they hold up in use.
+- A user guide: getting started, the command line, an OrbitScript tour and an embedding quickstart.
+
+## After 0.1.0
+
+- **Performance.** Match or beat PUC Lua's speed with a smaller footprint, on the benchmarks in [`bench/`](../bench/README.md). Work continues in the interpreter loop, table lookups and start-up time.
+- **JIT.** An optional Cargo feature. Prototypes with Cranelift and with a smaller template compiler exist on branches; whether and how one ships is decided once the interpreter work settles.
+- **Distribution.** Signed and notarized binaries, the VS Code extension on the Marketplace and Open VSX, crates on crates.io, and more targets (Intel macOS, musl Linux).
+- **Open source** under the MIT license, in the `orbitscript-lang` GitHub organization.
 
 ## Lua 5.5 changes that matter (versus 5.4)
 

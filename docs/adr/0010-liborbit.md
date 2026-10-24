@@ -1,12 +1,12 @@
 # ADR-10: The runtime as a shared library (`liborbit`, aliased as `liblua`)
 
-Status: Proposed (2026-10-16). Tym asked on 2026-10-16 for OrbitScript to replace Lua 5.5 for programs that embed it as a shared library, without recompiling them, and for a split into a runtime library and the programs that use it. He kept the CLIs as Rust programs that showcase the Rust embedding API (05:17Z), and chose `stabby` to carry that API across the library boundary (23:13Z). Accepting this record amends ADR-8 (states created from C) and the project decision that embedding is Rust-only, and adds `stabby` to the dependencies.
+Status: Accepted (Tym, 2026-10-24), as amended by ADR-11; proposed 2026-10-16. Tym asked on 2026-10-16 for OrbitScript to replace Lua 5.5 for programs that embed it as a shared library, without recompiling them, and for a split into a runtime library and the programs that use it. He kept the CLIs as Rust programs that showcase the Rust embedding API (05:17Z), and chose `stabby` to carry that API across the library boundary (23:13Z). Accepting this record amends ADR-8 (states created from C) and the project decision that embedding is Rust-only, and adds `stabby` to the dependencies.
 
 ## Context
 
 Programs that embed Lua 5.5 link a shared library by name (`liblua5.5.so.0` on Debian, `liblua-5.5.so` on Fedora, `lua55.dll` on Windows) and use the C API from their own code: they create and close states, use the stack between calls, open the libraries, resume coroutines and set hooks. ADR-8's shim covers C modules, which use the API only while a C function runs, and lists creating states from C as not planned. A spike (`spike/liblua`, never merged) ran the unmodified reference `lua` program on OrbitScript built as a shared library: 31 of the 32 suite files passed.
 
-A Rust `dylib` would let the CLIs use today's Rust API across a library boundary, but stable Rust then needs a shared `libstd-<hash>.so`, `panic = "unwind"` and no LTO, which measured 1.34x slower. A `cdylib` keeps LTO, `panic = "abort"` and a static libstd, so the boundary has to be a C ABI. Of a hand-written function table, `abi_stable` and `stabby`, `stabby` needed no `unsafe` in our code, added about 30 KB and 19 crates, and ran scripts at the same speed (planning notes: `planning/liblua/rust-api-boundary.md`).
+A Rust `dylib` would let the CLIs use today's Rust API across a library boundary, but stable Rust then needs a shared `libstd-<hash>.so`, `panic = "unwind"` and no LTO, which measured 1.34x slower. A `cdylib` keeps LTO, `panic = "abort"` and a static libstd, so the boundary has to be a C ABI. Of a hand-written function table, `abi_stable` and `stabby`, `stabby` needed no `unsafe` in our code, added about 30 KB and 19 crates, and ran scripts at the same speed.
 
 ## Decision
 

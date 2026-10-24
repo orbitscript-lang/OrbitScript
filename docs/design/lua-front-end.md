@@ -1,6 +1,6 @@
 # Lua front end (first light)
 
-Status: Proposed. Crate: `orbit-lua-syntax`. Scope: the [first-light subset](first-light-subset.md).
+Status: Implemented. Crate: `orbit-lua-syntax`. Scope: the [first-light subset](first-light-subset.md).
 
 The Lua front end turns Lua source bytes into the shared [HIR](hir.md). It is one of two front ends: the OrbitScript front end will produce the same HIR, so nothing Lua-specific leaks past this crate. It is written from the Lua 5.5 reference manual's grammar and the reference interpreter's observable behaviour, not from PUC Lua's parser.
 

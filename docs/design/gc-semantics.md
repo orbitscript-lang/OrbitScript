@@ -1,6 +1,6 @@
 # GC semantics: weak tables, finalizers and `collectgarbage` (compat C4)
 
-Status: Proposed. Crates: `orbit-gc` (collector), `orbit-core` (the table and metatable hooks), `orbit-vm` (running finalizers, closing a VM), `orbit-stdlib` (`collectgarbage`). Milestone C4 of the Lua 5.5 compatibility plan; exit is `gc.lua`, `gengc.lua` and `big.lua` from the official suite.
+Status: Implemented. Crates: `orbit-gc` (collector), `orbit-runtime::object` (the table and metatable hooks), `orbit-runtime::vm` (running finalizers, closing a VM), `orbit-runtime::stdlib` (`collectgarbage`). Milestone C4 of the Lua 5.5 compatibility plan; exit is `gc.lua`, `gengc.lua` and `big.lua` from the official suite.
 
 This builds on ADR-2 (own collector in `orbit-gc`, independent of the rest of the runtime) and on what `orbit-gc` already provides: per-object weak modes, ephemerons that wait on their key, and finalizer registration with resurrection. What is missing is the Lua side: tables don't read `__mode`, nothing registers or runs `__gc`, and `collectgarbage` knows six of its options. Every rule below comes from the 5.5 manual and from what the reference `lua5.5` binary does; the probes are listed at the end.
 

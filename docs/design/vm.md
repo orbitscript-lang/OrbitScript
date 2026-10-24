@@ -1,6 +1,6 @@
 # VM: runtime objects, bytecode, compiler and interpreter (first light)
 
-Status: Proposed. Crates: `orbit-core` (objects), `orbit-compiler` (HIR to bytecode), `orbit-vm` (interpreter), `orbit-stdlib` (the subset's library), `orbit` and `orbit-cli` (glue). Scope: the [first-light subset](first-light-subset.md).
+Status: Implemented. Crates: `orbit-runtime::object` (objects), `orbit-compiler` (HIR to bytecode), `orbit-runtime::vm` (interpreter), `orbit-runtime::stdlib` (the subset's library), `orbit` and `orbit-cli` (glue). Scope: the [first-light subset](first-light-subset.md).
 
 This document covers everything after the [HIR](hir.md): the objects a running program manipulates, the bytecode, the compiler that produces it, and the interpreter that runs it. It builds on the accepted ADRs (1 values, 2 own GC in `orbit-gc`, 4 `match` dispatch with superinstructions and inline-cache slots, 5 byte strings with `OrbitString`/`OrbitStr`, 6 safety) and the proposed ADR-3 (stackless frames, continuation-style natives). It is our own design: register-based like PUC Lua's VM, but with its own instruction set, capture model, error-message mechanism and calling convention.
 

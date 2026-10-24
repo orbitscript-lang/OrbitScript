@@ -1,6 +1,6 @@
 # Spike: ephemerons and finalization in orbit-gc
 
-Status: Done (informs the proposed ADR-2 amendment "Lua weak tables and finalizers").
+Status: Done (informed ADR-2's amendment "Lua weak tables and finalizers", accepted 2026-10-07).
 
 The GC semantics design asked for two API alternatives to be measured before ADR-2 is amended: how ephemerons are marked, and how unreachable objects registered for `__gc` are found. The code is on branch `spike/gc-ephemerons`: the alternatives sit behind spike-only Cargo features of `orbit-gc`, and `crates/orbit-gc/examples/ephemeron_spike.rs` runs the workloads.
 

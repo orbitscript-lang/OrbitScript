@@ -1,6 +1,6 @@
 # OrbitScript syntax proposal
 
-Status: **Proposed** (2026-10-13). Proposal only: no parser code, no PR. Nothing here changes an ADR or an accepted design.
+Status: **Decided and implemented.** Proposed 2026-10-13; Tym's decisions are in the Decisions table, and `orbit-orb-syntax` implements it ([orbitscript-front-end.md](../orbitscript-front-end.md)).
 
 Round 4 (2026-10-13 23:15Z): every question is decided; see [Decisions](#decisions-tym-2026-10-13). The document follows them. Indexing background: [indexing-report.md](indexing-report.md).
 
@@ -534,7 +534,7 @@ fn copy(src, dst) {
 
 `scope stmt;` (or `scope { ... }`) runs when the enclosing block exits by any route: fall-through, `return`, `break`, `continue`, or an error. Several run in reverse order, interleaved with scoped bindings. A scoped action can read locals in scope where it is written; `return`, `break` and `continue` inside it are compile errors.
 
-**[HIR]** Decided (Q13, changed by Tym on 2026-10-14): lowered in the front end, with no new HIR or bytecode. The action becomes a closure boxed in a table whose shared metatable's `__close` calls it, held in a `<close>` local, so it reuses Lua's to-be-closed machinery as is. It costs a closure and a table per run. The earlier plan, a `Defer { body: BlockId }` HIR statement compiled to inline code, turned out to need new unwinder states (see planning/orbitscript-syntax/scope-defer-design.md) and can still come later without changing any program.
+**[HIR]** Decided (Q13, changed by Tym on 2026-10-14): lowered in the front end, with no new HIR or bytecode. The action becomes a closure boxed in a table whose shared metatable's `__close` calls it, held in a `<close>` local, so it reuses Lua's to-be-closed machinery as is. It costs a closure and a table per run. The earlier plan, a `Defer { body: BlockId }` HIR statement compiled to inline code, turned out to need new unwinder states and can still come later without changing any program.
 
 ### Scoped bindings: `let scope name = expr;`
 

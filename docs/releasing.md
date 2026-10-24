@@ -42,8 +42,8 @@ Each target is tested and built on a runner of its own architecture, so `cargo t
 
 For each target there are two archives (`.tar.gz`, or `.zip` on Windows), each with `LICENSE` and `README.md`:
 
-- `orbitscript-<version>-<target>`: the shared layout of ADR-10 (`bin/`, `lib/` with `liborbit` and Lua 5.5's library names, `include/`); on Windows `bin/` also holds `orbit_lib.dll` and `lua55.dll`.
-- `orbitscript-<version>-<target>-static`: the static `orbit`, `orbitc` and `orbit-lsp`, one file each.
+- `orbitscript-<version>-<target>`: the shared layout of ADR-10 (`bin/` with `orbit`, `orbitc`, `orbit-lsp` and `orbit-fmt`, `lib/` with `liborbit` and Lua 5.5's library names, `include/`); on Windows `bin/` also holds `orbit_lib.dll` and `lua55.dll`.
+- `orbitscript-<version>-<target>-static`: the static `orbit`, `orbitc`, `orbit-lsp` and `orbit-fmt`, one file each.
 
 Plus `orbitscript-<version>.vsix`, the VS Code extension, and `SHA256SUMS`.
 

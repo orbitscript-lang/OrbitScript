@@ -9,27 +9,29 @@
 - **Lua 5.5 compatibility is judged by behavior.** When unsure, compare against the reference `lua5.5` interpreter and the official test suite, not memory of older Lua versions.
 
 ## Layout
-| Crate | Purpose | Stream |
-|---|---|---|
-| `orbit-lua-syntax` | Lua 5.5 lexer, parser, AST | A |
-| `orbit-orb-syntax` | OrbitScript lexer, parser, AST, lowering to HIR (always built in, no feature) | F |
-| `orbit-virtmem` | Low-level OS virtual address reservation and page commit buffer (`VmBuffer`) | B |
-| `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates | B |
-| `orbit-runtime` | Values, strings, tables (`object`), the interpreter (`vm`) and the built-in libraries (`stdlib`), built on `orbit-gc`. No I/O | B, C, D |
-| `orbit-hir`, `orbit-compiler` | HIR, bytecode compiler | C |
-| `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) | C |
-| `orbit-std` | The I/O-facing standard library (`io`, `os`, `print`, `loadfile`, `dofile`, the Lua searcher), built on the public `orbit` API | shared |
-| `orbit-capi` | Lua C API shim for loading C modules, installed above `orbit-std` (`orbit-cli` feature `c-modules`) | shared |
-| `orbit-lib` | `liborbit`, the runtime as one shared library that also serves as liblua 5.5 (ADR-10) | shared |
-| `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit-std` feature `ffi`) | shared |
-| `orbit-dap` | The Debug Adapter Protocol server behind `orbit --debug-server` (ADR-12), on the public `orbit::debugger` API | shared |
-| `orbit` | Rust embedding API | shared |
-| `orbit-cli` | `orbit` interpreter and `orbitc` compiler binaries | shared |
-| `orbit-check` | OrbitScript's optional type checker: library (used by the language server) and the `orbit-check` command. Reads the AST, never the runtime | F |
-| `orbit-fmt` | OrbitScript's formatter: library (used by the language server) and the `orbit-fmt` command. Reads the AST, never the runtime | F |
-| `orbit-testkit` | Conformance, differential and benchmark harness (dev tool, never shipped) | E |
+| Crate | Purpose |
+|---|---|
+| `orbit-lua-syntax` | Lua 5.5 lexer, parser, AST |
+| `orbit-orb-syntax` | OrbitScript lexer, parser, AST, lowering to HIR (always built in, no feature) |
+| `orbit-virtmem` | Low-level OS virtual address reservation and page commit buffer (`VmBuffer`) |
+| `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates |
+| `orbit-runtime` | Values, strings, tables (`object`), the interpreter (`vm`) and the built-in libraries (`stdlib`), built on `orbit-gc`. No I/O |
+| `orbit-hir`, `orbit-compiler` | HIR, bytecode compiler |
+| `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) |
+| `orbit-std` | The I/O-facing standard library (`io`, `os`, `print`, `loadfile`, `dofile`, the Lua searcher), built on the public `orbit` API |
+| `orbit-capi` | Lua C API shim for loading C modules, installed above `orbit-std` (`orbit-cli` feature `c-modules`) |
+| `orbit-lib` | `liborbit`, the runtime as one shared library that also serves as liblua 5.5 (ADR-10) |
+| `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit-std` feature `ffi`) |
+| `orbit-dap` | The Debug Adapter Protocol server behind `orbit --debug-server` (ADR-12), on the public `orbit::debugger` API |
+| `orbit` | Rust embedding API |
+| `orbit-macros` | The `#[native]` attribute: Rust functions as stack-API natives |
+| `orbit-cli` | `orbit` interpreter and `orbitc` compiler binaries |
+| `orbit-check` | OrbitScript's optional type checker: library (used by the language server) and the `orbit-check` command. Reads the AST, never the runtime |
+| `orbit-fmt` | OrbitScript's formatter: library (used by the language server) and the `orbit-fmt` command. Reads the AST, never the runtime |
+| `orbit-lsp` | The language server (ADR-12): a small host on the `orbit` API whose protocol layer is OrbitScript |
+| `orbit-testkit` | Conformance, differential and benchmark harness (dev tool, never shipped) |
 
-Design records live in `docs/adr/`. A **Proposed** ADR can be edited freely by its stream. An **Accepted** ADR changes only with Tym's approval, because other streams build on it.
+Design records live in `docs/adr/`. A **Proposed** ADR can be edited freely by the work that proposed it. An **Accepted** ADR changes only with Tym's approval, because other streams build on it.
 
 ## Testing against Lua
 `tests/README.md` explains the harness. The official 5.5 suite is vendored in `tests/lua-5.5/suite`: never edit it, and record every skip in `tests/lua-5.5/SKIPS.md`. When a change makes more suite files or `tests/diff` programs pass, update the matching `expected-orbit.txt` in the same PR (`--update-expected`).

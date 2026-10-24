@@ -1,6 +1,6 @@
 # Debug library, tracebacks and hooks
 
-Status: Proposed. Milestones C5d (debug core) and C6 (hooks, tracebacks, error-message parity) of the Lua 5.5 compatibility plan. Crates: `orbit-vm` (introspection, hooks), `orbit-stdlib` (the `debug` library, behind its own Cargo feature), `orbit-compiler` and `orbit-bytecode` (a few debug-info fields), `orbit-cli` (the uncaught-error traceback).
+Status: Implemented. Milestones C5d (debug core) and C6 (hooks, tracebacks, error-message parity) of the Lua 5.5 compatibility plan. Crates: `orbit-runtime::vm` (introspection, hooks), `orbit-runtime::stdlib` (the `debug` library, behind its own Cargo feature), `orbit-compiler` and `orbit-bytecode` (a few debug-info fields), `orbit-cli` (the uncaught-error traceback).
 
 This builds on the [VM design](vm.md) and [VM semantics](vm-semantics.md). Everything here was worked out from the manual, the reference `lua5.5` binary and the official suite (`db.lua`, `calls.lua`, `errors.lua`, `locals.lua`, `coroutine.lua`), never from PUC Lua's sources. It keeps the fast paths as they are (hooks cost nothing until one is set). Hooks are the one place Lua code runs in a nested call on the Rust stack: Lua hooks can't yield in the reference either (see [Hook calls](#hook-calls)).
 

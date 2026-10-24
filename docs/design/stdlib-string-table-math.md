@@ -1,6 +1,6 @@
 # The string, utf8, table and math libraries
 
-Status: Proposed
+Status: Implemented
 
 This covers milestone C5a of the Lua 5.5 compatibility plan: the full `string`, `utf8`, `table` and `math` libraries in `orbit-stdlib`. The exit test is that `strings.lua`, `pm.lua`, `tpack.lua`, `utf8.lua` and `math.lua` from the official suite pass (`sort.lua` also needs `debug.setmetatable`, which the debug library thread delivers).
 
