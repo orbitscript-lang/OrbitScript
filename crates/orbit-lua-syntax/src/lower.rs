@@ -666,6 +666,7 @@ impl Lowerer<'_> {
         Ok(())
     }
 
+    #[inline(never)]
     fn stmt(&mut self, s: &ast::Stmt, stmts: &mut Vec<hir::StmtId>) -> LResult<()> {
         // Like `Expr::at`: an assignment's stores and a declaration's checks report the
         // statement's last line, a numeric `for` the line of `do`, and a generic `for` the
@@ -678,81 +679,20 @@ impl Lowerer<'_> {
             }
             _ => s.span.start,
         };
+        // The larger kinds are lowered out of line so that this frame, which every level of
+        // nested blocks passes through, stays small (in debug builds especially).
         let kind = match &s.kind {
             StmtKind::Local {
                 attrib,
                 names,
                 values,
-            } => {
-                // The parser allows at most one `Close` per list.
-                let kinds: Vec<_> = names
-                    .iter()
-                    .map(|n| match n.attrib.or(*attrib) {
-                        None => LocalKind::Normal,
-                        Some(a) if a.kind == AttribKind::Const => LocalKind::Const,
-                        Some(_) => LocalKind::Close,
-                    })
-                    .collect();
-                let values = self.expr_list(values)?;
-                let mut locals = Vec::with_capacity(names.len());
-                let mut bindings = Vec::with_capacity(names.len());
-                for (n, kind) in names.iter().zip(kinds) {
-                    let local = self.new_local(Some(n.name.sym), n.name.span, kind);
-                    locals.push(local);
-                    bindings.push((n.name.sym, local));
-                }
-                // The names come into scope after the whole statement.
-                for (sym, local) in bindings {
-                    self.bind(sym, local);
-                }
-                hir::StmtKind::Let { locals, values }
-            }
-            StmtKind::Assign { targets, values } => {
-                let mut places = Vec::with_capacity(targets.len());
-                for t in targets {
-                    places.push(self.place(t)?);
-                }
-                let values = self.expr_list(values)?;
-                hir::StmtKind::Assign {
-                    targets: places,
-                    values,
-                }
-            }
-            StmtKind::Call(e) => hir::StmtKind::Eval(self.expr(e)?),
-            StmtKind::Do(b) => hir::StmtKind::Block(self.block(b)?),
-            StmtKind::While { cond, body } => {
-                let cond = self.expr(cond)?;
-                hir::StmtKind::While {
-                    cond,
-                    body: self.block(body)?,
-                }
-            }
-            StmtKind::Repeat { body, until } => {
-                // The condition sees the body's locals, and belongs to the body for `goto`.
-                self.open_scope();
-                let end_line = self.end_line_of(until.span);
-                let mut cond = None;
-                let result = self.labelled_block(body, true, end_line, Some((until, &mut cond)));
-                self.close_scope();
-                let body = result?;
-                let until = cond.expect("until condition");
-                hir::StmtKind::Repeat { body, until }
-            }
-            StmtKind::If { arms, else_ } => {
-                let mut hir_arms = Vec::with_capacity(arms.len());
-                for (cond, body) in arms {
-                    let cond = self.expr(cond)?;
-                    hir_arms.push((cond, self.block(body)?));
-                }
-                let else_ = match else_ {
-                    Some(b) => Some(self.block(b)?),
-                    None => None,
-                };
-                hir::StmtKind::If {
-                    arms: hir_arms,
-                    else_,
-                }
-            }
+            } => self.local_stmt(*attrib, names, values),
+            StmtKind::Assign { targets, values } => self.assign_stmt(targets, values),
+            StmtKind::Call(e) => self.expr(e).map(hir::StmtKind::Eval),
+            StmtKind::Do(b) => self.block(b).map(hir::StmtKind::Block),
+            StmtKind::While { cond, body } => self.while_stmt(cond, body),
+            StmtKind::Repeat { body, until } => self.repeat_stmt(body, until),
+            StmtKind::If { arms, else_ } => self.if_stmt(arms, else_.as_ref()),
             StmtKind::NumericFor {
                 var,
                 start,
@@ -760,163 +700,304 @@ impl Lowerer<'_> {
                 step,
                 body,
                 ..
-            } => {
-                let start = self.expr(start)?;
-                let limit = self.expr(limit)?;
-                let step = match step {
-                    Some(e) => Some(self.expr(e)?),
-                    None => None,
-                };
-                self.open_scope();
-                let local = self.new_local(Some(var.sym), var.span, LocalKind::ForControl);
-                self.bind(var.sym, local);
-                let body = self.block(body);
-                self.close_scope();
-                hir::StmtKind::NumericFor {
-                    var: local,
-                    start,
-                    limit,
-                    step,
-                    exclusive: false,
-                    body: body?,
-                }
-            }
+            } => self.numeric_for(*var, start, limit, step.as_ref(), body),
             StmtKind::GenericFor { vars, exprs, body } => {
-                let iter = self.expr_list(exprs)?;
-                let hidden = [(); 4].map(|_| self.new_local(None, s.span, LocalKind::Hidden));
-                self.open_scope();
-                let mut locals = Vec::with_capacity(vars.len());
-                for (i, v) in vars.iter().enumerate() {
-                    // Only the first variable is read-only (5.5).
-                    let kind = if i == 0 {
-                        LocalKind::ForControl
-                    } else {
-                        LocalKind::Normal
-                    };
-                    let local = self.new_local(Some(v.sym), v.span, kind);
-                    self.bind(v.sym, local);
-                    locals.push(local);
-                }
-                let body = self.block(body);
-                self.close_scope();
-                hir::StmtKind::GenericFor {
-                    vars: locals,
-                    iter,
-                    hidden,
-                    body: body?,
-                }
+                self.generic_for(vars, exprs, body, s.span)
             }
-            StmtKind::Function { path, func } => {
-                let mut target = if path.fields.is_empty() && path.method.is_none() {
-                    None
-                } else {
-                    Some(self.name_expr(path.base)?)
-                };
-                let mut fields = path.fields.iter().chain(path.method.iter()).peekable();
-                let mut last_key = None;
-                while let Some(field) = fields.next() {
-                    let key = self.add_expr(hir::ExprKind::Str(field.sym), field.span);
-                    if fields.peek().is_none() {
-                        last_key = Some(key);
-                        break;
-                    }
-                    let obj = target.expect("object for a field");
-                    let span = self.f().expr(obj).span.to(field.span);
-                    target = Some(self.add_expr(hir::ExprKind::Index { obj, key }, span));
-                }
-                let (place, name) = match (target, last_key) {
-                    (Some(obj), Some(key)) => {
-                        let last = path.method.or(path.fields.last().copied()).expect("field");
-                        let name = if path.method.is_some() {
-                            FunctionName::Method(last.sym)
-                        } else {
-                            FunctionName::Field(last.sym)
-                        };
-                        (hir::Place::Index { obj, key }, name)
-                    }
-                    _ => {
-                        let place = self.place_for_name(path.base)?;
-                        let name = match place {
-                            hir::Place::Local(_) | hir::Place::Outer { .. } => {
-                                FunctionName::Local(path.base.sym)
-                            }
-                            _ => FunctionName::Global(path.base.sym),
-                        };
-                        (place, name)
-                    }
-                };
-                let closure = self.function(func, name, path.method.is_some())?;
-                let value = self.add_expr(hir::ExprKind::Closure(closure), func.span);
-                hir::StmtKind::Assign {
-                    targets: vec![place],
-                    values: vec![value].into(),
-                }
-            }
-            StmtKind::LocalFunction { name, func } => {
-                // In scope inside its own body, so it can recurse.
-                let local = self.new_local(Some(name.sym), name.span, LocalKind::Normal);
-                self.bind(name.sym, local);
-                let func = self.function(func, FunctionName::Local(name.sym), false)?;
-                hir::StmtKind::LocalFunction { local, func }
-            }
-            StmtKind::Break => hir::StmtKind::Break,
-            StmtKind::Error => return Err(self.unparsed(s.span)),
+            StmtKind::Function { path, func } => self.function_stmt(path, func),
+            StmtKind::LocalFunction { name, func } => self.local_function(*name, func),
+            StmtKind::Break => Ok(hir::StmtKind::Break),
+            StmtKind::Error => Err(self.unparsed(s.span)),
             StmtKind::Goto(name) => {
                 self.goto(*name, s.span, stmts);
                 return Ok(());
             }
-            StmtKind::Label(name) => self.label(*name, s.span)?,
+            StmtKind::Label(name) => self.label(*name, s.span),
             StmtKind::Global {
                 attrib,
                 names,
                 values,
-            } => {
-                let mut entries = Vec::with_capacity(names.len());
-                for n in names {
-                    let constant = self.global_attrib(n.attrib.or(*attrib))?;
-                    entries.push(Entry::Global {
-                        name: n.name.sym,
-                        constant,
-                    });
-                }
-                // Like `local`, the names come into scope after the whole statement.
-                let values = if values.is_empty() {
-                    None
-                } else {
-                    Some(self.expr_list(values)?)
-                };
-                entries.into_iter().for_each(|e| self.declare(e));
-                let Some(values) = values else {
-                    return Ok(());
-                };
-                let mut targets = Vec::with_capacity(names.len());
-                for n in names {
-                    targets.push(self.global_place(n.name)?);
-                }
-                hir::StmtKind::Define { targets, values }
-            }
-            StmtKind::GlobalFunction { name, func } => {
-                // `global f; global f = function ... end`: in scope inside its own body.
-                self.declare(Entry::Global {
-                    name: name.sym,
-                    constant: false,
-                });
-                let place = self.global_place(*name)?;
-                let func = self.function(func, FunctionName::Global(name.sym), false)?;
-                let value = self.add_expr(hir::ExprKind::Closure(func), s.span);
-                hir::StmtKind::Define {
-                    targets: vec![place],
-                    values: vec![value].into(),
-                }
-            }
+            } => match self.global_stmt(*attrib, names, values)? {
+                Some(kind) => Ok(kind),
+                None => return Ok(()),
+            },
+            StmtKind::GlobalFunction { name, func } => self.global_function(*name, func, s.span),
             StmtKind::GlobalAll { attrib } => {
                 let constant = self.global_attrib(*attrib)?;
                 self.declare(Entry::GlobalAll { constant });
                 return Ok(());
             }
-        };
+        }?;
         stmts.push(self.f().add_stmt_at(kind, s.span, at));
         Ok(())
+    }
+
+    /// `local names = values`.
+    fn local_stmt(
+        &mut self,
+        attrib: Option<ast::Attrib>,
+        names: &[ast::AttName],
+        values: &[ast::Expr],
+    ) -> LResult<hir::StmtKind> {
+        // The parser allows at most one `Close` per list.
+        let kinds: Vec<_> = names
+            .iter()
+            .map(|n| match n.attrib.or(attrib) {
+                None => LocalKind::Normal,
+                Some(a) if a.kind == AttribKind::Const => LocalKind::Const,
+                Some(_) => LocalKind::Close,
+            })
+            .collect();
+        let values = self.expr_list(values)?;
+        let mut locals = Vec::with_capacity(names.len());
+        let mut bindings = Vec::with_capacity(names.len());
+        for (n, kind) in names.iter().zip(kinds) {
+            let local = self.new_local(Some(n.name.sym), n.name.span, kind);
+            locals.push(local);
+            bindings.push((n.name.sym, local));
+        }
+        // The names come into scope after the whole statement.
+        for (sym, local) in bindings {
+            self.bind(sym, local);
+        }
+        Ok(hir::StmtKind::Let { locals, values })
+    }
+
+    /// `targets = values`.
+    fn assign_stmt(
+        &mut self,
+        targets: &[ast::Expr],
+        values: &[ast::Expr],
+    ) -> LResult<hir::StmtKind> {
+        let mut places = Vec::with_capacity(targets.len());
+        for t in targets {
+            places.push(self.place(t)?);
+        }
+        let values = self.expr_list(values)?;
+        Ok(hir::StmtKind::Assign {
+            targets: places,
+            values,
+        })
+    }
+
+    /// `while cond do body end`.
+    fn while_stmt(&mut self, cond: &ast::Expr, body: &ast::Block) -> LResult<hir::StmtKind> {
+        let cond = self.expr(cond)?;
+        Ok(hir::StmtKind::While {
+            cond,
+            body: self.block(body)?,
+        })
+    }
+
+    /// `repeat body until cond`.
+    fn repeat_stmt(&mut self, body: &ast::Block, until: &ast::Expr) -> LResult<hir::StmtKind> {
+        // The condition sees the body's locals, and belongs to the body for `goto`.
+        self.open_scope();
+        let end_line = self.end_line_of(until.span);
+        let mut cond = None;
+        let result = self.labelled_block(body, true, end_line, Some((until, &mut cond)));
+        self.close_scope();
+        let body = result?;
+        let until = cond.expect("until condition");
+        Ok(hir::StmtKind::Repeat { body, until })
+    }
+
+    /// `if cond then ... {elseif cond then ...} [else ...] end`.
+    fn if_stmt(
+        &mut self,
+        arms: &[(ast::Expr, ast::Block)],
+        else_: Option<&ast::Block>,
+    ) -> LResult<hir::StmtKind> {
+        let mut hir_arms = Vec::with_capacity(arms.len());
+        for (cond, body) in arms {
+            let cond = self.expr(cond)?;
+            hir_arms.push((cond, self.block(body)?));
+        }
+        let else_ = match else_ {
+            Some(b) => Some(self.block(b)?),
+            None => None,
+        };
+        Ok(hir::StmtKind::If {
+            arms: hir_arms,
+            else_,
+        })
+    }
+
+    /// `for var = start, limit [, step] do body end`.
+    fn numeric_for(
+        &mut self,
+        var: ast::Name,
+        start: &ast::Expr,
+        limit: &ast::Expr,
+        step: Option<&ast::Expr>,
+        body: &ast::Block,
+    ) -> LResult<hir::StmtKind> {
+        let start = self.expr(start)?;
+        let limit = self.expr(limit)?;
+        let step = match step {
+            Some(e) => Some(self.expr(e)?),
+            None => None,
+        };
+        self.open_scope();
+        let local = self.new_local(Some(var.sym), var.span, LocalKind::ForControl);
+        self.bind(var.sym, local);
+        let body = self.block(body);
+        self.close_scope();
+        Ok(hir::StmtKind::NumericFor {
+            var: local,
+            start,
+            limit,
+            step,
+            exclusive: false,
+            body: body?,
+        })
+    }
+
+    /// `for vars in exprs do body end`, the statement spanning `span`.
+    fn generic_for(
+        &mut self,
+        vars: &[ast::Name],
+        exprs: &[ast::Expr],
+        body: &ast::Block,
+        span: Span,
+    ) -> LResult<hir::StmtKind> {
+        let iter = self.expr_list(exprs)?;
+        let hidden = [(); 4].map(|_| self.new_local(None, span, LocalKind::Hidden));
+        self.open_scope();
+        let mut locals = Vec::with_capacity(vars.len());
+        for (i, v) in vars.iter().enumerate() {
+            // Only the first variable is read-only (5.5).
+            let kind = if i == 0 {
+                LocalKind::ForControl
+            } else {
+                LocalKind::Normal
+            };
+            let local = self.new_local(Some(v.sym), v.span, kind);
+            self.bind(v.sym, local);
+            locals.push(local);
+        }
+        let body = self.block(body);
+        self.close_scope();
+        Ok(hir::StmtKind::GenericFor {
+            vars: locals,
+            iter,
+            hidden,
+            body: body?,
+        })
+    }
+
+    /// `function a.b:c (...) ... end`.
+    fn function_stmt(
+        &mut self,
+        path: &ast::FuncPath,
+        func: &ast::FuncBody,
+    ) -> LResult<hir::StmtKind> {
+        let mut target = if path.fields.is_empty() && path.method.is_none() {
+            None
+        } else {
+            Some(self.name_expr(path.base)?)
+        };
+        let mut fields = path.fields.iter().chain(path.method.iter()).peekable();
+        let mut last_key = None;
+        while let Some(field) = fields.next() {
+            let key = self.add_expr(hir::ExprKind::Str(field.sym), field.span);
+            if fields.peek().is_none() {
+                last_key = Some(key);
+                break;
+            }
+            let obj = target.expect("object for a field");
+            let span = self.f().expr(obj).span.to(field.span);
+            target = Some(self.add_expr(hir::ExprKind::Index { obj, key }, span));
+        }
+        let (place, name) = match (target, last_key) {
+            (Some(obj), Some(key)) => {
+                let last = path.method.or(path.fields.last().copied()).expect("field");
+                let name = if path.method.is_some() {
+                    FunctionName::Method(last.sym)
+                } else {
+                    FunctionName::Field(last.sym)
+                };
+                (hir::Place::Index { obj, key }, name)
+            }
+            _ => {
+                let place = self.place_for_name(path.base)?;
+                let name = match place {
+                    hir::Place::Local(_) | hir::Place::Outer { .. } => {
+                        FunctionName::Local(path.base.sym)
+                    }
+                    _ => FunctionName::Global(path.base.sym),
+                };
+                (place, name)
+            }
+        };
+        let closure = self.function(func, name, path.method.is_some())?;
+        let value = self.add_expr(hir::ExprKind::Closure(closure), func.span);
+        Ok(hir::StmtKind::Assign {
+            targets: vec![place],
+            values: vec![value].into(),
+        })
+    }
+
+    /// `local function name (...) ... end`.
+    fn local_function(&mut self, name: ast::Name, func: &ast::FuncBody) -> LResult<hir::StmtKind> {
+        // In scope inside its own body, so it can recurse.
+        let local = self.new_local(Some(name.sym), name.span, LocalKind::Normal);
+        self.bind(name.sym, local);
+        let func = self.function(func, FunctionName::Local(name.sym), false)?;
+        Ok(hir::StmtKind::LocalFunction { local, func })
+    }
+
+    /// `global names [= values]`: `None` when there are no values, which only declares.
+    fn global_stmt(
+        &mut self,
+        attrib: Option<ast::Attrib>,
+        names: &[ast::AttName],
+        values: &[ast::Expr],
+    ) -> LResult<Option<hir::StmtKind>> {
+        let mut entries = Vec::with_capacity(names.len());
+        for n in names {
+            let constant = self.global_attrib(n.attrib.or(attrib))?;
+            entries.push(Entry::Global {
+                name: n.name.sym,
+                constant,
+            });
+        }
+        // Like `local`, the names come into scope after the whole statement.
+        let values = if values.is_empty() {
+            None
+        } else {
+            Some(self.expr_list(values)?)
+        };
+        entries.into_iter().for_each(|e| self.declare(e));
+        let Some(values) = values else {
+            return Ok(None);
+        };
+        let mut targets = Vec::with_capacity(names.len());
+        for n in names {
+            targets.push(self.global_place(n.name)?);
+        }
+        Ok(Some(hir::StmtKind::Define { targets, values }))
+    }
+
+    /// `global function name (...) ... end`, the statement spanning `span`.
+    fn global_function(
+        &mut self,
+        name: ast::Name,
+        func: &ast::FuncBody,
+        span: Span,
+    ) -> LResult<hir::StmtKind> {
+        // `global f; global f = function ... end`: in scope inside its own body.
+        self.declare(Entry::Global {
+            name: name.sym,
+            constant: false,
+        });
+        let place = self.global_place(name)?;
+        let func = self.function(func, FunctionName::Global(name.sym), false)?;
+        let value = self.add_expr(hir::ExprKind::Closure(func), span);
+        Ok(hir::StmtKind::Define {
+            targets: vec![place],
+            values: vec![value].into(),
+        })
     }
 
     /// Whether a `global` declaration's attribute makes it read-only.
@@ -1013,13 +1094,16 @@ impl Lowerer<'_> {
         Ok(self.add_expr(kind, name.span))
     }
 
+    /// Lowers `e`. The composite kinds are lowered out of line so that this frame, which
+    /// every level of a nested expression passes through, stays small (in debug builds
+    /// especially).
+    ///
+    /// Each expression records where a runtime error from its own operation is reported.
+    /// lua5.5 uses the line of the last token read when it emits the instruction, except that
+    /// arithmetic, bitwise and concatenation use their operator token and calls the token
+    /// opening their arguments.
     fn expr(&mut self, e: &ast::Expr) -> LResult<ExprId> {
         let span = e.span;
-        // Where a runtime error from this expression's own operation is reported. lua5.5
-        // uses the line of the last token read when it emits the instruction, except that
-        // arithmetic, bitwise and concatenation use their operator token and calls the
-        // token opening their arguments.
-        let mut at = span.start;
         let kind = match &e.kind {
             ExprKind::Nil => hir::ExprKind::Nil,
             ExprKind::True => hir::ExprKind::Bool(true),
@@ -1030,119 +1114,159 @@ impl Lowerer<'_> {
             ExprKind::Vararg => hir::ExprKind::Vararg,
             ExprKind::Error => return Err(self.unparsed(span)),
             ExprKind::Name(sym) => return self.name_expr(ast::Name { sym: *sym, span }),
-            ExprKind::Index { obj, key } => {
-                let obj = self.expr(obj)?;
-                let key = self.expr(key)?;
-                at = span.last_byte();
-                hir::ExprKind::Index { obj, key }
-            }
+            ExprKind::Index { obj, key } => return self.index_expr(obj, key, span),
             ExprKind::Call {
                 callee,
                 args,
                 args_at,
-            } => {
-                let callee = self.expr(callee)?;
-                let args = self.expr_list(args)?;
-                at = *args_at;
-                hir::ExprKind::Call { callee, args }
-            }
+            } => return self.call_expr(callee, None, args, span, *args_at),
             ExprKind::Method {
                 obj,
                 name,
                 args,
                 args_at,
-            } => {
-                at = *args_at;
-                let obj = self.expr(obj)?;
-                let args = self.expr_list(args)?;
-                hir::ExprKind::MethodCall {
-                    obj,
-                    name: name.sym,
-                    args,
-                }
-            }
-            ExprKind::Function(body) => {
-                hir::ExprKind::Closure(self.function(body, FunctionName::Anonymous, false)?)
-            }
-            ExprKind::Table(fields) => {
-                let mut entries = Vec::with_capacity(fields.len());
-                for field in fields {
-                    entries.push(match field {
-                        Field::Positional(v) => hir::TableEntry::Positional(self.expr(v)?),
-                        Field::Named(n, v) => {
-                            let key = self.add_expr(hir::ExprKind::Str(n.sym), n.span);
-                            hir::TableEntry::Keyed(key, self.expr(v)?)
-                        }
-                        Field::Keyed(k, v) => {
-                            let key = self.expr(k)?;
-                            hir::TableEntry::Keyed(key, self.expr(v)?)
-                        }
-                    });
-                }
-                hir::ExprKind::Table(entries)
-            }
+            } => return self.call_expr(obj, Some(*name), args, span, *args_at),
+            ExprKind::Function(body) => return self.function_expr(body, span),
+            ExprKind::Table(fields) => return self.table_expr(fields, span),
             ExprKind::Binary {
                 op,
                 op_at,
                 lhs,
                 rhs,
-            } => {
-                let lhs = self.expr(lhs)?;
-                let rhs = self.expr(rhs)?;
-                use ast::BinOp as A;
-                use hir::BinOp as H;
-                let op = match op {
-                    A::And => return Ok(self.add_expr(hir::ExprKind::And { lhs, rhs }, span)),
-                    A::Or => return Ok(self.add_expr(hir::ExprKind::Or { lhs, rhs }, span)),
-                    A::Add => H::Add,
-                    A::Sub => H::Sub,
-                    A::Mul => H::Mul,
-                    A::Div => H::Div,
-                    A::IDiv => H::IDiv,
-                    A::Mod => H::Mod,
-                    A::Pow => H::Pow,
-                    A::Concat => H::Concat,
-                    A::Eq => H::Eq,
-                    A::Ne => H::Ne,
-                    A::Lt => H::Lt,
-                    A::Le => H::Le,
-                    A::Gt => H::Gt,
-                    A::Ge => H::Ge,
-                    A::BAnd => H::BAnd,
-                    A::BOr => H::BOr,
-                    A::BXor => H::BXor,
-                    A::Shl => H::Shl,
-                    A::Shr => H::Shr,
-                };
-                at = match op {
-                    H::Eq | H::Ne | H::Lt | H::Le | H::Gt | H::Ge => span.last_byte(),
-                    _ => *op_at,
-                };
-                hir::ExprKind::Binary { op, lhs, rhs }
-            }
-            ExprKind::Unary { op, expr } => {
-                let op = match op {
-                    ast::UnOp::Neg => hir::UnOp::Neg,
-                    ast::UnOp::Not => hir::UnOp::Not,
-                    ast::UnOp::Len => hir::UnOp::Len,
-                    ast::UnOp::BNot => hir::UnOp::BNot,
-                };
-                let expr = self.expr(expr)?;
-                hir::ExprKind::Unary { op, expr }
-            }
-            ExprKind::Paren(inner) => {
-                let multi = matches!(
-                    inner.kind,
-                    ExprKind::Call { .. } | ExprKind::Method { .. } | ExprKind::Vararg
-                );
-                let inner = self.expr(inner)?;
-                if !multi {
-                    return Ok(inner);
-                }
-                // `(f())` is exactly one value.
-                hir::ExprKind::First(inner)
-            }
+            } => return self.binary_expr(*op, lhs, rhs, span, *op_at),
+            ExprKind::Unary { op, expr } => return self.unary_expr(*op, expr, span),
+            ExprKind::Paren(inner) => return self.paren_expr(inner, span),
         };
-        Ok(self.f().add_expr_at(kind, span, at))
+        Ok(self.f().add_expr_at(kind, span, span.start))
+    }
+
+    /// `obj[key]`.
+    fn index_expr(&mut self, obj: &ast::Expr, key: &ast::Expr, span: Span) -> LResult<ExprId> {
+        let obj = self.expr(obj)?;
+        let key = self.expr(key)?;
+        let kind = hir::ExprKind::Index { obj, key };
+        Ok(self.f().add_expr_at(kind, span, span.last_byte()))
+    }
+
+    /// `callee(args)`, or the method call `callee:name(args)` when `method` is given.
+    fn call_expr(
+        &mut self,
+        callee: &ast::Expr,
+        method: Option<ast::Name>,
+        args: &[ast::Expr],
+        span: Span,
+        args_at: u32,
+    ) -> LResult<ExprId> {
+        let callee = self.expr(callee)?;
+        let args = self.expr_list(args)?;
+        let kind = match method {
+            None => hir::ExprKind::Call { callee, args },
+            Some(name) => hir::ExprKind::MethodCall {
+                obj: callee,
+                name: name.sym,
+                args,
+            },
+        };
+        Ok(self.f().add_expr_at(kind, span, args_at))
+    }
+
+    /// `function (...) ... end`.
+    fn function_expr(&mut self, body: &ast::FuncBody, span: Span) -> LResult<ExprId> {
+        let kind = hir::ExprKind::Closure(self.function(body, FunctionName::Anonymous, false)?);
+        Ok(self.f().add_expr_at(kind, span, span.start))
+    }
+
+    /// `{ fields }`.
+    fn table_expr(&mut self, fields: &[Field], span: Span) -> LResult<ExprId> {
+        let mut entries = Vec::with_capacity(fields.len());
+        for field in fields {
+            entries.push(match field {
+                Field::Positional(v) => hir::TableEntry::Positional(self.expr(v)?),
+                Field::Named(n, v) => {
+                    let key = self.add_expr(hir::ExprKind::Str(n.sym), n.span);
+                    hir::TableEntry::Keyed(key, self.expr(v)?)
+                }
+                Field::Keyed(k, v) => {
+                    let key = self.expr(k)?;
+                    hir::TableEntry::Keyed(key, self.expr(v)?)
+                }
+            });
+        }
+        let kind = hir::ExprKind::Table(entries);
+        Ok(self.f().add_expr_at(kind, span, span.start))
+    }
+
+    /// `lhs op rhs`, the operator at `op_at`.
+    fn binary_expr(
+        &mut self,
+        op: ast::BinOp,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        span: Span,
+        op_at: u32,
+    ) -> LResult<ExprId> {
+        let lhs = self.expr(lhs)?;
+        let rhs = self.expr(rhs)?;
+        use ast::BinOp as A;
+        use hir::BinOp as H;
+        let op = match op {
+            A::And => return Ok(self.add_expr(hir::ExprKind::And { lhs, rhs }, span)),
+            A::Or => return Ok(self.add_expr(hir::ExprKind::Or { lhs, rhs }, span)),
+            A::Add => H::Add,
+            A::Sub => H::Sub,
+            A::Mul => H::Mul,
+            A::Div => H::Div,
+            A::IDiv => H::IDiv,
+            A::Mod => H::Mod,
+            A::Pow => H::Pow,
+            A::Concat => H::Concat,
+            A::Eq => H::Eq,
+            A::Ne => H::Ne,
+            A::Lt => H::Lt,
+            A::Le => H::Le,
+            A::Gt => H::Gt,
+            A::Ge => H::Ge,
+            A::BAnd => H::BAnd,
+            A::BOr => H::BOr,
+            A::BXor => H::BXor,
+            A::Shl => H::Shl,
+            A::Shr => H::Shr,
+        };
+        let at = match op {
+            H::Eq | H::Ne | H::Lt | H::Le | H::Gt | H::Ge => span.last_byte(),
+            _ => op_at,
+        };
+        Ok(self
+            .f()
+            .add_expr_at(hir::ExprKind::Binary { op, lhs, rhs }, span, at))
+    }
+
+    /// `op expr`.
+    fn unary_expr(&mut self, op: ast::UnOp, expr: &ast::Expr, span: Span) -> LResult<ExprId> {
+        let op = match op {
+            ast::UnOp::Neg => hir::UnOp::Neg,
+            ast::UnOp::Not => hir::UnOp::Not,
+            ast::UnOp::Len => hir::UnOp::Len,
+            ast::UnOp::BNot => hir::UnOp::BNot,
+        };
+        let expr = self.expr(expr)?;
+        let kind = hir::ExprKind::Unary { op, expr };
+        Ok(self.f().add_expr_at(kind, span, span.start))
+    }
+
+    /// `(inner)`, which truncates a call or `...` to one value.
+    fn paren_expr(&mut self, inner: &ast::Expr, span: Span) -> LResult<ExprId> {
+        let multi = matches!(
+            inner.kind,
+            ExprKind::Call { .. } | ExprKind::Method { .. } | ExprKind::Vararg
+        );
+        let inner = self.expr(inner)?;
+        if !multi {
+            return Ok(inner);
+        }
+        // `(f())` is exactly one value.
+        Ok(self
+            .f()
+            .add_expr_at(hir::ExprKind::First(inner), span, span.start))
     }
 }

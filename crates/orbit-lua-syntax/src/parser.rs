@@ -613,13 +613,7 @@ impl Parser<'_> {
         // The indentation of the line opening the block, and whether the body doesn't start
         // on a line of its own that is no deeper (code written flush), to spot a missing `end`
         // when recovering.
-        let (opener, indented) = if self.recover {
-            let opener = self.line_indent(self.prev_end);
-            let flush = self.starts_line() && self.line_indent(start) <= opener;
-            (opener, self.layout || !flush)
-        } else {
-            (0, false)
-        };
+        let (opener, indented) = self.block_layout(start);
         let outer = (self.stmt_start, self.stmt_indent);
         while !self.block_follows() {
             if self.depth > 1 && self.block_end_missing(opener, indented)? {
@@ -630,36 +624,26 @@ impl Parser<'_> {
                 self.stmt_start = start;
                 self.stmt_indent = self.line_indent(start);
             }
-            let (depth, funcs, func) = (self.depth, self.funcs.len(), self.func_counts());
-            let result = if self.is_kw(Keyword::Return) {
+            let saved = (self.depth, self.funcs.len(), self.func_counts());
+            let failed = if self.is_kw(Keyword::Return) {
                 match self.return_stat() {
                     Ok(r) => {
                         ret = Some(r);
                         break;
                     }
-                    Err(d) => Err(d),
+                    Err(d) => d,
                 }
             } else {
-                self.statement()
-            };
-            match result {
-                Ok(Some(stmt)) => stmts.push(stmt),
-                Ok(None) => {}
-                Err(d) if self.recover => {
-                    self.depth = depth;
-                    self.funcs.truncate(funcs);
-                    self.restore_func_counts(func);
-                    if self.lex_error_at.is_none_or(|at| at < start) {
-                        self.report(d);
+                match self.statement() {
+                    Ok(Some(stmt)) => {
+                        stmts.push(stmt);
+                        continue;
                     }
-                    self.synchronize(start);
-                    stmts.push(Stmt {
-                        kind: StmtKind::Error,
-                        span: span_from(start, self.prev_end),
-                    });
+                    Ok(None) => continue,
+                    Err(d) => d,
                 }
-                Err(d) => return Err(d),
-            }
+            };
+            self.statement_failed(failed, start, saved, &mut stmts)?;
         }
         self.leave();
         self.func().active = active;
@@ -669,6 +653,47 @@ impl Parser<'_> {
             ret,
             span: span_from(start, self.prev_end),
         })
+    }
+
+    /// After the statement at `start` failed with `d`: gives `d` back, or when recovering,
+    /// restores the state saved before the statement, reports `d`, skips the rest of the
+    /// statement and adds its error node to `stmts`. Out of line, to keep `block`'s frame,
+    /// which nested blocks repeat, small.
+    #[cold]
+    fn statement_failed(
+        &mut self,
+        d: Diagnostic,
+        start: u32,
+        (depth, funcs, func): (u32, usize, (u32, u32)),
+        stmts: &mut Vec<Stmt>,
+    ) -> PResult<()> {
+        if !self.recover {
+            return Err(d);
+        }
+        self.depth = depth;
+        self.funcs.truncate(funcs);
+        self.restore_func_counts(func);
+        if self.lex_error_at.is_none_or(|at| at < start) {
+            self.report(d);
+        }
+        self.synchronize(start);
+        stmts.push(Stmt {
+            kind: StmtKind::Error,
+            span: span_from(start, self.prev_end),
+        });
+        Ok(())
+    }
+
+    /// For `block`, starting at `start`: the indentation of the line opening it, and whether
+    /// its body doesn't start on a line of its own that is no deeper (code written flush).
+    #[cold]
+    fn block_layout(&self, start: u32) -> (usize, bool) {
+        if !self.recover {
+            return (0, false);
+        }
+        let opener = self.line_indent(self.prev_end);
+        let flush = self.starts_line() && self.line_indent(start) <= opener;
+        (opener, self.layout || !flush)
     }
 
     /// The current function's loop and local counts, to restore after an error.
@@ -705,6 +730,9 @@ impl Parser<'_> {
         })
     }
 
+    /// One statement (`None` for `;`). Each kind is parsed out of line so that this frame,
+    /// which every level of nested blocks passes through, stays small (in debug builds
+    /// especially).
     fn statement(&mut self) -> PResult<Option<Stmt>> {
         let start = self.tok.span.start;
         let line = self.cur_line();
@@ -715,101 +743,127 @@ impl Parser<'_> {
                 self.advance()?;
                 return Ok(None);
             }
-            TokenKind::Keyword(Keyword::If) => self.if_stat(line)?,
-            TokenKind::Keyword(Keyword::While) => {
-                self.advance()?;
-                let cond = self.expr()?;
-                self.expect_kw(Keyword::Do)?;
-                let body = self.loop_block()?;
-                self.expect_match(TokenKind::Keyword(Keyword::End), "while", line)?;
-                StmtKind::While { cond, body }
-            }
-            TokenKind::Keyword(Keyword::Do) => {
-                self.advance()?;
-                let body = self.block()?;
-                self.expect_match(TokenKind::Keyword(Keyword::End), "do", line)?;
-                StmtKind::Do(body)
-            }
-            TokenKind::Keyword(Keyword::For) => self.for_stat(line)?,
-            TokenKind::Keyword(Keyword::Repeat) => {
-                self.advance()?;
-                let body = self.loop_block()?;
-                self.expect_match(TokenKind::Keyword(Keyword::Until), "repeat", line)?;
-                let until = self.expr()?;
-                StmtKind::Repeat { body, until }
-            }
-            TokenKind::Keyword(Keyword::Function) => {
-                self.advance()?;
-                let base = self.name()?;
-                let mut fields = Vec::new();
-                while self.test_punct(Punct::Dot)? {
-                    fields.push(self.name()?);
-                }
-                let method = if self.test_punct(Punct::Colon)? {
-                    Some(self.name()?)
-                } else {
-                    None
-                };
-                let func = self.func_body(start, line, method.is_some())?;
-                StmtKind::Function {
-                    path: FuncPath {
-                        base,
-                        fields,
-                        method,
-                    },
-                    func,
-                }
-            }
-            TokenKind::Keyword(Keyword::Local) => {
-                self.advance()?;
-                if self.is_kw(Keyword::Function) {
-                    self.advance()?;
-                    let name = self.name()?;
-                    self.add_locals(1)?;
-                    let func = self.func_body(start, line, false)?;
-                    StmtKind::LocalFunction { name, func }
-                } else {
-                    let attrib = self.opt_attrib()?;
-                    let (names, values) = self.att_names_and_values(attrib, true)?;
-                    let folded = match (names.as_slice(), values.as_slice()) {
-                        ([name], [value]) => {
-                            name.attrib.or(attrib).map(|a| a.kind) == Some(AttribKind::Const)
-                                && is_constant(value)
-                        }
-                        _ => false,
-                    };
-                    self.add_locals(names.len() as u32 - u32::from(folded))?;
-                    StmtKind::Local {
-                        attrib,
-                        names,
-                        values,
-                    }
-                }
-            }
-            TokenKind::Punct(Punct::ColonColon) => {
-                self.advance()?;
-                let name = self.name()?;
-                self.expect_punct(Punct::ColonColon)?;
-                StmtKind::Label(name)
-            }
-            TokenKind::Keyword(Keyword::Break) => {
-                if self.func().loops == 0 {
-                    return Err(self.error_here("break outside loop"));
-                }
-                self.advance()?;
-                StmtKind::Break
-            }
-            TokenKind::Keyword(Keyword::Goto) => {
-                self.advance()?;
-                StmtKind::Goto(self.name()?)
-            }
-            TokenKind::Name(_) if global_decl => self.global_stat(start, line)?,
-            _ => self.expr_stat()?,
+            TokenKind::Keyword(Keyword::If) => self.if_stat(line),
+            TokenKind::Keyword(Keyword::While) => self.while_stat(line),
+            TokenKind::Keyword(Keyword::Do) => self.do_stat(line),
+            TokenKind::Keyword(Keyword::For) => self.for_stat(line),
+            TokenKind::Keyword(Keyword::Repeat) => self.repeat_stat(line),
+            TokenKind::Keyword(Keyword::Function) => self.function_stat(start, line),
+            TokenKind::Keyword(Keyword::Local) => self.local_stat(start, line),
+            TokenKind::Punct(Punct::ColonColon) => self.label_stat(),
+            TokenKind::Keyword(Keyword::Break) => self.break_stat(),
+            TokenKind::Keyword(Keyword::Goto) => self.goto_stat(),
+            TokenKind::Name(_) if global_decl => self.global_stat(start, line),
+            _ => self.expr_stat(),
         };
-        Ok(Some(Stmt {
-            kind,
-            span: span_from(start, self.prev_end),
-        }))
+        // Through `map`, to keep the statement off this frame.
+        kind.map(|kind| {
+            Some(Stmt {
+                kind,
+                span: span_from(start, self.prev_end),
+            })
+        })
+    }
+
+    /// `while cond do ... end`.
+    fn while_stat(&mut self, line: u32) -> PResult<StmtKind> {
+        self.advance()?;
+        let cond = self.expr()?;
+        self.expect_kw(Keyword::Do)?;
+        let body = self.loop_block()?;
+        self.expect_match(TokenKind::Keyword(Keyword::End), "while", line)?;
+        Ok(StmtKind::While { cond, body })
+    }
+
+    /// `do ... end`.
+    fn do_stat(&mut self, line: u32) -> PResult<StmtKind> {
+        self.advance()?;
+        let body = self.block()?;
+        self.expect_match(TokenKind::Keyword(Keyword::End), "do", line)?;
+        Ok(StmtKind::Do(body))
+    }
+
+    /// `repeat ... until cond`.
+    fn repeat_stat(&mut self, line: u32) -> PResult<StmtKind> {
+        self.advance()?;
+        let body = self.loop_block()?;
+        self.expect_match(TokenKind::Keyword(Keyword::Until), "repeat", line)?;
+        let until = self.expr()?;
+        Ok(StmtKind::Repeat { body, until })
+    }
+
+    /// `function a.b.c:m(...) ... end`.
+    fn function_stat(&mut self, start: u32, line: u32) -> PResult<StmtKind> {
+        self.advance()?;
+        let base = self.name()?;
+        let mut fields = Vec::new();
+        while self.test_punct(Punct::Dot)? {
+            fields.push(self.name()?);
+        }
+        let method = if self.test_punct(Punct::Colon)? {
+            Some(self.name()?)
+        } else {
+            None
+        };
+        let func = self.func_body(start, line, method.is_some())?;
+        Ok(StmtKind::Function {
+            path: FuncPath {
+                base,
+                fields,
+                method,
+            },
+            func,
+        })
+    }
+
+    /// `local function f(...) ... end` or `local names = values`.
+    fn local_stat(&mut self, start: u32, line: u32) -> PResult<StmtKind> {
+        self.advance()?;
+        if self.is_kw(Keyword::Function) {
+            self.advance()?;
+            let name = self.name()?;
+            self.add_locals(1)?;
+            let func = self.func_body(start, line, false)?;
+            return Ok(StmtKind::LocalFunction { name, func });
+        }
+        let attrib = self.opt_attrib()?;
+        let (names, values) = self.att_names_and_values(attrib, true)?;
+        let folded = match (names.as_slice(), values.as_slice()) {
+            ([name], [value]) => {
+                name.attrib.or(attrib).map(|a| a.kind) == Some(AttribKind::Const)
+                    && is_constant(value)
+            }
+            _ => false,
+        };
+        self.add_locals(names.len() as u32 - u32::from(folded))?;
+        Ok(StmtKind::Local {
+            attrib,
+            names,
+            values,
+        })
+    }
+
+    /// `::name::`.
+    fn label_stat(&mut self) -> PResult<StmtKind> {
+        self.advance()?;
+        let name = self.name()?;
+        self.expect_punct(Punct::ColonColon)?;
+        Ok(StmtKind::Label(name))
+    }
+
+    /// `break`.
+    fn break_stat(&mut self) -> PResult<StmtKind> {
+        if self.func().loops == 0 {
+            return Err(self.error_here("break outside loop"));
+        }
+        self.advance()?;
+        Ok(StmtKind::Break)
+    }
+
+    /// `goto name`.
+    fn goto_stat(&mut self) -> PResult<StmtKind> {
+        self.advance()?;
+        Ok(StmtKind::Goto(self.name()?))
     }
 
     /// Whether the `global` at the current token starts a declaration rather than being used as
@@ -845,78 +899,94 @@ impl Parser<'_> {
 
     fn if_stat(&mut self, line: u32) -> PResult<StmtKind> {
         let mut arms = Vec::new();
-        self.advance()?;
-        let cond = self.expr()?;
-        self.expect_kw(Keyword::Then)?;
-        arms.push((cond, self.block()?));
-        let mut else_ = None;
         loop {
-            if self.is_kw(Keyword::Elseif) {
-                self.advance()?;
-                let cond = self.expr()?;
-                self.expect_kw(Keyword::Then)?;
-                arms.push((cond, self.block()?));
-            } else {
-                if self.is_kw(Keyword::Else) {
-                    self.advance()?;
-                    else_ = Some(self.block()?);
-                }
+            arms.push(self.if_arm()?);
+            if !self.is_kw(Keyword::Elseif) {
                 break;
             }
         }
+        let else_ = self.else_block()?;
         self.expect_match(TokenKind::Keyword(Keyword::End), "if", line)?;
         Ok(StmtKind::If { arms, else_ })
+    }
+
+    /// `[else block]`.
+    fn else_block(&mut self) -> PResult<Option<Block>> {
+        if !self.is_kw(Keyword::Else) {
+            return Ok(None);
+        }
+        self.advance()?;
+        self.block().map(Some)
+    }
+
+    /// `cond then block`, at `if` or `elseif`. Out of line, to keep `if_stat`'s frame, which
+    /// nested `if`s repeat, small.
+    fn if_arm(&mut self) -> PResult<(Expr, Block)> {
+        self.advance()?;
+        let cond = self.expr()?;
+        self.expect_kw(Keyword::Then)?;
+        Ok((cond, self.block()?))
     }
 
     fn for_stat(&mut self, line: u32) -> PResult<StmtKind> {
         let active = self.func().active;
         self.advance()?;
         let first = self.name()?;
+        // Each form is parsed out of line, to keep this frame, which nested loops repeat,
+        // small.
         let kind = match self.tok.kind {
-            TokenKind::Punct(Punct::Assign) => {
-                self.advance()?;
-                let start = self.expr()?;
-                self.expect_punct(Punct::Comma)?;
-                let limit = self.expr()?;
-                let step = if self.test_punct(Punct::Comma)? {
-                    Some(self.expr()?)
-                } else {
-                    None
-                };
-                let do_at = self.tok.span.start;
-                // Two hidden places for the loop state, then the control variable.
-                self.add_locals(2)?;
-                self.expect_kw(Keyword::Do)?;
-                self.add_locals(1)?;
-                let body = self.loop_block()?;
-                StmtKind::NumericFor {
-                    var: first,
-                    start,
-                    limit,
-                    step,
-                    do_at,
-                    body,
-                }
-            }
+            TokenKind::Punct(Punct::Assign) => self.numeric_for(first),
             TokenKind::Punct(Punct::Comma) | TokenKind::Keyword(Keyword::In) => {
-                let mut vars = vec![first];
-                while self.test_punct(Punct::Comma)? {
-                    vars.push(self.name()?);
-                }
-                self.expect_kw(Keyword::In)?;
-                let exprs = self.expr_list()?;
-                // Three hidden places for the iterator state, then the variables.
-                self.add_locals(3)?;
-                self.expect_kw(Keyword::Do)?;
-                self.add_locals(vars.len() as u32)?;
-                let body = self.loop_block()?;
-                StmtKind::GenericFor { vars, exprs, body }
+                self.generic_for(first)
             }
-            _ => return Err(self.error_expected("'=' or 'in'")),
-        };
+            _ => Err(self.error_expected("'=' or 'in'")),
+        }?;
         self.expect_match(TokenKind::Keyword(Keyword::End), "for", line)?;
         self.func().active = active;
         Ok(kind)
+    }
+
+    /// `= start, limit [, step] do ...` after `for var`.
+    fn numeric_for(&mut self, var: Name) -> PResult<StmtKind> {
+        self.advance()?;
+        let start = self.expr()?;
+        self.expect_punct(Punct::Comma)?;
+        let limit = self.expr()?;
+        let step = if self.test_punct(Punct::Comma)? {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        let do_at = self.tok.span.start;
+        // Two hidden places for the loop state, then the control variable.
+        self.add_locals(2)?;
+        self.expect_kw(Keyword::Do)?;
+        self.add_locals(1)?;
+        let body = self.loop_block()?;
+        Ok(StmtKind::NumericFor {
+            var,
+            start,
+            limit,
+            step,
+            do_at,
+            body,
+        })
+    }
+
+    /// `[, names] in exprs do ...` after `for first`.
+    fn generic_for(&mut self, first: Name) -> PResult<StmtKind> {
+        let mut vars = vec![first];
+        while self.test_punct(Punct::Comma)? {
+            vars.push(self.name()?);
+        }
+        self.expect_kw(Keyword::In)?;
+        let exprs = self.expr_list()?;
+        // Three hidden places for the iterator state, then the variables.
+        self.add_locals(3)?;
+        self.expect_kw(Keyword::Do)?;
+        self.add_locals(vars.len() as u32)?;
+        let body = self.loop_block()?;
+        Ok(StmtKind::GenericFor { vars, exprs, body })
     }
 
     /// An optional `<name>` attribute.
@@ -1029,6 +1099,20 @@ impl Parser<'_> {
     }
 
     fn func_contents(&mut self, start: u32, line: u32, method: bool) -> PResult<FuncBody> {
+        let (params, vararg) = self.params(method)?;
+        let body = self.block()?;
+        self.expect_match(TokenKind::Keyword(Keyword::End), "function", line)?;
+        Ok(FuncBody {
+            params,
+            vararg,
+            body,
+            span: span_from(start, self.prev_end),
+        })
+    }
+
+    /// The parameters up to and including `)`, declared as locals. Out of line, to keep
+    /// `func_contents`'s frame, which nested functions repeat, small.
+    fn params(&mut self, method: bool) -> PResult<(Vec<Name>, Option<VarargParam>)> {
         let mut params = Vec::new();
         let mut vararg = None;
         if !self.is_punct(Punct::RParen) {
@@ -1060,14 +1144,7 @@ impl Parser<'_> {
         self.add_locals(n)?;
         self.expect_punct(Punct::RParen)?;
         self.func().vararg = vararg.is_some();
-        let body = self.block()?;
-        self.expect_match(TokenKind::Keyword(Keyword::End), "function", line)?;
-        Ok(FuncBody {
-            params,
-            vararg,
-            body,
-            span: span_from(start, self.prev_end),
-        })
+        Ok((params, vararg))
     }
 
     // ---- expressions --------------------------------------------------------------------------
@@ -1128,39 +1205,50 @@ impl Parser<'_> {
     fn subexpr(&mut self, limit: u8) -> PResult<Expr> {
         self.enter()?;
         let start = self.tok.span.start;
-        let mut lhs = if let Some(op) = self.unary_op() {
-            self.advance()?;
-            let expr = self.subexpr(UNARY_POWER)?;
-            Expr {
-                kind: ExprKind::Unary {
-                    op,
-                    expr: Box::new(expr),
-                },
-                span: span_from(start, self.prev_end),
-            }
-        } else {
-            self.simple_expr()?
-        };
+        let mut lhs = match self.unary_op() {
+            Some(op) => self.unary(start, op),
+            None => self.simple_expr(),
+        }?;
         while let Some(op) = self.binary_op() {
             let (left, right) = op.binding_power();
             if left <= limit {
                 break;
             }
-            let op_at = self.tok.span.start;
-            self.advance()?;
-            let rhs = self.subexpr(right)?;
-            lhs = Expr {
-                kind: ExprKind::Binary {
-                    op,
-                    op_at,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                },
-                span: span_from(start, self.prev_end),
-            };
+            lhs = self.binary(start, lhs, op, right)?;
         }
         self.leave();
         Ok(lhs)
+    }
+
+    /// `op expr`, at the operator. Out of line, like the other parts of the expression
+    /// recursion below, to keep the frames that nested expressions repeat small: debug builds
+    /// keep a slot for every temporary, and 200 nesting levels must fit a 2 MiB thread stack.
+    fn unary(&mut self, start: u32, op: UnOp) -> PResult<Expr> {
+        self.advance()?;
+        let expr = self.subexpr(UNARY_POWER)?;
+        Ok(Expr {
+            kind: ExprKind::Unary {
+                op,
+                expr: Box::new(expr),
+            },
+            span: span_from(start, self.prev_end),
+        })
+    }
+
+    /// `lhs op rhs`, at `op`, where `rhs` binds at `right`.
+    fn binary(&mut self, start: u32, lhs: Expr, op: BinOp, right: u8) -> PResult<Expr> {
+        let op_at = self.tok.span.start;
+        self.advance()?;
+        let rhs = self.subexpr(right)?;
+        Ok(Expr {
+            kind: ExprKind::Binary {
+                op,
+                op_at,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            span: span_from(start, self.prev_end),
+        })
     }
 
     /// Reports a missing expression at `span` and stands in an error node for it (recovery
@@ -1196,20 +1284,24 @@ impl Parser<'_> {
                 ExprKind::Vararg
             }
             TokenKind::Punct(Punct::LBrace) => return self.table(),
-            TokenKind::Keyword(Keyword::Function) => {
-                let line = self.cur_line();
-                self.advance()?;
-                let body = self.func_body(span.start, line, false)?;
-                let span = body.span;
-                return Ok(Expr {
-                    kind: ExprKind::Function(Box::new(body)),
-                    span,
-                });
-            }
+            TokenKind::Keyword(Keyword::Function) => return self.function_expr(),
             _ => return self.suffixed_expr(),
         };
         self.advance()?;
         Ok(Expr { kind, span })
+    }
+
+    /// `function (...) ... end`. Out of line, to keep `simple_expr`'s frame small.
+    fn function_expr(&mut self) -> PResult<Expr> {
+        let start = self.tok.span.start;
+        let line = self.cur_line();
+        self.advance()?;
+        let body = self.func_body(start, line, false)?;
+        let span = body.span;
+        Ok(Expr {
+            kind: ExprKind::Function(Box::new(body)),
+            span,
+        })
     }
 
     fn primary_expr(&mut self) -> PResult<Expr> {
@@ -1222,16 +1314,7 @@ impl Parser<'_> {
                     span,
                 })
             }
-            TokenKind::Punct(Punct::LParen) => {
-                let line = self.cur_line();
-                self.advance()?;
-                let inner = self.expr()?;
-                self.expect_match(TokenKind::Punct(Punct::RParen), "(", line)?;
-                Ok(Expr {
-                    kind: ExprKind::Paren(Box::new(inner)),
-                    span: span_from(span.start, self.prev_end),
-                })
-            }
+            TokenKind::Punct(Punct::LParen) => self.paren_expr(),
             TokenKind::Eof
             | TokenKind::Punct(
                 Punct::Semi | Punct::Comma | Punct::RParen | Punct::RBracket | Punct::RBrace,
@@ -1251,6 +1334,19 @@ impl Parser<'_> {
         }
     }
 
+    /// `(e)`. Out of line, to keep `primary_expr`'s frame small.
+    fn paren_expr(&mut self) -> PResult<Expr> {
+        let start = self.tok.span.start;
+        let line = self.cur_line();
+        self.advance()?;
+        let inner = self.expr()?;
+        self.expect_match(TokenKind::Punct(Punct::RParen), "(", line)?;
+        Ok(Expr {
+            kind: ExprKind::Paren(Box::new(inner)),
+            span: span_from(start, self.prev_end),
+        })
+    }
+
     fn suffixed_expr(&mut self) -> PResult<Expr> {
         let start = self.tok.span.start;
         let e = self.primary_expr()?;
@@ -1260,60 +1356,83 @@ impl Parser<'_> {
     /// The `.name`, `[key]`, `:name(args)` and call suffixes after `e`, which starts at
     /// `start`. Out of line, so the frames of a parenthesised expression's recursion
     /// (`suffixed_expr`, `primary_expr`) stay small: debug builds keep a slot for every
-    /// temporary, and 200 nesting levels must fit a 2 MiB thread stack.
+    /// temporary, and 200 nesting levels must fit a 2 MiB thread stack. Each suffix is parsed
+    /// out of line too, for nested calls and indexing.
     #[inline(never)]
     fn suffixes(&mut self, start: u32, mut e: Expr) -> PResult<Expr> {
         loop {
-            let kind = match self.tok.kind {
-                TokenKind::Punct(Punct::Dot) => {
-                    self.advance()?;
-                    let name = self.name()?;
-                    let key = Expr {
-                        kind: ExprKind::Str(name.sym),
-                        span: name.span,
-                    };
-                    ExprKind::Index {
-                        obj: Box::new(e),
-                        key: Box::new(key),
-                    }
-                }
-                TokenKind::Punct(Punct::LBracket) => {
-                    self.advance()?;
-                    let key = self.expr()?;
-                    self.expect_punct(Punct::RBracket)?;
-                    ExprKind::Index {
-                        obj: Box::new(e),
-                        key: Box::new(key),
-                    }
-                }
-                TokenKind::Punct(Punct::Colon) => {
-                    self.advance()?;
-                    let name = self.name()?;
-                    let args_at = self.tok.span.start;
-                    let args = self.call_args()?;
-                    ExprKind::Method {
-                        obj: Box::new(e),
-                        name,
-                        args,
-                        args_at,
-                    }
-                }
+            e = match self.tok.kind {
+                TokenKind::Punct(Punct::Dot) => self.field_suffix(start, e),
+                TokenKind::Punct(Punct::LBracket) => self.index_suffix(start, e),
+                TokenKind::Punct(Punct::Colon) => self.method_suffix(start, e),
                 TokenKind::Punct(Punct::LParen | Punct::LBrace) | TokenKind::Str(_) => {
-                    let args_at = self.tok.span.start;
-                    let args = self.call_args()?;
-                    ExprKind::Call {
-                        callee: Box::new(e),
-                        args,
-                        args_at,
-                    }
+                    self.call_suffix(start, e)
                 }
                 _ => return Ok(e),
-            };
-            e = Expr {
-                kind,
-                span: span_from(start, self.prev_end),
-            };
+            }?;
         }
+    }
+
+    /// `e.name`, at `.`.
+    fn field_suffix(&mut self, start: u32, e: Expr) -> PResult<Expr> {
+        self.advance()?;
+        let name = self.name()?;
+        let key = Expr {
+            kind: ExprKind::Str(name.sym),
+            span: name.span,
+        };
+        Ok(Expr {
+            kind: ExprKind::Index {
+                obj: Box::new(e),
+                key: Box::new(key),
+            },
+            span: span_from(start, self.prev_end),
+        })
+    }
+
+    /// `e[key]`, at `[`.
+    fn index_suffix(&mut self, start: u32, e: Expr) -> PResult<Expr> {
+        self.advance()?;
+        let key = self.expr()?;
+        self.expect_punct(Punct::RBracket)?;
+        Ok(Expr {
+            kind: ExprKind::Index {
+                obj: Box::new(e),
+                key: Box::new(key),
+            },
+            span: span_from(start, self.prev_end),
+        })
+    }
+
+    /// `e:name(args)`, at `:`.
+    fn method_suffix(&mut self, start: u32, e: Expr) -> PResult<Expr> {
+        self.advance()?;
+        let name = self.name()?;
+        let args_at = self.tok.span.start;
+        let args = self.call_args()?;
+        Ok(Expr {
+            kind: ExprKind::Method {
+                obj: Box::new(e),
+                name,
+                args,
+                args_at,
+            },
+            span: span_from(start, self.prev_end),
+        })
+    }
+
+    /// `e(args)`, `e{table}` or `e"string"`.
+    fn call_suffix(&mut self, start: u32, e: Expr) -> PResult<Expr> {
+        let args_at = self.tok.span.start;
+        let args = self.call_args()?;
+        Ok(Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(e),
+                args,
+                args_at,
+            },
+            span: span_from(start, self.prev_end),
+        })
     }
 
     fn call_args(&mut self) -> PResult<Vec<Expr>> {
@@ -1326,20 +1445,23 @@ impl Parser<'_> {
                     span,
                 }])
             }
-            TokenKind::Punct(Punct::LBrace) => Ok(vec![self.table()?]),
-            TokenKind::Punct(Punct::LParen) => {
-                let line = self.cur_line();
-                self.advance()?;
-                let args = if self.is_punct(Punct::RParen) || self.dedented() {
-                    Vec::new()
-                } else {
-                    self.expr_list()?
-                };
-                self.expect_match(TokenKind::Punct(Punct::RParen), "(", line)?;
-                Ok(args)
-            }
+            TokenKind::Punct(Punct::LBrace) => self.table().map(|t| vec![t]),
+            TokenKind::Punct(Punct::LParen) => self.paren_args(),
             _ => Err(self.error_here("function arguments expected")),
         }
+    }
+
+    /// `(args)`.
+    fn paren_args(&mut self) -> PResult<Vec<Expr>> {
+        let line = self.cur_line();
+        self.advance()?;
+        let args = if self.is_punct(Punct::RParen) || self.dedented() {
+            Vec::new()
+        } else {
+            self.expr_list()?
+        };
+        self.expect_match(TokenKind::Punct(Punct::RParen), "(", line)?;
+        Ok(args)
     }
 
     fn table(&mut self) -> PResult<Expr> {
@@ -1363,21 +1485,28 @@ impl Parser<'_> {
     fn field(&mut self) -> PResult<Field> {
         let named = matches!(self.tok.kind, TokenKind::Name(_))
             && self.peek()? == TokenKind::Punct(Punct::Assign);
+        // Out of line, to keep this frame, which nested tables repeat, small.
         match self.tok.kind {
-            TokenKind::Name(_) if named => {
-                let name = self.name()?;
-                self.advance()?;
-                Ok(Field::Named(name, self.expr()?))
-            }
-            TokenKind::Punct(Punct::LBracket) => {
-                self.advance()?;
-                let key = self.expr()?;
-                self.expect_punct(Punct::RBracket)?;
-                self.expect_punct(Punct::Assign)?;
-                Ok(Field::Keyed(key, self.expr()?))
-            }
-            _ => Ok(Field::Positional(self.expr()?)),
+            TokenKind::Name(_) if named => self.named_field(),
+            TokenKind::Punct(Punct::LBracket) => self.keyed_field(),
+            _ => self.expr().map(Field::Positional),
         }
+    }
+
+    /// `name = value`.
+    fn named_field(&mut self) -> PResult<Field> {
+        let name = self.name()?;
+        self.advance()?;
+        Ok(Field::Named(name, self.expr()?))
+    }
+
+    /// `[key] = value`.
+    fn keyed_field(&mut self) -> PResult<Field> {
+        self.advance()?;
+        let key = self.expr()?;
+        self.expect_punct(Punct::RBracket)?;
+        self.expect_punct(Punct::Assign)?;
+        Ok(Field::Keyed(key, self.expr()?))
     }
 }
 
