@@ -15,6 +15,12 @@ orbit = { path = "../orbit", default-features = false }
 # (MSVC targets use only the C compiler).
 libffi-sys = { version = "2.3", default-features = false }
 
+# Apple platforms link the system's libffi, which every macOS has: the
+# libffi 3.4.4 that libffi-sys 2.3 bundles (the newest that builds on Rust
+# 1.75) has aarch64 assembly that current Apple clang rejects.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libffi-sys = { version = "2.3", default-features = false, features = ["system"] }
+
 [features]
 # Link the system's shared libffi instead of building the bundled copy
 # (ignored on MSVC targets, which always build it).
