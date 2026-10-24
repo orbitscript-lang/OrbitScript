@@ -310,7 +310,7 @@ fn many_and_mixed_arguments() {
         return;
     }
     let out = run(&format!(
-        "local lib = ffi.open('{}')
+        "local lib = ffi.open([[{}]])
          local sum10 = lib:bind('sum10', 'long', {})
          local mix = lib:bind('mix', 'double', 'int', 'double', 'float', 'long', 'double',
              'float', 'short', 'double', 'double', 'double', 'double', 'double', 'double', 'uchar')

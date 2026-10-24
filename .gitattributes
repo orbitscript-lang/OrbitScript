@@ -4,3 +4,8 @@ tests/lua-5.5/suite/** -text linguist-vendored
 
 # Trained PGO profiles (tests/README.md, "Profile-guided builds").
 pgo/*.profdata binary
+
+# Examples are compared byte for byte with their .expected output, and some
+# read multi-line string literals from their own source, so they keep LF line
+# ends even where git would check text out with CRLF (core.autocrlf).
+examples/** text eol=lf
