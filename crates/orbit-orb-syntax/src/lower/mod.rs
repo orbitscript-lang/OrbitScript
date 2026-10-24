@@ -714,14 +714,15 @@ impl Lowerer {
         }
         self.scan_items(&body.stmts);
         for s in &body.stmts {
-            if has_pub
-                && let ast::StmtKind::Expr(e) = &s.kind
-                && let ast::ExprKind::Return(_) = e.kind
-            {
-                return Err(self.error(
-                    e.span,
-                    "a module with `pub` items returns its exports; remove this `return`",
-                ));
+            if has_pub {
+                if let ast::StmtKind::Expr(e) = &s.kind {
+                    if let ast::ExprKind::Return(_) = e.kind {
+                        return Err(self.error(
+                            e.span,
+                            "a module with `pub` items returns its exports; remove this `return`",
+                        ));
+                    }
+                }
             }
             self.stmt(s, &mut stmts)?;
         }

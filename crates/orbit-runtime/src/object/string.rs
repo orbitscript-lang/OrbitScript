@@ -123,7 +123,8 @@ impl Trace<LuaSpace> for LuaStr {
 fn seed() -> u64 {
     static SEED: OnceLock<u64> = OnceLock::new();
     *SEED.get_or_init(|| {
-        use std::hash::{BuildHasher, RandomState};
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
         RandomState::new().hash_one(0x6f72_6269_7473_6372_u64) | 1
     })
 }
@@ -140,10 +141,12 @@ const K1: u64 = 0xe703_7ed1_a0b4_28db;
 /// Seeded hash of a byte string. Never returns 0.
 pub fn hash_bytes(b: &[u8]) -> u32 {
     let mut h = seed() ^ (b.len() as u64).wrapping_mul(K1);
-    let (chunks, rest) = b.as_chunks::<8>();
-    for c in chunks {
-        h = mix(h ^ u64::from_le_bytes(*c), K0);
+    let mut chunks = b.chunks_exact(8);
+    for c in &mut chunks {
+        let w = u64::from_le_bytes(c.try_into().unwrap_or([0; 8]));
+        h = mix(h ^ w, K0);
     }
+    let rest = chunks.remainder();
     if !rest.is_empty() {
         let mut buf = [0u8; 8];
         buf[..rest.len()].copy_from_slice(rest);

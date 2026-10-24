@@ -250,7 +250,7 @@ mod tests {
 
     fn val(i: usize) -> Value {
         match i % 4 {
-            0 => Value::Bool(i.is_multiple_of(8)),
+            0 => Value::Bool(i % 8 == 0),
             1 => Value::Int(i as i64),
             2 => Value::Float(i as f64 + 0.5),
             _ => Value::Nil,

@@ -8,6 +8,7 @@ use crate::trace::{
 use std::collections::VecDeque;
 use std::fmt;
 use std::marker::PhantomData;
+use std::mem::size_of;
 
 /// Collector tuning.
 ///
@@ -249,6 +250,21 @@ impl<S: Space + Default> Default for Heap<S> {
     }
 }
 
+/// `page_shift` of a space's page size, evaluated at compile time so a bad
+/// `PAGE_SLOTS` fails the build.
+struct PageShift<S>(PhantomData<S>);
+
+impl<S: Space> PageShift<S> {
+    const SHIFT: u32 = page_shift(S::PAGE_SLOTS);
+}
+
+/// Fails the build when `revive` is used on an object that isn't a leaf.
+struct LeafOnly<S, T>(PhantomData<(S, T)>);
+
+impl<S: Space, T: Trace<S>> LeafOnly<S, T> {
+    const CHECK: () = assert!(T::LEAF, "orbit-gc: only leaf objects can be revived");
+}
+
 /// The bytes one slot of `T` takes: the slot itself and its color byte.
 #[inline]
 pub fn slot_size<T>() -> usize {
@@ -273,7 +289,7 @@ impl<S: Space + Default> Heap<S> {
     pub fn with_params(params: Params) -> Self {
         let space = S::default();
         let meta = (0..S::KINDS)
-            .map(|_| KindMeta::new(const { page_shift(S::PAGE_SLOTS) }))
+            .map(|_| KindMeta::new(PageShift::<S>::SHIFT))
             .collect();
         Heap {
             space,
@@ -413,7 +429,8 @@ impl<S: Space> Heap<S> {
     where
         S: Holds<T>,
     {
-        const { assert!(T::LEAF, "orbit-gc: only leaf objects can be revived") };
+        #[allow(clippy::let_unit_value)]
+        let () = LeafOnly::<S, T>::CHECK;
         if !self.sweeping_weak {
             return;
         }

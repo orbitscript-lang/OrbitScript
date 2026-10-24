@@ -178,11 +178,10 @@ impl<'a> Lexer<'a> {
     fn newline(&mut self) {
         let first = self.src[self.pos];
         self.pos += 1;
-        if let Some(c) = self.cur()
-            && is_newline(c)
-            && c != first
-        {
-            self.pos += 1;
+        if let Some(c) = self.cur() {
+            if is_newline(c) && c != first {
+                self.pos += 1;
+            }
         }
         self.line_starts.push(self.pos as u32);
     }
@@ -352,13 +351,13 @@ impl<'a> Lexer<'a> {
     /// Skips a comment; `pos` is just after `--`.
     fn comment(&mut self) -> Result<(), Diagnostic> {
         let start = self.pos - 2;
-        if self.cur() == Some(b'[')
-            && let Some(level) = self.long_bracket_level(1)
-        {
-            let line = self.line_of(start as u32);
-            self.long_string(start, level, line, true)?;
-            self.push_comment(CommentKind::Block, start);
-            return Ok(());
+        if self.cur() == Some(b'[') {
+            if let Some(level) = self.long_bracket_level(1) {
+                let line = self.line_of(start as u32);
+                self.long_string(start, level, line, true)?;
+                self.push_comment(CommentKind::Block, start);
+                return Ok(());
+            }
         }
         while let Some(c) = self.cur() {
             if is_newline(c) {
@@ -655,8 +654,10 @@ fn convert_decimal(text: &[u8]) -> Result<TokenKind, NumError> {
     }
     // The text is ASCII digits, `.`, `e`, and signs, so it is valid UTF-8.
     let s = std::str::from_utf8(text).map_err(|_| NumError::Malformed)?;
-    if !is_float && let Ok(n) = s.parse::<i64>() {
-        return Ok(TokenKind::Int(n));
+    if !is_float {
+        if let Ok(n) = s.parse::<i64>() {
+            return Ok(TokenKind::Int(n));
+        }
     }
     // Decimal integers too large for i64 become floats, as in Lua.
     s.parse::<f64>()

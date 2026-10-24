@@ -435,9 +435,11 @@ impl Gen {
                     }
                     for _ in 0..1 + self.below(3) {
                         match self.below(4) {
-                            0 => {
-                                p.extend_from_slice(self.pick(&[b"a-c".as_slice(), b"0-9", b"x-z"]))
-                            }
+                            0 => p.extend_from_slice(self.pick::<&[u8]>(&[
+                                b"a-c".as_slice(),
+                                b"0-9",
+                                b"x-z",
+                            ])),
                             1 => {
                                 p.push(b'%');
                                 p.push(*self.pick(b"adsw]%-"));
@@ -449,7 +451,7 @@ impl Gen {
                         p.push(b']');
                     }
                 }
-                4 => p.extend_from_slice(self.pick(&[
+                4 => p.extend_from_slice(self.pick::<&[u8]>(&[
                     b"%b()".as_slice(),
                     b"%bab",
                     b"%b[]",
@@ -575,20 +577,20 @@ impl Gen {
         for _ in 0..self.below(6) {
             match self.below(9) {
                 0 => b.push(b'a' + self.below(3) as u8),
-                1 => b.extend_from_slice(self.pick(&[
+                1 => b.extend_from_slice(self.pick::<&[u8]>(&[
                     b"\xC3\xA9".as_slice(),
                     b"\xE2\x82\xAC",
                     b"\xF0\x9F\x98\x80",
                     b"\xF4\x8F\xBF\xBF",
                 ])),
-                2 => b.extend_from_slice(self.pick(&[
+                2 => b.extend_from_slice(self.pick::<&[u8]>(&[
                     b"\xED\xA0\x80".as_slice(),
                     b"\xF4\x90\x80\x80",
                     b"\xF8\x88\x80\x80\x80",
                     b"\xFC\x84\x80\x80\x80\x80",
                     b"\xFD\xBF\xBF\xBF\xBF\xBF",
                 ])),
-                3 => b.extend_from_slice(self.pick(&[
+                3 => b.extend_from_slice(self.pick::<&[u8]>(&[
                     b"\xC0\x80".as_slice(),
                     b"\xE0\x80\x80",
                     b"\xC2",

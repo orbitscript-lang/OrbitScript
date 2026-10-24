@@ -274,7 +274,7 @@ pub(crate) fn pack(ctx: &mut NativeCtx<'_>) -> R {
             .size
             .checked_add(item.pad)
             .and_then(|n| n.checked_add(out.len()))
-            .is_none_or(|n| n > MAX_SIZE)
+            .map_or(true, |n| n > MAX_SIZE)
         {
             return Err(ctx.arg_error(0, "result too long"));
         }
@@ -386,7 +386,7 @@ pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
         let short = item
             .pad
             .checked_add(item.size)
-            .is_none_or(|need| need > len - pos);
+            .map_or(true, |need| need > len - pos);
         if short {
             return Err(ctx.arg_error(1, "data string too short"));
         }

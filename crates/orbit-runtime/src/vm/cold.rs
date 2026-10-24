@@ -397,13 +397,13 @@ impl Vm {
     fn trim_dead_regs(&mut self, live: usize) {
         let s = &mut self.rt.stack;
         s.regs.truncate(live);
-        if let Some(f) = s.frames.last()
-            && let FrameKind::Lua { closure, .. } = f.kind
-        {
-            let end =
-                (f.base as usize + self.heap.get(closure).code.nregs as usize).max(self.rt.top);
-            if end < s.regs.len() {
-                s.regs[end..].fill(Value::Nil);
+        if let Some(f) = s.frames.last() {
+            if let FrameKind::Lua { closure, .. } = f.kind {
+                let end =
+                    (f.base as usize + self.heap.get(closure).code.nregs as usize).max(self.rt.top);
+                if end < s.regs.len() {
+                    s.regs[end..].fill(Value::Nil);
+                }
             }
         }
     }
@@ -668,10 +668,10 @@ impl Vm {
         let r = &mut self.rt.stack.regs[at..at + 4];
         // Numeric strings convert, always to floats, as in the reference.
         for v in &mut r[..3] {
-            if let Value::Str(s) = *v
-                && let Some(n) = crate::object::number::str_to_number(self.heap.get(s).as_bytes())
-            {
-                *v = Value::Float(n.as_f64().expect("a number"));
+            if let Value::Str(s) = *v {
+                if let Some(n) = crate::object::number::str_to_number(self.heap.get(s).as_bytes()) {
+                    *v = Value::Float(n.as_f64().expect("a number"));
+                }
             }
         }
         let (init, limit, step) = (r[0], r[1], r[2]);
@@ -711,8 +711,8 @@ impl Vm {
         // the nearest float inside it: no float lies between the two.
         let lim = match (exclusive, st > 0.0) {
             (false, _) => lim,
-            (true, true) => lim.next_down(),
-            (true, false) => lim.next_up(),
+            (true, true) => next_down(lim),
+            (true, false) => next_up(lim),
         };
         let runs = if st > 0.0 { start <= lim } else { lim <= start };
         if runs {
@@ -781,10 +781,10 @@ pub(crate) fn op_cast(
 /// `ty`, it is `ty` (a unit variant), or its metatable's `__enum` is `ty`.
 fn is_named(heap: &LuaHeap, metas: &Metas, v: Value, ty: Value) -> bool {
     let Value::Table(ty) = ty else { return false };
-    if let Value::Table(t) = v
-        && t == ty
-    {
-        return true;
+    if let Value::Table(t) = v {
+        if t == ty {
+            return true;
+        }
     }
     let Some(mt) = metas.metatable(heap, v) else {
         return false;
@@ -918,11 +918,10 @@ pub(crate) fn method_miss(
         };
         if depth == 0 {
             index.fill(slot);
-        } else if depth == 1
-            && let Some((index2, _)) = up
-            && index2.key == index.key
-        {
-            index2.fill(slot);
+        } else if depth == 1 {
+            if let Some((index2, _)) = up.filter(|(index2, _)| index2.key == index.key) {
+                index2.fill(slot);
+            }
         }
         let h = mtab.slot_value(slot);
         let Value::Table(c) = h else {
@@ -936,11 +935,10 @@ pub(crate) fn method_miss(
         if let Some(slot) = ctab.find_str_key(heap, &method_key) {
             if depth == 0 {
                 method.fill(slot);
-            } else if depth == 1
-                && let Some((_, method2)) = up
-                && method2.key == method.key
-            {
-                method2.fill(slot);
+            } else if depth == 1 {
+                if let Some((_, method2)) = up.filter(|(_, method2)| method2.key == method.key) {
+                    method2.fill(slot);
+                }
             }
             let v = ctab.slot_value(slot);
             if !v.is_nil() {
@@ -979,7 +977,7 @@ pub(crate) fn set_str_miss(
             // one (an object whose class gives only `__index`), the store
             // is raw, into the key's dead entry if it has one.
             let e = MetaField::NewIndex;
-            if slot.is_none_or(|s| tab.slot_value(s).is_nil())
+            if slot.map_or(true, |s| tab.slot_value(s).is_nil())
                 && !heap
                     .get(mt)
                     .meta_field(heap, e, metas.field_names.name(e))
@@ -1062,4 +1060,21 @@ fn for_error(heap: &LuaHeap, rt: &Metas, what: &str, v: Value) -> Exc {
         ),
         None,
     )
+}
+
+/// The least float greater than `x` (`f64::next_up`, stable only from Rust 1.86).
+fn next_up(x: f64) -> f64 {
+    if x.is_nan() || x == f64::INFINITY {
+        return x;
+    }
+    if x == 0.0 {
+        return f64::from_bits(1);
+    }
+    let bits = x.to_bits();
+    f64::from_bits(if x > 0.0 { bits + 1 } else { bits - 1 })
+}
+
+/// The greatest float less than `x` (`f64::next_down`, stable only from Rust 1.86).
+fn next_down(x: f64) -> f64 {
+    -next_up(-x)
 }

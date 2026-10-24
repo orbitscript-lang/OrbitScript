@@ -199,7 +199,7 @@ macro_rules! space {
                 ) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return $crate::__private::trace::<Self, $ty, _>(&self.$field, index, m);
+                            return $crate::__private::trace::<Self, $ty, { $slots }>(&self.$field, index, m);
                         }
                     )+
                     ::core::unreachable!()
@@ -208,7 +208,7 @@ macro_rules! space {
                 fn slot_parts(&self, kind: u8, index: u32) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return $crate::__private::parts::<Self, $ty, _>(&self.$field, index);
+                            return $crate::__private::parts::<Self, $ty, { $slots }>(&self.$field, index);
                         }
                     )+
                     ::core::unreachable!()
@@ -223,7 +223,7 @@ macro_rules! space {
                 ) -> bool {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return $crate::__private::trace_part::<Self, $ty, _>(
+                            return $crate::__private::trace_part::<Self, $ty, { $slots }>(
                                 &self.$field, index, range, m,
                             );
                         }
@@ -240,7 +240,7 @@ macro_rules! space {
                 ) {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return $crate::__private::clear::<Self, $ty, _>(
+                            return $crate::__private::clear::<Self, $ty, { $slots }>(
                                 &mut self.$field, index, mode, live,
                             );
                         }
@@ -255,7 +255,7 @@ macro_rules! space {
                 fn free_slot(&mut self, kind: u8, index: u32) -> usize {
                     $(
                         if kind == __Kind::$field as u8 {
-                            return $crate::__private::free::<Self, $ty, _>(&mut self.$field, index);
+                            return $crate::__private::free::<Self, $ty, { $slots }>(&mut self.$field, index);
                         }
                     )+
                     ::core::unreachable!()

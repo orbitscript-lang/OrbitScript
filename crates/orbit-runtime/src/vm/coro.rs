@@ -175,15 +175,13 @@ fn live_end(s: &Stack, top: usize) -> usize {
     s.aux.tbc.last().map_or(top, |&r| top.max(r as usize + 1))
 }
 
-// Upcasting to `dyn Any` reads its vtable from the thread's, which saves
-// the indirect call `as_any` would make on every switch.
 fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
-    let state: &dyn Any = &*heap.get(t).state;
+    let state: &dyn Any = heap.get(t).state.as_any();
     state.downcast_ref().expect("threads hold VM coroutines")
 }
 
 fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
-    let state: &mut dyn Any = &mut *heap.get_mut(t).state;
+    let state: &mut dyn Any = heap.get_mut(t).state.as_any_mut();
     state.downcast_mut().expect("threads hold VM coroutines")
 }
 
@@ -253,10 +251,10 @@ impl Vm {
             self.rt.cooling_at = (at + 1) % self.rt.cooling.len();
             let out = self.rt.cooling[at].replace((from, stamp));
             // An older entry of the thread parking now is stale.
-            if let Some((cold, stamp)) = out
-                && cold != from
-            {
-                self.shrink_parked(cold, stamp);
+            if let Some((cold, stamp)) = out {
+                if cold != from {
+                    self.shrink_parked(cold, stamp);
+                }
             }
         }
         let c = co_mut(&mut self.heap, to);
@@ -312,7 +310,7 @@ impl Vm {
             let at = self.rt.cooling_at;
             self.rt
                 .cooling
-                .splice(at..at, std::iter::repeat_n(None, hot));
+                .splice(at..at, std::iter::repeat_with(|| None).take(hot));
         }
     }
 
@@ -411,13 +409,18 @@ impl Vm {
         let f = self.rt.stack.frames.last().expect("a waiting frame");
         // The usual case: the values are the waiting native's results,
         // which a return hook (when one is set) must see in its frame.
-        if outcome.is_ok()
-            && let FrameKind::Native { call_at, ok, .. } = f.kind
-            && ok != ResumeOk::Continue
-            && !self.rt.stack.hook.wants(crate::vm::hook::RETURN)
-        {
-            let (func, want) = (f.func as usize, f.want);
-            return self.deliver_values(func, want, call_at as usize, ok == ResumeOk::ReturnTrue);
+        if outcome.is_ok() {
+            if let FrameKind::Native { call_at, ok, .. } = f.kind {
+                if ok != ResumeOk::Continue && !self.rt.stack.hook.wants(crate::vm::hook::RETURN) {
+                    let (func, want) = (f.func as usize, f.want);
+                    return self.deliver_values(
+                        func,
+                        want,
+                        call_at as usize,
+                        ok == ResumeOk::ReturnTrue,
+                    );
+                }
+            }
         }
         let f = *f;
         self.deliver_k(f, outcome)
@@ -660,11 +663,11 @@ impl Vm {
         let co = self.rt.current;
         // A coroutine being closed has reported its error to the closer.
         let closing = std::mem::replace(&mut self.rt.stack.aux.closing, Closing::No);
-        if let Err(e) = outcome
-            && closing != Closing::Closer
-        {
-            self.heap.barrier_back(co);
-            co_mut(&mut self.heap, co).error = Some(e);
+        if let Err(e) = outcome {
+            if closing != Closing::Closer {
+                self.heap.barrier_back(co);
+                co_mut(&mut self.heap, co).error = Some(e);
+            }
         }
         self.switch_to(resumer, CoStatus::Dead);
         switched(self.deliver(outcome))

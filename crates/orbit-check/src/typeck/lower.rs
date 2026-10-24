@@ -38,10 +38,10 @@ impl<'a> Lowering<'_, 'a, '_, '_> {
             TypeKind::Path { segments, args } => {
                 let last = segments[segments.len() - 1];
                 let args: Vec<TypeId> = args.iter().map(|a| self.lower(a)).collect();
-                if let Some(id) = self.syms.ref_at(last.span)
-                    && let Some(k) = self.syms.kind(id)
-                {
-                    return self.named_type(id, k, args);
+                if let Some(id) = self.syms.ref_at(last.span) {
+                    if let Some(k) = self.syms.kind(id) {
+                        return self.named_type(id, k, args);
+                    }
                 }
                 if segments.len() == 1 {
                     let name = self.text(last.sym);

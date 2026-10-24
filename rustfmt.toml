@@ -1,0 +1,3 @@
+# Format as the 2024 style edition, as before the crates moved to edition
+# 2021 for the MSRV (ADR-6).
+style_edition = "2024"

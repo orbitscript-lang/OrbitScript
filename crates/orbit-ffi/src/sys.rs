@@ -58,19 +58,24 @@ impl CType {
     /// libffi's description of the type: one of its predefined statics,
     /// which it only reads.
     fn ffi_type(self) -> *mut ffi::ffi_type {
-        match self {
-            CType::Void => addr_of_mut!(ffi::ffi_type_void),
-            CType::I8 => addr_of_mut!(ffi::ffi_type_sint8),
-            CType::U8 => addr_of_mut!(ffi::ffi_type_uint8),
-            CType::I16 => addr_of_mut!(ffi::ffi_type_sint16),
-            CType::U16 => addr_of_mut!(ffi::ffi_type_uint16),
-            CType::I32 => addr_of_mut!(ffi::ffi_type_sint32),
-            CType::U32 => addr_of_mut!(ffi::ffi_type_uint32),
-            CType::I64 => addr_of_mut!(ffi::ffi_type_sint64),
-            CType::U64 => addr_of_mut!(ffi::ffi_type_uint64),
-            CType::Pointer => addr_of_mut!(ffi::ffi_type_pointer),
-            CType::Float => addr_of_mut!(ffi::ffi_type_float),
-            CType::Double => addr_of_mut!(ffi::ffi_type_double),
+        // SAFETY: taking a static's address reads nothing. (Rust 1.82 and
+        // later need no `unsafe` for it.)
+        #[allow(unused_unsafe)]
+        unsafe {
+            match self {
+                CType::Void => addr_of_mut!(ffi::ffi_type_void),
+                CType::I8 => addr_of_mut!(ffi::ffi_type_sint8),
+                CType::U8 => addr_of_mut!(ffi::ffi_type_uint8),
+                CType::I16 => addr_of_mut!(ffi::ffi_type_sint16),
+                CType::U16 => addr_of_mut!(ffi::ffi_type_uint16),
+                CType::I32 => addr_of_mut!(ffi::ffi_type_sint32),
+                CType::U32 => addr_of_mut!(ffi::ffi_type_uint32),
+                CType::I64 => addr_of_mut!(ffi::ffi_type_sint64),
+                CType::U64 => addr_of_mut!(ffi::ffi_type_uint64),
+                CType::Pointer => addr_of_mut!(ffi::ffi_type_pointer),
+                CType::Float => addr_of_mut!(ffi::ffi_type_float),
+                CType::Double => addr_of_mut!(ffi::ffi_type_double),
+            }
         }
     }
 }
@@ -134,7 +139,7 @@ impl Cif {
     /// module comment describes, and return the result's bits.
     pub fn call(&self, f: u64, args: &mut [u64]) -> u64 {
         assert_eq!(args.len(), self.args.len(), "one slot per argument");
-        for (slot, t) in args.iter_mut().zip(&self.args) {
+        for (slot, t) in args.iter_mut().zip(self.args.iter()) {
             *slot = to_memory_order(*slot, *t);
         }
         let mut stack = [std::ptr::null_mut::<c_void>(); STACK_ARGS];
@@ -201,7 +206,7 @@ mod dl {
     pub const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
     #[cfg(not(target_os = "macos"))]
     pub const RTLD_DEFAULT: *mut c_void = std::ptr::null_mut();
-    unsafe extern "C" {
+    extern "C" {
         pub fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
         pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         pub fn dlerror() -> *const c_char;
@@ -255,7 +260,7 @@ pub fn symbol(lib: u64, name: &[u8]) -> Result<u64, String> {
 mod dl {
     use std::ffi::{c_char, c_void};
     #[link(name = "kernel32")]
-    unsafe extern "system" {
+    extern "system" {
         pub fn LoadLibraryA(name: *const c_char) -> *mut c_void;
         pub fn GetModuleHandleA(name: *const c_char) -> *mut c_void;
         pub fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
@@ -330,7 +335,7 @@ pub fn errno() -> i32 {
 /// apart from `GetLastError`).
 #[cfg(windows)]
 pub fn errno() -> i32 {
-    unsafe extern "C" {
+    extern "C" {
         fn _errno() -> *mut std::ffi::c_int;
     }
     // SAFETY: `_errno` returns the calling thread's errno location.

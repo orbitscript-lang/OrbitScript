@@ -2,6 +2,7 @@
 
 ## Non-negotiables
 - **Stable Rust only.** No nightly or beta features, no `#![feature]`, no `-Z` flags.
+- **Builds with Rust 1.75 (the MSRV, ADR-6).** Edition 2021 and nothing newer than 1.75: no let chains, `is_none_or`, `repeat_n`, inline `const {}`, `c"..."` literals, `#[allow(.., reason = ..)]`, trait upcasting or `unsafe extern`. Clippy flags newer std APIs (`incompatible_msrv`), but only a 1.75 build catches language features, so run the check below. Our own builds and releases use current stable.
 - **No `unsafe` in our code.** The workspace sets `unsafe_code = "forbid"`. The exceptions are the future `orbit-jit` crate, `orbit-virtmem` (virtual memory buffer for arena slots, approved by Tym on 2026-10-11), `orbit-gc`'s memory-trimming calls (glibc `malloc_trim` and macOS `malloc_zone_pressure_relief`) behind its `memory-trimming` feature (ADR-2, ADR-6), `orbit-capi/src/ffi.rs` (C modules, ADR-8), `orbit-ffi/src/sys.rs` (the `ffi` library, ADR-9), `orbit-std/src/crt.rs` (Windows C runtime `strerror`, ADR-6), the one-file Windows AF_UNIX socket and named-event wrapper for the debugger (ADR-12, until std's Windows Unix sockets are stable), and `orbit-dap/src/process.rs` (signalling and macOS process inspection for `--debug-attach`, ADR-12). Anything else needs Tym's sign-off in an ADR.
 - **Dependencies are justified.** Add a row to `DEPS.md` (reason plus measured size cost) in the same PR. `orbit-gc`, `orbit-runtime` and `orbit-compiler` take no runtime dependencies without an ADR.
 - **Greenfield, never ported.** Learn from PUC Lua's observable behavior (the reference `lua5.5` binary, the official suite, the manual), never from its source code. Don't read, translate or mirror PUC Lua's C sources unless Tym explicitly asks for it for a specific purpose. Design for multiple front ends (Lua and OrbitScript) throughout.
@@ -38,4 +39,5 @@ Design records live in `docs/adr/`. A **Proposed** ADR can be edited freely by i
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo +1.75.0 check --workspace --all-targets   # rustup toolchain install 1.75.0
 ```

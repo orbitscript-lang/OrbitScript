@@ -574,10 +574,9 @@ pub fn error_line(text: &str, file: &str) -> Option<u32> {
     while let Some(i) = text[from..].find(&pat) {
         let at = from + i;
         from = at + pat.len();
-        let whole = text[..at]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '-'));
+        let whole = text[..at].chars().next_back().map_or(true, |c| {
+            !(c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
+        });
         let rest = &text[from..];
         let digits = rest.chars().take_while(char::is_ascii_digit).count();
         if whole && digits > 0 && rest[digits..].starts_with(':') {

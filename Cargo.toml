@@ -1,5 +1,5 @@
 [workspace]
-resolver = "3"
+resolver = "2"
 members = ["crates/*"]
 # A plain `cargo build --release` at the root builds the CLI (`orbit` and
 # `orbitc`) with the features `./build.sh` gives it. Building every member
@@ -12,8 +12,8 @@ exclude = ["spike"]
 
 [workspace.package]
 version = "0.0.0"
-edition = "2024"
-rust-version = "1.94"
+edition = "2021"
+rust-version = "1.75"
 license = "MIT"
 repository = "https://github.com/tymlipari/OrbitScript"
 

@@ -8,6 +8,7 @@
 //! runs the write barrier.
 
 use std::cell::Cell;
+use std::mem::size_of;
 
 use orbit_gc::{Gc, Liveness, Marker, Trace, WeakMode};
 
@@ -353,10 +354,10 @@ impl Trace<LuaSpace> for Table {
         m: &mut Marker<'_, LuaSpace>,
         range: Option<std::ops::Range<usize>>,
     ) -> bool {
-        if let Some(meta) = self.meta
-            && gc::weak_mode(m.get(meta), |s| m.get(s)).is_some()
-        {
-            return false;
+        if let Some(meta) = self.meta {
+            if gc::weak_mode(m.get(meta), |s| m.get(s)).is_some() {
+                return false;
+            }
         }
         let Some(range) = range else {
             if let Some(meta) = self.meta {
@@ -451,10 +452,10 @@ impl Table {
                 if !weak_value {
                     mark(m, v);
                 }
-            } else if !weak_value
-                && let (Some(key), Some(value)) = (gc::object(m, k), gc::object(m, v))
-            {
-                m.ephemeron(key, value);
+            } else if !weak_value {
+                if let (Some(key), Some(value)) = (gc::object(m, k), gc::object(m, v)) {
+                    m.ephemeron(key, value);
+                }
             }
         }
     }
@@ -478,11 +479,12 @@ impl Table {
             if e.is_empty() {
                 break;
             }
-            if e.hash == hash
-                && let Value::Str(s) = e.key()
-                && str_of(s).as_bytes() == name
-            {
-                return e.value();
+            if e.hash == hash {
+                if let Value::Str(s) = e.key() {
+                    if str_of(s).as_bytes() == name {
+                        return e.value();
+                    }
+                }
             }
             i = (i + 1) & mask;
         }
@@ -507,10 +509,10 @@ impl Table {
         }
         if let Some((pos, i)) = self.meta_hint_pos(e) {
             let slot = self.entries[pos].meta_hints.get()[i] as usize;
-            if let Some(entry) = self.entries.get(slot)
-                && entry.holds_str(name)
-            {
-                return entry.value();
+            if let Some(entry) = self.entries.get(slot) {
+                if entry.holds_str(name) {
+                    return entry.value();
+                }
             }
         }
         self.meta_field_probe(heap, e, name)
@@ -763,10 +765,10 @@ impl Table {
         let room = (self.used as usize) < max_used(len);
         // An empty home slot ends the probe at once.
         let home = key.hash as usize & len.wrapping_sub(1);
-        if let Some(e) = self.entries.get(home)
-            && e.is_empty()
-        {
-            return Err(room.then_some(home));
+        if let Some(e) = self.entries.get(home) {
+            if e.is_empty() {
+                return Err(room.then_some(home));
+            }
         }
         match self.probe(key, |a, b| str_eq(heap, a, b)) {
             Ok(i) => Ok(i),
@@ -1128,12 +1130,11 @@ impl Table {
         self.used = 0;
         let mask = self.entries.len() - 1;
         for e in entries.iter().filter(|e| !e.value_is_nil()) {
-            if let Value::Int(k) = e.key()
-                && k > old
-                && k <= len
-            {
-                self.array.set(k as usize - 1, e.value());
-                continue;
+            if let Value::Int(k) = e.key() {
+                if k > old && k <= len {
+                    self.array.set(k as usize - 1, e.value());
+                    continue;
+                }
             }
             let mut i = e.hash as usize & mask;
             while !self.entries[i].is_empty() {
@@ -1245,10 +1246,10 @@ impl Table {
     #[inline]
     fn hash_slot_for_next(&self, heap: &LuaHeap, key: Value) -> Result<usize, InvalidKey> {
         let hint = self.next_hint.get() as usize;
-        if let Some(e) = self.entries.get(hint)
-            && e.holds(key)
-        {
-            return Ok(hint);
+        if let Some(e) = self.entries.get(hint) {
+            if e.holds(key) {
+                return Ok(hint);
+            }
         }
         self.probe(&Key::hashed(heap, key), |a, b| str_eq(heap, a, b))
             .map_err(|_| InvalidKey)

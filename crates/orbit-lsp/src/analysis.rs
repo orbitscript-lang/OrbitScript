@@ -117,11 +117,10 @@ impl Analysis {
     /// `file`, or of its definition.
     fn name_span(&mut self, file: FileId, offset: u32, id: SymbolId) -> Option<Span> {
         let covers = |s: Span| s.start <= offset && offset <= s.end;
-        if let Some(d) = self.ws.definition(id)
-            && d.file == file
-            && covers(d.span)
-        {
-            return Some(d.span);
+        if let Some(d) = self.ws.definition(id) {
+            if d.file == file && covers(d.span) {
+                return Some(d.span);
+            }
         }
         self.ws
             .references(id)

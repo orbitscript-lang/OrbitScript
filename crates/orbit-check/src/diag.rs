@@ -142,7 +142,7 @@ impl Code {
     }
 
     /// Every code, in order.
-    pub const ALL: &[Code] = &[
+    pub const ALL: &'static [Code] = &[
         Code::Syntax,
         Code::ModuleNotFound,
         Code::UnknownName,

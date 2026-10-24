@@ -14,6 +14,14 @@ pub(crate) enum ConstVal {
 }
 
 impl ConstVal {
+    /// An integer that fits a 16-bit key operand (`GetIndexInt`, `SetIndexInt`).
+    pub(crate) fn u16_key(self) -> Option<u16> {
+        match self {
+            ConstVal::Int(k) => u16::try_from(k).ok(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn truthy(self) -> bool {
         !matches!(self, ConstVal::Nil | ConstVal::Bool(false))
     }

@@ -249,18 +249,19 @@ impl Lowerer {
                             ));
                         }
                     }
-                    if !rest
-                        && let Some(missing) = known
+                    if !rest {
+                        if let Some(missing) = known
                             .iter()
                             .find(|k| !fields.iter().any(|f| f.name.sym == **k))
-                    {
-                        return Err(self.error(
+                        {
+                            return Err(self.error(
                             span,
                             format!(
                                 "pattern does not mention field `{}`; add `..` to ignore the rest",
                                 self.text(*missing)
                             ),
                         ));
+                        }
                     }
                 }
                 // getmetatable(v) == Type

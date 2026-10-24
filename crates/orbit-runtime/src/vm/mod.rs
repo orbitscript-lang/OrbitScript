@@ -249,12 +249,12 @@ impl CheapHasher {
 impl std::hash::Hasher for CheapHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let (chunks, rest) = bytes.as_chunks::<8>();
-        for c in chunks {
-            self.add(u64::from_le_bytes(*c));
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().expect("8 bytes")));
         }
         let mut last = [0; 8];
-        last[..rest.len()].copy_from_slice(rest);
+        last[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
         self.add(u64::from_le_bytes(last));
     }
 
@@ -751,8 +751,15 @@ impl fmt::Debug for Extensions {
 }
 
 /// `Write` that can be printed with `{:?}`.
-pub trait WriteDebug: Write + fmt::Debug {}
-impl<T: Write + fmt::Debug> WriteDebug for T {}
+pub trait WriteDebug: Write + fmt::Debug {
+    /// `self` as a plain writer (trait upcasting is stable only from Rust 1.86).
+    fn as_write(&mut self) -> &mut dyn Write;
+}
+impl<T: Write + fmt::Debug> WriteDebug for T {
+    fn as_write(&mut self) -> &mut dyn Write {
+        self
+    }
+}
 
 impl Roots<LuaSpace> for Runtime {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {

@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 use orbit_gc::{AnyGc, Gc, Heap, Liveness, Marker, Trace, WeakMode, space};
+use std::mem::size_of;
 
 #[derive(Debug)]
 pub struct Text(pub String);

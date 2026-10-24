@@ -390,10 +390,10 @@ impl Vm {
                             throw!(Exc::Lua(e));
                         }
                         #[cfg(feature = "debugger")]
-                        if self.rt.debug.watch
-                            && let Err(e) = self.debug_point(pc - 1)
-                        {
-                            throw!(Exc::Lua(e));
+                        if self.rt.debug.watch {
+                            if let Err(e) = self.debug_point(pc - 1) {
+                                throw!(Exc::Lua(e));
+                            }
                         }
                         if !self.hooked_here(&cur, closure, self.rt.stack.depth()) {
                             // The hook was turned off: run this instruction in
@@ -962,24 +962,25 @@ impl Vm {
                             // A native closure or a built-in in tail position
                             // is called like a native, keeping this frame, as
                             // natives are.
-                            if let Value::Closure(c) = w[func as usize]
-                                && let code = &self.heap.get(c).code
-                                && !code.builtin
-                                && !matches!(code.code.first(), Some(Op::NativeEntry { .. }))
-                            {
-                                let f = self.rt.stack.frames.pop().expect("frame");
-                                self.rt.stack.cells.truncate(f.cell_base as usize);
-                                let dst = f.func as usize;
-                                self.rt.stack.regs.copy_within(fa..fa + 1 + n, dst);
-                                if let Err(x) = self.push_lua_frame(c, dst, n, f.want) {
-                                    self.rt.stack.frames.push(f);
-                                    throw!(x);
+                            if let Value::Closure(c) = w[func as usize] {
+                                let code = &self.heap.get(c).code;
+                                if !code.builtin
+                                    && !matches!(code.code.first(), Some(Op::NativeEntry { .. }))
+                                {
+                                    let f = self.rt.stack.frames.pop().expect("frame");
+                                    self.rt.stack.cells.truncate(f.cell_base as usize);
+                                    let dst = f.func as usize;
+                                    self.rt.stack.regs.copy_within(fa..fa + 1 + n, dst);
+                                    if let Err(x) = self.push_lua_frame(c, dst, n, f.want) {
+                                        self.rt.stack.frames.push(f);
+                                        throw!(x);
+                                    }
+                                    self.rt.stack.frames.last_mut().expect("frame").tail = true;
+                                    if HOOKED {
+                                        self.rt.stack.hook.call_pending = Some(true);
+                                    }
+                                    continue 'reload;
                                 }
-                                self.rt.stack.frames.last_mut().expect("frame").tail = true;
-                                if HOOKED {
-                                    self.rt.stack.hook.call_pending = Some(true);
-                                }
-                                continue 'reload;
                             }
                             // A native in tail position: an ordinary call whose
                             // results the following `Return` delivers.
@@ -1014,8 +1015,8 @@ impl Vm {
                             // The common case, one value back to a Lua caller
                             // that wants one, without the general return path.
                             let from = base + src as usize;
-                            if let Some((caller, f)) = self.lua_caller()
-                                && f.want == 1
+                            if let Some((caller, f)) =
+                                self.lua_caller().filter(|(_, f)| f.want == 1)
                             {
                                 let func = f.func as usize;
                                 self.pop_frame(&f);
@@ -1125,23 +1126,23 @@ impl Vm {
                         Op::ForPrep { base: b, exit } => {
                             // The common integer loop counting up; the rest
                             // (floats, negative steps, errors) is cold.
-                            if let (&Value::Int(i), &Value::Int(lim), &Value::Int(s)) =
-                                (&w[b], &w[b + 1], &w[b + 2])
-                                && s > 0
-                            {
-                                if i <= lim {
-                                    // The iterations left replace the limit.
-                                    let count = (lim as u64).wrapping_sub(i as u64) / s as u64;
-                                    w[b + 1] = Value::Int(count as i64);
-                                    w[b + 3] = Value::Int(i);
-                                } else {
-                                    jump!(exit);
+                            match (&w[b], &w[b + 1], &w[b + 2]) {
+                                (&Value::Int(i), &Value::Int(lim), &Value::Int(s)) if s > 0 => {
+                                    if i <= lim {
+                                        // The iterations left replace the limit.
+                                        let count = (lim as u64).wrapping_sub(i as u64) / s as u64;
+                                        w[b + 1] = Value::Int(count as i64);
+                                        w[b + 3] = Value::Int(i);
+                                    } else {
+                                        jump!(exit);
+                                    }
                                 }
-                            } else {
-                                let runs = tri!(self.op_for_prep(base + b as usize, false));
-                                w = Window::take(&mut self.rt.stack.regs, base);
-                                if !runs {
-                                    jump!(exit);
+                                _ => {
+                                    let runs = tri!(self.op_for_prep(base + b as usize, false));
+                                    w = Window::take(&mut self.rt.stack.regs, base);
+                                    if !runs {
+                                        jump!(exit);
+                                    }
                                 }
                             }
                         }
@@ -1324,28 +1325,27 @@ impl Vm {
                     code_id: shape.code_id,
                 }))
             }
-            // A native's fast path, when it has one and takes these
-            // arguments: no window, no frame.
-            Value::Native(id)
-                if !HOOKED
-                    && (want <= 1 || want == MULTI)
-                    && let Some(fast) = self.rt.natives[id.0 as usize].fast
-                    && let Some(v) = self
+            Value::Native(id) if !HOOKED => {
+                // A native's fast path, when it has one and takes these
+                // arguments: no window, no frame.
+                let fast = match self.rt.natives[id.0 as usize].fast {
+                    Some(fast) if want <= 1 || want == MULTI => self
                         .rt
                         .stack
                         .regs
                         .get(fa + 1..fa + 1 + n)
-                        .and_then(|a| fast(&self.heap, a)) =>
-            {
-                if want != 0 {
-                    self.rt.stack.regs[fa] = v;
+                        .and_then(|a| fast(&self.heap, a)),
+                    _ => None,
+                };
+                if let Some(v) = fast {
+                    if want != 0 {
+                        self.rt.stack.regs[fa] = v;
+                    }
+                    self.rt.top = fa + want.min(1) as usize;
+                    return Ok(Frames::Same);
                 }
-                self.rt.top = fa + want.min(1) as usize;
-                Ok(Frames::Same)
-            }
-            // Any other native, called in place: no frame, and a plain
-            // return comes straight back to the loop.
-            Value::Native(id) if !HOOKED => {
+                // Any other native, called in place: no frame, and a plain
+                // return comes straight back to the loop.
                 self.rt
                     .stack
                     .frames
@@ -1410,21 +1410,21 @@ impl Vm {
     /// state for it, with the running frame.
     #[inline(always)]
     fn lua_caller(&self) -> Option<(LuaFrame, Frame)> {
-        if let [.., caller, f] = &self.rt.stack.frames[..]
-            && let FrameKind::Lua { closure, code_id } = caller.kind
-        {
-            Some((
-                LuaFrame {
-                    closure,
-                    base: caller.base as usize,
-                    pc: caller.pc as usize,
-                    code_id,
-                },
-                *f,
-            ))
-        } else {
-            None
-        }
+        let [.., caller, f] = &self.rt.stack.frames[..] else {
+            return None;
+        };
+        let FrameKind::Lua { closure, code_id } = caller.kind else {
+            return None;
+        };
+        Some((
+            LuaFrame {
+                closure,
+                base: caller.base as usize,
+                pc: caller.pc as usize,
+                code_id,
+            },
+            *f,
+        ))
     }
 
     /// Pop the running frame `f` and its cells.
@@ -1728,10 +1728,10 @@ impl Vm {
                 Ok(NativeStep::Flow(self.yield_(nvals, None, fa, want, id)?))
             }
             Ok(r) => {
-                if let NativeReturn::Return(k) = r
-                    && self.rt.stack.hook.wants(crate::vm::hook::RETURN)
-                {
-                    self.native_return_hook(fa, id, k).map_err(Exc::Lua)?;
+                if let NativeReturn::Return(k) = r {
+                    if self.rt.stack.hook.wants(crate::vm::hook::RETURN) {
+                        self.native_return_hook(fa, id, k).map_err(Exc::Lua)?;
+                    }
                 }
                 match self.native_returned(r, None, fa, want, id)? {
                     Flow::Reload if self.rt.stack.frames.len() == depth => Ok(NativeStep::Resumed),
@@ -1788,13 +1788,14 @@ fn method_lookup(
     // The usual class layout: the metatable's `__index` is a table holding
     // the method.
     let ci = &cur.caches[ic as usize + 1];
-    if let Some(c) = cached_table(heap.get(mt), ci)
-        && let Some(m) = heap
+    if let Some(c) = cached_table(heap.get(mt), ci) {
+        if let Some(m) = heap
             .get(c)
             .cached_str_packed(cm.slot.get() as usize, cm.key)
             .filter(|m| m.0 != Tag::Nil)
-    {
-        return Some(m);
+        {
+            return Some(m);
+        }
     }
     method_lookup_up(heap, metas, cur, ic, k, t, mt)
 }
@@ -1829,19 +1830,24 @@ fn method_lookup_up(
         .caches
         .get(ic as usize + 2)
         .zip(cur.caches.get(ic as usize + 3));
-    if let Some(c) = cached_table(heap.get(mt), ci)
-        && let ctab = heap.get(c)
-        && let (Some((ci2, cm2)), Some(mt2)) = (up, ctab.meta)
-        && ctab
-            .find_str_key(heap, &cm.key_for(heap, k))
-            .is_none_or(|s| ctab.slot_value(s).is_nil())
-        && let Some(p) = cached_table(heap.get(mt2), ci2)
-        && let Some(m) = heap
-            .get(p)
-            .cached_str_packed(cm2.slot.get() as usize, cm2.key)
-            .filter(|m| m.0 != Tag::Nil)
-    {
-        return Some(m);
+    if let Some(c) = cached_table(heap.get(mt), ci) {
+        let ctab = heap.get(c);
+        if let (Some((ci2, cm2)), Some(mt2)) = (up, ctab.meta) {
+            if ctab
+                .find_str_key(heap, &cm.key_for(heap, k))
+                .map_or(true, |s| ctab.slot_value(s).is_nil())
+            {
+                if let Some(p) = cached_table(heap.get(mt2), ci2) {
+                    if let Some(m) = heap
+                        .get(p)
+                        .cached_str_packed(cm2.slot.get() as usize, cm2.key)
+                        .filter(|m| m.0 != Tag::Nil)
+                    {
+                        return Some(m);
+                    }
+                }
+            }
+        }
     }
     method_miss(heap, metas, Value::Table(t), mt, k, cm, ci, up)
         .ok()

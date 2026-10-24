@@ -4,16 +4,66 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
 use orbit::{Chunk, Config, Runtime};
 use orbit_dap::Server;
 use serde_json::{Value, json};
 
+/// The writing end of an in-memory pipe (`std::io::pipe` is stable only
+/// from Rust 1.87).
+struct PipeWriter(Sender<Vec<u8>>);
+
+impl Write for PipeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .send(buf.to_vec())
+            .map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The reading end: end of file once every writer is gone.
+struct PipeReader {
+    rx: Receiver<Vec<u8>>,
+    buf: Vec<u8>,
+    at: usize,
+}
+
+impl Read for PipeReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while self.at == self.buf.len() {
+            match self.rx.recv() {
+                Ok(chunk) => (self.buf, self.at) = (chunk, 0),
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.buf.len() - self.at);
+        out[..n].copy_from_slice(&self.buf[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+fn pipe() -> (PipeReader, PipeWriter) {
+    let (tx, rx) = channel();
+    let reader = PipeReader {
+        rx,
+        buf: Vec::new(),
+        at: 0,
+    };
+    (reader, PipeWriter(tx))
+}
+
 /// The editor's end of the connection.
 struct Editor {
-    to: std::io::PipeWriter,
-    from: BufReader<std::io::PipeReader>,
+    to: PipeWriter,
+    from: BufReader<PipeReader>,
     seq: i64,
     /// Events read while waiting for something else.
     events: VecDeque<Value>,
@@ -99,8 +149,8 @@ fn script(name: &str, text: &str) -> PathBuf {
 /// Run a session: `editor` drives it from its own thread while this
 /// thread hosts the program; the exit code the host reported.
 fn session(editor: impl FnOnce(&mut Editor) + Send + 'static) -> (i32, JoinHandle<()>) {
-    let (from_editor, to_server) = std::io::pipe().unwrap();
-    let (from_server, to_editor) = std::io::pipe().unwrap();
+    let (from_editor, to_server) = pipe();
+    let (from_server, to_editor) = pipe();
     let client = std::thread::spawn(move || {
         let mut e = Editor {
             to: to_server,

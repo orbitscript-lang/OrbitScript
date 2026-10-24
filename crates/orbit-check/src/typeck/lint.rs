@@ -50,12 +50,14 @@ impl Pass for ZeroBasedLoops {
         };
         let mut indexes = false;
         walk_block(body, &mut |n| {
-            if let Node::Expr(e) = n
-                && let ExprKind::Index { obj, key } = &e.kind
-                && matches!(&key.kind, ExprKind::Name(k) if *k == name.sym)
-                && src(obj.span) == src(arr.span)
-            {
-                indexes = true;
+            if let Node::Expr(e) = n {
+                if let ExprKind::Index { obj, key } = &e.kind {
+                    if matches!(&key.kind, ExprKind::Name(k) if *k == name.sym)
+                        && src(obj.span) == src(arr.span)
+                    {
+                        indexes = true;
+                    }
+                }
             }
             !indexes
         });
@@ -96,21 +98,22 @@ fn unused(t: &Typed<'_, '_, '_>, out: &mut Vec<Diagnostic>) {
     let mut uses: Vec<(Span, bool)> = Vec::new();
     let mut imported: Vec<(SymbolId, ast::Name)> = Vec::new();
     for s in &ast.body.stmts {
-        if let StmtKind::Item(item) = &s.kind
-            && let ItemKind::Use(u) = &item.kind
-        {
-            uses.push((item.span, item.is_pub));
-            if item.is_pub {
-                continue;
-            }
-            // Members of a typed module refer straight to its items.
-            if let UseTail::Members(members) = &u.tail {
-                for (field, alias) in members {
-                    let shown = alias.unwrap_or(*field);
-                    if let Some(&(_, target)) = m.refs.iter().find(|(sp, _)| *sp == field.span)
-                        && target.file != file
-                    {
-                        imported.push((target, shown));
+        if let StmtKind::Item(item) = &s.kind {
+            if let ItemKind::Use(u) = &item.kind {
+                uses.push((item.span, item.is_pub));
+                if item.is_pub {
+                    continue;
+                }
+                // Members of a typed module refer straight to its items.
+                if let UseTail::Members(members) = &u.tail {
+                    for (field, alias) in members {
+                        let shown = alias.unwrap_or(*field);
+                        if let Some(&(_, target)) = m.refs.iter().find(|(sp, _)| *sp == field.span)
+                        {
+                            if target.file != file {
+                                imported.push((target, shown));
+                            }
+                        }
                     }
                 }
             }
@@ -122,13 +125,15 @@ fn unused(t: &Typed<'_, '_, '_>, out: &mut Vec<Diagnostic>) {
     };
     let mut scoped = HashSet::new();
     walk_block(&ast.body, &mut |n| {
-        if let Node::Stmt(s) = n
-            && let StmtKind::Let {
+        if let Node::Stmt(s) = n {
+            if let StmtKind::Let {
                 scope: true, pat, ..
             } = &s.kind
-            && let PatKind::Bind { name, .. } = &pat.kind
-        {
-            scoped.insert(name.span);
+            {
+                if let PatKind::Bind { name, .. } = &pat.kind {
+                    scoped.insert(name.span);
+                }
+            }
         }
         true
     });

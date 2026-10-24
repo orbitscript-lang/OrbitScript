@@ -243,13 +243,13 @@ impl<'a> FuncState<'a> {
                 self.emit(Op::LoadNil { dst: r, count: 1 });
             }
         }
-        if let Some(t) = f.vararg_table
-            && !f.vararg_table_elided
-        {
-            let r = self.alloc()?;
-            self.emit(Op::VarargTable { dst: r });
-            self.active = self.free;
-            self.declare(t, r)?;
+        if let Some(t) = f.vararg_table {
+            if !f.vararg_table_elided {
+                let r = self.alloc()?;
+                self.emit(Op::VarargTable { dst: r });
+                self.active = self.free;
+                self.declare(t, r)?;
+            }
         }
         let prologue = self.code.len();
         self.block_stmts(f.body)?;
@@ -487,7 +487,11 @@ impl<'a> FuncState<'a> {
     pub fn emit(&mut self, op: Op) -> usize {
         let pc = self.code.len();
         let start = self.clear_pending.take().unwrap_or(pc);
-        if self.lines.last().is_none_or(|&(_, line)| line != self.line) {
+        if self
+            .lines
+            .last()
+            .map_or(true, |&(_, line)| line != self.line)
+        {
             self.lines.push((start as u32, self.line));
         }
         self.code.push(op);
