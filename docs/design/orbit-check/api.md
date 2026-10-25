@@ -1,6 +1,6 @@
-# `orbit-check` library API (draft for the language server)
+# `orbit-check` library API
 
-Status: **Agreed with the language server design**. Names (stage 1), types (stage 2) and the bundled stubs (stage 3) are implemented in `crates/orbit-check`. The language server links this library (dev tooling D1), so this API, not the command line, is the checker's main interface. Design background: [proposal.md](proposal.md).
+Status: Implemented in `crates/orbit-check`. The language server ([language-server.md](../language-server.md)) links this library, so this API, not the command line, is the checker's main interface. What the checker checks and why: [proposal.md](proposal.md).
 
 ## Shape
 
@@ -15,12 +15,11 @@ flowchart LR
 
 - **One `Workspace` per project.** It owns every module it has loaded, the bundled stdlib stubs and the configuration. No global state, so the CLI and a server use it the same way and tests can run several in parallel.
 - **Sources come from the host** through a small trait, so the language server can serve unsaved buffers and fall back to disk for everything else. The workspace never writes files.
-- **Lazy and per module.** `set_source` only records new text and marks the module stale. A query on a module (re)checks it and, first, any stale module it depends on. A module's dependents are rechecked only if its exported signatures changed, so an edit inside a function body doesn't recheck the project.
+- **Lazy and per module.** `set_source` only records new text and marks the module and everything that depends on it, directly or not, stale. A query on a module (re)checks it and, first, any stale module it depends on.
 - **Positions are byte offsets** into the module's source, as `orbit_hir::Span` is. Converting to LSP's line and UTF-16 column is the server's job (it has the text). Definition and reference locations cover just the name token, so a rename edits exactly those spans.
 - **One id per file:** paths are made absolute (`std::path::absolute`) and `.`/`..` folded lexically, so `./a.orb`, `a.orb` and `/cwd/a.orb` share one `FileId`. Symlinks are not resolved.
 - **Plain data:** results (`Diagnostic`, `Symbol`, `DocumentSymbol`, `Location`) are `Clone` and own their strings, since the server copies them into OrbitScript values.
-- **Lua modules** reached through `use` resolve to `any` with no errors (T11). Navigation inside Lua files comes from the HIR on the server's side.
-- **Rechecks:** an edit rechecks the file and everything that depends on it. Narrowing that to dependents whose imports actually changed is a later optimization.
+- **Lua modules** reached through `use` resolve to `any` with no errors Navigation inside Lua files comes from the Lua front end on the server's side.
 
 ## Types
 
@@ -28,14 +27,14 @@ flowchart LR
 pub struct Workspace { /* modules, interners, config */ }
 
 pub struct Config {
-    /// `package.path`-style search templates for `use a::b`, tried in order.
-    /// Default: ["./?.orb", "./?/init.orb", "./?.lua", "./?/init.lua"]. A `.orbi` stub beside a
+    /// The directory `search_path` entries are relative to (`--root`, default `.`).
+    pub root: PathBuf,
+    /// `package.path`-style templates for `use a::b` (`--path`): `?` becomes `a/b`, tried in order.
+    /// Default: ["?.orb", "?/init.orb", "?.lua", "?/init.lua"]. A `.orbi` stub beside a
     /// `.lua` module wins over it; the bundled standard library comes last.
     pub search_path: Vec<String>,
     /// Check every module strictly, as `//! orbit-check: strict` does for one (`--strict`).
     pub strict: bool,
-    /// `extern` names the host provides, with optional types (`--extern NAME: T`).
-    pub externs: Vec<(String, Option<String>)>,
 }
 
 pub trait Sources {
@@ -75,27 +74,28 @@ impl Workspace {
     pub fn remove(&mut self, file: FileId);
     pub fn file_id(&self, path: &Path) -> Option<FileId>;
     pub fn path(&self, file: FileId) -> &Path;
+    pub fn line_col(&self, file: FileId, offset: u32) -> (u32, u32);
 
     // Diagnostics: parse (with recovery), name resolution, then types.
     pub fn diagnostics(&mut self, file: FileId) -> &[Diagnostic];
     pub fn check_all(&mut self) -> Vec<(FileId, &[Diagnostic])>;
 
-    // L1: names (resolution and the module graph)
+    // Names (resolution and the module graph)
     pub fn document_symbols(&mut self, file: FileId) -> Vec<DocumentSymbol>;   // tree: items, impl members, fields, variants
     pub fn symbol_at(&mut self, file: FileId, offset: u32) -> Option<SymbolId>; // a definition or a reference to one
-    pub fn definition(&mut self, symbol: SymbolId) -> Location;
+    pub fn definition(&self, symbol: SymbolId) -> Option<Location>;
     pub fn references(&mut self, symbol: SymbolId) -> Vec<Location>;          // whole workspace for pub items
-    pub fn symbol(&self, symbol: SymbolId) -> Option<&Symbol>;               // name, kind, name span, item span; later signature and doc spans
+    pub fn symbol(&self, symbol: SymbolId) -> Option<&Symbol>;               // name, kind, name span, item span, doc spans
     pub fn can_rename(&self, symbol: SymbolId) -> bool;                       // for prepareRename: false for globals, the prelude and stubs
     pub fn completions_at(&mut self, file: FileId, offset: u32) -> Completions;
     pub fn is_builtin(&self, file: FileId) -> bool;                           // the prelude or a bundled stdlib stub
     pub fn builtin_source(&self, file: FileId) -> Option<&'static str>;       // its text, for going to a definition in it
-    pub fn workspace_symbols(&mut self, query: &str) -> Vec<(SymbolId, Location)>;
 
-    // L2: types
+    // Types
     pub fn type_at(&mut self, file: FileId, offset: u32) -> Option<String>;   // display form, for hover and inlay hints
     pub fn signature_at(&mut self, file: FileId, offset: u32) -> Option<SignatureHelp>;
     pub fn inlay_hints(&mut self, file: FileId, range: Span) -> Vec<InlayHint>;
+    pub fn display_type(&self, t: TypeId) -> String;
 }
 ```
 
@@ -145,26 +145,21 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 | T0503 | error | a condition that isn't `bool` (strict mode) |
 | T0504 | error | `use` of a Lua module with no `.orbi` stub (strict mode) |
 
-## Pragmas and strict mode (T13)
+## Pragmas and strict mode
 
 - `// orbit-check: ignore` drops everything reported on its line, and `// orbit-check: ignore[T0207, T0201]` only those codes. A syntax error is never dropped. The comment goes at the end of the line it covers.
 - `//! orbit-check: strict` checks the module strictly, and `//! orbit-check: off` reports only syntax errors for it. `Config::strict` (`--strict`) makes every module strict except those marked `off`; the bundled stubs are never strict.
 - Strict mode adds T0501-T0504, and T0305 for an `ignore` with nothing to ignore. A `pub fn` in a module or a `pub` method needs types on its parameters (`self` aside) and, when it returns values, a result type. A condition must be `bool` (or `any`): `if n` becomes `if n > 0`, `if x` on an optional becomes `if x != nil`. An untyped Lua module is reported once, at its `use`, rather than at every use of a value from it.
 - `orbit-check --deny-warnings` exits with status 1 on warnings too.
 
-## Broken code (dev tooling D3)
+## Broken code
 
 - The checker parses with recovery (`parse_recovering`): every syntax error is reported, and a statement or item that didn't parse becomes an `Error` node. Resolution and checking treat it as `any` and report nothing further about it. Names it would have defined are unknown to the code after it.
-- Lowering is not run. The checker reports the name errors lowering reports today ("cannot find `x` in this scope", "used before its definition"), in the same words, so the server should take `.orb` diagnostics from the checker only, not from both.
+- Lowering is not run. The checker reports the name errors lowering reports ("cannot find `x` in this scope", "used before its definition"), in the same words, so the server should take `.orb` diagnostics from the checker only, not from both.
 
-## Build order
+## Stubs
 
-1. Skeleton (this thread, first PR): `Workspace`, `Sources`, `FileId`, `Diagnostic`, module graph through `use`, name resolution with a kept symbol table, `document_symbols`, `symbol_at`, `definition`, `references`, and an `orbit-check` CLI that prints resolution errors. That is everything L1 needs except completion and types.
-2. Types (C2, C3): `diagnostics` gains type errors; `type_at`, `signature_at`, `inlay_hints`, member completion. Merged in #188.
-3. Stubs (C4): the prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`. That includes `std.json` (`stubs/std/json.orbi`, shown as `<builtin>/std/json.orbi`). `tests/stubs.rs` fails when a stub and the runtime's libraries, or the prelude and the front end's list, disagree. Also in this stage: completion of names in scope and keywords, and parsing with recovery.
-
-4. Strict mode and pragmas (C5, T13): the `ignore` and module pragmas, `Config::strict`, `--strict` and `--deny-warnings`.
-5. Lints (C5): T0307-T0310. Assigning to a local counts as using it, so a value that is only ever written is not reported.
+The prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`; `std.json` is `stubs/std/json.orbi`, shown as `<builtin>/std/json.orbi`. `tests/stubs.rs` fails when a stub and the runtime's libraries, or the prelude and the front end's list, disagree.
 
 ### How the stubs are written
 
@@ -175,9 +170,10 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 - A stub may declare a body-less function more than once (overloads): a call takes the first declaration its arguments fit, so `math::random()` is `float` and `math::random(1, 6)` is `int`. When none fits, the error lists every form (T0201). Hover and signature help show the last declaration. Overloads exist only in stubs; OrbitScript code can't declare them.
 - Lua functions whose result type depends on the arguments' types otherwise return the argument's type through a generic (`math::abs<T>(x: T) -> T`), or `any` where nothing simpler is right (`os::date`, whose result depends on the format string's value).
 
-## Agreed with the language server design
+## Language server contract
 
 - The workspace owns a `Box<dyn Sources>`; open buffers go through `set_source`.
-- No cancellation in v1: the server drops stale requests, and checks are per module.
-- Doc comments: the front end attaches `docs: Vec<Span>` to items (its C0 work); the checker passes the spans on and the server slices the text.
-- Parser work (type trees, stub files, and later recovery and trivia) is done by the OrbitScript front end thread as one `ParseOptions` design, every flag off for `load`. With `recover`, the AST gets `Error` nodes in expressions, statements, items and types, which the checker treats as `any` without further errors.
+- No cancellation: the server drops stale requests, and checks are per module.
+- Doc comments: the parser attaches `docs: Vec<Span>` to items; the checker passes the spans on and the server slices the text.
+- Parser options (type trees, stub files, recovery, doc comments and trivia) are one `ParseOptions` design in the shared parser, every flag off for `load`. With `recover`, the AST gets `Error` nodes in expressions, statements, items and types, which the checker treats as `any` without further errors.
+- Lints: assigning to a local counts as using it, so a value that is only ever written is not reported by T0309.

@@ -2,7 +2,7 @@
 
 Highlighting, the `orbit-lsp` language server and the `orbit` debugger for OrbitScript (`.orb`, `.orbi`) and Lua 5.5.
 
-This folder is self-contained: its own `package.json`, no build coupling to Cargo (ADR-12 D7). It isn't on the marketplace yet.
+This folder is self-contained: its own `package.json`, no build coupling to Cargo (ADR-12). It isn't on the marketplace yet.
 
 ## What it does
 

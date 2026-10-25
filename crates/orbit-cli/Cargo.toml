@@ -45,7 +45,7 @@ shared = ["orbit/shared"]
 c-modules = ["dep:orbit-capi"]
 # The `ffi` library, on unless `--no-ffi` is given (ADR-9).
 ffi = ["orbit-std/ffi"]
-# The `std.json` module (ADR-12, D13).
+# The `std.json` module (ADR-12).
 json = ["orbit-std/json"]
 # Link the system's shared libffi rather than a static copy built from
 # bundled sources.

@@ -1,4 +1,4 @@
-//! The `analysis` module the server's scripts call (ADR-12 D9): what the
+//! The `analysis` module the server's scripts call (ADR-12): what the
 //! checker knows about the workspace, as small tables. Positions are byte
 //! offsets into a file's text; turning them into the editor's lines and
 //! columns is the scripts' job. A location is `{ path, start, end }`.
@@ -151,8 +151,7 @@ impl Analysis {
         Json::Array(list)
     }
 
-    /// Lua files get their syntax errors only: the checker doesn't check
-    /// Lua (T11).
+    /// Lua files get their syntax errors only: the checker doesn't check Lua.
     fn lua_diagnostics(&mut self, path: &str) -> Json {
         let p = PathBuf::from(path);
         let text = match self.open.get(&p) {

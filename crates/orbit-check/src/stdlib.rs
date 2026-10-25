@@ -1,4 +1,4 @@
-//! The bundled stubs (proposal T12): the prelude, which lists the names every module can read
+//! The bundled stubs: the prelude, which lists the names every module can read
 //! without declaring them, and one stub per standard library module. They describe what the
 //! runtime's libraries do; `tests/stubs.rs` checks them against the runtime and the front end.
 

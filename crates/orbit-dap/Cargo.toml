@@ -20,7 +20,7 @@ libc = { version = "0.2", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # AF_UNIX sockets and the debug-request event until std's Windows Unix
-# sockets are stable (D12); already in the tree for orbit-virtmem.
+# sockets are stable; already in the tree for orbit-virtmem.
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
@@ -33,7 +33,7 @@ orbit = { path = "../orbit", features = ["debugger"] }
 orbit-std = { path = "../orbit-std" }
 
 # Not the workspace lints: unsafe is denied rather than forbidden, and
-# allowed only in src/win.rs and src/process.rs (ADR-12, D12).
+# allowed only in src/win.rs and src/process.rs (ADR-12).
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

@@ -1,13 +1,13 @@
 # Language server (`orbit-lsp`)
 
-**Status: Proposed.** Implements tiers L0 to L2 of the [developer tooling plan](../adr/0012-developer-tooling.md) (ADR-12, decisions D1, D2, D4 and D9).
+Status: Implemented. Crate: `orbit-lsp`. Decisions: [ADR-12](../adr/0012-developer-tooling.md).
 
 ## Summary
 
-`orbit-lsp` is the language server for OrbitScript and Lua. An editor starts it and talks LSP over its standard input and output. It is a small Rust program on the public `orbit` API (D2), and most of it is OrbitScript (D9):
+`orbit-lsp` is the language server for OrbitScript and Lua. An editor starts it and talks LSP over its standard input and output. It is a small Rust program on the public `orbit` API, and most of it is OrbitScript:
 
 - **The protocol layer is OrbitScript**, bundled in the binary (`crates/orbit-lsp/scripts/lsp/`). It handles the framing, JSON (`std.json`), the open documents and their edits, positions in UTF-16 or UTF-8, and turns answers into LSP's shapes.
-- **The analysis is the checker** (D1). The host registers a module `analysis` whose functions ask `orbit-check`'s library what it knows about a file at a byte offset. The scripts call it the way any embedder's scripts call a host module.
+- **The analysis is the checker.** The host registers a module `analysis` whose functions ask `orbit-check`'s library what it knows about a file at a byte offset. The scripts call it the way any embedder's scripts call a host module.
 
 ```mermaid
 flowchart LR
@@ -28,21 +28,21 @@ flowchart LR
 
 ## What it answers
 
-| LSP request | OrbitScript (`.orb`, `.orbi`) | Lua (`.lua`) | Tier |
-|---|---|---|---|
-| `publishDiagnostics` | Syntax, name, module and type errors and warnings from the checker | Syntax errors, several per file (recovering parser) | L0, L2 |
-| `documentSymbol` | Items and their members, as a tree | none | L0 |
-| `foldingRange` | Each bracketed block, up to the line before its closing bracket; runs of comment lines | none | L0 |
-| `selectionRange` | Token, inside of each enclosing bracket pair, the pair, the file | the file | L0 |
-| `semanticTokens/full` | Keywords, literals, comments (doc comments with the `documentation` modifier), names by what they name | none | L0 |
-| `definition`, `references`, `documentHighlight` | Through `use`, into other modules and the bundled stubs | none | L1 |
-| `prepareRename`, `rename` | Locals, items and members the workspace owns (not the stubs) | none | L1 |
-| `hover` | The declaration's first line and its `///` comment, or a value's type | none | L1 |
-| `completion` | Names in scope, keywords, `use` paths, `Type::` items, fields and methods after `.` | none | L1, L2 |
-| `signatureHelp` | The call's signature and the active parameter | none | L2 |
-| `inlayHint` | Types of `let` bindings without an annotation | none | L2 |
-| `workspace/symbol` | Items in every `.orb` file under the root (up to 2,000 files), fuzzy-matched | none | L1 |
-| `formatting`, `rangeFormatting` | `orbit-fmt`'s layout ([formatter.md](formatter.md)), as one edit covering only what changes; a range formats the whole top-level items it touches. A file with a syntax error gets no edits; one the formatter can't format yet (a comment inside an expression) fails the request with the line | none | L3 |
+| LSP request | OrbitScript (`.orb`, `.orbi`) | Lua (`.lua`) |
+|---|---|---|
+| `publishDiagnostics` | Syntax, name, module and type errors and warnings from the checker | Syntax errors, several per file (recovering parser) |
+| `documentSymbol` | Items and their members, as a tree | none |
+| `foldingRange` | Each bracketed block, up to the line before its closing bracket; runs of comment lines | none |
+| `selectionRange` | Token, inside of each enclosing bracket pair, the pair, the file | the file |
+| `semanticTokens/full` | Keywords, literals, comments (doc comments with the `documentation` modifier), names by what they name | none |
+| `definition`, `references`, `documentHighlight` | Through `use`, into other modules and the bundled stubs | none |
+| `prepareRename`, `rename` | Locals, items and members the workspace owns (not the stubs) | none |
+| `hover` | The declaration's first line and its `///` comment, or a value's type | none |
+| `completion` | Names in scope, keywords, `use` paths, `Type::` items, fields and methods after `.` | none |
+| `signatureHelp` | The call's signature and the active parameter | none |
+| `inlayHint` | Types of `let` bindings without an annotation | none |
+| `workspace/symbol` | Items in every `.orb` file under the root (up to 2,000 files), fuzzy-matched | none |
+| `formatting`, `rangeFormatting` | `orbit-fmt`'s layout ([formatter.md](formatter.md)), as one edit covering only what changes; a range formats the whole top-level items it touches. A file with a syntax error gets no edits; one the formatter can't format yet (a comment inside an expression) fails the request with the line | none |
 
 A request at the position right after a name (where the cursor usually is) answers for that name.
 
@@ -75,7 +75,7 @@ LSP counts columns in UTF-16 code units unless both sides agree otherwise. The s
 
 ## Using it from an editor
 
-The VS Code extension (`editors/vscode`, D7) starts it. Other editors need only a few lines:
+The VS Code extension (`editors/vscode`) starts it. Other editors need only a few lines:
 
 **Neovim** (0.11 or later):
 
@@ -109,8 +109,7 @@ To add module paths, pass `initializationOptions = { searchPath = { "lib/?.orb" 
 
 `crates/orbit-lsp/tests/session.rs` runs the binary as an editor would, over pipes, against a small workspace: diagnostics on open and after incremental edits with wide characters before them, every request in the table above, UTF-8 positions when offered, Lua files, and the protocol's error cases. The scripts are fully annotated and marked `//! orbit-check: strict`; one test runs the checker over them in strict mode against `scripts/analysis.orbi`, the typed stub of the host module, so they stay checker-clean.
 
-## Not yet
+## Not supported
 
 - Lua files get syntax errors only; definitions and completion for Lua need name resolution in the checker's Lua path.
-- `semanticTokens/range` and `/delta`, code actions (L3), and pull diagnostics.
-- The checker never forgets a type it has made (noted in its design), which a session open for days will notice.
+- `semanticTokens/range` and `/delta`, code actions, and pull diagnostics.

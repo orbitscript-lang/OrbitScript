@@ -1,4 +1,4 @@
-//! Everything unsafe in the debugger (ADR-12, D12): AF_UNIX stream sockets
+//! Everything unsafe in the debugger (ADR-12): AF_UNIX stream sockets
 //! and the debug-request event on Windows, through Winsock and kernel32.
 //! std has Windows Unix sockets only on nightly
 //! (`windows_unix_domain_sockets`); this file goes when they are stable.

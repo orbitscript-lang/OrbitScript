@@ -15,9 +15,9 @@ The first `--interp` is the baseline. For each benchmark and interpreter the too
 - **peak RSS**: the largest resident set size across the runs, from `getrusage` on the interpreter process, so it is exact rather than sampled. Unix only.
 - **binary size** of each interpreter, next to the per-benchmark numbers.
 
-Then it prints each interpreter's geometric-mean time and RSS ratio against the baseline. The P5 target (see `docs/ROADMAP.md`) is time at or below 1.0x `lua5.5` with comparable or lower peak RSS.
+Then it prints each interpreter's geometric-mean time and RSS ratio against the baseline. The target ([ROADMAP.md](../docs/ROADMAP.md)) is time at or below 1.0x `lua5.5` with comparable or lower peak RSS.
 
-An interpreter whose output differs from the baseline's counts as failing that benchmark, so a fast wrong answer never shows up as a win. Only the baseline failing makes the command exit non-zero: `orbit` is expected to fail until its runtime exists.
+An interpreter whose output differs from the baseline's counts as failing that benchmark, so a fast wrong answer never shows up as a win. Only the baseline failing makes the command exit non-zero.
 
 `--json FILE` writes everything for tracking over time, and `--markdown FILE` appends a table (CI passes `$GITHUB_STEP_SUMMARY`). The `bench` job in CI runs the quick sizes, and `.github/workflows/bench.yml` runs the full sizes on x86_64 Linux, aarch64 Linux and macOS and keeps the JSON as an artifact. Both workflows currently run only when started by hand from the Actions tab; automatic runs are paused to save Actions minutes.
 

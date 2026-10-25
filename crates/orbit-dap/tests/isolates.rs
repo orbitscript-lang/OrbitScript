@@ -1,4 +1,4 @@
-//! Several isolates in one process share one debug server (D10): each is
+//! Several isolates in one process share one debug server: each is
 //! a DAP thread of its own that stops on its own.
 //!
 //! The server is process-wide, so this file holds one test.

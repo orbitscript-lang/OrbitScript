@@ -2,7 +2,7 @@
  * OrbitScript's luaconf.h: the configuration the Lua 5.5 C API headers
  * depend on. Written for OrbitScript; the values match the reference
  * build's ABI on 64-bit targets so modules compiled against either set of
- * headers load in OrbitScript (docs/design/c-modules.md).
+ * headers load in OrbitScript (docs/adr/0008-c-modules.md).
  */
 #ifndef luaconf_h
 #define luaconf_h

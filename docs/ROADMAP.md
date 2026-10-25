@@ -7,7 +7,7 @@ One semantic core, two syntaxes: the Lua 5.5 and OrbitScript front ends both low
 The first release covers:
 
 - **Lua 5.5.** The full language and standard library. The official 5.5 test suite passes, minus its internal (`T`) and C-library parts; every skip is in [`tests/lua-5.5/SKIPS.md`](../tests/lua-5.5/SKIPS.md) and every known difference in [`tests/lua-5.5/DEVIATIONS.md`](../tests/lua-5.5/DEVIATIONS.md).
-- **OrbitScript.** The language in [the syntax proposal](design/orbitscript-syntax/proposal.md), calling and called from Lua, with the optional type checker `orbit-check` and the formatter `orbit-fmt`.
+- **OrbitScript.** The language in [the language design](design/orbitscript-syntax/proposal.md), calling and called from Lua, with the optional type checker `orbit-check` and the formatter `orbit-fmt`.
 - **Runtime.** Our own garbage collector (`orbit-gc`, incremental with a generational mode), a stackless interpreter with coroutines that can yield across anything Lua allows, `std.json`, C modules built for Lua 5.5 (ADR-8) and the `ffi` library (ADR-9).
 - **Embedding.** The Rust API in the `orbit` crate (ADR-11), and `liborbit`, which also stands in for Lua 5.5's shared library (ADR-10).
 - **Tooling.** The language server, the debugger (DAP) and the VS Code extension (ADR-12).
@@ -36,7 +36,7 @@ flowchart LR
 
 ## Lua 5.5 changes that matter (versus 5.4)
 
-Checked by stream A against the Lua 5.5.1 manual and sources (the `v5.5.1` tag of the lua/lua mirror).
+Checked against the Lua 5.5.1 manual and the reference interpreter (the `v5.5.1` tag of the lua/lua mirror).
 
 Incompatibilities the manual lists (section 8):
 - Language:

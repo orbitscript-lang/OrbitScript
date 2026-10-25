@@ -405,7 +405,7 @@ impl State {
         };
         let announced = event.is_some();
         if let Some((why, text)) = event {
-            // Each attached isolate stops on its own (D10).
+            // Each attached isolate stops on its own.
             let mut body = json!({
                 "reason": why,
                 "threadId": self.link.thread,

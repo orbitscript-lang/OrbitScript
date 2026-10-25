@@ -1,4 +1,4 @@
-//! Attaching to a running program (ADR-12, D10, D11): the program serves
+//! Attaching to a running program (ADR-12): the program serves
 //! debuggers on a local socket ([`serve`], [`Service::start`]), and
 //! `orbit --debug-attach` finds it ([`list`]) and relays an editor's
 //! session to it ([`attach`]).
@@ -96,7 +96,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// attaches the program runs as it would undebugged. Fails if the isolate
 /// allows no debugger.
 ///
-/// Every isolate served in a process shares one server (D10): the first
+/// Every isolate served in a process shares one server: the first
 /// call makes it, with `about`; later calls join it (their `about` is not
 /// used) and their isolates appear to an attached editor as new threads.
 /// An isolate leaves when it closes.

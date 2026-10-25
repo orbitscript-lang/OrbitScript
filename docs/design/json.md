@@ -1,8 +1,8 @@
 # The `std.json` module
 
-Status: Implemented. JSON is a standard library module backed by `serde_json` (ADR-12 D13); the API below is the one built.
+Status: Implemented. Crate: `orbit-std` (feature `json`). JSON is a standard library module backed by `serde_json` (ADR-12).
 
-`orbit-std` has it behind the `json` feature, which the `orbit` CLI (feature `json`, on by default) and `liborbit` turn on. It uses only the public `orbit` API (the stack layer), so `orbit-runtime` takes no JSON dependency (D4).
+`orbit-std` has it behind the `json` feature, which the `orbit` CLI (feature `json`, on by default) and `liborbit` turn on. It uses only the public `orbit` API (the stack layer), so `orbit-runtime` takes no JSON dependency.
 
 ## Reaching it
 
@@ -48,7 +48,7 @@ flowchart LR
 
 - **`__tojson`**: a table or userdata whose metatable has a `__tojson` function is written as whatever that function returns for it, so a type picks its own JSON form (`fn __tojson(self) { json::array([self.x, self.y]) }` in an OrbitScript `impl`). A table it returns must be marked with `json.array` or `json.object` (or have a `__tojson` of its own), so the hook says the shape it writes; strings, numbers, booleans and `json.null` are written as they are. Its errors go to `encode`'s caller; giving back the value itself, or a table that holds it, is a cycle error.
 - **Tables**: an array when the keys are exactly `1..n` (an empty table is `[]`), otherwise an object. Object keys are strings, or numbers written as text (`{[1] = "a", [3] = "c"}` is `{"1":"a","3":"c"}`); other key types are an error. A metatable's `__jsontype` field (`"object"`, `"array"` or `"null"`) decides instead, which is what the markers and `json.null` use, and lets a class pick its shape. A table marked as an array whose keys aren't positive integers, or go past its length, is an error.
-- **Numbers** keep their subtype both ways: `1` and `1.0` encode differently and decode back to an integer and a float. A numeral past the 64-bit integers decodes to the nearest float, as Lua reads it: `serde_json` hands over numbers already converted unless its `arbitrary_precision` feature is on, which passes them through a private map key, so keeping them exact on decode waits for a cleaner way in. NaN and infinities are an error.
+- **Numbers** keep their subtype both ways: `1` and `1.0` encode differently and decode back to an integer and a float. A numeral past the 64-bit integers decodes to the nearest float, as Lua reads it: `serde_json` hands over numbers already converted unless its `arbitrary_precision` feature is on, which passes them through a private map key, so decoding them exactly needs another way in. NaN and infinities are an error.
 - **Strings** must be valid UTF-8 to encode; decoding gives UTF-8 with escapes resolved.
 - **`nil`** at the top encodes as `null`. JSON `null` decodes to `json.null`, so arrays keep their length.
 - **Empty objects** decode marked as objects, so `{}` round-trips; empty arrays are `[]` anyway.
@@ -67,7 +67,7 @@ Measured 2026-10-19, cloud x86_64, release builds without PGO:
 - **Size**: +72.7 KiB on the static `orbit` (2,201,200 → 2,275,680 bytes), mostly `serde_json`'s parser and number formatting. Builds without the feature carry nothing.
 - **Speed**: a 2.2 MB document of 20,000 small records encodes in about 46 ms and decodes in about 45 ms (about 48 MB/s each way, best of three), decoding including building the tables.
 
-## Not yet
+## Not supported
 
 - Decoding big numbers exactly (as `json.number`), and keys as integers.
 - Streaming (reading from a file without the whole text in memory).

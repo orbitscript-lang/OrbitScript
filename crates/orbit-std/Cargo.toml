@@ -30,7 +30,7 @@ os = []
 # default for embedders; a host still opts in with `install_ffi`).
 ffi = ["dep:orbit-ffi"]
 # The `std.json` module: JSON encoding and decoding over `serde_json`
-# (ADR-12, D13).
+# (ADR-12).
 json = ["dep:serde", "dep:serde_json"]
 # With `ffi`: link the system's shared libffi rather than a static copy built
 # from bundled sources.

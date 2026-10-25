@@ -1,7 +1,6 @@
-//! Local sockets for the debugger (ADR-12, D11): a per-user directory only
+//! Local sockets for the debugger (ADR-12): a per-user directory only
 //! its owner can enter, and sockets named so a reused pid never lands on
-//! an old name. No TCP. On Windows the sockets come from [`crate::win`]
-//! (D12).
+//! an old name. No TCP. On Windows the sockets come from [`crate::win`].
 
 use std::io::{self, Read, Write};
 #[cfg(unix)]

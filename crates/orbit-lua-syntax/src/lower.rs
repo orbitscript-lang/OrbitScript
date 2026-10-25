@@ -3,7 +3,7 @@
 //! One walk over the AST builds one `hir::Function` per function body. Names resolve to a local
 //! of the current function, a local of an enclosing function (`Outer`, which the HIR's capture
 //! analysis turns into captures), or a global, following Lua 5.5's `global` declarations and
-//! `_ENV`. Constructs not implemented yet fail here with `<construct> is not supported yet`.
+//! `_ENV`.
 
 use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};

@@ -177,7 +177,7 @@ let n = 3;
 let pct = 41.666;
 print(f"{name} has {n} items"); // orbit has 3 items
 print(f"{name} is {pct:.1}% done"); // orbit is 41.7% done
-print(f"{n:>4}|{n:<4}|{n:04}|{255:x}"); // "   3|3   |0003|ff"
+print(f"{n:>4}|{n:<4}|{255:x}|{255:#06x}"); // "   3|3   |ff|0x00ff"
 print(f"total: {a + b}, first: {t[1]}"); // any expression
 print(f"{{literal braces}}"); // {literal braces}
 print(f"{p}"); // uses __tostring if p has one

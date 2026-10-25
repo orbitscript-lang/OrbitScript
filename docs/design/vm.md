@@ -1,12 +1,12 @@
-# VM: runtime objects, bytecode, compiler and interpreter (first light)
+# VM: runtime objects, bytecode, compiler and interpreter
 
-Status: Implemented. Crates: `orbit-runtime::object` (objects), `orbit-compiler` (HIR to bytecode), `orbit-runtime::vm` (interpreter), `orbit-runtime::stdlib` (the subset's library), `orbit` and `orbit-cli` (glue). Scope: the [first-light subset](first-light-subset.md).
+Status: Implemented. Crates: `orbit-runtime` (`object`: the runtime objects; `vm`: the interpreter), `orbit-bytecode` (the instruction set), `orbit-compiler` (HIR to bytecode).
 
-This document covers everything after the [HIR](hir.md): the objects a running program manipulates, the bytecode, the compiler that produces it, and the interpreter that runs it. It builds on the accepted ADRs (1 values, 2 own GC in `orbit-gc`, 4 `match` dispatch with superinstructions and inline-cache slots, 5 byte strings with `OrbitString`/`OrbitStr`, 6 safety) and the proposed ADR-3 (stackless frames, continuation-style natives). It is our own design: register-based like PUC Lua's VM, but with its own instruction set, capture model, error-message mechanism and calling convention.
+This document covers everything after the [HIR](hir.md): the objects a running program manipulates, the bytecode, the compiler that produces it, and the interpreter that runs it. It builds on ADR-1 (values), ADR-2 (the collector in `orbit-gc`), ADR-3 (stackless frames and continuation-style natives), ADR-4 (bytecode and dispatch), ADR-5 (strings) and ADR-6 (safety). The design is our own: register-based like PUC Lua's VM, with its own instruction set, capture model, error-message mechanism and calling convention. Metatables, userdata, coroutines and to-be-closed variables are in [VM semantics](vm-semantics.md); the debug library and hooks in [debug.md](debug.md).
 
-## Runtime objects (`orbit-core`)
+## Runtime objects (`orbit_runtime::object`)
 
-`orbit-core` defines the Lua object types on top of `orbit-gc` (the API on draft PR #6: `space!`, `Gc<T>`, `Trace`, `Heap::{alloc, get, update, barrier_*, step}`). It takes no dependencies besides `orbit-gc` and `orbit-bytecode` (for `Proto`'s code).
+Every object lives in one `LuaHeap`, a heap of `orbit-gc` with one arena per type:
 
 ```rust
 orbit_gc::space! {
@@ -16,10 +16,11 @@ orbit_gc::space! {
         closures: Closure,
         cells: Cell,
         protos: Proto,
+        userdata: UserData,
+        threads: Thread,
     }
 }
 
-#[derive(Clone, Copy)]
 #[repr(C, u8)]                 // pinned layout (ADR-1): tag byte at offset 0, payload at offset 8
 pub enum Value {               // 16 bytes
     Nil = 0,
@@ -29,141 +30,158 @@ pub enum Value {               // 16 bytes
     Str(Gc<LuaStr>) = 4,
     Table(Gc<Table>) = 5,
     Closure(Gc<Closure>) = 6,
-    Native(NativeId) = 7,      // u32 index into the VM's native registry
-    // 8 = UserData, 9 = Thread: reserved for when they arrive
+    Native(NativeId) = 7,      // index into the VM's native registry
+    UserData(Gc<UserData>) = 8,
+    Thread(Gc<Thread>) = 9,
+    LightUserData(LightUserData) = 10,
 }
-
-const _: () = assert!(core::mem::size_of::<Value>() == 16);
 ```
 
-The layout is pinned so a future JIT can read and write values directly (see [JIT readiness](#jit-readiness)). `#[repr(C, u8)]` and explicit discriminants are plain safe Rust. The tag numbers are also the tag bytes the table array part stores, so a JIT reads a table slot and a register the same way. Rust code outside `orbit-core` still uses `Value`'s API, never its layout.
+Handles (`Gc<T>`) are plain indexes, so reading an object takes the heap (`heap.get(t)`). The layout of `Value` is pinned so a JIT could read and write values directly (see [JIT readiness](#jit-readiness)); `#[repr(C, u8)]` and explicit discriminants are plain safe Rust. The tag numbers are also the tag bytes table storage keeps, so a table slot and a register read the same way. Code outside `object` uses `Value`'s API, never its layout.
 
-- **Native functions** are `Value::Native(NativeId)`, an index into a per-VM registry of `{ name, fn }`. That answers ADR-1's open question for first light: natives cost no allocation, compare by id (Rust fn-pointer equality isn't reliable), and print as `function: 0x...` like any function, as the reference does. Natives with captured state come with metatables and coroutines.
-- **Strings** (`LuaStr { hash: Cell<u32>, bytes: Box<[u8]> }`): strings up to 40 bytes are interned (ADR-5) in an `Interner`, a hash set of handles keyed by a seeded hash of the bytes (linear probing, at most 3/4 full, 8-byte slots holding the hash and the handle, hash 0 marking an empty slot). The interner is weak. After a minor collection the VM's `Roots::clear_weak` removes the young strings that died. After a full marking it only starts pruning: `Roots::sweep_weak` checks the slots in steps before the sweep frees anything, and a lookup that finds a dead string not yet removed revives it (`Heap::revive`). When pruning ends, the set moves to a smaller one if what is left would fill a quarter of it. (`Interner::clear_dead` prunes at once, rehashing in place, for hosts that don't step.) Longer strings are hashed lazily the first time they are used as a key. Equal short strings are the same handle, so key comparison is a handle compare; long strings compare bytes.
-- **Tables** (`Table { array: ArrayPart, hash: HashPart, meta: Option<Gc<Table>> }`):
-  - The array part stores tags and payloads in one allocation (ADR-1): `cap` payload words followed by the tag bytes, eight to a word, 9 bytes per slot. The words are plain `[u8; 8]` arrays (one allocation holds one element type), private to `ArrayPart`, whose API takes and returns `Value`s; a payload is read and written as one native-endian `u64`, and a tag as one byte, so a store never has to read, mask and rewrite the tag word. Tag bytes are written only from a `Tag`. An integer-keyed read checks for an integer or a float with plain compares before the general case, which saves an indirect branch on the common reads. Growth resizes the allocation in place where the allocator can and moves the tag words up. `Value::pack` and `Value::unpack` convert to and from `(Tag, Payload)`, no `unsafe`. `Tag` is a one-byte enum with the pinned tag numbers, so a stored tag is always valid; `Payload` is an opaque 8-byte newtype that only `pack` makes and only `unpack` reads, so packed storage keeps `Value`'s type safety.
-  - The hash part is our own open-addressing table with linear probing and power-of-two capacity. An entry is 24 bytes: the key and the value each split into tag and payload like the array part (the two tag bytes side by side), and the key's hash. Parts of up to 8 slots may fill completely (a probe visits at most every slot), so a constructor's `hash_hint` of `n` allocates exactly `n` rounded up to a power of two; larger parts keep the load factor at most 3/4. Keys are normalised on the way in: a float with an integer value becomes `Int`, `nil` is `table index is nil`, NaN is `table index is NaN`. Assigning `nil` keeps the key in place with a `nil` value (a dead entry), so `next` keeps working while a loop clears the table; dead entries are dropped when the table is rebuilt.
-  - Integer key `n+1` goes to the array part when it extends it (and keys that then continue the array move over from the hash part). A rebuild (on hash-part growth) sizes the array part by density: the largest power of two `2^b` such that more than half of the keys `1..=2^b` would be present (more than a third from `2^12` slots up, where an array slot's 9 bytes already cost less than a hash key's 32 or more, so a large table filled in no particular order moves to the array part before its hash part doubles again; small parts keep Lua's half so `#` finds the same borders), counting the array part, the integer keys in the hash part and the key being inserted, tallied per power-of-two range rather than sorted. The array part never shrinks; when it grows, its length becomes the largest present key up to `2^b`, the hash part's keys in range move into it, and missing keys are nil holes. Any slot below the length may be nil: `next` skips it and the collector has nothing to trace there. The rebuild allocates the new hash part and any array growth before it moves anything, so running out of memory leaves the table unchanged, and the heap-limit check estimates exactly those allocations.
-  - `next` remembers the hash slot of the key it last returned; when the key it is given is exactly that slot's key, it resumes there instead of hashing and probing.
-  - `#t` returns a border: the array length when its last slot is non-nil and `n+1` is absent from the hash part, otherwise a binary search for a border inside the array part, or a search upward through the hash part.
-  - Iteration order for `next`: array slots, then hash slots. `next(t, k)` locates `k` (array index or hash slot) and continues from there.
-  - **Two-phase mutation.** Finding a key needs to read string objects, and `Heap::update` holds the heap mutably, so lookups and writes are split: `table.find_slot(&heap, key) -> Slot` borrows the heap immutably (for hashes and long-string bytes), then `heap.update(table, |t| t.write(slot, value))` performs the store, which also applies the write barrier. Inserting a new key uses `find_insert_slot` the same way, and only a table that must grow rebuilds itself inside `update`.
-  - `meta` is reserved and always `None` at first light.
-- **Closures** (`Closure { proto: Gc<Proto>, code: Rc<ProtoCode>, captures: Box<[Gc<Cell>]> }`) and **cells** (`Cell { value: Value }`, see [below](#locals-captures-and-cells)). `code` is a copy of the prototype's, so a call reaches the code and frame sizes with one heap lookup.
-- **Prototypes** (`Proto`) are GC objects holding the linked output of the compiler: `code: Rc<ProtoCode>`, `children: Box<[Gc<Proto>]>`, `captures: Box<[CaptureSource]>`, `debug: Rc<DebugInfo>`. `ProtoCode` is what running the function needs: the instructions, constants and inline caches, plus `nparams`, `is_vararg`, `nregs`, `ncells`. The interpreter keeps a clone of the current function's `Rc<ProtoCode>` while it runs, so fetching an instruction or constant doesn't go through the heap. A Lua frame records the address of its `ProtoCode`; when a call or return lands in a frame whose code the loop already holds (recursion, returning to the caller of a leaf), it skips both the heap lookup and the clone.
-- **Numbers**: `orbit_core::number` holds string-to-number conversion (the literal grammar plus surrounding whitespace, used by `tonumber` and coercion) and number-to-string formatting. Floats format as 5.5 does, observed from the reference: `%.15g` when that reads back as the same float, else `%.17g`, then `.0` appended if the text looks like an integer; `inf`, `-inf`, `nan`, `-nan`. Rust's own `{}` formatting differs (`1e+16` vs `10000000000000000`), so this is our own `%g` implementation, tested against a table of reference outputs.
-- **`OrbitString` / `OrbitStr<'a>`** (ADR-5): in `object/orbit_str.rs`, with the conversions and comparisons ADR-5 lists, re-exported by `orbit`. Error messages from natives and embedders travel as these types.
+- **Native functions** are `Value::Native(NativeId)`, an index into a per-VM registry of `{ name, fn, fast path, data }`. They cost no allocation, compare by id (Rust function-pointer equality isn't reliable), and print as `function: 0x...` like any function, as the reference's do. Natives with upvalues are native closures ([VM semantics](vm-semantics.md#coroutines)).
+- **Strings** (`LuaStr`, ADR-5): byte strings, stored inside the heap slot up to 22 bytes and in their own allocation beyond. Strings up to 40 bytes are interned in an `Interner`, a hash set of handles keyed by a seeded hash of the bytes (linear probing, at most 3/4 full, 8-byte slots holding the hash and the handle, hash 0 marking an empty slot). Equal short strings are the same handle, so key comparison is a handle compare; long strings are hashed lazily the first time they are used as a key and compare by bytes. The interner is weak. After a minor collection the VM's `Roots::clear_weak` removes the young strings that died. After a full marking it prunes in steps (`Roots::sweep_weak`) before the sweep frees anything, and a lookup that finds a dead string not yet removed revives it (`Heap::revive`). When pruning ends, the set moves to a smaller one if what is left would fill a quarter of it.
+- **`OrbitString` / `OrbitStr<'a>`** (ADR-5), in `object/orbit_str.rs` and re-exported by `orbit`, are how error messages and strings travel between natives, embedders and the runtime.
+- **Tables** (`Table { array, entries, meta, .. }`):
+  - The array part stores tags and payloads in one allocation (ADR-1): `cap` payload words followed by the tag bytes, eight to a word, 9 bytes per slot. The words are plain `[u8; 8]` arrays private to `ArrayPart`, whose API takes and returns `Value`s; a payload is read and written as one native-endian `u64` and a tag as one byte, so a store never reads, masks and rewrites the tag word. `Value::pack` and `Value::unpack` convert to and from `(Tag, Payload)` with no `unsafe`. `Tag` is a one-byte enum with the pinned tag numbers, so a stored tag is always valid, and `Payload` is an opaque 8-byte newtype that only `pack` makes and only `unpack` reads, so packed storage keeps `Value`'s type safety. An integer-keyed read checks for an integer or a float with plain compares before the general case.
+  - The hash part is our own open-addressing table with linear probing and power-of-two capacity. An entry is 24 bytes: key and value each split into tag and payload like the array part (the two tag bytes side by side), and the key's hash. Parts of up to 8 slots may fill completely, so a constructor's hint of `n` allocates exactly `n` rounded up to a power of two; larger parts stay at most 3/4 full. Keys are normalised on the way in: a float with an integer value becomes `Int`, `nil` is `table index is nil`, NaN is `table index is NaN`. Assigning `nil` keeps the key in place with a `nil` value (a dead entry), so `next` keeps working while a loop clears the table; dead entries are dropped when the table is rebuilt.
+  - Integer key `n+1` goes to the array part when it extends it, and keys that then continue the array move over from the hash part. A rebuild (on hash-part growth) sizes the array part by density: the largest power of two `2^b` such that more than half of the keys `1..=2^b` would be present (more than a third from `2^12` slots up, where an array slot's 9 bytes already cost less than a hash entry, so a large table filled in no particular order moves to the array part before its hash part doubles again; small parts keep Lua's half so `#` finds the same borders). Keys are tallied per power-of-two range rather than sorted. The array part never shrinks; when it grows, its length becomes the largest present key up to `2^b`, the hash part's keys in range move into it, and missing keys are nil holes. The rebuild allocates everything it needs before it moves anything, so running out of memory leaves the table unchanged, and the heap-limit check estimates exactly those allocations.
+  - `#t` returns a border: the array length when its last slot is non-nil and `n+1` is absent from the hash part, otherwise a binary search inside the array part, or a search upward through the hash part.
+  - `next` visits array slots, then hash slots. It remembers the hash slot of the key it last returned (`next_hint`), and when the key it is given is that slot's key, it resumes there without hashing and probing.
+  - `absent_meta` remembers, one bit per metatable field, that the table is known to lack that field, so a metamethod lookup that already found nothing is a bit test the next time. Every store into the hash part clears it.
+  - Small array and hash parts of dead tables go to a per-thread pool (at most 64 KiB) that new tables take from first, which is cheaper than returning a sweep's worth of small blocks to the system allocator and getting them back.
+  - **Two-phase mutation.** Finding a key needs to read string objects, and `Heap::update` holds the heap mutably, so lookups and writes are split: `find_slot` borrows the heap immutably, then `heap.update(table, |t| t.write(slot, value))` performs the store and applies the write barrier. Only a table that must grow rebuilds itself inside `update`.
+- **Closures** (`Closure { proto, code, captures }`) and **cells** (`Cell { value }`, see [below](#locals-captures-and-cells)). `code` is an `Rc` copy of the prototype's code, so a call reaches the code and frame sizes with one heap lookup.
+- **Prototypes** (`Proto`) are GC objects holding the linked output of the compiler: `code: Rc<ProtoCode>`, `children`, `captures` (where each capture comes from), the function's name and lines, the chunk name and source, the capture `CapSelf` stands for, and `debug: Rc<DebugInfo>`. `ProtoCode` is what running the function needs: the instructions, constants and inline caches, `nparams`, `is_vararg`, `nregs`, `ncells`, and two flags for built-ins written in OrbitScript (`builtin`, shown as a C function by the debug interface, and `refuses_yield`).
+- **Numbers**: `object::number` holds string-to-number conversion (the literal grammar plus surrounding whitespace, used by `tonumber` and coercion) and number-to-string formatting. Floats format as Lua 5.5 does: `%.15g` when that reads back as the same float, else `%.17g`, then `.0` appended if the text looks like an integer; `inf`, `-inf`, `nan`, `-nan`. Rust's own `{}` formatting differs (`1e+16` against `10000000000000000`), so this is our own `%g`, tested against reference outputs.
 
 ## Locals, captures and cells
 
-The capture model is the one real departure from how PUC Lua works, so it gets its own section.
+The capture model is the main departure from how PUC Lua works.
 
-A local that no closure captures (the HIR's `Local::captured == false`, most locals) lives in a register. A **captured local lives in a heap `Cell`** from the moment its declaration executes. The declaring function reaches it through a per-frame cell slot, and every closure that captures it holds the same `Gc<Cell>`. There are no "open upvalues" pointing into the stack and nothing to close when a scope ends.
+A local that no closure captures (the HIR's `Local::captured == false`, most locals) lives in a register. A **captured local lives in a heap `Cell`** from the moment its declaration executes. The declaring function reaches it through a per-frame cell slot, and every closure that captures it holds the same `Gc<Cell>`. There are no "open upvalues" pointing into the stack, and nothing to close when a scope ends.
 
-- Fresh bindings per iteration and per `local` statement fall out for free: executing the declaration allocates a new cell (`CellNew`), and closures created earlier keep the old one.
+- Fresh bindings per iteration and per `local` statement fall out for free: executing the declaration allocates a new cell (`CellNew`), and closures created earlier keep the old one. `CellClear` drops the cells of locals going out of scope, so the slots don't keep them alive.
 - The main chunk's `_ENV` is a cell too, created by the loader and holding the globals table. It is capture 0 of any function that uses globals.
-- Frames have two stacks, both on the per-coroutine `Stack`: `regs: Vec<Value>` and `cells: Vec<Gc<Cell>>`. Keeping cells out of `regs` means `Value` needs no hidden internal variant. When a collection cycle ends at a safe point and the running stack's `regs` holds more than 64K slots of capacity with at most a quarter in use (a native pushed a large table's elements, say, or recursion went deep), it shrinks to twice what is in use, so one deep moment doesn't hold its peak for the rest of the run.
-- Costs: a captured local costs one small allocation per binding (a closure allocation is happening anyway, usually in the same scope), and the declaring function reads it through the cell. Benefits: no open-upvalue list, no close-on-return scan, returns are cheaper, coroutines don't need upvalue fix-ups, and a JIT sees plain memory cells.
-- Later, when `debug.getlocal`/`setlocal` arrive, they read through the cell for captured locals.
+- Each stack has two arrays: `regs: Vec<Value>` and `cells: Vec<Gc<Cell>>`. Keeping cells out of `regs` means `Value` needs no hidden internal variant. When a collection cycle ends at a safe point and the running stack's `regs` holds more than 64K slots of capacity with at most a quarter in use (a native pushed a large table's elements, say, or recursion went deep), it shrinks to twice what is in use.
+- Costs: a captured local costs one small allocation per binding (a closure allocation usually happens in the same scope anyway), and the declaring function reads it through the cell. In return there is no open-upvalue list, no close-on-return scan, returns are cheaper, coroutines need no upvalue fix-ups, and a JIT sees plain memory cells.
+- `debug.getlocal` and `debug.setlocal` read and write a captured local through its cell.
 
-## Bytecode (`orbit-vm::op`)
+## Bytecode (`orbit-bytecode`)
 
-The types live in their own dependency-free crate, `orbit-bytecode` (re-exported as `orbit_vm::op`), because the compiler emits them, `orbit-core`'s `Proto` stores them and `orbit-vm` runs them; that keeps the compiler free of the runtime and the GC with no crate cycle. That crate is the exact contract; the table below is its summary.
+The instruction set lives in its own dependency-free crate, because the compiler emits it, `Proto` stores it and the VM runs it; that keeps the compiler free of the runtime and the GC with no crate cycle. The crate is the exact contract; this section summarises it.
 
-Register-based, one Rust enum, **8 bytes per instruction**:
+Register-based, one Rust enum, **8 bytes per instruction** (ADR-4):
 
 ```rust
 #[derive(Clone, Copy)]
 pub enum Op {
-    Move { dst: u8, src: u8 },
-    LoadInt { dst: u8, value: i32 },
+    Move { dst: Reg, src: Reg },
+    LoadInt { dst: Reg, value: i32 },
     // ...
 }
 const _: () = assert!(core::mem::size_of::<Op>() == 8);
 ```
 
-A Rust enum instead of hand-packed `u32`s: the compiler decodes fields for us, the `match` is exhaustive, and there's no bit-twiddling to get wrong. Register operands are `u8` (at most 255 registers per function, as in lua5.5), constant and child-prototype indices `u16` (a function may hold up to 2^25 constants: past the first 65,536 the compiler loads them with `LoadConstX{dst,k:u32}` and indexes with them through registers), jump offsets `i32` relative to the next instruction. ADR-4 left the instruction width open; 8 bytes is this design's proposal (S0 found 12-byte instructions cost time; 4-byte packing is a P5 experiment). Recording it in ADR-4 needs a maintainer's approval.
+A Rust enum instead of hand-packed words: the compiler decodes fields for us, the `match` is exhaustive, and there is no bit-twiddling to get wrong. Register operands are `u8` (at most 255 registers per function, as in Lua 5.5); constant and child-prototype indexes are `u16`, and a function may hold up to 2^25 constants, past the first 65,536 loaded with `LoadConstX` and used through registers. Jump offsets are `i32`, relative to the next instruction. `MULTI` (255) as a count means "up to the top".
 
-First-light instruction set (`R[x]` is a register, `K[x]` a constant, `C[x]` a frame cell slot, `U[x]` a capture of the current closure):
+`R[x]` is a register, `K[x]` a constant, `C[x]` a frame cell slot, `U[x]` a capture of the current closure:
 
 | Group | Instructions |
 |---|---|
-| Loads | `Move{dst,src}`, `LoadNil{dst,count}`, `LoadBool{dst,value}`, `LoadInt{dst,value:i32}`, `LoadConst{dst,k}`, `LoadConstX{dst,k:u32}` |
-| Cells and captures | `CellNew{cell,src}` (fresh cell holding `R[src]`), `CellGet{dst,cell}`, `CellSet{cell,src}`, `CapGet{dst,cap}`, `CapSet{cap,src}`, `CapSelf{dst}` (the running closure, for a `local function` that refers to itself and is never reassigned) |
-| Globals | `GetGlobal{dst,name:k,ic}`, `SetGlobal{src,name:k,ic}` (through `U[0]`, the `_ENV` cell) |
-| Tables | `NewTable{dst,array_hint,hash_hint}`, `GetField{dst,obj,key:k,ic}`, `SetField{obj,key:k,src,ic}`, `GetIndex{dst,obj,key}`, `SetIndex{obj,key,src}`, `GetIndexInt{dst,obj,key:u16}` and `SetIndexInt{obj,key:u16,src}` (integer constant keys), `SetList{table,first,count,start}`, `SelfCall{dst,obj,key:k}` (method lookup: `R[dst+1]=R[obj]; R[dst]=R[obj][K[key]]`) |
-| Arithmetic | `Add`, `Sub`, `Mul`, `Div`, `IDiv`, `Mod`, `Pow` as `{dst,a,b}`; `AddInt{dst,a,imm:i16}`; `Neg{dst,src}`, `Not`, `Len`, `Concat{dst,first,count}` |
-| Branches | `Jump{off}`, `JumpIfTrue{src,off}`, `JumpIfFalse{src,off}`, and fused compare-and-branch superinstructions `JumpLt`, `JumpNotLt`, `JumpLe`, `JumpNotLe`, `JumpEq`, `JumpNe` as `{a,b,off}`; against a small integer literal, `JumpEqInt`, `JumpLtInt`, `JumpLeInt`, `JumpGtInt`, `JumpGeInt` as `{a,imm:i8,want,off}` (jump when the comparison's result equals `want`, so one instruction covers both branch directions and stays correct for NaN) |
-| Calls | `Call{func,nargs,nresults}`, `TailCall{func,nargs}`, `Return{first,count}`, `Return0`, `Return1{src}`, `Vararg{dst,count}` (`count`/`nargs`/`nresults` = 255 means "up to the top") |
-| Loops | `ForPrep{base,exit}`, `ForPrepExclusive{base,exit}` (OrbitScript's `a..b`: stops short of the limit), `ForLoop{base,back}` (integer and float variants chosen at `ForPrep`), `GenericCall{base,nvars}`, `GenericLoop{base,back}` |
-| Casts | `Cast{dst,src,ty,mode}`: OrbitScript's `as` (`docs/design/orbitscript-syntax/runtime-as.md`). `mode` (`orbit_bytecode::cast`) names the target (`int`, `float`, `number`, `string`, `bool`, `nil`, a struct or enum in `R[ty]`, or a failure naming `R[ty]`) plus flags: `nil` passes, `nil` on failure (`as?`), or only test the type and give a boolean (union members). `int` on an integer is inline; the rest is out of line, and only a conversion to a string allocates or calls `__tostring` |
-| Functions | `Closure{dst,proto}` (captures built from the child prototype's `CaptureSource` list: `Cell(slot)` from the current frame or `Capture(i)` from the current closure) |
+| Loads | `Move`, `LoadNil{dst,count}`, `LoadBool`, `LoadInt{dst,value:i32}`, `LoadConst{dst,k}`, `LoadConstX{dst,k:u32}` |
+| Cells and captures | `CellNew{cell,src}` (a fresh cell holding `R[src]`), `CellGet`, `CellSet`, `CellClear{from,count}`, `CapGet{dst,cap}`, `CapSet{cap,src}`, `CapSelf{dst}` (the running closure, for a `local function` that refers to itself and is never reassigned) |
+| Globals | `GetGlobal{dst,name:k,ic}`, `SetGlobal{src,name:k,ic}` (through `U[0]`, the `_ENV` cell), `CheckUndefined{src,name:k}` (Lua 5.5's `global x = v`) |
+| Tables | `NewTable{dst,array_hint,hash_hint}`, `GetField{dst,obj,key:k,ic}`, `SetField{obj,key:k,src,ic}`, `GetIndex`, `SetIndex`, `GetIndexInt` and `SetIndexInt` (integer constant keys), `SetList{table,first,count,start}`, `SelfCall{dst,obj,key:k,ic}` (method lookup: `R[dst+1] = R[obj]; R[dst] = R[obj][K[key]]`) |
+| Arithmetic | `Add`, `Sub`, `Mul`, `Div`, `IDiv`, `Mod`, `Pow` as `{dst,a,b}`; the same with a constant right operand (`AddK` ... `PowK`) or left operand (`KAdd`, `KSub`, `KMul`, `KDiv`); `AddInt` and `SubInt` with an `i16` immediate; `Neg`, `Not`, `Len`, `Concat{dst,first,count}` |
+| Bitwise | `BAnd`, `BOr`, `BXor`, `Shl`, `Shr` as `{dst,a,b}`, `BNot{dst,src}` |
+| Branches | `Jump{off}`, `JumpIfTrue`, `JumpIfFalse`, and fused compare-and-branch instructions `JumpLt`, `JumpNotLt`, `JumpLe`, `JumpNotLe`, `JumpEq`, `JumpNe` as `{a,b,off}`; against a small integer literal, `JumpEqInt`, `JumpLtInt`, `JumpLeInt`, `JumpGtInt`, `JumpGeInt` as `{a,imm:i8,want,off}` (jump when the comparison's result equals `want`, so one instruction covers both branch directions and stays correct for NaN) |
+| Calls | `Call{func,nargs,nresults}`, `TailCall{func,nargs}`, `Return{first,count}`, `Return0`, `Return1{src}` |
+| Varargs | `Vararg{dst,count}`; for named varargs, `VarargTable{dst}` (build the table at entry), `VarargGet`, `VarargLen` and `VarargGetInt` (read the extra arguments as the table would, without building it), `VarargUnpack{dst,table,count}` (`...` from a table that was built) |
+| Loops | `ForPrep{base,exit}`, `ForPrepExclusive{base,exit}` (OrbitScript's `a..b`), `ForLoop{base,back}` (integer and float variants chosen at `ForPrep`), `GenericCall{base,nvars}`, `GenericLoop{base,back}` |
+| To-be-closed | `Tbc{reg}`, `Close{from}` ([VM semantics](vm-semantics.md#to-be-closed-variables)) |
+| Casts | `Cast{dst,src,ty,mode}`: OrbitScript's `as` ([runtime-as.md](orbitscript-syntax/runtime-as.md)). `mode` names the target (`int`, `float`, `number`, `string`, `bool`, `nil`, a struct or enum in `R[ty]`, or a failure naming `R[ty]`) plus flags: `nil` passes, `nil` on failure (`as?`), or only test the type and give a boolean (union members). `int` on an integer is inline; the rest is out of line, and only a conversion to a string allocates or calls `__tostring` |
+| Functions | `Closure{dst,proto}` (captures built from the child prototype's capture sources: a cell slot of the current frame or a capture of the current closure), `NativeEntry{id}` (the body of a native closure's stub prototype; never emitted by a compiler) |
 
-`ic` operands index a per-prototype inline-cache array (ADR-4). A cache holds its instruction's string key, filled in at link time, and the hash-slot index where the key was last found; a hit is "slot still holds this key", so the hit path doesn't read the constant table, and a miss falls back to the normal lookup and refreshes the slot. A function with more sites than `ic` values shares the last cache among them; linking marks a cache whose sites disagree on the key as shared, and a shared cache is never filled, so those sites always take the miss path with their own key. The operand is in the encoding from day one, so P5 can make caches smarter without changing the format.
+**Inline caches.** `ic` operands index a per-prototype array of `FieldCache`s (ADR-4). A cache holds its instruction's string key and that key's hash, filled in at link time, and the hash slot where the key was last found; a hit is "the slot still holds this key", so the hit path reads no constant, and a miss falls back to the normal lookup and refreshes the slot. A function with more sites than cache indexes shares the last cache among them; linking marks a cache whose sites disagree on the key as shared, and a shared cache never fills, so those sites always take the miss path with their own key. `SelfCall` has a chain of caches: the method in the object itself, in its metatable's `__index` table (a class), or one level further up (a superclass).
 
-**Type feedback (not built).** A JIT would want a feedback byte per instruction for the instructions whose operand types it specialises on (arithmetic, comparisons, `Len`, `Concat`, indexing and calls), recording what the interpreter saw (integer, float, string, table, closure, native, other). It belongs in a side table indexed by pc rather than in an operand, so no instruction grows past 8 bytes. First light reserved such a table behind a `type-feedback` Cargo feature, but nothing ever recorded into it, so it was removed before the first release; the JIT work adds it back with its recording.
+Compare-and-branch fusions save about a seventh of the instructions on branchy code. The constant and immediate operand forms came from profiles: in fib and fannkuch, a `LoadInt` before every `n < 2` or `p[1]` was about a tenth of the instructions run. New instructions need rows in `format.rs` (binary chunks) and arms in the verifier ([chunks-io-os-cli.md](chunks-io-os-cli.md#the-verifier)); the matches are exhaustive, so a missing arm doesn't compile.
 
-Compare-and-branch fusions are the superinstructions S0 measured at about 14% on branchy code. More are added in P5 from profiles: immediate integer operands for comparisons and table keys came from fib and fannkuch, where a `LoadInt` before every `n < 2` or `p[1]` was about a tenth of the instructions run.
+**Type feedback (not built).** A JIT would want a feedback byte per instruction for the instructions whose operand types it specialises on (arithmetic, comparisons, `Len`, `Concat`, indexing and calls), recording what the interpreter saw. It belongs in a side table indexed by pc rather than in an operand, so no instruction grows past 8 bytes. It is added with the JIT and its recording.
 
 ### Debug info
 
 Kept beside the code (ADR-4), in `DebugInfo`:
 
-- **Lines**: run-length pairs `(first_pc, line)`, binary-searched on error.
-- **Locals**: name, register or cell slot, and live pc range, for tracebacks and later `debug.getlocal`.
-- **Capture names**, for `upvalue 'x'` messages.
+- **Lines**: run-length pairs `(first_pc, line)`, binary-searched.
+- **Locals**: name, register or cell slot, and the live pc range, for tracebacks and `debug.getlocal`.
+- **Capture names**, for `upvalue 'x'` messages, and the debug order of upvalues ([debug.md](debug.md#upvalues)).
 - **Operand origins** (see [Error messages](#error-messages)): for each instruction that can raise a type error, where its operands came from.
 
-## Compiler (`orbit-compiler`)
+## Compiler
 
-`compile(&hir::Chunk, FuncId) -> UnlinkedProto`, one function at a time. The output is plain data (`Send`): instructions, constants as `Int | Float | Str(bytes)`, child function ids, capture sources, counts and debug info. Linking into a VM heap (interning strings, allocating `Proto` objects bottom-up) is a separate step in `orbit-vm`, so functions can be compiled in parallel later and the compiler never needs the GC.
+`orbit-compiler` compiles one HIR function at a time into an `UnlinkedProto`: plain data (`Send`) with the instructions, constants as `Int | Float | Str(bytes)`, child function ids, capture sources, counts and debug info. Linking into a VM heap (interning strings, allocating `Proto` objects bottom-up) is a separate step in the VM (`vm/link.rs`), so the compiler never needs the GC.
 
-- **Registers** are allocated in stack order: parameters first, then each block's locals in declaration order, released when the block ends; temporaries above the live locals. Reading an uncaptured local uses its register directly, with no `Move`. Captured locals get a cell slot instead, allocated the same way.
-- **Expressions** compile with a destination hint: `expr(e, Dest::Any | Dest::Reg(r))`. Constants that fit use `LoadInt`; everything else goes in the constant pool (deduplicated).
-- **Multiple results**: `expr_list(list, first_reg, Want::Exact(n) | Want::All)` places values in consecutive registers; if the last item is a call or `...`, it asks it for exactly the missing count or for "all" (255). This one function serves calls, returns, `local`, assignment and table constructors.
-- **Conditions** compile straight to branches: `cond(e, jump_if: bool, label)` handles `not`, `and`, `or` and comparisons without materialising booleans, choosing the fused `Jump*` forms. `a > b` evaluates `a` then `b` and emits `JumpLt b, a`.
-- **Jumps** use forward labels with a pending-patch list, resolved when the label is placed.
-- **Constant folding** of arithmetic on numeric literals, only where the result can't raise an error (no folding `1 // 0`), and constant propagation of `Const` locals that are never reassigned.
-- **Tail calls**: `Return` of a single call becomes `TailCall`.
+- **Registers** are allocated in stack order: parameters first, then each block's locals in declaration order, released when the block ends, and temporaries above the live locals. Reading an uncaptured local uses its register directly, with no `Move`. Captured locals get a cell slot instead, allocated the same way.
+- **Expressions** compile with a destination hint (any register, or a given one). Constants that fit use `LoadInt` or an immediate operand; everything else goes in the constant pool, deduplicated.
+- **Multiple results**: one function places an expression list in consecutive registers, asking a trailing call or `...` for exactly the missing count or for all of them (`MULTI`). It serves calls, returns, `local`, assignment and table constructors.
+- **Conditions** compile straight to branches: `not`, `and`, `or` and comparisons become fused `Jump*` instructions without materialising booleans. `a > b` evaluates `a` then `b` and emits `JumpLt b, a`.
+- **Jumps** use forward labels with a pending-patch list, resolved when the label is placed. `goto` is a `Jump`; registers are allocated by block, so a jump between block levels needs no register work, and a backward `goto` to before a captured local's declaration gets a fresh cell on the next pass.
+- **Constant folding** of arithmetic and bitwise operations on numeric literals, only where the result can't raise an error (no folding `1 // 0`), and constant propagation of `Const` and `Normal` locals that are never reassigned.
+- **Tail calls**: `Return` of a single call becomes `TailCall`, always followed by `Return{func, MULTI}`, which passes the results on when the callee turns out to be a native that asks for a call (`CallThen`).
 - **Assignment order** follows the HIR's rule (targets' objects and keys, then values, then stores right to left).
-- **Limits** give Lua-style compile errors: more than 255 registers is `function or expression needs too many registers`, more than 254 returned values is `too many returns (limit is 255)`, and more than 255 captures is `too many upvalues`.
+- **Limits** give Lua's compile errors: more than 255 registers is `function or expression needs too many registers`, more than 254 returned values is `too many returns (limit is 255)`, and more than 255 captures is `too many upvalues`.
 - A disassembler (`orbitc -l`) prints instructions with operand names from the debug info, for golden tests.
 
-## Interpreter (`orbit-vm`)
+## Interpreter (`orbit_runtime::vm`)
 
 ### State
 
 ```rust
 pub struct Vm {
-    heap: Heap<LuaSpace>,
-    strings: Interner,
-    globals: Gc<Table>,
+    pub heap: LuaHeap,
+    pub rt: Runtime,       // everything else, so the heap can be borrowed mutably
+}                          // while the runtime is borrowed as its GC roots
+
+pub struct Runtime {
+    pub strings: Interner,
+    pub globals: Gc<Table>,
+    pub registry: Gc<Table>,   // key 2 holds the globals; `_LOADED` is package.loaded
+    pub limits: Limits,
+    pub out: Box<dyn WriteDebug>,                      // where `print` writes, buffered
+    pub compile: Option<CompileFn>,                    // the Lua front end, installed by `orbit`
+    pub compile_orbitscript: Option<CompileFn>,        // the OrbitScript front end
     natives: Vec<Native>,
-    stack: Stack,            // the running coroutine; a heap object once coroutines exist
-    limits: Limits,          // stack depth etc.
-    out: Box<dyn Write>,     // `print` target, stdout by default
+    stack: Stack,          // the running thread's stack
+    // ... metatables, coroutine state, caches, warnings, extensions
 }
 
-pub struct Stack {
+struct Stack {
     regs: Vec<Value>,
     cells: Vec<Gc<Cell>>,
     frames: Vec<Frame>,
+    hook: Hook,            // debug.sethook, per thread
+    // ...
 }
 
-pub struct Frame {
-    closure: Gc<Closure>,    // or the native id for a native continuation frame
+struct Frame {
+    kind: FrameKind,       // Lua, Native (waiting on a call it asked for), Meta, Handler,
+                           // Boundary, CoBase, NativeCall, Hook
+    func: u32,             // where the callee was; results go here
+    base: u32,             // first register (Lua) or first argument (native)
     pc: u32,
-    base: u32,               // first register
     cell_base: u32,
-    nvarargs: u32,           // extra arguments, stored just below `base`
-    want: u8,                // results the caller expects (255 = all)
-    kind: FrameKind,         // Lua | Native { id, k, protected } (a native waiting on CallThen)
+    nvarargs: u32,         // extra arguments, stored just below `base`
+    want: u8,              // results the caller expects (MULTI = all)
+    tail: bool, extra: u8, cdepth: u8,   // tail call, `__call` chain, nested-call depth
 }
 ```
 
+The frame kinds beyond `Lua` and `Native` are described in [VM semantics](vm-semantics.md) and [debug.md](debug.md).
+
 ### Dispatch
 
-`Vm::run` is one loop over the current frame's code (ADR-4):
+`Vm::run` is one loop over the current frame's code (ADR-4), in `vm/dispatch.rs`:
 
 ```rust
 loop {
@@ -171,140 +189,106 @@ loop {
     pc += 1;
     match op {
         Op::Add { dst, a, b } => {
-            let (x, y) = (regs[base + a], regs[base + b]);
-            regs[base + dst] = match (x, y) {
-                (Value::Int(i), Value::Int(j)) => Value::Int(i.wrapping_add(j)),
-                (Value::Float(f), Value::Float(g)) => Value::Float(f + g),
-                _ => self.arith_slow(ArithOp::Add, x, y, pc)?,
-            };
+            match (&w[a], &w[b]) {
+                (Value::Int(i), Value::Int(j)) => set_int(&mut w[dst], i.wrapping_add(*j)),
+                (Value::Float(f), Value::Float(g)) => set_float(&mut w[dst], f + g),
+                _ => /* out of line: coercions, metamethods, errors */,
+            }
         }
         // ...
     }
 }
 ```
 
-Every instruction has an inline fast path for the common types and one out-of-line `*_slow` function for everything else: `arith_slow` (mixed int/float, string coercion, errors), `index_slow`, `call_slow`, `compare_slow`, `len_slow`, `concat_slow`. **Metamethods plug into exactly these functions later**, without touching fast paths or the instruction set.
+The loop keeps the running frame's state in locals (base, pc, code and a fixed-size view of its registers) and runs the common instructions in place. Lua-to-Lua calls and returns switch that state in place; everything else that changes the frame stack comes back through one `'reload` point, which reads the state from the frame on top.
 
-**Register window.** While a Lua frame runs, `regs` is kept at least `base + 256` long. The loop borrows `regs[base..base + 256]` as a `&mut [Value; 256]`, and register numbers are `u8`, so register access needs no bounds check and the window's address stays in a machine register (P5, ADR-4). Anything that takes `&mut self` (calls, allocation, collection steps, errors) ends the borrow, and the loop takes the window again afterwards. Values past the window, such as open-ended call results or varargs, are reached through `regs` itself. The extra slots above a frame's own registers are the callee's registers, so the only cost is a resize after a native call has shrunk the stack.
-
-**Read registers in place.** An instruction matches on its operand registers where they are (`match (&w[a], &w[b])`, or `match w[a]`), and never copies them to a temporary `Value` first. Arithmetic writes its result as a tag byte and an 8-byte payload, two stores. A following instruction that loads the whole 16-byte value can't take it from the store buffer, and it stalls until both stores land, about 10 to 15 cycles on x86. Matching in place loads just the tag and the payload, which the store buffer forwards. On the cloud x86_64 container this cut nbody by 25% and spectral_norm by 38%.
-
-**Copy numbers by parts.** The same stall hits instructions that copy a value: `Move`, a table or field store, a cell store, a `Return1`. They match the source in place and, for an integer or a float, store the known variant, so the copy is a tag store and a payload store again; other values are copied whole. A `for` loop's counters are updated by changing their payloads in place. On the cloud container a bare `for i = 1, n do a = i end` went from 1.6x to parity with PUC Lua, and fannkuch, which copies array elements, got 7% faster.
-
-**Hot and cold halves.** `run()` is one large function, and the compiler allocates machine registers across all of it. So an arm in `run()` holds only an instruction's common case: decoding, a type check, a few register operations. Everything slower, rarer or larger lives in `cold.rs` behind `#[inline(never)]`: allocation, cache misses, varargs, concatenation, `for` setup, error messages, and the error path itself (`Vm::raise`). New instructions follow the same split. When 26 simulated instructions were added this way (six with inline integer fast paths), instruction counts on the benchmarks moved by less than 1%. Wall time can still move by a few percent when code shifts, from alignment and branch-predictor effects, so compare changes by instruction counts (callgrind) as well as by time.
+- **Register window.** While a Lua frame runs, `regs` is kept at least `base + 256` long. The loop borrows `regs[base..base + 256]` as a `&mut [Value; 256]`, and register numbers are `u8`, so register access needs no bounds check and the window's address stays in a machine register. Anything that takes `&mut self` (calls, allocation, collection steps, errors) ends the borrow, and the loop takes the window again afterwards. Values past the window, such as open-ended call results or varargs, are reached through `regs` itself.
+- **Read registers in place.** An instruction matches on its operand registers where they are and never copies them to a temporary `Value` first. Arithmetic writes its result as a tag byte and an 8-byte payload, two stores. A following instruction that loaded the whole 16-byte value couldn't take it from the store buffer and would stall until both stores land (about 10 to 15 cycles on x86). Matching in place loads just the tag and the payload, which the store buffer forwards. This cut nbody by 25% and spectral_norm by 38% on x86_64.
+- **Copy numbers by parts.** The same stall hits instructions that copy a value (`Move`, table, field and cell stores, `Return1`). They match the source in place and, for an integer or a float, store the known variant, so the copy is again a tag store and a payload store. A `for` loop's counters are updated by changing their payloads in place.
+- **Hot and cold halves.** The loop is one large function, and the compiler allocates machine registers across all of it, so an arm holds only an instruction's common case: decoding, a type check and a few register operations. Everything slower, rarer or larger lives out of line behind `#[inline(never)]`: `vm/cold.rs` (allocation, cache misses, varargs, casts, cells, `for` setup), `vm/fast.rs` (the generic halves of arithmetic and comparisons), native calls, and the error path (`Vm::raise`). New instructions follow the same split, which keeps the loop's size, and the hot instructions' register allocation, independent of how many instructions there are. Compare changes by instruction counts (callgrind) as well as wall time, since code movement shifts wall time by a few percent through alignment and branch prediction.
+- **Two loops from one source.** With the `hooks` feature, `run_loop` is generic over whether hooks are on, and the hooked copy runs only where a hook, breakpoint or step needs it ([debug.md](debug.md#hooks)).
 
 ### Calls and returns (stackless, ADR-3)
 
-- `Call{func, nargs, nresults}`: the callee is in `R[func]`, arguments above it. For a Lua closure, the new frame's `base` is `func + 1`; missing parameters are set to `nil`. For a vararg function, the extra arguments stay where they are and the frame's registers start above them, with the fixed parameters moved up; `Vararg` copies from below `base`. No Rust recursion: the loop saves `pc`, pushes the frame, and reloads `code`, `consts` and `base`.
-- `Return{first, count}` copies results to where the callee was (`R[func]` of the caller), pads or truncates to the caller's `want`, pops the frame and reloads. When `want` is 255 the caller's "top" is set for the following `Call`/`Return`/`SetList` that consumes all values.
-- `TailCall` replaces the current frame, so `loop(200000, 0)` runs in constant space, as Lua requires. The compiler always follows it with `Return{func, 255}`: when the callee is a native that returns `CallThen`, the VM makes an ordinary call instead and that `Return` passes the results on.
-- **Fast switches.** A call to a Lua closure, and a `Return1` to a Lua caller that wants one value, switch the loop's frame state (`base`, `pc`, code, constants, caches, window) in place from values already in hand, instead of storing them in the frame and reading them back. The code is only reloaded when it changes, so a recursive call or its return never touches it, and the code that ran before the last switch is kept aside: a loop calling another function goes back and forth between two codes, so each switch swaps them instead of looking the closure up again. The cell base and vararg count stay in the frame rather than in loop locals, which leaves the hot loop more machine registers. A closure calling itself skips the heap lookup for its prototype: the running frame keeps `closure` alive, so an equal handle is the same closure. Any other Lua callee goes through a one-entry cache of the last closure called and what entering it needs (its code's address, parameter, register and cell counts). The cache is a GC root, so while an entry is held its handle can't be reused for another closure, and an equal handle is the same closure; a loop that keeps calling the same function never looks it up in the heap. Everything else (natives, errors, multiple results) goes back through the frame stack.
-- **Self reference.** A `local function` that calls itself reads its own name through a capture, which costs two arena lookups (closure, then cell). When the local is never assigned, the compiler emits `CapSelf` instead, which loads the running closure from the loop's frame state. The `local function` statement stores the closure in the cell before anything can call it, so the two always agree. The capture itself stays, so the function still has the upvalue. A future `debug.setupvalue` or `debug.upvaluejoin` on that upvalue would break the assumption, so they must account for it when they land.
-- **Depth limit**: pushing a frame beyond the configured limit (default one million register slots) raises the catchable error `stack overflow`. The Rust stack never grows with Lua recursion.
+- `Call{func, nargs, nresults}`: the callee is in `R[func]`, the arguments above it. For a Lua closure, the new frame's `base` is `func + 1` and missing parameters are `nil`. For a vararg function, the extra arguments stay where they are and the frame's registers start above them, with the fixed parameters moved up; `Vararg` copies from below `base`. There is no Rust recursion: the loop saves `pc`, pushes the frame, and switches its state.
+- `Return{first, count}` copies results to where the callee was (`R[func]` of the caller), pads or truncates them to the caller's `want`, pops the frame and switches back. When `want` is `MULTI`, the caller's top is set for the following `Call`, `Return` or `SetList` that consumes all values.
+- `TailCall` replaces the current frame, so unbounded tail recursion runs in constant space, as Lua requires.
+- **Fast switches.** A call to a Lua closure, and a `Return1` to a Lua caller that wants one value, switch the loop's frame state in place from values already in hand. The code is only reloaded when it changes, so a recursive call or its return never touches it, and the code that ran before the last switch is kept aside: a loop calling another function goes back and forth between two codes, so each switch swaps them instead of looking the closure up again. A closure calling itself skips the heap lookup for its prototype, and any other Lua callee goes through a one-entry cache of the last closure called and what entering it needs (its code's address and its parameter, register and cell counts). The cache is a GC root, so while an entry is held its handle can't be reused for another closure.
+- **Self reference.** A `local function` that calls itself would read its own name through a capture, two arena lookups. When the local is never assigned, the compiler emits `CapSelf` instead, which loads the running closure from the loop's frame state. The `local function` statement stores the closure in the cell before anything can call it, so the two agree; the debug library keeps them agreeing when it writes the cell ([debug.md](debug.md#capself)).
+- **Depth limit**: pushing a frame beyond the configured limit (one million register slots by default) raises the catchable error `stack overflow`. The Rust stack never grows with Lua recursion.
 
 ### Native functions
 
 ```rust
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
+pub type FastFn = fn(&LuaHeap, &[Value]) -> Option<Value>;
+pub type Continuation = fn(&mut NativeCtx<'_>, CallOutcome) -> Result<NativeReturn, LuaError>;
 
 pub enum NativeReturn {
-    Return(usize),                                 // the last n values of the window are the results
+    Return(usize),                                               // the last n values of the window
     CallThen { f: Value, nargs: usize, k: Continuation, protected: bool },
+    CallThenYieldable { f: Value, nargs: usize, k: Continuation, protected: bool },
+    CallHandled { f: Value, nargs: usize, k: Continuation },     // xpcall
+    Resume { co: Gc<Thread>, nargs: usize, k: Continuation, .. },
+    // ... yield, close
 }
-pub type Continuation = fn(&mut NativeCtx<'_>, CallOutcome) -> Result<NativeReturn, LuaError>;
 ```
 
-`NativeCtx` is the native's window of the register stack: its arguments first, then whatever it pushes. It has argument access and checks (`arg(i)`, `check_str(i)`, `check_int(i)` with Lua's `bad argument #2 to 'format' (...)` messages; the function name comes from the call site's debug info, falling back to the registered name), window editing (`set`, `push`, `truncate`), and allocation. `CallThen` calls `f` with the last `nargs` values of the window; the call's results replace those arguments, and the continuation sees the rest of the window unchanged, so state a native needs afterwards stays in its window. A native that needs to call a Lua function doesn't call back into the VM; it returns `CallThen`, the VM runs the call in its own loop, then invokes the continuation with the results or the error. That's ADR-3's continuation style, and it's how `pcall` works at first light:
+`NativeCtx` is the native's window of the register stack: its arguments first, then whatever it pushes. It has argument access and checks (`arg`, `check_str`, `check_int`, with Lua's `bad argument #2 to 'format' (...)` messages, the function name coming from the call site), window editing (`set`, `push`, `truncate`), allocation, and metatable helpers. A native that needs to call a Lua function doesn't call back into the VM: it returns `CallThen`, the VM runs the call in its own loop, then invokes the continuation with the results or the error. The call's results replace its arguments at the end of the window, and state the native needs afterwards stays in its window, where the collector sees it. That is ADR-3's continuation style, and it is how `pcall` works:
 
 ```rust
-fn pcall(ctx) -> ... { Ok(CallThen { f: ctx.arg(0)?, nargs: ctx.nargs() - 1, k: pcall_done, protected: true }) }
+fn pcall(ctx) -> ... { Ok(CallThenYieldable { f: ctx.arg(0)?, nargs: ctx.nargs() - 1, k: pcall_done, protected: true }) }
 fn pcall_done(ctx, outcome) -> ... { match outcome { Ok(n) => push true + n results, Err(e) => push false, e } }
 ```
 
-The same mechanism will make `pcall`, `table.sort` comparators and metamethods yieldable once coroutines arrive.
+Code called through `CallThen` may not yield across it (`attempt to yield across a C-call boundary`), matching most Lua 5.5 library callbacks; `CallThenYieldable` is for the few the reference lets callbacks yield through (`pcall`, `pairs` calling `__pairs`, `dofile`).
 
-**Fast paths.** A native may also have a `FastFn = fn(&[Value]) -> Option<Value>`, set with `vm.set_native_fast_path(name, fast)`. A call that wants at most one result (or all of them) tries it first, with the arguments as a slice of the caller's registers: no window, no frame, no result copying. It returns `None` for anything it doesn't handle (wrong types, coercions, errors), and the full native then runs, so a fast path never changes behavior. It can't allocate or call Lua, which keeps it a plain function a future JIT can call directly. `math.sqrt`, `abs`, `floor`, `max` and `min` have one.
+**Fast paths.** A native may also have a `FastFn`. A call that wants at most one result tries it first, with the arguments as a slice of the caller's registers: no window, no frame, no result copying. It returns `None` for anything it doesn't handle (wrong types, coercions, errors), and the full native then runs, so a fast path never changes behaviour. It can't allocate or call Lua, which keeps it a plain function a JIT could call directly. Most of `math` and the intrinsics the OrbitScript built-ins call have one.
+
+**Native data.** A native also carries two data words (`NativeCtx::native_data`), for natives that are many functions at once, such as an FFI binding's address and signature ([ffi.md](ffi.md)).
 
 ### Errors
 
-A Lua error is `Err(LuaError { value: Value, traceback: Option<String> })` propagated with `?`, never a Rust panic. When `run` sees an error it unwinds: it pops frames until it reaches a native continuation frame marked `protected`, truncates `regs` and `cells` to that frame, and resumes it with `Err(value)`. With no protected frame left, the error returns to the embedder with a traceback built from the popped frames.
+A Lua error is `Err(LuaError)` propagated with `?`, never a Rust panic. Slow paths return a small `Exc` (a runtime error with its operand origin, a Lua error value, or a metamethod request) through the same channel, so the fast paths stay unchanged. When the loop sees an error it unwinds ([VM semantics](vm-semantics.md#xpcall-and-errors)): it pops frames until it reaches one that catches (a protected native continuation, a `Boundary` or a `CoBase`), closing to-be-closed variables on the way, truncates `regs` and `cells` to that frame, and resumes it with the error. With no catching frame left, the error returns to the embedder with a traceback built before any frame was popped.
 
-`error(msg, level)` adds `chunk:line:` for the frame at `level` (1 = the caller of `error`, 2 = its caller), taken from the line table at the frame's saved `pc`. `error()` with no value raises `nil`, which `pcall` reports and the CLI prints as `<no error object>` (5.5).
+`error(msg, level)` adds `chunk:line:` for the activation at `level` (1 is the caller of `error`, 2 its caller), from the line table at that frame's saved `pc`. `error()` with no value raises `nil`, which the CLI prints as `<no error object>`.
 
 ### Error messages
 
-The reference interpreter names the culprit in type errors: `attempt to index a nil value (field 'a')`. We produce the same text from **compile-time knowledge**: when the compiler emits an instruction that can fail on an operand, it records where that operand came from (`Local("t")`, `Global("x")`, `Field("a")`, `Upvalue("u")`, `Method("m")`, `Constant("x")`) in the debug info, keyed by pc. On an error, the slow path looks up the pc and appends the description. No analysis of bytecode after the fact, and the same mechanism later gives OrbitScript better messages (it can record richer origins, such as the full expression text).
+The reference names the culprit in type errors: `attempt to index a nil value (field 'a')`. We produce the same text from **compile-time knowledge**: when the compiler emits an instruction that can fail on an operand, it records where that operand came from (`Origin::{Local, Global, Field, Upvalue, Method, Constant}`) in the debug info, keyed by pc and operand. On an error, the slow path looks up the pc and appends the description. Nothing analyses bytecode after the fact, and OrbitScript's front end can record its own origins the same way.
 
-Message forms covered at first light (all checked against `lua5.5`):
-
-- `attempt to index a nil value (local 't')`, `attempt to call a nil value (global 'f')`, `(method 'm')`, `(upvalue 'u')`, `(field 'a')`, `(constant 'x')`
-- `attempt to perform arithmetic on a table value (local 's')`, `attempt to add a 'string' with a 'number'`, `attempt to concatenate a table value`, `attempt to get length of a nil value`
-- `attempt to compare number with string`, `attempt to compare two table values`
-- `attempt to divide by zero`, `attempt to perform 'n%0'`, `table index is nil`, `table index is NaN`
-- `'for' step is zero`, `bad 'for' initial value (number expected, got string)`, `stack overflow`
+Covered forms include `attempt to index a nil value (local 't')`, `attempt to call a nil value (global 'f')`, `(method 'm')`, `(upvalue 'u')`, `(field 'a')`, `(constant 'x')`; `attempt to perform arithmetic on a table value (local 's')`, `attempt to add a 'string' with a 'number'`, `attempt to concatenate a table value`, `attempt to get length of a nil value`; `attempt to compare number with string`, `attempt to compare two table values`; `attempt to divide by zero`, `attempt to perform 'n%0'`, `table index is nil`, `table index is NaN`; `'for' step is zero`, `bad 'for' initial value (number expected, got string)`, `stack overflow`.
 
 ### Garbage collection
 
-- **Roots** (`impl Roots<LuaSpace> for VmRoots`): the stack's registers, cells and frame closures; the globals table; the loader's in-progress prototypes. `clear_weak` and `sweep_weak` prune the string interner.
-- **Safe points**: after instructions that allocate (`NewTable`, `Closure`, `CellNew`, `Concat`, table stores that grow, native calls that allocated; a store into the array part allocates nothing and skips the check), the loop checks `heap.should_step()` and runs `heap.step(&mut roots)`. At a safe point every live handle is in a register, cell slot, frame or root: the loop itself holds only an `Rc<ProtoCode>` (whose constants the frame's closure keeps alive) and integers. Natives never hold handles across `CallThen`; state they need afterwards goes in their frame's registers.
-- **Barriers**: table stores go through `Heap::update` (two-phase, above); `CellSet`, `CapSet` and `SetGlobal` likewise. The running stack is a root and is rescanned when marking finishes, so register writes need no barrier.
-- **Memory release**: `orbit-gc`'s `memory-trimming` feature returns freed pages to the OS after cycles that release them (calling `malloc_trim` on glibc and `malloc_zone_pressure_relief` on macOS); enabled by default.
-- **Start floor**: in generational mode no cycle starts below 1 MiB of heap; `ORBIT_GC_MIN_THRESHOLD` (bytes, or `K`, `M`, `G`; `0` for none) changes it (ADR-2).
-- **Stress mode**: `ORBIT_GC_STRESS=1` turns on `Heap::set_stress`, collecting at nearly every safe point that follows an allocation; the first-light tests must pass under it.
+- **Roots** (`impl Roots<LuaSpace> for Runtime`): the running stack's registers, cells and frames; parked coroutine stacks are traced through their `Thread` objects; the globals, the registry, the per-type metatables, interned metatable field names, the call cache, and the loader's in-progress prototypes. `clear_weak` and `sweep_weak` prune the string interner.
+- **Safe points**: after instructions that allocate (`NewTable`, `Closure`, `CellNew`, `Concat`, table stores that grow, native calls that allocated), the loop checks whether the collector wants to step and runs `heap.step`. A store into an existing array slot allocates nothing and skips the check. At a safe point every live handle is in a register, cell slot, frame or root: the loop itself holds only an `Rc<ProtoCode>` (whose constants the frame's closure keeps alive) and integers. Natives never hold handles across `CallThen`; state they need afterwards goes in their window.
+- **Barriers**: table stores go through `Heap::update` (two-phase, above), and so do `CellSet`, `CapSet` and `SetGlobal`. The running stack is a root and is rescanned when marking finishes, so register writes need no barrier.
+- **Memory release**: `orbit-gc`'s `memory-trimming` feature (on by default) returns freed pages to the OS after cycles that release them (`malloc_trim` on glibc, `malloc_zone_pressure_relief` on macOS).
+- **Start floor**: in generational mode no major cycle starts below 1 MiB of heap; `ORBIT_GC_MIN_THRESHOLD` (bytes, or with `K`, `M`, `G`; `0` for none) changes it (ADR-2).
+- **Stress mode**: `ORBIT_GC_STRESS=1` collects at nearly every safe point that follows an allocation; the differential tests run under it as well as normally.
 
-## Standard library subset (`orbit-stdlib`)
-
-Registered through one API (`vm.register_native("print", print)` and library tables built from `&[(&str, NativeFn)]`), with one library table per module so "open selected libraries" (plan) works from the start. Specifics:
-
-- `print` writes through a buffered `Write` owned by the VM, flushed on exit and before an uncaught error is reported.
-- `tostring` uses `orbit_core::number` and the object identity formatter (`table: 0x...`, stable per object).
-- `string.format` supports `%d`, `%i`, `%s`, `%%` with width and `-`, erroring with Lua's message on a non-integral float for `%d`; everything else is `invalid conversion '%f' to 'format'` plus "not supported yet".
-- `collectgarbage("count")` returns `heap.bytes() / 1024` as a float.
-- `os.clock` measures monotonic time since the VM started, because stable `std` has no process-CPU-time API. The plan already lists `os.clock` as a stdlib gap to settle in stream D; scripts only use it to time themselves.
-
-## Embedding and CLI
-
-```rust
-let mut iso = orbit::Runtime::new().new_isolate(orbit::Config::default());
-iso.exec(orbit::Chunk::new(source).name("@script.lua"))?; // compile → link → run
-```
-
-(The embedding API has since been redesigned; ADR-11 describes it.)
-
-`orbit-cli`: `orbit script.lua [args...]` sets the global `arg` table (`arg[0]` is the script), runs it, and on an uncaught error prints `<program>: <message>` and a traceback to stderr with exit status 1, the shape the diff runner expects. The separate `orbitc` compiler (after `luac`) prints the intermediate forms (`--ast`, `--hir`, `-l`) and writes binary chunks.
+Weak tables, finalizers and `collectgarbage` are in [gc-semantics.md](gc-semantics.md).
 
 ## JIT readiness
 
-A JIT (P7, an optional Cargo feature; Cranelift is the leading option) would compile hot functions from this bytecode, not from the HIR. The bytecode is where runtime type feedback lives, and HIR type annotations are optional and never enforced, so they can't be trusted for code generation. The design leaves these hooks for it:
+A JIT (an optional Cargo feature, in a future `orbit-jit` crate) would compile hot functions from this bytecode, not from the HIR. The bytecode is where runtime type feedback lives, and HIR type annotations are optional and never enforced, so they can't be trusted for code generation. The design leaves these hooks for it:
 
 | JIT need | Where the design provides it |
 |---|---|
-| Translate a function | Register bytecode maps directly onto Cranelift variables. Fused compare-and-branch instructions become native branches |
-| Read and write values | `Value` has a pinned layout (above): tag byte at offset 0, 8-byte payload at offset 8, fixed tag numbers shared with table array parts |
-| Specialise on types | Per-instruction type-feedback bytes, added with the JIT ([Type feedback](#bytecode-orbit-vmop)) |
-| Specialise lookups | Inline-cache slots on global and field instructions, readable as guards ("key still in cached slot") |
-| Uncommon cases | The `*_slow` functions and native functions, called from JIT code as helpers through small shims in `orbit-jit` |
-| Fall back to the interpreter | Frames record closure, pc, base and cell base (ADR-3). JIT code keeps Lua registers in the `regs` stack (or spills them there before any exit), so leaving JIT code is "store pc, return to the loop" |
+| Translate a function | Register bytecode maps directly onto code-generator variables; fused compare-and-branch instructions become native branches |
+| Read and write values | `Value` has a pinned layout: tag byte at offset 0, 8-byte payload at offset 8, fixed tag numbers shared with table storage |
+| Specialise on types | Per-instruction type-feedback bytes, added with the JIT |
+| Specialise lookups | Inline-cache slots on global, field and method instructions, readable as guards ("key still in the cached slot") |
+| Uncommon cases | The out-of-line halves of instructions and the native functions, called from JIT code as helpers |
+| Fall back to the interpreter | Frames record closure, pc, base and cell base (ADR-3). JIT code keeps Lua registers in `regs` (or spills them there before any exit), so leaving JIT code is "store pc, return to the loop" |
 | Captured variables | Heap cells: a load or store through the cell, with no open-upvalue bookkeeping |
-| Compile off-thread | The compiler never needs the heap; a JIT takes a copy of a prototype's code, constants and feedback for a background compile, since `Rc` can't cross threads |
+| Compile off-thread | The compiler never needs the heap; a JIT takes a copy of a prototype's code, constants and feedback, since `Rc` can't cross threads |
 
-**The JIT–VM contract**, which `orbit-jit` (the one crate allowed `unsafe`, ADR-6) must follow:
+**The JIT–VM contract**, which `orbit-jit` (allowed `unsafe` by ADR-6) must follow:
 
 1. **Store pc before every helper call.** Error messages, tracebacks and `error` levels all come from the frame's pc and the debug info.
-2. **Reload after helpers that can move memory.** Anything that allocates can run a GC step, which can release arena pages, and a call can grow `regs` (a `Vec`, which may reallocate). After such a helper, JIT code reloads the register base and every arena's slot base. An arena's slots are one vector in `orbit-gc` (ADR-2 flat-arena amendment), which allocation can grow and a sweep can shrink, moving objects; between helper calls nothing moves, so direct loads through a slot base are valid.
-3. **Handles stay handles.** A `Gc<T>` is an index, not a pointer. JIT code turns it into an address with the arena's slot base (address = base + index × slot size). That needs `orbit-gc` to expose the slot base and pin the layout of `Gc<T>` and of its slots as well, which is raised with the `orbit-gc` owner when the JIT work starts, not now.
+2. **Reload after helpers that can move memory.** Anything that allocates can run a GC step, which can release arena pages, and a call can grow `regs` (a `Vec`, which may reallocate). After such a helper, JIT code reloads the register base and every arena's slot base. An arena's slots are one buffer in `orbit-gc` (ADR-2), which allocation can grow and a sweep can shrink; between helper calls nothing moves, so direct loads through a slot base are valid.
+3. **Handles stay handles.** A `Gc<T>` is an index, not a pointer. JIT code turns it into an address with the arena's slot base, which needs `orbit-gc` to expose the slot base and pin the layout of `Gc<T>` and of its slots.
 4. **Yields leave JIT code.** Coroutine switches and native `CallThen` requests return to the interpreter loop, which handles them as it already does. JIT code never holds Rust frames across a yield.
-5. **Barriers.** Stores into tables and cells from JIT code go through the same write-barrier helpers (or inline the "is the owner black?" check once `orbit-gc` exposes it).
-
-## Performance expectations
-
-First light is about correctness and the right structure, not speed; P5 is the tuning phase. Still, the structure is chosen so first light should land near S0's numbers (1.5 to 2x PUC Lua on `fib`, faster than PUC on allocation churn), and the PR that completes it reports `cargo testkit bench` for `fib.lua` and `binary_trees.lua`, measured on the Linux x86_64 cloud container and labelled as such.
-
-## Implementation order
-
-1. `orbit-core` objects, tables, strings, number formatting (needs `orbit-gc` from PR #6 merged).
-2. In parallel: the front end and HIR crates (they don't need the runtime), and the compiler once the HIR types land.
-3. `orbit-vm` interpreter and linker, then `orbit-stdlib`'s subset and the CLI.
-4. The [end-to-end demo](README.md#end-to-end-demo) passes, including under GC stress mode.
-
-Each step lands as its own PR with unit and golden tests.
+5. **Barriers.** Stores into tables and cells from JIT code go through the same write-barrier helpers, or inline the "is the owner black?" check once `orbit-gc` exposes it.
