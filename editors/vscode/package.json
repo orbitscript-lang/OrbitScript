@@ -183,7 +183,7 @@
     "@types/node": "22.20.5",
     "@types/vscode": "1.140.0",
     "@vscode/vsce": "3.9.2",
-    "typescript": "5.9.3",
+    "typescript": "7.0.2",
     "vscode-tmgrammar-test": "0.1.3"
   }
 }
