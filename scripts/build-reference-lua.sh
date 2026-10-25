@@ -11,6 +11,9 @@
 # GitHub mirror of the Lua repository (www.lua.org is not reachable from
 # every sandbox) at the tag the vendored suite came from, as recorded in
 # tests/lua-5.5/VERSION. Needs git and a C compiler. Linux and macOS only.
+# Running the suite's main.lua with it also needs the readline library under
+# its unversioned name (libreadline.so, from libreadline-dev on Debian and
+# Ubuntu): lua5.5 -i loads it, and the test expects no warning.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
