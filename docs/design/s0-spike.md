@@ -1,6 +1,6 @@
 # Spike S0: GC and dispatch
 
-Status: Done (2026-09-28). It decided ADR-2 (heap and GC) and ADR-4 (dispatch) with numbers.
+Status: Done. It decided ADR-2 (heap and GC) and ADR-4 (dispatch) with numbers.
 
 The spike's code was throwaway: its own Cargo workspace on Rust 1.95, never imported by the product crates, so gc-arena and boa_gc never reached them. It was removed before the first release and stays in git history under `spike/` at commit `403fdb6` (`git checkout 403fdb6 -- spike` restores it). Paths below are relative to that directory.
 
@@ -12,7 +12,7 @@ The same micro-VM three times, running the same register bytecode (`common/`, mo
 |---|---|
 | `vm-arena` | Our own paged typed arenas with `u32` handles, colors in side byte vectors, an incremental tri-color mark-sweep with PUC-style backward (tables) and forward (upvalues) barriers, atomic stack rescan, weak-key ephemerons, `__gc` resurrection, byte-based pacing at PUC 5.5 defaults (pause 250%, stepmul 200%). Short strings (<= 40 bytes) are interned. |
 | `vm-gcarena` | gc-arena 0.7.0. The interpreter runs in slices inside `Arena::mutate_root` and returns to the host whenever allocation debt is positive. Every cycle is driven by hand through the fully-marked state (`mark_debt` → `finalize` loop → `start_sweeping`) to converge ephemerons and resurrect `__gc` objects. Strings are hashed, not interned. |
-| `vm-boagc` | boa_gc 0.22.0 (the Boa JavaScript engine's collector), added after the first round at Tym's request. Roots are found by reference counting: any `Gc` held outside the GC heap (the VM stack, Rust locals) is a root, so the interpreter needs no safe points or rooting. Stop-the-world mark-sweep that runs inside `Gc::new` past a byte threshold; one heap per thread. `__gc` resurrection is done from `Finalize` through a weak self-handle. Strings are hashed, not interned. |
+| `vm-boagc` | boa_gc 0.22.0 (the Boa JavaScript engine's collector), added after the first round. Roots are found by reference counting: any `Gc` held outside the GC heap (the VM stack, Rust locals) is a root, so the interpreter needs no safe points or rooting. Stop-the-world mark-sweep that runs inside `Gc::new` past a byte threshold; one heap per thread. `__gc` resurrection is done from `Finalize` through a weak self-handle. Strings are hashed, not interned. |
 
 Dispatch variants (ADR-4), on `vm-arena` unless noted:
 - **match**: a plain `match` loop.
@@ -94,7 +94,7 @@ Stripped `spike` binary with only one VM linked: arena 442 KiB, gc-arena 430 KiB
 
 ### Embedding API prototype (`embed/`)
 
-A follow-up asked by Tym: can the own arena give embedders compile-time rooting safety, as gc-arena's `'gc` does, without `unsafe`? It can. `embed/` is a working prototype of that API over `vm-arena`.
+A follow-up question: can the own arena give embedders compile-time rooting safety, as gc-arena's `'gc` does, without `unsafe`? It can. `embed/` is a working prototype of that API over `vm-arena`.
 
 - **Two handle types.** `Root` is a rooted `'static` registry handle that embedders keep in their own structs; dropping it unroots it. `Val<'cx>` is a raw value that borrows the `Ctx` it came from.
 - **The rule.** The collector only runs in the interpreter loop, never inside a native call. So everything that allocates but can't collect takes `&self`, and everything that runs Lua (and so may collect) takes `&mut self`. The borrow checker then rejects any raw `Val` still in use after a call back into Lua.
@@ -109,7 +109,7 @@ Friction found:
 
 ## Recommendation
 
-- **ADR-2: build our own safe typed arena, not gc-arena or boa_gc.** boa_gc gives the simplest embedding code, but it can't express `__gc` without corrupting memory, and it is slower and larger than the arena with no incremental mode. gc-arena is 10 to 20% faster to interpret today, but it loses on memory by 1.5 to 2x, on allocation-heavy code, on byte accounting, and on generational mode, and it dictates a resumable design for the whole stdlib. Most of the arena's interpreter overhead is fixable: flat per-kind storage with a reserved address range or larger pages, caching resolved upvalue handles in the frame, and generation-checked handles in debug builds. This reverses the plan's front-runner, so it's Tym's call.
+- **ADR-2: build our own safe typed arena, not gc-arena or boa_gc.** boa_gc gives the simplest embedding code, but it can't express `__gc` without corrupting memory, and it is slower and larger than the arena with no incremental mode. gc-arena is 10 to 20% faster to interpret today, but it loses on memory by 1.5 to 2x, on allocation-heavy code, on byte accounting, and on generational mode, and it dictates a resumable design for the whole stdlib. Most of the arena's interpreter overhead is fixable: flat per-kind storage with a reserved address range or larger pages, caching resolved upvalue handles in the frame, and generation-checked handles in debug builds.
 - **ADR-4: plain `match` plus superinstructions; reject closure threading.** Measure a packed instruction encoding early in stream C.
 
 ## Simplifications (why this is not a product)

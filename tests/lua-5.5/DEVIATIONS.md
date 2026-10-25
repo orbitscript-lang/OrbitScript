@@ -1,6 +1,6 @@
 # Deliberate differences from lua5.5
 
-OrbitScript aims to behave like the reference `lua5.5` (5.5.1) wherever a program can observe it. This file lists the places where it doesn't, on purpose. Each entry says what differs, why, and whether any suite file or `tests/diff` program depends on it. Every entry was flagged to Tym in the PR that added it.
+OrbitScript aims to behave like the reference `lua5.5` (5.5.1) wherever a program can observe it. This file lists the places where it doesn't, on purpose. Each entry says what differs, why, and whether any suite file or `tests/diff` program depends on it. Every entry was reviewed in the PR that added it.
 
 Bugs are not deviations: a difference that isn't listed here is a bug.
 
@@ -8,7 +8,7 @@ Bugs are not deviations: a difference that isn't listed here is a bug.
 
 `os.clock()` returns the seconds of wall-clock time since the VM started, where lua5.5 returns the CPU time the process has used. The two agree for a busy single-threaded program and differ when the program sleeps, waits on I/O or runs a child process (`os.clock` keeps counting here and not in lua5.5).
 
-Why: Rust's standard library has no portable CPU-time clock, and Tym chose to add no dependency for it (ADR-7 decision, 2026-10-05).
+Why: Rust's standard library has no portable CPU-time clock, and we chose to add no dependency for it (an ADR-7 decision).
 
 Suite: none depends on it. The suite only checks that `os.clock` returns a number that doesn't go backwards.
 
@@ -67,7 +67,7 @@ Hooks follow docs/design/debug.md. Proposed in the debug hooks PR.
 - **Count hooks.** A count hook with interval N fires every N of OrbitScript's bytecode instructions. The bytecode is our own design (ADR-4), so the events land at different points in the source than lua5.5's, and a different number of them fire for the same code. Events still fire before the instruction, and the line event that follows a count event fires as in lua5.5.
 - **Every full userdata has one user value.** `debug.getuservalue(u, 1)` and `debug.setuservalue(u, v, 1)` work on any full userdata, including the `io` library's files. In lua5.5 the number of user values is fixed when the userdata is created, and its files have none, so `debug.setuservalue(io.stdin, 10)` fails there and succeeds here. Other indexes fail as in lua5.5. Embedders get the one slot (`UserData::user_value`) for every userdata they create.
 - **`ftransfer` for `debug.sethook`'s own return event.** When `debug.sethook` turns on return hooks, the return event for that same call reports `ftransfer` from the native's own argument window. lua5.5 reports a value that reflects its C stack (4 where we report 3). Other natives' return events match.
-- **Locals assigned early in a multiple assignment.** In `a, b = f(), g()` with one value per target, a value may go straight into its target local when no later value reads that local. A metamethod or function that runs while a later value is computed (`g` here) can then see, through `debug.getlocal`, that `a` already holds its new value; lua5.5 shows the old value until every value is computed. Ordinary code can't observe the difference, since nothing later in the statement reads `a`. Accepted by Tym with the multi-assign PR (#118), which removes the temporary copies (nbody -4.5% instructions).
+- **Locals assigned early in a multiple assignment.** In `a, b = f(), g()` with one value per target, a value may go straight into its target local when no later value reads that local. A metamethod or function that runs while a later value is computed (`g` here) can then see, through `debug.getlocal`, that `a` already holds its new value; lua5.5 shows the old value until every value is computed. Ordinary code can't observe the difference, since nothing later in the statement reads `a`. Accepted with the multi-assign PR (#118), which removes the temporary copies (nbody -4.5% instructions).
 
 Suite: `db.lua` 603 expects a count hook with interval 1 to fire fewer than 1012 times over a 1000-iteration loop and its `assert`; lua5.5 fires 1011 times and we fire 1015. `db.lua` 434-436 check that `io.stdin` has no user value. The manifest disables these lines (see SKIPS.md).
 

@@ -1,6 +1,6 @@
 # VM: runtime objects, bytecode, compiler and interpreter (first light)
 
-Status: Proposed. Crates: `orbit-core` (objects), `orbit-compiler` (HIR to bytecode), `orbit-vm` (interpreter), `orbit-stdlib` (the subset's library), `orbit` and `orbit-cli` (glue). Scope: the [first-light subset](first-light-subset.md).
+Status: Implemented. Crates: `orbit-runtime::object` (objects), `orbit-compiler` (HIR to bytecode), `orbit-runtime::vm` (interpreter), `orbit-runtime::stdlib` (the subset's library), `orbit` and `orbit-cli` (glue). Scope: the [first-light subset](first-light-subset.md).
 
 This document covers everything after the [HIR](hir.md): the objects a running program manipulates, the bytecode, the compiler that produces it, and the interpreter that runs it. It builds on the accepted ADRs (1 values, 2 own GC in `orbit-gc`, 4 `match` dispatch with superinstructions and inline-cache slots, 5 byte strings with `OrbitString`/`OrbitStr`, 6 safety) and the proposed ADR-3 (stackless frames, continuation-style natives). It is our own design: register-based like PUC Lua's VM, but with its own instruction set, capture model, error-message mechanism and calling convention.
 
@@ -82,7 +82,7 @@ pub enum Op {
 const _: () = assert!(core::mem::size_of::<Op>() == 8);
 ```
 
-A Rust enum instead of hand-packed `u32`s: the compiler decodes fields for us, the `match` is exhaustive, and there's no bit-twiddling to get wrong. Register operands are `u8` (at most 255 registers per function, as in lua5.5), constant and child-prototype indices `u16` (a function may hold up to 2^25 constants: past the first 65,536 the compiler loads them with `LoadConstX{dst,k:u32}` and indexes with them through registers), jump offsets `i32` relative to the next instruction. ADR-4 left the instruction width open; 8 bytes is this design's proposal (S0 found 12-byte instructions cost time; 4-byte packing is a P5 experiment). Recording it in ADR-4 needs Tym's OK.
+A Rust enum instead of hand-packed `u32`s: the compiler decodes fields for us, the `match` is exhaustive, and there's no bit-twiddling to get wrong. Register operands are `u8` (at most 255 registers per function, as in lua5.5), constant and child-prototype indices `u16` (a function may hold up to 2^25 constants: past the first 65,536 the compiler loads them with `LoadConstX{dst,k:u32}` and indexes with them through registers), jump offsets `i32` relative to the next instruction. ADR-4 left the instruction width open; 8 bytes is this design's proposal (S0 found 12-byte instructions cost time; 4-byte packing is a P5 experiment). Recording it in ADR-4 needs a maintainer's approval.
 
 First-light instruction set (`R[x]` is a register, `K[x]` a constant, `C[x]` a frame cell slot, `U[x]` a capture of the current closure):
 

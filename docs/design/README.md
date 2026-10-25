@@ -1,6 +1,8 @@
 # Design documents
 
-ADRs in [`docs/adr/`](../adr/) record decisions. The documents here describe how a piece of the system is built, within those decisions. Status **Proposed** means open for review; a design becomes **Accepted** when Tym approves it, and changes after that need his OK, like ADRs.
+ADRs in [`docs/adr/`](../adr/) record decisions. The documents here describe how a piece of the system is built, within those decisions. Status **Proposed** means open for review; a design becomes **Accepted** when a maintainer approves it, and changes after that need a maintainer's approval, like ADRs. **Implemented** means the design was built: the document records how and why, and where it and the code differ, the code is the authority. **Done** marks a spike or report whose decision has been made.
+
+Designs written before ADR-11 name `orbit-core`, `orbit-vm` and `orbit-stdlib`. Those crates are now the `object`, `vm` and `stdlib` modules of `orbit-runtime`, and the I/O-facing libraries are in `orbit-std`.
 
 ## First light: running a Lua subset end to end
 
@@ -37,19 +39,7 @@ flowchart LR
 
 Everything in the box, before the link step, is plain `Send` data with no GC or VM access, which keeps a parallel front end open (see [lua-front-end.md](lua-front-end.md#parallel-and-async-front-end)).
 
-Crate dependencies this implies: `orbit-hir` depends on nothing; `orbit-lua-syntax` depends on `orbit-hir` (the Phase 0 placeholder has it the other way round); `orbit-bytecode` (the instruction set and `UnlinkedProto`) depends on nothing; `orbit-compiler` depends on `orbit-hir` and `orbit-bytecode`; `orbit-runtime` depends on `orbit-gc` and `orbit-bytecode` (prototypes hold code). It was three crates (`orbit-core`, `orbit-vm`, `orbit-stdlib`) until ADR-11 merged them.
-
-## Choices that need Tym's review
-
-These designs stay inside the accepted ADRs. Five choices are worth a deliberate look, because they either settle something an ADR left open or differ from how PUC Lua does it:
-
-1. **8-byte instructions as a Rust enum** ([vm.md](vm.md#bytecode-orbit-vmop)). ADR-4 left the instruction width open. Recording this in ADR-4 needs Tym's OK.
-2. **Captured locals live in heap cells** ([vm.md](vm.md#locals-captures-and-cells)), instead of open upvalues that point into the stack and are closed at scope exit. Simpler and JIT-friendly, at one small allocation per captured binding.
-3. **Native functions are registry ids** (`Value::Native(NativeId)`), which settles ADR-1's open question about light native functions for now.
-4. **Error-message variable names come from compile-time debug info** ([vm.md](vm.md#error-messages)) rather than from analysing bytecode when an error happens.
-5. **`os.clock` is monotonic wall time since start** at first light, because stable `std` can't read process CPU time. Stream D settles it for real.
-
-Decided since: Tym asked (2026-09-30) for the designs to prepare for a future JIT. [vm.md](vm.md#jit-readiness) now covers it, ADR-1 is amended to pin `Value`'s layout, and instructions get an optional type-feedback side table.
+Crate dependencies this implies: `orbit-hir` depends on nothing; `orbit-lua-syntax` depends on `orbit-hir`; `orbit-bytecode` (the instruction set and `UnlinkedProto`) depends on nothing; `orbit-compiler` depends on `orbit-hir` and `orbit-bytecode`; `orbit-runtime` depends on `orbit-gc` and `orbit-bytecode` (prototypes hold code). It was three crates (`orbit-core`, `orbit-vm`, `orbit-stdlib`) until ADR-11 merged them.
 
 ## End-to-end demo
 
@@ -90,19 +80,28 @@ The existing `tests/diff/` corpus keeps its ratchet: whichever of its files pass
 | [chunks-io-os-cli.md](chunks-io-os-cli.md) | `load` and friends, `require`/`package`, binary chunks and their verifier, the `io` and `os` libraries, and the command line |
 | [json.md](json.md) | The `std.json` module (`orbit-std` feature `json`, ADR-12 D13): its API, how values map to JSON, how it's built and what it costs |
 | [debug.md](debug.md) | The `debug` library, function names and levels, tracebacks, and hooks (milestones C5d, C6) |
+| [gc-semantics.md](gc-semantics.md) | Weak tables, ephemerons, `__gc` finalizers and `collectgarbage` (milestone C4) |
 
 ## OrbitScript
 
 | Document | Covers |
 |---|---|
-| [orbitscript-syntax/proposal.md](orbitscript-syntax/proposal.md) | The OrbitScript syntax, as decided by Tym (2026-10-13), with [indexing-report.md](orbitscript-syntax/indexing-report.md) behind its 1-based indexing decision |
+| [orbitscript-syntax/proposal.md](orbitscript-syntax/proposal.md) | The OrbitScript syntax, as decided, with [indexing-report.md](orbitscript-syntax/indexing-report.md) behind its 1-based indexing decision |
+| [orbitscript-syntax/runtime-as.md](orbitscript-syntax/runtime-as.md) | `as` as a runtime cast, and `as bool` as truthiness (decided) |
 | [orbitscript-front-end.md](orbitscript-front-end.md) | `orbit-orb-syntax`: lexer, parser, AST and lowering to HIR, and the rules it follows where the proposal is silent |
 
-## Native code
+## Tooling and native code
 
 | Document | Covers |
 |---|---|
 | [language-server.md](language-server.md) | `orbit-lsp`, the language server (ADR-12 D2, D9): the OrbitScript protocol layer over the checker, what it answers, positions, modules, editor setup |
-| [formatter.md](formatter.md) | `orbit-fmt`, OrbitScript's formatter (ADR-12 L3): the style (Tym's decisions F1 to F12), how comments are kept, and how it checks its own output |
-| [orbit-check/proposal.md](orbit-check/proposal.md), [orbit-check/api.md](orbit-check/api.md) | `orbit-check`, the optional type checker: what it checks, the type language, Tym's decisions T1 to T14, and the library API the language server uses |
+| [formatter.md](formatter.md) | `orbit-fmt`, OrbitScript's formatter (ADR-12 L3): the style (decisions F1 to F12), how comments are kept, and how it checks its own output |
+| [orbit-check/proposal.md](orbit-check/proposal.md), [orbit-check/api.md](orbit-check/api.md) | `orbit-check`, the optional type checker: what it checks, the type language, decisions T1 to T14, and the library API the language server uses |
 | [ffi.md](ffi.md) | The `ffi` library (`orbit-ffi`, ADR-9): binding C functions in shared libraries from Lua and OrbitScript, its types, buffers and raw memory, how calls are made, limits and costs |
+
+## Spikes and reports
+
+| Document | Covers |
+|---|---|
+| [s0-spike.md](s0-spike.md) | Spike S0: the same micro-VM on our own arena, gc-arena and boa_gc, against PUC Lua 5.5. The evidence for ADR-2 and ADR-4 |
+| [gc-spike-ephemerons.md](gc-spike-ephemerons.md) | How ephemerons are marked and finalizable objects found, measured before ADR-2's weak-tables amendment |

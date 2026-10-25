@@ -1,6 +1,6 @@
 # HIR: the shared high-level IR (first light)
 
-Status: Proposed. Crate: `orbit-hir`. Scope: the [first-light subset](first-light-subset.md), with the shape the full language needs.
+Status: Implemented. Crate: `orbit-hir`. Scope: the [first-light subset](first-light-subset.md), with the shape the full language needs.
 
 The HIR is the contract between front ends and everything after them. The [Lua front end](lua-front-end.md) produces it today and the OrbitScript front end will produce it later; the [compiler](vm.md#compiler) consumes it, and later so will `orbit-check` (the optional type checker) and optimisation passes. One semantic core, two syntaxes: if both languages lower to this HIR, a function written in one is an ordinary function to the other.
 

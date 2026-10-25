@@ -44,7 +44,7 @@ const CASTS: i32 = upvalue_index(5);
 const UPVALUES: i32 = 5;
 
 /// The casts, as OrbitScript runs them, so `json.int(x)` and `x as int` can't
-/// disagree (Tym 2026-10-19, runtime-as R7).
+/// disagree (runtime-as R7).
 const CASTS_SOURCE: &[u8] =
     b"return (|v| v as int, |v| v as float, |v| v as string, |v| v as bool);";
 

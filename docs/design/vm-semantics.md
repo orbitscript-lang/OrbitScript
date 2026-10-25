@@ -1,6 +1,6 @@
 # VM semantics: metatables, userdata, coroutines and to-be-closed variables
 
-Status: Proposed. Milestones C2 and C3 of the Lua 5.5 compatibility plan. Crates: `orbit-core` (objects), `orbit-vm` (interpreter), `orbit-compiler` and `orbit-bytecode` (two new instructions), `orbit-stdlib` (base and `coroutine` libraries). Owns [ADR-3](../adr/0003-frames-and-coroutines.md).
+Status: Implemented. Milestones C2 and C3 of the Lua 5.5 compatibility plan. Crates: `orbit-runtime::object` (objects), `orbit-runtime::vm` (interpreter), `orbit-compiler` and `orbit-bytecode` (two new instructions), `orbit-runtime::stdlib` (base and `coroutine` libraries). Owns [ADR-3](../adr/0003-frames-and-coroutines.md).
 
 This extends the [VM design](vm.md). It keeps that document's two structural rules: the interpreter is stackless (no Lua call, metamethod or coroutine switch recurses on the Rust stack), and every instruction keeps its common case inline in `run()` with everything else in a cold function. All behaviour here was checked against the reference `lua5.5` binary and the manual; nothing is taken from PUC Lua's sources.
 
@@ -246,4 +246,4 @@ The spike also found that every native call refilled a 4 KiB window with `nil`. 
 
 1. C2 PR: `UserData`, type metatables, event names, `Exc::Meta` and meta frames, every metamethod, base library pieces, the string metatable, error-message origins for metamethods. Exit: `tests/diff/metatables.lua` (with thread 1's `<close>` gate lifted) and C2 corpus programs, plain and under `ORBIT_GC_STRESS=1`.
 2. ADR-3 spike, then C3 PR: `Thread`, boundary frames, the `coroutine` library, yields across everything, `Tbc`/`Close` and unwinding, `xpcall`, `warn`. Exit: `cstack.lua` and the C3 corpus, plain and stressed.
-3. The proposed ADR-3 resolution, as edits to the ADR, for Tym.
+3. The proposed ADR-3 resolution, as edits to the ADR, for a maintainer to accept.

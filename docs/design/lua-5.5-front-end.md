@@ -1,6 +1,6 @@
 # Lua 5.5 front end: lifting the first-light gates (C1)
 
-Status: Proposed. Crates: `orbit-lua-syntax`, `orbit-hir`, `orbit-compiler`, `orbit-bytecode`, and the `orbit-vm` instructions they need. Milestone C1 of the Lua 5.5 compatibility plan.
+Status: Implemented. Crates: `orbit-lua-syntax`, `orbit-hir`, `orbit-compiler`, `orbit-bytecode`, and the `orbit-runtime::vm` instructions they need. Milestone C1 of the Lua 5.5 compatibility plan.
 
 First light parses all of Lua 5.5 but rejects seven constructs in lowering with "not supported yet" ([front end](lua-front-end.md#lowering-resolver-and-hir-construction)). This document says how each one reaches HIR and bytecode. Every rule below was checked against the reference `lua5.5` (5.5.1) and the reference manual, not PUC's sources. C1 is done when every suite file compiles, `api.lua`, `code.lua` and `memerr.lua` pass, the parser mutation fuzz shows no new mismatches, and the first-light tests still pass.
 

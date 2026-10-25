@@ -1,6 +1,6 @@
 # Debug library, tracebacks and hooks
 
-Status: Proposed. Milestones C5d (debug core) and C6 (hooks, tracebacks, error-message parity) of the Lua 5.5 compatibility plan. Crates: `orbit-vm` (introspection, hooks), `orbit-stdlib` (the `debug` library, behind its own Cargo feature), `orbit-compiler` and `orbit-bytecode` (a few debug-info fields), `orbit-cli` (the uncaught-error traceback).
+Status: Implemented. Milestones C5d (debug core) and C6 (hooks, tracebacks, error-message parity) of the Lua 5.5 compatibility plan. Crates: `orbit-runtime::vm` (introspection, hooks), `orbit-runtime::stdlib` (the `debug` library, behind its own Cargo feature), `orbit-compiler` and `orbit-bytecode` (a few debug-info fields), `orbit-cli` (the uncaught-error traceback).
 
 This builds on the [VM design](vm.md) and [VM semantics](vm-semantics.md). Everything here was worked out from the manual, the reference `lua5.5` binary and the official suite (`db.lua`, `calls.lua`, `errors.lua`, `locals.lua`, `coroutine.lua`), never from PUC Lua's sources. It keeps the fast paths as they are (hooks cost nothing until one is set). Hooks are the one place Lua code runs in a nested call on the Rust stack: Lua hooks can't yield in the reference either (see [Hook calls](#hook-calls)).
 
@@ -110,7 +110,7 @@ Only one closure can be affected (the cell holds exactly that closure until the 
 | B. A full userdata per cell, cached | Equal for the same cell only while the cache holds it; needs a weak cache (thread 5) or leaks; `setuservalue` succeeds where the reference fails | No ADR change; a recorded deviation |
 | C. Return the cell's index as an integer | Equality works; `type` is `number` | Deviation, and easy to misuse |
 
-The proposed resolution is A, in its own small PR so it can be declined independently. Until Tym decides, `upvalueid` uses B's shape without a cache (equal only within one call), and `closure.lua`/`goto.lua` stay red on those lines.
+The proposed resolution is A, in its own small PR so it can be declined independently. Until that is decided, `upvalueid` uses B's shape without a cache (equal only within one call), and `closure.lua`/`goto.lua` stay red on those lines.
 
 ## Metatables and user values
 
@@ -341,7 +341,7 @@ All small; each goes through the plan thread before it lands.
 | `Runtime::registry` | thread 4 (`_LOADED`) | `debug.getregistry`, function names from `package.loaded` |
 | `UnlinkedChunk::source`, `Proto::source`, `Proto::last_line` | thread 4 (`load`, binary chunks) | `getinfo` `source`, `lastlinedefined` |
 | `DebugInfo::upvalues` (Lua order), `UnlinkedProto::self_capture` | thread 1 (compiler) | Upvalue numbering, `CapSelf` safety |
-| `Value::LightUserData` (tag 10) | ADR-1, Tym | `upvalueid` |
+| `Value::LightUserData` (tag 10) | ADR-1 | `upvalueid` |
 
 ## Implementation order
 

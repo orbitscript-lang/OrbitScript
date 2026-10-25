@@ -1,6 +1,6 @@
 # Lua front end (first light)
 
-Status: Proposed. Crate: `orbit-lua-syntax`. Scope: the [first-light subset](first-light-subset.md).
+Status: Implemented. Crate: `orbit-lua-syntax`. Scope: the [first-light subset](first-light-subset.md).
 
 The Lua front end turns Lua source bytes into the shared [HIR](hir.md). It is one of two front ends: the OrbitScript front end will produce the same HIR, so nothing Lua-specific leaks past this crate. It is written from the Lua 5.5 reference manual's grammar and the reference interpreter's observable behaviour, not from PUC Lua's parser.
 
@@ -168,7 +168,7 @@ Lowering walks the AST once and builds one `hir::Function` per function body.
 
 ## Parallel and async front end
 
-Tym has suggested a parallel front end built on Rust async as the kind of improvement the greenfield rule allows. How the first-light design keeps that open without paying for it yet:
+A parallel front end built on Rust async is the kind of improvement the greenfield rule allows. How the first-light design keeps that open without paying for it yet:
 
 - **Every stage is a pure function over owned data.** `parse(&SourceFile) -> Ast`, `lower(Ast) -> hir::Chunk`, `hir::analyze(&mut Chunk)`, `compile(&hir::Function) -> UnlinkedProto`. None of them touches the VM, and all their outputs are `Send`. Only the last step, linking the compiled prototypes into a VM heap (interning constant strings, allocating GC objects), needs the VM.
 - **Per-function work is independent after lowering.** A `hir::Chunk` stores functions in a flat vector and the capture pass runs before compilation, so each function compiles without looking at its siblings. A large chunk can compile its functions on several threads with `std::thread::scope`, no dependency needed.

@@ -1,6 +1,6 @@
 # GC semantics: weak tables, finalizers and `collectgarbage` (compat C4)
 
-Status: Proposed. Crates: `orbit-gc` (collector), `orbit-core` (the table and metatable hooks), `orbit-vm` (running finalizers, closing a VM), `orbit-stdlib` (`collectgarbage`). Milestone C4 of the Lua 5.5 compatibility plan; exit is `gc.lua`, `gengc.lua` and `big.lua` from the official suite.
+Status: Implemented. Crates: `orbit-gc` (collector), `orbit-runtime::object` (the table and metatable hooks), `orbit-runtime::vm` (running finalizers, closing a VM), `orbit-runtime::stdlib` (`collectgarbage`). Milestone C4 of the Lua 5.5 compatibility plan; exit is `gc.lua`, `gengc.lua` and `big.lua` from the official suite.
 
 This builds on ADR-2 (own collector in `orbit-gc`, independent of the rest of the runtime) and on what `orbit-gc` already provides: per-object weak modes, ephemerons that wait on their key, and finalizer registration with resurrection. What is missing is the Lua side: tables don't read `__mode`, nothing registers or runs `__gc`, and `collectgarbage` knows six of its options. Every rule below comes from the 5.5 manual and from what the reference `lua5.5` binary does; the probes are listed at the end.
 
@@ -78,7 +78,7 @@ ADR-2 accepted the shape (value waits on key, registration list) without measure
 - **Ephemerons:** waiting map (current) against the classic convergence approach (rescan ephemeron tables until nothing new is marked), on weak-keyed caches with live and dead keys, adversarial key-value chains (quadratic for rescanning), and heaps with no ephemerons.
 - **Finalizers:** the registration list (current) against scanning color bytes for the FIN bit at the end of marking, on registration cost, atomic pause with 1k and 1M registered live objects, and churn.
 
-The results and the proposed ADR-2 amendment (accept as is, or exact edits) go to Tym with the implementation PR.
+The results and the proposed ADR-2 amendment (accept as is, or exact edits) go to a maintainer with the implementation PR.
 
 ## Tests
 

@@ -28,7 +28,7 @@ debugger = ["host", "orbit/debugger", "dep:orbit-dap"]
 cc = "1.2"
 
 # Not the workspace lints: unsafe is denied rather than forbidden, and
-# allowed only in src/ffi.rs (ADR-6 exception, Tym 2026-10-10).
+# allowed only in src/ffi.rs (ADR-6 exception).
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

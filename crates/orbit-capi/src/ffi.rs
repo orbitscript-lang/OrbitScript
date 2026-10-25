@@ -1,4 +1,4 @@
-//! The crate's only `unsafe` (ADR-6 exception, Tym 2026-10-10): the entry
+//! The crate's only `unsafe` (ADR-6 exception): the entry
 //! points `csrc/capi.c` calls, the call into C, and dynamic loading.
 //!
 //! Each entry point gets back the running native's [`Stack`] from the

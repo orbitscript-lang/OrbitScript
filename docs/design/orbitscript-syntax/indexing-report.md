@@ -1,6 +1,6 @@
 # OrbitScript indexing: 0-based or 1-based (Q5)
 
-Status: **Report** (2026-10-13), for Tym's decision. Companion to [proposal.md](proposal.md). Nothing here is implemented. Performance figures are worked out from the current code (`crates/orbit-core/src/table.rs`, `crates/orbit-bytecode/src/format.rs` on main `cbbac40`), **not measured**: measuring needs the OrbitScript front end, which doesn't exist yet.
+Status: **Report**, written for the indexing decision. Companion to [proposal.md](proposal.md). Nothing here is implemented. Performance figures are worked out from the current code (`crates/orbit-core/src/table.rs`, `crates/orbit-bytecode/src/format.rs` on main `cbbac40`), **not measured**: measuring needs the OrbitScript front end, which doesn't exist yet.
 
 ## Summary
 
@@ -141,7 +141,7 @@ Languages that compile to or embed in Lua have made both choices. Luau (Roblox),
 
 **A + M1.** The promise that a table is the same table in both languages is the core of the interop design, and the shifted view breaks it for every integer key, not just arrays. The newcomers 0-based indexing is meant to help would hit H1-H6 as silent wrong answers instead of learning one rule. M1 removes most hand-written indices and makes the remaining mistakes visible.
 
-## Decision for Tym
+## Decision
 
 | Option | One-line consequence |
 |---|---|
