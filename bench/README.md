@@ -19,7 +19,7 @@ Then it prints each interpreter's geometric-mean time and RSS ratio against the 
 
 An interpreter whose output differs from the baseline's counts as failing that benchmark, so a fast wrong answer never shows up as a win. Only the baseline failing makes the command exit non-zero.
 
-`--json FILE` writes everything for tracking over time, and `--markdown FILE` appends a table (CI passes `$GITHUB_STEP_SUMMARY`). The `bench` job in CI runs the quick sizes, and `.github/workflows/bench.yml` runs the full sizes on x86_64 Linux, aarch64 Linux and macOS and keeps the JSON as an artifact. Both workflows currently run only when started by hand from the Actions tab; automatic runs are paused to save Actions minutes.
+`--json FILE` writes everything for tracking over time, and `--markdown FILE` appends a table (CI passes `$GITHUB_STEP_SUMMARY`). `.github/workflows/bench.yml` runs the full sizes on x86_64 Linux, aarch64 Linux and macOS and keeps the JSON as an artifact. It runs only when started by hand from the Actions tab: shared runners are too noisy to judge performance on every pull request.
 
 ## Larger programs (`apps`)
 

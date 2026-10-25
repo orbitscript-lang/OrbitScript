@@ -1,48 +1,67 @@
 name: CI
 
-# Automatic runs are paused while the repo is private, to save Actions
-# minutes. Run it by hand from the Actions tab if needed. To re-enable,
-# restore:
-#   push:
-#     branches: [main]
-#   pull_request:
+# Checks every pull request into main. Sized to keep Actions minutes low:
+#
+# - A new push to a pull request cancels its running checks (concurrency).
+# - Draft pull requests and changes that touch only docs skip it; marking a
+#   draft ready for review starts it.
+# - Every supported OS runs the tests once: Linux on x86_64 and aarch64,
+#   macOS on arm64, Windows on x64. Windows ARM64 runs clippy, which compiles
+#   everything including the tests, and the release workflow runs its tests.
+# - The Lua suite and the differential tests run once, on Linux x86_64.
+# - The MSRV job only type-checks (`cargo check`): no linking, no tests.
+#
+# bench.yml (full benchmarks) and release.yml (every target, tests and
+# packaging) run by hand or on a tag, not on pull requests.
 on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'editors/**'
+      - '.github/dependabot.yml'
+      - '.github/workflows/bench.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/vscode.yml'
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   lint:
     name: fmt + clippy
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The shared backend (`liborbit` through stabby): `--workspace` always picks `runtime`.
-      - run: cargo clippy -p orbit --no-default-features --features shared --all-targets --locked
-
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup show
-      - run: cargo test --workspace --locked
+      - run: cargo clippy -p orbit --no-default-features --features shared --all-targets --locked -- -D warnings
 
   msrv:
-    name: build on MSRV
+    name: check on MSRV
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install the MSRV from Cargo.toml
@@ -50,48 +69,67 @@ jobs:
           msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
           rustup toolchain install "$msrv" --profile minimal
           echo "MSRV=$msrv" >> "$GITHUB_ENV"
-      - run: cargo +"$MSRV" build --workspace --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      # Type-checking catches newer language features and std APIs; linking
+      # and running the tests add nothing the other jobs don't cover.
+      - run: cargo +"$MSRV" check --workspace --all-targets --locked
 
-  aarch64-linux:
-    name: test (aarch64 Linux via QEMU)
-    runs-on: ubuntu-latest
-    env:
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+  test:
+    name: test (${{ matrix.name }})
+    if: github.event.pull_request.draft != true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+          - name: Linux aarch64
+            os: ubuntu-24.04-arm
+          - name: macOS arm64
+            os: macos-15
+          - name: Windows x64
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
+      # Windows runners check text files out with CRLF line ends, but tests
+      # compare output byte for byte and programs embed their .orb sources.
+      - name: Check out with LF line ends
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
-      - name: Install cross toolchain and QEMU
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
-      - run: rustup target add aarch64-unknown-linux-gnu
-      - run: cargo test --workspace --locked --target aarch64-unknown-linux-gnu
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
 
-  size:
-    name: binary size
+  windows-arm64:
+    name: clippy (Windows ARM64)
+    if: github.event.pull_request.draft != true
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - name: Check out with LF line ends
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # Lints the Windows-only code paths and compiles every test target.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  conformance:
+    name: Lua 5.5 suite, differential tests, size
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # Soft goal from the plan: runtime plus stdlib well under 10 MiB.
       SIZE_BUDGET_BYTES: 10485760
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      - run: cargo build --release --locked -p orbit-cli
-      - name: Report and check size
-        run: |
-          size=$(stat -c %s target/release/orbit)
-          echo "### Release \`orbit\` binary: $size bytes ($((size / 1024)) KiB)" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$size" -gt "$SIZE_BUDGET_BYTES" ]; then
-            echo "::error::orbit is $size bytes, over the $SIZE_BUDGET_BYTES byte budget"
-            exit 1
-          fi
-
-  conformance:
-    name: Lua 5.5 test suite + differential tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
       - name: Check the vendored test suite is unmodified
         working-directory: tests/lua-5.5/suite
         run: sha256sum --check --quiet ../SHA256SUMS
@@ -99,10 +137,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/reference-lua
-          key: reference-lua-${{ runner.os }}-${{ hashFiles('tests/lua-5.5/VERSION', 'scripts/build-reference-lua.sh') }}
+          key: reference-lua-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/lua-5.5/VERSION', 'scripts/build-reference-lua.sh') }}
       - name: Build reference lua5.5
         run: scripts/build-reference-lua.sh
       - run: cargo build --release --locked -p orbit-cli -p orbit-testkit
+      - name: Release orbit binary size
+        run: |
+          size=$(stat -c %s target/release/orbit)
+          echo "### Release \`orbit\` binary: $size bytes ($((size / 1024)) KiB)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt "$SIZE_BUDGET_BYTES" ]; then
+            echo "::error::orbit is $size bytes, over the $SIZE_BUDGET_BYTES byte budget"
+            exit 1
+          fi
       # Real Lua must pass every file: this checks the harness and manifest.
       - name: Suite against lua5.5
         run: >
@@ -117,34 +163,12 @@ jobs:
         run: >
           cargo testkit diff --reference target/reference-lua/bin/lua5.5
           --interp target/release/orbit --expect tests/diff/expected-orbit.txt
+      - name: Compatibility programs against lua5.5
+        run: >
+          cargo testkit diff --corpus tests/diff/compat --reference target/reference-lua/bin/lua5.5
+          --interp target/release/orbit --expect tests/diff/compat/expected-orbit.txt
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: failure()
         with:
           name: conformance-results
           path: target/testkit/*.json
-
-  bench:
-    name: benchmarks (quick inputs)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup show
-      - name: Cache the reference interpreter
-        uses: actions/cache@v4
-        with:
-          path: target/reference-lua
-          key: reference-lua-${{ runner.os }}-${{ hashFiles('tests/lua-5.5/VERSION', 'scripts/build-reference-lua.sh') }}
-      - name: Build reference lua5.5
-        run: scripts/build-reference-lua.sh
-      - run: cargo build --release --locked -p orbit-cli -p orbit-testkit
-      # Shared runners are noisy: this is a smoke run that reports time,
-      # peak RSS and binary size. bench.yml runs the full inputs.
-      - name: Run benchmarks
-        run: >
-          cargo testkit bench --quick --runs 3
-          --interp lua5.5=target/reference-lua/bin/lua5.5 --interp orbit=target/release/orbit
-          --json target/testkit/bench.json --markdown "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bench-quick
-          path: target/testkit/bench.json
