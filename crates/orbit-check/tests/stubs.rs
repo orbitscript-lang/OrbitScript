@@ -94,7 +94,7 @@ fn stubs_match_the_runtime() {
     let mut expected = BTreeSet::new();
     let mut stubbed = BTreeSet::new();
     // Globals the CLI or a feature adds, which `orbit_std::install` alone doesn't.
-    let host_only = ["arg", "ffi"];
+    let host_only = ["arg"];
     for n in &names {
         expected.insert(n.clone());
     }
@@ -130,12 +130,16 @@ fn stubs_match_the_runtime() {
     let io = read("stubs/io.orbi");
     assert_eq!(stub_methods(&io), file_methods, "file methods");
 
-    // The `ffi` library, which this test's runtime doesn't install, lists its functions.
+    // The `std.ffi` module, which this test's runtime doesn't install, lists its functions.
     let ffi = listed(
         &read("../orbit-ffi/src/lib.rs"),
         "const FUNCTIONS: &[(&[u8], Push)] = &[",
     );
-    assert_eq!(stub_names(&read("stubs/ffi.orbi")), ffi, "ffi functions");
+    assert_eq!(
+        stub_names(&read("stubs/std/ffi.orbi")),
+        ffi,
+        "std.ffi functions"
+    );
 }
 
 /// The prelude stub names what the front end lets a module read without declaring it.

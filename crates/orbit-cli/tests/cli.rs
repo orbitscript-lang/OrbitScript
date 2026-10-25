@@ -242,25 +242,25 @@ fn no_interactive_mode() {
 #[cfg(feature = "ffi")]
 #[test]
 fn ffi_is_on_unless_no_ffi() {
+    let o = orbit(&["-e", "print(type(require 'std.ffi'), ffi)"], "", &[]);
+    assert_eq!(out(&o), "table\tnil\n");
     let o = orbit(
-        &["-e", "print(type(ffi), package.loaded.ffi == ffi)"],
+        &[
+            "--no-ffi",
+            "-e",
+            "print(package.loaded['std.ffi'], (pcall(require, 'std.ffi')))",
+        ],
         "",
         &[],
     );
-    assert_eq!(out(&o), "table\ttrue\n");
-    let o = orbit(
-        &["--no-ffi", "-e", "print(ffi, package.loaded.ffi)"],
-        "",
-        &[],
-    );
-    assert_eq!(out(&o), "nil\tnil\n");
+    assert_eq!(out(&o), "nil\tfalse\n");
 }
 
 #[test]
 fn usage_lists_no_ffi() {
     let o = orbit(&["-h"], "", &[]);
     assert!(
-        err(&o).contains("--no-ffi  leave out the 'ffi' library"),
+        err(&o).contains("--no-ffi  leave out the 'std.ffi' module"),
         "{}",
         err(&o)
     );

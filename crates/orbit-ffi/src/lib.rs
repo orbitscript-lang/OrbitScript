@@ -3,6 +3,7 @@
 //! `docs/design/ffi.md`).
 //!
 //! ```lua
+//! local ffi = require "std.ffi"               -- use std::ffi; in OrbitScript
 //! local libc = ffi.open("libc.so.6")          -- ffi.open() for the process
 //! local strlen = libc:bind("strlen", "size", "cstr")
 //! print(strlen("hello"))                      --> 5
@@ -23,9 +24,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use orbit::OrbitString;
-use orbit::stack::{
-    Native, NativeRef, REGISTRY_INDEX, RIDX_GLOBALS, Return, Stack, StackResult, Type,
-};
+use orbit::stack::{Native, NativeRef, REGISTRY_INDEX, Return, Stack, StackResult, Type};
 
 /// A C type the library converts values to and from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -204,7 +203,8 @@ const FUNCTIONS: &[(&[u8], Push)] = &[
     (b"errno", push::<Errno>),
 ];
 
-/// Open the `ffi` library: the `ffi` global and `package.loaded.ffi`.
+/// Open the `ffi` library as the `std.ffi` module: what `require "std.ffi"`
+/// (`use std::ffi;` in OrbitScript) returns. It sets no global.
 /// Scripts can then call any C function in any library the process can
 /// load, so only hosts that trust their scripts as much as native code
 /// should call this. Installing twice does nothing. Leaves the stack as it
@@ -228,7 +228,7 @@ pub fn install(s: &mut Stack<'_>) -> StackResult<()> {
     s.push_native::<BufferLen>();
     s.raw_set_field(-2, b"__len")?;
     s.set_top(-2)?;
-    // `package.loaded.ffi`, then the global.
+    // `package.loaded["std.ffi"]`, what `require "std.ffi"` returns; no global.
     if s.raw_get_field(REGISTRY_INDEX, b"_LOADED")? != Type::Table {
         s.set_top(-2)?;
         s.create_table(0, 1);
@@ -236,11 +236,8 @@ pub fn install(s: &mut Stack<'_>) -> StackResult<()> {
         s.raw_set_field(REGISTRY_INDEX, b"_LOADED")?;
     }
     s.push_copy(-2);
-    s.raw_set_field(-2, b"ffi")?;
-    s.raw_get_index(REGISTRY_INDEX, RIDX_GLOBALS)?;
-    s.push_copy(-3);
-    s.raw_set_field(-2, b"ffi")?;
-    s.set_top(-4)
+    s.raw_set_field(-2, b"std.ffi")?;
+    s.set_top(-3)
 }
 
 /// Push a metatable for userdata named `name`, kept in the registry under

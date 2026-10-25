@@ -1,5 +1,6 @@
-// The `ffi` library (ADR-9, docs/design/ffi.md), when the host enables it. Pointers and buffers
-// are userdata. Bound functions take and return what their signature says, so they are `any`.
+// The `std.ffi` module (ADR-9, docs/design/ffi.md), when the host enables it: `use std::ffi;` in
+// OrbitScript, `require "std.ffi"` in Lua. Pointers and buffers are userdata. Bound functions
+// take and return what their signature says, so they are `any`.
 
 /// Binds the C function `name` in `lib` with a signature.
 pub fn bind(...args: any) -> any;

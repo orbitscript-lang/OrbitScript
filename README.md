@@ -32,7 +32,7 @@ fn fizzbuzz(n) {
 | `liborbit` | The runtime as a shared library. It is also installed under Lua 5.5's library names, so programs built against Lua 5.5 run on OrbitScript without recompiling |
 | VS Code extension | Highlighting, the language server and the debugger ([`editors/vscode`](editors/vscode/)) |
 
-Lua code can load C modules built for Lua 5.5 (`require` through `package.cpath`), and both languages can call C functions in shared libraries through the `ffi` library (`orbit --no-ffi` turns it off). The standard library adds `std.json`.
+Lua code can load C modules built for Lua 5.5 (`require` through `package.cpath`), and both languages can call C functions in shared libraries through the `std.ffi` module (`orbit --no-ffi` turns it off). The standard library adds `std.json`.
 
 ## Install
 
