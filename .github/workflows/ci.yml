@@ -126,6 +126,9 @@ jobs:
     env:
       # Soft goal from the plan: runtime plus stdlib well under 10 MiB.
       SIZE_BUDGET_BYTES: 10485760
+      # The runner's C.UTF-8 would show in lua5.5's os.setlocale(""), where
+      # OrbitScript knows only C (tests/lua-5.5/DEVIATIONS.md).
+      LC_ALL: C
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
@@ -138,6 +141,11 @@ jobs:
         with:
           path: target/reference-lua
           key: reference-lua-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/lua-5.5/VERSION', 'scripts/build-reference-lua.sh') }}
+      # main.lua runs lua5.5 -i with LUA_READLINELIB ignored (-E) and expects
+      # no warning, so the default libreadline.so must load. The runner image
+      # has only libreadline.so.8; the unversioned name comes with the -dev package.
+      - name: Install libreadline-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libreadline-dev
       - name: Build reference lua5.5
         run: scripts/build-reference-lua.sh
       - run: cargo build --release --locked -p orbit-cli -p orbit-testkit

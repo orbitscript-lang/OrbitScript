@@ -193,6 +193,64 @@ fn print_output_reaches_a_pipe_at_once() {
     assert_eq!(line.as_deref(), Ok("ready\n"));
 }
 
+/// One Ctrl-C can't stop a long library call, which never reaches an
+/// interrupt check; a second ends the process, as it ends `lua`. This is
+/// what `main.lua`'s "long unbreakable search" checks, but its `.*b` search
+/// ends at once in our matcher, so the manifest disables those lines.
+#[test]
+#[cfg(unix)]
+fn second_ctrl_c_ends_a_long_library_call() {
+    use std::io::{BufRead, BufReader};
+    use std::time::{Duration, Instant};
+    // Quadratic in our matcher: every 'a' is a start that scans to the end.
+    // Seconds per 100,000 bytes in a release build, so this runs for minutes.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .args([
+            "-e",
+            "print(15) string.find(string.rep('a', 1000000), 'a.*b') print('finished')",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id().to_string();
+    let int = || {
+        let ok = Command::new("kill").args(["-INT", &pid]).status();
+        assert!(ok.is_ok_and(|s| s.success()), "kill -INT {pid} failed");
+    };
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    assert_eq!(line, "15\n");
+
+    std::thread::sleep(Duration::from_millis(300));
+    int();
+    std::thread::sleep(Duration::from_millis(500));
+    let still_running = child.try_wait().unwrap().is_none();
+    if still_running {
+        int();
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break Some(s);
+        }
+        if Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // Exit status 130 here means the first Ctrl-C ended orbit; a success,
+    // that the search finished and a slower call is needed.
+    assert!(still_running, "orbit exited after one Ctrl-C: {status:?}");
+    let status = status.expect("a second Ctrl-C didn't end orbit");
+    assert_eq!(status.code(), Some(130));
+}
+
 #[test]
 fn memory_limit_from_the_environment() {
     let script = "local t = {} \

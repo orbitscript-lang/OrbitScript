@@ -22,7 +22,7 @@ GitHub CI runs all three, but its automatic runs are paused for now (see `.githu
 
 ## Differential tests
 
-Each `diff/*.lua` file runs under both interpreters. Exit status, standard output and the error message must be identical, after three normalizations: the program name at the start of an uncaught-error message becomes `lua`, the stack traceback is dropped, and addresses such as `table: 0x55d0c2a3b2c0` become `0xADDR`. Tests must be deterministic, so don't depend on `pairs` order, `os.time`, `math.random` without a seed, or GC timing.
+Each `diff/*.lua` file runs under both interpreters. Exit status, standard output and the error message must be identical, after three normalizations: the program name at the start of an uncaught-error message becomes `lua`, the stack traceback is dropped, and addresses such as `table: 0x55d0c2a3b2c0` become `0xADDR`. Tests must be deterministic, so don't depend on `pairs` order, `os.time`, `math.random` without a seed, or GC timing. Run them under the C locale (`LC_ALL=C`): `os.setlocale("")` returns the environment's locale in lua5.5 but always `C` in OrbitScript (DEVIATIONS.md), and `diff/os.lua` calls it.
 
 ```sh
 cargo testkit diff --reference target/reference-lua/bin/lua5.5 --interp target/release/orbit

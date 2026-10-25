@@ -95,6 +95,22 @@ Why: it's a different program; claiming Lua.org's copyright line for it would be
 
 Suite: `main.lua` reads the release with `"Lua (%d+%.%d+%.%d+)"` and checks that `PUC-Rio` ends the line; both hold.
 
+## `os.setlocale` knows only `C`
+
+`os.setlocale` accepts only the `C` locale (and `POSIX`, its alias): `"C"` and `""` return `"C"`, other names return nil, and the program's locale never changes. lua5.5 calls the C library, so `os.setlocale("")` returns the locale the environment selects (`LANG`, `LC_ALL`, `LC_*`), for example `C.UTF-8`, and other installed locales can be selected.
+
+Why: `os.setlocale` doesn't call the C library's `setlocale` (that would need `unsafe`), and OrbitScript's number and string conversions never read a C locale, so selecting another one would change nothing.
+
+Suite: `literals.lua` and `strings.lua` try `pt_BR` and Latin-1 locales and skip their locale checks when none is available, as they do on a system without them. `tests/diff/os.lua` calls `os.setlocale("")`, so differential runs use `LC_ALL=C` (CI sets it).
+
+## Pattern searches skip starts that can't match
+
+`string.find`, `match`, `gmatch` and `gsub` skip start positions and backtracking steps that can't produce a match (`crates/orbit-runtime/src/stdlib/string/pattern.rs`). Results are the same as lua5.5's; only the time differs. A search that backtracks quadratically in lua5.5 can finish at once: `string.find(string.rep('a', 100000), '.*b')` takes about 30 s in lua5.5 and about 10 ms in OrbitScript.
+
+Why: the skips are free for patterns that can match and remove a quadratic worst case for the ones that can't.
+
+Suite: `main.lua` 580-596 interrupts exactly that search with Ctrl-C and needs it to still be running a second later; the manifest disables those lines (`deviates=580-596`, see SKIPS.md). `orbit-cli`'s `second_ctrl_c_ends_a_long_library_call` test checks the same thing with a search that stays slow.
+
 ## Interactive mode's own line editor
 
 On a terminal, interactive mode edits lines with its own editor instead of GNU readline: the usual Emacs keys, Up and Down through history (a statement typed over several lines is one entry, as in lua5.5), Ctrl-R reverse search, and Ctrl-Z. Tab completes Lua names (keywords, globals and fields such as `string.fo`, including methods reached through `__index` tables) where readline completes file names. History lasts for the session, as in lua5.5. It never loads a readline library, so `LUA_READLINELIB` always gets the warning lua5.5 gives for a library it can't load. Without a terminal, or with `TERM=dumb`, it reads plain lines, as before. On Windows it reads plain lines too; the console provides its own editing and history for those.

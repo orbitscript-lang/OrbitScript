@@ -15,7 +15,7 @@
 #                    only, skipped elsewhere
 #   skip             never run; the # comment gives the reason
 
-main.lua        needs-clibs=250-253   # the lua command line; one check loads a C module
+main.lua        needs-clibs=250-253 deviates=580-596   # the lua command line; one check loads a C module; the Ctrl-C search ends at once
 gc.lua
 db.lua          deviates=434-436 deviates=603   # io files have a user value; count hooks count our instructions
 calls.lua       deviates=539-542      # compares a dump's header with lua5.5's layout
