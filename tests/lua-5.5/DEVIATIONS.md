@@ -109,7 +109,7 @@ Suite: `literals.lua` and `strings.lua` try `pt_BR` and Latin-1 locales and skip
 
 Why: the skips are free for patterns that can match and remove a quadratic worst case for the ones that can't.
 
-Suite: `main.lua` 580-596 interrupts exactly that search with Ctrl-C and needs it to still be running a second later; the manifest disables those lines (`deviates=580-596`, see SKIPS.md).
+Suite: `main.lua` 580-596 interrupts exactly that search with Ctrl-C and needs it to still be running a second later; the manifest disables those lines (`deviates=580-596`, see SKIPS.md). `orbit-cli`'s `second_ctrl_c_ends_a_long_library_call` test checks the same thing with a search that stays slow.
 
 ## Interactive mode's own line editor
 
