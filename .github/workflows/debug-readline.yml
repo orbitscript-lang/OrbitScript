@@ -1,0 +1,20 @@
+name: debug readline
+on:
+  push:
+    branches: [debug/readline-reference]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/build-reference-lua.sh
+      - run: |
+          env | sort | grep -v -i token | grep -v -i secret
+          tty || true; ls -l /proc/self/fd/0
+          ls /usr/lib/x86_64-linux-gnu | grep -i -e readline -e edit || true
+          L=target/reference-lua/bin/lua5.5
+          echo "== pipe"; echo " " | env LUA_READLINELIB=xuxu LUA_INIT="warn('@allow')" $L -W -i 2>&1 | head -3
+          echo "== via sh"; sh -c "echo ' ' | env LUA_READLINELIB=xuxu LUA_INIT=\"warn('@allow')\" $L -W -i > /tmp/o 2>&1"; cat /tmp/o
+          echo "== readline default"; echo " " | $L -W -i 2>&1 | head -3
+          echo "== bogus path"; echo " " | env LUA_READLINELIB=/nonexistent/xuxu.so $L -W -i 2>&1 | head -3
+          echo "== strace"; sudo apt-get install -y strace >/dev/null 2>&1; echo " " | env LUA_READLINELIB=xuxu strace -f -e trace=openat,execve $L -W -i 2>&1 | grep -v ENOENT.*locale | head -40
