@@ -8,23 +8,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/build-reference-lua.sh
-      - name: replicate main.lua 204-208 through os.execute
+      - name: main.lua several ways
         run: |
           L=$PWD/target/reference-lua/bin/lua5.5
-          cat > /tmp/p.lua <<'LUA'
-          local progname = arg[-1]
-          local out = os.tmpname()
-          local env = [[LUA_READLINELIB=xuxu LUA_INIT="warn('@allow')"]]
-          local code = 'echo " " | env %s lua %s -W -i >%s 2>&1'
-          local p = string.gsub(code, "lua", '"'..progname..'"', 1)
-          local s = string.format(p, env, "", out)
-          print("cmd: " .. s)
-          print(os.execute(s))
-          local f = io.open(out); print("out: [" .. f:read("a") .. "]"); f:close()
-          LUA
-          $L /tmp/p.lua
-          echo "== stdin from pipe, stdout/stderr piped"; $L /tmp/p.lua </dev/null 2>&1 | cat
-      - name: suite main.lua only, twice
-        run: |
           cargo build --release -p orbit-testkit -q
-          for i in 1 2; do cargo testkit conformance --interp target/reference-lua/bin/lua5.5 --c-libs target/reference-lua/libs main.lua || true; done
+          echo "== testkit binary directly"; target/release/orbit-testkit conformance --interp $L --c-libs target/reference-lua/libs main.lua || true
+          cp -r tests/lua-5.5/suite /tmp/suite
+          cp target/reference-lua/libs/*.so /tmp/suite/libs/ || true
+          cd /tmp/suite
+          sed -i '207s/^/print("OUTPUT[["..getoutput().."]]") do return end /' main.lua
+          sed -n 200,212p main.lua
+          echo "== direct"; $L main.lua 2>&1 | tail -20 || true
