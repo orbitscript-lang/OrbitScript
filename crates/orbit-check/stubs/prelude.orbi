@@ -9,7 +9,6 @@
 
 use coroutine;
 use debug;
-use ffi;
 use io;
 use math;
 use os;

@@ -49,7 +49,7 @@ Crate dependencies: `orbit-hir` and `orbit-bytecode` (the instruction set and `U
 | [chunks-io-os-cli.md](chunks-io-os-cli.md) | `load` and friends, `require` and `package`, binary chunks and their verifier, the `io` and `os` libraries, and the command line |
 | [debug.md](debug.md) | The `debug` library, function names and levels, tracebacks, hooks, and the debugger's runtime side |
 | [json.md](json.md) | The `std.json` module (`orbit-std` feature `json`): its API, how values map to JSON, and what it costs |
-| [ffi.md](ffi.md) | The `ffi` library (`orbit-ffi`, ADR-9): binding C functions in shared libraries from Lua and OrbitScript |
+| [ffi.md](ffi.md) | The `ffi` library, `std.ffi` (`orbit-ffi`, ADR-9): binding C functions in shared libraries from Lua and OrbitScript |
 
 ## OrbitScript
 

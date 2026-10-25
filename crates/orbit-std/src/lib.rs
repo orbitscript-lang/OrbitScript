@@ -132,8 +132,8 @@ fn publish<'s>(s: &'s Scope<'s>, name: &str, lib: orbit::Table<'s>) -> Result<()
     Ok(())
 }
 
-/// Give scripts the `ffi` library (the `ffi` global and
-/// `package.loaded.ffi`): calling C functions in any shared library the
+/// Give scripts the `ffi` library as the `std.ffi` module (`require
+/// "std.ffi"`, `use std::ffi;`; no global): calling C functions in any shared library the
 /// process can load, and reading and writing memory through pointers. That
 /// is as much power as a C module has, so a host enables it only for
 /// scripts it trusts that far (ADR-9). Calling it again does nothing.

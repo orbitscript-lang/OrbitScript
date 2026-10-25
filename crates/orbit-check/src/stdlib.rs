@@ -11,11 +11,11 @@ pub(crate) const PRELUDE: &str = include_str!("../stubs/prelude.orbi");
 pub(crate) const MODULES: &[(&str, &str)] = &[
     ("coroutine", include_str!("../stubs/coroutine.orbi")),
     ("debug", include_str!("../stubs/debug.orbi")),
-    ("ffi", include_str!("../stubs/ffi.orbi")),
     ("io", include_str!("../stubs/io.orbi")),
     ("math", include_str!("../stubs/math.orbi")),
     ("os", include_str!("../stubs/os.orbi")),
     ("package", include_str!("../stubs/package.orbi")),
+    ("std.ffi", include_str!("../stubs/std/ffi.orbi")),
     ("std.json", include_str!("../stubs/std/json.orbi")),
     ("string", include_str!("../stubs/string.orbi")),
     ("table", include_str!("../stubs/table.orbi")),

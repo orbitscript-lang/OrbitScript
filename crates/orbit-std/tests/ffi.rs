@@ -26,8 +26,9 @@ fn run_in(iso: &mut Isolate, src: &str) -> String {
     }
 }
 
+/// Run `src` with the library as the local `ffi`.
 fn run(src: &str) -> String {
-    run_in(&mut lua(), src)
+    run_in(&mut lua(), &format!("local ffi = require 'std.ffi' {src}"))
 }
 
 /// The error message `src` raises.
@@ -43,14 +44,20 @@ const LIBC: &str = "local libc = ffi.open() ";
 fn absent_until_the_host_enables_it() {
     let mut lua = Runtime::new().new_isolate(Config::default());
     assert_eq!(
-        run_in(&mut lua, "return ffi, package.loaded.ffi"),
-        "nil\tnil"
+        run_in(
+            &mut lua,
+            "return package.loaded['std.ffi'], (pcall(require, 'std.ffi'))"
+        ),
+        "nil\tfalse"
     );
     orbit_std::install_ffi(&mut lua);
     orbit_std::install_ffi(&mut lua);
     assert_eq!(
-        run_in(&mut lua, "return type(ffi), package.loaded.ffi == ffi"),
-        "table\ttrue"
+        run_in(
+            &mut lua,
+            "return type(require 'std.ffi'), ffi, package.loaded.ffi"
+        ),
+        "table\tnil\tnil"
     );
 }
 
@@ -267,7 +274,8 @@ fn binding_errors() {
 #[test]
 fn from_orbitscript() {
     let mut iso = lua();
-    let src = "let libc = ffi::open();\n\
+    let src = "use std::ffi;\n\
+               let libc = ffi::open();\n\
                let strlen = libc.bind(\"strlen\", \"size\", \"cstr\");\n\
                return strlen(\"orbit\");\n";
     let n = iso.scope(|s| {

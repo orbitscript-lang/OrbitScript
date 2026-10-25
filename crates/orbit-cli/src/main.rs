@@ -4,8 +4,8 @@
 //! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#the-command-line)):
 //! `-e stat`, `-l mod`, `-l g=mod`, `-i`, `-v`, `-E`, `-W`, `--` and `-`,
 //! plus `--lock-cpath`, which keeps C modules to the search path `orbit`
-//! starts with (ADR-8), and `--no-ffi`, which leaves out the `ffi` library
-//! (ADR-9).
+//! starts with (ADR-8), and `--no-ffi`, which leaves out the `std.ffi`
+//! module (ADR-9).
 //! `arg` holds the script at 0, the interpreter and options below it and
 //! the arguments from 1; `...` holds the arguments. An uncaught error prints
 //! `<program>: <message>` plus a traceback to stderr with exit status 1.
@@ -208,7 +208,7 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          -E        ignore environment variables\n  \
          -W        turn warnings on\n  \
          --lock-cpath  load C modules only from the starting 'package.cpath'\n  \
-         --no-ffi  leave out the 'ffi' library\n  \
+         --no-ffi  leave out the 'std.ffi' module\n  \
          --        stop handling options\n  \
          -         stop handling options and execute stdin\n"
     );

@@ -1,10 +1,11 @@
-# The `ffi` library
+# The `ffi` library (`std.ffi`)
 
 Status: Implemented. Crate `orbit-ffi`; `orbit-std` feature `ffi`. Decisions: [ADR-9](../adr/0009-ffi.md).
 
-The `ffi` library lets Lua and OrbitScript code call C functions in shared libraries directly, without writing a C module. A script opens a library, binds a function by name with its C signature, and calls the result like any other function:
+The `ffi` library lets Lua and OrbitScript code call C functions in shared libraries directly, without writing a C module. A script loads the `std.ffi` module, opens a library, binds a function by name with its C signature, and calls the result like any other function:
 
 ```lua
+local ffi = require "std.ffi"
 local libc = ffi.open("libc.so.6")
 local strlen = libc:bind("strlen", "size", "cstr")
 print(strlen("hello"))  --> 5
@@ -12,6 +13,8 @@ print(strlen("hello"))  --> 5
 
 ```rust
 // OrbitScript: the same library, `::` for plain calls and `.` for methods.
+use std::ffi;
+
 let libc = ffi::open("libc.so.6");
 let strlen = libc.bind("strlen", "size", "cstr");
 print(strlen("hello"));
@@ -21,10 +24,10 @@ print(strlen("hello"));
 
 The library gives scripts the same power a C module has: they can call any function the process can load and read or write any address. So it is a capability the host grants:
 
-- **Embedders** need the `ffi` Cargo feature on `orbit-std`, which is off by default, and must also call `orbit_std::install_ffi(&mut isolate)`. Without that call, scripts see no `ffi` global and `require "ffi"` fails, even when the feature is compiled in.
+- **Embedders** need the `ffi` Cargo feature on `orbit-std`, which is off by default, and must also call `orbit_std::install_ffi(&mut isolate)`. Without that call, `require "std.ffi"` fails, even when the feature is compiled in.
 - **The `orbit` CLI** builds with the feature and enables it, unless it is started with `--no-ffi`.
 
-Once enabled, the library is the `ffi` global and `package.loaded.ffi`. It is also part of OrbitScript's prelude, so `.orb` code can use it without declaring it.
+Once enabled, the library is `package.loaded["std.ffi"]`: Lua code loads it with `require "std.ffi"` and OrbitScript code with `use std::ffi;`, as with `std.json`. It sets no global and isn't in OrbitScript's prelude.
 
 ## Reference
 
@@ -72,6 +75,7 @@ Type names are strings. Aliases are listed after the main name.
 ### Example: an out-parameter and `errno`
 
 ```lua
+local ffi = require "std.ffi"
 local libc = ffi.open()
 local strtol = libc:bind("strtol", "long", "ptr", "ptr", "int")
 local text = ffi.buffer("123abc")    -- not a cstr: the end pointer points into it
