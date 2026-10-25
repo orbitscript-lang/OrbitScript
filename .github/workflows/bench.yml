@@ -3,11 +3,9 @@ name: Benchmarks
 # Full-size benchmark run. Results (time, peak RSS, binary size) are kept as
 # a JSON artifact per commit on main, so they can be compared over time.
 #
-# Automatic runs are paused while the repo is private, to save Actions
-# minutes (like ci.yml). Run it by hand from the Actions tab. To re-enable,
-# restore:
-#   push:
-#     branches: [main]
+# It runs only when started by hand from the Actions tab: shared runners are
+# too noisy to judge performance on every change, and the full inputs cost
+# many Actions minutes.
 on:
   workflow_dispatch:
 
