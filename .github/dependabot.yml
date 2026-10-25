@@ -1,8 +1,8 @@
 # Dependabot keeps dependencies current. Security updates open as soon as an
 # advisory affects a dependency (they need "Dependabot security updates" on
 # in the repository settings); version updates come once a month. Minor and
-# patch bumps are grouped into one pull request per ecosystem, so each round
-# costs one CI run; major bumps get their own pull request.
+# patch bumps are grouped into one pull request per ecosystem, and major
+# bumps into a second one, so a breaking upgrade can't hold up the rest.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -17,6 +17,10 @@ updates:
       cargo:
         applies-to: version-updates
         update-types: [minor, patch]
+        patterns: ['*']
+      cargo-major:
+        applies-to: version-updates
+        update-types: [major]
         patterns: ['*']
     ignore:
       # 3.x and later need a newer Rust than the 1.75 MSRV (DEPS.md).
@@ -35,6 +39,10 @@ updates:
       npm:
         applies-to: version-updates
         update-types: [minor, patch]
+        patterns: ['*']
+      npm-major:
+        applies-to: version-updates
+        update-types: [major]
         patterns: ['*']
 
   - package-ecosystem: github-actions
