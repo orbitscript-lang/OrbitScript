@@ -367,7 +367,7 @@ fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
 /// nothing and returns `nil` (`-1` for `"param"`), as in Lua, so the
 /// collector is never re-entered.
 ///
-/// [GC semantics design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/gc-semantics.md
+/// [GC semantics design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/gc-semantics.md
 fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
     let opt = match ctx.arg(0) {
         Value::Nil => b"collect".to_vec(),

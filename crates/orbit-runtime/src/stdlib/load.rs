@@ -1,6 +1,6 @@
 //! Loading chunks: `load` (`loadfile` and `dofile` read files, so they
 //! are `orbit-std`'s)
-//! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md)).
+//! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md)).
 //!
 //! Source text goes through the compiler the host installed in
 //! [`Runtime::compile`](crate::vm::Runtime::compile), so this library needs

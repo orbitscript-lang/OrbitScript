@@ -1,5 +1,5 @@
 //! `require` and the `package` library
-//! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#modules-require-and-package)).
+//! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#modules-require-and-package)).
 //!
 //! `package.loaded` and `package.preload` are also kept in the registry
 //! (`_LOADED`, `_PRELOAD`), and the `package` table itself (`_PACKAGE`), so

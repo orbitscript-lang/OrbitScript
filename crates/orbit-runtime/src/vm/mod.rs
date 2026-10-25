@@ -6,7 +6,7 @@
 //! [`NativeReturn::CallThen`] continuation instead of recursing, so neither
 //! Lua recursion nor `pcall` grows the Rust stack.
 //!
-//! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
+//! [VM design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md
 
 mod cold;
 mod coro;

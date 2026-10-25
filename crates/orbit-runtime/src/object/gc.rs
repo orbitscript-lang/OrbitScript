@@ -1,7 +1,7 @@
 //! The Lua side of `orbit-gc`'s weak references and finalizers: which
 //! values a weak table may drop, reading `__mode` and `__gc` from a
 //! metatable while the collector runs, and registering objects for `__gc`
-//! ([GC semantics design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/gc-semantics.md)).
+//! ([GC semantics design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/gc-semantics.md)).
 
 use orbit_gc::{AnyGc, Gc, Liveness, Marker, WeakMode};
 

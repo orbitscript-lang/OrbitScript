@@ -8,7 +8,7 @@
 //! yield, return and errors all come back through the continuation
 //! mechanism `pcall` uses.
 //!
-//! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
+//! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use crate::object::table::mark;
 use crate::object::{Gc, LuaHeap, LuaSpace, NativeId, Thread, ThreadState, Value};

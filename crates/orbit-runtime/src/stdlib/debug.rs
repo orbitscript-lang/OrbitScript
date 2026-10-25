@@ -3,7 +3,7 @@
 //! The VM does the introspection (`crate::vm::debug`); this module parses
 //! arguments and builds the tables and messages the reference produces.
 //!
-//! [debug design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/debug.md
+//! [debug design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/debug.md
 
 use crate::object::{Gc, LightUserData, Table, Thread, Value};
 use crate::vm::debug::CallName;

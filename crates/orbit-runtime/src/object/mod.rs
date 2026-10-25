@@ -9,7 +9,7 @@
 //! [`Heap::update`](orbit_gc::Heap::update), which also runs the write
 //! barrier.
 //!
-//! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
+//! [VM design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md
 
 pub mod func;
 pub mod gc;

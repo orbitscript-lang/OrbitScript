@@ -1,6 +1,6 @@
 //! `require` finding files: `package.path` and `package.cpath`,
 //! `package.searchpath`, and the Lua searcher
-//! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#modules-require-and-package)).
+//! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#modules-require-and-package)).
 //!
 //! The runtime's `package` library keeps `require`, `package.loaded`,
 //! `package.preload` and the preload searcher; this adds the searcher that

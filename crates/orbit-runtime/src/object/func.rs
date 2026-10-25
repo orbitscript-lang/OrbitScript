@@ -11,7 +11,7 @@ use crate::object::table::mark;
 use crate::object::{LuaSpace, LuaStr, Value};
 
 /// A captured local. Every closure that captures the binding holds the same
-/// cell ([VM design, "Locals, captures and cells"](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md#locals-captures-and-cells)).
+/// cell ([VM design, "Locals, captures and cells"](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md#locals-captures-and-cells)).
 #[derive(Debug, Default)]
 pub struct Cell {
     pub value: Value,

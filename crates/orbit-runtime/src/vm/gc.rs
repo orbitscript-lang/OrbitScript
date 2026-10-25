@@ -15,7 +15,7 @@
 //! [`finalize_then_return`]), and when the VM closes ([`Vm::close`], or
 //! [`close_then`] from a native, for `os.exit(code, true)`).
 //!
-//! [GC semantics design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/gc-semantics.md
+//! [GC semantics design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/gc-semantics.md
 
 use crate::object::gc::finalizer;
 use crate::object::{LuaHeap, Value};

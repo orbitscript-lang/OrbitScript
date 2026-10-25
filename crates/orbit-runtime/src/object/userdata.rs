@@ -1,6 +1,6 @@
 //! Full userdata: a host Rust value with a metatable ([VM semantics]).
 //!
-//! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#runtime-objects
+//! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#runtime-objects
 
 use std::any::Any;
 use std::fmt;

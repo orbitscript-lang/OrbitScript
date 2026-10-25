@@ -3,7 +3,7 @@
 //! The VM owns what a coroutine is (its stack and status); this crate only
 //! knows that a thread is a heap object whose state the collector traces.
 //!
-//! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
+//! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use std::any::Any;
 use std::fmt;

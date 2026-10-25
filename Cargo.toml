@@ -13,7 +13,7 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
-repository = "https://github.com/tymlipari/OrbitScript"
+repository = "https://github.com/orbitscript-lang/OrbitScript"
 
 [workspace.lints.rust]
 # Policy (ADR-6): no unsafe code. The few exceptions (each granted in an ADR)
