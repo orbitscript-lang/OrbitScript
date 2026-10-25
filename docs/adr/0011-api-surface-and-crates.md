@@ -1,78 +1,55 @@
 # ADR-11: Public API surface and crate layout
 
-Status: Proposed (2026-10-18). Tym asked on 2026-10-18 (00:34Z) to define the public embedding API as an object model before choosing how it crosses the `liborbit` boundary, and approved the design and the crate layout below between 01:12Z and 02:35Z. Accepting this record supersedes ADR-10's `orbit-abi`/`orbit-api` split and its choice of `stabby` (the boundary is chosen again once the new API exists), and changes the crate table in `CLAUDE.md`.
+Status: Accepted
 
 ## Context
 
-The first `stabby` boundary (#160, closed) wrapped the Rust API as it stood: a value went through five types between the VM and the program (the core `Value`, two raw forms on each side of the boundary, and the API's `Value`), and each operation was written five times. The API had grown from what the CLIs needed rather than from a design. The full surface, with diagrams and measurements, is in the Claude Doc "OrbitScript embedding API surface" (https://claude.ai/code/artifact/2b15da4b-abf6-4866-8bcd-89eb319db36e).
+Hosts embed OrbitScript through Rust, and the same API has to work whether the runtime is linked in or reached through `liborbit` (ADR-10). An API grown from what the CLIs needed would have to be wrapped once per layer; it is designed as an object model instead.
 
 ## Decision
 
 ### The object model
-- **`Runtime`** is built from a `Config` (libraries, memory limit, GC mode, warnings, the host's `Io` and `Searcher`) and creates **`Isolate`**s. An isolate is one VM: it loads and runs chunks, owns globals, creates values, defines host classes, registers modules, and exposes the collector, interrupts, budgets and the debugger.
-- **`Chunk`** is built only from bytes the host supplies, with a name, a language (Lua or OrbitScript), a mode (text, binary) and an optional environment. The runtime never opens files or reads stdin: resolving paths is the host's job.
-- **`Compiler`** is `Send + Sync` and needs no isolate.
-- Values are **`Value`**, **`Str`** (borrowed), **`Table`**, **`Function`**, **`Thread`** and **`Userdata`**. Handles are scoped (they live for a scope's lifetime and cost nothing) or pinned (`Pinned<T>`, kept alive until dropped).
-- Hosts extend the runtime with **`HostFunction`**s (taking a `Call`), **`Class<T>`** for userdata types, and the `Io`, `Searcher`, `Clock` and `Hook` interfaces. Errors are `Syntax`, `Runtime` (keeping the error value), `Memory` and `Interrupted`.
+- **`Runtime`** creates **`Isolate`**s from a **`Config`** (libraries, memory limit, GC mode, warnings, debugger). An isolate is one VM: it loads and runs chunks, owns globals, creates values, defines host classes, registers modules, and exposes the collector, interrupts and the debugger.
+- **`Chunk`** is built only from bytes the host supplies, with a name, a language (Lua or OrbitScript) and a mode (text or binary). The runtime never opens files or reads standard input; resolving paths is the host's job. A chunk's environment is given at load time (`Scope::load_in`).
+- **`Compiler`** is `Send + Sync` and needs no isolate. Its errors are a `SyntaxError` with no script value, so compiling on another thread can send its result back; `Scope::load_compiled` links it.
+- **Values** are `Value`, `Str` (borrowed), `Table`, `Function`, `Thread` and `Userdata`. Light userdata is a `Value` variant holding an opaque `u64`.
+- **Handles** are scoped or pinned. A `Scope` is a native function's stack window (the host's own window outside calls), so each scoped handle is a window slot: a GC root with no bookkeeping, released when the scope ends, with the scope's lifetime. `Pinned<T>` lives in numbered slots the collector traces until it is dropped.
+- **Host functions** take a `Call` and return with `Call::ret`; `Call::check` and `Call::opt` give Lua's argument errors. A panicking host function raises a runtime error where the build unwinds, and aborts where it doesn't.
+- **`Class<T>`** defines userdata types. A method gets its object taken out of the userdata while it runs, so it can use its whole `Call`; calling a method of an object whose method is running raises an error.
+- **Errors** are `Syntax`, `Runtime` (keeping the error value), `Memory` and `Interrupted`. Interrupts are catchable by `pcall`, as in `lua`.
 
-### Settled while building the API (phase b)
-- **One public crate**: `orbit` is this surface. `orbit::Lua` and raw VM access are gone from it; `orbit-capi` and `orbit-ffi` still reach the runtime directly, below the API.
-- **Scoped handles are window slots**: a `Scope` is a native function's stack window (the host's own window outside calls), so every handle is a GC root without bookkeeping and the window is cut back when the scope ends. Handles carry the scope's lifetime; pinned handles live in numbered slots the collector traces.
-- **A chunk's environment** is given at load time (`Scope::load_in(chunk, env)`) rather than on `Chunk`, so `Chunk` holds only bytes and names and can be built outside any scope.
-- **`Compiler` errors** are a `SyntaxError` with no script value, so compiling on another thread can send its result back; `Scope::load_compiled` links what it made.
-- **Host functions** take a `Call` and return with `Call::ret`; `Call::check` and `Call::opt` give Lua's argument errors. Typed closures (`|a: i64, b: Option<String>|`) are left for later.
-- **A panicking host function** raises a runtime error (`host function panicked: ...`) where the build unwinds, and aborts where it doesn't.
-- **Interrupts** stay catchable by `pcall`, matching `lua`; uncatchable budgets come with `set_budget`.
-- **Light userdata** is a `Value` variant holding the address as an opaque `u64`.
-- **Class methods** get the object taken out of its userdata while they run, so a method can use its whole `Call`; calling a method of an object whose method is running raises an error.
-- **Not yet built**: debugger hooks (with the debugger plan), `yield_with`, budgets, and `Function::info`.
+### The stack layer
+- **`orbit::stack`** is the low-level layer under the typed handles: a `Stack` over a window, addressed by Lua's indices (1 is the first slot, -1 the top, plus the registry and upvalue pseudo-indices), with operations shaped like Lua's C API, in safe Rust. Errors are an opaque `Raised` holding the error value.
+- **Natives and continuations are types** (`Native`, `Continuation`), so each gets its own trampoline and calling one costs no more than a runtime native. A native closure carries one data word scripts can't reach.
+- **Threads** are opaque `ThreadRef`s; another thread's stack can stand in for the window (`enter_thread`).
+- **`Control`** reaches the isolate itself: hooks, the interrupt handler and flag. Per-isolate state for bindings is an extension value of any type (`Stack::extension`). Userdata memory blocks stay put while the userdata lives.
+- The typed API is written over the stack layer. Only the stack layer and the isolate touch the runtime, so only they have a second implementation for the shared build (ADR-10).
 
-### Settled while moving I/O out (phase c)
-- **The runtime does no I/O.** `orbit-runtime` keeps `load`, `require`, `package.loaded`, `package.preload` and the preload searcher; it has no `io` or `os` library, no `print`, `loadfile`, `dofile` or `debug.debug`, and reads no environment variables except `ORBIT_VERIFY`.
-- **`orbit-std` uses only the public API.** `orbit_std::install(&mut isolate, &Options)` adds `print`, `loadfile`, `dofile`, `debug.debug`, `package.path`, `package.cpath`, `package.searchpath`, the Lua searcher, and the `io` and `os` libraries (features `io` and `os`). `FILE*` is a `Class`; files write through `Scope::with_stdout`, so `print`, `io.write` and C's `printf` (through `liborbit`) share one buffer. `os.exit` is `Call::exit`, which closes the isolate when asked, runs the `before_exit` hooks (open files flush there) and flushes standard output.
-- **`Options` instead of `Io`, `Searcher` and `Clock`.** No host has needed to replace the file system or clock yet, so `orbit-std` calls `std` directly; a host that wants scripts without file access doesn't install it, or installs only some of it. The interfaces stay a possible later addition.
-- **`orbit-capi` sits above `orbit-std`.** C modules need the `io` and `os` libraries for `luaopen_io` and friends, so `orbit-capi` depends on `orbit-std`, `orbit` has no `c-modules` feature, and the CLIs call `orbit_capi::install(&mut isolate, lock_cpath)` after `orbit_std::install`. This moves ADR-8's install step out of the runtime's `Options` without changing what scripts see. With `orbit-std` alone, `package.searchers` holds the preload and Lua searchers and `package.loadlib` reports C modules absent.
-- **`ffi`** stays `Isolate::enable_ffi` (feature `ffi`) for now; it moves into `orbit-std` with the `liborbit` boundary.
-- **Host functions cost more than the runtime's own natives.** A host function is a native closure entered through a Lua-style frame and a trampoline: about 250 more instructions per call than a built-in native (x86_64, no PGO), which made loops of tiny writes run 30 to 40% more instructions (`print`, `file:write`, an empty `io.write`). Calling native closures without the stub frame is the main follow-up.
-
-### Settled while writing the first built-ins (phase d)
-- **Built-in modules** live in `orbit-runtime/src/stdlib/builtins/*.orb`. The build script compiles them with `orbit-orb-syntax` and `orbit-compiler` (build dependencies only) to stripped binary chunks, which are embedded and decoded once per process. Each module runs in its own environment with only `next` and `type` as globals and takes the intrinsics it needs with `use intrinsics::{...}`, which copies them into locals once at load (cheaper per call than globals). Scripts can neither reach the intrinsics nor change what a built-in calls. A module returns its exports.
-- **The built-in mark** is a flag on the linked prototype, set only when the runtime links its own modules, so a binary chunk can't claim it. A built-in's activations look like a C function's: `what` is `"C"`, the source is `=[C]`, the current line is -1, upvalues and locals are hidden, errors carry no position, tracebacks show `[C]`, line and count hooks don't fire inside it, `string.dump` refuses it, and a tail call into it keeps the caller's frame. An intrinsic raises its errors as the built-in would (`bad argument #2 to 'sort'`), positioned at the built-in's caller.
-- **Yields across built-ins are refused** (`attempt to yield across a C-call boundary`), as the official suite requires for `table.sort` and the reference does for most library callbacks. `pairs` is the exception, as in the reference, so `__pairs` may yield.
-- **Written in OrbitScript so far**: `ipairs`, `pairs`, `table.insert`, `table.remove` and `table.sort`. `table.sort` keeps a native fast path (intrinsic `sortprim`) for arrays of only numbers or only strings without a comparator. Against `main` (x86_64, no PGO): `ipairs` loops take 0.57x the time, `table.sort` with a comparator 0.58x, without one 0.86x, and `pairs` is unchanged; the binary grows 8.5 KiB, and starting an isolate takes about 275,000 more instructions (25% of an empty script's run) to decode, link and run the modules, which loading them on first use could avoid. `table.sort` is now a stable merge sort that checks the whole result against the comparator or `__lt`, so it reports `invalid order function for sorting` for inconsistent comparators the reference sometimes lets through.
-- **`table.insert` and `table.remove` cost more for now** (Tym chose to move them anyway, 2026-10-18 07:11Z): they take 1.6 to 2.5x the time of the native versions, about what the same function written in Lua costs, because calling a Lua function with varargs costs more than calling a native. Cheaper vararg calls are the follow-up. Both use intrinsic `plainlen` to skip `checktab` and `__len` for tables without a metatable.
-- **`orbit-capi` and `orbit-ffi` move onto the public surface with phase (e)** (Tym, 2026-10-18 06:35Z): they used `orbit-runtime` directly, which contradicts the layering above; they move onto the low-level stack API rather than a stopgap.
-
-### Settled while building the boundary (phase e)
-Tym agreed the plan in the Claude Doc "liborbit boundary and stack API (phase e)" (https://claude.ai/code/artifact/56ee2f84-9b02-4e8c-a699-e2e7f4f65ce6) on 2026-10-18, with packaging as a top-level `build.sh` script rather than a testkit command, and each step as its own stacked PR.
-- **`orbit::stack`** is the low-level layer under the typed handles: a `Stack` over the window a native (or the host) works in, addressed by Lua's indices (1 is the first slot, -1 the top, plus the registry and upvalue pseudo-indices), with Lua-C-API-shaped operations in safe Rust. Errors are an opaque `Raised` holding the error value. Natives (`Native`) and continuations (`Continuation`) are types, so each gets its own trampoline and calling one costs no more than a runtime native; a native closure carries one data word scripts can't reach (a C function's address). Threads are opaque `ThreadRef`s; another thread's stack can stand in for the window (`enter_thread`), for `lua_xmove` and calls on suspended threads. `Control` reaches the isolate itself: hooks with natives that read data words, the interrupt handler, the interrupt flag. Per-isolate state for bindings is an extension value of any type (`Stack::extension`). Memory blocks for userdata (`new_userdata`) stay put while the userdata lives.
-- **`orbit-capi` depends on `orbit` and `orbit-std` only.** States C creates (`lua_newstate`) are isolates with no libraries open, driven through `Isolate::host_stack`. `orbit::runtime_access` is gone.
-- **The typed API is written over the stack API.** A `Scope` holds the window's `Stack`, each handle is a slot index in it, and host functions are stack closures (`Stack::push_function`) that build a `Call`. Only the stack API and the isolate itself touch the runtime, so only they need a second implementation for the shared build.
-- **`orbit-ffi` depends on `orbit` only** and is written on the stack API; `orbit-std`'s `ffi` feature installs it (`orbit_std::install_ffi`), replacing `Isolate::enable_ffi` and `orbit`'s `ffi` feature. FFI functions are natives with data words (address, signature), not host function closures, which keeps a call as cheap as before.
-- **The shared build is a feature of `orbit`** (`shared`), not a second crate: the stack layer and the isolate get a second implementation over `stabby` trait objects, and everything else in `orbit` builds unchanged on top (ADR-10 has the details and the measured host call cost). `orbit-lib` builds `liborbit` with the `abi` feature, exporting `orbit_check` and `orbit_new_isolate` beside the Lua C API, and carries `orbit-std`, the C module loader and `ffi`, which shared CLIs install from it.
-
-### Intrinsics and the standard library
-- The runtime exposes **intrinsics**: named primitive operations that need the VM's internals or its speed (string and table primitives, math, utf8, `string.pack`).
-- Each library function is then either bound directly to an intrinsic, written natively in the runtime, or written in OrbitScript on top of intrinsics and precompiled to bytecode at build time. The choice is made per function, by measurement: a call through an OrbitScript wrapper costs about 16 ns, `ipairs` and `table.sort` with a comparator ran faster written in Lua than natively, and `table.concat` and `string.rep` ran ten times slower.
-- Functions written in OrbitScript keep the observable behaviour of natives: error messages name the function, error levels skip the built-in frame, and tracebacks show `[C]`.
-- **`orbit-std`** implements the I/O-facing parts of the standard library (`io`, `os`, `print`, `loadfile`, `dofile`, file searchers, environment variables, C modules, `ffi`) over the public API only, with no access to the runtime's internals. The CLIs install it. (Phase c changed the C module and `ffi` parts: see above.)
+### The standard library
+- **The runtime does no I/O.** `orbit-runtime` provides the base library without `print`, `loadfile` and `dofile`, plus `string`, `table`, `math`, `utf8`, `coroutine`, `debug` without `debug.debug`, `load`, `require`, `package.loaded`, `package.preload` and the preload searcher. It reads no environment variables except `ORBIT_VERIFY`.
+- **`orbit-std`** adds the I/O-facing parts over the public API only: `print`, `loadfile`, `dofile`, `debug.debug`, `package.path`, `package.cpath`, `package.searchpath`, the Lua searcher, `io` and `os`, and `std.json` (`orbit_std::install(&mut isolate, &Options)`). It calls `std` directly; a host that wants scripts without file access doesn't install it, or installs only part of it. `FILE*` is a `Class`, and files write through `Scope::with_stdout`, so `print`, `io.write` and C's `printf` through `liborbit` share one buffer.
+- **`orbit-capi`** (ADR-8) depends on `orbit` and `orbit-std`; **`orbit-ffi`** (ADR-9) depends on `orbit` and is installed through `orbit_std::install_ffi`. Both use the stack layer.
+- **Intrinsics.** The runtime exposes named primitive operations that need its internals or its speed. Each library function is bound directly to an intrinsic, written natively, or written in OrbitScript over intrinsics, chosen per function by measurement.
+- **Built-in modules in OrbitScript** live in `orbit-runtime/src/stdlib/builtins/*.orb`. The build script compiles them to stripped binary chunks, embedded and decoded once per process. Each runs in its own environment and takes its intrinsics with `use intrinsics::{...}`; scripts can neither reach the intrinsics nor change what a built-in calls. `ipairs`, `pairs`, `table.insert`, `table.remove` and `table.sort` are written this way; `table.sort` is a stable merge sort with a native fast path for arrays of only numbers or only strings.
+- **Built-ins look like C functions.** A flag on the linked prototype, set only when the runtime links its own modules, gives their activations `what = "C"`, source `=[C]`, line -1, hidden locals and upvalues, `[C]` in tracebacks, no line or count hooks, and errors positioned at the caller (`bad argument #2 to 'sort'`). `string.dump` refuses them, and yields across them are refused, except through `pairs`.
 
 ### Crates, bottom up
+
 | Layer | Crates |
 |---|---|
 | Memory | `orbit-gc`, `orbit-virtmem` |
 | Front ends and compiler | `orbit-lua-syntax`, `orbit-orb-syntax`, `orbit-hir`, `orbit-compiler`, `orbit-bytecode` |
-| Runtime | `orbit-runtime`: the former `orbit-core`, `orbit-vm` and `orbit-stdlib`, the intrinsics, and the precompiled built-in modules. Objects, interpreter and libraries stay separate modules so each can be tested alone |
-| Public API | `orbit` |
-| Host libraries | `orbit-std`; `orbit-capi` and `orbit-ffi` |
-| Programs | `orbit-cli`, `orbit-lib`, `orbit-testkit` |
+| Runtime | `orbit-runtime` (objects, interpreter, libraries and intrinsics, as separate modules) |
+| Public API | `orbit`, `orbit-macros` |
+| Host libraries | `orbit-std`, `orbit-capi`, `orbit-ffi`, `orbit-dap` |
+| Programs and tools | `orbit-cli`, `orbit-lib`, `orbit-lsp`, `orbit-check`, `orbit-fmt`, `orbit-testkit` |
 
-No test enforces the layering: the ABI boundary, once chosen, enforces it.
-
-### Order of work
-Each step is its own PR and keeps the suite passing: (a) merge `orbit-core`, `orbit-vm` and `orbit-stdlib` into `orbit-runtime` without behaviour changes; (b) the new `orbit` API and the CLIs ported to it, replacing `orbit::Lua`; (c) `orbit-std` takes over I/O; (d) the first OrbitScript built-ins (`table.insert`, `table.remove`, `table.sort`, `ipairs`, `pairs`) with built-in frames; (e) the `liborbit` boundary (`stabby`, a hand-written flat C ABI, or a COM-like interface table).
+The ABI boundary enforces the layering: nothing above `orbit` reaches the runtime directly.
 
 ## Consequences
-- One runtime crate means one set of Cargo features for objects, interpreter and libraries; the PGO profile has to be retrained after the merge because symbol names change.
-- Accepted ADRs and older design notes still name `orbit-core`, `orbit-vm` and `orbit-stdlib`; read those as the modules `orbit_runtime::object`, `orbit_runtime::vm` and `orbit_runtime::stdlib`.
-- Threads with open work on the old crates rebase onto the new layout once it lands.
+
+- One runtime crate means one set of Cargo features for objects, interpreter and libraries.
+- A host function is a native closure entered through a stub frame, so it costs more per call than a built-in native. Cheaper native-closure calls are a follow-up.
+- `table.insert` and `table.remove` in OrbitScript take 1.6 to 2.5x the time of native versions, because vararg calls into Lua functions cost more than native calls; `ipairs` loops and `table.sort` with a comparator got faster. Cheaper vararg calls are the follow-up.
+- Starting an isolate decodes and links the built-in modules, about 25% of an empty script's run. Loading them on first use could avoid it.
+- Not built yet: typed host-function closures, `yield_with`, execution budgets and `Function::info`.

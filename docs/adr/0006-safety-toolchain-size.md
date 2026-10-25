@@ -1,12 +1,44 @@
 # ADR-6: Safety, toolchain and size
 
-Status: Accepted (Tym, 2026-10-06, PR #49)
+Status: Accepted
+
+## Context
+
+OrbitScript is a showcase of a scripting runtime in safe Rust, aimed first at embedded Linux, where binary size and RAM matter.
 
 ## Decision
-- **Safety:** the workspace lint sets `unsafe_code = "forbid"`. Exceptions are the future `orbit-jit` crate (calling generated code is inherently unsafe; its `unsafe` stays in one small, audited module), `orbit-gc`'s memory-trimming FFI calls in `src/os.rs` behind the default `memory-trimming` feature (glibc's `malloc_trim`, approved by Tym on 2026-09-30 in ADR-2, and macOS's `malloc_zone_pressure_relief`, approved by Tym on 2026-10-11), and the dedicated `orbit-virtmem` crate (approved by Tym on 2026-10-11 in ADR-2) which isolates OS virtual memory reservation and page commit/decommit logic (`mmap`/`VirtualAlloc`) for arena slot allocation behind `unsafe_code = "deny"` with strictly scoped, audited `unsafe` blocks. They hand memory the collector freed back to the OS, which the system allocator otherwise keeps. The last is `orbit-capi`, the C module shim behind the `c-modules` feature (off in `orbit`, on in `orbit-cli`; granted by Tym on 2026-10-10, ADR-8): it denies `unsafe_code` and allows it only in `src/ffi.rs`, for the `extern "C"` entry points C modules call, raw pointers handed to C, and `dlopen`. `orbit-ffi`, the `ffi` library behind the `ffi` feature (off in `orbit-std`, on in `orbit-cli` unless `--no-ffi`; granted by Tym on 2026-10-18, ADR-9), likewise denies `unsafe_code` and allows it only in `src/sys.rs`, for `dlopen`/`dlsym`, calls through libffi and memory access through script-supplied pointers. `orbit-std` (granted by Tym on 2026-10-23) denies `unsafe_code` and allows it only in `src/crt.rs`, built on Windows only: the C runtime's `strerror` (through `libc`), so I/O errors carry the text Lua reports on Windows rather than a copy of the runtime's messages to maintain. The `errno` itself comes from std's `io::ErrorKind` and `libc`'s constants, since the runtime's own Win32-to-`errno` mapping is private. Dependencies may contain `unsafe` internally, as `std` does.
-- **Toolchain:** stable Rust only. `rust-version` in `Cargo.toml` is the MSRV: 1.75 since 2026-10-24 (it was 1.94), so the crates build with the older Rust that some distributions pin, while our own builds and releases use current stable. Raising it needs Tym's approval.
-- **Targets:** 64-bit only: x86_64 and aarch64 Linux (embedded Linux is primary), macOS and Windows. CI tests aarch64 Linux under QEMU. 32-bit is revisited only on request.
-- **Size:** release builds use LTO, one codegen unit, `panic = "abort"` and stripped symbols. `opt-level` stays at the release default `3`: measured on the cloud x86_64 container (2026-10-04), `"s"`/`"z"` for the whole binary cut its size by about 17% but made the benchmarks 5% to 39% slower. Size-only gains (per-crate `opt-level` for cold crates such as the front end, linker flags) are taken where they leave the benchmarks unchanged. CI reports the `orbit` binary size and fails above 10 MiB (a soft goal; the JIT study sets feature-specific targets). While CI is manual-only, a PR that adds a library or feature reports the release size before and after in its description.
-- **Selectable libraries:** each standard library (`string`, `table`, `math`, `utf8`, `coroutine`, `io`, `os`, `package`, `debug`) sits behind its own Cargo feature in `orbit-stdlib`, all on by default, and the embedding API can open a chosen subset at run time. Embedded builds drop what they don't use.
-- **CI:** GitHub Actions is manual-only for now (workflow_dispatch) to save minutes while the repo is private. Contributors run the checks in `CLAUDE.md` locally before pushing. Automatic runs return later in the project.
-- **RAM:** at least 256 MiB is assumed on devices, but the P5 target is comparable or lower peak RSS than PUC Lua on the benchmark suite.
+
+### Safety
+- The workspace lint sets `unsafe_code = "forbid"`. Memory safety is a sandbox boundary: a script can't break it unless the host enables a feature that hands it native code.
+- The only exceptions, each confined to one module of a crate that denies `unsafe_code` instead of forbidding it:
+
+  | Where | Why | Granted by |
+  |---|---|---|
+  | `orbit-jit` (future) | Calling generated code | this ADR |
+  | `orbit-gc/src/os.rs` (feature `memory-trimming`) | glibc `malloc_trim`, macOS `malloc_zone_pressure_relief` | ADR-2 |
+  | `orbit-virtmem` | Reserving, committing and decommitting address space (`mmap`, `VirtualAlloc`) | ADR-2 |
+  | `orbit-capi/src/ffi.rs` (feature `c-modules`) | `extern "C"` entry points, pointers handed to C, `dlopen` | ADR-8 |
+  | `orbit-ffi/src/sys.rs` (feature `ffi`) | `dlopen`/`dlsym`, calls through libffi, memory access through script-supplied pointers | ADR-9 |
+  | `orbit-std/src/crt.rs` (Windows only) | The C runtime's `strerror`, so I/O errors carry the text Lua reports on Windows | this ADR |
+  | `orbit-dap`'s Windows socket and event wrapper, `orbit-dap/src/process.rs` | AF_UNIX sockets on Windows until `std` has them; signalling and inspecting `orbit` processes for `--debug-attach` | ADR-12 |
+
+- Any other exception needs an ADR. Dependencies may use `unsafe` internally, as `std` does.
+
+### Toolchain
+- Stable Rust only: no nightly or beta features.
+- `rust-version` in `Cargo.toml` is the MSRV, 1.75, so the crates build with the older Rust some distributions pin. Our own builds and releases use current stable. Raising the MSRV needs a maintainer's approval.
+
+### Targets
+- 64-bit only: x86_64 and aarch64 Linux (embedded Linux first), macOS and Windows. 32-bit is revisited only on request.
+- At least 256 MiB of RAM is assumed, and peak RSS should be comparable to or lower than PUC Lua's.
+
+### Size
+- Release builds use LTO, one codegen unit, `panic = "abort"` and stripped symbols.
+- `opt-level` stays at `3`. `"s"` or `"z"` for the whole binary cut its size by about 17% but made the benchmarks 5 to 39% slower. Size-only gains (per-crate `opt-level` for cold code, linker flags) are taken where the benchmarks don't move.
+- The `orbit` binary has a soft budget of 10 MiB. A PR that adds a library, feature or dependency reports the release size before and after.
+- Optional costs sit behind Cargo features. Each standard library (`string`, `table`, `math`, `utf8`, `coroutine`, `package`, `debug`, and `io` and `os` in `orbit-std`) has its own feature, and the embedding API opens a chosen subset at run time.
+
+## Consequences
+
+- Every `unsafe` block in the tree is in a module listed above.
+- Performance work has to find its gains in safe Rust: no unchecked indexing or pointer tricks in the interpreter.
