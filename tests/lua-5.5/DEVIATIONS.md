@@ -95,6 +95,14 @@ Why: it's a different program; claiming Lua.org's copyright line for it would be
 
 Suite: `main.lua` reads the release with `"Lua (%d+%.%d+%.%d+)"` and checks that `PUC-Rio` ends the line; both hold.
 
+## Pattern searches skip starts that can't match
+
+`string.find`, `match`, `gmatch` and `gsub` skip start positions and backtracking steps that can't produce a match (`crates/orbit-runtime/src/stdlib/string/pattern.rs`). Results are the same as lua5.5's; only the time differs. A search that backtracks quadratically in lua5.5 can finish at once: `string.find(string.rep('a', 100000), '.*b')` takes about 30 s in lua5.5 and about 10 ms in OrbitScript.
+
+Why: the skips are free for patterns that can match and remove a quadratic worst case for the ones that can't.
+
+Suite: `main.lua` 580-596 interrupts exactly that search with Ctrl-C and needs it to still be running a second later; the manifest disables those lines (`deviates=580-596`, see SKIPS.md).
+
 ## Interactive mode's own line editor
 
 On a terminal, interactive mode edits lines with its own editor instead of GNU readline: the usual Emacs keys, Up and Down through history (a statement typed over several lines is one entry, as in lua5.5), Ctrl-R reverse search, and Ctrl-Z. Tab completes Lua names (keywords, globals and fields such as `string.fo`, including methods reached through `__index` tables) where readline completes file names. History lasts for the session, as in lua5.5. It never loads a readline library, so `LUA_READLINELIB` always gets the warning lua5.5 gives for a library it can't load. Without a terminal, or with `TERM=dumb`, it reads plain lines, as before. On Windows it reads plain lines too; the console provides its own editing and history for those.
