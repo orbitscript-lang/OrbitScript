@@ -1,4 +1,4 @@
-//! Lowering tests: name resolution, the subset gate, and the HIR the first-light programs give.
+//! Lowering tests: name resolution and the HIR the `tests/first-light` programs give.
 
 use std::path::Path;
 

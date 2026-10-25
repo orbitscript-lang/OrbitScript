@@ -1,4 +1,4 @@
-//! Comment pragmas (proposal T13): `// orbit-check: ignore` or `ignore[T0207, T0201]` at the end
+//! Comment pragmas: `// orbit-check: ignore` or `ignore[T0207, T0201]` at the end
 //! of a line drops what the checker reports on that line, and `//! orbit-check: strict` or `off`
 //! sets how a whole module is checked.
 

@@ -24,7 +24,7 @@ orbit-virtmem = { path = "../orbit-virtmem" }
 default = ["memory-trimming"]
 # Check a generation on every handle access so a stale handle always panics
 # (8-byte `Gc`). Always on in debug builds; this turns it on in release too.
-# It costs about 8% in interpreter speed (measured on the Milestone 1 build).
+# It costs about 8% in interpreter speed (measured when it was added).
 checked-handles = []
 # On supported platforms (glibc via `malloc_trim(0)`, macOS via
 # `malloc_zone_pressure_relief(NULL, 0)`), ask the allocator to return freed

@@ -745,7 +745,7 @@ fn items() {
     }
 }
 
-/// Every OrbitScript example in the syntax proposal parses.
+/// Every OrbitScript example in the language design (`docs/design/orbitscript-syntax/proposal.md`) parses.
 #[test]
 fn proposal_examples() {
     let src = include_str!("programs/proposal.orb");

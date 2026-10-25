@@ -1,6 +1,6 @@
 //! `orbit-check`: OrbitScript's optional type checker.
 //!
-//! Design: `docs/design/orbit-check/proposal.md` (decisions T1 to T14) and the library API the
+//! Design: `docs/design/orbit-check/proposal.md` and the library API the
 //! language server builds on, `docs/design/orbit-check/api.md`. The checker reads the
 //! OrbitScript AST (not the HIR), never touches the runtime, and keeps per-module results so an
 //! editor can recheck one file at a time.
@@ -102,7 +102,7 @@ pub struct Config {
     pub root: PathBuf,
     /// `package.path`-style templates for `use a::b`: `?` becomes `a/b`, tried in order.
     pub search_path: Vec<String>,
-    /// Check every module strictly (proposal T13), as `//! orbit-check: strict` does for one.
+    /// Check every module strictly, as `//! orbit-check: strict` does for one.
     pub strict: bool,
 }
 
@@ -436,7 +436,7 @@ impl Workspace {
             return Module::default();
         };
         if is_lua(&path) {
-            // Lua modules aren't checked (T11); their exports are `any` until stubs exist.
+            // Lua modules aren't checked; their exports are `any` unless a stub describes them.
             return Module::default();
         }
         let name = path.display().to_string();

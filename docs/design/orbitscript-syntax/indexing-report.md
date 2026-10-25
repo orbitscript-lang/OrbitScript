@@ -1,13 +1,13 @@
-# OrbitScript indexing: 0-based or 1-based (Q5)
+# OrbitScript indexing: 0-based or 1-based
 
-Status: **Report**, written for the indexing decision. Companion to [proposal.md](proposal.md). Nothing here is implemented. Performance figures are worked out from the current code (`crates/orbit-core/src/table.rs`, `crates/orbit-bytecode/src/format.rs` on main `cbbac40`), **not measured**: measuring needs the OrbitScript front end, which doesn't exist yet.
+Status: Report. It weighs 0-based against 1-based indexing for OrbitScript; the outcome is 1-based ([proposal.md](proposal.md#tables-arrays-and-maps)), with the `orbit-check` lints from M1. Performance figures were worked out from the table and bytecode code before the OrbitScript front end existed, **not measured**.
 
 ## Summary
 
 - **Speed is not the obstacle.** With two extra VM ops, a 0-based OrbitScript costs about nothing at run time. The array fast path actually loses one subtraction. Lua code pays nothing.
 - **Interop is the obstacle.** OrbitScript and Lua share the same tables. So 0-based can't mean "arrays start at 0". It has to mean "OrbitScript sees every integer key shifted by one". That shift also hits integer-keyed maps (ids, sparse tables, `arg[0]`), metamethod keys, and every position that crosses between the languages (`string.find` results, `table.insert` positions, user functions that return an index). These bugs are silent: an off-by-one read gives `nil`, and a write lands next to the intended slot.
 - **No middle ground avoids that.** A per-table base, a type-directed shift and a separate array type each either break Lua libraries, contradict "types are erased", or need an ADR-1 change. None of them removes the boundary problem.
-- **Recommendation: keep 1-based**, and add the ergonomics in [M1](#m1-keep-1-based-make-indices-rare-and-mistakes-loud) so that most code never writes an index and mistakes get caught. If you'd rather have 0-based, the only coherent version is the shifted view with native library twins ([M2](#m2-shifted-view-with-native-library-twins)), and its rules are listed below so it's a decision with known costs.
+- **Outcome: 1-based**, with the ergonomics in [M1](#m1-keep-1-based-make-indices-rare-and-mistakes-loud) so that most code never writes an index and mistakes get caught. The only coherent 0-based version is the shifted view with native library twins ([M2](#m2-shifted-view-with-native-library-twins)); its rules are listed below so its costs are known.
 
 ## What "0-based" would have to mean
 
@@ -27,17 +27,17 @@ flowchart LR
 
 | Option | What it means | Verdict |
 |---|---|---|
-| **A. 1-based** (current draft) | Both languages use the same keys | Recommended, with M1 |
+| **A. 1-based** | Both languages use the same keys | Chosen, with M1 |
 | **B. Shifted view** | OrbitScript's `t[k]` for an integer `k` uses key `k + 1`; Lua is unchanged | The only coherent 0-based option (M2) |
 | C. Per-table base | Tables made in OrbitScript start at 0 for everyone | Rejected: breaks Lua libraries |
 | D. Type-directed shift | Shift only where static types prove an array (how TypeScriptToLua compiles JS arrays to Lua) | Rejected: types are optional and erased |
-| E. Separate array type | A new 0-based value kind; plain tables stay 1-based | Rejected for now: ADR-1 change, still has the boundary problem |
+| E. Separate array type | A new 0-based value kind; plain tables stay 1-based | Rejected: ADR-1 change, still has the boundary problem |
 
 ## Performance of the shifted view (B)
 
-Today every integer access starts with `idx = (i as u64).wrapping_sub(1)` and a bounds check against the array part (`get_int`, `read_int`, `store_int`, `set_int` in table.rs). Under B:
+Every integer access starts with `idx = (i as u64).wrapping_sub(1)` and a bounds check against the array part (the table's integer get and set paths). Under B:
 
-| Path | Lua today | OrbitScript 0-based | Change |
+| Path | Lua | OrbitScript 0-based | Change |
 |---|---|---|---|
 | Array part (`t[i]`, `i` in range) | `i - 1`, bounds check | `i`, bounds check | one instruction fewer |
 | Hash part (sparse key, outside the array part) | hash key `i` | hash key `i + 1` | one add |
@@ -47,7 +47,7 @@ Today every integer access starts with `idx = (i as u64).wrapping_sub(1)` and a 
 | `ipairs`/`pairs`/`next` from OrbitScript | n/a | native iterators that shift integer keys back | one branch per step |
 | Lua code | unchanged | unchanged (different ops) | none |
 
-The VM cost is two new ops, `GetIndex0`/`SetIndex0`, for register keys. `GetIndexInt`/`SetIndexInt` take constant keys, which the compiler shifts. If #140's int-array ops merge, they'd need twins too. Each new op needs format.rs, verify.rs and flow.rs rows and a PGO retrain, and costs an estimated 1-3 KiB of binary.
+The VM cost is two new ops, `GetIndex0`/`SetIndex0`, for register keys. `GetIndexInt`/`SetIndexInt` take constant keys, which the compiler shifts. The integer-key array ops would need twins too. Each new op needs format.rs, verify.rs and flow.rs rows and a PGO retrain, and costs an estimated 1-3 KiB of binary.
 
 **The library boundary is where it can get expensive.** Every stdlib function that takes or returns a position needs a 0-based face for OrbitScript:
 
@@ -115,11 +115,11 @@ What makes 1-based painful is mostly writing indices by hand. OrbitScript can ma
 - **Loud mistakes:** `orbit-check` warns on `t[0]` where `t` is known to be an array, and on `0..#t`-style loops that index `t`. The compiler doesn't error on `t[0]`, because key 0 is legal in maps.
 - **Teach it once:** the language guide's first page about tables says "tables are shared with Lua, so arrays start at 1".
 
-Cost: none at run time, a few prelude natives, and some lints in `orbit-check`.
+Cost: none at run time, a few prelude natives, and some lints in `orbit-check`. The lints exist (T0307 and T0308); the prelude helpers and slices do not.
 
 ### M2. Shifted view with native library twins
 
-If you choose 0-based, this is the version that works end to end:
+The 0-based version that works end to end:
 - Two new ops (`GetIndex0`, `SetIndex0`); the compiler shifts constant keys and constructors.
 - Native twins of the position-taking stdlib functions, registered under the same names in OrbitScript's prelude.
 - Fixed rules for the hazards: metamethods get the stored key (H3), integer-keyed maps shift (H1, documented), and boundary APIs say which convention they use (H2).
@@ -137,14 +137,6 @@ Run-time cost is close to zero. The cost is the hazards above, plus about 25 ext
 
 Languages that compile to or embed in Lua have made both choices. Luau (Roblox), whose audience is mostly new programmers, kept 1-based. TypeScriptToLua and Haxe's Lua target shift, but only because their static types tell them where arrays are. Julia, MATLAB, R and Fortran are 1-based and widely used by non-specialists.
 
-## Recommendation
+## Conclusion
 
 **A + M1.** The promise that a table is the same table in both languages is the core of the interop design, and the shifted view breaks it for every integer key, not just arrays. The newcomers 0-based indexing is meant to help would hit H1-H6 as silent wrong answers instead of learning one rule. M1 removes most hand-written indices and makes the remaining mistakes visible.
-
-## Decision
-
-| Option | One-line consequence |
-|---|---|
-| **A + M1 (recommended)** | 1-based, `values`/`first`/`last`/`push`/`pop` in the prelude, `orbit-check` lints |
-| M2 | 0-based everywhere in OrbitScript: two new ops, ~25 native twins, half-open string ranges, documented boundary rules |
-| Spike first | Build M2's two ops and a string twin on a branch and measure, before deciding (needs the parser to exist, so after S1-S2) |

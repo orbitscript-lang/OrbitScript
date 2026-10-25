@@ -110,7 +110,7 @@ pub enum Debugger {
     #[default]
     Allowed,
     /// None can, for the isolate's whole life: a host that runs code it
-    /// doesn't want inspected says so here (ADR-12, D5).
+    /// doesn't want inspected says so here (ADR-12).
     Disabled,
 }
 

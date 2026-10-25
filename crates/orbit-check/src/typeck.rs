@@ -95,7 +95,7 @@ pub(crate) struct Deps<'c> {
     pub checked: &'c dyn Fn(FileId) -> Option<&'c Module>,
     /// The prelude stub, whose functions (`type`, `error`) some checks recognize.
     pub prelude: Option<FileId>,
-    /// Strict mode (proposal T13): annotated `pub fn`s and `bool` conditions.
+    /// Strict mode: annotated `pub fn`s and `bool` conditions.
     pub strict: bool,
     /// The module's text, when it gets lints (it isn't a stub or a bundled module).
     pub lint_text: Option<&'c [u8]>,

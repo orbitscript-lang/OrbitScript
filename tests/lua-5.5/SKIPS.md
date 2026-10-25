@@ -1,12 +1,12 @@
 # What the conformance run skips, and why
 
-Milestone 1 is "the official Lua 5.5 test suite passes, minus the C API and internal (`T`) parts, each skip documented". This file is that documentation. Every skip below comes from one of four sources, and none of them edits a vendored file on disk: the harness works on a scratch copy.
+The official Lua 5.5 test suite passes minus its internal (`T`) parts, and every skip is documented here. Every skip below comes from one of four sources, and none of them edits a vendored file on disk: the harness works on a scratch copy.
 
 Line numbers refer to the vendored files in `suite/` (Lua 5.5.1).
 
 ## 1. Internal test library (`T`)
 
-PUC Lua can be built with `ltests.c`, which adds a global `T` exposing internals: a raw C API driver (`T.testC`), allocator fault injection, GC and table-layout probes. OrbitScript has no C API and different internals, so the harness always runs with `T = nil`, exactly as `all.lua` does in user mode. The suite already guards every such test with `if T then` or returns early with a "testC not active" message, so these parts skip themselves.
+PUC Lua can be built with `ltests.c`, which adds a global `T` exposing internals: a raw C API driver (`T.testC`), allocator fault injection, GC and table-layout probes. OrbitScript's internals are different, and its C API (`orbit-capi`, ADR-8) has no `T` driver, so the harness always runs with `T = nil`, exactly as `all.lua` does in user mode. The suite already guards every such test with `if T then` or returns early with a "testC not active" message, so these parts skip themselves.
 
 | File | Guard | What is skipped |
 |---|---|---|

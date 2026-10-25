@@ -1,17 +1,17 @@
-# Spike: ephemerons and finalization in orbit-gc
+# Ephemerons and finalization in orbit-gc: measurements
 
-Status: Done (informed ADR-2's amendment "Lua weak tables and finalizers").
+Status: Report. The evidence behind how `orbit-gc` marks ephemerons and finds finalizable objects (ADR-2, [GC semantics](gc-semantics.md)).
 
-The GC semantics design asked for two API alternatives to be measured before ADR-2 is amended: how ephemerons are marked, and how unreachable objects registered for `__gc` are found. The code is on branch `spike/gc-ephemerons`: the alternatives sit behind spike-only Cargo features of `orbit-gc`, and `crates/orbit-gc/examples/ephemeron_spike.rs` runs the workloads.
+Two implementation choices were measured against alternatives: how ephemerons are marked, and how unreachable objects registered for `__gc` are found. The alternatives were built behind experiment-only Cargo features of `orbit-gc`, with a driver running the workloads; only the chosen designs were merged.
 
 ## Alternatives
 
 | | What it does |
 |---|---|
-| **E1** (current) | An ephemeron value waits on its key in a hash map keyed by the key's slot; marking the key releases the value. Each entry is handled once per cycle. |
+| **E1** | An ephemeron value waits on its key in a hash map keyed by the key's slot; marking the key releases the value. Each entry is handled once per cycle. |
 | **E1 tuned** | E1 with a cheap slot hasher instead of SipHash and the first waiting value stored inline instead of in a `Vec`. |
 | **E2** | Rescan: ephemeron tables whose keys are not all marked are revisited at the end of marking until a pass marks nothing new. |
-| **F1** (current) | A list of registered objects; at the end of marking, unreachable ones move to the finalization queue. |
+| **F1** | A list of registered objects; at the end of marking, unreachable ones move to the finalization queue. |
 | **F3** | No list: scan the color bytes for objects with the FIN bit at the end of marking, ordered by a per-slot registration number. |
 
 ## Workloads
@@ -51,6 +51,6 @@ Wait-map memory at 1M waiting entries: 92.6 MB for E1, 60.6 MB tuned, none for E
 ## Findings
 
 - **E2 is much faster on caches and catastrophic on chains.** Its rescans are quadratic in chain length: 9.5 s for 100,000 links, where E1 takes 15 ms. A program can build such a chain by accident (memoizing on objects whose results reference other memoized objects), and for long-running embedded processes a bounded worst case matters more than the best case. **Keep E1.**
-- **E1 tuned** roughly halves E1's time and cuts the wait map by a third on the workloads that wait, at no cost elsewhere (a1 and d are within noise). No dependency is added. **Adopted** after the amendment was approved: `orbit-gc` uses it since the "faster ephemeron wait map" PR.
+- **E1 tuned** roughly halves E1's time and cuts the wait map by a third on the workloads that wait, at no cost elsewhere (a1 and d are within noise). No dependency is added. **Adopted**: it is what `orbit-gc` uses.
 - **F3 saves memory only when many objects are registered**, and pays for every heap object each cycle even when few are (9 times F1's pause with 1,000 registered), and more under churn. Lua programs register few objects. **Keep F1.**
-- Neither alternative changes the API embedders see, so the ADR-2 amendment fixes the semantics and leaves these as implementation choices.
+- Neither alternative changes the API embedders see, so ADR-2 fixes the semantics and leaves these as implementation choices.

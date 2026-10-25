@@ -1,6 +1,6 @@
 # OrbitScript front end
 
-Status: Implemented. Crate: `orbit-orb-syntax`. Spec: the locked [syntax proposal](orbitscript-syntax/proposal.md) (its Decisions table is authoritative).
+Status: Implemented. Crate: `orbit-orb-syntax`. The language it implements: [OrbitScript syntax](orbitscript-syntax/proposal.md).
 
 The OrbitScript front end turns `.orb` source into the same [HIR](hir.md) as the [Lua front end](lua-front-end.md), so everything after it (compiler, VM, stdlib) is shared and a function written in one language is an ordinary function to the other. Like the Lua front end it never touches the VM or the GC heap, and depends only on `orbit-hir`.
 
@@ -13,21 +13,11 @@ flowchart LR
     lower --> hir["orbit-hir<br/>(shared)"]
 ```
 
-## Delivery
-
-| Step | Contents | State |
-|---|---|---|
-| 1 | Lexer, parser, AST, tests | Done (#145) |
-| 2 | Lowering to HIR: resolution, items, structs, enums, `match`, `?`, hoisting, templates | #146 |
-| 3 | `.orb` in the CLI, `require`'s searcher, `orbitc --hir`, behind a Cargo feature | #147 |
-| 4a | `NumericFor { exclusive }` (Q15) and the `ForPrepExclusive` op | #148 |
-| 4b | `scope stmt;` (Q13), lowered in the front end to a closure in a `<close>` local | This PR |
-
 ## Lexer
 
-Hand-written and pull-based, like the Lua lexer. Rust's spelling throughout: `//` and nesting `/* */` comments (`///` and `//!` are ordinary comments for now), `"..."` with Rust's escapes (`\xHH` takes any byte, since strings are byte strings), `r"..."`/`r#"..."#`, `1_000`, `0b`, `0o`, `0x`. A byte literal `b'a'` lexes straight to an integer token, so the parser, patterns and `orbit-check` treat it as any other integer literal. Line numbers come from `SourceInfo::new` over the whole source, so they're exact everywhere, including inside templates.
+Hand-written and pull-based, like the Lua lexer. Rust's spelling throughout: `//` and nesting `/* */` comments (`///` and `//!` are doc comments, kept only for tools), `"..."` with Rust's escapes (`\xHH` takes any byte, since strings are byte strings), `r"..."`/`r#"..."#`, `1_000`, `0b`, `0o`, `0x`. A byte literal `b'a'` lexes straight to an integer token, so the parser, patterns and `orbit-check` treat it as any other integer literal. Line numbers come from `SourceInfo::new` over the whole source, so they're exact everywhere, including inside templates.
 
-Where the proposal is silent, the lexer chooses:
+Where the language design is silent, the lexer chooses:
 
 - **Integer literals.** A decimal literal that doesn't fit in `i64` is an error ("write `9223372036854775808.0` for a float") instead of Lua's silent conversion to a float. Hexadecimal, octal and binary literals keep Lua's rule and give the 64-bit pattern written (`0xffff_ffff_ffff_ffff == -1`), which bit masks need.
 - **No leading-dot floats** (`.5`), as in Rust; `1..10` lexes as a range.
@@ -39,9 +29,9 @@ Where the proposal is silent, the lexer chooses:
 
 Recursive descent for items and statements, precedence climbing for expressions, with a depth limit (200) so deep nesting is an error, not a stack overflow.
 
-Precedence, low to high, is Rust's table with the proposal's additions: `||`, `&&`, comparisons, `|`, `^`, `&`, `<<` `>>`, `+` `-` `~`, `*` `/` `\` `%`, prefix `-` `!` `~` `#`, `**` (right-associative), then postfix calls, fields, indexing and `?`.
+Precedence, low to high, is Rust's table with OrbitScript's additions: `||`, `&&`, comparisons, `|`, `^`, `&`, `<<` `>>`, `+` `-` `~`, `*` `/` `\` `%`, prefix `-` `!` `~` `#`, `**` (right-associative), then postfix calls, fields, indexing and `?`.
 
-Rust rules the parser follows where the proposal doesn't say otherwise:
+Rust rules the parser follows where the language design doesn't say otherwise:
 
 - **Keywords as member names.** After `.` and `::`, as field names (struct definitions, literals, patterns, `#{ key: value }`), variant names, and `fn`/`const` names in `impl`, a keyword is read as a name, so `string::match(s, p)` and `s.match(p)` work. Where the name would also bind or read a local (shorthand `P { match }`, the last segment of `use` without `as`), it needs `r#`. `pub` in a field list is the visibility modifier unless a `:`, `,` or `}` follows it. The contextual keyword `scope` is never a keyword when written `r#scope`.
 - **Struct literals are not parsed in `if`, `while`, `match` and `for` headers**, so `if x == y { ... }` reads the block as the body. Parenthesise a literal there.
@@ -51,8 +41,8 @@ Rust rules the parser follows where the proposal doesn't say otherwise:
 - **A `match` arm body may be an assignment** (`"end" => stack[#stack] = nil,`, or `+=` and the other compound forms), as in Rust, where assignment is a unit expression. It runs the assignment and the arm's value is nil, the same as `"end" => { stack[#stack] = nil; }`. Assignment is still a statement everywhere else.
 - **A bare name as a positional `#{ }` entry is an error.** Struct literals read `P { x, y }` as `x: x, y: y`, so `#{ word, count }` looks like the same shorthand but would build `[1] = word, [2] = count`. The message offers both spellings: `word: word` for a field, `(word)` (any other expression stays positional) or `[...]` for an array entry.
 - `scope` is a keyword at the start of a statement only when followed by a name, a keyword, a literal or `{`; `let scope` only when followed by a name. Everywhere else `scope` is an ordinary name.
-- Generic parameters (`fn first<T>`) and every type annotation are parsed and kept only as spans: the compiler ignores them, and `orbit-check` will define their structure.
-- Not in v1, each with a specific message: tuple structs and tuple variants, traits (`impl X for Y`) and generic bounds, `()` as a value, `if let`/`while let`.
+- Generic parameters (`fn first<T>`) and every type annotation are parsed; the compiler ignores them, and `orbit-check` reads their trees (`type_trees`, below).
+- Not in the language, each with a specific message: tuple structs and tuple variants, traits (`impl X for Y`) and generic bounds, `()` as a value, `if let`/`while let`.
 
 ### Options for tools
 
@@ -79,11 +69,11 @@ Every `Diagnostic` has a `kind`: `UnexpectedEof` when the input stops in the mid
 
 Lowering rejects `Error` nodes ("this code has a syntax error, so it can't run"). Deleting the first or last token of any line of any OrbitScript file in the repository never loses an item before or after the break (`tests/recover.rs`).
 
-Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, `type A<T>`) and the `self: T` and `...rest: T` annotations are always kept. `type` aliases lower to nothing; `e as T` lowers like `(e)`.
+Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, `type A<T>`) and the `self: T` and `...rest: T` annotations are always kept. `type` aliases lower to nothing.
 
-## Lowering (step 2)
+## Lowering
 
-`lower` (in `src/lower/`) walks the AST once and builds one `hir::Function` per function body; `to_hir` adds the HIR's shared analysis, as the Lua front end does. Lowering needs no new HIR node: everything below is plain `Let`, `If`, `Goto`, calls and table constructors.
+`lower` (in `src/lower/`) walks the AST once and builds one `hir::Function` per function body; `to_hir` adds the HIR's shared analysis, as the Lua front end does. Apart from `Cast` (runtime `as`), lowering uses only HIR nodes Lua needs too: everything below is plain `Let`, `If`, `Goto`, calls and table constructors.
 
 ```mermaid
 flowchart LR
@@ -100,7 +90,7 @@ flowchart LR
 ### Names
 
 - A name resolves to the innermost binding, then to an item later in an enclosing block, then to the prelude: Lua 5.5's base functions and standard modules, plus `panic` (`error`). The prelude is read-only. Any other global needs `extern NAME;` (read and write) or `global NAME = value;` (a `Define`). There are no implicit globals; a typo is a compile error that suggests `extern`.
-- **Items are visible in their whole block**, as in Rust, so module-level functions can call each other in any order. An item used before its definition, from inside a function, becomes a local declared at the top of its block and assigned at the definition; others lower exactly as the proposal says (`LocalFunction`, `Let`). A use before the definition in the same function (where the value can't exist yet) is a compile error.
+- **Items are visible in their whole block**, as in Rust, so module-level functions can call each other in any order. An item used before its definition, from inside a function, becomes a local declared at the top of its block and assigned at the definition; others lower as the language design says (`LocalFunction`, `Let`). A use before the definition in the same function (where the value can't exist yet) is a compile error.
 - **Parameters are immutable** unless written `mut x`, like `let`. Pattern bindings are immutable unless `mut`.
 
 ### Expressions
@@ -110,15 +100,15 @@ flowchart LR
 - **`~` chains are right-nested** in the HIR (`a ~ b ~ c` as `a ~ (b ~ c)`), so the compiler's concatenation fusion turns them into one `Concat` op, as for Lua's `..`. Parentheses keep their meaning.
 - `obj.name(args)` is a method call (`obj:name(args)`); `a::b(args)` is a plain call of a field (`a.b(args)`), so library functions are called as `math::sqrt(x)` and `table::concat(t, ",")`.
 - A decimal integer literal that overflows `i64` is an error; hex, octal and binary literals wrap, as in Lua.
-- **Templates** become one `string.format` call: text with `%` doubled, `%s` for a plain hole (so `nil`, booleans and `__tostring` work), and a translated conversion for a spec: alignment `<`/`>` and width (`%-8s`, `%8s`), `+`, `#`, `.N` (decimal places, `%.Nf`, or `%.Ne` with `e`/`E`), types `x X o e E`, and `?` for `%q`. A template with no holes is a string constant. The specs the proposal sends to a stdlib helper (zero padding without a numeric type or precision, centering `^`, binary `b`, fill characters other than a space) are compile errors ("not supported yet") until that helper exists.
+- **Templates** become one `string.format` call: text with `%` doubled, `%s` for a plain hole (so `nil`, booleans and `__tostring` work), and a translated conversion for a spec: alignment `<`/`>` and width (`%-8s`, `%8s`), `+`, `#`, `.N` (decimal places, `%.Nf`, or `%.Ne` with `e`/`E`), types `x X o e E`, and `?` for `%q`. A template with no holes is a string constant. Specs `string.format` can't express (zero padding without a numeric type or precision, centering `^`, binary `b`, fill characters other than a space) are compile errors.
 - `expr?` lowers to `local v, e = expr; if v == nil then return nil, e end`, then `v`.
-- **`expr as T` and `expr as? T`** are casts checked while the program runs (`docs/design/orbitscript-syntax/runtime-as.md`). The parser always builds the target's type tree, whatever the parse options. A scalar, struct, enum or variant target (with or without `?`) lowers to one `Cast` node; `any` lowers to the value itself. A union keeps the value in a hidden local and tests each member's type: `local t = e; if not (is A or is B) then t = fail(t) end`, where `fail` raises `cannot cast number to int | string` (or gives `nil` for `as?`). Lowering resolves the target itself: a type parameter of the enclosing `fn` or `impl`, a `type` alias in an enclosing block, generic arguments and structural types are compile errors, a struct or enum of the module shadows a built-in name, and any other path is evaluated like a `match` pattern's path.
+- **`expr as T` and `expr as? T`** are casts checked while the program runs ([runtime-as.md](orbitscript-syntax/runtime-as.md)). The parser always builds the target's type tree, whatever the parse options. A scalar, struct, enum or variant target (with or without `?`) lowers to one `Cast` node; `any` lowers to the value itself. A union keeps the value in a hidden local and tests each member's type: `local t = e; if not (is A or is B) then t = fail(t) end`, where `fail` raises `cannot cast number to int | string` (or gives `nil` for `as?`). Lowering resolves the target itself: a type parameter of the enclosing `fn` or `impl`, a `type` alias in an enclosing block, generic arguments and structural types are compile errors, a struct or enum of the module shadows a built-in name, and any other path is evaluated like a `match` pattern's path.
 
 ### Control flow
 
 - `loop`, `while` and `for` become `While`/`NumericFor`/`GenericFor`. `continue` jumps to a label at the end of the body; a labelled `break` from an inner loop jumps to a label after the outer loop; `break value` assigns the loop's hidden result first. `(a..=b).rev()` and `.step_by(n)` set the step of a `NumericFor`. `a..b` sets its `exclusive` flag; `(a..b).rev()` counts down from `b - 1` to `a` inclusive, as Rust's does (for an integer range; on a float range it counts down from `b - 1` in steps of 1).
 - **`match`** evaluates its scrutinee into hidden locals (one per tuple item for `match (a, b)`). Without guards it is an `if` chain whose first catch-all arm becomes the `else`. With guards, each arm's body ends with a `Goto` to a label after the `match`, so a failed guard falls through to the next arm. When no arm matches, the `match` raises `no match arm for value of type T` (the value's `__name`, or its `type`).
-- Pattern tests: literals compare with `==`; a range also checks `type(v)` is `"number"` or `"string"` (so other values don't raise a comparison error); a struct or data-variant pattern compares `getmetatable(v)` with the type's table, then tests its fields; a unit variant compares identity with `rawequal`. `|` alternatives may not bind names yet. Field names in struct patterns and literals, and variant names in patterns, are checked against the definition when it is in the same module.
+- Pattern tests: literals compare with `==`; a range also checks `type(v)` is `"number"` or `"string"` (so other values don't raise a comparison error); a struct or data-variant pattern compares `getmetatable(v)` with the type's table, then tests its fields; a unit variant compares identity with `rawequal`. `|` alternatives may not bind names. Field names in struct patterns and literals, and variant names in patterns, are checked against the definition when it is in the same module.
 
 - **`scope stmt;`** (and `scope { ... }`) lowers to a closure in a box with a `<close>` local holding it, so Lua's to-be-closed machinery runs it on every exit, in reverse order with `let scope` bindings, with no HIR or VM support of its own:
 
@@ -126,7 +116,7 @@ flowchart LR
   local _ <close> = setmetatable({ function() stmt end }, scope_meta)
   ```
 
-  `scope_meta` is `{ __close = function(box) box[1]() end }`, built once per chunk in a hidden local of the main function. The action reads the current values of the locals it names (they become upvalues). `return`, `?`, and a `break` or `continue` that would leave the action are compile errors; loops and closures inside it keep their own. Each run costs a closure and a table; a `StmtKind::Defer` compiled to inline code could remove that later without changing any `.orb` program.
+  `scope_meta` is `{ __close = function(box) box[1]() end }`, built once per chunk in a hidden local of the main function. The action reads the current values of the locals it names (they become upvalues). `return`, `?`, and a `break` or `continue` that would leave the action are compile errors; loops and closures inside it keep their own. Each run costs a closure and a table; a dedicated HIR statement compiled to inline code could remove that without changing any `.orb` program.
 
 ### Items
 
@@ -135,12 +125,11 @@ flowchart LR
 - **`impl`.** Methods go in the methods table and on the type table (the struct, or the enum's namespace), so `P::method(p)` and `pcall(P::method, p)` work wherever `P` is reachable; associated functions go only on the type table, so instances don't see them. A method and an associated function can't share a name, and an enum method can't be named like a variant. Names starting with `__` (and `const __mode = "k"`) go on the metatable: the struct's table, or every variant's metatable. A user `__index` is wrapped so methods are found first, then the user's function or table. `impl` blocks must be in the module that defines the struct or enum (Rust's rule for inherent impls), so the front end knows every variant metatable a metamethod goes on.
 - **Modules.** `use a::b;` is `local b = require("a.b")`; `use a::b::{x, y};` requires once and copies the fields into locals; `use a::b as c;` renames. When the module has a top-level `pub` item, the chunk builds an exports table and returns it; a top-level `return` in such a module is an error.
 
-## Running OrbitScript (step 3)
+## Running OrbitScript
 
 - OrbitScript is always built in: it is the runtime's own language, so there is no Cargo feature or runtime switch that leaves it out. `orbit` (the crate) has `Compiler::compile_orbitscript` and `Language::OrbitScript` for chunks, and `orbit::Isolate` installs the VM's second compiler hook, `Runtime::compile_orbitscript`. Source chunks named `@path.orb` use it, so `loadfile`, `dofile` and the CLI's script pick the language by file name. `load` of a string, `-e`, standard input and interactive mode stay Lua.
 - `require` finds `.orb` modules on `package.path`: the default path has `/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb` after `lua`'s entries, and the Lua searcher picks the compiler by the file name. There is no `package.orbpath` and no extra searcher, so `package.searchers` keeps `lua`'s four entries. `use a::b;` becomes `require("a.b")`, so an `.orb` module can load a Lua module and the other way round.
-- `orbit script.orb` runs a script, and `orbitc` compiles and lists `.orb` files and prints their HIR with `--hir`. `--ast` is Lua-only for now.
-- **Size** (cloud x86_64, Ubuntu 24.04, release build with the committed PGO profile, stripped): `orbit` was 1,928,592 bytes without OrbitScript and 2,238,000 with it (+302 KiB), measured while it was still an optional feature. `orbitc` grows by the same amount. In an unstripped build, `orbit-orb-syntax`'s own symbols come to 258,560 bytes, against 114,911 for the Lua front end. The largest functions are the lowering of statements and expressions and the parser's `primary` and `item`. Shrinking them is follow-up work.
+- `orbit script.orb` runs a script, and `orbitc` compiles and lists `.orb` files and prints their HIR with `--hir`; `--ast` prints Lua syntax trees only.
 
 ## Binary size
 
@@ -148,7 +137,7 @@ A few small helpers are called from hundreds of places: the HIR's `Function::add
 
 The HIR's capture analysis and the compiler's operand-origin table also sort packed `u128` keys with one shared `sort_unstable`, instead of instantiating a stable sort for each element type.
 
-Measured on cloud x86_64 (Ubuntu 24.04, release without PGO, stripped `orbit`): 113 KiB smaller in all. The Lua-only build (OrbitScript was then optional) was 43 KiB smaller, and OrbitScript's cost fell from 279 KiB to 208 KiB. Compiling costs about 3 to 4% more instructions (valgrind: 3.9% for 200 loads of the suite's `strings.lua`, 3.0% for `bench/orb/compile.lua`), which is within the noise of wall time. The bytecode produced is unchanged, so scripts run at the same speed.
+Measured on cloud x86_64 (Ubuntu 24.04, release without PGO, stripped `orbit`): 113 KiB smaller in all, of which 71 KiB in OrbitScript's front end, which costs about 208 KiB. In an unstripped build, `orbit-orb-syntax`'s own symbols are about twice the Lua front end's; the largest functions are the lowering of statements and expressions and the parser's `primary` and `item`. Compiling costs about 3 to 4% more instructions (valgrind: 3.9% for 200 loads of the suite's `strings.lua`, 3.0% for `bench/orb/compile.lua`), which is within the noise of wall time. The bytecode produced is unchanged, so scripts run at the same speed.
 
 Sharing more code between the two front ends would save little (about 5 to 10 KiB, estimated): they share the HIR and everything after it already, and OrbitScript's extra size is its desugaring, which Lua doesn't need.
 
@@ -156,6 +145,6 @@ Sharing more code between the two front ends would save little (about 5 to 10 Ki
 
 ## Testing
 
-`tests/parse.rs` checks tree shapes as S-expressions, every example in the proposal (`tests/programs/proposal.orb`), error messages, and a deterministic mutation run that must never panic.
+`tests/parse.rs` checks tree shapes as S-expressions, every example in the language design (`tests/programs/proposal.orb`), error messages, and a deterministic mutation run that must never panic.
 
 `tests/run.rs` lowers programs, compiles them and runs them on the VM, checking what they print: each construct above, a runnable tour (`tests/programs/tour.orb`), the exports table seen from Lua, and compile errors. Its mutation run lowers mutants of the tour and checks that every one that lowers passes `orbit_hir::verify` and never panics the compiler.

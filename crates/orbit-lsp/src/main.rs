@@ -1,5 +1,5 @@
-//! `orbit-lsp`: the language server for OrbitScript and Lua (ADR-12, D2 and
-//! D9), speaking LSP over standard input and output.
+//! `orbit-lsp`: the language server for OrbitScript and Lua (ADR-12),
+//! speaking LSP over standard input and output.
 //!
 //! The protocol is handled by OrbitScript scripts bundled in the binary
 //! (`scripts/`): framing, JSON, the open documents, positions and turning

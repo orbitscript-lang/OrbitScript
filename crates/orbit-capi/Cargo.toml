@@ -20,7 +20,7 @@ orbit-dap = { path = "../orbit-dap", optional = true }
 # States created from C (`lua_newstate`, ADR-10): for the shared library
 # that programs embedding Lua link to.
 host = []
-# C states can be debugged (ADR-12, D5): `orbit_debug_listen` and
+# C states can be debugged (ADR-12): `orbit_debug_listen` and
 # `ORBIT_DEBUG` start the DAP server.
 debugger = ["host", "orbit/debugger", "dep:orbit-dap"]
 

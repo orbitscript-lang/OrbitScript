@@ -1,4 +1,4 @@
-//! Debugging states that C programs create (ADR-12, D5, D10): each one is
+//! Debugging states that C programs create (ADR-12): each one is
 //! served at creation unless made with `ORBIT_STATE_NO_DEBUGGER`, so that
 //! `orbit_debug_listen`, or `ORBIT_DEBUG=1` when the state is made, can
 //! start the process's debug server from any thread. Until an editor

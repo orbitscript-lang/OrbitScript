@@ -20,7 +20,7 @@ pub(super) struct Typed<'x, 'm, 'c> {
     pub ast: &'x ast::Ast,
     pub syms: &'x SymbolView<'m, 'c>,
     pub types: &'x Types,
-    /// Strict mode (proposal T13): conditions must be `bool`.
+    /// Strict mode: conditions must be `bool`.
     pub strict: bool,
     /// The module's text, when it gets lints (it isn't a stub or a bundled module).
     pub lint_text: Option<&'x [u8]>,

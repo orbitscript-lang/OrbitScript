@@ -111,7 +111,7 @@ impl Keyword {
     }
 }
 
-/// Every operator and separator, including those the first-light subset rejects.
+/// Every operator and separator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Punct {
     Plus,

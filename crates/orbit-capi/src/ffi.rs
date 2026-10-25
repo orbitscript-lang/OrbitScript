@@ -80,6 +80,7 @@ pub(crate) struct Bridge {
     /// In a state C created, its isolate, which the state owns.
     isolate: Cell<*mut orbit::Isolate>,
     /// A state C created that debuggers can attach to ([`crate::debug`]).
+    #[cfg(feature = "host")]
     debuggable: Cell<bool>,
     /// The native standing for each C hook function installed so far.
     hooks: RefCell<Vec<(usize, NativeRef)>>,
@@ -193,6 +194,7 @@ pub(crate) fn install(s: &mut Stack<'_>) {
         st: Shared::default(),
         host: Cell::new(std::ptr::null_mut()),
         isolate: Cell::new(std::ptr::null_mut()),
+        #[cfg(feature = "host")]
         debuggable: Cell::new(false),
         hooks: Default::default(),
         hook_ctx: Cell::new(std::ptr::null_mut()),

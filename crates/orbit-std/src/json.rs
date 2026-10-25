@@ -1,5 +1,5 @@
 //! The `std.json` module: JSON text to and from values, over
-//! `serde_json` (ADR-12, D13).
+//! `serde_json` (ADR-12).
 //!
 //! Reached as `require "std.json"` (`use std::json;`), never as a
 //! global, so programs that bring their own `json` module keep it.

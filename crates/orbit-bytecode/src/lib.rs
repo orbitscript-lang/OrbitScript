@@ -358,7 +358,7 @@ pub enum Op {
     ForLoop { base: Reg, back: Offset },
     /// Generic `for` call: `R[base]` is the iterator, `R[base+1]` the state,
     /// `R[base+2]` the control value and `R[base+3]` the closing value
-    /// (ignored at first light). Copies the first three to `R[base+4..]` and
+    /// (a to-be-closed variable, closed when the loop ends). Copies the first three to `R[base+4..]` and
     /// calls `R[base+4](R[base+5], R[base+6])` with `nvars` results, which
     /// land in `R[base+4..base+4+nvars]`, the loop variables.
     GenericCall { base: Reg, nvars: u8 },

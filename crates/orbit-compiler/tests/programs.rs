@@ -1,4 +1,4 @@
-//! Compiles the first-light programs and benchmarks through the real front end and checks
+//! Compiles the `tests/first-light` programs and benchmarks through the real front end and checks
 //! that the bytecode is well formed: every register, cell, capture, constant, cache slot,
 //! child and jump target in range.
 

@@ -13,7 +13,7 @@
 //! [`ProtoCode`] keeps a mark of the breakpoint generation it was last
 //! checked against, so setting breakpoints is one counter bump plus a scan
 //! of the source's prototypes to resolve lines, and a function is checked
-//! again the next time it is entered. No code is patched (ADR-12, D6).
+//! again the next time it is entered. No code is patched (ADR-12).
 //!
 //! A stop calls the host's [`DebugEvents::stopped`] from a native run above
 //! a hook marker frame, as a Lua hook is called, so the host sees the

@@ -1,6 +1,6 @@
 # Spike S0: GC and dispatch
 
-Status: Done. It decided ADR-2 (heap and GC) and ADR-4 (dispatch) with numbers.
+Status: Report. Its measurements decided ADR-2 (heap and GC) and ADR-4 (dispatch).
 
 The spike's code was throwaway: its own Cargo workspace on Rust 1.95, never imported by the product crates, so gc-arena and boa_gc never reached them. It was removed before the first release and stays in git history under `spike/` at commit `403fdb6` (`git checkout 403fdb6 -- spike` restores it). Paths below are relative to that directory.
 
@@ -68,7 +68,7 @@ Stripped `spike` binary with only one VM linked: arena 442 KiB, gc-arena 430 KiB
 1. **Interpreter speed favors gc-arena by 10 to 20%.** `Gc` pointers are direct. An arena handle costs a page lookup, two bounds checks and an `Option` check per access, and upvalue reads take two of those. On fib that is about 58 extra instructions per call (callgrind: 91M vs 77M for fib(25)). Removing per-call `Rc` refcounts (frames and closures now hold proto ids into an immutable code store) gained only 3%, so the rest is handle resolution.
 2. **Allocation-heavy code favors the arena by about 40%.** On gc churn the arena beats PUC Lua (0.77x) and gc-arena trails it (1.27x). Arena slots are reused from a free list with no `malloc`/`free` per object, and sweeping walks dense pages.
 3. **Memory favors the arena.** It is at or below PUC Lua for closures and strings and 14 bytes over for tables. gc-arena is 1.5 to 2x Lua for tables and closures because of the header plus one `malloc` per object.
-4. **Neither matches Lua's RAM on big string-keyed tables** (str peak: Lua 134 MiB, arena 329, gc-arena 376). Lua's own live data after the fill loop is 86 MiB. Our costs are layout, not the GC choice: `HashMap<Key, Value>` is 32 bytes an entry at <= 87.5% load with a transient double during resize, and strings are a slot plus a separate byte allocation. Lua packs 24-byte nodes at 100% load and keeps string bytes inline. Stream B needs its own hash part and inline short strings under either option. gc-arena cannot allocate runtime-sized objects safely (its `unsize!` only takes compile-time arrays), so inline strings there would need size classes or `unsafe`.
+4. **Neither matches Lua's RAM on big string-keyed tables** (str peak: Lua 134 MiB, arena 329, gc-arena 376). Lua's own live data after the fill loop is 86 MiB. Our costs are layout, not the GC choice: `HashMap<Key, Value>` is 32 bytes an entry at <= 87.5% load with a transient double during resize, and strings are a slot plus a separate byte allocation. Lua packs 24-byte nodes at 100% load and keeps string bytes inline. The product needs its own hash part and inline short strings under either option. gc-arena cannot allocate runtime-sized objects safely (its `unsize!` only takes compile-time arrays), so inline strings there would need size classes or `unsafe`.
 5. **Ephemerons and `__gc` resurrection work on both** (tests pass). On the arena they are ordinary code in the atomic phase, as in `lgc.c`. On gc-arena they work only if every cycle is driven by hand through `finalize`: ephemeron values are stored as `GcWeak` and resurrected each cycle while their key lives, and each resurrection needs another `finish_marking` pass. Tracing can't ask whether a key is marked, and one stray `collect_debt` call that runs a cycle straight through would silently drop every ephemeron value.
 6. **gc-arena's pacing counts objects, not bytes.** Large strings and table growth are invisible to it unless we feed `adjust_debt` by hand. `collectgarbage("count")` and PUC-style tuning need byte accounting, which we'd have to layer on top.
 7. **gc-arena has no generational mode.** P5 plans one, and Lua 5.5 exposes it. With gc-arena that means waiting for upstream or forking it.
@@ -89,8 +89,8 @@ Stripped `spike` binary with only one VM linked: arena 442 KiB, gc-arena 430 KiB
 
 1. **Superinstructions pay off on branchy, call-heavy code:** 14% on fib for both VMs, neutral on loop (whose hot loop is already `ForLoop`), neutral elsewhere. Keep a plain `match` and add a small peephole set, driven by profiles.
 2. **Closure-threaded code is slower everywhere:** 1.6x the match loop on fib, 1.3x on loop. Each boxed closure is an indirect call that returns a control enum to the dispatcher, which adds work instead of removing it. It also doesn't fit gc-arena: closures that capture `'gc` constants can't live outside the arena. Reject it.
-3. **We are 1.5 to 2x behind PUC Lua on pure interpretation** (fib, loop), and at or ahead of it on string and allocation work. The gap is per-instruction overhead that computed goto would hide and safe Rust can't: bounds checks on every register and code access, `Result` checks after every fallible op, nil-filling frames, and 12-byte instructions. It's the target for stream C: a register window slice per frame (one bounds check per frame instead of per access), a 4 or 8 byte instruction encoding, infallible fast paths for int/int arithmetic, and more superinstructions.
-4. **Instruction width:** our `Op` enum is 12 bytes because of the fused forms carrying a 32-bit target. PUC uses 4. ADR-4's open question stays open; a packed `u32`/`u64` encoding with a decoder is worth measuring in stream C.
+3. **We are 1.5 to 2x behind PUC Lua on pure interpretation** (fib, loop), and at or ahead of it on string and allocation work. The gap is per-instruction overhead that computed goto would hide and safe Rust can't: bounds checks on every register and code access, `Result` checks after every fallible op, nil-filling frames, and 12-byte instructions. It set the targets for the interpreter: a register window slice per frame (one bounds check per frame instead of per access), a 4 or 8 byte instruction encoding, infallible fast paths for int/int arithmetic, and more superinstructions.
+4. **Instruction width:** our `Op` enum is 12 bytes because of the fused forms carrying a 32-bit target. PUC uses 4. A packed encoding was worth measuring; the product's `Op` is 8 bytes ([vm.md](vm.md)).
 
 ### Embedding API prototype (`embed/`)
 
@@ -107,10 +107,10 @@ Friction found:
 - **Values taken before a call must be re-read after it** (`cx.arg(1)` again), or converted to Rust data (`i64`, `String`) first.
 - **Not yet covered:** raw values from two different `Lua` instances can be mixed. That yields a wrong object, not memory unsafety. An invariant brand lifetime on `Ctx` (the generativity pattern gc-arena uses) would close it. Also untested: yielding across a native (needs `lua_callk`-style continuations), and userdata.
 
-## Recommendation
+## Outcome
 
 - **ADR-2: build our own safe typed arena, not gc-arena or boa_gc.** boa_gc gives the simplest embedding code, but it can't express `__gc` without corrupting memory, and it is slower and larger than the arena with no incremental mode. gc-arena is 10 to 20% faster to interpret today, but it loses on memory by 1.5 to 2x, on allocation-heavy code, on byte accounting, and on generational mode, and it dictates a resumable design for the whole stdlib. Most of the arena's interpreter overhead is fixable: flat per-kind storage with a reserved address range or larger pages, caching resolved upvalue handles in the frame, and generation-checked handles in debug builds.
-- **ADR-4: plain `match` plus superinstructions; reject closure threading.** Measure a packed instruction encoding early in stream C.
+- **ADR-4: plain `match` plus superinstructions; reject closure threading.** A packed instruction encoding to be measured early.
 
 ## Simplifications (why this is not a product)
 
