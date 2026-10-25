@@ -3,7 +3,7 @@
 //! Every function is a [`NativeFn`] registered with the VM, one table per
 //! library, so hosts can open only the libraries they want. The `string`,
 //! `utf8`, `table` and `math` libraries are each behind a Cargo feature of
-//! the same name ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
+//! the same name ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
 
 mod base;
 mod builtins;

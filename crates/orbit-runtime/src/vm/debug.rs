@@ -7,7 +7,7 @@
 //! the top down. Meta frames (and hook frames) are not levels; they name
 //! the activation above them.
 //!
-//! [debug design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/debug.md
+//! [debug design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/debug.md
 
 use std::fmt::Write as _;
 

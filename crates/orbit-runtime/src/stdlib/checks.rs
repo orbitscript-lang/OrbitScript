@@ -1,5 +1,5 @@
 //! How much `load` checks a binary chunk before linking it
-//! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#the-verifier)).
+//! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#the-verifier)).
 //!
 //! The build sets the most that can be checked: the `verify` feature compiles
 //! layer 1 of the verifier (structure) and `verify-flow` layer 2 (data

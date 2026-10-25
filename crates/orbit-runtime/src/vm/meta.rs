@@ -7,7 +7,7 @@
 //! returns. Chains through tables (`__index = other_table`) are followed
 //! here without calls.
 //!
-//! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#metamethods
+//! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#metamethods
 
 use std::borrow::Cow;
 

@@ -14,7 +14,7 @@
 //! the jump. "Top" is the register just past the last value produced by the
 //! most recent open-ended call or `Vararg` (one whose count is [`MULTI`]).
 //!
-//! [VM design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md
+//! [VM design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md
 
 pub mod format;
 pub mod number;

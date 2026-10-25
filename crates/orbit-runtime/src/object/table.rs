@@ -1,5 +1,5 @@
 //! Lua tables: an array part for keys `1..=n` and an open-addressing hash
-//! part for everything else ([VM design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm.md)).
+//! part for everything else ([VM design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md)).
 //!
 //! Reads take the heap immutably (string keys are hashed and, for long
 //! strings, compared through it). Stores are two-phase: [`Table::find_slot`]

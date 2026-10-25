@@ -1,7 +1,7 @@
 //! `orbit`: command-line interpreter for Lua 5.5 and OrbitScript.
 //!
 //! `orbit [options] [script [args]]` takes the reference `lua`'s options
-//! ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#the-command-line)):
+//! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#the-command-line)):
 //! `-e stat`, `-l mod`, `-l g=mod`, `-i`, `-v`, `-E`, `-W`, `--` and `-`,
 //! plus `--lock-cpath`, which keeps C modules to the search path `orbit`
 //! starts with (ADR-8), and `--no-ffi`, which leaves out the `std.ffi`

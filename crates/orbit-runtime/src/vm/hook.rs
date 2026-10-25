@@ -11,7 +11,7 @@
 //! tracebacks and, like a boundary frame, ends the call. Lua hooks can't yield (the reference raises "attempt to yield
 //! across a C-call boundary"), so the nested call costs no capability.
 //!
-//! [debug design]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/debug.md
+//! [debug design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/debug.md
 
 use crate::object::{NativeId, Value};
 use orbit_bytecode::{MULTI, Op};

@@ -1,4 +1,4 @@
-//! The `os` library ([design](https://github.com/tymlipari/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#os)).
+//! The `os` library ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#os)).
 
 use std::time::Instant;
 

@@ -1,7 +1,7 @@
 //! The `coroutine` library ([VM semantics]). The VM does the switching;
 //! these natives check arguments and shape results.
 //!
-//! [VM semantics]: https://github.com/tymlipari/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
+//! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use crate::object::{Gc, Thread, Value};
 use crate::vm::{CallOutcome, CoStatus, LuaError, NativeCtx, NativeFn, NativeReturn, ResumeOk};
