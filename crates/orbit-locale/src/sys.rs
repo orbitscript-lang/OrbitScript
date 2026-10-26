@@ -525,13 +525,24 @@ mod imp {
         /// C runtime gives them (`"Portuguese_Brazil.1252"` for
         /// `"Portuguese"`). `None` if one isn't available.
         pub(crate) fn new(names: &Names) -> Option<(LocaleObj, Names)> {
-            let name = c_string(&composite(names));
-            let canonical = with_thread_locale(&name, || {
-                std::array::from_fn(|cat| {
-                    // SAFETY: a valid category; copied at once.
-                    unsafe { copy_c(libc::setlocale(LC[cat], std::ptr::null())) }
-                })
-            })?;
+            // One category at a time: given a composite name, the C runtime
+            // drops the parts it doesn't know instead of failing.
+            let pin = ThreadPin::set(lit(b"C\0"))?;
+            let mut canonical: Names = Default::default();
+            for (cat, n) in names.iter().enumerate() {
+                let n = c_string(n);
+                // SAFETY: a valid category and a NUL-terminated name, on
+                // this thread's own locale; the result is copied at once.
+                let r = unsafe { libc::setlocale(LC[cat], n.as_ptr()) };
+                if r.is_null() {
+                    pin.restore();
+                    return None;
+                }
+                // SAFETY: as above.
+                canonical[cat] = unsafe { copy_c(r) };
+            }
+            pin.restore();
+            let name = c_string(&composite(&canonical));
             // SAFETY: a valid category and name.
             let loc = unsafe { _create_locale(libc::LC_ALL, name.as_ptr()) };
             if loc.is_null() {
