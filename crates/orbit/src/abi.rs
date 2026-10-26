@@ -215,6 +215,23 @@ pub fn category_of(code: u8) -> crate::LocaleCategory {
     }
 }
 
+/// A [`crate::LocaleScope`] across the boundary.
+pub fn scope_code(s: crate::LocaleScope) -> u8 {
+    match s {
+        crate::LocaleScope::Default => 0,
+        crate::LocaleScope::Thread => 1,
+        crate::LocaleScope::Process => 2,
+    }
+}
+
+pub fn scope_of(code: u8) -> crate::LocaleScope {
+    match code {
+        1 => crate::LocaleScope::Thread,
+        2 => crate::LocaleScope::Process,
+        _ => crate::LocaleScope::Default,
+    }
+}
+
 /// A [`crate::LocaleMode`] across the boundary: 0 the isolate's, 1 the
 /// process's.
 pub fn locale_mode_code(m: crate::LocaleMode) -> u8 {
@@ -407,11 +424,12 @@ pub trait StackAbi {
     extern "C" fn control<'a>(&'a mut self) -> ControlMut<'a>;
 
     /// [`crate::stack::Stack::set_locale`]: `category` a
-    /// [`category_code`].
+    /// [`category_code`], `scope` a [`scope_code`].
     extern "C" fn set_locale<'b>(
         &mut self,
         category: u8,
         name: SOption<Slice<'b, u8>>,
+        scope: u8,
     ) -> SOption<SVec<u8>>;
     extern "C" fn decimal_point(&self) -> SVec<u8>;
     /// A [`locale_mode_code`].

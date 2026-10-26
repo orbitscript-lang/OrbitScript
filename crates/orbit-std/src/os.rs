@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, TableArg, Type};
 use orbit::{
-    Call, Error, LocaleCategory, OrbitStr, OrbitString, Ret, Scope, Table, TimeParts, native,
+    Call, Error, LocaleCategory, LocaleScope, OrbitStr, OrbitString, Ret, Scope, Table, TimeParts,
+    native,
 };
 
 use crate::sys::{ExitResults, FileFailure, exit_results, file_failure, os_bytes, os_path, shell};
@@ -110,13 +111,21 @@ fn setlocale(
     s: &mut Stack<'_>,
     locale: Option<OrbitString>,
     category: Option<OrbitString>,
+    scope: Option<OrbitString>,
 ) -> Result<Option<OrbitString>, Fail> {
+    let invalid = |arg, name: &OrbitString| {
+        Fail::arg(arg, OrbitString::concat(&[b"invalid option '", name, b"'"]))
+    };
     let category = match category {
         None => LocaleCategory::All,
-        Some(cat) => LocaleCategory::from_name(&cat)
-            .ok_or_else(|| Fail::arg(2, OrbitString::concat(&[b"invalid option '", &cat, b"'"])))?,
+        Some(cat) => LocaleCategory::from_name(&cat).ok_or_else(|| invalid(2, &cat))?,
     };
-    Ok(s.set_locale(category, locale.as_ref().map(OrbitStr::from)))
+    // OrbitScript's addition (ADR-13): lua5.5 ignores a third argument.
+    let scope = match scope {
+        None => LocaleScope::Default,
+        Some(sc) => LocaleScope::from_name(&sc).ok_or_else(|| invalid(3, &sc))?,
+    };
+    Ok(s.set_locale(category, locale.as_ref().map(OrbitStr::from), scope))
 }
 
 /// The isolate's time category, for `os.date`.

@@ -3,7 +3,7 @@
 use std::any::{Any, TypeId};
 use std::ffi::c_void;
 
-use orbit_runtime::locale::{Category, LocaleMode, TimeParts};
+use orbit_runtime::locale::{Category, LocaleMode, LocaleScope, TimeParts};
 use orbit_runtime::object::number::float_to_int;
 use orbit_runtime::object::table as tbl;
 use orbit_runtime::object::value::raw_eq;
@@ -1841,18 +1841,19 @@ impl<'s> Stack<'s> {
 
     // ---- the locale (ADR-13) ----------------------------------------------
 
-    /// `os.setlocale(name, category)`: switch `category` to locale `name`,
-    /// or with no name, ask. The locale's name, or `None` if it isn't
-    /// available.
+    /// `os.setlocale(name, category, scope)`: switch `category` to locale
+    /// `name`, or with no name, ask. The locale's name, or `None` if it
+    /// isn't available.
     pub fn set_locale(
         &mut self,
         category: Category,
         name: Option<OrbitStr<'_>>,
+        scope: LocaleScope,
     ) -> Option<OrbitString> {
         let name = name.as_ref().map(|n| n.as_bytes());
         self.ctx
             .vm
-            .set_locale(category, name)
+            .set_locale(category, name, scope)
             .map(OrbitString::from)
     }
 

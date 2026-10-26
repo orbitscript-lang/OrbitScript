@@ -368,6 +368,10 @@ mod imp {
             // SAFETY: the thread's locale before `new`.
             unsafe { uselocale(self.0) };
         }
+
+        /// Leave the locale on the thread for good. The caller keeps the
+        /// object alive for as long as the thread may use it.
+        pub(crate) fn keep(self) {}
     }
 
     /// The process's `setlocale(category, name)` (`None` is `LC_ALL`): the
@@ -639,6 +643,10 @@ mod imp {
                 }
             }
         }
+
+        /// Leave the locale on the thread for good (the C runtime keeps
+        /// its own copy).
+        pub(crate) fn keep(self) {}
     }
 
     pub(crate) fn process_setlocale(cat: Option<usize>, name: Option<&[u8]>) -> Option<Vec<u8>> {

@@ -42,7 +42,7 @@ mod libc_locale {
     use std::rc::Rc;
 
     use orbit_runtime::locale::{
-        Category, CharTables, Collate, Locale, LocaleMode, LocaleProvider, TimeParts,
+        Category, CharTables, Collate, Locale, LocaleMode, LocaleProvider, LocaleScope, TimeParts,
     };
 
     use crate::sys::{self, LocaleObj, Names, ThreadPin, TimeNames};
@@ -175,6 +175,9 @@ mod libc_locale {
         process_seen: Vec<u8>,
         /// Runs [`LocaleProvider::enter`] started and not yet left.
         depth: u32,
+        /// The last change in this run asked for `"thread"`: leave the
+        /// locale on the thread when the run ends.
+        sticky: bool,
         /// While running in isolate mode with a locale other than C: the
         /// object installed on the thread (kept alive until then) and the
         /// thread's locale before.
@@ -199,6 +202,7 @@ mod libc_locale {
                 time: None,
                 process_seen: Vec::new(),
                 depth: 0,
+                sticky: false,
                 pin: None,
             }
         }
@@ -311,19 +315,35 @@ mod libc_locale {
     }
 
     impl LocaleProvider for LibcProvider {
-        fn set(&mut self, category: Category, name: Option<&[u8]>) -> Option<Vec<u8>> {
+        fn set(
+            &mut self,
+            category: Category,
+            name: Option<&[u8]>,
+            scope: LocaleScope,
+        ) -> Option<Vec<u8>> {
             let cat = index(category);
-            match (self.mode, name) {
-                (LocaleMode::Isolate, None) => Some(self.name_of(cat)),
-                (LocaleMode::Isolate, Some(name)) => self.set_own(cat, name),
-                (LocaleMode::Process, _) => {
-                    let r = sys::process_setlocale(cat, name);
-                    if r.is_some() && name.is_some() {
-                        self.adopt_process();
+            if self.mode == LocaleMode::Process || scope == LocaleScope::Process {
+                let r = sys::process_setlocale(cat, name);
+                if let (Some(_), Some(name)) = (&r, name) {
+                    match self.mode {
+                        LocaleMode::Process => self.adopt_process(),
+                        // The isolate's own follows what the script asked
+                        // the process for.
+                        LocaleMode::Isolate => {
+                            self.set_own(cat, name);
+                        }
                     }
-                    r
                 }
+                return r;
             }
+            let Some(name) = name else {
+                return Some(self.name_of(cat));
+            };
+            let r = self.set_own(cat, name);
+            if r.is_some() {
+                self.sticky = scope == LocaleScope::Thread;
+            }
+            r
         }
 
         fn locale(&self) -> Locale {
@@ -399,8 +419,27 @@ mod libc_locale {
 
         fn leave(&mut self) {
             self.depth -= 1;
-            if self.depth == 0 {
-                if let Some((_obj, pin)) = self.pin.take() {
+            if self.depth > 0 {
+                return;
+            }
+            let sticky = std::mem::take(&mut self.sticky);
+            if sticky && self.pin.is_none() && self.mode == LocaleMode::Isolate {
+                // The C locale has no object of its own while running; the
+                // thread gets one to keep.
+                let c: Names = std::array::from_fn(|_| b"C".to_vec());
+                if let Some((obj, _)) = LocaleObj::new(&c) {
+                    let obj = Rc::new(obj);
+                    self.pin = Some((Rc::clone(&obj), ThreadPin::new(&obj)));
+                }
+            }
+            if let Some((obj, pin)) = self.pin.take() {
+                if sticky {
+                    // The thread keeps using the object after this isolate
+                    // is gone, so it is never freed (one per `"thread"`
+                    // change that outlives its run).
+                    std::mem::forget(obj);
+                    pin.keep();
+                } else {
                     pin.restore();
                 }
             }
@@ -414,15 +453,29 @@ mod libc_locale {
         #[cfg(unix)]
         fn has(name: &str) -> bool {
             let mut p = LibcProvider::default();
-            p.set(Category::All, Some(name.as_bytes())).is_some()
+            p.set(Category::All, Some(name.as_bytes()), LocaleScope::Default)
+                .is_some()
         }
 
         #[test]
         fn starts_in_c() {
             let mut p = LibcProvider::default();
-            assert_eq!(p.set(Category::All, None), Some(b"C".to_vec()));
-            assert_eq!(p.set(Category::All, Some(b"POSIX")), Some(b"C".to_vec()));
-            assert_eq!(p.set(Category::Numeric, Some(b"no_SUCH.locale")), None);
+            assert_eq!(
+                p.set(Category::All, None, LocaleScope::Default),
+                Some(b"C".to_vec())
+            );
+            assert_eq!(
+                p.set(Category::All, Some(b"POSIX"), LocaleScope::Default),
+                Some(b"C".to_vec())
+            );
+            assert_eq!(
+                p.set(
+                    Category::Numeric,
+                    Some(b"no_SUCH.locale"),
+                    LocaleScope::Default
+                ),
+                None
+            );
             assert!(p.locale().c_numbers());
         }
 
@@ -434,12 +487,12 @@ mod libc_locale {
             }
             let mut p = LibcProvider::default();
             assert_eq!(
-                p.set(Category::Numeric, Some(b"pt_BR.utf8")),
+                p.set(Category::Numeric, Some(b"pt_BR.utf8"), LocaleScope::Default),
                 Some(b"pt_BR.utf8".to_vec())
             );
             assert_eq!(p.locale().decimal_point(), b",");
             assert!(p.locale().byte_order());
-            let all = p.set(Category::All, None).unwrap();
+            let all = p.set(Category::All, None, LocaleScope::Default).unwrap();
             if cfg!(target_env = "gnu") {
                 assert!(all.starts_with(b"LC_CTYPE=C;LC_NUMERIC=pt_BR.utf8;LC_TIME=C;"));
             }
@@ -457,7 +510,8 @@ mod libc_locale {
                 return;
             }
             let mut p = LibcProvider::default();
-            p.set(Category::All, Some(b"pt_BR.iso88591")).unwrap();
+            p.set(Category::All, Some(b"pt_BR.iso88591"), LocaleScope::Default)
+                .unwrap();
             let l = p.locale();
             assert!(l.chars().is(0xe1, orbit_runtime::locale::class::ALPHA));
             assert_eq!(l.chars().upper[0xe1], 0xc1);
@@ -484,7 +538,8 @@ mod libc_locale {
             }
             let point = sys::thread_decimal_point;
             let mut p = LibcProvider::default();
-            p.set(Category::Numeric, Some(b"pt_BR.utf8")).unwrap();
+            p.set(Category::Numeric, Some(b"pt_BR.utf8"), LocaleScope::Default)
+                .unwrap();
             // Outside a run the thread keeps its own.
             assert_eq!(point(), b".");
             p.enter();
@@ -494,9 +549,11 @@ mod libc_locale {
             p.leave();
             assert_eq!(point(), b",");
             // `os.setlocale` while running takes effect at once.
-            p.set(Category::Numeric, Some(b"C")).unwrap();
+            p.set(Category::Numeric, Some(b"C"), LocaleScope::Default)
+                .unwrap();
             assert_eq!(point(), b".");
-            p.set(Category::All, Some(b"pt_BR.utf8")).unwrap();
+            p.set(Category::All, Some(b"pt_BR.utf8"), LocaleScope::Default)
+                .unwrap();
             assert_eq!(point(), b",");
             p.leave();
             assert_eq!(point(), b".");
@@ -504,14 +561,17 @@ mod libc_locale {
             // A second isolate running inside the first one's native code
             // puts the first one's back when it returns.
             let mut q = LibcProvider::default();
-            q.set(Category::Numeric, Some(b"C")).unwrap();
+            q.set(Category::Numeric, Some(b"C"), LocaleScope::Default)
+                .unwrap();
             p.enter();
             q.enter();
             assert_eq!(point(), b",", "a C isolate leaves the thread alone");
-            q.set(Category::Numeric, Some(b"pt_BR.utf8")).unwrap();
+            q.set(Category::Numeric, Some(b"pt_BR.utf8"), LocaleScope::Default)
+                .unwrap();
             q.leave();
             assert_eq!(point(), b",");
-            p.set(Category::Numeric, Some(b"C")).unwrap();
+            p.set(Category::Numeric, Some(b"C"), LocaleScope::Default)
+                .unwrap();
             q.enter();
             assert_eq!(point(), b",");
             q.leave();

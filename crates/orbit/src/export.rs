@@ -737,9 +737,13 @@ impl StackAbi for Win<'_, '_> {
         &mut self,
         category: u8,
         name: SOption<Slice<'b, u8>>,
+        scope: u8,
     ) -> SOption<SVec<u8>> {
         let name = Option::from(name).map(|n: Slice<'_, u8>| OrbitStr::from(n.as_slice()));
-        bytes(self.s.set_locale(category_of(category), name))
+        bytes(
+            self.s
+                .set_locale(category_of(category), name, scope_of(scope)),
+        )
     }
     extern "C" fn decimal_point(&self) -> SVec<u8> {
         self.s.decimal_point().as_bytes().into()

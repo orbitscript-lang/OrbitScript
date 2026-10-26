@@ -1022,9 +1022,13 @@ impl<'s> Stack<'s> {
         &mut self,
         category: crate::LocaleCategory,
         name: Option<OrbitStr<'_>>,
+        scope: crate::LocaleScope,
     ) -> Option<OrbitString> {
         let name: SOption<Slice<'_, u8>> = name.as_ref().map(|n| Slice::from(n.as_bytes())).into();
-        bytes(self.w.set_locale(category_code(category), name))
+        bytes(
+            self.w
+                .set_locale(category_code(category), name, scope_code(scope)),
+        )
     }
 
     pub fn decimal_point(&self) -> OrbitString {

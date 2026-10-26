@@ -389,6 +389,35 @@ pub enum LocaleMode {
     Process,
 }
 
+/// What one `os.setlocale` call changes besides what the mode says: its
+/// optional third argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum LocaleScope {
+    /// What the [`LocaleMode`] says.
+    #[default]
+    Default,
+    /// `"thread"`: in [`LocaleMode::Isolate`], also leave the locale on
+    /// the calling thread when the run returns to the host, rather than
+    /// giving the thread its own back. In [`LocaleMode::Process`] the
+    /// locale is the process's anyway.
+    Thread,
+    /// `"process"`: change the process's locale with the C library's
+    /// `setlocale`, as PUC Lua does, whatever the mode; the isolate takes
+    /// it on. Asking (no name) gives the process's locale.
+    Process,
+}
+
+impl LocaleScope {
+    /// `os.setlocale`'s third argument.
+    pub fn from_name(name: &[u8]) -> Option<LocaleScope> {
+        match name {
+            b"thread" => Some(LocaleScope::Thread),
+            b"process" => Some(LocaleScope::Process),
+            _ => None,
+        }
+    }
+}
+
 /// A broken-down time for the locale-dependent `os.date` conversions:
 /// C's `struct tm`, with a full year and 1-based month and year day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -411,10 +440,15 @@ pub struct TimeParts {
 /// Where an isolate's locales come from: `os.setlocale` and the
 /// locale-dependent `os.date` conversions go through it.
 pub trait LocaleProvider: fmt::Debug {
-    /// `os.setlocale(name, category)`: with a name, switch `category` to
-    /// it; without, ask. The locale's name, or `None` if it isn't
-    /// available (and nothing changed).
-    fn set(&mut self, category: Category, name: Option<&[u8]>) -> Option<Vec<u8>>;
+    /// `os.setlocale(name, category, scope)`: with a name, switch
+    /// `category` to it; without, ask. The locale's name, or `None` if it
+    /// isn't available (and nothing changed).
+    fn set(
+        &mut self,
+        category: Category,
+        name: Option<&[u8]>,
+        scope: LocaleScope,
+    ) -> Option<Vec<u8>>;
 
     /// The current locale, for the runtime.
     fn locale(&self) -> Locale;
@@ -466,7 +500,12 @@ pub struct CLocaleProvider {
 }
 
 impl LocaleProvider for CLocaleProvider {
-    fn set(&mut self, _category: Category, name: Option<&[u8]>) -> Option<Vec<u8>> {
+    fn set(
+        &mut self,
+        _category: Category,
+        name: Option<&[u8]>,
+        _scope: LocaleScope,
+    ) -> Option<Vec<u8>> {
         matches!(name, None | Some(b"" | b"C" | b"POSIX")).then(|| b"C".to_vec())
     }
 
@@ -539,9 +578,18 @@ mod tests {
     #[test]
     fn c_provider() {
         let mut p = CLocaleProvider::default();
-        assert_eq!(p.set(Category::All, Some(b"POSIX")), Some(b"C".to_vec()));
-        assert_eq!(p.set(Category::Numeric, Some(b"pt_BR")), None);
-        assert_eq!(p.set(Category::Time, None), Some(b"C".to_vec()));
+        assert_eq!(
+            p.set(Category::All, Some(b"POSIX"), LocaleScope::Default),
+            Some(b"C".to_vec())
+        );
+        assert_eq!(
+            p.set(Category::Numeric, Some(b"pt_BR"), LocaleScope::Default),
+            None
+        );
+        assert_eq!(
+            p.set(Category::Time, None, LocaleScope::Default),
+            Some(b"C".to_vec())
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The isolate's locale (ADR-13): what `os.setlocale` changes, through the
 //! installed [`LocaleProvider`].
 
-use crate::locale::{Category, Locale, LocaleMode, LocaleProvider, TimeParts};
+use crate::locale::{Category, Locale, LocaleMode, LocaleProvider, LocaleScope, TimeParts};
 use crate::vm::Vm;
 
 impl Vm {
@@ -17,10 +17,15 @@ impl Vm {
         &self.rt.metas.locale
     }
 
-    /// `os.setlocale(name, category)`: the locale's name, or `None` if it
-    /// isn't available.
-    pub fn set_locale(&mut self, category: Category, name: Option<&[u8]>) -> Option<Vec<u8>> {
-        let r = self.rt.locale_provider.set(category, name);
+    /// `os.setlocale(name, category, scope)`: the locale's name, or `None`
+    /// if it isn't available.
+    pub fn set_locale(
+        &mut self,
+        category: Category,
+        name: Option<&[u8]>,
+        scope: LocaleScope,
+    ) -> Option<Vec<u8>> {
+        let r = self.rt.locale_provider.set(category, name, scope);
         if r.is_some() && name.is_some() {
             self.refresh_locale();
         }
