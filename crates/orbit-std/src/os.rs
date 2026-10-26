@@ -3,10 +3,12 @@
 use std::time::Instant;
 
 use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, TableArg, Type};
-use orbit::{Call, Error, OrbitStr, OrbitString, Ret, Scope, Table, native};
+use orbit::{
+    Call, Error, LocaleCategory, OrbitStr, OrbitString, Ret, Scope, Table, TimeParts, native,
+};
 
 use crate::sys::{ExitResults, FileFailure, exit_results, file_failure, os_bytes, os_path, shell};
-use crate::time::{self, Tm};
+use crate::time::{self, TimeLocale, Tm};
 use crate::tz;
 
 fn clock<'s>(c: &'s Call<'s>, start: Instant) -> Result<Ret, Error> {
@@ -101,31 +103,48 @@ fn difftime(t2: i64, t1: i64) -> f64 {
     t2 as f64 - t1 as f64
 }
 
+/// `os.setlocale`: the isolate's locale, or the process's when the host
+/// asked for that (ADR-13).
 #[native(name = "os.setlocale")]
 fn setlocale(
-    locale: Option<OrbitStr<'_>>,
-    category: Option<OrbitStr<'_>>,
-) -> Result<Option<&'static str>, Fail> {
-    const CATEGORIES: [&[u8]; 6] = [
-        b"all",
-        b"collate",
-        b"ctype",
-        b"monetary",
-        b"numeric",
-        b"time",
-    ];
-    if let Some(cat) = category {
-        if !CATEGORIES.contains(&cat.as_bytes()) {
-            return Err(Fail::arg(
-                2,
-                OrbitString::concat(&[b"invalid option '", &cat, b"'"]),
-            ));
-        }
+    s: &mut Stack<'_>,
+    locale: Option<OrbitString>,
+    category: Option<OrbitString>,
+) -> Result<Option<OrbitString>, Fail> {
+    let category = match category {
+        None => LocaleCategory::All,
+        Some(cat) => LocaleCategory::from_name(&cat)
+            .ok_or_else(|| Fail::arg(2, OrbitString::concat(&[b"invalid option '", &cat, b"'"])))?,
+    };
+    Ok(s.set_locale(category, locale.as_ref().map(OrbitStr::from)))
+}
+
+/// The isolate's time category, for `os.date`.
+struct DateLocale<'a, 's>(&'a Stack<'s>);
+
+impl TimeLocale for DateLocale<'_, '_> {
+    fn pattern(&self, spec: &[u8]) -> Option<Vec<u8>> {
+        self.0
+            .locale_time_pattern(spec)
+            .map(|p| p.as_bytes().to_vec())
     }
-    // Only the C locale exists: querying or asking for it (by any of its
-    // names) gives "C", anything else fails.
-    let ok = matches!(locale.as_deref(), None | Some(b"" | b"C" | b"POSIX"));
-    Ok(ok.then_some("C"))
+
+    fn text(&self, spec: &[u8], tm: &Tm) -> Option<Vec<u8>> {
+        let parts = TimeParts {
+            year: tm.year,
+            month: tm.month,
+            day: tm.day,
+            hour: tm.hour,
+            min: tm.min,
+            sec: tm.sec,
+            wday: tm.wday,
+            yday: tm.yday,
+            isdst: tm.isdst,
+        };
+        self.0
+            .locale_time_text(spec, &parts)
+            .map(|t| t.as_bytes().to_vec())
+    }
 }
 /// The current time in seconds since the epoch.
 fn now() -> i64 {
@@ -166,7 +185,7 @@ fn date(
         set_fields(s, -1, &tm)?;
         return Ok(Either::Left(Return::values(1)));
     }
-    match time::strftime(fmt, &tm) {
+    match time::strftime_in(fmt, &tm, &DateLocale(s)) {
         Ok(out) => Ok(Either::Right(out.into())),
         Err(bad) => Err(Fail::arg(
             1,

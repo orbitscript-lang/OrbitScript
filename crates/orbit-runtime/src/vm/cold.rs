@@ -472,7 +472,7 @@ impl Vm {
                 let mut buf = Vec::new();
                 buf.try_reserve_exact(len).map_err(NoMemory::from)?;
                 for &v in &regs[at..from + left] {
-                    ops::concat_piece(&self.heap, v, &mut buf);
+                    ops::concat_piece(&self.heap, &self.rt.metas.locale, v, &mut buf);
                 }
                 let s = Value::Str(self.rt.strings.new_str_owned(&mut self.heap, buf));
                 if at == from {
@@ -534,7 +534,7 @@ impl Vm {
     fn number_string(&mut self, v: Value) -> Result<Value, Exc> {
         self.reserve(64)?;
         let mut buf = Vec::new();
-        ops::concat_piece(&self.heap, v, &mut buf);
+        ops::concat_piece(&self.heap, &self.rt.metas.locale, v, &mut buf);
         Ok(Value::Str(
             self.rt.strings.new_str_owned(&mut self.heap, buf),
         ))
@@ -669,7 +669,12 @@ impl Vm {
         // Numeric strings convert, always to floats, as in the reference.
         for v in &mut r[..3] {
             if let Value::Str(s) = *v {
-                if let Some(n) = crate::object::number::str_to_number(self.heap.get(s).as_bytes()) {
+                if let Some(n) = self
+                    .rt
+                    .metas
+                    .locale
+                    .str_to_number(self.heap.get(s).as_bytes())
+                {
                     *v = Value::Float(n.as_f64().expect("a number"));
                 }
             }

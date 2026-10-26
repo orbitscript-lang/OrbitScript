@@ -131,7 +131,7 @@ File handles are userdata of the `FILE*` class (`__index` methods, `__gc`, `__cl
 
 ## `os`
 
-`os.getenv`, `remove`, `rename`, `tmpname`, `execute`, `exit` and `difftime` map directly onto `std`. `os.tmpname` creates the file (as the reference does, so the name can't be raced) under the temporary directory. `os.execute()` with no command returns true; with one, `true|nil, "exit"|"signal", code`. `os.exit(code, close)` flushes output and exits with `true` as success and `false` as failure; with `close`, it closes the state first: the main thread's variables still to close (newest first; the first handler gets no error, later ones the latest handler error, and the last error is dropped), then the finalizers. `os.setlocale` knows only the `C` locale: `"C"` and `""` return `"C"`, other names return nil.
+`os.getenv`, `remove`, `rename`, `tmpname`, `execute`, `exit` and `difftime` map directly onto `std`. `os.tmpname` creates the file (as the reference does, so the name can't be raced) under the temporary directory. `os.execute()` with no command returns true; with one, `true|nil, "exit"|"signal", code`. `os.exit(code, close)` flushes output and exits with `true` as success and `false` as failure; with `close`, it closes the state first: the main thread's variables still to close (newest first; the first handler gets no error, later ones the latest handler error, and the last error is dropped), then the finalizers. `os.setlocale` goes to the isolate's locale provider (ADR-13): with the `locale` feature it selects the C library's locales by lua5.5's names, without it only `C` (and `POSIX`) exist.
 
 `os.time`, `os.date` and `os.clock` are where stable `std` falls short (ADR-7):
 

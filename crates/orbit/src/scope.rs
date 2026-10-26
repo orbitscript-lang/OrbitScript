@@ -174,6 +174,12 @@ impl<'s> Scope<'s> {
         self.stack().with_stdout(f)
     }
 
+    /// The decimal point of the isolate's locale (`.` in the C locale),
+    /// which numbers are written and read with (ADR-13).
+    pub fn decimal_point(&self) -> crate::OrbitString {
+        self.stack().decimal_point()
+    }
+
     /// `text` as a Lua numeral (decimal or hexadecimal, integer or float,
     /// spaces around allowed), as `tonumber` reads a string; `None` if it
     /// isn't one.

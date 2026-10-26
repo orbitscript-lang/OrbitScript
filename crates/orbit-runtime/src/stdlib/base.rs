@@ -2,7 +2,6 @@
 
 use crate::object::Tag;
 use crate::object::Value;
-use crate::object::number::str_to_number;
 use crate::object::table as tbl;
 use crate::object::value::raw_eq;
 use crate::vm::{
@@ -140,7 +139,10 @@ fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
         let v = ctx.check_any(0)?;
         let r = match v {
             Value::Int(_) | Value::Float(_) => v,
-            Value::Str(s) => str_to_number(ctx.bytes(s)).unwrap_or(Value::Nil),
+            Value::Str(s) => ctx
+                .locale()
+                .str_to_number(ctx.bytes(s))
+                .unwrap_or(Value::Nil),
             _ => Value::Nil,
         };
         return ctx.ret([r]);

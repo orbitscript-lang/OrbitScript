@@ -142,6 +142,96 @@ pub struct BreakpointAbi {
     pub line: u32,
 }
 
+/// A broken-down time ([`crate::TimeParts`]).
+#[stabby::stabby]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TimePartsAbi {
+    pub year: i64,
+    pub month: i64,
+    pub day: i64,
+    pub hour: i64,
+    pub min: i64,
+    pub sec: i64,
+    pub wday: i64,
+    pub yday: i64,
+    pub isdst: bool,
+}
+
+impl From<&crate::TimeParts> for TimePartsAbi {
+    fn from(t: &crate::TimeParts) -> TimePartsAbi {
+        TimePartsAbi {
+            year: t.year,
+            month: t.month,
+            day: t.day,
+            hour: t.hour,
+            min: t.min,
+            sec: t.sec,
+            wday: t.wday,
+            yday: t.yday,
+            isdst: t.isdst,
+        }
+    }
+}
+
+impl From<TimePartsAbi> for crate::TimeParts {
+    fn from(t: TimePartsAbi) -> crate::TimeParts {
+        crate::TimeParts {
+            year: t.year,
+            month: t.month,
+            day: t.day,
+            hour: t.hour,
+            min: t.min,
+            sec: t.sec,
+            wday: t.wday,
+            yday: t.yday,
+            isdst: t.isdst,
+        }
+    }
+}
+
+/// A [`crate::LocaleCategory`] across the boundary.
+pub fn category_code(c: crate::LocaleCategory) -> u8 {
+    use crate::LocaleCategory as C;
+    match c {
+        C::All => 0,
+        C::Collate => 1,
+        C::Ctype => 2,
+        C::Monetary => 3,
+        C::Numeric => 4,
+        C::Time => 5,
+    }
+}
+
+pub fn category_of(code: u8) -> crate::LocaleCategory {
+    use crate::LocaleCategory as C;
+    match code {
+        1 => C::Collate,
+        2 => C::Ctype,
+        3 => C::Monetary,
+        4 => C::Numeric,
+        5 => C::Time,
+        _ => C::All,
+    }
+}
+
+/// A [`crate::LocaleMode`] across the boundary: 0 the isolate's, 1 the
+/// process's.
+pub fn locale_mode_code(m: crate::LocaleMode) -> u8 {
+    match m {
+        crate::LocaleMode::Isolate => 0,
+        crate::LocaleMode::Process => 1,
+    }
+}
+
+pub fn locale_mode_of(code: u8) -> crate::LocaleMode {
+    if code == 1 {
+        crate::LocaleMode::Process
+    } else {
+        crate::LocaleMode::Isolate
+    }
+}
+
 /// Why the program stopped ([`crate::debugger::StopReason`]): `kind` is
 /// [`StopAbi::BREAKPOINT`] (at `line`) or one of the others below. For an
 /// error, the window's slot 1 holds the error.
@@ -316,6 +406,27 @@ pub trait StackAbi {
     extern "C" fn safepoint(&mut self);
     extern "C" fn control<'a>(&'a mut self) -> ControlMut<'a>;
 
+    /// [`crate::stack::Stack::set_locale`]: `category` a
+    /// [`category_code`].
+    extern "C" fn set_locale<'b>(
+        &mut self,
+        category: u8,
+        name: SOption<Slice<'b, u8>>,
+    ) -> SOption<SVec<u8>>;
+    extern "C" fn decimal_point(&self) -> SVec<u8>;
+    /// A [`locale_mode_code`].
+    extern "C" fn locale_mode(&self) -> u8;
+    extern "C" fn set_locale_mode(&mut self, mode: u8);
+    extern "C" fn sync_locale(&mut self);
+    extern "C" fn locale_time_pattern<'b>(&self, spec: Slice<'b, u8>) -> SOption<SVec<u8>>;
+    extern "C" fn locale_time_text<'b>(
+        &self,
+        spec: Slice<'b, u8>,
+        tm: TimePartsAbi,
+    ) -> SOption<SVec<u8>>;
+    extern "C" fn enter_native_locale(&mut self);
+    extern "C" fn leave_native_locale(&mut self);
+
     extern "C" fn running_thread(&self) -> ThreadAbi;
     extern "C" fn main_thread(&self) -> ThreadAbi;
     extern "C" fn push_thread(&mut self, t: ThreadAbi);
@@ -416,6 +527,9 @@ pub trait IsolateAbi {
     extern "C" fn flush(&mut self);
     /// `level`: 0 none, 1 structure, 2 full.
     extern "C" fn set_binary_checks(&mut self, level: u8);
+    /// A [`locale_mode_code`].
+    extern "C" fn set_locale_mode(&mut self, mode: u8);
+    extern "C" fn locale_mode(&self) -> u8;
     extern "C" fn before_exit(&mut self, hook: HookBox);
     /// Install the library's own `orbit-std` (`orbit_std::install`).
     extern "C" fn install_std(

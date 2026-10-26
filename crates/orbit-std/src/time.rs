@@ -1,6 +1,7 @@
 //! Calendar arithmetic and `strftime`-style formatting for `os.date` and
-//! `os.time`, in the C locale. Pure functions on plain numbers: the time
-//! zone comes in as an offset from [`crate::tz`].
+//! `os.time`. Pure functions on plain numbers: the time zone comes in as an
+//! offset from [`crate::tz`], and what depends on the locale (names, the
+//! `%c` formats) from a [`TimeLocale`].
 //!
 //! The day-count conversions are the well-known proleptic Gregorian
 //! formulas (days since 1970-01-01, with 400-year eras), valid for every
@@ -142,11 +143,143 @@ fn iso_week(tm: &Tm) -> (i64, i64) {
     }
 }
 
+/// What `os.date` asks of the time category's locale. `None` means the
+/// C locale's answer.
+pub trait TimeLocale {
+    /// What `%c`, `%x`, `%X` or `%r` (`spec`, without its `%`, also `Ec`,
+    /// `Ex` or `EX`) expands to, in `strftime`'s language.
+    fn pattern(&self, spec: &[u8]) -> Option<Vec<u8>>;
+    /// The text of a locale-dependent conversion: `spec` (without its `%`)
+    /// is `a`, `A`, `b`, `B`, `h`, `p`, `c`, `x`, `X`, `r`, or one with an
+    /// `E` or `O` modifier.
+    fn text(&self, spec: &[u8], tm: &Tm) -> Option<Vec<u8>>;
+}
+
+/// The C locale.
+#[derive(Debug)]
+pub struct CTime;
+
+impl TimeLocale for CTime {
+    fn pattern(&self, _spec: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+    fn text(&self, _spec: &[u8], _tm: &Tm) -> Option<Vec<u8>> {
+        None
+    }
+}
+
 /// Format one conversion (`spec` is one or two bytes, already checked by
-/// [`conversion_len`]) of `tm` onto `out`.
-fn convert(out: &mut Vec<u8>, spec: &[u8], tm: &Tm) {
-    use std::io::Write;
+/// [`conversion_len`]) of `tm` onto `out`, in locale `loc`.
+fn convert(out: &mut Vec<u8>, spec: &[u8], tm: &Tm, loc: &dyn TimeLocale) {
     let c = *spec.last().unwrap_or(&b'%');
+    let modified = spec.len() == 2;
+    let patterned = match spec {
+        [c] => b"cxXr".contains(c),
+        [b'E', c] => b"cxX".contains(c),
+        _ => false,
+    };
+    if patterned {
+        if let Some(p) = loc.pattern(spec) {
+            // The locale's formats use nothing locale-dependent but names,
+            // so they expand with the C ones for anything else.
+            expand(out, &p, tm, loc);
+            return;
+        }
+    }
+    if modified || b"aAbBhpcxXr".contains(&c) {
+        if let Some(text) = loc.text(spec, tm) {
+            out.extend_from_slice(&text);
+            return;
+        }
+    }
+    convert_c(out, c, tm, loc);
+}
+
+/// Expand a locale's format: `strftime` conversions, with the GNU flags
+/// (`%-d`, `%_H`, `%^a`) and conversions (`%k`, `%l`, `%P`) glibc's
+/// locales use. Anything else is copied as it is.
+fn expand(out: &mut Vec<u8>, pattern: &[u8], tm: &Tm, loc: &dyn TimeLocale) {
+    let mut i = 0;
+    while i < pattern.len() {
+        if pattern[i] != b'%' {
+            out.push(pattern[i]);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        let flag = match pattern.get(i) {
+            Some(&f @ (b'-' | b'_' | b'0' | b'^' | b'#')) => {
+                i += 1;
+                Some(f)
+            }
+            _ => None,
+        };
+        let mark = out.len();
+        let rest = &pattern[i..];
+        match rest {
+            [b'k', ..] | [b'l', ..] => {
+                let h = if rest[0] == b'k' {
+                    tm.hour
+                } else if tm.hour % 12 == 0 {
+                    12
+                } else {
+                    tm.hour % 12
+                };
+                out.extend_from_slice(format!("{h:2}").as_bytes());
+                i += 1;
+            }
+            [b'P', ..] => {
+                let mut text = Vec::new();
+                convert(&mut text, b"p", tm, loc);
+                out.extend(text.iter().map(u8::to_ascii_lowercase));
+                i += 1;
+            }
+            _ => match conversion_len(rest) {
+                // Formats inside formats would never end; C's stands in.
+                Some(n) if b"cxXr".contains(&rest[n - 1]) => {
+                    convert(out, &rest[..n], tm, &CTime);
+                    i += n;
+                }
+                Some(n) => {
+                    convert(out, &rest[..n], tm, loc);
+                    i += n;
+                }
+                None => {
+                    out.extend_from_slice(&pattern[start..i]);
+                    continue;
+                }
+            },
+        }
+        let piece = &mut out[mark..];
+        match flag {
+            Some(b'-') => {
+                let keep = piece.len().saturating_sub(1);
+                let pad = piece[..keep]
+                    .iter()
+                    .take_while(|&&b| b == b'0' || b == b' ')
+                    .count();
+                out.drain(mark..mark + pad);
+            }
+            Some(b'_') => {
+                for b in piece.iter_mut().take_while(|b| **b == b'0') {
+                    *b = b' ';
+                }
+                if let Some(last) = piece.last_mut() {
+                    if *last == b' ' {
+                        *last = b'0';
+                    }
+                }
+            }
+            Some(b'^') => piece.make_ascii_uppercase(),
+            _ => {}
+        }
+    }
+}
+
+/// One conversion (`c`, its letter) in the C locale.
+fn convert_c(out: &mut Vec<u8>, c: u8, tm: &Tm, loc: &dyn TimeLocale) {
+    use std::io::Write;
     let hour12 = if tm.hour % 12 == 0 { 12 } else { tm.hour % 12 };
     let w = &mut *out;
     let _ = match c {
@@ -155,15 +288,15 @@ fn convert(out: &mut Vec<u8>, spec: &[u8], tm: &Tm) {
         b'b' | b'h' => write!(w, "{}", &MONTHS[tm.month as usize - 1][..3]),
         b'B' => write!(w, "{}", MONTHS[tm.month as usize - 1]),
         b'c' => {
-            convert(w, b"a", tm);
+            convert(w, b"a", tm, loc);
             w.push(b' ');
-            convert(w, b"b", tm);
+            convert(w, b"b", tm, loc);
             w.push(b' ');
-            convert(w, b"e", tm);
+            convert(w, b"e", tm, loc);
             w.push(b' ');
-            convert(w, b"T", tm);
+            convert(w, b"T", tm, loc);
             w.push(b' ');
-            convert(w, b"Y", tm);
+            convert(w, b"Y", tm, loc);
             Ok(())
         }
         b'C' => write!(w, "{:02}", tm.year.div_euclid(100)),
@@ -214,9 +347,16 @@ fn convert(out: &mut Vec<u8>, spec: &[u8], tm: &Tm) {
     };
 }
 
-/// Format `fmt` with `tm`, or return the bad conversion: the format from
-/// that `%` to its end, which is what the error message shows.
+/// Format `fmt` with `tm` in the C locale, or return the bad conversion:
+/// the format from that `%` to its end, which is what the error message
+/// shows.
+#[cfg(test)]
 pub fn strftime(fmt: &[u8], tm: &Tm) -> Result<Vec<u8>, Vec<u8>> {
+    strftime_in(fmt, tm, &CTime)
+}
+
+/// [`strftime`] in locale `loc`.
+pub fn strftime_in(fmt: &[u8], tm: &Tm, loc: &dyn TimeLocale) -> Result<Vec<u8>, Vec<u8>> {
     let mut out = Vec::with_capacity(fmt.len());
     let mut i = 0;
     while i < fmt.len() {
@@ -229,7 +369,7 @@ pub fn strftime(fmt: &[u8], tm: &Tm) -> Result<Vec<u8>, Vec<u8>> {
         let Some(n) = conversion_len(spec) else {
             return Err(fmt[i..].to_vec());
         };
-        convert(&mut out, &spec[..n], tm);
+        convert(&mut out, &spec[..n], tm, loc);
         i += 1 + n;
     }
     Ok(out)
@@ -298,6 +438,46 @@ mod tests {
                 0
             ),
             "Thu Jan  1 00:00:00 1970|19|01/01/70|00:00:00|70|1970|01| 1|00|12|01|00|00|4|00|01|4|00|70"
+        );
+    }
+
+    /// Names and formats as glibc's `pt_BR` and `de_DE` have them.
+    struct Pt;
+
+    impl TimeLocale for Pt {
+        fn pattern(&self, spec: &[u8]) -> Option<Vec<u8>> {
+            match spec {
+                b"c" | b"Ec" => Some(b"%a %-d %b %Y %T %Z".to_vec()),
+                b"x" => Some(b"%d/%m/%Y".to_vec()),
+                b"Ex" => Some(b"%Ey|%x".to_vec()),
+                b"r" => Some(b"%l:%M:%S %P|%c".to_vec()),
+                _ => None,
+            }
+        }
+        fn text(&self, spec: &[u8], tm: &Tm) -> Option<Vec<u8>> {
+            match spec {
+                b"a" => Some(
+                    ["dom", "seg", "ter", "qua", "qui", "sex", "s\u{e1}b"][tm.wday as usize].into(),
+                ),
+                b"b" => Some(b"fev".to_vec()),
+                b"p" => Some(b"PM".to_vec()),
+                b"Ey" => Some(b"era".to_vec()),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn locale_formats() {
+        let tm = utc(86_400 * 40 + 3600 * 15);
+        let f = |s: &str| String::from_utf8(strftime_in(s.as_bytes(), &tm, &Pt).unwrap()).unwrap();
+        assert_eq!(f("%c"), "ter 10 fev 1970 15:00:00 GMT");
+        assert_eq!(f("%x|%X|%Ey|%EY"), "10/02/1970|15:00:00|era|1970");
+        assert_eq!(f("%r"), " 3:00:00 pm|Tue Feb 10 15:00:00 1970");
+        // A format inside a format is the C one.
+        assert_eq!(
+            f("%Ec|%Ex|%EX"),
+            "ter 10 fev 1970 15:00:00 GMT|era|02/10/70|15:00:00"
         );
     }
 

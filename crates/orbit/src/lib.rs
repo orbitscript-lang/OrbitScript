@@ -56,6 +56,7 @@ pub use host::{Call, HostFunction, Ret};
 pub use isolate::BinaryChecks;
 pub use isolate::{Config, Debugger, Gc, GcMode, Interrupt, Isolate, Library, Runtime};
 pub use orbit_macros::native;
+pub use orbit_runtime::locale::{Category as LocaleCategory, LocaleMode, TimeParts};
 pub use pin::{PinKind, Pinned};
 pub use scope::Scope;
 pub use value::{

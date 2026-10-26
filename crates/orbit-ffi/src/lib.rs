@@ -478,7 +478,7 @@ fn call(s: &mut Stack<'_>) -> StackResult<Return> {
     for (arg, (slot, &t)) in (1..).zip(slots.iter_mut().zip(sig.args.iter())) {
         *slot = arg_value(s, arg, t)?;
     }
-    let r = sig.cif.call(addr, slots);
+    let r = call_c(s, &sig, addr, slots);
     finish(s, sig.ret, r)
 }
 
@@ -533,9 +533,19 @@ fn call_with_strings(
             p
         };
     }
-    let r = sig.cif.call(addr, slots);
+    let r = call_c(s, sig, addr, slots);
     drop(long);
     finish(s, sig.ret, r)
+}
+
+/// Call the C function, with the isolate's locale as the thread's while it
+/// runs (ADR-13).
+#[inline(always)]
+fn call_c(s: &mut Stack<'_>, sig: &Signature, addr: u64, slots: &mut [u64]) -> u64 {
+    s.enter_native_locale();
+    let r = sig.cif.call(addr, slots);
+    s.leave_native_locale();
+    r
 }
 
 /// Argument `arg` (not a string) as a value of type `t`, in the low bits.

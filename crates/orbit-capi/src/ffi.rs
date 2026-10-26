@@ -265,9 +265,11 @@ fn run_c(s: &mut Stack<'_>, call: impl FnOnce(*mut LState) -> c_int) -> Res<COut
     Ok(COut::Ret(n as usize))
 }
 
-/// Call C function `f` with the native's window as its stack.
+/// Call C function `f` with the native's window as its stack, and the
+/// isolate's locale as the thread's while it runs (ADR-13).
 pub(crate) fn invoke(s: &mut Stack<'_>, f: u64) -> Res<COut> {
-    run_c(s, |l| {
+    s.enter_native_locale();
+    let r = run_c(s, |l| {
         // SAFETY: `f` came from a C module as a `lua_CFunction`
         // (lua_pushcclosure or dlsym); calling it is what loading the
         // module asked for.
@@ -275,7 +277,9 @@ pub(crate) fn invoke(s: &mut Stack<'_>, f: u64) -> Res<COut> {
             let cf = std::mem::transmute::<usize, CFn>(f as usize);
             orbit_capi_trampoline(l, cf)
         }
-    })
+    });
+    s.leave_native_locale();
+    r
 }
 
 /// What the native running a C function does once C is done: return its
@@ -641,6 +645,16 @@ macro_rules! entry {
             }
         }
     }};
+}
+
+/// A call into Lua from the program that made the state (not from a C
+/// function): with the process's locale (ADR-13), take on what the
+/// program did to it since the last call.
+fn sync_host_locale(b: &Bridge, c: &mut Stack<'static>) {
+    let host = b.host.get();
+    if !host.is_null() && std::ptr::eq(b.ctx.get(), host) {
+        c.sync_locale();
+    }
 }
 
 /// Between calls in a state C created: let the collector run, and drop
@@ -1225,6 +1239,7 @@ extern "C" fn orbit_r_callk(
     k: Option<KFn>,
 ) {
     let req = entry!(l, None, |b, c| {
+        sync_host_locale(b, c);
         if let Some(k) = k {
             if can_continue(b, c, l) {
                 let nargs = c.check_call(nargs)?;
@@ -1255,6 +1270,7 @@ extern "C" fn orbit_r_pcallk(
     k: Option<KFn>,
 ) -> c_int {
     let req = entry!(l, Err(abi::ERRRUN), |b, c| {
+        sync_host_locale(b, c);
         if let Some(k) = k {
             if errfunc == 0 && can_continue(b, c, l) {
                 let nargs = c.check_call(nargs)?;
@@ -1470,6 +1486,7 @@ extern "C" fn orbit_r_resume(
     nres: *mut c_int,
 ) -> c_int {
     entry!(here l, abi::ERRRUN, |b, c| {
+        sync_host_locale(b, c);
         let t = thread_of(b, l);
         let narg = usize::try_from(narg).unwrap_or(0);
         let r = c.resume(t, thread_base(b, t), narg)?;
@@ -1882,6 +1899,31 @@ impl std::io::Write for CStdout {
     }
 }
 
+/// `orbit_setlocalemode`'s modes (orbit.h).
+const LOCALE_PROCESS: c_int = 0;
+const LOCALE_STATE: c_int = 1;
+
+/// `orbit_setlocalemode`: whether `os.setlocale` in `l`'s isolate changes
+/// the process's locale or the isolate's own (ADR-13). Returns the mode
+/// before, or -1 (changing nothing) for an unknown mode. -1 as `mode`
+/// only asks.
+#[no_mangle]
+extern "C" fn orbit_r_setlocalemode(l: *mut LState, mode: c_int) -> c_int {
+    entry!(here l, -1, |_b, c| {
+        let before = match c.locale_mode() {
+            orbit::LocaleMode::Process => LOCALE_PROCESS,
+            orbit::LocaleMode::Isolate => LOCALE_STATE,
+        };
+        match mode {
+            LOCALE_PROCESS => c.set_locale_mode(orbit::LocaleMode::Process),
+            LOCALE_STATE => c.set_locale_mode(orbit::LocaleMode::Isolate),
+            -1 => {}
+            _ => return Ok(-1),
+        }
+        Ok(before)
+    })
+}
+
 /// `orbit_newstate`'s flag for a state no debugger may attach to.
 #[cfg(feature = "host")]
 const STATE_NO_DEBUGGER: std::ffi::c_uint = 1;
@@ -1905,6 +1947,9 @@ extern "C" fn orbit_r_newstate(flags: std::ffi::c_uint) -> *mut LState {
     // freed by `orbit_r_close`.
     let iso_ref: &'static mut orbit::Isolate = unsafe { &mut *iso };
     iso_ref.set_stdout(CStdout);
+    // As in PUC Lua: `os.setlocale` is the C library's `setlocale`, so C
+    // programs see no change (ADR-13). `orbit_setlocalemode` switches.
+    iso_ref.set_locale_mode(orbit::LocaleMode::Process);
     let debuggable = allowed && crate::debug::serve(iso_ref);
     let host: StackPtr = Box::into_raw(Box::new(iso_ref.host_stack()));
     // SAFETY: just made, and not shared yet.

@@ -3,7 +3,8 @@
 use std::any::{Any, TypeId};
 use std::ffi::c_void;
 
-use orbit_runtime::object::number::{float_to_int, fmt_number, str_to_number};
+use orbit_runtime::locale::{Category, LocaleMode, TimeParts};
+use orbit_runtime::object::number::float_to_int;
 use orbit_runtime::object::table as tbl;
 use orbit_runtime::object::value::raw_eq;
 use orbit_runtime::object::{
@@ -590,7 +591,7 @@ impl<'s> Stack<'s> {
         match self.get(idx) {
             RawValue::Int(i) => Some(i as f64),
             RawValue::Float(f) => Some(f),
-            RawValue::Str(s) => match str_to_number(self.ctx.bytes(s)) {
+            RawValue::Str(s) => match self.ctx.locale().str_to_number(self.ctx.bytes(s)) {
                 Some(RawValue::Int(i)) => Some(i as f64),
                 Some(RawValue::Float(f)) => Some(f),
                 _ => None,
@@ -603,7 +604,7 @@ impl<'s> Stack<'s> {
     /// float.
     pub fn to_integer(&self, idx: i32) -> Option<i64> {
         let v = match self.get(idx) {
-            RawValue::Str(s) => str_to_number(self.ctx.bytes(s))?,
+            RawValue::Str(s) => self.ctx.locale().str_to_number(self.ctx.bytes(s))?,
             v => v,
         };
         match v {
@@ -649,9 +650,9 @@ impl<'s> Stack<'s> {
         let s = match self.get(idx) {
             RawValue::Str(s) => s,
             v @ (RawValue::Int(_) | RawValue::Float(_)) => {
-                let mut out = String::new();
-                fmt_number(&mut out, v);
-                let RawValue::Str(s) = self.ctx.new_str(out.as_bytes()) else {
+                let mut out = Vec::new();
+                self.ctx.locale().fmt_number(&mut out, v);
+                let RawValue::Str(s) = self.ctx.new_str(&out) else {
                     unreachable!("new_str makes a string")
                 };
                 if let Slot::Stack(_) | Slot::Upvalue(_) = self.slot(idx) {
@@ -673,9 +674,10 @@ impl<'s> Stack<'s> {
     pub fn number_text(&self, idx: i32) -> Option<String> {
         match self.get(idx) {
             v @ (RawValue::Int(_) | RawValue::Float(_)) => {
-                let mut out = String::new();
-                fmt_number(&mut out, v);
-                Some(out)
+                let mut out = Vec::new();
+                self.ctx.locale().fmt_number(&mut out, v);
+                // Decimal points are text in every locale.
+                Some(String::from_utf8_lossy(&out).into_owned())
             }
             _ => None,
         }
@@ -919,7 +921,7 @@ impl<'s> Stack<'s> {
 
     fn push_numeral_str(&mut self, text: OrbitStr<'_>) -> usize {
         let text = text.as_bytes();
-        match str_to_number(text) {
+        match self.ctx.locale().str_to_number(text) {
             Some(v) => {
                 self.ctx.push(v);
                 text.len() + 1
@@ -1835,6 +1837,75 @@ impl<'s> Stack<'s> {
     #[inline]
     pub fn find_extension<T: Any, R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
         self.ctx.vm.rt.ext.get::<T>().map(f)
+    }
+
+    // ---- the locale (ADR-13) ----------------------------------------------
+
+    /// `os.setlocale(name, category)`: switch `category` to locale `name`,
+    /// or with no name, ask. The locale's name, or `None` if it isn't
+    /// available.
+    pub fn set_locale(
+        &mut self,
+        category: Category,
+        name: Option<OrbitStr<'_>>,
+    ) -> Option<OrbitString> {
+        let name = name.as_ref().map(|n| n.as_bytes());
+        self.ctx
+            .vm
+            .set_locale(category, name)
+            .map(OrbitString::from)
+    }
+
+    /// The decimal point numbers are written and read with: `.` in the C
+    /// locale.
+    pub fn decimal_point(&self) -> OrbitString {
+        self.ctx.locale().decimal_point().into()
+    }
+
+    /// Whether `os.setlocale` changes this isolate's locale or the
+    /// process's.
+    pub fn locale_mode(&self) -> LocaleMode {
+        self.ctx.vm.locale_mode()
+    }
+
+    /// See [`crate::Isolate::set_locale_mode`].
+    pub fn set_locale_mode(&mut self, mode: LocaleMode) {
+        self.ctx.vm.set_locale_mode(mode)
+    }
+
+    /// In [`LocaleMode::Process`], take on changes the host made to the
+    /// process's locale: for a host about to call into the isolate.
+    pub fn sync_locale(&mut self) {
+        self.ctx.vm.sync_locale()
+    }
+
+    /// What `os.date`'s `%c`, `%x`, `%X` or `%r` expands to in the time
+    /// category's locale, or `None` for the C locale's.
+    pub fn locale_time_pattern(&self, spec: &[u8]) -> Option<OrbitString> {
+        self.ctx.vm.locale_time_pattern(spec).map(OrbitString::from)
+    }
+
+    /// The text of a locale-dependent `os.date` conversion (`spec` without
+    /// its `%`) in the time category's locale, or `None` for the C
+    /// locale's.
+    pub fn locale_time_text(&self, spec: &[u8], tm: &TimeParts) -> Option<OrbitString> {
+        self.ctx
+            .vm
+            .locale_time_text(spec, tm)
+            .map(OrbitString::from)
+    }
+
+    /// Native code (a C module, `ffi`) is about to run on this thread: make
+    /// the isolate's locale the thread's while it does. Match each call
+    /// with [`Stack::leave_native_locale`].
+    pub fn enter_native_locale(&mut self) {
+        self.ctx.vm.enter_native_locale()
+    }
+
+    /// Native code returned: undo the matching
+    /// [`Stack::enter_native_locale`].
+    pub fn leave_native_locale(&mut self) {
+        self.ctx.vm.leave_native_locale()
     }
 
     /// What reaches the isolate itself: hooks, the interrupt handler.

@@ -135,6 +135,16 @@ impl Isolate {
         self.obj.set_stdout(SBox::new(WriterObj(out)).into())
     }
 
+    /// Whether `os.setlocale` changes this isolate's own locale (the
+    /// default) or the process's, as PUC Lua does (ADR-13).
+    pub fn set_locale_mode(&mut self, mode: crate::LocaleMode) {
+        self.obj.set_locale_mode(crate::abi::locale_mode_code(mode))
+    }
+
+    pub fn locale_mode(&self) -> crate::LocaleMode {
+        crate::abi::locale_mode_of(self.obj.locale_mode())
+    }
+
     /// The collector.
     pub fn gc(&mut self) -> Gc<'_> {
         Gc { obj: &mut self.obj }

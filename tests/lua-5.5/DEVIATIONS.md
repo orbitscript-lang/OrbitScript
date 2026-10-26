@@ -95,13 +95,17 @@ Why: it's a different program; claiming Lua.org's copyright line for it would be
 
 Suite: `main.lua` reads the release with `"Lua (%d+%.%d+%.%d+)"` and checks that `PUC-Rio` ends the line; both hold.
 
-## `os.setlocale` knows only `C`
+## A script's locale belongs to its isolate
 
-`os.setlocale` accepts only the `C` locale (and `POSIX`, its alias): `"C"` and `""` return `"C"`, other names return nil, and the program's locale never changes. lua5.5 calls the C library, so `os.setlocale("")` returns the locale the environment selects (`LANG`, `LC_ALL`, `LC_*`), for example `C.UTF-8`, and other installed locales can be selected.
+`os.setlocale` selects the C library's locales by the same names and with the same effects as lua5.5 (number formatting and reading, `%a`-style classes, `upper`/`lower`, string comparison, `os.date` names and formats; ADR-13). In the `orbit` program, and in any Rust host, the locale belongs to the isolate rather than the process: one script's `os.setlocale` doesn't change another isolate's, nor what the host's own C code sees. C modules and `ffi` calls run with the script's locale installed on their thread, so `strtod`, `printf` and `isalpha` in them follow it as they would in lua5.5; a thread such a module starts itself doesn't. C hosts of `liborbit` (states from `lua_newstate`) keep lua5.5's behavior and share the process locale unless they call `orbit_setlocalemode` (`orbit.h`).
 
-Why: `os.setlocale` doesn't call the C library's `setlocale` (that would need `unsafe`), and OrbitScript's number and string conversions never read a C locale, so selecting another one would change nothing.
+Why: a process-wide locale is a data race between isolates on different threads, and a library has no business changing its host's number formatting.
 
-Suite: `literals.lua` and `strings.lua` try `pt_BR` and Latin-1 locales and skip their locale checks when none is available, as they do on a system without them. `tests/diff/os.lua` calls `os.setlocale("")`, so differential runs use `LC_ALL=C` (CI sets it).
+Source code always reads `.` as the decimal point. lua5.5's lexer reads numerals with the locale's, falling back to `.` only when that is a single byte, so under a locale whose point is longer (`ps_AF`, U+066B) `load "return 3.5"` fails there and compiles here. Why: a chunk that compiles differently by locale helps nobody, and the lexers don't depend on the runtime.
+
+On Windows the names are the C runtime's (`English_United States.1252` style; `""` resolves from the user's settings, not `LANG`), as they are for lua5.5 built there.
+
+Suite: `literals.lua` and `strings.lua` try `pt_BR` and Latin-1 locales and skip their locale checks when none is available; CI generates them. `tests/diff/locale.lua` compares the installed locales' effects with lua5.5.
 
 ## Pattern searches skip starts that can't match
 
