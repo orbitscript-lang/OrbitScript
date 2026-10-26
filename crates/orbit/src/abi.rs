@@ -417,15 +417,12 @@ pub trait StackAbi {
     /// A [`locale_mode_code`].
     extern "C" fn locale_mode(&self) -> u8;
     extern "C" fn set_locale_mode(&mut self, mode: u8);
-    extern "C" fn sync_locale(&mut self);
     extern "C" fn locale_time_pattern<'b>(&self, spec: Slice<'b, u8>) -> SOption<SVec<u8>>;
     extern "C" fn locale_time_text<'b>(
         &self,
         spec: Slice<'b, u8>,
         tm: TimePartsAbi,
     ) -> SOption<SVec<u8>>;
-    extern "C" fn enter_native_locale(&mut self);
-    extern "C" fn leave_native_locale(&mut self);
 
     extern "C" fn running_thread(&self) -> ThreadAbi;
     extern "C" fn main_thread(&self) -> ThreadAbi;

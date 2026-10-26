@@ -426,12 +426,6 @@ pub trait LocaleProvider: fmt::Debug {
     /// [`LocaleMode::Isolate`] keeps it as the isolate's own.
     fn set_mode(&mut self, mode: LocaleMode);
 
-    /// In [`LocaleMode::Process`], take on changes the host made to the
-    /// process's locale since the last call; true if there were any.
-    fn sync(&mut self) -> bool {
-        false
-    }
-
     /// The pattern a `%c`, `%x`, `%X` or `%r` conversion (`spec`, without
     /// its `%`, also `Ec`, `Ex` or `EX`) expands to in the time category's
     /// locale, or `None` to format it the C way (or with
@@ -448,14 +442,19 @@ pub trait LocaleProvider: fmt::Debug {
         None
     }
 
-    /// Native code (a C module, `ffi`) is about to run on this thread:
-    /// make the isolate's locale the thread's, if scripts changed it.
-    /// Calls nest; each is matched by [`LocaleProvider::leave_native`].
-    fn enter_native(&mut self) {}
+    /// The isolate starts running code on this thread: make its locale
+    /// the thread's, so native code it runs (C modules, `ffi`) sees it, and
+    /// keep it there until the matching [`LocaleProvider::leave`], through
+    /// any `set` in between. In [`LocaleMode::Process`], take on changes
+    /// the host made to the process's locale instead; true if there were
+    /// any. Only the runtime calls this, around each run, and runs nest.
+    fn enter(&mut self) -> bool {
+        false
+    }
 
-    /// Native code returned: undo the matching
-    /// [`LocaleProvider::enter_native`].
-    fn leave_native(&mut self) {}
+    /// The run [`LocaleProvider::enter`] started is over: at the outermost
+    /// one, give the thread back the locale it had.
+    fn leave(&mut self) {}
 }
 
 /// The provider when none is installed: only the C locale exists.

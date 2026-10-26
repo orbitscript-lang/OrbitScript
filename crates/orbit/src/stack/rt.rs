@@ -1873,12 +1873,6 @@ impl<'s> Stack<'s> {
         self.ctx.vm.set_locale_mode(mode)
     }
 
-    /// In [`LocaleMode::Process`], take on changes the host made to the
-    /// process's locale: for a host about to call into the isolate.
-    pub fn sync_locale(&mut self) {
-        self.ctx.vm.sync_locale()
-    }
-
     /// What `os.date`'s `%c`, `%x`, `%X` or `%r` expands to in the time
     /// category's locale, or `None` for the C locale's.
     pub fn locale_time_pattern(&self, spec: &[u8]) -> Option<OrbitString> {
@@ -1893,19 +1887,6 @@ impl<'s> Stack<'s> {
             .vm
             .locale_time_text(spec, tm)
             .map(OrbitString::from)
-    }
-
-    /// Native code (a C module, `ffi`) is about to run on this thread: make
-    /// the isolate's locale the thread's while it does. Match each call
-    /// with [`Stack::leave_native_locale`].
-    pub fn enter_native_locale(&mut self) {
-        self.ctx.vm.enter_native_locale()
-    }
-
-    /// Native code returned: undo the matching
-    /// [`Stack::enter_native_locale`].
-    pub fn leave_native_locale(&mut self) {
-        self.ctx.vm.leave_native_locale()
     }
 
     /// What reaches the isolate itself: hooks, the interrupt handler.

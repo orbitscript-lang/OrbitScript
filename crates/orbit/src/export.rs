@@ -750,9 +750,6 @@ impl StackAbi for Win<'_, '_> {
     extern "C" fn set_locale_mode(&mut self, mode: u8) {
         self.s.set_locale_mode(locale_mode_of(mode))
     }
-    extern "C" fn sync_locale(&mut self) {
-        self.s.sync_locale()
-    }
     extern "C" fn locale_time_pattern<'b>(&self, spec: Slice<'b, u8>) -> SOption<SVec<u8>> {
         bytes(self.s.locale_time_pattern(spec.as_slice()))
     }
@@ -762,12 +759,6 @@ impl StackAbi for Win<'_, '_> {
         tm: TimePartsAbi,
     ) -> SOption<SVec<u8>> {
         bytes(self.s.locale_time_text(spec.as_slice(), &tm.into()))
-    }
-    extern "C" fn enter_native_locale(&mut self) {
-        self.s.enter_native_locale()
-    }
-    extern "C" fn leave_native_locale(&mut self) {
-        self.s.leave_native_locale()
     }
     extern "C" fn control<'a>(&'a mut self) -> ControlMut<'a> {
         self.into()

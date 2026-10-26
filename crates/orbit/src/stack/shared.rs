@@ -1039,24 +1039,12 @@ impl<'s> Stack<'s> {
         self.w.set_locale_mode(locale_mode_code(mode))
     }
 
-    pub fn sync_locale(&mut self) {
-        self.w.sync_locale()
-    }
-
     pub fn locale_time_pattern(&self, spec: &[u8]) -> Option<OrbitString> {
         bytes(self.w.locale_time_pattern(spec.into()))
     }
 
     pub fn locale_time_text(&self, spec: &[u8], tm: &crate::TimeParts) -> Option<OrbitString> {
         bytes(self.w.locale_time_text(spec.into(), tm.into()))
-    }
-
-    pub fn enter_native_locale(&mut self) {
-        self.w.enter_native_locale()
-    }
-
-    pub fn leave_native_locale(&mut self) {
-        self.w.leave_native_locale()
     }
 
     // ---- threads ---------------------------------------------------------------------

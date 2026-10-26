@@ -173,10 +173,12 @@ mod libc_locale {
         time: Option<TimeNames>,
         /// In process mode, the process's locale as last seen.
         process_seen: Vec<u8>,
-        /// One entry per [`LocaleProvider::enter_native`] not yet left: the
-        /// object made the thread's locale (kept alive until then) and the
+        /// Runs [`LocaleProvider::enter`] started and not yet left.
+        depth: u32,
+        /// While running in isolate mode with a locale other than C: the
+        /// object installed on the thread (kept alive until then) and the
         /// thread's locale before.
-        pins: Vec<Option<(Rc<LocaleObj>, ThreadPin)>>,
+        pin: Option<(Rc<LocaleObj>, ThreadPin)>,
     }
 
     impl std::fmt::Debug for LibcProvider {
@@ -196,7 +198,8 @@ mod libc_locale {
                 locale: Locale::c(),
                 time: None,
                 process_seen: Vec::new(),
-                pins: Vec::new(),
+                depth: 0,
+                pin: None,
             }
         }
     }
@@ -274,7 +277,36 @@ mod libc_locale {
                 self.obj = Some(Rc::new(obj));
             }
             self.rebuild();
+            self.repin();
             Some(self.name_of(cat))
+        }
+
+        /// While running, make the thread's locale match the object (or
+        /// give the thread its own back).
+        fn repin(&mut self) {
+            if self.depth == 0 {
+                return;
+            }
+            if let Some((_obj, pin)) = self.pin.take() {
+                pin.restore();
+            }
+            if let (Some(obj), LocaleMode::Isolate) = (&self.obj, self.mode) {
+                self.pin = Some((Rc::clone(obj), ThreadPin::new(obj)));
+            }
+        }
+
+        /// In process mode, take on the host's changes to the process's
+        /// locale since last seen; true if there were any.
+        fn sync(&mut self) -> bool {
+            if self.mode != LocaleMode::Process {
+                return false;
+            }
+            let now = sys::process_setlocale(None, None).unwrap_or_default();
+            if now == self.process_seen {
+                return false;
+            }
+            self.adopt_process();
+            true
         }
     }
 
@@ -312,18 +344,7 @@ mod libc_locale {
             }
             // To the isolate's own: it keeps the process's locale as it was,
             // in the object `adopt_process` copied.
-        }
-
-        fn sync(&mut self) -> bool {
-            if self.mode != LocaleMode::Process {
-                return false;
-            }
-            let now = sys::process_setlocale(None, None).unwrap_or_default();
-            if now == self.process_seen {
-                return false;
-            }
-            self.adopt_process();
-            true
+            self.repin();
         }
 
         fn time_pattern(&self, spec: &[u8]) -> Option<Vec<u8>> {
@@ -363,20 +384,25 @@ mod libc_locale {
             Some(text)
         }
 
-        fn enter_native(&mut self) {
-            let pin = match (&self.obj, self.mode) {
-                (Some(obj), LocaleMode::Isolate) => {
-                    let pin = ThreadPin::new(obj);
-                    Some((Rc::clone(obj), pin))
-                }
-                _ => None,
-            };
-            self.pins.push(pin);
+        fn enter(&mut self) -> bool {
+            self.depth += 1;
+            if self.mode == LocaleMode::Process {
+                // Every run: C code may change the process's locale and
+                // call back in.
+                return self.sync();
+            }
+            if self.depth == 1 {
+                self.repin();
+            }
+            false
         }
 
-        fn leave_native(&mut self) {
-            if let Some(Some((_obj, pin))) = self.pins.pop() {
-                pin.restore();
+        fn leave(&mut self) {
+            self.depth -= 1;
+            if self.depth == 0 {
+                if let Some((_obj, pin)) = self.pin.take() {
+                    pin.restore();
+                }
             }
         }
     }
@@ -456,13 +482,42 @@ mod libc_locale {
             if !has("pt_BR.utf8") {
                 return;
             }
+            let point = sys::thread_decimal_point;
             let mut p = LibcProvider::default();
             p.set(Category::Numeric, Some(b"pt_BR.utf8")).unwrap();
-            assert_eq!(sys::thread_decimal_point(), b".");
-            p.enter_native();
-            assert_eq!(sys::thread_decimal_point(), b",");
-            p.leave_native();
-            assert_eq!(sys::thread_decimal_point(), b".");
+            // Outside a run the thread keeps its own.
+            assert_eq!(point(), b".");
+            p.enter();
+            assert_eq!(point(), b",");
+            // Runs nest; only the outermost gives the thread back.
+            p.enter();
+            p.leave();
+            assert_eq!(point(), b",");
+            // `os.setlocale` while running takes effect at once.
+            p.set(Category::Numeric, Some(b"C")).unwrap();
+            assert_eq!(point(), b".");
+            p.set(Category::All, Some(b"pt_BR.utf8")).unwrap();
+            assert_eq!(point(), b",");
+            p.leave();
+            assert_eq!(point(), b".");
+
+            // A second isolate running inside the first one's native code
+            // puts the first one's back when it returns.
+            let mut q = LibcProvider::default();
+            q.set(Category::Numeric, Some(b"C")).unwrap();
+            p.enter();
+            q.enter();
+            assert_eq!(point(), b",", "a C isolate leaves the thread alone");
+            q.set(Category::Numeric, Some(b"pt_BR.utf8")).unwrap();
+            q.leave();
+            assert_eq!(point(), b",");
+            p.set(Category::Numeric, Some(b"C")).unwrap();
+            q.enter();
+            assert_eq!(point(), b",");
+            q.leave();
+            assert_eq!(point(), b".");
+            p.leave();
+            assert_eq!(point(), b".");
         }
     }
 }

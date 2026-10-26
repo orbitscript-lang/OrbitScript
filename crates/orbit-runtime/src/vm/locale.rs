@@ -37,14 +37,6 @@ impl Vm {
         self.refresh_locale();
     }
 
-    /// In [`LocaleMode::Process`], take on changes the host made to the
-    /// process's locale.
-    pub fn sync_locale(&mut self) {
-        if self.rt.locale_provider.sync() {
-            self.refresh_locale();
-        }
-    }
-
     /// See [`LocaleProvider::time_pattern`].
     pub fn locale_time_pattern(&self, spec: &[u8]) -> Option<Vec<u8>> {
         self.rt.locale_provider.time_pattern(spec)
@@ -55,14 +47,17 @@ impl Vm {
         self.rt.locale_provider.time_text(spec, tm)
     }
 
-    /// See [`LocaleProvider::enter_native`].
-    pub fn enter_native_locale(&mut self) {
-        self.rt.locale_provider.enter_native();
-    }
-
-    /// See [`LocaleProvider::leave_native`].
-    pub fn leave_native_locale(&mut self) {
-        self.rt.locale_provider.leave_native();
+    /// Run `f`, which runs code, with the isolate's locale on this
+    /// thread ([`LocaleProvider::enter`]). Every way into running code
+    /// (`call_at`, nested resumes and closes) goes through here, so native
+    /// code needs nothing of its own.
+    pub(crate) fn with_thread_locale<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
+        if self.rt.locale_provider.enter() {
+            self.refresh_locale();
+        }
+        let r = f(self);
+        self.rt.locale_provider.leave();
+        r
     }
 
     fn refresh_locale(&mut self) {
