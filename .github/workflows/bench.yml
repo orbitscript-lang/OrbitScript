@@ -24,10 +24,10 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - name: Cache the reference interpreter
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/reference-lua
           key: reference-lua-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/lua-5.5/VERSION', 'scripts/build-reference-lua.sh') }}
@@ -39,7 +39,7 @@ jobs:
           cargo testkit bench --runs 5
           --interp lua5.5=target/reference-lua/bin/lua5.5 --interp orbit=target/release/orbit
           --json target/testkit/bench.json --markdown "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           path: target/testkit/bench.json

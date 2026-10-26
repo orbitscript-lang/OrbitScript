@@ -52,7 +52,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ env.TAG }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG || github.ref }}
       - name: Stamp the tag's version
@@ -99,7 +99,7 @@ jobs:
       - name: Check out with LF line ends
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG || github.ref }}
       - name: Install Rust
@@ -155,7 +155,7 @@ jobs:
             fi
           done
           ls -l "$RUNNER_TEMP/dist"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.NAME }}
           path: ${{ runner.temp }}/dist/*
@@ -169,10 +169,10 @@ jobs:
       run:
         working-directory: editors/vscode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG || github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Stamp the tag's version
@@ -182,7 +182,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npx vsce package -o "$RUNNER_TEMP/orbitscript-${{ needs.version.outputs.version }}.vsix"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: orbitscript-vsix
           path: ${{ runner.temp }}/*.vsix
@@ -196,7 +196,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

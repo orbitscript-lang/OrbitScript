@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
@@ -63,7 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install the MSRV from Cargo.toml
         run: |
           msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
@@ -99,7 +99,7 @@ jobs:
       - name: Check out with LF line ends
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
@@ -112,7 +112,7 @@ jobs:
     steps:
       - name: Check out with LF line ends
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       # Lints the Windows-only code paths and compiles every test target.
@@ -130,14 +130,14 @@ jobs:
       # OrbitScript knows only C (tests/lua-5.5/DEVIATIONS.md).
       LC_ALL: C
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Check the vendored test suite is unmodified
         working-directory: tests/lua-5.5/suite
         run: sha256sum --check --quiet ../SHA256SUMS
       - name: Cache the reference interpreter
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/reference-lua
           key: reference-lua-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/lua-5.5/VERSION', 'scripts/build-reference-lua.sh') }}
@@ -175,7 +175,7 @@ jobs:
         run: >
           cargo testkit diff --corpus tests/diff/compat --reference target/reference-lua/bin/lua5.5
           --interp target/release/orbit --expect tests/diff/compat/expected-orbit.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: conformance-results
