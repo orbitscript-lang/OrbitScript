@@ -16,8 +16,10 @@ pub fn getenv(name: string) -> string?;
 pub fn remove(filename: string) -> (bool?, string?, int?);
 /// Renames a file or directory.
 pub fn rename(oldname: string, newname: string) -> (bool?, string?, int?);
-/// Sets or queries the locale for `category` (default `"all"`).
-pub fn setlocale(locale: string?, category: string?) -> string?;
+/// Sets or queries the locale for `category` (default `"all"`). `scope`
+/// `"process"` changes the process's locale, `"thread"` leaves it on the
+/// thread after the script returns (OrbitScript only; Lua 5.5 ignores it).
+pub fn setlocale(locale: string?, category: string?, scope: string?) -> string?;
 /// The current time, or the time a date table describes, in seconds.
 pub fn time(t: table?) -> int;
 /// A name usable for a temporary file.

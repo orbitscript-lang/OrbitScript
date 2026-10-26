@@ -5,10 +5,11 @@
 
 use std::io::Write as _;
 
+use crate::locale::Locale;
 use crate::object::number::{self, ArithError, ArithOp, float_to_int};
 use crate::object::table::StoreError;
 use crate::object::value::raw_eq;
-use crate::object::{LuaHeap, NoMemory, Value};
+use crate::object::{Gc, LuaHeap, LuaStr, NoMemory, Value};
 use orbit_bytecode::number::BitOp;
 
 use crate::vm::Runtime;
@@ -172,10 +173,10 @@ fn is_num(v: Value) -> bool {
 }
 
 /// String-to-number coercion for arithmetic.
-fn coerce(heap: &LuaHeap, v: Value) -> Option<Value> {
+fn coerce(heap: &LuaHeap, locale: &Locale, v: Value) -> Option<Value> {
     match v {
         Value::Int(_) | Value::Float(_) => Some(v),
-        Value::Str(s) => number::str_to_number(heap.get(s).as_bytes()),
+        Value::Str(s) => locale.str_to_number(heap.get(s).as_bytes()),
         _ => None,
     }
 }
@@ -196,7 +197,7 @@ pub(crate) fn arith_slow(
     if strings {
         // Strings do arithmetic through the string library's coercion, which
         // reports failures in its own words and its errors carry no position.
-        if let (Some(x), Some(y)) = (coerce(heap, a), coerce(heap, b)) {
+        if let (Some(x), Some(y)) = (coerce(heap, &rt.locale, a), coerce(heap, &rt.locale, b)) {
             return arith_num(op, x, y).map_err(|m| Exc::Plain(m.into()));
         }
     }
@@ -313,7 +314,7 @@ pub(crate) fn less_than(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Resul
         (Float(x), Float(y)) => Ok(x < y),
         (Int(x), Float(y)) => Ok(number::int_lt_float(x, y)),
         (Float(x), Int(y)) => Ok(number::float_lt_int(x, y)),
-        (Str(x), Str(y)) => Ok(heap.get(x).as_bytes() < heap.get(y).as_bytes()),
+        (Str(x), Str(y)) => Ok(str_order(heap, rt, x, y).is_lt()),
         _ => Err(compare_meta(heap, rt, MetaField::Lt, a, b)),
     }
 }
@@ -326,9 +327,18 @@ pub(crate) fn less_equal(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Resu
         (Float(x), Float(y)) => Ok(x <= y),
         (Int(x), Float(y)) => Ok(number::int_le_float(x, y)),
         (Float(x), Int(y)) => Ok(number::float_le_int(x, y)),
-        (Str(x), Str(y)) => Ok(heap.get(x).as_bytes() <= heap.get(y).as_bytes()),
+        (Str(x), Str(y)) => Ok(str_order(heap, rt, x, y).is_le()),
         _ => Err(compare_meta(heap, rt, MetaField::Le, a, b)),
     }
+}
+
+/// The order of two strings: byte order, or the locale's collation. Out
+/// of line, so the interpreter loop and `table.sort`, which inline
+/// [`less_than`], don't grow.
+#[inline(never)]
+fn str_order(heap: &LuaHeap, rt: &Metas, x: Gc<LuaStr>, y: Gc<LuaStr>) -> std::cmp::Ordering {
+    rt.locale
+        .compare(heap.get(x).as_bytes(), heap.get(y).as_bytes())
 }
 
 /// `__lt` or `__le` for operands that aren't two numbers or two strings.
@@ -379,12 +389,13 @@ fn equal_meta(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Result<bool, Ex
 }
 
 /// Append `v` for `..`, or return false if it isn't a string or number.
+/// Floats are written with `locale`'s decimal point.
 #[inline]
-pub(crate) fn concat_piece(heap: &LuaHeap, v: Value, out: &mut Vec<u8>) -> bool {
+pub(crate) fn concat_piece(heap: &LuaHeap, locale: &Locale, v: Value, out: &mut Vec<u8>) -> bool {
     match v {
         Value::Str(s) => out.extend_from_slice(heap.get(s).as_bytes()),
         Value::Int(i) => number::push_int(out, i),
-        Value::Float(f) => push_float(out, f),
+        Value::Float(f) => push_float(locale, out, f),
         _ => return false,
     }
     true
@@ -393,10 +404,12 @@ pub(crate) fn concat_piece(heap: &LuaHeap, v: Value, out: &mut Vec<u8>) -> bool 
 /// [`concat_piece`] of a float, out of line: rarer than strings and
 /// integers, and it needs a buffer.
 #[inline(never)]
-fn push_float(out: &mut Vec<u8>, f: f64) {
+fn push_float(locale: &Locale, out: &mut Vec<u8>, f: f64) {
     let mut s = String::new();
     number::fmt_float(&mut s, f);
+    let start = out.len();
     out.extend_from_slice(s.as_bytes());
+    locale.localize_float(out, start);
 }
 
 /// `tostring` without metamethods.
@@ -405,7 +418,7 @@ pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>)
         Value::Nil => out.extend_from_slice(b"nil"),
         Value::Bool(b) => out.extend_from_slice(if b { b"true" } else { b"false" }),
         Value::Int(_) | Value::Float(_) | Value::Str(_) => {
-            concat_piece(heap, v, out);
+            concat_piece(heap, &rt.metas.locale, v, out);
         }
         Value::Table(_)
         | Value::Closure(_)

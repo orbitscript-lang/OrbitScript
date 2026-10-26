@@ -1016,6 +1016,41 @@ impl<'s> Stack<'s> {
         Control::new(self.w.control(), Rc::clone(&self.host))
     }
 
+    // ---- the locale (ADR-13) --------------------------------------------------------
+
+    pub fn set_locale(
+        &mut self,
+        category: crate::LocaleCategory,
+        name: Option<OrbitStr<'_>>,
+        scope: crate::LocaleScope,
+    ) -> Option<OrbitString> {
+        let name: SOption<Slice<'_, u8>> = name.as_ref().map(|n| Slice::from(n.as_bytes())).into();
+        bytes(
+            self.w
+                .set_locale(category_code(category), name, scope_code(scope)),
+        )
+    }
+
+    pub fn decimal_point(&self) -> OrbitString {
+        OrbitString::from(&self.w.decimal_point()[..])
+    }
+
+    pub fn locale_mode(&self) -> crate::LocaleMode {
+        locale_mode_of(self.w.locale_mode())
+    }
+
+    pub fn set_locale_mode(&mut self, mode: crate::LocaleMode) {
+        self.w.set_locale_mode(locale_mode_code(mode))
+    }
+
+    pub fn locale_time_pattern(&self, spec: &[u8]) -> Option<OrbitString> {
+        bytes(self.w.locale_time_pattern(spec.into()))
+    }
+
+    pub fn locale_time_text(&self, spec: &[u8], tm: &crate::TimeParts) -> Option<OrbitString> {
+        bytes(self.w.locale_time_text(spec.into(), tm.into()))
+    }
+
     // ---- threads ---------------------------------------------------------------------
 
     pub fn running_thread(&self) -> ThreadRef {

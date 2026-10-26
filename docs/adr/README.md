@@ -14,5 +14,6 @@
 | [0010](0010-liborbit.md) | The runtime as a shared library (`liborbit`, aliased as `liblua`) | Accepted |
 | [0011](0011-api-surface-and-crates.md) | Public API surface and crate layout | Accepted |
 | [0012](0012-developer-tooling.md) | Developer tooling: language server and debugger | Accepted |
+| [0013](0013-locales.md) | Locales | Proposed |
 
 Each record states a decision and the technical reasons for it; git history shows how it changed. Statuses: **Proposed** (open for edits), **Accepted** (changes need a maintainer's approval), **Superseded**.

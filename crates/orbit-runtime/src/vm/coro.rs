@@ -1080,8 +1080,10 @@ impl NativeCtx<'_> {
         let at = vm.push_wait_boundary().map_err(|e| e.value)?;
         vm.rt.xfer.clear();
         vm.rt.xfer.extend_from_slice(args);
-        let flow = vm.enter_resumed(t);
-        let r = vm.finish_nested(flow);
+        let r = vm.with_thread_locale(|vm| {
+            let flow = vm.enter_resumed(t);
+            vm.finish_nested(flow)
+        });
         vm.rt.top = at;
         match r {
             Ok(()) => {
@@ -1110,8 +1112,10 @@ impl NativeCtx<'_> {
             return outcome;
         }
         let at = vm.push_wait_boundary().map_err(|e| e.value)?;
-        let flow = vm.enter_closing(co);
-        let r = vm.finish_nested(flow);
+        let r = vm.with_thread_locale(|vm| {
+            let flow = vm.enter_closing(co);
+            vm.finish_nested(flow)
+        });
         vm.rt.top = at;
         vm.rt.xfer.clear();
         r.map_err(|e| e.value)

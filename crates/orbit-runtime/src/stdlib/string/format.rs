@@ -288,7 +288,9 @@ fn format_from(
             }
             b'a' | b'A' | b'e' | b'E' | b'f' | b'g' | b'G' => {
                 let x = ctx.check_f64(arg)?;
+                let start = out.len();
                 printf_float(&mut out, &spec, conv, x);
+                ctx.locale().localize_float(&mut out, start);
             }
             b'p' => {
                 let v = ctx.arg(arg);
