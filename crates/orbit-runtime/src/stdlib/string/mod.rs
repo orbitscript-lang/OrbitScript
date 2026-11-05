@@ -160,15 +160,13 @@ fn reverse(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 fn upper(ctx: &mut NativeCtx<'_>) -> R {
-    map_bytes(ctx, |b, out| {
-        out.extend(b.iter().map(u8::to_ascii_uppercase))
-    })
+    let locale = ctx.locale().clone();
+    map_bytes(ctx, |b, out| locale.upper(b, out))
 }
 
 fn lower(ctx: &mut NativeCtx<'_>) -> R {
-    map_bytes(ctx, |b, out| {
-        out.extend(b.iter().map(u8::to_ascii_lowercase))
-    })
+    let locale = ctx.locale().clone();
+    map_bytes(ctx, |b, out| locale.lower(b, out))
 }
 
 // ---- patterns ------------------------------------------------------------
@@ -233,7 +231,8 @@ fn find_aux(ctx: &mut NativeCtx<'_>, find: bool) -> R {
         };
     }
     let mut caps = Captures::new();
-    let (a, b) = match pattern::search(ctx.bytes(s), ctx.bytes(p), init, &mut caps) {
+    let chars = ctx.locale().chars_rc();
+    let (a, b) = match pattern::search(ctx.bytes(s), ctx.bytes(p), &chars, init, &mut caps) {
         Ok(Some(m)) => m,
         Ok(None) => return ctx.ret([Value::Nil]),
         Err(e) => return Err(pattern_error(ctx, e)),
@@ -294,9 +293,10 @@ fn gmatch_step(ctx: &mut NativeCtx<'_>) -> R {
         _ => None,
     };
     let mut caps = Captures::new();
+    let chars = ctx.locale().chars_rc();
     // An empty match where the last one ended doesn't count.
-    let found =
-        Matcher::new(ctx.bytes(s), ctx.bytes(p), &mut caps).find_from(start, 0, false, last);
+    let found = Matcher::new(ctx.bytes(s), ctx.bytes(p), &chars, &mut caps)
+        .find_from(start, 0, false, last);
     let (a, e) = match found {
         Ok(Some(m)) => m,
         Ok(None) => return Ok(NativeReturn::Return(0)),
@@ -393,8 +393,9 @@ fn gsub_resume(ctx: &mut NativeCtx<'_>, after_match: bool, mut out: Vec<u8>) -> 
     let mut gap_start = pos;
     let mut done = after_match && anchored;
     let mut caps = Captures::new();
+    let chars = ctx.locale().chars_rc();
     while !done && count < max {
-        let found = Matcher::new(ctx.bytes(s), ctx.bytes(p), &mut caps)
+        let found = Matcher::new(ctx.bytes(s), ctx.bytes(p), &chars, &mut caps)
             .find_from(pos, pstart, anchored, last);
         let f = match found {
             Ok(Some((start, end))) => Found { start, end },

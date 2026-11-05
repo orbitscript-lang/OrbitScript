@@ -293,8 +293,9 @@ impl Stream {
 
     /// Read a numeral as `read("n")` does: the longest prefix that can
     /// start a numeral, at most [`MAX_NUMERAL`] bytes, looking one byte
-    /// ahead. Returns the bytes, or `None` if they ran too long.
-    fn read_numeral(&mut self, out: &mut dyn Write) -> io::Result<Option<Vec<u8>>> {
+    /// ahead. The decimal point is `.` or the locale's `point`. Returns the
+    /// bytes, or `None` if they ran too long.
+    fn read_numeral(&mut self, point: u8, out: &mut dyn Write) -> io::Result<Option<Vec<u8>>> {
         let mut buf = Vec::new();
         let mut too_long = false;
         while let Some(c) = self.peek(out)? {
@@ -339,7 +340,7 @@ impl Stream {
         while take(self, &mut buf, &digit)? {
             count += 1;
         }
-        if take(self, &mut buf, &|c| c == b'.')? {
+        if take(self, &mut buf, &|c| c == b'.' || c == point)? {
             while take(self, &mut buf, &digit)? {
                 count += 1;
             }
@@ -696,10 +697,21 @@ fn f_write<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
 fn write<'s>(c: &'s Call<'s>, s: &Shared, file: Value<'s>, first: usize) -> Result<Ret, Error> {
     let mut written = 0usize;
     let mut bytes = Vec::new();
+    let mut point = None;
     for i in first..c.nargs() {
         bytes.clear();
-        if !c.arg(i).write_text(&mut bytes) {
+        let v = c.arg(i);
+        if !v.write_text(&mut bytes) {
             return Err(c.type_error(i, "string"));
+        }
+        if let Value::Float(_) = v {
+            // Floats are written with the locale's decimal point.
+            let point = point.get_or_insert_with(|| c.decimal_point());
+            if &point[..] != b"." {
+                if let Some(at) = bytes.iter().position(|&b| b == b'.') {
+                    bytes.splice(at..at + 1, point.iter().copied());
+                }
+            }
         }
         let r = c.with_stdout(|out| s.borrow_mut().write(&bytes, out));
         if let Err(e) = r {
@@ -891,6 +903,13 @@ enum ReadOutcome {
 
 /// One format's value, or nil if it fails.
 fn read_one<'s>(c: &'s Call<'s>, s: &Shared, fmt: Format) -> io::Result<Value<'s>> {
+    // The first byte of the locale's decimal point, as lua5.5 reads it.
+    let point = c
+        .decimal_point()
+        .as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(b'.');
     let read = c.with_stdout(|out| -> io::Result<ReadOutcome> {
         let mut st = s.borrow_mut();
         let mut buf = Vec::new();
@@ -905,7 +924,7 @@ fn read_one<'s>(c: &'s Call<'s>, s: &Shared, fmt: Format) -> io::Result<Value<'s
                 st.read_all(&mut buf, out)?;
                 true
             }
-            Format::Number => return Ok(ReadOutcome::Numeral(st.read_numeral(out)?)),
+            Format::Number => return Ok(ReadOutcome::Numeral(st.read_numeral(point, out)?)),
         };
         Ok(if ok {
             ReadOutcome::Bytes(buf)

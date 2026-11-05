@@ -127,6 +127,49 @@ fn floating_point() {
 }
 
 #[test]
+fn c_sees_the_script_locale_only_while_the_script_runs() {
+    let bind = "local ffi = require 'std.ffi'
+        local strtod = ffi.open():bind('strtod', 'double', 'cstr', 'ptr')";
+    let with_os = || {
+        let mut iso = lua();
+        orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
+        iso
+    };
+    let mut a = with_os();
+    if run_in(
+        &mut a,
+        "return os.setlocale('pt_BR.utf8', 'numeric') ~= nil",
+    ) != "true"
+    {
+        eprintln!("pt_BR.utf8 is not installed; skipped");
+        return;
+    }
+    // C code the script calls reads numbers with its decimal comma, and
+    // follows `os.setlocale` at once.
+    assert_eq!(
+        run_in(
+            &mut a,
+            &format!(
+                "{bind}
+                 local before = strtod('1,5', nil) == 1.5
+                 os.setlocale('C', 'numeric')
+                 local after = strtod('1,5', nil) == 1
+                 os.setlocale('pt_BR.utf8', 'numeric')
+                 return before, after"
+            )
+        ),
+        "true\ttrue"
+    );
+    // Once it returns, the thread has its own locale back: another isolate
+    // in the C locale sees `.` again.
+    let mut b = with_os();
+    assert_eq!(
+        run_in(&mut b, &format!("{bind} return strtod('1,5', nil) == 1")),
+        "true"
+    );
+}
+
+#[test]
 fn out_parameters_through_buffers() {
     let out = run(&format!(
         "{LIBC}

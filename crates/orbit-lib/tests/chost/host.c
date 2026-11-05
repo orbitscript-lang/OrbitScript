@@ -1,6 +1,7 @@
 /* A C program that embeds OrbitScript through the Lua 5.5 C API, as a
    program built for liblua does (ADR-10). Each mode prints what it checks;
    tests/host.rs compares the output. */
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -176,6 +177,44 @@ static int states(void) {
   lua_close(a);
   run(b, "print(x .. ' still open')");
   lua_close(b);
+  return 0;
+}
+
+/* A C function: 2.5 as this thread's C library formats it. */
+static int c_format(lua_State *L) {
+  char buf[32];
+  snprintf(buf, sizeof buf, "%.1f", 2.5);
+  lua_pushstring(L, buf);
+  return 1;
+}
+
+static void host_sees(const char *when) {
+  char buf[32];
+  snprintf(buf, sizeof buf, "%.1f", 2.5);
+  printf("%s: host formats %s, process numeric %s\n", when, buf, setlocale(LC_NUMERIC, NULL));
+}
+
+static int locale(void) {
+  lua_State *L = luaL_newstate();
+  luaL_openlibs(L);
+  lua_register(L, "c_format", c_format);
+  printf("mode %d\n", orbit_setlocalemode(L, -1));
+  if (setlocale(LC_NUMERIC, "pt_BR.utf8") == NULL) {
+    printf("no pt_BR.utf8\n");
+    lua_close(L);
+    return 0;
+  }
+  /* The process's locale, as in PUC Lua: the program's change reaches
+     scripts, and theirs reaches the program. */
+  run(L, "print(1.5, os.setlocale(nil, 'numeric'), c_format())");
+  run(L, "os.setlocale('C', 'numeric')");
+  host_sees("after the script's C");
+  /* The state's own: the process's locale stays as it is. */
+  printf("was %d\n", orbit_setlocalemode(L, ORBIT_LOCALE_STATE));
+  run(L, "print(os.setlocale('pt_BR.utf8', 'numeric'), 1.5, c_format())");
+  host_sees("after the state's pt_BR");
+  printf("bad mode %d\n", orbit_setlocalemode(L, 7));
+  lua_close(L);
   return 0;
 }
 
@@ -517,6 +556,7 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "locals") == 0) return locals();
   if (strcmp(mode, "toclose") == 0) return toclose();
   if (strcmp(mode, "threads") == 0) return threads();
+  if (strcmp(mode, "locale") == 0) return locale();
   if (strcmp(mode, "debug") == 0 && argc > 2) return debug(argc, argv);
   fprintf(stderr, "unknown mode %s\n", mode);
   return 2;

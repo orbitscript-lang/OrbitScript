@@ -25,7 +25,7 @@ The engines (`pattern`, `format`, `pack`, `rng`, UTF-8 decoding) are plain funct
 
 ## Patterns
 
-The matcher implements the manual's §6.4.1 grammar directly: character classes (`%a %c %d %g %l %p %s %u %w %x` and their complements, using the C locale's ASCII definitions), sets with ranges and classes, `.`, the four repetition suffixes (`* + - ?`), anchors, captures including position captures `()`, back-references `%1`-`%9`, `%b`, and `%f` frontiers.
+The matcher implements the manual's §6.4.1 grammar directly: character classes (`%a %c %d %g %l %p %s %u %w %x` and their complements, from the isolate's character tables: the C locale's ASCII definitions until a script selects another locale (ADR-13)), sets with ranges and classes, `.`, the four repetition suffixes (`* + - ?`), anchors, captures including position captures `()`, back-references `%1`-`%9`, `%b`, and `%f` frontiers.
 
 It is a backtracking matcher that interprets the pattern bytes as it goes, rather than compiling the pattern first. Lua patterns are short and usually used once, so a compile step and a cache would cost more than they save for typical scripts. Greedy single-item repetition (`x*`, `x+`) counts the maximal run first and backs off without recursion; only captures, `-`, and alternation-like backtracking recurse. Recursion depth is bounded by a fixed limit, and exceeding it raises `pattern too complex` (pm.lua runs a pattern that must fail that way rather than overflow). A compiled form would be a contained change behind the same function signature.
 

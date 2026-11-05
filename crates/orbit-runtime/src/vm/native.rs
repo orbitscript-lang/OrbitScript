@@ -2,7 +2,8 @@
 
 use std::rc::Rc;
 
-use crate::object::number::{self, float_to_int};
+use crate::locale::Locale;
+use crate::object::number::float_to_int;
 use crate::object::{
     Cell, Closure, Gc, LuaStr, NativeId, OrbitStr, OrbitString, Proto, ProtoCode, Table, Value,
 };
@@ -489,6 +490,11 @@ impl NativeCtx<'_> {
         self.vm.heap.get(s).as_bytes()
     }
 
+    /// The isolate's locale.
+    pub fn locale(&self) -> &Locale {
+        &self.vm.rt.metas.locale
+    }
+
     /// `tostring` without metamethods, appended to `out`.
     pub fn display(&self, v: Value, out: &mut Vec<u8>) {
         ops::display(&self.vm.heap, &self.vm.rt, v, out);
@@ -879,13 +885,9 @@ impl NativeCtx<'_> {
         match self.arg(i) {
             Value::Str(s) => Ok(s),
             v @ (Value::Int(_) | Value::Float(_)) if i < self.nargs => {
-                let mut text = String::new();
-                number::fmt_number(&mut text, v);
-                let s = self
-                    .vm
-                    .rt
-                    .strings
-                    .new_str(&mut self.vm.heap, text.as_bytes());
+                let mut text = Vec::new();
+                self.vm.rt.metas.locale.fmt_number(&mut text, v);
+                let s = self.vm.rt.strings.new_str(&mut self.vm.heap, &text);
                 self.set(i, Value::Str(s));
                 Ok(s)
             }
@@ -897,7 +899,13 @@ impl NativeCtx<'_> {
     pub fn check_number(&mut self, i: usize) -> Result<Value, LuaError> {
         match self.arg(i) {
             v @ (Value::Int(_) | Value::Float(_)) => Ok(v),
-            Value::Str(s) => match number::str_to_number(self.vm.heap.get(s).as_bytes()) {
+            Value::Str(s) => match self
+                .vm
+                .rt
+                .metas
+                .locale
+                .str_to_number(self.vm.heap.get(s).as_bytes())
+            {
                 Some(v) => Ok(v),
                 None => Err(self.type_error(i, "number")),
             },
@@ -910,7 +918,12 @@ impl NativeCtx<'_> {
     /// either.
     pub fn to_integer(&self, v: Value) -> Option<i64> {
         let n = match v {
-            Value::Str(s) => number::str_to_number(self.vm.heap.get(s).as_bytes())?,
+            Value::Str(s) => self
+                .vm
+                .rt
+                .metas
+                .locale
+                .str_to_number(self.vm.heap.get(s).as_bytes())?,
             _ => v,
         };
         match n {
@@ -1074,12 +1087,15 @@ impl NativeCtx<'_> {
     pub fn concat(&mut self, a: Value, b: Value) -> Result<Meta<Value>, LuaError> {
         let mut out = Vec::new();
         let heap = &self.vm.heap;
-        if ops::concat_piece(heap, a, &mut out) && ops::concat_piece(heap, b, &mut out) {
+        let locale = &self.vm.rt.metas.locale;
+        if ops::concat_piece(heap, locale, a, &mut out)
+            && ops::concat_piece(heap, locale, b, &mut out)
+        {
             return Ok(Meta::Done(self.new_str_owned(out)));
         }
         let h = meta::binary_handler(heap, &self.vm.rt.metas, MetaField::Concat, a, b);
         if h.is_nil() {
-            let bad = if ops::concat_piece(heap, a, &mut Vec::new()) {
+            let bad = if ops::concat_piece(heap, locale, a, &mut Vec::new()) {
                 b
             } else {
                 a

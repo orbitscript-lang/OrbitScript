@@ -14,7 +14,7 @@
 
 use std::sync::OnceLock;
 
-use crate::object::number::{self, float_to_int};
+use crate::object::number::float_to_int;
 use crate::object::{LuaHeap, Table, Value};
 use crate::vm::op::{UnlinkedChunk, format};
 use crate::vm::{FastFn, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
@@ -252,7 +252,7 @@ fn checkint(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.arg(0);
     let num = match v {
         Value::Int(_) | Value::Float(_) => Some(v),
-        Value::Str(s) => number::str_to_number(ctx.bytes(s)),
+        Value::Str(s) => ctx.locale().str_to_number(ctx.bytes(s)),
         _ => None,
     };
     match num {
@@ -368,13 +368,17 @@ fn sortprim(ctx: &mut NativeCtx<'_>) -> R {
         Value::Float(f) => !f.is_nan(),
         _ => false,
     });
-    let strings = !numbers && values.iter().all(|v| matches!(v, Value::Str(_)));
+    // Strings in byte order only: a locale's collation goes through `<`
+    // with the built-in's own sort.
+    let strings = !numbers
+        && ctx.vm.rt.metas.locale.byte_order()
+        && values.iter().all(|v| matches!(v, Value::Str(_)));
     if !numbers && !strings {
         return ctx.ret([Value::Bool(false)]);
     }
     let mut values = values;
     values.sort_by(|&x, &y| {
-        let lt = |x, y| crate::vm::ops::less_than(heap, &ctx.vm.rt.metas, x, y).unwrap_or(false);
+        let lt = |x, y| sort_lt(ctx.vm, x, y);
         if lt(x, y) {
             std::cmp::Ordering::Less
         } else if lt(y, x) {
@@ -388,6 +392,16 @@ fn sortprim(ctx: &mut NativeCtx<'_>) -> R {
             .map_err(|_| ctx.no_memory())?;
     }
     ctx.ret([Value::Bool(true)])
+}
+
+/// `<` for [`sortprim`], whose strings compare in byte order.
+fn sort_lt(vm: &Vm, x: Value, y: Value) -> bool {
+    match (x, y) {
+        (Value::Int(a), Value::Int(b)) => a < b,
+        (Value::Float(a), Value::Float(b)) => a < b,
+        (Value::Str(a), Value::Str(b)) => vm.heap.get(a).as_bytes() < vm.heap.get(b).as_bytes(),
+        _ => crate::vm::ops::less_than(&vm.heap, &vm.rt.metas, x, y).unwrap_or(false),
+    }
 }
 
 /// `require(name)` inside a built-in module, which `use` calls: only

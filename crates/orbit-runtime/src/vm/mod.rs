@@ -19,6 +19,7 @@ mod gc;
 pub mod hook;
 mod interp;
 mod link;
+mod locale;
 mod meta;
 mod native;
 pub(crate) mod ops;
@@ -27,6 +28,7 @@ use std::fmt;
 use std::io::Write;
 use std::time::Instant;
 
+use crate::locale::{CLocaleProvider, Locale, LocaleProvider};
 use crate::object::table::{self, mark};
 use crate::object::{
     Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table, Thread,
@@ -586,6 +588,9 @@ pub struct Runtime {
     /// files whose name ends in `.orb` use it; everything else uses
     /// [`Runtime::compile`].
     pub compile_orbitscript: Option<CompileFn>,
+    /// Where `os.setlocale` gets locales ([`Vm::set_locale_provider`]).
+    /// Only the C locale exists until a host installs one.
+    pub(crate) locale_provider: Box<dyn LocaleProvider>,
     pub(crate) natives: Vec<Native>,
     /// The runtime's own natives, by name, so each is registered once.
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId, CheapHash>,
@@ -881,7 +886,9 @@ impl Vm {
                 metas: meta::Metas {
                     field_names,
                     type_meta: Default::default(),
+                    locale: Locale::c(),
                 },
+                locale_provider: Box::new(CLocaleProvider::default()),
                 gc,
                 current: main_thread,
                 main_thread,

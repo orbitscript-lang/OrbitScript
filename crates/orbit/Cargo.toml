@@ -16,6 +16,8 @@ orbit-runtime = { path = "../orbit-runtime", default-features = false }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 # `#[native]` (build time only, no dependencies of its own).
 orbit-macros = { path = "../orbit-macros" }
+# The C library's locales for `os.setlocale` (ADR-13).
+orbit-locale = { path = "../orbit-locale", optional = true }
 # The liborbit boundary (ADR-10): declared with it under `abi`, crossed with
 # it under `shared`.
 stabby = { version = "72.1.16", optional = true }
@@ -34,7 +36,7 @@ shared = ["dep:stabby"]
 abi = ["runtime", "dep:stabby"]
 # The standard library's optional parts (see `orbit-runtime`), for the
 # runtime backend; a shared build has what liborbit was built with.
-default = ["runtime", "string", "utf8", "table", "math", "load", "package", "coroutine", "debug", "dump", "verify", "verify-flow"]
+default = ["runtime", "locale", "string", "utf8", "table", "math", "load", "package", "coroutine", "debug", "dump", "verify", "verify-flow"]
 string = ["orbit-runtime/string"]
 utf8 = ["orbit-runtime/utf8"]
 table = ["orbit-runtime/table"]
@@ -46,6 +48,9 @@ debug = ["orbit-runtime/debug"]
 dump = ["orbit-runtime/dump"]
 verify = ["orbit-runtime/verify"]
 verify-flow = ["orbit-runtime/verify-flow"]
+# `os.setlocale` with the C library's locales (ADR-13), for the runtime
+# backend; without it only the C locale exists.
+locale = ["dep:orbit-locale"]
 # The debugger engine (ADR-12), for the runtime backend.
 debugger = ["orbit-runtime/debugger"]
 

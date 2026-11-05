@@ -31,4 +31,29 @@ LUA_API lua_State *(orbit_newstate)(lua_Alloc f, void *ud, unsigned flags);
  */
 LUA_API int (orbit_debug_listen)(lua_State *L, const char *addr);
 
+/* orbit_setlocalemode's modes: whose locale os.setlocale changes. */
+
+/*
+ * The process's: os.setlocale is the C library's setlocale, as in PUC Lua,
+ * and the state follows what the program does to the process's locale
+ * (from its next lua_call, lua_pcall or lua_resume). The default for
+ * states made with lua_newstate, luaL_newstate and orbit_newstate.
+ */
+#define ORBIT_LOCALE_PROCESS 0
+
+/*
+ * The state's own: os.setlocale changes this state only, and never the
+ * process's locale or other states. C functions the state calls run with
+ * its locale as their thread's. The default for isolates a Rust program
+ * makes.
+ */
+#define ORBIT_LOCALE_STATE 1
+
+/*
+ * Switch L's state to `mode` (or with -1, only ask), keeping the locale
+ * scripts see: a switch to the process's takes it on, one to the state's
+ * own keeps it. Returns the mode before, or -1 for an unknown mode.
+ */
+LUA_API int (orbit_setlocalemode)(lua_State *L, int mode);
+
 #endif

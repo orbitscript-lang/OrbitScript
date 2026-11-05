@@ -1232,6 +1232,12 @@ LUALIB_API void luaL_openselectedlibs(lua_State *L, int load, int preload) {
   lua_pop(L, 1);
 }
 
+extern int orbit_r_setlocalemode(lua_State *L, int mode);
+
+LUA_API int orbit_setlocalemode(lua_State *L, int mode) {
+  return orbit_r_setlocalemode(L, mode);
+}
+
 #if defined(ORBIT_CAPI_HOST)
 extern lua_State *orbit_r_newstate(unsigned flags);
 extern int orbit_r_debug_listen(lua_State *L, int announce);

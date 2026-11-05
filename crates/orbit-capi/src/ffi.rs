@@ -1882,6 +1882,31 @@ impl std::io::Write for CStdout {
     }
 }
 
+/// `orbit_setlocalemode`'s modes (orbit.h).
+const LOCALE_PROCESS: c_int = 0;
+const LOCALE_STATE: c_int = 1;
+
+/// `orbit_setlocalemode`: whether `os.setlocale` in `l`'s isolate changes
+/// the process's locale or the isolate's own (ADR-13). Returns the mode
+/// before, or -1 (changing nothing) for an unknown mode. -1 as `mode`
+/// only asks.
+#[no_mangle]
+extern "C" fn orbit_r_setlocalemode(l: *mut LState, mode: c_int) -> c_int {
+    entry!(here l, -1, |_b, c| {
+        let before = match c.locale_mode() {
+            orbit::LocaleMode::Process => LOCALE_PROCESS,
+            orbit::LocaleMode::Isolate => LOCALE_STATE,
+        };
+        match mode {
+            LOCALE_PROCESS => c.set_locale_mode(orbit::LocaleMode::Process),
+            LOCALE_STATE => c.set_locale_mode(orbit::LocaleMode::Isolate),
+            -1 => {}
+            _ => return Ok(-1),
+        }
+        Ok(before)
+    })
+}
+
 /// `orbit_newstate`'s flag for a state no debugger may attach to.
 #[cfg(feature = "host")]
 const STATE_NO_DEBUGGER: std::ffi::c_uint = 1;
@@ -1905,6 +1930,9 @@ extern "C" fn orbit_r_newstate(flags: std::ffi::c_uint) -> *mut LState {
     // freed by `orbit_r_close`.
     let iso_ref: &'static mut orbit::Isolate = unsafe { &mut *iso };
     iso_ref.set_stdout(CStdout);
+    // As in PUC Lua: `os.setlocale` is the C library's `setlocale`, so C
+    // programs see no change (ADR-13). `orbit_setlocalemode` switches.
+    iso_ref.set_locale_mode(orbit::LocaleMode::Process);
     let debuggable = allowed && crate::debug::serve(iso_ref);
     let host: StackPtr = Box::into_raw(Box::new(iso_ref.host_stack()));
     // SAFETY: just made, and not shared yet.

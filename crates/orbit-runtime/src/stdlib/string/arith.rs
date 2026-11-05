@@ -3,7 +3,7 @@
 //! that doesn't convert hands the operation to the other operand's
 //! metamethod, or fails with `attempt to add a 'string' with a 'table'`.
 
-use crate::object::number::{self, ArithOp, Number};
+use crate::object::number::{ArithOp, Number};
 use crate::object::{Gc, Table, Value};
 use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
 
@@ -98,7 +98,10 @@ pub(crate) fn install(vm: &mut Vm, mt: Gc<Table>) {
 /// A number, or a string that converts to one.
 fn to_number(ctx: &NativeCtx<'_>, v: Value) -> Option<Number> {
     match v {
-        Value::Str(s) => number::str_to_number(ctx.bytes(s)).and_then(Value::as_number),
+        Value::Str(s) => ctx
+            .locale()
+            .str_to_number(ctx.bytes(s))
+            .and_then(Value::as_number),
         _ => v.as_number(),
     }
 }

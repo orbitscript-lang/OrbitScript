@@ -114,6 +114,7 @@ dependencies = [
  "orbit-bytecode",
  "orbit-compiler",
  "orbit-hir",
+ "orbit-locale",
  "orbit-lua-syntax",
  "orbit-macros",
  "orbit-orb-syntax",
@@ -217,6 +218,14 @@ dependencies = [
  "orbit-std",
  "serde_json",
  "stabby",
+]
+
+[[package]]
+name = "orbit-locale"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "orbit-runtime",
 ]
 
 [[package]]

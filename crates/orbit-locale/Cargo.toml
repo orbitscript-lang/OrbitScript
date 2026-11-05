@@ -1,0 +1,25 @@
+[package]
+name = "orbit-locale"
+description = "OrbitScript's locales from the C library: os.setlocale per isolate or for the process (ADR-13)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+orbit-runtime = { path = "../orbit-runtime", default-features = false }
+
+[target.'cfg(any(unix, windows))'.dependencies]
+libc = "0.2"
+
+# Not the workspace lints: unsafe is denied rather than forbidden, and
+# allowed only in src/sys.rs (ADR-6 exception, ADR-13).
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"

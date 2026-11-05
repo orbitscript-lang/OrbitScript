@@ -79,6 +79,24 @@ fn a_program_creates_uses_and_closes_a_state() {
 }
 
 #[test]
+fn states_from_c_use_the_process_locale_unless_told_otherwise() {
+    let out = run("locale");
+    if out.contains("no pt_BR.utf8") {
+        return;
+    }
+    assert_eq!(
+        out,
+        "mode 0\n\
+         1,5\tpt_BR.utf8\t2,5\n\
+         after the script's C: host formats 2.5, process numeric C\n\
+         was 0\n\
+         pt_BR.utf8\t1,5\t2,5\n\
+         after the state's pt_BR: host formats 2.5, process numeric C\n\
+         bad mode -1\n"
+    );
+}
+
+#[test]
 fn libraries_open_one_by_one_or_through_preload() {
     assert_eq!(run("selected"), "table\tnil\tnil\tnil\ntable\t7\tnil\n");
 }

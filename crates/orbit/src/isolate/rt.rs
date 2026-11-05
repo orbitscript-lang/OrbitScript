@@ -13,6 +13,7 @@ use crate::stack::{Control, Stack};
 #[cfg(feature = "verify")]
 use super::BinaryChecks;
 use super::{Config, GcMode, Library};
+use crate::LocaleMode;
 
 /// Nothing to check: the runtime is part of this program.
 pub(crate) fn check_library() {}
@@ -52,6 +53,8 @@ impl Isolate {
     pub(crate) fn new(config: Config) -> Isolate {
         let mut vm = Vm::new();
         adopt(&mut vm);
+        #[cfg(feature = "locale")]
+        vm.set_locale_provider(orbit_locale::provider());
         vm.rt.warnings = config.warnings;
         vm.set_gc_mode(config.gc_mode.raw());
         let options = stdlib::Options {
@@ -107,6 +110,18 @@ impl Isolate {
     /// Send standard output (`print`, `io.stdout`) to `out`.
     pub fn set_stdout(&mut self, out: impl std::io::Write + std::fmt::Debug + 'static) {
         self.vm.rt.out = Box::new(out);
+    }
+
+    /// Whether `os.setlocale` changes this isolate's own locale (the
+    /// default) or the process's, as PUC Lua does (ADR-13). The locale
+    /// scripts see doesn't change: a switch to the process's takes it on,
+    /// one to the isolate's own keeps it.
+    pub fn set_locale_mode(&mut self, mode: LocaleMode) {
+        self.vm.set_locale_mode(mode)
+    }
+
+    pub fn locale_mode(&self) -> LocaleMode {
+        self.vm.locale_mode()
     }
 
     /// The collector.

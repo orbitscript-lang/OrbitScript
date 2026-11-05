@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+use crate::locale::{CharTables, class};
+
 /// Most captures one pattern may have.
 pub const MAX_CAPTURES: usize = 32;
 
@@ -177,15 +179,23 @@ enum Suffix {
 pub struct Matcher<'a, 'c> {
     src: &'a [u8],
     pat: &'a [u8],
+    /// The locale's character classes.
+    chars: &'a CharTables,
     depth: usize,
     caps: &'c mut Captures,
 }
 
 impl<'a, 'c> Matcher<'a, 'c> {
-    pub fn new(src: &'a [u8], pat: &'a [u8], caps: &'c mut Captures) -> Self {
+    pub fn new(
+        src: &'a [u8],
+        pat: &'a [u8],
+        chars: &'a CharTables,
+        caps: &'c mut Captures,
+    ) -> Self {
         Matcher {
             src,
             pat,
+            chars,
             depth: 0,
             caps,
         }
@@ -404,7 +414,7 @@ impl<'a, 'c> Matcher<'a, 'c> {
             Item::Lit(l) => rest.iter().position(|&c| c != l).unwrap_or(rest.len()),
             Item::Class { mask, neg } => rest
                 .iter()
-                .position(|&c| (CLASSES[c as usize] & mask != 0) == neg)
+                .position(|&c| self.chars.is(c, mask) == neg)
                 .unwrap_or(rest.len()),
             Item::Set { p, close } => rest
                 .iter()
@@ -582,7 +592,7 @@ impl<'a, 'c> Matcher<'a, 'c> {
         match it {
             Item::Any => true,
             Item::Lit(l) => l == c,
-            Item::Class { mask, neg } => (CLASSES[c as usize] & mask != 0) != neg,
+            Item::Class { mask, neg } => self.chars.is(c, mask) != neg,
             Item::Set { p, close } => self.in_set(c, p, close),
         }
     }
@@ -591,7 +601,7 @@ impl<'a, 'c> Matcher<'a, 'c> {
     fn single(&self, c: u8, p: usize, end: usize) -> bool {
         match self.pat[p] {
             b'.' => true,
-            b'%' => class(c, self.pat[p + 1]),
+            b'%' => class(self.chars, c, self.pat[p + 1]),
             b'[' => self.in_set(c, p, end - 1),
             l => l == c,
         }
@@ -609,7 +619,7 @@ impl<'a, 'c> Matcher<'a, 'c> {
             // A `%` escapes the next byte even when that is the closing
             // `]` (after a range ending in an escaped `%`, as in `[ -%%]`).
             if pat[q] == b'%' {
-                if class(c, pat[q + 1]) {
+                if class(self.chars, c, pat[q + 1]) {
                     return !negate;
                 }
                 q += 2;
@@ -629,84 +639,20 @@ impl<'a, 'c> Matcher<'a, 'c> {
     }
 }
 
-/// The [`CLASSES`] bit of a lower-case `%x` class letter, or 0.
-const fn class_bit(lower: u8) -> u16 {
-    match lower {
-        b'a' => 1 << 0,
-        b'c' => 1 << 1,
-        b'd' => 1 << 2,
-        b'g' => 1 << 3,
-        b'l' => 1 << 4,
-        b'p' => 1 << 5,
-        b's' => 1 << 6,
-        b'u' => 1 << 7,
-        b'w' => 1 << 8,
-        b'x' => 1 << 9,
-        b'z' => 1 << 10,
-        _ => 0,
-    }
-}
-
-/// For each byte, the classes it belongs to in the C locale.
-static CLASSES: [u16; 256] = {
-    let mut t = [0u16; 256];
-    let mut i = 0;
-    while i < 256 {
-        let c = i as u8;
-        let mut m = 0;
-        if c.is_ascii_alphabetic() {
-            m |= class_bit(b'a');
-        }
-        if c.is_ascii_control() {
-            m |= class_bit(b'c');
-        }
-        if c.is_ascii_digit() {
-            m |= class_bit(b'd');
-        }
-        if c.is_ascii_graphic() {
-            m |= class_bit(b'g');
-        }
-        if c.is_ascii_lowercase() {
-            m |= class_bit(b'l');
-        }
-        if c.is_ascii_punctuation() {
-            m |= class_bit(b'p');
-        }
-        if matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
-            m |= class_bit(b's');
-        }
-        if c.is_ascii_uppercase() {
-            m |= class_bit(b'u');
-        }
-        if c.is_ascii_alphanumeric() {
-            m |= class_bit(b'w');
-        }
-        if c.is_ascii_hexdigit() {
-            m |= class_bit(b'x');
-        }
-        if c == 0 {
-            m |= class_bit(b'z');
-        }
-        t[i] = m;
-        i += 1;
-    }
-    t
-};
-
-/// The [`CLASSES`] bit of class letter `cl` (either case), if it is one.
+/// The [`class`] bit of class letter `cl` (either case), if it is one.
 #[inline]
 fn class_mask(cl: u8) -> Option<u16> {
-    match class_bit(cl.to_ascii_lowercase()) {
+    match class::of_letter(cl.to_ascii_lowercase()) {
         0 => None,
         m => Some(m),
     }
 }
 
-/// `%x` classes, in the C locale. Upper case complements; anything else is
-/// the literal character.
-fn class(c: u8, cl: u8) -> bool {
+/// `%x` classes, in the locale of `chars`. Upper case complements;
+/// anything else is the literal character.
+fn class(chars: &CharTables, c: u8, cl: u8) -> bool {
     match class_mask(cl) {
-        Some(mask) => (CLASSES[c as usize] & mask != 0) != cl.is_ascii_uppercase(),
+        Some(mask) => chars.is(c, mask) != cl.is_ascii_uppercase(),
         None => cl == c,
     }
 }
@@ -717,11 +663,12 @@ fn class(c: u8, cl: u8) -> bool {
 pub fn search(
     src: &[u8],
     pat: &[u8],
+    chars: &CharTables,
     init: usize,
     caps: &mut Captures,
 ) -> Res<Option<(usize, usize)>> {
     let anchored = pat.first() == Some(&b'^');
-    Matcher::new(src, pat, caps).find_from(init, usize::from(anchored), anchored, None)
+    Matcher::new(src, pat, chars, caps).find_from(init, usize::from(anchored), anchored, None)
 }
 
 #[cfg(test)]
@@ -730,12 +677,15 @@ mod tests {
 
     fn find(s: &str, p: &str) -> Res<Option<(usize, usize)>> {
         let mut caps = Captures::new();
-        Ok(search(s.as_bytes(), p.as_bytes(), 0, &mut caps)?.map(|(a, b)| (a + 1, b)))
+        Ok(
+            search(s.as_bytes(), p.as_bytes(), &CharTables::c(), 0, &mut caps)?
+                .map(|(a, b)| (a + 1, b)),
+        )
     }
 
     fn cap(s: &str, p: &str) -> Vec<String> {
         let mut m = Captures::new();
-        let (a, b) = search(s.as_bytes(), p.as_bytes(), 0, &mut m)
+        let (a, b) = search(s.as_bytes(), p.as_bytes(), &CharTables::c(), 0, &mut m)
             .unwrap()
             .unwrap();
         (0..m.nresults())
@@ -804,7 +754,9 @@ mod tests {
         assert_eq!(find("a", "[a%"), Err(PatternError::MissingBracket));
         assert_eq!(find("a", "%f"), Err(PatternError::MissingFrontierBracket));
         let mut m = Captures::new();
-        let (a, b) = search(b"a", b"(()", 0, &mut m).unwrap().unwrap();
+        let (a, b) = search(b"a", b"(()", &CharTables::c(), 0, &mut m)
+            .unwrap()
+            .unwrap();
         assert_eq!(m.capture(0, a, b), Err(PatternError::UnfinishedCapture));
         assert_eq!(find("a", ".)"), Err(PatternError::InvalidPatternCapture));
         assert_eq!(find("a", "%1"), Err(PatternError::InvalidCaptureIndex(1)));

@@ -158,20 +158,22 @@ impl Vm {
     /// Call `regs[func]` with the `nargs` values above it and run until it
     /// returns. Its results end up at `regs[func..top]`.
     pub(crate) fn call_at(&mut self, func: usize, nargs: usize) -> Result<(), LuaError> {
-        let flow = match self.call_value(func, nargs, MULTI) {
-            Ok(f) => f,
-            Err(x) => {
-                let e = self.make_error(x);
-                self.unwind(e)?
+        self.with_thread_locale(|vm| {
+            let flow = match vm.call_value(func, nargs, MULTI) {
+                Ok(f) => f,
+                Err(x) => {
+                    let e = vm.make_error(x);
+                    vm.unwind(e)?
+                }
+            };
+            match flow {
+                Flow::Done => Ok(()),
+                Flow::Reload | Flow::Switched => {
+                    vm.rt.switched = false;
+                    vm.run()
+                }
             }
-        };
-        match flow {
-            Flow::Done => Ok(()),
-            Flow::Reload | Flow::Switched => {
-                self.rt.switched = false;
-                self.run()
-            }
-        }
+        })
     }
 
     /// Start a call of `regs[func]`. Lua functions get a frame (the loop runs

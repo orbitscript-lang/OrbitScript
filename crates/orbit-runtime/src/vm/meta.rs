@@ -11,6 +11,7 @@
 
 use std::borrow::Cow;
 
+use crate::locale::Locale;
 use crate::object::table;
 use crate::object::{Gc, Interner, LuaHeap, LuaStr, Table, Tag, Value};
 
@@ -51,13 +52,15 @@ impl MetaFieldNames {
 }
 
 /// What metamethod lookups need: the field names and the metatables of
-/// the types whose values don't carry their own (one slot per tag). Kept
-/// apart from the stack so slow paths can borrow it while the dispatch
-/// loop holds the register window.
+/// the types whose values don't carry their own (one slot per tag); and
+/// the locale numbers and string comparisons follow. Kept apart from the
+/// stack so slow paths can borrow it while the dispatch loop holds the
+/// register window.
 #[derive(Debug)]
 pub(crate) struct Metas {
     pub(crate) field_names: MetaFieldNames,
     pub(crate) type_meta: [Option<Gc<Table>>; 11],
+    pub(crate) locale: Locale,
 }
 
 impl Metas {

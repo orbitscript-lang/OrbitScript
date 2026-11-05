@@ -733,6 +733,37 @@ impl StackAbi for Win<'_, '_> {
     extern "C" fn safepoint(&mut self) {
         self.s.safepoint()
     }
+    extern "C" fn set_locale<'b>(
+        &mut self,
+        category: u8,
+        name: SOption<Slice<'b, u8>>,
+        scope: u8,
+    ) -> SOption<SVec<u8>> {
+        let name = Option::from(name).map(|n: Slice<'_, u8>| OrbitStr::from(n.as_slice()));
+        bytes(
+            self.s
+                .set_locale(category_of(category), name, scope_of(scope)),
+        )
+    }
+    extern "C" fn decimal_point(&self) -> SVec<u8> {
+        self.s.decimal_point().as_bytes().into()
+    }
+    extern "C" fn locale_mode(&self) -> u8 {
+        locale_mode_code(self.s.locale_mode())
+    }
+    extern "C" fn set_locale_mode(&mut self, mode: u8) {
+        self.s.set_locale_mode(locale_mode_of(mode))
+    }
+    extern "C" fn locale_time_pattern<'b>(&self, spec: Slice<'b, u8>) -> SOption<SVec<u8>> {
+        bytes(self.s.locale_time_pattern(spec.as_slice()))
+    }
+    extern "C" fn locale_time_text<'b>(
+        &self,
+        spec: Slice<'b, u8>,
+        tm: TimePartsAbi,
+    ) -> SOption<SVec<u8>> {
+        bytes(self.s.locale_time_text(spec.as_slice(), &tm.into()))
+    }
     extern "C" fn control<'a>(&'a mut self) -> ControlMut<'a> {
         self.into()
     }
@@ -1081,6 +1112,12 @@ impl<B: Bundled> IsolateAbi for IsoObj<B> {
         });
         #[cfg(not(feature = "verify"))]
         let _ = level;
+    }
+    extern "C" fn set_locale_mode(&mut self, mode: u8) {
+        self.iso.set_locale_mode(locale_mode_of(mode))
+    }
+    extern "C" fn locale_mode(&self) -> u8 {
+        locale_mode_code(self.iso.locale_mode())
     }
     extern "C" fn before_exit(&mut self, hook: HookBox) {
         self.iso.before_exit(move || hook.run())
