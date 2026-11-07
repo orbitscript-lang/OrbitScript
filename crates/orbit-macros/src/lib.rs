@@ -20,7 +20,7 @@ use proc_macro2::Span;
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{
-    Error, FnArg, ItemFn, LitStr, Path, ReturnType, Token, Type, TypePath, TypeReference,
+    Error, FnArg, ItemFn, LitStr, Path, ReturnType, Safety, Token, Type, TypePath, TypeReference,
     parse_macro_input,
 };
 
@@ -69,7 +69,7 @@ fn is_stack(ty: &Type) -> bool {
     else {
         return false;
     };
-    matches!(&**elem, Type::Path(TypePath { qself: None, path: Path { segments, .. } })
+    matches!(&**elem, Type::Path(TypePath { qself: None, path: Path { segments, .. }, .. })
         if segments.last().is_some_and(|s| s.ident == "Stack"))
 }
 
@@ -93,7 +93,10 @@ fn expand(f: &ItemFn, name: Option<LitStr>) -> syn::Result<proc_macro2::TokenStr
         .as_ref()
         .map(|t| t.span())
         .or(sig.asyncness.as_ref().map(|t| t.span()))
-        .or(sig.unsafety.as_ref().map(|t| t.span()))
+        .or(match &sig.safety {
+            Safety::Default => None,
+            safety => Some(safety.span()),
+        })
         .or(sig.abi.as_ref().map(|a| a.span()));
     if let Some(span) = unsupported {
         return Err(Error::new(span, "#[native] goes on a plain `fn`"));
