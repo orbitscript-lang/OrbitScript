@@ -19,6 +19,26 @@
 #   --pgo-check       instead of laying anything out, list the functions of
 #                     our crates the profile no longer covers; fails if any
 #
+# What goes into the programs (the defaults are what releases ship):
+#   --system-libffi   link the system's shared libffi instead of building the
+#                     bundled copy and linking it statically (pkg-config must
+#                     find libffi); Apple targets always use the system's and
+#                     MSVC targets always build the bundled copy
+#   --no-ffi          leave out the `std.ffi` module and libffi altogether
+#   --no-debugger     leave out the debugger: `orbit --debug-server` and the
+#                     other debug options, and liborbit's DAP server
+#   --features LIST   more Cargo features, separated by commas: PKG/FEATURE
+#                     goes to that package's build when PKG is orbit-cli,
+#                     orbit-lib, orbit-lsp or orbit-fmt; a bare FEATURE, or
+#                     DEP/FEATURE for one of orbit-cli's dependencies, goes to
+#                     the `orbit` and `orbitc` build (for example
+#                     --features orbit-lib/system-libffi,orbit-cli/repl).
+#                     May be given more than once
+# The options apply to PGO training and checking too, so a profile trained
+# with them matches the build that uses it. The committed profiles are
+# trained with the defaults; with other options --pgo-check reports the
+# functions that differ.
+#
 # The shared layout (ADR-10): liborbit holds the runtime once, `orbit`,
 # `orbitc` and the language server `orbit-lsp` are built with `orbit`'s
 # `shared` feature and find it through their run path, and Lua 5.5's library
@@ -55,6 +75,10 @@ pgo=
 no_pgo=no
 train=no
 check=no
+ffi=yes
+system_libffi=no
+debugger=yes
+features=
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) out=${2:?--out needs a value}; shift 2 ;;
@@ -65,7 +89,14 @@ while [ $# -gt 0 ]; do
         --no-pgo) no_pgo=yes; shift ;;
         --pgo-train) train=yes; shift ;;
         --pgo-check) check=yes; shift ;;
-        -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --system-libffi) system_libffi=yes; shift ;;
+        --no-ffi) ffi=no; shift ;;
+        --no-debugger) debugger=no; shift ;;
+        --features)
+            features="$features ${2:?--features needs a value}"
+            shift 2
+            ;;
+        -h|--help) sed -n '2,/^set -eu$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "build.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -75,6 +106,10 @@ host=$(rustc -vV | sed -n 's/^host: //p')
 [ -n "$triple" ] || triple=$host
 if [ "$no_pgo" = yes ] && { [ -n "$pgo" ] || [ "$train" = yes ] || [ "$check" = yes ]; }; then
     echo "build.sh: --no-pgo can't be combined with --pgo, --pgo-train or --pgo-check" >&2
+    exit 2
+fi
+if [ "$ffi" = no ] && [ "$system_libffi" = yes ]; then
+    echo "build.sh: --system-libffi and --no-ffi can't be combined" >&2
     exit 2
 fi
 if [ "$train" = yes ] && [ "$triple" != "$host" ]; then
@@ -128,12 +163,84 @@ build() {
 # the programs link against it. The language server is built after them,
 # with the same profile (only its runtime is profiled), and the formatter,
 # which has no runtime, with the same flags.
-static_args="-p orbit-cli"
-lsp_static_args="-p orbit-lsp"
-lsp_shared_args="-p orbit-lsp --no-default-features --features shared"
-fmt_args="-p orbit-fmt"
-lib_args="-p orbit-lib --features debugger"
-shared_args="-p orbit-cli --no-default-features --features shared,line-editing,dap"
+#
+# Each build's features: what the options leave out is taken away from the
+# package's defaults (read from its Cargo.toml, so a new default feature
+# needs no change here), and what they add, or --features names, is added.
+# The default features of the package in crates/$1, separated by commas.
+defaults() {
+    list=$(sed -n 's/^default = \[\(.*\)\]$/\1/p' "crates/$1/Cargo.toml" | tr -d '" ')
+    [ -n "$list" ] || { echo "build.sh: no default features in crates/$1/Cargo.toml" >&2; exit 1; }
+    printf '%s' "$list"
+}
+# $1 with the comma-separated features after it removed.
+without() {
+    kept=
+    for f in $(printf '%s' "$1" | tr ',' ' '); do
+        drop=no
+        for g in $(shift; printf '%s ' "$@"); do
+            [ "$f" != "$g" ] || drop=yes
+        done
+        [ "$drop" = yes ] || kept=${kept:+$kept,}$f
+    done
+    printf '%s' "$kept"
+}
+# $1 and $2 joined by a comma, either of them possibly empty.
+join() {
+    if [ -n "$1" ] && [ -n "$2" ]; then printf '%s,%s' "$1" "$2"; else printf '%s' "$1$2"; fi
+}
+cli_static=$(defaults orbit-cli)
+cli_shared=shared,line-editing,dap
+lib=$(defaults orbit-lib),debugger
+[ "$ffi" = yes ] || {
+    cli_static=$(without "$cli_static" ffi ffi-system-libffi)
+    lib=$(without "$lib" ffi system-libffi)
+}
+[ "$debugger" = yes ] || {
+    cli_static=$(without "$cli_static" dap debugger)
+    cli_shared=$(without "$cli_shared" dap debugger)
+    lib=$(without "$lib" debugger)
+}
+[ "$system_libffi" = no ] || {
+    cli_static=$(join "$cli_static" ffi-system-libffi)
+    lib=$(join "$lib" system-libffi)
+}
+cli_extra= lib_extra= lsp_extra= fmt_extra=
+for f in $(printf '%s' "$features" | tr ',' ' '); do
+    case "$f" in
+        orbit-lib/*) lib_extra=$(join "$lib_extra" "$f") ;;
+        orbit-lsp/*) lsp_extra=$(join "$lsp_extra" "$f") ;;
+        orbit-fmt/*) fmt_extra=$(join "$fmt_extra" "$f") ;;
+        *) cli_extra=$(join "$cli_extra" "$f") ;;
+    esac
+done
+cli_static=$(join "$cli_static" "$cli_extra")
+cli_shared=$(join "$cli_shared" "$cli_extra")
+lib=$(join "$lib" "$lib_extra")
+# `--features ""` is fine with cargo, but leaves a stray word in the log.
+features_arg() {
+    [ -z "$1" ] || printf -- '--features %s' "$1"
+}
+# The cargo arguments that build the package in crates/$1 with the features
+# $2. While those include all its defaults, they are asked for as the
+# defaults: the enabled features, `default` among them, are part of the
+# hash in every symbol name, which the profile is keyed on.
+package_args() {
+    all=$(defaults "$1")
+    # shellcheck disable=SC2046 # split the lists on their commas
+    if [ -z "$(without "$all" $(printf '%s' "$2" | tr ',' ' '))" ]; then
+        # shellcheck disable=SC2046
+        printf -- '-p %s %s' "$1" "$(features_arg "$(without "$2" $(printf '%s' "$all" | tr ',' ' '))")"
+    else
+        printf -- '-p %s --no-default-features %s' "$1" "$(features_arg "$2")"
+    fi
+}
+static_args=$(package_args orbit-cli "$cli_static")
+lsp_static_args="-p orbit-lsp $(features_arg "$lsp_extra")"
+lsp_shared_args="-p orbit-lsp --no-default-features $(features_arg "$(join shared "$lsp_extra")")"
+fmt_args="-p orbit-fmt $(features_arg "$fmt_extra")"
+lib_args=$(package_args orbit-lib "$lib")
+shared_args="-p orbit-cli --no-default-features $(features_arg "$cli_shared")"
 
 # The rustflags of a build optimized with the profile at $pgo.
 #
@@ -326,7 +433,8 @@ if [ "$check" = yes ]; then
     log="$target/check.log"
     # `orbit` only: training never runs `orbitc`, so the profile has nothing
     # for the functions only it has.
-    build -p orbit-cli --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" \
+    # shellcheck disable=SC2086 # plain words
+    build $static_args --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" \
         -Cllvm-args=-pgo-warn-missing-function 2> "$log" || { cat "$log" >&2; exit 1; }
     # Only our crates: LLVM warns about dependencies too.
     stale='^warning: orbit.*\((hash mismatch)\|no profile data available for function\)'

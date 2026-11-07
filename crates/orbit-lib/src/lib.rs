@@ -7,7 +7,8 @@
 //! The C API lives in `orbit-capi` and the boundary's implementation in
 //! `orbit`; this crate links them into the library, names the library
 //! (`build.rs`), and carries the libraries above the API (`orbit-std`, the
-//! C module loader, `ffi`) for shared programs to install.
+//! C module loader, and `ffi` unless built without its feature) for shared
+//! programs to install.
 
 // stabby's type reports nest deeply for the isolate's trait.
 #![recursion_limit = "1024"]
@@ -46,9 +47,16 @@ impl orbit::export::Bundled for Bundled {
         orbit_capi::install(iso, lock_cpath)
     }
 
+    #[cfg(feature = "ffi")]
     fn install_ffi(iso: &mut Isolate) -> bool {
         orbit_std::install_ffi(iso);
         true
+    }
+
+    /// Built without `ffi`: there is none to install.
+    #[cfg(not(feature = "ffi"))]
+    fn install_ffi(_iso: &mut Isolate) -> bool {
+        false
     }
 }
 

@@ -19,13 +19,20 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 orbit = { path = "../orbit", features = ["abi"] }
 orbit-capi = { path = "../orbit-capi", features = ["host"] }
-orbit-std = { path = "../orbit-std", features = ["ffi", "json"] }
+orbit-std = { path = "../orbit-std", features = ["json"] }
 stabby = "72.1.16"
 
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["std"] }
 
 [features]
+default = ["ffi"]
+# The `ffi` library for the programs that install it (ADR-9). Without it
+# `install_bundled_ffi` reports that the library has none.
+ffi = ["orbit-std/ffi"]
+# With `ffi`: link the system's shared libffi rather than a static copy built
+# from bundled sources (`build.sh --system-libffi`).
+system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
 # The debugger engine and its API (ADR-12), for programs on the shared
 # backend, and the DAP server C hosts start (`orbit_debug_listen`,
 # `ORBIT_DEBUG`).

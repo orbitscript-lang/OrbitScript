@@ -110,7 +110,7 @@ flowchart LR
   - The C module shim's functions are native closures, whose calls go through a stub Lua frame, about 15-20 ns more per call.
   - Natives are never freed, so bindings are interned per (address, signature). The count is bounded by the distinct functions scripts bind.
 - **libffi makes the call** (`orbit-ffi/src/sys.rs`). Each distinct signature gets one call description (`ffi_cif`), prepared by `ffi_prep_cif` when it is first bound. A call fills one 64-bit slot per argument, passes libffi a pointer to each, and reads the result from a 64-bit slot.
-- **Linking libffi.** By default the `libffi-sys` crate builds libffi from its bundled sources and links it statically (needs a C compiler, `sh` and `make` at build time). The `ffi-system-libffi` feature of `orbit-std` and `orbit-cli` (`system-libffi` on `orbit-ffi`) links the system's shared `libffi` instead.
+- **Linking libffi.** By default the `libffi-sys` crate builds libffi from its bundled sources and links it statically (needs a C compiler, `sh` and `make` at build time). The `ffi-system-libffi` feature of `orbit-std` and `orbit-cli` (`system-libffi` on `orbit-ffi` and `orbit-lib`) links the system's shared `libffi` instead; `./build.sh --system-libffi` turns it on for both layouts. `orbit-lib`'s `ffi` feature (on by default) carries the library in liborbit, and `./build.sh --no-ffi` leaves it out of both layouts.
 - **Strings.**
   - Conversions that can allocate run before any string pointer is taken, because allocating can move short strings, which live inline in the heap (ADR-5).
   - `cstr` copies go into a 256-byte stack buffer while they fit, and into their own allocations after that.
