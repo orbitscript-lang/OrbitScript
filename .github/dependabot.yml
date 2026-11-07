@@ -44,6 +44,16 @@ updates:
         applies-to: version-updates
         update-types: [major]
         patterns: ['*']
+    ignore:
+      # The VS Code API types must not be newer than engines.vscode in
+      # package.json, or `vsce package` refuses to build the extension.
+      # Raise both together by hand.
+      - dependency-name: '@types/vscode'
+        versions: ['>= 1.92']
+      # Node's types follow the Node major the extension is built and
+      # tested with (vscode.yml); raise them with that.
+      - dependency-name: '@types/node'
+        versions: ['>= 23']
 
   - package-ecosystem: github-actions
     directory: /
