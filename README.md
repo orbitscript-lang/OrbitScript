@@ -87,8 +87,11 @@ You need stable Rust 1.75 or newer and a C compiler. The `ffi` library also buil
 ```sh
 ./build.sh                # the shared layout in target/package/out
 ./build.sh --static       # self-contained programs instead
-./build.sh --help         # targets, profiles and PGO options
+./build.sh --system-libffi  # link the system's libffi instead of a bundled copy
+./build.sh --help         # targets, profiles, PGO and feature options
 ```
+
+`--no-ffi` and `--no-debugger` leave those parts out, and `--features` passes other Cargo features through (`./build.sh --help` lists them). Without these options the build has what a release ships.
 
 `./build.sh` is how releases are built, with profile-guided optimization when a profile is available. `cargo build --release` is fine for development. [`tests/README.md`](tests/README.md) covers testing against the reference Lua, and [`CLAUDE.md`](CLAUDE.md) has the checks to run before pushing.
 

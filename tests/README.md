@@ -82,4 +82,6 @@ A stale profile never produces wrong code, but it can make the build much slower
 
 The optimized build also passes `-Cllvm-args=-vectorizer-min-trip-count=1`. When a profile shows that a loop runs fewer than 16 times, LLVM otherwise vectorizes the loop with masked lanes. On x86-64 without AVX-512, a few register clears then cost hundreds of instructions, which made coroutines 12% slower than a build without a profile (`build.sh` has the details).
 
+The feature options (`--system-libffi`, `--no-ffi`, `--no-debugger`, `--features`) apply to `--pgo-train` and `--pgo-check` too, so a profile trained with them matches the build that uses it. The committed profiles are trained with the defaults. Leaving parts out changes little of the interpreter, so a default profile still serves such a build, but `--pgo-check` with those options lists the functions that differ.
+
 To time a benchmark the profile has never seen, leave it out of training with `PGO_EXCLUDE="fib.lua" ./build.sh --pgo-train --pgo target/no-fib.profdata`, which keeps the committed profile as it is. Two runs don't give byte-identical binaries, because counts from GC- and clock-dependent programs vary a little.
