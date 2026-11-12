@@ -1,7 +1,7 @@
-//! `conformance`: runs the official Lua 5.5 test suite against an interpreter.
+//! `conformance`: runs the official Lua test suite against an interpreter.
 //!
 //! Each suite file runs in its own process from a scratch copy of
-//! `tests/lua-5.5/suite`, through a generated driver that sets the globals
+//! `tests/lua-X.Y/suite` (5.5 by default, `--lua 5.4` for the 5.4 target, ADR-14), through a generated driver that sets the globals
 //! `all.lua` would set and prints a marker when the file finishes. A file
 //! passes when the process exits with code 0 and printed the marker.
 
@@ -17,13 +17,16 @@ use crate::util::{self, Result, io_err, json_str};
 const USAGE: &str = "\
 usage: orbit-testkit conformance --interp PATH [options] [FILE...]
 
-Runs the Lua 5.5 test suite (tests/lua-5.5) against PATH, one file per
-process. FILE limits the run to those manifest entries (e.g. strings.lua).
+Runs the Lua test suite (tests/lua-5.5, or tests/lua-5.4 with --lua 5.4)
+against PATH, one file per process. FILE limits the run to those manifest
+entries (e.g. strings.lua).
 
 options:
+  --lua X.Y            which suite: 5.5 (default) or 5.4, the Lua the
+                       interpreter was built for (ADR-14)
   --c-libs DIR         copy the suite's prebuilt C test libraries (*.so) from
                        DIR into libs/; without it, lines that need them are
-                       disabled (see tests/lua-5.5/SKIPS.md)
+                       disabled (see tests/lua-X.Y/SKIPS.md)
   --soft               set _soft = true (skip long or memory-hungry tests)
   --port               set _port = true (skip non-portable tests)
   --expect FILE        compare with an expected-pass list; fail only on
@@ -34,7 +37,7 @@ options:
   --work DIR           scratch directory (default target/testkit/conformance/NAME)
   --list               print the manifest and exit";
 
-/// A line of `tests/lua-5.5/manifest.txt`.
+/// A line of `tests/lua-X.Y/manifest.txt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub file: String,
@@ -46,7 +49,7 @@ pub struct Entry {
     /// Line ranges disabled when the C test libraries are absent
     /// (`needs-clibs=250-253`).
     pub needs_clibs: Vec<(usize, usize)>,
-    /// Line ranges that check a documented deviation (tests/lua-5.5/DEVIATIONS.md), always
+    /// Line ranges that check a documented deviation (tests/lua-X.Y/DEVIATIONS.md), always
     /// disabled (`deviates=331`).
     pub deviates: Vec<(usize, usize)>,
     pub timeout: Option<Duration>,
@@ -238,15 +241,28 @@ pub struct Options {
     pub work: Option<PathBuf>,
     /// Limit the run to these manifest entries; empty for all.
     pub only: Vec<String>,
+    /// Which suite: `"5.5"` or `"5.4"`.
+    pub lua: String,
+}
+
+/// The Lua versions with a vendored suite (ADR-14).
+pub const VERSIONS: [&str; 2] = ["5.5", "5.4"];
+
+/// `tests/lua-X.Y` for a version in [`VERSIONS`].
+pub fn lua_dir(lua: &str) -> PathBuf {
+    util::repo_root().join(format!("tests/lua-{lua}"))
 }
 
 /// Runs the suite (or the entries in `opts.only`), calling `report` after each file.
 pub fn run_suite(opts: &Options, mut report: impl FnMut(&FileResult)) -> Result<Vec<FileResult>> {
-    let lua_dir = util::repo_root().join("tests/lua-5.5");
-    let entries = load_manifest()?;
+    let lua_dir = lua_dir(&opts.lua);
+    let entries = load_manifest(&opts.lua)?;
     for name in &opts.only {
         if !entries.iter().any(|e| &e.file == name) {
-            return Err(format!("{name} is not in tests/lua-5.5/manifest.txt"));
+            return Err(format!(
+                "{name} is not in tests/lua-{}/manifest.txt",
+                opts.lua
+            ));
         }
     }
     let (name, interp) = &opts.interp;
@@ -280,9 +296,9 @@ pub fn run_suite(opts: &Options, mut report: impl FnMut(&FileResult)) -> Result<
     Ok(results)
 }
 
-/// The parsed `tests/lua-5.5/manifest.txt`.
-pub fn load_manifest() -> Result<Vec<Entry>> {
-    let path = util::repo_root().join("tests/lua-5.5/manifest.txt");
+/// The parsed `tests/lua-X.Y/manifest.txt`.
+pub fn load_manifest(lua: &str) -> Result<Vec<Entry>> {
+    let path = lua_dir(lua).join("manifest.txt");
     let text = fs::read_to_string(&path).map_err(io_err(path.display()))?;
     parse_manifest(&text)
 }
@@ -298,6 +314,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     let mut work: Option<PathBuf> = None;
     let mut list = false;
     let mut only = Vec::new();
+    let mut lua = "5.5".to_string();
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -308,6 +325,12 @@ pub fn main(args: &[String]) -> Result<bool> {
         };
         match a.as_str() {
             "--interp" => interp = Some(util::parse_interp(&val()?)?),
+            "--lua" => {
+                lua = val()?;
+                if !VERSIONS.contains(&lua.as_str()) {
+                    return Err(format!("--lua must be one of {VERSIONS:?}"));
+                }
+            }
             "--c-libs" => c_libs = Some(util::absolute(Path::new(&val()?))?),
             "--soft" => flags.soft = true,
             "--port" => flags.port = true,
@@ -331,7 +354,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     }
 
     if list {
-        for e in load_manifest()? {
+        for e in load_manifest(&lua)? {
             println!(
                 "{:<16} {}",
                 e.file,
@@ -347,7 +370,15 @@ pub fn main(args: &[String]) -> Result<bool> {
         return Err("--update-expected needs --expect FILE".to_string());
     }
     let name = interp.0.clone();
-    println!("Lua 5.5 test suite against {name} ({})", interp.1.display());
+    println!(
+        "Lua {lua} test suite against {name} ({})",
+        interp.1.display()
+    );
+    let lua_arg = if lua == VERSIONS[0] {
+        String::new()
+    } else {
+        format!(" --lua {lua}")
+    };
     let opts = Options {
         interp,
         c_libs,
@@ -355,6 +386,7 @@ pub fn main(args: &[String]) -> Result<bool> {
         timeout,
         work,
         only,
+        lua,
     };
     let results = run_suite(&opts, |r| match (&r.skipped, r.passed) {
         (Some(why), _) => println!("  skip {:<16} {why}", r.file),
@@ -408,7 +440,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     let verdict = expected.check(outcomes.clone());
     if update {
         let header = format!(
-            "Suite files {name} is expected to pass. Updated with:\n  cargo testkit conformance --interp ... --expect {} --update-expected",
+            "Suite files {name} is expected to pass. Updated with:\n  cargo testkit conformance{lua_arg} --interp ... --expect {} --update-expected",
             path.display()
         );
         expected.update(&header, outcomes)?;
@@ -653,12 +685,19 @@ mod tests {
     }
 
     #[test]
-    fn the_real_manifest_parses_and_names_real_files() {
-        let lua_dir = util::repo_root().join("tests/lua-5.5");
-        let m = parse_manifest(&fs::read_to_string(lua_dir.join("manifest.txt")).unwrap()).unwrap();
-        assert!(m.len() > 25);
-        for e in m {
-            assert!(lua_dir.join("suite").join(&e.file).is_file(), "{}", e.file);
+    fn the_real_manifests_parse_and_name_real_files() {
+        for lua in VERSIONS {
+            let lua_dir = lua_dir(lua);
+            let m =
+                parse_manifest(&fs::read_to_string(lua_dir.join("manifest.txt")).unwrap()).unwrap();
+            assert!(m.len() > 25);
+            for e in m {
+                assert!(
+                    lua_dir.join("suite").join(&e.file).is_file(),
+                    "{lua} {}",
+                    e.file
+                );
+            }
         }
     }
 

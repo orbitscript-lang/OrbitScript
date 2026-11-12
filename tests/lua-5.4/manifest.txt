@@ -1,0 +1,53 @@
+# Files of the official Lua 5.4 test suite (the 5.4 target, ADR-14) that orbit-testkit runs, one
+# process each, in the order all.lua runs them. See README.md and SKIPS.md.
+#
+# Options:
+#   set=G[,G]        set these globals to true first (all.lua's _U user mode)
+#   yields=V[,V]     run the file as a coroutine that must yield V in order
+#   needs-clibs=A-B  lines that load the suite's C test libraries; they are
+#                    commented out unless --c-libs is given
+#   deviates=A-B     lines that check a deliberate difference listed in
+#                    DEVIATIONS.md; always commented out
+#   not-soft         skipped under --soft, as all.lua does
+#   not-stress       skipped when ORBIT_GC_STRESS is set (too slow there)
+#   timeout=SECS     per-file timeout override
+#   vmem-kb=KB       run under this address-space limit (ulimit -v); Unix
+#                    only, skipped elsewhere
+#   skip             never run; the # comment gives the reason
+
+
+main.lua        needs-clibs=229-232 deviates=385-389   # the lua command line; one check loads a C module; one prompt check needs readline echoing piped input
+gc.lua          deviates=473 deviates=475-476   # memory count right after weak string keys are cleared
+db.lua          deviates=124-131 deviates=429-431 deviates=597   # if-then line events; io files have a user value; count hooks count our instructions
+calls.lua       deviates=474-478      # compares a dump's header with lua5.4's layout
+strings.lua
+literals.lua
+tpack.lua
+attrib.lua      needs-clibs=266-334   # 266-334 load the suite's C libraries (lib1, lib2-v2, ...)
+gengc.lua
+locals.lua
+constructs.lua
+code.lua                              # entirely T (opcode) tests; checks it skips cleanly
+big.lua         yields=b,a not-soft   # all.lua runs it in a coroutine, and not under _soft
+cstack.lua
+nextvar.lua
+pm.lua
+utf8.lua
+api.lua                               # entirely C API tests; checks it skips cleanly
+events.lua
+vararg.lua
+closure.lua
+coroutine.lua
+goto.lua
+errors.lua
+math.lua
+sort.lua
+bitwise.lua
+verybig.lua
+files.lua
+
+# The whole suite in one process, in user mode (_U = true), which also
+# round-trips every file through string.dump and load.
+all.lua         set=_U  timeout=600
+
+heavy.lua       vmem-kb=2000000 not-stress  # not part of all.lua: grows a table until allocation fails
