@@ -16,7 +16,7 @@
 #   skip             never run; the # comment gives the reason
 
 
-main.lua        needs-clibs=229-232 deviates=385-389   # the lua command line; one check loads a C module; one prompt check needs readline echoing piped input
+main.lua        needs-clibs=229-232 deviates=385-389 deviates=550-566   # the lua command line; one check loads a C module; one prompt check needs readline echoing piped input; the Ctrl-C search ends at once
 gc.lua          deviates=473 deviates=475-476   # memory count right after weak string keys are cleared
 db.lua          deviates=124-131 deviates=429-431 deviates=597   # if-then line events; io files have a user value; count hooks count our instructions
 calls.lua       deviates=474-478      # compares a dump's header with lua5.4's layout

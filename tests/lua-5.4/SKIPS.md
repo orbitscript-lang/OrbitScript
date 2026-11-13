@@ -45,6 +45,7 @@ Each is in [DEVIATIONS.md](DEVIATIONS.md). Like the 5.5 suite's `deviates=` line
 | `calls.lua` | 474-478 | Binary chunk layout: a dump's header is OrbitScript's, not lua5.4's |
 | `gc.lua` | 473, 475-476 | A weak table's cleared string key is freed one collection later |
 | `main.lua` | 385-389 | The interactive prompt check expects GNU readline to echo piped input |
+| `main.lua` | 550-566 | Pattern searches skip starts that can't match, so the "long unbreakable search" that Ctrl-C must interrupt twice ends in milliseconds (as `main.lua` 580-596 in the 5.5 suite) |
 
 ## 4. Whole files not run
 
