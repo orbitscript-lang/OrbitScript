@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 orbit-hir = { path = "../orbit-hir" }
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 [dev-dependencies]
 # The nesting tests compile what they lower, since the compiler recurses too.

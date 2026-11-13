@@ -95,8 +95,30 @@ fn stubs_match_the_runtime() {
     let mut stubbed = BTreeSet::new();
     // Globals the CLI or a feature adds, which `orbit_std::install` alone doesn't.
     let host_only = ["arg"];
+    // The stubs describe the default (Lua 5.5) library. A Lua 5.4 build
+    // (ADR-14) adds the 5.3 compatibility functions and has no `table.create`.
+    let (only_5_4, only_5_5): (&[&str], &[&str]) = if orbit::LUA.is_5_4() {
+        (
+            &[
+                "math.atan2",
+                "math.cosh",
+                "math.log10",
+                "math.pow",
+                "math.sinh",
+                "math.tanh",
+            ],
+            &["table.create"],
+        )
+    } else {
+        (&[], &[])
+    };
     for n in &names {
-        expected.insert(n.clone());
+        if !only_5_4.contains(&n.as_str()) {
+            expected.insert(n.clone());
+        }
+    }
+    for n in only_5_5 {
+        expected.insert(n.to_string());
     }
     for n in stub_names(&read("stubs/prelude.orbi")) {
         if !host_only.contains(&n.as_str()) && n != "panic" {

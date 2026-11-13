@@ -4,6 +4,11 @@
 // the intrinsics as their only globals, so scripts can't reach or replace
 // what they use. The debug interface shows their functions as C functions.
 // A built-in avoids tail calls, which would drop its frame.
+//
+// Code that differs by Lua version (ADR-14) sits in `//#if lua-5.4` blocks,
+// which the build resolves before compiling (`orbit_lua_version::preprocess`),
+// so the bytecode never tests the version. A block holds whole items, so the
+// file still parses as it is, for orbit-fmt and the language server.
 
 use intrinsics::{argerror, metafield};
 
@@ -25,6 +30,21 @@ pub fn ipairs(...args) {
     (ipairs_next, args[1], 0)
 }
 
+//#if lua-5.4
+// Lua 5.4: three values.
+pub fn pairs(...args) {
+    if args.n == 0 {
+        argerror(1, "value expected");
+    }
+    let t = args[1];
+    let h = metafield(t, "__pairs");
+    if h != nil {
+        let (f, s, c) = h(t);
+        return (f, s, c);
+    }
+    (next, t, nil)
+}
+//#else
 pub fn pairs(...args) {
     if args.n == 0 {
         argerror(1, "value expected");
@@ -39,3 +59,4 @@ pub fn pairs(...args) {
     }
     (next, t, nil, nil)
 }
+//#endif

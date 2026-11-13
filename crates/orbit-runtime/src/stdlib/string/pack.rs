@@ -6,6 +6,7 @@
 
 use crate::object::Value;
 use crate::vm::{LuaError, NativeCtx, NativeReturn};
+use orbit_lua_version::LUA;
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -107,7 +108,7 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let mut n = 0usize;
         while let Some(d) = self.fmt.get(self.pos).filter(|d| d.is_ascii_digit()) {
-            if n > (MAX_SIZE - 9) / 10 {
+            if n > (PACKSIZE_MAX - 9) / 10 {
                 break;
             }
             n = n * 10 + (d - b'0') as usize;
@@ -348,6 +349,14 @@ pub(crate) fn pack(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret([r])
 }
 
+/// The largest size `packsize` reports, and the most a size in a format
+/// may read: Lua 5.4 caps them at a C `int` (ADR-14).
+const PACKSIZE_MAX: usize = if LUA.is_5_4() {
+    i32::MAX as usize
+} else {
+    MAX_SIZE
+};
+
 pub(crate) fn packsize(ctx: &mut NativeCtx<'_>) -> R {
     let fmt = ctx.check_str(0)?;
     let fmt = ctx.bytes(fmt).to_vec();
@@ -362,7 +371,7 @@ pub(crate) fn packsize(ctx: &mut NativeCtx<'_>) -> R {
             .checked_add(item.pad)
             .and_then(|n| n.checked_add(item.size))
         {
-            Some(n) if n <= MAX_SIZE => total = n,
+            Some(n) if n <= PACKSIZE_MAX => total = n,
             _ => return Err(ctx.arg_error(0, "format result too large")),
         }
     }
@@ -499,7 +508,12 @@ mod tests {
         assert_eq!(size("i0"), Err(FormatError::SizeOutOfLimits(0)));
         assert_eq!(
             size("i9999999999999999999"),
-            Err(FormatError::SizeOutOfLimits(-1486618625))
+            // lua5.4 stops reading digits before the size overflows an `int`.
+            Err(FormatError::SizeOutOfLimits(if LUA.is_5_4() {
+                999999999
+            } else {
+                -1486618625
+            }))
         );
         assert_eq!(size("c1".to_owned().as_str()), Ok(1));
         assert_eq!(size("i3r"), Err(FormatError::InvalidOption(b'r')));

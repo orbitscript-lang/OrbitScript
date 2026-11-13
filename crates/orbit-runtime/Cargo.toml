@@ -11,12 +11,15 @@ publish = false
 [dependencies]
 orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-gc = { path = "../orbit-gc" }
+# The Lua version (ADR-14); its `links` metadata also tells the build script.
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 # The build script compiles the built-in OrbitScript modules (ADR-11); none
 # of this is linked into the runtime.
 [build-dependencies]
 orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-compiler = { path = "../orbit-compiler" }
+orbit-lua-version = { path = "../orbit-lua-version" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 
 [dev-dependencies]

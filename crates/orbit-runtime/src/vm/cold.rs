@@ -11,6 +11,7 @@
 //! instructions' register allocation, independent of how many instructions
 //! there are.
 
+use orbit_lua_version::LUA;
 use std::borrow::Cow;
 
 use crate::object::number::float_to_int;
@@ -219,16 +220,27 @@ impl Vm {
             | Op::SetField { .. }
             | Op::SetIndex { .. }
             | Op::SetIndexInt { .. } => MetaAction::Discard,
+            // A negated comparison (`aux` is `NEGATE`) branches on the
+            // opposite result.
             Op::JumpLt { off, .. } | Op::JumpLe { off, .. } | Op::JumpEq { off, .. } => {
-                MetaAction::Branch { want: true, off }
+                MetaAction::Branch {
+                    want: aux != crate::vm::meta::NEGATE,
+                    off,
+                }
             }
             Op::JumpNotLt { off, .. } | Op::JumpNotLe { off, .. } | Op::JumpNe { off, .. } => {
-                MetaAction::Branch { want: false, off }
+                MetaAction::Branch {
+                    want: aux == crate::vm::meta::NEGATE,
+                    off,
+                }
             }
             Op::JumpLtInt { want, off, .. }
             | Op::JumpLeInt { want, off, .. }
             | Op::JumpGtInt { want, off, .. }
-            | Op::JumpGeInt { want, off, .. } => MetaAction::Branch { want, off },
+            | Op::JumpGeInt { want, off, .. } => MetaAction::Branch {
+                want: want != (aux == crate::vm::meta::NEGATE),
+                off,
+            },
             Op::Concat { dst, first, .. } => MetaAction::Concat {
                 dst,
                 first,
@@ -326,6 +338,10 @@ impl Vm {
         let t = self.rt.stack.aux.tbc.pop().expect("a variable to close") as usize;
         let v = self.rt.stack.regs[t];
         let h = self.rt.metamethod(&self.heap, v, MetaField::Close);
+        // Lua 5.4 passes a `nil` error too (ADR-14).
+        if LUA.is_5_4() {
+            return Exc::Meta(MetaCall::new(h, MetaField::Close, &[v, Value::Nil]));
+        }
         Exc::Meta(MetaCall::new(h, MetaField::Close, &[v]))
     }
 

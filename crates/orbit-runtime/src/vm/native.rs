@@ -1,5 +1,6 @@
 //! The native-function interface (ADR-3's continuation style).
 
+use orbit_lua_version::LUA;
 use std::rc::Rc;
 
 use crate::locale::Locale;
@@ -1053,10 +1054,28 @@ impl NativeCtx<'_> {
         self.meta_result(r)
     }
 
-    /// `a <= b` with `__le`.
+    /// `a <= b` with `__le`. In a Lua 5.4 build, when [`Self::le_via_lt`]
+    /// says so, a [`Meta::Call`] here is `__lt` for `b < a`, whose result
+    /// must be negated.
     pub fn less_equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
         let r = ops::less_equal(&self.vm.heap, &self.vm.rt.metas, a, b);
         self.meta_result(r)
+    }
+
+    /// Whether [`Self::less_equal`] answers through `__lt` and a negation
+    /// (Lua 5.4's 5.3 compatibility, ADR-14). Never in a 5.5 build.
+    pub fn le_via_lt(&self, a: Value, b: Value) -> bool {
+        let (heap, metas) = (&self.vm.heap, &self.vm.rt.metas);
+        LUA.is_5_4()
+            && !matches!(
+                (a, b),
+                (
+                    Value::Int(_) | Value::Float(_),
+                    Value::Int(_) | Value::Float(_)
+                ) | (Value::Str(_), Value::Str(_))
+            )
+            && meta::binary_handler(heap, metas, MetaField::Le, a, b).is_nil()
+            && ops::le_fallback(heap, metas, MetaField::Le, a, b).is_some()
     }
 
     /// `a op b` (for the unary operators, `a` alone) with metamethods, as

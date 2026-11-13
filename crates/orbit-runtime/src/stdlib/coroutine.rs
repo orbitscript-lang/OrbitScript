@@ -5,6 +5,7 @@
 
 use crate::object::{Gc, Thread, Value};
 use crate::vm::{CallOutcome, CoStatus, LuaError, NativeCtx, NativeFn, NativeReturn, ResumeOk};
+use orbit_lua_version::LUA;
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -152,13 +153,15 @@ fn close_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
 }
 
 fn close(ctx: &mut NativeCtx<'_>) -> R {
-    // With no argument, the running coroutine closes itself.
+    // With no argument, the running coroutine closes itself (5.5; Lua 5.4
+    // needs a coroutine, and can't close the running one).
     let co = match ctx.arg(0) {
-        Value::Nil if ctx.nargs() == 0 => ctx.running().0,
+        Value::Nil if ctx.nargs() == 0 && LUA.is_5_5() => ctx.running().0,
         _ => check_thread(ctx, 0)?,
     };
     match ctx.thread_status(co) {
         CoStatus::Suspended | CoStatus::Dead => Ok(NativeReturn::Close { co, k: close_done }),
+        CoStatus::Running if LUA.is_5_4() => Err(ctx.error("cannot close a running coroutine")),
         CoStatus::Running if co == ctx.running_main_thread() => {
             Err(ctx.error("cannot close main thread"))
         }

@@ -22,7 +22,9 @@ assert(select(2, pcall(string.rep, "x", 1 << 26)) == "not enough memory")
 local big = string.rep("y", 1 << 20)
 assert(select(2, pcall(function () return big .. string.rep("z", 1 << 23) .. big end))
   == "not enough memory")
-assert(select(2, pcall(table.create, 1 << 24)) == "not enough memory")
+if table.create then   -- Lua 5.5 only
+  assert(select(2, pcall(table.create, 1 << 24)) == "not enough memory")
+end
 assert(collectgarbage("count") < 16 * 1024)
 
 -- Holding on past the cap: the error comes back once the grace is used.

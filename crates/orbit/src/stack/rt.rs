@@ -852,12 +852,14 @@ impl<'s> Stack<'s> {
             return Ok(false);
         }
         let (x, y) = (self.get(a), self.get(b));
+        // A Lua 5.4 build answers a missing `__le` with `__lt` (ADR-14).
+        let negate = op == CompareOp::Le && self.ctx.le_via_lt(x, y);
         let m = match op {
             CompareOp::Eq => self.ctx.equal(x, y)?,
             CompareOp::Lt => self.ctx.less_than(x, y)?,
             CompareOp::Le => self.ctx.less_equal(x, y)?,
         };
-        self.finish_meta(m, |v| !v.is_falsy())
+        self.finish_meta(m, |v| v.is_falsy() == negate)
     }
 
     // ---- operators ---------------------------------------------------------------

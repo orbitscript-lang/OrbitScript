@@ -846,10 +846,14 @@ fn compile_errors() {
 
 #[test]
 fn tour() {
-    check(
-        include_str!("programs/tour.orb"),
-        r#"
-6.4031242374328485	(4, 5)	(5, 6)	true
+    // A Lua 5.4 build (ADR-14) prints floats with 14 digits.
+    let length = if orbit::LUA.is_5_4() {
+        "6.4031242374328"
+    } else {
+        "6.4031242374328485"
+    };
+    let want = r#"
+LENGTH	(4, 5)	(5, 6)	true
 12 10 0 none some some 3 2 1 0 5 10 w1 w3 60 11 21
 3 1 a8.0b
 3	nil	no b
@@ -858,7 +862,10 @@ true	nil	3
 true	10	lower
 6	big	true
 4
-release	a"#,
+release	a"#;
+    check(
+        include_str!("programs/tour.orb"),
+        &want.replacen("LENGTH", length, 1),
     );
 }
 

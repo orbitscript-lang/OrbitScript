@@ -20,6 +20,8 @@ orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 # tests/stubs.rs compares the bundled stubs with the libraries the runtime installs.
 orbit = { path = "../orbit" }
 orbit-std = { path = "../orbit-std", features = ["json"] }
+# tests/check.rs reads the built-in modules as each Lua version compiles them.
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 [lints]
 workspace = true

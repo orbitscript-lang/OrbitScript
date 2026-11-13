@@ -3,6 +3,7 @@
 //! `lua5.5` binary.
 
 use crate::object::Value;
+use orbit_lua_version::LUA;
 
 use orbit_bytecode::number::TWO_63;
 pub use orbit_bytecode::number::{
@@ -354,13 +355,17 @@ fn strip_zeros(s: &str) -> &str {
     }
 }
 
-/// Append a float the way Lua 5.5 prints it: `%.15g` if that reads back as
-/// the same number, else `%.17g`, with `.0` added if it looks like an
-/// integer.
+/// Append a float the way Lua prints it, with `.0` added if it looks like an
+/// integer: 5.5 uses `%.15g` if that reads back as the same number, else
+/// `%.17g`; 5.4 always uses `%.14g` (ADR-14).
 pub fn fmt_float(out: &mut String, x: f64) {
     let start = out.len();
-    fmt_g(out, x, 15);
-    if x.is_finite() && out[start..].parse::<f64>().ok() != Some(x) {
+    if LUA.is_5_4() {
+        fmt_g(out, x, 14);
+    } else {
+        fmt_g(out, x, 15);
+    }
+    if LUA.is_5_5() && x.is_finite() && out[start..].parse::<f64>().ok() != Some(x) {
         out.truncate(start);
         fmt_g(out, x, 17);
     }
@@ -492,6 +497,24 @@ mod tests {
         }
     }
 
+    /// What lua5.4 prints where lua5.5 needs 17 digits: 5.4 always uses
+    /// 14 (ADR-14).
+    fn as_5_4(want: &str) -> &str {
+        if LUA.is_5_5() {
+            return want;
+        }
+        match want {
+            "0.33333333333333331" => "0.33333333333333",
+            "0.30000000000000004" => "0.3",
+            "9.2233720368547758e+18 float" => "9.2233720368548e+18 float",
+            "-9.2233720368547758e+18 float" => "-9.2233720368548e+18 float",
+            "9.2233720368547758e+18" => "9.2233720368548e+18",
+            "3.1415926535897931" => "3.1415926535898",
+            "9007199254740992.0" => "9.007199254741e+15",
+            w => w,
+        }
+    }
+
     #[test]
     fn string_to_number_matches_reference() {
         // Outputs of `tostring(tonumber(s)), math.type(...)` from lua5.5.
@@ -519,7 +542,7 @@ mod tests {
             ("", "nil"),
             ("  ", "nil"),
         ] {
-            assert_eq!(show(str_to_number(s.as_bytes())), want, "{s:?}");
+            assert_eq!(show(str_to_number(s.as_bytes())), as_5_4(want), "{s:?}");
         }
     }
 
@@ -543,7 +566,7 @@ mod tests {
             (std::f64::consts::PI, "3.1415926535897931"),
             (123456789012.0, "123456789012.0"),
         ] {
-            assert_eq!(float_to_string(x), want, "{x:e}");
+            assert_eq!(float_to_string(x), as_5_4(want), "{x:e}");
         }
     }
 

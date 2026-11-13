@@ -104,9 +104,14 @@ pub(crate) struct MetaCall {
     pub args: [Value; 3],
     pub nargs: u8,
     pub field: MetaField,
-    /// Instruction-specific state: for `Concat`, how many values are left.
+    /// Instruction-specific state: for `Concat`, how many values are left;
+    /// for a comparison, [`NEGATE`] when the result must be negated.
     pub aux: u8,
 }
+
+/// [`MetaCall::aux`] of a comparison answered by negating its handler's
+/// result (Lua 5.4's `__le` through `__lt`, ADR-14).
+pub(crate) const NEGATE: u8 = 1;
 
 impl MetaCall {
     pub(crate) fn new(f: Value, field: MetaField, args: &[Value]) -> MetaCall {

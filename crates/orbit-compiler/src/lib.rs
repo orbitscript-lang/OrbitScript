@@ -17,6 +17,7 @@ use orbit_bytecode::{CaptureSource, UnlinkedChunk, UnlinkedProto};
 use orbit_hir::{CaptureFrom, Chunk, StmtKind};
 
 pub use disasm::disassemble;
+
 /// The instruction set this compiler emits.
 pub use orbit_bytecode as bytecode;
 

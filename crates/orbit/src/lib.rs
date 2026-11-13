@@ -75,6 +75,12 @@ pub use orbit_compiler::bytecode::UnlinkedChunk;
 /// The runtime version, taken from the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The Lua version this build implements (ADR-14), for the whole process: every isolate, both
+/// front ends' library and the C API. The `lua-5-4` feature selects Lua 5.4; without it the
+/// build is Lua 5.5. Ask it through [`LuaVersion`]'s methods: `orbit::LUA.is_5_4()`,
+/// `orbit::LUA.name()` (`_VERSION`), `orbit::LUA.release()`.
+pub use orbit_lua_version::{LUA, LuaVersion};
+
 #[cfg(test)]
 mod tests {
     use super::*;

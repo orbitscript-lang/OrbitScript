@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use orbit_check::{Code, Config, DiskSources, Sources, SymbolKind, Workspace};
+use orbit_lua_version::LuaVersion;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -12,12 +13,33 @@ fn root() -> PathBuf {
 
 /// Checks every `.orb` under `dir` with `dir` as the search root; returns (file, line, code).
 fn check_dir(dir: &Path) -> (Workspace, BTreeSet<(String, u32, String)>) {
+    check_dir_with(dir, Box::new(DiskSources))
+}
+
+/// The files on disk as `version`'s build compiles them, for sources with
+/// `//#if lua-5.4` blocks such as the built-in modules (ADR-14).
+struct Preprocessed(LuaVersion);
+
+impl Sources for Preprocessed {
+    fn read(&self, path: &Path) -> Option<Vec<u8>> {
+        let src = std::fs::read_to_string(path).ok()?;
+        let selected = orbit_lua_version::preprocess(&src, self.0)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        Some(selected.into_bytes())
+    }
+}
+
+/// [`check_dir`] with the sources read through `sources`.
+fn check_dir_with(
+    dir: &Path,
+    sources: Box<dyn Sources>,
+) -> (Workspace, BTreeSet<(String, u32, String)>) {
     let mut ws = Workspace::new(
         Config {
             root: dir.to_path_buf(),
             ..Config::default()
         },
-        Box::new(DiskSources),
+        sources,
     );
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
@@ -105,12 +127,18 @@ fn repository_programs_check() {
         let (_, found) = check_dir(&root().join(dir));
         assert!(found.is_empty(), "findings in {dir}: {found:?}");
     }
-    let (_, found) = check_dir(&root().join("crates/orbit-runtime/src/stdlib/builtins"));
-    // The built-ins take their intrinsics from a host module that isn't a file.
-    assert!(
-        found.iter().all(|(_, _, code)| code == "T0002"),
-        "built-ins: {found:?}"
-    );
+    // The built-ins, as each Lua version's build compiles them.
+    for version in LuaVersion::ALL {
+        let (_, found) = check_dir_with(
+            &root().join("crates/orbit-runtime/src/stdlib/builtins"),
+            Box::new(Preprocessed(version)),
+        );
+        // The built-ins take their intrinsics from a host module that isn't a file.
+        assert!(
+            found.iter().all(|(_, _, code)| code == "T0002"),
+            "built-ins for {version}: {found:?}"
+        );
+    }
 }
 
 /// The unused-name lints, which tests that bind values only to look at them leave out.

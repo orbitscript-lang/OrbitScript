@@ -1,4 +1,4 @@
-//! Lua 5.5 front end: lexer, parser, syntax-only AST, and lowering to the shared HIR.
+//! Lua front end (5.5, or 5.4 with the `lua-5-4` feature, ADR-14): lexer, parser, syntax-only AST, and lowering to the shared HIR.
 //!
 //! Written from the Lua 5.5 reference manual and the reference interpreter's observable
 //! behaviour; see `docs/design/lua-front-end.md`. Every stage works on plain owned data and never

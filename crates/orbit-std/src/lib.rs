@@ -34,7 +34,7 @@ mod tz;
 use orbit::{Error, Isolate, Scope};
 
 pub use base::{STDIN, read_chunk_file};
-pub use package::{DIRSEP, load_error, path_field, search_path};
+pub use package::{DIRSEP, load_error, path_field, search_path, versioned_env};
 pub use sys::os_error_text;
 
 /// What [`install`] gives scripts. The default is everything this build

@@ -13,19 +13,35 @@ use orbit::{Chunk, Error, OrbitStr, OrbitString, Scope, Table, Value, native};
 use crate::base::read_chunk_file;
 use crate::sys::os_path;
 
-/// The defaults the reference `lua5.5` build uses, so scripts see the same
-/// strings, with OrbitScript modules after Lua's: the Lua searcher loads
-/// whatever file `package.path` finds, picking the compiler by the `.orb`
-/// name.
-const DEFAULT_PATH: &str = "/usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;\
+/// The defaults the reference `lua5.5` build uses (`lua5.4`'s in a 5.4
+/// build, ADR-14), so scripts see the same strings, with OrbitScript modules
+/// after Lua's: the Lua searcher loads whatever file `package.path` finds,
+/// picking the compiler by the `.orb` name.
+const DEFAULT_PATH: &str = if orbit::LUA.is_5_4() {
+    "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua;\
+/usr/local/lib/lua/5.4/?.lua;/usr/local/lib/lua/5.4/?/init.lua;./?.lua;./?/init.lua;\
+/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb"
+} else {
+    "/usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;\
 /usr/local/lib/lua/5.5/?.lua;/usr/local/lib/lua/5.5/?/init.lua;./?.lua;./?/init.lua;\
-/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb";
-const DEFAULT_CPATH: &str = "/usr/local/lib/lua/5.5/?.so;/usr/local/lib/lua/5.5/loadall.so;./?.so";
+/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb"
+};
+const DEFAULT_CPATH: &str = if orbit::LUA.is_5_4() {
+    "/usr/local/lib/lua/5.4/?.so;/usr/local/lib/lua/5.4/loadall.so;./?.so"
+} else {
+    "/usr/local/lib/lua/5.5/?.so;/usr/local/lib/lua/5.5/loadall.so;./?.so"
+};
+
+/// `LUA_PATH_5_5` and the like: `name` with the build's version suffix
+/// (`_5_4` in a 5.4 build), as Lua's `LUA_VERSUFFIX` makes it.
+pub fn versioned_env(name: &str) -> String {
+    format!("{name}_{}", orbit::LUA.underscored())
+}
 
 /// The directory separator, which `require` puts in place of dots.
 pub const DIRSEP: &str = if cfg!(windows) { "\\" } else { "/" };
 
-/// A search path from the environment (`LUA_PATH_5_5`, then `LUA_PATH`),
+/// A search path from the environment (`LUA_PATH_5_5` or `_5_4`, then `LUA_PATH`),
 /// with `;;` replaced by the default, or the default.
 fn env_path(versioned: &str, plain: &str, default: &str, ignore_env: bool) -> String {
     let v = if ignore_env {
@@ -198,9 +214,19 @@ pub fn open<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<(), Error> {
     let Some(pkg) = s.registry().raw_get::<Option<Table>>("_PACKAGE")? else {
         return Ok(());
     };
-    let path = env_path("LUA_PATH_5_5", "LUA_PATH", DEFAULT_PATH, ignore_env);
+    let path = env_path(
+        &versioned_env("LUA_PATH"),
+        "LUA_PATH",
+        DEFAULT_PATH,
+        ignore_env,
+    );
     pkg.raw_set("path", path)?;
-    let cpath = env_path("LUA_CPATH_5_5", "LUA_CPATH", DEFAULT_CPATH, ignore_env);
+    let cpath = env_path(
+        &versioned_env("LUA_CPATH"),
+        "LUA_CPATH",
+        DEFAULT_CPATH,
+        ignore_env,
+    );
     pkg.raw_set("cpath", cpath)?;
     pkg.raw_set("searchpath", s.create_native::<searchpath>())?;
     pkg.raw_set("loadlib", s.create_native::<loadlib_absent>())?;

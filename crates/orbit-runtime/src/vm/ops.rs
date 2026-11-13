@@ -3,6 +3,7 @@
 //! pieces and `for` limits, and the errors or metamethod requests ([`Exc`])
 //! they end in.
 
+use orbit_lua_version::LUA;
 use std::io::Write as _;
 
 use crate::locale::Locale;
@@ -345,11 +346,33 @@ fn str_order(heap: &LuaHeap, rt: &Metas, x: Gc<LuaStr>, y: Gc<LuaStr>) -> std::c
 #[cold]
 fn compare_meta(heap: &LuaHeap, rt: &Metas, e: MetaField, a: Value, b: Value) -> Exc {
     let h = meta::binary_handler(heap, rt, e, a, b);
-    if h.is_nil() {
-        compare_error(heap, rt, a, b)
-    } else {
-        Exc::Meta(MetaCall::new(h, e, &[a, b]))
+    if !h.is_nil() {
+        return Exc::Meta(MetaCall::new(h, e, &[a, b]));
     }
+    if let Some(lt) = le_fallback(heap, rt, e, a, b) {
+        // `a <= b` as `not (b < a)`.
+        let mut call = MetaCall::new(lt, MetaField::Lt, &[b, a]);
+        call.aux = meta::NEGATE;
+        return Exc::Meta(call);
+    }
+    compare_error(heap, rt, a, b)
+}
+
+/// Lua 5.4 with its 5.3 compatibility (as Debian builds it, ADR-14) reads a
+/// missing `__le` as `not (b < a)` through `__lt`: that handler, when `e` is
+/// `__le`, there is no `__le` handler, and there is a `__lt` one.
+pub(crate) fn le_fallback(
+    heap: &LuaHeap,
+    rt: &Metas,
+    e: MetaField,
+    a: Value,
+    b: Value,
+) -> Option<Value> {
+    if LUA.is_5_5() || e != MetaField::Le {
+        return None;
+    }
+    let lt = meta::binary_handler(heap, rt, MetaField::Lt, b, a);
+    (!lt.is_nil()).then_some(lt)
 }
 
 fn compare_error(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Exc {

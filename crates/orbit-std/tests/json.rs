@@ -306,7 +306,12 @@ fn decode_builds_values() {
     assert_eq!(lua(src).unwrap(), ["{}", "[]", "null"]);
     assert_eq!(
         one("return json.decode('18446744073709551615')"),
-        "1.8446744073709552e+19"
+        // A Lua 5.4 build (ADR-14) prints floats with 14 digits.
+        if orbit::LUA.is_5_4() {
+            "1.844674407371e+19"
+        } else {
+            "1.8446744073709552e+19"
+        }
     );
     assert_eq!(
         one("return math.type(json.decode('9223372036854775807'))"),

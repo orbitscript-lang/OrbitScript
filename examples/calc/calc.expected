@@ -14,8 +14,8 @@ y = 2.0
 4
 > max(x, y, 10 % 4)
 4
-> sqrt(y * 8) + abs(-pi)
-7.1415926535897931
+> sqrt(y * 8) + abs(-pi) - pi
+4.0
 > y - z
 error: unknown variable 'z'
 > 1 / (x - 4)
