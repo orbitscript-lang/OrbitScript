@@ -88,6 +88,7 @@ You need stable Rust 1.75 or newer and a C compiler. The `ffi` library also buil
 ./build.sh                # the shared layout in target/package/out
 ./build.sh --static       # self-contained programs instead
 ./build.sh --system-libffi  # link the system's libffi instead of a bundled copy
+./build.sh --lua 5.4      # implement Lua 5.4 instead of 5.5 (ADR-14), in target/package-lua5.4/out
 ./build.sh --help         # targets, profiles, PGO and feature options
 ```
 

@@ -5,6 +5,13 @@
 #   ./build.sh [options]
 #
 #   --target TRIPLE   the target to build for (default: this machine's)
+#   --lua VERSION     the Lua version the build implements: 5.5 (default) or
+#                     5.4 (the `lua-5-4` feature, ADR-14), for the language,
+#                     the libraries and the C API alike. A 5.4 build has its
+#                     own target directory (target/package-lua5.4), default
+#                     --out (target/package-lua5.4/out) and default profile
+#                     (pgo/<target>-lua5.4.profdata), and installs Lua 5.4's
+#                     headers and library names
 #   --static          lay out the static `orbit`, `orbitc`, `orbit-lsp` and
 #                     `orbit-fmt` instead of the shared layout
 #   --out DIR         where to lay it out (default target/package/out)
@@ -41,8 +48,9 @@
 #
 # The shared layout (ADR-10): liborbit holds the runtime once, `orbit`,
 # `orbitc` and the language server `orbit-lsp` are built with `orbit`'s
-# `shared` feature and find it through their run path, and Lua 5.5's library
-# names are aliases of it, so programs built for Lua 5.5 use it too. The
+# `shared` feature and find it through their run path, and Lua's library
+# names are aliases of it, so programs built for that Lua use it too. The
+# names below are a 5.5 build's; a 5.4 build has the same with 5.4 (lua54.dll). The
 # formatter `orbit-fmt` doesn't link the runtime and is the same in both.
 #   Linux:   bin/orbit, bin/orbitc, bin/orbit-lsp, bin/orbit-fmt
 #            lib/liborbit.so.0, and liborbit.so, liblua5.5.so.0 (Debian),
@@ -67,7 +75,8 @@
 set -eu
 
 root=$(cd "$(dirname "$0")" && pwd)
-out="$root/target/package/out"
+out=
+lua=5.5
 profile=release
 triple=
 layout=shared
@@ -84,6 +93,7 @@ while [ $# -gt 0 ]; do
         --out) out=${2:?--out needs a value}; shift 2 ;;
         --profile) profile=${2:?--profile needs a value}; shift 2 ;;
         --target) triple=${2:?--target needs a value}; shift 2 ;;
+        --lua) lua=${2:?--lua needs a value}; shift 2 ;;
         --static) layout=static; shift ;;
         --pgo) pgo=${2:?--pgo needs a value}; shift 2 ;;
         --no-pgo) no_pgo=yes; shift ;;
@@ -100,6 +110,15 @@ while [ $# -gt 0 ]; do
         *) echo "build.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
+
+case "$lua" in
+    5.5) package=package profile_suffix= ;;
+    5.4) package=package-lua5.4 profile_suffix=-lua5.4 ;;
+    *) echo "build.sh: --lua must be 5.5 or 5.4, not $lua" >&2; exit 2 ;;
+esac
+[ -n "$out" ] || out="$root/target/$package/out"
+# Lua's library names: 55 or 54, as in lua55.dll.
+lua_nodot=$(printf '%s' "$lua" | tr -d .)
 
 cargo=${CARGO:-cargo}
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -122,11 +141,11 @@ if [ -n "$pgo" ]; then
     # Absolute already: /x, or C:\x and C:/x on Windows.
     case "$pgo" in /* | [A-Za-z]:[\\/]*) ;; *) pgo="$(pwd)/$pgo" ;; esac
 elif [ "$no_pgo" = no ]; then
-    pgo="$root/pgo/$triple.profdata"
+    pgo="$root/pgo/$triple$profile_suffix.profdata"
 fi
 cd "$root"
 
-target="$root/target/package"
+target="$root/target/$package"
 
 # The environment's rustflags with "$@" appended, encoded for
 # CARGO_ENCODED_RUSTFLAGS (flags separated by 0x1f), which cargo prefers
@@ -206,6 +225,9 @@ lib=$(defaults orbit-lib),debugger
     lib=$(join "$lib" system-libffi)
 }
 cli_extra= lib_extra= lsp_extra= fmt_extra=
+# The Lua version selects the whole build's (ADR-14): every package that
+# links the runtime gets the feature.
+[ "$lua" = 5.5 ] || features="$features lua-5-4,orbit-lib/lua-5-4,orbit-lsp/lua-5-4"
 for f in $(printf '%s' "$features" | tr ',' ' '); do
     case "$f" in
         orbit-lib/*) lib_extra=$(join "$lib_extra" "$f") ;;
@@ -278,7 +300,7 @@ import_lib() {
 # declaration in our headers names, one per line.
 # Lua's headers are per version (ADR-14); orbit.h is shared.
 capi_include="$root/crates/orbit-capi/csrc/include"
-headers="$capi_include/5.5"
+headers="$capi_include/$lua"
 api_names() {
     grep -hE '^(LUA_API|LUALIB_API|LUAMOD_API) ' "$headers/lua.h" "$headers/lauxlib.h" "$headers/lualib.h" |
         awk '{ if (match($0, /(lua|luaL|luaopen)_[a-z][A-Za-z0-9_]*/)) print substr($0, RSTART, RLENGTH) }' |
@@ -330,7 +352,7 @@ lay_out() {
             cp "$built/orbit" "$built/orbitc" "$dir/bin/"
             lib=liborbit.0.dylib
             cp "$built/liborbit_lib.dylib" "$dir/lib/$lib"
-            for alias in liborbit.dylib liblua.5.5.dylib liblua5.5.dylib; do
+            for alias in liborbit.dylib "liblua.$lua.dylib" "liblua$lua.dylib"; do
                 ln -s "$lib" "$dir/lib/$alias"
             done
             files="bin/orbit bin/orbitc lib/$lib"
@@ -339,9 +361,10 @@ lay_out() {
             for f in orbit.exe orbitc.exe orbit_lib.dll; do
                 cp "$built/$f" "$dir/bin/$f"
             done
-            def="$target/lua55.def"
+            luadll=lua$lua_nodot.dll
+            def="$target/lua$lua_nodot.def"
             {
-                echo "LIBRARY lua55.dll"
+                echo "LIBRARY $luadll"
                 echo "EXPORTS"
                 api_names | sed 's/.*/  & = orbit_lib.&/'
             } > "$def"
@@ -356,17 +379,17 @@ lay_out() {
             if link=$(msvc_link); then
                 # Git Bash would turn the /OPTIONS into paths.
                 MSYS2_ARG_CONV_EXCL='*' "$link" /NOLOGO /DLL /NOENTRY "/MACHINE:$machine" \
-                    "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/lua55.dll")"
+                    "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/$luadll")"
             else
-                "${CC:-gcc}" -shared -nostdlib -o "$dir/bin/lua55.dll" "$def"
+                "${CC:-gcc}" -shared -nostdlib -o "$dir/bin/$luadll" "$def"
             fi
-            files="bin/orbit.exe bin/orbitc.exe bin/orbit_lib.dll bin/lua55.dll"
+            files="bin/orbit.exe bin/orbitc.exe bin/orbit_lib.dll bin/$luadll"
             ;;
         *)
             cp "$built/orbit" "$built/orbitc" "$dir/bin/"
             lib=liborbit.so.0
             cp "$built/liborbit_lib.so" "$dir/lib/$lib"
-            for alias in liborbit.so liblua5.5.so.0 liblua-5.5.so liblua.so.5.5; do
+            for alias in liborbit.so "liblua$lua.so.0" "liblua-$lua.so" "liblua.so.$lua"; do
                 ln -s "$lib" "$dir/lib/$alias"
             done
             files="bin/orbit bin/orbitc lib/$lib"
