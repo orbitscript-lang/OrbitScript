@@ -307,7 +307,7 @@ fn decode_builds_values() {
     assert_eq!(
         one("return json.decode('18446744073709551615')"),
         // A Lua 5.4 build (ADR-14) prints floats with 14 digits.
-        if orbit::LUA_VERSION_NUM == 504 {
+        if orbit::LUA.is_5_4() {
             "1.844674407371e+19"
         } else {
             "1.8446744073709552e+19"

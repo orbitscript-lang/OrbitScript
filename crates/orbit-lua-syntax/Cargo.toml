@@ -10,12 +10,7 @@ publish = false
 
 [dependencies]
 orbit-hir = { path = "../orbit-hir" }
-
-[features]
-# Parse Lua 5.4 instead of 5.5 (ADR-14): no `global` declarations, no named
-# vararg tables, and assignable `for` variables. The whole build targets one
-# Lua version; enable it through `orbit`'s feature of the same name.
-lua-5-4 = []
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 [dev-dependencies]
 # The nesting tests compile what they lower, since the compiler recurses too.

@@ -4,6 +4,7 @@
 
 use crate::object::{Gc, LuaStr, Value};
 use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_lua_version::LUA;
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -222,7 +223,7 @@ fn offset(ctx: &mut NativeCtx<'_>) -> R {
     }
     ctx.push(Value::Int(pos as i64 + 1));
     // Lua 5.4 gives only the start.
-    if crate::LUA_5_4 {
+    if LUA.is_5_4() {
         return Ok(NativeReturn::Return(1));
     }
     ctx.push(Value::Int(end as i64));

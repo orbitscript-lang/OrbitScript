@@ -7,6 +7,7 @@
 
 use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};
+use orbit_lua_version::LUA;
 
 use std::collections::HashSet;
 
@@ -404,7 +405,7 @@ impl Lowerer<'_> {
         let read_only = match kind {
             LocalKind::Const | LocalKind::Close => true,
             // Lua 5.4's `for` variables are ordinary locals.
-            LocalKind::ForControl => !crate::LUA_5_4,
+            LocalKind::ForControl => LUA.is_5_5(),
             _ => false,
         };
         if read_only {
@@ -650,7 +651,7 @@ impl Lowerer<'_> {
                 let message = format!(
                     "<goto {label_name}> at line {goto_line} jumps into the scope of {}'{var}'",
                     // Lua 5.4's message says `local`.
-                    if crate::LUA_5_4 { "local " } else { "" }
+                    if LUA.is_5_4() { "local " } else { "" }
                 );
                 block.scope_error = Some((message, run));
                 found = true;

@@ -9,6 +9,7 @@ use crate::diag::{Diagnostic, Near};
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Punct, Token, TokenKind};
 use orbit_hir::{Language, SourceInfo, Span, StrId};
+use orbit_lua_version::LUA;
 
 /// Parser settings.
 #[derive(Clone, Debug)]
@@ -737,7 +738,7 @@ impl Parser<'_> {
         let start = self.tok.span.start;
         let line = self.cur_line();
         // Lua 5.4 has no `global` declarations: there it is always a name.
-        let global_decl = !crate::LUA_5_4
+        let global_decl = LUA.is_5_5()
             && self.tok.kind == TokenKind::Name(self.sym_global)
             && self.starts_global_decl()?;
         let kind = match self.tok.kind {
@@ -1085,7 +1086,7 @@ impl Parser<'_> {
     /// values. `levels` counts the syntax levels entered, which the caller leaves.
     fn assign_rest(&mut self, targets: &mut Vec<Expr>, levels: &mut u32) -> PResult<Vec<Expr>> {
         while self.test_punct(Punct::Comma)? {
-            if crate::LUA_5_4 {
+            if LUA.is_5_4() {
                 *levels += 1;
                 self.enter()?;
             }
@@ -1145,7 +1146,7 @@ impl Parser<'_> {
                         self.advance()?;
                         // Lua 5.4 has no named vararg table: the `)` check reports a name.
                         let name = match self.tok.kind {
-                            TokenKind::Name(_) if !crate::LUA_5_4 => Some(self.name()?),
+                            TokenKind::Name(_) if LUA.is_5_5() => Some(self.name()?),
                             _ => None,
                         };
                         vararg = Some(VarargParam {

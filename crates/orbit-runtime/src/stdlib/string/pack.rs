@@ -6,6 +6,7 @@
 
 use crate::object::Value;
 use crate::vm::{LuaError, NativeCtx, NativeReturn};
+use orbit_lua_version::LUA;
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -350,7 +351,7 @@ pub(crate) fn pack(ctx: &mut NativeCtx<'_>) -> R {
 
 /// The largest size `packsize` reports, and the most a size in a format
 /// may read: Lua 5.4 caps them at a C `int` (ADR-14).
-const PACKSIZE_MAX: usize = if crate::LUA_5_4 {
+const PACKSIZE_MAX: usize = if LUA.is_5_4() {
     i32::MAX as usize
 } else {
     MAX_SIZE
@@ -508,7 +509,7 @@ mod tests {
         assert_eq!(
             size("i9999999999999999999"),
             // lua5.4 stops reading digits before the size overflows an `int`.
-            Err(FormatError::SizeOutOfLimits(if crate::LUA_5_4 {
+            Err(FormatError::SizeOutOfLimits(if LUA.is_5_4() {
                 999999999
             } else {
                 -1486618625

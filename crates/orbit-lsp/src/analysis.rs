@@ -43,7 +43,7 @@ impl Analysis {
         // The editor's paths first, then `package.path` as `orbit` would
         // start with it.
         let defaults = std::mem::take(&mut config.search_path);
-        let env = std::env::var(format!("LUA_PATH_5_{}", orbit::LUA_VERSION_NUM % 100))
+        let env = std::env::var(format!("LUA_PATH_{}", orbit::LUA.underscored()))
             .or_else(|_| std::env::var("LUA_PATH"));
         let package = match env {
             Ok(path) => package_path(&path, &defaults),

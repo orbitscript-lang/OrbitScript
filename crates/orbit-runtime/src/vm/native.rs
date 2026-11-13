@@ -1,5 +1,6 @@
 //! The native-function interface (ADR-3's continuation style).
 
+use orbit_lua_version::LUA;
 use std::rc::Rc;
 
 use crate::locale::Locale;
@@ -1065,7 +1066,7 @@ impl NativeCtx<'_> {
     /// (Lua 5.4's 5.3 compatibility, ADR-14). Never in a 5.5 build.
     pub fn le_via_lt(&self, a: Value, b: Value) -> bool {
         let (heap, metas) = (&self.vm.heap, &self.vm.rt.metas);
-        crate::LUA_5_4
+        LUA.is_5_4()
             && !matches!(
                 (a, b),
                 (

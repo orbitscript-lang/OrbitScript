@@ -3,6 +3,7 @@
 //! `lua5.5` binary.
 
 use crate::object::Value;
+use orbit_lua_version::LUA;
 
 use orbit_bytecode::number::TWO_63;
 pub use orbit_bytecode::number::{
@@ -359,12 +360,12 @@ fn strip_zeros(s: &str) -> &str {
 /// `%.17g`; 5.4 always uses `%.14g` (ADR-14).
 pub fn fmt_float(out: &mut String, x: f64) {
     let start = out.len();
-    if crate::LUA_5_4 {
+    if LUA.is_5_4() {
         fmt_g(out, x, 14);
     } else {
         fmt_g(out, x, 15);
     }
-    if !crate::LUA_5_4 && x.is_finite() && out[start..].parse::<f64>().ok() != Some(x) {
+    if LUA.is_5_5() && x.is_finite() && out[start..].parse::<f64>().ok() != Some(x) {
         out.truncate(start);
         fmt_g(out, x, 17);
     }
@@ -499,7 +500,7 @@ mod tests {
     /// What lua5.4 prints where lua5.5 needs 17 digits: 5.4 always uses
     /// 14 (ADR-14).
     fn as_5_4(want: &str) -> &str {
-        if !crate::LUA_5_4 {
+        if LUA.is_5_5() {
             return want;
         }
         match want {

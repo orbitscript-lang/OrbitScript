@@ -116,6 +116,7 @@ dependencies = [
  "orbit-hir",
  "orbit-locale",
  "orbit-lua-syntax",
+ "orbit-lua-version",
  "orbit-macros",
  "orbit-orb-syntax",
  "orbit-runtime",
@@ -142,6 +143,7 @@ version = "0.0.0"
 dependencies = [
  "orbit",
  "orbit-hir",
+ "orbit-lua-version",
  "orbit-orb-syntax",
  "orbit-std",
 ]
@@ -169,6 +171,7 @@ dependencies = [
  "orbit-bytecode",
  "orbit-hir",
  "orbit-lua-syntax",
+ "orbit-lua-version",
 ]
 
 [[package]]
@@ -247,7 +250,12 @@ version = "0.0.0"
 dependencies = [
  "orbit-compiler",
  "orbit-hir",
+ "orbit-lua-version",
 ]
+
+[[package]]
+name = "orbit-lua-version"
+version = "0.0.0"
 
 [[package]]
 name = "orbit-macros"
@@ -275,6 +283,7 @@ dependencies = [
  "orbit-compiler",
  "orbit-gc",
  "orbit-lua-syntax",
+ "orbit-lua-version",
  "orbit-orb-syntax",
 ]
 

@@ -17,7 +17,7 @@ use crate::sys::os_path;
 /// build, ADR-14), so scripts see the same strings, with OrbitScript modules
 /// after Lua's: the Lua searcher loads whatever file `package.path` finds,
 /// picking the compiler by the `.orb` name.
-const DEFAULT_PATH: &str = if LUA_5_4 {
+const DEFAULT_PATH: &str = if orbit::LUA.is_5_4() {
     "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua;\
 /usr/local/lib/lua/5.4/?.lua;/usr/local/lib/lua/5.4/?/init.lua;./?.lua;./?/init.lua;\
 /usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb"
@@ -26,19 +26,16 @@ const DEFAULT_PATH: &str = if LUA_5_4 {
 /usr/local/lib/lua/5.5/?.lua;/usr/local/lib/lua/5.5/?/init.lua;./?.lua;./?/init.lua;\
 /usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb"
 };
-const DEFAULT_CPATH: &str = if LUA_5_4 {
+const DEFAULT_CPATH: &str = if orbit::LUA.is_5_4() {
     "/usr/local/lib/lua/5.4/?.so;/usr/local/lib/lua/5.4/loadall.so;./?.so"
 } else {
     "/usr/local/lib/lua/5.5/?.so;/usr/local/lib/lua/5.5/loadall.so;./?.so"
 };
 
-/// Whether this build targets Lua 5.4 (ADR-14).
-const LUA_5_4: bool = orbit::LUA_VERSION_NUM == 504;
-
 /// `LUA_PATH_5_5` and the like: `name` with the build's version suffix
 /// (`_5_4` in a 5.4 build), as Lua's `LUA_VERSUFFIX` makes it.
 pub fn versioned_env(name: &str) -> String {
-    format!("{name}_5_{}", orbit::LUA_VERSION_NUM % 100)
+    format!("{name}_{}", orbit::LUA.underscored())
 }
 
 /// The directory separator, which `require` puts in place of dots.

@@ -11,6 +11,7 @@
 //! instructions' register allocation, independent of how many instructions
 //! there are.
 
+use orbit_lua_version::LUA;
 use std::borrow::Cow;
 
 use crate::object::number::float_to_int;
@@ -338,7 +339,7 @@ impl Vm {
         let v = self.rt.stack.regs[t];
         let h = self.rt.metamethod(&self.heap, v, MetaField::Close);
         // Lua 5.4 passes a `nil` error too (ADR-14).
-        if crate::LUA_5_4 {
+        if LUA.is_5_4() {
             return Exc::Meta(MetaCall::new(h, MetaField::Close, &[v, Value::Nil]));
         }
         Exc::Meta(MetaCall::new(h, MetaField::Close, &[v]))

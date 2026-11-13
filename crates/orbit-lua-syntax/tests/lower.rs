@@ -1,5 +1,6 @@
 //! Lowering tests: name resolution and the HIR the `tests/first-light` programs give.
 
+use orbit_lua_version::LUA;
 use std::path::Path;
 
 use orbit_hir::{ExprKind, FunctionName, LocalKind, StmtKind};
@@ -21,11 +22,9 @@ fn dump(src: &str) -> String {
     orbit_hir::print(&hir(src))
 }
 
-/// A `lua-5-4` build (ADR-14) has no `global` declarations or named
-/// varargs, and its loop control variables can be assigned.
-const LUA_5_4: bool = orbit_lua_syntax::LUA_VERSION_NUM == 504;
-
-/// Whether a case uses something only Lua 5.5 has.
+/// Whether a case uses something only Lua 5.5 has: a Lua 5.4 build (ADR-14)
+/// has no `global` declarations or named varargs, and its loop control
+/// variables can be assigned.
 fn only_5_5(src: &str) -> bool {
     src.contains("global") || src.starts_with("for ")
 }
@@ -79,7 +78,7 @@ fn const_assignment_matches_the_reference() {
         ),
     ];
     for (src, expected) in cases {
-        if LUA_5_4 && only_5_5(src) {
+        if LUA.is_5_4() && only_5_5(src) {
             continue;
         }
         assert_eq!(err(src), expected, "source: {src:?}");
@@ -139,7 +138,7 @@ fn to_be_closed_variables_match_the_reference() {
         ),
     ];
     for (src, expected) in errors {
-        if LUA_5_4 && only_5_5(src) {
+        if LUA.is_5_4() && only_5_5(src) {
             continue;
         }
         assert_eq!(err(src), expected, "source: {src:?}");
@@ -268,8 +267,11 @@ fn lowered_hir_verifies_before_and_after_analysis() {
 
 /// `global` declarations and `_ENV`. Each message was checked against the reference.
 #[test]
-#[cfg(not(feature = "lua-5-4"))]
 fn global_declarations_match_the_reference() {
+    // Lua 5.5 only (ADR-14).
+    if LUA.is_5_4() {
+        return;
+    }
     let cases = [
         ("global x; y = 1", "s.lua:1: variable 'y' not declared"),
         (
@@ -333,7 +335,7 @@ fn env_lowers_to_the_environment_or_a_local() {
     assert!(text.contains("global \"x\" = 1"), "{text}");
     let text = dump("local _ENV = {}; x = y");
     assert!(text.contains("_ENV#l0[\"x\"] = _ENV#l0[\"y\"]"), "{text}");
-    if LUA_5_4 {
+    if LUA.is_5_4() {
         return;
     }
     let text = dump("global x = 1; global function f() end");
@@ -342,8 +344,11 @@ fn env_lowers_to_the_environment_or_a_local() {
 }
 
 #[test]
-#[cfg(not(feature = "lua-5-4"))]
 fn named_varargs_keep_their_table_only_when_needed() {
+    // Lua 5.5 only (ADR-14).
+    if LUA.is_5_4() {
+        return;
+    }
     assert_eq!(
         err("local function f(...t) t = 1 end"),
         "s.lua:1: attempt to assign to const variable 't'"
@@ -424,11 +429,11 @@ fn goto_rules_match_the_reference() {
         ),
     ];
     for (src, expected) in cases {
-        if LUA_5_4 && only_5_5(src) {
+        if LUA.is_5_4() && only_5_5(src) {
             continue;
         }
         // Lua 5.4 says `local 'x'`.
-        let expected = if LUA_5_4 {
+        let expected = if LUA.is_5_4() {
             expected.replace("scope of '", "scope of local '")
         } else {
             expected.to_string()

@@ -95,7 +95,7 @@ fn standard_input_runs_without_a_script() {
     assert_eq!(out(&orbit(&["-W"], "print(2)", &[])), "2\n");
     assert_eq!(out(&orbit(&["-e", "x=1"], "print(3)", &[])), "");
     let o = orbit(&["-v"], "print(4)", &[]);
-    let release = format!("Lua {}", orbit::LUA_RELEASE);
+    let release = format!("Lua {}", orbit::LUA.release());
     assert!(out(&o).contains(&release) && out(&o).ends_with("PUC-Rio\n"));
 }
 
@@ -147,13 +147,13 @@ fn interactive() {
     assert!(out(&o).ends_with("> >> > \n"), "{}", out(&o));
     let o = orbit(&["-i"], "  \t local x\nlocal1 = 10\nlocal1 + 3\n", &[]);
     // Lua 5.4's interpreter has no such warning.
-    let warnings = if orbit::LUA_VERSION_NUM == 504 { 0 } else { 1 };
+    let warnings = if orbit::LUA.is_5_4() { 0 } else { 1 };
     assert_eq!(
         err(&o).matches("warning: locals do not survive").count(),
         warnings
     );
     assert!(out(&o).contains("13\n"));
-    if orbit::LUA_VERSION_NUM == 504 {
+    if orbit::LUA.is_5_4() {
         // Lua 5.4's interpreter reads `=expr` as `return expr`.
         let o = orbit(&["-e", prompts, "-i"], "=1+1\n= [[a\nb]]\n", &[]);
         assert!(out(&o).ends_with("2\na\nb\n\n"), "{}", out(&o));

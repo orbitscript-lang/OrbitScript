@@ -76,7 +76,7 @@ fn a_program_creates_uses_and_closes_a_state() {
              top 0\n\
              finalized at close\n\
              closed\n",
-            orbit::LUA_VERSION
+            orbit::LUA.name()
         )
     );
 }

@@ -562,7 +562,7 @@ fn print_version() {
     println!(
         "OrbitScript {}  implements Lua {}, designed by Lua.org, PUC-Rio",
         orbit::VERSION,
-        orbit::LUA_RELEASE
+        orbit::LUA.release()
     );
 }
 

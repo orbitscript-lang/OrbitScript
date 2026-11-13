@@ -32,9 +32,7 @@ fn main() {
     let mut h = DefaultHasher::new();
     source.hash(&mut h);
     // A 5.4 program can't use a 5.5 library or the other way round (ADR-14).
-    std::env::var_os("CARGO_FEATURE_LUA_5_4")
-        .is_some()
-        .hash(&mut h);
+    orbit_lua_version::LuaVersion::from_build_env().hash(&mut h);
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     if let Ok(v) = std::process::Command::new(rustc).arg("-V").output() {
         v.stdout.hash(&mut h);

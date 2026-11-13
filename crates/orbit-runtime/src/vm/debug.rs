@@ -9,6 +9,7 @@
 //!
 //! [debug design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/debug.md
 
+use orbit_lua_version::LUA;
 use std::fmt::Write as _;
 
 use crate::object::{Cell, Closure, Gc, LuaHeap, NativeId, Proto, Table, Value};
@@ -338,7 +339,7 @@ impl Runtime {
                 if line <= 0 {
                     if unknown_line {
                         // Lua 5.4 shows the unknown line as -1 (ADR-14).
-                        let line = if crate::LUA_5_4 { "-1" } else { "?" };
+                        let line = if LUA.is_5_4() { "-1" } else { "?" };
                         format!("{}:{line}: ", proto.chunk)
                     } else {
                         String::new()
@@ -527,7 +528,7 @@ impl Runtime {
         }
         // Lua 5.4 names a function a loaded module holds before asking the
         // call site; 5.5 asks the call site first.
-        let global = if crate::LUA_5_4 {
+        let global = if LUA.is_5_4() {
             self.global_name(heap, func)
         } else {
             None
@@ -739,7 +740,7 @@ fn active_locals(
     // The reference reports an unnamed `...` as a local after the
     // parameters; a named one (`...t`) is an ordinary local the compiler
     // declares at pc 0.
-    let hidden_table = !crate::LUA_5_4
+    let hidden_table = LUA.is_5_5()
         && proto.code.is_vararg
         && !matches!(proto.name, orbit_bytecode::FunctionName::Main)
         && !proto.debug.lines.is_empty()

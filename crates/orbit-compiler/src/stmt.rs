@@ -2,6 +2,7 @@
 
 use orbit_bytecode::{MULTI, Op};
 use orbit_hir::{BlockId, ExprId, ExprKind, ExprList, LocalId, LocalKind, Place, StmtId, StmtKind};
+use orbit_lua_version::LUA;
 
 use crate::consts::ConstVal;
 use crate::expr::Want;
@@ -551,7 +552,7 @@ impl FuncState<'_> {
         self.jump(prep, exit);
         // The iteration count and the step, which is what the reference's
         // two hidden locals hold (Lua 5.4 has three, ADR-14).
-        if crate::LUA_5_4 {
+        if LUA.is_5_4() {
             self.push_loop_state(base);
         }
         self.push_loop_state(base + 1);
@@ -589,7 +590,7 @@ impl FuncState<'_> {
         }
         // The reference's hidden locals: iterator, state and closing value
         // (and the control value too in Lua 5.4, ADR-14).
-        if crate::LUA_5_4 {
+        if LUA.is_5_4() {
             for r in [base, base + 1, base + 2, base + 3] {
                 self.push_loop_state(r);
             }

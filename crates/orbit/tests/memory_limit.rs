@@ -35,7 +35,7 @@ fn no_cap_by_default() {
     let ok: bool = iso
         .scope(|s| {
             // `table.create` is Lua 5.5 only.
-            let code = if orbit::LUA_VERSION_NUM == 504 {
+            let code = if orbit::LUA.is_5_4() {
                 "return pcall(string.rep, 'x', 1 << 26)"
             } else {
                 "return pcall(table.create, 1 << 22)"

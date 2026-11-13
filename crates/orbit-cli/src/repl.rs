@@ -116,13 +116,12 @@ impl Runner {
             }
         }
         self.start_editor();
-        let lua_5_4 = orbit::LUA_VERSION_NUM == 504;
         while let Some(mut line) = self.read_line(false) {
             // Lua 5.4's interpreter reads `=expr` as `return expr`.
-            if lua_5_4 && line.first() == Some(&b'=') {
+            if orbit::LUA.is_5_4() && line.first() == Some(&b'=') {
                 line.splice(..1, *b"return ");
             }
-            if !lua_5_4 && starts_with_local(&line) {
+            if orbit::LUA.is_5_5() && starts_with_local(&line) {
                 self.report("warning: locals do not survive across lines in interactive mode");
             }
             let mut ret = b"return ".to_vec();

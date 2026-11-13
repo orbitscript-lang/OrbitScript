@@ -717,7 +717,7 @@ fn write<'s>(c: &'s Call<'s>, s: &Shared, file: Value<'s>, first: usize) -> Resu
         if let Err(e) = r {
             let msg = os_error_text(&e);
             // Lua 5.4 doesn't report the bytes written (ADR-14).
-            if orbit::LUA_VERSION_NUM == 504 {
+            if orbit::LUA.is_5_4() {
                 return c.ret((Value::Nil, msg, os_error_code(&e)));
             }
             return c.ret((Value::Nil, msg, os_error_code(&e), written as i64));

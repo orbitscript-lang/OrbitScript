@@ -1,5 +1,6 @@
 //! Parser tests: error messages as the reference `lua5.5` prints them, and whole programs.
 
+use orbit_lua_version::LUA;
 use std::path::{Path, PathBuf};
 
 use orbit_lua_syntax::ast::{BinOp, ExprKind, StmtKind};
@@ -87,7 +88,7 @@ fn syntax_errors_match_the_reference() {
     ];
     for (src, expected) in cases {
         // A `lua-5-4` build (ADR-14) has no `global` declarations.
-        if orbit_lua_syntax::LUA_VERSION_NUM == 504 && src.starts_with("global") {
+        if LUA.is_5_4() && src.starts_with("global") {
             continue;
         }
         assert_eq!(err(src), expected, "source: {src:?}");
@@ -95,8 +96,11 @@ fn syntax_errors_match_the_reference() {
 }
 
 #[test]
-#[cfg(not(feature = "lua-5-4"))]
 fn global_is_contextual() {
+    // Lua 5.5 only (ADR-14).
+    if LUA.is_5_4() {
+        return;
+    }
     for src in [
         "global = print global(1)",
         "global = {} global.x = 1",
@@ -259,11 +263,7 @@ fn official_suite_parses() {
     let suite = std::env::var_os("LUA_SUITE")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let lua = if orbit_lua_syntax::LUA_VERSION_NUM == 504 {
-                "5.4"
-            } else {
-                "5.5"
-            };
+            let lua = if LUA.is_5_4() { "5.4" } else { "5.5" };
             root.join(format!("tests/lua-{lua}/suite"))
         });
     let mut parsed = 0;

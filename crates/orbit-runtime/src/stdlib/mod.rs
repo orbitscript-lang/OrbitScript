@@ -187,7 +187,7 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
         #[cfg(feature = "table")]
         Lib::Table => {
             let t = open_lib(vm, "table", table::FUNCTIONS);
-            if !crate::LUA_5_4 {
+            if orbit_lua_version::LUA.is_5_5() {
                 add_functions(vm, t, table::FUNCTIONS_5_5);
             }
             // `insert`, `remove` and `sort` are written in OrbitScript.
@@ -200,7 +200,7 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
         #[cfg(feature = "math")]
         Lib::Math => {
             let m = open_lib(vm, "math", math::FUNCTIONS);
-            if crate::LUA_5_4 {
+            if orbit_lua_version::LUA.is_5_4() {
                 add_functions(vm, m, math::COMPAT_5_3);
             }
             math::constants(vm, m);

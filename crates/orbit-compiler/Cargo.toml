@@ -11,11 +11,7 @@ publish = false
 [dependencies]
 orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-hir = { path = "../orbit-hir" }
-
-[features]
-# Debug information as Lua 5.4 reports it (the hidden `for` locals), for a
-# build that targets Lua 5.4 (ADR-14). Enable it through `orbit`.
-lua-5-4 = []
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 [lints]
 workspace = true

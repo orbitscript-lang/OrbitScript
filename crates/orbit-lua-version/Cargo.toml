@@ -1,0 +1,22 @@
+[package]
+name = "orbit-lua-version"
+description = "The Lua version an OrbitScript build implements (ADR-14), shared by every crate that depends on it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+# Build scripts of the crates that depend on this one read the version from
+# `DEP_ORBIT_LUA_VERSION` (`5.4` or `5.5`), see `LuaVersion::from_build_env`.
+links = "orbit_lua"
+
+[features]
+# Implement Lua 5.4 instead of 5.5, for the whole process (ADR-14). The
+# feature selects rather than adds: with Cargo's feature unification, any
+# crate enabling it makes the whole build 5.4. Enable it through `orbit`'s
+# feature of the same name, in the program at the top of the build.
+lua-5-4 = []
+
+[lints]
+workspace = true

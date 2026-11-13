@@ -11,12 +11,15 @@ publish = false
 [dependencies]
 orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-gc = { path = "../orbit-gc" }
+# The Lua version (ADR-14); its `links` metadata also tells the build script.
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 # The build script compiles the built-in OrbitScript modules (ADR-11); none
 # of this is linked into the runtime.
 [build-dependencies]
 orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-compiler = { path = "../orbit-compiler" }
+orbit-lua-version = { path = "../orbit-lua-version" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 
 [dev-dependencies]
@@ -56,7 +59,3 @@ hooks = []
 # The debugger engine (ADR-12): breakpoints, stepping, pause and stops on
 # errors, reported to a host's `DebugEvents`.
 debugger = ["hooks"]
-# Behave as Lua 5.4 (with Lua 5.3 compatibility, as Debian builds it)
-# instead of 5.5 (ADR-14). It selects the whole build's Lua version rather
-# than adding code: enable it through `orbit`'s feature of the same name.
-lua-5-4 = []

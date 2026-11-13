@@ -847,7 +847,7 @@ fn compile_errors() {
 #[test]
 fn tour() {
     // A Lua 5.4 build (ADR-14) prints floats with 14 digits.
-    let length = if orbit::LUA_VERSION_NUM == 504 {
+    let length = if orbit::LUA.is_5_4() {
         "6.4031242374328"
     } else {
         "6.4031242374328485"

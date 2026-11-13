@@ -117,7 +117,7 @@ fn main() -> ExitCode {
         println!(
             "OrbitScript {}  compiler for Lua {}, designed by Lua.org, PUC-Rio",
             orbit::VERSION,
-            orbit::LUA_RELEASE
+            orbit::LUA.release()
         );
         if cli.inputs.is_empty() {
             return ExitCode::SUCCESS;

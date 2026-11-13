@@ -3,6 +3,7 @@
 //! pieces and `for` limits, and the errors or metamethod requests ([`Exc`])
 //! they end in.
 
+use orbit_lua_version::LUA;
 use std::io::Write as _;
 
 use crate::locale::Locale;
@@ -367,7 +368,7 @@ pub(crate) fn le_fallback(
     a: Value,
     b: Value,
 ) -> Option<Value> {
-    if !crate::LUA_5_4 || e != MetaField::Le {
+    if LUA.is_5_5() || e != MetaField::Le {
         return None;
     }
     let lt = meta::binary_handler(heap, rt, MetaField::Lt, b, a);

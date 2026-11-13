@@ -18,12 +18,6 @@ use orbit_hir::{CaptureFrom, Chunk, StmtKind};
 
 pub use disasm::disassemble;
 
-/// The Lua version whose debug information this build mirrors: 505, or 504 with the `lua-5-4`
-/// feature (ADR-14).
-pub const LUA_VERSION_NUM: u32 = if cfg!(feature = "lua-5-4") { 504 } else { 505 };
-
-/// Whether this build mirrors Lua 5.4.
-pub(crate) const LUA_5_4: bool = LUA_VERSION_NUM == 504;
 /// The instruction set this compiler emits.
 pub use orbit_bytecode as bytecode;
 

@@ -19,6 +19,7 @@
 
 use crate::object::gc::finalizer;
 use crate::object::{LuaHeap, Value};
+use orbit_lua_version::LUA;
 
 use crate::vm::{CallOutcome, Continuation, LuaError, NativeCtx, NativeReturn, Runtime, Vm};
 
@@ -245,7 +246,7 @@ impl Runtime {
         let mut msg = b"error in __gc (".to_vec();
         match err {
             Value::Str(s) => msg.extend_from_slice(heap.get(s).as_bytes()),
-            Value::Nil if !crate::LUA_5_4 => msg.extend_from_slice(b"<no error object>"),
+            Value::Nil if LUA.is_5_5() => msg.extend_from_slice(b"<no error object>"),
             _ => msg.extend_from_slice(b"error object is not a string"),
         }
         msg.push(b')');

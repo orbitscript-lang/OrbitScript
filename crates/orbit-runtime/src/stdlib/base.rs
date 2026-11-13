@@ -8,6 +8,7 @@ use crate::vm::{
     CallOutcome, GcMode, GcParam, LuaError, MetaField, NativeCtx, NativeFn, NativeReturn, Vm,
     finalize_then_return,
 };
+use orbit_lua_version::LUA;
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -46,7 +47,7 @@ pub(crate) fn open(vm: &mut Vm) {
     vm.pin(Value::Table(mt));
     vm.rt.set_type_meta(Tag::Str, Some(mt));
     vm.unpin(Value::Table(mt));
-    let v = vm.new_str(crate::LUA_VERSION.as_bytes());
+    let v = vm.new_str(LUA.name().as_bytes());
     vm.set_global("_VERSION", v);
     // `ipairs` and `pairs` are written in OrbitScript.
     for (name, f) in super::builtins::load(vm, &super::builtins::BASE) {
@@ -255,7 +256,7 @@ fn protected_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
         CallOutcome::Err(e) => {
             // Lua 5.4 keeps a `nil` error as it is.
-            let e = if e.is_nil() && !crate::LUA_5_4 {
+            let e = if e.is_nil() && LUA.is_5_5() {
                 ctx.new_str(b"<no error object>")
             } else {
                 e
@@ -426,7 +427,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         b"setpause",
         b"setstepmul",
     ];
-    let options = if crate::LUA_5_4 { OPTIONS_5_4 } else { OPTIONS };
+    let options = if LUA.is_5_4() { OPTIONS_5_4 } else { OPTIONS };
     if !options.contains(&&opt[..]) {
         return Err(ctx.arg_error(0, &[b"invalid option '", &opt[..], b"'"].concat()));
     }
@@ -477,7 +478,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             } else {
                 GcMode::Generational
             };
-            if crate::LUA_5_4 {
+            if LUA.is_5_4() {
                 set_params_5_4(ctx, mode)?;
             }
             let old = ctx.vm.set_gc_mode(mode);

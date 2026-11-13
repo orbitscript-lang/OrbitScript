@@ -3,6 +3,7 @@
 
 use crate::object::{Closure, Gc, NoMemory, ProtoCode, Value};
 use orbit_bytecode::{MULTI, Op, Origin};
+use orbit_lua_version::LUA;
 
 use crate::vm::meta::MetaField;
 use crate::vm::native::{CallOutcome, NativeCtx, NativeReturn};
@@ -12,7 +13,7 @@ use crate::vm::{Catch, Frame, FrameKind, LuaError, Vm};
 /// The most `__call` handlers one call goes through (observed from lua5.5:
 /// a chain of 15 works, 16 is "too long"). `getinfo`'s `extraargs` counts
 /// them. Lua 5.4 has no such limit short of the stack's own (ADR-14).
-const MAX_CALL_CHAIN: usize = if crate::LUA_5_4 { 1_000_000 } else { 15 };
+const MAX_CALL_CHAIN: usize = if LUA.is_5_4() { 1_000_000 } else { 15 };
 
 /// Registers a frame can address: register numbers are `u8`.
 pub(crate) const WINDOW: usize = 256;
@@ -201,7 +202,7 @@ impl Vm {
                         ));
                     }
                     if chain == MAX_CALL_CHAIN {
-                        let msg = if crate::LUA_5_4 {
+                        let msg = if LUA.is_5_4() {
                             "stack overflow"
                         } else {
                             "'__call' chain too long"
@@ -803,7 +804,7 @@ impl Vm {
             // Past the message handler, a `nil` error reads as a message
             // (a close without errors is the exception: it has no error).
             // Lua 5.4 keeps the `nil`.
-            if e.value.is_nil() && !closing && !crate::LUA_5_4 {
+            if e.value.is_nil() && !closing && LUA.is_5_5() {
                 e.value = self.new_str(b"<no error object>");
             }
             // A coroutine that dies with an error keeps its variables open
@@ -933,7 +934,7 @@ impl Vm {
             cdepth,
         });
         // A close without errors passes no error (Lua 5.4 passes `nil`).
-        let nargs = if closing && err.is_nil() && !crate::LUA_5_4 {
+        let nargs = if closing && err.is_nil() && LUA.is_5_5() {
             1
         } else {
             2

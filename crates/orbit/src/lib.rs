@@ -75,29 +75,11 @@ pub use orbit_compiler::bytecode::UnlinkedChunk;
 /// The runtime version, taken from the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The Lua version this build behaves as, as Lua's `LUA_VERSION_NUM` gives it: 505, or 504 with
-/// the `lua-5-4` feature (ADR-14). It holds for the whole process: every isolate, both front
-/// ends' library, and the C API.
-pub const LUA_VERSION_NUM: u32 = orbit_runtime::LUA_VERSION_NUM;
-
-/// The Lua release this build implements, as `lua -v` names it: the release the vendored suite
-/// comes from (`tests/lua-X.Y/VERSION`).
-pub const LUA_RELEASE: &str = if LUA_VERSION_NUM == 504 {
-    "5.4.9"
-} else {
-    "5.5.1"
-};
-
-/// `_VERSION` in this build: `"Lua 5.5"` or `"Lua 5.4"`.
-pub const LUA_VERSION: &str = orbit_runtime::LUA_VERSION;
-
-// The runtime, the Lua front end and the compiler must agree: enabling `lua-5-4` on one of them alone (rather
-// than through this crate) is a build error.
-const _: () = assert!(
-    orbit_runtime::LUA_VERSION_NUM == orbit_lua_syntax::LUA_VERSION_NUM
-        && orbit_runtime::LUA_VERSION_NUM == orbit_compiler::LUA_VERSION_NUM,
-    "orbit's crates target different Lua versions: enable `lua-5-4` through `orbit`"
-);
+/// The Lua version this build implements (ADR-14), for the whole process: every isolate, both
+/// front ends' library and the C API. The `lua-5-4` feature selects Lua 5.4; without it the
+/// build is Lua 5.5. Ask it through [`LuaVersion`]'s methods: `orbit::LUA.is_5_4()`,
+/// `orbit::LUA.name()` (`_VERSION`), `orbit::LUA.release()`.
+pub use orbit_lua_version::{LUA, LuaVersion};
 
 #[cfg(test)]
 mod tests {

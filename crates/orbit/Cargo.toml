@@ -12,6 +12,7 @@ publish = false
 orbit-compiler = { path = "../orbit-compiler" }
 orbit-hir = { path = "../orbit-hir" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
+orbit-lua-version = { path = "../orbit-lua-version" }
 orbit-runtime = { path = "../orbit-runtime", default-features = false }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 # `#[native]` (build time only, no dependencies of its own).
@@ -25,6 +26,10 @@ stabby = { version = "72.1.16", optional = true }
 [dev-dependencies]
 # The verifier tests and the chunk fuzzer measure layer 2 directly.
 orbit-bytecode = { path = "../orbit-bytecode", features = ["verify-flow"] }
+
+# The build script reads the Lua version (`links` metadata, ADR-14).
+[build-dependencies]
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 [features]
 # The backend. `runtime` links the runtime into the program; `shared`
@@ -55,7 +60,7 @@ locale = ["dep:orbit-locale"]
 # instead of 5.5, for the whole process (ADR-14). Unlike the others this
 # feature selects rather than adds: any crate enabling it makes the whole
 # build 5.4, so only the final program (or `build.sh --lua 5.4`) should.
-lua-5-4 = ["orbit-runtime/lua-5-4", "orbit-lua-syntax/lua-5-4", "orbit-compiler/lua-5-4"]
+lua-5-4 = ["orbit-lua-version/lua-5-4"]
 # The debugger engine (ADR-12), for the runtime backend.
 debugger = ["orbit-runtime/debugger"]
 

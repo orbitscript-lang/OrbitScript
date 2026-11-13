@@ -20,13 +20,6 @@ pub use unparse::unparse;
 /// Source positions and pools shared with the HIR, re-exported for convenience.
 pub use orbit_hir::{Language, SourceInfo, Span, StrId, StringPool};
 
-/// The Lua version this build parses, as `LUA_VERSION_NUM` gives it: 505, or 504 with the
-/// `lua-5-4` feature (ADR-14).
-pub const LUA_VERSION_NUM: u32 = if cfg!(feature = "lua-5-4") { 504 } else { 505 };
-
-/// Whether this build parses Lua 5.4 rather than 5.5.
-pub(crate) const LUA_5_4: bool = LUA_VERSION_NUM == 504;
-
 /// The whole Lua front end: parses `src`, lowers it to HIR and runs the HIR's shared analysis,
 /// giving a chunk ready for the compiler.
 pub fn to_hir(

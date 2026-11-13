@@ -97,7 +97,7 @@ fn stubs_match_the_runtime() {
     let host_only = ["arg"];
     // The stubs describe the default (Lua 5.5) library. A Lua 5.4 build
     // (ADR-14) adds the 5.3 compatibility functions and has no `table.create`.
-    let (only_5_4, only_5_5): (&[&str], &[&str]) = if orbit::LUA_VERSION_NUM == 504 {
+    let (only_5_4, only_5_5): (&[&str], &[&str]) = if orbit::LUA.is_5_4() {
         (
             &[
                 "math.atan2",
