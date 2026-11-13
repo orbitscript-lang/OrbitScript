@@ -34,9 +34,13 @@ fn no_cap_by_default() {
     let mut iso = Runtime::new().new_isolate(Config::default());
     let ok: bool = iso
         .scope(|s| {
-            s.load(Chunk::new("return pcall(table.create, 1 << 22)"))?
-                .call(())?[0]
-                .get()
+            // `table.create` is Lua 5.5 only.
+            let code = if orbit::LUA_VERSION_NUM == 504 {
+                "return pcall(string.rep, 'x', 1 << 26)"
+            } else {
+                "return pcall(table.create, 1 << 22)"
+            };
+            s.load(Chunk::new(code))?.call(())?[0].get()
         })
         .unwrap();
     assert!(ok);

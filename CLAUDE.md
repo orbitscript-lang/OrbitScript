@@ -35,7 +35,7 @@
 Design records live in `docs/adr/`. A **Proposed** ADR can be edited freely by the work that proposed it. An **Accepted** ADR changes only with a maintainer's approval, because other work builds on it.
 
 ## Testing against Lua
-`tests/README.md` explains the harness. The official 5.5 suite is vendored in `tests/lua-5.5/suite`: never edit it, and record every skip in `tests/lua-5.5/SKIPS.md`. When a change makes more suite files or `tests/diff` programs pass, update the matching `expected-orbit.txt` in the same PR (`--update-expected`).
+`tests/README.md` explains the harness. The official 5.5 suite is vendored in `tests/lua-5.5/suite`: never edit it, and record every skip in `tests/lua-5.5/SKIPS.md`. A build with the `lua-5-4` feature implements Lua 5.4 instead, for the whole process (ADR-14); its suite is `tests/lua-5.4`, run with `cargo testkit conformance --lua 5.4`. When a change makes more suite files or `tests/diff` programs pass, update the matching `expected-orbit.txt` in the same PR (`--update-expected`).
 
 ## Before pushing
 ```sh
@@ -43,4 +43,11 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo +1.75.0 check --workspace --all-targets   # rustup toolchain install 1.75.0
+```
+
+A change to behaviour that differs between Lua 5.4 and 5.5 also needs the 5.4 build checked:
+
+```sh
+cargo clippy --workspace --all-targets --features orbit/lua-5-4,orbit-cli/lua-5-4 --target-dir target/lua54 -- -D warnings
+cargo test --workspace --features orbit/lua-5-4,orbit-cli/lua-5-4 --target-dir target/lua54
 ```

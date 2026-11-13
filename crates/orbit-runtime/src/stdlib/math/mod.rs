@@ -10,6 +10,39 @@ use rng::Xoshiro;
 
 type R = Result<NativeReturn, LuaError>;
 
+/// Lua 5.3's functions that Lua 5.4 keeps when built with its 5.3
+/// compatibility, as Debian builds it: only in 5.4 builds (ADR-14).
+pub(crate) const COMPAT_5_3: &[(&str, NativeFn)] = &[
+    ("math.atan2", atan),
+    ("math.cosh", cosh),
+    ("math.sinh", sinh),
+    ("math.tanh", tanh),
+    ("math.pow", pow),
+    ("math.log10", log10),
+];
+
+fn cosh(ctx: &mut NativeCtx<'_>) -> R {
+    float_fn(ctx, f64::cosh)
+}
+
+fn sinh(ctx: &mut NativeCtx<'_>) -> R {
+    float_fn(ctx, f64::sinh)
+}
+
+fn tanh(ctx: &mut NativeCtx<'_>) -> R {
+    float_fn(ctx, f64::tanh)
+}
+
+fn log10(ctx: &mut NativeCtx<'_>) -> R {
+    float_fn(ctx, f64::log10)
+}
+
+fn pow(ctx: &mut NativeCtx<'_>) -> R {
+    let x = ctx.check_f64(0)?;
+    let y = ctx.check_f64(1)?;
+    ctx.ret([Value::Float(x.powf(y))])
+}
+
 pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("math.floor", floor),
     ("math.ceil", ceil),

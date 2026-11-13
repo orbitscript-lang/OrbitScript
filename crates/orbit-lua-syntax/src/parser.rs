@@ -736,8 +736,10 @@ impl Parser<'_> {
     fn statement(&mut self) -> PResult<Option<Stmt>> {
         let start = self.tok.span.start;
         let line = self.cur_line();
-        let global_decl =
-            self.tok.kind == TokenKind::Name(self.sym_global) && self.starts_global_decl()?;
+        // Lua 5.4 has no `global` declarations: there it is always a name.
+        let global_decl = !crate::LUA_5_4
+            && self.tok.kind == TokenKind::Name(self.sym_global)
+            && self.starts_global_decl()?;
         let kind = match self.tok.kind {
             TokenKind::Punct(Punct::Semi) => {
                 self.advance()?;
@@ -1060,20 +1062,39 @@ impl Parser<'_> {
         if self.is_punct(Punct::Assign) || self.is_punct(Punct::Comma) {
             self.check_assignable(&first)?;
             let mut targets = vec![first];
-            while self.test_punct(Punct::Comma)? {
-                let target = self.suffixed_expr()?;
-                self.check_assignable(&target)?;
-                targets.push(target);
+            // Lua 5.4 reads each further target one syntax level deeper, so a long list
+            // hits the nesting limit (ADR-14).
+            let mut levels = 0;
+            let values = self.assign_rest(&mut targets, &mut levels);
+            for _ in 0..levels {
+                self.leave();
             }
-            self.expect_punct(Punct::Assign)?;
-            let values = self.expr_list()?;
-            Ok(StmtKind::Assign { targets, values })
+            Ok(StmtKind::Assign {
+                targets,
+                values: values?,
+            })
         } else {
             match first.kind {
                 ExprKind::Call { .. } | ExprKind::Method { .. } => Ok(StmtKind::Call(first)),
                 _ => Err(self.error_here("syntax error")),
             }
         }
+    }
+
+    /// The rest of an assignment after its first target: the other targets, `=` and the
+    /// values. `levels` counts the syntax levels entered, which the caller leaves.
+    fn assign_rest(&mut self, targets: &mut Vec<Expr>, levels: &mut u32) -> PResult<Vec<Expr>> {
+        while self.test_punct(Punct::Comma)? {
+            if crate::LUA_5_4 {
+                *levels += 1;
+                self.enter()?;
+            }
+            let target = self.suffixed_expr()?;
+            self.check_assignable(&target)?;
+            targets.push(target);
+        }
+        self.expect_punct(Punct::Assign)?;
+        self.expr_list()
     }
 
     fn check_assignable(&self, target: &Expr) -> PResult<()> {
@@ -1122,8 +1143,9 @@ impl Parser<'_> {
                     TokenKind::Punct(Punct::Ellipsis) => {
                         let dots = self.tok.span;
                         self.advance()?;
+                        // Lua 5.4 has no named vararg table: the `)` check reports a name.
                         let name = match self.tok.kind {
-                            TokenKind::Name(_) => Some(self.name()?),
+                            TokenKind::Name(_) if !crate::LUA_5_4 => Some(self.name()?),
                             _ => None,
                         };
                         vararg = Some(VarargParam {

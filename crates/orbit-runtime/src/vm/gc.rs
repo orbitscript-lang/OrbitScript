@@ -245,7 +245,7 @@ impl Runtime {
         let mut msg = b"error in __gc (".to_vec();
         match err {
             Value::Str(s) => msg.extend_from_slice(heap.get(s).as_bytes()),
-            Value::Nil => msg.extend_from_slice(b"<no error object>"),
+            Value::Nil if !crate::LUA_5_4 => msg.extend_from_slice(b"<no error object>"),
             _ => msg.extend_from_slice(b"error object is not a string"),
         }
         msg.push(b')');

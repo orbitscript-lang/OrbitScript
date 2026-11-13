@@ -37,6 +37,9 @@ system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
 # backend, and the DAP server C hosts start (`orbit_debug_listen`,
 # `ORBIT_DEBUG`).
 debugger = ["orbit/debugger", "orbit-capi/debugger"]
+# Lua 5.4 rather than 5.5: the language, the libraries, the C API and
+# headers, and liblua5.4's names (`build.sh --lua 5.4`, ADR-14).
+lua-5-4 = ["orbit/lua-5-4", "orbit-capi/lua-5-4"]
 
 [lints]
 workspace = true

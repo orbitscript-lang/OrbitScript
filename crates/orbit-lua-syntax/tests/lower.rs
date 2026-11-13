@@ -21,6 +21,15 @@ fn dump(src: &str) -> String {
     orbit_hir::print(&hir(src))
 }
 
+/// A `lua-5-4` build (ADR-14) has no `global` declarations or named
+/// varargs, and its loop control variables can be assigned.
+const LUA_5_4: bool = orbit_lua_syntax::LUA_VERSION_NUM == 504;
+
+/// Whether a case uses something only Lua 5.5 has.
+fn only_5_5(src: &str) -> bool {
+    src.contains("global") || src.starts_with("for ")
+}
+
 #[test]
 fn const_assignment_matches_the_reference() {
     let cases = [
@@ -70,6 +79,9 @@ fn const_assignment_matches_the_reference() {
         ),
     ];
     for (src, expected) in cases {
+        if LUA_5_4 && only_5_5(src) {
+            continue;
+        }
         assert_eq!(err(src), expected, "source: {src:?}");
     }
     // Only the first generic-for variable is read-only; shadowing lifts the restriction.
@@ -127,6 +139,9 @@ fn to_be_closed_variables_match_the_reference() {
         ),
     ];
     for (src, expected) in errors {
+        if LUA_5_4 && only_5_5(src) {
+            continue;
+        }
         assert_eq!(err(src), expected, "source: {src:?}");
     }
     // A per-name attribute overrides the prefix one, and one closing variable per list is fine.
@@ -253,6 +268,7 @@ fn lowered_hir_verifies_before_and_after_analysis() {
 
 /// `global` declarations and `_ENV`. Each message was checked against the reference.
 #[test]
+#[cfg(not(feature = "lua-5-4"))]
 fn global_declarations_match_the_reference() {
     let cases = [
         ("global x; y = 1", "s.lua:1: variable 'y' not declared"),
@@ -317,12 +333,16 @@ fn env_lowers_to_the_environment_or_a_local() {
     assert!(text.contains("global \"x\" = 1"), "{text}");
     let text = dump("local _ENV = {}; x = y");
     assert!(text.contains("_ENV#l0[\"x\"] = _ENV#l0[\"y\"]"), "{text}");
+    if LUA_5_4 {
+        return;
+    }
     let text = dump("global x = 1; global function f() end");
     assert!(text.contains("define global \"x\" = 1"), "{text}");
     assert!(text.contains("define global \"f\" = closure fn1"), "{text}");
 }
 
 #[test]
+#[cfg(not(feature = "lua-5-4"))]
 fn named_varargs_keep_their_table_only_when_needed() {
     assert_eq!(
         err("local function f(...t) t = 1 end"),
@@ -404,6 +424,15 @@ fn goto_rules_match_the_reference() {
         ),
     ];
     for (src, expected) in cases {
+        if LUA_5_4 && only_5_5(src) {
+            continue;
+        }
+        // Lua 5.4 says `local 'x'`.
+        let expected = if LUA_5_4 {
+            expected.replace("scope of '", "scope of local '")
+        } else {
+            expected.to_string()
+        };
         assert_eq!(err(src), expected, "source: {src:?}");
     }
     // A label followed only by labels is outside the block's scopes.

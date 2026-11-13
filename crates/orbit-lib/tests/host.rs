@@ -68,13 +68,16 @@ fn run(mode: &str) -> String {
 fn a_program_creates_uses_and_closes_a_state() {
     assert_eq!(
         run("basic"),
-        "hello from Lua 5.5\n\
-         add: 42, top 1\n\
-         syntax: [string \"return 1 +\"]:1: unexpected symbol near <eof>\n\
-         pcall error: 0\n\
-         top 0\n\
-         finalized at close\n\
-         closed\n"
+        format!(
+            "hello from {}\n\
+             add: 42, top 1\n\
+             syntax: [string \"return 1 +\"]:1: unexpected symbol near <eof>\n\
+             pcall error: 0\n\
+             top 0\n\
+             finalized at close\n\
+             closed\n",
+            orbit::LUA_VERSION
+        )
     );
 }
 

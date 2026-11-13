@@ -401,10 +401,13 @@ impl Lowerer<'_> {
             }
             Resolved::Global { constant: false } => return self.global_place(name),
         };
-        if matches!(
-            kind,
-            LocalKind::Const | LocalKind::Close | LocalKind::ForControl
-        ) {
+        let read_only = match kind {
+            LocalKind::Const | LocalKind::Close => true,
+            // Lua 5.4's `for` variables are ordinary locals.
+            LocalKind::ForControl => !crate::LUA_5_4,
+            _ => false,
+        };
+        if read_only {
             return Err(self.assign_to_const(name));
         }
         Ok(place)
@@ -645,7 +648,9 @@ impl Lowerer<'_> {
             }
             if let Some((_, var)) = block.decls.iter().find(|(d, _)| from < *d && *d < index) {
                 let message = format!(
-                    "<goto {label_name}> at line {goto_line} jumps into the scope of '{var}'"
+                    "<goto {label_name}> at line {goto_line} jumps into the scope of {}'{var}'",
+                    // Lua 5.4's message says `local`.
+                    if crate::LUA_5_4 { "local " } else { "" }
                 );
                 block.scope_error = Some((message, run));
                 found = true;
@@ -866,7 +871,8 @@ impl Lowerer<'_> {
         self.open_scope();
         let mut locals = Vec::with_capacity(vars.len());
         for (i, v) in vars.iter().enumerate() {
-            // Only the first variable is read-only (5.5).
+            // Only the first variable is read-only (5.5; none in 5.4, where lowering lets
+            // assignments to it through).
             let kind = if i == 0 {
                 LocalKind::ForControl
             } else {

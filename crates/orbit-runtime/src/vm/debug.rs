@@ -311,8 +311,8 @@ impl Runtime {
     }
 
     /// The prefix of a runtime error raised by an instruction: like
-    /// [`Runtime::where_`], but a stripped chunk gives `chunk:?: `, as in
-    /// the reference.
+    /// [`Runtime::where_`], but a stripped chunk gives `chunk:?: ` (5.4:
+    /// `chunk:-1: `), as in the reference.
     pub(crate) fn error_where(&self, heap: &LuaHeap, n: usize) -> String {
         self.position(heap, None, n, true)
     }
@@ -337,7 +337,9 @@ impl Runtime {
                 let line = pc_line(proto, f.pc.saturating_sub(1));
                 if line <= 0 {
                     if unknown_line {
-                        format!("{}:?: ", proto.chunk)
+                        // Lua 5.4 shows the unknown line as -1 (ADR-14).
+                        let line = if crate::LUA_5_4 { "-1" } else { "?" };
+                        format!("{}:{line}: ", proto.chunk)
                     } else {
                         String::new()
                     }
@@ -523,7 +525,16 @@ impl Runtime {
                 let _ = write!(s, "{}:{}: in ", info.short_src, line);
             }
         }
-        if let Some(name) = self.call_name(heap, l) {
+        // Lua 5.4 names a function a loaded module holds before asking the
+        // call site; 5.5 asks the call site first.
+        let global = if crate::LUA_5_4 {
+            self.global_name(heap, func)
+        } else {
+            None
+        };
+        if let Some(g) = global {
+            let _ = write!(s, "function '{}'", String::from_utf8_lossy(&g));
+        } else if let Some(name) = self.call_name(heap, l) {
             let _ = write!(
                 s,
                 "{} '{}'",
@@ -728,7 +739,8 @@ fn active_locals(
     // The reference reports an unnamed `...` as a local after the
     // parameters; a named one (`...t`) is an ordinary local the compiler
     // declares at pc 0.
-    let hidden_table = proto.code.is_vararg
+    let hidden_table = !crate::LUA_5_4
+        && proto.code.is_vararg
         && !matches!(proto.name, orbit_bytecode::FunctionName::Main)
         && !proto.debug.lines.is_empty()
         && !proto

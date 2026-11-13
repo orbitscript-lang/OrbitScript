@@ -95,14 +95,16 @@ fn standard_input_runs_without_a_script() {
     assert_eq!(out(&orbit(&["-W"], "print(2)", &[])), "2\n");
     assert_eq!(out(&orbit(&["-e", "x=1"], "print(3)", &[])), "");
     let o = orbit(&["-v"], "print(4)", &[]);
-    assert!(out(&o).contains("Lua 5.5.1") && out(&o).ends_with("PUC-Rio\n"));
+    let release = format!("Lua {}", orbit::LUA_RELEASE);
+    assert!(out(&o).contains(&release) && out(&o).ends_with("PUC-Rio\n"));
 }
 
 #[test]
 fn environment() {
     let o = orbit(&["-e", "print(X)"], "", &[("LUA_INIT", "X=3")]);
     assert_eq!(out(&o), "3\n");
-    let init = [("LUA_INIT_5_5", "X=10"), ("LUA_INIT", "X=3")];
+    let versioned = orbit_std::versioned_env("LUA_INIT");
+    let init = [(versioned.as_str(), "X=10"), ("LUA_INIT", "X=3")];
     assert_eq!(out(&orbit(&["-e", "print(X)"], "", &init)), "10\n");
     let o = orbit(&["-e", ""], "", &[("LUA_INIT", "error('msg')")]);
     assert!(err(&o).contains("LUA_INIT:1: msg"), "{}", err(&o));
@@ -144,8 +146,18 @@ fn interactive() {
     assert!(err(&o).contains("near <eof>"), "{}", err(&o));
     assert!(out(&o).ends_with("> >> > \n"), "{}", out(&o));
     let o = orbit(&["-i"], "  \t local x\nlocal1 = 10\nlocal1 + 3\n", &[]);
-    assert_eq!(err(&o).matches("warning: locals do not survive").count(), 1);
+    // Lua 5.4's interpreter has no such warning.
+    let warnings = if orbit::LUA_VERSION_NUM == 504 { 0 } else { 1 };
+    assert_eq!(
+        err(&o).matches("warning: locals do not survive").count(),
+        warnings
+    );
     assert!(out(&o).contains("13\n"));
+    if orbit::LUA_VERSION_NUM == 504 {
+        // Lua 5.4's interpreter reads `=expr` as `return expr`.
+        let o = orbit(&["-e", prompts, "-i"], "=1+1\n= [[a\nb]]\n", &[]);
+        assert!(out(&o).ends_with("2\na\nb\n\n"), "{}", out(&o));
+    }
     let o = orbit(&["-e", "print=nil", "-i"], "10\n", &[]);
     assert!(err(&o).contains("error calling 'print'"), "{}", err(&o));
     let o = orbit(&["-i"], "error('boom')\nprint(1)\n", &[]);

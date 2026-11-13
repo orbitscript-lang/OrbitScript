@@ -11,8 +11,8 @@ use crate::vm::{Catch, Frame, FrameKind, LuaError, Vm};
 
 /// The most `__call` handlers one call goes through (observed from lua5.5:
 /// a chain of 15 works, 16 is "too long"). `getinfo`'s `extraargs` counts
-/// them.
-const MAX_CALL_CHAIN: usize = 15;
+/// them. Lua 5.4 has no such limit short of the stack's own (ADR-14).
+const MAX_CALL_CHAIN: usize = if crate::LUA_5_4 { 1_000_000 } else { 15 };
 
 /// Registers a frame can address: register numbers are `u8`.
 pub(crate) const WINDOW: usize = 256;
@@ -201,7 +201,12 @@ impl Vm {
                         ));
                     }
                     if chain == MAX_CALL_CHAIN {
-                        return Err(Exc::Rt("'__call' chain too long".into(), None));
+                        let msg = if crate::LUA_5_4 {
+                            "stack overflow"
+                        } else {
+                            "'__call' chain too long"
+                        };
+                        return Err(Exc::Rt(msg.into(), None));
                     }
                     self.rt.stack.insert(func, func + 1 + nargs, h);
                     nargs += 1;
@@ -222,7 +227,8 @@ impl Vm {
                 let nregs = self.heap.get(c).code.nregs as usize;
                 s.dirty_to = s.dirty_to.max(e.base + nregs);
                 if chain > 0 {
-                    self.rt.stack.frames.last_mut().expect("frame").extra = chain as u8;
+                    self.rt.stack.frames.last_mut().expect("frame").extra =
+                        chain.min(usize::from(u8::MAX)) as u8;
                 }
                 if self.rt.stack.hook.armed() {
                     self.rt.stack.hook.call_pending = Some(false);
@@ -796,7 +802,8 @@ impl Vm {
             }
             // Past the message handler, a `nil` error reads as a message
             // (a close without errors is the exception: it has no error).
-            if e.value.is_nil() && !closing {
+            // Lua 5.4 keeps the `nil`.
+            if e.value.is_nil() && !closing && !crate::LUA_5_4 {
                 e.value = self.new_str(b"<no error object>");
             }
             // A coroutine that dies with an error keeps its variables open
@@ -925,8 +932,12 @@ impl Vm {
             extra: 0,
             cdepth,
         });
-        // A close without errors passes no error.
-        let nargs = if closing && err.is_nil() { 1 } else { 2 };
+        // A close without errors passes no error (Lua 5.4 passes `nil`).
+        let nargs = if closing && err.is_nil() && !crate::LUA_5_4 {
+            1
+        } else {
+            2
+        };
         self.call_close_handler(at + 1, h, nargs)
     }
 

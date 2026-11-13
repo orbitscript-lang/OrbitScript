@@ -7,6 +7,10 @@
 
 use intrinsics::{argerror, metafield};
 
+// Which Lua the build implements (ADR-14). The build script compiles this
+// line as `true` with the `lua-5-4` feature.
+const LUA_5_4 = false;
+
 // The iterator `ipairs` returns: one function, so every call returns the
 // same one, as the reference does.
 fn ipairs_next(t, i) {
@@ -31,6 +35,14 @@ pub fn pairs(...args) {
     }
     let t = args[1];
     let h = metafield(t, "__pairs");
+    if LUA_5_4 {
+        // Lua 5.4: three values.
+        if h != nil {
+            let (f, s, c) = h(t);
+            return (f, s, c);
+        }
+        return (next, t, nil);
+    }
     if h != nil {
         // Exactly four of its results: the fourth is the loop's
         // to-be-closed value.

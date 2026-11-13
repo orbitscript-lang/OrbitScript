@@ -187,6 +187,9 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
         #[cfg(feature = "table")]
         Lib::Table => {
             let t = open_lib(vm, "table", table::FUNCTIONS);
+            if !crate::LUA_5_4 {
+                add_functions(vm, t, table::FUNCTIONS_5_5);
+            }
             // `insert`, `remove` and `sort` are written in OrbitScript.
             for (name, f) in builtins::load(vm, &builtins::TABLE) {
                 let k = vm.new_str(&name);
@@ -197,6 +200,9 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
         #[cfg(feature = "math")]
         Lib::Math => {
             let m = open_lib(vm, "math", math::FUNCTIONS);
+            if crate::LUA_5_4 {
+                add_functions(vm, m, math::COMPAT_5_3);
+            }
             math::constants(vm, m);
             for &(name, fast) in math::FAST {
                 vm.set_native_fast_path(name, fast);

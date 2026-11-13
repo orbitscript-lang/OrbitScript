@@ -221,6 +221,10 @@ fn offset(ctx: &mut NativeCtx<'_>) -> R {
         }
     }
     ctx.push(Value::Int(pos as i64 + 1));
+    // Lua 5.4 gives only the start.
+    if crate::LUA_5_4 {
+        return Ok(NativeReturn::Return(1));
+    }
     ctx.push(Value::Int(end as i64));
     Ok(NativeReturn::Return(2))
 }

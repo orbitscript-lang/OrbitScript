@@ -25,6 +25,12 @@ fn run_stripped(src: &str) -> String {
 
 #[test]
 fn stripped_chunks_have_no_error_lines() {
+    // Lua 5.4 writes an unknown line as -1, 5.5 as `?`.
+    let unknown = if orbit::LUA_VERSION_NUM == 504 {
+        "-1"
+    } else {
+        "?"
+    };
     assert_eq!(run_stripped("return select(2, pcall(error, 'e'))"), "e");
     assert_eq!(
         run_stripped("return select(2, pcall(function() error('e') end))"),
@@ -32,6 +38,6 @@ fn stripped_chunks_have_no_error_lines() {
     );
     assert_eq!(
         run_stripped("return select(2, pcall(function() local x; return x.y end))"),
-        "?:?: attempt to index a nil value (local 'x')"
+        format!("?:{unknown}: attempt to index a nil value (local 'x')")
     );
 }

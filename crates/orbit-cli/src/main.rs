@@ -1,4 +1,4 @@
-//! `orbit`: command-line interpreter for Lua 5.5 and OrbitScript.
+//! `orbit`: command-line interpreter for Lua (5.5, or 5.4 with `lua-5-4`) and OrbitScript.
 //!
 //! `orbit [options] [script [args]]` takes the reference `lua`'s options
 //! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#the-command-line)):
@@ -444,10 +444,12 @@ impl Runner {
             .expect("setting 'arg' on a fresh isolate");
     }
 
-    /// `LUA_INIT_5_5`, or else `LUA_INIT`: code to run, or `@file`.
+    /// `LUA_INIT_5_5` (`_5_4` in a 5.4 build), or else `LUA_INIT`: code to
+    /// run, or `@file`.
     fn run_init(&mut self) -> bool {
-        let (name, init) = match std::env::var("LUA_INIT_5_5") {
-            Ok(v) => ("LUA_INIT_5_5", v),
+        let versioned = orbit_std::versioned_env("LUA_INIT");
+        let (name, init) = match std::env::var(&versioned) {
+            Ok(v) => (versioned.as_str(), v),
             Err(_) => match std::env::var("LUA_INIT") {
                 Ok(v) => ("LUA_INIT", v),
                 Err(_) => return true,
@@ -558,8 +560,9 @@ fn load_and_call<'s>(
 /// The banner. It names the Lua release we implement, as `lua -v` does.
 fn print_version() {
     println!(
-        "OrbitScript {}  implements Lua 5.5.1, designed by Lua.org, PUC-Rio",
-        orbit::VERSION
+        "OrbitScript {}  implements Lua {}, designed by Lua.org, PUC-Rio",
+        orbit::VERSION,
+        orbit::LUA_RELEASE
     );
 }
 

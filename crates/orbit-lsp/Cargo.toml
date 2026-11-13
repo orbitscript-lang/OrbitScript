@@ -28,6 +28,8 @@ runtime = ["orbit/default"]
 # The runtime in liborbit instead (ADR-10), for `build.sh`'s package:
 # `--no-default-features --features shared`.
 shared = ["orbit/shared"]
+# Lua 5.4 rather than 5.5 (`build.sh --lua 5.4`, ADR-14).
+lua-5-4 = ["orbit/lua-5-4", "orbit-lua-syntax/lua-5-4"]
 
 [lints]
 workspace = true

@@ -17,8 +17,10 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("table.unpack", unpack),
     ("table.pack", pack),
     ("table.move", move_),
-    ("table.create", create),
 ];
+
+/// Lua 5.5's additions, absent from 5.4 builds (ADR-14).
+pub(crate) const FUNCTIONS_5_5: &[(&str, NativeFn)] = &[("table.create", create)];
 
 /// Largest array size `create` accepts (a C `int`).
 const MAX_INT: i64 = i32::MAX as i64;

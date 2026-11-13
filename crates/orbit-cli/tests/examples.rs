@@ -41,7 +41,7 @@ fn examples_print_what_they_expect() {
                 .arg(&file)
                 .current_dir(&cwd)
                 .env_remove("LUA_PATH")
-                .env_remove("LUA_PATH_5_5")
+                .env_remove(orbit_std::versioned_env("LUA_PATH"))
                 .env_remove("ORBIT_PATH")
                 .output()
                 .unwrap();

@@ -171,7 +171,10 @@ fn getinfo(ctx: &mut NativeCtx<'_>) -> R {
             b't' => {
                 let (tail, extra) = (act.tail, act.extra);
                 set_field(ctx, t, "istailcall", Value::Bool(tail));
-                set_field(ctx, t, "extraargs", Value::Int(extra as i64));
+                // Lua 5.4 has no `extraargs`.
+                if !crate::LUA_5_4 {
+                    set_field(ctx, t, "extraargs", Value::Int(extra as i64));
+                }
             }
             b'L' => {
                 if let Some(lines) = ctx.active_lines(func) {

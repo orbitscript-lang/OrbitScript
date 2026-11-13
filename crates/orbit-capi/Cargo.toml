@@ -23,6 +23,9 @@ host = []
 # C states can be debugged (ADR-12): `orbit_debug_listen` and
 # `ORBIT_DEBUG` start the DAP server.
 debugger = ["host", "orbit/debugger", "dep:orbit-dap"]
+# The Lua 5.4 C API and headers instead of 5.5's, with the runtime behaving
+# as Lua 5.4 (ADR-14). It selects the whole build's Lua version.
+lua-5-4 = ["orbit/lua-5-4"]
 
 [build-dependencies]
 cc = "1.2"

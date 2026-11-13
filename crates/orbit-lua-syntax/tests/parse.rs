@@ -86,11 +86,16 @@ fn syntax_errors_match_the_reference() {
         ("global function", "s.lua:1: <name> expected near <eof>"),
     ];
     for (src, expected) in cases {
+        // A `lua-5-4` build (ADR-14) has no `global` declarations.
+        if orbit_lua_syntax::LUA_VERSION_NUM == 504 && src.starts_with("global") {
+            continue;
+        }
         assert_eq!(err(src), expected, "source: {src:?}");
     }
 }
 
 #[test]
+#[cfg(not(feature = "lua-5-4"))]
 fn global_is_contextual() {
     for src in [
         "global = print global(1)",
@@ -253,7 +258,14 @@ fn official_suite_parses() {
     let root = repo_root();
     let suite = std::env::var_os("LUA_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("tests/lua-5.5/suite"));
+        .unwrap_or_else(|| {
+            let lua = if orbit_lua_syntax::LUA_VERSION_NUM == 504 {
+                "5.4"
+            } else {
+                "5.5"
+            };
+            root.join(format!("tests/lua-{lua}/suite"))
+        });
     let mut parsed = 0;
     for path in lua_files(&suite) {
         let name = path.file_name().unwrap().to_str().unwrap().to_string();

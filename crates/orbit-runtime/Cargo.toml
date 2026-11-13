@@ -56,3 +56,7 @@ hooks = []
 # The debugger engine (ADR-12): breakpoints, stepping, pause and stops on
 # errors, reported to a host's `DebugEvents`.
 debugger = ["hooks"]
+# Behave as Lua 5.4 (with Lua 5.3 compatibility, as Debian builds it)
+# instead of 5.5 (ADR-14). It selects the whole build's Lua version rather
+# than adding code: enable it through `orbit`'s feature of the same name.
+lua-5-4 = []

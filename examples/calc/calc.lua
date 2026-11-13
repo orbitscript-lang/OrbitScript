@@ -217,7 +217,7 @@ local program = {
   "-2 ^ 2",
   "17 % 5 - 7 % -3",
   "max(x, y, 10 % 4)",
-  "sqrt(y * 8) + abs(-pi)",
+  "sqrt(y * 8) + abs(-pi) - pi",
   "y - z",
   "1 / (x - 4)",
   "2 +",

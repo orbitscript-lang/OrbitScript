@@ -46,7 +46,7 @@ pub(crate) fn open(vm: &mut Vm) {
     vm.pin(Value::Table(mt));
     vm.rt.set_type_meta(Tag::Str, Some(mt));
     vm.unpin(Value::Table(mt));
-    let v = vm.new_str(b"Lua 5.5");
+    let v = vm.new_str(crate::LUA_VERSION.as_bytes());
     vm.set_global("_VERSION", v);
     // `ipairs` and `pairs` are written in OrbitScript.
     for (name, f) in super::builtins::load(vm, &super::builtins::BASE) {
@@ -254,7 +254,8 @@ fn protected_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     match outcome {
         CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
         CallOutcome::Err(e) => {
-            let e = if e.is_nil() {
+            // Lua 5.4 keeps a `nil` error as it is.
+            let e = if e.is_nil() && !crate::LUA_5_4 {
                 ctx.new_str(b"<no error object>")
             } else {
                 e
@@ -365,6 +366,28 @@ fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret([Value::Int(n)])
 }
 
+/// Lua 5.4's `collectgarbage("incremental", pause, stepmul, stepsize)` and
+/// `collectgarbage("generational", minormul, majormul)`: each given non-zero
+/// value sets that parameter. 5.4's step size is a power of two; its major
+/// multiplier is the growth that makes the next collection major.
+fn set_params_5_4(ctx: &mut NativeCtx<'_>, mode: GcMode) -> Result<(), LuaError> {
+    let params: &[GcParam] = match mode {
+        GcMode::Incremental => &[GcParam::Pause, GcParam::StepMul, GcParam::StepSize],
+        GcMode::Generational => &[GcParam::MinorMul, GcParam::MinorMajor],
+    };
+    for (i, &p) in params.iter().enumerate() {
+        let v = ctx.opt_int(i + 1, 0)?;
+        if v != 0 {
+            let v = match p {
+                GcParam::StepSize => 1i64 << v.clamp(0, 40),
+                _ => v.max(0),
+            };
+            ctx.vm.rt.gc.set_param(&mut ctx.vm.heap, p, v);
+        }
+    }
+    Ok(())
+}
+
 /// `collectgarbage` ([GC semantics design]). Inside a finalizer it does
 /// nothing and returns `nil` (`-1` for `"param"`), as in Lua, so the
 /// collector is never re-entered.
@@ -389,11 +412,26 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         b"generational",
         b"param",
     ];
-    if !OPTIONS.contains(&&opt[..]) {
+    // Lua 5.4 sets the parameters with the modes, or with the 5.3 options
+    // `setpause` and `setstepmul`, and has no `param` (ADR-14).
+    const OPTIONS_5_4: &[&[u8]] = &[
+        b"collect",
+        b"count",
+        b"step",
+        b"stop",
+        b"restart",
+        b"isrunning",
+        b"incremental",
+        b"generational",
+        b"setpause",
+        b"setstepmul",
+    ];
+    let options = if crate::LUA_5_4 { OPTIONS_5_4 } else { OPTIONS };
+    if !options.contains(&&opt[..]) {
         return Err(ctx.arg_error(0, &[b"invalid option '", &opt[..], b"'"].concat()));
     }
     if ctx.vm.rt.gc.finalizing() {
-        let v = if &opt[..] == b"param" {
+        let v = if matches!(&opt[..], b"param" | b"setpause" | b"setstepmul") {
             Value::Int(-1)
         } else {
             Value::Nil
@@ -439,9 +477,22 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
             } else {
                 GcMode::Generational
             };
+            if crate::LUA_5_4 {
+                set_params_5_4(ctx, mode)?;
+            }
             let old = ctx.vm.set_gc_mode(mode);
             let v = ctx.new_str(old.name().as_bytes());
             ctx.ret([v])
+        }
+        b"setpause" | b"setstepmul" => {
+            let p = if &opt[..] == b"setpause" {
+                GcParam::Pause
+            } else {
+                GcParam::StepMul
+            };
+            let v = ctx.opt_int(1, 0)?.max(0);
+            let old = ctx.vm.rt.gc.set_param(&mut ctx.vm.heap, p, v);
+            ctx.ret([Value::Int(old)])
         }
         _ => {
             let name = ctx.check_str(1)?;
