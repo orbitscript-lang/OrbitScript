@@ -98,6 +98,7 @@ pub fn main(args: &[String]) -> Result<bool> {
         timeout,
         work: Some(root.join("target/testkit/scoreboard").join(&iname)),
         only: Vec::new(),
+        lua: "5.5".to_string(),
     };
     let suite = conformance::run_suite(&opts, |r| {
         eprintln!("  {} {}", if r.passed { "pass" } else { "...." }, r.file)
@@ -142,7 +143,7 @@ fn compile_check_suite(
 ) -> Result<Vec<(String, Option<String>)>> {
     let suite = util::repo_root().join("tests/lua-5.5/suite");
     let mut out = Vec::new();
-    for e in conformance::load_manifest()? {
+    for e in conformance::load_manifest("5.5")? {
         if e.skip.is_some() {
             continue;
         }

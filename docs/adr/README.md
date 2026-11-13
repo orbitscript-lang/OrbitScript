@@ -15,5 +15,6 @@
 | [0011](0011-api-surface-and-crates.md) | Public API surface and crate layout | Accepted |
 | [0012](0012-developer-tooling.md) | Developer tooling: language server and debugger | Accepted |
 | [0013](0013-locales.md) | Locales | Proposed |
+| [0014](0014-lua-version-targets.md) | Lua version targets (5.4 or 5.5 per build) | Proposed |
 
 Each record states a decision and the technical reasons for it; git history shows how it changed. Statuses: **Proposed** (open for edits), **Accepted** (changes need a maintainer's approval), **Superseded**.
