@@ -1,12 +1,12 @@
 //! Names the library and exports Lua's API from it (ADR-10).
 //!
 //! - ELF (Linux, the BSDs): `liborbit.so.0`, Lua's names under the symbol
-//!   version `LUA_5.5` and our own (`orbit.h`) under `ORBIT_0`
-//!   (`liborbit.map`). Only lld accepts our version script
+//!   version `LUA_5.5` (`LUA_5.4` in a Lua 5.4 build, ADR-14) and our own
+//!   (`orbit.h`) under `ORBIT_0` (`liborbit.map`). Only lld accepts our version script
 //!   next to the one rustc writes (GNU ld refuses to combine them), so where
 //!   rustc links through the C compiler this switches to lld, as the CLIs'
 //!   build does for code folding.
-//! - macOS: install name `@rpath/liborbit.0.dylib`, versions 5.5.0 (dyld
+//! - macOS: install name `@rpath/liborbit.0.dylib`, versions 5.5.0 or 5.4.0 (dyld
 //!   checks a program's `compatibility_version` against them), and Lua's
 //!   names exported next to rustc's list.
 //! - Windows: `capi.c` marks Lua's names `dllexport` (`luaconf.h`).
@@ -21,16 +21,28 @@ fn main() {
     println!("cargo:rerun-if-env-changed=RUSTC_LINKER");
     let os = var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let vendor = var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
+    let lua = orbit_lua_version::LuaVersion::from_build_env();
     if os == "linux" || os == "android" || os.ends_with("bsd") {
         let dir = var("CARGO_MANIFEST_DIR").unwrap_or_default();
-        println!("cargo:rustc-link-arg-cdylib=-Wl,--version-script={dir}/liborbit.map");
+        let map = std::fs::read_to_string(format!("{dir}/liborbit.map")).expect("liborbit.map");
+        let out = PathBuf::from(var("OUT_DIR").expect("cargo sets OUT_DIR")).join("liborbit.map");
+        std::fs::write(
+            &out,
+            map.replace("LUA_5.5", &format!("LUA_{}", lua.dotted())),
+        )
+        .expect("OUT_DIR is writable");
+        println!(
+            "cargo:rustc-link-arg-cdylib=-Wl,--version-script={}",
+            out.display()
+        );
         println!("cargo:rustc-link-arg-cdylib=-Wl,-soname,liborbit.so.0");
         use_lld();
     } else if vendor == "apple" {
+        let version = format!("{}.0", lua.dotted());
         for arg in [
             "-install_name,@rpath/liborbit.0.dylib",
-            "-compatibility_version,5.5.0",
-            "-current_version,5.5.0",
+            &format!("-compatibility_version,{version}"),
+            &format!("-current_version,{version}"),
             "-exported_symbol,_lua_*",
             "-exported_symbol,_luaL_*",
             "-exported_symbol,_luaopen_*",

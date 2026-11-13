@@ -276,7 +276,9 @@ import_lib() {
 
 # The function or variable each LUA_API, LUALIB_API and LUAMOD_API
 # declaration in our headers names, one per line.
-headers="$root/crates/orbit-capi/csrc/include"
+# Lua's headers are per version (ADR-14); orbit.h is shared.
+capi_include="$root/crates/orbit-capi/csrc/include"
+headers="$capi_include/5.5"
 api_names() {
     grep -hE '^(LUA_API|LUALIB_API|LUAMOD_API) ' "$headers/lua.h" "$headers/lauxlib.h" "$headers/lualib.h" |
         awk '{ if (match($0, /(lua|luaL|luaopen)_[a-z][A-Za-z0-9_]*/)) print substr($0, RSTART, RLENGTH) }' |
@@ -370,9 +372,10 @@ lay_out() {
             files="bin/orbit bin/orbitc lib/$lib"
             ;;
     esac
-    for h in lua.h luaconf.h lualib.h lauxlib.h orbit.h; do
+    for h in lua.h luaconf.h lualib.h lauxlib.h; do
         cp "$headers/$h" "$dir/include/$h"
     done
+    cp "$capi_include/orbit.h" "$dir/include/orbit.h"
 }
 
 # Adds the language server and the formatter to the layout lay_out last

@@ -1,9 +1,12 @@
-//! The Lua 5.5 C API, for loading C modules into OrbitScript (ADR-8,
-//! `docs/adr/0008-c-modules.md`).
+//! The Lua C API, for loading C modules into OrbitScript (ADR-8,
+//! `docs/adr/0008-c-modules.md`): Lua 5.5's, or Lua 5.4's in a build with
+//! the `lua-5-4` feature (ADR-14).
 //!
 //! Modules compiled against the reference `lua.h` load unchanged: the
-//! headers in `csrc/include` are OrbitScript's own but match the reference
-//! ABI. A C function is a closure of the [`CFunction`] native whose data word
+//! headers in `csrc/include/5.5` and `csrc/include/5.4` are OrbitScript's
+//! own but match the reference ABI. The C half of a 5.4 build maps 5.4's
+//! pseudo-indices and `lua_gc` options onto the 5.5 ones the Rust half
+//! reads. A C function is a closure of the [`CFunction`] native whose data word
 //! holds the C function pointer; its Lua stack is the native's window, as
 //! [`orbit::stack`] presents it. Errors raised inside C `longjmp` only across C
 //! frames (`csrc/capi.c`). All `unsafe` is in [`ffi`].

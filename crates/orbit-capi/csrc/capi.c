@@ -273,36 +273,61 @@ static void orbit_throw(lua_State *L) {
     CHECK(L);                                         \
   }
 
+/* The Rust half reads Lua 5.5's pseudo-indices (orbit::stack's
+   REGISTRY_INDEX). A Lua 5.4 build (ADR-14) maps 5.4's onto them: the
+   registry and the upvalues below it keep their order, and stack indices
+   pass unchanged. IX is applied to every argument that can be one. */
+#define ORBIT_RS_REGISTRYINDEX (-(INT_MAX / 2 + 1000))
+#if LUA_VERSION_NUM == 504
+static int ix(int idx) {
+  return idx <= LUA_REGISTRYINDEX ? ORBIT_RS_REGISTRYINDEX - (LUA_REGISTRYINDEX - idx) : idx;
+}
+/* And back, for lua_absindex's result. */
+static int ix_back(int idx) {
+  return idx <= ORBIT_RS_REGISTRYINDEX ? LUA_REGISTRYINDEX - (ORBIT_RS_REGISTRYINDEX - idx) : idx;
+}
+#define IX(idx) ix(idx)
+#else
+#define IX(idx) (idx)
+#endif
+
 /* ------------------------------------------------------------------------
  * The core API, implemented in Rust
  * --------------------------------------------------------------------- */
 
 API(lua_Number, version, (lua_State *L), (L))
-API(int, absindex, (lua_State *L, int idx), (L, idx))
+LUA_API int lua_absindex(lua_State *L, int idx) {
+  int r = orbit_r->absindex(L, IX(idx));
+  CHECK(L);
+#if LUA_VERSION_NUM == 504
+  r = ix_back(r);
+#endif
+  return r;
+}
 API(int, gettop, (lua_State *L), (L))
 APIV(settop, (lua_State *L, int idx), (L, idx))
-APIV(pushvalue, (lua_State *L, int idx), (L, idx))
+APIV(pushvalue, (lua_State *L, int idx), (L, IX(idx)))
 APIV(rotate, (lua_State *L, int idx, int n), (L, idx, n))
-APIV(copy, (lua_State *L, int fromidx, int toidx), (L, fromidx, toidx))
+APIV(copy, (lua_State *L, int fromidx, int toidx), (L, IX(fromidx), IX(toidx)))
 API(int, checkstack, (lua_State *L, int n), (L, n))
 
-API(int, isnumber, (lua_State *L, int idx), (L, idx))
-API(int, isstring, (lua_State *L, int idx), (L, idx))
-API(int, iscfunction, (lua_State *L, int idx), (L, idx))
-API(int, isinteger, (lua_State *L, int idx), (L, idx))
-API(int, isuserdata, (lua_State *L, int idx), (L, idx))
-API(int, type, (lua_State *L, int idx), (L, idx))
-API(lua_Number, tonumberx, (lua_State *L, int idx, int *isnum), (L, idx, isnum))
-API(lua_Integer, tointegerx, (lua_State *L, int idx, int *isnum), (L, idx, isnum))
-API(int, toboolean, (lua_State *L, int idx), (L, idx))
-API(const char *, tolstring, (lua_State *L, int idx, size_t *len), (L, idx, len))
-API(lua_Unsigned, rawlen, (lua_State *L, int idx), (L, idx))
-API(lua_CFunction, tocfunction, (lua_State *L, int idx), (L, idx))
-API(void *, touserdata, (lua_State *L, int idx), (L, idx))
-API(const void *, topointer, (lua_State *L, int idx), (L, idx))
+API(int, isnumber, (lua_State *L, int idx), (L, IX(idx)))
+API(int, isstring, (lua_State *L, int idx), (L, IX(idx)))
+API(int, iscfunction, (lua_State *L, int idx), (L, IX(idx)))
+API(int, isinteger, (lua_State *L, int idx), (L, IX(idx)))
+API(int, isuserdata, (lua_State *L, int idx), (L, IX(idx)))
+API(int, type, (lua_State *L, int idx), (L, IX(idx)))
+API(lua_Number, tonumberx, (lua_State *L, int idx, int *isnum), (L, IX(idx), isnum))
+API(lua_Integer, tointegerx, (lua_State *L, int idx, int *isnum), (L, IX(idx), isnum))
+API(int, toboolean, (lua_State *L, int idx), (L, IX(idx)))
+API(const char *, tolstring, (lua_State *L, int idx, size_t *len), (L, IX(idx), len))
+API(lua_Unsigned, rawlen, (lua_State *L, int idx), (L, IX(idx)))
+API(lua_CFunction, tocfunction, (lua_State *L, int idx), (L, IX(idx)))
+API(void *, touserdata, (lua_State *L, int idx), (L, IX(idx)))
+API(const void *, topointer, (lua_State *L, int idx), (L, IX(idx)))
 
-API(int, rawequal, (lua_State *L, int a, int b), (L, a, b))
-API(int, compare, (lua_State *L, int a, int b, int op), (L, a, b, op))
+API(int, rawequal, (lua_State *L, int a, int b), (L, IX(a), IX(b)))
+API(int, compare, (lua_State *L, int a, int b, int op), (L, IX(a), IX(b), op))
 
 APIV(pushnil, (lua_State *L), (L))
 APIV(pushnumber, (lua_State *L, lua_Number n), (L, n))
@@ -313,26 +338,26 @@ APIV(pushboolean, (lua_State *L, int b), (L, b))
 APIV(pushlightuserdata, (lua_State *L, void *p), (L, p))
 
 API(int, getglobal, (lua_State *L, const char *name), (L, name))
-API(int, gettable, (lua_State *L, int idx), (L, idx))
-API(int, getfield, (lua_State *L, int idx, const char *k), (L, idx, k))
-API(int, geti, (lua_State *L, int idx, lua_Integer n), (L, idx, n))
-API(int, rawget, (lua_State *L, int idx), (L, idx))
-API(int, rawgeti, (lua_State *L, int idx, lua_Integer n), (L, idx, n))
-API(int, rawgetp, (lua_State *L, int idx, const void *p), (L, idx, p))
+API(int, gettable, (lua_State *L, int idx), (L, IX(idx)))
+API(int, getfield, (lua_State *L, int idx, const char *k), (L, IX(idx), k))
+API(int, geti, (lua_State *L, int idx, lua_Integer n), (L, IX(idx), n))
+API(int, rawget, (lua_State *L, int idx), (L, IX(idx)))
+API(int, rawgeti, (lua_State *L, int idx, lua_Integer n), (L, IX(idx), n))
+API(int, rawgetp, (lua_State *L, int idx, const void *p), (L, IX(idx), p))
 APIV(createtable, (lua_State *L, int narr, int nrec), (L, narr, nrec))
 API(void *, newuserdatauv, (lua_State *L, size_t sz, int nuvalue), (L, sz, nuvalue))
-API(int, getmetatable, (lua_State *L, int idx), (L, idx))
-API(int, getiuservalue, (lua_State *L, int idx, int n), (L, idx, n))
+API(int, getmetatable, (lua_State *L, int idx), (L, IX(idx)))
+API(int, getiuservalue, (lua_State *L, int idx, int n), (L, IX(idx), n))
 
 APIV(setglobal, (lua_State *L, const char *name), (L, name))
-APIV(settable, (lua_State *L, int idx), (L, idx))
-APIV(setfield, (lua_State *L, int idx, const char *k), (L, idx, k))
-APIV(seti, (lua_State *L, int idx, lua_Integer n), (L, idx, n))
-APIV(rawset, (lua_State *L, int idx), (L, idx))
-APIV(rawseti, (lua_State *L, int idx, lua_Integer n), (L, idx, n))
-APIV(rawsetp, (lua_State *L, int idx, const void *p), (L, idx, p))
-API(int, setmetatable, (lua_State *L, int idx), (L, idx))
-API(int, setiuservalue, (lua_State *L, int idx, int n), (L, idx, n))
+APIV(settable, (lua_State *L, int idx), (L, IX(idx)))
+APIV(setfield, (lua_State *L, int idx, const char *k), (L, IX(idx), k))
+APIV(seti, (lua_State *L, int idx, lua_Integer n), (L, IX(idx), n))
+APIV(rawset, (lua_State *L, int idx), (L, IX(idx)))
+APIV(rawseti, (lua_State *L, int idx, lua_Integer n), (L, IX(idx), n))
+APIV(rawsetp, (lua_State *L, int idx, const void *p), (L, IX(idx), p))
+API(int, setmetatable, (lua_State *L, int idx), (L, IX(idx)))
+API(int, setiuservalue, (lua_State *L, int idx, int n), (L, IX(idx), n))
 
 APIV(callk, (lua_State *L, int nargs, int nresults, lua_KContext ctx, lua_KFunction k),
      (L, nargs, nresults, ctx, k))
@@ -341,23 +366,98 @@ API(int, pcallk,
     (L, nargs, nresults, errfunc, ctx, k))
 
 API(int, error, (lua_State *L), (L))
-API(int, next, (lua_State *L, int idx), (L, idx))
+API(int, next, (lua_State *L, int idx), (L, IX(idx)))
 APIV(concat, (lua_State *L, int n), (L, n))
-APIV(len, (lua_State *L, int idx), (L, idx))
+APIV(len, (lua_State *L, int idx), (L, IX(idx)))
 API(size_t, stringtonumber, (lua_State *L, const char *s), (L, s))
 APIV(arith, (lua_State *L, int op), (L, op))
+#if LUA_VERSION_NUM >= 505
 API(unsigned, numbertocstring, (lua_State *L, int idx, char *buff), (L, idx, buff))
+#endif
 API(int, pushthread, (lua_State *L), (L))
 API(int, getstack, (lua_State *L, int level, lua_Debug *ar), (L, level, ar))
 API(int, getinfo, (lua_State *L, const char *what, lua_Debug *ar), (L, what, ar))
-API(const char *, getupvalue, (lua_State *L, int funcindex, int n), (L, funcindex, n))
-API(const char *, setupvalue, (lua_State *L, int funcindex, int n), (L, funcindex, n))
-API(void *, upvalueid, (lua_State *L, int fidx, int n), (L, fidx, n))
-APIV(upvaluejoin, (lua_State *L, int fidx1, int n1, int fidx2, int n2), (L, fidx1, n1, fidx2, n2))
+API(const char *, getupvalue, (lua_State *L, int funcindex, int n), (L, IX(funcindex), n))
+API(const char *, setupvalue, (lua_State *L, int funcindex, int n), (L, IX(funcindex), n))
+API(void *, upvalueid, (lua_State *L, int fidx, int n), (L, IX(fidx), n))
+APIV(upvaluejoin, (lua_State *L, int fidx1, int n1, int fidx2, int n2),
+     (L, IX(fidx1), n1, IX(fidx2), n2))
 
+/* The lua_gc options the Rust half takes: Lua 5.5's. */
+enum {
+  RS_GCISRUNNING = 6,
+  RS_GCGEN = 7,
+  RS_GCINC = 8,
+  RS_GCPARAM = 9,
+  RS_GCPMINORMUL = 0,
+  RS_GCPMINORMAJOR = 2,
+  RS_GCPPAUSE = 3,
+  RS_GCPSTEPMUL = 4,
+  RS_GCPSTEPSIZE = 5
+};
+
+static int gc_call(lua_State *L, int what, int a, int b) {
+  int r = orbit_r->gc(L, what, a, b);
+  CHECK(L);
+  return r;
+}
+
+#if LUA_VERSION_NUM == 504
+/* Set a collector parameter when the caller gave one (Lua 5.4 reads 0 as
+   "keep the current value"). */
+static void gc_set(lua_State *L, int param, int value) {
+  if (value != 0) gc_call(L, RS_GCPARAM, param, value);
+}
+
+/* Lua 5.4's options, on the 5.5 ones the Rust half takes (ADR-14). The
+   parameters mean our collector's, as for collectgarbage. */
 LUA_API int lua_gc(lua_State *L, int what, ...) {
   va_list ap;
-  int a = 0, b = 0, r;
+  int r;
+  va_start(ap, what);
+  switch (what) {
+    case LUA_GCSTEP:
+      r = gc_call(L, what, va_arg(ap, int), 0);
+      break;
+    case LUA_GCSETPAUSE:
+      r = gc_call(L, RS_GCPARAM, RS_GCPPAUSE, va_arg(ap, int));
+      break;
+    case LUA_GCSETSTEPMUL:
+      r = gc_call(L, RS_GCPARAM, RS_GCPSTEPMUL, va_arg(ap, int));
+      break;
+    case LUA_GCISRUNNING:
+      r = gc_call(L, RS_GCISRUNNING, 0, 0);
+      break;
+    case LUA_GCGEN: {
+      int minormul = va_arg(ap, int), majormul = va_arg(ap, int);
+      gc_set(L, RS_GCPMINORMUL, minormul);
+      gc_set(L, RS_GCPMINORMAJOR, majormul);
+      r = gc_call(L, RS_GCGEN, 0, 0);
+      break;
+    }
+    case LUA_GCINC: {
+      int pause = va_arg(ap, int), stepmul = va_arg(ap, int), stepsize = va_arg(ap, int);
+      gc_set(L, RS_GCPPAUSE, pause);
+      gc_set(L, RS_GCPSTEPMUL, stepmul);
+      /* 5.4's step size is a power of two of bytes. */
+      if (stepsize > 0) gc_set(L, RS_GCPSTEPSIZE, stepsize >= 30 ? 1 << 30 : 1 << stepsize);
+      r = gc_call(L, RS_GCINC, 0, 0);
+      break;
+    }
+    default:
+      r = what >= 0 && what <= LUA_GCSTEP ? gc_call(L, what, 0, 0) : -1;
+      break;
+  }
+  va_end(ap);
+  /* A mode switch answers with the previous mode, in 5.4's numbering. */
+  if ((what == LUA_GCGEN || what == LUA_GCINC) && r != -1)
+    r = r == RS_GCGEN ? LUA_GCGEN : LUA_GCINC;
+  return r;
+}
+#else
+LUA_API int lua_gc(lua_State *L, int what, ...) {
+  va_list ap;
+  int a = 0, b = 0;
   va_start(ap, what);
   if (what == LUA_GCSTEP) a = va_arg(ap, int);
   if (what == LUA_GCPARAM) {
@@ -365,10 +465,9 @@ LUA_API int lua_gc(lua_State *L, int what, ...) {
     b = va_arg(ap, int);
   }
   va_end(ap);
-  r = orbit_r->gc(L, what, a, b);
-  CHECK(L);
-  return r;
+  return gc_call(L, what, a, b);
 }
+#endif
 
 LUA_API const char *lua_typename(lua_State *L, int t) {
   static const char *const names[] = {"no value", "nil",   "boolean",  "userdata", "number",
@@ -386,6 +485,7 @@ LUA_API const char *lua_pushstring(lua_State *L, const char *s) {
   return lua_pushlstring(L, s, strlen(s));
 }
 
+#if LUA_VERSION_NUM >= 505
 /* The string is copied, so the caller's buffer is released at once. */
 LUA_API const char *lua_pushexternalstring(lua_State *L, const char *s, size_t len,
                                            lua_Alloc falloc, void *ud) {
@@ -393,6 +493,7 @@ LUA_API const char *lua_pushexternalstring(lua_State *L, const char *s, size_t l
   if (falloc != NULL) falloc(ud, (void *)s, len + 1, 0);
   return r;
 }
+#endif
 
 static void *orbit_default_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
   (void)ud;
@@ -415,9 +516,11 @@ LUA_API lua_Alloc lua_getallocf(lua_State *L, void **ud) {
   return orbit_default_alloc;
 }
 
+#if LUA_VERSION_NUM >= 505
 LUALIB_API void *luaL_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
   return orbit_default_alloc(ud, ptr, osize, nsize);
 }
+#endif
 
 LUA_API lua_CFunction lua_atpanic(lua_State *L, lua_CFunction panicf) {
   lua_CFunction old = L->panicf;
@@ -607,7 +710,7 @@ LUALIB_API int luaL_callmeta(lua_State *L, int obj, const char *e) {
 }
 
 LUALIB_API const char *luaL_tolstring(lua_State *L, int idx, size_t *len) {
-  const char *r = orbit_r->tolstringmeta(L, idx, len);
+  const char *r = orbit_r->tolstringmeta(L, IX(idx), len);
   CHECK(L);
   return r;
 }
@@ -703,7 +806,7 @@ LUALIB_API void *luaL_testudata(lua_State *L, int ud, const char *tname) {
 LUALIB_API void *luaL_checkudata(lua_State *L, int ud, const char *tname) {
   void *p = luaL_testudata(L, ud, tname);
   if (p == NULL) {
-    int rust = orbit_r->isrustudata(L, ud);
+    int rust = orbit_r->isrustudata(L, IX(ud));
     CHECK(L);
     /* An OrbitScript library's userdata (an io file) has no C memory, so
        no C module can take it, whatever its type name says. */
@@ -1085,7 +1188,7 @@ LUA_API int lua_dump(lua_State *L, lua_Writer writer, void *data, int strip) {
    longjmp, as an error does: Rust then does what it asked for. */
 API(int, status, (lua_State *L), (L))
 API(int, isyieldable, (lua_State *L), (L))
-API(lua_State *, tothread, (lua_State *L, int idx), (L, idx))
+API(lua_State *, tothread, (lua_State *L, int idx), (L, IX(idx)))
 API(lua_State *, newthread, (lua_State *L), (L))
 API(int, closethread, (lua_State *L, lua_State *from), (L, from))
 API(int, resume, (lua_State *L, lua_State *from, int narg, int *nres), (L, from, narg, nres))
@@ -1216,7 +1319,9 @@ static const struct {
     {LUA_TABLIBNAME, luaopen_table},    {LUA_UTF8LIBNAME, luaopen_utf8},
 };
 
-LUALIB_API void luaL_openselectedlibs(lua_State *L, int load, int preload) {
+/* Open the libraries in `load` (bits in orbit_libs' order), and put those in
+   `preload` in package.preload for `require` to open. */
+static void openselectedlibs(lua_State *L, int load, int preload) {
   int i;
   luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
   for (i = 0; i < (int)(sizeof(orbit_libs) / sizeof(orbit_libs[0])); i++) {
@@ -1231,6 +1336,16 @@ LUALIB_API void luaL_openselectedlibs(lua_State *L, int load, int preload) {
   }
   lua_pop(L, 1);
 }
+
+#if LUA_VERSION_NUM == 504
+LUALIB_API void luaL_openlibs(lua_State *L) {
+  openselectedlibs(L, ~0, 0);
+}
+#else
+LUALIB_API void luaL_openselectedlibs(lua_State *L, int load, int preload) {
+  openselectedlibs(L, load, preload);
+}
+#endif
 
 extern int orbit_r_setlocalemode(lua_State *L, int mode);
 
@@ -1280,10 +1395,16 @@ LUA_API lua_State *orbit_newstate(lua_Alloc f, void *ud, unsigned flags) {
   return L;
 }
 
+#if LUA_VERSION_NUM == 504
+LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud) {
+  return orbit_newstate(f, ud, 0);
+}
+#else
 LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
   (void)seed;
   return orbit_newstate(f, ud, 0);
 }
+#endif
 
 static int orbit_panic(lua_State *L) {
   const char *msg = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1)
@@ -1304,12 +1425,20 @@ LUA_API void lua_close(lua_State *L) {
 }
 #else
 /* Without the `host` feature only Rust creates states. */
+#if LUA_VERSION_NUM == 504
+LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud) {
+  (void)f;
+  (void)ud;
+  return NULL;
+}
+#else
 LUA_API lua_State *lua_newstate(lua_Alloc f, void *ud, unsigned seed) {
   (void)f;
   (void)ud;
   (void)seed;
   return NULL;
 }
+#endif
 
 LUALIB_API lua_State *luaL_newstate(void) {
   return NULL;
@@ -1343,8 +1472,22 @@ LUA_API void lua_setwarnf(lua_State *L, lua_WarnFunction f, void *ud) {
   CHECK(L);
 }
 
+#if LUA_VERSION_NUM >= 505
 LUALIB_API unsigned luaL_makeseed(lua_State *L) {
   static int addr;
   (void)L;
   return (unsigned)(size_t)&addr ^ (unsigned)time(NULL);
 }
+#else
+LUA_API int lua_resetthread(lua_State *L) {
+  return lua_closethread(L, NULL);
+}
+
+/* Deprecated in Lua 5.4: changes nothing and returns lua5.4's fixed
+   limit. */
+LUA_API int lua_setcstacklimit(lua_State *L, unsigned int limit) {
+  (void)L;
+  (void)limit;
+  return 200;
+}
+#endif

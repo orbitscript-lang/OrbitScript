@@ -37,12 +37,12 @@ The language and libraries differ less: `global` declarations, named varargs and
 - **Built-in `.orb` modules are preprocessed.** The VM doesn't fold constants, so a run-time test of the version would stay in the bytecode. Code that differs sits in `//#if lua-5.4` ... `//#else` ... `//#endif` blocks, which `orbit_lua_version::preprocess` resolves before the runtime's build script compiles the module; the other version's lines become blank, keeping line numbers. The directives are comments, and `orbit-check`'s tests check the modules as each version compiles them.
 
 ### Which 5.4
-- **The latest 5.4 release, built with `LUA_COMPAT_5_3`**, as Debian, Ubuntu and most distributions build it. A 5.4 build therefore also has `math.pow`, `math.atan2`, `math.cosh`, `math.sinh`, `math.tanh`, `math.log10`, `__le` falling back to `not __lt(b, a)`, and in its headers the 5.3 C API macros (`lua_pushunsigned`, `lua_strlen`, ...).
+- **The latest 5.4 release, built with `LUA_COMPAT_5_3`**, as Debian, Ubuntu and most distributions build it. A 5.4 build therefore also has `math.pow`, `math.atan2`, `math.cosh`, `math.sinh`, `math.tanh`, `math.log10` and `__le` falling back to `not __lt(b, a)`. Its headers, like the reference ones, offer the 5.3 C API macros (`lua_pushunsigned`, `lua_strlen`, ...) to C code that defines `LUA_COMPAT_5_3`.
 - **The reference** is `lua5.4` built from the Lua repository's tag with those flags (`LUA_VERSION=5.4 scripts/build-reference-lua.sh`), and the official 5.4 suite is vendored in `tests/lua-5.4/` with its own manifest, skips and deviations, like the 5.5 suite.
 - **OrbitScript code** keeps its syntax in both builds and sees the build's library, for example its float formatting.
 
 ### The C ABI is translated in C
-- **Two header sets of our own**, one per version, written from the public headers' ABI facts. `orbit-capi`'s build compiles its C half against the selected set and installs that set.
+- **Two header sets of our own**, `csrc/include/5.5` and `csrc/include/5.4`, written from the public headers' ABI facts. `orbit-capi`'s build script reads the version (`LuaVersion::from_build_env`) and compiles its C half against the matching set, and packaging installs that set.
 - **The Rust half keeps one internal ABI.** The C half of a 5.4 build maps the 5.4 registry pseudo-index, `lua_gc` options and `lua_Debug` layout onto it, and adds the three 5.4-only functions, so `orbit::stack::REGISTRY_INDEX` and the FFI layer need no version switch. The cost is one comparison per index argument.
 - **`liborbit`** gets the `LUA_5.4` symbol version node and the 5.4 file names in a 5.4 build.
 

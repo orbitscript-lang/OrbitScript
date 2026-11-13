@@ -10,6 +10,7 @@ Everything in [`tests/lua-5.5/README.md`](../lua-5.5/README.md) applies here: do
 | `SKIPS.md` | Every skipped part of the 5.4 suite and why |
 | `DEVIATIONS.md` | Deliberate differences from `lua5.4`, on top of the 5.5 list |
 | `expected-orbit.txt` | Files a `lua-5-4` build of `orbit` currently passes |
+| `expected-liblua.txt` | Files the reference `lua5.4` program passes on a `lua-5-4` build of `liborbit` |
 | `VERSION`, `SHA256SUMS` | Provenance of `suite/` |
 
 ## Running it
@@ -22,7 +23,11 @@ cargo build --release -p orbit-cli --features lua-5-4 --target-dir target/lua54
 cargo testkit conformance --lua 5.4 --interp target/reference-lua-5.4/bin/lua5.4 --c-libs target/reference-lua-5.4/libs
 
 # OrbitScript's 5.4 build, checked against the expected-pass list.
-cargo testkit conformance --lua 5.4 --interp target/lua54/release/orbit --expect tests/lua-5.4/expected-orbit.txt
+cargo testkit conformance --lua 5.4 --interp target/lua54/release/orbit --c-libs target/reference-lua-5.4/libs --expect tests/lua-5.4/expected-orbit.txt
+
+# PUC's own 5.4 lua.c, built for liblua5.4, on OrbitScript's 5.4 library.
+cargo build --release -p orbit-lib --features lua-5-4 --target-dir target/lua54
+cargo testkit liblua --lua 5.4 --lib target/lua54/release/liborbit_lib.so --c-libs target/reference-lua-5.4/libs --expect tests/lua-5.4/expected-liblua.txt
 ```
 
 A separate target directory keeps the 5.4 build from replacing the default (5.5) one. The reference is built with `-DLUA_COMPAT_5_3`, as Debian's and most distributions' `lua5.4` are, and on Linux it links GNU readline, because one `main.lua` check needs readline's echo of piped input.

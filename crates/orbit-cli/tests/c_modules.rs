@@ -18,10 +18,14 @@ fn module_dir() -> &'static Path {
         std::fs::create_dir_all(&dir).unwrap();
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
         let include = Path::new(MANIFEST).join("../orbit-capi/csrc/include");
+        // The headers for the build's Lua version (ADR-14).
+        let versioned = orbit::LUA.dotted();
         let out = Command::new(cc)
             .args([
                 "-O1", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-I",
             ])
+            .arg(include.join(versioned))
+            .arg("-I")
             .arg(include)
             .arg("-o")
             .arg(dir.join("testmod.so"))
@@ -41,9 +45,9 @@ fn orbit(args: &[&str], cpath: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_orbit"))
         .args(args)
         .env("LUA_CPATH", cpath)
-        .env_remove("LUA_CPATH_5_5")
+        .env_remove(orbit_std::versioned_env("LUA_CPATH"))
         .env_remove("LUA_INIT")
-        .env_remove("LUA_INIT_5_5")
+        .env_remove(orbit_std::versioned_env("LUA_INIT"))
         .output()
         .unwrap()
 }

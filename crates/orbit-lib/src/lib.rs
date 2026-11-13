@@ -1,6 +1,7 @@
 //! `liborbit`: the runtime as one shared library (ADR-10). It exports the
-//! Lua 5.5 C API under the version node `LUA_5.5`, so programs built
-//! against Lua 5.5 run on OrbitScript when it is installed under Lua's
+//! Lua 5.5 C API under the version node `LUA_5.5` (or, built with the
+//! `lua-5-4` feature, Lua 5.4's under `LUA_5.4`, ADR-14), so programs built
+//! against that Lua run on OrbitScript when it is installed under Lua's
 //! names, and the Rust API's boundary (`orbit`'s `shared` feature): one
 //! check and one constructor, exported with `stabby`.
 //!
