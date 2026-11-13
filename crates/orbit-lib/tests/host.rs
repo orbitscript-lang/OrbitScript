@@ -1,5 +1,6 @@
-//! A C program that embeds OrbitScript through the Lua 5.5 C API
-//! (`chost/host.c`), built against orbit-capi's headers and linked to
+//! A C program that embeds OrbitScript through the Lua C API
+//! (`chost/host.c`), built against orbit-capi's headers for the build's
+//! Lua version (ADR-14) and linked to
 //! `liborbit` as a program built for liblua would be (ADR-10).
 #![cfg(target_os = "linux")]
 
@@ -31,9 +32,13 @@ fn host() -> &'static (PathBuf, PathBuf) {
         std::fs::copy(library(), &soname).unwrap();
         let exe = dir.join("host");
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        let include = Path::new(MANIFEST).join("../orbit-capi/csrc/include");
+        let versioned = orbit::LUA.dotted();
         let out = Command::new(cc)
             .args(["-O1", "-Wall", "-Wextra", "-Werror", "-I"])
-            .arg(Path::new(MANIFEST).join("../orbit-capi/csrc/include"))
+            .arg(include.join(versioned))
+            .arg("-I")
+            .arg(include)
             .arg("-o")
             .arg(&exe)
             .arg(Path::new(MANIFEST).join("tests/chost/host.c"))
@@ -133,6 +138,22 @@ fn lua_gc_options() {
          running after restart: 1\n\
          collect: 0\n"
     );
+}
+
+#[test]
+fn pseudo_indices_and_the_registry_follow_the_headers() {
+    let mut want = "version: 1\n\
+                    absindex: 1 1\n\
+                    main thread: 1\n\
+                    globals: 1\n\
+                    upvalue:\t12\n\
+                    registry field: 1\n\
+                    short_src: [string \"function where() end\"], line 1\n"
+        .to_string();
+    if orbit::LUA.is_5_4() {
+        want.push_str("cstacklimit: 200\nresetthread: 0\n");
+    }
+    assert_eq!(run("abi"), want);
 }
 
 #[test]

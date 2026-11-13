@@ -1,8 +1,10 @@
-//! `liblua`: the Lua 5.5 suite run by the reference `lua` program on
+//! `liblua`: the Lua suite run by the reference `lua` program on
 //! OrbitScript's shared library (ADR-10). The program is
 //! `target/reference-lua/bin/lua5.5-host`, `lua.c` built against the
 //! reference library the way Debian ships it (`liblua5.5.so.0`, symbols
 //! versioned `LUA_5.5`); here the loader finds `liborbit` under that name.
+//! With `--lua 5.4` it is the 5.4 program and library names, for a
+//! `liborbit` built with the `lua-5-4` feature (ADR-14).
 
 use std::path::{Path, PathBuf};
 
@@ -10,16 +12,17 @@ use crate::conformance;
 use crate::util::{self, Result};
 
 const USAGE: &str = "\
-usage: orbit-testkit liblua [--lib PATH] [--host PATH] [conformance options] [FILE...]
+usage: orbit-testkit liblua [--lua X.Y] [--lib PATH] [--host PATH] [conformance options] [FILE...]
 
-Runs the Lua 5.5 test suite through a program built for Lua's shared
+Runs the Lua test suite through a program built for Lua's shared
 library, with OrbitScript's library installed under Lua's name.
 
 options:
   --lib PATH    the library (default target/release/liborbit_lib.so; build it
                 with cargo build --release -p orbit-lib)
   --host PATH   the program (default target/reference-lua/bin/lua5.5-host,
-                from scripts/build-reference-lua.sh)
+                from scripts/build-reference-lua.sh; with --lua 5.4,
+                target/reference-lua-5.4/bin/lua5.4-host)
 
 Other options are conformance's (see conformance --help), for example
 --expect tests/lua-5.5/expected-liblua.txt.";
@@ -27,13 +30,18 @@ Other options are conformance's (see conformance --help), for example
 pub fn main(args: &[String]) -> Result<bool> {
     let root = util::repo_root();
     let mut lib = root.join("target/release/liborbit_lib.so");
-    let mut host = root.join("target/reference-lua/bin/lua5.5-host");
+    let mut host = None;
+    let mut lua = conformance::VERSIONS[0].to_string();
     let mut rest = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--lua" => {
+                lua = it.next().ok_or("--lua needs a value")?.clone();
+                rest.extend(["--lua".to_string(), lua.clone()]);
+            }
             "--lib" => lib = PathBuf::from(it.next().ok_or("--lib needs a value")?),
-            "--host" => host = PathBuf::from(it.next().ok_or("--host needs a value")?),
+            "--host" => host = Some(PathBuf::from(it.next().ok_or("--host needs a value")?)),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -41,12 +49,20 @@ pub fn main(args: &[String]) -> Result<bool> {
             _ => rest.push(a.clone()),
         }
     }
+    let host = host.unwrap_or_else(|| {
+        let dir = if lua == conformance::VERSIONS[0] {
+            "reference-lua".to_string()
+        } else {
+            format!("reference-lua-{lua}")
+        };
+        root.join(format!("target/{dir}/bin/lua{lua}-host"))
+    });
     for (what, p) in [("library", &lib), ("program", &host)] {
         if !p.is_file() {
             return Err(format!("{what} {} not found\n\n{USAGE}", p.display()));
         }
     }
-    let wrapper = install(&util::absolute(&lib)?, &util::absolute(&host)?)?;
+    let wrapper = install(&util::absolute(&lib)?, &util::absolute(&host)?, &lua)?;
     let mut conf = vec![
         "--interp".to_string(),
         format!("lua-on-liborbit={}", wrapper.display()),
@@ -55,13 +71,14 @@ pub fn main(args: &[String]) -> Result<bool> {
     conformance::main(&conf)
 }
 
-/// A directory where `liblua5.5.so.0` is `lib`, and a script that runs
-/// `host` with the loader looking there first. Returns the script.
-fn install(lib: &Path, host: &Path) -> Result<PathBuf> {
+/// A directory where `liblua5.5.so.0` (for `lua` 5.5) is `lib`, and a
+/// script that runs `host` with the loader looking there first. Returns the
+/// script.
+fn install(lib: &Path, host: &Path, lua: &str) -> Result<PathBuf> {
     let dir = util::repo_root().join("target/testkit/liblua");
     let libdir = dir.join("lib");
     std::fs::create_dir_all(&libdir).map_err(util::io_err(libdir.display()))?;
-    let alias = libdir.join("liblua5.5.so.0");
+    let alias = libdir.join(format!("liblua{lua}.so.0"));
     let _ = std::fs::remove_file(&alias);
     link(lib, &alias)?;
     let script = dir.join("lua");

@@ -1,6 +1,7 @@
 /* Which symbols liborbit exports, and their versions. Lua's names carry
    LUA_5.5, as Debian's liblua5.5 does: programs built there ask for it,
-   and other programs ignore it. Rust's own exports get the anonymous
+   and other programs ignore it. A Lua 5.4 build (ADR-14) writes LUA_5.4
+   instead (build.rs). Rust's own exports get the anonymous
    version from rustc's script. */
 LUA_5.5 {
   global:

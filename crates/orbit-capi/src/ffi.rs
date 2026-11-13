@@ -939,7 +939,7 @@ static TABLE: RTable = RTable {
 // ---- entry points (names match csrc/capi.c) ---------------------------------
 
 extern "C" fn orbit_r_version(l: *mut LState) -> f64 {
-    entry!(l, 0.0, |_b, _c| Ok(505.0))
+    entry!(l, 0.0, |_b, _c| Ok(f64::from(orbit::LUA.num())))
 }
 
 extern "C" fn orbit_r_absindex(l: *mut LState, idx: c_int) -> c_int {
@@ -1530,7 +1530,8 @@ extern "C" fn orbit_r_unsupported(l: *mut LState, what: *const c_char) {
 
 // ---- debug interface ----------------------------------------------------------
 
-/// `lua_Debug` in `lua.h`.
+/// `lua_Debug` in `lua.h`. Lua 5.4's (ADR-14) has no `extraargs` and
+/// `unsigned short` transfer counts.
 #[repr(C)]
 pub(crate) struct LuaDebug {
     event: c_int,
@@ -1545,14 +1546,25 @@ pub(crate) struct LuaDebug {
     nups: u8,
     nparams: u8,
     isvararg: c_char,
+    #[cfg(not(lua_5_4))]
     extraargs: u8,
     istailcall: c_char,
-    ftransfer: c_int,
-    ntransfer: c_int,
+    ftransfer: Transfer,
+    ntransfer: Transfer,
     short_src: [c_char; 60],
     /// The level `lua_getstack` found, plus one (0: none).
     private: usize,
 }
+
+/// The type of `lua_Debug`'s `ftransfer` and `ntransfer`.
+#[cfg(not(lua_5_4))]
+type Transfer = c_int;
+#[cfg(lua_5_4)]
+type Transfer = u16;
+
+// The layout `lua.h` declares, on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<LuaDebug>() == if cfg!(lua_5_4) { 136 } else { 144 });
 
 extern "C" fn orbit_r_getstack(l: *mut LState, level: c_int, ar: *mut LuaDebug) -> c_int {
     entry!(l, 0, |b, c| {
@@ -1683,7 +1695,10 @@ extern "C" fn orbit_r_getinfo(l: *mut LState, what: *const c_char, ar: *mut LuaD
                 }
                 b't' => {
                     d.istailcall = info.istailcall as c_char;
-                    d.extraargs = info.extraargs;
+                    #[cfg(not(lua_5_4))]
+                    {
+                        d.extraargs = info.extraargs;
+                    }
                 }
                 b'r' => {
                     d.ftransfer = 0;

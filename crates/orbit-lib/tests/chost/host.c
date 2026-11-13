@@ -1,5 +1,6 @@
-/* A C program that embeds OrbitScript through the Lua 5.5 C API, as a
-   program built for liblua does (ADR-10). Each mode prints what it checks;
+/* A C program that embeds OrbitScript through the Lua C API, as a program
+   built for liblua does (ADR-10). It builds against either header set
+   (5.5, or 5.4 for a lua-5-4 build, ADR-14). Each mode prints what it checks;
    tests/host.rs compares the output. */
 #include <locale.h>
 #include <stdio.h>
@@ -46,7 +47,19 @@ static int basic(void) {
 
 static int selected(void) {
   lua_State *L = luaL_newstate();
+#if LUA_VERSION_NUM == 504
+  /* Lua 5.4 has no luaL_openselectedlibs: the same by hand. */
+  luaL_requiref(L, LUA_GNAME, luaopen_base, 1);
+  luaL_requiref(L, LUA_LOADLIBNAME, luaopen_package, 1);
+  luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);
+  lua_pop(L, 3);
+  luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
+  lua_pushcfunction(L, luaopen_math);
+  lua_setfield(L, -2, LUA_MATHLIBNAME);
+  lua_pop(L, 1);
+#else
   luaL_openselectedlibs(L, LUA_GLIBK | LUA_LOADLIBK | LUA_STRLIBK, LUA_MATHLIBK);
+#endif
   run(L, "print(type(string), type(math), type(table), type(io))\n"
          "local m = require 'math'\n"
          "print(type(m), m.max(3, 7), type(math))");
@@ -130,11 +143,20 @@ static int strings(void) {
 static int gc(void) {
   lua_State *L = luaL_newstate();
   luaL_openlibs(L);
+#if LUA_VERSION_NUM == 504
+  lua_gc(L, LUA_GCSETPAUSE, 150);
+  printf("pause: %d\n", lua_gc(L, LUA_GCSETPAUSE, 150));
+  /* States start generational (ADR-2). The modes take their parameters
+     (0: unchanged). */
+  printf("inc (was gen): %d\n", lua_gc(L, LUA_GCINC, 0, 0, 0) == LUA_GCGEN);
+  printf("gen (was inc): %d\n", lua_gc(L, LUA_GCGEN, 0, 0) == LUA_GCINC);
+#else
   lua_gc(L, LUA_GCPARAM, LUA_GCPPAUSE, 150);
   printf("pause: %d\n", lua_gc(L, LUA_GCPARAM, LUA_GCPPAUSE, -1));
   /* States start generational (ADR-2). */
   printf("inc (was gen): %d\n", lua_gc(L, LUA_GCINC) == LUA_GCGEN);
   printf("gen (was inc): %d\n", lua_gc(L, LUA_GCGEN) == LUA_GCINC);
+#endif
   lua_gc(L, LUA_GCSTOP);
   printf("running after stop: %d\n", lua_gc(L, LUA_GCISRUNNING));
   lua_gc(L, LUA_GCRESTART);
@@ -157,7 +179,11 @@ static void *my_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 static int alloc(void) {
   static int tag;
   void *ud = NULL;
+#if LUA_VERSION_NUM == 504
+  lua_State *L = lua_newstate(my_alloc, &tag);
+#else
   lua_State *L = lua_newstate(my_alloc, &tag, 0);
+#endif
   printf("allocator kept: %d\n", lua_getallocf(L, &ud) == my_alloc && ud == &tag);
   luaL_openlibs(L);
   /* A plain state drops warnings. */
@@ -542,6 +568,48 @@ static int debug(int argc, char **argv) {
   return 0;
 }
 
+static int counter(lua_State *L) {
+  lua_Integer n = lua_tointeger(L, lua_upvalueindex(1)) + 1;
+  lua_pushinteger(L, n);
+  lua_copy(L, -1, lua_upvalueindex(1));
+  return 1;
+}
+
+/* The pseudo-indices, registry layout and lua_Debug as the headers
+   describe them, whichever Lua version they are for. */
+static int abi(void) {
+  lua_State *L = luaL_newstate();
+  lua_Debug ar;
+  luaL_openlibs(L);
+  printf("version: %d\n", (int)lua_version(L) == LUA_VERSION_NUM);
+  printf("absindex: %d %d\n", lua_absindex(L, LUA_REGISTRYINDEX) == LUA_REGISTRYINDEX,
+         lua_absindex(L, lua_upvalueindex(2)) == lua_upvalueindex(2));
+  printf("main thread: %d\n", lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD) == LUA_TTHREAD &&
+                                   lua_tothread(L, -1) == L);
+  lua_pop(L, 1);
+  printf("globals: %d\n", lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) == LUA_TTABLE);
+  lua_pop(L, 1);
+  lua_pushinteger(L, 10);
+  lua_pushcclosure(L, counter, 1);
+  lua_setglobal(L, "counter");
+  run(L, "counter() print('upvalue:', counter())");
+  lua_pushinteger(L, 7);
+  lua_setfield(L, LUA_REGISTRYINDEX, "abi_key");
+  printf("registry field: %d\n", lua_getfield(L, LUA_REGISTRYINDEX, "abi_key") == LUA_TNUMBER &&
+                                      lua_tointeger(L, -1) == 7);
+  lua_pop(L, 1);
+  run(L, "function where() end");
+  lua_getglobal(L, "where");
+  lua_getinfo(L, ">S", &ar);
+  printf("short_src: %s, line %d\n", ar.short_src, ar.linedefined);
+#if LUA_VERSION_NUM == 504
+  printf("cstacklimit: %d\n", lua_setcstacklimit(L, 100));
+  printf("resetthread: %d\n", lua_resetthread(lua_newthread(L)));
+#endif
+  lua_close(L);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *mode = argc > 1 ? argv[1] : "";
   if (strcmp(mode, "basic") == 0) return basic();
@@ -550,6 +618,7 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "warn") == 0) return warn();
   if (strcmp(mode, "strings") == 0) return strings();
   if (strcmp(mode, "gc") == 0) return gc();
+  if (strcmp(mode, "abi") == 0) return abi();
   if (strcmp(mode, "alloc") == 0) return alloc();
   if (strcmp(mode, "states") == 0) return states();
   if (strcmp(mode, "hooks") == 0) return hooks();

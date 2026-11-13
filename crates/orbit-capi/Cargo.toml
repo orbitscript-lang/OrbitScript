@@ -1,6 +1,6 @@
 [package]
 name = "orbit-capi"
-description = "Lua 5.5 C API for loading C modules into OrbitScript (ADR-8)"
+description = "Lua 5.5 (or 5.4, ADR-14) C API for loading C modules into OrbitScript (ADR-8)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,9 @@ links = "orbit_capi"
 # and friends open them, and C states are isolates the API can reach.
 orbit = { path = "../orbit", default-features = false, features = ["package"] }
 orbit-std = { path = "../orbit-std" }
+# The Lua version (ADR-14): the build script reads it from its `links`
+# metadata, so this must be a direct dependency.
+orbit-lua-version = { path = "../orbit-lua-version" }
 orbit-dap = { path = "../orbit-dap", optional = true }
 
 [features]
@@ -26,6 +29,7 @@ debugger = ["host", "orbit/debugger", "dep:orbit-dap"]
 
 [build-dependencies]
 cc = "1.2"
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 # Not the workspace lints: unsafe is denied rather than forbidden, and
 # allowed only in src/ffi.rs (ADR-6 exception).

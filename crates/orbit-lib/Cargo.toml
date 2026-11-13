@@ -20,7 +20,13 @@ crate-type = ["cdylib", "rlib"]
 orbit = { path = "../orbit", features = ["abi"] }
 orbit-capi = { path = "../orbit-capi", features = ["host"] }
 orbit-std = { path = "../orbit-std", features = ["json"] }
+# The Lua version (ADR-14): the build script reads it from its `links`
+# metadata, so this must be a direct dependency.
+orbit-lua-version = { path = "../orbit-lua-version" }
 stabby = "72.1.16"
+
+[build-dependencies]
+orbit-lua-version = { path = "../orbit-lua-version" }
 
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["std"] }

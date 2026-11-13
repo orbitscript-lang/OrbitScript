@@ -55,8 +55,9 @@ pub const fn upvalue_index(i: i32) -> i32 {
 /// As a result count: keep every result (Lua's `LUA_MULTRET`).
 pub const MULTRET: i32 = -1;
 
-/// Registry entry 3: the main thread (Lua's `LUA_RIDX_MAINTHREAD`).
-pub const RIDX_MAINTHREAD: i64 = 3;
+/// The registry entry that holds the main thread (Lua's
+/// `LUA_RIDX_MAINTHREAD`): 3, or 1 in a Lua 5.4 build (ADR-14).
+pub const RIDX_MAINTHREAD: i64 = if crate::LUA.is_5_4() { 1 } else { 3 };
 
 /// The registry index of the global table (`LUA_RIDX_GLOBALS`).
 pub const RIDX_GLOBALS: i64 = 2;

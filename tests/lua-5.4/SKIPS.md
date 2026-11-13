@@ -31,7 +31,7 @@ Without `--c-libs DIR`, these lines are commented out, keeping line numbers:
 - **`attrib.lua` 266 to 334** (`needs-clibs=266-334`): the body of its C-library block, which loads `lib1`, `lib11`, `lib2-v2` and friends.
 - **`main.lua` 229 to 232** (`needs-clibs=229-232`): they run `lua -l lib2-v2` and have no fallback.
 
-The reference `lua5.4` runs with `--c-libs`. Loading the 5.4 suite's C modules into `orbit` needs the 5.4 C ABI (headers built for `LUA_VERSION_NUM` 504), which comes with the `orbit-capi` side of the 5.4 target.
+The reference `lua5.4` runs with `--c-libs`, and so does a `lua-5-4` build of `orbit`: its C API is Lua 5.4's (`orbit-capi`'s `csrc/include/5.4` headers, ADR-14), so the modules the reference build script compiles against PUC's 5.4 headers load into it, and both files pass in full.
 
 ## 3. Lines that check a deliberate deviation
 
