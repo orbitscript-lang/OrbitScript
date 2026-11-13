@@ -1,0 +1,18 @@
+name: Set up Rust
+description: >
+  Installs the toolchain rust-toolchain.toml names and restores the build
+  cache. Runs after actions/checkout, which brings this action.
+inputs:
+  cache-key:
+    description: >
+      Extra cache key, for jobs that build the same targets with different
+      features (the Lua 5.4 build, ADR-14).
+    default: ''
+runs:
+  using: composite
+  steps:
+    - run: rustup show
+      shell: bash
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}

@@ -1,0 +1,60 @@
+name: Reference Lua
+description: >
+  Builds (or restores from the cache) the reference interpreter for one Lua
+  version, with the official suite's C modules (scripts/build-reference-lua.sh).
+  With `suite: true` it also checks that the vendored suite is unmodified and
+  installs what the suite needs from the runner (readline, test locales).
+inputs:
+  lua:
+    description: The Lua version, 5.5 or 5.4 (ADR-14).
+    required: true
+  suite:
+    description: Prepare to run the official suite too.
+    default: 'true'
+outputs:
+  dir:
+    description: The reference build's directory (bin/luaX.Y, libs/).
+    value: ${{ steps.dir.outputs.dir }}
+runs:
+  using: composite
+  steps:
+    - id: dir
+      shell: bash
+      run: |
+        case "${{ inputs.lua }}" in
+          5.5) echo "dir=target/reference-lua" >> "$GITHUB_OUTPUT" ;;
+          5.4) echo "dir=target/reference-lua-5.4" >> "$GITHUB_OUTPUT" ;;
+          *) echo "::error::unsupported Lua version ${{ inputs.lua }}"; exit 1 ;;
+        esac
+    - name: Check the vendored test suite is unmodified
+      if: inputs.suite == 'true'
+      shell: bash
+      working-directory: tests/lua-${{ inputs.lua }}/suite
+      run: sha256sum --check --quiet ../SHA256SUMS
+    - name: Cache the reference interpreter
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.dir.outputs.dir }}
+        key: reference-lua-${{ inputs.lua }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('tests/lua-{0}/VERSION', inputs.lua), 'scripts/build-reference-lua.sh') }}
+    # main.lua runs luaX.Y -i with LUA_READLINELIB ignored (-E) and expects
+    # no warning, so the default libreadline.so must load (and one 5.4 check
+    # needs readline's echo). The runner image has only libreadline.so.8;
+    # the unversioned name comes with the -dev package.
+    - name: Install libreadline-dev
+      if: inputs.suite == 'true'
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libreadline-dev
+    # literals.lua, strings.lua and tests/diff/locale.lua try these locales
+    # and skip their checks without them.
+    - name: Generate test locales
+      if: inputs.suite == 'true'
+      shell: bash
+      run: |
+        sudo localedef -i pt_BR -f ISO-8859-1 pt_BR.ISO-8859-1
+        sudo localedef -i pt_BR -f ISO-8859-1 pt_BR
+        sudo localedef -i pt_BR -f UTF-8 pt_BR.UTF-8
+        sudo localedef -i de_DE -f ISO-8859-1 de_DE.ISO-8859-1
+        sudo localedef -i tr_TR -f ISO-8859-9 tr_TR.ISO-8859-9
+    - name: Build reference lua${{ inputs.lua }}
+      shell: bash
+      run: LUA_VERSION=${{ inputs.lua }} scripts/build-reference-lua.sh
