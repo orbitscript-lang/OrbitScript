@@ -86,26 +86,14 @@ pub fn flush_all() {
     });
 }
 
+/// `EBADF`, for an operation on a closed standard stream.
 fn bad_fd() -> io::Error {
-    #[cfg(unix)]
-    {
-        io::Error::from_raw_os_error(9)
-    }
-    #[cfg(not(unix))]
-    {
-        io::Error::other("Bad file descriptor")
-    }
+    crate::crt::system_error(libc::EBADF)
 }
 
+/// `ESPIPE`, for seeking a stream that can't seek.
 fn illegal_seek() -> io::Error {
-    #[cfg(unix)]
-    {
-        io::Error::from_raw_os_error(29)
-    }
-    #[cfg(not(unix))]
-    {
-        io::Error::other("Illegal seek")
-    }
+    crate::crt::system_error(libc::ESPIPE)
 }
 
 impl Stream {
@@ -734,7 +722,8 @@ fn f_seek<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
     let from = match &whence[..] {
         b"set" => {
             if off < 0 {
-                return file_error(c, &io::Error::from(io::ErrorKind::InvalidInput), None);
+                // What the system says for a negative offset.
+                return file_error(c, &crate::crt::system_error(libc::EINVAL), None);
             }
             SeekFrom::Start(off as u64)
         }

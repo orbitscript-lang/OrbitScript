@@ -70,16 +70,16 @@ impl<W: std::io::Write> Writer for WriterObj<W> {
     extern "C" fn write<'b>(
         &mut self,
         bytes: stabby::slice::Slice<'b, u8>,
-    ) -> SResult<usize, SString> {
+    ) -> SResult<usize, IoErrorAbi> {
         match self.0.write(&bytes) {
             Ok(n) => SResult::Ok(n),
-            Err(e) => SResult::Err(e.to_string().as_str().into()),
+            Err(e) => SResult::Err(IoErrorAbi::new(&e)),
         }
     }
-    extern "C" fn flush(&mut self) -> SResult<(), SString> {
+    extern "C" fn flush(&mut self) -> SResult<(), IoErrorAbi> {
         match self.0.flush() {
             Ok(()) => SResult::Ok(()),
-            Err(e) => SResult::Err(e.to_string().as_str().into()),
+            Err(e) => SResult::Err(IoErrorAbi::new(&e)),
         }
     }
 }
