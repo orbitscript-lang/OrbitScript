@@ -94,17 +94,21 @@
 /* Members of a union that has the strictest alignment Lua guarantees. */
 #define LUAI_MAXALIGN long double u; void *s; long long l
 
+/* On Windows a module imports Lua's functions from lua55.dll (lua54.dll in a
+   5.4 build) and exports its own luaopen_ functions, which LUAMOD_API marks:
+   a module defines them, so they can't be imports. */
 #if defined(_WIN32)
 #if defined(ORBIT_CAPI_BUILD)
 #define LUA_API __declspec(dllexport)
 #else
 #define LUA_API __declspec(dllimport)
 #endif
+#define LUAMOD_API __declspec(dllexport)
 #else
 #define LUA_API extern
+#define LUAMOD_API extern
 #endif
 #define LUALIB_API LUA_API
-#define LUAMOD_API LUA_API
 
 #if defined(__GNUC__)
 #define luai_likely(x) (__builtin_expect(((x) != 0), 1))

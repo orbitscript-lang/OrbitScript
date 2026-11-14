@@ -233,7 +233,9 @@ static const luaL_Reg funcs[] = {
   {NULL, NULL}
 };
 
-int luaopen_testmod(lua_State *L) {
+/* Windows exports only what is marked so. */
+/* LUAMOD_API exports it on Windows. */
+LUAMOD_API int luaopen_testmod(lua_State *L) {
   luaL_checkversion(L);
   if (luaL_newmetatable(L, "testmod.Point")) {
     luaL_newlib(L, point_methods);

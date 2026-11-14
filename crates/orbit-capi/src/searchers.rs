@@ -46,8 +46,15 @@ fn locked_cpath(s: &mut Stack<'_>) -> Option<Vec<u8>> {
 }
 
 /// Whether some template in `cpath` gives `file` with each `?` replaced by
-/// the same non-empty text holding no `.`.
+/// the same non-empty text holding no `.`, and on Windows no `:` (a drive
+/// or an alternate data stream) or `/` either.
 fn cpath_allows(cpath: &[u8], file: &[u8]) -> bool {
+    cpath_allows_on(cpath, file, cfg!(windows))
+}
+
+/// [`cpath_allows`] with Windows' rules or not, so both are tested
+/// everywhere.
+fn cpath_allows_on(cpath: &[u8], file: &[u8], windows: bool) -> bool {
     cpath.split(|&b| b == b';').any(|template| {
         let marks = template.iter().filter(|&&b| b == b'?').count();
         if marks == 0 {
@@ -62,7 +69,7 @@ fn cpath_allows(cpath: &[u8], file: &[u8]) -> bool {
         }
         let first = template.iter().position(|&b| b == b'?').unwrap_or(0);
         let name = &file[first..first + rest / marks];
-        if name.contains(&b'.') {
+        if name.contains(&b'.') || windows && (name.contains(&b':') || name.contains(&b'/')) {
             return false;
         }
         let mut built = Vec::with_capacity(file.len());
@@ -270,7 +277,7 @@ impl Native for SearchCRoot {
 
 #[cfg(test)]
 mod tests {
-    use super::cpath_allows;
+    use super::{cpath_allows, cpath_allows_on};
 
     const CPATH: &[u8] = b"/usr/lib/lua/?.so;/opt/?/core.so;./?.so;/fixed/all.so";
 
@@ -295,5 +302,20 @@ mod tests {
         // Every `?` takes the same text.
         assert!(cpath_allows(b"/m/?/?.so", b"/m/a/a.so"));
         assert!(!cpath_allows(b"/m/?/?.so", b"/m/a/b.so"));
+    }
+
+    #[test]
+    fn locked_cpath_on_windows_also_refuses_drives_streams_and_slashes() {
+        const WIN: &[u8] = b"C:\\lua\\?.dll;.\\?.dll";
+        assert!(cpath_allows_on(WIN, b"C:\\lua\\lfs.dll", true));
+        assert!(cpath_allows_on(WIN, b"C:\\lua\\socket\\core.dll", true));
+        assert!(cpath_allows_on(WIN, b".\\cjson.dll", true));
+        assert!(!cpath_allows_on(WIN, b".\\D:\\evil.dll", true));
+        assert!(!cpath_allows_on(WIN, b"C:\\lua\\lfs.dll:stream.dll", true));
+        assert!(!cpath_allows_on(WIN, b"C:\\lua\\x:y.dll", true));
+        assert!(!cpath_allows_on(WIN, b"C:\\lua\\/other.dll", true));
+        // Elsewhere `:` is an ordinary character and `/` the separator.
+        assert!(cpath_allows_on(b"/m/?.so", b"/m/x:y.so", false));
+        assert!(cpath_allows_on(b"/m/?.so", b"/m/a/b.so", false));
     }
 }

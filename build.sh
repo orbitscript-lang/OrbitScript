@@ -76,6 +76,7 @@
 #                lua55.dll, which forwards Lua's names to orbit_lib.dll (a
 #                copy would be a second runtime in the process); run from
 #                Git Bash or MSYS2
+#            lib/lua55.lib, lua55.dll's import library, for C modules
 #   all:     include/lua.h, luaconf.h, lualib.h, lauxlib.h, orbit.h
 # The static layout: bin/orbit, bin/orbitc, bin/orbit-lsp and bin/orbit-fmt,
 # one file each.
@@ -462,12 +463,18 @@ lay_out() {
                 aarch64-*) machine=ARM64 ;;
                 *) machine=X64 ;;
             esac
+            # Its import library, lib/lua55.lib, is what C modules link
+            # against (ADR-8): they import Lua's names from lua55.dll.
+            implib="$dir/lib/lua$lua_nodot.lib"
             if link=$(msvc_link); then
                 # Git Bash would turn the /OPTIONS into paths.
                 MSYS2_ARG_CONV_EXCL='*' "$link" /NOLOGO /DLL /NOENTRY "/MACHINE:$machine" \
-                    "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/$luadll")"
+                    "/DEF:$(cygpath -w "$def")" "/OUT:$(cygpath -w "$dir/bin/$luadll")" \
+                    "/IMPLIB:$(cygpath -w "$implib")"
+                rm -f "$dir/lib/lua$lua_nodot.exp"
             else
-                "${CC:-gcc}" -shared -nostdlib -o "$dir/bin/$luadll" "$def"
+                "${CC:-gcc}" -shared -nostdlib -o "$dir/bin/$luadll" "$def" \
+                    "-Wl,--out-implib,$implib"
             fi
             files="bin/orbit.exe bin/orbitc.exe bin/orbit_lib.dll bin/$luadll"
             ;;
