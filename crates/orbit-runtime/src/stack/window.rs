@@ -1732,11 +1732,10 @@ impl<'s> Stack<'s> {
 
     /// Open standard library `lib` as `orbit::Config::libraries` would
     /// (setting its global), and push its table; false, pushing nothing, if
-    /// this build leaves it out. `ignore_env` as `orbit::Config::ignore_env`.
-    pub fn open_library(&mut self, lib: Library, ignore_env: bool) -> bool {
-        let options = stdlib::Options { ignore_env };
+    /// this build leaves it out.
+    pub fn open_library(&mut self, lib: Library) -> bool {
         let top = self.ctx.len();
-        let opened = stdlib::open_one(self.ctx.vm, lib.lib(), options);
+        let opened = stdlib::open_one(self.ctx.vm, lib.lib());
         // Running the built-in modules can leave the VM's top above the
         // window's; what lies there is no value of ours.
         self.ctx.truncate(top);

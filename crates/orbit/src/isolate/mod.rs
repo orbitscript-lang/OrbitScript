@@ -78,7 +78,6 @@ pub struct Config {
     memory_limit: Option<usize>,
     gc_mode: GcMode,
     warnings: bool,
-    ignore_env: bool,
     debugger: Debugger,
 }
 
@@ -91,7 +90,6 @@ impl Default for Config {
             memory_limit: None,
             gc_mode: GcMode::Generational,
             warnings: false,
-            ignore_env: false,
             debugger: Debugger::Allowed,
         }
     }
@@ -124,12 +122,6 @@ impl Config {
     /// them with `warn("@on")`).
     pub fn warnings(mut self, on: bool) -> Config {
         self.warnings = on;
-        self
-    }
-
-    /// Ignore the environment variable `ORBIT_VERIFY`, as `lua -E` does.
-    pub fn ignore_env(mut self, ignore: bool) -> Config {
-        self.ignore_env = ignore;
         self
     }
 
@@ -176,12 +168,9 @@ impl Isolate {
         vm.set_locale_provider(orbit_locale::provider());
         vm.rt.warnings = config.warnings;
         vm.set_gc_mode(config.gc_mode.raw());
-        let options = stdlib::Options {
-            ignore_env: config.ignore_env,
-        };
         for lib in Lib::OPEN_ORDER {
             if config.libraries.iter().any(|l| l.lib() == lib) {
-                stdlib::open_one(&mut vm, lib, options);
+                stdlib::open_one(&mut vm, lib);
             }
         }
         vm.set_memory_limit(config.memory_limit);
@@ -259,9 +248,10 @@ impl Isolate {
     }
 
     /// How much `load` checks binary chunks before running them (`None`:
-    /// not at all, so a malformed chunk can make the VM panic). Starts at
-    /// what `ORBIT_VERIFY` asks for, or the most this build can check;
-    /// levels past that are capped.
+    /// not at all: a malformed chunk can then make the VM panic or reach
+    /// values the script was never given, so lower it only for chunks you
+    /// trust). Starts at the most this build can check, whatever the
+    /// environment; levels past that are capped.
     #[cfg(feature = "verify")]
     pub fn set_binary_checks(&mut self, level: Option<BinaryChecks>) {
         use orbit_runtime::vm::op::verify::Level;

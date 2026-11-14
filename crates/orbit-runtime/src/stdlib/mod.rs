@@ -57,23 +57,11 @@ pub(crate) fn first_result(
     Ok(v)
 }
 
-/// How [`open_libs_with`] sets the libraries up.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Options {
-    /// Ignore the environment variable `ORBIT_VERIFY`, as `lua -E` does.
-    pub ignore_env: bool,
-}
-
-/// Open every library with default [`Options`].
-pub fn open_libs(vm: &mut Vm) {
-    open_libs_with(vm, Options::default());
-}
-
 /// Open every library this build has: base functions as globals, plus the
 /// library tables.
-pub fn open_libs_with(vm: &mut Vm, options: Options) {
+pub fn open_libs(vm: &mut Vm) {
     for lib in Lib::OPEN_ORDER {
-        open_one(vm, lib, options);
+        open_one(vm, lib);
     }
 }
 
@@ -108,7 +96,7 @@ impl Lib {
         Lib::Utf8,
     ];
 
-    /// The order [`open_libs_with`] opens them in.
+    /// The order [`open_libs`] opens them in.
     pub const OPEN_ORDER: [Lib; 10] = [
         Lib::Base,
         Lib::String,
@@ -147,7 +135,7 @@ impl Lib {
 
 /// Open one library: set its global and its `package.loaded` entry, and
 /// return its table. `None` when this build leaves the library out.
-pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object::Value> {
+pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
     use crate::object::Value;
     let opened = match lib {
         Lib::Base => {
@@ -157,15 +145,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
                 let v = vm.register_native(name, f);
                 vm.set_global(name, v);
             }
-            #[cfg(feature = "dump")]
-            checks::set_level(
-                vm,
-                if options.ignore_env {
-                    checks::strongest()
-                } else {
-                    checks::from_env()
-                },
-            );
             let g = vm.rt.globals;
             mark_loaded(vm, "_G", Value::Table(g));
             return Some(Value::Table(g));
@@ -228,7 +207,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib, options: Options) -> Option<crate::object
         #[allow(unreachable_patterns)]
         _ => false,
     };
-    let _ = options;
     opened.then(|| vm.global(lib.name()))
 }
 

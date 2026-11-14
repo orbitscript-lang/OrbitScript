@@ -307,10 +307,17 @@ macro_rules! op_table {
         }
 
         fn get_op(r: &mut Reader<'_>) -> Result<Op> {
-            Ok(match r.byte()? {
+            let op = match r.byte()? {
                 $($tag => Op::$name $({ $($f: Field::get(r)?),* })?,)*
                 _ => return Err(FormatError::Malformed("unknown instruction")),
-            })
+            };
+            // Only the VM makes native stubs. In a chunk, at any verification
+            // level or none, it would call any native by number, whatever
+            // the script was given.
+            if let Op::NativeEntry { .. } = op {
+                return Err(FormatError::Malformed("VM-internal instruction"));
+            }
+            Ok(op)
         }
     };
 }
