@@ -2,7 +2,7 @@
 //! with the system C compiler and loads it into `orbit`. The same module
 //! loads into the reference `lua5.5`, which passes `cmod/testmod.lua` too.
 //! A shared build loads it through liborbit's C module loader.
-#![cfg(all(target_os = "linux", feature = "c-modules"))]
+#![cfg(all(any(target_os = "linux", target_os = "macos"), feature = "c-modules"))]
 
 mod common;
 
@@ -22,10 +22,17 @@ fn module_dir() -> &'static Path {
         let include = Path::new(MANIFEST).join("../orbit-capi/csrc/include");
         // The headers for the build's Lua version (ADR-14).
         let versioned = orbit::LUA.dotted();
+        // Lua's names stay undefined, for the program to provide, as
+        // modules for `lua` are built: macOS needs that said.
+        let link: &[&str] = if cfg!(target_os = "macos") {
+            &["-bundle", "-undefined", "dynamic_lookup"]
+        } else {
+            &["-shared"]
+        };
         let out = Command::new(cc)
-            .args([
-                "-O1", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-I",
-            ])
+            .args(["-O1", "-fPIC", "-Wall", "-Wextra", "-Werror"])
+            .args(link)
+            .arg("-I")
             .arg(include.join(versioned))
             .arg("-I")
             .arg(include)
