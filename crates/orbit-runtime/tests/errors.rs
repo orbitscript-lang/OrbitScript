@@ -24,7 +24,9 @@ fn run(src: &str) -> Result<Vec<Value>, LuaError> {
 
 fn traceback(src: &str) -> String {
     let e = run(src).expect_err("the program fails");
-    e.traceback.expect("an uncaught error has a traceback")
+    e.traceback
+        .expect("an uncaught error has a traceback")
+        .into()
 }
 
 const TBC: &str = "local function tbc(f) return setmetatable({}, {__close = f}) end\n";

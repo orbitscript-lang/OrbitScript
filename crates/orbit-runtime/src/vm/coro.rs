@@ -19,7 +19,7 @@ use crate::vm::interp::Flow;
 use crate::vm::interp::extend_nil;
 use crate::vm::native::{CallOutcome, Continuation, NativeCtx, NativeReturn, ResumeOk};
 use crate::vm::ops::Exc;
-use crate::vm::{Catch, Frame, FrameKind, LuaError, Stack, Vm};
+use crate::vm::{Catch, Cause, Frame, FrameKind, LuaError, Stack, Vm};
 
 /// Nested resumes allowed before `C stack overflow` (where the reference
 /// stops).
@@ -79,6 +79,9 @@ pub(crate) struct Coroutine {
     status: CoStatus,
     /// The error it died with, if any (for `coroutine.close`).
     error: Option<Value>,
+    /// What raised `error`, so `coroutine.wrap` raises it again as the
+    /// same kind (a host's interrupt stays one).
+    cause: Cause,
     /// What [`ThreadState::extra_bytes`] reports: the parked stack's size.
     bytes: usize,
     /// How many times it has been parked suspended, to tell whether an
@@ -114,6 +117,7 @@ impl Coroutine {
             top: 1,
             status: CoStatus::Suspended,
             error: None,
+            cause: Cause::Error,
             parks: 0,
             cycle: 0,
             shrunk_at: None,
@@ -136,6 +140,7 @@ impl Coroutine {
             top: 0,
             status: CoStatus::Running,
             error: None,
+            cause: Cause::Error,
             bytes: 0,
             parks: 0,
             cycle: 0,
@@ -654,7 +659,7 @@ impl Vm {
     /// The running coroutine finished with its results, now in `xfer`: its
     /// stack is dropped and the resumer continues.
     fn co_finished(&mut self) -> Result<Flow, Exc> {
-        let flow = self.co_finish(Ok(()));
+        let flow = self.co_finish(Ok(()), Cause::Error);
         self.after_switch(flow)
     }
 
@@ -663,7 +668,11 @@ impl Vm {
     /// `Err` is an error raised on the resumer's stack, for the caller to
     /// raise there: [`Vm::unwind`], which is already doing that, or
     /// [`Vm::after_switch`].
-    pub(crate) fn co_finish(&mut self, outcome: Result<(), Value>) -> Result<Flow, Exc> {
+    pub(crate) fn co_finish(
+        &mut self,
+        outcome: Result<(), Value>,
+        cause: Cause,
+    ) -> Result<Flow, Exc> {
         let resumer = self.rt.resumers.pop().expect("a coroutine has a resumer");
         let co = self.rt.current;
         // A coroutine being closed has reported its error to the closer.
@@ -671,7 +680,9 @@ impl Vm {
         if let Err(e) = outcome {
             if closing != Closing::Closer {
                 self.heap.barrier_back(co);
-                co_mut(&mut self.heap, co).error = Some(e);
+                let c = co_mut(&mut self.heap, co);
+                c.error = Some(e);
+                c.cause = cause;
             }
         }
         self.switch_to(resumer, CoStatus::Dead);
@@ -1072,6 +1083,17 @@ impl NativeCtx<'_> {
     /// Whether thread `t` died with an error that no close has cleared.
     pub fn thread_failed(&self, t: Gc<Thread>) -> bool {
         t != self.vm.rt.current && co(&self.vm.heap, t).error.is_some()
+    }
+
+    /// What raised error `e`, when it is the one thread `t` died with
+    /// (and no close has cleared it): so a host's interrupt stays one when
+    /// it is raised again past the coroutine.
+    pub(crate) fn thread_error_cause(&self, t: Gc<Thread>, e: Value) -> Cause {
+        let c = co(&self.vm.heap, t);
+        match c.error {
+            Some(died) if t != self.vm.rt.current && died.same(e) => c.cause,
+            _ => Cause::Error,
+        }
     }
 
     /// Resume `t` with `args` and wait until it yields, returns or fails,

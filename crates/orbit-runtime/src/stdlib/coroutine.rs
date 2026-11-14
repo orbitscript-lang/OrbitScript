@@ -4,7 +4,9 @@
 //! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use crate::object::{Gc, Thread, Value};
-use crate::vm::{CallOutcome, CoStatus, LuaError, NativeCtx, NativeFn, NativeReturn, ResumeOk};
+use crate::vm::{
+    CallOutcome, Cause, CoStatus, LuaError, NativeCtx, NativeFn, NativeReturn, ResumeOk,
+};
 use orbit_lua_version::LUA;
 
 type R = Result<NativeReturn, LuaError>;
@@ -113,12 +115,15 @@ fn wrapped_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
             // Close the coroutine, which runs its pending `__close` handlers,
             // then raise the error (or theirs). The window keeps the error:
             // a resume refused at once (say, nested too deeply) leaves the
-            // coroutine without one.
+            // coroutine without one. Beside it, whether the host's
+            // interrupt raised it, which the close clears.
             let Value::Thread(co) = ctx.upvalue(0) else {
                 unreachable!("wrap's upvalue is its coroutine")
             };
+            let interrupt = ctx.thread_error_cause(co, e) == Cause::Interrupt;
             ctx.truncate(0);
             ctx.push(e);
+            ctx.push(Value::Bool(interrupt));
             Ok(NativeReturn::Close {
                 co,
                 k: wrapped_closed,
@@ -132,16 +137,23 @@ fn wrapped_closed(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
         CallOutcome::Err(e) => e,
         CallOutcome::Ok(_) => ctx.arg(0),
     };
+    // An interrupt stays one, unless a `__close` handler raised another
+    // error in its place.
+    let cause = if e.same(ctx.arg(0)) && matches!(ctx.arg(1), Value::Bool(true)) {
+        Cause::Interrupt
+    } else {
+        Cause::Error
+    };
     // A string error gets the position of the wrapper's caller (level 1).
+    let mut e = e;
     if let Value::Str(s) = e {
         let mut text = ctx.where_(1).into_bytes();
         if !text.is_empty() {
             text.extend_from_slice(ctx.bytes(s));
-            let msg = ctx.new_str_owned(text);
-            return Err(ctx.error_value(msg));
+            e = ctx.new_str_owned(text);
         }
     }
-    Err(ctx.error_value(e))
+    Err(LuaError::with_cause(e, cause))
 }
 
 fn close_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {

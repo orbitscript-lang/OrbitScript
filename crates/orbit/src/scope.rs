@@ -110,16 +110,15 @@ impl<'s> Scope<'s> {
 
     /// An error raised in the VM, as the API reports it, keeping its value.
     pub(crate) fn error_of(&self, stack: &mut Stack<'_>, e: Raised) -> Error {
-        let kind = match stack.status_of(&e) {
-            Status::Memory => ErrorKind::Memory,
-            _ => ErrorKind::Runtime,
-        };
-        let (message, traceback) = stack.take_raised(e);
-        let kind = if kind == ErrorKind::Runtime && message.ends_with("interrupted!") {
+        let kind = if stack.is_interrupt(&e) {
             ErrorKind::Interrupted
         } else {
-            kind
+            match stack.status_of(&e) {
+                Status::Memory => ErrorKind::Memory,
+                _ => ErrorKind::Runtime,
+            }
         };
+        let (message, traceback) = stack.take_raised(e);
         self.release_pins(stack);
         let slot = stack.pin(-1);
         let _ = stack.set_top(-2);

@@ -275,17 +275,16 @@ impl Vm {
             unreachable!("meta frame")
         };
         let res = self.rt.stack.regs[m.func as usize];
-        if let MetaAction::Unwind = action {
+        if let MetaAction::Unwind { cause } = action {
             // A `__close` handler ran while `res` unwound: carry on.
             let traceback = match self.rt.stack.regs[m.func as usize + 1] {
-                Value::Str(t) => {
-                    Some(String::from_utf8_lossy(self.heap.get(t).as_bytes()).into_owned())
-                }
+                Value::Str(t) => Some(String::from_utf8_lossy(self.heap.get(t).as_bytes()).into()),
                 _ => None,
             };
             return Err(Exc::Handled(LuaError {
                 value: res,
                 traceback,
+                cause,
             }));
         }
         let caller = self.rt.stack.frames.last_mut().expect("caller frame");
@@ -303,7 +302,7 @@ impl Vm {
                 self.rt.top = top as usize;
                 caller.pc -= 1;
             }
-            MetaAction::Unwind => unreachable!("handled above"),
+            MetaAction::Unwind { .. } => unreachable!("handled above"),
             MetaAction::ToStr { dst } => {
                 let v = match res {
                     Value::Str(_) => res,
