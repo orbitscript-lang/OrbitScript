@@ -339,7 +339,7 @@ fn convert_c(out: &mut Vec<u8>, c: u8, tm: &Tm, loc: &dyn TimeLocale) {
         b'Y' => write!(w, "{}", tm.year),
         b'z' => {
             let sign = if tm.offset < 0 { '-' } else { '+' };
-            let a = tm.offset.abs();
+            let a = tm.offset.unsigned_abs();
             write!(w, "{sign}{:02}{:02}", a / 3600, a / 60 % 60)
         }
         b'Z' => write!(w, "{}", tm.zone),

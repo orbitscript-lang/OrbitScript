@@ -58,3 +58,23 @@ err(select, math.mininteger)
 err(select, math.mininteger, 1, 2)
 err(select, -3, 1, 2)
 print(select(-2, "a", "b"))
+
+-- Ranges at the edges of the integer range: errors or a count, not a crash.
+local mi, ma = math.mininteger, math.maxinteger
+err(table.move, {}, mi, ma, 1)
+err(table.move, {}, mi + 1, ma, 1)
+err(table.move, {}, 0, ma, 1)
+err(table.move, {1, 2}, 1, 2, ma)
+print(#table.move({1, 2}, 1, 2, ma - 1, {}))
+print(table.move({1, 2}, ma, mi, 1)[1])
+err(table.unpack, {}, mi, ma)
+err(table.unpack, {}, 0, ma)
+err(table.unpack, {}, mi, -1)
+print(select("#", table.unpack({}, ma, ma)))
+print(select("#", table.unpack({}, mi, mi + 2)))
+-- Loops counting down from the top or up from the bottom with extreme steps.
+for i = ma, mi, mi do io.write(i, " ") end print()
+for i = mi, ma, ma do io.write(i, " ") end print()
+for i = ma, ma - 2, -1 do io.write(i, " ") end print()
+for i = mi, mi + 2 do io.write(i, " ") end print()
+for i = 0, mi, mi + 1 do io.write(i, " ") end print()
