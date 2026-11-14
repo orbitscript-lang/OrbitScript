@@ -560,15 +560,19 @@ fn open_options(mode: &[u8]) -> Option<(OpenOptions, bool, bool)> {
 fn open_file(name: &[u8], mode: &[u8], line_endings: LineEndings) -> Option<io::Result<Stream>> {
     let (o, r, w) = open_options(mode)?;
     let text = !mode.contains(&b'b') && line_endings.translates();
-    let opened = o
-        .open(os_path(name))
-        .map_err(|e| windows_directory_error(e, name));
-    Some(opened.and_then(|mut f| {
-        if text && mode.starts_with(b"a+") {
-            drop_end_of_text(&mut f)?;
+    let path = os_path(name);
+    if text && mode.starts_with(b"a+") {
+        // A handle opened to append can't truncate, so this one does. If
+        // it can't open the file (`a+` creates a missing one), the open
+        // below reports why.
+        if let Ok(mut f) = OpenOptions::new().read(true).write(true).open(&path) {
+            if let Err(e) = drop_end_of_text(&mut f) {
+                return Some(Err(e));
+            }
         }
-        Ok(Stream::new(Kind::File(f), r, w).text(text, line_endings))
-    }))
+    }
+    let opened = o.open(&path).map_err(|e| windows_directory_error(e, name));
+    Some(opened.map(|f| Stream::new(Kind::File(f), r, w).text(text, line_endings)))
 }
 
 /// Remove a Ctrl-Z that ends `f`, as the C library does when it opens a
@@ -1339,7 +1343,7 @@ mod tests {
         std::fs::write(&path, b"x\x1a").unwrap();
         let mut f = OpenOptions::new()
             .read(true)
-            .append(true)
+            .write(true)
             .open(&path)
             .unwrap();
         drop_end_of_text(&mut f).unwrap();

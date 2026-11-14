@@ -47,7 +47,7 @@ fn examples_print_what_they_expect() {
                 .env_remove("ORBIT_PATH")
                 .output()
                 .unwrap();
-            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stdout = common::text(&out.stdout);
             if !out.status.success() || stdout != expected {
                 failures.push(format!(
                     "{dir}/{file}: {}\n--- stdout\n{stdout}--- stderr\n{}",

@@ -27,11 +27,11 @@ fn orbit(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
 }
 
 fn out(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stdout).into_owned()
+    common::text(&o.stdout)
 }
 
 fn err(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stderr).into_owned()
+    common::text(&o.stderr)
 }
 
 /// Standard input, output and error are text streams on Windows, as the
@@ -259,6 +259,7 @@ fn print_output_reaches_a_pipe_at_once() {
     let line = rx.recv_timeout(std::time::Duration::from_secs(10));
     let _ = child.kill();
     let _ = child.wait();
+    let line = line.map(|l| common::text(l.as_bytes()));
     assert_eq!(line.as_deref(), Ok("ready\n"));
 }
 
