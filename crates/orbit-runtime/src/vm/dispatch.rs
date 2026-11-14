@@ -125,7 +125,7 @@ impl Vm {
                 Ran::Done => return Ok(()),
                 Ran::NoMemory => match self.raise(crate::object::NoMemory.into())? {
                     Flow::Done => return Ok(()),
-                    Flow::Reload | Flow::Switched => self.rt.switched = false,
+                    Flow::Reload | Flow::Switched => {}
                 },
                 Ran::Switch => {}
             }
@@ -339,11 +339,7 @@ impl Vm {
                     macro_rules! flow {
                         ($e:expr) => {
                             match $e {
-                                Ok(Flow::Reload) => continue 'reload,
-                                Ok(Flow::Switched) => {
-                                    self.rt.switched = false;
-                                    continue 'reload;
-                                }
+                                Ok(Flow::Reload | Flow::Switched) => continue 'reload,
                                 Ok(Flow::Done) => return Ok(Ran::Done),
                                 Err(x) => throw!(x),
                             }
@@ -1243,17 +1239,9 @@ impl Vm {
                 }
                 break 'run exc;
             };
-            // The instruction at `pc - 1` raised `exc`. After a coroutine
-            // switch, the running stack isn't the one this loop's frame
-            // state describes, so its pc isn't saved.
-            if !std::mem::take(&mut self.rt.switched) {
-                save_pc!();
-            }
-            match self.raise(exc) {
-                Ok(Flow::Reload | Flow::Switched) => {
-                    self.rt.switched = false;
-                    continue 'reload;
-                }
+            // The instruction at `pc - 1` raised `exc`.
+            match self.raise_at(exc, pc) {
+                Ok(Flow::Reload | Flow::Switched) => continue 'reload,
                 Ok(Flow::Done) => return Ok(Ran::Done),
                 Err(e) => return Err(e),
             }

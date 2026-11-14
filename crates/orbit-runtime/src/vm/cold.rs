@@ -26,6 +26,20 @@ use crate::vm::ops::{self, Exc};
 use crate::vm::{Frame, FrameKind, LuaError, Vm};
 
 impl Vm {
+    /// [`Vm::raise`] for the dispatch loop, whose frame (on top) raised `x`
+    /// at the instruction before `pc`. An error that left after a coroutine
+    /// switch is not that frame's: the running stack isn't the one the
+    /// loop's state describes, so the pc isn't saved.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn raise_at(&mut self, x: Exc, pc: usize) -> Result<Flow, LuaError> {
+        if let Exc::Left(e) = x {
+            return Err(e);
+        }
+        self.rt.stack.frames.last_mut().expect("a frame").pc = pc as u32;
+        self.raise(x)
+    }
+
     /// Raise an instruction's error: add its position, then resume the
     /// nearest protected call or return the error.
     #[cold]
@@ -80,8 +94,7 @@ impl Vm {
             }
             x => x,
         };
-        let t = self.thrown(x);
-        self.unwind(t)
+        self.settle(x)
     }
 
     /// Native `id`, called at stack index `func`, raised `e`: give it a

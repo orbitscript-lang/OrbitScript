@@ -629,9 +629,6 @@ pub struct Runtime {
     /// building a string needs no allocation of its own
     /// ([`NativeCtx::take_buf`](crate::vm::NativeCtx::take_buf)).
     pub(crate) scratch: Vec<u8>,
-    /// Set by a stack switch, so the dispatch loop doesn't save its pc into
-    /// the other stack's frames; cleared when the loop reloads.
-    pub(crate) switched: bool,
     /// Whether any stack's hook may differ from [`hook::Hook::default`]:
     /// set (for good) by `debug.sethook`, an interrupt, or a finalizer
     /// turning hooks off. Until then a coroutine switch skips copying the
@@ -882,7 +879,6 @@ impl Vm {
                 resumers: Vec::new(),
                 xfer: Vec::new(),
                 scratch: Vec::new(),
-                switched: false,
                 hooks_touched: false,
                 limit_grace: false,
                 native_protos: Default::default(),

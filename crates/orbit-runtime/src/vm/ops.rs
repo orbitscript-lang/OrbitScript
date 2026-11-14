@@ -31,6 +31,11 @@ pub(crate) enum Exc {
     Handled(crate::vm::LuaError),
     /// An error in error handling: no message handler runs for it.
     ErrErr,
+    /// Not for the frame that gets it: an error raised right after a
+    /// coroutine switch, on a stack this frame doesn't belong to, that has
+    /// already unwound and found nothing in the run to catch it. The run
+    /// returns it.
+    Left(crate::vm::LuaError),
     /// An allocation failed, or would pass the heap's limit: Lua's
     /// `not enough memory`, which has no position. A store that fails this
     /// way is retried once after a full collection.

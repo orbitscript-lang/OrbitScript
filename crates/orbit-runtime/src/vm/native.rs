@@ -1008,7 +1008,7 @@ impl NativeCtx<'_> {
             Err(Exc::Rt(msg, _)) => Err(self.error(&msg)),
             Err(Exc::Plain(msg)) => Err(LuaError::new(self.new_str(msg.as_bytes()))),
             Err(Exc::NoMemory) => Err(self.no_memory()),
-            Err(Exc::Lua(e) | Exc::Handled(e)) => Err(e),
+            Err(Exc::Lua(e) | Exc::Handled(e) | Exc::Left(e)) => Err(e),
             Err(x @ Exc::ErrErr) => Err(self.vm.make_error(x)),
             Err(Exc::Index { .. } | Exc::NewIndex { .. }) => {
                 unreachable!("only the dispatch loop defers indexing")
