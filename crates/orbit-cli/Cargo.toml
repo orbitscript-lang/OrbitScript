@@ -29,8 +29,16 @@ orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 signal-hook = "0.4.5"
 
+# The terminal for line editing (`src/repl/tty.rs`).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "termios", "process"], optional = true }
+
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["std"] }
+
+# A pseudo-terminal for the line editor's tests (`tests/tty.rs`).
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "termios", "process", "pty", "fs"] }
 
 [features]
 default = ["runtime", "c-modules", "ffi", "json", "line-editing", "dap"]
@@ -55,7 +63,7 @@ ffi-system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
 # input is read as a script, as a pipe is.
 repl = []
 # Line editing, history and Tab completion in interactive mode.
-line-editing = ["repl"]
+line-editing = ["repl", "dep:rustix"]
 # The debugger engine (ADR-12), without a way in yet.
 debugger = ["orbit/debugger"]
 # `orbit --debug-server`: run a script under an editor's debugger (ADR-12).
