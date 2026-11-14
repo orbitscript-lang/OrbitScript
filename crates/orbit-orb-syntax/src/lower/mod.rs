@@ -145,46 +145,9 @@ impl Syms {
 }
 
 /// Global names every module can read without declaring them: Lua 5.5's base library and
-/// standard modules, plus `panic` (an alias of `error`).
-const PRELUDE: &[&[u8]] = &[
-    b"assert",
-    b"collectgarbage",
-    b"dofile",
-    b"error",
-    b"getmetatable",
-    b"ipairs",
-    b"load",
-    b"loadfile",
-    b"next",
-    b"pairs",
-    b"pcall",
-    b"print",
-    b"rawequal",
-    b"rawget",
-    b"rawlen",
-    b"rawset",
-    b"require",
-    b"select",
-    b"setmetatable",
-    b"tonumber",
-    b"tostring",
-    b"type",
-    b"warn",
-    b"xpcall",
-    b"_G",
-    b"_VERSION",
-    b"arg",
-    b"coroutine",
-    b"debug",
-    b"io",
-    b"math",
-    b"os",
-    b"package",
-    b"string",
-    b"table",
-    b"utf8",
-    b"panic",
-];
+/// standard modules, plus `panic` (an alias of `error`). The build script reads them from the
+/// checker's prelude stub (`orbit-check/stubs/prelude.orbi`), which is where a name is added.
+const PRELUDE: &[&[u8]] = include!(concat!(env!("OUT_DIR"), "/prelude.rs"));
 
 /// What a scope entry names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

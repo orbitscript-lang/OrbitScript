@@ -237,8 +237,13 @@ version = "0.0.0"
 dependencies = [
  "orbit-compiler",
  "orbit-hir",
+ "orbit-lua-text",
  "orbit-lua-version",
 ]
+
+[[package]]
+name = "orbit-lua-text"
+version = "0.0.0"
 
 [[package]]
 name = "orbit-lua-version"
@@ -270,6 +275,7 @@ dependencies = [
  "orbit-compiler",
  "orbit-gc",
  "orbit-lua-syntax",
+ "orbit-lua-text",
  "orbit-lua-version",
  "orbit-orb-syntax",
 ]

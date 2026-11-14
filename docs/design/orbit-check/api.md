@@ -201,7 +201,7 @@ A code marked **compiler** is a rule of the language that the compiler enforces:
 
 ## Stubs
 
-The prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`; `std.json` is `stubs/std/json.orbi`, shown as `<builtin>/std/json.orbi`. `tests/stubs.rs` fails when a stub and the runtime's libraries, or the prelude and the front end's list, disagree.
+The prelude and the standard library come from bundled `.orbi` files (`crates/orbit-check/stubs/`), shown as `<builtin>/NAME.orbi`; `std.json` is `stubs/std/json.orbi`, shown as `<builtin>/std/json.orbi`. `tests/stubs.rs` fails when a stub and the runtime's libraries disagree. The front end's list of prelude names is made from `prelude.orbi` when it is built (`orbit-orb-syntax/build.rs`), so the two cannot.
 
 ### How the stubs are written
 

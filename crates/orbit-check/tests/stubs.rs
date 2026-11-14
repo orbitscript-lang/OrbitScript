@@ -1,6 +1,6 @@
 //! The bundled stubs name exactly what the runtime provides: every global and library field the
-//! runtime installs has a stub, and every stub names something real. The prelude also matches
-//! the front end's own list of names that need no declaration.
+//! runtime installs has a stub, and every stub names something real. (The front end's list of
+//! names that need no declaration is made from the prelude stub when it is built.)
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -46,16 +46,6 @@ fn stub_methods(text: &str) -> BTreeSet<String> {
         }
     }
     out
-}
-
-/// The byte-string names listed in a Rust `&[...]` constant that starts at `start`.
-fn listed(source: &str, start: &str) -> BTreeSet<String> {
-    let from = source.find(start).expect("the list") + start.len();
-    let list = &source[from..from + source[from..].find("];").expect("the list's end")];
-    list.split("b\"")
-        .skip(1)
-        .map(|s| s[..s.find('"').expect("a closing quote")].to_string())
-        .collect()
 }
 
 /// The fields `#[native(name = "<module>f")]` attributes in `source` name: the natives a module
@@ -174,14 +164,4 @@ fn stubs_match_the_runtime() {
         ffi,
         "std.ffi functions"
     );
-}
-
-/// The prelude stub names what the front end lets a module read without declaring it.
-#[test]
-fn prelude_matches_the_front_end() {
-    let front_end = listed(
-        &read("../orbit-orb-syntax/src/lower/mod.rs"),
-        "const PRELUDE: &[&[u8]] = &[",
-    );
-    assert_eq!(stub_names(&read("stubs/prelude.orbi")), front_end);
 }

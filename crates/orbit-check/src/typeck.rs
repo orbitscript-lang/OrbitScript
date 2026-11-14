@@ -41,11 +41,12 @@ use crate::FileId;
 use crate::observe::{Def, Defs, Owner};
 use crate::symbols::{Module, StructLit, SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
-use cast::{CastRules, Target, strip_optional};
+use cast::{CastRules, Target};
 use env::{Base, Env, Key, falsy_part, filter_type_name};
 use generics::Generics;
 use lower::Lowering;
 use ops::OpRules;
+use orbit_orb_syntax::cast::{Scalar, strip_optional};
 use passes::Typed;
 use report::Reporter;
 use view::SymbolView;
@@ -2231,18 +2232,15 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
             let (m, opt) = strip_optional(m);
             nilable |= opt;
             match self.casts().target(m) {
-                Ok(Target::Any) => return result(self, self.types.any),
-                Ok(t) => targets.push(t),
-                Err(msg) => {
-                    self.report.error(m.span, code::UNCHECKABLE_CAST, msg);
-                    // The cast still has the type it names.
-                    return result(self, lowered);
-                }
+                Some(Target::Any) => return result(self, self.types.any),
+                Some(t) => targets.push(t),
+                // Lowering reports it (T0210). The cast still has the type it names.
+                None => return result(self, lowered),
             }
         }
 
         if src != self.types.any {
-            if targets == [Target::Bool] {
+            if targets == [Target::Scalar(Scalar::Bool)] {
                 if falsy_part(self.types, src).is_none() {
                     let msg = format!(
                         "a value of type {} is never false, so `as bool` is always `true`; {}",

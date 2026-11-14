@@ -139,7 +139,7 @@ The compiler's observer is `Nothing`: its handle is `()`, its methods are empty 
 
 ### Names
 
-- A name resolves to the innermost binding, then to an item later in an enclosing block, then to the prelude: Lua 5.5's base functions and standard modules, plus `panic` (`error`). The prelude is read-only. Any other global needs `extern NAME;` (read and write) or `global NAME = value;` (a `Define`). There are no implicit globals; a typo is a compile error that suggests `extern`.
+- A name resolves to the innermost binding, then to an item later in an enclosing block, then to the prelude: Lua 5.5's base functions and standard modules, plus `panic` (`error`). The list is made at build time from the checker's stub of the prelude, `orbit-check/stubs/prelude.orbi`, so it is written once. The prelude is read-only. Any other global needs `extern NAME;` (read and write) or `global NAME = value;` (a `Define`). There are no implicit globals; a typo is a compile error that suggests `extern`.
 - **Items are visible in their whole block**, as in Rust, so module-level functions can call each other in any order. An item used before its definition, from inside a function, becomes a local declared at the top of its block and assigned at the definition; others lower as the language design says (`LocalFunction`, `Let`). A use before the definition in the same function (where the value can't exist yet) is a compile error.
 - **Parameters are immutable** unless written `mut x`, like `let`. Pattern bindings are immutable unless `mut`.
 
