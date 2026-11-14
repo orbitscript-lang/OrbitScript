@@ -152,6 +152,7 @@ fn compile_check_suite(
         let o = process::run(&Spec {
             program: compiler.to_path_buf(),
             args: vec!["-p".into(), e.file.as_str().into()],
+            env: Vec::new(),
             cwd: suite.clone(),
             timeout,
             measure_rss: false,

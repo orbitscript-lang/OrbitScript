@@ -35,7 +35,8 @@ json = ["dep:serde", "dep:serde_json"]
 ffi-system-libffi = ["ffi", "orbit-ffi/system-libffi"]
 
 # The workspace lints, except that `unsafe_code` is denied rather than
-# forbidden, so `src/crt.rs` can allow its `strerror` calls (ADR-6). Keep the rest in step with the workspace `Cargo.toml`.
+# forbidden, so `src/crt.rs` (the C library's `strerror`) and
+# `src/ctime.rs` (the C library's local time) can allow theirs (ADR-6). Keep the rest in step with the workspace `Cargo.toml`.
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

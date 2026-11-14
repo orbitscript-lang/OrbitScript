@@ -4,6 +4,11 @@
 //! exit status, standard output and error message must match after
 //! normalizing the things that legitimately differ (the program name in
 //! error messages, object addresses, traceback layout).
+//!
+//! A file `NAME.lua` with a `NAME.env` beside it runs once for each line of
+//! that file, with the line's `VAR=value` set in the environment (`#`
+//! starts a comment line). Each run is its own result, named
+//! `NAME.lua VAR=value`, so an expected-pass list can hold some of them.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -241,11 +246,16 @@ pub fn run_corpus(
         return Err(format!("no .lua files to run in {}", corpus.display()));
     }
     let mut results = Vec::new();
-    for f in files {
+    for (f, setting) in with_settings(corpus, files)? {
+        let name = match &setting {
+            Some((var, value)) => format!("{f} {var}={value}"),
+            None => f.clone(),
+        };
         let run = |program: &Path| {
             process::run(&Spec {
                 program: program.to_path_buf(),
                 args: vec![f.as_str().into()],
+                env: setting.iter().map(|(k, v)| (k.into(), v.into())).collect(),
                 cwd: corpus.to_path_buf(),
                 timeout,
                 measure_rss: false,
@@ -262,10 +272,42 @@ pub fn run_corpus(
                 _ => m,
             }
         });
-        report(&f, mismatch.as_deref());
-        results.push((f, mismatch));
+        report(&name, mismatch.as_deref());
+        results.push((name, mismatch));
     }
     Ok(results)
+}
+
+/// An environment variable and its value for one run.
+type Setting = Option<(String, String)>;
+
+/// Each file with the settings it runs under: those in its `.env` file,
+/// or none.
+fn with_settings(corpus: &Path, files: Vec<String>) -> Result<Vec<(String, Setting)>> {
+    let mut runs = Vec::new();
+    for f in files {
+        let env = corpus
+            .join(f.trim_end_matches(".lua"))
+            .with_extension("env");
+        let text = match fs::read_to_string(&env) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                runs.push((f, None));
+                continue;
+            }
+            Err(e) => return Err(format!("{}: {e}", env.display())),
+        };
+        for line in text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let (var, value) = line
+                .split_once('=')
+                .ok_or_else(|| format!("{}: expected VAR=value, found {line:?}", env.display()))?;
+            runs.push((f.clone(), Some((var.to_string(), value.to_string()))));
+        }
+    }
+    Ok(runs)
 }
 
 #[cfg(test)]

@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 pub struct Spec {
     pub program: PathBuf,
     pub args: Vec<OsString>,
+    /// Variables set for the program, on top of this process's environment.
+    pub env: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
     pub timeout: Duration,
     /// Record peak RSS (Unix only; ignored elsewhere).
@@ -70,7 +72,9 @@ pub fn run(spec: &Spec) -> std::io::Result<Outcome> {
 
 fn run_plain(spec: &Spec) -> std::io::Result<Outcome> {
     let mut cmd = Command::new(&spec.program);
-    cmd.args(&spec.args).current_dir(&spec.cwd);
+    cmd.args(&spec.args)
+        .envs(spec.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&spec.cwd);
     let (exit, wall, stdout, stderr) = spawn_and_wait(cmd, spec.timeout)?;
     Ok(Outcome {
         exit,
@@ -93,6 +97,7 @@ fn run_measured(spec: &Spec) -> std::io::Result<Outcome> {
         .arg(spec.timeout.as_millis().to_string())
         .arg(&spec.program)
         .args(&spec.args)
+        .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&spec.cwd);
     // The helper enforces the timeout on its child; ours is a backstop.
     let (outer, _, stdout, stderr) = spawn_and_wait(cmd, spec.timeout + Duration::from_secs(10))?;
@@ -263,6 +268,7 @@ mod tests {
         run(&Spec {
             program: "sh".into(),
             args: vec!["-c".into(), script.into()],
+            env: Vec::new(),
             cwd: ".".into(),
             timeout,
             measure_rss: false,

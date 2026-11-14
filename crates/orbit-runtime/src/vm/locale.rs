@@ -42,11 +42,6 @@ impl Vm {
         self.refresh_locale();
     }
 
-    /// See [`LocaleProvider::time_pattern`].
-    pub fn locale_time_pattern(&self, spec: &[u8]) -> Option<Vec<u8>> {
-        self.rt.locale_provider.time_pattern(spec)
-    }
-
     /// See [`LocaleProvider::time_text`].
     pub fn locale_time_text(&self, spec: &[u8], tm: &TimeParts) -> Option<Vec<u8>> {
         self.rt.locale_provider.time_text(spec, tm)
