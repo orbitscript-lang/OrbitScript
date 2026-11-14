@@ -620,7 +620,7 @@ fn unwinding_close(k: FrameKind) -> bool {
     matches!(
         k,
         FrameKind::Meta {
-            action: crate::vm::meta::MetaAction::Unwind { .. },
+            action: crate::vm::meta::MetaAction::Unwind,
             ..
         }
     )

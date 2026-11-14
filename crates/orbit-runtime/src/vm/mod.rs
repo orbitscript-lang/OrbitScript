@@ -637,23 +637,10 @@ pub struct Runtime {
     /// turning hooks off. Until then a coroutine switch skips copying the
     /// hooks, which are all equal.
     pub(crate) hooks_touched: bool,
-    /// A safe point found the heap over its limit ([`Vm::set_memory_limit`])
-    /// even after a full collection: the dispatch loop returned so `run`
-    /// can raise `not enough memory` there.
-    pub(crate) no_memory: bool,
     /// `not enough memory` was raised for passing the limit and the heap
     /// hasn't been back under it since: the script may use up to
     /// [`LIMIT_GRACE`] more to handle the error.
     pub(crate) limit_grace: bool,
-    /// The error being raised is an error in error handling: it skips
-    /// message handlers and becomes `error in error handling`.
-    pub(crate) errerr: bool,
-    /// The error being raised has already been through its message handler
-    /// (it is being re-raised after a `__close` handler ran).
-    pub(crate) handled: bool,
-    /// The traceback of an error on its way out of a `Vm::call`, taken
-    /// before its to-be-closed variables closed (and popped the frames).
-    pub(crate) unwind_traceback: Option<String>,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>, CheapHash>,
     /// The threads parked suspended most recently, with their park count
@@ -897,11 +884,7 @@ impl Vm {
                 scratch: Vec::new(),
                 switched: false,
                 hooks_touched: false,
-                no_memory: false,
                 limit_grace: false,
-                errerr: false,
-                handled: false,
-                unwind_traceback: None,
                 native_protos: Default::default(),
                 cooling: vec![None; coro::HOT_STACKS],
                 cooling_at: 0,
