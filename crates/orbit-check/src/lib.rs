@@ -548,10 +548,11 @@ impl Workspace {
         let (mut compile_errors, recorder) = orbit_orb_syntax::lower_observed(&ast, recorder);
         let (mut m, defs) = recorder.finish();
         if is_stub(&path) {
-            // A stub has declarations without bodies and is never compiled. What lowering
-            // finds wrong with its names is the checker's to report, like its other findings.
-            compile_errors
-                .retain(|e| e.code == code::UNKNOWN_NAME || e.code == code::USED_BEFORE_DEFINITION);
+            // A stub is never compiled: its declarations have no bodies or values, which is the
+            // one thing lowering holds against it that isn't a mistake. The rest of what
+            // lowering finds (an unknown name, a parameter declared twice) is wrong in a stub
+            // too, and is the checker's to report, like its other findings.
+            compile_errors.retain(|e| e.code != code::STUB_DECLARATION);
             diagnostics.append(&mut compile_errors);
         }
         typeck::check(

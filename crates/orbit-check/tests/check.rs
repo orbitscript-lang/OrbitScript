@@ -776,15 +776,23 @@ fn names_are_the_compilers() {
         codes("fn f(v) {\n    match v {\n        _ => 1,\n        n => n + zzz,\n    }\n}\n"),
         [(4, "T0101")]
     );
-    // A stub is lowered only for its names, and reports nothing about having no bodies.
+    // A stub reports nothing about having no bodies or values, and everything else that the
+    // compiler would hold against it.
     let mut ws = Workspace::new(Config::default(), Box::new(Memory(vec![])));
     let stub = ws.set_source(
         Path::new("/p/m.orbi"),
-        b"pub struct P { x: int }\nimpl P {\n    pub fn get(self) -> int;\n}\npub fn f(p: P, q: Q) -> int;\n"
+        b"pub struct P { x: int }\nimpl P {\n    pub fn get(self) -> int;\n}\npub const N: int;\npub fn f(p: P, q: Q) -> int;\npub fn g(a: int, a: int);\n"
             .to_vec(),
     );
-    let found: Vec<_> = ws.diagnostics(stub).iter().map(|d| d.code).collect();
-    assert_eq!(found, [code::UNKNOWN_TYPE]);
+    let found: Vec<_> = ws
+        .diagnostics(stub)
+        .iter()
+        .map(|d| (d.line, d.code))
+        .collect();
+    assert_eq!(
+        found,
+        [(6, code::UNKNOWN_TYPE), (7, code::DUPLICATE_PARAMETER)]
+    );
 }
 
 /// The design document's table lists every code, and nothing that isn't one.
