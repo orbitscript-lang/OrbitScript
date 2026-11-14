@@ -758,6 +758,35 @@ fn compile_errors_cannot_be_hidden() {
     assert_eq!(ws.diagnostics(stub), []);
 }
 
+/// What a name refers to is what the compiler's lowering says it refers to.
+#[test]
+fn names_are_the_compilers() {
+    let codes = |src: &str| -> Vec<(u32, &'static str)> {
+        diagnostics_of(src, false)
+            .into_iter()
+            .filter(|(_, code, _)| !code.starts_with("T03"))
+            .map(|(line, code, _)| (line, code))
+            .collect()
+    };
+    // A type alias or a type parameter isn't a value.
+    assert_eq!(codes("type Id = int;\nprint(Id);\n"), [(2, "T0101")]);
+    assert_eq!(codes("fn f<T>(x: T) { print(T, x); }\n"), [(1, "T0101")]);
+    // An arm that never runs is still read: its names are known and its mistakes reported.
+    assert_eq!(
+        codes("fn f(v) {\n    match v {\n        _ => 1,\n        n => n + zzz,\n    }\n}\n"),
+        [(4, "T0101")]
+    );
+    // A stub is lowered only for its names, and reports nothing about having no bodies.
+    let mut ws = Workspace::new(Config::default(), Box::new(Memory(vec![])));
+    let stub = ws.set_source(
+        Path::new("/p/m.orbi"),
+        b"pub struct P { x: int }\nimpl P {\n    pub fn get(self) -> int;\n}\npub fn f(p: P, q: Q) -> int;\n"
+            .to_vec(),
+    );
+    let found: Vec<_> = ws.diagnostics(stub).iter().map(|d| d.code).collect();
+    assert_eq!(found, [code::UNKNOWN_TYPE]);
+}
+
 /// The design document's table lists every code, and nothing that isn't one.
 #[test]
 fn every_code_is_documented() {

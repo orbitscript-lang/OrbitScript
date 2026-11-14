@@ -38,7 +38,7 @@ use orbit_orb_syntax::ast::{
 };
 
 use crate::FileId;
-use crate::resolve::{Def, Defs, Owner};
+use crate::observe::{Def, Defs, Owner};
 use crate::symbols::{Module, StructLit, SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
 use cast::{CastRules, Target, strip_optional};

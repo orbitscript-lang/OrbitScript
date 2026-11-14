@@ -19,9 +19,90 @@ use orbit_orb_syntax::ast::{self, ItemKind, TypeKind};
 use orbit_orb_syntax::observe::{Assign as Assigned, Local, Observer, TypeNames};
 
 use crate::diag::code;
-use crate::resolve::{Assign, BUILTIN_TYPES, Def, Defs, Deps, Owner};
 use crate::symbols::{Module, Symbol, SymbolId, SymbolKind};
 use crate::{Code, FileId};
+
+/// Type names that need no definition (proposal, "The type language").
+pub(crate) const BUILTIN_TYPES: &[&str] = &[
+    "nil", "bool", "int", "float", "number", "string", "table", "function", "thread", "userdata",
+    "any",
+];
+
+/// Where a symbol of this module was defined, for the type checker to read its annotation or
+/// value. Symbols without an entry get their type while the checker walks the code that binds
+/// them (pattern bindings, closure parameters).
+#[derive(Debug)]
+pub(crate) enum Def<'a> {
+    Fn {
+        decl: &'a ast::FnDecl,
+        owner: Option<Owner<'a>>,
+    },
+    Let {
+        ty: Option<&'a ast::Type>,
+        init: Option<&'a ast::Expr>,
+        mutable: bool,
+        /// The position in `let (a, b) = ...`.
+        slot: Option<usize>,
+    },
+    Param {
+        ty: Option<&'a ast::Type>,
+        rest: bool,
+    },
+    Const {
+        ty: Option<&'a ast::Type>,
+        value: Option<&'a ast::Expr>,
+    },
+    Field {
+        ty: Option<&'a ast::Type>,
+    },
+    Struct,
+    Enum,
+    Variant {
+        enum_: u32,
+    },
+    Alias {
+        ty: &'a ast::Type,
+    },
+    Global {
+        value: Option<&'a ast::Expr>,
+    },
+}
+
+/// The `impl` block a function is in.
+#[derive(Debug)]
+pub(crate) struct Owner<'a> {
+    pub target: SymbolId,
+    pub args: &'a [ast::Type],
+    pub generics: Vec<SymbolId>,
+}
+
+/// A value assigned to a mutable local after its `let`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Assign<'a> {
+    pub value: &'a ast::Expr,
+    /// The position in `(a, b) = ...`.
+    pub slot: Option<usize>,
+    /// For `x op= value`, the operator.
+    pub op: Option<ast::BinOp>,
+}
+
+/// What resolution found, beyond the module's symbols: where each symbol is defined.
+#[derive(Debug, Default)]
+pub(crate) struct Defs<'a> {
+    pub defs: HashMap<u32, Def<'a>>,
+    pub assigns: HashMap<u32, Vec<Assign<'a>>>,
+}
+
+/// What recording a module's names needs from the rest of the workspace.
+#[derive(Clone, Copy)]
+pub(crate) struct Deps<'a> {
+    /// `use` paths (`a.b`) to the file found for them.
+    pub modules: &'a HashMap<String, FileId>,
+    /// The names every module can read without declaring them, from the prelude stub.
+    pub prelude: &'a HashMap<String, SymbolId>,
+    /// Already checked modules, by file. `None` while a module is being checked (a cycle).
+    pub checked: &'a dyn Fn(FileId) -> Option<&'a Module>,
+}
 
 /// What a name stands for: a symbol, or nothing known (from Lua, or after an error).
 type Res = Option<SymbolId>;
@@ -659,242 +740,4 @@ impl<'a> Observer<'a> for Recorder<'a> {
     fn ty(&mut self, ty: &'a ast::Type, names: &dyn TypeNames<Res>) {
         self.type_names(ty, names);
     }
-}
-
-/// While the checker still resolves names itself (`resolve`): what differs between what the
-/// resolver found and what was recorded from lowering, symbol order aside. Empty when they
-/// agree. The test `recorder` checks every program in the repository with this on.
-pub(crate) fn differences(
-    file: FileId,
-    resolved: (&Module, &Defs),
-    recorded: (&Module, &Defs),
-    lowering_errors: &[crate::Diagnostic],
-) -> Vec<String> {
-    let unknown: Vec<Span> = lowering_errors
-        .iter()
-        .filter(|d| d.code == code::UNKNOWN_NAME)
-        .map(|d| d.span)
-        .collect();
-    let (rm, rd) = resolved;
-    let (om, od) = recorded;
-    let mut out = Vec::new();
-    // A symbol is known by its kind and where its name is.
-    let key = |s: &Symbol| (s.span.start, s.span.end, format!("{:?}", s.kind));
-    let mut index: HashMap<_, Vec<u32>> = HashMap::new();
-    for (i, s) in om.symbols.iter().enumerate().rev() {
-        index.entry(key(s)).or_default().push(i as u32);
-    }
-    let mut map: Vec<Option<u32>> = Vec::new();
-    for s in &rm.symbols {
-        let found = index.get_mut(&key(s)).and_then(|v| v.pop());
-        if found.is_none() {
-            out.push(format!("symbol not recorded: {s:?}"));
-        }
-        map.push(found);
-    }
-    for (_, left) in index {
-        for i in left {
-            out.push(format!(
-                "symbol only recorded: {:?}",
-                om.symbols[i as usize]
-            ));
-        }
-    }
-    if !out.is_empty() {
-        return out;
-    }
-    let ix = |i: u32| map[i as usize].expect("mapped");
-    let id = |id: SymbolId| {
-        if id.file == file {
-            SymbolId {
-                file,
-                index: ix(id.index),
-            }
-        } else {
-            id
-        }
-    };
-    let show = |id: SymbolId| (id.file.0, id.index);
-    for (i, s) in rm.symbols.iter().enumerate() {
-        let o = &om.symbols[ix(i as u32) as usize];
-        let same = s.name == o.name
-            && s.full == o.full
-            && s.container.map(ix) == o.container
-            && s.is_pub == o.is_pub
-            && s.module == o.module;
-        if !same {
-            out.push(format!(
-                "symbol differs:\n  resolved {s:?}\n  recorded {o:?}"
-            ));
-        }
-    }
-    let sorted = |mut v: Vec<String>| {
-        v.sort();
-        v
-    };
-    let mut list = |what: &str, a: Vec<String>, b: Vec<String>| {
-        let (a, b) = (sorted(a), sorted(b));
-        if a != b {
-            let only_a: Vec<_> = a.iter().filter(|x| !b.contains(x)).collect();
-            let only_b: Vec<_> = b.iter().filter(|x| !a.contains(x)).collect();
-            out.push(format!(
-                "{what} differ ({} and {}):\n  only resolved {only_a:?}\n  only recorded {only_b:?}",
-                a.len(),
-                b.len()
-            ));
-        }
-    };
-    let name = |i: u32| {
-        let s = &om.symbols[i as usize];
-        format!("{}@{}", s.name, s.span.start)
-    };
-    let sym = |s: SymbolId| {
-        if s.file == file {
-            name(s.index)
-        } else {
-            format!("{:?}", show(s))
-        }
-    };
-    // In `a | a::B` the resolver takes the second `a` for the name the first alternative
-    // binds. Lowering reads an arm's paths before its bindings, and reports an unknown name.
-    let known = |&&(span, s): &&(Span, SymbolId)| {
-        !unknown.contains(&span) || om.refs.contains(&(span, id(s)))
-    };
-    list(
-        "references",
-        rm.refs
-            .iter()
-            .filter(known)
-            .map(|&(s, r)| format!("{s:?} {}", sym(id(r))))
-            .collect(),
-        om.refs
-            .iter()
-            .map(|&(s, r)| format!("{s:?} {}", sym(r)))
-            .collect(),
-    );
-    list(
-        "exports",
-        rm.exports
-            .iter()
-            .map(|(k, &v)| format!("{k} {}", sym(id(v))))
-            .collect(),
-        om.exports
-            .iter()
-            .map(|(k, &v)| format!("{k} {}", sym(v)))
-            .collect(),
-    );
-    type Table = HashMap<u32, HashMap<String, SymbolId>>;
-    let table = |t: &Table, resolved: bool| -> Vec<String> {
-        let mut v = Vec::new();
-        for (&owner, inner) in t {
-            for (k, &s) in inner {
-                let (owner, s) = if resolved {
-                    (ix(owner), id(s))
-                } else {
-                    (owner, s)
-                };
-                v.push(format!("{}.{k} {}", name(owner), sym(s)));
-            }
-        }
-        v
-    };
-    list(
-        "members",
-        table(&rm.members, true),
-        table(&om.members, false),
-    );
-    list("fields", table(&rm.fields, true), table(&om.fields, false));
-    list(
-        "generics",
-        rm.generics
-            .iter()
-            .map(|(&k, v)| {
-                let v: Vec<_> = v.iter().map(|&s| sym(id(s))).collect();
-                format!("{} {v:?}", name(ix(k)))
-            })
-            .collect(),
-        om.generics
-            .iter()
-            .map(|(&k, v)| {
-                let v: Vec<_> = v.iter().map(|&s| sym(s)).collect();
-                format!("{} {v:?}", name(k))
-            })
-            .collect(),
-    );
-    list(
-        "scope names",
-        rm.scope_names
-            .iter()
-            .map(|&(e, from, s)| format!("{e:?} {from} {}", sym(id(s))))
-            .collect(),
-        om.scope_names
-            .iter()
-            .map(|&(e, from, s)| format!("{e:?} {from} {}", sym(s)))
-            .collect(),
-    );
-    // Lowering reports these two itself.
-    let own = |d: &&crate::Diagnostic| {
-        d.code != code::UNKNOWN_NAME && d.code != code::USED_BEFORE_DEFINITION
-    };
-    let diag = |d: &crate::Diagnostic| format!("{:?} {} {}", d.span, d.code, d.message);
-    list(
-        "diagnostics",
-        rm.diagnostics.iter().filter(own).map(diag).collect(),
-        om.diagnostics.iter().map(diag).collect(),
-    );
-    let ptr = |t: Option<&ast::Type>| t.map(|t| t as *const ast::Type);
-    let eptr = |e: Option<&ast::Expr>| e.map(|e| e as *const ast::Expr);
-    let def = |d: &Def, resolved: bool| -> String {
-        let fix = |s: SymbolId| if resolved { id(s) } else { s };
-        match d {
-            Def::Fn { decl, owner } => {
-                let owner = owner.as_ref().map(|o| {
-                    let generics: Vec<_> = o.generics.iter().map(|&g| sym(fix(g))).collect();
-                    (sym(fix(o.target)), o.args.as_ptr(), generics)
-                });
-                format!("fn {:?} {owner:?}", *decl as *const ast::FnDecl)
-            }
-            Def::Let {
-                ty,
-                init,
-                mutable,
-                slot,
-            } => format!("let {:?} {:?} {mutable} {slot:?}", ptr(*ty), eptr(*init)),
-            Def::Param { ty, rest } => format!("param {:?} {rest}", ptr(*ty)),
-            Def::Const { ty, value } => format!("const {:?} {:?}", ptr(*ty), eptr(*value)),
-            Def::Field { ty } => format!("field {:?}", ptr(*ty)),
-            Def::Struct => "struct".to_string(),
-            Def::Enum => "enum".to_string(),
-            Def::Variant { enum_ } => {
-                let e = if resolved { ix(*enum_) } else { *enum_ };
-                format!("variant {}", name(e))
-            }
-            Def::Alias { ty } => format!("alias {:?}", *ty as *const ast::Type),
-            Def::Global { value } => format!("global {:?}", eptr(*value)),
-        }
-    };
-    list(
-        "definitions",
-        rd.defs
-            .iter()
-            .map(|(&i, d)| format!("{} {}", name(ix(i)), def(d, true)))
-            .collect(),
-        od.defs
-            .iter()
-            .map(|(&i, d)| format!("{} {}", name(i), def(d, false)))
-            .collect(),
-    );
-    let assigns = |i: u32, v: &Vec<Assign>| {
-        let v: Vec<_> = v
-            .iter()
-            .map(|a| (a.value as *const ast::Expr, a.slot, a.op))
-            .collect();
-        format!("{} {v:?}", name(i))
-    };
-    list(
-        "assignments",
-        rd.assigns.iter().map(|(&i, v)| assigns(ix(i), v)).collect(),
-        od.assigns.iter().map(|(&i, v)| assigns(i, v)).collect(),
-    );
-    out
 }
