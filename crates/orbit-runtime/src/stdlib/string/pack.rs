@@ -242,7 +242,7 @@ fn get_int(data: &[u8], little: bool, signed: bool) -> Result<i64, usize> {
 /// a missing value as `nil` here.
 fn value_error(ctx: &mut NativeCtx<'_>, arg: usize, expected: &str) -> LuaError {
     if arg >= ctx.nargs() {
-        ctx.arg_error(arg, &format!("{expected} expected, got nil"))
+        ctx.arg_error(arg, &crate::arg_errors::type_mismatch(expected, "nil"))
     } else {
         ctx.type_error(arg, expected)
     }

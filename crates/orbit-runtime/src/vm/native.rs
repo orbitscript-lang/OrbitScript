@@ -1,12 +1,14 @@
 //! The native-function interface (ADR-3's continuation style).
 
 use orbit_lua_version::LUA;
+use std::borrow::Cow;
 use std::rc::Rc;
 
+use crate::arg_errors;
 use crate::locale::Locale;
 use crate::object::number::float_to_int;
 use crate::object::{
-    Cell, Closure, Gc, LuaStr, NativeId, OrbitStr, OrbitString, Proto, ProtoCode, Table, Value,
+    Cell, Closure, Gc, LuaStr, NativeId, OrbitStr, Proto, ProtoCode, Table, Value,
 };
 use orbit_bytecode::{FunctionName, Op, Origin};
 
@@ -827,7 +829,7 @@ impl NativeCtx<'_> {
             self.name_at(caller, Value::Closure(closure))
         });
         let (name, method) = named.unwrap_or_else(|| (b"?".to_vec(), false));
-        let text = bad_argument(&name, method, n, msg);
+        let text = arg_errors::bad_argument(&name, method, n, msg);
         self.builtin_error_str(text.as_orbit_str())
     }
 
@@ -839,12 +841,8 @@ impl NativeCtx<'_> {
         expected: &str,
         v: Option<Value>,
     ) -> LuaError {
-        let got = match v {
-            None => "no value".into(),
-            Some(Value::LightUserData(_)) => "light userdata".into(),
-            Some(v) => self.vm.rt.metas.type_name(&self.vm.heap, v),
-        };
-        self.builtin_arg_error(n, &format!("{expected} expected, got {got}"))
+        let got = self.arg_type_name(v);
+        self.builtin_arg_error(n, &arg_errors::type_mismatch(expected, &got))
     }
 
     /// `bad argument #i to 'name' (msg)`, for 0-based argument `i`.
@@ -856,27 +854,31 @@ impl NativeCtx<'_> {
     #[inline(never)]
     fn arg_error_str(&mut self, i: usize, msg: OrbitStr<'_>) -> LuaError {
         let (name, method) = self.call_name();
-        let text = bad_argument(&name, method, i + 1, msg);
+        let text = arg_errors::bad_argument(&name, method, i + 1, msg);
         LuaError::new(self.positioned(&text))
     }
 
     /// `bad argument` for a wrong type.
     pub fn type_error(&mut self, i: usize, expected: &str) -> LuaError {
-        let got = if i >= self.nargs {
-            "no value".into()
-        } else {
-            match self.arg(i) {
-                Value::LightUserData(_) => "light userdata".into(),
-                v => self.vm.rt.metas.type_name(&self.vm.heap, v),
-            }
-        };
-        self.arg_error(i, &format!("{expected} expected, got {got}"))
+        let v = (i < self.nargs).then(|| self.arg(i));
+        let got = self.arg_type_name(v);
+        self.arg_error(i, &arg_errors::type_mismatch(expected, &got))
+    }
+
+    /// The type a type error names for argument `v`, `None` when it is
+    /// absent: as `luaL_typename`, but light userdata says so.
+    fn arg_type_name(&self, v: Option<Value>) -> Cow<'static, str> {
+        match v {
+            None => arg_errors::NO_VALUE.into(),
+            Some(Value::LightUserData(_)) => "light userdata".into(),
+            Some(v) => self.vm.rt.metas.type_name(&self.vm.heap, v),
+        }
     }
 
     /// Any value (`value expected` if absent).
     pub fn check_any(&mut self, i: usize) -> Result<Value, LuaError> {
         if i >= self.nargs {
-            return Err(self.arg_error(i, "value expected"));
+            return Err(self.arg_error(i, arg_errors::VALUE_EXPECTED));
         }
         Ok(self.arg(i))
     }
@@ -945,7 +947,7 @@ impl NativeCtx<'_> {
             Value::Int(n) => Ok(n),
             Value::Float(f) => match float_to_int(f) {
                 Some(n) => Ok(n),
-                None => Err(self.arg_error(i, "number has no integer representation")),
+                None => Err(self.arg_error(i, arg_errors::NO_INTEGER_REP)),
             },
             _ => unreachable!(),
         }
@@ -1262,24 +1264,4 @@ impl Vm {
         }
         self.native_returned(r, None, func, want, id)
     }
-}
-
-/// `bad argument #n to 'name' (msg)` for argument `n` (1-based, counting
-/// `self`), or `calling 'name' on bad self (msg)` when a method call's
-/// `self` is the bad one.
-fn bad_argument(name: &[u8], method: bool, n: usize, msg: OrbitStr<'_>) -> OrbitString {
-    let mut text = OrbitString::new();
-    if method && n == 1 {
-        text.push("calling '");
-        text.push(name);
-        text.push("' on bad self (");
-    } else {
-        let n = if method { n - 1 } else { n };
-        text.push(format!("bad argument #{n} to '"));
-        text.push(name);
-        text.push("' (");
-    }
-    text.push(msg);
-    text.push(")");
-    text
 }

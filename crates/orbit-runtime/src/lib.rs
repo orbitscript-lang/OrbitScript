@@ -9,6 +9,7 @@
 //! The three stay separate modules so each can be tested on its own; the
 //! public embedding API is the `orbit` crate, built on this one.
 
+pub mod arg_errors;
 pub mod locale;
 pub mod object;
 pub mod stdlib;
