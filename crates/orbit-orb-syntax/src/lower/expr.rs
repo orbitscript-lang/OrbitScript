@@ -3,6 +3,7 @@
 use orbit_hir as hir;
 use orbit_hir::{ExprId, LocalKind, Span, StmtId};
 
+use super::mode::Mode;
 use super::{Dest, LResult, Lowerer, Resolved};
 use crate::ast::{self, ExprKind as K};
 use crate::code;
@@ -45,7 +46,7 @@ pub(super) fn bin_op(op: ast::BinOp) -> hir::BinOp {
     }
 }
 
-impl Lowerer {
+impl<M: Mode> Lowerer<M> {
     /// Lowers operands in order. When an operand hoists statements, the operands before it
     /// that a statement could change are first saved in temporaries, so they are still
     /// evaluated first.
@@ -176,11 +177,11 @@ impl Lowerer {
         match &e.kind {
             K::Spread(inner) => {
                 if !last {
-                    return Err(self.error(
+                    self.report(
                         e.span,
                         code::SPREAD_NOT_LAST,
                         "a spread `...` must be the last item of its list",
-                    ));
+                    )?;
                 }
                 self.spread(inner, out)
             }
@@ -199,11 +200,11 @@ impl Lowerer {
                 let top = self.funcs.len() - 1;
                 if self.funcs[depth].rest == Some(local) {
                     if depth != top {
-                        return Err(self.error(
+                        self.report(
                             inner.span,
                             code::INVALID_SPREAD,
                             "only the enclosing function's own rest parameter can be spread",
-                        ));
+                        )?;
                     }
                     return Ok(self.add_expr(hir::ExprKind::Vararg, inner.span));
                 }
@@ -211,11 +212,11 @@ impl Lowerer {
         }
         let id = self.expr(inner, out)?;
         if !self.f().expr(id).kind.is_multi() {
-            return Err(self.error(
+            self.report(
                 inner.span,
                 code::INVALID_SPREAD,
                 "only a call or the rest parameter can be spread with `...`",
-            ));
+            )?;
         }
         Ok(id)
     }
@@ -233,7 +234,10 @@ impl Lowerer {
             K::Int(v) => hir::ExprKind::Int(*v),
             K::Float(v) => hir::ExprKind::Float(*v),
             K::Str(s) => hir::ExprKind::Str(*s),
-            K::Error => return Err(self.unparsed(span)),
+            K::Error => {
+                self.unparsed(span)?;
+                hir::ExprKind::Nil
+            }
             K::Template(pieces) => return self.template(pieces, span, out),
             K::Name(sym) => return self.name_expr(ast::Name { sym: *sym, span }),
             K::SelfValue => return self.self_value(span),
@@ -279,26 +283,34 @@ impl Lowerer {
             K::Unary { op, expr } => return self.unary(*op, expr, span, out),
             K::Paren(inner) => return self.single(inner, out),
             K::As { expr, ty, optional } => return self.cast(expr, ty, *optional, span, out),
-            K::Tuple(_) => {
-                return Err(self.error(
+            // After each of these errors the operands are still lowered, for their own.
+            K::Tuple(items) => {
+                self.report(
                     span,
                     code::TUPLE_AS_VALUE,
                     "tuples are multiple results, not values; use `[a, b]` for a table",
-                ));
+                )?;
+                self.list(items, out)?;
+                hir::ExprKind::Nil
             }
-            K::Spread(_) => {
-                return Err(self.error(
+            K::Spread(inner) => {
+                self.report(
                     span,
                     code::INVALID_SPREAD,
                     "`...` spreads values into a call, an array or a list of results",
-                ));
+                )?;
+                self.only_check(inner)?;
+                hir::ExprKind::Nil
             }
-            K::Range { .. } => {
-                return Err(self.error(
+            K::Range { start, end, .. } => {
+                self.report(
                     span,
                     code::RANGE_AS_VALUE,
                     "ranges are only allowed in `for` headers and patterns",
-                ));
+                )?;
+                self.only_check(start)?;
+                self.only_check(end)?;
+                hir::ExprKind::Nil
             }
             K::Try(inner) => return self.try_(inner, span, out),
             K::If { .. }
@@ -317,11 +329,12 @@ impl Lowerer {
     /// `self`.
     fn self_value(&mut self, span: Span) -> LResult<ExprId> {
         if !self.is_bound(self.syms.self_) {
-            return Err(self.error(
+            self.report(
                 span,
                 code::SELF_OUTSIDE_METHOD,
                 "`self` is only available in methods",
-            ));
+            )?;
+            return Ok(self.error_expr(span));
         }
         self.name_expr(ast::Name {
             sym: self.syms.self_,
@@ -476,11 +489,12 @@ impl Lowerer {
     /// `Self` inside an `impl` block: the struct or enum being implemented.
     pub(super) fn self_type(&mut self, span: Span) -> LResult<ExprId> {
         let Some(ctx) = self.impls.last() else {
-            return Err(self.error(
+            self.report(
                 span,
                 code::SELF_TYPE_OUTSIDE_IMPL,
                 "`Self` is only available in `impl` blocks",
-            ));
+            )?;
+            return Ok(self.error_expr(span));
         };
         let target = ast::Name {
             sym: ctx.target.sym,
@@ -640,11 +654,11 @@ impl Lowerer {
                     // Only the constructor's last entry may expand to several values.
                     let last = Some(i) == last_positional && i + 1 == entries.len();
                     if matches!(v.kind, K::Spread(_)) && !last {
-                        return Err(self.error(
+                        self.report(
                             v.span,
                             code::SPREAD_NOT_LAST,
                             "a spread `...` must be the last entry of a table",
-                        ));
+                        )?;
                     }
                     parts.push(Part::Item(v, last));
                 }

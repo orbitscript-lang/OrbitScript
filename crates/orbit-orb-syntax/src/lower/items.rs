@@ -13,6 +13,7 @@ use orbit_hir as hir;
 use orbit_hir::{ExprId, FuncId, FunctionName, LocalId, LocalKind, Span, StmtId, StrId};
 
 use super::expr::Part;
+use super::mode::{Continue, Mode};
 use super::pattern::PathKind;
 use super::{Binding, Dest, ImplCtx, ItemTag, LResult, Lowerer, Resolved, Target};
 use crate::ast::{self, ExprKind as K};
@@ -24,18 +25,18 @@ pub(super) enum FnBody<'a> {
     Expr(&'a ast::Expr),
 }
 
-impl Lowerer {
+impl<M: Mode> Lowerer<M> {
     fn at_module_level(&self) -> bool {
         self.funcs.len() == 1 && self.funcs[0].scopes.len() == 1
     }
 
     pub(super) fn item(&mut self, item: &ast::Item, out: &mut Vec<StmtId>) -> LResult<()> {
         if item.is_pub && !self.at_module_level() {
-            return Err(self.error(
+            self.report(
                 item.span,
                 code::NESTED_PUB,
                 "`pub` items must be at module level",
-            ));
+            )?;
         }
         match &item.kind {
             ast::ItemKind::Fn(f) => {
@@ -46,7 +47,11 @@ impl Lowerer {
                 r
             }
             ast::ItemKind::Const { name, value, .. } => {
-                let value = self.const_value(item, value)?;
+                let Some(value) = value else {
+                    self.stub(item.span, "value")?;
+                    self.define_stub(*name, ItemTag::Const, out);
+                    return Ok(());
+                };
                 self.check_const(value)?;
                 let local = self.define_value_item(*name, ItemTag::Const, value, out)?;
                 self.export(item, *name, local, out);
@@ -71,7 +76,10 @@ impl Lowerer {
             }
             // Aliases are for `orbit-check`; nothing runs.
             ast::ItemKind::TypeAlias { .. } => Ok(()),
-            ast::ItemKind::Error => Err(self.unparsed(item.span)),
+            ast::ItemKind::Error => {
+                self.unparsed(item.span)?;
+                Ok(())
+            }
             ast::ItemKind::Use(u) => self.use_decl(u, item.span, out),
             ast::ItemKind::Global { name, value } => {
                 let v = self.single(value, out)?;
@@ -96,7 +104,11 @@ impl Lowerer {
     }
 
     fn fn_item(&mut self, item: &ast::Item, f: &ast::FnDecl, out: &mut Vec<StmtId>) -> LResult<()> {
-        let body = self.fn_body(f)?;
+        let Some(body) = &f.body else {
+            self.stub(f.span, "body")?;
+            self.define_stub(f.name, ItemTag::Fn, out);
+            return Ok(());
+        };
         let local = self.define_item(f.name, ItemTag::Fn, out, |lx, local, early, out| {
             let func = lx.function(
                 &f.sig,
@@ -226,7 +238,11 @@ impl Lowerer {
         if !item.is_pub {
             return;
         }
-        let exports = self.exports.expect("export table for `pub` items");
+        // A `pub` item has an export table, except one nested in a module that has no `pub`
+        // at its top level, which was an error.
+        let Some(exports) = self.exports else {
+            return;
+        };
         let obj = self.local_expr(exports, name.span);
         let key = self.str_expr(name.sym, name.span);
         let v = self.local_expr(local, name.span);
@@ -240,33 +256,23 @@ impl Lowerer {
         );
     }
 
+    /// The error for a stub declaration (`fn f();`, `const N: int;`), which has no body or
+    /// value (`what`) and can't run.
+    fn stub(&mut self, span: Span, what: &str) -> LResult<Continue<M>> {
+        self.report(
+            span,
+            code::STUB_DECLARATION,
+            format!("a stub declaration has no {what} to run"),
+        )
+    }
+
+    /// Brings a stub declaration's name into scope, once its error is reported.
+    fn define_stub(&mut self, name: ast::Name, tag: ItemTag, out: &mut Vec<StmtId>) {
+        let nil = self.error_expr(name.span);
+        self.define_value_item_expr(name, tag, nil, out);
+    }
+
     /// A `const` value must be a literal or another `const`.
-    /// A function's body; a stub declaration (`fn f();`) has none and can't run.
-    fn fn_body<'b>(&self, f: &'b ast::FnDecl) -> LResult<&'b ast::Block> {
-        f.body.as_ref().ok_or_else(|| {
-            self.error(
-                f.span,
-                code::STUB_DECLARATION,
-                "a stub declaration has no body to run",
-            )
-        })
-    }
-
-    /// A constant's value; a stub declaration (`const N: int;`) has none and can't run.
-    fn const_value<'b>(
-        &self,
-        item: &ast::Item,
-        value: &'b Option<ast::Expr>,
-    ) -> LResult<&'b ast::Expr> {
-        value.as_ref().ok_or_else(|| {
-            self.error(
-                item.span,
-                code::STUB_DECLARATION,
-                "a stub declaration has no value to run",
-            )
-        })
-    }
-
     fn check_const(&mut self, value: &ast::Expr) -> LResult<()> {
         let ok = match &value.kind {
             K::Nil | K::True | K::False | K::Int(_) | K::Float(_) | K::Str(_) => true,
@@ -285,19 +291,24 @@ impl Lowerer {
                         ..
                     },
                     ..
+                } | Resolved::Global {
+                    binding: Some(Binding {
+                        item: Some(ItemTag::Unresolved),
+                        ..
+                    }),
+                    ..
                 }
             ),
             _ => false,
         };
-        if ok {
-            Ok(())
-        } else {
-            Err(self.error(
+        if !ok {
+            self.report(
                 value.span,
                 code::CONST_NOT_LITERAL,
                 "a `const` must be a literal or another `const`; use `let` for other values",
-            ))
+            )?;
         }
+        Ok(())
     }
 
     // ---- functions ----------------------------------------------------------------------------
@@ -326,11 +337,11 @@ impl Lowerer {
         for p in &sig.params {
             if let Some(n) = p.name {
                 if seen.contains(&n.sym) {
-                    return Err(self.error(
+                    self.report(
                         n.span,
                         code::DUPLICATE_PARAMETER,
                         format!("parameter `{}` is declared twice", self.text(n.sym)),
-                    ));
+                    )?;
                 }
                 seen.push(n.sym);
             }
@@ -404,11 +415,11 @@ impl Lowerer {
         let mut seen = Vec::new();
         for f in &s.fields {
             if seen.contains(&f.name.sym) {
-                return Err(self.error(
+                self.report(
                     f.name.span,
                     code::DUPLICATE_FIELD,
                     format!("field `{}` is declared twice", self.text(f.name.sym)),
-                ));
+                )?;
             }
             seen.push(f.name.sym);
         }
@@ -448,11 +459,11 @@ impl Lowerer {
         let mut freeze: Option<LocalId> = None;
         for v in &e.variants {
             if seen.contains(&v.name.sym) {
-                return Err(self.error(
+                self.report(
                     v.name.span,
                     code::DUPLICATE_VARIANT,
                     format!("variant `{}` is declared twice", self.text(v.name.sym)),
-                ));
+                )?;
             }
             seen.push(v.name.sym);
             let full = format!("{}::{}", self.text(e.name.sym), self.text(v.name.sym));
@@ -563,10 +574,12 @@ impl Lowerer {
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
+        // After any of the errors here the literal is lowered as written, a table with the
+        // fields it gives.
         let kind = self.path_kind(path)?;
         match kind {
             PathKind::Enum(idx) => {
-                return Err(self.error(
+                self.report(
                     path.span,
                     code::ENUM_NEEDS_VARIANT,
                     format!(
@@ -574,44 +587,44 @@ impl Lowerer {
                         self.text(self.types[idx].name),
                         self.text(self.types[idx].name)
                     ),
-                ));
+                )?;
             }
             _ if self.is_unit_variant(&kind) => {
-                return Err(self.error(
+                self.report(
                     path.span,
                     code::VARIANT_SHAPE,
                     "this variant has no fields; write it without braces",
-                ));
+                )?;
             }
             _ => {}
         }
         let mut seen = Vec::new();
         for f in fields {
             if seen.contains(&f.name.sym) {
-                return Err(self.error(
+                self.report(
                     f.name.span,
                     code::FIELD_GIVEN_TWICE,
                     format!("field `{}` is given twice", self.text(f.name.sym)),
-                ));
+                )?;
             }
             seen.push(f.name.sym);
         }
         if let Some(known) = self.known_fields(&kind) {
             for f in fields {
                 if !known.contains(&f.name.sym) {
-                    return Err(self.error(
+                    self.report(
                         f.name.span,
                         code::UNKNOWN_FIELD,
                         format!("no field `{}` in this struct", self.text(f.name.sym)),
-                    ));
+                    )?;
                 }
             }
             if let Some(missing) = known.iter().find(|k| !seen.contains(k)) {
-                return Err(self.error(
+                self.report(
                     span,
                     code::MISSING_FIELD,
                     format!("missing field `{}` in struct literal", self.text(*missing)),
-                ));
+                )?;
             }
         }
         // Shorthand fields read the local of the same name.
@@ -659,19 +672,34 @@ impl Lowerer {
                     },
             } => (depth, local, idx),
             _ => {
-                return Err(self.error(
-                    i.target.span,
-                    code::IMPL_TARGET,
-                    format!(
-                        "`{}` is not a struct or enum defined in this module",
-                        self.text(i.target.sym)
-                    ),
-                ));
+                if !r.is_unresolved() {
+                    self.report(
+                        i.target.span,
+                        code::IMPL_TARGET,
+                        format!(
+                            "`{}` is not a struct or enum defined in this module",
+                            self.text(i.target.sym)
+                        ),
+                    )?;
+                }
+                return self.impl_without_type(i);
             }
         };
-        let (mfunc, methods) = self.types[idx]
-            .methods
-            .expect("type defined before its impl");
+        let Some((mfunc, methods)) = self.types[idx].methods else {
+            // The type is defined later. In the same function that was an error when the
+            // name resolved; from inside a function, it is one here.
+            if depth != self.funcs.len() - 1 {
+                self.report(
+                    i.target.span,
+                    code::USED_BEFORE_DEFINITION,
+                    format!(
+                        "`impl {0}` comes before the definition of `{0}`; move the definition up",
+                        self.text(i.target.sym)
+                    ),
+                )?;
+            }
+            return self.impl_without_type(i);
+        };
         let is_enum = self.types[idx].variants.is_some();
         self.impls.push(ImplCtx { target: i.target });
         let result = (|| {
@@ -679,7 +707,10 @@ impl Lowerer {
                 let (name, mspan) = match &m.kind {
                     ast::ItemKind::Fn(f) => (f.name, f.span),
                     ast::ItemKind::Const { name, .. } => (*name, m.span),
-                    ast::ItemKind::Error => return Err(self.unparsed(m.span)),
+                    ast::ItemKind::Error => {
+                        self.unparsed(m.span)?;
+                        continue;
+                    }
                     _ => unreachable!("the parser allows `fn` and `const` in `impl`"),
                 };
                 let text = self.chunk.strings.get(name.sym).to_vec();
@@ -693,23 +724,23 @@ impl Lowerer {
                         .iter()
                         .any(|v| v.0 == name.sym)
                 {
-                    return Err(self.error(
+                    self.report(
                         name.span,
                         code::DUPLICATE_MEMBER,
                         format!(
                             "`{}` is already a variant of this enum",
                             self.text(name.sym)
                         ),
-                    ));
+                    )?;
                 }
                 if !is_meta {
                     // Methods and associated functions share the type table.
                     if self.types[idx].members.contains(&name.sym) {
-                        return Err(self.error(
+                        self.report(
                             name.span,
                             code::DUPLICATE_MEMBER,
                             format!("`{}` is already defined for this type", self.text(name.sym)),
-                        ));
+                        )?;
                     }
                     self.types[idx].members.push(name.sym);
                 }
@@ -721,7 +752,10 @@ impl Lowerer {
                         } else {
                             FunctionName::Field(name.sym)
                         };
-                        let body = self.fn_body(f)?;
+                        let Some(body) = &f.body else {
+                            self.stub(f.span, "body")?;
+                            continue;
+                        };
                         let n = self.generics.len();
                         self.generics.extend(f.generics.iter().map(|g| g.name.sym));
                         let func = self.function(&f.sig, FnBody::Block(body), fname, f.span);
@@ -733,7 +767,10 @@ impl Lowerer {
                         )
                     }
                     ast::ItemKind::Const { value, .. } => {
-                        let value = self.const_value(m, value)?;
+                        let Some(value) = value else {
+                            self.stub(m.span, "value")?;
+                            continue;
+                        };
                         self.check_const(value)?;
                         (self.single(value, out)?, false)
                     }
@@ -800,6 +837,37 @@ impl Lowerer {
         self.impls.pop();
         let _ = span;
         result
+    }
+
+    /// What is left of an `impl` block whose target isn't a type it can add to, once that
+    /// error is reported: the errors inside its members. `Self` and the target's name stand
+    /// for nothing in them.
+    fn impl_without_type(&mut self, i: &ast::ImplDecl) -> LResult<()> {
+        let mut dropped = Vec::new();
+        self.open_scope();
+        self.bind(i.target.sym, Binding::UNRESOLVED);
+        self.impls.push(ImplCtx { target: i.target });
+        for m in &i.members {
+            match &m.kind {
+                ast::ItemKind::Fn(f) => {
+                    let Some(body) = &f.body else {
+                        continue;
+                    };
+                    let n = self.generics.len();
+                    self.generics.extend(f.generics.iter().map(|g| g.name.sym));
+                    let name = FunctionName::Field(f.name.sym);
+                    self.function(&f.sig, FnBody::Block(body), name, f.span)?;
+                    self.generics.truncate(n);
+                }
+                ast::ItemKind::Const {
+                    value: Some(value), ..
+                } => self.check_const(value)?,
+                _ => {}
+            }
+        }
+        self.impls.pop();
+        self.close_scope(&mut dropped, i.target.span);
+        Ok(())
     }
 
     /// A user `__index` replaces `__index = methods`, so it is wrapped: methods first, then
@@ -870,7 +938,7 @@ impl Lowerer {
 
     fn use_decl(&mut self, u: &ast::UseDecl, span: Span, out: &mut Vec<StmtId>) -> LResult<()> {
         if !self.at_module_level() {
-            return Err(self.error(span, code::NESTED_USE, "`use` must be at module level"));
+            self.report(span, code::NESTED_USE, "`use` must be at module level")?;
         }
         let path: Vec<String> = u.path.iter().map(|n| self.text(n.sym)).collect();
         let module = self.intern(path.join(".").as_bytes());

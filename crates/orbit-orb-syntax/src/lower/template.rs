@@ -4,11 +4,12 @@ use orbit_hir as hir;
 use orbit_hir::{ExprId, Span, StmtId};
 
 use super::expr::Part;
+use super::mode::Mode;
 use super::{LResult, Lowerer};
 use crate::ast;
 use crate::code;
 
-impl Lowerer {
+impl<M: Mode> Lowerer<M> {
     pub(super) fn template(
         &mut self,
         pieces: &[ast::TemplatePiece],
@@ -58,17 +59,7 @@ impl Lowerer {
     }
 
     /// Translates a hole's spec (Rust's mini-language) to a `string.format` conversion.
-    fn format_spec(&self, spec: &ast::FormatSpec) -> LResult<Vec<u8>> {
-        let bad = |lx: &Self, what: &str| {
-            lx.error(
-                spec.span,
-                code::FORMAT_SPEC,
-                format!(
-                    "format spec `{}`: {what}",
-                    String::from_utf8_lossy(&spec.text)
-                ),
-            )
-        };
+    fn format_spec(&mut self, spec: &ast::FormatSpec) -> LResult<Vec<u8>> {
         let t = &spec.text[..];
         let mut i = 0;
         // Fill and alignment: an optional fill character before `<`, `^` or `>`.
@@ -76,10 +67,10 @@ impl Lowerer {
         let is_align = |b: u8| matches!(b, b'<' | b'>' | b'^');
         let align = if t.len() >= 2 && is_align(t[1]) && !is_align(t[0]) {
             if t[0] != b' ' {
-                return Err(bad(
-                    self,
+                return self.bad_spec(
+                    spec,
                     "fill characters other than a space are not supported yet",
-                ));
+                );
             }
             i = 2;
             Some(t[1])
@@ -91,7 +82,7 @@ impl Lowerer {
         };
         match align {
             Some(b'<') => left = true,
-            Some(b'^') => return Err(bad(self, "centering `^` is not supported yet")),
+            Some(b'^') => return self.bad_spec(spec, "centering `^` is not supported yet"),
             _ => {}
         }
         let mut plus = false;
@@ -121,7 +112,7 @@ impl Lowerer {
             i += 1;
             let p = digits(&mut i);
             if p.is_empty() {
-                return Err(bad(self, "expected digits after `.`"));
+                return self.bad_spec(spec, "expected digits after `.`");
             }
             Some(p)
         } else {
@@ -130,11 +121,11 @@ impl Lowerer {
         let ty = match &t[i..] {
             [] => None,
             [b @ (b'x' | b'X' | b'o' | b'e' | b'E' | b'?')] => Some(*b),
-            [b'b'] => return Err(bad(self, "binary `b` is not supported yet")),
-            _ => return Err(bad(self, "expected a type: one of `x X o e E ?`")),
+            [b'b'] => return self.bad_spec(spec, "binary `b` is not supported yet"),
+            _ => return self.bad_spec(spec, "expected a type: one of `x X o e E ?`"),
         };
         if width.len() > 2 || precision.is_some_and(|p| p.len() > 2) {
-            return Err(bad(self, "width and precision must be at most 99"));
+            return self.bad_spec(spec, "width and precision must be at most 99");
         }
         let conv = match (ty, precision) {
             (Some(b'?'), _) => {
@@ -145,12 +136,12 @@ impl Lowerer {
                     || precision.is_some()
                     || align.is_some()
                 {
-                    return Err(bad(self, "`?` takes no other options"));
+                    return self.bad_spec(spec, "`?` takes no other options");
                 }
                 return Ok(b"%q".to_vec());
             }
             (Some(b'x' | b'X' | b'o'), Some(_)) => {
-                return Err(bad(self, "precision does not apply to integer types"));
+                return self.bad_spec(spec, "precision does not apply to integer types");
             }
             (Some(b), _) => b,
             (None, Some(_)) => b'f',
@@ -159,17 +150,14 @@ impl Lowerer {
         let numeric = conv != b's';
         if !numeric {
             if plus || alt {
-                return Err(bad(self, "`+` and `#` need a numeric type or a precision"));
+                return self.bad_spec(spec, "`+` and `#` need a numeric type or a precision");
             }
             if zero {
-                return Err(bad(
-                    self,
-                    "zero padding `0` needs a numeric type or a precision",
-                ));
+                return self.bad_spec(spec, "zero padding `0` needs a numeric type or a precision");
             }
         }
         if plus && matches!(conv, b'x' | b'X' | b'o') {
-            return Err(bad(self, "`+` does not apply to `x`, `X` or `o`"));
+            return self.bad_spec(spec, "`+` does not apply to `x`, `X` or `o`");
         }
         let mut out = vec![b'%'];
         if left {
@@ -191,5 +179,18 @@ impl Lowerer {
         }
         out.push(conv);
         Ok(out)
+    }
+
+    /// The error for a format spec that can't be translated; the hole then formats as `{}`.
+    fn bad_spec(&mut self, spec: &ast::FormatSpec, what: &str) -> LResult<Vec<u8>> {
+        self.report(
+            spec.span,
+            code::FORMAT_SPEC,
+            format!(
+                "format spec `{}`: {what}",
+                String::from_utf8_lossy(&spec.text)
+            ),
+        )?;
+        Ok(b"%s".to_vec())
     }
 }
