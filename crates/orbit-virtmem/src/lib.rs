@@ -14,9 +14,15 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
 /// Default address space reservation: 2^24 slots (16,777,216 elements).
-/// At 56 bytes per slot (Lua tables), this reserves ~940 MiB of virtual address
+/// At 64 bytes per slot (Lua tables), this reserves 1 GiB of virtual address
 /// space, consuming 0 bytes of physical memory until pages are committed.
 pub const DEFAULT_MAX_SLOTS: usize = 1 << 24;
+
+/// Bytes copied at a time when a [growable](VmBuffer::growable) buffer
+/// moves to a larger reservation by copying: each chunk is committed in the new place,
+/// copied, and decommitted in the old, so moving costs at most this much
+/// extra memory.
+const MOVE_CHUNK: usize = 1 << 20;
 
 /// Under a process address-space limit, one buffer reserves at most this
 /// fraction of it, so several buffers and the malloc heap all fit.
@@ -26,6 +32,8 @@ pub const LIMIT_SHARE: usize = 16;
 pub struct VmBuffer<T> {
     base: NonNull<T>,
     reserved_slots: usize,
+    /// What [`VmBuffer::try_grow`] may grow the reservation to.
+    max_slots: usize,
     committed_slots: usize,
     len: usize,
 }
@@ -50,6 +58,26 @@ impl<T> VmBuffer<T> {
     /// one page of address space can be reserved.
     #[must_use]
     pub fn with_capacity(max_slots: usize) -> Self {
+        let mut buf = Self::reserve(max_slots);
+        buf.max_slots = buf.reserved_slots;
+        buf
+    }
+
+    /// Creates a buffer reserving address space for `initial_slots`
+    /// elements (fewer when address space is scarce, as for
+    /// [`with_capacity`](Self::with_capacity)), which
+    /// [`try_grow`](Self::try_grow) can enlarge up to `max_slots`.
+    ///
+    /// # Panics
+    /// As for [`with_capacity`](Self::with_capacity).
+    #[must_use]
+    pub fn growable(initial_slots: usize, max_slots: usize) -> Self {
+        let mut buf = Self::reserve(initial_slots.min(max_slots));
+        buf.max_slots = max_slots.max(buf.reserved_slots);
+        buf
+    }
+
+    fn reserve(max_slots: usize) -> Self {
         let size = std::mem::size_of::<T>();
         assert!(
             size > 0,
@@ -75,6 +103,7 @@ impl<T> VmBuffer<T> {
                 return VmBuffer {
                     base: base_u8.cast(),
                     reserved_slots: slots,
+                    max_slots: slots,
                     committed_slots: 0,
                     len: 0,
                 };
@@ -91,6 +120,87 @@ impl<T> VmBuffer<T> {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.reserved_slots
+    }
+
+    /// What the reservation may grow to with [`try_grow`](Self::try_grow).
+    #[inline]
+    #[must_use]
+    pub fn max_capacity(&self) -> usize {
+        self.max_slots
+    }
+
+    /// Doubles the reservation, up to [`max_capacity`](Self::max_capacity),
+    /// moving the elements to a new range of address space. Returns whether
+    /// it grew: `false` at the maximum, or when the operating system has no
+    /// room for a larger range, after which the maximum is the current
+    /// capacity.
+    ///
+    /// The elements move, so their addresses change. On Linux the committed
+    /// pages are remapped to the new range without copying; elsewhere they
+    /// are copied a chunk at a time, so moving needs little more memory
+    /// than they use.
+    pub fn try_grow(&mut self) -> bool {
+        self.grow(true)
+    }
+
+    /// [`try_grow`](Self::try_grow), always copying: for testing the path
+    /// other systems take.
+    #[doc(hidden)]
+    pub fn try_grow_by_copying(&mut self) -> bool {
+        self.grow(false)
+    }
+
+    fn grow(&mut self, remap: bool) -> bool {
+        if self.reserved_slots >= self.max_slots {
+            return false;
+        }
+        let size = std::mem::size_of::<T>();
+        let slots = self.reserved_slots.saturating_mul(2).min(self.max_slots);
+        let Some(new_base) = slots
+            .checked_mul(size)
+            .and_then(os::try_reserve_address_space)
+        else {
+            self.max_slots = self.reserved_slots;
+            return false;
+        };
+        let old_base = self.base.cast::<u8>();
+        let committed = self.committed_slots * size;
+        if remap && os::move_pages(old_base, new_base, committed) {
+            self.committed_slots = os::align_up(committed, os::page_size()) / size;
+        } else {
+            self.copy_to(new_base);
+        }
+        os::free_address_space(old_base, self.reserved_slots * size);
+        self.base = new_base.cast();
+        self.reserved_slots = slots;
+        true
+    }
+
+    /// Copy the elements to the reservation at `new_base`, a chunk at a
+    /// time, releasing the old pages as it goes.
+    fn copy_to(&mut self, new_base: NonNull<u8>) {
+        let old_base = self.base.cast::<u8>();
+        let bytes = self.len * std::mem::size_of::<T>();
+        let mut done = 0;
+        while done < bytes {
+            let end = (done + MOVE_CHUNK).min(bytes);
+            os::commit_pages(new_base, done, end);
+            // Both ranges are committed from `done` to `end`, and the new
+            // reservation is a different range from the old.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    old_base.as_ptr().add(done),
+                    new_base.as_ptr().add(done),
+                    end - done,
+                );
+            }
+            // Only whole pages below `end` are decommitted, so the page
+            // holding the rest of the chunk stays until it is copied.
+            os::decommit_pages(old_base, done, os::align_down(end, os::page_size()));
+            done = end;
+        }
+        self.committed_slots = os::align_up(bytes, os::page_size()) / std::mem::size_of::<T>();
     }
 
     /// Number of active initialized slots.
