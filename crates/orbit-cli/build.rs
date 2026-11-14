@@ -1,7 +1,8 @@
 //! Link options for the `orbit` and `orbitc` binaries.
 //!
 //! With C modules on, the `orbit` binary exports the Lua C API so the
-//! modules it loads can link against it, as they link against `lua`. With
+//! modules it loads can link against it, as they link against `lua`
+//! (Linux and macOS; see [`export_c_api`]). With
 //! the runtime in liborbit (the `shared` feature), the
 //! library exports the API instead, and the binaries look for it next to
 //! themselves and in `../lib`.
@@ -25,15 +26,36 @@ fn main() {
         } else if os != "windows" {
             println!("cargo:rustc-link-arg-bins=-Wl,-rpath,$ORIGIN/../lib:$ORIGIN");
         }
-    } else if c_modules && os == "linux" {
-        for pattern in ["lua_*", "luaL_*"] {
-            println!("cargo:rustc-link-arg-bins=-Wl,--export-dynamic-symbol={pattern}");
-        }
+    } else if c_modules {
+        export_c_api(&os);
     }
     // Profiles that inherit from `release` report it here too. Debug
     // builds keep one symbol per function for debuggers.
     if var("PROFILE").as_deref() == Ok("release") {
         fold_identical_code(&os);
+    }
+}
+
+/// Exports the Lua C API from the static `orbit` binary, for the C modules
+/// it loads. Modules leave Lua's names undefined and the dynamic linker
+/// finds them in the program: on Linux in its dynamic symbol table, on
+/// macOS among the images already loaded (modules are linked with
+/// `-undefined dynamic_lookup`). Naming the symbols also keeps them through
+/// the linkers' dead code removal.
+///
+/// Windows has no such lookup: a module imports Lua's names from
+/// `lua55.dll` by name, so nothing here helps it (and orbit-capi doesn't
+/// load libraries on Windows yet).
+fn export_c_api(os: &str) {
+    if os == "linux" {
+        for pattern in ["lua_*", "luaL_*"] {
+            println!("cargo:rustc-link-arg-bins=-Wl,--export-dynamic-symbol={pattern}");
+        }
+    } else if var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+        // Mach-O names carry a leading underscore.
+        for pattern in ["_lua_*", "_luaL_*"] {
+            println!("cargo:rustc-link-arg-bins=-Wl,-exported_symbol,{pattern}");
+        }
     }
 }
 
