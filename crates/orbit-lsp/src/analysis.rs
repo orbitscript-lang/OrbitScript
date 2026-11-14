@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use orbit::{Call, Error, Isolate, Table, Value};
+use orbit::stack::{Any, Fail, Results, Return, Stack, StackResult, State, Type};
+use orbit::{Error, Isolate, native};
 use orbit_check::{
     Config, DiskSources, FileId, Location, Severity, Span, SymbolId, SymbolKind, Workspace,
 };
@@ -679,153 +680,233 @@ fn minimal_edit(old: &[u8], new: &[u8]) -> Option<(usize, usize, String)> {
     Some((prefix, old.len() - suffix, text))
 }
 
-/// `v` as a script value.
-fn to_value<'s>(c: &'s Call<'s>, v: &Json) -> Result<Value<'s>, Error> {
-    Ok(match v {
-        Json::Null => Value::Nil,
-        Json::Bool(b) => Value::Bool(*b),
+/// Push `v` as a script value.
+fn push_json(s: &mut Stack<'_>, v: &Json) -> StackResult<()> {
+    match v {
+        Json::Null => s.push_nil(),
+        Json::Bool(b) => s.push_boolean(*b),
         Json::Number(n) => match n.as_i64() {
-            Some(i) => Value::Int(i),
-            None => Value::Float(n.as_f64().unwrap_or(0.0)),
+            Some(i) => s.push_integer(i),
+            None => s.push_number(n.as_f64().unwrap_or(0.0)),
         },
-        Json::String(s) => Value::Str(c.create_string(s)),
+        Json::String(text) => {
+            s.push_bytes(text.as_bytes());
+        }
         Json::Array(a) => {
-            let t = c.create_table();
-            for x in a {
-                t.push(to_value(c, x)?)?;
+            s.create_table(a.len().try_into().unwrap_or(0), 0);
+            for (i, x) in a.iter().enumerate() {
+                push_json(s, x)?;
+                s.raw_set_index(-2, i as i64 + 1)?;
             }
-            Value::Table(t)
         }
         Json::Object(o) => {
-            let t = c.create_table();
+            s.create_table(0, o.len().try_into().unwrap_or(0));
             for (k, x) in o {
-                t.raw_set(k.as_str(), to_value(c, x)?)?;
+                push_json(s, x)?;
+                s.raw_set_field(-2, k.as_bytes())?;
             }
-            Value::Table(t)
         }
-    })
+    }
+    Ok(())
 }
 
-type Shared = Rc<RefCell<Analysis>>;
+/// What an analysis function returns: one value, made from JSON.
+struct Reply(Json);
 
-/// `t[name]` = a function that runs `f` on the analysis and returns what it
-/// gives.
-fn add<'s>(
-    c: &'s orbit::Scope<'s>,
-    t: &Table<'s>,
-    shared: &Shared,
-    name: &str,
-    f: impl for<'c> Fn(&mut Analysis, &'c Call<'c>) -> Result<Json, Error> + 'static,
-) -> Result<(), Error> {
-    let shared = Rc::clone(shared);
-    let function = c.create_function(move |call| {
-        let result = f(&mut shared.borrow_mut(), call)?;
-        call.ret(to_value(call, &result)?)
-    });
-    t.raw_set(name, function)
+impl Results for Reply {
+    fn push_results(self, s: &mut Stack<'_>) -> StackResult<Return> {
+        push_json(s, &self.0)?;
+        Ok(Return::values(1))
+    }
 }
 
-/// A byte offset argument.
-fn offset<'s>(c: &'s Call<'s>, i: usize) -> Result<u32, Error> {
-    let n: i64 = c.check(i)?;
-    u32::try_from(n).map_err(|_| c.arg_error(i, "offset out of range"))
+/// The isolate's analysis, which every function of the module shares. It
+/// starts on the current directory until `configure` names the editor's.
+#[derive(Clone)]
+struct Shared(Rc<RefCell<Analysis>>);
+
+impl Default for Shared {
+    fn default() -> Shared {
+        Shared(Rc::new(RefCell::new(Analysis::new(
+            std::env::current_dir().unwrap_or_default(),
+            Vec::new(),
+        ))))
+    }
+}
+
+impl Shared {
+    fn get(&self) -> std::cell::RefMut<'_, Analysis> {
+        self.0.borrow_mut()
+    }
+}
+
+/// A byte offset argument: argument `i`, `n`.
+fn offset(i: i32, n: i64) -> Result<u32, Fail> {
+    u32::try_from(n).map_err(|_| Fail::arg(i, "offset out of range"))
+}
+
+/// `configure(root [, search_path])`: a fresh workspace for the editor's
+/// folder.
+#[native(name = "analysis.configure")]
+fn configure(
+    s: &mut Stack<'_>,
+    a: State<Shared>,
+    root: String,
+    list: Option<Any>,
+) -> StackResult<Reply> {
+    let mut extra = Vec::new();
+    if let Some(Any(list)) = list.filter(|l| s.type_at(l.0) == Type::Table) {
+        for i in 1..=s.raw_len(list) as i64 {
+            s.raw_get_index(list, i)?;
+            match s.string_at(-1) {
+                Some(path) => extra.push(path.to_string_lossy().into_owned()),
+                None => return Err(s.error("search path entries must be strings")),
+            }
+            s.set_top(-2)?;
+        }
+    }
+    *a.get() = Analysis::new(PathBuf::from(root), extra);
+    Ok(Reply(Json::Null))
+}
+
+#[native(name = "analysis.open")]
+fn open(a: State<Shared>, path: String, text: Vec<u8>) -> Reply {
+    let mut a = a.get();
+    let path = PathBuf::from(path);
+    a.ws.set_source(&path, text.clone());
+    a.open.insert(path, text);
+    Reply(Json::Null)
+}
+
+#[native(name = "analysis.close")]
+fn close(a: State<Shared>, path: String) -> Reply {
+    let mut a = a.get();
+    let path = PathBuf::from(path);
+    if let Some(f) = a.ws.file_id(&path) {
+        a.ws.remove(f);
+    }
+    a.open.remove(&path);
+    Reply(Json::Null)
+}
+
+#[native(name = "analysis.search_path")]
+fn search_path(a: State<Shared>) -> Reply {
+    Reply(json!(a.get().extra_paths))
+}
+
+#[native(name = "analysis.text")]
+fn text(a: State<Shared>, path: String) -> Reply {
+    let mut a = a.get();
+    let f = a.file(&path);
+    Reply(
+        a.text(f)
+            .map(|t| json!(String::from_utf8_lossy(&t)))
+            .unwrap_or(Json::Null),
+    )
+}
+
+#[native(name = "analysis.diagnostics")]
+fn diagnostics(a: State<Shared>, path: String) -> Reply {
+    Reply(a.get().diagnostics(&path))
+}
+
+#[native(name = "analysis.symbols")]
+fn symbols(a: State<Shared>, path: String) -> Reply {
+    Reply(a.get().symbols(&path))
+}
+
+#[native(name = "analysis.definition")]
+fn definition(a: State<Shared>, path: String, at: i64) -> Result<Reply, Fail> {
+    Ok(Reply(a.get().definition(&path, offset(2, at)?)))
+}
+
+#[native(name = "analysis.references")]
+fn references(a: State<Shared>, path: String, at: i64) -> Result<Reply, Fail> {
+    Ok(Reply(a.get().references(&path, offset(2, at)?)))
+}
+
+#[native(name = "analysis.rename_target")]
+fn rename_target(a: State<Shared>, path: String, at: i64) -> Result<Reply, Fail> {
+    Ok(Reply(a.get().rename_target(&path, offset(2, at)?)))
+}
+
+#[native(name = "analysis.hover")]
+fn hover(a: State<Shared>, path: String, at: i64) -> Result<Reply, Fail> {
+    Ok(Reply(a.get().hover(&path, offset(2, at)?)))
+}
+
+#[native(name = "analysis.completions")]
+fn completions(a: State<Shared>, path: String, at: i64) -> Result<Reply, Fail> {
+    Ok(Reply(a.get().completions(&path, offset(2, at)?)))
+}
+
+#[native(name = "analysis.signature")]
+fn signature(a: State<Shared>, path: String, at: i64) -> Result<Reply, Fail> {
+    Ok(Reply(a.get().signature(&path, offset(2, at)?)))
+}
+
+#[native(name = "analysis.inlay_hints")]
+fn inlay_hints(a: State<Shared>, path: String, start: i64, end: i64) -> Result<Reply, Fail> {
+    let (start, end) = (offset(2, start)?, offset(3, end)?);
+    Ok(Reply(a.get().inlay_hints(&path, start, end)))
+}
+
+#[native(name = "analysis.tokens")]
+fn tokens(a: State<Shared>, path: String) -> Reply {
+    Reply(a.get().tokens(&path))
+}
+
+#[native(name = "analysis.folds")]
+fn folds(a: State<Shared>, path: String) -> Reply {
+    Reply(a.get().folds(&path))
+}
+
+/// `format(path, text [, start, end])`: edits that format the text, or the
+/// top-level items in `start..end`.
+#[native(name = "analysis.format")]
+fn format_edits(
+    path: String,
+    text: Vec<u8>,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Result<Reply, Fail> {
+    let range = match start {
+        None => None,
+        Some(start) => {
+            let end = end.ok_or(Fail::Type(4, "number"))?;
+            Some((offset(3, start)?, offset(4, end)?))
+        }
+    };
+    Ok(Reply(format(&path, &text, range)))
+}
+
+#[native(name = "analysis.workspace_symbols")]
+fn workspace_symbols(a: State<Shared>) -> Reply {
+    Reply(a.get().workspace_symbols())
 }
 
 /// Make `require "analysis"` give the module.
 pub(crate) fn install(iso: &mut Isolate) -> Result<(), Error> {
-    let shared: Shared = Rc::new(RefCell::new(Analysis::new(
-        std::env::current_dir().unwrap_or_default(),
-        Vec::new(),
-    )));
     iso.scope(|s| {
         let t = s.create_table();
-        // configure(root [, search_path]): a fresh workspace for the
-        // editor's folder.
-        add(s, &t, &shared, "configure", |a, c| {
-            let root: String = c.check(0)?;
-            let extra = match c.arg(1) {
-                Value::Table(list) => {
-                    let mut out = Vec::new();
-                    for i in 1..=list.raw_len() as i64 {
-                        out.push(list.raw_get::<String>(i)?);
-                    }
-                    out
-                }
-                _ => Vec::new(),
-            };
-            *a = Analysis::new(PathBuf::from(root), extra);
-            Ok(Json::Null)
-        })?;
-        add(s, &t, &shared, "open", |a, c| {
-            let (path, text): (String, Vec<u8>) = (c.check(0)?, c.check(1)?);
-            let path = PathBuf::from(path);
-            a.ws.set_source(&path, text.clone());
-            a.open.insert(path, text);
-            Ok(Json::Null)
-        })?;
-        add(s, &t, &shared, "close", |a, c| {
-            let path = PathBuf::from(c.check::<String>(0)?);
-            if let Some(f) = a.ws.file_id(&path) {
-                a.ws.remove(f);
-            }
-            a.open.remove(&path);
-            Ok(Json::Null)
-        })?;
-        add(s, &t, &shared, "search_path", |a, _| {
-            Ok(json!(a.extra_paths))
-        })?;
-        add(s, &t, &shared, "text", |a, c| {
-            let f = a.file(&c.check::<String>(0)?);
-            Ok(a.text(f)
-                .map(|t| json!(String::from_utf8_lossy(&t)))
-                .unwrap_or(Json::Null))
-        })?;
-        add(s, &t, &shared, "diagnostics", |a, c| {
-            Ok(a.diagnostics(&c.check::<String>(0)?))
-        })?;
-        add(s, &t, &shared, "symbols", |a, c| {
-            Ok(a.symbols(&c.check::<String>(0)?))
-        })?;
-        add(s, &t, &shared, "definition", |a, c| {
-            Ok(a.definition(&c.check::<String>(0)?, offset(c, 1)?))
-        })?;
-        add(s, &t, &shared, "references", |a, c| {
-            Ok(a.references(&c.check::<String>(0)?, offset(c, 1)?))
-        })?;
-        add(s, &t, &shared, "rename_target", |a, c| {
-            Ok(a.rename_target(&c.check::<String>(0)?, offset(c, 1)?))
-        })?;
-        add(s, &t, &shared, "hover", |a, c| {
-            Ok(a.hover(&c.check::<String>(0)?, offset(c, 1)?))
-        })?;
-        add(s, &t, &shared, "completions", |a, c| {
-            Ok(a.completions(&c.check::<String>(0)?, offset(c, 1)?))
-        })?;
-        add(s, &t, &shared, "signature", |a, c| {
-            Ok(a.signature(&c.check::<String>(0)?, offset(c, 1)?))
-        })?;
-        add(s, &t, &shared, "inlay_hints", |a, c| {
-            Ok(a.inlay_hints(&c.check::<String>(0)?, offset(c, 1)?, offset(c, 2)?))
-        })?;
-        add(s, &t, &shared, "tokens", |a, c| {
-            Ok(a.tokens(&c.check::<String>(0)?))
-        })?;
-        add(s, &t, &shared, "folds", |a, c| {
-            Ok(a.folds(&c.check::<String>(0)?))
-        })?;
-        // format(path, text [, start, end]): edits that format the text,
-        // or the top-level items in `start..end`.
-        add(s, &t, &shared, "format", |_, c| {
-            let (path, text): (String, Vec<u8>) = (c.check(0)?, c.check(1)?);
-            let range = match c.arg(2) {
-                Value::Nil => None,
-                _ => Some((offset(c, 2)?, offset(c, 3)?)),
-            };
-            Ok(format(&path, &text, range))
-        })?;
-        add(s, &t, &shared, "workspace_symbols", |a, _| {
-            Ok(a.workspace_symbols())
-        })?;
+        t.add_native::<configure>()?;
+        t.add_native::<open>()?;
+        t.add_native::<close>()?;
+        t.add_native::<search_path>()?;
+        t.add_native::<text>()?;
+        t.add_native::<diagnostics>()?;
+        t.add_native::<symbols>()?;
+        t.add_native::<definition>()?;
+        t.add_native::<references>()?;
+        t.add_native::<rename_target>()?;
+        t.add_native::<hover>()?;
+        t.add_native::<completions>()?;
+        t.add_native::<signature>()?;
+        t.add_native::<inlay_hints>()?;
+        t.add_native::<tokens>()?;
+        t.add_native::<folds>()?;
+        t.add_native::<format_edits>()?;
+        t.add_native::<workspace_symbols>()?;
         t.raw_set("version", env!("CARGO_PKG_VERSION"))?;
         s.register_module("analysis", t);
         Ok(())

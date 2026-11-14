@@ -6,6 +6,7 @@ use crate::error::Error;
 use crate::host::{Call, HostFunction, Ret};
 use crate::pin::Pinned;
 use crate::scope::Scope;
+use crate::stack::Native;
 use crate::value::{Table, Userdata};
 
 /// How the API stores a host value in a userdata: taken out while a method
@@ -104,6 +105,27 @@ impl<'s, T: 'static> ClassBuilder<'s, T> {
     pub fn function(&mut self, name: &str, f: impl HostFunction) -> Result<&mut Self, Error> {
         let f = self.s.create_function(f);
         self.methods.raw_set(name, f)?;
+        Ok(self)
+    }
+
+    /// Native `N` (one written with [`#[native]`](crate::native)) as the
+    /// method `name`. Unlike [`ClassBuilder::method`] it gets the object as
+    /// an ordinary argument, a [`Ud`](crate::stack::Ud) for `T`, and costs
+    /// a native call.
+    pub fn native<N: Native>(&mut self, name: &str) -> Result<&mut Self, Error> {
+        self.methods.raw_set(name, self.s.create_native::<N>())?;
+        Ok(self)
+    }
+
+    /// Native `N` as the metamethod for `event`, as
+    /// [`ClassBuilder::metamethod`] sets one.
+    pub fn native_metamethod<N: Native>(&mut self, event: &str) -> Result<&mut Self, Error> {
+        if matches!(event, "__index" | "__name" | "__gc") {
+            return Err(Error::runtime(format!(
+                "a class can't set {event}: it is the class's own"
+            )));
+        }
+        self.meta.raw_set(event, self.s.create_native::<N>())?;
         Ok(self)
     }
 

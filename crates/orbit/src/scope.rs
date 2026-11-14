@@ -174,6 +174,14 @@ impl<'s> Scope<'s> {
         self.stack().with_stdout(f)
     }
 
+    /// Run `f` on the isolate's extension value of type `T`, made with
+    /// `Default` on first use: the per-isolate state natives read with
+    /// [`Stack::extension`](crate::stack::Stack::extension) and
+    /// [`State`](crate::stack::State). `f` must not use the scope.
+    pub fn extension<T: std::any::Any + Default, R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        self.stack().extension(f)
+    }
+
     /// The decimal point of the isolate's locale (`.` in the C locale),
     /// which numbers are written and read with (ADR-13).
     pub fn decimal_point(&self) -> crate::OrbitString {

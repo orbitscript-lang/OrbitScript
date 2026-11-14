@@ -12,11 +12,14 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::process::{Child, Stdio};
 use std::rc::{Rc, Weak};
 
-use orbit::stack::{Any, Stack};
-use orbit::{Call, Class, Error, OrbitString, Pinned, Ret, Scope, Table, Userdata, Value, native};
+use orbit::stack::{
+    Any, Arg, Nil, REGISTRY_INDEX, Rest, Results, Return, Stack, StackResult, Type, Ud, UserType,
+    upvalue_index,
+};
+use orbit::{Error, OrbitString, Scope, Table, native};
 
 use crate::sys::{
-    exit_status, file_error, flush_stdout, os_error_code, os_error_text, os_path, shell,
+    exit_results, file_failure, flush_stdout, os_error_code, os_error_text, os_path, shell,
 };
 
 /// The C library's `BUFSIZ`, the default buffer size.
@@ -411,71 +414,63 @@ impl Drop for Stream {
 
 // ---- handles ---------------------------------------------------------------
 
-/// A default file (`io.input`, `io.output`): the handle, and its stream.
-struct Default {
-    file: Pinned<Userdata<'static>>,
-    stream: Shared,
+impl UserType for LuaFile {
+    const NAME: &'static str = FILE_TYPE;
 }
 
-/// The library's state, which its functions share.
-struct Io {
-    class: Class<LuaFile>,
-    input: Default,
-    output: Default,
+/// The registry keys of the default input and output handles (`io.input`,
+/// `io.output`).
+const INPUT_KEY: &str = "orbit.io.input";
+const OUTPUT_KEY: &str = "orbit.io.output";
+
+fn default_key(input: bool) -> &'static [u8] {
+    if input {
+        INPUT_KEY.as_bytes()
+    } else {
+        OUTPUT_KEY.as_bytes()
+    }
 }
 
-type State = Rc<RefCell<Io>>;
-
-/// A new `FILE*` handle for `stream`.
-fn new_file<'s>(
-    s: &'s Scope<'s>,
-    class: &Class<LuaFile>,
-    stream: Stream,
-) -> Result<(Userdata<'s>, Shared), Error> {
+/// Push a new `FILE*` handle for `stream`, and give its stream.
+fn push_file(s: &mut Stack<'_>, stream: Stream) -> StackResult<Shared> {
     let rc = Rc::new(RefCell::new(stream));
     OPEN.with(|open| {
         let mut open = open.borrow_mut();
         open.retain(|w| w.strong_count() > 0);
         open.push(Rc::downgrade(&rc));
     });
-    let u = class.instance(s, LuaFile(rc.clone()))?;
-    Ok((u, rc))
+    s.push_userdata(LuaFile(rc.clone()));
+    s.raw_get_field(REGISTRY_INDEX, FILE_TYPE.as_bytes())?;
+    s.set_metatable(-2)?;
+    Ok(rc)
 }
 
-/// The stream of a `FILE*` value.
-fn stream_of(v: Value<'_>) -> Option<Shared> {
-    let u = v.as_userdata()?;
-    let f = u.borrow::<LuaFile>().ok()?;
-    Some(f.0.clone())
+/// The stream of the `FILE*` at `idx`, open or closed.
+fn stream_at(s: &mut Stack<'_>, idx: i32) -> Option<Shared> {
+    s.with_userdata::<LuaFile, _>(idx, |f| f.as_ref().map(|f| f.0.clone()))
+        .flatten()
 }
 
-/// The stream of a `FILE*` argument, open or closed.
-fn stream_arg<'s>(c: &'s Call<'s>, i: usize) -> Result<Shared, Error> {
-    stream_of(c.arg(i)).ok_or_else(|| c.type_error(i, FILE_TYPE))
-}
-
-/// The stream of an open `FILE*` argument.
-fn open_arg<'s>(c: &'s Call<'s>, i: usize) -> Result<Shared, Error> {
-    let s = stream_arg(c, i)?;
-    if s.borrow().is_closed() {
-        return Err(c.error("attempt to use a closed file"));
+/// The stream of a file, which must be open.
+fn open_stream(s: &mut Stack<'_>, file: &LuaFile) -> StackResult<Shared> {
+    if file.0.borrow().is_closed() {
+        return Err(s.error("attempt to use a closed file"));
     }
-    Ok(s)
+    Ok(file.0.clone())
 }
 
-/// The default input or output stream, which must be open.
-fn default_file<'s>(
-    c: &'s Call<'s>,
-    state: &State,
-    input: bool,
-) -> Result<(Userdata<'s>, Shared), Error> {
-    let st = state.borrow();
-    let d = if input { &st.input } else { &st.output };
-    if d.stream.borrow().is_closed() {
-        let what = if input { "input" } else { "output" };
-        return Err(c.error(&format!("default {what} file is closed")));
+/// Push the default input or output handle, and give its stream, which
+/// must be open.
+fn push_default(s: &mut Stack<'_>, input: bool) -> StackResult<Shared> {
+    s.raw_get_field(REGISTRY_INDEX, default_key(input))?;
+    let stream = stream_at(s, -1).filter(|st| !st.borrow().is_closed());
+    match stream {
+        Some(st) => Ok(st),
+        None => {
+            let what = if input { "input" } else { "output" };
+            Err(s.error(format!("default {what} file is closed").as_str()))
+        }
     }
-    Ok((d.file.get(c)?, d.stream.clone()))
 }
 
 /// `io.open`'s mode: `[rwa]%+?b*`.
@@ -521,37 +516,35 @@ fn cannot_open(name: &[u8], e: &io::Error) -> OrbitString {
     OrbitString::concat(&[b"cannot open file '", name, b"' (", why.as_bytes(), b")"])
 }
 
-/// Argument `i` as a string, or `default` when nil or absent.
-fn opt_bytes<'s>(c: &'s Call<'s>, i: usize, default: &[u8]) -> Result<Vec<u8>, Error> {
-    Ok(c.opt::<Option<Vec<u8>>>(i, None)?
-        .unwrap_or_else(|| default.to_vec()))
+/// Push `nil, message, code` for a failed file operation.
+fn push_failure(s: &mut Stack<'_>, e: &io::Error, name: Option<&[u8]>) -> StackResult<Return> {
+    file_failure(e, name).push_results(s)
 }
 
 // ---- library functions -------------------------------------------------------
 
-fn io_open<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
-    let name: Vec<u8> = c.check(0)?;
-    let mode = opt_bytes(c, 1, b"r")?;
+#[native(name = "io.open")]
+fn io_open(s: &mut Stack<'_>, name: Vec<u8>, mode: Option<Vec<u8>>) -> StackResult<Return> {
+    let mode = mode.unwrap_or_else(|| b"r".to_vec());
     match open_file(&name, &mode) {
-        None => Err(c.arg_error(1, "invalid mode")),
+        None => Err(s.arg_error(2, "invalid mode")),
         Some(Ok(stream)) => {
-            let (f, _) = new_file(c, &state.borrow().class, stream)?;
-            c.ret(f)
+            push_file(s, stream)?;
+            Ok(Return::values(1))
         }
-        Some(Err(e)) => file_error(c, &e, Some(&name)),
+        Some(Err(e)) => push_failure(s, &e, Some(&name)),
     }
 }
 
-fn io_popen<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
-    let cmd: Vec<u8> = c.check(0)?;
-    let mode = opt_bytes(c, 1, b"r")?;
-    let reading = match &mode[..] {
-        b"r" => true,
-        b"w" => false,
-        _ => return Err(c.arg_error(1, "invalid mode")),
+#[native(name = "io.popen")]
+fn io_popen(s: &mut Stack<'_>, cmd: Vec<u8>, mode: Option<Vec<u8>>) -> StackResult<Return> {
+    let reading = match mode.as_deref() {
+        None | Some(b"r") => true,
+        Some(b"w") => false,
+        _ => return Err(s.arg_error(2, "invalid mode")),
     };
     // The child writes to the same terminal; keep our output first.
-    flush_stdout(c);
+    flush_stdout(s);
     let mut command = shell(os_path(&cmd).as_os_str());
     if reading {
         command.stdout(Stdio::piped());
@@ -565,35 +558,32 @@ fn io_popen<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
             } else {
                 Stream::new(Kind::PipeWrite(child), false, true)
             };
-            let (f, _) = new_file(c, &state.borrow().class, stream)?;
-            c.ret(f)
+            push_file(s, stream)?;
+            Ok(Return::values(1))
         }
-        Err(e) => file_error(c, &e, Some(&cmd)),
+        Err(e) => push_failure(s, &e, Some(&cmd)),
     }
 }
 
-fn io_tmpfile<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
+#[native(name = "io.tmpfile")]
+fn io_tmpfile(s: &mut Stack<'_>) -> StackResult<Return> {
     // Removed at once: the open handle keeps the file until it is closed.
-    match crate::sys::temp_file() {
-        Ok((path, _)) => {
-            let opened = OpenOptions::new().read(true).write(true).open(&path);
-            let _ = std::fs::remove_file(&path);
-            match opened {
-                Ok(f) => {
-                    let stream = Stream::new(Kind::File(f), true, true);
-                    let (f, _) = new_file(c, &state.borrow().class, stream)?;
-                    c.ret(f)
-                }
-                Err(e) => file_error(c, &e, None),
-            }
+    let opened = crate::sys::temp_file().and_then(|(path, _)| {
+        let opened = OpenOptions::new().read(true).write(true).open(&path);
+        let _ = std::fs::remove_file(&path);
+        opened
+    });
+    match opened {
+        Ok(f) => {
+            push_file(s, Stream::new(Kind::File(f), true, true))?;
+            Ok(Return::values(1))
         }
-        Err(e) => file_error(c, &e, None),
+        Err(e) => push_failure(s, &e, None),
     }
 }
 
 #[native(name = "io.type")]
 fn io_type(s: &mut Stack<'_>, v: Any) -> Option<&'static str> {
-    // A file whose method is running reads as not a file, as before.
     let closed = s.with_userdata::<LuaFile, _>(v.0, |f| Some(f.as_ref()?.0.borrow().is_closed()));
     match closed.flatten()? {
         true => Some("closed file"),
@@ -601,201 +591,215 @@ fn io_type(s: &mut Stack<'_>, v: Any) -> Option<&'static str> {
     }
 }
 
-/// `io.input` and `io.output`.
-fn set_default<'s>(c: &'s Call<'s>, state: &State, input: bool) -> Result<Ret, Error> {
-    let new = match c.arg(0) {
-        Value::Nil => None,
-        Value::Str(_) | Value::Int(_) | Value::Float(_) => {
-            let name: Vec<u8> = c.check(0)?;
+#[native(name = "io.input")]
+fn io_input(s: &mut Stack<'_>) -> StackResult<Return> {
+    set_default(s, true)
+}
+
+#[native(name = "io.output")]
+fn io_output(s: &mut Stack<'_>) -> StackResult<Return> {
+    set_default(s, false)
+}
+
+/// `io.input` and `io.output`: with a file name or a file, make it the
+/// default; return the default.
+fn set_default(s: &mut Stack<'_>, input: bool) -> StackResult<Return> {
+    match s.type_at(1) {
+        Type::None | Type::Nil => {}
+        Type::String | Type::Number => {
+            let name = s.check_string(1)?.to_vec();
             let mode: &[u8] = if input { b"r" } else { b"w" };
             match open_file(&name, mode).expect("valid mode") {
-                Ok(stream) => Some(new_file(c, &state.borrow().class, stream)?),
-                Err(e) => return Err(c.error(&cannot_open(&name, &e))),
+                Ok(stream) => {
+                    push_file(s, stream)?;
+                }
+                Err(e) => return Err(s.error(&cannot_open(&name, &e))),
             }
+            s.raw_set_field(REGISTRY_INDEX, default_key(input))?;
         }
-        v => {
-            let s = open_arg(c, 0)?;
-            Some((v.as_userdata().expect("a file is userdata"), s))
-        }
-    };
-    if let Some((file, stream)) = new {
-        let d = Default {
-            file: file.pin(),
-            stream,
-        };
-        let mut st = state.borrow_mut();
-        if input {
-            st.input = d;
-        } else {
-            st.output = d;
+        _ => {
+            let file = Ud::<LuaFile>::arg(s, 1)?;
+            open_stream(s, &file)?;
+            s.push_copy(1);
+            s.raw_set_field(REGISTRY_INDEX, default_key(input))?;
         }
     }
-    let st = state.borrow();
-    let d = if input { &st.input } else { &st.output };
-    c.ret(d.file.get(c)?)
+    s.raw_get_field(REGISTRY_INDEX, default_key(input))?;
+    Ok(Return::values(1))
 }
 
-fn io_close<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
-    if c.arg(0).is_nil() {
-        let (_, s) = default_file(c, state, false)?;
-        return close(c, &s);
+#[native(name = "io.close")]
+fn io_close(s: &mut Stack<'_>) -> StackResult<Return> {
+    if matches!(s.type_at(1), Type::None | Type::Nil) {
+        let stream = push_default(s, false)?;
+        return close(s, &stream);
     }
-    f_close(c)
+    let file = Ud::<LuaFile>::arg(s, 1)?;
+    f_close(s, file)
 }
 
-fn f_close<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let s = open_arg(c, 0)?;
-    close(c, &s)
+// Methods are unnamed in messages, as in the reference: `bad argument #2
+// to '?'` when no call names them.
+
+#[native(name = "?")]
+fn f_close(s: &mut Stack<'_>, file: Ud<LuaFile>) -> StackResult<Return> {
+    let stream = open_stream(s, &file)?;
+    close(s, &stream)
 }
 
-fn close<'s>(c: &'s Call<'s>, s: &Shared) -> Result<Ret, Error> {
-    if s.borrow().is_std() {
-        return c.ret((Value::Nil, "cannot close standard file"));
+fn close(s: &mut Stack<'_>, stream: &Shared) -> StackResult<Return> {
+    if stream.borrow().is_std() {
+        return (Nil, "cannot close standard file").push_results(s);
     }
-    let r = c.with_stdout(|out| s.borrow_mut().close(out));
-    match r {
-        Ok(Some(status)) => exit_status(c, status),
-        Ok(None) => c.ret(true),
-        Err(e) => file_error(c, &e, None),
-    }
-}
-
-fn io_flush<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
-    let (f, s) = default_file(c, state, false)?;
-    flush_result(c, &s, f)
-}
-
-fn f_flush<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let s = open_arg(c, 0)?;
-    flush_result(c, &s, c.arg(0))
-}
-
-fn flush_result<'s>(
-    c: &'s Call<'s>,
-    s: &Shared,
-    file: impl orbit::IntoValue<'s>,
-) -> Result<Ret, Error> {
-    let r = c.with_stdout(|out| s.borrow_mut().flush(out));
-    match r {
-        Ok(()) => c.ret(file),
-        Err(e) => file_error(c, &e, None),
+    match s.with_stdout(|out| stream.borrow_mut().close(out)) {
+        Ok(Some(status)) => exit_results(status).push_results(s),
+        Ok(None) => true.push_results(s),
+        Err(e) => push_failure(s, &e, None),
     }
 }
 
-fn io_write<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
-    let (f, s) = default_file(c, state, false)?;
-    write(c, &s, f.to_value(), 0)
+#[native(name = "io.flush")]
+fn io_flush(s: &mut Stack<'_>) -> StackResult<Return> {
+    let stream = push_default(s, false)?;
+    flush_result(s, &stream)
 }
 
-fn f_write<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let s = open_arg(c, 0)?;
-    write(c, &s, c.arg(0), 1)
+#[native(name = "?")]
+fn f_flush(s: &mut Stack<'_>, file: Ud<LuaFile>) -> StackResult<Return> {
+    let stream = open_stream(s, &file)?;
+    s.push_copy(1);
+    flush_result(s, &stream)
 }
 
-/// Write arguments `first..` (strings or numbers) to `s`. Returns the file,
+/// Flush `stream`: the file on top, or `nil, message, code`.
+fn flush_result(s: &mut Stack<'_>, stream: &Shared) -> StackResult<Return> {
+    match s.with_stdout(|out| stream.borrow_mut().flush(out)) {
+        Ok(()) => Ok(Return::values(1)),
+        Err(e) => push_failure(s, &e, None),
+    }
+}
+
+#[native(name = "io.write")]
+fn io_write(s: &mut Stack<'_>, args: Rest) -> StackResult<Return> {
+    let stream = push_default(s, false)?;
+    write(s, &stream, args)
+}
+
+#[native(name = "?")]
+fn f_write(s: &mut Stack<'_>, file: Ud<LuaFile>, args: Rest) -> StackResult<Return> {
+    let stream = open_stream(s, &file)?;
+    s.push_copy(1);
+    write(s, &stream, args)
+}
+
+/// Write `args` (strings or numbers) to `stream`. Returns the file on top,
 /// or `nil, message, code, bytes written` (5.4: without the count).
-fn write<'s>(c: &'s Call<'s>, s: &Shared, file: Value<'s>, first: usize) -> Result<Ret, Error> {
+fn write(s: &mut Stack<'_>, stream: &Shared, args: Rest) -> StackResult<Return> {
     let mut written = 0usize;
     let mut bytes = Vec::new();
-    let mut point = None;
-    for i in first..c.nargs() {
+    for i in args.indices() {
         bytes.clear();
-        let v = c.arg(i);
-        if !v.write_text(&mut bytes) {
-            return Err(c.type_error(i, "string"));
-        }
-        if let Value::Float(_) = v {
-            // Floats are written with the locale's decimal point.
-            let point = point.get_or_insert_with(|| c.decimal_point());
-            if &point[..] != b"." {
-                if let Some(at) = bytes.iter().position(|&b| b == b'.') {
-                    bytes.splice(at..at + 1, point.iter().copied());
-                }
+        match s.type_at(i) {
+            Type::String => bytes.extend_from_slice(&s.string_at(i).unwrap_or_default()),
+            // With the locale's decimal point, as `tostring` writes it.
+            Type::Number => {
+                bytes.extend_from_slice(s.number_text(i).unwrap_or_default().as_bytes())
             }
+            _ => return Err(s.type_error(i, "string")),
         }
-        let r = c.with_stdout(|out| s.borrow_mut().write(&bytes, out));
-        if let Err(e) = r {
-            let msg = os_error_text(&e);
+        if let Err(e) = s.with_stdout(|out| stream.borrow_mut().write(&bytes, out)) {
+            let (msg, code) = (os_error_text(&e), os_error_code(&e));
             // Lua 5.4 doesn't report the bytes written (ADR-14).
             if orbit::LUA.is_5_4() {
-                return c.ret((Value::Nil, msg, os_error_code(&e)));
+                return (Nil, msg, code).push_results(s);
             }
-            return c.ret((Value::Nil, msg, os_error_code(&e), written as i64));
+            return (Nil, msg, code, written as i64).push_results(s);
         }
         written += bytes.len();
     }
-    c.ret(file)
+    Ok(Return::values(1))
 }
 
-fn f_seek<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let s = open_arg(c, 0)?;
-    let whence = opt_bytes(c, 1, b"cur")?;
-    let off: i64 = c.opt(2, 0)?;
-    let from = match &whence[..] {
+#[native(name = "?")]
+fn f_seek(
+    s: &mut Stack<'_>,
+    file: Ud<LuaFile>,
+    whence: Option<Vec<u8>>,
+    off: Option<i64>,
+) -> StackResult<Return> {
+    let stream = open_stream(s, &file)?;
+    let off = off.unwrap_or(0);
+    let from = match whence.as_deref().unwrap_or(b"cur") {
         b"set" => {
             if off < 0 {
-                return file_error(c, &io::Error::from(io::ErrorKind::InvalidInput), None);
+                return push_failure(s, &io::Error::from(io::ErrorKind::InvalidInput), None);
             }
             SeekFrom::Start(off as u64)
         }
         b"cur" => SeekFrom::Current(off),
         b"end" => SeekFrom::End(off),
-        _ => {
-            let msg = OrbitString::concat(&[b"invalid option '", &whence, b"'"]);
-            return Err(c.arg_error(1, &msg));
+        other => {
+            let msg = OrbitString::concat(&[b"invalid option '", other, b"'"]);
+            return Err(s.arg_error(2, &msg));
         }
     };
-    let r = c.with_stdout(|out| s.borrow_mut().seek(from, out));
-    match r {
-        Ok(p) => c.ret(p as i64),
-        Err(e) => file_error(c, &e, None),
+    match s.with_stdout(|out| stream.borrow_mut().seek(from, out)) {
+        Ok(p) => (p as i64).push_results(s),
+        Err(e) => push_failure(s, &e, None),
     }
 }
 
-fn f_setvbuf<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let s = open_arg(c, 0)?;
-    let mode: Vec<u8> = c.check(1)?;
-    let size = c.opt::<i64>(2, BUFSIZ as i64)?.max(0) as usize;
+#[native(name = "?")]
+fn f_setvbuf(
+    s: &mut Stack<'_>,
+    file: Ud<LuaFile>,
+    mode: Vec<u8>,
+    size: Option<i64>,
+) -> StackResult<Return> {
+    let stream = open_stream(s, &file)?;
+    let size = size.unwrap_or(BUFSIZ as i64).max(0) as usize;
     let b = match &mode[..] {
         b"no" => Buffering::No,
         b"line" => Buffering::Line(size),
         b"full" => Buffering::Full(size),
         _ => {
             let msg = OrbitString::concat(&[b"invalid option '", &mode, b"'"]);
-            return Err(c.arg_error(1, &msg));
+            return Err(s.arg_error(2, &msg));
         }
     };
-    let r = c.with_stdout(|out| {
-        let mut st = s.borrow_mut();
+    let r = s.with_stdout(|out| {
+        let mut st = stream.borrow_mut();
         let r = st.flush(out);
         st.buffering = b;
         r
     });
     match r {
-        Ok(()) => c.ret(true),
-        Err(e) => file_error(c, &e, None),
+        Ok(()) => true.push_results(s),
+        Err(e) => push_failure(s, &e, None),
     }
 }
 
 // ---- reading ---------------------------------------------------------------
 
-fn io_read<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
-    let (_, s) = default_file(c, state, true)?;
-    let fmts: Vec<FormatArg> = (0..c.nargs()).map(|i| FormatArg::of(c.arg(i))).collect();
-    read(c, &s, &fmts, 0)
+#[native(name = "io.read")]
+fn io_read(s: &mut Stack<'_>, formats: Rest) -> StackResult<Return> {
+    let stream = push_default(s, true)?;
+    let fmts = format_args(s, formats);
+    read(s, &stream, &fmts, formats.first)
 }
 
-fn f_read<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let s = open_arg(c, 0)?;
-    let fmts: Vec<FormatArg> = (1..c.nargs()).map(|i| FormatArg::of(c.arg(i))).collect();
-    read(c, &s, &fmts, 1)
+#[native(name = "?")]
+fn f_read(s: &mut Stack<'_>, file: Ud<LuaFile>, formats: Rest) -> StackResult<Return> {
+    let stream = open_stream(s, &file)?;
+    let fmts = format_args(s, formats);
+    read(s, &stream, &fmts, formats.first)
 }
 
 /// `read`: the values, or `nil, message, code` on an I/O error.
-fn read<'s>(c: &'s Call<'s>, s: &Shared, fmts: &[FormatArg], arg: usize) -> Result<Ret, Error> {
-    match read_values(c, s, fmts, arg)? {
-        Ok(values) => c.ret(values),
-        Err(e) => file_error(c, &e, None),
+fn read(s: &mut Stack<'_>, stream: &Shared, fmts: &[FormatArg], arg: i32) -> StackResult<Return> {
+    match read_values(s, stream, fmts, arg)? {
+        Ok(n) => Ok(Return::values(n)),
+        Err(e) => push_failure(s, &e, None),
     }
 }
 
@@ -819,20 +823,27 @@ enum FormatArg {
 }
 
 impl FormatArg {
-    fn of(v: Value<'_>) -> FormatArg {
-        match v {
-            Value::Int(n) => FormatArg::Int(n),
-            Value::Float(f) => FormatArg::Float(f),
-            Value::Str(s) => FormatArg::Str(s.to_bytes()),
+    /// The format at `idx`.
+    fn at(s: &Stack<'_>, idx: i32) -> FormatArg {
+        match s.type_at(idx) {
+            Type::Number if s.is_integer(idx) => FormatArg::Int(s.to_integer(idx).unwrap_or(0)),
+            Type::Number => FormatArg::Float(s.to_number(idx).unwrap_or(0.0)),
+            Type::String => FormatArg::Str(s.string_at(idx).unwrap_or_default().to_vec()),
             _ => FormatArg::Other,
         }
     }
 }
 
+/// The formats among the arguments.
+fn format_args(s: &Stack<'_>, args: Rest) -> Vec<FormatArg> {
+    args.indices().map(|i| FormatArg::at(s, i)).collect()
+}
+
 /// 2^63 as a float: the first float above every `i64`.
 const TWO_63: f64 = 9_223_372_036_854_775_808.0;
 
-fn format<'s>(c: &'s Call<'s>, v: &FormatArg, arg: usize) -> Result<Format, Error> {
+/// Format `v`, argument `arg`.
+fn format(s: &mut Stack<'_>, v: &FormatArg, arg: i32) -> StackResult<Format> {
     let count = |n: i64| Format::Count(usize::try_from(n).unwrap_or(0));
     match *v {
         FormatArg::Int(n) => Ok(count(n)),
@@ -840,7 +851,7 @@ fn format<'s>(c: &'s Call<'s>, v: &FormatArg, arg: usize) -> Result<Format, Erro
         FormatArg::Float(f) if f.fract() == 0.0 && (-TWO_63..TWO_63).contains(&f) => {
             Ok(count(f as i64))
         }
-        FormatArg::Float(_) => Err(c.arg_error(arg, "number has no integer representation")),
+        FormatArg::Float(_) => Err(s.arg_error(arg, "number has no integer representation")),
         FormatArg::Str(ref b) => {
             let b = b.strip_prefix(b"*").unwrap_or(b);
             match b.first() {
@@ -848,10 +859,10 @@ fn format<'s>(c: &'s Call<'s>, v: &FormatArg, arg: usize) -> Result<Format, Erro
                 Some(b'l') => Ok(Format::Line { keep: false }),
                 Some(b'L') => Ok(Format::Line { keep: true }),
                 Some(b'a') => Ok(Format::All),
-                _ => Err(c.arg_error(arg, "invalid format")),
+                _ => Err(s.arg_error(arg, "invalid format")),
             }
         }
-        FormatArg::Other => Err(c.type_error(arg, "string")),
+        FormatArg::Other => Err(s.type_error(arg, "string")),
     }
 }
 
@@ -865,37 +876,36 @@ fn append(into: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Read with formats `fmts` (none: one line) from `s`: one value per
-/// format, stopping after the first that fails (nil). `arg` is the
-/// argument index of the first format, for messages. As in lua5.5, each
-/// format is checked when its turn comes, so formats after a failed read
-/// are never looked at.
-fn read_values<'s>(
-    c: &'s Call<'s>,
-    s: &Shared,
+/// Read with formats `fmts` (none: one line) from `stream`, pushing one
+/// value per format and stopping after the first that fails (nil). `arg` is
+/// the argument number of the first format, for messages. As in lua5.5,
+/// each format is checked when its turn comes, so formats after a failed
+/// read are never looked at. Gives how many values it pushed, or the I/O
+/// error, with the values taken off again.
+fn read_values(
+    s: &mut Stack<'_>,
+    stream: &Shared,
     fmts: &[FormatArg],
-    arg: usize,
-) -> Result<io::Result<Vec<Value<'s>>>, Error> {
+    arg: i32,
+) -> StackResult<io::Result<usize>> {
+    let top = s.top();
     let n = fmts.len().max(1);
-    let mut values = Vec::with_capacity(n);
     for i in 0..n {
         let fmt = match fmts.get(i) {
-            Some(f) => format(c, f, arg + i)?,
+            Some(f) => format(s, f, arg + i as i32)?,
             None => Format::Line { keep: false },
         };
-        match read_one(c, s, fmt) {
-            Ok(v) => {
-                let failed = v.is_nil();
-                values.push(v);
-                if failed {
-                    break;
-                }
+        match read_one(s, stream, fmt) {
+            Ok(true) => {}
+            Ok(false) => return Ok(Ok(i + 1)),
+            Err(e) if e.kind() == io::ErrorKind::OutOfMemory => return Err(s.memory_error()),
+            Err(e) => {
+                s.set_top(top)?;
+                return Ok(Err(e));
             }
-            Err(e) if e.kind() == io::ErrorKind::OutOfMemory => return Err(Error::memory()),
-            Err(e) => return Ok(Err(e)),
         }
     }
-    Ok(Ok(values))
+    Ok(Ok(n))
 }
 
 /// What one format read.
@@ -905,17 +915,17 @@ enum ReadOutcome {
     Nothing,
 }
 
-/// One format's value, or nil if it fails.
-fn read_one<'s>(c: &'s Call<'s>, s: &Shared, fmt: Format) -> io::Result<Value<'s>> {
+/// Push one format's value, or nil if it fails. Gives whether it read.
+fn read_one(s: &mut Stack<'_>, stream: &Shared, fmt: Format) -> io::Result<bool> {
     // The first byte of the locale's decimal point, as lua5.5 reads it.
-    let point = c
+    let point = s
         .decimal_point()
         .as_bytes()
         .first()
         .copied()
         .unwrap_or(b'.');
-    let read = c.with_stdout(|out| -> io::Result<ReadOutcome> {
-        let mut st = s.borrow_mut();
+    let read = s.with_stdout(|out| -> io::Result<ReadOutcome> {
+        let mut st = stream.borrow_mut();
         let mut buf = Vec::new();
         let ok = match fmt {
             Format::Count(0) => st.fill(out)?,
@@ -937,123 +947,153 @@ fn read_one<'s>(c: &'s Call<'s>, s: &Shared, fmt: Format) -> io::Result<Value<'s
         })
     })?;
     Ok(match read {
-        ReadOutcome::Bytes(b) => c.create_string(b).to_value(),
-        ReadOutcome::Numeral(digits) => digits
-            .and_then(|d| c.parse_number(&d))
-            .unwrap_or(Value::Nil),
-        ReadOutcome::Nothing => Value::Nil,
+        ReadOutcome::Bytes(b) => {
+            s.push_bytes(&b[..]);
+            true
+        }
+        ReadOutcome::Numeral(Some(d)) if s.push_numeral(&d[..]) != 0 => true,
+        ReadOutcome::Numeral(_) | ReadOutcome::Nothing => {
+            s.push_nil();
+            false
+        }
     })
 }
 
 // ---- lines -----------------------------------------------------------------
 
-fn io_lines<'s>(c: &'s Call<'s>, state: &State) -> Result<Ret, Error> {
-    let (file, stream, close) = if c.arg(0).is_nil() {
-        let (f, s) = default_file(c, state, true)?;
-        (f, s, false)
-    } else {
-        let name: Vec<u8> = c.check(0)?;
+#[native(name = "io.lines")]
+fn io_lines(s: &mut Stack<'_>, formats: Rest) -> StackResult<Return> {
+    let close = !matches!(s.type_at(1), Type::None | Type::Nil);
+    if close {
+        let name = s.check_string(1)?.to_vec();
         match open_file(&name, b"r").expect("valid mode") {
             Ok(stream) => {
-                let (f, s) = new_file(c, &state.borrow().class, stream)?;
-                (f, s, true)
+                push_file(s, stream)?;
             }
-            Err(e) => return Err(c.error(&cannot_open(&name, &e))),
+            Err(e) => return Err(s.error(&cannot_open(&name, &e))),
         }
-    };
-    let iter = lines_iterator(c, file, stream, 1, close)?;
-    let to_close = if close { file.to_value() } else { Value::Nil };
-    c.ret((iter, Value::Nil, Value::Nil, to_close))
-}
-
-fn f_lines<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let stream = open_arg(c, 0)?;
-    let file = c.arg(0).as_userdata().expect("checked");
-    let iter = lines_iterator(c, file, stream, 1, false)?;
-    c.ret(iter)
-}
-
-/// A function that reads `file` with the formats in arguments `first..`,
-/// closing the file at the end when `close`.
-fn lines_iterator<'s>(
-    c: &'s Call<'s>,
-    file: Userdata<'s>,
-    stream: Shared,
-    first: usize,
-    close: bool,
-) -> Result<orbit::Function<'s>, Error> {
-    let n = c.nargs().saturating_sub(first);
-    if n > MAX_LINE_FORMATS {
-        return Err(c.arg_error(first + MAX_LINE_FORMATS, "too many arguments"));
+    } else {
+        push_default(s, true)?;
     }
-    let fmts: Vec<FormatArg> = (0..n).map(|i| FormatArg::of(c.arg(first + i))).collect();
-    // Keeps the handle alive while the iterator lives, as Lua's upvalue
-    // does.
-    let file = file.pin();
-    Ok(c.create_function(move |c| {
-        let _ = &file;
-        if stream.borrow().is_closed() {
-            return Err(c.error("file is already closed"));
-        }
-        match read_values(c, &stream, &fmts, 1)? {
-            Ok(values) if values.first().is_some_and(Value::truthy) => c.ret(values),
-            Ok(_) => {
-                // The end: no values, and the file closes if `lines` opened it.
-                if close {
-                    let _ = c.with_stdout(|out| stream.borrow_mut().close(out));
-                }
-                c.ret(())
+    // [file?, formats..., file]
+    let file = s.top();
+    push_lines_iterator(
+        s,
+        file,
+        formats.first + 1,
+        formats.count.saturating_sub(1),
+        close,
+    )?;
+    if close {
+        // The iterator, two nils, and the file to close.
+        s.push_nil();
+        s.push_nil();
+        s.push_copy(file);
+    } else {
+        s.push_nil();
+        s.push_nil();
+        s.push_nil();
+    }
+    Ok(Return::values(4))
+}
+
+#[native(name = "?")]
+fn f_lines(s: &mut Stack<'_>, file: Ud<LuaFile>, formats: Rest) -> StackResult<Return> {
+    open_stream(s, &file)?;
+    push_lines_iterator(s, 1, formats.first, formats.count, false)?;
+    Ok(Return::values(1))
+}
+
+/// Push a function that reads the file at `file` with the `n` formats from
+/// `first`, closing the file at the end when `close`. The file and the
+/// formats are its upvalues, which keep the handle alive, as Lua's do.
+fn push_lines_iterator(
+    s: &mut Stack<'_>,
+    file: i32,
+    first: i32,
+    n: usize,
+    close: bool,
+) -> StackResult<()> {
+    if n > MAX_LINE_FORMATS {
+        return Err(s.arg_error(first + MAX_LINE_FORMATS as i32, "too many arguments"));
+    }
+    s.push_copy(file);
+    for i in 0..n as i32 {
+        s.push_copy(first + i);
+    }
+    let data = (n as u64) << 1 | u64::from(close);
+    s.push_native_closure::<lines_next>(n + 1, data)
+}
+
+#[native(name = "?")]
+fn lines_next(s: &mut Stack<'_>) -> StackResult<Return> {
+    let data = s.closure_data();
+    let (n, close) = ((data >> 1) as i32, data & 1 != 0);
+    let Some(stream) = stream_at(s, upvalue_index(1)) else {
+        return Err(s.error("file is already closed"));
+    };
+    if stream.borrow().is_closed() {
+        return Err(s.error("file is already closed"));
+    }
+    let fmts: Vec<FormatArg> = (2..n + 2)
+        .map(|i| FormatArg::at(s, upvalue_index(i)))
+        .collect();
+    let top = s.top();
+    match read_values(s, &stream, &fmts, 2)? {
+        Ok(n) if s.to_boolean(top + 1) => Ok(Return::values(n)),
+        Ok(_) => {
+            // The end: no values, and the file closes if `lines` opened it.
+            if close {
+                let _ = s.with_stdout(|out| stream.borrow_mut().close(out));
             }
-            Err(e) => Err(c.error(&os_error_text(&e))),
+            Ok(Return::values(0))
         }
-    }))
+        Err(e) => Err(s.error(os_error_text(&e).as_str())),
+    }
 }
 
 // ---- metamethods and opening ----------------------------------------------
 
-fn f_tostring<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let s = stream_arg(c, 0)?;
-    let text = if s.borrow().is_closed() {
+#[native(name = "?")]
+fn f_tostring(s: &mut Stack<'_>, file: Ud<LuaFile>) -> String {
+    if (file.0).0.borrow().is_closed() {
         "file (closed)".to_string()
     } else {
-        format!("file (0x{:012x})", c.arg(0).address().unwrap_or(0))
-    };
-    c.ret(text)
+        format!("file (0x{:012x})", s.identity(1).unwrap_or(0))
+    }
 }
 
-/// `__close` and `__gc`: close the file unless it is closed or
-/// standard.
-fn f_gc<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let s = stream_arg(c, 0)?;
-    let open = { !s.borrow().is_closed() && !s.borrow().is_std() };
+/// `__close` and `__gc`: close the file unless it is closed or standard.
+#[native(name = "?")]
+fn f_gc(s: &mut Stack<'_>, file: Ud<LuaFile>) {
+    let stream = &(file.0).0;
+    let open = !stream.borrow().is_closed() && !stream.borrow().is_std();
     if open {
-        let _ = c.with_stdout(|out| s.borrow_mut().close(out));
+        let _ = s.with_stdout(|out| stream.borrow_mut().close(out));
     }
-    c.ret(())
 }
 
 /// Open the library: the `io` table, the `FILE*` class and the standard
 /// files, which are also the default input and output. Returns the table.
 pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
     let class = s.define_class::<LuaFile>(FILE_TYPE, |b| {
-        b.function("close", f_close)?
-            .function("flush", f_flush)?
-            .function("lines", f_lines)?
-            .function("read", f_read)?
-            .function("seek", f_seek)?
-            .function("setvbuf", f_setvbuf)?
-            .function("write", f_write)?
-            .metamethod("__tostring", f_tostring)?
-            .metamethod("__close", f_gc)?;
+        b.native::<f_close>("close")?
+            .native::<f_flush>("flush")?
+            .native::<f_lines>("lines")?
+            .native::<f_read>("read")?
+            .native::<f_seek>("seek")?
+            .native::<f_setvbuf>("setvbuf")?
+            .native::<f_write>("write")?
+            .native_metamethod::<f_tostring>("__tostring")?
+            .native_metamethod::<f_gc>("__close")?;
         Ok(())
     })?;
     // `T`'s `Drop` would close a collected file too, but Lua's metatable
     // has a `__gc` scripts can see and call.
     let meta = class.metatable(s)?;
-    meta.raw_set("__gc", s.create_function(f_gc))?;
+    meta.raw_set("__gc", s.create_native::<f_gc>())?;
     s.registry().raw_set(FILE_TYPE, meta)?;
     let io = s.create_table();
-    let mut defaults = Vec::new();
     for (name, kind, r, w) in [
         ("stdin", Kind::Stdin, true, false),
         ("stdout", Kind::Stdout, false, true),
@@ -1063,39 +1103,27 @@ pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
         if name == "stderr" {
             stream.buffering = Buffering::No;
         }
-        let (f, rc) = new_file(s, &class, stream)?;
+        let rc = Rc::new(RefCell::new(stream));
+        OPEN.with(|open| open.borrow_mut().push(Rc::downgrade(&rc)));
+        let f = class.instance(s, LuaFile(rc))?;
         io.raw_set(name, f)?;
-        defaults.push(Default {
-            file: f.pin(),
-            stream: rc,
-        });
+        match name {
+            "stdin" => s.registry().raw_set(INPUT_KEY, f)?,
+            "stdout" => s.registry().raw_set(OUTPUT_KEY, f)?,
+            _ => {}
+        }
     }
-    defaults.truncate(2);
-    let output = defaults.pop().expect("stdout");
-    let input = defaults.pop().expect("stdin");
-    let state: State = Rc::new(RefCell::new(Io {
-        class,
-        input,
-        output,
-    }));
-    type WithState = for<'c> fn(&'c Call<'c>, &State) -> Result<Ret, Error>;
-    let with_state: [(&str, WithState); 10] = [
-        ("close", io_close),
-        ("flush", io_flush),
-        ("input", |c, st| set_default(c, st, true)),
-        ("lines", io_lines),
-        ("open", io_open),
-        ("output", |c, st| set_default(c, st, false)),
-        ("popen", io_popen),
-        ("read", io_read),
-        ("tmpfile", io_tmpfile),
-        ("write", io_write),
-    ];
-    for (name, f) in with_state {
-        let st = state.clone();
-        io.raw_set(name, s.create_function(move |c| f(c, &st)))?;
-    }
-    io.raw_set("type", s.create_native::<io_type>())?;
+    io.add_native::<io_close>()?;
+    io.add_native::<io_flush>()?;
+    io.add_native::<io_input>()?;
+    io.add_native::<io_lines>()?;
+    io.add_native::<io_open>()?;
+    io.add_native::<io_output>()?;
+    io.add_native::<io_popen>()?;
+    io.add_native::<io_read>()?;
+    io.add_native::<io_tmpfile>()?;
+    io.add_native::<io_type>()?;
+    io.add_native::<io_write>()?;
     s.before_exit(flush_all);
     Ok(io)
 }

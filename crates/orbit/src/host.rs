@@ -30,6 +30,12 @@ use crate::value::{FromValue, FromValueError, Function, IntoValues, TailCalled, 
 /// Results go back with [`Call::ret`]; an `Err` becomes a script error
 /// that `pcall` can catch. A host function that panics raises an error
 /// instead of unwinding into the script.
+///
+/// This is the convenient tier: a host function can capture Rust state and
+/// works with handles, but a call costs several times a native's. A
+/// function scripts call often is better written as a native with
+/// [`#[native]`](crate::native), the fast tier, which the first-party
+/// libraries use.
 pub trait HostFunction: for<'s> Fn(&'s Call<'s>) -> Result<Ret, Error> + 'static {}
 
 impl<F> HostFunction for F where F: for<'s> Fn(&'s Call<'s>) -> Result<Ret, Error> + 'static {}
@@ -228,7 +234,7 @@ fn move_to_end(stack: &mut Stack<'_>, at: i32, n: usize) -> StackResult<()> {
     Ok(())
 }
 
-fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
     let what = p
         .downcast_ref::<&str>()
         .copied()

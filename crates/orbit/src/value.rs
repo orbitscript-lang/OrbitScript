@@ -416,6 +416,14 @@ impl<'s> Table<'s> {
         self.s.run(|st| st.raw_set(self.idx))
     }
 
+    /// Set native `N` (one written with [`#[native]`](crate::native)) as
+    /// the field its name ends in, without metamethods: for a native named
+    /// `os.date`, `t.date`. The name is written once, in the attribute.
+    pub fn add_native<N: Native>(&self) -> Result<(), Error> {
+        let f = self.s.create_native::<N>();
+        self.raw_set(crate::stack::field_name(N::NAME), f)
+    }
+
     /// `#t`, with `__len`.
     // `#t` is a border, not a count, so `#t == 0` isn't emptiness
     #[allow(clippy::len_without_is_empty)]

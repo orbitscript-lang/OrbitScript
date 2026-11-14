@@ -2,21 +2,33 @@
 
 use std::time::Instant;
 
-use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, TableArg, Type};
+use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, State, TableArg, Type};
 use orbit::{
-    Call, Error, LocaleCategory, LocaleScope, OrbitStr, OrbitString, Ret, Scope, Table, TimeParts,
-    native,
+    Error, LocaleCategory, LocaleScope, OrbitStr, OrbitString, Scope, Table, TimeParts, native,
 };
 
-use crate::sys::{ExitResults, FileFailure, exit_results, file_failure, os_bytes, os_path, shell};
+use crate::sys::{
+    ExitResults, FileFailure, exit_results, file_failure, flush_stdout, os_bytes, os_path, shell,
+};
 use crate::time::{self, TimeLocale, Tm};
 use crate::tz;
 
-fn clock<'s>(c: &'s Call<'s>, start: Instant) -> Result<Ret, Error> {
+/// When the isolate first asked: `open` asks, so the library's opening.
+#[derive(Clone, Copy)]
+struct ClockStart(Instant);
+
+impl Default for ClockStart {
+    fn default() -> ClockStart {
+        ClockStart(Instant::now())
+    }
+}
+
+#[native(name = "os.clock")]
+fn clock(start: State<ClockStart>) -> f64 {
     // Wall time since the library opened, not CPU time: std has no CPU
     // clock and ADR-7 adds no dependency for one
     // (tests/lua-5.5/DEVIATIONS.md).
-    c.ret(start.elapsed().as_secs_f64())
+    (start.0).0.elapsed().as_secs_f64()
 }
 
 #[native(name = "os.getenv")]
@@ -66,9 +78,7 @@ fn execute(
         return Either::Left(cfg!(windows) || std::path::Path::new("/bin/sh").exists());
     };
     // The child's output mustn't overtake ours.
-    s.with_stdout(|out| {
-        let _ = out.flush();
-    });
+    flush_stdout(s);
     Either::Right(match shell(os_path(&cmd).as_os_str()).status() {
         Ok(status) => Either::Left(exit_results(status)),
         Err(e) => Either::Right(file_failure(&e, None)),
@@ -275,17 +285,18 @@ fn time_(s: &mut Stack<'_>, t: Option<TableArg>) -> Result<i64, Fail> {
 /// Open the library. Returns the `os` table.
 pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
     let os = s.create_table();
-    let start = Instant::now();
-    os.raw_set("clock", s.create_function(move |c| clock(c, start)))?;
-    os.raw_set("date", s.create_native::<date>())?;
-    os.raw_set("difftime", s.create_native::<difftime>())?;
-    os.raw_set("execute", s.create_native::<execute>())?;
-    os.raw_set("exit", s.create_native::<exit>())?;
-    os.raw_set("getenv", s.create_native::<getenv>())?;
-    os.raw_set("remove", s.create_native::<remove>())?;
-    os.raw_set("rename", s.create_native::<rename>())?;
-    os.raw_set("setlocale", s.create_native::<setlocale>())?;
-    os.raw_set("time", s.create_native::<time_>())?;
-    os.raw_set("tmpname", s.create_native::<tmpname>())?;
+    // The clock starts now.
+    s.extension(|_: &mut ClockStart| ());
+    os.add_native::<clock>()?;
+    os.add_native::<date>()?;
+    os.add_native::<difftime>()?;
+    os.add_native::<execute>()?;
+    os.add_native::<exit>()?;
+    os.add_native::<getenv>()?;
+    os.add_native::<remove>()?;
+    os.add_native::<rename>()?;
+    os.add_native::<setlocale>()?;
+    os.add_native::<time_>()?;
+    os.add_native::<tmpname>()?;
     Ok(os)
 }
