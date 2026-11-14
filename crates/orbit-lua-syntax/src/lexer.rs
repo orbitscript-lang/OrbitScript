@@ -4,9 +4,10 @@
 //! interpreter prints.
 
 use crate::ast::{Comment, CommentKind};
-use crate::diag::{Diagnostic, Near};
 use crate::token::{Keyword, Punct, Token, TokenKind};
+use orbit_hir::{Code, Diagnostic, Near};
 use orbit_hir::{Span, StringPool};
+use orbit_lua_text::{Numeral, push_utf8};
 
 pub struct Lexer<'a> {
     src: &'a [u8],
@@ -43,10 +44,6 @@ fn is_name_char(c: u8) -> bool {
 
 fn hex_value(c: u8) -> Option<u32> {
     (c as char).to_digit(16)
-}
-
-enum NumError {
-    Malformed,
 }
 
 impl<'a> Lexer<'a> {
@@ -188,12 +185,13 @@ impl<'a> Lexer<'a> {
 
     fn error(&self, start: usize, message: impl Into<String>, near: Option<Near>) -> Diagnostic {
         let line = self.line_of(self.pos as u32);
-        Diagnostic::new(
+        Diagnostic::error(
             Span::new(start as u32, self.pos as u32),
             line,
+            Code::SYNTAX,
             message,
-            near,
         )
+        .near(near)
     }
 
     /// An error whose `near` text runs from `from` through the byte being looked at, which is how
@@ -570,7 +568,8 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    /// Scans the longest run Lua reads as one numeral, then converts it.
+    /// Scans the longest run Lua reads as one numeral, then converts it (`orbit_lua_text`, which
+    /// `tonumber` reads strings with too).
     fn numeral(&mut self, start: usize) -> Result<Token, Diagnostic> {
         let hex = self.cur() == Some(b'0') && matches!(self.at(1), Some(b'x' | b'X'));
         let exponent: &[u8] = if hex {
@@ -597,260 +596,12 @@ impl<'a> Lexer<'a> {
             return Err(self.error_through_cur(start, start, "malformed number"));
         }
         let text = &self.src[start..self.pos];
-        let converted = if hex {
-            convert_hex(&text[2..])
-        } else {
-            convert_decimal(text)
-        };
-        match converted {
-            Ok(kind) => Ok(self.token(kind, start)),
-            Err(NumError::Malformed) => {
-                Err(self.error(start, "malformed number", Some(Near::Text(text.to_vec()))))
-            }
+        match orbit_lua_text::numeral(false, text) {
+            Some(Numeral::Int(i)) => Ok(self.token(TokenKind::Int(i), start)),
+            Some(Numeral::Float(f)) => Ok(self.token(TokenKind::Float(f), start)),
+            None => Err(self.error(start, "malformed number", Some(Near::Text(text.to_vec())))),
         }
     }
-}
-
-fn count_digits(s: &[u8], hex: bool) -> usize {
-    s.iter()
-        .take_while(|c| {
-            if hex {
-                c.is_ascii_hexdigit()
-            } else {
-                c.is_ascii_digit()
-            }
-        })
-        .count()
-}
-
-fn convert_decimal(text: &[u8]) -> Result<TokenKind, NumError> {
-    let int_digits = count_digits(text, false);
-    let mut i = int_digits;
-    let mut is_float = false;
-    let mut frac_digits = 0;
-    if text.get(i) == Some(&b'.') {
-        is_float = true;
-        i += 1;
-        frac_digits = count_digits(&text[i..], false);
-        i += frac_digits;
-    }
-    if int_digits + frac_digits == 0 {
-        return Err(NumError::Malformed);
-    }
-    if matches!(text.get(i), Some(b'e' | b'E')) {
-        is_float = true;
-        i += 1;
-        if matches!(text.get(i), Some(b'+' | b'-')) {
-            i += 1;
-        }
-        let exp_digits = count_digits(&text[i..], false);
-        if exp_digits == 0 {
-            return Err(NumError::Malformed);
-        }
-        i += exp_digits;
-    }
-    if i != text.len() {
-        return Err(NumError::Malformed);
-    }
-    // The text is ASCII digits, `.`, `e`, and signs, so it is valid UTF-8.
-    let s = std::str::from_utf8(text).map_err(|_| NumError::Malformed)?;
-    if !is_float {
-        if let Ok(n) = s.parse::<i64>() {
-            return Ok(TokenKind::Int(n));
-        }
-    }
-    // Decimal integers too large for i64 become floats, as in Lua.
-    s.parse::<f64>()
-        .map(TokenKind::Float)
-        .map_err(|_| NumError::Malformed)
-}
-
-/// Converts the part of a hexadecimal numeral after `0x`.
-fn convert_hex(text: &[u8]) -> Result<TokenKind, NumError> {
-    let int_digits = count_digits(text, true);
-    let mut i = int_digits;
-    let mut is_float = false;
-    let mut frac_digits = 0;
-    if text.get(i) == Some(&b'.') {
-        is_float = true;
-        i += 1;
-        frac_digits = count_digits(&text[i..], true);
-        i += frac_digits;
-    }
-    if int_digits + frac_digits == 0 {
-        return Err(NumError::Malformed);
-    }
-    if matches!(text.get(i), Some(b'p' | b'P')) {
-        is_float = true;
-        i += 1;
-        if matches!(text.get(i), Some(b'+' | b'-')) {
-            i += 1;
-        }
-        let exp_digits = count_digits(&text[i..], false);
-        if exp_digits == 0 {
-            return Err(NumError::Malformed);
-        }
-        i += exp_digits;
-    }
-    if i != text.len() {
-        return Err(NumError::Malformed);
-    }
-    if is_float {
-        return Ok(TokenKind::Float(hex_float(text)));
-    }
-    // Hexadecimal integers wrap around modulo 2^64.
-    let mut n: u64 = 0;
-    for &c in text {
-        n = n
-            .wrapping_mul(16)
-            .wrapping_add(u64::from(hex_value(c).unwrap_or(0)));
-    }
-    Ok(TokenKind::Int(n as i64))
-}
-
-/// The value of a hexadecimal float numeral, given the already validated text after `0x`
-/// (`hex digits [. hex digits] [p [sign] decimal digits]`), rounded once to the nearest `f64`
-/// (ties to even), subnormals included.
-///
-/// `orbit_runtime::object::number` converts the same syntax for `tonumber`; the two share test vectors,
-/// not code, because the front end doesn't depend on the runtime.
-fn hex_float(text: &[u8]) -> f64 {
-    // Significant digits go into `mant` (up to 15 of them, 60 bits); later nonzero digits
-    // only set `sticky`. The value is `mant * 2^exp`, plus a little if `sticky`.
-    let mut mant: u64 = 0;
-    let mut digits = 0;
-    let mut sticky = false;
-    let mut exp: i64 = 0;
-    let mut i = 0;
-    let mut frac = false;
-    while i < text.len() {
-        let c = text[i];
-        if c == b'.' {
-            frac = true;
-        } else if let Some(d) = hex_value(c) {
-            if mant == 0 && d == 0 {
-                // Leading zeros carry no precision.
-                if frac {
-                    exp -= 4;
-                }
-            } else if digits < 15 {
-                mant = mant << 4 | u64::from(d);
-                digits += 1;
-                if frac {
-                    exp -= 4;
-                }
-            } else {
-                sticky |= d != 0;
-                if !frac {
-                    exp += 4;
-                }
-            }
-        } else {
-            break;
-        }
-        i += 1;
-    }
-    if i < text.len() {
-        // `p [sign] digits`; the syntax was validated by the caller.
-        i += 1;
-        let neg = text[i] == b'-';
-        if matches!(text[i], b'+' | b'-') {
-            i += 1;
-        }
-        let mut e: i64 = 0;
-        for &c in &text[i..] {
-            e = (e * 10 + i64::from(c - b'0')).min(1 << 24);
-        }
-        exp += if neg { -e } else { e };
-    }
-    round_to_f64(mant, exp, sticky)
-}
-
-/// `mant * 2^exp` (plus less than one unit of `mant` when `sticky`) rounded to the nearest
-/// `f64`, ties to even.
-fn round_to_f64(mant: u64, exp: i64, sticky: bool) -> f64 {
-    if mant == 0 {
-        return 0.0;
-    }
-    let bits = 64 - i64::from(mant.leading_zeros());
-    // The value lies in [2^(top-1), 2^top).
-    let top = exp + bits;
-    if top > 1024 {
-        return f64::INFINITY;
-    }
-    // Bits we can keep: 53, fewer for subnormals (the least significant bit of any f64 is
-    // worth at least 2^-1074).
-    let keep = 53.min(top + 1074);
-    if keep <= 0 {
-        // Below half the smallest subnormal, or exactly half of it (a tie, rounding to 0).
-        let half = keep == 0 && mant.is_power_of_two() && !sticky;
-        return if keep == 0 && !half {
-            f64::from_bits(1)
-        } else {
-            0.0
-        };
-    }
-    let shift = bits - keep;
-    let (mut m, mut e) = (mant, exp);
-    if shift > 0 {
-        let dropped = mant & ((1u64 << shift) - 1);
-        let half = 1u64 << (shift - 1);
-        m = mant >> shift;
-        e += shift;
-        let above = dropped > half || (dropped == half && sticky);
-        if above || (dropped == half && !sticky && m & 1 == 1) {
-            m += 1;
-            if m >> keep != 0 && keep == 53 {
-                m >>= 1;
-                e += 1;
-            }
-        }
-    }
-    // Now `m` has at most 53 bits and `m * 2^e` is representable (or overflows).
-    if e + 64 - i64::from(m.leading_zeros()) > 1024 {
-        return f64::INFINITY;
-    }
-    scale(m as f64, e)
-}
-
-/// `x * 2^e` when the result is exactly representable, without double rounding.
-fn scale(mut x: f64, mut e: i64) -> f64 {
-    let pow2 = |k: i64| f64::from_bits(((1023 + k) as u64) << 52);
-    while e > 1000 {
-        x *= pow2(1000);
-        e -= 1000;
-    }
-    // Stay normal until the last step, so only the final, exact multiply goes subnormal.
-    while e < -1000 && x * pow2(-1000) >= f64::MIN_POSITIVE {
-        x *= pow2(-1000);
-        e += 1000;
-    }
-    while e < -1000 {
-        x *= 0.5;
-        e += 1;
-    }
-    x * pow2(e)
-}
-
-/// Appends `value` (at most 2^31 - 1) in UTF-8, extended to six bytes as Lua's `\u{...}` allows.
-fn push_utf8(buf: &mut Vec<u8>, mut value: u32) {
-    if value < 0x80 {
-        buf.push(value as u8);
-        return;
-    }
-    let mut tail = [0u8; 5];
-    let mut n = 0;
-    // Largest value the first byte can still hold after `n` continuation bytes.
-    let mut first_max = 0x3f;
-    while value > first_max {
-        tail[n] = 0x80 | (value & 0x3f) as u8;
-        n += 1;
-        value >>= 6;
-        first_max >>= 1;
-    }
-    let prefix = (0xff00u32 >> (n + 1)) as u8;
-    buf.push(prefix | value as u8);
-    buf.extend(tail[..n].iter().rev());
 }
 
 #[cfg(test)]
@@ -864,7 +615,7 @@ mod tests {
             match lx.next_token() {
                 Ok(t) if t.kind == TokenKind::Eof => return Ok(out),
                 Ok(t) => out.push(t.kind),
-                Err(d) => return Err(d.to_lua_message("s.lua")),
+                Err(d) => return Err(d.to_message("s.lua")),
             }
         }
     }
@@ -925,40 +676,14 @@ mod tests {
         }
     }
 
-    /// Hexadecimal floats, checked against the reference `lua5.5` (`%.17g` of each value).
-    /// `orbit_runtime::object::number` has the same table for `tonumber`.
+    /// Hexadecimal floats lex as floats; `orbit_lua_text` has the table of values.
     #[test]
     fn hex_floats() {
         let cases: &[(&str, f64)] = &[
             ("0x1p4", 16.0),
-            ("0x.8", 0.5),
             ("0xA.8p1", 21.0),
-            ("0x1P-1", 0.5),
-            ("0x.1p4", 1.0),
-            ("0x10p-4", 1.0),
-            ("0x1.8", 1.5),
-            ("0x0.0p0", 0.0),
-            ("0x0p99999", 0.0),
             ("0x1p-1074", 4.94065645841247e-324),
-            ("0x1p-1075", 0.0),
-            ("0x1.8p-1075", 4.94065645841247e-324),
-            ("0x1p-1076", 0.0),
-            ("0x3p-1076", 4.94065645841247e-324),
-            ("0x1p-1022", 2.2250738585072014e-308),
-            ("0x.fffffffffffffp-1022", 2.225073858507201e-308),
-            ("0x1p1023", 8.98846567431158e307),
-            ("0x1.fffffffffffffp1023", f64::MAX),
             ("0x1.fffffffffffff8p1023", f64::INFINITY),
-            ("0x1p1024", f64::INFINITY),
-            ("0x123456789abcdef123p0", 3.358127276707303e20),
-            ("0x1.fffffffffffff8p0", 2.0),
-            ("0x1.fffffffffffff7p0", 1.9999999999999998),
-            ("0x1.00000000000008p0", 1.0),
-            ("0x1.000000000000080000001p0", 1.0000000000000002),
-            ("0x1.00000000000018p0", 1.0000000000000004),
-            ("0x0000000000000000000001p0", 1.0),
-            ("0x.00000000000000000000001p92", 1.0),
-            ("0xffffffffffffffffffffp0", 1.2089258196146292e24),
         ];
         for &(src, want) in cases {
             match lex(src).unwrap().as_slice() {

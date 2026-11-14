@@ -2,7 +2,8 @@
 //!
 //! Sizes and alignment are those of the reference interpreter on 64-bit
 //! targets: `h`=2, `i`=4, `l`=`j`=`T`=8, `f`=4, `d`=`n`=8, native order
-//! little-endian, and `!` alone means a maximum alignment of 16.
+//! little-endian. `!` alone sets the maximum alignment to the reference
+//! interpreter's on the same platform (see [`NATIVE_ALIGN`]).
 
 use crate::object::Value;
 use crate::vm::{LuaError, NativeCtx, NativeReturn};
@@ -14,8 +15,20 @@ type R = Result<NativeReturn, LuaError>;
 const MAX_INT_SIZE: usize = 16;
 /// Bytes in a Lua integer.
 const INT_SIZE: usize = 8;
-/// The alignment `!` sets when it has no number.
-const NATIVE_ALIGN: usize = 16;
+/// The alignment `!` sets when it has no number: the C compiler's largest
+/// alignment for a basic type (`max_align_t`), which the reference
+/// interpreter reports. It is 16 where `long double` is 16 bytes (x86_64,
+/// aarch64 Linux and the BSDs) and 8 where `long double` is `double`
+/// (arm64 macOS, MSVC Windows, arm64 Windows).
+const NATIVE_ALIGN: usize = if cfg!(any(
+    all(target_vendor = "apple", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "aarch64"),
+    target_env = "msvc"
+)) {
+    8
+} else {
+    16
+};
 /// Largest total size of a packed string.
 const MAX_SIZE: usize = i64::MAX as usize;
 
@@ -242,7 +255,7 @@ fn get_int(data: &[u8], little: bool, signed: bool) -> Result<i64, usize> {
 /// a missing value as `nil` here.
 fn value_error(ctx: &mut NativeCtx<'_>, arg: usize, expected: &str) -> LuaError {
     if arg >= ctx.nargs() {
-        ctx.arg_error(arg, &format!("{expected} expected, got nil"))
+        ctx.arg_error(arg, &crate::arg_errors::type_mismatch(expected, "nil"))
     } else {
         ctx.type_error(arg, expected)
     }
@@ -494,9 +507,24 @@ mod tests {
         Ok(total)
     }
 
+    /// `NATIVE_ALIGN` is C's `max_align_t` alignment. Rust can't name that
+    /// type, so the constant is a table by target; this checks it against
+    /// the `libc` crate's definition on the targets that have one (not
+    /// MSVC Windows or arm64 Windows).
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        all(windows, target_env = "gnu", target_arch = "x86_64")
+    ))]
+    #[test]
+    fn native_alignment_is_max_align_t() {
+        assert_eq!(NATIVE_ALIGN, std::mem::align_of::<libc::max_align_t>());
+    }
+
     #[test]
     fn sizes_and_alignment() {
-        assert_eq!(size("!xi16"), Ok(32));
+        assert_eq!(size("!xi16"), Ok(16 + NATIVE_ALIGN));
         assert_eq!(size("!xd"), Ok(16));
         assert_eq!(size("xXd"), Ok(1));
         assert_eq!(size("!4xi8"), Ok(12));

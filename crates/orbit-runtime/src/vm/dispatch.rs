@@ -123,14 +123,10 @@ impl Vm {
             let ran = self.run_loop::<false>()?;
             match ran {
                 Ran::Done => return Ok(()),
-                Ran::Switch if std::mem::take(&mut self.rt.no_memory) => {
-                    // A safe point found the heap over its limit; the frame's
-                    // pc is saved.
-                    match self.raise(crate::object::NoMemory.into())? {
-                        Flow::Done => return Ok(()),
-                        Flow::Reload | Flow::Switched => self.rt.switched = false,
-                    }
-                }
+                Ran::NoMemory => match self.raise(crate::object::NoMemory.into())? {
+                    Flow::Done => return Ok(()),
+                    Flow::Reload | Flow::Switched => self.rt.switched = false,
+                },
                 Ran::Switch => {}
             }
         }
@@ -157,8 +153,7 @@ impl Vm {
             if self.heap.should_step() {
                 let base = self.rt.stack.frames.last().expect("a frame").base as usize;
                 if self.gc_safepoint((base + WINDOW).max(self.rt.top)) {
-                    // Over the memory limit: `run` raises the error.
-                    return Ok(Ran::Switch);
+                    return Ok(Ran::NoMemory);
                 }
             }
             // The running frame's state. Lua-to-Lua calls and returns switch
@@ -282,8 +277,7 @@ impl Vm {
                         // open results is live; don't let it keep garbage.
                         let live = (base + WINDOW).max(self.rt.top);
                         if self.gc_safepoint(live) {
-                            // Over the memory limit: `run` raises the error.
-                            return Ok(Ran::Switch);
+                            return Ok(Ran::NoMemory);
                         }
                         w = Window::take(&mut self.rt.stack.regs, base);
                     }
@@ -1130,7 +1124,7 @@ impl Vm {
                                 (&Value::Int(i), &Value::Int(lim), &Value::Int(s)) if s > 0 => {
                                     if i <= lim {
                                         // The iterations left replace the limit.
-                                        let count = (lim as u64).wrapping_sub(i as u64) / s as u64;
+                                        let count = lim.abs_diff(i) / s as u64;
                                         w[b + 1] = Value::Int(count as i64);
                                         w[b + 3] = Value::Int(i);
                                     } else {

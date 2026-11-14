@@ -9,7 +9,7 @@ use orbit_orb_syntax::ast::{self, ItemKind, StmtKind};
 use super::lower::Lowering;
 use super::sk;
 use crate::FileId;
-use crate::resolve::{Def, Defs, Owner};
+use crate::observe::{Def, Defs, Owner};
 use crate::symbols::SymbolId;
 use crate::types::{FnTy, Ty, TypeId, Types};
 

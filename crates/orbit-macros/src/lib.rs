@@ -11,9 +11,17 @@
 //! The function stays as written. Next to it the attribute adds a type of
 //! the same name implementing `orbit::stack::Native`, whose `call` reads
 //! argument `i` as the `i`th parameter's type (`orbit::stack::Arg`), calls
-//! the function, and pushes what it returns (`orbit::stack::Results`). A
-//! parameter of type `&mut Stack<'_>` gets the stack itself and takes no
-//! argument.
+//! the function, and pushes what it returns (`orbit::stack::Results`). Two
+//! kinds of parameter take no argument: `&mut Stack<'_>` gets the stack
+//! itself, and `State<T>` the isolate's per-isolate state of type `T`
+//! (`orbit::stack::State`). A panic in the function is caught at its entry
+//! and raised as a script error, as a `Call` closure's is.
+//!
+//! Options, comma-separated:
+//! - `name = "lib.f"`: the native's name in messages, and (its last part)
+//!   the field it is registered under. The function's name by default.
+//! - `crate = path`: where the `orbit` API is, `::orbit` by default; for
+//!   code that reaches it under another name.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -26,51 +34,77 @@ use syn::{
 
 #[proc_macro_attribute]
 pub fn native(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let name = parse_macro_input!(attr as Options).name;
+    let options = parse_macro_input!(attr as Options);
     let f = parse_macro_input!(item as ItemFn);
-    let generated = expand(&f, name).unwrap_or_else(Error::into_compile_error);
+    let generated = expand(&f, options).unwrap_or_else(Error::into_compile_error);
     quote!(#f #generated).into()
 }
 
-/// The attribute's arguments: nothing, or `name = "lib.f"`.
+/// The attribute's options: `name = "lib.f"` and `crate = path`, each at
+/// most once, in any order.
 struct Options {
     name: Option<LitStr>,
+    krate: Option<Path>,
 }
+
+const USAGE: &str = "#[native] takes `name = \"lib.f\"` and `crate = path`";
 
 impl syn::parse::Parse for Options {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Options> {
-        if input.is_empty() {
-            return Ok(Options { name: None });
+        let mut options = Options {
+            name: None,
+            krate: None,
+        };
+        while !input.is_empty() {
+            if input.peek(Token![crate]) {
+                let key = input.parse::<Token![crate]>()?;
+                input.parse::<Token![=]>()?;
+                if options.krate.is_some() {
+                    return Err(Error::new(key.span, "`crate` given twice"));
+                }
+                options.krate = Some(input.call(Path::parse_mod_style)?);
+            } else {
+                let key: syn::Ident = input.parse()?;
+                if key != "name" {
+                    return Err(Error::new(key.span(), USAGE));
+                }
+                input.parse::<Token![=]>()?;
+                if options.name.is_some() {
+                    return Err(Error::new(key.span(), "`name` given twice"));
+                }
+                options.name = Some(input.parse()?);
+            }
+            if input.is_empty() {
+                break;
+            }
+            input.parse::<Token![,]>()?;
         }
-        let key: syn::Ident = input.parse()?;
-        if key != "name" {
-            return Err(Error::new(
-                key.span(),
-                "#[native] takes only `name = \"lib.f\"`",
-            ));
-        }
-        input.parse::<Token![=]>()?;
-        let name = input.parse()?;
-        if !input.is_empty() {
-            return Err(input.error("#[native] takes only `name = \"lib.f\"`"));
-        }
-        Ok(Options { name: Some(name) })
+        Ok(options)
     }
 }
 
-/// Whether `ty` is `&mut Stack<..>` (any path ending in `Stack`). Types
-/// can't be resolved in a macro, so this goes by the name.
+/// Whether `ty` is a path whose last segment is `name`. Types can't be
+/// resolved in a macro, so parameters are recognized by name.
+fn is_named(ty: &Type, name: &str) -> bool {
+    matches!(ty, Type::Path(TypePath { qself: None, path: Path { segments, .. }, .. })
+        if segments.last().is_some_and(|s| s.ident == name))
+}
+
+/// Whether `ty` is `&mut Stack<..>` (any path ending in `Stack`).
 fn is_stack(ty: &Type) -> bool {
-    let Type::Reference(TypeReference {
-        mutability: Some(_),
-        elem,
-        ..
-    }) = ty
-    else {
-        return false;
-    };
-    matches!(&**elem, Type::Path(TypePath { qself: None, path: Path { segments, .. }, .. })
-        if segments.last().is_some_and(|s| s.ident == "Stack"))
+    match ty {
+        Type::Reference(TypeReference {
+            mutability: Some(_),
+            elem,
+            ..
+        }) => is_named(elem, "Stack"),
+        _ => false,
+    }
+}
+
+/// Whether `ty` is `State<T>` (any path ending in `State`).
+fn is_state(ty: &Type) -> bool {
+    is_named(ty, "State")
 }
 
 /// Whether `ty` borrows anything (`&[u8]`, `Option<&str>`).
@@ -86,7 +120,11 @@ fn borrows(ty: &Type) -> bool {
     finder.0
 }
 
-fn expand(f: &ItemFn, name: Option<LitStr>) -> syn::Result<proc_macro2::TokenStream> {
+fn expand(f: &ItemFn, options: Options) -> syn::Result<proc_macro2::TokenStream> {
+    let krate = match options.krate {
+        Some(path) => quote!(#path),
+        None => quote!(::orbit),
+    };
     let sig = &f.sig;
     let unsupported = sig
         .constness
@@ -134,7 +172,9 @@ fn expand(f: &ItemFn, name: Option<LitStr>) -> syn::Result<proc_macro2::TokenStr
 
     let ident = &sig.ident;
     let vis = &f.vis;
-    let lua_name = name.unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
+    let lua_name = options
+        .name
+        .unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
     let mut checks = Vec::new();
     let mut gets = Vec::new();
     let mut args = Vec::new();
@@ -144,24 +184,33 @@ fn expand(f: &ItemFn, name: Option<LitStr>) -> syn::Result<proc_macro2::TokenStr
             args.push(quote!(&mut *__s));
             continue;
         }
+        let v = format_ident!("__v{k}");
+        if is_state(ty) {
+            // Read before the arguments, which may borrow the stack.
+            checks.push(quote_spanned! {ty.span()=>
+                let #v = <#ty>::of(__s);
+            });
+            args.push(quote!(#v));
+            continue;
+        }
         arg += 1;
-        let (c, v) = (format_ident!("__c{k}"), format_ident!("__v{k}"));
+        let c = format_ident!("__c{k}");
         // Spanned at the type, so a type that isn't an `Arg` is reported
         // there.
         checks.push(quote_spanned! {ty.span()=>
-            let #c = <#ty as ::orbit::stack::Arg>::check(__s, #arg)?;
+            let #c = <#ty as #krate::stack::Arg>::check(__s, #arg)?;
         });
         gets.push(quote_spanned! {ty.span()=>
-            let #v = <#ty as ::orbit::stack::Arg>::get(&*__s, #arg, #c);
+            let #v = <#ty as #krate::stack::Arg>::get(&*__s, #arg, #c);
         });
         args.push(quote!(#v));
     }
     let push = match &sig.output {
         // `impl Trait` can't be named here.
         ReturnType::Type(_, ty) if !matches!(**ty, Type::ImplTrait(_)) => {
-            quote_spanned!(ty.span()=> <#ty as ::orbit::stack::Results>::push_results)
+            quote_spanned!(ty.span()=> <#ty as #krate::stack::Results>::push_results)
         }
-        _ => quote_spanned!(Span::call_site()=> ::orbit::stack::Results::push_results),
+        _ => quote_spanned!(Span::call_site()=> #krate::stack::Results::push_results),
     };
 
     Ok(quote! {
@@ -169,19 +218,21 @@ fn expand(f: &ItemFn, name: Option<LitStr>) -> syn::Result<proc_macro2::TokenStr
         #[doc(hidden)]
         #vis struct #ident {}
 
-        impl ::orbit::stack::Native for #ident {
+        impl #krate::stack::Native for #ident {
             const NAME: &'static str = #lua_name;
 
             #[inline]
             fn call(
-                __s: &mut ::orbit::stack::Stack<'_>,
-            ) -> ::orbit::stack::StackResult<::orbit::stack::Return> {
-                #(#checks)*
-                let __r = {
-                    #(#gets)*
-                    #ident(#(#args),*)
-                };
-                #push(__r, __s)
+                __s: &mut #krate::stack::Stack<'_>,
+            ) -> #krate::stack::StackResult<#krate::stack::Return> {
+                #krate::stack::catch_panic(__s, |__s: &mut #krate::stack::Stack<'_>| {
+                    #(#checks)*
+                    let __r = {
+                        #(#gets)*
+                        #ident(#(#args),*)
+                    };
+                    #push(__r, __s)
+                })
             }
         }
     })

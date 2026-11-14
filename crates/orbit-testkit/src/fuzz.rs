@@ -199,6 +199,7 @@ fn candidate(program: &Path, work: &Path, name: &str) -> Result<String> {
     let out = process::run(&Spec {
         program: program.to_path_buf(),
         args: vec!["-p".into(), name.into()],
+        env: Vec::new(),
         cwd: work.to_path_buf(),
         timeout: Duration::from_secs(30),
         measure_rss: false,
@@ -227,6 +228,7 @@ fn reference(program: &Path, work: &Path, names: &[String]) -> Result<BTreeMap<S
     args.extend(names.iter().map(OsString::from));
     let out = process::run(&Spec {
         program: program.to_path_buf(),
+        env: Vec::new(),
         args,
         cwd: work.to_path_buf(),
         timeout: Duration::from_secs(600),

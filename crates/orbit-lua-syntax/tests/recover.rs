@@ -17,7 +17,7 @@ fn options() -> ParseOptions {
 
 fn recovering(src: &str) -> (Ast, Vec<String>) {
     let (ast, errors) = parse_recovering("t.lua", src.as_bytes(), &options());
-    let messages = errors.iter().map(|d| d.to_lua_message("t.lua")).collect();
+    let messages = errors.iter().map(|d| d.to_message("t.lua")).collect();
     (ast, messages)
 }
 

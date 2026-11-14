@@ -15,13 +15,12 @@
 //! what can be attached to.
 
 use std::ffi::OsString;
-use std::path::Path;
 use std::process::ExitCode;
 
 use orbit::Isolate;
 use orbit_dap::{About, Server, Service};
 
-use super::{Cli, Runner, new_isolate, parse};
+use super::{Cli, Runner, args, new_isolate, parse};
 
 /// `orbit --debug-server`.
 pub(crate) fn server(prog: &str) -> ExitCode {
@@ -38,14 +37,15 @@ pub(crate) fn server(prog: &str) -> ExitCode {
 
 /// `orbit --debug-connect <socket> [options] <script> [args]`: what
 /// [`server`] starts.
-pub(crate) fn connect(prog: &str, args: &[String]) -> ExitCode {
-    let Some(socket) = args.get(2) else {
+pub(crate) fn connect(prog: &str, args: &[Vec<u8>]) -> ExitCode {
+    let Some(socket) = args.get(2).map(|s| args::path(s)) else {
         eprintln!("{prog}: '--debug-connect' needs a socket");
         return ExitCode::FAILURE;
     };
-    let mut server = match Server::connect(Path::new(socket)) {
+    let mut server = match Server::connect(&socket) {
         Ok(s) => s,
         Err(e) => {
+            let socket = socket.display();
             eprintln!("{prog}: cannot reach the debugger at '{socket}': {e}");
             return ExitCode::FAILURE;
         }
@@ -59,7 +59,7 @@ pub(crate) fn connect(prog: &str, args: &[String]) -> ExitCode {
         server.finish(1);
         ExitCode::FAILURE
     };
-    let mut run_args = vec![prog.to_owned()];
+    let mut run_args = vec![args[0].clone()];
     run_args.extend(args[3..].iter().cloned());
     let cli = match parse(&run_args) {
         Ok(cli) if cli.script.is_some() => cli,
@@ -92,14 +92,14 @@ fn exit_code(code: i32) -> ExitCode {
 
 /// Make a normal run attachable, as its options say; the service to stop
 /// on the way out.
-pub(crate) fn serve(iso: &mut Isolate, cli: &Cli, args: &[String], prog: &str) -> Option<Service> {
+pub(crate) fn serve(iso: &mut Isolate, cli: &Cli, args: &[Vec<u8>], prog: &str) -> Option<Service> {
     if !cli.debug_listen && cli.no_debug_signal {
         return None;
     }
     let about = match cli.script {
         Some(i) => About {
-            program: args[i].clone(),
-            args: args[i + 1..].to_vec(),
+            program: args::text(&args[i]),
+            args: args[i + 1..].iter().map(|a| args::text(a)).collect(),
         },
         None => About {
             program: prog.to_owned(),
@@ -162,14 +162,17 @@ fn announce(s: &Service, prog: &str) {
 }
 
 /// `orbit --debug-attach <pid>` and `orbit --debug-attach --list`.
-pub(crate) fn attach(prog: &str, args: &[String]) -> ExitCode {
-    match args.get(2).map(String::as_str) {
-        Some("--list") => {
+pub(crate) fn attach(prog: &str, args: &[Vec<u8>]) -> ExitCode {
+    match args.get(2).map(Vec::as_slice) {
+        Some(b"--list") => {
             println!("{}", orbit_dap::list());
             ExitCode::SUCCESS
         }
         Some(pid) => {
-            let Ok(pid) = pid.parse::<u32>() else {
+            let Some(pid) = std::str::from_utf8(pid)
+                .ok()
+                .and_then(|p| p.parse::<u32>().ok())
+            else {
                 eprintln!("{prog}: '--debug-attach' needs a process id or '--list'");
                 return ExitCode::FAILURE;
             };

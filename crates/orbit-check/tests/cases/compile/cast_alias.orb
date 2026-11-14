@@ -1,0 +1,4 @@
+extern y;
+type Id = int;
+let x = y as Id; //~ T0210
+print(x);

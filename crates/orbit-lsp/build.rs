@@ -1,14 +1,12 @@
-//! Link options for `orbit-lsp`: with the runtime in liborbit (`shared`
-//! without `runtime`), the binary looks for the library next to itself and
+//! Link options for `orbit-lsp`: with the runtime in liborbit (the `shared`
+//! feature), the binary looks for the library next to itself and
 //! in `../lib`, as `orbit` and `orbitc` do in `build.sh`'s package.
 
 use std::env::{var, var_os};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    let bundled =
-        var_os("CARGO_FEATURE_SHARED").is_some() && var_os("CARGO_FEATURE_RUNTIME").is_none();
-    if !bundled {
+    if var_os("CARGO_FEATURE_SHARED").is_none() {
         return;
     }
     if var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {

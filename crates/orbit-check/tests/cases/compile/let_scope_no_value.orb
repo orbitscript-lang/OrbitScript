@@ -1,0 +1,1 @@
+let scope f; //~ T0701

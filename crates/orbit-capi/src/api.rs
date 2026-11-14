@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 
 use orbit::Library;
-use orbit::stack::{ArithOp, CompareOp, GcOp, GcParam, Raised, Stack, StackResult, Type};
+use orbit::stack::{ArithOp, CompareOp, GcOp, GcParam, Raised, Stack, StackExt, StackResult, Type};
 
 pub(crate) type Res<T> = StackResult<T>;
 
@@ -215,7 +215,7 @@ pub(crate) fn openlib(c: &mut Stack<'_>, lib: i32) -> Res<i32> {
         Lib::Io => c.push_from_scope(|s| orbit_std::open_io(s).ok().map(|t| t.to_value())),
         Lib::Os => c.push_from_scope(|s| orbit_std::open_os(s).ok().map(|t| t.to_value())),
         Lib::Runtime(l) => {
-            let opened = c.open_library(l, ignore_env);
+            let opened = c.open_library(l);
             if opened {
                 // What `orbit-std` adds to the runtime's own libraries.
                 let added = c.with_scope(|s| match l {

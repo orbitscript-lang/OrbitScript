@@ -146,9 +146,9 @@ pub(crate) enum MetaAction {
     /// must be a string or a number (converted).
     ToStr { dst: u8 },
     /// A `__close` handler run while an error unwinds: raise the error
-    /// (in the frame's `func` slot) again. `handled`: it has been through
-    /// its message handler.
-    Unwind { handled: bool },
+    /// again, past its message handler. Its value waits in the frame's
+    /// `func` slot and its traceback, if it has one, in the slot above.
+    Unwind,
 }
 
 impl Runtime {

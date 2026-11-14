@@ -1,0 +1,15 @@
+Deletes: `debug.setupvalue` and `debug.setlocal` on a captured local (`write_place`).
+Tests: debug_setupvalue debug_setlocal_of_a_captured_local
+
+diff --git a/crates/orbit-runtime/src/vm/debug.rs b/crates/orbit-runtime/src/vm/debug.rs
+index fb78ba6..4dd6cc2 100644
+--- a/crates/orbit-runtime/src/vm/debug.rs
++++ b/crates/orbit-runtime/src/vm/debug.rs
+@@ -453,7 +453,6 @@ impl Runtime {
+             }
+             Place::Cell(c) => {
+                 crate::vm::debug::before_cell_write(heap, c);
+-                heap.barrier_back(c);
+                 heap.get_mut(c).value = v;
+             }
+             Place::Nil => {}

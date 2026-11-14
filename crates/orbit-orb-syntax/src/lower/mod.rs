@@ -14,6 +14,8 @@ mod cast;
 mod control;
 mod expr;
 mod items;
+mod mode;
+pub mod observe;
 mod pattern;
 mod template;
 
@@ -21,9 +23,15 @@ use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};
 
 use crate::ast::{self, Ast};
-use crate::diag::Diagnostic;
+use crate::code::{self, Code};
+use mode::{Check, Compile, Continue, Mode, Reporter, Sym};
+use observe::{Assign, LetDef, Local, Nothing, Observer, TypeNames};
+use orbit_hir::Diagnostic;
 
 /// Lowers a parsed module to HIR, before the HIR's shared analysis (`orbit_hir::analyze`).
+///
+/// This is the compiler's entry: the chunk takes over the tree's string pool and line table,
+/// so nothing is copied.
 pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
     let Ast {
         body,
@@ -31,9 +39,41 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
         source,
         ..
     } = ast;
-    let mut strings = strings;
+    let (chunk, _, _) = lower_module::<Compile>(&body, strings, source, Nothing)?;
+    Ok(chunk)
+}
+
+/// Every error lowering finds in a module, in the order it meets them: the first is the error
+/// [`lower`] gives. This is the checker's and the editor's entry. Lowering recovers after each
+/// error (see [`mode`]) and the HIR it builds is dropped. The tree is only read, and may come
+/// from an error-recovering parse: its `Error` nodes, which the parser reported, are passed
+/// over.
+pub fn lower_collecting(ast: &Ast) -> Vec<Diagnostic> {
+    lower_observed(ast, Nothing).0
+}
+
+/// [`lower_collecting`], telling `observer` about every definition, reference and scope on
+/// the way (see [`observe`]). Gives the errors and the observer back.
+pub fn lower_observed<'a, O: Observer<'a>>(ast: &'a Ast, observer: O) -> (Vec<Diagnostic>, O) {
+    let (strings, source) = (ast.strings.clone(), ast.source.clone());
+    match lower_module::<Check<O>>(&ast.body, strings, source, observer) {
+        Ok((_, collected, observer)) => (collected.found, observer),
+        Err(_) => unreachable!("collecting lowering recovers from every error"),
+    }
+}
+
+/// The walk itself reads the tree and never changes it. `strings` is the pool the tree's names
+/// are interned in; lowering adds the names it introduces.
+fn lower_module<'a, M: Mode<'a>>(
+    body: &'a ast::Block,
+    mut strings: hir::StringPool,
+    source: hir::SourceInfo,
+    observer: M::Observer,
+) -> Result<(hir::Chunk, M::Reporter, M::Observer), Diagnostic> {
     let syms = Syms::new(&mut strings);
-    let mut lx = Lowerer {
+    let mut lx = Lowerer::<M> {
+        reporter: M::Reporter::default(),
+        observer,
         chunk: hir::Chunk {
             source,
             strings,
@@ -50,10 +90,11 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
     let span = body.span;
     let main = lx.begin_function(FunctionName::Main, span);
     lx.f().is_vararg = true;
-    let result = lx.module(&body);
+    lx.observer.scope_opened(span);
+    let result = lx.module(body);
     lx.end_function(main);
     result?;
-    Ok(lx.chunk)
+    Ok((lx.chunk, lx.reporter, lx.observer))
 }
 
 /// Interned names lowering refers to.
@@ -104,46 +145,9 @@ impl Syms {
 }
 
 /// Global names every module can read without declaring them: Lua 5.5's base library and
-/// standard modules, plus `panic` (an alias of `error`).
-const PRELUDE: &[&[u8]] = &[
-    b"assert",
-    b"collectgarbage",
-    b"dofile",
-    b"error",
-    b"getmetatable",
-    b"ipairs",
-    b"load",
-    b"loadfile",
-    b"next",
-    b"pairs",
-    b"pcall",
-    b"print",
-    b"rawequal",
-    b"rawget",
-    b"rawlen",
-    b"rawset",
-    b"require",
-    b"select",
-    b"setmetatable",
-    b"tonumber",
-    b"tostring",
-    b"type",
-    b"warn",
-    b"xpcall",
-    b"_G",
-    b"_VERSION",
-    b"arg",
-    b"coroutine",
-    b"debug",
-    b"io",
-    b"math",
-    b"os",
-    b"package",
-    b"string",
-    b"table",
-    b"utf8",
-    b"panic",
-];
+/// standard modules, plus `panic` (an alias of `error`). The build script reads them from the
+/// checker's prelude stub (`orbit-check/stubs/prelude.orbi`), which is where a name is added.
+const PRELUDE: &[&[u8]] = include!(concat!(env!("OUT_DIR"), "/prelude.rs"));
 
 /// What a scope entry names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +158,9 @@ enum ItemTag {
     Type(usize),
     /// A `use`d module.
     Module,
+    /// Nothing: the stand-in for a name that didn't resolve, after the error is reported
+    /// (see [`mode`]). Rules about what a name is pass over it, so one mistake is one error.
+    Unresolved,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -170,22 +177,56 @@ struct Binding {
     item: Option<ItemTag>,
 }
 
+impl Binding {
+    /// What a name that didn't resolve is taken for once its error is reported: something
+    /// that can be read and assigned, so the same mistake isn't reported as others.
+    const UNRESOLVED: Binding = Binding {
+        target: Target::Global,
+        mutable: true,
+        item: Some(ItemTag::Unresolved),
+    };
+}
+
 /// An item later in a block, which code before it may refer to (from inside a function).
-struct PendingItem {
+struct PendingItem<S> {
     sym: StrId,
     tag: ItemTag,
     /// Set once a use before the definition needs the item's local declared early.
     local: Option<LocalId>,
+    /// The observer's handle for the item.
+    id: S,
 }
 
-#[derive(Default)]
-struct Scope {
-    entries: Vec<(StrId, Binding)>,
-    pending: Vec<PendingItem>,
+/// A block's names. `S` is the observer's handle for a name ([`Observer::Sym`]), kept beside
+/// each binding and handed back with every reference to it; the compiler's is `()`.
+struct Scope<S> {
+    entries: Vec<(StrId, Binding, S)>,
+    pending: Vec<PendingItem<S>>,
     /// Locals declared at the top of the block for items used before their definition.
     predeclared: Vec<LocalId>,
-    /// `type` aliases declared in the block (only `as` needs them).
-    aliases: Vec<StrId>,
+    /// `type` aliases declared in the block (only `as` and the observer need them).
+    aliases: Vec<Alias<S>>,
+}
+
+/// A `type` alias of a block.
+struct Alias<S> {
+    name: ast::Name,
+    /// The observer's handle for it.
+    id: S,
+    /// Once lowering has reached its definition: how many names the block had bound by then.
+    /// Among the block's names in a type annotation, the one bound last wins.
+    defined: Option<usize>,
+}
+
+impl<S> Scope<S> {
+    fn new() -> Scope<S> {
+        Scope {
+            entries: Vec::new(),
+            pending: Vec::new(),
+            predeclared: Vec::new(),
+            aliases: Vec::new(),
+        }
+    }
 }
 
 /// A struct or enum known to this module.
@@ -225,10 +266,10 @@ struct LoopCtx {
     cont: Option<LabelId>,
 }
 
-struct FnCtx {
+struct FnCtx<S> {
     id: FuncId,
     f: hir::Function,
-    scopes: Vec<Scope>,
+    scopes: Vec<Scope<S>>,
     loops: Vec<LoopCtx>,
     /// The rest parameter (`...name`), which `...name` spreads.
     rest: Option<LocalId>,
@@ -238,24 +279,31 @@ struct FnCtx {
 }
 
 /// An `impl` block being lowered, for `Self`.
-struct ImplCtx {
+struct ImplCtx<S> {
     target: ast::Name,
+    /// The observer's handle for the target.
+    id: S,
 }
 
-struct Lowerer {
+struct Lowerer<'a, M: Mode<'a>> {
+    /// Where errors go, and whether lowering goes on after one.
+    reporter: M::Reporter,
+    /// Who is told about the names lowering resolves.
+    observer: M::Observer,
     chunk: hir::Chunk,
     /// Functions being lowered, innermost last.
-    funcs: Vec<FnCtx>,
+    funcs: Vec<FnCtx<Sym<'a, M>>>,
     types: Vec<TypeInfo>,
-    impls: Vec<ImplCtx>,
+    impls: Vec<ImplCtx<Sym<'a, M>>>,
     syms: Syms,
     /// The main function's export table, when the module has `pub` items.
     exports: Option<LocalId>,
     /// The main function's hidden local holding the metatable `scope` actions share, once one
     /// needs it.
     scope_meta: Option<LocalId>,
-    /// Type parameters of the `fn` items and `impl` blocks being lowered.
-    generics: Vec<StrId>,
+    /// Type parameters in scope: of the `fn` items and `impl` blocks being lowered, and for
+    /// an observer also of the struct, enum or alias whose types it is reading.
+    generics: Vec<(StrId, Sym<'a, M>)>,
 }
 
 type LResult<T> = Result<T, Diagnostic>;
@@ -276,10 +324,26 @@ enum Resolved {
     },
 }
 
-impl Lowerer {
+impl Resolved {
+    /// The stand-in for a name that didn't resolve (see [`Binding::UNRESOLVED`]).
+    fn is_unresolved(&self) -> bool {
+        matches!(
+            self,
+            Resolved::Global {
+                binding: Some(Binding {
+                    item: Some(ItemTag::Unresolved),
+                    ..
+                }),
+                ..
+            }
+        )
+    }
+}
+
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     // ---- functions ----------------------------------------------------------------------------
 
-    fn cur(&mut self) -> &mut FnCtx {
+    fn cur(&mut self) -> &mut FnCtx<Sym<'a, M>> {
         self.funcs.last_mut().expect("function being lowered")
     }
 
@@ -293,7 +357,7 @@ impl Lowerer {
         self.funcs.push(FnCtx {
             id,
             f,
-            scopes: vec![Scope::default()],
+            scopes: vec![Scope::new()],
             loops: Vec::new(),
             rest: None,
             scope_action: false,
@@ -310,15 +374,75 @@ impl Lowerer {
     // The small node builders and helpers below are kept out of line: lowering calls them
     // from hundreds of places, and inlined they cost binary size for no measurable compile
     // speed (see the design doc, "Binary size").
+    /// Reports an error. Written `self.report(..)?`: what follows it is the recovery, which
+    /// only a collecting walk reaches (see [`mode`]).
     #[inline(never)]
-    fn error(&self, span: Span, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::new(span, self.chunk.source.line_of(span.start), message)
+    fn report(
+        &mut self,
+        span: Span,
+        code: Code,
+        message: impl Into<String>,
+    ) -> LResult<Continue<'a, M>> {
+        let line = self.chunk.source.line_of(span.start);
+        self.reporter
+            .report(Diagnostic::error(span, line, code, message))
     }
 
-    /// The error for an `Error` node, which only an error-recovering parse makes.
+    /// Reports an `Error` node, which only an error-recovering parse makes. The parser said
+    /// what is wrong, so a collecting walk only passes over it.
     #[cold]
-    fn unparsed(&self, span: Span) -> Diagnostic {
-        self.error(span, "this code has a syntax error, so it can't run")
+    fn unparsed(&mut self, span: Span) -> LResult<Continue<'a, M>> {
+        let line = self.chunk.source.line_of(span.start);
+        self.reporter.unparsed(Diagnostic::error(
+            span,
+            line,
+            code::SYNTAX,
+            "this code has a syntax error, so it can't run",
+        ))
+    }
+
+    /// The stand-in for an expression that can't be lowered, once its error is reported.
+    fn error_expr(&mut self, span: Span) -> ExprId {
+        self.add_expr(hir::ExprKind::Nil, span)
+    }
+
+    /// Lowers an expression only for the errors in it, after an error in what holds it.
+    fn only_check(&mut self, e: &'a ast::Expr) -> LResult<()> {
+        let mut dropped = Vec::new();
+        self.expr(e, &mut dropped)?;
+        Ok(())
+    }
+
+    /// Declares the names a pattern binds, after an error in the pattern or in what holds it,
+    /// so their uses aren't reported as unknown names. The observer is shown what else the
+    /// pattern names.
+    fn declare_pattern_names(
+        &mut self,
+        pat: &'a ast::Pat,
+        let_end: Option<u32>,
+        out: &mut Vec<hir::StmtId>,
+    ) {
+        self.observe_pattern(pat);
+        let mut names = Vec::new();
+        pattern::names(pat, &mut names);
+        for (name, mutable, full) in names {
+            let how = Local {
+                full,
+                let_end,
+                def: None,
+            };
+            let id = self.observer.local(name, how);
+            let local = self.new_local(Some(name.sym), name.span, LocalKind::Normal);
+            self.push(
+                out,
+                hir::StmtKind::Let {
+                    locals: vec![local],
+                    values: hir::ExprList::default(),
+                },
+                name.span,
+            );
+            self.bind_local(name.sym, local, mutable, id);
+        }
     }
 
     fn text(&self, sym: StrId) -> String {
@@ -433,12 +557,15 @@ impl Lowerer {
 
     // ---- scopes and names ---------------------------------------------------------------------
 
-    fn open_scope(&mut self) {
-        self.cur().scopes.push(Scope::default());
+    /// Opens a scope over `extent` of the source.
+    fn open_scope(&mut self, extent: Span) {
+        self.cur().scopes.push(Scope::new());
+        self.observer.scope_opened(extent);
     }
 
     /// Closes the innermost scope; its predeclared items are declared at the top of `stmts`.
     fn close_scope(&mut self, stmts: &mut Vec<hir::StmtId>, span: Span) {
+        self.observer.scope_closed();
         let scope = self.cur().scopes.pop().expect("scope");
         if !scope.predeclared.is_empty() {
             let id = self.f().add_stmt(
@@ -452,16 +579,17 @@ impl Lowerer {
         }
     }
 
-    fn bind(&mut self, sym: StrId, binding: Binding) {
+    /// Binds a name in the innermost scope. `id` is the observer's handle for what it names.
+    fn bind(&mut self, sym: StrId, binding: Binding, id: Sym<'a, M>) {
         self.cur()
             .scopes
             .last_mut()
             .expect("scope")
             .entries
-            .push((sym, binding));
+            .push((sym, binding, id));
     }
 
-    fn bind_local(&mut self, sym: StrId, local: LocalId, mutable: bool) {
+    fn bind_local(&mut self, sym: StrId, local: LocalId, mutable: bool, id: Sym<'a, M>) {
         self.bind(
             sym,
             Binding {
@@ -469,20 +597,72 @@ impl Lowerer {
                 mutable,
                 item: None,
             },
+            id,
         );
+    }
+
+    /// Hands the observer a type annotation, with the scopes it stands in. Lowering itself
+    /// reads no types but the targets of `as`.
+    fn observe_type(&mut self, ty: Option<&'a ast::Type>) {
+        if !M::Observer::ACTIVE {
+            return;
+        }
+        if let Some(ty) = ty {
+            let names = Names {
+                funcs: &self.funcs,
+                generics: &self.generics,
+                impls: &self.impls,
+            };
+            self.observer.ty(ty, &names);
+        }
+    }
+
+    /// What a name is as a value where lowering stands, for the observer: asked without
+    /// reporting anything.
+    fn observed_value(&mut self, sym: StrId) -> Sym<'a, M> {
+        let names = Names {
+            funcs: &self.funcs,
+            generics: &self.generics,
+            impls: &self.impls,
+        };
+        if let Some(id) = names.value(sym) {
+            return id;
+        }
+        let text = self.chunk.strings.get(sym);
+        if PRELUDE.contains(&text) {
+            return self.observer.prelude(text);
+        }
+        M::Observer::NOTHING
+    }
+
+    /// The observer's handle for an item of the innermost block that isn't defined yet.
+    fn pending_id(&self, sym: StrId) -> Sym<'a, M> {
+        if !M::Observer::ACTIVE {
+            return M::Observer::NOTHING;
+        }
+        let scope = self.funcs.last().and_then(|f| f.scopes.last());
+        scope
+            .and_then(|s| s.pending.iter().find(|p| p.sym == sym))
+            .map_or(M::Observer::NOTHING, |p| p.id)
     }
 
     /// Records the items of a block before lowering it, so code before an item (inside a
     /// function) can refer to it.
-    fn scan_items(&mut self, stmts: &[ast::Stmt]) {
+    fn scan_items(&mut self, stmts: &'a [ast::Stmt]) {
+        let module_level = self.at_module_level();
         for s in stmts {
             let ast::StmtKind::Item(item) = &s.kind else {
                 continue;
             };
             let (sym, tag) = match &item.kind {
                 ast::ItemKind::TypeAlias { name, .. } => {
+                    let id = self.observer.item_declared(item, module_level);
                     let scope = self.cur().scopes.last_mut().expect("scope");
-                    scope.aliases.push(name.sym);
+                    scope.aliases.push(Alias {
+                        name: *name,
+                        id,
+                        defined: None,
+                    });
                     continue;
                 }
                 ast::ItemKind::Fn(f) => (f.name.sym, ItemTag::Fn),
@@ -523,6 +703,7 @@ impl Lowerer {
                 }
                 _ => continue,
             };
+            let id = self.observer.item_declared(item, module_level);
             self.cur()
                 .scopes
                 .last_mut()
@@ -532,28 +713,77 @@ impl Lowerer {
                     sym,
                     tag,
                     local: None,
+                    id,
                 });
+        }
+        if M::Observer::ACTIVE {
+            // An `impl` block's members belong to its type from the start of the block too.
+            for s in stmts {
+                if let ast::StmtKind::Item(item) = &s.kind {
+                    if let ast::ItemKind::Impl(block) = &item.kind {
+                        let target = self.observed_value(block.target.sym);
+                        self.observer.impl_declared(block, target);
+                    }
+                }
+            }
         }
     }
 
-    /// Takes the pending entry for an item being defined now: its tag, and the local if a use
-    /// before the definition already declared one.
-    fn take_pending(&mut self, sym: StrId) -> Option<(ItemTag, Option<LocalId>)> {
+    /// Takes the pending entry for an item being defined now: its tag, the local if a use
+    /// before the definition already declared one, and the observer's handle. `tag` is for
+    /// an item no block's scan recorded.
+    fn take_pending(&mut self, sym: StrId, tag: ItemTag) -> (ItemTag, Option<LocalId>, Sym<'a, M>) {
         let scope = self.cur().scopes.last_mut().expect("scope");
-        let i = scope.pending.iter().position(|p| p.sym == sym)?;
-        let p = scope.pending.remove(i);
-        Some((p.tag, p.local))
+        match scope.pending.iter().position(|p| p.sym == sym) {
+            Some(i) => {
+                let p = scope.pending.remove(i);
+                (p.tag, p.local, p.id)
+            }
+            None => (tag, None, M::Observer::NOTHING),
+        }
+    }
+
+    /// Whether `sym` names a struct or enum of this module where it is used: the question
+    /// [`Lowerer::resolve`] answers, asked without reporting anything.
+    fn names_type(&self, sym: StrId) -> bool {
+        for f in self.funcs.iter().rev() {
+            for scope in f.scopes.iter().rev() {
+                if let Some((_, binding, _)) = scope.entries.iter().rev().find(|e| e.0 == sym) {
+                    return matches!(binding.item, Some(ItemTag::Type(_)));
+                }
+                if let Some(p) = scope.pending.iter().find(|p| p.sym == sym) {
+                    return matches!(p.tag, ItemTag::Type(_));
+                }
+            }
+        }
+        false
+    }
+
+    /// Resolves a name where it is only asked about (what kind of thing a path starts with,
+    /// say): the observer isn't told of a reference.
+    fn resolve(&mut self, name: ast::Name) -> LResult<Resolved> {
+        Ok(self.lookup(name)?.0)
+    }
+
+    /// Resolves a name where it is used, which is a reference to what it names: gives the
+    /// observer's handle for that too.
+    fn resolve_observed(&mut self, name: ast::Name) -> LResult<(Resolved, Sym<'a, M>)> {
+        let found = self.lookup(name)?;
+        self.observer.reference(name.span, found.1);
+        Ok(found)
     }
 
     /// Resolves a name: the innermost binding wins, then an item later in an enclosing block,
     /// then the prelude.
-    fn resolve(&mut self, name: ast::Name) -> LResult<Resolved> {
+    fn lookup(&mut self, name: ast::Name) -> LResult<(Resolved, Sym<'a, M>)> {
         let top = self.funcs.len() - 1;
         for depth in (0..=top).rev() {
             for si in (0..self.funcs[depth].scopes.len()).rev() {
                 let scope = &self.funcs[depth].scopes[si];
-                if let Some(&(_, binding)) = scope.entries.iter().rev().find(|e| e.0 == name.sym) {
-                    return Ok(match binding.target {
+                if let Some(&(_, binding, id)) =
+                    scope.entries.iter().rev().find(|e| e.0 == name.sym)
+                {
+                    let resolved = match binding.target {
                         Target::Local(local) => Resolved::Local {
                             depth,
                             local,
@@ -563,20 +793,25 @@ impl Lowerer {
                             name: name.sym,
                             binding: Some(binding),
                         },
-                    });
+                    };
+                    return Ok((resolved, id));
                 }
                 if let Some(pi) = scope.pending.iter().position(|p| p.sym == name.sym) {
                     if depth == top {
-                        return Err(self.error(
+                        self.report(
                             name.span,
+                            code::USED_BEFORE_DEFINITION,
                             format!(
                                 "`{}` is used before its definition; move the definition up \
                                  (functions may refer to items defined after them)",
                                 self.text(name.sym)
                             ),
-                        ));
+                        )?;
+                        // Goes on as a function before the definition does: with the item's
+                        // local, declared early.
                     }
-                    let tag = scope.pending[pi].tag;
+                    let scope = &self.funcs[depth].scopes[si];
+                    let (tag, id) = (scope.pending[pi].tag, scope.pending[pi].id);
                     let local = match scope.pending[pi].local {
                         Some(l) => l,
                         None => {
@@ -591,7 +826,7 @@ impl Lowerer {
                             l
                         }
                     };
-                    return Ok(Resolved::Local {
+                    let resolved = Resolved::Local {
                         depth,
                         local,
                         binding: Binding {
@@ -599,30 +834,39 @@ impl Lowerer {
                             mutable: false,
                             item: Some(tag),
                         },
-                    });
+                    };
+                    return Ok((resolved, id));
                 }
             }
         }
         let text = self.chunk.strings.get(name.sym);
         if PRELUDE.contains(&text) {
+            let id = self.observer.prelude(text);
             let global = if name.sym == self.syms.panic {
                 self.syms.error
             } else {
                 name.sym
             };
-            return Ok(Resolved::Global {
+            let resolved = Resolved::Global {
                 name: global,
                 binding: None,
-            });
+            };
+            return Ok((resolved, id));
         }
-        Err(self.error(
+        self.report(
             name.span,
+            code::UNKNOWN_NAME,
             format!(
                 "cannot find `{}` in this scope (to use a global, declare it with `extern {}`)",
                 self.text(name.sym),
                 self.text(name.sym)
             ),
-        ))
+        )?;
+        let resolved = Resolved::Global {
+            name: name.sym,
+            binding: Some(Binding::UNRESOLVED),
+        };
+        Ok((resolved, M::Observer::NOTHING))
     }
 
     fn resolved_expr(&mut self, r: Resolved, span: Span) -> ExprId {
@@ -633,13 +877,14 @@ impl Lowerer {
     }
 
     fn name_expr(&mut self, name: ast::Name) -> LResult<ExprId> {
-        let r = self.resolve(name)?;
+        let (r, _) = self.resolve_observed(name)?;
         Ok(self.resolved_expr(r, name.span))
     }
 
-    /// The assignment target for a name, checking that it may be assigned.
-    fn name_place(&mut self, name: ast::Name) -> LResult<hir::Place> {
-        let r = self.resolve(name)?;
+    /// The assignment target for a name, checking that it may be assigned, with the
+    /// observer's handle for the name.
+    fn name_place(&mut self, name: ast::Name) -> LResult<(hir::Place, Sym<'a, M>)> {
+        let (r, id) = self.resolve_observed(name)?;
         let binding = match r {
             Resolved::Local { binding, .. } => Some(binding),
             Resolved::Global { binding, .. } => binding,
@@ -647,10 +892,11 @@ impl Lowerer {
         match binding {
             Some(b) if b.mutable => {}
             Some(Binding { item: Some(_), .. }) => {
-                return Err(self.error(
+                self.report(
                     name.span,
+                    code::ASSIGN_TO_ITEM,
                     format!("cannot assign to `{}`: it is an item", self.text(name.sym)),
-                ));
+                )?;
             }
             Some(_) => {
                 let is_param = match r {
@@ -669,19 +915,21 @@ impl Lowerer {
                         "cannot assign twice to immutable variable `{text}` (declare it with `let mut`)"
                     )
                 };
-                return Err(self.error(name.span, message));
+                self.report(name.span, code::ASSIGN_TO_IMMUTABLE, message)?;
             }
             None => {
-                return Err(self.error(
+                self.report(
                     name.span,
+                    code::ASSIGN_TO_PRELUDE,
                     format!(
                         "cannot assign to prelude name `{0}`; declare it with `extern {0};` first",
                         self.text(name.sym)
                     ),
-                ));
+                )?;
             }
         }
-        Ok(match r {
+        // After any of these errors the assignment is lowered as written.
+        let place = match r {
             Resolved::Local { depth, local, .. } => {
                 if depth == self.funcs.len() - 1 {
                     hir::Place::Local(local)
@@ -693,13 +941,14 @@ impl Lowerer {
                 }
             }
             Resolved::Global { name, .. } => hir::Place::Global(name),
-        })
+        };
+        Ok((place, id))
     }
 
     // ---- blocks -------------------------------------------------------------------------------
 
     /// The module's top level: items, statements, and the export table.
-    fn module(&mut self, body: &ast::Block) -> LResult<()> {
+    fn module(&mut self, body: &'a ast::Block) -> LResult<()> {
         let has_pub = body
             .stmts
             .iter()
@@ -715,10 +964,11 @@ impl Lowerer {
             if has_pub {
                 if let ast::StmtKind::Expr(e) = &s.kind {
                     if let ast::ExprKind::Return(_) = e.kind {
-                        return Err(self.error(
+                        self.report(
                             e.span,
+                            code::RETURN_WITH_EXPORTS,
                             "a module with `pub` items returns its exports; remove this `return`",
-                        ));
+                        )?;
                     }
                 }
             }
@@ -755,7 +1005,7 @@ impl Lowerer {
     }
 
     /// Lowers `{ ... }` in a scope of its own, its final expression going to `dest`.
-    fn block(&mut self, b: &ast::Block, dest: &Dest) -> LResult<BlockId> {
+    fn block(&mut self, b: &'a ast::Block, dest: &Dest) -> LResult<BlockId> {
         let mut stmts = Vec::new();
         self.block_into(b, dest, &mut stmts)?;
         Ok(self.new_block(stmts, b.span))
@@ -764,11 +1014,11 @@ impl Lowerer {
     /// Like [`Lowerer::block`], appending to `stmts` (which must be a fresh block's list).
     fn block_into(
         &mut self,
-        b: &ast::Block,
+        b: &'a ast::Block,
         dest: &Dest,
         stmts: &mut Vec<hir::StmtId>,
     ) -> LResult<()> {
-        self.open_scope();
+        self.open_scope(b.span);
         let result = self.block_contents(b, dest, stmts);
         self.close_scope(stmts, b.span);
         result
@@ -776,7 +1026,7 @@ impl Lowerer {
 
     fn block_contents(
         &mut self,
-        b: &ast::Block,
+        b: &'a ast::Block,
         dest: &Dest,
         stmts: &mut Vec<hir::StmtId>,
     ) -> LResult<()> {
@@ -792,14 +1042,20 @@ impl Lowerer {
 
     // ---- statements ---------------------------------------------------------------------------
 
-    fn stmt(&mut self, s: &ast::Stmt, out: &mut Vec<hir::StmtId>) -> LResult<()> {
+    fn stmt(&mut self, s: &'a ast::Stmt, out: &mut Vec<hir::StmtId>) -> LResult<()> {
         match &s.kind {
             ast::StmtKind::Let {
-                scope, pat, value, ..
-            } => self.let_stmt(*scope, pat, value.as_ref(), s.span, out),
+                scope,
+                pat,
+                ty,
+                value,
+            } => self.let_stmt(*scope, pat, ty.as_ref(), value.as_ref(), s.span, out),
             ast::StmtKind::Item(item) => self.item(item, out),
             ast::StmtKind::Scope(inner) => self.scope_action(inner, s.span, out),
-            ast::StmtKind::Error => Err(self.unparsed(s.span)),
+            ast::StmtKind::Error => {
+                self.unparsed(s.span)?;
+                Ok(())
+            }
             _ => {
                 // Statements a hoisted operand added stay in a block of their own, so their
                 // temporaries end with the statement.
@@ -816,7 +1072,7 @@ impl Lowerer {
         }
     }
 
-    fn plain_stmt(&mut self, s: &ast::Stmt, out: &mut Vec<hir::StmtId>) -> LResult<()> {
+    fn plain_stmt(&mut self, s: &'a ast::Stmt, out: &mut Vec<hir::StmtId>) -> LResult<()> {
         match &s.kind {
             ast::StmtKind::Expr(e) => self.tail(e, &Dest::Discard, out),
             ast::StmtKind::Assign { targets, value } => self.assign(targets, value, s.span, out),
@@ -833,29 +1089,55 @@ impl Lowerer {
     fn let_stmt(
         &mut self,
         scope: bool,
-        pat: &ast::Pat,
-        value: Option<&ast::Expr>,
+        pat: &'a ast::Pat,
+        ty: Option<&'a ast::Type>,
+        value: Option<&'a ast::Expr>,
         span: Span,
         out: &mut Vec<hir::StmtId>,
     ) -> LResult<()> {
+        self.observe_type(ty);
+        // What gives a plainly bound name its type, for the observer.
+        let plain = |mutable: bool, slot: Option<usize>| Local {
+            full: pat.span,
+            let_end: Some(span.end),
+            def: Some(LetDef {
+                ty: if slot.is_some() { None } else { ty },
+                init: value,
+                mutable,
+                slot,
+            }),
+        };
         if scope {
-            let ast::PatKind::Bind { name, .. } = pat.kind else {
-                return Err(self.error(pat.span, "`let scope` binds a single name"));
+            let ast::PatKind::Bind { name, mutable } = pat.kind else {
+                self.report(
+                    pat.span,
+                    code::LET_PATTERN,
+                    "`let scope` binds a single name",
+                )?;
+                return self.let_recovered(pat, value, span, out);
             };
-            let Some(value) = value else {
-                return Err(self.error(span, "`let scope` needs a value to close"));
+            let values = match value {
+                Some(value) => vec![self.single(value, out)?].into(),
+                None => {
+                    self.report(
+                        span,
+                        code::LET_NEEDS_VALUE,
+                        "`let scope` needs a value to close",
+                    )?;
+                    hir::ExprList::default()
+                }
             };
-            let v = self.single(value, out)?;
             let local = self.new_local(Some(name.sym), name.span, LocalKind::Close);
             self.push(
                 out,
                 hir::StmtKind::Let {
                     locals: vec![local],
-                    values: vec![v].into(),
+                    values,
                 },
                 span,
             );
-            self.bind_local(name.sym, local, false);
+            let id = self.observer.local(name, plain(mutable, None));
+            self.bind_local(name.sym, local, false, id);
             return Ok(());
         }
         match &pat.kind {
@@ -864,13 +1146,15 @@ impl Lowerer {
                     Some(v) => vec![self.single(v, out)?].into(),
                     None if *mutable => hir::ExprList::default(),
                     None => {
-                        return Err(self.error(
+                        self.report(
                             span,
+                            code::LET_NEEDS_VALUE,
                             format!(
                                 "`let {}` needs a value (only `let mut` may start as nil)",
                                 self.text(name.sym)
                             ),
-                        ));
+                        )?;
+                        hir::ExprList::default()
                     }
                 };
                 let kind = if *mutable {
@@ -887,7 +1171,8 @@ impl Lowerer {
                     },
                     span,
                 );
-                self.bind_local(name.sym, local, *mutable);
+                let id = self.observer.local(*name, plain(*mutable, None));
+                self.bind_local(name.sym, local, *mutable, id);
                 Ok(())
             }
             ast::PatKind::Wild => {
@@ -898,13 +1183,25 @@ impl Lowerer {
                 Ok(())
             }
             ast::PatKind::Tuple(items) => {
-                let Some(value) = value else {
-                    return Err(self.error(span, "destructuring `let` needs a value"));
+                let values = match value {
+                    Some(value) => self.values(value, out)?,
+                    None => {
+                        self.report(
+                            span,
+                            code::LET_NEEDS_VALUE,
+                            "destructuring `let` needs a value",
+                        )?;
+                        hir::ExprList::default()
+                    }
                 };
-                let values = self.values(value, out)?;
                 let mut locals = Vec::with_capacity(items.len());
                 let mut bindings = Vec::new();
-                for item in items {
+                // The value types the names by their position only if every item is one.
+                let by_slot = M::Observer::ACTIVE
+                    && items
+                        .iter()
+                        .all(|p| matches!(p.kind, ast::PatKind::Bind { .. } | ast::PatKind::Wild));
+                for (slot, item) in items.iter().enumerate() {
                     match &item.kind {
                         ast::PatKind::Bind { name, mutable } => {
                             let kind = if *mutable {
@@ -914,58 +1211,102 @@ impl Lowerer {
                             };
                             let local = self.new_local(Some(name.sym), name.span, kind);
                             locals.push(local);
-                            bindings.push((name.sym, local, *mutable));
+                            let mut how = plain(*mutable, Some(slot));
+                            how.full = item.span;
+                            if !by_slot {
+                                how.def = None;
+                            }
+                            let id = self.observer.local(*name, how);
+                            bindings.push((name.sym, local, *mutable, id));
                         }
                         ast::PatKind::Wild => {
                             locals.push(self.new_local(None, item.span, LocalKind::Hidden));
                         }
                         _ => {
-                            return Err(self.error(
+                            self.report(
                                 item.span,
+                                code::LET_PATTERN,
                                 "a `let` tuple holds names or `_`; use `match` for other patterns",
-                            ));
+                            )?;
+                            locals.push(self.new_local(None, item.span, LocalKind::Hidden));
+                            self.declare_pattern_names(item, Some(span.end), out);
                         }
                     }
                 }
                 self.push(out, hir::StmtKind::Let { locals, values }, span);
-                for (sym, local, mutable) in bindings {
-                    self.bind_local(sym, local, mutable);
+                for (sym, local, mutable, id) in bindings {
+                    self.bind_local(sym, local, mutable, id);
                 }
                 Ok(())
             }
             ast::PatKind::Struct { .. } => {
                 let Some(value) = value else {
-                    return Err(self.error(span, "destructuring `let` needs a value"));
+                    self.report(
+                        span,
+                        code::LET_NEEDS_VALUE,
+                        "destructuring `let` needs a value",
+                    )?;
+                    return self.let_recovered(pat, None, span, out);
                 };
                 let v = self.single(value, out)?;
                 let subject = self.temp(Some(v), span, out);
                 let mut binds = Vec::new();
                 self.pattern_binds(pat, &pattern::Access::Local(subject), &mut binds)?;
-                self.emit_binds(binds, out);
+                self.observe_pattern(pat);
+                self.emit_binds(binds, Some(span.end), out);
                 Ok(())
             }
-            _ => Err(self.error(pat.span, "refutable pattern in `let`; use `match` or `if`")),
+            _ => {
+                self.report(
+                    pat.span,
+                    code::LET_PATTERN,
+                    "refutable pattern in `let`; use `match` or `if`",
+                )?;
+                self.let_recovered(pat, value, span, out)
+            }
         }
+    }
+
+    /// What is left of a `let` whose pattern it can't have: the errors in its value, and the
+    /// names it meant to bind.
+    fn let_recovered(
+        &mut self,
+        pat: &'a ast::Pat,
+        value: Option<&'a ast::Expr>,
+        span: Span,
+        out: &mut Vec<hir::StmtId>,
+    ) -> LResult<()> {
+        if let Some(value) = value {
+            self.only_check(value)?;
+        }
+        self.declare_pattern_names(pat, Some(span.end), out);
+        Ok(())
     }
 
     fn assign(
         &mut self,
-        targets: &[ast::Expr],
-        value: &ast::Expr,
+        targets: &'a [ast::Expr],
+        value: &'a ast::Expr,
         span: Span,
         out: &mut Vec<hir::StmtId>,
     ) -> LResult<()> {
         let mut places = Vec::with_capacity(targets.len());
-        let mut parts: Vec<expr::Part<'_>> = Vec::new();
-        for t in targets {
+        let mut parts: Vec<expr::Part<'a>> = Vec::new();
+        for (slot, t) in targets.iter().enumerate() {
             match &t.kind {
                 ast::ExprKind::Name(sym) => {
                     // Checked now; a name has no operands to evaluate.
-                    let p = self.name_place(ast::Name {
+                    let (p, id) = self.name_place(ast::Name {
                         sym: *sym,
                         span: t.span,
                     })?;
                     places.push(Some(p));
+                    let assign = Assign {
+                        value,
+                        slot: (targets.len() > 1).then_some(slot),
+                        op: None,
+                    };
+                    self.observer.assigned(id, assign);
                 }
                 ast::ExprKind::Field { obj, .. } => {
                     parts.push(expr::Part::Expr(obj));
@@ -976,7 +1317,15 @@ impl Lowerer {
                     parts.push(expr::Part::Expr(key));
                     places.push(None);
                 }
-                _ => return Err(self.error(t.span, "invalid left-hand side of assignment")),
+                _ => {
+                    self.report(
+                        t.span,
+                        code::INVALID_ASSIGN_TARGET,
+                        "invalid left-hand side of assignment",
+                    )?;
+                    // Nothing can be assigned; the value may hold errors of its own.
+                    return self.only_check(value);
+                }
             }
         }
         parts.push(expr::Part::Values(value));
@@ -1010,8 +1359,8 @@ impl Lowerer {
         &mut self,
         op: ast::BinOp,
         op_at: u32,
-        target: &ast::Expr,
-        value: &ast::Expr,
+        target: &'a ast::Expr,
+        value: &'a ast::Expr,
         span: Span,
         out: &mut Vec<hir::StmtId>,
     ) -> LResult<()> {
@@ -1022,8 +1371,16 @@ impl Lowerer {
                     sym: *sym,
                     span: target.span,
                 };
-                let place = self.name_place(name)?;
-                let read = self.name_expr(name)?;
+                let (place, id) = self.name_place(name)?;
+                let assign = Assign {
+                    value,
+                    slot: None,
+                    op: Some(op),
+                };
+                self.observer.assigned(id, assign);
+                // The same name read: one reference, made above.
+                let r = self.resolve(name)?;
+                let read = self.resolved_expr(r, name.span);
                 (place, read)
             }
             ast::ExprKind::Field { obj, name } => {
@@ -1043,7 +1400,14 @@ impl Lowerer {
                 let read = self.add_expr(hir::ExprKind::Index { obj: ro, key: rk }, target.span);
                 (hir::Place::Index { obj: o, key: k }, read)
             }
-            _ => return Err(self.error(target.span, "invalid left-hand side of assignment")),
+            _ => {
+                self.report(
+                    target.span,
+                    code::INVALID_ASSIGN_TARGET,
+                    "invalid left-hand side of assignment",
+                )?;
+                return self.only_check(value);
+            }
         };
         let v = self.expr(value, out)?;
         let combined = self.add_expr_at(
@@ -1067,7 +1431,7 @@ impl Lowerer {
     }
 
     /// Lowers an expression in a final position: its value (or values) go to `dest`.
-    fn tail(&mut self, e: &ast::Expr, dest: &Dest, out: &mut Vec<hir::StmtId>) -> LResult<()> {
+    fn tail(&mut self, e: &'a ast::Expr, dest: &Dest, out: &mut Vec<hir::StmtId>) -> LResult<()> {
         use ast::ExprKind as K;
         match &e.kind {
             K::If { .. } => self.if_expr(e, dest, out),
@@ -1139,7 +1503,7 @@ impl Lowerer {
 
     fn return_(
         &mut self,
-        value: Option<&ast::Expr>,
+        value: Option<&'a ast::Expr>,
         span: Span,
         out: &mut Vec<hir::StmtId>,
     ) -> LResult<()> {
@@ -1153,9 +1517,13 @@ impl Lowerer {
     }
 
     /// An error if code in a `scope` action would leave it with `what`.
-    fn check_not_scope_action(&self, span: Span, what: &str) -> LResult<()> {
+    fn check_not_scope_action(&mut self, span: Span, what: &str) -> LResult<()> {
         if self.funcs.last().expect("function").scope_action {
-            return Err(self.error(span, format!("`{what}` can't leave a `scope` action")));
+            self.report(
+                span,
+                code::LEAVES_SCOPE_ACTION,
+                format!("`{what}` can't leave a `scope` action"),
+            )?;
         }
         Ok(())
     }
@@ -1166,11 +1534,12 @@ impl Lowerer {
     /// to-be-closed machinery: `local _ <close> = setmetatable({function() stmt end}, meta)`.
     fn scope_action(
         &mut self,
-        inner: &ast::Stmt,
+        inner: &'a ast::Stmt,
         span: Span,
         out: &mut Vec<hir::StmtId>,
     ) -> LResult<()> {
         let func = self.begin_function(FunctionName::Anonymous, inner.span);
+        self.observer.scope_opened(inner.span);
         self.cur().scope_action = true;
         let mut stmts = Vec::new();
         let result = self.stmt(inner, &mut stmts);
@@ -1238,5 +1607,63 @@ impl Lowerer {
             hir::ExprKind::Table(vec![hir::TableEntry::Keyed(key, value)]),
             span,
         )
+    }
+}
+
+/// Lowering's scopes as an observer reads them for a type annotation.
+struct Names<'s, S> {
+    funcs: &'s [FnCtx<S>],
+    generics: &'s [(StrId, S)],
+    impls: &'s [ImplCtx<S>],
+}
+
+impl<S: Copy> Names<'_, S> {
+    /// What `name` is bound to as a value: the innermost binding, or an item later in an
+    /// enclosing block.
+    fn value(&self, name: StrId) -> Option<S> {
+        for f in self.funcs.iter().rev() {
+            for scope in f.scopes.iter().rev() {
+                if let Some(&(_, _, id)) = scope.entries.iter().rev().find(|e| e.0 == name) {
+                    return Some(id);
+                }
+                if let Some(p) = scope.pending.iter().find(|p| p.sym == name) {
+                    return Some(p.id);
+                }
+            }
+        }
+        None
+    }
+}
+
+impl<S: Copy> TypeNames<S> for Names<'_, S> {
+    fn lookup(&self, name: StrId) -> Option<S> {
+        if let Some(&(_, id)) = self.generics.iter().rev().find(|g| g.0 == name) {
+            return Some(id);
+        }
+        for f in self.funcs.iter().rev() {
+            for scope in f.scopes.iter().rev() {
+                let aliases = || scope.aliases.iter().filter(|a| a.name.sym == name);
+                let alias = aliases().filter(|a| a.defined.is_some()).last();
+                let entry = scope.entries.iter().rposition(|e| e.0 == name);
+                match (entry, alias) {
+                    (Some(e), Some(a)) if a.defined > Some(e) => return Some(a.id),
+                    (Some(e), _) => return Some(scope.entries[e].2),
+                    (None, Some(a)) => return Some(a.id),
+                    (None, None) => {}
+                }
+                // Then what the block defines later.
+                if let Some(a) = aliases().next() {
+                    return Some(a.id);
+                }
+                if let Some(p) = scope.pending.iter().find(|p| p.sym == name) {
+                    return Some(p.id);
+                }
+            }
+        }
+        None
+    }
+
+    fn self_type(&self) -> Option<S> {
+        self.impls.last().map(|c| c.id)
     }
 }

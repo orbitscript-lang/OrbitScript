@@ -78,18 +78,14 @@ impl<'a> Chunk<'a> {
         }
     }
 
-    #[cfg(runtime_backend)]
     pub(crate) fn is_binary(&self) -> bool {
         self.bytes.first() == Some(&orbit_runtime::stdlib::BINARY_SIGNATURE)
     }
 }
 
-#[cfg(runtime_backend)]
 pub(crate) use loading::load;
 
-/// Loading over the runtime linked into this program; on the shared
-/// backend, `liborbit` loads.
-#[cfg(runtime_backend)]
+/// Loading: sources through the compiler, binary chunks through the verifier.
 mod loading {
     use orbit_runtime::object as raw;
     use orbit_runtime::stdlib::chunk_id;

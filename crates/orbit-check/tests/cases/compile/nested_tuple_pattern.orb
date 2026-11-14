@@ -1,0 +1,3 @@
+struct P { x: int }
+fn f(v) { match v { P { x: (a, b) } => a, } } //~ T0707
+print(f(1));

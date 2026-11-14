@@ -41,6 +41,14 @@ pub fn align_down(val: usize, align: usize) -> usize {
     val & !(align - 1)
 }
 
+/// The address `bytes` past `base`, which must lie within (or one past the
+/// end of) the same reservation.
+#[inline]
+#[must_use]
+pub fn offset(base: NonNull<u8>, bytes: usize) -> NonNull<u8> {
+    NonNull::new(base.as_ptr().wrapping_add(bytes)).expect("orbit-virtmem: address overflow")
+}
+
 /// Reserves `bytes` of contiguous virtual address space with no access
 /// permissions, or returns `None` if the operating system refuses, for
 /// example because a process address-space limit (`ulimit -v`) would be
@@ -192,6 +200,40 @@ pub fn decommit_pages(base: NonNull<u8>, start_offset: usize, end_offset: usize)
         unsafe {
             VirtualFree(ptr as *mut _, len, MEM_DECOMMIT);
         }
+    }
+}
+
+/// Moves the first `bytes` (committed) of the reservation at `old` to the
+/// start of the larger reservation at `new`, without copying, leaving that
+/// part of `old` unmapped: it no longer belongs to the caller, and another
+/// thread's mapping can land in it straight away. Returns `false`, changing nothing, where the
+/// system can't (everywhere but Linux, or when the pages aren't one
+/// mapping); the caller then copies.
+pub fn move_pages(old: NonNull<u8>, new: NonNull<u8>, bytes: usize) -> bool {
+    let bytes = align_up(bytes, page_size());
+    if bytes == 0 {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // mremap moves the page mappings of `old` over the start of the
+        // reservation at `new`, which the caller owns and has nothing in.
+        #[allow(unsafe_code)]
+        let res = unsafe {
+            libc::mremap(
+                old.as_ptr().cast(),
+                bytes,
+                bytes,
+                libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
+                new.as_ptr().cast::<libc::c_void>(),
+            )
+        };
+        res == new.as_ptr().cast()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (old, new);
+        false
     }
 }
 

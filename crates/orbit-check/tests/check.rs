@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use orbit_check::{Code, Config, DiskSources, Sources, SymbolKind, Workspace};
+use orbit_check::{Config, DiskSources, Sources, SymbolKind, Workspace, code};
 use orbit_lua_version::LuaVersion;
 
 fn root() -> PathBuf {
@@ -65,7 +65,7 @@ fn check_dir_with(
             .into_owned();
         for d in diags {
             let (line, _) = ws.line_col(file, d.span.start);
-            found.insert((name.clone(), line, d.code.as_str().to_string()));
+            found.insert((name.clone(), line, d.code.to_string()));
         }
     }
     (ws, found)
@@ -122,11 +122,20 @@ fn repository_programs_check() {
         all.extend(found);
     }
     assert_eq!(all, known, "findings in examples/");
-    // The front end's sample programs (`proposal.orb` opts out with `//! orbit-check: off`).
-    for dir in ["crates/orbit-orb-syntax/tests/programs", "bench/orb"] {
-        let (_, found) = check_dir(&root().join(dir));
-        assert!(found.is_empty(), "findings in {dir}: {found:?}");
-    }
+    // The front end's sample programs. `proposal.orb` is the design document's examples one
+    // after another, parsed but never run: it opts out of checking with
+    // `//! orbit-check: off`, which leaves what stops it compiling: an item used before its
+    // definition, and the names its fragments leave undeclared.
+    let undeclared = [
+        67, 124, 134, 136, 138, 142, 143, 146, 151, 157, 160, 161, 163, 164, 168, 181, 194, 209,
+        217, 221, 227, 248, 265, 266, 267,
+    ];
+    let mut proposal: BTreeSet<_> = [("proposal.orb".to_string(), 47, "T0102".to_string())].into();
+    proposal.extend(undeclared.map(|line| ("proposal.orb".to_string(), line, "T0101".to_string())));
+    let (_, found) = check_dir(&root().join("crates/orbit-orb-syntax/tests/programs"));
+    assert_eq!(found, proposal, "findings in the front end's programs");
+    let (_, found) = check_dir(&root().join("bench/orb"));
+    assert!(found.is_empty(), "findings in bench/orb: {found:?}");
     // The built-ins, as each Lua version's build compiles them.
     for version in LuaVersion::ALL {
         let (_, found) = check_dir_with(
@@ -143,7 +152,7 @@ fn repository_programs_check() {
 
 /// The unused-name lints, which tests that bind values only to look at them leave out.
 fn is_unused_lint(d: &orbit_check::Diagnostic) -> bool {
-    matches!(d.code, Code::UnusedLocal | Code::UnusedImport)
+    matches!(d.code, code::UNUSED_LOCAL | code::UNUSED_IMPORT)
 }
 
 /// What `file` reports apart from the unused-name lints.
@@ -289,7 +298,7 @@ fn editing_a_dependency_rechecks_its_users() {
     let codes: Vec<_> = ws
         .diagnostics(app)
         .iter()
-        .map(|d| d.code.as_str())
+        .map(|d| code_name(d.code))
         .collect();
     // `helper` is gone from the `use` list and from `lib::helper`; `P::new` too.
     assert_eq!(codes, ["T0103", "T0104", "T0103"]);
@@ -307,7 +316,7 @@ fn syntax_error_keeps_the_rest_of_the_module() {
         .diagnostics(lib)
         .iter()
         .filter(|d| !is_unused_lint(d))
-        .map(|d| d.code.as_str())
+        .map(|d| code_name(d.code))
         .collect();
     // The broken item is reported, and the code after it is still checked.
     assert_eq!(codes, ["T0001", "T0201"]);
@@ -540,6 +549,7 @@ fn cast_errors_match_the_compiler() {
         let src = format!("extern y; {src}");
         let compiler = orbit_orb_syntax::to_hir("t", src.as_bytes(), &Default::default())
             .expect_err("the compiler rejects the cast")
+            .into_data()
             .message;
         let mut ws = Workspace::new(
             Config {
@@ -553,10 +563,15 @@ fn cast_errors_match_the_compiler() {
             .diagnostics(file)
             .iter()
             .filter(|d| !is_unused_lint(d))
-            .map(|d| (d.code.as_str(), d.message.clone()))
+            .map(|d| (code_name(d.code), d.message.clone()))
             .collect();
         assert_eq!(checker, [("T0210", compiler)], "{src}");
     }
+}
+
+/// A code as the tests write it (`"T0201"`).
+fn code_name(code: orbit_check::Code) -> &'static str {
+    Box::leak(code.to_string().into_boxed_str())
 }
 
 /// What one module reports as `(line, code, message)`, checked alone.
@@ -576,7 +591,7 @@ fn diagnostics_of(src: &str, strict: bool) -> Vec<(u32, &'static str, String)> {
         .map(|d| {
             (
                 ws.line_col(f, d.span.start).0,
-                d.code.as_str(),
+                code_name(d.code),
                 d.message.clone(),
             )
         })
@@ -706,4 +721,89 @@ fn long_editing_sessions_keep_the_type_store_bounded() {
         (diags, types, hints)
     };
     assert_eq!(answers(&mut ws), answers(&mut fresh));
+}
+
+/// A module the checker passes must compile, so nothing a module can write hides the error
+/// that stops lowering: not an `ignore` pragma on the checker's own name error, and not
+/// `//! orbit-check: off`. Lowering stops at its first error, so one is reported.
+#[test]
+fn compile_errors_cannot_be_hidden() {
+    let codes = |src: &str| -> Vec<(u32, &'static str)> {
+        diagnostics_of(src, false)
+            .into_iter()
+            .map(|(line, code, _)| (line, code))
+            .collect()
+    };
+    assert_eq!(codes("print(zzz);\n"), [(1, "T0101")]);
+    assert_eq!(
+        codes("print(zzz); // orbit-check: ignore\n"),
+        [(1, "T0101")]
+    );
+    assert_eq!(
+        codes("let x = 1;\nx = 2; // orbit-check: ignore\nprint(x);\n"),
+        [(2, "T0111")]
+    );
+    assert_eq!(
+        codes("//! orbit-check: off\nlet s: string = 3;\nbreak;\nprint(zzz);\n"),
+        [(3, "T0601"), (4, "T0101")]
+    );
+    // Lowering passes over what didn't parse and still reports the rest.
+    assert_eq!(codes("print(1 +);\nbreak;\n"), [(1, "T0001"), (2, "T0601")]);
+    // A stub declares functions without bodies and is never compiled.
+    let mut ws = Workspace::new(Config::default(), Box::new(Memory(vec![])));
+    let stub = ws.set_source(
+        Path::new("/p/m.orbi"),
+        b"pub fn f(n: int) -> int;\n".to_vec(),
+    );
+    assert_eq!(ws.diagnostics(stub), []);
+}
+
+/// What a name refers to is what the compiler's lowering says it refers to.
+#[test]
+fn names_are_the_compilers() {
+    let codes = |src: &str| -> Vec<(u32, &'static str)> {
+        diagnostics_of(src, false)
+            .into_iter()
+            .filter(|(_, code, _)| !code.starts_with("T03"))
+            .map(|(line, code, _)| (line, code))
+            .collect()
+    };
+    // A type alias or a type parameter isn't a value.
+    assert_eq!(codes("type Id = int;\nprint(Id);\n"), [(2, "T0101")]);
+    assert_eq!(codes("fn f<T>(x: T) { print(T, x); }\n"), [(1, "T0101")]);
+    // An arm that never runs is still read: its names are known and its mistakes reported.
+    assert_eq!(
+        codes("fn f(v) {\n    match v {\n        _ => 1,\n        n => n + zzz,\n    }\n}\n"),
+        [(4, "T0101")]
+    );
+    // A stub reports nothing about having no bodies or values, and everything else that the
+    // compiler would hold against it.
+    let mut ws = Workspace::new(Config::default(), Box::new(Memory(vec![])));
+    let stub = ws.set_source(
+        Path::new("/p/m.orbi"),
+        b"pub struct P { x: int }\nimpl P {\n    pub fn get(self) -> int;\n}\npub const N: int;\npub fn f(p: P, q: Q) -> int;\npub fn g(a: int, a: int);\n"
+            .to_vec(),
+    );
+    let found: Vec<_> = ws
+        .diagnostics(stub)
+        .iter()
+        .map(|d| (d.line, d.code))
+        .collect();
+    assert_eq!(
+        found,
+        [(6, code::UNKNOWN_TYPE), (7, code::DUPLICATE_PARAMETER)]
+    );
+}
+
+/// The design document's table lists every code, and nothing that isn't one.
+#[test]
+fn every_code_is_documented() {
+    let doc = std::fs::read_to_string(root().join("docs/design/orbit-check/api.md")).unwrap();
+    let listed: Vec<String> = doc
+        .lines()
+        .filter_map(|l| l.strip_prefix("| T"))
+        .map(|l| format!("T{}", &l[..4]))
+        .collect();
+    let all: Vec<String> = code::all().iter().map(|c| c.to_string()).collect();
+    assert_eq!(listed, all);
 }

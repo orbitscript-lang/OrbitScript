@@ -28,7 +28,7 @@ flowchart LR
 
 Everything before the link step is plain `Send` data with no GC or VM access, which keeps a parallel front end possible (see [lua-front-end.md](lua-front-end.md#plain-data-off-the-vm)).
 
-Crate dependencies: `orbit-hir` and `orbit-bytecode` (the instruction set and `UnlinkedProto`) depend on nothing; both front ends depend on `orbit-hir`; `orbit-compiler` depends on `orbit-hir` and `orbit-bytecode`; `orbit-runtime` depends on `orbit-gc` and `orbit-bytecode`. The embedding API `orbit` sits on `orbit-runtime` and the compilers, and `orbit-std` on `orbit` (ADR-11).
+Crate dependencies: `orbit-hir`, `orbit-bytecode` (the instruction set and `UnlinkedProto`) and `orbit-lua-text` (numerals and extended UTF-8, for the Lua front end and the runtime) depend on nothing; both front ends depend on `orbit-hir`; `orbit-compiler` depends on `orbit-hir` and `orbit-bytecode`; `orbit-runtime` depends on `orbit-gc` and `orbit-bytecode`. The embedding API `orbit` sits on `orbit-runtime` and the compilers, and `orbit-std` on `orbit` (ADR-11).
 
 ## Front ends and the compiler
 

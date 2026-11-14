@@ -50,11 +50,10 @@ flowchart LR
 
 - **On `Isolate`**: `set_breakpoints`, `resume`, `step`, `pause` and `set_debug_events(impl DebugEvents)`. Callbacks (stopped, error, output, new source) receive a paused view with `activations()`, `frame_info(level)`, `locals(level)`, `upvalues(level)`, `set_local` and `globals()`, built on what `orbit::stack` already offers.
 - **Values handed to the editor are pinned handles** (ADR-11's `Pinned`) held while paused and dropped on resume, which matches DAP's rule that variable references are valid only while stopped. Hidden compiler and lowering locals are not shown.
-- **In the shared layout** these are a few methods and one callback trait in `orbit::abi`.
 
 ### The DAP server and who turns it on
 
-- **`orbit-dap`** is a crate on the public `orbit` API and `serde_json`, with its own I/O (stdio and local sockets). It builds over either backend, like `orbit-std`.
+- **`orbit-dap`** is a crate on the public `orbit` API and `serde_json`, with its own I/O (stdio and local sockets). The shared layout carries it in `liborbit` (ADR-10).
 - **Launch**: `orbit --debug-server` is the editor's debug adapter, speaking DAP on stdio. It never runs the program itself: it starts `orbit --debug-connect <socket> <program> <args>` in the editor's terminal (`runInTerminal`) or, with `console` `"internalConsole"`, as its own child with no input, and relays to it over a local socket, so the program's standard input and output never carry the protocol. The CLI links `orbit-dap` behind a `dap` feature, on by default.
 - **`liborbit` carries `orbit-dap` too**, behind an `orbit-lib` feature that `build.sh` turns on, so C hosts can be debugged: `orbit_debug_listen(lua_State *L, const char *addr)` for hosts that add a debug option, and `ORBIT_DEBUG=1`, read when a state is created through the C API, for unmodified hosts. Rust programs call `orbit_dap::serve`. Without the feature both C functions still exist, and listening fails.
 - **Suppressed per isolate, at creation only**. Rust: `Config::debugger` on `Runtime::new_isolate`, `Debugger::Allowed` (default), `Debugger::Disabled`, or `Debugger::FromEnv` (only isolates with this read `ORBIT_DEBUG`). C: `orbit_newstate(lua_Alloc f, void *ud, unsigned flags)` with `ORBIT_STATE_NO_DEBUGGER`, exported in the `ORBIT_0` symbol version; `lua_newstate` and `luaL_newstate` behave as `orbit_newstate` with no flags. A disabled isolate has no engine state. There is no process-wide switch and no way to disable it later.

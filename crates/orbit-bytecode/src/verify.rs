@@ -5,7 +5,7 @@
 //! constant, a jump past the end, a `ForLoop` whose state was never set up)
 //! or break invariants the VM relies on, such as `top` being set before a
 //! [`MULTI`] operand reads it. `load` runs [`verify`] on every binary chunk
-//! before linking it (at the level its build and `ORBIT_VERIFY` choose), and the tests run it over everything the compiler
+//! before linking it (at the level its build and host choose), and the tests run it over everything the compiler
 //! produces, so the two stay in agreement.
 //!
 //! The checks come in two layers:

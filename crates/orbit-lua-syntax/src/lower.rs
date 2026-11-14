@@ -12,9 +12,9 @@ use orbit_lua_version::LUA;
 use std::collections::HashSet;
 
 use crate::ast::{self, Ast, AttribKind, ExprKind, Field, StmtKind};
-use crate::diag::Diagnostic;
 use crate::lexer::Lexer;
 use crate::parser::near_token;
+use orbit_hir::{Code, Diagnostic};
 
 /// Most upvalues one function may have, as in lua5.5 (`_ENV` counts when the function uses a
 /// global).
@@ -193,7 +193,7 @@ impl Lowerer<'_> {
     }
 
     fn error(&self, span: Span, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::new(span, self.line_of(span), message, None)
+        Diagnostic::error(span, self.line_of(span), Code::COMPILE, message)
     }
 
     /// The error for an `Error` node, which only an error-recovering parse makes.
@@ -363,12 +363,13 @@ impl Lowerer<'_> {
         let mut lx = Lexer::new(self.src);
         lx.seek(span.end);
         match lx.next_token() {
-            Ok(tok) => Diagnostic::new(
+            Ok(tok) => Diagnostic::error(
                 tok.span,
                 self.chunk.source.line_of(tok.span.start),
+                Code::COMPILE,
                 message,
-                Some(near_token(&lx, tok)),
-            ),
+            )
+            .near(Some(near_token(&lx, tok))),
             Err(_) => self.error(span, message),
         }
     }
@@ -534,7 +535,8 @@ impl Lowerer<'_> {
     fn end_labels(&mut self) -> LResult<()> {
         let block = self.cur().blocks.pop().expect("label block");
         let end_line = block.end_line;
-        let error = |message: String| Diagnostic::new(Span::new(0, 0), end_line, message, None);
+        let error =
+            |message: String| Diagnostic::error(Span::new(0, 0), end_line, Code::COMPILE, message);
         if let Some((message, _)) = block.scope_error {
             return Err(error(message));
         }

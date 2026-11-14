@@ -8,13 +8,13 @@ use orbit_lua_syntax::{ParseOptions, lower, parse, to_hir};
 
 fn hir(src: &str) -> orbit_hir::Chunk {
     to_hir("s.lua", src.as_bytes(), &ParseOptions::default())
-        .unwrap_or_else(|d| panic!("{src}: {}", d.to_lua_message("s.lua")))
+        .unwrap_or_else(|d| panic!("{src}: {}", d.to_message("s.lua")))
 }
 
 fn err(src: &str) -> String {
     match to_hir("s.lua", src.as_bytes(), &ParseOptions::default()) {
         Ok(_) => panic!("expected an error for {src:?}"),
-        Err(d) => d.to_lua_message("s.lua"),
+        Err(d) => d.to_message("s.lua"),
     }
 }
 
@@ -257,8 +257,8 @@ fn lowered_hir_verifies_before_and_after_analysis() {
     for path in files {
         let src = std::fs::read(&path).unwrap();
         let name = path.display().to_string();
-        let ast = parse(&name, &src).unwrap_or_else(|d| panic!("{}", d.to_lua_message(&name)));
-        let mut chunk = lower(ast, &src).unwrap_or_else(|d| panic!("{}", d.to_lua_message(&name)));
+        let ast = parse(&name, &src).unwrap_or_else(|d| panic!("{}", d.to_message(&name)));
+        let mut chunk = lower(ast, &src).unwrap_or_else(|d| panic!("{}", d.to_message(&name)));
         orbit_hir::verify_lowered(&chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
         orbit_hir::analyze(&mut chunk).unwrap_or_else(|e| panic!("{name}: {e}"));
         orbit_hir::verify(&chunk).unwrap_or_else(|e| panic!("{name}: {e}"));

@@ -585,15 +585,9 @@ impl Vm {
         if caught && d.on_error == ErrorBreak::Uncaught {
             return;
         }
-        // The stop runs code above the failing frames; the error's own
-        // state waits.
-        let (errerr, handled) = (self.rt.errerr, self.rt.handled);
-        let traceback = self.rt.unwind_traceback.take();
-        // An error from the host's callback is the host's to report.
+        // The stop runs code above the failing frames; its errors are its
+        // own. An error from the host's callback is the host's to report.
         let _ = self.debug_stop(StopReason::Error { value, caught });
-        self.rt.errerr = errerr;
-        self.rt.handled = handled;
-        self.rt.unwind_traceback = traceback;
     }
 
     /// Report a stop and take the host's answer.

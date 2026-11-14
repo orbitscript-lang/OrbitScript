@@ -6,9 +6,9 @@
 //! expression at the start of a statement ends the statement, comparisons don't chain.
 
 use crate::ast::*;
-use crate::diag::Diagnostic;
 use crate::lexer::{Lexer, TemplatePart};
 use crate::token::{Keyword, Punct, Token, TokenKind};
+use orbit_hir::{Code, Diagnostic};
 use orbit_hir::{Span, StrId};
 
 /// Parser settings. The defaults are what the runtime uses; the other flags are for tools
@@ -110,7 +110,12 @@ fn parse_module(
     options: &ParseOptions,
 ) -> Result<(Ast, Vec<Diagnostic>), Diagnostic> {
     if u32::try_from(src.len()).is_err() {
-        return Err(Diagnostic::new(Span::default(), 1, "chunk too large"));
+        return Err(Diagnostic::error(
+            Span::default(),
+            1,
+            Code::SYNTAX,
+            "chunk too large",
+        ));
     }
     let mut lx = Lexer::new(chunk_name, src);
     let sym_scope = lx.strings_mut().intern(b"scope");
@@ -537,7 +542,7 @@ impl Parser<'_> {
 
     #[inline(never)]
     fn error(&self, span: Span, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::new(span, self.lx.line_of(span.start), message)
+        Diagnostic::error(span, self.lx.line_of(span.start), Code::SYNTAX, message)
     }
 
     #[inline(never)]

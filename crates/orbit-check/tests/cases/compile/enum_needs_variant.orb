@@ -1,0 +1,3 @@
+enum E { A { x: int }, B }
+let e = E { x: 1 }; //~ T0710
+print(e);

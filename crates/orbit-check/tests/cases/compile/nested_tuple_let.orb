@@ -1,0 +1,3 @@
+struct P { x: int }
+fn f(v) { let P { x: (a, b) } = v; a } //~ T0707
+print(f(1));

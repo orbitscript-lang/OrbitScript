@@ -1,0 +1,26 @@
+Deletes: A coroutine's error kept in its thread (`co_finished`), and `switch_to`'s barrier for a coroutine that finished, which follows with no safe point between and covers the store on its own.
+Tests: coroutine_error_value
+
+diff --git a/crates/orbit-runtime/src/vm/coro.rs b/crates/orbit-runtime/src/vm/coro.rs
+index 9eac692..7c7fe9f 100644
+--- a/crates/orbit-runtime/src/vm/coro.rs
++++ b/crates/orbit-runtime/src/vm/coro.rs
+@@ -204,7 +204,9 @@ impl Vm {
+         let hooks = self.rt.hooks_touched;
+         // A parked stack is traced through its thread, which the collector
+         // may already have scanned.
+-        self.heap.barrier_back(from);
++        if !matches!(from_status, CoStatus::Dead) {
++            self.heap.barrier_back(from);
++        }
+         let c = co_mut(&mut self.heap, from);
+         c.status = from_status;
+         // A thread's bytes are its stack's, parked or running: they change
+@@ -659,7 +661,6 @@ impl Vm {
+         let closing = std::mem::replace(&mut self.rt.stack.aux.closing, Closing::No);
+         if let Err(e) = outcome {
+             if closing != Closing::Closer {
+-                self.heap.barrier_back(co);
+                 co_mut(&mut self.heap, co).error = Some(e);
+             }
+         }

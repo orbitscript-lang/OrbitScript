@@ -1,0 +1,127 @@
+name: Platforms
+
+# Checks pull requests into main on every supported platform other than
+# Linux x86_64, which ci.yml covers. One job per platform, since jobs are
+# billed by the whole minute and macOS minutes cost the most:
+#
+# - Linux aarch64, macOS arm64 and Windows x64 run the tests, and the shared
+#   layout (ADR-10) built by ./build.sh without a profile and tested as laid
+#   out. macOS and Windows also type-check with the MSRV, since each has code
+#   only it compiles.
+# - Windows ARM64 runs clippy, which compiles everything including the
+#   tests, and its shared layout, and tests the static programs with
+#   liborbit as a C library only, which is what releases ship for it. The
+#   release workflow runs its tests.
+# - The corpus tests (CORPUS_TESTS below) re-parse and re-check the
+#   repository's own files many times over. Their code has nothing
+#   platform-specific, so they run once, on Linux x86_64 in ci.yml.
+#
+# Pull requests that change only crates with no platform-specific code or
+# build script (paths-ignore below) skip this workflow; ci.yml still checks
+# them on Linux x86_64. orbit-runtime is not among them: its math library
+# uses the platform's libm. Run it by hand (workflow_dispatch) to check such
+# a change on every platform before merging.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'editors/**'
+      - '.github/dependabot.yml'
+      - '.github/workflows/bench.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/vscode.yml'
+      - 'crates/orbit-bytecode/**'
+      - 'crates/orbit-check/**'
+      - 'crates/orbit-compiler/**'
+      - 'crates/orbit-fmt/**'
+      - 'crates/orbit-hir/**'
+      - 'crates/orbit-lua-syntax/**'
+      - 'crates/orbit-macros/**'
+      - 'crates/orbit-orb-syntax/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CORPUS_TESTS: >-
+    --skip every_deleted_token_and_every_cut
+    --skip broken_programs_the_checker_passes_compile
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  platform:
+    name: ${{ matrix.name }}
+    if: github.event.pull_request.draft != true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux aarch64
+            os: ubuntu-24.04-arm
+            test: true
+          - name: macOS arm64
+            os: macos-15
+            test: true
+            msrv: true
+          - name: Windows x64
+            os: windows-2025
+            test: true
+            msrv: true
+          - name: Windows ARM64
+            os: windows-11-arm
+            clippy: true
+            # What releases ship for this target, which can't train a
+            # profile (ADR-10).
+            static-programs: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      # Windows runners check text files out with CRLF line ends, but tests
+      # compare output byte for byte and programs embed their .orb sources.
+      - name: Check out with LF line ends
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      # Each later step runs even when an earlier one fails, so one run
+      # reports every problem.
+      - name: Tests, without the corpus tests
+        if: matrix.test
+        run: cargo test --workspace --locked -- $CORPUS_TESTS
+      # Lints the Windows-only code paths and compiles every test target.
+      - name: Clippy
+        if: matrix.clippy && (success() || failure())
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # liborbit as a Rust `dylib` with the programs that link it: the
+      # library swap, the programs' tests and the C host tests, all on the
+      # layout.
+      - name: Shared layout
+        if: success() || failure()
+        run: tools/check-shared-layout.sh
+      - name: Static programs with liborbit as a C library only
+        if: matrix.static-programs && (success() || failure())
+        run: |
+          ./build.sh --no-pgo --static-programs --out "$RUNNER_TEMP/static-programs"
+          ORBIT_BIN_DIR="$RUNNER_TEMP/static-programs/bin" cargo test --locked -p orbit-cli -p orbit-lsp
+      # Type-checking with the MSRV catches newer language features and std
+      # APIs in the code only this platform compiles; linking and running the
+      # tests add nothing the steps above don't cover.
+      - name: MSRV check
+        if: matrix.msrv && (success() || failure())
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          cargo +"$msrv" check --workspace --all-targets --locked

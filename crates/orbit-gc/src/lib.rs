@@ -40,6 +40,11 @@
 //!   [`Heap::take_finalizable`] implement Lua's `__gc` semantics and order.
 //! - **Stress mode.** [`Heap::set_stress`] collects at nearly every safe point
 //!   that follows an allocation.
+//! - **A heap verifier, in debug builds.** [`Heap::set_verify`] re-walks the
+//!   heap from the roots when marking ends and panics, naming the chain from
+//!   a root, on an object the collector missed (usually a missed write
+//!   barrier) or a stale handle, and recounts [`Heap::bytes`]. Release
+//!   builds don't contain it.
 //!
 //! # Rooting
 //!
@@ -93,8 +98,12 @@ mod heap;
 mod os;
 mod trace;
 
-pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, Store};
-pub use heap::{Heap, Mode, Params, Phase};
+pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, MAX_OBJECTS, Store};
+pub use heap::{Heap, Mode, Params, Phase, Verify};
+
+/// Whether this build has the heap verifier ([`Heap::set_verify`]): debug
+/// builds only, so release builds pay nothing for it.
+pub const VERIFIER: bool = cfg!(debug_assertions);
 pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 
 /// Declare a [`Space`]: a struct with one [`Arena`] per object type.
@@ -270,10 +279,41 @@ macro_rules! space {
                     ::core::unreachable!()
                 }
 
+                fn slot_size_of(&self, kind: u8, index: u32) -> usize {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return $crate::__private::size_of_slot::<Self, $ty, { $slots }>(&self.$field, index);
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
                 fn release_page(&mut self, kind: u8, page: u32) {
                     $(
                         if kind == __Kind::$field as u8 {
                             return self.$field.release_page(page);
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
+                fn with_slot_capacity(initial: usize, max: usize) -> Self {
+                    $name { $( $field: $crate::Arena::with_capacity(initial, max), )+ }
+                }
+
+                fn grow_slots(&mut self, kind: u8) -> bool {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return self.$field.grow_reservation();
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
+                fn slot_capacity(&self, kind: u8) -> usize {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return self.$field.capacity();
                         }
                     )+
                     ::core::unreachable!()
@@ -324,6 +364,14 @@ pub mod __private {
         let obj = a.get_slot(index);
         obj.trace(m);
         slot_size::<T>() + obj.extra_bytes()
+    }
+
+    /// The bytes of one object: its slot plus what it owns outside it.
+    pub fn size_of_slot<S: Space, T: Trace<S>, const N: usize>(
+        a: &Arena<T, N>,
+        index: u32,
+    ) -> usize {
+        slot_size::<T>() + a.get_slot(index).extra_bytes()
     }
 
     #[inline]

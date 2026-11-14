@@ -12,7 +12,7 @@ publish = false
 proc-macro = true
 
 # Build time only: a proc macro runs in the compiler, so none of these reach
-# a binary. syn 2 is the version stabby's macros already use.
+# a binary.
 [dependencies]
 proc-macro2 = "1"
 quote = "1"

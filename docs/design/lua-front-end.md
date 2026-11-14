@@ -48,7 +48,7 @@ pub enum TokenKind {
 ```
 
 - **Names and strings are interned per chunk** into the pools the HIR uses, so lowering never copies them again.
-- **Numbers.** The lexer scans the longest run Lua would treat as a numeral (digits, letters, `.`, and a sign after an exponent letter), then converts it. Decimal integers that overflow `i64` become floats; hexadecimal integers wrap modulo 2^64. Decimal floats go through `str::parse::<f64>`, which rounds correctly. Hexadecimal floats (`0x1p4`, `0x.8`, `0xA.8p-1`) collect their significant digits into a `u64` with a sticky bit for the rest, adjust the binary exponent, and round once, to nearest-even, to 53 bits or to the subnormal precision at the bottom of the range: `0x1p-1074` is the smallest subnormal, `0x1p-1075` rounds to 0, `0x1p1024` is `inf`, and `0x1.00000000000008p0` rounds to `1.0`. Anything else is `malformed number near '3..4'`. The runtime's string-to-number conversion (`tonumber`, arithmetic coercion) lives in `orbit-runtime`, which the front end must not depend on, so the two share test vectors rather than code.
+- **Numbers.** The lexer scans the longest run Lua would treat as a numeral (digits, letters, `.`, and a sign after an exponent letter), then converts it. Decimal integers that overflow `i64` become floats; hexadecimal integers wrap modulo 2^64. Decimal floats go through `str::parse::<f64>`, which rounds correctly. Hexadecimal floats (`0x1p4`, `0x.8`, `0xA.8p-1`) collect their significant digits into a `u64` with a sticky bit for the rest, adjust the binary exponent, and round once, to nearest-even, to 53 bits or to the subnormal precision at the bottom of the range: `0x1p-1074` is the smallest subnormal, `0x1p-1075` rounds to 0, `0x1p1024` is `inf`, and `0x1.00000000000008p0` rounds to `1.0`. Anything else is `malformed number near '3..4'`. The conversion is `orbit-lua-text`'s `numeral`, a crate with no dependencies that the runtime reads strings with too (`tonumber`, arithmetic coercion), so a numeral means the same in source and in a string. The same crate writes the extended UTF-8 of `\u{...}` escapes and `utf8.char`.
 - **Strings.** Escapes are decoded while scanning (`\a \b \f \n \r \t \v \\ \" \' \<newline> \ddd \xXX \z \u{...}`, the last up to 2^31 as Lua allows). Long brackets `[==[ ... ]==]` skip a first newline.
 - **Comments** are skipped, or kept in a side table for tools (below).
 
@@ -101,7 +101,7 @@ Messages follow the reference's format and wording:
 | `for i=1,2 do i = 3 end` | `s.lua:1: attempt to assign to const variable 'i'` |
 | `x = [==[ abc` | `s.lua:2: unfinished long string (starting at line 1) near <eof>` |
 
-`Diagnostic::to_lua_message` gives the reference's one-line format, which `load` returns and the differential tests compare.
+`Diagnostic::to_message` gives the reference's one-line format, which `load` returns and the differential tests compare.
 
 ## AST
 

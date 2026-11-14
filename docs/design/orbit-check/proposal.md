@@ -33,7 +33,7 @@ flowchart LR
     ast --> lower["lower to HIR"] --> comp["compiler, VM<br/>(orbit, orbitc)"]
     ast --> resolve
     stubs[".orbi stubs<br/>stdlib, Lua modules"] --> parse
-    resolve["resolve names,<br/>build module graph"]
+    resolve["lower once more (errors kept, HIR dropped):<br/>names recorded, module graph built"]
     resolve --> decls["collect declarations<br/>structs, enums, impls, signatures"]
     decls --> bodies["check bodies<br/>inference, narrowing,<br/>exhaustiveness"]
     bodies --> diag["diagnostics"]
@@ -51,7 +51,9 @@ flowchart LR
 - **The HIR ships in the runtime.** Every field the checker needs there (struct and enum tables, generic parameters, type trees) would cost memory during every compile and code size in `orbit`.
 - **Error positions.** The AST has every construct as written, with spans, which is what good messages need. Hidden locals and hoisted temporaries in the HIR would leak into messages.
 
-So the checker parses with the same parser the runtime uses (one grammar, no drift), then does its own name resolution and type checking. The HIR's `Local::ty` and `Function::result_type` stay empty.
+So the checker parses with the same parser the runtime uses (one grammar, no drift) and types the AST itself. The HIR's `Local::ty` and `Function::result_type` stay empty.
+
+What a name refers to is not the checker's to work out a second time. It runs the compiler's own lowering over the AST, in the mode that goes on after an error, and drops the HIR. That lowering reports every definition, reference and scope to an observer as it resolves them, each with the syntax that made it ([the front end](../orbitscript-front-end.md), "Telling a tool about the names"), and the checker's observer (`observe.rs`) records them as the module's symbols. The scoping rules are written once, in lowering, and the same run gives every error that stops the module from compiling.
 
 ### Type trees from the shared parser
 
@@ -92,7 +94,7 @@ A Cargo feature instead of a runtime option would remove the code from `orbit`, 
 
 - **No implicit `int` to `float`.** `int` and `float` are distinct, and neither is accepted where the other is expected. Code that works with both takes `number`; code that needs one representation narrows to it (`math::type(n) == "integer"`, a literal of the right kind, or `as`).
 - **No built-in `Result`.** Lua's `nil, err` convention is written `(T?, E?)`: `io::open` returns `(File?, string?)`. A built-in `Result<T, E>` would collide with a user's own `Result` enum, and OrbitScript has no `Ok(...)` form, so the parallel with Rust would break down. The cost is that the checker doesn't know the two results are linked: after `let (f, err) = io::open(p); if f == nil { ... }`, `err` is still `string?`. `?` only looks at the first result, so it is unaffected.
-- **`as`** is a runtime cast ([runtime-as.md](../orbitscript-syntax/runtime-as.md)). The checker types `v as T` as `T` (`T?` for `as?`), accepts wider sources, reports a source that can never pass (T0209) and a target the runtime can't check (T0210), and narrows a plain local after a checked cast. `as any` is the unchecked escape hatch.
+- **`as`** is a runtime cast ([runtime-as.md](../orbitscript-syntax/runtime-as.md)). The checker types `v as T` as `T` (`T?` for `as?`), accepts wider sources, reports a source that can never pass (T0209) and a target the runtime can't check (T0210), and narrows a plain local after a checked cast. `as any` is the unchecked escape hatch. What a target is (a scalar, a named type, `any`, or something the runtime can't check, T0210) is read from the table lowering compiles casts by, `orbit_orb_syntax::cast`, and T0210 is lowering's to report.
 
 Not in the language: interfaces or protocols (they would be traits; records cover most structural needs), literal types (`"r" | "w"`), `never`, variance annotations, and overloads outside stubs.
 

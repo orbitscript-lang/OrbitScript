@@ -56,6 +56,8 @@ Rust rules the parser follows where the language design doesn't say otherwise:
 
 Every `Diagnostic` has a `kind`: `UnexpectedEof` when the input stops in the middle of something (an unclosed `{`, string, comment or template hole, or a construct cut short), so a REPL can read another line; `Other` for the rest.
 
+A `Diagnostic` is `orbit_hir::Diagnostic`, the type the Lua front end and the checker use too, and carries a severity and a stable code. The lexer and the parser report everything as `T0001`. Lowering has one code for each rule of the language it enforces (`code.rs`, listed in `docs/design/orbit-check/api.md`). The compiler prints only the message; the checker and the language server show the code as well.
+
 ### Error recovery
 
 `parse_recovering` first parses normally, so a module without errors gets exactly the tree `parse_with` gives (the layout rules below never see valid code). Only a module with errors is parsed again with recovery, where an error is recorded and the parse picks up where the next thing most likely starts, so an editor gets an AST for everything around the broken line:
@@ -73,7 +75,7 @@ Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, 
 
 ## Lowering
 
-`lower` (in `src/lower/`) walks the AST once and builds one `hir::Function` per function body; `to_hir` adds the HIR's shared analysis, as the Lua front end does. Apart from `Cast` (runtime `as`), lowering uses only HIR nodes Lua needs too: everything below is plain `Let`, `If`, `Goto`, calls and table constructors.
+`lower` (in `src/lower/`) walks the AST once and builds one `hir::Function` per function body; `to_hir` adds the HIR's shared analysis, as the Lua front end does. The walk only reads the tree. `lower` takes the `Ast` by value so that the chunk can take over its string pool and line table without a copy, which is what the compiler wants. Apart from `Cast` (runtime `as`), lowering uses only HIR nodes Lua needs too: everything below is plain `Let`, `If`, `Goto`, calls and table constructors.
 
 ```mermaid
 flowchart LR
@@ -87,9 +89,57 @@ flowchart LR
     hir --> analyze["orbit_hir::analyze"]
 ```
 
+### Errors: stop or go on
+
+The compiler wants the first error and nothing else; a checker or an editor wants every error in the module. Both run the same walk. What it does at an error is a type parameter of the lowerer (`lower/mode.rs`), not a flag it tests:
+
+| Entry | Mode | At an error |
+|---|---|---|
+| `lower(ast)` | `Compile` | returns it: the result is the HIR or the first error |
+| `lower_collecting(&ast)` | `Check` | keeps it and recovers: the result is every error, and the HIR is dropped |
+
+Each rule reports with `self.report(span, code, message)?`, and the lines after it are the recovery: carry on with a stand-in that keeps one mistake from becoming several. An expression that can't be lowered is `nil`; a name nothing declares is taken for a declared global (so it isn't also "immutable" or "not a type"); a pattern in the wrong place still declares its names; an `Error` node from the parser, already reported, is passed over without a word. The first error collected is always the one `lower` returns.
+
+`report` returns `Result<Continue, Diagnostic>`. When collecting, `Continue` is `()`. In the compiler's mode it is a type with no values, so `report` can only return the error, `?` always leaves, and the recovery after it is unreachable code the compiler's lowering is built without. Recovery costs the compiler nothing at run time: this is measured (instruction counts for compiling the repository's programs) whenever the walk changes. A handful of recovery helpers that are entered without a report of their own (an `impl` block whose target didn't resolve) are still present in the compiler, never called.
+
+`lower_collecting` reads the tree and copies its string pool and line table, since the checker goes on using all three. Lowering reads some nodes twice (a pattern for its test and again for its bindings), so the collector drops a second error with the same code and span.
+
+The compiler drops some code unread: the arms of a `match` after one that always matches, and the alternatives of a `|` pattern after one that does. A collecting walk reads them too, so it reports their errors, which the compiler never meets. That is the one way a module the compiler accepts can have errors here.
+
+### Telling a tool about the names
+
+Lowering is the one place that knows the scoping rules: where a scope opens, when a name comes into it, what a use refers to. A checker or an editor needs all of that, and gets it from the walk itself instead of following the rules a second time. The second type a mode names is an **observer** (`lower/observe.rs`, the public `Observer` trait), and lowering reports each step to it:
+
+```mermaid
+sequenceDiagram
+    participant L as lowering
+    participant O as observer
+    L->>O: scope_opened(extent)
+    L->>O: item_declared(item)
+    O-->>L: handle for the item
+    L->>O: local(name, how it is bound)
+    O-->>L: handle for the local
+    L->>O: reference(span, handle)
+    L->>O: member(handle of `a`, `b`) for `a::b`
+    O-->>L: handle for what `a::b` names
+    L->>O: ty(annotation, lowering's scopes)
+    L->>O: scope_closed()
+```
+
+- **Handles.** The observer answers each definition with a handle of its own type (`Observer::Sym`). Lowering keeps it beside the binding in its scopes and hands it back with every reference, so the observer never looks a name up, and can't disagree with the compiler about what a name refers to.
+- **Syntax, not HIR.** A definition is reported with the syntax node that made it (the `Item`, the `Param`, a `let`'s annotation and value), because that is what a type checker reads. This is why lowering borrows the tree for the tree's whole lifetime (`'a` on `Lowerer`).
+- **Questions go the other way through the same trait.** What a prelude name is, and what `module::item` or `Type::Variant` names, only the tool knows, so lowering asks (`prelude`, `member`) and passes the answer on as it does any handle.
+- **Types.** Lowering reads no type annotation except the target of `as`, so it hands each one over whole (`ty`), with a view of its scopes (`TypeNames`) for the names in it. In a type, a generic parameter comes first, then in each block outwards whichever of its names and `type` aliases was bound last.
+- **One reference per use.** Where lowering reads a name only to ask what it is (the kind of a path in a pattern, a `const`'s value before it is lowered) it resolves it without telling the observer (`resolve`); where the name is used it tells it (`resolve_observed`).
+- **A stub** (`fn f(x: int) -> int;`) is a compile error, and a collecting walk then reads its signature all the same, so the observer sees the declarations of a stub file.
+
+`lower_observed(&ast, observer)` is the entry: a collecting walk that gives the errors and the observer back. `lower_collecting` is the same walk with the observer that does nothing.
+
+The compiler's observer is `Nothing`: its handle is `()`, its methods are empty and inlined away, and `Observer::ACTIVE` is `false`, a constant that removes the few places where lowering does work only for the observer. Like recovery, this is held to costing the compiler nothing by measuring it.
+
 ### Names
 
-- A name resolves to the innermost binding, then to an item later in an enclosing block, then to the prelude: Lua 5.5's base functions and standard modules, plus `panic` (`error`). The prelude is read-only. Any other global needs `extern NAME;` (read and write) or `global NAME = value;` (a `Define`). There are no implicit globals; a typo is a compile error that suggests `extern`.
+- A name resolves to the innermost binding, then to an item later in an enclosing block, then to the prelude: Lua 5.5's base functions and standard modules, plus `panic` (`error`). The list is made at build time from the checker's stub of the prelude, `orbit-check/stubs/prelude.orbi`, so it is written once. The prelude is read-only. Any other global needs `extern NAME;` (read and write) or `global NAME = value;` (a `Define`). There are no implicit globals; a typo is a compile error that suggests `extern`.
 - **Items are visible in their whole block**, as in Rust, so module-level functions can call each other in any order. An item used before its definition, from inside a function, becomes a local declared at the top of its block and assigned at the definition; others lower as the language design says (`LocalFunction`, `Let`). A use before the definition in the same function (where the value can't exist yet) is a compile error.
 - **Parameters are immutable** unless written `mut x`, like `let`. Pattern bindings are immutable unless `mut`.
 
@@ -128,7 +178,7 @@ flowchart LR
 ## Running OrbitScript
 
 - OrbitScript is always built in: it is the runtime's own language, so there is no Cargo feature or runtime switch that leaves it out. `orbit` (the crate) has `Compiler::compile_orbitscript` and `Language::OrbitScript` for chunks, and `orbit::Isolate` installs the VM's second compiler hook, `Runtime::compile_orbitscript`. Source chunks named `@path.orb` use it, so `loadfile`, `dofile` and the CLI's script pick the language by file name. `load` of a string, `-e`, standard input and interactive mode stay Lua.
-- `require` finds `.orb` modules on `package.path`: the default path has `/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb` after `lua`'s entries, and the Lua searcher picks the compiler by the file name. There is no `package.orbpath` and no extra searcher, so `package.searchers` keeps `lua`'s four entries. `use a::b;` becomes `require("a.b")`, so an `.orb` module can load a Lua module and the other way round.
+- `require` finds `.orb` modules on `package.path`: the default path has `/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb` after `lua`'s entries (on Windows, `share\orbit` beside the program's directory and `.\`), and the Lua searcher picks the compiler by the file name. There is no `package.orbpath` and no extra searcher, so `package.searchers` keeps `lua`'s four entries. `use a::b;` becomes `require("a.b")`, so an `.orb` module can load a Lua module and the other way round.
 - `orbit script.orb` runs a script, and `orbitc` compiles and lists `.orb` files and prints their HIR with `--hir`; `--ast` prints Lua syntax trees only.
 
 ## Binary size
@@ -146,5 +196,9 @@ Sharing more code between the two front ends would save little (about 5 to 10 Ki
 ## Testing
 
 `tests/parse.rs` checks tree shapes as S-expressions, every example in the language design (`tests/programs/proposal.orb`), error messages, and a deterministic mutation run that must never panic.
+
+`tests/collect.rs` holds the two modes of lowering together: over every program and checker case in the repository, collecting gives no errors exactly when the compiler accepts the module, its first error is the compiler's, and the tree is untouched. It also checks that a module with several mistakes gets one error for each.
+
+`tests/observe.rs` checks what an observer is told: the exact sequence for a few small programs, and over every program, stub and checker case that scopes nest, that every handle lowering hands back is one a definition was given, and that observing changes no error.
 
 `tests/run.rs` lowers programs, compiles them and runs them on the VM, checking what they print: each construct above, a runnable tour (`tests/programs/tour.orb`), the exports table seen from Lua, and compile errors. Its mutation run lowers mutants of the tour and checks that every one that lowers passes `orbit_hir::verify` and never panics the compiler.

@@ -640,23 +640,10 @@ pub struct Runtime {
     /// turning hooks off. Until then a coroutine switch skips copying the
     /// hooks, which are all equal.
     pub(crate) hooks_touched: bool,
-    /// A safe point found the heap over its limit ([`Vm::set_memory_limit`])
-    /// even after a full collection: the dispatch loop returned so `run`
-    /// can raise `not enough memory` there.
-    pub(crate) no_memory: bool,
     /// `not enough memory` was raised for passing the limit and the heap
     /// hasn't been back under it since: the script may use up to
     /// [`LIMIT_GRACE`] more to handle the error.
     pub(crate) limit_grace: bool,
-    /// The error being raised is an error in error handling: it skips
-    /// message handlers and becomes `error in error handling`.
-    pub(crate) errerr: bool,
-    /// The error being raised has already been through its message handler
-    /// (it is being re-raised after a `__close` handler ran).
-    pub(crate) handled: bool,
-    /// The traceback of an error on its way out of a `Vm::call`, taken
-    /// before its to-be-closed variables closed (and popped the frames).
-    pub(crate) unwind_traceback: Option<String>,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>, CheapHash>,
     /// The threads parked suspended most recently, with their park count
@@ -902,11 +889,7 @@ impl Vm {
                 scratch: Vec::new(),
                 switched: false,
                 hooks_touched: false,
-                no_memory: false,
                 limit_grace: false,
-                errerr: false,
-                handled: false,
-                unwind_traceback: None,
                 native_protos: Default::default(),
                 cooling: vec![None; coro::HOT_STACKS],
                 cooling_at: 0,
@@ -1201,7 +1184,8 @@ impl Vm {
     /// At a safe point that stepped the collector, with the heap over its
     /// limit: collect in full, and say whether to raise `not enough memory`.
     /// The allocation that passed the limit has already happened, so once
-    /// the error is raised the script may use up to [`LIMIT_GRACE`] more,
+    /// the error is raised the script may use up to [`LIMIT_GRACE`] more
+    /// (or, when an arena ran short of slots, half the slots it keeps back),
     /// to handle it, before every safe point raises it again; the grace
     /// ends when the heap is back under the limit. Finalizers stay queued,
     /// as in an emergency collection of lua5.5's.
@@ -1212,7 +1196,8 @@ impl Vm {
             .limit()
             .map_or(usize::MAX, |l| l.saturating_add(l / LIMIT_GRACE));
         // Inside the grace, collecting at every safe point would thrash.
-        if self.rt.gc.finalizing() || self.rt.limit_grace && self.heap.bytes() <= hard {
+        let past_grace = || self.heap.bytes() > hard || self.heap.slots_exhausted();
+        if self.rt.gc.finalizing() || self.rt.limit_grace && !past_grace() {
             return false;
         }
         self.heap.full_collect(&mut self.rt);
@@ -1224,7 +1209,7 @@ impl Vm {
             self.rt.limit_grace = true;
             return true;
         }
-        self.heap.bytes() > hard
+        self.heap.bytes() > hard || self.heap.slots_exhausted()
     }
 
     /// Room for `bytes` more under the heap's limit, collecting in full

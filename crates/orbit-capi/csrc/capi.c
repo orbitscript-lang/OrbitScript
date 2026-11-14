@@ -41,6 +41,12 @@ struct lua_State {
   lua_CFunction panicf; /* lua_atpanic */
   lua_Alloc allocf;     /* the allocator lua_newstate got, unused */
   void *allocud;
+  /* The Rust entry points of the runtime that made this state. Every
+     copy of this file reaches Rust through the state, never through a
+     global: in a layout where lua55.dll leads to a second copy of the
+     runtime (build.sh --static-programs, ADR-10), a module's calls still
+     reach the program that loaded it. */
+  const struct orbit_r_table *r;
 };
 
 /* The atomic accesses lua_sethook's request needs, safe in a signal
@@ -81,6 +87,8 @@ struct orbit_r_table {
   void (*argerror)(lua_State *L, int arg, const char *extramsg);
   void (*arith)(lua_State *L, int op);
   void (*callk)(lua_State *L, int nargs, int nresults, lua_KContext ctx, lua_KFunction k);
+  void (*checkany)(lua_State *L, int arg);
+  lua_Integer (*checkinteger)(lua_State *L, int arg);
   int (*checkstack)(lua_State *L, int n);
   void (*close)(lua_State *L);
   void (*closeslot)(lua_State *L, int idx);
@@ -172,8 +180,6 @@ struct orbit_r_table {
   void (*yieldk)(lua_State *L, int nresults, lua_KContext ctx, lua_KFunction k);
 };
 
-static const struct orbit_r_table *orbit_r;
-
 size_t orbit_capi_table_size(void) {
   return sizeof(struct orbit_r_table);
 }
@@ -190,7 +196,7 @@ lua_State *orbit_capi_newstate(void *rs, const struct orbit_r_table *table) {
   if (block == NULL) return NULL;
   L = (lua_State *)(block + LUA_EXTRASPACE);
   L->rs = rs;
-  orbit_r = table;
+  L->r = table;
   return L;
 }
 
@@ -204,6 +210,7 @@ lua_State *orbit_capi_newthread(lua_State *main) {
   L = (lua_State *)(block + LUA_EXTRASPACE);
   memset(L, 0, sizeof(*L));
   L->rs = main->rs;
+  L->r = main->r;
   L->wake = main->wake;
   L->panicf = main->panicf;
   L->allocf = main->allocf;
@@ -244,7 +251,7 @@ static void orbit_throw(lua_State *L) {
   if (L->jb == NULL && L->panicf != NULL) {
     /* An error outside every protected call: the panic function gets the
        error on the stack; if it returns, the program aborts. */
-    orbit_r->pushpending(L);
+    L->r->pushpending(L);
     L->panicf(L);
     abort();
   }
@@ -263,13 +270,13 @@ static void orbit_throw(lua_State *L) {
 /* An entry point returning a value, and one returning nothing. */
 #define API(ret, name, params, args)                  \
   LUA_API ret lua_##name params {                     \
-    ret r_ = orbit_r->name args;                     \
+    ret r_ = L->r->name args;                     \
     CHECK(L);                                         \
     return r_;                                        \
   }
 #define APIV(name, params, args)                      \
   LUA_API void lua_##name params {                    \
-    orbit_r->name args;                              \
+    L->r->name args;                              \
     CHECK(L);                                         \
   }
 
@@ -297,7 +304,7 @@ static int ix_back(int idx) {
 
 API(lua_Number, version, (lua_State *L), (L))
 LUA_API int lua_absindex(lua_State *L, int idx) {
-  int r = orbit_r->absindex(L, IX(idx));
+  int r = L->r->absindex(L, IX(idx));
   CHECK(L);
 #if LUA_VERSION_NUM == 504
   r = ix_back(r);
@@ -397,7 +404,7 @@ enum {
 };
 
 static int gc_call(lua_State *L, int what, int a, int b) {
-  int r = orbit_r->gc(L, what, a, b);
+  int r = L->r->gc(L, what, a, b);
   CHECK(L);
   return r;
 }
@@ -529,7 +536,7 @@ LUA_API lua_CFunction lua_atpanic(lua_State *L, lua_CFunction panicf) {
 }
 
 LUA_API void lua_warning(lua_State *L, const char *msg, int tocont) {
-  orbit_r->warning(L, msg, tocont);
+  L->r->warning(L, msg, tocont);
   CHECK(L);
 }
 
@@ -655,19 +662,19 @@ LUA_API const char *lua_pushfstring(lua_State *L, const char *fmt, ...) {
 
 
 LUALIB_API int luaL_argerror(lua_State *L, int arg, const char *extramsg) {
-  orbit_r->argerror(L, arg, extramsg);
+  L->r->argerror(L, arg, extramsg);
   CHECK(L);
   return 0;
 }
 
 LUALIB_API int luaL_typeerror(lua_State *L, int arg, const char *tname) {
-  orbit_r->typeerror(L, arg, tname);
+  L->r->typeerror(L, arg, tname);
   CHECK(L);
   return 0;
 }
 
 LUALIB_API void luaL_where(lua_State *L, int lvl) {
-  orbit_r->where(L, lvl);
+  L->r->where(L, lvl);
   CHECK(L);
 }
 
@@ -710,7 +717,7 @@ LUALIB_API int luaL_callmeta(lua_State *L, int obj, const char *e) {
 }
 
 LUALIB_API const char *luaL_tolstring(lua_State *L, int idx, size_t *len) {
-  const char *r = orbit_r->tolstringmeta(L, IX(idx), len);
+  const char *r = L->r->tolstringmeta(L, IX(idx), len);
   CHECK(L);
   return r;
 }
@@ -744,15 +751,11 @@ LUALIB_API lua_Number luaL_optnumber(lua_State *L, int arg, lua_Number def) {
   return luaL_opt(L, luaL_checknumber, arg, def);
 }
 
+/* The argument errors' messages are written once, in the runtime, so the
+   checks that raise one are made there. */
 LUALIB_API lua_Integer luaL_checkinteger(lua_State *L, int arg) {
-  int ok;
-  lua_Integer d = lua_tointegerx(L, arg, &ok);
-  if (!ok) {
-    if (lua_isnumber(L, arg))
-      luaL_argerror(L, arg, "number has no integer representation");
-    else
-      tag_error(L, arg, LUA_TNUMBER);
-  }
+  lua_Integer d = L->r->checkinteger(L, IX(arg));
+  CHECK(L);
   return d;
 }
 
@@ -774,7 +777,8 @@ LUALIB_API void luaL_checktype(lua_State *L, int arg, int t) {
 }
 
 LUALIB_API void luaL_checkany(lua_State *L, int arg) {
-  if (lua_type(L, arg) == LUA_TNONE) luaL_argerror(L, arg, "value expected");
+  L->r->checkany(L, IX(arg));
+  CHECK(L);
 }
 
 LUALIB_API int luaL_newmetatable(lua_State *L, const char *tname) {
@@ -806,7 +810,7 @@ LUALIB_API void *luaL_testudata(lua_State *L, int ud, const char *tname) {
 LUALIB_API void *luaL_checkudata(lua_State *L, int ud, const char *tname) {
   void *p = luaL_testudata(L, ud, tname);
   if (p == NULL) {
-    int rust = orbit_r->isrustudata(L, IX(ud));
+    int rust = L->r->isrustudata(L, IX(ud));
     CHECK(L);
     /* An OrbitScript library's userdata (an io file) has no C memory, so
        no C module can take it, whatever its type name says. */
@@ -1043,7 +1047,7 @@ LUALIB_API char *luaL_buffinitsize(lua_State *L, luaL_Buffer *B, size_t sz) {
 /* The buffer is freed before any error is raised, so no jump leaks it. */
 static int load_bytes(lua_State *L, char *buf, size_t len, const char *chunkname,
                       const char *mode, int owned) {
-  int status = orbit_r->load(L, buf, len, chunkname, mode);
+  int status = L->r->load(L, buf, len, chunkname, mode);
   if (owned) free(buf);
   CHECK(L);
   return status;
@@ -1141,7 +1145,7 @@ LUALIB_API int luaL_loadfilex(lua_State *L, const char *filename, const char *mo
     if (p + 1 < buf + len && p[1] == LUA_SIGNATURE[0]) p++;
   }
   chunkname = lua_tostring(L, -1);
-  status = orbit_r->load(L, p, len - (size_t)(p - buf), chunkname, mode);
+  status = L->r->load(L, p, len - (size_t)(p - buf), chunkname, mode);
   free(buf);
   CHECK(L);
   lua_rotate(L, -2, -1); /* drop the chunk name */
@@ -1155,14 +1159,14 @@ LUALIB_API int luaL_loadfilex(lua_State *L, const char *filename, const char *mo
 
 
 static void unsupported(lua_State *L, const char *what) {
-  orbit_r->unsupported(L, what);
+  L->r->unsupported(L, what);
   CHECK(L);
 }
 
 /* Only this state's own thread has a lua_State. */
 LUALIB_API void luaL_traceback(lua_State *L, lua_State *L1, const char *msg, int level) {
   if (L1 != L) unsupported(L, "luaL_traceback of another thread");
-  orbit_r->traceback(L, msg, level);
+  L->r->traceback(L, msg, level);
   CHECK(L);
 }
 
@@ -1194,12 +1198,12 @@ API(int, closethread, (lua_State *L, lua_State *from), (L, from))
 API(int, resume, (lua_State *L, lua_State *from, int narg, int *nres), (L, from, narg, nres))
 
 LUA_API void lua_xmove(lua_State *from, lua_State *to, int n) {
-  orbit_r->xmove(from, to, n);
+  from->r->xmove(from, to, n);
   CHECK(from);
 }
 
 LUA_API int lua_yieldk(lua_State *L, int nresults, lua_KContext ctx, lua_KFunction k) {
-  orbit_r->yieldk(L, nresults, ctx, k);
+  L->r->yieldk(L, nresults, ctx, k);
   CHECK(L);
   return 0;
 }
@@ -1290,7 +1294,7 @@ int orbit_capi_flush_stdout(void) {
 }
 
 static int orbit_openlib(lua_State *L, int lib) {
-  int n = orbit_r->openlib(L, lib);
+  int n = L->r->openlib(L, lib);
   CHECK(L);
   if (n == 0) return luaL_error(L, "library not included in this build of OrbitScript");
   return n;
@@ -1421,7 +1425,7 @@ LUALIB_API lua_State *luaL_newstate(void) {
 }
 
 LUA_API void lua_close(lua_State *L) {
-  orbit_r->close(L);
+  L->r->close(L);
 }
 #else
 /* Without the `host` feature only Rust creates states. */
@@ -1468,7 +1472,7 @@ LUA_API void lua_setallocf(lua_State *L, lua_Alloc f, void *ud) {
 }
 
 LUA_API void lua_setwarnf(lua_State *L, lua_WarnFunction f, void *ud) {
-  orbit_r->setwarnf(L, f, ud);
+  L->r->setwarnf(L, f, ud);
   CHECK(L);
 }
 

@@ -80,8 +80,8 @@ impl Vm {
             }
             x => x,
         };
-        let e = self.make_error(x);
-        self.unwind(e)
+        let t = self.thrown(x);
+        self.unwind(t)
     }
 
     /// Native `id`, called at stack index `func`, raised `e`: give it a
@@ -262,17 +262,25 @@ impl Vm {
             unreachable!("meta frame")
         };
         let res = self.rt.stack.regs[m.func as usize];
-        if let MetaAction::Unwind { handled } = action {
+        if let MetaAction::Unwind = action {
             // A `__close` handler ran while `res` unwound: carry on.
-            self.rt.handled = handled;
-            return Err(Exc::Lua(crate::vm::LuaError::new(res)));
+            let traceback = match self.rt.stack.regs[m.func as usize + 1] {
+                Value::Str(t) => {
+                    Some(String::from_utf8_lossy(self.heap.get(t).as_bytes()).into_owned())
+                }
+                _ => None,
+            };
+            return Err(Exc::Handled(LuaError {
+                value: res,
+                traceback,
+            }));
         }
         let caller = self.rt.stack.frames.last_mut().expect("caller frame");
         let base = caller.base as usize;
         match action {
             MetaAction::Store { dst } => self.rt.stack.regs[base + dst as usize] = res,
             MetaAction::Branch { want, off } => {
-                if !res.is_falsy() == want {
+                if res.is_falsy() != want {
                     caller.pc = (caller.pc as i64 + off as i64) as u32;
                 }
             }
@@ -282,7 +290,7 @@ impl Vm {
                 self.rt.top = top as usize;
                 caller.pc -= 1;
             }
-            MetaAction::Unwind { .. } => unreachable!("handled above"),
+            MetaAction::Unwind => unreachable!("handled above"),
             MetaAction::ToStr { dst } => {
                 let v = match res {
                     Value::Str(_) => res,
@@ -452,8 +460,7 @@ impl Vm {
             self.rt.limit_grace = false;
             return false;
         }
-        self.rt.no_memory = self.over_limit_after_collecting();
-        self.rt.no_memory
+        self.over_limit_after_collecting()
     }
 
     /// `Concat` of the `n` values at stack index `from`. Strings and numbers
@@ -705,11 +712,7 @@ impl Vm {
                 Ok(None) => Ok(false),
                 Ok(Some(lim)) => {
                     // The number of iterations left replaces the limit.
-                    let count = if s > 0 {
-                        (lim as u64).wrapping_sub(i as u64) / s as u64
-                    } else {
-                        (i as u64).wrapping_sub(lim as u64) / ((-(s + 1)) as u64 + 1)
-                    };
+                    let count = i.abs_diff(lim) / s.unsigned_abs();
                     r[1] = Value::Int(count as i64);
                     r[3] = Value::Int(i);
                     Ok(true)
@@ -781,7 +784,7 @@ pub(crate) fn op_cast(
             Some(i) => Some(Value::Int(i)),
             None if mode & cast::SOFT != 0 => return Ok(Value::Nil),
             None => {
-                return Err(Exc::Rt("number has no integer representation".into(), None));
+                return Err(Exc::Rt(crate::arg_errors::NO_INTEGER_REP.into(), None));
             }
         },
         (cast::FLOAT, Value::Int(i)) => Some(Value::Float(i as f64)),
