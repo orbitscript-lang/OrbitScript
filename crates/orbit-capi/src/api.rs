@@ -55,43 +55,14 @@ pub(crate) mod abi {
 pub(crate) struct State {
     /// The error a Rust entry point raised, for the trampoline's caller.
     pub pending: Option<Raised>,
-    /// NUL-terminated copies of strings handed to C. Each C call drops the
-    /// copies made during it when it returns. Between calls, in a state C
-    /// created (ADR-10), copies of string values (`lua_tolstring`) last
-    /// while an equal string is on the host's stack; see
-    /// [`State::prune`].
-    pub strs: Vec<CStrCopy>,
-    /// How many copies the last [`State::prune`] kept.
-    pub kept: usize,
-}
-
-/// A string handed to C.
-#[derive(Debug)]
-pub(crate) struct CStrCopy {
-    /// The bytes and a trailing NUL.
-    pub bytes: Box<[u8]>,
-    /// A copy of a string value, which may go once no equal string is on
-    /// the host's stack. Other copies (`lua_getinfo`'s source) stay until
-    /// the state closes.
-    pub value: bool,
-}
-
-impl State {
-    /// Drop the copies of string values that no string on `stack` equals.
-    /// Runs when the copies have doubled since the last pruning, so each
-    /// costs O(1) amortized.
-    pub fn prune(&mut self, stack: &[&[u8]]) {
-        if self.strs.len() < 2 * self.kept + 16 {
-            return;
-        }
-        self.strs.retain(|s| {
-            !s.value || {
-                let text = &s.bytes[..s.bytes.len() - 1];
-                stack.contains(&text)
-            }
-        });
-        self.kept = self.strs.len();
-    }
+    /// NUL-terminated copies of names and source text handed to C
+    /// (`lua_getlocal`, `lua_getinfo`), each the bytes and a trailing NUL.
+    /// Each C call drops the copies made during it when it returns; copies
+    /// made between calls, in a state C created (ADR-10), stay until the
+    /// state closes. String values (`lua_tolstring`) are not here: the
+    /// runtime keeps their copies for as long as the strings are alive
+    /// ([`orbit::stack::Stack::to_c_str`]).
+    pub strs: Vec<Box<[u8]>>,
 }
 
 pub(crate) type Shared = RefCell<State>;

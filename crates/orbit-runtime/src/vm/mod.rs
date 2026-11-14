@@ -31,8 +31,8 @@ use std::time::Instant;
 use crate::locale::{CLocaleProvider, Locale, LocaleProvider};
 use crate::object::table::{self, mark};
 use crate::object::{
-    Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table, Thread,
-    UserData, Value,
+    CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table,
+    Thread, UserData, Value,
 };
 use orbit_gc::{Liveness, Marker, Roots};
 
@@ -552,6 +552,9 @@ impl std::fmt::Debug for WarnHook {
 #[derive(Debug)]
 pub struct Runtime {
     pub strings: Interner,
+    /// NUL-terminated copies of strings handed to C, each kept while its
+    /// string is alive.
+    pub c_strings: CStrings,
     pub globals: Gc<Table>,
     /// The registry (`debug.getregistry()`): key 2 holds the globals, and
     /// `_LOADED` is `package.loaded`.
@@ -801,6 +804,7 @@ impl Roots<LuaSpace> for Runtime {
         // On a big heap, pruning the string table at once was most of the
         // pause at the end of marking: it is done in steps instead.
         self.strings.begin_clear_dead(live);
+        self.c_strings.clear_dead(live);
         for e in &mut self.cooling {
             if e.is_some_and(|(t, _)| !live.is_live(t)) {
                 *e = None;
@@ -881,6 +885,7 @@ impl Vm {
                 prev_code: None,
                 dead_cell,
                 pinned: Vec::new(),
+                c_strings: CStrings::default(),
                 pin_slots: PinSlots::default(),
                 top: 0,
                 metas: meta::Metas {

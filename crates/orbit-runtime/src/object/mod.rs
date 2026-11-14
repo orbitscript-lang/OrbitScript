@@ -28,7 +28,7 @@ pub use mem::NoMemory;
 pub use meta::MetaField;
 pub use orbit_gc::{Gc, Heap};
 pub use orbit_str::{OrbitStr, OrbitString};
-pub use string::{Interner, LuaStr};
+pub use string::{CStrings, Interner, LuaStr};
 pub use table::Table;
 pub use thread::{Thread, ThreadState};
 pub use userdata::UserData;

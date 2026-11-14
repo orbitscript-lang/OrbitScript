@@ -364,6 +364,15 @@ impl StackAbi for Win<'_, '_> {
     extern "C" fn to_str<'a>(&'a mut self, idx: i32) -> Res<SOption<Slice<'a, u8>>> {
         res_slice!(self, self.s.to_str(idx).map(|b| opt(b.map(slice))))
     }
+    extern "C" fn to_c_str(&mut self, idx: i32) -> Res<SOption<CStrAbi>> {
+        let r = self.s.to_c_str(idx).map(|c| {
+            opt(c.map(|(p, len)| CStrAbi {
+                addr: p as usize,
+                len: len as u64,
+            }))
+        });
+        self.res(r)
+    }
     extern "C" fn string_at<'a>(&'a self, idx: i32) -> SOption<Slice<'a, u8>> {
         opt(self.s.string_at(idx).map(slice))
     }
