@@ -277,31 +277,36 @@ impl Native for SearchCRoot {
 
 #[cfg(test)]
 mod tests {
-    use super::{cpath_allows, cpath_allows_on};
+    use super::cpath_allows_on;
+
+    /// The rules outside Windows, where these tests' paths come from.
+    fn unix(cpath: &[u8], file: &[u8]) -> bool {
+        cpath_allows_on(cpath, file, false)
+    }
 
     const CPATH: &[u8] = b"/usr/lib/lua/?.so;/opt/?/core.so;./?.so;/fixed/all.so";
 
     #[test]
     fn locked_cpath_allows_what_the_searchers_could_open() {
-        assert!(cpath_allows(CPATH, b"/usr/lib/lua/lfs.so"));
-        assert!(cpath_allows(CPATH, b"/usr/lib/lua/socket/core.so"));
-        assert!(cpath_allows(CPATH, b"/opt/x/core.so"));
-        assert!(cpath_allows(CPATH, b"./cjson.so"));
-        assert!(cpath_allows(CPATH, b"/fixed/all.so"));
+        assert!(unix(CPATH, b"/usr/lib/lua/lfs.so"));
+        assert!(unix(CPATH, b"/usr/lib/lua/socket/core.so"));
+        assert!(unix(CPATH, b"/opt/x/core.so"));
+        assert!(unix(CPATH, b"./cjson.so"));
+        assert!(unix(CPATH, b"/fixed/all.so"));
     }
 
     #[test]
     fn locked_cpath_refuses_other_files() {
-        assert!(!cpath_allows(CPATH, b"/usr/lib/lua/../../libc.so"));
-        assert!(!cpath_allows(CPATH, b"/usr/lib/lua/.so"));
-        assert!(!cpath_allows(CPATH, b"/usr/lib/lua/lfs.so.6"));
-        assert!(!cpath_allows(CPATH, b"/opt/a/b.so"));
-        assert!(!cpath_allows(CPATH, b"/lib/libc.so.6"));
-        assert!(!cpath_allows(CPATH, b"/fixed/all.so2"));
-        assert!(!cpath_allows(b"", b""));
+        assert!(!unix(CPATH, b"/usr/lib/lua/../../libc.so"));
+        assert!(!unix(CPATH, b"/usr/lib/lua/.so"));
+        assert!(!unix(CPATH, b"/usr/lib/lua/lfs.so.6"));
+        assert!(!unix(CPATH, b"/opt/a/b.so"));
+        assert!(!unix(CPATH, b"/lib/libc.so.6"));
+        assert!(!unix(CPATH, b"/fixed/all.so2"));
+        assert!(!unix(b"", b""));
         // Every `?` takes the same text.
-        assert!(cpath_allows(b"/m/?/?.so", b"/m/a/a.so"));
-        assert!(!cpath_allows(b"/m/?/?.so", b"/m/a/b.so"));
+        assert!(unix(b"/m/?/?.so", b"/m/a/a.so"));
+        assert!(!unix(b"/m/?/?.so", b"/m/a/b.so"));
     }
 
     #[test]
