@@ -1,0 +1,2 @@
+fn f() { pub fn g() { 1 } g() } //~ T0003
+print(f());

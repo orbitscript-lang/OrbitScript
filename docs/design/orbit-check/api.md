@@ -111,6 +111,7 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 |---|---|---|
 | T0001 | error | the module doesn't parse |
 | T0002 | error | `use a::b` names no module on the search path |
+| T0003 | error | the module parses but doesn't compile: it breaks a rule the compiler enforces (assigning to an immutable name, `break` outside a loop, a duplicate field); the compiler's message |
 | T0101 | error | unknown name |
 | T0102 | error | an item used before its definition in the same function |
 | T0103 | error | the module has no public item of that name |
@@ -147,15 +148,15 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 
 ## Pragmas and strict mode
 
-- `// orbit-check: ignore` drops everything reported on its line, and `// orbit-check: ignore[T0207, T0201]` only those codes. A syntax error is never dropped. The comment goes at the end of the line it covers.
-- `//! orbit-check: strict` checks the module strictly, and `//! orbit-check: off` reports only syntax errors for it. `Config::strict` (`--strict`) makes every module strict except those marked `off`; the bundled stubs are never strict.
+- `// orbit-check: ignore` drops everything reported on its line, and `// orbit-check: ignore[T0207, T0201]` only those codes. A syntax error (T0001) or a compile error (T0003) is never dropped, and an ignored name error that stops the module compiling comes back as T0003: the module wouldn't run. The comment goes at the end of the line it covers.
+- `//! orbit-check: strict` checks the module strictly, and `//! orbit-check: off` reports only syntax and compile errors for it. `Config::strict` (`--strict`) makes every module strict except those marked `off`; the bundled stubs are never strict.
 - Strict mode adds T0501-T0504, and T0305 for an `ignore` with nothing to ignore. A `pub fn` in a module or a `pub` method needs types on its parameters (`self` aside) and, when it returns values, a result type. A condition must be `bool` (or `any`): `if n` becomes `if n > 0`, `if x` on an optional becomes `if x != nil`. An untyped Lua module is reported once, at its `use`, rather than at every use of a value from it.
 - `orbit-check --deny-warnings` exits with status 1 on warnings too.
 
 ## Broken code
 
 - The checker parses with recovery (`parse_recovering`): every syntax error is reported, and a statement or item that didn't parse becomes an `Error` node. Resolution and checking treat it as `any` and report nothing further about it. Names it would have defined are unknown to the code after it.
-- Lowering is not run. The checker reports the name errors lowering reports ("cannot find `x` in this scope", "used before its definition"), in the same words, so the server should take `.orb` diagnostics from the checker only, not from both.
+- A module that parsed without errors is also lowered, as the compiler lowers it, and the error that stops lowering is reported as T0003 with the compiler's message. So a module with no errors from the checker is one the compiler accepts, and the server should take `.orb` diagnostics from the checker only, not from both. Lowering stops at its first error, so there is at most one T0003 per module. Where the checker has a rule of its own for the same mistake (an unknown name, a use before the definition, a missing or unknown field, an `as` target that can't be checked), only the checker's diagnostic is shown. Stubs and modules with syntax errors are not lowered.
 
 ## Stubs
 

@@ -7,6 +7,8 @@
 //!
 //! Checking a module takes two passes over its AST: `resolve` binds every name to a symbol and
 //! records where symbols are defined, then `typeck` types the module with those definitions.
+//! A module that parsed is then lowered as the compiler lowers it, so the checker reports
+//! whatever stops the module from compiling: a module with no errors here is one that runs.
 
 mod diag;
 mod pragma;
@@ -187,6 +189,23 @@ fn normalize(path: &Path) -> PathBuf {
         out.push(".");
     }
     out
+}
+
+/// Whether the checker's own diagnostic `d` already tells the user about the compile error
+/// `e`. The checker has rules of its own for a few things lowering also refuses, under a more
+/// specific code and sometimes with what it knows about types in the message; when one of them
+/// is reported at the same place, the compile error would only repeat it.
+fn covers(d: &Diagnostic, e: &orbit_orb_syntax::Diagnostic) -> bool {
+    let also_a_compile_rule = matches!(
+        d.code,
+        Code::UnknownName
+            | Code::UsedBeforeDefinition
+            | Code::NoAssociatedItem
+            | Code::UnknownField
+            | Code::MissingField
+            | Code::UncheckableCast
+    );
+    also_a_compile_rule && d.span.start == e.span.start
 }
 
 fn is_word_byte(b: u8) -> bool {
@@ -451,6 +470,7 @@ impl Workspace {
         // The parser goes on after a syntax error, so the rest of a module being edited is
         // still checked; a statement that didn't parse is an `Error` node, typed `any`.
         let (ast, syntax_errors) = orbit_orb_syntax::parse_recovering(&name, &text, &options);
+        let parsed = syntax_errors.is_empty();
         let mut diagnostics: Vec<Diagnostic> = syntax_errors
             .into_iter()
             .map(|e| Diagnostic::error(file, e.span, Code::Syntax, e.message))
@@ -549,14 +569,29 @@ impl Workspace {
         );
         drop(defs);
         diagnostics.append(&mut m.diagnostics);
+        // Lowering consumes the tree, so the line table is kept for the queries.
+        let source = ast.source.clone();
+        // A stub has declarations without bodies and is never compiled. A module with syntax
+        // errors has `Error` nodes, which lowering would only report a second time.
+        let compile_error = if parsed && !is_stub(&path) {
+            orbit_orb_syntax::lower(ast).err()
+        } else {
+            None
+        };
         if mode == pragma::Mode::Off {
-            diagnostics.retain(|d| d.code == Code::Syntax);
+            diagnostics.retain(|d| d.code.stops_the_module());
         }
-        pragmas.apply(file, &ast.source, strict, &mut diagnostics);
+        pragmas.apply(file, &source, strict, &mut diagnostics);
+        // Added after the pragmas so that none can hide it; see `covers`.
+        if let Some(e) = compile_error {
+            if !diagnostics.iter().any(|d| covers(d, &e)) {
+                diagnostics.push(Diagnostic::error(file, e.span, Code::Compile, e.message));
+            }
+        }
         diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
         m.diagnostics = diagnostics;
         m.deps = deps;
-        m.source = Some(ast.source);
+        m.source = Some(source);
         m
     }
 

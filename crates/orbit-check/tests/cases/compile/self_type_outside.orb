@@ -1,0 +1,2 @@
+fn f() { Self::new() } //~ T0003
+print(1);

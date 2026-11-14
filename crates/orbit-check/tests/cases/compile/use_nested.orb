@@ -1,0 +1,2 @@
+fn f() { use math; math::pi } //~ T0003
+print(f());

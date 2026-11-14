@@ -122,11 +122,14 @@ fn repository_programs_check() {
         all.extend(found);
     }
     assert_eq!(all, known, "findings in examples/");
-    // The front end's sample programs (`proposal.orb` opts out with `//! orbit-check: off`).
-    for dir in ["crates/orbit-orb-syntax/tests/programs", "bench/orb"] {
-        let (_, found) = check_dir(&root().join(dir));
-        assert!(found.is_empty(), "findings in {dir}: {found:?}");
-    }
+    // The front end's sample programs. `proposal.orb` is the design document's examples one
+    // after another, parsed but never run: it opts out of checking with
+    // `//! orbit-check: off`, which leaves the one thing that stops it compiling.
+    let proposal: BTreeSet<_> = [("proposal.orb".to_string(), 47, "T0003".to_string())].into();
+    let (_, found) = check_dir(&root().join("crates/orbit-orb-syntax/tests/programs"));
+    assert_eq!(found, proposal, "findings in the front end's programs");
+    let (_, found) = check_dir(&root().join("bench/orb"));
+    assert!(found.is_empty(), "findings in bench/orb: {found:?}");
     // The built-ins, as each Lua version's build compiles them.
     for version in LuaVersion::ALL {
         let (_, found) = check_dir_with(
@@ -706,4 +709,39 @@ fn long_editing_sessions_keep_the_type_store_bounded() {
         (diags, types, hints)
     };
     assert_eq!(answers(&mut ws), answers(&mut fresh));
+}
+
+/// A module the checker passes must compile, so nothing a module can write hides the error
+/// that stops lowering: not an `ignore` pragma on the checker's own name error, and not
+/// `//! orbit-check: off`. Lowering stops at its first error, so one is reported.
+#[test]
+fn compile_errors_cannot_be_hidden() {
+    let codes = |src: &str| -> Vec<(u32, &'static str)> {
+        diagnostics_of(src, false)
+            .into_iter()
+            .map(|(line, code, _)| (line, code))
+            .collect()
+    };
+    assert_eq!(codes("print(zzz);\n"), [(1, "T0101")]);
+    assert_eq!(
+        codes("print(zzz); // orbit-check: ignore\n"),
+        [(1, "T0003")]
+    );
+    assert_eq!(
+        codes("let x = 1;\nx = 2; // orbit-check: ignore\nprint(x);\n"),
+        [(2, "T0003")]
+    );
+    assert_eq!(
+        codes("//! orbit-check: off\nlet s: string = 3;\nbreak;\nprint(zzz);\n"),
+        [(3, "T0003")]
+    );
+    // A syntax error leaves nodes lowering can't use, so only the syntax error is reported.
+    assert_eq!(codes("print(1 +);\nbreak;\n"), [(1, "T0001")]);
+    // A stub declares functions without bodies and is never compiled.
+    let mut ws = Workspace::new(Config::default(), Box::new(Memory(vec![])));
+    let stub = ws.set_source(
+        Path::new("/p/m.orbi"),
+        b"pub fn f(n: int) -> int;\n".to_vec(),
+    );
+    assert_eq!(ws.diagnostics(stub), []);
 }

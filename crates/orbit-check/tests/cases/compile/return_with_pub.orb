@@ -1,0 +1,2 @@
+pub fn f() { 1 }
+return 5; //~ T0003
