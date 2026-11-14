@@ -140,7 +140,8 @@ jobs:
           cargo testkit bench --runs 7 $interps --json bench-pgo.json --markdown "$GITHUB_STEP_SUMMARY"
           cargo testkit bench --suite apps --runs 5 $interps --json apps-pgo.json --markdown "$GITHUB_STEP_SUMMARY"
       - name: Profiling outcome
-        run: echo "### Profiling on Windows ARM64: ${{ steps.pgo.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "### Profiling on Windows ARM64: ${{ steps.pgo.outcome }}" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
