@@ -44,7 +44,8 @@ fn main() {
 /// the linkers' dead code removal.
 ///
 /// Windows has no such lookup: a module imports Lua's names from
-/// `lua55.dll` by name, which only the shared layout provides (ADR-10).
+/// `lua55.dll` by name, so nothing here helps it (and orbit-capi doesn't
+/// load libraries on Windows yet).
 fn export_c_api(os: &str) {
     if os == "linux" {
         for pattern in ["lua_*", "luaL_*"] {
