@@ -82,14 +82,44 @@ pub(crate) fn fold(f: &Function, locals: &[Option<ConstVal>], e: ExprId) -> Opti
         ExprKind::Float(x) => Some(ConstVal::Float(*x)),
         ExprKind::Str(s) => Some(ConstVal::Str(*s)),
         ExprKind::Local(l) => locals.get(l.index()).copied().flatten(),
-        ExprKind::Binary { op, lhs, rhs } => {
-            let a = fold(f, locals, *lhs)?;
-            let b = fold(f, locals, *rhs)?;
-            fold_arith(*op, a, b)
-        }
+        ExprKind::Binary { .. } => fold_chain(
+            e,
+            |e| match f.expr(e).kind {
+                ExprKind::Binary { op, lhs, rhs } => Some((op, lhs, rhs)),
+                _ => None,
+            },
+            |e| fold(f, locals, e),
+        ),
         ExprKind::Unary { op, expr } => fold_unary(*op, fold(f, locals, *expr)?),
         _ => None,
     }
+}
+
+/// Folds a chain of binary operators (`a + b + c`) starting at `e`, left to right, in a loop:
+/// such a chain is a tree as deep as it is long. `link` gives a link's operator and operands
+/// (`None` past the chain's first operand), `fold` the value of anything else.
+pub(crate) fn fold_chain(
+    e: ExprId,
+    link: impl Fn(ExprId) -> Option<(BinOp, ExprId, ExprId)>,
+    fold: impl Fn(ExprId) -> Option<ConstVal>,
+) -> Option<ConstVal> {
+    // Most chains are one link long, and need no list.
+    if let Some((op, lhs, rhs)) = link(e) {
+        if link(lhs).is_none() {
+            return fold_arith(op, fold(lhs)?, fold(rhs)?);
+        }
+    }
+    let mut links = Vec::new();
+    let mut first = e;
+    while let Some((op, lhs, rhs)) = link(first) {
+        links.push((op, rhs));
+        first = lhs;
+    }
+    let mut v = fold(first)?;
+    for (op, rhs) in links.into_iter().rev() {
+        v = fold_arith(op, v, fold(rhs)?)?;
+    }
+    Some(v)
 }
 
 /// Folds `-x` and `~x` on a number, only where it can't raise an error.

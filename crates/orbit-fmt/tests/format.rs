@@ -242,3 +242,50 @@ fn repository_files() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Chains of operators and suffixes (`a + b + c`, `a.b(c)[d]`) and `else if` chains as long
+/// as a program makes them. Each is a tree as deep as it is long, so printing and the check
+/// that the output means the same walk it with a loop, and must fit a 2 MiB thread stack
+/// (Rust's default for spawned threads), in debug builds too. The other passes' tests use
+/// 200,000 links; this uses fewer because that check is slow in debug builds, but still
+/// far more than recursion would fit.
+#[test]
+fn long_chains_fit_a_2_mib_stack() {
+    const LINKS: usize = 50_000;
+    type Shape = (&'static str, fn(usize) -> String);
+    const SHAPES: &[Shape] = &[
+        ("additions", |n| format!("let x = 1{};", " + 1".repeat(n))),
+        ("fields", |n| format!("let x = a{};", ".b".repeat(n))),
+        ("paths", |n| format!("let x = a{};", "::b".repeat(n))),
+        ("indexing", |n| format!("let x = a{};", "[1]".repeat(n))),
+        ("calls", |n| format!("let x = f{};", "()".repeat(n))),
+        ("method calls", |n| {
+            format!("let x = a{};", ".m()".repeat(n))
+        }),
+        ("casts", |n| format!("let x = a{};", " as int".repeat(n))),
+        ("tries", |n| format!("let x = a{};", "?".repeat(n))),
+        ("mixed suffixes", |n| {
+            format!("let x = a{};", ".b[1].m()(2)?".repeat(n / 5))
+        }),
+        ("ands", |n| format!("let x = a{};", " && a".repeat(n))),
+        ("else ifs", |n| {
+            format!(
+                "let x = if a {{ 1 }} {}else {{ 2 }};",
+                "else if a { 1 } ".repeat(n)
+            )
+        }),
+    ];
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            for (shape, chain) in SHAPES {
+                let src = chain(LINKS);
+                let out = format(src.as_bytes(), Options::default())
+                    .unwrap_or_else(|e| panic!("{shape}: {e}"));
+                assert!(out.len() > src.len() / 2, "{shape}");
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

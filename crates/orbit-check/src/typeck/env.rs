@@ -24,6 +24,10 @@ pub(super) struct Key {
 }
 
 impl Key {
+    /// The most fields a narrowed path has, so that each link of a long chain of fields
+    /// doesn't build a key as long as the chain.
+    const MAX_FIELDS: usize = 16;
+
     pub fn sym(id: SymbolId) -> Key {
         Key {
             base: Base::Sym(id),
@@ -39,25 +43,39 @@ impl Key {
     }
 
     /// The path narrowing tracks for `e`: a local, `self`, or fields of one.
+    /// The path `e` names, if narrowing tracks it: a local, parameter, global or `self`, then
+    /// up to [`Key::MAX_FIELDS`] fields.
     pub fn of(e: &ast::Expr, syms: &SymbolView<'_, '_>, strings: &StringPool) -> Option<Key> {
-        match &e.kind {
-            ExprKind::Name(_) => {
-                let id = syms.ref_at(e.span)?;
-                matches!(
-                    syms.kind(id)?,
-                    SymbolKind::Local | SymbolKind::Param | SymbolKind::Global
-                )
-                .then(|| Key::sym(id))
+        let mut fields = Vec::new();
+        let mut e = e;
+        let base = loop {
+            match &e.kind {
+                ExprKind::Name(_) => {
+                    let id = syms.ref_at(e.span)?;
+                    let tracked = matches!(
+                        syms.kind(id)?,
+                        SymbolKind::Local | SymbolKind::Param | SymbolKind::Global
+                    );
+                    break tracked.then_some(Base::Sym(id))?;
+                }
+                ExprKind::SelfValue => break Base::SelfValue,
+                ExprKind::Field { obj, name } => {
+                    if fields.len() == Key::MAX_FIELDS {
+                        return None;
+                    }
+                    fields.push(name.sym);
+                    e = obj;
+                }
+                ExprKind::Paren(inner) => e = inner,
+                _ => return None,
             }
-            ExprKind::SelfValue => Some(Key::self_value()),
-            ExprKind::Field { obj, name } => {
-                let mut k = Key::of(obj, syms, strings)?;
-                k.fields.push(strings.display(name.sym).into_owned());
-                Some(k)
-            }
-            ExprKind::Paren(inner) => Key::of(inner, syms, strings),
-            _ => None,
-        }
+        };
+        let fields = fields
+            .into_iter()
+            .rev()
+            .map(|f| strings.display(f).into_owned())
+            .collect();
+        Some(Key { base, fields })
     }
 
     fn starts_with(&self, prefix: &Key) -> bool {

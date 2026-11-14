@@ -191,6 +191,54 @@ pub struct Expr {
     pub span: Span,
 }
 
+impl Expr {
+    /// The left operand of a chain link: the object of an index or method call, the callee
+    /// of a call, the left side of a binary operator. The parser builds chains (`a + b + c`,
+    /// `a.b(c)[d]`) in a loop, but they become trees as deep as they are long, so passes over
+    /// the tree walk them with a loop rather than recursing once per link.
+    pub fn chain_lhs(&self) -> Option<&Expr> {
+        match &self.kind {
+            ExprKind::Index { obj, .. } | ExprKind::Method { obj, .. } => Some(obj),
+            ExprKind::Call { callee, .. } => Some(callee),
+            ExprKind::Binary { lhs, .. } => Some(lhs),
+            _ => None,
+        }
+    }
+}
+
+impl ExprKind {
+    /// [`Expr::chain_lhs`], taken out; the rest of the link is dropped.
+    fn into_chain_lhs(self) -> Option<Box<Expr>> {
+        match self {
+            ExprKind::Index { obj, .. } | ExprKind::Method { obj, .. } => Some(obj),
+            ExprKind::Call { callee, .. } => Some(callee),
+            ExprKind::Binary { lhs, .. } => Some(lhs),
+            _ => None,
+        }
+    }
+}
+
+/// How many links a chain has before dropping it takes a loop.
+const SHORT_CHAIN: usize = 16;
+
+impl Drop for Expr {
+    /// Drops a long chain's links one at a time, as [`Expr::chain_lhs`] explains. A short one
+    /// drops as usual, which is cheaper.
+    fn drop(&mut self) {
+        let mut link: &Expr = self;
+        for _ in 0..SHORT_CHAIN {
+            match link.chain_lhs() {
+                Some(lhs) => link = lhs,
+                None => return,
+            }
+        }
+        let mut kind = std::mem::replace(&mut self.kind, ExprKind::Nil);
+        while let Some(mut lhs) = kind.into_chain_lhs() {
+            kind = std::mem::replace(&mut lhs.kind, ExprKind::Nil);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ExprKind {
     Nil,

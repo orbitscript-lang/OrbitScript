@@ -26,13 +26,12 @@ enum Target {
 impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     pub(super) fn cast(
         &mut self,
-        inner: &'a ast::Expr,
+        value: ExprId,
         ty: &'a ast::Type,
         soft: bool,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
-        let value = self.single(inner, out)?;
         // The observer reads the target as a type; lowering it below tells it nothing more.
         self.observe_type(Some(ty));
         let (target, nilable) = strip_optional(ty);

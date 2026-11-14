@@ -289,10 +289,171 @@ pub enum UseTail {
     Members(Vec<(Name, Option<Name>)>),
 }
 
-#[derive(Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+}
+
+impl std::fmt::Debug for Expr {
+    /// The derived format, written in a loop down chains and `else if` chains (see
+    /// [`Expr::chain_lhs`]): each link's text before its left operand on the way down, the
+    /// rest on the way back up. `{:#?}` recurses.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if f.alternate() {
+            return f
+                .debug_struct("Expr")
+                .field("kind", &self.kind)
+                .field("span", &self.span)
+                .finish();
+        }
+        let mut spine = Vec::new();
+        let mut e = self;
+        loop {
+            f.write_str("Expr { kind: ")?;
+            let next = match &e.kind {
+                ExprKind::Path { base, .. } => {
+                    f.write_str("Path { base: ")?;
+                    base
+                }
+                ExprKind::Field { obj, .. } => {
+                    f.write_str("Field { obj: ")?;
+                    obj
+                }
+                ExprKind::Index { obj, .. } => {
+                    f.write_str("Index { obj: ")?;
+                    obj
+                }
+                ExprKind::Call { callee, .. } => {
+                    f.write_str("Call { callee: ")?;
+                    callee
+                }
+                ExprKind::MethodCall { obj, .. } => {
+                    f.write_str("MethodCall { obj: ")?;
+                    obj
+                }
+                ExprKind::Binary { op, op_at, lhs, .. } => {
+                    write!(f, "Binary {{ op: {op:?}, op_at: {op_at:?}, lhs: ")?;
+                    lhs
+                }
+                ExprKind::As { expr, .. } => {
+                    f.write_str("As { expr: ")?;
+                    expr
+                }
+                ExprKind::Try(inner) => {
+                    f.write_str("Try(")?;
+                    inner
+                }
+                ExprKind::If {
+                    cond,
+                    then,
+                    else_: Some(else_),
+                } => {
+                    write!(f, "If {{ cond: {cond:?}, then: {then:?}, else_: Some(")?;
+                    else_
+                }
+                kind => {
+                    write!(f, "{kind:?}, span: {:?} }}", e.span)?;
+                    break;
+                }
+            };
+            spine.push(e);
+            e = next;
+        }
+        while let Some(e) = spine.pop() {
+            match &e.kind {
+                ExprKind::Path { name, .. } | ExprKind::Field { name, .. } => {
+                    write!(f, ", name: {name:?} }}")?
+                }
+                ExprKind::Index { key, .. } => write!(f, ", key: {key:?} }}")?,
+                ExprKind::Call { args, args_at, .. } => {
+                    write!(f, ", args: {args:?}, args_at: {args_at:?} }}")?
+                }
+                ExprKind::MethodCall {
+                    name,
+                    args,
+                    args_at,
+                    ..
+                } => write!(
+                    f,
+                    ", name: {name:?}, args: {args:?}, args_at: {args_at:?} }}"
+                )?,
+                ExprKind::Binary { rhs, .. } => write!(f, ", rhs: {rhs:?} }}")?,
+                ExprKind::As { ty, optional, .. } => {
+                    write!(f, ", ty: {ty:?}, optional: {optional:?} }}")?
+                }
+                ExprKind::Try(_) => f.write_str(")")?,
+                // `If { .., else_: Some(`
+                _ => f.write_str(") }")?,
+            }
+            write!(f, ", span: {:?} }}", e.span)?;
+        }
+        Ok(())
+    }
+}
+
+impl Expr {
+    /// The left operand of a chain link: the base of a path, the object of a field, index or
+    /// method call, the callee of a call, the left side of a binary operator, the value of a
+    /// cast or of `?`. The parser builds chains (`a + b + c`, `a.b(c)[d]`, `x as int as int`)
+    /// in a loop, but they become trees as deep as they are long, so passes over the tree walk
+    /// them with a loop rather than recursing once per link.
+    pub fn chain_lhs(&self) -> Option<&Expr> {
+        match &self.kind {
+            ExprKind::Path { base: lhs, .. }
+            | ExprKind::Field { obj: lhs, .. }
+            | ExprKind::Index { obj: lhs, .. }
+            | ExprKind::Call { callee: lhs, .. }
+            | ExprKind::MethodCall { obj: lhs, .. }
+            | ExprKind::Binary { lhs, .. }
+            | ExprKind::As { expr: lhs, .. }
+            | ExprKind::Try(lhs) => Some(lhs),
+            _ => None,
+        }
+    }
+}
+
+impl ExprKind {
+    /// [`Expr::chain_lhs`], or an `if`'s `else` (`else if` chains nest to the right), taken
+    /// out; the rest is dropped.
+    fn into_spine(self) -> Option<Box<Expr>> {
+        match self {
+            ExprKind::Path { base: lhs, .. }
+            | ExprKind::Field { obj: lhs, .. }
+            | ExprKind::Index { obj: lhs, .. }
+            | ExprKind::Call { callee: lhs, .. }
+            | ExprKind::MethodCall { obj: lhs, .. }
+            | ExprKind::Binary { lhs, .. }
+            | ExprKind::As { expr: lhs, .. }
+            | ExprKind::Try(lhs) => Some(lhs),
+            ExprKind::If { else_, .. } => else_,
+            _ => None,
+        }
+    }
+}
+
+/// How many links a chain has before dropping it takes a loop.
+const SHORT_CHAIN: usize = 16;
+
+impl Drop for Expr {
+    /// Drops a long chain's links (and a long `else if` chain's branches) one at a time, as
+    /// [`Expr::chain_lhs`] explains. A short one drops as usual, which is cheaper.
+    fn drop(&mut self) {
+        let mut link: &Expr = self;
+        for _ in 0..SHORT_CHAIN {
+            let next = match &link.kind {
+                ExprKind::If { else_, .. } => else_.as_deref(),
+                _ => link.chain_lhs(),
+            };
+            match next {
+                Some(next) => link = next,
+                None => return,
+            }
+        }
+        let mut kind = std::mem::replace(&mut self.kind, ExprKind::Nil);
+        while let Some(mut next) = kind.into_spine() {
+            kind = std::mem::replace(&mut next.kind, ExprKind::Nil);
+        }
+    }
 }
 
 #[derive(Debug)]
