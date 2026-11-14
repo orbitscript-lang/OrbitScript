@@ -26,6 +26,11 @@ pub(crate) enum Exc {
     Plain(String),
     /// A finished error.
     Lua(crate::vm::LuaError),
+    /// A finished error that is past its message handler: the handler
+    /// returned it, or a `__close` handler ran while it unwound.
+    Handled(crate::vm::LuaError),
+    /// An error in error handling: no message handler runs for it.
+    ErrErr,
     /// An allocation failed, or would pass the heap's limit: Lua's
     /// `not enough memory`, which has no position. A store that fails this
     /// way is retried once after a full collection.
@@ -57,6 +62,12 @@ impl Exc {
         Exc::NewIndex { obj, key, v }
     }
 }
+
+// Every slow path hands one of these back to the dispatch loop: carrying
+// more with an error must fit in what is there.
+const _: () = assert!(std::mem::size_of::<Exc>() == EXC_SIZE);
+const _: () = assert!(std::mem::size_of::<Result<crate::vm::interp::Flow, Exc>>() == EXC_SIZE);
+const EXC_SIZE: usize = 72;
 
 impl From<crate::vm::LuaError> for Exc {
     fn from(e: crate::vm::LuaError) -> Self {
