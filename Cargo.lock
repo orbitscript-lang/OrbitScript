@@ -277,6 +277,7 @@ dependencies = [
  "orbit-lua-syntax",
  "orbit-lua-text",
  "orbit-lua-version",
+ "orbit-macros",
  "orbit-orb-syntax",
 ]
 

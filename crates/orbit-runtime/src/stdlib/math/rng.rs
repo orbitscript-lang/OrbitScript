@@ -13,6 +13,14 @@ pub(crate) struct Xoshiro {
     s: [u64; 4],
 }
 
+/// A generator seeded from the clock, as an isolate's first use of
+/// `math.random` makes one.
+impl Default for Xoshiro {
+    fn default() -> Xoshiro {
+        Xoshiro::from_entropy().0
+    }
+}
+
 impl Xoshiro {
     pub(crate) fn seeded(n1: u64, n2: u64) -> Self {
         let mut r = Xoshiro {

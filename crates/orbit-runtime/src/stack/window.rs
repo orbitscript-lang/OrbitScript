@@ -111,6 +111,17 @@ fn native_entry<N: Native>(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaE
     }
 }
 
+/// The runtime's entry for native `N`, for the built-in libraries'
+/// tables of `(name, entry)` rows.
+pub(crate) const fn native_fn<N: Native>() -> vm::NativeFn {
+    native_entry::<N>
+}
+
+/// A library table's row for native `N`: its name and its entry.
+pub(crate) const fn library_row<N: Native>() -> (&'static str, vm::NativeFn) {
+    (N::NAME, native_entry::<N>)
+}
+
 /// How a [`Return`] names the continuation to run: the runtime's.
 pub(crate) type ContRef = vm::Continuation;
 
@@ -402,6 +413,14 @@ impl<'s> Stack<'s> {
         }
     }
 
+    /// Push a string with `bytes`, for results ([`Push`](super::Push)):
+    /// [`Stack::push_bytes`] without reading the string back.
+    #[inline]
+    pub(crate) fn push_string_result(&mut self, bytes: &[u8]) {
+        let v = self.ctx.new_str(bytes);
+        self.ctx.push(v);
+    }
+
     fn push_str_value(&mut self, bytes: &[u8]) -> Gc<LuaStr> {
         let v = self.ctx.new_str(bytes);
         self.ctx.push(v);
@@ -598,6 +617,28 @@ impl<'s> Stack<'s> {
             self.get(idx),
             RawValue::Str(_) | RawValue::Int(_) | RawValue::Float(_)
         )
+    }
+
+    /// The number at `idx`, if it holds one (no conversion from strings).
+    #[inline]
+    pub(crate) fn number_at(&self, idx: i32) -> Option<crate::object::number::Number> {
+        use crate::object::number::Number;
+        // An argument's index (the usual case) needs no pseudo-index checks.
+        let v = if idx > 0 {
+            let at = idx as usize - 1;
+            if at < self.ctx.len() {
+                self.ctx.arg(at)
+            } else {
+                return None;
+            }
+        } else {
+            self.get(idx)
+        };
+        match v {
+            RawValue::Int(i) => Some(Number::Int(i)),
+            RawValue::Float(f) => Some(Number::Float(f)),
+            _ => None,
+        }
     }
 
     pub fn is_integer(&self, idx: i32) -> bool {
