@@ -14,7 +14,7 @@
 
 All three are driven by `orbit-testkit` (`crates/orbit-testkit`), which runs interpreters as subprocesses, so it tests `orbit` and the reference `lua5.5` the same way. `cargo testkit` is an alias for `cargo run --release -p orbit-testkit --`; every command takes `--help`.
 
-GitHub CI runs all three, but its automatic runs are paused for now (see `.github/workflows/ci.yml`), so run them locally before pushing. The reference interpreter is built from source by `scripts/build-reference-lua.sh` into `target/reference-lua/` (it needs git and a C compiler).
+GitHub CI runs all three on every pull request, on Linux x86_64 (`.github/workflows/ci.yml`); run them locally before pushing anyway. The reference interpreter is built from source by `scripts/build-reference-lua.sh` into `target/reference-lua/` (it needs git and a C compiler).
 
 ## Expected-pass lists
 
@@ -22,7 +22,7 @@ GitHub CI runs all three, but its automatic runs are paused for now (see `.githu
 
 ## Differential tests
 
-Each `diff/*.lua` file runs under both interpreters. Exit status, standard output and the error message must be identical, after three normalizations: the program name at the start of an uncaught-error message becomes `lua`, the stack traceback is dropped, and addresses such as `table: 0x55d0c2a3b2c0` become `0xADDR`. Tests must be deterministic, so don't depend on `pairs` order, `os.time`, `math.random` without a seed, or GC timing. `diff/locale.lua` tries a few locales and prints only for those the machine has, so its output depends on the installed locales but is the same for both interpreters; CI generates them with `localedef` (see `.github/workflows/ci.yml`).
+Each `diff/*.lua` file runs under both interpreters. Exit status, standard output and the error message must be identical, after three normalizations: the program name at the start of an uncaught-error message becomes `lua`, the stack traceback is dropped, and addresses such as `table: 0x55d0c2a3b2c0` become `0xADDR`. Tests must be deterministic, so don't depend on `pairs` order, `os.time`, `math.random` without a seed, or GC timing. `diff/locale.lua` tries a few locales and prints only for those the machine has, so its output depends on the installed locales but is the same for both interpreters; CI generates them with `localedef` (see `.github/actions/reference-lua`).
 
 ```sh
 cargo testkit diff --reference target/reference-lua/bin/lua5.5 --interp target/release/orbit
