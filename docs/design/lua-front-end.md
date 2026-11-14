@@ -101,7 +101,7 @@ Messages follow the reference's format and wording:
 | `for i=1,2 do i = 3 end` | `s.lua:1: attempt to assign to const variable 'i'` |
 | `x = [==[ abc` | `s.lua:2: unfinished long string (starting at line 1) near <eof>` |
 
-`Diagnostic::to_lua_message` gives the reference's one-line format, which `load` returns and the differential tests compare.
+`Diagnostic::to_message` gives the reference's one-line format, which `load` returns and the differential tests compare.
 
 ## AST
 

@@ -10,7 +10,7 @@ fn main() {
         let options = orbit_lua_syntax::ParseOptions::default();
         let line = match orbit_lua_syntax::to_hir("s.lua", &src, &options) {
             Ok(_) => b"ok".to_vec(),
-            Err(d) => d.to_lua_message_bytes(b"s.lua"),
+            Err(d) => d.to_message_bytes(b"s.lua"),
         };
         out.write_all(&line).unwrap();
         out.write_all(b"\x1e").unwrap();

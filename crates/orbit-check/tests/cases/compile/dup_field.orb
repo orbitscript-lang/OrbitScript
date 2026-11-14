@@ -1,2 +1,2 @@
-struct P { x: int, x: int } //~ T0003
+struct P { x: int, x: int } //~ T0802
 print(1);

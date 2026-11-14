@@ -21,7 +21,8 @@ use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};
 
 use crate::ast::{self, Ast};
-use crate::diag::Diagnostic;
+use crate::code::{self, Code};
+use orbit_hir::Diagnostic;
 
 /// Lowers a parsed module to HIR, before the HIR's shared analysis (`orbit_hir::analyze`).
 pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
@@ -311,14 +312,18 @@ impl Lowerer {
     // from hundreds of places, and inlined they cost binary size for no measurable compile
     // speed (see the design doc, "Binary size").
     #[inline(never)]
-    fn error(&self, span: Span, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::new(span, self.chunk.source.line_of(span.start), message)
+    fn error(&self, span: Span, code: Code, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::error(span, self.chunk.source.line_of(span.start), code, message)
     }
 
     /// The error for an `Error` node, which only an error-recovering parse makes.
     #[cold]
     fn unparsed(&self, span: Span) -> Diagnostic {
-        self.error(span, "this code has a syntax error, so it can't run")
+        self.error(
+            span,
+            code::SYNTAX,
+            "this code has a syntax error, so it can't run",
+        )
     }
 
     fn text(&self, sym: StrId) -> String {
@@ -569,6 +574,7 @@ impl Lowerer {
                     if depth == top {
                         return Err(self.error(
                             name.span,
+                            code::USED_BEFORE_DEFINITION,
                             format!(
                                 "`{}` is used before its definition; move the definition up \
                                  (functions may refer to items defined after them)",
@@ -617,6 +623,7 @@ impl Lowerer {
         }
         Err(self.error(
             name.span,
+            code::UNKNOWN_NAME,
             format!(
                 "cannot find `{}` in this scope (to use a global, declare it with `extern {}`)",
                 self.text(name.sym),
@@ -649,6 +656,7 @@ impl Lowerer {
             Some(Binding { item: Some(_), .. }) => {
                 return Err(self.error(
                     name.span,
+                    code::ASSIGN_TO_ITEM,
                     format!("cannot assign to `{}`: it is an item", self.text(name.sym)),
                 ));
             }
@@ -669,11 +677,12 @@ impl Lowerer {
                         "cannot assign twice to immutable variable `{text}` (declare it with `let mut`)"
                     )
                 };
-                return Err(self.error(name.span, message));
+                return Err(self.error(name.span, code::ASSIGN_TO_IMMUTABLE, message));
             }
             None => {
                 return Err(self.error(
                     name.span,
+                    code::ASSIGN_TO_PRELUDE,
                     format!(
                         "cannot assign to prelude name `{0}`; declare it with `extern {0};` first",
                         self.text(name.sym)
@@ -717,6 +726,7 @@ impl Lowerer {
                     if let ast::ExprKind::Return(_) = e.kind {
                         return Err(self.error(
                             e.span,
+                            code::RETURN_WITH_EXPORTS,
                             "a module with `pub` items returns its exports; remove this `return`",
                         ));
                     }
@@ -840,10 +850,18 @@ impl Lowerer {
     ) -> LResult<()> {
         if scope {
             let ast::PatKind::Bind { name, .. } = pat.kind else {
-                return Err(self.error(pat.span, "`let scope` binds a single name"));
+                return Err(self.error(
+                    pat.span,
+                    code::LET_PATTERN,
+                    "`let scope` binds a single name",
+                ));
             };
             let Some(value) = value else {
-                return Err(self.error(span, "`let scope` needs a value to close"));
+                return Err(self.error(
+                    span,
+                    code::LET_NEEDS_VALUE,
+                    "`let scope` needs a value to close",
+                ));
             };
             let v = self.single(value, out)?;
             let local = self.new_local(Some(name.sym), name.span, LocalKind::Close);
@@ -866,6 +884,7 @@ impl Lowerer {
                     None => {
                         return Err(self.error(
                             span,
+                            code::LET_NEEDS_VALUE,
                             format!(
                                 "`let {}` needs a value (only `let mut` may start as nil)",
                                 self.text(name.sym)
@@ -899,7 +918,11 @@ impl Lowerer {
             }
             ast::PatKind::Tuple(items) => {
                 let Some(value) = value else {
-                    return Err(self.error(span, "destructuring `let` needs a value"));
+                    return Err(self.error(
+                        span,
+                        code::LET_NEEDS_VALUE,
+                        "destructuring `let` needs a value",
+                    ));
                 };
                 let values = self.values(value, out)?;
                 let mut locals = Vec::with_capacity(items.len());
@@ -922,6 +945,7 @@ impl Lowerer {
                         _ => {
                             return Err(self.error(
                                 item.span,
+                                code::LET_PATTERN,
                                 "a `let` tuple holds names or `_`; use `match` for other patterns",
                             ));
                         }
@@ -935,7 +959,11 @@ impl Lowerer {
             }
             ast::PatKind::Struct { .. } => {
                 let Some(value) = value else {
-                    return Err(self.error(span, "destructuring `let` needs a value"));
+                    return Err(self.error(
+                        span,
+                        code::LET_NEEDS_VALUE,
+                        "destructuring `let` needs a value",
+                    ));
                 };
                 let v = self.single(value, out)?;
                 let subject = self.temp(Some(v), span, out);
@@ -944,7 +972,11 @@ impl Lowerer {
                 self.emit_binds(binds, out);
                 Ok(())
             }
-            _ => Err(self.error(pat.span, "refutable pattern in `let`; use `match` or `if`")),
+            _ => Err(self.error(
+                pat.span,
+                code::LET_PATTERN,
+                "refutable pattern in `let`; use `match` or `if`",
+            )),
         }
     }
 
@@ -976,7 +1008,13 @@ impl Lowerer {
                     parts.push(expr::Part::Expr(key));
                     places.push(None);
                 }
-                _ => return Err(self.error(t.span, "invalid left-hand side of assignment")),
+                _ => {
+                    return Err(self.error(
+                        t.span,
+                        code::INVALID_ASSIGN_TARGET,
+                        "invalid left-hand side of assignment",
+                    ));
+                }
             }
         }
         parts.push(expr::Part::Values(value));
@@ -1043,7 +1081,13 @@ impl Lowerer {
                 let read = self.add_expr(hir::ExprKind::Index { obj: ro, key: rk }, target.span);
                 (hir::Place::Index { obj: o, key: k }, read)
             }
-            _ => return Err(self.error(target.span, "invalid left-hand side of assignment")),
+            _ => {
+                return Err(self.error(
+                    target.span,
+                    code::INVALID_ASSIGN_TARGET,
+                    "invalid left-hand side of assignment",
+                ));
+            }
         };
         let v = self.expr(value, out)?;
         let combined = self.add_expr_at(
@@ -1155,7 +1199,11 @@ impl Lowerer {
     /// An error if code in a `scope` action would leave it with `what`.
     fn check_not_scope_action(&self, span: Span, what: &str) -> LResult<()> {
         if self.funcs.last().expect("function").scope_action {
-            return Err(self.error(span, format!("`{what}` can't leave a `scope` action")));
+            return Err(self.error(
+                span,
+                code::LEAVES_SCOPE_ACTION,
+                format!("`{what}` can't leave a `scope` action"),
+            ));
         }
         Ok(())
     }

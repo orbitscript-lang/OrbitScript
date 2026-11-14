@@ -1,2 +1,2 @@
-let x; //~ T0003
+let x; //~ T0701
 print(x);

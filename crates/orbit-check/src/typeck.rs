@@ -29,6 +29,7 @@ mod report;
 mod view;
 mod walk;
 
+use crate::diag::code;
 use std::collections::{HashMap, HashSet};
 
 use orbit_hir::{Span, StrId, StringPool};
@@ -36,10 +37,10 @@ use orbit_orb_syntax::ast::{
     self, BinOp, ExprKind, ItemKind, MapEntry, PatKind, StmtKind, TypeKind, UnOp,
 };
 
+use crate::FileId;
 use crate::resolve::{Def, Defs, Owner};
 use crate::symbols::{Module, StructLit, SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
-use crate::{Code, FileId};
 use cast::{CastRules, Target, strip_optional};
 use env::{Base, Env, Key, falsy_part, filter_type_name};
 use generics::Generics;
@@ -116,7 +117,7 @@ pub(crate) fn check<'a, 'b, 'c>(
     let by_span = SymbolView::by_span(m);
     declare::overloads(file, &ast.body.stmts, &by_span, &mut m.overloads);
 
-    let report = Reporter::take(file, m);
+    let report = Reporter::take(m);
     let sym_types = std::mem::take(&mut m.sym_types);
     let param_names = std::mem::take(&mut m.param_names);
     let mut c = Typer {
@@ -214,10 +215,10 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 self.show(expected),
                 self.show(t)
             );
-            self.report.error(span, Code::MaybeNil, msg);
+            self.report.error(span, code::MAYBE_NIL, msg);
         } else {
             let msg = format!("{what} {}, found {}", self.show(expected), self.show(t));
-            self.report.error(span, Code::Mismatch, msg);
+            self.report.error(span, code::MISMATCH, msg);
         }
     }
 
@@ -554,7 +555,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                                 "this function returns {}, but it can reach its end without a value",
                                 self.show(r)
                             );
-                            self.report.error(name_span, Code::Mismatch, msg);
+                            self.report.error(name_span, code::MISMATCH, msg);
                         }
                     }
                 }
@@ -626,7 +627,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 if let Some(&r) = rs.first() {
                     if !self.types.may_be_nil(r) {
                         let msg = format!("expected a value of type {}, found none", self.show(r));
-                        self.report.error(span, Code::Mismatch, msg);
+                        self.report.error(span, code::MISMATCH, msg);
                     }
                 }
             }
@@ -654,7 +655,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                             (None, Some(r)) if !self.types.may_be_nil(r) => {
                                 let msg =
                                     format!("missing result {} (result {})", self.show(r), i + 1);
-                                self.report.error(e.span, Code::Mismatch, msg);
+                                self.report.error(e.span, code::MISMATCH, msg);
                             }
                             _ => {}
                         }
@@ -683,12 +684,12 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 items.len(),
                 self.results_text(&rs)
             );
-            self.report.error(e.span, Code::Mismatch, msg);
+            self.report.error(e.span, code::MISMATCH, msg);
         }
         for (i, &r) in rs.iter().enumerate().skip(items.len()) {
             if !self.types.may_be_nil(r) {
                 let msg = format!("missing result {} (result {})", self.show(r), i + 1);
-                self.report.error(e.span, Code::Mismatch, msg);
+                self.report.error(e.span, code::MISMATCH, msg);
             }
         }
         Some(out)
@@ -738,14 +739,14 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 None => "parameter `_`".to_string(),
             };
             let msg = format!("{what} of public function `{name}` needs a type (strict mode)");
-            self.report.error(p.span, Code::MissingParamType, msg);
+            self.report.error(p.span, code::MISSING_PARAM_TYPE, msg);
         }
         if let (Some(rest), None) = (f.sig.rest, &f.sig.rest_ty) {
             let msg = format!(
                 "parameter `...{}` of public function `{name}` needs a type (strict mode)",
                 self.text(rest.sym)
             );
-            self.report.error(rest.span, Code::MissingParamType, msg);
+            self.report.error(rest.span, code::MISSING_PARAM_TYPE, msg);
         }
         let t = self
             .syms
@@ -759,7 +760,8 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                             "public function `{name}` returns {} but has no result type (strict mode)",
                             self.results_text(&rs)
                         );
-                        self.report.error(f.name.span, Code::MissingResultType, msg);
+                        self.report
+                            .error(f.name.span, code::MISSING_RESULT_TYPE, msg);
                     }
                 }
             }
@@ -917,7 +919,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                         vs.len(),
                         if vs.len() == 1 { "" } else { "s" }
                     );
-                    self.report.error(pat.span, Code::ResultCount, msg);
+                    self.report.error(pat.span, code::RESULT_COUNT, msg);
                 }
             }
             return;
@@ -1012,7 +1014,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 let holder = self.syms.holder(id);
                 if self.syms.member_sym(holder, "__newindex").is_none() {
                     let msg = format!("{} has no field `{text}`", self.show(ot));
-                    self.report.error(span, Code::NoMember, msg);
+                    self.report.error(span, code::NO_MEMBER, msg);
                 }
                 None
             }
@@ -1351,14 +1353,14 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
         let d = self.describe(e);
         if t == self.types.nil {
             self.report
-                .error(e.span, Code::MaybeNil, format!("{d} is nil"));
+                .error(e.span, code::MAYBE_NIL, format!("{d} is nil"));
             return self.types.any;
         }
         let msg = format!(
             "{d} may be nil (type {}); check it with `!= nil` first, or use `?`",
             self.show(t)
         );
-        self.report.error(e.span, Code::MaybeNil, msg);
+        self.report.error(e.span, code::MAYBE_NIL, msg);
         self.types.non_nil(t)
     }
 
@@ -1391,7 +1393,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 }
                 if self.syms.member_sym(holder, "__index").is_none() {
                     let msg = format!("{} has no field `{text}`", self.show(t));
-                    self.report.error(span, Code::NoMember, msg);
+                    self.report.error(span, code::NO_MEMBER, msg);
                 }
                 any
             }
@@ -1400,7 +1402,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 None => {
                     if !inferred {
                         let msg = format!("{} has no field `{text}`", self.show(t));
-                        self.report.error(span, Code::NoMember, msg);
+                        self.report.error(span, code::NO_MEMBER, msg);
                     }
                     any
                 }
@@ -1411,7 +1413,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 None => {
                     self.report.error(
                         span,
-                        Code::NoMember,
+                        code::NO_MEMBER,
                         format!("string has no field `{text}`"),
                     );
                     any
@@ -1419,7 +1421,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
             },
             Ty::Int | Ty::Float | Ty::Bool | Ty::Fn(_) | Ty::Function => {
                 let msg = format!("type {} has no field `{text}`", self.show(t));
-                self.report.error(span, Code::NoMember, msg);
+                self.report.error(span, code::NO_MEMBER, msg);
                 any
             }
             _ => any,
@@ -1438,7 +1440,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
             Ty::Array(t) => {
                 if matches!(self.types.get(kt), Ty::Str | Ty::Bool) {
                     let msg = format!("arrays are indexed by `int`, found {}", self.show(kt));
-                    self.report.error(key.span, Code::BadOperand, msg);
+                    self.report.error(key.span, code::BAD_OPERAND, msg);
                 }
                 t
             }
@@ -1455,7 +1457,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
             },
             Ty::Int | Ty::Float | Ty::Bool | Ty::Fn(_) | Ty::Function => {
                 let msg = format!("a value of type {} can't be indexed", self.show(ot));
-                self.report.error(obj.span, Code::BadOperand, msg);
+                self.report.error(obj.span, code::BAD_OPERAND, msg);
                 any
             }
             _ => any,
@@ -1541,7 +1543,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
             "no form of {name} takes these arguments; it is one of: {}",
             shown.join(", ")
         );
-        self.report.error(span, Code::Mismatch, msg);
+        self.report.error(span, code::MISMATCH, msg);
         self.args_any(args);
         None
     }
@@ -1588,7 +1590,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
         let mut ct = ct;
         if ct != any && self.types.may_be_nil(ct) {
             let msg = format!("{name} may be nil (type {})", self.show(ct));
-            self.report.error(span, Code::MaybeNil, msg);
+            self.report.error(span, code::MAYBE_NIL, msg);
             ct = self.types.non_nil(ct);
         }
         match self.types.get(ct).clone() {
@@ -1607,7 +1609,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                     }
                     None => {
                         let msg = format!("{name} is not a function (type {})", self.show(ct));
-                        self.report.error(span, Code::NotCallable, msg);
+                        self.report.error(span, code::NOT_CALLABLE, msg);
                         self.args_any(args);
                         None
                     }
@@ -1615,7 +1617,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
             }
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Nil => {
                 let msg = format!("{name} is not a function (type {})", self.show(ct));
-                self.report.error(span, Code::NotCallable, msg);
+                self.report.error(span, code::NOT_CALLABLE, msg);
                 self.args_any(args);
                 None
             }
@@ -1658,13 +1660,13 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                     params.len(),
                     if params.len() == 1 { "" } else { "s" }
                 );
-                self.report.error(span, Code::ArgCount, msg);
+                self.report.error(span, code::ARG_COUNT, msg);
             } else if n < needed {
                 let msg = format!(
                     "{name} needs {needed} argument{}, found {n}",
                     if needed == 1 { "" } else { "s" }
                 );
-                self.report.error(span, Code::ArgCount, msg);
+                self.report.error(span, code::ARG_COUNT, msg);
             }
         }
         let mut checks = Vec::new();
@@ -1726,7 +1728,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                             "`{tn}::{text}` is an associated function, not a method; call it as \
                              `{tn}::{text}(...)`"
                         );
-                        self.report.error(name.span, Code::NoMember, msg);
+                        self.report.error(name.span, code::NO_MEMBER, msg);
                         self.args_any(args);
                         return None;
                     }
@@ -1740,7 +1742,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 }
                 if self.syms.member_sym(holder, "__index").is_none() {
                     let msg = format!("{} has no method `{text}`", self.show(ot));
-                    self.report.error(name.span, Code::NoMember, msg);
+                    self.report.error(name.span, code::NO_MEMBER, msg);
                 }
                 self.args_any(args);
                 None
@@ -1750,7 +1752,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 None => {
                     if !inferred {
                         let msg = format!("{} has no method `{text}`", self.show(ot));
-                        self.report.error(name.span, Code::NoMember, msg);
+                        self.report.error(name.span, code::NO_MEMBER, msg);
                     }
                     self.args_any(args);
                     None
@@ -1764,14 +1766,14 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 }
                 None => {
                     let msg = format!("string has no method `{text}`");
-                    self.report.error(name.span, Code::NoMember, msg);
+                    self.report.error(name.span, code::NO_MEMBER, msg);
                     self.args_any(args);
                     None
                 }
             },
             Ty::Int | Ty::Float | Ty::Bool | Ty::Fn(_) | Ty::Function => {
                 let msg = format!("type {} has no method `{text}`", self.show(ot));
-                self.report.error(name.span, Code::NoMember, msg);
+                self.report.error(name.span, code::NO_MEMBER, msg);
                 self.args_any(args);
                 None
             }
@@ -1799,7 +1801,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
             Some(Some(fr)) => match fr.first() {
                 None => self.report.error(
                     span,
-                    Code::TryResult,
+                    code::TRY_RESULT,
                     "`?` returns `nil` and the error, but this function has no results; \
                      annotate them as `(T?, E?)`"
                         .into(),
@@ -1810,7 +1812,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                          be nil",
                         self.show(r0)
                     );
-                    self.report.error(span, Code::TryResult, msg);
+                    self.report.error(span, code::TRY_RESULT, msg);
                 }
                 Some(_) => {
                     if rs.len() >= 2 {
@@ -1822,7 +1824,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                                     self.show(err),
                                     self.show(r1)
                                 );
-                                self.report.error(span, Code::TryResult, msg);
+                                self.report.error(span, code::TRY_RESULT, msg);
                             }
                             Some(_) => {}
                             None => {
@@ -1831,7 +1833,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                                      result to return it in",
                                     self.show(err)
                                 );
-                                self.report.error(span, Code::TryResult, msg);
+                                self.report.error(span, code::TRY_RESULT, msg);
                             }
                         }
                     }
@@ -2080,7 +2082,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
             // module is only missing if it can't be nil.
             if id.file == self.syms.file || !self.types.may_be_nil(ft) {
                 let msg = format!("missing field `{name}` in {}", self.show(t));
-                self.report.error(path.span, Code::MissingField, msg);
+                self.report.error(path.span, code::MISSING_FIELD, msg);
             }
         }
         t
@@ -2101,7 +2103,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
         }
         self.ops().unary(op, t).unwrap_or_else(|| {
             let msg = format!("`{}` can't be applied to {}", op.as_str(), self.show(t));
-            self.report.error(inner.span, Code::BadOperand, msg);
+            self.report.error(inner.span, code::BAD_OPERAND, msg);
             self.types.any
         })
     }
@@ -2163,7 +2165,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                         self.show(f.params[0]),
                         self.show(f.params[1])
                     );
-                    self.report.error(span, Code::BadOperand, msg);
+                    self.report.error(span, code::BAD_OPERAND, msg);
                     return Some(self.types.any);
                 }
             }
@@ -2191,7 +2193,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                     op.as_str(),
                     self.show(*side)
                 );
-                self.report.error(span, Code::MaybeNil, msg);
+                self.report.error(span, code::MAYBE_NIL, msg);
                 *side = self.types.non_nil(*side);
             }
         }
@@ -2205,7 +2207,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 self.show(l),
                 self.show(r)
             );
-            self.report.error(span, Code::BadOperand, msg);
+            self.report.error(span, code::BAD_OPERAND, msg);
             self.ops().fallback(op)
         })
     }
@@ -2232,7 +2234,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 Ok(Target::Any) => return result(self, self.types.any),
                 Ok(t) => targets.push(t),
                 Err(msg) => {
-                    self.report.error(m.span, Code::UncheckableCast, msg);
+                    self.report.error(m.span, code::UNCHECKABLE_CAST, msg);
                     // The cast still has the type it names.
                     return result(self, lowered);
                 }
@@ -2247,7 +2249,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                         self.show(src),
                         self.casts().truth_hint(src)
                     );
-                    self.report.error(span, Code::ImpossibleCast, msg);
+                    self.report.error(span, code::IMPOSSIBLE_CAST, msg);
                 }
             } else {
                 let rules = self.casts();
@@ -2261,7 +2263,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                         self.show(src),
                         self.show(lowered)
                     );
-                    self.report.error(span, Code::ImpossibleCast, msg);
+                    self.report.error(span, code::IMPOSSIBLE_CAST, msg);
                 }
             }
         }
@@ -2489,7 +2491,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 for (t, x) in [(s, start), (e, end)] {
                     if t != any && !self.types.is_numeric(t) {
                         let msg = format!("a range bound must be a number, found {}", self.show(t));
-                        self.report.error(x.span, Code::BadOperand, msg);
+                        self.report.error(x.span, code::BAD_OPERAND, msg);
                     }
                 }
                 self.report.record(iter.span, any);
@@ -2672,7 +2674,7 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 self.show(tt),
                 self.show(t)
             );
-            self.report.error(path.span, Code::Mismatch, msg);
+            self.report.error(path.span, code::MISMATCH, msg);
         }
         self.report.record(path.span, tt);
         Some((id, tt))

@@ -56,6 +56,8 @@ Rust rules the parser follows where the language design doesn't say otherwise:
 
 Every `Diagnostic` has a `kind`: `UnexpectedEof` when the input stops in the middle of something (an unclosed `{`, string, comment or template hole, or a construct cut short), so a REPL can read another line; `Other` for the rest.
 
+A `Diagnostic` is `orbit_hir::Diagnostic`, the type the Lua front end and the checker use too, and carries a severity and a stable code. The lexer and the parser report everything as `T0001`. Lowering has one code for each rule of the language it enforces (`code.rs`, listed in `docs/design/orbit-check/api.md`). The compiler prints only the message; the checker and the language server show the code as well.
+
 ### Error recovery
 
 `parse_recovering` first parses normally, so a module without errors gets exactly the tree `parse_with` gives (the layout rules below never see valid code). Only a module with errors is parsed again with recovery, where an error is recorded and the parse picks up where the next thing most likely starts, so an editor gets an AST for everything around the broken line:

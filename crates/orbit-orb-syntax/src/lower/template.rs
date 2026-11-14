@@ -6,6 +6,7 @@ use orbit_hir::{ExprId, Span, StmtId};
 use super::expr::Part;
 use super::{LResult, Lowerer};
 use crate::ast;
+use crate::code;
 
 impl Lowerer {
     pub(super) fn template(
@@ -61,6 +62,7 @@ impl Lowerer {
         let bad = |lx: &Self, what: &str| {
             lx.error(
                 spec.span,
+                code::FORMAT_SPEC,
                 format!(
                     "format spec `{}`: {what}",
                     String::from_utf8_lossy(&spec.text)

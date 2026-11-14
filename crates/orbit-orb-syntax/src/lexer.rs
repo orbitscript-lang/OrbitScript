@@ -4,8 +4,8 @@
 //! `1_000`, `0b1010`); see `docs/design/orbitscript-syntax/proposal.md`, "Lexical structure".
 
 use crate::ast::{Comment, CommentKind};
-use crate::diag::Diagnostic;
 use crate::token::{Keyword, Punct, Token, TokenKind};
+use orbit_hir::{Code, Diagnostic};
 use orbit_hir::{Language, SourceInfo, Span, StringPool};
 
 /// One piece of an `f"..."` template.
@@ -171,9 +171,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn error_at(&self, start: usize, end: usize, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::new(
+        Diagnostic::error(
             Span::new(start as u32, end as u32),
             self.line_of(start as u32),
+            Code::SYNTAX,
             message,
         )
     }
@@ -1041,7 +1042,7 @@ mod tests {
             match lx.next_token() {
                 Ok(t) if t.kind == TokenKind::Eof => panic!("no error for {src:?}"),
                 Ok(_) => {}
-                Err(e) => return e.message,
+                Err(e) => return e.message.clone(),
             }
         }
     }

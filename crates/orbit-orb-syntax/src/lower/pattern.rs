@@ -5,6 +5,7 @@ use orbit_hir::{ExprId, LocalId, LocalKind, Span, StmtId, StrId};
 
 use super::{ItemTag, LResult, Lowerer, Resolved};
 use crate::ast::{self, ExprKind as K};
+use crate::code;
 
 /// How to read a value being matched: a hidden local, or a field of one.
 #[derive(Clone)]
@@ -88,6 +89,7 @@ impl Lowerer {
                 let Some(variants) = &self.types[idx].variants else {
                     return Err(self.error(
                         name.span,
+                        code::NO_ASSOCIATED_ITEM,
                         format!(
                             "`{}` is a struct, not an enum",
                             self.text(self.types[idx].name)
@@ -98,6 +100,7 @@ impl Lowerer {
                     Some(vi) => Ok(PathKind::Variant(idx, vi)),
                     None => Err(self.error(
                         name.span,
+                        code::NO_ASSOCIATED_ITEM,
                         format!(
                             "no variant `{}` in enum `{}`",
                             self.text(name.sym),
@@ -158,6 +161,7 @@ impl Lowerer {
                     _ => {
                         return Err(self.error(
                             span,
+                            code::RANGE_PATTERN_BOUNDS,
                             "range pattern bounds must both be numbers or both be strings",
                         ));
                     }
@@ -202,6 +206,7 @@ impl Lowerer {
                     if !binds.is_empty() {
                         return Err(self.error(
                             alt.span,
+                            code::OR_PATTERN_BINDING,
                             "bindings inside `|` patterns are not supported yet",
                         ));
                     }
@@ -217,6 +222,7 @@ impl Lowerer {
             }
             ast::PatKind::Tuple(_) => Err(self.error(
                 span,
+                code::NESTED_TUPLE_PATTERN,
                 "a tuple pattern matches several results, so it can only be a whole `match` arm",
             )),
             ast::PatKind::Struct { path, fields, rest } => {
@@ -224,6 +230,7 @@ impl Lowerer {
                 if let PathKind::Enum(idx) = kind {
                     return Err(self.error(
                         path.span,
+                        code::ENUM_NEEDS_VARIANT,
                         format!(
                             "`{}` is an enum; name a variant, such as `{}::Variant {{ .. }}`",
                             self.text(self.types[idx].name),
@@ -234,6 +241,7 @@ impl Lowerer {
                 if self.is_unit_variant(&kind) {
                     return Err(self.error(
                         path.span,
+                        code::VARIANT_SHAPE,
                         "this variant has no fields; match it without braces",
                     ));
                 }
@@ -242,6 +250,7 @@ impl Lowerer {
                         if !known.contains(&f.name.sym) {
                             return Err(self.error(
                                 f.name.span,
+                                code::UNKNOWN_FIELD,
                                 format!(
                                     "no field `{}` in this pattern's type",
                                     self.text(f.name.sym)
@@ -255,7 +264,7 @@ impl Lowerer {
                             .find(|k| !fields.iter().any(|f| f.name.sym == **k))
                         {
                             return Err(self.error(
-                            span,
+                            span, code::PATTERN_MISSING_FIELD,
                             format!(
                                 "pattern does not mention field `{}`; add `..` to ignore the rest",
                                 self.text(*missing)
@@ -292,10 +301,11 @@ impl Lowerer {
                         let call = self.call_global(self.syms.rawequal, vec![v, value], span);
                         Ok(Some(self.add_expr(hir::ExprKind::First(call), span)))
                     }
-                    PathKind::Variant(..) => {
-                        Err(self
-                            .error(path.span, "this variant has fields; match it with `{ .. }`"))
-                    }
+                    PathKind::Variant(..) => Err(self.error(
+                        path.span,
+                        code::VARIANT_SHAPE,
+                        "this variant has fields; match it with `{ .. }`",
+                    )),
                     _ => Ok(Some(self.compare(hir::BinOp::Eq, v, value, span))),
                 }
             }
@@ -314,6 +324,7 @@ impl Lowerer {
                 if out.iter().any(|b| b.0.sym == name.sym) {
                     return Err(self.error(
                         name.span,
+                        code::DUPLICATE_BINDING,
                         format!(
                             "`{}` is bound more than once in this pattern",
                             self.text(name.sym)
@@ -331,6 +342,7 @@ impl Lowerer {
                             if out.iter().any(|b| b.0.sym == f.name.sym) {
                                 return Err(self.error(
                                     f.name.span,
+                                    code::DUPLICATE_BINDING,
                                     format!(
                                         "`{}` is bound more than once in this pattern",
                                         self.text(f.name.sym)

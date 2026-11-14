@@ -1,2 +1,2 @@
-fn f() { use math; math::pi } //~ T0003
+fn f() { use math; math::pi } //~ T0608
 print(f());

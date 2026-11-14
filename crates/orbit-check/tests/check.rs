@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use orbit_check::{Code, Config, DiskSources, Sources, SymbolKind, Workspace};
+use orbit_check::{Config, DiskSources, Sources, SymbolKind, Workspace, code};
 use orbit_lua_version::LuaVersion;
 
 fn root() -> PathBuf {
@@ -65,7 +65,7 @@ fn check_dir_with(
             .into_owned();
         for d in diags {
             let (line, _) = ws.line_col(file, d.span.start);
-            found.insert((name.clone(), line, d.code.as_str().to_string()));
+            found.insert((name.clone(), line, d.code.to_string()));
         }
     }
     (ws, found)
@@ -125,7 +125,7 @@ fn repository_programs_check() {
     // The front end's sample programs. `proposal.orb` is the design document's examples one
     // after another, parsed but never run: it opts out of checking with
     // `//! orbit-check: off`, which leaves the one thing that stops it compiling.
-    let proposal: BTreeSet<_> = [("proposal.orb".to_string(), 47, "T0003".to_string())].into();
+    let proposal: BTreeSet<_> = [("proposal.orb".to_string(), 47, "T0102".to_string())].into();
     let (_, found) = check_dir(&root().join("crates/orbit-orb-syntax/tests/programs"));
     assert_eq!(found, proposal, "findings in the front end's programs");
     let (_, found) = check_dir(&root().join("bench/orb"));
@@ -146,7 +146,7 @@ fn repository_programs_check() {
 
 /// The unused-name lints, which tests that bind values only to look at them leave out.
 fn is_unused_lint(d: &orbit_check::Diagnostic) -> bool {
-    matches!(d.code, Code::UnusedLocal | Code::UnusedImport)
+    matches!(d.code, code::UNUSED_LOCAL | code::UNUSED_IMPORT)
 }
 
 /// What `file` reports apart from the unused-name lints.
@@ -292,7 +292,7 @@ fn editing_a_dependency_rechecks_its_users() {
     let codes: Vec<_> = ws
         .diagnostics(app)
         .iter()
-        .map(|d| d.code.as_str())
+        .map(|d| code_name(d.code))
         .collect();
     // `helper` is gone from the `use` list and from `lib::helper`; `P::new` too.
     assert_eq!(codes, ["T0103", "T0104", "T0103"]);
@@ -310,7 +310,7 @@ fn syntax_error_keeps_the_rest_of_the_module() {
         .diagnostics(lib)
         .iter()
         .filter(|d| !is_unused_lint(d))
-        .map(|d| d.code.as_str())
+        .map(|d| code_name(d.code))
         .collect();
     // The broken item is reported, and the code after it is still checked.
     assert_eq!(codes, ["T0001", "T0201"]);
@@ -543,6 +543,7 @@ fn cast_errors_match_the_compiler() {
         let src = format!("extern y; {src}");
         let compiler = orbit_orb_syntax::to_hir("t", src.as_bytes(), &Default::default())
             .expect_err("the compiler rejects the cast")
+            .into_data()
             .message;
         let mut ws = Workspace::new(
             Config {
@@ -556,10 +557,15 @@ fn cast_errors_match_the_compiler() {
             .diagnostics(file)
             .iter()
             .filter(|d| !is_unused_lint(d))
-            .map(|d| (d.code.as_str(), d.message.clone()))
+            .map(|d| (code_name(d.code), d.message.clone()))
             .collect();
         assert_eq!(checker, [("T0210", compiler)], "{src}");
     }
+}
+
+/// A code as the tests write it (`"T0201"`).
+fn code_name(code: orbit_check::Code) -> &'static str {
+    Box::leak(code.to_string().into_boxed_str())
 }
 
 /// What one module reports as `(line, code, message)`, checked alone.
@@ -579,7 +585,7 @@ fn diagnostics_of(src: &str, strict: bool) -> Vec<(u32, &'static str, String)> {
         .map(|d| {
             (
                 ws.line_col(f, d.span.start).0,
-                d.code.as_str(),
+                code_name(d.code),
                 d.message.clone(),
             )
         })
@@ -725,15 +731,15 @@ fn compile_errors_cannot_be_hidden() {
     assert_eq!(codes("print(zzz);\n"), [(1, "T0101")]);
     assert_eq!(
         codes("print(zzz); // orbit-check: ignore\n"),
-        [(1, "T0003")]
+        [(1, "T0101")]
     );
     assert_eq!(
         codes("let x = 1;\nx = 2; // orbit-check: ignore\nprint(x);\n"),
-        [(2, "T0003")]
+        [(2, "T0111")]
     );
     assert_eq!(
         codes("//! orbit-check: off\nlet s: string = 3;\nbreak;\nprint(zzz);\n"),
-        [(3, "T0003")]
+        [(3, "T0601")]
     );
     // A syntax error leaves nodes lowering can't use, so only the syntax error is reported.
     assert_eq!(codes("print(1 +);\nbreak;\n"), [(1, "T0001")]);
@@ -744,4 +750,17 @@ fn compile_errors_cannot_be_hidden() {
         b"pub fn f(n: int) -> int;\n".to_vec(),
     );
     assert_eq!(ws.diagnostics(stub), []);
+}
+
+/// The design document's table lists every code, and nothing that isn't one.
+#[test]
+fn every_code_is_documented() {
+    let doc = std::fs::read_to_string(root().join("docs/design/orbit-check/api.md")).unwrap();
+    let listed: Vec<String> = doc
+        .lines()
+        .filter_map(|l| l.strip_prefix("| T"))
+        .map(|l| format!("T{}", &l[..4]))
+        .collect();
+    let all: Vec<String> = code::all().iter().map(|c| c.to_string()).collect();
+    assert_eq!(listed, all);
 }

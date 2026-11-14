@@ -11,6 +11,7 @@ use orbit_hir::{CastKind, ExprId, Span, StmtId};
 
 use super::{ItemTag, LResult, Lowerer, Resolved};
 use crate::ast::{self, ExprKind as K, TypeKind};
+use crate::code;
 
 /// What a single (non-union) cast target is.
 enum Target {
@@ -178,7 +179,7 @@ impl Lowerer {
                             "`as` can't use the type alias `{}`; name the type it stands for",
                             self.text(first.sym)
                         );
-                        return Err(self.error(ty.span, msg));
+                        return Err(self.error(ty.span, code::UNCHECKABLE_CAST, msg));
                     }
                     // A struct or enum of this module may shadow a built-in name.
                     let local_type = matches!(
@@ -235,12 +236,12 @@ impl Lowerer {
         Ok(Target::Named(e))
     }
 
-    fn uncheckable(&self, ty: &ast::Type) -> crate::diag::Diagnostic {
+    fn uncheckable(&self, ty: &ast::Type) -> orbit_hir::Diagnostic {
         let msg = format!(
             "`as` can't check `{}` while the program runs; give the value a type annotation instead",
             type_text(self, ty)
         );
-        self.error(ty.span, msg)
+        self.error(ty.span, code::UNCHECKABLE_CAST, msg)
     }
 
     /// `sym` names a type alias declared in an enclosing block.
