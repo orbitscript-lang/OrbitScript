@@ -84,7 +84,6 @@ fn errors_inside_close_handlers_leave_the_traceback_alone() {
 /// Nor have errors that leave through a call a native made and waited for,
 /// as host functions do.
 #[test]
-#[ignore = "the nested call's error takes the waiting traceback"]
 fn errors_through_native_calls_inside_close_handlers_leave_the_traceback_alone() {
     let tb = traceback(&format!(
         "{TBC}local function fails() local x = nil; return x.z end
