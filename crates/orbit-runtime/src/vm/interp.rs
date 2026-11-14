@@ -188,7 +188,8 @@ pub(crate) enum Flow {
     /// Returned into the boundary frame the run started from.
     Done,
     /// A coroutine switch replaced the running stack: reload, and don't
-    /// trust anything the loop knew about the frame.
+    /// take the frame on top for the one that was running, whatever its
+    /// depth.
     Switched,
 }
 
@@ -199,17 +200,11 @@ impl Vm {
         self.with_thread_locale(|vm| {
             let flow = match vm.call_value(func, nargs, MULTI) {
                 Ok(f) => f,
-                Err(x) => {
-                    let t = vm.thrown(x);
-                    vm.unwind(t)?
-                }
+                Err(x) => vm.settle(x)?,
             };
             match flow {
                 Flow::Done => Ok(()),
-                Flow::Reload | Flow::Switched => {
-                    vm.rt.switched = false;
-                    vm.run()
-                }
+                Flow::Reload | Flow::Switched => vm.run(),
             }
         })
     }
@@ -724,10 +719,20 @@ impl Vm {
         }
     }
 
+    /// Raise `x` on the running stack: resume whatever catches it, or
+    /// return the error once it has left the run.
+    pub(crate) fn settle(&mut self, x: Exc) -> Result<Flow, LuaError> {
+        if let Exc::Left(e) = x {
+            return Err(e);
+        }
+        let t = self.thrown(x);
+        self.unwind(t)
+    }
+
     /// [`Vm::thrown`]'s error alone, for a caller that hands it to a native.
     pub(crate) fn make_error(&mut self, x: Exc) -> LuaError {
         match x {
-            Exc::Lua(e) | Exc::Handled(e) => e,
+            Exc::Lua(e) | Exc::Handled(e) | Exc::Left(e) => e,
             Exc::ErrErr => LuaError::new(self.new_str(ERRERR)),
             Exc::Plain(m) => LuaError::new(self.new_str(m.as_bytes())),
             Exc::NoMemory => LuaError::new(self.new_str(NoMemory::MESSAGE.as_bytes())),
@@ -804,7 +809,11 @@ impl Vm {
         // An error raised while this one unwinds takes its place.
         macro_rules! replaced_by {
             ($x:expr) => {{
-                let t = self.thrown($x);
+                let t = match $x {
+                    // It unwound on its own, after a switch, out of the run.
+                    Exc::Left(e) => return Err(e),
+                    x => self.thrown(x),
+                };
                 e = t.error;
                 stage = t.stage;
             }};
@@ -905,7 +914,7 @@ impl Vm {
                     } else {
                         Err(e.value)
                     };
-                    match self.co_finished(outcome) {
+                    match self.co_finish(outcome) {
                         Ok(flow) => return Ok(flow),
                         Err(x) => replaced_by!(x),
                     }
