@@ -345,24 +345,26 @@ fn arguments_are_bytes() {
     use std::os::unix::ffi::OsStrExt;
     let dir = std::env::temp_dir().join(format!("orbit-args-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let script = dir.join(OsStr::from_bytes(b"s\xff.lua"));
-    std::fs::write(
-        &script,
-        "print(#arg[0] - #arg[0]:gsub('^.*/', ''), arg[0]:match('[^/]*$') == 's\\xff.lua', \
-         arg[1] == '\\xff\\xfe', select('#', ...), (...) == '\\xff\\xfe', x == '\\xfa')",
-    )
-    .unwrap();
+    let code = "io.write(arg[0]:match('[^/]*$'), '\\t', tostring(arg[1] == '\\xff\\xfe'), '\\t', \
+                select('#', ...), '\\t', tostring((...) == '\\xff\\xfe'), '\\t', tostring(x == '\\xfa'), '\\n')";
+    // Some file systems (APFS) refuse names that are not UTF-8.
+    let mut name: &[u8] = b"s\xff.lua";
+    if std::fs::write(dir.join(OsStr::from_bytes(name)), code).is_err() {
+        name = b"s.lua";
+        std::fs::write(dir.join(OsStr::from_bytes(name)), code).unwrap();
+    }
     let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
         .arg("-e")
         .arg(OsStr::from_bytes(b"x='\xfa'"))
-        .arg(&script)
+        .arg(dir.join(OsStr::from_bytes(name)))
         .arg(OsStr::from_bytes(b"\xff\xfe"))
         .output()
         .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(o.status.success(), "{}", err(&o));
-    let o = out(&o);
-    assert!(o.ends_with("\ttrue\ttrue\t1\ttrue\ttrue\n"), "{o}");
+    let mut expected = name.to_vec();
+    expected.extend_from_slice(b"\ttrue\t1\ttrue\ttrue\n");
+    assert_eq!(o.stdout, expected, "{}", out(&o));
 
     // An unknown option is reported with its bytes.
     let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
