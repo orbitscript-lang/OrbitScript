@@ -12,7 +12,7 @@ mod lower;
 mod parser;
 pub mod token;
 
-pub use lower::{lower, lower_collecting};
+pub use lower::{lower, lower_collecting, lower_observed, observe};
 pub use orbit_hir::{Code, Diagnostic, DiagnosticKind, Severity};
 pub use parser::{ParseOptions, parse, parse_recovering, parse_with};
 

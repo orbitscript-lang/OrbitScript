@@ -104,6 +104,39 @@ Each rule reports with `self.report(span, code, message)?`, and the lines after 
 
 `lower_collecting` reads the tree and copies its string pool and line table, since the checker goes on using all three. Lowering reads some nodes twice (a pattern for its test and again for its bindings), so the collector drops a second error with the same code and span.
 
+The compiler drops some code unread: the arms of a `match` after one that always matches, and the alternatives of a `|` pattern after one that does. A collecting walk reads them too, so it reports their errors, which the compiler never meets. That is the one way a module the compiler accepts can have errors here.
+
+### Telling a tool about the names
+
+Lowering is the one place that knows the scoping rules: where a scope opens, when a name comes into it, what a use refers to. A checker or an editor needs all of that, and gets it from the walk itself instead of following the rules a second time. The second type a mode names is an **observer** (`lower/observe.rs`, the public `Observer` trait), and lowering reports each step to it:
+
+```mermaid
+sequenceDiagram
+    participant L as lowering
+    participant O as observer
+    L->>O: scope_opened(extent)
+    L->>O: item_declared(item)
+    O-->>L: handle for the item
+    L->>O: local(name, how it is bound)
+    O-->>L: handle for the local
+    L->>O: reference(span, handle)
+    L->>O: member(handle of `a`, `b`) for `a::b`
+    O-->>L: handle for what `a::b` names
+    L->>O: ty(annotation, lowering's scopes)
+    L->>O: scope_closed()
+```
+
+- **Handles.** The observer answers each definition with a handle of its own type (`Observer::Sym`). Lowering keeps it beside the binding in its scopes and hands it back with every reference, so the observer never looks a name up, and can't disagree with the compiler about what a name refers to.
+- **Syntax, not HIR.** A definition is reported with the syntax node that made it (the `Item`, the `Param`, a `let`'s annotation and value), because that is what a type checker reads. This is why lowering borrows the tree for the tree's whole lifetime (`'a` on `Lowerer`).
+- **Questions go the other way through the same trait.** What a prelude name is, and what `module::item` or `Type::Variant` names, only the tool knows, so lowering asks (`prelude`, `member`) and passes the answer on as it does any handle.
+- **Types.** Lowering reads no type annotation except the target of `as`, so it hands each one over whole (`ty`), with a view of its scopes (`TypeNames`) for the names in it. In a type, a generic parameter comes first, then in each block outwards whichever of its names and `type` aliases was bound last.
+- **One reference per use.** Where lowering reads a name only to ask what it is (the kind of a path in a pattern, a `const`'s value before it is lowered) it resolves it without telling the observer (`resolve`); where the name is used it tells it (`resolve_observed`).
+- **A stub** (`fn f(x: int) -> int;`) is a compile error, and a collecting walk then reads its signature all the same, so the observer sees the declarations of a stub file.
+
+`lower_observed(&ast, observer)` is the entry: a collecting walk that gives the errors and the observer back. `lower_collecting` is the same walk with the observer that does nothing.
+
+The compiler's observer is `Nothing`: its handle is `()`, its methods are empty and inlined away, and `Observer::ACTIVE` is `false`, a constant that removes the few places where lowering does work only for the observer. Like recovery, this is held to costing the compiler nothing by measuring it.
+
 ### Names
 
 - A name resolves to the innermost binding, then to an item later in an enclosing block, then to the prelude: Lua 5.5's base functions and standard modules, plus `panic` (`error`). The prelude is read-only. Any other global needs `extern NAME;` (read and write) or `global NAME = value;` (a `Define`). There are no implicit globals; a typo is a compile error that suggests `extern`.
@@ -165,5 +198,7 @@ Sharing more code between the two front ends would save little (about 5 to 10 Ki
 `tests/parse.rs` checks tree shapes as S-expressions, every example in the language design (`tests/programs/proposal.orb`), error messages, and a deterministic mutation run that must never panic.
 
 `tests/collect.rs` holds the two modes of lowering together: over every program and checker case in the repository, collecting gives no errors exactly when the compiler accepts the module, its first error is the compiler's, and the tree is untouched. It also checks that a module with several mistakes gets one error for each.
+
+`tests/observe.rs` checks what an observer is told: the exact sequence for a few small programs, and over every program, stub and checker case that scopes nest, that every handle lowering hands back is one a definition was given, and that observing changes no error.
 
 `tests/run.rs` lowers programs, compiles them and runs them on the VM, checking what they print: each construct above, a runnable tour (`tests/programs/tour.orb`), the exports table seen from Lua, and compile errors. Its mutation run lowers mutants of the tour and checks that every one that lowers passes `orbit_hir::verify` and never panics the compiler.

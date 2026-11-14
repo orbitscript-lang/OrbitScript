@@ -95,6 +95,7 @@ enum Res {
 }
 
 /// What resolution needs from the rest of the workspace.
+#[derive(Clone, Copy)]
 pub(crate) struct Deps<'a> {
     /// `use` paths (`a.b`) to the file found for them.
     pub modules: &'a HashMap<String, FileId>,
@@ -250,13 +251,25 @@ impl<'a> Resolver<'a> {
 
     // ---- names --------------------------------------------------------------------------------
 
+    /// Whether `res` is a type alias or a type parameter, which isn't a value: a name used as
+    /// one doesn't refer to it.
+    fn only_a_type(&self, res: Res) -> bool {
+        let Res::Sym(id) = res else { return false };
+        self.symbol(id)
+            .is_some_and(|s| matches!(s.kind, SymbolKind::TypeAlias | SymbolKind::TypeParam))
+    }
+
     fn lookup(&mut self, name: ast::Name) -> Res {
         for si in (0..self.scopes.len()).rev() {
             let scope = &self.scopes[si];
-            if let Some(&(_, res)) = scope.entries.iter().rev().find(|e| e.0 == name.sym) {
+            let value = |res: Res| !self.only_a_type(res);
+            let entries = scope.entries.iter().rev();
+            if let Some(&(_, res)) = entries.filter(|e| value(e.1)).find(|e| e.0 == name.sym) {
                 return res;
             }
-            if let Some(&(_, index)) = scope.pending.iter().find(|p| p.0 == name.sym) {
+            let mut pending = scope.pending.iter();
+            let pending = pending.find(|p| p.0 == name.sym && value(Res::Sym(self.id(p.1))));
+            if let Some(&(_, index)) = pending {
                 if scope.depth == self.depth {
                     let text = self.text(name.sym);
                     self.error(
