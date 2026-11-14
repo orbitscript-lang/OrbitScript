@@ -9,9 +9,10 @@
 use orbit_hir as hir;
 use orbit_hir::{CastKind, ExprId, Span, StmtId};
 
-use super::mode::{Continue, Mode};
+use super::mode::Mode;
 use super::{LResult, Lowerer};
 use crate::ast::{self, ExprKind as K, TypeKind};
+use crate::cast::{self, NameKind, strip_optional};
 use crate::code;
 
 /// What a single (non-union) cast target is.
@@ -122,7 +123,7 @@ impl<'a, M: Mode<'a>> Lowerer<'a, M> {
             span,
         );
         // t = fail(t): raises, naming the union, or gives nil for `as?`.
-        let text = type_text(self, whole);
+        let text = cast::type_text(whole, &self.chunk.strings);
         let text = self.intern(text.as_bytes());
         let name = self.str_expr(text, span);
         let v = self.local_expr(t, span);
@@ -165,49 +166,28 @@ impl<'a, M: Mode<'a>> Lowerer<'a, M> {
         let Some(kind) = ty.kind.as_deref() else {
             unreachable!("`as` targets always have a tree")
         };
-        let path = match kind {
-            TypeKind::Nil => return Ok(Target::Scalar(CastKind::Nil)),
-            TypeKind::SelfType => ast::Expr {
-                kind: K::SelfType,
-                span: ty.span,
-            },
-            TypeKind::Path { segments, args } if args.is_empty() => {
+        let class = cast::target(kind, &self.chunk.strings, |name| {
+            if self.generics.iter().any(|g| g.0 == name.sym) {
+                NameKind::TypeParam
+            } else if self.is_alias(name.sym) {
+                NameKind::Alias
+            } else if self.names_type(name.sym) {
+                NameKind::Type
+            } else {
+                NameKind::Other
+            }
+        });
+        let path = match (class, kind) {
+            (Ok(cast::Target::Any), _) => return Ok(Target::Any),
+            (Ok(cast::Target::Scalar(s)), _) => return Ok(Target::Scalar(s.kind())),
+            (Err(why), _) => {
+                // After the error the cast checks nothing, as `as any`.
+                let msg = why.message(ty, &self.chunk.strings);
+                self.report(ty.span, code::UNCHECKABLE_CAST, msg)?;
+                return Ok(Target::Any);
+            }
+            (Ok(cast::Target::Named), TypeKind::Path { segments, .. }) => {
                 let first = segments[0];
-                if segments.len() == 1 {
-                    // After any of the errors here the cast checks nothing, as `as any`.
-                    if self.generics.iter().any(|g| g.0 == first.sym) {
-                        self.uncheckable(ty)?;
-                        return Ok(Target::Any);
-                    }
-                    if self.is_alias(first.sym) {
-                        let msg = format!(
-                            "`as` can't use the type alias `{}`; name the type it stands for",
-                            self.text(first.sym)
-                        );
-                        self.report(ty.span, code::UNCHECKABLE_CAST, msg)?;
-                        return Ok(Target::Any);
-                    }
-                    // A struct or enum of this module may shadow a built-in name.
-                    if !self.names_type(first.sym) {
-                        let scalar = match self.chunk.strings.get(first.sym) {
-                            b"int" => Some(Target::Scalar(CastKind::Int)),
-                            b"float" => Some(Target::Scalar(CastKind::Float)),
-                            b"number" => Some(Target::Scalar(CastKind::Number)),
-                            b"string" => Some(Target::Scalar(CastKind::String)),
-                            b"bool" => Some(Target::Scalar(CastKind::Bool)),
-                            b"any" => Some(Target::Any),
-                            // Built-in type names with no cast rule.
-                            b"table" | b"function" | b"thread" | b"userdata" => {
-                                self.uncheckable(ty)?;
-                                return Ok(Target::Any);
-                            }
-                            _ => None,
-                        };
-                        if let Some(t) = scalar {
-                            return Ok(t);
-                        }
-                    }
-                }
                 let mut e = ast::Expr {
                     kind: K::Name(first.sym),
                     span: first.span,
@@ -223,10 +203,10 @@ impl<'a, M: Mode<'a>> Lowerer<'a, M> {
                 }
                 e
             }
-            _ => {
-                self.uncheckable(ty)?;
-                return Ok(Target::Any);
-            }
+            (Ok(cast::Target::Named), _) => ast::Expr {
+                kind: K::SelfType,
+                span: ty.span,
+            },
         };
         // Reports a struct used as an enum, or a variant that doesn't exist.
         self.path_kind(&path)?;
@@ -255,141 +235,11 @@ impl<'a, M: Mode<'a>> Lowerer<'a, M> {
         Ok(self.resolved_expr(r, name.span))
     }
 
-    fn uncheckable(&mut self, ty: &'a ast::Type) -> LResult<Continue<'a, M>> {
-        let msg = format!(
-            "`as` can't check `{}` while the program runs; give the value a type annotation instead",
-            type_text(self, ty)
-        );
-        self.report(ty.span, code::UNCHECKABLE_CAST, msg)
-    }
-
     /// `sym` names a type alias declared in an enclosing block.
     fn is_alias(&self, sym: hir::StrId) -> bool {
         self.funcs
             .iter()
             .flat_map(|f| &f.scopes)
             .any(|s| s.aliases.iter().any(|a| a.name.sym == sym))
-    }
-}
-
-/// `T??` is `T` with `nil` allowed.
-fn strip_optional(mut ty: &ast::Type) -> (&ast::Type, bool) {
-    let mut nilable = false;
-    while let Some(TypeKind::Optional(inner)) = ty.kind.as_deref() {
-        ty = inner;
-        nilable = true;
-    }
-    (ty, nilable)
-}
-
-/// A type as messages write it: `[int]`, `Shape::Circle`, `int | string`.
-fn type_text<'a, M: Mode<'a>>(lx: &Lowerer<'a, M>, ty: &ast::Type) -> String {
-    let mut s = String::new();
-    write_type(lx, ty, &mut s);
-    s
-}
-
-fn write_type<'a, M: Mode<'a>>(lx: &Lowerer<'a, M>, ty: &ast::Type, s: &mut String) {
-    let list = |s: &mut String, items: &[ast::Type]| {
-        for (i, t) in items.iter().enumerate() {
-            if i > 0 {
-                s.push_str(", ");
-            }
-            write_type(lx, t, s);
-        }
-    };
-    let Some(kind) = ty.kind.as_deref() else {
-        s.push('?');
-        return;
-    };
-    match kind {
-        TypeKind::Path { segments, args } => {
-            for (i, seg) in segments.iter().enumerate() {
-                if i > 0 {
-                    s.push_str("::");
-                }
-                s.push_str(&lx.text(seg.sym));
-            }
-            if !args.is_empty() {
-                s.push('<');
-                list(s, args);
-                s.push('>');
-            }
-        }
-        TypeKind::Nil => s.push_str("nil"),
-        TypeKind::SelfType => s.push_str("Self"),
-        TypeKind::Optional(inner) => {
-            let group = matches!(
-                inner.kind.as_deref(),
-                Some(TypeKind::Union(_) | TypeKind::Fn { .. })
-            );
-            if group {
-                s.push('(');
-            }
-            write_type(lx, inner, s);
-            if group {
-                s.push(')');
-            }
-            s.push('?');
-        }
-        TypeKind::Union(members) => {
-            for (i, t) in members.iter().enumerate() {
-                if i > 0 {
-                    s.push_str(" | ");
-                }
-                write_type(lx, t, s);
-            }
-        }
-        TypeKind::Array(t) => {
-            s.push('[');
-            write_type(lx, t, s);
-            s.push(']');
-        }
-        TypeKind::Map { key, value } => {
-            s.push_str("#{[");
-            write_type(lx, key, s);
-            s.push_str("]: ");
-            write_type(lx, value, s);
-            s.push('}');
-        }
-        TypeKind::Record(fields) => {
-            s.push_str("#{");
-            for (i, f) in fields.iter().enumerate() {
-                s.push_str(if i > 0 { ", " } else { " " });
-                s.push_str(&lx.text(f.name.sym));
-                s.push_str(": ");
-                write_type(lx, &f.ty, s);
-            }
-            s.push_str(if fields.is_empty() { "}" } else { " }" });
-        }
-        TypeKind::Tuple(items) => {
-            s.push('(');
-            list(s, items);
-            if items.len() == 1 {
-                s.push(',');
-            }
-            s.push(')');
-        }
-        TypeKind::Fn { params, rest, ret } => {
-            s.push_str("fn(");
-            list(s, params);
-            if let Some(r) = rest {
-                if !params.is_empty() {
-                    s.push_str(", ");
-                }
-                s.push_str("...");
-                write_type(lx, r, s);
-            }
-            s.push(')');
-            if let Some(r) = ret {
-                s.push_str(" -> ");
-                write_type(lx, r, s);
-            }
-        }
-        TypeKind::Rest(t) => {
-            s.push_str("...");
-            write_type(lx, t, s);
-        }
-        TypeKind::Error => s.push('?'),
     }
 }

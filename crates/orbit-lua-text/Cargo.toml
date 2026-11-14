@@ -1,0 +1,12 @@
+[package]
+name = "orbit-lua-text"
+description = "How Lua writes numbers and code points as text: numeral conversion and extended UTF-8, shared by the Lua front end and the runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

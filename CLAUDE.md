@@ -13,6 +13,7 @@
 | Crate | Purpose |
 |---|---|
 | `orbit-lua-syntax` | Lua 5.5 lexer, parser, AST |
+| `orbit-lua-text` | How Lua writes numbers and code points as text: numeral conversion and extended UTF-8, shared by the Lua lexer and the runtime (no dependencies) |
 | `orbit-orb-syntax` | OrbitScript lexer, parser, AST, lowering to HIR (always built in, no feature) |
 | `orbit-virtmem` | Low-level OS virtual address reservation and page commit buffer (`VmBuffer`) |
 | `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates |

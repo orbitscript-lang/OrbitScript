@@ -4,6 +4,7 @@
 
 use crate::object::{Gc, LuaStr, Value};
 use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_lua_text::push_utf8;
 use orbit_lua_version::LUA;
 
 type R = Result<NativeReturn, LuaError>;
@@ -61,30 +62,6 @@ pub(crate) fn decode(s: &[u8], i: usize, strict: bool) -> Option<(u32, usize)> {
     Some((code, n))
 }
 
-/// Append the (extended) UTF-8 encoding of `c` (at most `0x7FFFFFFF`).
-pub(crate) fn encode(out: &mut Vec<u8>, c: u32) {
-    if c < 0x80 {
-        out.push(c as u8);
-        return;
-    }
-    let mut tail = [0u8; 6];
-    let mut n = 0;
-    let mut c = c;
-    // Largest value the first byte can still hold.
-    let mut first_max = 0x3f;
-    loop {
-        tail[n] = 0x80 | (c & 0x3f) as u8;
-        n += 1;
-        c >>= 6;
-        first_max >>= 1;
-        if c <= first_max {
-            break;
-        }
-    }
-    out.push((!first_max << 1) as u8 | c as u8);
-    out.extend(tail[..n].iter().rev());
-}
-
 /// A relative position: negative counts from the end, too negative is 0.
 fn relative(pos: i64, len: usize) -> i64 {
     if pos >= 0 {
@@ -103,7 +80,7 @@ fn char(ctx: &mut NativeCtx<'_>) -> R {
         if !(0..=MAX_LAX as i64).contains(&c) {
             return Err(ctx.arg_error(i, "value out of range"));
         }
-        encode(&mut out, c as u32);
+        push_utf8(&mut out, c as u32);
     }
     let r = ctx.new_str_owned(out);
     ctx.ret([r])
@@ -291,7 +268,7 @@ mod tests {
             0, 0x7f, 0x80, 0x7ff, 0x800, 0xffff, 0x10000, 0x10ffff, 0x200000, 0x7fffffff,
         ] {
             let mut out = Vec::new();
-            encode(&mut out, c);
+            push_utf8(&mut out, c);
             assert_eq!(decode(&out, 0, false), Some((c, out.len())), "{c:#x}");
         }
     }

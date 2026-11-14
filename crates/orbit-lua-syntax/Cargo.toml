@@ -9,6 +9,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# Numerals and extended UTF-8, read the same way in source and by the runtime.
+orbit-lua-text = { path = "../orbit-lua-text" }
 orbit-hir = { path = "../orbit-hir" }
 orbit-lua-version = { path = "../orbit-lua-version" }
 

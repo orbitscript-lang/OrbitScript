@@ -6,6 +6,7 @@
 //! works on plain owned data and never touches the VM or the GC heap.
 
 pub mod ast;
+pub mod cast;
 pub mod code;
 pub mod lexer;
 mod lower;

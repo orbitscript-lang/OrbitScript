@@ -1,7 +1,8 @@
 // The prelude: the names every OrbitScript module can read without declaring them. These are
 // Lua 5.5's base library and standard modules, plus `panic`, which the front end compiles as
-// `error`. Bundled with orbit-check; tests/stubs.rs checks them against the runtime and the
-// front end's own list.
+// `error`. Bundled with orbit-check; tests/stubs.rs checks them against the runtime, and the
+// front end's build reads its list of these names from this file, so a name added here is one
+// lowering accepts.
 //
 // A body-less function with no `->` has results the checker doesn't know: each is `any`.
 // Functions whose result count depends on the arguments say what they can of it with `...T`:

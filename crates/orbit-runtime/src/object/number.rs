@@ -10,6 +10,8 @@ pub use orbit_bytecode::number::{
     ArithError, ArithOp, Number, float_arith, float_idiv, float_mod, float_to_int, int_idiv,
     int_mod,
 };
+use orbit_lua_text::Numeral;
+pub use orbit_lua_text::ldexp;
 
 /// `i == f` mathematically.
 #[inline]
@@ -84,225 +86,10 @@ pub fn str_to_number(s: &[u8]) -> Option<Value> {
         Some(b'+') => (false, &s[1..]),
         _ => (false, s),
     };
-    if body.len() >= 2 && body[0] == b'0' && (body[1] | 0x20) == b'x' {
-        return hex_number(neg, &body[2..]);
-    }
-    if !body.is_empty() && body.iter().all(u8::is_ascii_digit) {
-        // Accumulate the magnitude unsigned so `-9223372036854775808`
-        // (whose magnitude is one past `i64::MAX`) still reads as an integer.
-        let mut n: u64 = 0;
-        let mut overflow = false;
-        for &d in body {
-            match n
-                .checked_mul(10)
-                .and_then(|n| n.checked_add((d - b'0') as u64))
-            {
-                Some(v) => n = v,
-                None => {
-                    overflow = true;
-                    break;
-                }
-            }
-        }
-        let limit = if neg {
-            i64::MIN.unsigned_abs()
-        } else {
-            i64::MAX as u64
-        };
-        if !overflow && n <= limit {
-            return Some(Value::Int((n as i64).wrapping_mul(if neg {
-                -1
-            } else {
-                1
-            })));
-        }
-        // Too big for an integer: read it as a float below.
-    }
-    if !valid_decimal_float(body) {
-        return None;
-    }
-    let text = std::str::from_utf8(s).ok()?;
-    text.parse::<f64>().ok().map(Value::Float)
-}
-
-/// `digits [. digits] [e [sign] digits]`, at least one mantissa digit.
-fn valid_decimal_float(b: &[u8]) -> bool {
-    let mut i = 0;
-    let mut digits = 0;
-    while i < b.len() && b[i].is_ascii_digit() {
-        i += 1;
-        digits += 1;
-    }
-    if i < b.len() && b[i] == b'.' {
-        i += 1;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-            digits += 1;
-        }
-    }
-    if digits == 0 {
-        return false;
-    }
-    if i < b.len() && (b[i] | 0x20) == b'e' {
-        i += 1;
-        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
-            i += 1;
-        }
-        let exp_start = i;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i == exp_start {
-            return false;
-        }
-    }
-    i == b.len()
-}
-
-fn hex_number(neg: bool, b: &[u8]) -> Option<Value> {
-    let hex = |c: u8| (c as char).to_digit(16);
-    let mut i = 0;
-    let mut int: u64 = 0;
-    let mut mant: u64 = 0; // up to 15 significant hex digits, for floats
-    let mut exp: i64 = 0; // binary exponent adjustment for `mant`
-    let mut sig = 0;
-    let mut sticky = false; // a nonzero digit past the 15 kept in `mant`
-    let mut any = false;
-    let mut is_float = false;
-    let mut take = |d: u32, frac: bool, exp: &mut i64| {
-        if mant == 0 && d == 0 {
-            if frac {
-                *exp -= 4;
-            }
-            return;
-        }
-        if sig < 15 {
-            mant = mant * 16 + d as u64;
-            sig += 1;
-            if frac {
-                *exp -= 4;
-            }
-        } else {
-            sticky |= d != 0;
-            if !frac {
-                *exp += 4;
-            }
-        }
-    };
-    while i < b.len() {
-        let Some(d) = hex(b[i]) else { break };
-        int = int.wrapping_mul(16).wrapping_add(d as u64);
-        take(d, false, &mut exp);
-        any = true;
-        i += 1;
-    }
-    if i < b.len() && b[i] == b'.' {
-        is_float = true;
-        i += 1;
-        while i < b.len() {
-            let Some(d) = hex(b[i]) else { break };
-            take(d, true, &mut exp);
-            any = true;
-            i += 1;
-        }
-    }
-    if !any {
-        return None;
-    }
-    if i < b.len() && (b[i] | 0x20) == b'p' {
-        is_float = true;
-        i += 1;
-        let mut eneg = false;
-        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
-            eneg = b[i] == b'-';
-            i += 1;
-        }
-        let start = i;
-        let mut e: i64 = 0;
-        while i < b.len() && b[i].is_ascii_digit() {
-            e = (e * 10 + (b[i] - b'0') as i64).min(1 << 20);
-            i += 1;
-        }
-        if i == start {
-            return None;
-        }
-        exp += if eneg { -e } else { e };
-    }
-    if i != b.len() {
-        return None;
-    }
-    if is_float {
-        let f = round_to_f64(mant, exp, sticky);
-        Some(Value::Float(if neg { -f } else { f }))
-    } else {
-        let n = int as i64;
-        Some(Value::Int(if neg { n.wrapping_neg() } else { n }))
-    }
-}
-
-/// `mant * 2^exp` (plus less than one unit of `mant` when `sticky`) rounded to the nearest
-/// `f64`, ties to even, subnormals included. The Lua lexer converts hexadecimal float literals
-/// the same way; the two share test vectors, not code, because the front end doesn't depend
-/// on the runtime.
-fn round_to_f64(mant: u64, exp: i64, sticky: bool) -> f64 {
-    if mant == 0 {
-        return 0.0;
-    }
-    let bits = 64 - i64::from(mant.leading_zeros());
-    // The value lies in [2^(top-1), 2^top).
-    let top = exp + bits;
-    if top > 1024 {
-        return f64::INFINITY;
-    }
-    // Bits that fit: 53, fewer for subnormals (no f64 bit is worth less than 2^-1074).
-    let keep = 53.min(top + 1074);
-    if keep <= 0 {
-        // At most half the smallest subnormal; exactly half is a tie and rounds to 0.
-        let half = keep == 0 && mant.is_power_of_two() && !sticky;
-        return if keep == 0 && !half {
-            f64::from_bits(1)
-        } else {
-            0.0
-        };
-    }
-    let shift = bits - keep;
-    let (mut m, mut e) = (mant, exp);
-    if shift > 0 {
-        let dropped = mant & ((1u64 << shift) - 1);
-        let half = 1u64 << (shift - 1);
-        m = mant >> shift;
-        e += shift;
-        let above = dropped > half || (dropped == half && sticky);
-        if above || (dropped == half && !sticky && m & 1 == 1) {
-            m += 1;
-            if m >> keep != 0 && keep == 53 {
-                m >>= 1;
-                e += 1;
-            }
-        }
-    }
-    if e + 64 - i64::from(m.leading_zeros()) > 1024 {
-        return f64::INFINITY;
-    }
-    ldexp(m as f64, e)
-}
-
-/// `x * 2^n`, rounded once (C's `ldexp`).
-pub fn ldexp(mut x: f64, n: i64) -> f64 {
-    // Past 2200 every finite `x` overflows or underflows anyway.
-    let mut n = n.clamp(-2200, 2200) as i32;
-    let p = |k: i32| f64::from_bits(((k + 1023) as u64) << 52);
-    while n > 1023 {
-        x *= p(1023);
-        n -= 1023;
-    }
-    // Scale down in steps that stay normal until the last one, so a
-    // subnormal result is rounded only once.
-    while n < -1022 {
-        x *= p(-1022 + 53);
-        n += 1022 - 53;
-    }
-    x * p(n)
+    Some(match orbit_lua_text::numeral(neg, body)? {
+        Numeral::Int(i) => Value::Int(i),
+        Numeral::Float(f) => Value::Float(f),
+    })
 }
 
 /// Append a float formatted like C's `%.<prec>g`.
@@ -442,39 +229,14 @@ mod tests {
         }
     }
 
-    /// The same vectors as the Lua lexer's `hex_floats` test, from the reference `lua5.5`.
+    /// Hexadecimal floats through `tonumber`'s reading; `orbit_lua_text` has the table of values.
     #[test]
     fn hex_floats() {
         let cases: &[(&str, f64)] = &[
             ("0x1p4", 16.0),
-            ("0x.8", 0.5),
             ("0xA.8p1", 21.0),
-            ("0x1P-1", 0.5),
-            ("0x.1p4", 1.0),
-            ("0x10p-4", 1.0),
-            ("0x1.8", 1.5),
-            ("0x0.0p0", 0.0),
-            ("0x0p99999", 0.0),
             ("0x1p-1074", 4.94065645841247e-324),
-            ("0x1p-1075", 0.0),
-            ("0x1.8p-1075", 4.94065645841247e-324),
-            ("0x1p-1076", 0.0),
-            ("0x3p-1076", 4.94065645841247e-324),
-            ("0x1p-1022", 2.2250738585072014e-308),
-            ("0x.fffffffffffffp-1022", 2.225073858507201e-308),
-            ("0x1p1023", 8.98846567431158e307),
-            ("0x1.fffffffffffffp1023", f64::MAX),
             ("0x1.fffffffffffff8p1023", f64::INFINITY),
-            ("0x1p1024", f64::INFINITY),
-            ("0x123456789abcdef123p0", 3.358127276707303e20),
-            ("0x1.fffffffffffff8p0", 2.0),
-            ("0x1.fffffffffffff7p0", 1.9999999999999998),
-            ("0x1.00000000000008p0", 1.0),
-            ("0x1.000000000000080000001p0", 1.0000000000000002),
-            ("0x1.00000000000018p0", 1.0000000000000004),
-            ("0x0000000000000000000001p0", 1.0),
-            ("0x.00000000000000000000001p92", 1.0),
-            ("0xffffffffffffffffffffp0", 1.2089258196146292e24),
         ];
         for &(src, want) in cases {
             match str_to_number(src.as_bytes()) {
