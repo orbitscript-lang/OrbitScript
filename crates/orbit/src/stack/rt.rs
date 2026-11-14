@@ -647,6 +647,21 @@ impl<'s> Stack<'s> {
     /// The string at `idx`, converting a number in place (`lua_tolstring`);
     /// `None` for other types.
     pub fn to_str(&mut self, idx: i32) -> StackResult<Option<OrbitStr<'_>>> {
+        Ok(self.converted_str(idx)?.map(|s| self.ctx.bytes(s).into()))
+    }
+
+    /// [`Stack::to_str`] for C (`lua_tolstring`): the address of a
+    /// NUL-terminated copy of the string, and its length in bytes. The copy
+    /// belongs to the string: it is made once, never changes, and stays at
+    /// that address for as long as the string is alive.
+    pub fn to_c_str(&mut self, idx: i32) -> StackResult<Option<(*const u8, usize)>> {
+        Ok(self
+            .converted_str(idx)?
+            .map(|s| (self.ctx.c_string(s), self.ctx.bytes(s).len())))
+    }
+
+    /// The string at `idx`, converting a number in place.
+    fn converted_str(&mut self, idx: i32) -> StackResult<Option<Gc<LuaStr>>> {
         let s = match self.get(idx) {
             RawValue::Str(s) => s,
             v @ (RawValue::Int(_) | RawValue::Float(_)) => {
@@ -662,7 +677,7 @@ impl<'s> Stack<'s> {
             }
             _ => return Ok(None),
         };
-        Ok(Some(self.ctx.bytes(s).into()))
+        Ok(Some(s))
     }
 
     /// The string at `idx`, without converting numbers.

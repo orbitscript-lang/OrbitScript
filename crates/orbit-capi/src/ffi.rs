@@ -19,7 +19,7 @@ use orbit::stack::{
 };
 use orbit::{OrbitStr, OrbitString, ThreadStatus};
 
-use crate::api::{self, CStrCopy, Res, Shared, abi};
+use crate::api::{self, Res, Shared, abi};
 
 /// `struct lua_State` in `csrc/capi.c`.
 #[repr(C)]
@@ -643,83 +643,50 @@ macro_rules! entry {
     }};
 }
 
-/// Between calls in a state C created: let the collector run, and drop
-/// string copies no string on the host's stack needs any more
-/// ([`api::State::prune`]).
+/// Between calls in a state C created: let the collector run.
 fn host_prune(b: &Bridge, c: &mut Stack<'static>) {
     let host = b.host.get();
     if host.is_null() || !std::ptr::eq(b.ctx.get(), host) {
         return;
     }
     c.safepoint();
-    {
-        let st = b.st.borrow();
-        if st.strs.len() < 2 * st.kept + 16 {
-            return;
-        }
-    }
-    // Strings on the stacks of the threads C has seen count too.
-    let threads: Vec<(ThreadRef, Option<usize>)> = b
-        .threads
-        .borrow()
-        .values()
-        .filter(|e| {
-            c.thread_is_live(e.thread) && c.thread_status(e.thread) != ThreadStatus::Running
-        })
-        .map(|e| (e.thread, e.base))
-        .collect();
-    let mut texts: Vec<Vec<u8>> = Vec::new();
-    let mut collect = |c: &mut Stack<'_>| {
-        for i in 1..=c.top() {
-            if let Some(s) = c.string_at(i) {
-                texts.push(s.to_vec());
-            }
-        }
-    };
-    collect(c);
-    for (t, base) in threads {
-        c.on_thread(t, base, &mut collect);
-    }
-    let texts: Vec<&[u8]> = texts.iter().map(Vec::as_slice).collect();
-    b.st.borrow_mut().prune(&texts);
 }
 
-/// A NUL-terminated copy of `bytes` that stays valid until the running C
-/// function returns.
+/// A NUL-terminated copy of a name or of source text (not a string value:
+/// see [`string_value`]) that stays valid until the running C function
+/// returns.
 fn hand_out(st: &Shared, bytes: &[u8], len: *mut usize) -> *const c_char {
-    hand_out_copy(st, bytes, len, false)
+    let mut copy = Vec::with_capacity(bytes.len() + 1);
+    copy.extend_from_slice(bytes);
+    copy.push(0);
+    let copy = copy.into_boxed_slice();
+    let p = copy.as_ptr() as *const c_char;
+    st.borrow_mut().strs.push(copy);
+    set_len(len, bytes.len());
+    p
 }
 
-/// [`hand_out`] for a string value C asked for (`lua_tolstring`): between
-/// calls in a state C created, the copy lives while an equal string is on
-/// the host's stack, and asking again for an equal string reuses a recent
-/// copy.
-fn hand_out_value(st: &Shared, bytes: &[u8], len: *mut usize) -> *const c_char {
-    hand_out_copy(st, bytes, len, true)
-}
-
-fn hand_out_copy(st: &Shared, bytes: &[u8], len: *mut usize, value: bool) -> *const c_char {
-    let mut state = st.borrow_mut();
-    let recent = state.strs.iter().rev().take(8).find(|s| {
-        s.value && value && s.bytes.len() == bytes.len() + 1 && &s.bytes[..bytes.len()] == bytes
-    });
-    let p = match recent {
-        Some(s) => s.bytes.as_ptr() as *const c_char,
-        None => {
-            let mut copy = Vec::with_capacity(bytes.len() + 1);
-            copy.extend_from_slice(bytes);
-            copy.push(0);
-            let copy = copy.into_boxed_slice();
-            let p = copy.as_ptr() as *const c_char;
-            state.strs.push(CStrCopy { bytes: copy, value });
-            p
+/// The string at `idx` (a number is converted in place) as C sees it: the
+/// runtime's NUL-terminated copy, valid for as long as the string is alive
+/// anywhere, as the Lua manual promises. Null for other types.
+fn string_value(c: &mut Stack<'_>, idx: c_int, len: *mut usize) -> Res<*const c_char> {
+    Ok(match c.to_c_str(idx)? {
+        Some((p, n)) => {
+            set_len(len, n);
+            p as *const c_char
         }
-    };
+        None => {
+            set_len(len, 0);
+            std::ptr::null()
+        }
+    })
+}
+
+fn set_len(len: *mut usize, n: usize) {
     if !len.is_null() {
         // SAFETY: C passed a pointer to a size_t, or NULL.
-        unsafe { *len = bytes.len() };
+        unsafe { *len = n };
     }
-    p
 }
 
 /// # Safety
@@ -1018,18 +985,7 @@ extern "C" fn orbit_r_toboolean(l: *mut LState, idx: c_int) -> c_int {
 }
 
 extern "C" fn orbit_r_tolstring(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
-    entry!(l, std::ptr::null(), |b, c| {
-        Ok(match c.to_str(idx)? {
-            Some(s) => hand_out_value(&b.st, &s, len),
-            None => {
-                if !len.is_null() {
-                    // SAFETY: C passed a pointer to a size_t.
-                    unsafe { *len = 0 };
-                }
-                std::ptr::null()
-            }
-        })
-    })
+    entry!(l, std::ptr::null(), |_b, c| string_value(c, idx, len))
 }
 
 extern "C" fn orbit_r_rawlen(l: *mut LState, idx: c_int) -> u64 {
@@ -1093,8 +1049,8 @@ extern "C" fn orbit_r_pushlstring(l: *mut LState, s: *const c_char, len: usize) 
             // SAFETY: C passed `len` readable bytes at `s`.
             unsafe { std::slice::from_raw_parts(s as *const u8, len) }
         };
-        let st = c.push_bytes(bytes);
-        Ok(hand_out_value(&b.st, &st, std::ptr::null_mut()))
+        c.push_bytes(bytes);
+        string_value(c, -1, std::ptr::null_mut())
     })
 }
 
@@ -1324,9 +1280,9 @@ extern "C" fn orbit_r_where(l: *mut LState, lvl: c_int) {
 }
 
 extern "C" fn orbit_r_tolstringmeta(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
-    entry!(l, std::ptr::null(), |b, c| {
-        let s = c.to_display_string(idx)?;
-        Ok(hand_out_value(&b.st, &s, len))
+    entry!(l, std::ptr::null(), |_b, c| {
+        c.to_display_string(idx)?;
+        string_value(c, -1, len)
     })
 }
 

@@ -72,6 +72,15 @@ pub struct ThreadAbi {
     pub slot: u32,
 }
 
+/// A NUL-terminated copy of a string for C: its address and length.
+#[stabby::stabby]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CStrAbi {
+    pub addr: usize,
+    pub len: u64,
+}
+
 /// Two words: a native's data, or the outcome of a resume here.
 #[stabby::stabby]
 #[repr(C)]
@@ -295,6 +304,8 @@ pub trait StackAbi {
     extern "C" fn to_boolean(&self, idx: i32) -> bool;
     extern "C" fn to_str<'a>(&'a mut self, idx: i32) -> Res<SOption<Slice<'a, u8>>>;
     extern "C" fn string_at<'a>(&'a self, idx: i32) -> SOption<Slice<'a, u8>>;
+    /// [`crate::stack::Stack::to_c_str`].
+    extern "C" fn to_c_str(&mut self, idx: i32) -> Res<SOption<CStrAbi>>;
     extern "C" fn number_text(&self, idx: i32) -> SOption<SString>;
     extern "C" fn raw_len(&self, idx: i32) -> u64;
     extern "C" fn to_userdata(&self, idx: i32) -> usize;

@@ -34,8 +34,14 @@ fn host() -> &'static (PathBuf, PathBuf) {
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
         let include = Path::new(MANIFEST).join("../orbit-capi/csrc/include");
         let versioned = orbit::LUA.dotted();
+        // `ORBIT_CHOST_SANITIZE=address` builds the host with a sanitizer,
+        // which also checks the library's memory as C uses it.
+        let sanitize = std::env::var("ORBIT_CHOST_SANITIZE")
+            .ok()
+            .map(|s| format!("-fsanitize={s}"));
         let out = Command::new(cc)
-            .args(["-O1", "-Wall", "-Wextra", "-Werror", "-I"])
+            .args(sanitize.iter().map(String::as_str))
+            .args(["-O1", "-g", "-Wall", "-Wextra", "-Werror", "-I"])
             .arg(include.join(versioned))
             .arg("-I")
             .arg(include)
@@ -56,11 +62,17 @@ fn host() -> &'static (PathBuf, PathBuf) {
 
 fn run(mode: &str) -> String {
     let (exe, dir) = host();
-    let out = Command::new(exe)
-        .arg(mode)
-        .env("LD_LIBRARY_PATH", dir)
-        .output()
-        .unwrap();
+    let mut command = Command::new(exe);
+    command.arg(mode).env("LD_LIBRARY_PATH", dir);
+    if std::env::var_os("ORBIT_CHOST_SANITIZE").is_some() {
+        // A C panic function ends the program without closing the state,
+        // and the sanitizer's quarantine of freed memory defeats the memory
+        // bound `strings` checks.
+        command
+            .env("ASAN_OPTIONS", "detect_leaks=0")
+            .env("HOST_SANITIZED", "1");
+    }
+    let out = command.output().unwrap();
     let (o, e) = (
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
@@ -120,10 +132,28 @@ fn warnings_go_to_the_program_piece_by_piece() {
 }
 
 #[test]
-fn string_pointers_last_while_on_the_stack_and_no_longer() {
+fn string_pointers_last_while_on_the_stack_and_copies_go_with_their_strings() {
     assert_eq!(
         run("strings"),
         "kept: kept string\nbounded: yes\nkept: kept string\n"
+    );
+}
+
+/// `lua_tolstring`'s pointer lasts while the string is alive anywhere: in
+/// the globals after it is popped, in the registry after a C function
+/// returns. Run with `ORBIT_CHOST_SANITIZE=address` to have AddressSanitizer
+/// check the reads.
+#[test]
+fn string_pointers_last_while_the_string_is_alive() {
+    let name = format!("hello-{}", "x".repeat(40));
+    let total: usize = (1..=1000).map(|i| 46 + i.to_string().len()).sum();
+    assert_eq!(
+        run("string-lifetime"),
+        format!(
+            "global: {name} {total}\n\
+             same pointer: yes\n\
+             registry: anchored-in-the-registry-0123456789-0123456789\n"
+        )
     );
 }
 

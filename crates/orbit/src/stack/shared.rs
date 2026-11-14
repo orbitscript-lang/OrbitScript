@@ -571,6 +571,11 @@ impl<'s> Stack<'s> {
         res(self.w.to_str(idx)).map(|s| Option::from(s).map(str_of))
     }
 
+    pub fn to_c_str(&mut self, idx: i32) -> StackResult<Option<(*const u8, usize)>> {
+        let copy: Option<CStrAbi> = res(self.w.to_c_str(idx))?.into();
+        Ok(copy.map(|c| (c.addr as *const u8, c.len as usize)))
+    }
+
     pub fn string_at(&self, idx: i32) -> Option<OrbitStr<'_>> {
         Option::from(self.w.string_at(idx)).map(str_of)
     }

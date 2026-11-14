@@ -491,6 +491,13 @@ impl NativeCtx<'_> {
         self.vm.heap.get(s).as_bytes()
     }
 
+    /// A NUL-terminated copy of string `s` for C, which stays valid for as
+    /// long as `s` is alive ([`CStrings`](crate::object::CStrings)).
+    pub fn c_string(&mut self, s: Gc<LuaStr>) -> *const u8 {
+        let bytes = self.vm.heap.get(s).as_bytes();
+        self.vm.rt.c_strings.copy_of(s, bytes)
+    }
+
     /// The isolate's locale.
     pub fn locale(&self) -> &Locale {
         &self.vm.rt.metas.locale
