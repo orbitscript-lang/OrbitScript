@@ -14,8 +14,9 @@
 //! makes (`check_integer`, `push_number`, ...): no boxing, no dynamic
 //! dispatch, no `Value` handles.
 
-use super::{Raised, Return, Stack, StackResult, Type};
+use super::{Native, Raised, Return, Stack, StackResult, Type};
 use crate::{OrbitStr, OrbitString};
+pub use orbit_runtime::object::number::Number;
 
 /// A type a native's parameter can have: how to read argument `i`
 /// (1-based) as one, raising Lua's argument error when it can't.
@@ -161,6 +162,99 @@ impl<'a> Arg<'a> for Any {
     }
 }
 
+/// A number that may be an integer or a float, as `math.abs` takes one:
+/// an integer argument stays one, and a float or a numeric string reads as
+/// a float.
+impl<'a> Arg<'a> for Number {
+    type Checked = Number;
+
+    #[inline(always)]
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<Number> {
+        if s.is_integer(i) {
+            if let Some(n) = s.to_integer(i) {
+                return Ok(Number::Int(n));
+            }
+        }
+        s.check_number(i).map(Number::Float)
+    }
+
+    #[inline(always)]
+    fn get(_: &'a Stack<'_>, _: i32, v: Number) -> Number {
+        v
+    }
+}
+
+/// A Rust type scripts hold as userdata (made with
+/// [`Stack::push_userdata`]), which a native takes as a [`Ud`] argument.
+pub trait UserType: Clone + 'static {
+    /// The type's name in type errors (`FILE* expected, got nil`): the name
+    /// its metatable has as `__name`.
+    const NAME: &'static str;
+}
+
+/// A userdata argument holding a `T`: a copy of the value, so the native
+/// can use the stack while it has it. For a value a native changes, `T` is
+/// a shared handle (`Rc<RefCell<..>>`). Anything else raises Lua's type
+/// error, naming [`UserType::NAME`].
+#[derive(Debug, Clone)]
+pub struct Ud<T>(pub T);
+
+impl<T> std::ops::Deref for Ud<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<'a, T: UserType> Arg<'a> for Ud<T> {
+    type Checked = Ud<T>;
+
+    #[inline(always)]
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<Ud<T>> {
+        // A value taken out of its userdata reads as none.
+        match s.with_userdata::<T, _>(i, |v| v.clone()).flatten() {
+            Some(v) => Ok(Ud(v)),
+            None => Err(not_a_userdata(s, i, T::NAME)),
+        }
+    }
+
+    #[inline(always)]
+    fn get(_: &'a Stack<'_>, _: i32, v: Ud<T>) -> Ud<T> {
+        v
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn not_a_userdata(s: &mut Stack<'_>, i: i32, name: &str) -> Raised {
+    s.type_error(i, name)
+}
+
+/// The isolate's state of type `T` (see [`Stack::extension`]), made with
+/// `Default` on first use. As a `#[native]` parameter it takes no argument:
+/// the attribute fills it before reading the arguments. It holds a copy, so
+/// state a native changes is a shared handle (`Rc<Cell<..>>`), or is changed
+/// with [`Stack::extension`].
+#[derive(Debug, Clone, Default)]
+pub struct State<T>(pub T);
+
+impl<T: std::any::Any + Default + Clone> State<T> {
+    /// A copy of the isolate's `T`.
+    #[inline(always)]
+    pub fn of(s: &mut Stack<'_>) -> State<T> {
+        State(s.extension(|v: &mut T| v.clone()))
+    }
+}
+
+impl<T> std::ops::Deref for State<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn not_utf8(s: &mut Stack<'_>, i: i32) -> Raised {
@@ -268,6 +362,16 @@ impl Push for i64 {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
         s.push_integer(self);
+    }
+}
+
+impl Push for Number {
+    #[inline(always)]
+    fn push(self, s: &mut Stack<'_>) {
+        match self {
+            Number::Int(n) => s.push_integer(n),
+            Number::Float(f) => s.push_number(f),
+        }
     }
 }
 
@@ -540,7 +644,7 @@ impl From<OrbitString> for Fail {
 }
 
 /// Native `N` as a value to [`Push`]: `s.raw_put(t, b"f", function::<f>())`.
-pub fn function<N: super::Native>() -> NativeFunction<N> {
+pub fn function<N: Native>() -> NativeFunction<N> {
     NativeFunction(std::marker::PhantomData)
 }
 
@@ -548,7 +652,7 @@ pub fn function<N: super::Native>() -> NativeFunction<N> {
 #[derive(Debug)]
 pub struct NativeFunction<N>(std::marker::PhantomData<N>);
 
-impl<N: super::Native> Push for NativeFunction<N> {
+impl<N: Native> Push for NativeFunction<N> {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
         s.push_native::<N>();
@@ -564,4 +668,39 @@ impl Stack<'_> {
         v.push(self);
         self.raw_set_field(t, k)
     }
+
+    /// Put native `N` in the table at `idx` under its field name
+    /// ([`field_name`]): `s.raw_put_native::<date>(-1)` for a native named
+    /// `os.date` sets `date`.
+    #[inline]
+    pub fn raw_put_native<N: Native>(&mut self, idx: i32) -> StackResult<()> {
+        self.raw_put(idx, field_name(N::NAME).as_bytes(), function::<N>())
+    }
+}
+
+/// The field a native named `name` is registered under: the part after
+/// its last `.` (`os.date` is `date`, `FILE*.__gc` is `__gc`), or all of it.
+pub fn field_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+/// Run a native's body, raising a panic in it as a script error, as a
+/// [`Call`](crate::Call) closure does. What `#[native]` wraps each function
+/// in. Where panics abort, it is the body alone.
+#[doc(hidden)]
+#[inline(always)]
+pub fn catch_panic(
+    s: &mut Stack<'_>,
+    body: impl FnOnce(&mut Stack<'_>) -> StackResult<Return>,
+) -> StackResult<Return> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&mut *s))) {
+        Ok(r) => r,
+        Err(p) => Err(panicked(s, &*p)),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn panicked(s: &mut Stack<'_>, p: &(dyn std::any::Any + Send)) -> Raised {
+    s.error(crate::host::panic_message(p).as_str())
 }

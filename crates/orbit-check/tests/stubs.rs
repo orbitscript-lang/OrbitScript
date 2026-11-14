@@ -58,6 +58,20 @@ fn listed(source: &str, start: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The fields `#[native(name = "<module>f")]` attributes in `source` name: the natives a module
+/// registers under their own names. Names with a further `.` (`ffi.buffer.__len`) are a
+/// metatable's, not the module's.
+fn registered(source: &str, module: &str) -> BTreeSet<String> {
+    let start = format!("#[native(name = \"{module}");
+    source
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(start.as_str()))
+        .map(|rest| &rest[..rest.find('"').expect("a closing quote")])
+        .filter(|name| !name.contains('.'))
+        .map(str::to_string)
+        .collect()
+}
+
 /// `(global, its fields)` for everything the runtime installs, and the methods of files.
 fn runtime() -> (BTreeSet<String>, BTreeSet<String>) {
     let mut iso = Runtime::new().new_isolate(Config::default());
@@ -152,11 +166,9 @@ fn stubs_match_the_runtime() {
     let io = read("stubs/io.orbi");
     assert_eq!(stub_methods(&io), file_methods, "file methods");
 
-    // The `std.ffi` module, which this test's runtime doesn't install, lists its functions.
-    let ffi = listed(
-        &read("../orbit-ffi/src/lib.rs"),
-        "const FUNCTIONS: &[(&[u8], Push)] = &[",
-    );
+    // The `std.ffi` module, which this test's runtime doesn't install: the natives it registers
+    // under the module (named `ffi.f`).
+    let ffi = registered(&read("../orbit-ffi/src/lib.rs"), "ffi.");
     assert_eq!(
         stub_names(&read("stubs/std/ffi.orbi")),
         ffi,

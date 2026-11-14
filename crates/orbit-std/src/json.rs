@@ -24,7 +24,7 @@
 use std::fmt::Write as _;
 
 use orbit::stack::{
-    Any, Native, Raised, Return, Stack, StackResult, Status, TableArg, Type, function,
+    Any, Native, Raised, Return, Stack, StackResult, Status, TableArg, Type, field_name,
     upvalue_index,
 };
 use orbit::{Chunk, Language, OrbitString, native};
@@ -54,8 +54,8 @@ pub(crate) fn open(s: &mut Stack<'_>) -> StackResult<()> {
     s.create_table(0, 0);
     s.create_table(0, 3);
     s.raw_put(-1, b"__jsontype", "null")?;
-    s.raw_put(-1, b"__tostring", function::<null_to_string>())?;
-    s.raw_put(-1, b"__newindex", function::<null_new_index>())?;
+    s.raw_put_native::<null_to_string>(-1)?;
+    s.raw_put_native::<null_new_index>(-1)?;
     s.set_metatable(-2)?;
     for shape in ["object", "array"] {
         s.create_table(0, 1);
@@ -63,7 +63,7 @@ pub(crate) fn open(s: &mut Stack<'_>) -> StackResult<()> {
     }
     s.create_table(0, 2);
     s.raw_put(-1, b"__jsontype", "number")?;
-    s.raw_put(-1, b"__tostring", function::<number_to_string>())?;
+    s.raw_put_native::<number_to_string>(-1)?;
     // Filled on first use: compiling them costs more than the rest of the
     // module's setup.
     s.create_table(4, 0);
@@ -71,27 +71,28 @@ pub(crate) fn open(s: &mut Stack<'_>) -> StackResult<()> {
     s.create_table(0, 6);
     let lib = s.top();
     s.raw_put(lib, b"null", Any(ups))?;
-    put_closure::<encode>(s, lib, b"encode", ups)?;
-    put_closure::<decode>(s, lib, b"decode", ups)?;
-    put_closure::<mark_object>(s, lib, b"object", ups)?;
-    put_closure::<mark_array>(s, lib, b"array", ups)?;
-    put_closure::<number>(s, lib, b"number", ups)?;
-    put_closure::<to_int>(s, lib, b"int", ups)?;
-    put_closure::<to_float>(s, lib, b"float", ups)?;
-    put_closure::<to_string>(s, lib, b"string", ups)?;
-    put_closure::<to_bool>(s, lib, b"bool", ups)?;
+    put_closure::<encode>(s, lib, ups)?;
+    put_closure::<decode>(s, lib, ups)?;
+    put_closure::<mark_object>(s, lib, ups)?;
+    put_closure::<mark_array>(s, lib, ups)?;
+    put_closure::<number>(s, lib, ups)?;
+    put_closure::<to_int>(s, lib, ups)?;
+    put_closure::<to_float>(s, lib, ups)?;
+    put_closure::<to_string>(s, lib, ups)?;
+    put_closure::<to_bool>(s, lib, ups)?;
     // Leave only the module.
     s.rotate(ups, 1)?;
     s.set_top(ups)
 }
 
-/// `lib[name] =` native `N` as a closure over the upvalues starting at `ups`.
-fn put_closure<N: Native>(s: &mut Stack<'_>, lib: i32, name: &[u8], ups: i32) -> StackResult<()> {
+/// Native `N`, as a closure over the upvalues starting at `ups`, in `lib`
+/// under its field name.
+fn put_closure<N: Native>(s: &mut Stack<'_>, lib: i32, ups: i32) -> StackResult<()> {
     for i in 0..UPVALUES {
         s.push_copy(ups + i);
     }
     s.push_native_closure::<N>(UPVALUES as usize, 0)?;
-    s.raw_set_field(lib, name)
+    s.raw_set_field(lib, field_name(N::NAME))
 }
 
 #[native(name = "json.null.__tostring")]

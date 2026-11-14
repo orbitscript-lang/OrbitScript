@@ -28,9 +28,11 @@ use crate::OrbitString;
 use crate::scope::Scope;
 use crate::value::Value;
 
+#[doc(hidden)]
+pub use typed::catch_panic;
 pub use typed::{
-    Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Push, Rest, Results,
-    TableArg, function,
+    Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Number, Push, Rest,
+    Results, State, TableArg, Ud, UserType, field_name, function,
 };
 pub(crate) use window::{ContRef, cont_ref};
 pub use window::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};

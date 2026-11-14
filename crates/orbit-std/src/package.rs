@@ -228,8 +228,8 @@ pub fn open<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<(), Error> {
         ignore_env,
     );
     pkg.raw_set("cpath", cpath)?;
-    pkg.raw_set("searchpath", s.create_native::<searchpath>())?;
-    pkg.raw_set("loadlib", s.create_native::<loadlib_absent>())?;
+    pkg.add_native::<searchpath>()?;
+    pkg.add_native::<loadlib_absent>()?;
     if let Some(searchers) = pkg.raw_get::<Option<Table>>("searchers")? {
         searchers.push(s.create_native::<search_lua>())?;
     }
