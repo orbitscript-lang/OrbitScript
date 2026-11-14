@@ -261,8 +261,9 @@ impl Value {
             _ => return None,
         };
         // Looks like an address: a fixed base, the type in the high bits and
-        // the slot index scaled by a plausible object size.
-        Some(0x5500_0000_0000 | (tag as u64) << 36 | payload << 5)
+        // the slot index scaled by a plausible object size. A 32-bit index
+        // scaled by 32 ends below bit 37, where the type starts.
+        Some(0x5000_0000_0000 | (tag as u64) << 37 | payload << 5)
     }
 }
 

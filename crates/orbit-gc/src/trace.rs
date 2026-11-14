@@ -52,8 +52,17 @@ pub trait Space: Sized {
     fn slot_bytes(kind: u8) -> usize;
     #[doc(hidden)]
     fn release_page(&mut self, kind: u8, page: u32);
-    /// How many slots arena `kind` reserved address space for: the most
-    /// objects of that kind that can be alive at once.
+    /// A space whose arenas each reserve address space for `initial`
+    /// objects (fewer when address space is limited), and can grow to
+    /// `max`.
+    #[doc(hidden)]
+    fn with_slot_capacity(initial: usize, max: usize) -> Self;
+    /// Double the slots arena `kind` reserved, up to its maximum. Whether
+    /// it grew.
+    #[doc(hidden)]
+    fn grow_slots(&mut self, kind: u8) -> bool;
+    /// How many slots arena `kind` has reserved address space for so far:
+    /// the most objects of that kind that can be alive until it grows.
     #[doc(hidden)]
     fn slot_capacity(&self, kind: u8) -> usize;
 
@@ -238,8 +247,7 @@ pub(crate) struct KindMeta {
     pub(crate) live: usize,
     /// Pages currently allocated.
     pub(crate) allocated: usize,
-    /// The arena's reserved slots ([`Space::slot_capacity`]), at most what
-    /// 32-bit indexes reach.
+    /// The arena's reserved slots so far ([`Space::slot_capacity`]).
     pub(crate) capacity: usize,
 }
 
@@ -252,7 +260,7 @@ pub(crate) const SLOT_RESERVE: usize = 16;
 impl KindMeta {
     pub(crate) fn new(shift: u32, capacity: usize) -> Self {
         KindMeta {
-            capacity: capacity.min(1 << 32),
+            capacity,
             shift,
             color: Vec::new(),
             pages: Vec::new(),

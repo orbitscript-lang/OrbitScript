@@ -77,6 +77,15 @@ pub struct Params {
     pub card_min_len: usize,
     /// Elements per remembered part (card). 128 by default.
     pub card_slots: usize,
+    /// How many objects of one kind each arena reserves address space for
+    /// at first (fewer when the process's address space is limited). An
+    /// arena that runs short doubles its reservation, up to
+    /// [`Params::max_objects`], moving its objects. 2^24 by default.
+    pub reserved_objects: usize,
+    /// The most objects of one kind that can be alive at once, at most
+    /// 2^32 (the default), what 32-bit handles reach. The heap reports
+    /// [`Heap::over_limit`] when an arena is nearly full and can't grow.
+    pub max_objects: usize,
 }
 
 impl Default for Params {
@@ -95,6 +104,8 @@ impl Default for Params {
             minor_max_bytes: usize::MAX,
             card_min_len: 1024,
             card_slots: 128,
+            reserved_objects: orbit_virtmem::DEFAULT_MAX_SLOTS,
+            max_objects: crate::arena::MAX_OBJECTS,
         }
     }
 }
@@ -291,7 +302,7 @@ impl<S: Space + Default> Heap<S> {
     }
 
     pub fn with_params(params: Params) -> Self {
-        let space = S::default();
+        let space = S::with_slot_capacity(params.reserved_objects, params.max_objects);
         let meta = (0..S::KINDS)
             .map(|kind| KindMeta::new(PageShift::<S>::SHIFT, space.slot_capacity(kind as u8)))
             .collect();
@@ -763,11 +774,11 @@ impl<S: Space> Heap<S> {
     }
 
     /// Whether [`Heap::bytes`] is past the limit, or so many objects of one
-    /// kind are alive that its arena is nearly out of slots. Each arena
-    /// reserves address space for a fixed number of objects (2^24 unless the
-    /// process's address space is limited); the last sixteenth is kept back
-    /// so the owner can report running out, as for the byte limit, rather
-    /// than the allocation that finds no slot aborting.
+    /// kind are alive that its arena is nearly out of slots and can't grow
+    /// (it is at [`Params::max_objects`], or the operating system has no
+    /// larger range of address space). The last sixteenth of its slots is
+    /// kept back so the owner can report running out, as for the byte
+    /// limit, rather than the allocation that finds no slot aborting.
     #[inline]
     pub fn over_limit(&self) -> bool {
         self.bytes > self.limit || self.slots_low && self.short_of_slots()
@@ -786,17 +797,21 @@ impl<S: Space> Heap<S> {
     }
 
     /// [`KindMeta::take_slot`] when the current page is full: a slot in
-    /// another page, noting when the arena runs short of slots. A step is
-    /// then due, so the owner's next safe point sees
-    /// [`Heap::over_limit`].
+    /// another page. When the arena runs short of slots it grows, or if it
+    /// can't, notes that it is short: a step is then due, so the owner's
+    /// next safe point sees [`Heap::over_limit`].
     #[cold]
     #[inline(never)]
     fn take_slot_slow(&mut self, kind: u8) -> u32 {
         let meta = &mut self.marks.meta[kind as usize];
         let index = meta.take_slot_slow();
         if meta.live > meta.low_mark() {
-            self.slots_low = true;
-            self.debt = self.debt.max(1);
+            if self.space.grow_slots(kind) {
+                meta.capacity = self.space.slot_capacity(kind);
+            } else {
+                self.slots_low = true;
+                self.debt = self.debt.max(1);
+            }
         }
         index
     }

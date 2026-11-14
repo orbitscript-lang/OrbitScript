@@ -93,7 +93,7 @@ mod heap;
 mod os;
 mod trace;
 
-pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, Store};
+pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, MAX_OBJECTS, Store};
 pub use heap::{Heap, Mode, Params, Phase};
 pub use trace::{Holds, Liveness, Marker, Roots, Space, Trace, WeakMode};
 
@@ -274,6 +274,19 @@ macro_rules! space {
                     $(
                         if kind == __Kind::$field as u8 {
                             return self.$field.release_page(page);
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
+                fn with_slot_capacity(initial: usize, max: usize) -> Self {
+                    $name { $( $field: $crate::Arena::with_capacity(initial, max), )+ }
+                }
+
+                fn grow_slots(&mut self, kind: u8) -> bool {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return self.$field.grow_reservation();
                         }
                     )+
                     ::core::unreachable!()

@@ -195,6 +195,39 @@ pub fn decommit_pages(base: NonNull<u8>, start_offset: usize, end_offset: usize)
     }
 }
 
+/// Moves the first `bytes` (committed) of the reservation at `old` to the
+/// start of the larger reservation at `new`, without copying, leaving that
+/// part of `old` unmapped. Returns `false`, changing nothing, where the
+/// system can't (everywhere but Linux, or when the pages aren't one
+/// mapping); the caller then copies.
+pub fn move_pages(old: NonNull<u8>, new: NonNull<u8>, bytes: usize) -> bool {
+    let bytes = align_up(bytes, page_size());
+    if bytes == 0 {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // mremap moves the page mappings of `old` over the start of the
+        // reservation at `new`, which the caller owns and has nothing in.
+        #[allow(unsafe_code)]
+        let res = unsafe {
+            libc::mremap(
+                old.as_ptr().cast(),
+                bytes,
+                bytes,
+                libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
+                new.as_ptr().cast::<libc::c_void>(),
+            )
+        };
+        res == new.as_ptr().cast()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (old, new);
+        false
+    }
+}
+
 /// Releases the entire virtual address range previously reserved.
 pub fn free_address_space(base: NonNull<u8>, bytes: usize) {
     #[cfg(unix)]

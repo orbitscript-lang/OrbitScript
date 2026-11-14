@@ -803,6 +803,74 @@ fn limit_is_reported_not_enforced() {
     assert!(!h.over_limit());
 }
 
+/// Each arena starts with room for
+/// [`Params::reserved_objects`](orbit_gc::Params) objects and doubles it,
+/// moving them, as it fills, up to `max_objects`. There, the last sixteenth
+/// is kept back: once more than the rest are alive, the heap reports it as
+/// it reports passing the byte limit, a step comes due even with the
+/// collector stopped, and once half the reserve is used too the owner
+/// should report it again. A full collection that frees them clears it,
+/// and the slots are reused.
+#[test]
+fn arenas_grow_and_report_running_short_of_slots() {
+    const MAX: usize = 4096;
+    let mut h = TestHeap::with_params(orbit_gc::Params {
+        reserved_objects: 1000,
+        max_objects: MAX,
+        ..Default::default()
+    });
+    h.stop();
+    let mut roots = Stack(Vec::new());
+    for round in 0..2 {
+        while !h.over_limit() {
+            assert!(!h.should_step() && !h.slots_exhausted());
+            let id = roots.0.len() as u64;
+            roots.0.push(Ref::Obj(obj(&mut h, id)));
+        }
+        assert_eq!(roots.0.len(), MAX - MAX / 16 + 1, "round {round}");
+        // The objects moved with every growth.
+        for (id, r) in roots.0.iter().enumerate() {
+            assert_eq!(h.get(r.obj()).id, id as u64);
+        }
+        assert!(h.should_step() && !h.slots_exhausted());
+        while !h.slots_exhausted() {
+            roots.0.push(Ref::Obj(obj(&mut h, 0)));
+        }
+        assert_eq!(roots.0.len(), MAX - MAX / 32 + 1);
+        // Collecting what is still reachable doesn't help.
+        h.full_collect(&mut roots);
+        assert!(h.over_limit() && h.slots_exhausted());
+        roots.0.clear();
+        h.full_collect(&mut roots);
+        assert!(!h.over_limit() && !h.slots_exhausted() && !h.should_step());
+        assert_eq!(h.count::<common::Obj>(), 0);
+    }
+    // Other kinds have arenas of their own.
+    let mut roots = Stack(
+        (0..MAX - MAX / 16)
+            .map(|_| Ref::Obj(obj(&mut h, 0)))
+            .collect(),
+    );
+    roots.0.push(Ref::Text(text(&mut h, "a text")));
+    h.full_collect(&mut roots);
+    assert!(!h.over_limit());
+}
+
+/// Allocating past every slot, ignoring [`Heap::over_limit`], panics.
+#[test]
+#[should_panic(expected = "arena full")]
+fn allocating_past_every_slot_panics() {
+    let mut h = TestHeap::with_params(orbit_gc::Params {
+        max_objects: 1024,
+        ..Default::default()
+    });
+    h.stop();
+    let mut roots = Vec::new();
+    for _ in 0..=1024 {
+        roots.push(obj(&mut h, 0));
+    }
+}
+
 #[test]
 fn stress_mode_steps_only_after_allocating() {
     let mut h = TestHeap::new();

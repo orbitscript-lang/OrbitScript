@@ -282,52 +282,6 @@ fn memory_limit_from_the_environment() {
     assert!(err(&o).contains("ORBIT_MEMORY_LIMIT"), "{}", err(&o));
 }
 
-/// Every arena has room for a fixed number of objects (fewer under an
-/// address-space limit, which shrinks the reservations). Running out is the
-/// catchable `not enough memory`, again on every later attempt, also with
-/// the collector stopped; and the script can go on once it lets go.
-#[test]
-#[cfg(target_os = "linux")]
-fn running_out_of_object_slots_is_not_enough_memory() {
-    let script = "local t = {} \
-                  local function fill(new) \
-                    for round = 1, 3 do \
-                      print(pcall(function () for i = #t + 1, math.huge do t[i] = new(i) end end)) \
-                    end \
-                    t = {} collectgarbage() \
-                  end \
-                  fill(function () return {} end) \
-                  fill(function (i) return 's' .. i end) \
-                  collectgarbage('stop') \
-                  fill(function () return {} end) \
-                  collectgarbage('restart') \
-                  local u = {} for i = 1, 100000 do u[i] = {} end print(#u)";
-    // About 650,000 tables, so the test stays quick.
-    let o = Command::new("sh")
-        .args([
-            "-c",
-            "ulimit -v 600000 && exec \"$0\" -",
-            env!("CARGO_BIN_EXE_orbit"),
-        ])
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            child.stdin.take().unwrap().write_all(script.as_bytes())?;
-            child.wait_with_output()
-        })
-        .unwrap();
-    let no_memory = "false\tnot enough memory\n".repeat(3);
-    assert_eq!(
-        out(&o),
-        format!("{no_memory}{no_memory}{no_memory}100000\n"),
-        "{}",
-        err(&o)
-    );
-}
-
 /// Without the `c-modules` feature, `package.loadlib` gives Lua's result for
 /// a build without dynamic libraries. (A shared build has liborbit's.)
 #[test]

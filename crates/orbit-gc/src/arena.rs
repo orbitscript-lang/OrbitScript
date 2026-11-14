@@ -135,6 +135,9 @@ impl Gens {
 /// Slots per arena page, unless a [`space!`](crate::space) sets its own
 /// `PAGE_SLOTS`.
 pub const DEFAULT_PAGE_SLOTS: usize = 1024;
+
+/// The most objects one arena can hold: what a 32-bit slot index reaches.
+pub const MAX_OBJECTS: usize = 1 << 32;
 /// Pages hold between 2^4 and 2^16 slots, so an in-page offset fits a `u16`.
 const MIN_PAGE_SLOTS: usize = 1 << 4;
 const MAX_PAGE_SLOTS: usize = 1 << 16;
@@ -165,11 +168,28 @@ pub struct Arena<T, const SLOTS: usize = DEFAULT_PAGE_SLOTS> {
 
 impl<T, const SLOTS: usize> Default for Arena<T, SLOTS> {
     fn default() -> Self {
+        Self::with_capacity(orbit_virtmem::DEFAULT_MAX_SLOTS, MAX_OBJECTS)
+    }
+}
+
+impl<T, const SLOTS: usize> Arena<T, SLOTS> {
+    /// An arena with address space reserved for `initial` objects (fewer
+    /// when address space is limited), which [`Arena::grow_reservation`] can enlarge
+    /// up to `max`. Both are at least one page.
+    #[doc(hidden)]
+    pub fn with_capacity(initial: usize, max: usize) -> Self {
         Arena {
-            slots: VmBuffer::new(),
+            slots: VmBuffer::growable(initial.max(SLOTS), max.clamp(SLOTS, MAX_OBJECTS)),
             live: Vec::new(),
             gens: Gens::default(),
         }
+    }
+
+    /// Doubles the arena's reserved slots, up to its maximum, moving the
+    /// objects. Returns whether it grew.
+    #[doc(hidden)]
+    pub fn grow_reservation(&mut self) -> bool {
+        self.slots.try_grow()
     }
 }
 
@@ -202,7 +222,8 @@ fn stale(i: u32) -> ! {
 impl<T, const SLOTS: usize> Arena<T, SLOTS> {
     const SHIFT: u32 = page_shift(SLOTS);
 
-    /// How many slots the arena reserved address space for, in whole pages.
+    /// How many slots the arena has reserved address space for so far, in
+    /// whole pages.
     #[doc(hidden)]
     pub fn capacity(&self) -> usize {
         self.slots.capacity() / SLOTS * SLOTS
