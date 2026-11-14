@@ -26,8 +26,8 @@ cargo testkit conformance --lua 5.4 --interp target/reference-lua-5.4/bin/lua5.4
 cargo testkit conformance --lua 5.4 --interp target/lua54/release/orbit --c-libs target/reference-lua-5.4/libs --expect tests/lua-5.4/expected-orbit.txt
 
 # PUC's own 5.4 lua.c, built for liblua5.4, on OrbitScript's 5.4 library.
-cargo build --release -p orbit-lib --features lua-5-4 --target-dir target/lua54
-cargo testkit liblua --lua 5.4 --lib target/lua54/release/liborbit_lib.so --c-libs target/reference-lua-5.4/libs --expect tests/lua-5.4/expected-liblua.txt
+./build.sh --lua 5.4 --no-pgo        # lays out target/package-lua5.4/out
+cargo testkit liblua --lua 5.4 --c-libs target/reference-lua-5.4/libs --expect tests/lua-5.4/expected-liblua.txt
 ```
 
 A separate target directory keeps the 5.4 build from replacing the default (5.5) one. The reference is built with `-DLUA_COMPAT_5_3`, as Debian's and most distributions' `lua5.4` are, and on Linux it links GNU readline, because one `main.lua` check needs readline's echo of piped input.

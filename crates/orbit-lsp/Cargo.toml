@@ -20,14 +20,16 @@ orbit-fmt = { path = "../orbit-fmt" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 serde_json = { version = "1", default-features = false, features = ["std"] }
+# liborbit, for the shared layout (`shared`).
+orbit-lib = { path = "../orbit-lib", optional = true }
 
 [features]
 default = ["runtime"]
 # The runtime linked into the program, as `orbit` has it.
 runtime = ["orbit/default"]
-# The runtime in liborbit instead (ADR-10), for `build.sh`'s package:
-# `--no-default-features --features shared`.
-shared = ["orbit/shared"]
+# The runtime in liborbit instead (ADR-10), as `orbit` has it in
+# `build.sh`'s shared layout.
+shared = ["dep:orbit-lib", "orbit/default"]
 # Lua 5.4 rather than 5.5 (`build.sh --lua 5.4`, ADR-14).
 lua-5-4 = ["orbit/lua-5-4"]
 

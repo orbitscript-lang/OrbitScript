@@ -1,13 +1,15 @@
 //! The command line against the reference `lua`'s observable behaviour
 //! (`main.lua` checks the rest once the libraries it uses land).
 
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 /// Run `orbit` with `args`, `stdin` as its input and a clean environment
 /// apart from `env`.
 fn orbit(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_orbit"));
+    let mut c = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")));
     c.args(args)
         .env_clear()
         .envs(env.iter().copied())
@@ -184,7 +186,7 @@ fn print_output_reaches_a_pipe_at_once() {
     use std::io::{BufRead, BufReader};
     // The script keeps running after printing, so the line can only arrive
     // in time if `print` flushed it.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orbit"))
+    let mut child = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .args([
             "-e",
             "print('ready') local t = os.time() while os.time() - t < 20 do end",
@@ -216,7 +218,7 @@ fn second_ctrl_c_ends_a_long_library_call() {
     use std::time::{Duration, Instant};
     // Quadratic in our matcher: every 'a' is a start that scans to the end.
     // Seconds per 100,000 bytes in a release build, so this runs for minutes.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orbit"))
+    let mut child = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .args([
             "-e",
             "print(15) string.find(string.rep('a', 1000000), 'a.*b') print('finished')",
@@ -285,7 +287,7 @@ fn memory_limit_from_the_environment() {
 /// Without the `c-modules` feature, `package.loadlib` gives Lua's result for
 /// a build without dynamic libraries. (A shared build has liborbit's.)
 #[test]
-#[cfg(not(any(feature = "c-modules", bundled)))]
+#[cfg(not(feature = "c-modules"))]
 fn loadlib_is_absent_without_c_modules() {
     let o = orbit(
         &["-e", "print(select(3, package.loadlib('x.so', 'f')))"],
@@ -299,7 +301,7 @@ fn loadlib_is_absent_without_c_modules() {
 #[test]
 #[cfg(not(feature = "repl"))]
 fn no_interactive_mode() {
-    let out = Command::new(env!("CARGO_BIN_EXE_orbit"))
+    let out = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .arg("-i")
         .output()
         .unwrap();

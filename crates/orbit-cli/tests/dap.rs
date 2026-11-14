@@ -5,6 +5,8 @@
 //! error reports, `os.exit`, the script's input and output).
 #![cfg(feature = "dap")]
 
+mod common;
+
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -254,7 +256,7 @@ impl Drop for Editor {
 
 /// The `orbit` binary, without the environment's `LUA_INIT`.
 fn orbit() -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_orbit"));
+    let mut c = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")));
     c.env_remove("LUA_INIT").env_remove("LUA_INIT_5_5");
     c
 }

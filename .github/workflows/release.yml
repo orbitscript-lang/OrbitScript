@@ -96,10 +96,15 @@ jobs:
             os: windows-2025
           # No profile: LLVM's profiling runtime writes malformed counts on
           # aarch64-pc-windows-msvc ("symbol name is empty"), and the
-          # instrumented orbit crashes at random there.
+          # instrumented orbit crashes at random there. Without a profile
+          # liborbit as a Rust `dylib` ran 1.12x slower than the static
+          # programs on this runner, so until one can be trained the shared
+          # archive holds the static programs and liborbit as a C library
+          # only, both link-time optimized (ADR-10).
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
             pgo: none
+            shared: --static-programs
     runs-on: ${{ matrix.os }}
     env:
       NAME: orbitscript-${{ needs.version.outputs.version }}${{ matrix.lua == '5.4' && '-lua5.4' || '' }}-${{ matrix.target }}
@@ -145,11 +150,15 @@ jobs:
             train) pgo=(--pgo "$RUNNER_TEMP/release.profdata") ;;
             none) pgo=(--no-pgo) ;;
           esac
-          ./build.sh --lua "$LUA" "${pgo[@]}" --out "$RUNNER_TEMP/out/$NAME"
+          ./build.sh --lua "$LUA" "${pgo[@]}" ${{ matrix.shared }} --out "$RUNNER_TEMP/out/$NAME"
           ./build.sh --lua "$LUA" "${pgo[@]}" --static --out "$RUNNER_TEMP/out/$NAME-static"
           for d in "$NAME" "$NAME-static"; do
             cp LICENSE README.md "$RUNNER_TEMP/out/$d/"
           done
+      # The programs' tests again, on the shared layout as it will ship.
+      - name: Test the shared layout
+        timeout-minutes: 30
+        run: ORBIT_BIN_DIR="$RUNNER_TEMP/out/$NAME/bin" cargo test --locked -p orbit-cli -p orbit-lsp $FEATURES
       - name: Smoke test
         working-directory: ${{ runner.temp }}/out
         run: |
