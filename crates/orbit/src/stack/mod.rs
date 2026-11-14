@@ -99,7 +99,7 @@ impl Type {
     /// The name `type` gives (`"no value"` for [`Type::None`]).
     pub fn name(self) -> &'static str {
         match self {
-            Type::None => "no value",
+            Type::None => crate::arg_errors::NO_VALUE,
             Type::Nil => "nil",
             Type::Boolean => "boolean",
             Type::LightUserdata | Type::Userdata => "userdata",

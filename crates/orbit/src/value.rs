@@ -4,6 +4,7 @@ use std::cell::{Ref, RefMut};
 
 use std::fmt;
 
+use orbit_runtime::arg_errors;
 use orbit_runtime::object::number;
 
 use crate::error::Error;
@@ -750,7 +751,7 @@ impl FromValueError {
     /// The message, given the type name of the value that failed.
     pub(crate) fn message(self, got: &str) -> String {
         match self {
-            FromValueError::Expected(want) => format!("{want} expected, got {got}"),
+            FromValueError::Expected(want) => arg_errors::type_mismatch(want, got),
             FromValueError::Invalid(why) => why.to_owned(),
         }
     }
@@ -806,9 +807,9 @@ impl<'s> FromValue<'s> for i64 {
         };
         match n {
             Some(Value::Int(i)) => Ok(i),
-            Some(Value::Float(f)) => number::float_to_int(f).ok_or(FromValueError::Invalid(
-                "number has no integer representation",
-            )),
+            Some(Value::Float(f)) => {
+                number::float_to_int(f).ok_or(FromValueError::Invalid(arg_errors::NO_INTEGER_REP))
+            }
             _ => Err(FromValueError::Expected("number")),
         }
     }

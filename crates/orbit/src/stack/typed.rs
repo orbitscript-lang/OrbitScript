@@ -96,7 +96,7 @@ fn arg_type(s: &Stack<'_>, i: i32) -> Type {
 #[cold]
 #[inline(never)]
 fn missing(s: &mut Stack<'_>, i: i32) -> Raised {
-    s.arg_error(i, "value expected")
+    s.arg_error(i, crate::arg_errors::VALUE_EXPECTED)
 }
 
 #[cold]

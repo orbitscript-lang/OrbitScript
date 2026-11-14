@@ -840,7 +840,7 @@ fn format<'s>(c: &'s Call<'s>, v: &FormatArg, arg: usize) -> Result<Format, Erro
         FormatArg::Float(f) if f.fract() == 0.0 && (-TWO_63..TWO_63).contains(&f) => {
             Ok(count(f as i64))
         }
-        FormatArg::Float(_) => Err(c.arg_error(arg, "number has no integer representation")),
+        FormatArg::Float(_) => Err(c.arg_error(arg, orbit::arg_errors::NO_INTEGER_REP)),
         FormatArg::Str(ref b) => {
             let b = b.strip_prefix(b"*").unwrap_or(b);
             match b.first() {

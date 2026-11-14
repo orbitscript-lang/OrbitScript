@@ -229,7 +229,7 @@ pub(crate) fn arith_slow(
 
 /// The error for a float operand of a bitwise operator that has no integer value. When the
 /// operand has a name, the interpreter puts it after "number".
-pub(crate) const NO_INTEGER_REP: &str = "number has no integer representation";
+pub(crate) use crate::arg_errors::NO_INTEGER_REP;
 
 /// A bitwise operator's operand as an integer: an integer, or a float with an integer value.
 fn bit_operand(v: Value) -> Option<Option<i64>> {
