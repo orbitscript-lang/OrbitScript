@@ -556,19 +556,17 @@ impl Workspace {
         );
         drop(defs);
         diagnostics.append(&mut m.diagnostics);
-        // Lowering consumes the tree, so the line table is kept for the queries.
-        let source = ast.source.clone();
         // A stub has declarations without bodies and is never compiled. A module with syntax
         // errors has `Error` nodes, which lowering would only report a second time.
         let compile_error = if parsed && !is_stub(&path) {
-            orbit_orb_syntax::lower(ast).err()
+            orbit_orb_syntax::lower_borrowed(&ast).err()
         } else {
             None
         };
         if mode == pragma::Mode::Off {
             diagnostics.retain(|d| d.code == code::SYNTAX);
         }
-        pragmas.apply(&source, strict, &mut diagnostics);
+        pragmas.apply(&ast.source, strict, &mut diagnostics);
         // Added after the pragmas so that none can hide it; see `covers`.
         if let Some(e) = compile_error {
             if !diagnostics.iter().any(|d| covers(d, &e)) {
@@ -576,12 +574,12 @@ impl Workspace {
             }
         }
         for d in &mut diagnostics {
-            d.line = source.line_of(d.span.start);
+            d.line = ast.source.line_of(d.span.start);
         }
         diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
         m.diagnostics = diagnostics;
         m.deps = deps;
-        m.source = Some(source);
+        m.source = Some(ast.source);
         m
     }
 

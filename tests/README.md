@@ -30,6 +30,8 @@ cargo testkit diff --reference target/reference-lua/bin/lua5.5 --interp target/r
 
 Add a file whenever a behavior is subtle enough that a unit test might encode the wrong expectation: the reference interpreter decides.
 
+A program that depends on the environment can run under several settings: `NAME.env` beside `NAME.lua` lists them, one `VAR=value` per line, and the program runs once under each, as its own result named `NAME.lua VAR=value`. `diff/time_zones.lua` runs that way in the time zones of `diff/time_zones.env`, so `os.date` and `os.time` are compared in real zones, POSIX rule strings, file paths and invalid names.
+
 ## Programs built for liblua
 
 `cargo testkit liblua` runs the suite through `lua5.5-host`, the reference `lua.c` linked against Lua's shared library the way Debian ships it (`liblua5.5.so.0`, symbols versioned `LUA_5.5`), with `liborbit` installed under that name instead (ADR-10). The program is built by `scripts/build-reference-lua.sh` (Linux only for now). `lua-5.5/expected-liblua.txt` lists what passes.

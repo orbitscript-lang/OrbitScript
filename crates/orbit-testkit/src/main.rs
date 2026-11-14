@@ -16,6 +16,7 @@ mod ratchet;
 mod scoreboard;
 mod util;
 
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -34,13 +35,27 @@ commands:
 Run a command with --help for its options.";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`: `std::env::args` panics on an argument that is not UTF-8.
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let Some((cmd, rest)) = args.split_first() else {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
-    let result = match cmd.as_str() {
-        "__rusage" => return process::rusage_helper(rest),
+    // The helper passes a measured program's arguments through as given.
+    if cmd == "__rusage" {
+        return process::rusage_helper(rest);
+    }
+    // The commands themselves take options and paths as text.
+    let Some(rest) = rest
+        .iter()
+        .map(|a| a.to_str().map(str::to_owned))
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("orbit-testkit: arguments must be UTF-8");
+        return ExitCode::from(2);
+    };
+    let rest = rest.as_slice();
+    let result = match cmd.to_str().unwrap_or("") {
         "conformance" => conformance::main(rest),
         "diff" => diff::main(rest),
         "bench" => bench::main(rest),
@@ -53,7 +68,7 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             Ok(true)
         }
-        other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
+        _ => Err(format!("unknown command {cmd:?}\n\n{USAGE}")),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,

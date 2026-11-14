@@ -44,7 +44,7 @@ impl LineEditor {
             return None;
         }
         #[cfg(unix)]
-        if let Some(term) = tty::Stty::new() {
+        if let Some(term) = tty::Tty::new() {
             return Some(LineEditor {
                 editor: editor::Editor::default(),
                 term: Box::new(term),

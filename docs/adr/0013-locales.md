@@ -21,7 +21,7 @@ A process-wide locale doesn't fit OrbitScript: isolates on different threads wou
 - **The runtime keeps a safe `Locale`** per isolate: the decimal point, 256-entry class and case tables, and an optional collator (`orbit_runtime::locale`). Everything listed above reads it, so the C locale costs no more than before: the fast paths check one flag and fall through to the code they always ran.
 - **Source code doesn't follow the locale.** Both lexers always read `.`, so a chunk compiles the same everywhere; lua5.5 rejects `3.5` in source under a locale like `ps_AF` (`tests/lua-5.5/DEVIATIONS.md`).
 - **A `LocaleProvider` makes locales.** The runtime's own knows only `C` (and `POSIX`). `orbit-locale` is the C library's, behind `orbit`'s `locale` feature, on by default and in every binary we ship; without it a build has only `C`, which is what the core needs for no-I/O embedders.
-- **`orbit-locale` uses locale objects**, never the process locale: `newlocale` and `uselocale` on Linux and macOS, `_create_locale` with `_strcoll_l`, `_strftime_l` and a per-thread `setlocale` on Windows. It builds the tables once per `os.setlocale` and asks the C library again only for collation and the `E`/`O` date conversions. Other dates expand the locale's `nl_langinfo` patterns in `orbit-std`, so `%Z` and `%z` keep using our time zone reader.
+- **`orbit-locale` uses locale objects**, never the process locale: `newlocale` and `uselocale` on Linux and macOS, `_create_locale` with `_strcoll_l`, `_strftime_l` and a per-thread `setlocale` on Windows. It builds the tables once per `os.setlocale` and asks the C library again only for collation and the date conversions other than names (`%c`, `%x`, `%X`, `%r` and the `E`/`O` ones), which its `strftime` formats whole, with the zone `orbit-std` got from the C library's local time.
 
 ### Native code sees the script's locale
 - **The isolate's locale is on the thread while the isolate runs.** When a run starts (the host's call, a nested resume or close, a finalizer; all go through `Vm::with_thread_locale`), the isolate's locale object goes on the thread (`uselocale`, or `_configthreadlocale` and `setlocale` on Windows). It stays for everything the run does, so C modules, `ffi` calls and callbacks into Lua need no code of their own, and `os.setlocale` while running replaces it at once. When the outermost run returns, the thread gets its own locale back, so the host's C code between calls is untouched. Runs nest: an isolate entered from another's native code puts the other's back when it returns.
@@ -57,7 +57,7 @@ sequenceDiagram
 - Allowed only in `orbit-locale/src/sys.rs` (ADR-6): the C library's locale calls, reading the strings it returns, and `strcoll`/`strftime` on our buffers.
 
 ### Windows
-- Names are the C runtime's (`English_United States.1252`, `""` from the user's settings), as for lua5.5 built there. Only `%c`, `%x` and `%X` go through `strftime`, since the runtime has no patterns to expand.
+- Names are the C runtime's (`English_United States.1252`, `""` from the user's settings), as for lua5.5 built there.
 
 ## Alternatives rejected
 
