@@ -3,7 +3,9 @@
 use orbit_hir as hir;
 use orbit_hir::{ExprId, LocalKind, Span, StmtId};
 
-use super::mode::Mode;
+use super::items::{FnBody, FnSource};
+use super::mode::{Mode, Sym};
+use super::observe::Observer;
 use super::{Dest, LResult, Lowerer, Resolved};
 use crate::ast::{self, ExprKind as K};
 use crate::code;
@@ -12,6 +14,8 @@ use crate::code;
 pub(super) enum Part<'a> {
     /// One value.
     Expr(&'a ast::Expr),
+    /// A name read as a value: a struct literal's shorthand field.
+    Name(ast::Name),
     /// An item of a call's arguments or a table's positional entries: one value, or all of a
     /// spread's values when `last`.
     Item(&'a ast::Expr, bool),
@@ -46,13 +50,13 @@ pub(super) fn bin_op(op: ast::BinOp) -> hir::BinOp {
     }
 }
 
-impl<M: Mode> Lowerer<M> {
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     /// Lowers operands in order. When an operand hoists statements, the operands before it
     /// that a statement could change are first saved in temporaries, so they are still
     /// evaluated first.
     pub(super) fn parts(
         &mut self,
-        parts: &[Part<'_>],
+        parts: &[Part<'a>],
         out: &mut Vec<StmtId>,
     ) -> LResult<(Vec<ExprId>, Option<hir::ExprList>)> {
         let mut ids: Vec<ExprId> = Vec::with_capacity(parts.len());
@@ -61,6 +65,7 @@ impl<M: Mode> Lowerer<M> {
             let mark = out.len();
             match *part {
                 Part::Expr(e) => ids.push(self.expr(e, out)?),
+                Part::Name(name) => ids.push(self.name_expr(name)?),
                 Part::Item(e, last) => ids.push(self.item_value(e, last, out)?),
                 Part::Values(e) => values = Some(self.values(e, out)?),
             }
@@ -127,7 +132,7 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// One value: a call or `...` is truncated to its first result.
-    pub(super) fn single(&mut self, e: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    pub(super) fn single(&mut self, e: &'a ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
         let id = self.expr(e, out)?;
         Ok(self.first(id))
     }
@@ -145,7 +150,7 @@ impl<M: Mode> Lowerer<M> {
     /// A list of values: a tuple's items, all of a call's results, or one value.
     pub(super) fn values(
         &mut self,
-        e: &ast::Expr,
+        e: &'a ast::Expr,
         out: &mut Vec<StmtId>,
     ) -> LResult<hir::ExprList> {
         match &e.kind {
@@ -161,7 +166,7 @@ impl<M: Mode> Lowerer<M> {
     /// the last place.
     pub(super) fn list(
         &mut self,
-        items: &[ast::Expr],
+        items: &'a [ast::Expr],
         out: &mut Vec<StmtId>,
     ) -> LResult<hir::ExprList> {
         let parts: Vec<_> = items
@@ -173,7 +178,12 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// A list item: a spread keeps all values (only in the last place).
-    fn item_value(&mut self, e: &ast::Expr, last: bool, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    fn item_value(
+        &mut self,
+        e: &'a ast::Expr,
+        last: bool,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<ExprId> {
         match &e.kind {
             K::Spread(inner) => {
                 if !last {
@@ -190,15 +200,17 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// `...e`: all of a call's results, or the rest parameter's values.
-    fn spread(&mut self, inner: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    fn spread(&mut self, inner: &'a ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
         if let K::Name(sym) = inner.kind {
             let name = ast::Name {
                 sym,
                 span: inner.span,
             };
-            if let Resolved::Local { depth, local, .. } = self.resolve(name)? {
+            let (r, id) = self.lookup(name)?;
+            if let Resolved::Local { depth, local, .. } = r {
                 let top = self.funcs.len() - 1;
                 if self.funcs[depth].rest == Some(local) {
+                    self.observer.reference(name.span, id);
                     if depth != top {
                         self.report(
                             inner.span,
@@ -225,7 +237,7 @@ impl<M: Mode> Lowerer<M> {
     /// see [`Lowerer::single`]), emitting any statements it needs into `out`.
     /// Lowers `e`. The larger kinds are lowered out of line so that this frame, which every
     /// level of a nested expression passes through, stays small (in debug builds especially).
-    pub(super) fn expr(&mut self, e: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    pub(super) fn expr(&mut self, e: &'a ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
         let span = e.span;
         let kind = match &e.kind {
             K::Nil => hir::ExprKind::Nil,
@@ -242,9 +254,8 @@ impl<M: Mode> Lowerer<M> {
             K::Name(sym) => return self.name_expr(ast::Name { sym: *sym, span }),
             K::SelfValue => return self.self_value(span),
             K::SelfType => return self.self_type(span),
-            K::Path { base, name } | K::Field { obj: base, name } => {
-                return self.field_expr(base, name, span, out);
-            }
+            K::Path { .. } => return Ok(self.path_expr(e, out)?.0),
+            K::Field { obj, name } => return self.field_expr(obj, name, span, out),
             K::Index { obj, key } => return self.index_expr(obj, key, span, out),
             K::Call {
                 callee,
@@ -342,11 +353,44 @@ impl<M: Mode> Lowerer<M> {
         })
     }
 
-    /// `base.name` or `base::name`.
+    /// A path (`a`, `Self`, `a::b`), with the observer's handle for what it names. Another
+    /// expression where a path is expected is lowered as it is, and names nothing.
+    pub(super) fn path_expr(
+        &mut self,
+        e: &'a ast::Expr,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<(ExprId, Sym<'a, M>)> {
+        match &e.kind {
+            K::Name(sym) => {
+                let (r, id) = self.resolve_observed(ast::Name {
+                    sym: *sym,
+                    span: e.span,
+                })?;
+                Ok((self.resolved_expr(r, e.span), id))
+            }
+            K::SelfType => {
+                let Some(target) = self.self_type_name(e.span)? else {
+                    return Ok((self.error_expr(e.span), M::Observer::NOTHING));
+                };
+                let (r, id) = self.resolve_observed(target)?;
+                Ok((self.resolved_expr(r, e.span), id))
+            }
+            K::Path { base, name } => {
+                let (obj, base_id) = self.path_expr(base, out)?;
+                let obj = self.first(obj);
+                let self_base = matches!(base.kind, K::SelfType);
+                let id = self.observer.member(base_id, self_base, *name);
+                Ok((self.field(obj, name.sym, e.span), id))
+            }
+            _ => Ok((self.expr(e, out)?, M::Observer::NOTHING)),
+        }
+    }
+
+    /// `base.name`.
     fn field_expr(
         &mut self,
-        base: &ast::Expr,
-        name: &ast::Name,
+        base: &'a ast::Expr,
+        name: &'a ast::Name,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
@@ -358,8 +402,8 @@ impl<M: Mode> Lowerer<M> {
     /// `obj[key]`.
     fn index_expr(
         &mut self,
-        obj: &ast::Expr,
-        key: &ast::Expr,
+        obj: &'a ast::Expr,
+        key: &'a ast::Expr,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
@@ -372,9 +416,9 @@ impl<M: Mode> Lowerer<M> {
     /// `callee(args)`, or the method call `callee.name(args)` when `method` is given.
     fn call_expr(
         &mut self,
-        callee: &ast::Expr,
-        method: Option<&ast::Name>,
-        args: &[ast::Expr],
+        callee: &'a ast::Expr,
+        method: Option<&'a ast::Name>,
+        args: &'a [ast::Expr],
         span: Span,
         args_at: u32,
         out: &mut Vec<StmtId>,
@@ -402,18 +446,25 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// `|params| body`.
-    fn closure(&mut self, c: &ast::Closure, span: Span) -> LResult<ExprId> {
-        let func = self.function(
-            &c.sig,
-            super::items::FnBody::Expr(&c.body),
-            hir::FunctionName::Anonymous,
-            c.span,
-        )?;
+    fn closure(&mut self, c: &'a ast::Closure, span: Span) -> LResult<ExprId> {
+        let source = FnSource {
+            sig: &c.sig,
+            generics: &[],
+            body: FnBody::Expr(&c.body),
+            item: M::Observer::NOTHING,
+            extent: c.span,
+        };
+        let func = self.function(source, hir::FunctionName::Anonymous, c.span)?;
         Ok(self.add_expr(hir::ExprKind::Closure(func), span))
     }
 
     /// `[a, b, ...]`.
-    fn array(&mut self, items: &[ast::Expr], span: Span, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    fn array(
+        &mut self,
+        items: &'a [ast::Expr],
+        span: Span,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<ExprId> {
         let entries = self
             .list(items, out)?
             .items
@@ -427,8 +478,8 @@ impl<M: Mode> Lowerer<M> {
     fn binary(
         &mut self,
         op: ast::BinOp,
-        lhs: &ast::Expr,
-        rhs: &ast::Expr,
+        lhs: &'a ast::Expr,
+        rhs: &'a ast::Expr,
         span: Span,
         op_at: u32,
         out: &mut Vec<StmtId>,
@@ -451,7 +502,7 @@ impl<M: Mode> Lowerer<M> {
     fn unary(
         &mut self,
         op: ast::UnOp,
-        expr: &ast::Expr,
+        expr: &'a ast::Expr,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
@@ -467,7 +518,7 @@ impl<M: Mode> Lowerer<M> {
 
     /// A block, `if`, `match` or loop used as a value; or `while`, `for`, `return`, `break`
     /// or `continue`, statements whose value, if any is used, is nil.
-    fn control_value(&mut self, e: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    fn control_value(&mut self, e: &'a ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
         let span = e.span;
         if let K::If { .. } | K::Match { .. } | K::Block(_) | K::Loop { .. } = e.kind {
             let local = self.temp(None, span, out);
@@ -482,25 +533,31 @@ impl<M: Mode> Lowerer<M> {
         self.funcs.iter().any(|f| {
             f.scopes
                 .iter()
-                .any(|s| s.entries.iter().any(|(n, _)| *n == sym))
+                .any(|s| s.entries.iter().any(|e| e.0 == sym))
         })
     }
 
     /// `Self` inside an `impl` block: the struct or enum being implemented.
-    pub(super) fn self_type(&mut self, span: Span) -> LResult<ExprId> {
+    fn self_type(&mut self, span: Span) -> LResult<ExprId> {
+        match self.self_type_name(span)? {
+            Some(target) => self.name_expr(target),
+            None => Ok(self.error_expr(span)),
+        }
+    }
+
+    /// The name `Self` at `span` stands for: the enclosing `impl` block's target, as if it
+    /// were written there. `None` once the error for a `Self` outside one is reported.
+    pub(super) fn self_type_name(&mut self, span: Span) -> LResult<Option<ast::Name>> {
         let Some(ctx) = self.impls.last() else {
             self.report(
                 span,
                 code::SELF_TYPE_OUTSIDE_IMPL,
                 "`Self` is only available in `impl` blocks",
             )?;
-            return Ok(self.error_expr(span));
+            return Ok(None);
         };
-        let target = ast::Name {
-            sym: ctx.target.sym,
-            span,
-        };
-        self.name_expr(target)
+        let sym = ctx.target.sym;
+        Ok(Some(ast::Name { sym, span }))
     }
 
     /// `a && b` and `a || b`, returning an operand as Lua does. When `b` needs statements,
@@ -508,8 +565,8 @@ impl<M: Mode> Lowerer<M> {
     fn logical(
         &mut self,
         is_and: bool,
-        lhs: &ast::Expr,
-        rhs: &ast::Expr,
+        lhs: &'a ast::Expr,
+        rhs: &'a ast::Expr,
         span: Span,
         op_at: u32,
         out: &mut Vec<StmtId>,
@@ -560,7 +617,7 @@ impl<M: Mode> Lowerer<M> {
 
     /// `a ~ b ~ c`, written left-associative, lowered right-nested so the compiler fuses the
     /// chain into one concatenation (as for Lua's `a .. b .. c`). Parentheses are kept.
-    fn concat(&mut self, e: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    fn concat(&mut self, e: &'a ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
         let mut operands = Vec::new();
         let mut ops = Vec::new();
         let mut cur = e;
@@ -598,7 +655,7 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// `e?`: if `e`'s first value is nil, the function returns `nil, <second value>`.
-    fn try_(&mut self, inner: &ast::Expr, span: Span, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    fn try_(&mut self, inner: &'a ast::Expr, span: Span, out: &mut Vec<StmtId>) -> LResult<ExprId> {
         self.check_not_scope_action(span, "?")?;
         let values = self.values(inner, out)?;
         let value = self.new_local(None, span, LocalKind::Hidden);
@@ -640,7 +697,7 @@ impl<M: Mode> Lowerer<M> {
     /// `#{ ... }`.
     fn map(
         &mut self,
-        entries: &[ast::MapEntry],
+        entries: &'a [ast::MapEntry],
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {

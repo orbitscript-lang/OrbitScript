@@ -9,10 +9,10 @@ use super::{LResult, Lowerer};
 use crate::ast;
 use crate::code;
 
-impl<M: Mode> Lowerer<M> {
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     pub(super) fn template(
         &mut self,
-        pieces: &[ast::TemplatePiece],
+        pieces: &'a [ast::TemplatePiece],
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
@@ -59,7 +59,7 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// Translates a hole's spec (Rust's mini-language) to a `string.format` conversion.
-    fn format_spec(&mut self, spec: &ast::FormatSpec) -> LResult<Vec<u8>> {
+    fn format_spec(&mut self, spec: &'a ast::FormatSpec) -> LResult<Vec<u8>> {
         let t = &spec.text[..];
         let mut i = 0;
         // Fill and alignment: an optional fill character before `<`, `^` or `>`.
@@ -182,7 +182,7 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// The error for a format spec that can't be translated; the hole then formats as `{}`.
-    fn bad_spec(&mut self, spec: &ast::FormatSpec, what: &str) -> LResult<Vec<u8>> {
+    fn bad_spec(&mut self, spec: &'a ast::FormatSpec, what: &str) -> LResult<Vec<u8>> {
         self.report(
             spec.span,
             code::FORMAT_SPEC,

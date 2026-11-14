@@ -22,16 +22,18 @@ enum Target {
     Named(ExprId),
 }
 
-impl<M: Mode> Lowerer<M> {
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     pub(super) fn cast(
         &mut self,
-        inner: &ast::Expr,
-        ty: &ast::Type,
+        inner: &'a ast::Expr,
+        ty: &'a ast::Type,
         soft: bool,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
         let value = self.single(inner, out)?;
+        // The observer reads the target as a type; lowering it below tells it nothing more.
+        self.observe_type(Some(ty));
         let (target, nilable) = strip_optional(ty);
         let Some(kind) = target.kind.as_deref() else {
             unreachable!("`as` targets always have a tree")
@@ -64,8 +66,8 @@ impl<M: Mode> Lowerer<M> {
     fn union_cast(
         &mut self,
         value: ExprId,
-        whole: &ast::Type,
-        members: &[ast::Type],
+        whole: &'a ast::Type,
+        members: &'a [ast::Type],
         mut nilable: bool,
         soft: bool,
         span: Span,
@@ -159,7 +161,7 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// Classifies a target that isn't a union or optional.
-    fn cast_target(&mut self, ty: &ast::Type) -> LResult<Target> {
+    fn cast_target(&mut self, ty: &'a ast::Type) -> LResult<Target> {
         let Some(kind) = ty.kind.as_deref() else {
             unreachable!("`as` targets always have a tree")
         };
@@ -173,7 +175,7 @@ impl<M: Mode> Lowerer<M> {
                 let first = segments[0];
                 if segments.len() == 1 {
                     // After any of the errors here the cast checks nothing, as `as any`.
-                    if self.generics.contains(&first.sym) {
+                    if self.generics.iter().any(|g| g.0 == first.sym) {
                         self.uncheckable(ty)?;
                         return Ok(Target::Any);
                     }
@@ -228,13 +230,32 @@ impl<M: Mode> Lowerer<M> {
         };
         // Reports a struct used as an enum, or a variant that doesn't exist.
         self.path_kind(&path)?;
-        let mut none = Vec::new();
-        let e = self.expr(&path, &mut none)?;
-        debug_assert!(none.is_empty(), "a path lowers without statements");
-        Ok(Target::Named(e))
+        Ok(Target::Named(self.type_path(&path)?))
     }
 
-    fn uncheckable(&mut self, ty: &ast::Type) -> LResult<Continue<M>> {
+    /// The value of a path that names a cast's target: the struct's, enum's or variant's
+    /// table.
+    fn type_path(&mut self, path: &ast::Expr) -> LResult<ExprId> {
+        let name = match &path.kind {
+            K::Name(sym) => ast::Name {
+                sym: *sym,
+                span: path.span,
+            },
+            K::SelfType => match self.self_type_name(path.span)? {
+                Some(target) => target,
+                None => return Ok(self.error_expr(path.span)),
+            },
+            K::Path { base, name } => {
+                let obj = self.type_path(base)?;
+                return Ok(self.field(obj, name.sym, path.span));
+            }
+            _ => unreachable!("a cast target's path"),
+        };
+        let r = self.resolve(name)?;
+        Ok(self.resolved_expr(r, name.span))
+    }
+
+    fn uncheckable(&mut self, ty: &'a ast::Type) -> LResult<Continue<'a, M>> {
         let msg = format!(
             "`as` can't check `{}` while the program runs; give the value a type annotation instead",
             type_text(self, ty)
@@ -247,7 +268,7 @@ impl<M: Mode> Lowerer<M> {
         self.funcs
             .iter()
             .flat_map(|f| &f.scopes)
-            .any(|s| s.aliases.contains(&sym))
+            .any(|s| s.aliases.iter().any(|a| a.name.sym == sym))
     }
 }
 
@@ -262,13 +283,13 @@ fn strip_optional(mut ty: &ast::Type) -> (&ast::Type, bool) {
 }
 
 /// A type as messages write it: `[int]`, `Shape::Circle`, `int | string`.
-fn type_text<M: Mode>(lx: &Lowerer<M>, ty: &ast::Type) -> String {
+fn type_text<'a, M: Mode<'a>>(lx: &Lowerer<'a, M>, ty: &ast::Type) -> String {
     let mut s = String::new();
     write_type(lx, ty, &mut s);
     s
 }
 
-fn write_type<M: Mode>(lx: &Lowerer<M>, ty: &ast::Type, s: &mut String) {
+fn write_type<'a, M: Mode<'a>>(lx: &Lowerer<'a, M>, ty: &ast::Type, s: &mut String) {
     let list = |s: &mut String, items: &[ast::Type]| {
         for (i, t) in items.iter().enumerate() {
             if i > 0 {

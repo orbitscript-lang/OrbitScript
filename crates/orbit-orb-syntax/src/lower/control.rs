@@ -4,7 +4,8 @@ use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, LabelId, LocalId, LocalKind, Span, StmtId};
 
 use super::expr::Part;
-use super::mode::Mode;
+use super::mode::{Mode, Reporter};
+use super::observe::{Local, Observer};
 use super::pattern::Access;
 use super::{Dest, LResult, LoopCtx, Lowerer};
 use crate::ast::{self, ExprKind as K};
@@ -21,10 +22,10 @@ struct RangeHeader<'a> {
     span: Span,
 }
 
-impl<M: Mode> Lowerer<M> {
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     pub(super) fn if_expr(
         &mut self,
-        e: &ast::Expr,
+        e: &'a ast::Expr,
         dest: &Dest,
         out: &mut Vec<StmtId>,
     ) -> LResult<()> {
@@ -40,8 +41,8 @@ impl<M: Mode> Lowerer<M> {
     fn if_chain(
         &mut self,
         cond: ExprId,
-        then: &ast::Block,
-        mut else_: Option<&ast::Expr>,
+        then: &'a ast::Block,
+        mut else_: Option<&'a ast::Expr>,
         span: Span,
         dest: &Dest,
         out: &mut Vec<StmtId>,
@@ -86,8 +87,8 @@ impl<M: Mode> Lowerer<M> {
 
     pub(super) fn match_expr(
         &mut self,
-        scrutinee: &ast::Expr,
-        arms: &[ast::Arm],
+        scrutinee: &'a ast::Expr,
+        arms: &'a [ast::Arm],
         span: Span,
         dest: &Dest,
         out: &mut Vec<StmtId>,
@@ -116,13 +117,14 @@ impl<M: Mode> Lowerer<M> {
             // An `if` chain, the first catch-all arm (if any) as its `else`.
             let mut hir_arms = Vec::new();
             let mut else_block = None;
-            for arm in arms {
+            for (i, arm) in arms.iter().enumerate() {
                 let test = self.arm_test(&arm.pat, &subjects)?;
                 let block = self.arm_body(arm, &subjects, dest, None)?;
                 match test {
                     Some(t) => hir_arms.push((t, block)),
                     None => {
                         else_block = Some(block);
+                        self.unreached_arms(&arms[i + 1..], &subjects, dest)?;
                         break;
                     }
                 }
@@ -151,7 +153,7 @@ impl<M: Mode> Lowerer<M> {
             let name = self.syms.result;
             let done = self.f().add_label(hir::Label { name, span });
             let mut catch_all = false;
-            for arm in arms {
+            for (i, arm) in arms.iter().enumerate() {
                 let test = self.arm_test(&arm.pat, &subjects)?;
                 let block = self.arm_body(arm, &subjects, dest, Some(done))?;
                 match test {
@@ -167,6 +169,7 @@ impl<M: Mode> Lowerer<M> {
                         self.push(&mut stmts, hir::StmtKind::Block(block), arm.span);
                         if arm.guard.is_none() {
                             catch_all = true;
+                            self.unreached_arms(&arms[i + 1..], &subjects, dest)?;
                             break;
                         }
                     }
@@ -182,8 +185,25 @@ impl<M: Mode> Lowerer<M> {
         Ok(())
     }
 
+    /// The arms after one that always matches never run, and the compiler drops them unread.
+    /// A collecting walk reads them, for their errors and their names.
+    fn unreached_arms(
+        &mut self,
+        arms: &'a [ast::Arm],
+        subjects: &[LocalId],
+        dest: &Dest,
+    ) -> LResult<()> {
+        if M::Reporter::RECOVERS {
+            for arm in arms {
+                self.arm_test(&arm.pat, subjects)?;
+                self.arm_body(arm, subjects, dest, None)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The test for an arm's pattern (`None` if it always matches).
-    fn arm_test(&mut self, pat: &ast::Pat, subjects: &[LocalId]) -> LResult<Option<ExprId>> {
+    fn arm_test(&mut self, pat: &'a ast::Pat, subjects: &[LocalId]) -> LResult<Option<ExprId>> {
         if let ast::PatKind::Or(alts) = &pat.kind {
             if alts
                 .iter()
@@ -191,7 +211,7 @@ impl<M: Mode> Lowerer<M> {
             {
                 // `(0, _) | (_, 0)`: alternatives over all the subjects.
                 let mut test: Option<ExprId> = None;
-                for alt in alts {
+                for (i, alt) in alts.iter().enumerate() {
                     let mut binds = Vec::new();
                     match &alt.kind {
                         ast::PatKind::Tuple(items) => {
@@ -209,6 +229,12 @@ impl<M: Mode> Lowerer<M> {
                         )?;
                     }
                     let Some(t) = self.arm_test(alt, subjects)? else {
+                        // As for an alternative of one value that always matches.
+                        if M::Reporter::RECOVERS {
+                            for unreached in &alts[i + 1..] {
+                                self.arm_test(unreached, subjects)?;
+                            }
+                        }
                         return Ok(None);
                     };
                     test = Some(match test {
@@ -235,12 +261,12 @@ impl<M: Mode> Lowerer<M> {
     /// An arm's bindings, guard and body. With `done`, the body jumps there when it finishes.
     fn arm_body(
         &mut self,
-        arm: &ast::Arm,
+        arm: &'a ast::Arm,
         subjects: &[LocalId],
         dest: &Dest,
         done: Option<LabelId>,
     ) -> LResult<BlockId> {
-        self.open_scope();
+        self.open_scope(arm.span);
         let mut stmts = Vec::new();
         let result = (|| {
             let mut binds = Vec::new();
@@ -251,7 +277,7 @@ impl<M: Mode> Lowerer<M> {
             } else {
                 self.pattern_binds(&arm.pat, &Access::Local(subjects[0]), &mut binds)?;
             }
-            self.emit_binds(binds, &mut stmts);
+            self.emit_binds(binds, None, &mut stmts);
             let mut body = Vec::new();
             self.tail(&arm.body, dest, &mut body)?;
             if let Some(done) = done {
@@ -317,8 +343,8 @@ impl<M: Mode> Lowerer<M> {
     pub(super) fn loop_(
         &mut self,
         label: Option<ast::Name>,
-        cond: Option<&ast::Expr>,
-        body: &ast::Block,
+        cond: Option<&'a ast::Expr>,
+        body: &'a ast::Block,
         span: Span,
         dest: &Dest,
         out: &mut Vec<StmtId>,
@@ -394,13 +420,16 @@ impl<M: Mode> Lowerer<M> {
     pub(super) fn for_(
         &mut self,
         label: Option<ast::Name>,
-        pat: &ast::Pat,
-        iter: &ast::Expr,
-        body: &ast::Block,
+        pat: &'a ast::Pat,
+        iter: &'a ast::Expr,
+        body: &'a ast::Block,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<()> {
         let header = self.range_header(iter)?;
+        // After an error in the pattern, the names it meant to bind are declared in the loop
+        // as plain variables.
+        let mut recovered: Vec<&'a ast::Pat> = Vec::new();
         // The loop variables, checked before anything is lowered.
         let names: Vec<Option<ast::Name>> = match &pat.kind {
             ast::PatKind::Bind { name, mutable } => {
@@ -410,8 +439,7 @@ impl<M: Mode> Lowerer<M> {
                         code::MUT_LOOP_VARIABLE,
                         "loop variables can't be `mut`; copy into a `let mut` in the body",
                     )?;
-                    // Goes on with a variable the body can assign, declared around the loop.
-                    self.declare_pattern_names(pat, out);
+                    recovered.push(pat);
                     vec![None]
                 } else {
                     vec![Some(*name)]
@@ -427,15 +455,13 @@ impl<M: Mode> Lowerer<M> {
                             mutable: false,
                         } => names.push(Some(*name)),
                         ast::PatKind::Wild => names.push(None),
-                        // After this error and the next, the names the pattern meant to bind
-                        // are declared around the loop.
                         _ => {
                             self.report(
                                 item.span,
                                 code::FOR_PATTERN,
                                 "a `for` pattern holds names or `_`",
                             )?;
-                            self.declare_pattern_names(item, out);
+                            recovered.push(item);
                             names.push(None);
                         }
                     }
@@ -448,9 +474,16 @@ impl<M: Mode> Lowerer<M> {
                     code::FOR_PATTERN,
                     "a `for` pattern holds a name, `_` or a tuple of them",
                 )?;
-                self.declare_pattern_names(pat, out);
+                recovered.push(pat);
                 vec![None]
             }
+        };
+        // The loop variables' scope, as the observer is told of it.
+        let extent = pat.span.to(body.span);
+        let loop_var = |name: ast::Name| Local {
+            full: name.span,
+            let_end: None,
+            def: None,
         };
 
         let (kind, brk) = match header {
@@ -493,14 +526,16 @@ impl<M: Mode> Lowerer<M> {
                         h.span,
                     )),
                 };
-                self.open_scope();
+                self.open_scope(extent);
+                self.declare_recovered(&recovered);
                 let var = self.new_local(
                     names[0].map(|n| n.sym),
                     names[0].map_or(pat.span, |n| n.span),
                     LocalKind::ForControl,
                 );
                 if let Some(n) = names[0] {
-                    self.bind_local(n.sym, var, false);
+                    let id = self.observer.local(n, loop_var(n));
+                    self.bind_local(n.sym, var, false, id);
                 }
                 let body = self.for_body(label, body);
                 let mut none = Vec::new();
@@ -519,7 +554,8 @@ impl<M: Mode> Lowerer<M> {
             None => {
                 let iter = self.values(iter, out)?;
                 let hidden = [(); 4].map(|_| self.new_local(None, span, LocalKind::Hidden));
-                self.open_scope();
+                self.open_scope(extent);
+                self.declare_recovered(&recovered);
                 let mut vars = Vec::with_capacity(names.len());
                 for (i, n) in names.iter().enumerate() {
                     // Only the first variable is the control variable (as in Lua 5.5); all
@@ -531,8 +567,9 @@ impl<M: Mode> Lowerer<M> {
                     };
                     let local =
                         self.new_local(n.map(|n| n.sym), n.map_or(pat.span, |n| n.span), kind);
-                    if let Some(n) = n {
-                        self.bind_local(n.sym, local, false);
+                    if let Some(n) = *n {
+                        let id = self.observer.local(n, loop_var(n));
+                        self.bind_local(n.sym, local, false, id);
                     }
                     vars.push(local);
                 }
@@ -556,11 +593,20 @@ impl<M: Mode> Lowerer<M> {
         Ok(())
     }
 
+    /// Declares in the loop's scope the names of the patterns it couldn't have as loop
+    /// variables. Only a collecting walk has any, and its HIR is dropped.
+    fn declare_recovered(&mut self, pats: &[&'a ast::Pat]) {
+        let mut dropped = Vec::new();
+        for pat in pats {
+            self.declare_pattern_names(pat, None, &mut dropped);
+        }
+    }
+
     /// A `for` loop's body, and the label its `break`s jump to, which goes after the loop.
     fn for_body(
         &mut self,
         label: Option<ast::Name>,
-        body: &ast::Block,
+        body: &'a ast::Block,
     ) -> LResult<(BlockId, Option<LabelId>)> {
         self.cur().loops.push(LoopCtx {
             label: label.map(|l| l.sym),
@@ -580,7 +626,7 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// Recognises a numeric `for` header.
-    fn range_header<'a>(&mut self, iter: &'a ast::Expr) -> LResult<Option<RangeHeader<'a>>> {
+    fn range_header(&mut self, iter: &'a ast::Expr) -> LResult<Option<RangeHeader<'a>>> {
         let mut e = iter;
         let mut step = None;
         let mut rev = false;
@@ -698,7 +744,7 @@ impl<M: Mode> Lowerer<M> {
     pub(super) fn break_(
         &mut self,
         label: Option<ast::Name>,
-        value: Option<&ast::Expr>,
+        value: Option<&'a ast::Expr>,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<()> {

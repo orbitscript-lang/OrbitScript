@@ -12,6 +12,7 @@
 //! a module with no errors here is one that runs.
 
 mod diag;
+mod observe;
 mod pragma;
 mod resolve;
 mod stdlib;
@@ -32,6 +33,17 @@ pub use types::TypeId;
 
 use symbols::Module;
 use types::{Names, Ty, Types};
+
+static COMPARE_WITH_LOWERING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// For this crate's tests, while the checker still resolves names itself: makes every check
+/// also record the module's names from the front end's lowering, and panic where the two
+/// disagree.
+#[doc(hidden)]
+pub fn compare_with_lowering(on: bool) {
+    COMPARE_WITH_LOWERING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// A source file the workspace knows. Ids are stable for a path for the workspace's lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -532,15 +544,25 @@ impl Workspace {
             (Some(p), None) => (Some(p.file), &p.names),
             _ => (None, &no_prelude),
         };
-        let (mut m, defs) = resolve::resolve(
-            file,
-            &ast,
-            resolve::Deps {
-                modules: &modules,
-                prelude: prelude_names,
-                checked: &checked,
-            },
-        );
+        let resolve_deps = resolve::Deps {
+            modules: &modules,
+            prelude: prelude_names,
+            checked: &checked,
+        };
+        let (mut m, defs) = resolve::resolve(file, &ast, resolve_deps);
+        if COMPARE_WITH_LOWERING.load(std::sync::atomic::Ordering::Relaxed) {
+            let recorder = observe::Recorder::new(file, &ast, resolve_deps);
+            let (errors, recorder) = orbit_orb_syntax::lower_observed(&ast, recorder);
+            let (recorded, recorded_defs) = recorder.finish();
+            let found =
+                observe::differences(file, (&m, &defs), (&recorded, &recorded_defs), &errors);
+            assert!(
+                found.is_empty(),
+                "{}: the resolver and lowering disagree\n{}",
+                path.display(),
+                found.join("\n")
+            );
+        }
         typeck::check(
             file,
             &ast,

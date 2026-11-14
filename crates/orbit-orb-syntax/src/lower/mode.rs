@@ -17,11 +17,18 @@
 //! values: `report` can only return the error, `?` always leaves, and the recovery code after
 //! it is unreachable, so none of it is in the compiler.
 
+use std::marker::PhantomData;
+
 use orbit_hir::Diagnostic;
 
-/// What a lowering walk is for. A mode only names types; it has no values.
-pub(super) trait Mode {
+use super::observe::{Nothing, Observer};
+
+/// What a lowering walk is for: what it does at an error (the reporter) and whom it tells
+/// about the names it resolves (the observer, see [`super::observe`]). A mode only names
+/// types; it has no values. `'a` is the syntax tree's lifetime.
+pub(super) trait Mode<'a> {
     type Reporter: Reporter + Default;
+    type Observer: Observer<'a>;
 }
 
 /// Receives each error lowering finds.
@@ -29,6 +36,10 @@ pub(super) trait Reporter {
     /// Proof that lowering goes on after an error: `()` when collecting, [`Never`] when the
     /// first error ends the walk.
     type Continue;
+
+    /// Whether lowering goes on after an error. A walk that does also reads the code the
+    /// compiler drops unread (a `match` arm after one that always matches), for its errors.
+    const RECOVERS: bool;
 
     /// Takes an error: `Err` to end the walk with it, `Ok` to go on.
     fn report(&mut self, error: Diagnostic) -> Result<Self::Continue, Diagnostic>;
@@ -41,13 +52,17 @@ pub(super) trait Reporter {
 pub(super) enum Never {}
 
 /// What going on after a report gives in mode `M`.
-pub(super) type Continue<M> = <<M as Mode>::Reporter as Reporter>::Continue;
+pub(super) type Continue<'a, M> = <<M as Mode<'a>>::Reporter as Reporter>::Continue;
 
-/// The compiler's mode: the first error is the result.
+/// The observer's handle for a name in mode `M`.
+pub(super) type Sym<'a, M> = <<M as Mode<'a>>::Observer as Observer<'a>>::Sym;
+
+/// The compiler's mode: the first error is the result, and nothing is observed.
 pub(super) struct Compile;
 
-impl Mode for Compile {
+impl<'a> Mode<'a> for Compile {
     type Reporter = FailFast;
+    type Observer = Nothing;
 }
 
 #[derive(Default)]
@@ -55,6 +70,7 @@ pub(super) struct FailFast;
 
 impl Reporter for FailFast {
     type Continue = Never;
+    const RECOVERS: bool = false;
 
     #[inline(always)]
     fn report(&mut self, error: Diagnostic) -> Result<Never, Diagnostic> {
@@ -67,11 +83,12 @@ impl Reporter for FailFast {
     }
 }
 
-/// The checker's mode: every error is kept and lowering recovers.
-pub(super) struct Check;
+/// The checker's mode: every error is kept, lowering recovers, and `O` observes.
+pub(super) struct Check<O>(PhantomData<O>);
 
-impl Mode for Check {
+impl<'a, O: Observer<'a>> Mode<'a> for Check<O> {
     type Reporter = Collect;
+    type Observer = O;
 }
 
 #[derive(Default)]
@@ -81,6 +98,7 @@ pub(super) struct Collect {
 
 impl Reporter for Collect {
     type Continue = ();
+    const RECOVERS: bool = true;
 
     fn report(&mut self, error: Diagnostic) -> Result<(), Diagnostic> {
         // Lowering reads some nodes twice (a pattern for its test and again for its bindings,

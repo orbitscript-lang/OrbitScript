@@ -3,7 +3,8 @@
 use orbit_hir as hir;
 use orbit_hir::{ExprId, LocalId, LocalKind, Span, StmtId, StrId};
 
-use super::mode::Mode;
+use super::mode::{Mode, Reporter, Sym};
+use super::observe::{Local, Observer};
 use super::{ItemTag, LResult, Lowerer, Resolved};
 use crate::ast::{self, ExprKind as K};
 use crate::code;
@@ -15,13 +16,15 @@ pub(super) enum Access {
     Field(Box<Access>, StrId),
 }
 
-/// A binding a pattern makes: the name, whether it's `mut`, and where its value is.
-pub(super) type Bind = (ast::Name, bool, Access);
+/// A binding a pattern makes: the name, whether it's `mut`, where its value is, and the
+/// pattern that binds it (the name itself for a shorthand field).
+pub(super) type Bind = (ast::Name, bool, Access, Span);
 
-/// Every name a pattern binds, with whether it is `mut`: for declaring them after an error.
-pub(super) fn names(pat: &ast::Pat, out: &mut Vec<(ast::Name, bool)>) {
+/// Every name a pattern binds, with whether it is `mut` and the pattern that binds it: for
+/// declaring them after an error.
+pub(super) fn names(pat: &ast::Pat, out: &mut Vec<(ast::Name, bool, Span)>) {
     match &pat.kind {
-        ast::PatKind::Bind { name, mutable } => out.push((*name, *mutable)),
+        ast::PatKind::Bind { name, mutable } => out.push((*name, *mutable, pat.span)),
         ast::PatKind::Tuple(items) | ast::PatKind::Or(items) => {
             for item in items {
                 names(item, out);
@@ -31,7 +34,7 @@ pub(super) fn names(pat: &ast::Pat, out: &mut Vec<(ast::Name, bool)>) {
             for f in fields {
                 match &f.pat {
                     Some(p) => names(p, out),
-                    None => out.push((f.name, false)),
+                    None => out.push((f.name, false, f.name.span)),
                 }
             }
         }
@@ -54,7 +57,7 @@ pub(super) enum PathKind {
     Unknown,
 }
 
-impl<M: Mode> Lowerer<M> {
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     fn access_expr(&mut self, a: &Access, span: Span) -> ExprId {
         match a {
             Access::Local(l) => self.local_expr(*l, span),
@@ -168,7 +171,11 @@ impl<M: Mode> Lowerer<M> {
     }
 
     /// The test that `a` matches `pat` (`None` when it always does).
-    pub(super) fn pattern_test(&mut self, pat: &ast::Pat, a: &Access) -> LResult<Option<ExprId>> {
+    pub(super) fn pattern_test(
+        &mut self,
+        pat: &'a ast::Pat,
+        a: &Access,
+    ) -> LResult<Option<ExprId>> {
         let span = pat.span;
         match &pat.kind {
             ast::PatKind::Wild | ast::PatKind::Bind { .. } => Ok(None),
@@ -231,7 +238,7 @@ impl<M: Mode> Lowerer<M> {
             }
             ast::PatKind::Or(alts) => {
                 let mut test: Option<ExprId> = None;
-                for alt in alts {
+                for (i, alt) in alts.iter().enumerate() {
                     let mut binds = Vec::new();
                     self.pattern_binds(alt, a, &mut binds)?;
                     if !binds.is_empty() {
@@ -242,6 +249,13 @@ impl<M: Mode> Lowerer<M> {
                         )?;
                     }
                     let Some(t) = self.pattern_test(alt, a)? else {
+                        // It always matches, so the alternatives after it are never tested.
+                        // A collecting walk still reads them.
+                        if M::Reporter::RECOVERS {
+                            for unreached in &alts[i + 1..] {
+                                self.pattern_test(unreached, a)?;
+                            }
+                        }
                         return Ok(None);
                     };
                     test = Some(match test {
@@ -310,9 +324,10 @@ impl<M: Mode> Lowerer<M> {
                 let mt = self.call_global(self.syms.getmetatable, vec![v], span);
                 let mt = self.add_expr(hir::ExprKind::First(mt), span);
                 let mut none = Vec::new();
-                let ty = self.expr(path, &mut none)?;
+                let (ty, target) = self.path_expr(path, &mut none)?;
                 let mut test = Some(self.compare(hir::BinOp::Eq, mt, ty, span));
                 for f in fields {
+                    self.observer.field(target, f.name);
                     if let Some(p) = &f.pat {
                         let fa = Access::Field(Box::new(a.clone()), f.name.sym);
                         let t = self.pattern_test(p, &fa)?;
@@ -324,7 +339,7 @@ impl<M: Mode> Lowerer<M> {
             ast::PatKind::Path(path) => {
                 let kind = self.path_kind(path)?;
                 let mut none = Vec::new();
-                let value = self.expr(path, &mut none)?;
+                let (value, _) = self.path_expr(path, &mut none)?;
                 let v = self.access_expr(a, span);
                 match kind {
                     PathKind::Variant(..) if self.is_unit_variant(&kind) => {
@@ -350,7 +365,7 @@ impl<M: Mode> Lowerer<M> {
     /// The bindings `pat` makes, reading from `a`.
     pub(super) fn pattern_binds(
         &mut self,
-        pat: &ast::Pat,
+        pat: &'a ast::Pat,
         a: &Access,
         out: &mut Vec<Bind>,
     ) -> LResult<()> {
@@ -366,7 +381,7 @@ impl<M: Mode> Lowerer<M> {
                         ),
                     )?;
                 }
-                out.push((*name, *mutable, a.clone()));
+                out.push((*name, *mutable, a.clone(), pat.span));
             }
             ast::PatKind::Struct { fields, .. } => {
                 for f in fields {
@@ -384,7 +399,7 @@ impl<M: Mode> Lowerer<M> {
                                     ),
                                 )?;
                             }
-                            out.push((f.name, false, fa));
+                            out.push((f.name, false, fa, f.name.span));
                         }
                     }
                 }
@@ -397,20 +412,89 @@ impl<M: Mode> Lowerer<M> {
                     self.pattern_binds(item, a, out)?;
                 }
             }
+            // A name in an alternative is an error where the pattern's test is lowered. A
+            // collecting walk binds it all the same, so its uses aren't errors too.
+            ast::PatKind::Or(alts) if M::Reporter::RECOVERS => {
+                for alt in alts {
+                    // An alternative of a whole arm may be a tuple, one item for each value.
+                    let items = match &alt.kind {
+                        ast::PatKind::Tuple(items) => &items[..],
+                        _ => std::slice::from_ref(alt),
+                    };
+                    let mut inner = Vec::new();
+                    for item in items {
+                        self.pattern_binds(item, a, &mut inner)?;
+                    }
+                    out.append(&mut inner);
+                }
+            }
             _ => {}
         }
         Ok(())
     }
 
-    /// Declares a pattern's bindings with one `Let` and brings them into scope.
-    pub(super) fn emit_binds(&mut self, binds: Vec<Bind>, out: &mut Vec<StmtId>) {
+    /// Shows the observer the paths and fields a destructuring `let` names. Lowering reads
+    /// only the bindings of such a pattern, so nothing is reported here.
+    pub(super) fn observe_pattern(&mut self, pat: &'a ast::Pat) {
+        if !M::Observer::ACTIVE {
+            return;
+        }
+        match &pat.kind {
+            ast::PatKind::Struct { path, fields, .. } => {
+                let target = self.observe_path(path);
+                for f in fields {
+                    self.observer.field(target, f.name);
+                    if let Some(p) = &f.pat {
+                        self.observe_pattern(p);
+                    }
+                }
+            }
+            ast::PatKind::Path(path) => {
+                self.observe_path(path);
+            }
+            ast::PatKind::Tuple(items) | ast::PatKind::Or(items) => {
+                for item in items {
+                    self.observe_pattern(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn observe_path(&mut self, path: &'a ast::Expr) -> Sym<'a, M> {
+        let sym = match &path.kind {
+            K::Name(sym) => *sym,
+            K::SelfType => match self.impls.last() {
+                Some(ctx) => ctx.target.sym,
+                None => return M::Observer::NOTHING,
+            },
+            K::Path { base, name } => {
+                let base_id = self.observe_path(base);
+                let self_base = matches!(base.kind, K::SelfType);
+                return self.observer.member(base_id, self_base, *name);
+            }
+            _ => return M::Observer::NOTHING,
+        };
+        let id = self.observed_value(sym);
+        self.observer.reference(path.span, id);
+        id
+    }
+
+    /// Declares a pattern's bindings with one `Let` and brings them into scope. `let_end` is
+    /// where a `let` that binds them ends.
+    pub(super) fn emit_binds(
+        &mut self,
+        binds: Vec<Bind>,
+        let_end: Option<u32>,
+        out: &mut Vec<StmtId>,
+    ) {
         if binds.is_empty() {
             return;
         }
         let span = binds[0].0.span;
         let mut locals = Vec::with_capacity(binds.len());
         let mut values = Vec::with_capacity(binds.len());
-        for (name, mutable, access) in &binds {
+        for (name, mutable, access, _) in &binds {
             let kind = if *mutable {
                 LocalKind::Normal
             } else {
@@ -427,8 +511,14 @@ impl<M: Mode> Lowerer<M> {
             },
             span,
         );
-        for ((name, mutable, _), local) in binds.into_iter().zip(locals) {
-            self.bind_local(name.sym, local, mutable);
+        for ((name, mutable, _, full), local) in binds.into_iter().zip(locals) {
+            let how = Local {
+                full,
+                let_end,
+                def: None,
+            };
+            let id = self.observer.local(name, how);
+            self.bind_local(name.sym, local, mutable, id);
         }
     }
 }
