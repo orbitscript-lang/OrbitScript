@@ -5,6 +5,7 @@ use orbit_hir::{ExprId, LocalKind, Span, StmtId};
 
 use super::{Dest, LResult, Lowerer, Resolved};
 use crate::ast::{self, ExprKind as K};
+use crate::code;
 
 /// One operand of a construct whose operands are lowered in order (see [`Lowerer::parts`]).
 pub(super) enum Part<'a> {
@@ -175,9 +176,11 @@ impl Lowerer {
         match &e.kind {
             K::Spread(inner) => {
                 if !last {
-                    return Err(
-                        self.error(e.span, "a spread `...` must be the last item of its list")
-                    );
+                    return Err(self.error(
+                        e.span,
+                        code::SPREAD_NOT_LAST,
+                        "a spread `...` must be the last item of its list",
+                    ));
                 }
                 self.spread(inner, out)
             }
@@ -198,6 +201,7 @@ impl Lowerer {
                     if depth != top {
                         return Err(self.error(
                             inner.span,
+                            code::INVALID_SPREAD,
                             "only the enclosing function's own rest parameter can be spread",
                         ));
                     }
@@ -209,6 +213,7 @@ impl Lowerer {
         if !self.f().expr(id).kind.is_multi() {
             return Err(self.error(
                 inner.span,
+                code::INVALID_SPREAD,
                 "only a call or the rest parameter can be spread with `...`",
             ));
         }
@@ -277,18 +282,21 @@ impl Lowerer {
             K::Tuple(_) => {
                 return Err(self.error(
                     span,
+                    code::TUPLE_AS_VALUE,
                     "tuples are multiple results, not values; use `[a, b]` for a table",
                 ));
             }
             K::Spread(_) => {
                 return Err(self.error(
                     span,
+                    code::INVALID_SPREAD,
                     "`...` spreads values into a call, an array or a list of results",
                 ));
             }
             K::Range { .. } => {
                 return Err(self.error(
                     span,
+                    code::RANGE_AS_VALUE,
                     "ranges are only allowed in `for` headers and patterns",
                 ));
             }
@@ -309,7 +317,11 @@ impl Lowerer {
     /// `self`.
     fn self_value(&mut self, span: Span) -> LResult<ExprId> {
         if !self.is_bound(self.syms.self_) {
-            return Err(self.error(span, "`self` is only available in methods"));
+            return Err(self.error(
+                span,
+                code::SELF_OUTSIDE_METHOD,
+                "`self` is only available in methods",
+            ));
         }
         self.name_expr(ast::Name {
             sym: self.syms.self_,
@@ -464,7 +476,11 @@ impl Lowerer {
     /// `Self` inside an `impl` block: the struct or enum being implemented.
     pub(super) fn self_type(&mut self, span: Span) -> LResult<ExprId> {
         let Some(ctx) = self.impls.last() else {
-            return Err(self.error(span, "`Self` is only available in `impl` blocks"));
+            return Err(self.error(
+                span,
+                code::SELF_TYPE_OUTSIDE_IMPL,
+                "`Self` is only available in `impl` blocks",
+            ));
         };
         let target = ast::Name {
             sym: ctx.target.sym,
@@ -624,9 +640,11 @@ impl Lowerer {
                     // Only the constructor's last entry may expand to several values.
                     let last = Some(i) == last_positional && i + 1 == entries.len();
                     if matches!(v.kind, K::Spread(_)) && !last {
-                        return Err(
-                            self.error(v.span, "a spread `...` must be the last entry of a table")
-                        );
+                        return Err(self.error(
+                            v.span,
+                            code::SPREAD_NOT_LAST,
+                            "a spread `...` must be the last entry of a table",
+                        ));
                     }
                     parts.push(Part::Item(v, last));
                 }

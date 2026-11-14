@@ -6,14 +6,14 @@
 //! works on plain owned data and never touches the VM or the GC heap.
 
 pub mod ast;
-mod diag;
+pub mod code;
 pub mod lexer;
 mod lower;
 mod parser;
 pub mod token;
 
-pub use diag::{Diagnostic, DiagnosticKind};
 pub use lower::lower;
+pub use orbit_hir::{Code, Diagnostic, DiagnosticKind, Severity};
 pub use parser::{ParseOptions, parse, parse_recovering, parse_with};
 
 /// The whole OrbitScript front end: parses `src`, lowers it to HIR and runs the HIR's shared

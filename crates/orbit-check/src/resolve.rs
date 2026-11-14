@@ -6,13 +6,14 @@
 //! Unlike lowering, it keeps going after an error and records every definition and reference,
 //! which is what the language server's queries need.
 
+use crate::diag::code;
 use std::collections::HashMap;
 
 use orbit_hir::{Span, StrId, StringPool};
 use orbit_orb_syntax::ast::{self, ExprKind, ItemKind, PatKind, StmtKind, TypeKind};
 
 use crate::symbols::{Module, Symbol, SymbolId, SymbolKind};
-use crate::{Code, Diagnostic, FileId, Severity};
+use crate::{Code, FileId};
 
 /// Type names that need no definition (proposal, "The type language").
 pub(crate) const BUILTIN_TYPES: &[&str] = &[
@@ -163,7 +164,7 @@ impl<'a> Resolver<'a> {
     fn error(&mut self, span: Span, code: Code, message: String) {
         self.m
             .diagnostics
-            .push(Diagnostic::error(self.file, span, code, message));
+            .push(crate::diag::error(span, code, message));
     }
 
     fn add_symbol(&mut self, name: ast::Name, kind: SymbolKind, full: Span, is_pub: bool) -> u32 {
@@ -260,7 +261,7 @@ impl<'a> Resolver<'a> {
                     let text = self.text(name.sym);
                     self.error(
                         name.span,
-                        Code::UsedBeforeDefinition,
+                        code::USED_BEFORE_DEFINITION,
                         format!(
                             "`{text}` is used before its definition; move the definition up \
                              (functions may refer to items defined after them)"
@@ -276,7 +277,7 @@ impl<'a> Resolver<'a> {
         }
         self.error(
             name.span,
-            Code::UnknownName,
+            code::UNKNOWN_NAME,
             format!(
                 "cannot find `{text}` in this scope (to use a global, declare it with `extern {text}`)"
             ),
@@ -341,7 +342,7 @@ impl<'a> Resolver<'a> {
                 let module = sym.name.clone();
                 self.error(
                     name.span,
-                    Code::NoPublicItem,
+                    code::NO_PUBLIC_ITEM,
                     format!("module `{module}` has no public item `{text}`"),
                 );
                 Res::Unknown
@@ -363,7 +364,7 @@ impl<'a> Resolver<'a> {
                         };
                         self.error(
                             name.span,
-                            Code::NoAssociatedItem,
+                            code::NO_ASSOCIATED_ITEM,
                             format!("`{what}` has no variant or associated item `{text}`"),
                         );
                         Res::Unknown
@@ -395,7 +396,7 @@ impl<'a> Resolver<'a> {
                 let text = self.text(name.sym);
                 self.error(
                     name.span,
-                    Code::UnknownField,
+                    code::UNKNOWN_FIELD,
                     format!("`{owner}` has no field `{text}`"),
                 );
             }
@@ -780,7 +781,7 @@ impl<'a> Resolver<'a> {
                         Some(None) => {
                             self.error(
                                 field.span,
-                                Code::NoPublicItem,
+                                code::NO_PUBLIC_ITEM,
                                 format!("module `{}` has no public item `{text}`", key),
                             );
                             self.bind_new(alias.unwrap_or(*field), SymbolKind::Import, span);
@@ -839,16 +840,14 @@ impl<'a> Resolver<'a> {
                 for f in fields {
                     let text = self.text(f.name.sym);
                     if BUILTIN_TYPES.contains(&text.as_str()) {
-                        self.m.diagnostics.push(Diagnostic {
-                            file: self.file,
-                            span: f.name.span,
-                            severity: Severity::Warning,
-                            code: Code::RecordFieldLikeType,
-                            message: format!(
+                        self.m.diagnostics.push(crate::diag::warning(
+                            f.name.span,
+                            code::RECORD_FIELD_LIKE_TYPE,
+                            format!(
                                 "record field named `{text}`, like a type; a map type is written \
                                  `#{{[{text}]: V}}`"
                             ),
-                        });
+                        ));
                     }
                     self.ty(&f.ty);
                 }
@@ -879,13 +878,13 @@ impl<'a> Resolver<'a> {
                     self.m.refs.push((first.span, id));
                     self.error(
                         first.span,
-                        Code::NotAType,
+                        code::NOT_A_TYPE,
                         format!("`{text}` is a value, not a type"),
                     );
                 }
                 Res::Unknown => self.error(
                     first.span,
-                    Code::UnknownType,
+                    code::UNKNOWN_TYPE,
                     format!("cannot find type `{text}` in this scope"),
                 ),
             }
@@ -903,7 +902,7 @@ impl<'a> Resolver<'a> {
                 let text = self.text(last.sym);
                 self.error(
                     last.span,
-                    Code::NotAType,
+                    code::NOT_A_TYPE,
                     format!("`{text}` is a value, not a type"),
                 );
             }

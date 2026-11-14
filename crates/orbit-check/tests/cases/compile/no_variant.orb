@@ -1,0 +1,3 @@
+enum E { A, B }
+fn f(v) { match v { E::C => 1, _ => 0 } } //~ T0104
+print(f(1));

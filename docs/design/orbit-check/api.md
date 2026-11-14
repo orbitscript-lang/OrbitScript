@@ -47,13 +47,15 @@ pub struct FileId(u32);          // stable for a path for the workspace's lifeti
 
 pub struct Location { pub file: FileId, pub span: Span }
 
+// `orbit_hir::Diagnostic`, the type the compiler's front ends report with too.
 pub struct Diagnostic {
-    pub file: FileId,
     pub span: Span,
+    pub line: u32,               // 1-based line of `span.start`
     pub severity: Severity,      // Error, Warning, Hint
-    pub code: Code,              // stable, e.g. T0101; `Code::as_str()`
+    pub code: Code,              // stable; prints as `T0101`
     pub message: String,
-    pub related: Vec<(Location, String)>,   // "defined here", "previous arm"
+    pub near: Option<Near>,      // Lua messages only
+    pub kind: DiagnosticKind,    // `UnexpectedEof` for input cut short
 }
 
 pub struct SymbolId(u32);        // a definition: local, parameter, item, field, variant, method
@@ -105,50 +107,89 @@ impl Workspace {
 
 ## Diagnostic codes
 
-Codes are stable: one never changes meaning, and a retired code isn't reused.
+Codes are stable: one never changes meaning, and a retired code isn't reused. T0003 is the code of a compile error from a front end that doesn't give each of its rules a code (Lua's); the checker reads only OrbitScript and never reports it.
 
-| Code | Severity | Meaning |
-|---|---|---|
-| T0001 | error | the module doesn't parse |
-| T0002 | error | `use a::b` names no module on the search path |
-| T0003 | error | the module parses but doesn't compile: it breaks a rule the compiler enforces (assigning to an immutable name, `break` outside a loop, a duplicate field); the compiler's message |
-| T0101 | error | unknown name |
-| T0102 | error | an item used before its definition in the same function |
-| T0103 | error | the module has no public item of that name |
-| T0104 | error | the struct or enum has no such variant or associated item |
-| T0105 | error | a struct literal or pattern names a field the struct doesn't have |
-| T0106 | error | a type annotation names something undefined |
-| T0107 | error | a type annotation names a value |
-| T0108 | error | a struct literal leaves out a field |
-| T0201 | error | a value of the wrong type (argument, `let`, field, result, pattern) |
-| T0202 | error | too many or too few arguments |
-| T0203 | error | no such field or method on the value's type |
-| T0204 | error | calling something that isn't a function |
-| T0205 | error | `let (a, b) = f()` binds more names than `f` returns |
-| T0206 | error | an operator on operand types it doesn't take |
-| T0207 | error | a value that may be nil used where nil isn't allowed |
-| T0208 | error | `?` in a function whose results can't be `nil, err` |
-| T0209 | error | an `as` cast that can never succeed, or `as bool` on a value that is never false |
-| T0210 | error | an `as` target the program can't check while it runs (structural types, `table`, type parameters, aliases); same message as the compiler |
-| T0301 | warning | `==` or `!=` between types that are never equal |
-| T0302 | warning | a bitwise operator on a float |
-| T0303 | warning | a condition that is always true |
-| T0304 | warning | a record field named like a type (the old map spelling `#{string: int}`) |
-| T0305 | warning | an `orbit-check: ignore` that ignores nothing (strict mode) |
-| T0306 | warning | an `orbit-check:` comment that isn't a pragma, or names an unknown code |
-| T0307 | warning | `t[0]` on an array (arrays start at 1) |
-| T0308 | warning | `for i in 0..#t` that reads `t[i]`: it reads `t[0]` and skips the last element |
-| T0309 | warning | a local that is never read (names starting with `_` and `let scope` bindings are exempt) |
-| T0310 | warning | a `use`d module or name that is never used (`pub use` is exempt) |
-| T0401 | error | a `match` on an enum, `bool` or optional value that misses cases |
-| T0501 | error | a `pub fn` parameter without a type (strict mode) |
-| T0502 | error | a `pub fn` that returns values without a result type (strict mode) |
-| T0503 | error | a condition that isn't `bool` (strict mode) |
-| T0504 | error | `use` of a Lua module with no `.orbi` stub (strict mode) |
+A code marked **compiler** is a rule of the language that the compiler enforces: `orbit` refuses the module with the same message (it prints no codes). The codes are defined in the front end (`orbit_orb_syntax::code`), which is what reports them, to the compiler and to the checker alike. The rest are the checker's alone (`orbit_check::code`) and never stop a module from running. `orbit_check::code::all()` lists both.
+
+| Code | Severity | Reported by | Meaning |
+|---|---|---|---|
+| T0001 | error | compiler | the module doesn't parse |
+| T0002 | error | checker | `use a::b` names no module on the search path |
+| T0101 | error | compiler | unknown name |
+| T0102 | error | compiler | an item used before its definition in the same function |
+| T0103 | error | checker | the module has no public item of that name |
+| T0104 | error | compiler | the struct or enum has no such variant or associated item |
+| T0105 | error | compiler | a struct literal or pattern names a field the struct doesn't have |
+| T0106 | error | checker | a type annotation names something undefined |
+| T0107 | error | checker | a type annotation names a value |
+| T0108 | error | compiler | a struct literal leaves out a field |
+| T0111 | error | compiler | assigning to a `let` or a parameter that isn't `mut` |
+| T0112 | error | compiler | assigning to an item (a function, constant, struct, enum or `use`d module) |
+| T0113 | error | compiler | assigning to a prelude name that wasn't declared with `extern` |
+| T0114 | error | compiler | assigning to something that isn't a name, a field or an element |
+| T0201 | error | checker | a value of the wrong type (argument, `let`, field, result, pattern) |
+| T0202 | error | checker | too many or too few arguments |
+| T0203 | error | checker | no such field or method on the value's type |
+| T0204 | error | checker | calling something that isn't a function |
+| T0205 | error | checker | `let (a, b) = f()` binds more names than `f` returns |
+| T0206 | error | checker | an operator on operand types it doesn't take |
+| T0207 | error | checker | a value that may be nil used where nil isn't allowed |
+| T0208 | error | checker | `?` in a function whose results can't be `nil, err` |
+| T0209 | error | checker | an `as` cast that can never succeed, or `as bool` on a value that is never false |
+| T0210 | error | compiler | an `as` target the program can't check while it runs (structural types, `table`, type parameters, aliases) |
+| T0301 | warning | checker | `==` or `!=` between types that are never equal |
+| T0302 | warning | checker | a bitwise operator on a float |
+| T0303 | warning | checker | a condition that is always true |
+| T0304 | warning | checker | a record field named like a type (the old map spelling `#{string: int}`) |
+| T0305 | warning | checker | an `orbit-check: ignore` that ignores nothing (strict mode) |
+| T0306 | warning | checker | an `orbit-check:` comment that isn't a pragma, or names an unknown code |
+| T0307 | warning | checker | `t[0]` on an array (arrays start at 1) |
+| T0308 | warning | checker | `for i in 0..#t` that reads `t[i]`: it reads `t[0]` and skips the last element |
+| T0309 | warning | checker | a local that is never read (names starting with `_` and `let scope` bindings are exempt) |
+| T0310 | warning | checker | a `use`d module or name that is never used (`pub use` is exempt) |
+| T0401 | error | checker | a `match` on an enum, `bool` or optional value that misses cases |
+| T0501 | error | checker | a `pub fn` parameter without a type (strict mode) |
+| T0502 | error | checker | a `pub fn` that returns values without a result type (strict mode) |
+| T0503 | error | checker | a condition that isn't `bool` (strict mode) |
+| T0504 | error | checker | `use` of a Lua module with no `.orbi` stub (strict mode) |
+| T0601 | error | compiler | `break` or `continue` outside a loop |
+| T0602 | error | compiler | a label no enclosing loop has |
+| T0603 | error | compiler | `break` with a value in a `while` or `for` |
+| T0604 | error | compiler | `return`, `?`, `break` or `continue` that would leave a `scope` action |
+| T0605 | error | compiler | `self` outside a method |
+| T0606 | error | compiler | `Self` outside an `impl` block |
+| T0607 | error | compiler | a `pub` item below module level |
+| T0608 | error | compiler | `use` below module level |
+| T0609 | error | compiler | `return` at the top level of a module with `pub` items |
+| T0610 | error | compiler | a range used as a value |
+| T0611 | error | compiler | a tuple used as a value |
+| T0612 | error | compiler | a spread `...` that isn't last in its list |
+| T0613 | error | compiler | a spread `...` of something that can't be spread, or where no list takes it |
+| T0614 | error | compiler | `.rev()` or `.step_by(s)` misused on a `for` range |
+| T0615 | error | compiler | a declaration without a body or value outside a stub file |
+| T0616 | error | compiler | a format spec in a template string that isn't supported or is malformed |
+| T0701 | error | compiler | a `let` that needs a value and has none |
+| T0702 | error | compiler | a pattern a `let` can't take (one that may not match; more than one name for `let scope`) |
+| T0703 | error | compiler | a pattern a `for` can't take |
+| T0704 | error | compiler | a `mut` loop variable |
+| T0705 | error | compiler | a binding inside a `\|` pattern |
+| T0706 | error | compiler | a name bound twice in one pattern |
+| T0707 | error | compiler | a tuple pattern that isn't a whole `match` arm |
+| T0708 | error | compiler | a range pattern whose bounds aren't both numbers or both strings |
+| T0709 | error | compiler | a struct pattern that leaves out a field without `..` |
+| T0710 | error | compiler | an enum named where one of its variants is needed |
+| T0711 | error | compiler | braces after a variant without fields, or none after one with fields |
+| T0801 | error | compiler | a parameter name used twice |
+| T0802 | error | compiler | a field declared twice |
+| T0803 | error | compiler | a variant declared twice |
+| T0804 | error | compiler | an `impl` member the type already has, as a member or a variant |
+| T0805 | error | compiler | a field given twice in a struct literal |
+| T0806 | error | compiler | a `const` that isn't a literal or another `const` |
+| T0807 | error | compiler | an `impl` for something that isn't a struct or enum of the module |
 
 ## Pragmas and strict mode
 
-- `// orbit-check: ignore` drops everything reported on its line, and `// orbit-check: ignore[T0207, T0201]` only those codes. A syntax error (T0001) or a compile error (T0003) is never dropped, and an ignored name error that stops the module compiling comes back as T0003: the module wouldn't run. The comment goes at the end of the line it covers.
+- `// orbit-check: ignore` drops everything reported on its line, and `// orbit-check: ignore[T0207, T0201]` only those codes. It cannot drop a syntax error or what stops the module compiling (the codes marked compiler above): the module wouldn't run. The comment goes at the end of the line it covers.
 - `//! orbit-check: strict` checks the module strictly, and `//! orbit-check: off` reports only syntax and compile errors for it. `Config::strict` (`--strict`) makes every module strict except those marked `off`; the bundled stubs are never strict.
 - Strict mode adds T0501-T0504, and T0305 for an `ignore` with nothing to ignore. A `pub fn` in a module or a `pub` method needs types on its parameters (`self` aside) and, when it returns values, a result type. A condition must be `bool` (or `any`): `if n` becomes `if n > 0`, `if x` on an optional becomes `if x != nil`. An untyped Lua module is reported once, at its `use`, rather than at every use of a value from it.
 - `orbit-check --deny-warnings` exits with status 1 on warnings too.
@@ -156,7 +197,7 @@ Codes are stable: one never changes meaning, and a retired code isn't reused.
 ## Broken code
 
 - The checker parses with recovery (`parse_recovering`): every syntax error is reported, and a statement or item that didn't parse becomes an `Error` node. Resolution and checking treat it as `any` and report nothing further about it. Names it would have defined are unknown to the code after it.
-- A module that parsed without errors is also lowered, as the compiler lowers it, and the error that stops lowering is reported as T0003 with the compiler's message. So a module with no errors from the checker is one the compiler accepts, and the server should take `.orb` diagnostics from the checker only, not from both. Lowering stops at its first error, so there is at most one T0003 per module. Where the checker has a rule of its own for the same mistake (an unknown name, a use before the definition, a missing or unknown field, an `as` target that can't be checked), only the checker's diagnostic is shown. Stubs and modules with syntax errors are not lowered. `tests/agreement.rs` holds the checker to this: every `.orb` file in the repository, and a few thousand broken variants of them, must compile whenever the checker reports no errors.
+- A module that parsed without errors is also lowered, as the compiler lowers it, and the error that stops lowering is reported with its code and the compiler's message. So a module with no errors from the checker is one the compiler accepts, and the server should take `.orb` diagnostics from the checker only, not from both. Lowering stops at its first error, so a module shows one such error at a time. The checker still has rules of its own for a few of the same mistakes (an unknown name, a use before the definition, a missing or unknown field, an `as` target that can't be checked); when it reports one under the same code at the same place, the compiler's copy is left out. Stubs and modules with syntax errors are not lowered. `tests/agreement.rs` holds the checker to this: every `.orb` file in the repository, and a few thousand broken variants of them, must compile whenever the checker reports no errors.
 
 ## Stubs
 

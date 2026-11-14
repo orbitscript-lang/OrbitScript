@@ -1,0 +1,3 @@
+extern y;
+let x = y as [int]; //~ T0210
+print(x);

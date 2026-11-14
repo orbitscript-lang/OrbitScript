@@ -10,7 +10,7 @@ fn main() {
         match orbit_lua_syntax::to_hir(&path, &src, &options) {
             Ok(chunk) => print!("{}", orbit_hir::print(&chunk)),
             Err(d) => {
-                eprintln!("{}", d.to_lua_message(&path));
+                eprintln!("{}", d.to_message(&path));
                 std::process::exit(1);
             }
         }

@@ -1,0 +1,2 @@
+fn f() { scope return 1; } //~ T0604
+f();

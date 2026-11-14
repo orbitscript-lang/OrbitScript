@@ -4,8 +4,8 @@
 //! interpreter prints.
 
 use crate::ast::{Comment, CommentKind};
-use crate::diag::{Diagnostic, Near};
 use crate::token::{Keyword, Punct, Token, TokenKind};
+use orbit_hir::{Code, Diagnostic, Near};
 use orbit_hir::{Span, StringPool};
 
 pub struct Lexer<'a> {
@@ -188,12 +188,13 @@ impl<'a> Lexer<'a> {
 
     fn error(&self, start: usize, message: impl Into<String>, near: Option<Near>) -> Diagnostic {
         let line = self.line_of(self.pos as u32);
-        Diagnostic::new(
+        Diagnostic::error(
             Span::new(start as u32, self.pos as u32),
             line,
+            Code::SYNTAX,
             message,
-            near,
         )
+        .near(near)
     }
 
     /// An error whose `near` text runs from `from` through the byte being looked at, which is how
@@ -864,7 +865,7 @@ mod tests {
             match lx.next_token() {
                 Ok(t) if t.kind == TokenKind::Eof => return Ok(out),
                 Ok(t) => out.push(t.kind),
-                Err(d) => return Err(d.to_lua_message("s.lua")),
+                Err(d) => return Err(d.to_message("s.lua")),
             }
         }
     }

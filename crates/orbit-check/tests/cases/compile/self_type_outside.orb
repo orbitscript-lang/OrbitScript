@@ -1,2 +1,2 @@
-fn f() { Self::new() } //~ T0003
+fn f() { Self::new() } //~ T0606
 print(1);

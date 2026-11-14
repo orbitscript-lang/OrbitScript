@@ -1,2 +1,2 @@
-fn f(v) { match v { (a, a) => a, } } //~ T0003
+fn f(v) { match v { (a, a) => a, } } //~ T0706
 print(f(1));

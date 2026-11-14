@@ -16,6 +16,7 @@ use super::expr::Part;
 use super::pattern::PathKind;
 use super::{Binding, Dest, ImplCtx, ItemTag, LResult, Lowerer, Resolved, Target};
 use crate::ast::{self, ExprKind as K};
+use crate::code;
 
 /// A function body: an item's block, or a closure's expression.
 pub(super) enum FnBody<'a> {
@@ -30,7 +31,11 @@ impl Lowerer {
 
     pub(super) fn item(&mut self, item: &ast::Item, out: &mut Vec<StmtId>) -> LResult<()> {
         if item.is_pub && !self.at_module_level() {
-            return Err(self.error(item.span, "`pub` items must be at module level"));
+            return Err(self.error(
+                item.span,
+                code::NESTED_PUB,
+                "`pub` items must be at module level",
+            ));
         }
         match &item.kind {
             ast::ItemKind::Fn(f) => {
@@ -238,9 +243,13 @@ impl Lowerer {
     /// A `const` value must be a literal or another `const`.
     /// A function's body; a stub declaration (`fn f();`) has none and can't run.
     fn fn_body<'b>(&self, f: &'b ast::FnDecl) -> LResult<&'b ast::Block> {
-        f.body
-            .as_ref()
-            .ok_or_else(|| self.error(f.span, "a stub declaration has no body to run"))
+        f.body.as_ref().ok_or_else(|| {
+            self.error(
+                f.span,
+                code::STUB_DECLARATION,
+                "a stub declaration has no body to run",
+            )
+        })
     }
 
     /// A constant's value; a stub declaration (`const N: int;`) has none and can't run.
@@ -249,9 +258,13 @@ impl Lowerer {
         item: &ast::Item,
         value: &'b Option<ast::Expr>,
     ) -> LResult<&'b ast::Expr> {
-        value
-            .as_ref()
-            .ok_or_else(|| self.error(item.span, "a stub declaration has no value to run"))
+        value.as_ref().ok_or_else(|| {
+            self.error(
+                item.span,
+                code::STUB_DECLARATION,
+                "a stub declaration has no value to run",
+            )
+        })
     }
 
     fn check_const(&mut self, value: &ast::Expr) -> LResult<()> {
@@ -281,6 +294,7 @@ impl Lowerer {
         } else {
             Err(self.error(
                 value.span,
+                code::CONST_NOT_LITERAL,
                 "a `const` must be a literal or another `const`; use `let` for other values",
             ))
         }
@@ -314,6 +328,7 @@ impl Lowerer {
                 if seen.contains(&n.sym) {
                     return Err(self.error(
                         n.span,
+                        code::DUPLICATE_PARAMETER,
                         format!("parameter `{}` is declared twice", self.text(n.sym)),
                     ));
                 }
@@ -391,6 +406,7 @@ impl Lowerer {
             if seen.contains(&f.name.sym) {
                 return Err(self.error(
                     f.name.span,
+                    code::DUPLICATE_FIELD,
                     format!("field `{}` is declared twice", self.text(f.name.sym)),
                 ));
             }
@@ -434,6 +450,7 @@ impl Lowerer {
             if seen.contains(&v.name.sym) {
                 return Err(self.error(
                     v.name.span,
+                    code::DUPLICATE_VARIANT,
                     format!("variant `{}` is declared twice", self.text(v.name.sym)),
                 ));
             }
@@ -551,6 +568,7 @@ impl Lowerer {
             PathKind::Enum(idx) => {
                 return Err(self.error(
                     path.span,
+                    code::ENUM_NEEDS_VARIANT,
                     format!(
                         "`{}` is an enum; build a variant, such as `{}::Variant {{ .. }}`",
                         self.text(self.types[idx].name),
@@ -561,6 +579,7 @@ impl Lowerer {
             _ if self.is_unit_variant(&kind) => {
                 return Err(self.error(
                     path.span,
+                    code::VARIANT_SHAPE,
                     "this variant has no fields; write it without braces",
                 ));
             }
@@ -571,6 +590,7 @@ impl Lowerer {
             if seen.contains(&f.name.sym) {
                 return Err(self.error(
                     f.name.span,
+                    code::FIELD_GIVEN_TWICE,
                     format!("field `{}` is given twice", self.text(f.name.sym)),
                 ));
             }
@@ -581,6 +601,7 @@ impl Lowerer {
                 if !known.contains(&f.name.sym) {
                     return Err(self.error(
                         f.name.span,
+                        code::UNKNOWN_FIELD,
                         format!("no field `{}` in this struct", self.text(f.name.sym)),
                     ));
                 }
@@ -588,6 +609,7 @@ impl Lowerer {
             if let Some(missing) = known.iter().find(|k| !seen.contains(k)) {
                 return Err(self.error(
                     span,
+                    code::MISSING_FIELD,
                     format!("missing field `{}` in struct literal", self.text(*missing)),
                 ));
             }
@@ -639,6 +661,7 @@ impl Lowerer {
             _ => {
                 return Err(self.error(
                     i.target.span,
+                    code::IMPL_TARGET,
                     format!(
                         "`{}` is not a struct or enum defined in this module",
                         self.text(i.target.sym)
@@ -672,6 +695,7 @@ impl Lowerer {
                 {
                     return Err(self.error(
                         name.span,
+                        code::DUPLICATE_MEMBER,
                         format!(
                             "`{}` is already a variant of this enum",
                             self.text(name.sym)
@@ -683,6 +707,7 @@ impl Lowerer {
                     if self.types[idx].members.contains(&name.sym) {
                         return Err(self.error(
                             name.span,
+                            code::DUPLICATE_MEMBER,
                             format!("`{}` is already defined for this type", self.text(name.sym)),
                         ));
                     }
@@ -845,7 +870,7 @@ impl Lowerer {
 
     fn use_decl(&mut self, u: &ast::UseDecl, span: Span, out: &mut Vec<StmtId>) -> LResult<()> {
         if !self.at_module_level() {
-            return Err(self.error(span, "`use` must be at module level"));
+            return Err(self.error(span, code::NESTED_USE, "`use` must be at module level"));
         }
         let path: Vec<String> = u.path.iter().map(|n| self.text(n.sym)).collect();
         let module = self.intern(path.join(".").as_bytes());

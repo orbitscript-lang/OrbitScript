@@ -2,243 +2,118 @@
 
 use orbit_hir::Span;
 
-use crate::FileId;
+pub use orbit_hir::{Code, Diagnostic, Severity};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Severity {
-    Error,
-    Warning,
-    Hint,
-}
-
-impl Severity {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-            Severity::Hint => "hint",
-        }
-    }
-}
-
-/// A stable diagnostic code. Codes never change meaning; retired ones are not reused.
+/// Every diagnostic code. Codes never change meaning; retired ones are not reused.
 ///
 /// `T00xx` are syntax and module errors, `T01xx` names, `T02xx` type errors, `T03xx` warnings
 /// about code that runs but is probably wrong (and about pragmas), `T04xx` `match` coverage,
-/// `T05xx` what strict mode adds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Code {
-    /// The module doesn't parse.
-    Syntax,
-    /// `use a::b` names no module on the search path.
-    ModuleNotFound,
-    /// The module parses but breaks a rule the compiler enforces, so it doesn't run.
-    Compile,
-    /// A name that is not a local, an item, a `use`, an `extern` or the prelude.
-    UnknownName,
-    /// An item used before its definition in the same function.
-    UsedBeforeDefinition,
-    /// `use m::{x}` or `m::x` where the OrbitScript module `m` has no public `x`.
-    NoPublicItem,
-    /// `Type::x` where the struct or enum has no variant, method, function or constant `x`.
-    NoAssociatedItem,
-    /// A struct literal or pattern names a field the struct or variant doesn't declare.
-    UnknownField,
-    /// A struct literal leaves out a field.
-    MissingField,
-    /// A type annotation names something that isn't defined.
-    UnknownType,
-    /// A type annotation names a value.
-    NotAType,
-    /// A value of one type where another is expected.
-    Mismatch,
-    /// A call with too many or too few arguments.
-    ArgCount,
-    /// A field or method the value's type doesn't have.
-    NoMember,
-    /// Calling a value that isn't a function.
-    NotCallable,
-    /// `let (a, b) = f()` binding more values than `f` returns.
-    ResultCount,
-    /// An operator on operand types it doesn't accept.
-    BadOperand,
-    /// A possibly-nil value used where nil isn't allowed.
-    MaybeNil,
-    /// `?` in a function whose results can't be `nil, err`.
-    TryResult,
-    /// An `as` cast whose source can never pass it (or `as bool` on a value never false).
-    ImpossibleCast,
-    /// An `as` target the runtime can't check: structural types, type parameters, aliases.
-    UncheckableCast,
-    /// `==` or `!=` between types that are never equal.
-    AlwaysUnequal,
-    /// A bitwise operator on a float.
-    FloatBitwise,
-    /// A condition whose type is never false.
-    AlwaysTrue,
-    /// A record type field named like a built-in type (`#{string: int}`, the old map spelling).
-    RecordFieldLikeType,
-    /// An `orbit-check: ignore` that ignores nothing (strict mode).
-    UnusedIgnore,
-    /// An `orbit-check:` comment that isn't a pragma, or names an unknown code.
-    BadPragma,
-    /// `t[0]` on an array, whose first element is `t[1]`.
-    ZeroIndex,
-    /// `for i in 0..#t` reading `t[i]`.
-    ZeroBasedLoop,
-    /// A local that is never read.
-    UnusedLocal,
-    /// A `use`d name that is never used.
-    UnusedImport,
-    /// A `match` that misses cases.
-    NonExhaustive,
-    /// A `pub fn` parameter without a type (strict mode).
-    MissingParamType,
-    /// A `pub fn` that returns values without a result type (strict mode).
-    MissingResultType,
-    /// A condition that isn't `bool` (strict mode).
-    NotBool,
-    /// `use` of a Lua module that has no `.orbi` stub (strict mode).
-    UntypedModule,
-}
+/// `T05xx` what strict mode adds, `T06xx` where a construct may appear, `T07xx` bindings and
+/// patterns, `T08xx` declarations.
+///
+/// The rules the compiler enforces have their codes in the front end
+/// (`orbit_orb_syntax::code`, re-exported here), which is what reports them. The codes defined
+/// here are for what only the checker looks at.
+pub mod code {
+    pub use orbit_orb_syntax::code::*;
 
-impl Code {
-    /// Whether the module can't run at all with this error: it doesn't parse or doesn't
-    /// compile. Pragmas never hide these.
-    pub fn stops_the_module(self) -> bool {
-        matches!(self, Code::Syntax | Code::Compile)
+    orbit_hir::codes! {
+        all in CHECKS;
+        /// `use a::b` names no module on the search path.
+        MODULE_NOT_FOUND = 2;
+        /// `use m::{x}` or `m::x` where the OrbitScript module `m` has no public `x`.
+        NO_PUBLIC_ITEM = 103;
+        /// A type annotation names something that isn't defined.
+        UNKNOWN_TYPE = 106;
+        /// A type annotation names a value.
+        NOT_A_TYPE = 107;
+        /// A value of one type where another is expected.
+        MISMATCH = 201;
+        /// A call with too many or too few arguments.
+        ARG_COUNT = 202;
+        /// A field or method the value's type doesn't have.
+        NO_MEMBER = 203;
+        /// Calling a value that isn't a function.
+        NOT_CALLABLE = 204;
+        /// `let (a, b) = f()` binding more values than `f` returns.
+        RESULT_COUNT = 205;
+        /// An operator on operand types it doesn't accept.
+        BAD_OPERAND = 206;
+        /// A possibly-nil value used where nil isn't allowed.
+        MAYBE_NIL = 207;
+        /// `?` in a function whose results can't be `nil, err`.
+        TRY_RESULT = 208;
+        /// An `as` cast whose source can never pass it (or `as bool` on a value never false).
+        IMPOSSIBLE_CAST = 209;
+        /// `==` or `!=` between types that are never equal.
+        ALWAYS_UNEQUAL = 301;
+        /// A bitwise operator on a float.
+        FLOAT_BITWISE = 302;
+        /// A condition whose type is never false.
+        ALWAYS_TRUE = 303;
+        /// A record type field named like a built-in type (`#{string: int}`, the old map spelling).
+        RECORD_FIELD_LIKE_TYPE = 304;
+        /// An `orbit-check: ignore` that ignores nothing (strict mode).
+        UNUSED_IGNORE = 305;
+        /// An `orbit-check:` comment that isn't a pragma, or names an unknown code.
+        BAD_PRAGMA = 306;
+        /// `t[0]` on an array, whose first element is `t[1]`.
+        ZERO_INDEX = 307;
+        /// `for i in 0..#t` reading `t[i]`.
+        ZERO_BASED_LOOP = 308;
+        /// A local that is never read.
+        UNUSED_LOCAL = 309;
+        /// A `use`d name that is never used.
+        UNUSED_IMPORT = 310;
+        /// A `match` that misses cases.
+        NON_EXHAUSTIVE = 401;
+        /// A `pub fn` parameter without a type (strict mode).
+        MISSING_PARAM_TYPE = 501;
+        /// A `pub fn` that returns values without a result type (strict mode).
+        MISSING_RESULT_TYPE = 502;
+        /// A condition that isn't `bool` (strict mode).
+        NOT_BOOL = 503;
+        /// `use` of a Lua module that has no `.orbi` stub (strict mode).
+        UNTYPED_MODULE = 504;
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Code::Syntax => "T0001",
-            Code::ModuleNotFound => "T0002",
-            Code::Compile => "T0003",
-            Code::UnknownName => "T0101",
-            Code::UsedBeforeDefinition => "T0102",
-            Code::NoPublicItem => "T0103",
-            Code::NoAssociatedItem => "T0104",
-            Code::UnknownField => "T0105",
-            Code::UnknownType => "T0106",
-            Code::MissingField => "T0108",
-            Code::NotAType => "T0107",
-            Code::Mismatch => "T0201",
-            Code::ArgCount => "T0202",
-            Code::NoMember => "T0203",
-            Code::NotCallable => "T0204",
-            Code::ResultCount => "T0205",
-            Code::BadOperand => "T0206",
-            Code::MaybeNil => "T0207",
-            Code::TryResult => "T0208",
-            Code::ImpossibleCast => "T0209",
-            Code::UncheckableCast => "T0210",
-            Code::AlwaysUnequal => "T0301",
-            Code::FloatBitwise => "T0302",
-            Code::AlwaysTrue => "T0303",
-            Code::RecordFieldLikeType => "T0304",
-            Code::UnusedIgnore => "T0305",
-            Code::BadPragma => "T0306",
-            Code::ZeroIndex => "T0307",
-            Code::ZeroBasedLoop => "T0308",
-            Code::UnusedLocal => "T0309",
-            Code::UnusedImport => "T0310",
-            Code::NonExhaustive => "T0401",
-            Code::MissingParamType => "T0501",
-            Code::MissingResultType => "T0502",
-            Code::NotBool => "T0503",
-            Code::UntypedModule => "T0504",
-        }
+    /// Every code, the front end's and the checker's, in order.
+    pub fn all() -> Vec<Code> {
+        let mut all = vec![SYNTAX];
+        all.extend_from_slice(RULES);
+        all.extend_from_slice(CHECKS);
+        all.sort();
+        all
     }
 
-    /// Every code, in order.
-    pub const ALL: &'static [Code] = &[
-        Code::Syntax,
-        Code::ModuleNotFound,
-        Code::Compile,
-        Code::UnknownName,
-        Code::UsedBeforeDefinition,
-        Code::NoPublicItem,
-        Code::NoAssociatedItem,
-        Code::UnknownField,
-        Code::UnknownType,
-        Code::NotAType,
-        Code::MissingField,
-        Code::Mismatch,
-        Code::ArgCount,
-        Code::NoMember,
-        Code::NotCallable,
-        Code::ResultCount,
-        Code::BadOperand,
-        Code::MaybeNil,
-        Code::TryResult,
-        Code::ImpossibleCast,
-        Code::UncheckableCast,
-        Code::AlwaysUnequal,
-        Code::FloatBitwise,
-        Code::AlwaysTrue,
-        Code::RecordFieldLikeType,
-        Code::UnusedIgnore,
-        Code::BadPragma,
-        Code::ZeroIndex,
-        Code::ZeroBasedLoop,
-        Code::UnusedLocal,
-        Code::UnusedImport,
-        Code::NonExhaustive,
-        Code::MissingParamType,
-        Code::MissingResultType,
-        Code::NotBool,
-        Code::UntypedModule,
-    ];
-
-    /// The code written `name` (`T0201`).
-    pub fn parse(name: &str) -> Option<Code> {
-        Code::ALL.iter().copied().find(|c| c.as_str() == name)
+    /// The code written `text` (`T0201`), if there is such a code.
+    pub fn parse(text: &str) -> Option<Code> {
+        Code::parse(text).filter(|c| all().contains(c))
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Diagnostic {
-    pub file: FileId,
-    pub span: Span,
-    pub severity: Severity,
-    pub code: Code,
-    pub message: String,
+/// An error at `span`. The checker fills in the line when a module's diagnostics are complete.
+pub(crate) fn error(span: Span, code: Code, message: impl Into<String>) -> Diagnostic {
+    Diagnostic::error(span, 0, code, message)
 }
 
-impl Diagnostic {
-    pub(crate) fn error(file: FileId, span: Span, code: Code, message: impl Into<String>) -> Self {
-        Diagnostic {
-            file,
-            span,
-            severity: Severity::Error,
-            code,
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn warning(
-        file: FileId,
-        span: Span,
-        code: Code,
-        message: impl Into<String>,
-    ) -> Self {
-        Diagnostic {
-            severity: Severity::Warning,
-            ..Diagnostic::error(file, span, code, message)
-        }
-    }
+pub(crate) fn warning(span: Span, code: Code, message: impl Into<String>) -> Diagnostic {
+    Diagnostic::warning(span, 0, code, message)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Code;
+    use super::code;
 
     #[test]
     fn codes_are_unique_and_parse_back() {
-        let mut seen = std::collections::HashSet::new();
-        for &c in Code::ALL {
-            assert!(seen.insert(c.as_str()), "{} twice", c.as_str());
-            assert_eq!(Code::parse(c.as_str()), Some(c));
+        let all = code::all();
+        for pair in all.windows(2) {
+            assert_ne!(pair[0], pair[1], "{} twice", pair[0]);
         }
+        for c in all {
+            assert_eq!(code::parse(&c.to_string()), Some(c));
+        }
+        assert_eq!(code::parse("T9999"), None);
     }
 }

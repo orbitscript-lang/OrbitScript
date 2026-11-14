@@ -2,6 +2,7 @@
 //! wrong, and that need only the AST and the resolved names. They skip stubs and bundled
 //! modules.
 
+use crate::diag::code;
 use std::collections::HashSet;
 
 use orbit_hir::Span;
@@ -9,8 +10,8 @@ use orbit_orb_syntax::ast::{self, ExprKind, ItemKind, PatKind, StmtKind, UnOp, U
 
 use super::passes::{Pass, Typed};
 use super::walk::{Node, walk_block};
+use crate::Diagnostic;
 use crate::symbols::{SymbolId, SymbolKind};
-use crate::{Code, Diagnostic};
 
 /// `for i in 0..#t { ... t[i] ... }` visits `t[0]`, which is never set, and misses `t[#t]`.
 pub(super) struct ZeroBasedLoops;
@@ -63,10 +64,9 @@ impl Pass for ZeroBasedLoops {
         });
         if indexes {
             let arr = String::from_utf8_lossy(src(arr.span));
-            out.push(Diagnostic::warning(
-                m.file,
+            out.push(crate::diag::warning(
                 iter.span,
-                Code::ZeroBasedLoop,
+                code::ZERO_BASED_LOOP,
                 format!(
                     "arrays start at 1: this loop reads `{arr}[0]`, which is never set, and \
                      skips the last element; write `1..=#{arr}`"
@@ -151,7 +151,7 @@ fn unused(t: &Typed<'_, '_, '_>, out: &mut Vec<Diagnostic>) {
             continue;
         }
         let code = match sym.kind {
-            SymbolKind::Local if !scoped.contains(&sym.span) => Code::UnusedLocal,
+            SymbolKind::Local if !scoped.contains(&sym.span) => code::UNUSED_LOCAL,
             // A module that wasn't found, or a member it lacks, is reported already.
             SymbolKind::Module if sym.module.is_none() => continue,
             SymbolKind::Import if t.diagnostics.iter().any(|d| d.span == sym.span) => continue,
@@ -160,27 +160,22 @@ fn unused(t: &Typed<'_, '_, '_>, out: &mut Vec<Diagnostic>) {
                     !public && u.start <= sym.span.start && sym.span.end <= u.end
                 }) =>
             {
-                Code::UnusedImport
+                code::UNUSED_IMPORT
             }
             _ => continue,
         };
-        let msg = if code == Code::UnusedLocal {
+        let msg = if code == code::UNUSED_LOCAL {
             format!("`{0}` is never read; remove it or name it `_{0}`", sym.name)
         } else {
             format!("`{}` is imported but never used; remove it", sym.name)
         };
-        out.push(Diagnostic::warning(file, sym.span, code, msg));
+        out.push(crate::diag::warning(sym.span, code, msg));
     }
     for (target, name) in imported {
         if !read.contains(&target) {
             let text = ast.strings.display(name.sym);
             let msg = format!("`{text}` is imported but never used; remove it");
-            out.push(Diagnostic::warning(
-                file,
-                name.span,
-                Code::UnusedImport,
-                msg,
-            ));
+            out.push(crate::diag::warning(name.span, code::UNUSED_IMPORT, msg));
         }
     }
 }

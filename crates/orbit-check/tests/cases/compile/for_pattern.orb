@@ -1,0 +1,1 @@
+for 1 in pairs([1]) { print(1); } //~ T0703

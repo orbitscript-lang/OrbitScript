@@ -1,0 +1,3 @@
+fn nothing() { 1 }
+impl nothing { fn f() { 1 } } //~ T0807
+print(1);

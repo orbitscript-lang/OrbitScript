@@ -64,7 +64,7 @@ impl Compiler {
         options: &ParseOptions,
     ) -> Result<UnlinkedChunk, SyntaxError> {
         let hir = orbit_lua_syntax::to_hir(chunk_name, src, options)
-            .map_err(|d| SyntaxError(d.to_lua_message(chunk_name)))?;
+            .map_err(|d| SyntaxError(d.to_message(chunk_name)))?;
         compile_hir(&hir)
     }
 

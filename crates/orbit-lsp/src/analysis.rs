@@ -144,7 +144,7 @@ impl Analysis {
                     "start": d.span.start,
                     "end": d.span.end,
                     "severity": d.severity.as_str(),
-                    "code": d.code.as_str(),
+                    "code": d.code.to_string(),
                     "message": d.message,
                 })
             })
