@@ -32,6 +32,30 @@ Add a file whenever a behavior is subtle enough that a unit test might encode th
 
 A program that depends on the environment can run under several settings: `NAME.env` beside `NAME.lua` lists them, one `VAR=value` per line, and the program runs once under each, as its own result named `NAME.lua VAR=value`. `diff/time_zones.lua` runs that way in the time zones of `diff/time_zones.env`, so `os.date` and `os.time` are compared in real zones, POSIX rule strings, file paths and invalid names.
 
+## The heap verifier
+
+A debug build of `orbit` has `orbit-gc`'s heap verifier. With `ORBIT_GC_VERIFY=1`, the end of every full marking, and of a minor collection once as many bytes as the heap held have been allocated since the last check, walks the heap again from the roots. It panics if it reaches an object the collector did not mark, or a handle to a freed object, naming the chain of objects from a root, and it checks the heap's byte count against what its objects add up to. `ORBIT_GC_VERIFY=all` checks every minor collection too, which is much slower. Under `ORBIT_GC_STRESS=1` collections come at nearly every safe point, so a missed write barrier is caught close to the store that missed it:
+
+```sh
+cargo build -p orbit-cli
+ORBIT_GC_STRESS=1 ORBIT_GC_VERIFY=1 cargo testkit conformance --interp target/debug/orbit --expect tests/lua-5.5/expected-orbit.txt
+```
+
+CI's `gc-verify` job runs the suite, the differential tests, the compatibility programs and the examples that way on every pull request. Release builds have no verifier and ignore the variable.
+
+## Write-barrier tests
+
+`crates/orbit/tests/gc_barriers.rs` has a test for each way the runtime stores a value into an object the collector may already have traced: table stores by every path, upvalues, metatables, user values, the registry, coroutine stacks and errors, the debug library's writes and pin slots. Each test ages the object, stores a new object into it, collects, and checks the value is still there, with the verifier checking every collection. A plain `cargo test` runs them.
+
+A test that passes proves nothing until it fails without its barrier. Each patch in `tests/gc-barriers` deletes one barrier and names the tests that depend on it, and `tests/gc-barriers/check-deletions.sh` applies each in turn and requires every one of its tests to fail:
+
+```sh
+tests/gc-barriers/check-deletions.sh              # every patch, about a minute
+tests/gc-barriers/check-deletions.sh int-store    # one patch
+```
+
+It needs a clean working tree under `crates/`, which it changes and restores. Paste its output into the description of any pull request that changes barrier or collector code. A pull request that adds a write path adds its test and a patch that deletes its barrier; one that changes the code a patch touches rewrites that patch, since the script fails on a patch that no longer applies.
+
 ## Programs built for liblua
 
 `cargo testkit liblua` runs the suite through `lua5.5-host`, the reference `lua.c` linked against Lua's shared library the way Debian ships it (`liblua5.5.so.0`, symbols versioned `LUA_5.5`), with `liborbit` installed under that name instead (ADR-10). The program is built by `scripts/build-reference-lua.sh` (Linux only for now). `lua-5.5/expected-liblua.txt` lists what passes.

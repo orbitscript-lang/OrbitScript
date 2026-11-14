@@ -1,0 +1,15 @@
+Deletes: The interpreter's integer-key table store (`store_int`).
+Tests: table_store_by_integer_key table_store_by_integer_key_into_a_big_table table_library_sort_of_strings_in_a_big_table
+
+diff --git a/crates/orbit-runtime/src/object/table.rs b/crates/orbit-runtime/src/object/table.rs
+index 9a1d5cf..1ae0783 100644
+--- a/crates/orbit-runtime/src/object/table.rs
++++ b/crates/orbit-runtime/src/object/table.rs
+@@ -1412,7 +1412,6 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
+         v,
+         Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+     ) {
+-        heap.barrier_at(t, idx as usize);
+     }
+     let tab = heap.get_mut(t);
+     if idx < tab.array.len() as u64 {

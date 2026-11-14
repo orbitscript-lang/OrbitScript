@@ -1,0 +1,20 @@
+Deletes: The general table store (`set_key`): `Heap::update` without its barrier.
+Tests: table_store_of_a_new_key_that_grows_the_table table_store_of_a_new_object_key registry_field_store
+
+diff --git a/crates/orbit-runtime/src/object/table.rs b/crates/orbit-runtime/src/object/table.rs
+index 9a1d5cf..d7888a5 100644
+--- a/crates/orbit-runtime/src/object/table.rs
++++ b/crates/orbit-runtime/src/object/table.rs
+@@ -1474,7 +1474,11 @@ pub fn set_key(
+         return Err(NoMemory);
+     }
+     if slot != Slot::None {
+-        heap.update(t, |tab| tab.write(slot, key, v))?;
++        let before = Trace::extra_bytes(heap.get(t));
++        let r = heap.get_mut(t).write(slot, key, v);
++        let after = Trace::extra_bytes(heap.get(t));
++        heap.adjust_bytes(after as isize - before as isize);
++        r?;
+     }
+     Ok(match slot {
+         Slot::Existing(i) | Slot::New(i) => Some(i),

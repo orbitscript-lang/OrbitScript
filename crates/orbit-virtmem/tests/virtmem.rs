@@ -145,3 +145,34 @@ fn fixed_buffer_does_not_grow() {
     assert_eq!(buf.max_capacity(), 1000);
     assert!(!buf.try_grow());
 }
+
+/// Growing by remapping gives up the start of the old reservation to the
+/// system, so it must not then release that range: another thread's mapping
+/// may already be there. One thread grows buffers while another keeps
+/// creating and filling small ones that could land in the gap.
+#[test]
+fn growing_leaves_other_threads_mappings_alone() {
+    use std::sync::atomic::AtomicBool;
+    let stop = Arc::new(AtomicBool::new(false));
+    let other = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut rounds = 0usize;
+            while !stop.load(Ordering::Relaxed) || rounds < 1000 {
+                let mut buf: VmBuffer<u64> = VmBuffer::with_capacity(512);
+                buf.resize_with(512, || 5);
+                std::hint::black_box(&mut buf[..]).fill(6);
+                assert!(buf.iter().all(|&x| x == 6));
+                rounds += 1;
+            }
+        })
+    };
+    for _ in 0..20_000 {
+        let mut buf: VmBuffer<u64> = VmBuffer::growable(512, 1024);
+        buf.resize_with(512, || 1);
+        assert!(buf.try_grow());
+        assert_eq!(buf[511], 1);
+    }
+    stop.store(true, Ordering::Relaxed);
+    other.join().unwrap();
+}

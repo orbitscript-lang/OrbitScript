@@ -41,6 +41,7 @@ pub use typed::{
 pub use typed::{catch_panic, panic_message};
 pub(crate) use window::{ContRef, cont_ref};
 pub use window::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
+pub(crate) use window::{library_row, native_fn};
 
 /// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).
 pub const REGISTRY_INDEX: i32 = -(i32::MAX / 2 + 1000);

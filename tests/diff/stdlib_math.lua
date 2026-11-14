@@ -22,3 +22,6 @@ for _, s in ipairs{"-9223372036854775808", "-9223372036854775809", "922337203685
   print(s, tonumber(s), math.type(tonumber(s)))
 end
 print(tonumber("  +1Z  ", 36), tonumber("+-1", 10), tonumber("+", 10), tonumber("-ff", 16))
+-- `fmod` checks its divisor first; an integer is its own integral part.
+P(math.fmod, "x") P(math.fmod, "x", 1) P(math.fmod, 1, "x") P(math.fmod, {}, {}) P(math.fmod, 1.5)
+P(math.modf, math.maxinteger) P(math.modf, math.mininteger) P(math.modf, "5") P(math.modf, -7)

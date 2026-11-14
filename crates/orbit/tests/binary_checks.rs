@@ -1,5 +1,6 @@
-//! `load` checks binary chunks at the level the build and `ORBIT_VERIFY`
-//! (or `Isolate::set_binary_checks`) choose.
+//! `load` checks binary chunks at the level the build and
+//! `Isolate::set_binary_checks` choose, never the environment, and rejects
+//! VM-internal instructions at every level.
 
 #![cfg(feature = "verify")]
 
@@ -57,6 +58,32 @@ fn each_level_runs_its_layers() {
 
     iso.set_binary_checks(None);
     assert_eq!(load(&mut iso, &structure), Ok(()));
+}
+
+/// A native stub's body in a chunk would call any native by number, so
+/// decoding rejects it even with verification off.
+#[test]
+fn native_entry_is_rejected_at_every_level() {
+    let forged = chunk_with(vec![Op::NativeEntry { id: 0 }]);
+    let mut iso = isolate();
+    for level in [
+        Some(BinaryChecks::Full),
+        Some(BinaryChecks::Structure),
+        None,
+    ] {
+        iso.set_binary_checks(level);
+        let e = load(&mut iso, &forged).unwrap_err();
+        assert!(e.contains("VM-internal instruction"), "{level:?}: {e}");
+    }
+}
+
+/// `ORBIT_VERIFY` is the `orbit` CLI's: an embedded isolate keeps its level
+/// whatever the host process's environment holds.
+#[test]
+fn the_environment_cannot_lower_the_level() {
+    std::env::set_var("ORBIT_VERIFY", "none");
+    let structure = chunk_with(vec![Op::Return1 { src: 200 }]);
+    assert!(load(&mut isolate(), &structure).is_err());
 }
 
 #[test]

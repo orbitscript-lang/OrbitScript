@@ -16,6 +16,10 @@ name: CI
 #   its official suite on `orbit`, on the shared layout's `orbit` and
 #   through its liblua, the size budget, and for 5.5 the differential tests.
 #   The corpus tests that platforms.yml skips run here.
+# - `gc-verify`: a debug `orbit` runs the 5.5 suite, the differential tests,
+#   the compatibility programs and the examples under GC stress mode with
+#   the heap verifier on (tests/README.md, "The heap verifier"): a missed
+#   write barrier fails here even when the release build's run passes.
 # - Steps several jobs share live in .github/actions: `setup-rust` (the
 #   toolchain and the build cache) and `reference-lua` (the reference
 #   interpreter and what the suite needs from the runner).
@@ -185,3 +189,61 @@ jobs:
         with:
           name: conformance-results-lua${{ matrix.lua }}
           path: target/testkit/*.json
+
+  gc-verify:
+    name: Suites under GC stress mode and the heap verifier
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: gc-verify
+      - id: reference
+        uses: ./.github/actions/reference-lua
+        with:
+          lua: '5.5'
+      # The verifier is in debug builds only; the test tool is built for
+      # release as usual.
+      - id: build
+        run: |
+          cargo build --locked -p orbit-cli
+          cargo build --release --locked -p orbit-testkit
+      - name: Suite, stress mode and verifier
+        if: steps.reference.outcome == 'success' && steps.build.outcome == 'success'
+        run: >
+          cargo testkit conformance --lua 5.5 --interp target/debug/orbit
+          --c-libs "$REF/libs" --expect tests/lua-5.5/expected-orbit.txt
+        env:
+          REF: ${{ steps.reference.outputs.dir }}
+          ORBIT_GC_STRESS: '1'
+          ORBIT_GC_VERIFY: '1'
+      - name: Differential tests, stress mode and verifier
+        if: (success() || failure()) && steps.reference.outcome == 'success' && steps.build.outcome == 'success'
+        run: >
+          cargo testkit diff --reference "$REF/bin/lua5.5"
+          --interp target/debug/orbit --expect tests/diff/expected-orbit.txt
+        env:
+          REF: ${{ steps.reference.outputs.dir }}
+          ORBIT_GC_STRESS: '1'
+          ORBIT_GC_VERIFY: '1'
+      # c4_gc_collectgarbage.lua prints what one explicit generational step
+      # frees, which depends on when the collections before it ran, so
+      # stress mode changes it: it is left out of the expected list here.
+      - name: Compatibility programs, stress mode and verifier
+        if: (success() || failure()) && steps.reference.outcome == 'success' && steps.build.outcome == 'success'
+        run: |
+          grep -v '^c4_gc_collectgarbage\.lua$' tests/diff/compat/expected-orbit.txt > target/compat-expected-stress.txt
+          cargo testkit diff --corpus tests/diff/compat --reference "$REF/bin/lua5.5" \
+            --interp target/debug/orbit --expect target/compat-expected-stress.txt
+        env:
+          REF: ${{ steps.reference.outputs.dir }}
+          ORBIT_GC_STRESS: '1'
+          ORBIT_GC_VERIFY: '1'
+      - name: Examples, stress mode and verifier
+        if: (success() || failure()) && steps.build.outcome == 'success'
+        run: cargo testkit examples --interp target/debug/orbit
+        env:
+          ORBIT_GC_STRESS: '1'
+          ORBIT_GC_VERIFY: '1'

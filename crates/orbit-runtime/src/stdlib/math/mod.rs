@@ -2,9 +2,11 @@
 
 mod rng;
 
-use crate::object::number::{self, float_to_int};
+use crate::object::number::{self, Number, float_to_int};
 use crate::object::{Gc, LuaHeap, Table, Value};
+use crate::stack::{Any, Arg, Stack, StackResult, library_row, native_fn};
 use crate::vm::{CallOutcome, FastFn, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_macros::native;
 
 use rng::Xoshiro;
 
@@ -13,62 +15,65 @@ type R = Result<NativeReturn, LuaError>;
 /// Lua 5.3's functions that Lua 5.4 keeps when built with its 5.3
 /// compatibility, as Debian builds it: only in 5.4 builds (ADR-14).
 pub(crate) const COMPAT_5_3: &[(&str, NativeFn)] = &[
-    ("math.atan2", atan),
-    ("math.cosh", cosh),
-    ("math.sinh", sinh),
-    ("math.tanh", tanh),
-    ("math.pow", pow),
-    ("math.log10", log10),
+    ("math.atan2", native_fn::<atan>()),
+    library_row::<cosh>(),
+    library_row::<sinh>(),
+    library_row::<tanh>(),
+    library_row::<pow>(),
+    library_row::<log10>(),
 ];
 
-fn cosh(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::cosh)
+#[native(crate = crate, name = "math.cosh")]
+fn cosh(x: f64) -> f64 {
+    x.cosh()
 }
 
-fn sinh(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::sinh)
+#[native(crate = crate, name = "math.sinh")]
+fn sinh(x: f64) -> f64 {
+    x.sinh()
 }
 
-fn tanh(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::tanh)
+#[native(crate = crate, name = "math.tanh")]
+fn tanh(x: f64) -> f64 {
+    x.tanh()
 }
 
-fn log10(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::log10)
+#[native(crate = crate, name = "math.log10")]
+fn log10(x: f64) -> f64 {
+    x.log10()
 }
 
-fn pow(ctx: &mut NativeCtx<'_>) -> R {
-    let x = ctx.check_f64(0)?;
-    let y = ctx.check_f64(1)?;
-    ctx.ret([Value::Float(x.powf(y))])
+#[native(crate = crate, name = "math.pow")]
+fn pow(x: f64, y: f64) -> f64 {
+    x.powf(y)
 }
 
 pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("math.floor", floor),
-    ("math.ceil", ceil),
-    ("math.abs", abs),
+    library_row::<floor>(),
+    library_row::<ceil>(),
+    library_row::<abs>(),
     ("math.max", max),
     ("math.min", min),
-    ("math.sqrt", sqrt),
-    ("math.type", type_),
-    ("math.fmod", fmod),
-    ("math.modf", modf),
-    ("math.tointeger", tointeger),
-    ("math.ult", ult),
-    ("math.exp", exp),
-    ("math.log", log),
-    ("math.sin", sin),
-    ("math.cos", cos),
-    ("math.tan", tan),
-    ("math.asin", asin),
-    ("math.acos", acos),
-    ("math.atan", atan),
-    ("math.deg", deg),
-    ("math.rad", rad),
-    ("math.frexp", frexp),
-    ("math.ldexp", ldexp),
-    ("math.random", random),
-    ("math.randomseed", randomseed),
+    library_row::<sqrt>(),
+    library_row::<type_>(),
+    library_row::<fmod>(),
+    library_row::<modf>(),
+    library_row::<tointeger>(),
+    library_row::<ult>(),
+    library_row::<exp>(),
+    library_row::<log>(),
+    library_row::<sin>(),
+    library_row::<cos>(),
+    library_row::<tan>(),
+    library_row::<asin>(),
+    library_row::<acos>(),
+    library_row::<atan>(),
+    library_row::<deg>(),
+    library_row::<rad>(),
+    library_row::<frexp>(),
+    library_row::<ldexp>(),
+    library_row::<random>(),
+    library_row::<randomseed>(),
 ];
 
 /// Fast paths for the number cases (see [`FastFn`]). Each returns `None`
@@ -151,150 +156,157 @@ pub(crate) fn constants(vm: &mut Vm, m: Gc<Table>) {
 }
 
 /// A float result that is an integer when it fits (`floor`, `ceil`).
-fn int_if_fits(f: f64) -> Value {
-    float_to_int(f).map_or(Value::Float(f), Value::Int)
+fn int_if_fits(f: f64) -> Number {
+    float_to_int(f).map_or(Number::Float(f), Number::Int)
 }
 
-fn floor(ctx: &mut NativeCtx<'_>) -> R {
-    let v = match ctx.arg(0) {
-        v @ Value::Int(_) => v,
-        _ => int_if_fits(ctx.check_f64(0)?.floor()),
-    };
-    ctx.ret([v])
+#[native(crate = crate, name = "math.floor")]
+fn floor(x: Number) -> Number {
+    match x {
+        Number::Int(_) => x,
+        Number::Float(f) => int_if_fits(f.floor()),
+    }
 }
 
-fn ceil(ctx: &mut NativeCtx<'_>) -> R {
-    let v = match ctx.arg(0) {
-        v @ Value::Int(_) => v,
-        _ => int_if_fits(ctx.check_f64(0)?.ceil()),
-    };
-    ctx.ret([v])
+#[native(crate = crate, name = "math.ceil")]
+fn ceil(x: Number) -> Number {
+    match x {
+        Number::Int(_) => x,
+        Number::Float(f) => int_if_fits(f.ceil()),
+    }
 }
 
 /// Integer-typed values keep integer arithmetic; anything else (including
 /// numeric strings) goes through floats, as in the reference.
-fn abs(ctx: &mut NativeCtx<'_>) -> R {
-    let v = match ctx.arg(0) {
-        Value::Int(i) => Value::Int(i.wrapping_abs()),
-        _ => Value::Float(ctx.check_f64(0)?.abs()),
-    };
-    ctx.ret([v])
+#[native(crate = crate, name = "math.abs")]
+fn abs(x: Number) -> Number {
+    match x {
+        Number::Int(i) => Number::Int(i.wrapping_abs()),
+        Number::Float(f) => Number::Float(f.abs()),
+    }
 }
 
-fn fmod(ctx: &mut NativeCtx<'_>) -> R {
-    let v = match (ctx.arg(0), ctx.arg(1)) {
-        (Value::Int(a), Value::Int(d)) => {
+/// The divisor is checked before the dividend, as in the reference
+/// (`math.fmod("x")` blames argument #2).
+#[native(crate = crate, name = "math.fmod")]
+fn fmod(s: &mut Stack<'_>) -> StackResult<Number> {
+    let d = <Number as Arg>::check(s, 2)?;
+    let a = <Number as Arg>::check(s, 1)?;
+    Ok(match (a, d) {
+        (Number::Int(a), Number::Int(d)) => {
             if d == 0 {
-                return Err(ctx.arg_error(1, "zero"));
+                return Err(s.arg_error(2, "zero"));
             }
             // `wrapping_rem` gives 0 for `mininteger % -1`.
-            Value::Int(a.wrapping_rem(d))
+            Number::Int(a.wrapping_rem(d))
         }
-        _ => {
-            let a = ctx.check_f64(0)?;
-            let d = ctx.check_f64(1)?;
-            Value::Float(a % d)
-        }
-    };
-    ctx.ret([v])
+        (a, d) => Number::Float(as_float(a) % as_float(d)),
+    })
 }
 
-fn modf(ctx: &mut NativeCtx<'_>) -> R {
-    let x = ctx.check_f64(0)?;
+/// `n` as a float.
+fn as_float(n: Number) -> f64 {
+    match n {
+        Number::Int(i) => i as f64,
+        Number::Float(f) => f,
+    }
+}
+
+/// An integer argument is its own integral part, even where a float
+/// can't hold it (`math.modf(math.maxinteger)`).
+#[native(crate = crate, name = "math.modf")]
+fn modf(x: Number) -> (Number, f64) {
+    let x = match x {
+        Number::Int(i) => return (Number::Int(i), 0.0),
+        Number::Float(x) => x,
+    };
     let int = x.trunc();
     let frac = if x.is_infinite() { 0.0 } else { x - int };
     let int = if x.is_finite() {
         int_if_fits(int)
     } else {
-        Value::Float(int)
+        Number::Float(int)
     };
-    ctx.push(int);
-    ctx.push(Value::Float(frac));
-    Ok(NativeReturn::Return(2))
+    (int, frac)
 }
 
-fn tointeger(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.check_any(0)?;
-    let r = ctx.to_integer(v).map_or(Value::Nil, Value::Int);
-    ctx.ret([r])
+#[native(crate = crate, name = "math.tointeger")]
+fn tointeger(s: &mut Stack<'_>, v: Any) -> Option<i64> {
+    match s.number_at(v.0) {
+        Some(Number::Int(i)) => Some(i),
+        Some(Number::Float(f)) => float_to_int(f),
+        None => s.to_integer(v.0),
+    }
 }
 
-fn ult(ctx: &mut NativeCtx<'_>) -> R {
-    let a = ctx.check_int(0)?;
-    let b = ctx.check_int(1)?;
-    ctx.ret([Value::Bool((a as u64) < (b as u64))])
+#[native(crate = crate, name = "math.ult")]
+fn ult(a: i64, b: i64) -> bool {
+    (a as u64) < (b as u64)
 }
 
-fn float_fn(ctx: &mut NativeCtx<'_>, f: fn(f64) -> f64) -> R {
-    let x = ctx.check_f64(0)?;
-    ctx.ret([Value::Float(f(x))])
+#[native(crate = crate, name = "math.exp")]
+fn exp(x: f64) -> f64 {
+    x.exp()
 }
 
-fn exp(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::exp)
+#[native(crate = crate, name = "math.sin")]
+fn sin(x: f64) -> f64 {
+    x.sin()
 }
 
-fn sin(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::sin)
+#[native(crate = crate, name = "math.cos")]
+fn cos(x: f64) -> f64 {
+    x.cos()
 }
 
-fn cos(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::cos)
+#[native(crate = crate, name = "math.tan")]
+fn tan(x: f64) -> f64 {
+    x.tan()
 }
 
-fn tan(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::tan)
+#[native(crate = crate, name = "math.asin")]
+fn asin(x: f64) -> f64 {
+    x.asin()
 }
 
-fn asin(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::asin)
+#[native(crate = crate, name = "math.acos")]
+fn acos(x: f64) -> f64 {
+    x.acos()
 }
 
-fn acos(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, f64::acos)
+#[native(crate = crate, name = "math.deg")]
+fn deg(x: f64) -> f64 {
+    x * (180.0 / std::f64::consts::PI)
 }
 
-fn deg(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, |x| x * (180.0 / std::f64::consts::PI))
+#[native(crate = crate, name = "math.rad")]
+fn rad(x: f64) -> f64 {
+    x * (std::f64::consts::PI / 180.0)
 }
 
-fn rad(ctx: &mut NativeCtx<'_>) -> R {
-    float_fn(ctx, |x| x * (std::f64::consts::PI / 180.0))
+#[native(crate = crate, name = "math.atan")]
+fn atan(y: f64, x: Option<f64>) -> f64 {
+    y.atan2(x.unwrap_or(1.0))
 }
 
-fn atan(ctx: &mut NativeCtx<'_>) -> R {
-    let y = ctx.check_f64(0)?;
-    let x = if ctx.arg(1).is_nil() {
-        1.0
+#[native(crate = crate, name = "math.log")]
+fn log(x: f64, base: Option<f64>) -> f64 {
+    let Some(base) = base else {
+        return x.ln();
+    };
+    if base == 2.0 {
+        x.log2()
+    } else if base == 10.0 {
+        x.log10()
     } else {
-        ctx.check_f64(1)?
-    };
-    ctx.ret([Value::Float(y.atan2(x))])
+        x.ln() / base.ln()
+    }
 }
 
-fn log(ctx: &mut NativeCtx<'_>) -> R {
-    let x = ctx.check_f64(0)?;
-    let r = if ctx.arg(1).is_nil() {
-        x.ln()
-    } else {
-        let base = ctx.check_f64(1)?;
-        if base == 2.0 {
-            x.log2()
-        } else if base == 10.0 {
-            x.log10()
-        } else {
-            x.ln() / base.ln()
-        }
-    };
-    ctx.ret([Value::Float(r)])
-}
-
-fn frexp(ctx: &mut NativeCtx<'_>) -> R {
-    let x = ctx.check_f64(0)?;
+#[native(crate = crate, name = "math.frexp")]
+fn frexp(x: f64) -> (f64, i64) {
     let (m, e) = split_float(x);
-    ctx.push(Value::Float(m));
-    ctx.push(Value::Int(e as i64));
-    Ok(NativeReturn::Return(2))
+    (m, i64::from(e))
 }
 
 /// `x = m * 2^e` with `0.5 <= |m| < 1`; zero, infinities and NaN come back
@@ -315,11 +327,10 @@ fn split_float(x: f64) -> (f64, i32) {
     (m, exp + bias)
 }
 
-fn ldexp(ctx: &mut NativeCtx<'_>) -> R {
-    let m = ctx.check_f64(0)?;
+#[native(crate = crate, name = "math.ldexp")]
+fn ldexp(m: f64, e: i64) -> f64 {
     // The reference takes the exponent as a C `int`, truncating it.
-    let e = ctx.check_int(1)? as i32;
-    ctx.ret([Value::Float(number::ldexp(m, i64::from(e)))])
+    number::ldexp(m, i64::from(e as i32))
 }
 
 fn less(a: Value, b: Value) -> bool {
@@ -411,62 +422,50 @@ fn min(ctx: &mut NativeCtx<'_>) -> R {
     extreme(ctx, false)
 }
 
-fn rng<'a>(ctx: &'a mut NativeCtx<'_>) -> &'a mut Xoshiro {
-    ctx.vm
-        .rt
-        .ext
-        .get_or_insert_with(|| Xoshiro::from_entropy().0)
-}
-
-fn random(ctx: &mut NativeCtx<'_>) -> R {
-    let (low, up) = match ctx.nargs() {
-        0 => {
-            let x = rng(ctx).next_f64();
-            return ctx.ret([Value::Float(x)]);
-        }
+#[native(crate = crate, name = "math.random")]
+fn random(s: &mut Stack<'_>) -> StackResult<Number> {
+    let (low, up) = match s.top() {
+        0 => return Ok(Number::Float(s.extension(Xoshiro::next_f64))),
         1 => {
-            let up = ctx.check_int(0)?;
+            let up = s.check_integer(1)?;
             if up == 0 {
-                let r = rng(ctx).next_u64();
-                return ctx.ret([Value::Int(r as i64)]);
+                return Ok(Number::Int(s.extension(Xoshiro::next_u64) as i64));
             }
             (1, up)
         }
-        2 => (ctx.check_int(0)?, ctx.check_int(1)?),
-        _ => return Err(ctx.error("wrong number of arguments")),
+        2 => (s.check_integer(1)?, s.check_integer(2)?),
+        _ => return Err(s.error("wrong number of arguments")),
     };
     if low > up {
-        return Err(ctx.arg_error(0, "interval is empty"));
+        return Err(s.arg_error(1, "interval is empty"));
     }
-    let r = rng(ctx).project(up.wrapping_sub(low) as u64);
-    ctx.ret([Value::Int(low.wrapping_add(r as i64))])
+    let r = s.extension(|g: &mut Xoshiro| g.project(up.wrapping_sub(low) as u64));
+    Ok(Number::Int(low.wrapping_add(r as i64)))
 }
 
-fn randomseed(ctx: &mut NativeCtx<'_>) -> R {
-    let (seeded, n1, n2) = if ctx.nargs() == 0 {
+#[native(crate = crate, name = "math.randomseed")]
+fn randomseed(s: &mut Stack<'_>) -> StackResult<(i64, i64)> {
+    let (seeded, n1, n2) = if s.top() == 0 {
         Xoshiro::from_entropy()
     } else {
-        let n1 = ctx.check_int(0)? as u64;
-        let n2 = ctx.opt_int(1, 0)? as u64;
+        let n1 = s.check_integer(1)? as u64;
+        let n2 = s.opt_integer(2, 0)? as u64;
         (Xoshiro::seeded(n1, n2), n1, n2)
     };
-    *rng(ctx) = seeded;
-    ctx.push(Value::Int(n1 as i64));
-    ctx.push(Value::Int(n2 as i64));
-    Ok(NativeReturn::Return(2))
+    s.extension(|g: &mut Xoshiro| *g = seeded);
+    Ok((n1 as i64, n2 as i64))
 }
 
-fn sqrt(ctx: &mut NativeCtx<'_>) -> R {
-    let x = ctx.check_f64(0)?;
-    ctx.ret([Value::Float(x.sqrt())])
+#[native(crate = crate, name = "math.sqrt")]
+fn sqrt(x: f64) -> f64 {
+    x.sqrt()
 }
 
-fn type_(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.check_any(0)?;
-    let r = match v {
-        Value::Int(_) => ctx.new_str(b"integer"),
-        Value::Float(_) => ctx.new_str(b"float"),
-        _ => Value::Nil,
-    };
-    ctx.ret([r])
+#[native(crate = crate, name = "math.type")]
+fn type_(s: &mut Stack<'_>, v: Any) -> Option<&'static str> {
+    match s.number_at(v.0) {
+        Some(Number::Int(_)) => Some("integer"),
+        Some(Number::Float(_)) => Some("float"),
+        None => None,
+    }
 }

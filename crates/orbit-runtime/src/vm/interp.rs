@@ -141,7 +141,44 @@ pub(crate) enum Ran {
     Done,
     /// A hook was armed or disarmed: continue in the other loop.
     Switch,
+    /// A safe point found the heap over its limit even after a full
+    /// collection ([`Vm::set_memory_limit`]): raise `not enough memory` in
+    /// the top frame, whose pc is saved.
+    NoMemory,
 }
+
+/// An error on its way to the frame that catches it, with how far its
+/// handling has got. What used to wait in the runtime between raising and
+/// unwinding travels here instead, so a nested run has its own.
+pub(crate) struct Thrown {
+    pub(crate) error: LuaError,
+    pub(crate) stage: Stage,
+}
+
+/// How far an error's handling has got.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Stage {
+    /// Just raised: the catcher's message handler, if it has one, runs
+    /// first.
+    Raised,
+    /// Past its message handler: the handler returned it, or a `__close`
+    /// handler ran while it unwound.
+    Handled,
+    /// An error in error handling: it skips message handlers.
+    ErrErr,
+}
+
+impl From<LuaError> for Thrown {
+    fn from(error: LuaError) -> Self {
+        Thrown {
+            error,
+            stage: Stage::Raised,
+        }
+    }
+}
+
+/// The message of an error in error handling.
+const ERRERR: &[u8] = b"error in error handling";
 
 /// What the dispatch loop does next.
 pub(crate) enum Flow {
@@ -163,8 +200,8 @@ impl Vm {
             let flow = match vm.call_value(func, nargs, MULTI) {
                 Ok(f) => f,
                 Err(x) => {
-                    let e = vm.make_error(x);
-                    vm.unwind(e)?
+                    let t = vm.thrown(x);
+                    vm.unwind(t)?
                 }
             };
             match flow {
@@ -345,8 +382,7 @@ fn overflow(rt: &mut crate::vm::Runtime, end: usize) -> Option<Exc> {
     if end <= rt.limits.max_stack + HANDLER_HEADROOM {
         return None;
     }
-    rt.errerr = true;
-    Some(Exc::Plain("error in error handling".into()))
+    Some(Exc::ErrErr)
 }
 
 /// Push a frame for Lua closure `c` running `proto`: the body of
@@ -674,11 +710,25 @@ impl Vm {
         }
     }
 
-    /// Turn an instruction's error into a Lua error, adding the position of
-    /// the running function and the operand's name.
+    /// Turn an instruction's error into a Lua error on its way, adding the
+    /// position of the running function and the operand's name.
+    pub(crate) fn thrown(&mut self, x: Exc) -> Thrown {
+        let stage = match x {
+            Exc::Handled(_) => Stage::Handled,
+            Exc::ErrErr => Stage::ErrErr,
+            _ => Stage::Raised,
+        };
+        Thrown {
+            error: self.make_error(x),
+            stage,
+        }
+    }
+
+    /// [`Vm::thrown`]'s error alone, for a caller that hands it to a native.
     pub(crate) fn make_error(&mut self, x: Exc) -> LuaError {
         match x {
-            Exc::Lua(e) => e,
+            Exc::Lua(e) | Exc::Handled(e) => e,
+            Exc::ErrErr => LuaError::new(self.new_str(ERRERR)),
             Exc::Plain(m) => LuaError::new(self.new_str(m.as_bytes())),
             Exc::NoMemory => LuaError::new(self.new_str(NoMemory::MESSAGE.as_bytes())),
             Exc::Meta(_) | Exc::Index { .. } | Exc::NewIndex { .. } => {
@@ -740,17 +790,26 @@ impl Vm {
     /// each getting the error) before it is resumed. In a coroutine that
     /// `coroutine.close` is closing (its frames already popped to the base),
     /// the base frame closes its variables too.
-    pub(crate) fn unwind(&mut self, mut e: LuaError) -> Result<Flow, LuaError> {
+    pub(crate) fn unwind(&mut self, thrown: Thrown) -> Result<Flow, LuaError> {
+        let Thrown {
+            error: mut e,
+            mut stage,
+        } = thrown;
         // Once per error, before its handler and before anything unwinds
         // (`coroutine.close` unwinding a dead coroutine raises nothing new).
         #[cfg(feature = "debugger")]
-        if !self.rt.handled && !self.rt.errerr && !crate::vm::coro::closing(&self.rt) {
+        if stage == Stage::Raised && !crate::vm::coro::closing(&self.rt) {
             self.debug_error(e.value);
         }
-        let mut errerr = false;
+        // An error raised while this one unwinds takes its place.
+        macro_rules! replaced_by {
+            ($x:expr) => {{
+                let t = self.thrown($x);
+                e = t.error;
+                stage = t.stage;
+            }};
+        }
         loop {
-            errerr |= std::mem::take(&mut self.rt.errerr);
-            let handled = std::mem::take(&mut self.rt.handled);
             let closing = crate::vm::coro::closing(&self.rt);
             let frames = &self.rt.stack.frames;
             let idx = frames
@@ -774,8 +833,7 @@ impl Vm {
                     catch: Catch::Handler,
                     ..
                 } | FrameKind::Boundary { handler: true, .. }
-            ) && !errerr
-                && !handled
+            ) && stage == Stage::Raised
             {
                 // An error inside the handler calls it again, up to a limit.
                 let nested = frames[idx..]
@@ -791,15 +849,13 @@ impl Vm {
                     match self.call_handler(f.base as usize, v) {
                         Ok(flow) => return Ok(flow),
                         Err(x) => {
-                            e = self.make_error(x);
+                            replaced_by!(x);
                             continue;
                         }
                     }
                 }
-                errerr = true;
-            }
-            if std::mem::take(&mut errerr) {
-                e = LuaError::new(self.new_str(b"error in error handling"));
+                // Too many handlers deep: an error in error handling.
+                e = LuaError::new(self.new_str(ERRERR));
             }
             // Past the message handler, a `nil` error reads as a message
             // (a close without errors is the exception: it has no error).
@@ -819,18 +875,21 @@ impl Vm {
             if closes {
                 if let Some(&t) = self.rt.stack.aux.tbc.last() {
                     if t >= limit {
+                        // The handlers run once the frames above the
+                        // catcher are gone: an error that will need its
+                        // traceback gets it now.
                         if matches!(
                             f.kind,
                             FrameKind::Boundary { native: false, .. } | FrameKind::Hook
                         ) && e.traceback.is_none()
-                            && self.rt.unwind_traceback.is_none()
                         {
-                            self.rt.unwind_traceback = Some(self.rt.traceback(&self.heap, None, 1));
+                            let tb = self.rt.traceback(&self.heap, None, 1);
+                            e.traceback = Some(tb.into_boxed_str());
                         }
-                        match self.start_close(e.value, idx, closing) {
+                        match self.start_close(e, idx, closing) {
                             Ok(flow) => return Ok(flow),
                             Err(x) => {
-                                e = self.make_error(x);
+                                replaced_by!(x);
                                 continue;
                             }
                         }
@@ -849,7 +908,7 @@ impl Vm {
                     };
                     match self.co_finished(outcome, e.cause) {
                         Ok(flow) => return Ok(flow),
-                        Err(x) => e = self.make_error(x),
+                        Err(x) => replaced_by!(x),
                     }
                 }
                 FrameKind::Boundary { .. } | FrameKind::Hook => {
@@ -857,9 +916,8 @@ impl Vm {
                     // it again where the hook was called, or the native's
                     // call, which hands it to the native).
                     let native = matches!(f.kind, FrameKind::Boundary { native: true, .. });
-                    let taken = self.rt.unwind_traceback.take();
                     if e.traceback.is_none() && !native {
-                        let tb = taken.unwrap_or_else(|| self.rt.traceback(&self.heap, None, 1));
+                        let tb = self.rt.traceback(&self.heap, None, 1);
                         e.traceback = Some(tb.into_boxed_str());
                     }
                     self.rt.stack.cells.truncate(f.cell_base as usize);
@@ -868,7 +926,7 @@ impl Vm {
                 }
                 _ => match self.catch(idx, e.value) {
                     Ok(flow) => return Ok(flow),
-                    Err(x) => e = self.make_error(x),
+                    Err(x) => replaced_by!(x),
                 },
             }
         }
@@ -894,9 +952,16 @@ impl Vm {
 
     /// Close the newest to-be-closed variable while error `err` unwinds to
     /// the frame at `catcher`: pop the frames above the catcher, then call
-    /// the variable's `__close` handler under an `Unwind` meta frame, which raises `err` again when
-    /// the handler returns.
-    fn start_close(&mut self, err: Value, catcher: usize, closing: bool) -> Result<Flow, Exc> {
+    /// the variable's `__close` handler under an `Unwind` meta frame, which
+    /// raises `e` again when the handler returns. The error waits in the
+    /// meta frame's slots meanwhile: its value, then its traceback if it
+    /// has one, as a string.
+    fn start_close(&mut self, e: LuaError, catcher: usize, closing: bool) -> Result<Flow, Exc> {
+        let (err, cause) = (e.value, e.cause);
+        let traceback = match e.traceback {
+            Some(t) => self.new_str(t.as_bytes()),
+            None => Value::Nil,
+        };
         let t = self.rt.stack.aux.tbc.pop().expect("a variable to close") as usize;
         // As in the reference, the handler runs once the error has left the
         // frames above the one that catches it: it is called from there.
@@ -910,17 +975,18 @@ impl Vm {
         let at = t + 1;
         let v = self.rt.stack.regs[t];
         let h = self.rt.metamethod(&self.heap, v, MetaField::Close);
-        // The error waits in the meta frame's slot; the handler goes above.
+        // The error waits in the meta frame's slots; the handler goes above.
         let regs = &mut self.rt.stack.regs;
-        extend_nil(regs, at + 4);
+        extend_nil(regs, at + 5);
         regs[at] = err;
-        regs[at + 1] = h;
-        regs[at + 2] = v;
-        regs[at + 3] = err;
+        regs[at + 1] = traceback;
+        regs[at + 2] = h;
+        regs[at + 3] = v;
+        regs[at + 4] = err;
         let cdepth = self.rt.stack.deeper();
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Meta {
-                action: crate::vm::meta::MetaAction::Unwind { handled: true },
+                action: crate::vm::meta::MetaAction::Unwind { cause },
                 field: MetaField::Close,
             },
             func: at as u32,
@@ -939,7 +1005,7 @@ impl Vm {
         } else {
             2
         };
-        self.call_close_handler(at + 1, h, nargs)
+        self.call_close_handler(at + 2, h, nargs)
     }
 
     /// Call the `__close` handler `h` at `at` with its `nargs` arguments,
@@ -1032,7 +1098,6 @@ impl Vm {
         // Raise the result again, past the handler: the variables to close
         // between the error and the catcher get it.
         let v = self.rt.stack.regs[f.func as usize];
-        self.rt.handled = true;
-        Err(Exc::Lua(LuaError::new(v)))
+        Err(Exc::Handled(LuaError::new(v)))
     }
 }

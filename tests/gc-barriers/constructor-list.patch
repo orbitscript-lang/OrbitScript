@@ -1,0 +1,31 @@
+Deletes: A constructor's list store (`SetList`): `Heap::update` without its barrier.
+Tests: table_constructor_list_store
+
+diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
+index a41812b..7aeff1c 100644
+--- a/crates/orbit-runtime/src/vm/cold.rs
++++ b/crates/orbit-runtime/src/vm/cold.rs
+@@ -567,12 +567,18 @@ impl Vm {
+         start: i64,
+     ) -> Result<(), NoMemory> {
+         let regs = &self.rt.stack.regs;
+-        self.heap.update(t, |tab| {
+-            for (i, &v) in regs[from..from + n].iter().enumerate() {
+-                tab.set_int(start + i as i64, v)?;
++        let before = orbit_gc::Trace::extra_bytes(self.heap.get(t));
++        let tab = self.heap.get_mut(t);
++        let mut r = Ok(());
++        for (i, &v) in regs[from..from + n].iter().enumerate() {
++            if let Err(e) = tab.set_int(start + i as i64, v) {
++                r = Err(e);
++                break;
+             }
+-            Ok(())
+-        })
++        }
++        let after = orbit_gc::Trace::extra_bytes(self.heap.get(t));
++        self.heap.adjust_bytes(after as isize - before as isize);
++        r
+     }
+ 
+     /// `Vararg`: copy the frame's extra arguments (the `nvarargs` values

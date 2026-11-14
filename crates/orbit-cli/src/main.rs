@@ -12,9 +12,14 @@
 //!
 //! Compiling, listing bytecode and printing front-end stages are `orbitc`'s
 //! job (`orbitc.rs`). `ORBIT_GC_STRESS=1` collects at
-//! nearly every safe point after an allocation. `ORBIT_MEMORY_LIMIT=64M`
+//! nearly every safe point after an allocation. In debug builds,
+//! `ORBIT_GC_VERIFY=1` checks the heap after markings (`orbit_gc`'s
+//! verifier, minor collections paced by allocation) and panics on an object
+//! the collector missed; `ORBIT_GC_VERIFY=all` checks every marking. `ORBIT_MEMORY_LIMIT=64M`
 //! (bytes, or with a `K`, `M` or `G` suffix) caps the Lua heap: past it,
-//! scripts get the error `not enough memory`.
+//! scripts get the error `not enough memory`. `ORBIT_VERIFY=structure` or
+//! `none` lowers how much `load` checks binary chunks (`-E` ignores it):
+//! only for chunks you trust.
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +31,9 @@ mod dap;
 mod repl;
 
 use orbit::stack::{FunctionArg, MULTRET, Rest, Return, Stack, StackResult, Status, Type};
-use orbit::{Chunk, Config, Error, Function, Isolate, Runtime, Scope, Table, Value, native};
+use orbit::{
+    BinaryChecks, Chunk, Config, Error, Function, Isolate, Runtime, Scope, Table, Value, native,
+};
 
 /// The chunk names `lua` gives command-line code and standard input.
 const COMMAND_LINE: &[u8] = b"=(command line)";
@@ -283,6 +290,17 @@ fn main() -> ExitCode {
     }
 }
 
+/// The level `ORBIT_VERIFY` asks for: `full`, `structure` or `none`. `None`
+/// for anything else, which keeps the most the build checks.
+fn binary_checks_from_env() -> Option<Option<BinaryChecks>> {
+    match std::env::var_os("ORBIT_VERIFY")?.to_str()? {
+        "full" => Some(Some(BinaryChecks::Full)),
+        "structure" => Some(Some(BinaryChecks::Structure)),
+        "none" => Some(None),
+        _ => None,
+    }
+}
+
 /// The isolate the command line asks for, with its libraries installed and
 /// Ctrl-C hooked up.
 fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
@@ -296,10 +314,14 @@ fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
         },
     };
     let config = Config::default()
-        .ignore_env(cli.ignore_env)
         .warnings(cli.warnings)
         .memory_limit(memory_limit);
     let mut iso = Runtime::new().new_isolate(config);
+    if !cli.ignore_env {
+        if let Some(level) = binary_checks_from_env() {
+            iso.set_binary_checks(level);
+        }
+    }
     let options = orbit_std::Options {
         ignore_env: cli.ignore_env,
         ..Default::default()
@@ -308,6 +330,11 @@ fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
     catch_interrupts(iso.interrupt());
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         iso.gc().set_stress(true);
+    }
+    // Only debug builds have the verifier, so release binaries don't change.
+    #[cfg(debug_assertions)]
+    if let Some(v) = std::env::var_os("ORBIT_GC_VERIFY").filter(|v| v != "0") {
+        iso.gc().set_verify(true, v == "all");
     }
     Ok(iso)
 }

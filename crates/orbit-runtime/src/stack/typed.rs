@@ -170,12 +170,10 @@ impl<'a> Arg<'a> for Number {
 
     #[inline(always)]
     fn check(s: &mut Stack<'_>, i: i32) -> StackResult<Number> {
-        if s.is_integer(i) {
-            if let Some(n) = s.to_integer(i) {
-                return Ok(Number::Int(n));
-            }
+        match s.number_at(i) {
+            Some(n) => Ok(n),
+            None => s.check_number(i).map(Number::Float),
         }
-        s.check_number(i).map(Number::Float)
     }
 
     #[inline(always)]
@@ -392,42 +390,42 @@ impl Push for bool {
 impl Push for &[u8] {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
-        s.push_bytes(self);
+        s.push_string_result(self);
     }
 }
 
 impl Push for &str {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
-        s.push_bytes(self.as_bytes());
+        s.push_string_result(self.as_bytes());
     }
 }
 
 impl Push for Vec<u8> {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
-        s.push_bytes(&self);
+        s.push_string_result(&self);
     }
 }
 
 impl Push for String {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
-        s.push_bytes(self.as_bytes());
+        s.push_string_result(self.as_bytes());
     }
 }
 
 impl Push for OrbitString {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
-        s.push_bytes(&self);
+        s.push_string_result(self.as_bytes());
     }
 }
 
 impl Push for OrbitStr<'_> {
     #[inline(always)]
     fn push(self, s: &mut Stack<'_>) {
-        s.push_bytes(self);
+        s.push_string_result(self.as_bytes());
     }
 }
 

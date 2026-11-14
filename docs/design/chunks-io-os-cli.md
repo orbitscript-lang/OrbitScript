@@ -53,7 +53,7 @@ pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, S
 // Runtime::compile, Runtime::compile_orbitscript: Option<CompileFn>
 ```
 
-An `orbit::Isolate` installs both: the Lua front end, and the OrbitScript front end, which has no Cargo feature because it is the runtime's own language. A source chunk named `@path.orb` (from `loadfile`, `dofile`, `require` or the CLI's script) uses OrbitScript; everything else, including `load` of a string, `-e`, standard input and interactive mode, is Lua. The default `package.path` has `.orb` entries after the `.lua` ones (`/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb`), and the Lua searcher loads whichever file it finds, the loader picking the compiler by the name. There is no separate OrbitScript path or searcher, so `#package.searchers` is 4 as in `lua`. A script that sets `package.path` (or `LUA_PATH`) itself decides whether `.orb` files are searched; a missing module's message lists the `.orb` files tried along with the others.
+An `orbit::Isolate` installs both: the Lua front end, and the OrbitScript front end, which has no Cargo feature because it is the runtime's own language. A source chunk named `@path.orb` (from `loadfile`, `dofile`, `require` or the CLI's script) uses OrbitScript; everything else, including `load` of a string, `-e`, standard input and interactive mode, is Lua. The default `package.path` has `.orb` entries after the `.lua` ones (`/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb`; on Windows `!\..\share\orbit\?.orb;!\..\share\orbit\?\init.orb;.\?.orb;.\?\init.orb`, where `!` is the program's directory as in the reference build's defaults), and the Lua searcher loads whichever file it finds, the loader picking the compiler by the name. There is no separate OrbitScript path or searcher, so `#package.searchers` is 4 as in `lua`. A script that sets `package.path` (or `LUA_PATH`) itself decides whether `.orb` files are searched; a missing module's message lists the `.orb` files tried along with the others.
 
 ### Environments and captures
 
@@ -63,7 +63,7 @@ An `orbit::Isolate` installs both: the Lua front end, and the OrbitScript front 
 
 Standard behaviour throughout, built on the registry table, so `package.loaded` and `package.preload` survive reassignment of the `package` fields, as in Lua.
 
-- `package.path` comes from `LUA_PATH_5_5`, then `LUA_PATH`, then the default; `;;` expands to the default. `package.cpath` is the same with `LUA_CPATH*`. The defaults are the reference build's (plus the `.orb` entries), so scripts and the suite see the same strings. `-E` ignores the variables.
+- `package.path` comes from `LUA_PATH_5_5`, then `LUA_PATH`, then the default; `;;` expands to the default. `package.cpath` is the same with `LUA_CPATH*`. The defaults are the reference build's (plus the `.orb` entries), so scripts and the suite see the same strings. On Windows they start in the program's directory, and every `!` in either path, the variables' included, becomes that directory, as in the reference build. `-E` ignores the variables.
 - `package.config` is `/\n;\n?\n!\n-\n`.
 - `package.searchers`: preload, Lua files, C files, C root. With `orbit-capi` installed (the CLI's `c-modules` feature, on by default), the C searchers load C modules through the Lua C API shim (ADR-8). Without it they still search `cpath` like `lua`, so a missing module's error lists the same `no file '...'` lines, and `package.loadlib` returns `nil, msg, "absent"`, the manual's result for a build without dynamic libraries.
 - `package.searchpath` as in the manual, including the `no file '...'` lines.
@@ -115,9 +115,10 @@ The six sites structure alone leaves are all things only data flow can see: the 
 **Levels.**
 
 - **Cargo features.** `orbit-runtime` (and `orbit`, which forwards them) has `verify` for layer 1 and `verify-flow` for both layers, on by default. Layer 2 lives in `orbit_bytecode::verify::flow` behind `orbit-bytecode`'s own `verify-flow` feature, so a build without it doesn't carry the code. Release sizes of the `orbit` CLI when this was built (cloud x86_64): no verifier 1,036,504 bytes, layer 1 1,041,928, both layers 1,047,160.
-- **Environment.** `ORBIT_VERIFY=full`, `structure` or `none` lowers the level at run time (ignored with `-E`); anything else keeps the most the build has. A host can set it per isolate (`Isolate::set_binary_checks`). The level lives in the runtime, not the registry, so scripts can't change it.
+- **Per isolate.** A host sets it with `Isolate::set_binary_checks`; every isolate starts at the most the build has, and the libraries read no environment variable for it, so a variable set in a host's environment can't weaken an embedded isolate. The `orbit` CLI lowers it when `ORBIT_VERIFY=structure` or `none` (`full` or anything else keeps the most; ignored with `-E`). The level lives in the runtime, not the registry, so scripts can't change it.
+- **Always.** Decoding rejects `NativeEntry`, the body of the native stubs the VM makes, at every level including none: in a chunk it would call any native by number, whatever environment the script was given.
 
-Below both layers, a malformed chunk can make the VM panic (and abort the process), but never corrupt memory. Every new instruction needs an encode, a decode and a verify arm; the matches are exhaustive, so adding an `Op` without them doesn't compile.
+Below both layers, a malformed chunk can make the VM panic (and abort the process), but never corrupt memory. It isn't sandboxed, though: it may reach values the script was never given, so lowering the level is only for chunks you trust. Every new instruction needs an encode, a decode and a verify arm; the matches are exhaustive, so adding an `Op` without them doesn't compile.
 
 ## `io`
 

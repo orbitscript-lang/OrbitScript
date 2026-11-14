@@ -732,7 +732,7 @@ impl Vm {
         self.rt.resumers.push(self.rt.current);
         self.switch_to(co, CoStatus::Normal);
         self.rt.stack.pop_to_base();
-        self.unwind(LuaError::new(error.unwrap_or(Value::Nil)))
+        self.unwind(LuaError::new(error.unwrap_or(Value::Nil)).into())
             .map_err(Exc::Lua)
     }
 
@@ -832,8 +832,8 @@ impl Vm {
         let flow = match flow {
             Ok(f) => f,
             Err(x) => {
-                let e = self.make_error(x);
-                self.unwind(e)?
+                let t = self.thrown(x);
+                self.unwind(t)?
             }
         };
         match flow {

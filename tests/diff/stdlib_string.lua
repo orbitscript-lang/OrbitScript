@@ -25,6 +25,11 @@ p(string.find, "THE (quick) fox", "%((%a+)%)")
 p(string.find, "[[]] [][] [[[[", "%f[[].")
 p(string.gsub, "aaa aa a aaa a", "%f[%w]a", "x")
 p(string.rep, "ab", 3, ",")
+-- Nothing to repeat: empty at once, however many times.
+p(string.rep, "", math.maxinteger)
+p(string.rep, "", math.maxinteger, "")
+p(string.rep, "", 3, ",")
+p(string.rep, "x", math.maxinteger, "")
 p(string.reverse, "abc") p(string.upper, "aBc1") p(string.lower, "ABc")
 p(string.format, "%5.2f|%e|%g|%g|%g|%g|%#g|%.0e|%#.0f|%G", 3.14159, 12345.678, 1e20, 1e-5, 123456789, 0.0001, 1.0, 5.5, 2.0, 1e-10)
 p(string.format, "%.3f %.20g %g %g %.14g", 2.5, 0.1, 100000, 1e6, 2^53)
@@ -82,4 +87,15 @@ do
   print("gsub reuse", same((string.gsub(s, "b", "c"))), same((string.gsub(s, ".", {x = "y"}))),
         same((string.gsub(s, ".", function() return nil end))),
         same((string.gsub(s, ".", function(x) return x end))), same((string.gsub(s, "a", "%0"))))
+end
+
+-- A million function replacements (and through `__index`): no stack overflow.
+do
+  local s = string.rep("a", 1000000)
+  local r, n = string.gsub(s, "a", function(c) return c end)
+  print(#r, n, r == s)
+  r, n = string.gsub(s, "a", setmetatable({}, {__index = function(_, c) return c .. "b" end}))
+  print(#r, n, r == string.rep("ab", 1000000))
+  r, n = string.gsub(string.rep("abc ", 200000), "%w+", function(w) if #w % 2 == 1 then return w:upper() end end)
+  print(#r, n, r:sub(1, 12), r:sub(-12))
 end

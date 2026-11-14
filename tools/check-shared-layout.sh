@@ -17,6 +17,9 @@
 # 2. The tests of `orbit`, `orbitc` and `orbit-lsp`, run on the laid-out
 #    programs (ORBIT_BIN_DIR).
 # 3. On Linux, the C host tests on the laid-out liborbit (ORBIT_LIBORBIT).
+# 4. On Linux and macOS, a C module loaded by the static `orbit` whose
+#    calls go to the laid-out liborbit, a second copy of the runtime, as in
+#    the --static-programs layout (orbit-cli's ignored C module test).
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -92,6 +95,15 @@ echo "the programs refuse another build's liborbit" >&2
 echo "== program tests on the layout" >&2
 # shellcheck disable=SC2086 # $test_features holds plain words
 ORBIT_BIN_DIR="$out/bin" cargo test --locked -p orbit-cli -p orbit-lsp $test_features
+
+case "$library" in
+    lib/liborbit.so.0 | lib/liborbit.0.dylib)
+        echo "== a C module on a second copy of the runtime" >&2
+        # shellcheck disable=SC2086
+        ORBIT_LIBORBIT="$out/$library" cargo test --locked -p orbit-cli $test_features \
+            --test c_modules -- --ignored
+        ;;
+esac
 
 case "$library" in
     lib/liborbit.so.0)

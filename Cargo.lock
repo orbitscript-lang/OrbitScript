@@ -137,6 +137,7 @@ dependencies = [
 name = "orbit-cli"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "orbit",
  "orbit-capi",
  "orbit-compiler",
@@ -278,6 +279,7 @@ dependencies = [
  "orbit-lua-syntax",
  "orbit-lua-text",
  "orbit-lua-version",
+ "orbit-macros",
  "orbit-orb-syntax",
 ]
 

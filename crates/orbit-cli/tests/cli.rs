@@ -121,6 +121,43 @@ fn environment() {
     assert!(out(&o).starts_with("a;") && out(&o).ends_with(";b\n"));
 }
 
+/// On Windows the default paths start in the program's directory, which
+/// a path from the environment can name with `!` too, as in the reference
+/// build.
+#[cfg(windows)]
+#[test]
+fn windows_paths_are_relative_to_the_program() {
+    let exe = common::bin("orbit", env!("CARGO_BIN_EXE_orbit"));
+    let lua = orbit::LUA.dotted();
+    let o = orbit(&["-e", "print(package.path) print(package.cpath)"], "", &[]);
+    // The directory as the system names the program, which may be spelled
+    // differently from the path the test started it by.
+    let dir = out(&o).split("\\lua\\?.lua;").next().unwrap().to_string();
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+    assert_eq!(
+        canonical(std::path::Path::new(&dir)),
+        canonical(exe.parent().unwrap()),
+        "{}",
+        out(&o)
+    );
+    assert_eq!(
+        out(&o),
+        format!(
+            "{dir}\\lua\\?.lua;{dir}\\lua\\?\\init.lua;{dir}\\?.lua;{dir}\\?\\init.lua;\
+             {dir}\\..\\share\\lua\\{lua}\\?.lua;{dir}\\..\\share\\lua\\{lua}\\?\\init.lua;\
+             .\\?.lua;.\\?\\init.lua;{dir}\\..\\share\\orbit\\?.orb;\
+             {dir}\\..\\share\\orbit\\?\\init.orb;.\\?.orb;.\\?\\init.orb\n\
+             {dir}\\?.dll;{dir}\\..\\lib\\lua\\{lua}\\?.dll;{dir}\\loadall.dll;.\\?.dll\n"
+        )
+    );
+    let o = orbit(
+        &["-e", "print(package.cpath)"],
+        "",
+        &[("LUA_CPATH", "!\\x\\?.dll")],
+    );
+    assert_eq!(out(&o), format!("{dir}\\x\\?.dll\n"));
+}
+
 #[test]
 fn error_objects() {
     let o = orbit(&["-e", "error{}"], "", &[]);
@@ -282,6 +319,31 @@ fn memory_limit_from_the_environment() {
     let o = orbit(&["-"], "", &[("ORBIT_MEMORY_LIMIT", "lots")]);
     assert!(!o.status.success());
     assert!(err(&o).contains("ORBIT_MEMORY_LIMIT"), "{}", err(&o));
+}
+
+/// `ORBIT_VERIFY=none` lowers the checks on binary chunks, unless `-E`.
+#[test]
+fn verification_level_from_the_environment() {
+    use orbit_compiler::bytecode::{Op, format};
+    // Fails the structure check: a register past the frame.
+    let mut chunk = orbit::Compiler
+        .compile(b"local a = 1", "t", orbit::Language::Lua)
+        .unwrap();
+    chunk.protos[0].code = vec![Op::Return1 { src: 200 }];
+    chunk.protos[0].debug = Default::default();
+    let path = std::env::temp_dir().join(format!("orbit-verify-{}.out", std::process::id()));
+    std::fs::write(&path, format::encode(&chunk, true)).unwrap();
+    let script = format!(
+        "local f = io.open({:?}, 'rb') print(type(load(f:read('a')))) f:close()",
+        path.to_str().unwrap()
+    );
+    let checked = orbit(&["-e", &script], "", &[]);
+    let unchecked = orbit(&["-e", &script], "", &[("ORBIT_VERIFY", "none")]);
+    let ignored = orbit(&["-E", "-e", &script], "", &[("ORBIT_VERIFY", "none")]);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(out(&checked), "nil\n", "{}", err(&checked));
+    assert_eq!(out(&unchecked), "function\n", "{}", err(&unchecked));
+    assert_eq!(out(&ignored), "nil\n", "{}", err(&ignored));
 }
 
 /// Without the `c-modules` feature, `package.loadlib` gives Lua's result for

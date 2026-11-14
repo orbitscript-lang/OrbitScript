@@ -79,7 +79,7 @@ fn orb_modules_are_on_package_path() {
     let mut iso = isolate();
     let out = exec_str(
         &mut iso,
-        "local default = package.path:find('./?.orb', 1, true) ~= nil
+        "local default = package.path:find('.' .. package.config:sub(1, 1) .. '?.orb', 1, true) ~= nil
          package.path = './?.lua;./?.orb' package.cpath = './?.so'
          local ok, msg = pcall(require, 'nope')
          return default, msg",

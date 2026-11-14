@@ -94,6 +94,15 @@ fn only_a_real_interrupt_is_reported_as_one() {
         kind_of("coroutine.wrap(function() while true do end end)()", true),
         ErrorKind::Interrupted
     );
+    // A `__close` handler that returns lets the interrupt go on as one.
+    assert_eq!(
+        kind_of(
+            "local x <close> = setmetatable({}, {__close = function() end})
+             while true do end",
+            true
+        ),
+        ErrorKind::Interrupted
+    );
     // A `__close` handler's error replaces the interrupt.
     assert_eq!(
         kind_of(
