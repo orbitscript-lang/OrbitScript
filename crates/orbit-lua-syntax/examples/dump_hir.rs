@@ -1,8 +1,9 @@
 //! Prints the analysed HIR of each file named on the command line.
 
 fn main() {
-    for path in std::env::args().skip(1) {
-        let src = std::fs::read(&path).expect("read source");
+    for arg in std::env::args_os().skip(1) {
+        let src = std::fs::read(&arg).expect("read source");
+        let path = arg.to_string_lossy();
         let options = orbit_lua_syntax::ParseOptions {
             skip_comment_line: true,
             ..Default::default()

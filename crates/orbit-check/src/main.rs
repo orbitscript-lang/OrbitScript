@@ -1,5 +1,6 @@
 //! The `orbit-check` command: checks OrbitScript files and prints what it finds.
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -35,15 +36,21 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Whether an argument is an option: it starts with `-`.
+fn is_option(arg: &OsStr) -> bool {
+    arg.to_string_lossy().starts_with('-')
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`: a file name need not be UTF-8.
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let mut config = Config::default();
     let mut paths = Vec::new();
     let mut search = Vec::new();
     let mut deny_warnings = false;
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        match args[i].to_str().unwrap_or("") {
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -51,22 +58,31 @@ fn main() -> ExitCode {
             "--strict" => config.strict = true,
             "--deny-warnings" => deny_warnings = true,
             "--path" | "--root" if i + 1 >= args.len() => {
-                eprintln!("orbit-check: {} needs a value\n{USAGE}", args[i]);
+                eprintln!(
+                    "orbit-check: {} needs a value\n{USAGE}",
+                    args[i].to_string_lossy()
+                );
                 return ExitCode::from(2);
             }
             "--path" => {
-                search.push(args[i + 1].clone());
+                // A template (`?.orb`), matched as text.
+                let Some(p) = args[i + 1].to_str() else {
+                    eprintln!("orbit-check: --path needs a UTF-8 value");
+                    return ExitCode::from(2);
+                };
+                search.push(p.to_owned());
                 i += 1;
             }
             "--root" => {
                 config.root = PathBuf::from(&args[i + 1]);
                 i += 1;
             }
-            a if a.starts_with('-') => {
+            _ if is_option(&args[i]) => {
+                let a = args[i].to_string_lossy();
                 eprintln!("orbit-check: unknown option {a}\n{USAGE}");
                 return ExitCode::from(2);
             }
-            a => paths.push(PathBuf::from(a)),
+            _ => paths.push(PathBuf::from(&args[i])),
         }
         i += 1;
     }

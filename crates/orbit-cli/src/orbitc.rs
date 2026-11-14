@@ -18,6 +18,8 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use orbit::Compiler;
+
+mod args;
 use orbit_compiler::bytecode::{UnlinkedChunk, format, verify};
 use orbit_lua_syntax::ParseOptions;
 
@@ -41,12 +43,13 @@ struct Cli {
     strip: bool,
     version: bool,
     stage: Stage,
-    output: Option<String>,
+    output: Option<Vec<u8>>,
     /// Input files; `-` is standard input.
-    inputs: Vec<String>,
+    inputs: Vec<Vec<u8>>,
 }
 
-fn parse(args: &[String]) -> Result<Cli, String> {
+/// The options in `args` (bytes, see [`args`]) and the input files.
+fn parse(args: &[Vec<u8>]) -> Result<Cli, String> {
     let mut cli = Cli {
         list: false,
         parse_only: false,
@@ -58,29 +61,29 @@ fn parse(args: &[String]) -> Result<Cli, String> {
     };
     let mut i = 1;
     while i < args.len() {
-        let a = args[i].as_str();
-        if !a.starts_with('-') || a == "-" {
+        let a = args[i].as_slice();
+        if !a.starts_with(b"-") || a == b"-" {
             break;
         }
         match a {
-            "--" => {
+            b"--" => {
                 i += 1;
                 break;
             }
-            "-l" => cli.list = true,
-            "-p" => cli.parse_only = true,
-            "-s" => cli.strip = true,
-            "-v" => cli.version = true,
-            "--ast" => cli.stage = Stage::Ast,
-            "--hir" => cli.stage = Stage::Hir,
-            "-o" => match args.get(i + 1) {
-                Some(o) if !o.starts_with('-') || o == "-" => {
+            b"-l" => cli.list = true,
+            b"-p" => cli.parse_only = true,
+            b"-s" => cli.strip = true,
+            b"-v" => cli.version = true,
+            b"--ast" => cli.stage = Stage::Ast,
+            b"--hir" => cli.stage = Stage::Hir,
+            b"-o" => match args.get(i + 1) {
+                Some(o) if !o.starts_with(b"-") || o == b"-" => {
                     cli.output = Some(o.clone());
                     i += 1;
                 }
                 _ => return Err("'-o' needs argument".into()),
             },
-            _ => return Err(format!("unrecognized option '{a}'")),
+            _ => return Err(format!("unrecognized option '{}'", args::text(a))),
         }
         i += 1;
     }
@@ -107,8 +110,10 @@ fn usage(prog: &str, message: &str) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    let prog = args.first().cloned().unwrap_or_else(|| "orbitc".into());
+    let args = args::args();
+    let prog = args
+        .first()
+        .map_or_else(|| "orbitc".into(), |p| args::text(p));
     let cli = match parse(&args) {
         Ok(c) => c,
         Err(e) => return usage(&prog, &e),
@@ -131,8 +136,8 @@ fn main() -> ExitCode {
         return usage(&prog, "writing a chunk takes exactly one input file");
     }
     for input in &cli.inputs {
-        let path = (input != "-").then_some(input.as_str());
-        let result = match orbit_std::read_chunk_file(path.map(str::as_bytes)) {
+        let path = (input != b"-").then_some(input.as_slice());
+        let result = match orbit_std::read_chunk_file(path) {
             Ok((bytes, source)) => run(&cli, &bytes, &source),
             Err(e) => Err(e.to_string()),
         };
@@ -179,14 +184,14 @@ fn output(cli: &Cli, chunk: &UnlinkedChunk) -> Result<(), String> {
         let _ = stdout.write_all(orbit_compiler::disassemble(chunk).as_bytes());
     }
     if !cli.parse_only {
-        let out = cli.output.as_deref().unwrap_or(DEFAULT_OUTPUT);
+        let out = cli.output.as_deref().unwrap_or(DEFAULT_OUTPUT.as_bytes());
         let encoded = format::encode(chunk, cli.strip);
-        let written = if out == "-" {
+        let written = if out == b"-" {
             stdout.write_all(&encoded)
         } else {
-            std::fs::write(out, &encoded)
+            std::fs::write(args::path(out), &encoded)
         };
-        written.map_err(|e| format!("cannot write {out}: {e}"))?;
+        written.map_err(|e| format!("cannot write {}: {e}", args::text(out)))?;
     }
     Ok(())
 }

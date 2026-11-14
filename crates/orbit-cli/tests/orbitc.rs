@@ -152,3 +152,28 @@ fn orbitscript_files_run_compile_and_print_hir() {
         text(&run.stderr)
     );
 }
+
+/// Input and output file names need not be UTF-8.
+#[cfg(unix)]
+#[test]
+fn file_names_are_bytes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = dir_with("bytes", "print('compiled')\n");
+    std::fs::rename(dir.join("t.lua"), dir.join(OsStr::from_bytes(b"\xff.lua"))).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_orbitc"))
+        .arg("-o")
+        .arg(OsStr::from_bytes(b"\xfe.out"))
+        .arg(OsStr::from_bytes(b"\xff.lua"))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg(OsStr::from_bytes(b"\xfe.out"))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(text(&o.stdout), "compiled\n", "{}", text(&o.stderr));
+}
