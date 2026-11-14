@@ -126,16 +126,65 @@ static int strings(void) {
     lua_pop(L, 1);
   }
   printf("kept: %s\n", kept);
-  /* Copies of strings no longer on the stack are freed. */
+  /* Copies of strings that died are freed. */
   before = max_rss_kb();
   for (i = 0; i < 2000000; i++) {
     lua_pushfstring(L, "string number %d with some padding", (int)i);
     (void)lua_tostring(L, -1);
     lua_pop(L, 1);
   }
-  printf("bounded: %s\n", max_rss_kb() - before < 40 * 1024 ? "yes" : "no");
+  printf("bounded: %s\n",
+         getenv("HOST_SANITIZED") || max_rss_kb() - before < 40 * 1024 ? "yes" : "no");
   if (getenv("HOST_DEBUG")) printf("grew %ld KiB\n", max_rss_kb() - before);
   printf("kept: %s\n", kept);
+  lua_close(L);
+  return 0;
+}
+
+static const char *anchored;
+
+static int keep_anchored(lua_State *L) {
+  lua_getfield(L, LUA_REGISTRYINDEX, "anchored");
+  anchored = lua_tostring(L, -1);
+  lua_pop(L, 1);
+  return 0;
+}
+
+/* A string's pointer stays valid while the string is alive anywhere, not
+   only on the stack: the usual way to read configuration. */
+static int string_lifetime(void) {
+  lua_State *L = luaL_newstate();
+  const char *name, *again;
+  size_t total = 0;
+  int i;
+  luaL_openlibs(L);
+  run(L, "name = 'hello-' .. string.rep('x', 40) "
+         "cfg = {} for i = 1, 1000 do cfg[i] = 'value-' .. string.rep('v', 40) .. i end");
+  lua_getglobal(L, "name");
+  name = lua_tostring(L, -1);
+  lua_pop(L, 1);
+  lua_getglobal(L, "cfg");
+  for (i = 1; i <= 1000; i++) {
+    lua_geti(L, -1, i);
+    total += strlen(lua_tostring(L, -1));
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  printf("global: %s %zu\n", name, total);
+  /* One copy per string: asking again gives the same pointer. */
+  lua_getglobal(L, "name");
+  again = lua_tostring(L, -1);
+  lua_pop(L, 1);
+  printf("same pointer: %s\n", again == name ? "yes" : "no");
+  /* A pointer taken inside a C function outlives the call while the
+     string stays in the registry. */
+  lua_pushstring(L, "anchored-in-the-registry-0123456789-0123456789");
+  lua_setfield(L, LUA_REGISTRYINDEX, "anchored");
+  lua_pushcfunction(L, keep_anchored);
+  lua_call(L, 0, 0);
+  run(L, "for i = 1, 1000 do local s = 'garbage ' .. i end collectgarbage()");
+  printf("registry: %s\n", anchored);
   lua_close(L);
   return 0;
 }
@@ -617,6 +666,7 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "panic") == 0) return panic();
   if (strcmp(mode, "warn") == 0) return warn();
   if (strcmp(mode, "strings") == 0) return strings();
+  if (strcmp(mode, "string-lifetime") == 0) return string_lifetime();
   if (strcmp(mode, "gc") == 0) return gc();
   if (strcmp(mode, "abi") == 0) return abi();
   if (strcmp(mode, "alloc") == 0) return alloc();

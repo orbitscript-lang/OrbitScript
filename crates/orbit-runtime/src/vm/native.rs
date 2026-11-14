@@ -493,6 +493,13 @@ impl NativeCtx<'_> {
         self.vm.heap.get(s).as_bytes()
     }
 
+    /// A NUL-terminated copy of string `s` for C, which stays valid for as
+    /// long as `s` is alive ([`CStrings`](crate::object::CStrings)).
+    pub fn c_string(&mut self, s: Gc<LuaStr>) -> *const u8 {
+        let bytes = self.vm.heap.get(s).as_bytes();
+        self.vm.rt.c_strings.copy_of(s, bytes)
+    }
+
     /// The isolate's locale.
     pub fn locale(&self) -> &Locale {
         &self.vm.rt.metas.locale
@@ -1008,7 +1015,7 @@ impl NativeCtx<'_> {
             Err(Exc::Rt(msg, _)) => Err(self.error(&msg)),
             Err(Exc::Plain(msg)) => Err(LuaError::new(self.new_str(msg.as_bytes()))),
             Err(Exc::NoMemory) => Err(self.no_memory()),
-            Err(Exc::Lua(e) | Exc::Handled(e)) => Err(e),
+            Err(Exc::Lua(e) | Exc::Handled(e) | Exc::Left(e)) => Err(e),
             Err(x @ Exc::ErrErr) => Err(self.vm.make_error(x)),
             Err(Exc::Index { .. } | Exc::NewIndex { .. }) => {
                 unreachable!("only the dispatch loop defers indexing")

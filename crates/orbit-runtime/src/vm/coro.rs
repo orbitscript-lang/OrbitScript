@@ -279,7 +279,6 @@ impl Vm {
             self.rt.stack.regs.truncate(live);
         }
         self.rt.current = to;
-        self.rt.switched = true;
     }
 
     /// Shrink suspended thread `t`'s stack to its live values, if it hasn't
@@ -559,7 +558,8 @@ impl Vm {
             let e = self.new_str(msg.as_bytes());
             return self.deliver(Err(e));
         }
-        switched(self.enter_resumed(co))
+        let flow = self.enter_resumed(co);
+        self.after_switch(flow)
     }
 
     /// Switch to suspended coroutine `co`, the running one waiting for it,
@@ -652,12 +652,23 @@ impl Vm {
         self.take_values(n);
         self.rt.resumers.pop();
         self.switch_to(resumer, CoStatus::Suspended);
-        switched(self.deliver(Ok(())))
+        let flow = self.deliver(Ok(()));
+        self.after_switch(flow)
+    }
+
+    /// The running coroutine finished with its results, now in `xfer`: its
+    /// stack is dropped and the resumer continues.
+    fn co_finished(&mut self) -> Result<Flow, Exc> {
+        let flow = self.co_finish(Ok(()), Cause::Error);
+        self.after_switch(flow)
     }
 
     /// The running coroutine finished: with its results (now in `xfer`), or
-    /// with an error. Its stack is dropped and the resumer continues.
-    pub(crate) fn co_finished(
+    /// with an error. Its stack is dropped and the resumer continues. An
+    /// `Err` is an error raised on the resumer's stack, for the caller to
+    /// raise there: [`Vm::unwind`], which is already doing that, or
+    /// [`Vm::after_switch`].
+    pub(crate) fn co_finish(
         &mut self,
         outcome: Result<(), Value>,
         cause: Cause,
@@ -675,7 +686,7 @@ impl Vm {
             }
         }
         self.switch_to(resumer, CoStatus::Dead);
-        switched(self.deliver(outcome))
+        self.deliver(outcome)
     }
 
     /// `NativeReturn::Close`: native `id` closes coroutine `co`, which is
@@ -701,7 +712,7 @@ impl Vm {
         if let Some(outcome) = self.close_at_once(co) {
             return self.deliver(outcome);
         }
-        switched(self.enter_closing(co))
+        self.enter_closing(co)
     }
 
     /// Close coroutine `co` (suspended or dead) here if it has no variables
@@ -733,7 +744,8 @@ impl Vm {
         self.switch_to(co, CoStatus::Normal);
         self.rt.stack.pop_to_base();
         self.unwind(LuaError::new(error.unwrap_or(Value::Nil)).into())
-            .map_err(Exc::Lua)
+            .map(switched)
+            .map_err(Exc::Left)
     }
 
     /// `NativeReturn::Exit`: the running coroutine closes itself. Its
@@ -742,7 +754,7 @@ impl Vm {
     pub(crate) fn exit_co(&mut self) -> Result<Flow, Exc> {
         if self.rt.stack.aux.tbc.is_empty() {
             self.rt.xfer.clear();
-            return self.co_finished(Ok(()), Cause::Error);
+            return self.co_finished();
         }
         self.rt.stack.aux.closing = Closing::Itself;
         self.rt.stack.pop_to_base();
@@ -760,7 +772,7 @@ impl Vm {
         self.rt
             .xfer
             .extend_from_slice(&self.rt.stack.regs[from..top]);
-        self.co_finished(Ok(()), Cause::Error)
+        self.co_finished()
     }
 
     pub(crate) fn co_status(&self, t: Gc<Thread>) -> CoStatus {
@@ -827,21 +839,34 @@ impl Vm {
         Ok(at)
     }
 
+    /// What a coroutine switch hands back to the code that asked for it.
+    /// That code (the dispatch loop, in the end) holds a frame of the stack
+    /// that was running before, so an error raised on the stack switched to
+    /// is not its to raise: it unwinds here, and comes back as the flow of
+    /// whatever caught it or, if nothing in the run did, as [`Exc::Left`].
+    #[inline(always)]
+    fn after_switch(&mut self, flow: Result<Flow, Exc>) -> Result<Flow, Exc> {
+        match flow {
+            Ok(flow) => Ok(switched(flow)),
+            Err(x) => self.raised_after_switch(x),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn raised_after_switch(&mut self, x: Exc) -> Result<Flow, Exc> {
+        self.settle(x).map(switched).map_err(Exc::Left)
+    }
+
     /// Run a nested resume or close until it comes back to its boundary.
     fn finish_nested(&mut self, flow: Result<Flow, Exc>) -> Result<(), LuaError> {
         let flow = match flow {
             Ok(f) => f,
-            Err(x) => {
-                let t = self.thrown(x);
-                self.unwind(t)?
-            }
+            Err(x) => self.settle(x)?,
         };
         match flow {
             Flow::Done => Ok(()),
-            Flow::Reload | Flow::Switched => {
-                self.rt.switched = false;
-                self.run()
-            }
+            Flow::Reload | Flow::Switched => self.run(),
         }
     }
 }
@@ -932,11 +957,11 @@ pub(crate) fn yieldable(heap: &LuaHeap, stack: &Stack) -> bool {
 
 /// After a switch the loop must reload: the frame it had is on another
 /// stack.
-fn switched(flow: Result<Flow, Exc>) -> Result<Flow, Exc> {
-    flow.map(|f| match f {
+fn switched(flow: Flow) -> Flow {
+    match flow {
         Flow::Reload => Flow::Switched,
         f => f,
-    })
+    }
 }
 
 /// Whether the running coroutine is being closed by `coroutine.close`.

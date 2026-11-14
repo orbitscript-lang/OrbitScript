@@ -31,8 +31,8 @@ use std::time::Instant;
 use crate::locale::{CLocaleProvider, Locale, LocaleProvider};
 use crate::object::table::{self, mark};
 use crate::object::{
-    Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table, Thread,
-    UserData, Value,
+    CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table,
+    Thread, UserData, Value,
 };
 use orbit_gc::{Liveness, Marker, Roots};
 
@@ -577,6 +577,9 @@ impl std::fmt::Debug for WarnHook {
 #[derive(Debug)]
 pub struct Runtime {
     pub strings: Interner,
+    /// NUL-terminated copies of strings handed to C, each kept while its
+    /// string is alive.
+    pub c_strings: CStrings,
     pub globals: Gc<Table>,
     /// The registry (`debug.getregistry()`): key 2 holds the globals, and
     /// `_LOADED` is `package.loaded`.
@@ -654,9 +657,6 @@ pub struct Runtime {
     /// building a string needs no allocation of its own
     /// ([`NativeCtx::take_buf`](crate::vm::NativeCtx::take_buf)).
     pub(crate) scratch: Vec<u8>,
-    /// Set by a stack switch, so the dispatch loop doesn't save its pc into
-    /// the other stack's frames; cleared when the loop reloads.
-    pub(crate) switched: bool,
     /// Whether any stack's hook may differ from [`hook::Hook::default`]:
     /// set (for good) by `debug.sethook`, an interrupt, or a finalizer
     /// turning hooks off. Until then a coroutine switch skips copying the
@@ -813,6 +813,7 @@ impl Roots<LuaSpace> for Runtime {
         // On a big heap, pruning the string table at once was most of the
         // pause at the end of marking: it is done in steps instead.
         self.strings.begin_clear_dead(live);
+        self.c_strings.clear_dead(live);
         for e in &mut self.cooling {
             if e.is_some_and(|(t, _)| !live.is_live(t)) {
                 *e = None;
@@ -893,6 +894,7 @@ impl Vm {
                 prev_code: None,
                 dead_cell,
                 pinned: Vec::new(),
+                c_strings: CStrings::default(),
                 pin_slots: PinSlots::default(),
                 top: 0,
                 metas: meta::Metas {
@@ -907,7 +909,6 @@ impl Vm {
                 resumers: Vec::new(),
                 xfer: Vec::new(),
                 scratch: Vec::new(),
-                switched: false,
                 hooks_touched: false,
                 limit_grace: false,
                 native_protos: Default::default(),
