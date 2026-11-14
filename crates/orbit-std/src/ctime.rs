@@ -42,7 +42,8 @@ impl Time {
         // From now on the zone is the copy, which lives as long as `tm`.
         #[cfg(unix)]
         {
-            time.tm.tm_zone = time.zone.as_ptr();
+            // `const` on some systems, not on others (macOS).
+            time.tm.tm_zone = time.zone.as_ptr() as _;
         }
         time
     }
@@ -104,7 +105,7 @@ impl Time {
 /// The time `t` (seconds since the epoch) in the local time zone, or
 /// `None` where the C library can't represent it.
 pub(crate) fn local_time(t: i64) -> Option<Time> {
-    let t = libc::time_t::try_from(t).ok()?;
+    let t = sys::TimeT::try_from(t).ok()?;
     // SAFETY: an all-zero `struct tm` is a valid value to be overwritten
     // (integers, and on Unix a zone pointer left null).
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -120,7 +121,7 @@ pub(crate) fn local_time(t: i64) -> Option<Time> {
 /// The time `t` in UTC (`os.date("!...")`), or `None` where the C library
 /// can't represent it.
 pub(crate) fn utc_time(t: i64) -> Option<Time> {
-    let t = libc::time_t::try_from(t).ok()?;
+    let t = sys::TimeT::try_from(t).ok()?;
     // SAFETY: as in `local_time`.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: valid pointers to a `time_t` and a `struct tm` the call fills.
@@ -177,7 +178,12 @@ fn c_locale_strftime(buf: &mut [u8], fmt: &CStr, tm: &libc::tm) -> usize {
 mod sys {
     use std::sync::OnceLock;
 
-    use libc::{c_char, c_int, locale_t, size_t, time_t, tm};
+    use libc::{c_char, c_int, locale_t, size_t, tm};
+
+    /// C's `time_t`, 64 bits on every 64-bit target (ADR-6). Declared
+    /// here because `libc` marks musl's deprecated.
+    pub(super) type TimeT = i64;
+    use TimeT as time_t;
 
     // Declared here rather than taken from `libc`, which leaves some of
     // them out for some targets.
@@ -215,7 +221,9 @@ mod sys {
         static C: OnceLock<usize> = OnceLock::new();
         let p = *C.get_or_init(|| {
             // SAFETY: a NUL-terminated name and no base object.
-            let l = unsafe { newlocale(libc::LC_ALL_MASK, b"C\0".as_ptr().cast(), 0 as locale_t) };
+            // `strftime` reads only the time category; with no base
+            // object, the others are "C" too.
+            let l = unsafe { newlocale(libc::LC_TIME_MASK, b"C\0".as_ptr().cast(), 0 as locale_t) };
             l as usize
         });
         (p != 0).then_some(p as locale_t)
@@ -226,7 +234,11 @@ mod sys {
 mod sys {
     use std::sync::OnceLock;
 
-    use libc::{c_char, c_int, c_void, size_t, time_t, tm};
+    use libc::{c_char, c_int, c_void, size_t, tm};
+
+    /// The C runtime's 64-bit `time_t`.
+    pub(super) type TimeT = i64;
+    use TimeT as time_t;
 
     /// The C runtime's `_locale_t`.
     pub(super) type Locale = *mut c_void;

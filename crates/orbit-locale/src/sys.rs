@@ -80,7 +80,8 @@ fn c_tm(tm: &TimeParts) -> (libc::tm, CString) {
     #[cfg(unix)]
     {
         t.tm_gmtoff = tm.offset as _;
-        t.tm_zone = zone.as_ptr();
+        // `const` on some systems, not on others (macOS).
+        t.tm_zone = zone.as_ptr() as _;
     }
     (t, zone)
 }
