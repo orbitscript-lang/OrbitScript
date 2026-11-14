@@ -65,7 +65,7 @@ mod macos {
     pub(crate) fn caught_signals(pid: u32) -> Option<u32> {
         let pid = c_int::try_from(pid).ok()?;
         let info = sysctl(&mut [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid])?;
-        let at = std::mem::offset_of!(ExternProc, p_sigcatch);
+        let at = ExternProc::sigcatch_offset();
         let mask = info.get(at..at + std::mem::size_of::<libc::sigset_t>())?;
         Some(libc::sigset_t::from_ne_bytes(mask.try_into().ok()?))
     }
@@ -110,7 +110,8 @@ mod macos {
     /// The start of `struct extern_proc` (`<sys/proc.h>`), up to the
     /// caught-signals mask: the first member of the `struct kinfo_proc`
     /// that `KERN_PROC_PID` answers with. `libc` doesn't declare it for
-    /// macOS. Only its layout is used, for the mask's offset.
+    /// macOS. Only its layout is used, for the mask's offset
+    /// ([`ExternProc::sigcatch_offset`]).
     #[allow(dead_code)]
     #[repr(C)]
     struct ExternProc {
@@ -147,6 +148,53 @@ mod macos {
         p_sigmask: libc::sigset_t,
         p_sigignore: libc::sigset_t,
         p_sigcatch: libc::sigset_t,
+    }
+
+    impl ExternProc {
+        /// Where `p_sigcatch` starts, in bytes: measured on a value, since
+        /// `std::mem::offset_of!` is newer than our minimum Rust.
+        fn sigcatch_offset() -> usize {
+            let zero_time = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+            let proc = ExternProc {
+                p_un: [null_mut(); 2],
+                p_vmspace: null_mut(),
+                p_sigacts: null_mut(),
+                p_flag: 0,
+                p_stat: 0,
+                p_pid: 0,
+                p_oppid: 0,
+                p_dupfd: 0,
+                user_stack: null_mut(),
+                exit_thread: null_mut(),
+                p_debugger: 0,
+                sigwait: 0,
+                p_estcpu: 0,
+                p_cpticks: 0,
+                p_pctcpu: 0,
+                p_wchan: null_mut(),
+                p_wmesg: null_mut(),
+                p_swtime: 0,
+                p_slptime: 0,
+                p_realtimer: [zero_time; 2],
+                p_rtime: zero_time,
+                p_uticks: 0,
+                p_sticks: 0,
+                p_iticks: 0,
+                p_traceflag: 0,
+                p_tracep: null_mut(),
+                p_siglist: 0,
+                p_textvp: null_mut(),
+                p_holdcnt: 0,
+                p_sigmask: 0,
+                p_sigignore: 0,
+                p_sigcatch: 0,
+            };
+            let start = std::ptr::addr_of!(proc) as usize;
+            std::ptr::addr_of!(proc.p_sigcatch) as usize - start
+        }
     }
 
     #[cfg(test)]

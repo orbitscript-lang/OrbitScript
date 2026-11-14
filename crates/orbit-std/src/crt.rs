@@ -62,26 +62,28 @@ pub(crate) fn errno(e: &io::Error) -> Option<i32> {
 /// unmapped codes do in the C runtime.
 #[cfg(windows)]
 fn windows_errno(code: i32, kind: io::ErrorKind) -> i32 {
-    use io::ErrorKind as K;
     // ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION (a file another
     // process holds open), which std leaves uncategorized.
     if let 32 | 33 = code {
         return libc::EACCES;
     }
-    match kind {
-        K::NotFound => libc::ENOENT,
-        K::ArgumentListTooLong => libc::E2BIG,
-        K::WouldBlock | K::ResourceBusy => libc::EAGAIN,
-        K::OutOfMemory => libc::ENOMEM,
-        K::PermissionDenied | K::ReadOnlyFilesystem => libc::EACCES,
-        K::AlreadyExists => libc::EEXIST,
-        K::CrossesDevices => libc::EXDEV,
-        K::NotADirectory => libc::ENOTDIR,
-        K::IsADirectory => libc::EISDIR,
-        K::StorageFull => libc::ENOSPC,
-        K::BrokenPipe => libc::EPIPE,
-        K::InvalidFilename => libc::ENAMETOOLONG,
-        K::DirectoryNotEmpty => libc::ENOTEMPTY,
+    // The kind by its name: std has mapped Win32 codes to all of these
+    // since before the MSRV, but most of the variants can only be named
+    // from Rust 1.83 on.
+    match format!("{kind:?}").as_str() {
+        "NotFound" => libc::ENOENT,
+        "ArgumentListTooLong" => libc::E2BIG,
+        "WouldBlock" | "ResourceBusy" => libc::EAGAIN,
+        "OutOfMemory" => libc::ENOMEM,
+        "PermissionDenied" | "ReadOnlyFilesystem" => libc::EACCES,
+        "AlreadyExists" => libc::EEXIST,
+        "CrossesDevices" => libc::EXDEV,
+        "NotADirectory" => libc::ENOTDIR,
+        "IsADirectory" => libc::EISDIR,
+        "StorageFull" => libc::ENOSPC,
+        "BrokenPipe" => libc::EPIPE,
+        "InvalidFilename" => libc::ENAMETOOLONG,
+        "DirectoryNotEmpty" => libc::ENOTEMPTY,
         _ => libc::EINVAL,
     }
 }
