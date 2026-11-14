@@ -106,7 +106,7 @@ pub trait DebugEvents: 'static {
 /// takes effect at the running code's next loop back edge, call or return
 /// from a native. It does nothing while no debugger is attached.
 #[derive(Debug, Clone)]
-pub struct PauseHandle(pub(crate) crate::isolate::backend::PauseInner);
+pub struct PauseHandle(pub(crate) crate::isolate::PauseInner);
 
 impl PauseHandle {
     pub fn request(&self) {
@@ -253,87 +253,5 @@ impl<'a, 'b> Paused<'a, 'b> {
     fn pin(&mut self, idx: i32) -> Pinned<Value<'static>> {
         let idx = self.s.abs_index(idx);
         self.s.with_scope(|s| s.pin_slot(idx))
-    }
-}
-
-/// The boundary's forms of these types (ADR-10).
-#[cfg(any(feature = "abi", shared_backend))]
-pub(crate) mod abi {
-    use super::{Breakpoint, ErrorBreak, Resume, StopReason};
-    use crate::abi::{BreakpointAbi, StopAbi};
-
-    #[cfg(all(feature = "abi", runtime_backend))]
-    pub(crate) fn breakpoint_to(b: Breakpoint) -> BreakpointAbi {
-        BreakpointAbi {
-            requested: b.requested,
-            line: b.line.unwrap_or(0),
-        }
-    }
-
-    #[cfg(shared_backend)]
-    pub(crate) fn breakpoint_from(b: BreakpointAbi) -> Breakpoint {
-        Breakpoint {
-            requested: b.requested,
-            line: (b.line != 0).then_some(b.line),
-        }
-    }
-
-    #[cfg(all(feature = "abi", runtime_backend))]
-    pub(crate) fn stop_to(r: StopReason) -> StopAbi {
-        let (kind, caught, line) = match r {
-            StopReason::Breakpoint { line } => (StopAbi::BREAKPOINT, false, line),
-            StopReason::Step => (StopAbi::STEP, false, 0),
-            StopReason::Pause => (StopAbi::PAUSE, false, 0),
-            StopReason::Error { caught } => (StopAbi::ERROR, caught, 0),
-        };
-        StopAbi { kind, caught, line }
-    }
-
-    #[cfg(shared_backend)]
-    pub(crate) fn stop_from(r: StopAbi) -> StopReason {
-        match r.kind {
-            StopAbi::BREAKPOINT => StopReason::Breakpoint { line: r.line },
-            StopAbi::STEP => StopReason::Step,
-            StopAbi::PAUSE => StopReason::Pause,
-            _ => StopReason::Error { caught: r.caught },
-        }
-    }
-
-    #[cfg(shared_backend)]
-    pub(crate) fn resume_to(r: Resume) -> u8 {
-        match r {
-            Resume::Continue => 0,
-            Resume::StepIn => 1,
-            Resume::StepOver => 2,
-            Resume::StepOut => 3,
-        }
-    }
-
-    #[cfg(all(feature = "abi", runtime_backend))]
-    pub(crate) fn resume_from(code: u8) -> Resume {
-        match code {
-            1 => Resume::StepIn,
-            2 => Resume::StepOver,
-            3 => Resume::StepOut,
-            _ => Resume::Continue,
-        }
-    }
-
-    #[cfg(shared_backend)]
-    pub(crate) fn error_break_to(on: ErrorBreak) -> u8 {
-        match on {
-            ErrorBreak::Never => 0,
-            ErrorBreak::Uncaught => 1,
-            ErrorBreak::All => 2,
-        }
-    }
-
-    #[cfg(all(feature = "abi", runtime_backend))]
-    pub(crate) fn error_break_from(code: u8) -> ErrorBreak {
-        match code {
-            1 => ErrorBreak::Uncaught,
-            2 => ErrorBreak::All,
-            _ => ErrorBreak::Never,
-        }
     }
 }

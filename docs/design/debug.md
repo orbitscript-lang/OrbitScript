@@ -195,16 +195,16 @@ Cost, measured on cloud x86_64 without PGO: the feature on and nothing attached 
 
 ### Embedding API
 
-`orbit::debugger` (feature `debugger` of `orbit`, over either backend) is what hosts and the DAP server use:
+`orbit::debugger` (feature `debugger` of `orbit`) is what hosts and the DAP server use:
 
 - **On `Isolate`**: `set_debug_events(Option<Box<dyn DebugEvents>>)`, `set_breakpoints(source, lines)`, `set_error_break(ErrorBreak)`, `stop_on_next_line()` (stop on entry) and `pause_handle()`, whose `PauseHandle` is `Send` and works from any thread. Resuming and stepping are the `Resume` value `DebugEvents::stopped` returns.
 - **`Paused`** is the stopped program as the callback sees it, with levels from the function that stopped (0) outwards: `frame(level)` and `frames()` (`debug.getinfo`'s `FrameInfo`), `locals(level)` and `upvalues(level)` as `Variable`s holding pinned values, `set_local(level, index, value)`, `set_breakpoints` and `set_error_break` (requests that arrive while stopped), `globals()`, `error()` for an error stop, `scope(f)` for reading values or calling script code, and `stack()` for the rest of the stack API. Locals named in parentheses (the compilers' hidden ones) are left out.
 - **`Config::debugger(Debugger::Disabled)`** refuses a debugger for the isolate's whole life, enforced in the engine however it is reached: `set_debug_events` fails, breakpoints never resolve and pausing does nothing.
-- **Shared layout**: `IsolateAbi::set_debug_events` and `pause_handle`, `ControlAbi::set_breakpoints`, `set_error_break` and `stop_on_next_line` (on `Control`, so they work both from the host and from inside a stop), the `DebugEventsAbi` callback trait a program implements, `PauseAbi`, and `ConfigAbi::debugger`. A stop hands the program the reporting native's window, with the error in slot 1, so `Paused` is the same code on both backends. A `liborbit` built without its `debugger` feature refuses `set_debug_events`.
+- **Shared layout**: the same API, linked from `liborbit` (ADR-10). `build.sh --no-debugger` leaves the engine out of the library and the programs alike.
 
 ## DAP server and `orbit --debug-server`
 
-`orbit-dap` is the Debug Adapter Protocol server, on the public API only (`orbit::debugger`), so it builds over either backend. `orbit --debug-server` (CLI feature `dap`, on by default; `build.sh` turns on `orbit-lib/debugger` and `dap` for the shared layout, and `--no-debugger` leaves both out) is the editor's debug adapter: it speaks DAP with the editor over standard input and output, but the script never runs in that process. On `launch` it opens a socket (`launch-<pid>-<nonce>.sock`, mode 0600, in the per-user directory) and starts `orbit --debug-connect <socket> <script> <args>`, which connects back and runs the script as `orbit <script> <args>` would, debugged over the socket. The adapter relays between the two, so the script's standard input and output, and anything native code writes to file descriptors 0 and 1, are never the editor's stream.
+`orbit-dap` is the Debug Adapter Protocol server, on the public API only (`orbit::debugger`). `orbit --debug-server` (CLI feature `dap`, on by default; `build.sh` turns on `orbit-lib/debugger` and `dap` for the shared layout, and `--no-debugger` leaves both out) is the editor's debug adapter: it speaks DAP with the editor over standard input and output, but the script never runs in that process. On `launch` it opens a socket (`launch-<pid>-<nonce>.sock`, mode 0600, in the per-user directory) and starts `orbit --debug-connect <socket> <script> <args>`, which connects back and runs the script as `orbit <script> <args>` would, debugged over the socket. The adapter relays between the two, so the script's standard input and output, and anything native code writes to file descriptors 0 and 1, are never the editor's stream.
 
 ```mermaid
 sequenceDiagram

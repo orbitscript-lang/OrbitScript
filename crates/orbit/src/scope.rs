@@ -40,9 +40,6 @@ pub(crate) struct Shared {
 pub struct Scope<'s> {
     stack: RefCell<Stack<'s>>,
     pub(crate) shared: Rc<Shared>,
-    /// Where the program keeps the isolate's host values.
-    #[cfg(shared_backend)]
-    pub(crate) host: Rc<crate::stack::backend::HostState>,
 }
 
 impl fmt::Debug for Scope<'_> {
@@ -57,8 +54,6 @@ impl<'s> Scope<'s> {
             .find_extension::<Rc<Shared>, _>(Rc::clone)
             .expect("every VM the API reaches belongs to an isolate");
         let scope = Scope {
-            #[cfg(shared_backend)]
-            host: Rc::clone(&stack.host),
             stack: RefCell::new(stack),
             shared,
         };

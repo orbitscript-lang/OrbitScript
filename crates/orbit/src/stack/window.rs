@@ -1,4 +1,4 @@
-//! The stack API over the runtime linked into this program.
+//! The window: the stack API's operations over the runtime.
 
 use std::any::{Any, TypeId};
 use std::ffi::c_void;
@@ -148,17 +148,6 @@ fn continue_in<K: Continuation>(
 pub struct ThreadRef(Gc<raw::Thread>);
 
 impl ThreadRef {
-    /// The thread's heap handle as plain bits, and back.
-    #[cfg(feature = "abi")]
-    pub(crate) fn to_bits(self) -> u64 {
-        self.0.to_bits()
-    }
-
-    #[cfg(feature = "abi")]
-    pub(crate) fn from_bits(bits: u64) -> ThreadRef {
-        ThreadRef(Gc::from_bits(bits))
-    }
-
     /// The heap slot the thread occupies. A collected thread's slot goes to
     /// the next thread made, so this tells live threads apart only.
     pub fn slot(self) -> u32 {
@@ -176,14 +165,6 @@ pub struct ThreadWindow(pub(crate) vm::WindowSave);
 /// value with no collector state, to keep as long as the isolate.
 #[derive(Debug, Clone, Copy)]
 pub struct NativeRef(pub(crate) RawValue);
-
-#[cfg(feature = "abi")]
-impl NativeRef {
-    /// The native with index `id`.
-    pub(crate) fn from_index(id: u32) -> NativeRef {
-        NativeRef(RawValue::Native(NativeId(id)))
-    }
-}
 
 /// Memory a binding asked for with [`Stack::new_userdata`], aligned to 16
 /// bytes. The cells never move while the userdata lives, so the binding can
@@ -306,7 +287,7 @@ impl<'s> Stack<'s> {
                 }
             }
             Ret::Exit { code, close } => {
-                return crate::isolate::backend::exit_process(c, code, close);
+                return crate::isolate::exit_process(c, code, close);
             }
         })
     }
@@ -801,15 +782,6 @@ impl<'s> Stack<'s> {
             .0
     }
 
-    /// A fresh native running `f`, named `name` in messages: its index.
-    #[cfg(feature = "abi")]
-    pub(crate) fn add_native(&mut self, name: &'static str, f: vm::NativeFn) -> u32 {
-        let RawValue::Native(id) = self.ctx.vm.register_native_with_data(name, f, [0; 2]) else {
-            unreachable!("natives are registered as natives")
-        };
-        id.0
-    }
-
     /// [`Stack::closure_data_of`] for the native with index `id`.
     pub(crate) fn closure_data_of_index(&mut self, idx: i32, id: u32) -> Option<u64> {
         let v = self.get(idx);
@@ -820,24 +792,6 @@ impl<'s> Stack<'s> {
             RawValue::LightUserData(p) => Some(p.get()),
             _ => None,
         }
-    }
-
-    /// See [`Control::interrupt_flag`].
-    #[cfg(feature = "abi")]
-    pub(crate) fn interrupt_flag(&self) -> *mut bool {
-        self.ctx.vm.interrupt_flag()
-    }
-
-    /// The running native's index.
-    #[cfg(feature = "abi")]
-    pub(crate) fn running_native(&self) -> u32 {
-        self.ctx.native_id().0
-    }
-
-    /// Push the native with index `id`.
-    #[cfg(feature = "abi")]
-    pub(crate) fn push_native_index(&mut self, id: u32) {
-        self.ctx.push(RawValue::Native(NativeId(id)));
     }
 
     /// Whether the values at `a` and `b` are equal without metamethods.
@@ -1814,7 +1768,7 @@ impl<'s> Stack<'s> {
     /// `os.exit`), after the isolate closes (if it does) and before
     /// standard output is flushed.
     pub fn before_exit(&mut self, hook: impl Fn() + 'static) {
-        crate::isolate::backend::exit_hooks(self.ctx.vm)
+        crate::isolate::exit_hooks(self.ctx.vm)
             .0
             .push(Box::new(hook));
     }
@@ -2249,11 +2203,6 @@ fn interrupt_entry<H: InterruptHandler>(vm: &mut Vm) -> bool {
 impl<'a> Control<'a> {
     pub(crate) fn new(vm: &'a mut Vm) -> Control<'a> {
         Control { vm }
-    }
-
-    #[cfg(feature = "abi")]
-    pub(crate) fn reborrow(&mut self) -> Control<'_> {
-        Control { vm: &mut *self.vm }
     }
 
     /// See [`Stack::extension`].

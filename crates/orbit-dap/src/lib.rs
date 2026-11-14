@@ -4,8 +4,7 @@
 //! starts the program as its own process, which debugs itself through a
 //! [`Server`] connected back over a local socket ([`Server::connect`]).
 //!
-//! It runs on the public `orbit` API only ([`orbit::debugger`]), so it
-//! builds over either backend. The program runs on the host's thread in
+//! It runs on the public `orbit` API only ([`orbit::debugger`]). The program runs on the host's thread in
 //! its isolate; a reader thread takes the editor's messages. While the
 //! program runs, the reader reaches it only by pausing it
 //! ([`orbit::debugger::PauseHandle`]): a request that needs the isolate
