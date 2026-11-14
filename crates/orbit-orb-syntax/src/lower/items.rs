@@ -13,60 +13,98 @@ use orbit_hir as hir;
 use orbit_hir::{ExprId, FuncId, FunctionName, LocalId, LocalKind, Span, StmtId, StrId};
 
 use super::expr::Part;
+use super::mode::{Continue, Mode, Sym};
+use super::observe::Observer;
 use super::pattern::PathKind;
 use super::{Binding, Dest, ImplCtx, ItemTag, LResult, Lowerer, Resolved, Target};
 use crate::ast::{self, ExprKind as K};
+use crate::code;
 
 /// A function body: an item's block, or a closure's expression.
 pub(super) enum FnBody<'a> {
     Block(&'a ast::Block),
     Expr(&'a ast::Expr),
+    /// A stub declaration's, which has none. Its error is reported; a collecting walk goes on
+    /// to read the signature.
+    Absent,
 }
 
-impl Lowerer {
-    fn at_module_level(&self) -> bool {
+/// A function to lower: an `fn` item, an `impl` member or a closure. `S` is the observer's
+/// handle for a name.
+pub(super) struct FnSource<'a, S> {
+    pub sig: &'a ast::FnSig,
+    pub generics: &'a [ast::GenericParam],
+    pub body: FnBody<'a>,
+    /// The observer's handle for the item, or nothing for a closure.
+    pub item: S,
+    /// The source the function's scope covers: the whole item or closure.
+    pub extent: Span,
+}
+
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
+    pub(super) fn at_module_level(&self) -> bool {
         self.funcs.len() == 1 && self.funcs[0].scopes.len() == 1
     }
 
-    pub(super) fn item(&mut self, item: &ast::Item, out: &mut Vec<StmtId>) -> LResult<()> {
+    pub(super) fn item(&mut self, item: &'a ast::Item, out: &mut Vec<StmtId>) -> LResult<()> {
         if item.is_pub && !self.at_module_level() {
-            return Err(self.error(item.span, "`pub` items must be at module level"));
+            self.report(
+                item.span,
+                code::NESTED_PUB,
+                "`pub` items must be at module level",
+            )?;
         }
         match &item.kind {
-            ast::ItemKind::Fn(f) => {
-                let n = self.generics.len();
-                self.generics.extend(f.generics.iter().map(|g| g.name.sym));
-                let r = self.fn_item(item, f, out);
-                self.generics.truncate(n);
-                r
-            }
-            ast::ItemKind::Const { name, value, .. } => {
-                let value = self.const_value(item, value)?;
+            ast::ItemKind::Fn(f) => self.fn_item(item, f, out),
+            ast::ItemKind::Const { name, ty, value } => {
+                self.observe_type(ty.as_ref());
+                let Some(value) = value else {
+                    self.stub(item.span, "value")?;
+                    self.define_stub(*name, ItemTag::Const, out);
+                    return Ok(());
+                };
                 self.check_const(value)?;
                 let local = self.define_value_item(*name, ItemTag::Const, value, out)?;
                 self.export(item, *name, local, out);
                 Ok(())
             }
             ast::ItemKind::Struct(s) => {
+                let id = self.pending_id(s.name.sym);
                 let local = self.struct_def(s, item.span, out)?;
+                let types = s.fields.iter().filter_map(|f| f.ty.as_ref());
+                self.observe_declared_types(id, &s.generics, item.span, types);
                 self.export(item, s.name, local, out);
                 Ok(())
             }
             ast::ItemKind::Enum(e) => {
+                let id = self.pending_id(e.name.sym);
                 let local = self.enum_def(e, item.span, out)?;
+                let fields = e.variants.iter().filter_map(|v| v.fields.as_ref());
+                let types = fields.flatten().filter_map(|f| f.ty.as_ref());
+                self.observe_declared_types(id, &e.generics, item.span, types);
                 self.export(item, e.name, local, out);
                 Ok(())
             }
-            ast::ItemKind::Impl(i) => {
-                let n = self.generics.len();
-                self.generics.extend(i.generics.iter().map(|g| g.name.sym));
-                let r = self.impl_block(i, item.span, out);
-                self.generics.truncate(n);
-                r
-            }
+            ast::ItemKind::Impl(i) => self.impl_block(i, item.span, out),
             // Aliases are for `orbit-check`; nothing runs.
-            ast::ItemKind::TypeAlias { .. } => Ok(()),
-            ast::ItemKind::Error => Err(self.unparsed(item.span)),
+            ast::ItemKind::TypeAlias { name, generics, ty } => {
+                if M::Observer::ACTIVE {
+                    let scope = self.cur().scopes.last_mut().expect("scope");
+                    let bound = scope.entries.len();
+                    let alias = scope.aliases.iter_mut().find(|a| a.name.span == name.span);
+                    let id = alias.map_or(M::Observer::NOTHING, |a| {
+                        a.defined = Some(bound);
+                        a.id
+                    });
+                    self.observer.item_defined(id);
+                    self.observe_declared_types(id, generics, item.span, std::iter::once(ty));
+                }
+                Ok(())
+            }
+            ast::ItemKind::Error => {
+                self.unparsed(item.span)?;
+                Ok(())
+            }
             ast::ItemKind::Use(u) => self.use_decl(u, item.span, out),
             ast::ItemKind::Global { name, value } => {
                 let v = self.single(value, out)?;
@@ -78,27 +116,71 @@ impl Lowerer {
                     },
                     item.span,
                 );
-                self.bind_global(name.sym);
+                let exported = item.is_pub && self.at_module_level();
+                let id = self
+                    .observer
+                    .global(*name, item.span, Some(value), exported);
+                self.bind_global(name.sym, id);
                 Ok(())
             }
             ast::ItemKind::Extern(names) => {
                 for n in names {
-                    self.bind_global(n.sym);
+                    let id = self.observer.global(*n, n.span, None, false);
+                    self.bind_global(n.sym, id);
                 }
                 Ok(())
             }
         }
     }
 
-    fn fn_item(&mut self, item: &ast::Item, f: &ast::FnDecl, out: &mut Vec<StmtId>) -> LResult<()> {
-        let body = self.fn_body(f)?;
-        let local = self.define_item(f.name, ItemTag::Fn, out, |lx, local, early, out| {
-            let func = lx.function(
-                &f.sig,
-                FnBody::Block(body),
-                FunctionName::Local(f.name.sym),
-                f.span,
-            )?;
+    /// Shows the observer the types a struct, an enum or an alias declares, in a scope that
+    /// holds its generic parameters.
+    fn observe_declared_types(
+        &mut self,
+        owner: Sym<'a, M>,
+        generics: &'a [ast::GenericParam],
+        extent: Span,
+        types: impl Iterator<Item = &'a ast::Type>,
+    ) {
+        if !M::Observer::ACTIVE {
+            return;
+        }
+        self.observer.scope_opened(extent);
+        let outer = self.generics.len();
+        for g in generics {
+            let id = self.observer.generic(g, owner);
+            self.generics.push((g.name.sym, id));
+        }
+        for ty in types {
+            self.observe_type(Some(ty));
+        }
+        self.generics.truncate(outer);
+        self.observer.scope_closed();
+    }
+
+    fn fn_item(
+        &mut self,
+        item: &'a ast::Item,
+        f: &'a ast::FnDecl,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<()> {
+        let source = |body, id| FnSource {
+            sig: &f.sig,
+            generics: &f.generics,
+            body,
+            item: id,
+            extent: item.span,
+        };
+        let name = FunctionName::Local(f.name.sym);
+        let Some(body) = &f.body else {
+            self.stub(f.span, "body")?;
+            let id = self.pending_id(f.name.sym);
+            self.define_stub(f.name, ItemTag::Fn, out);
+            self.function(source(FnBody::Absent, id), name, f.span)?;
+            return Ok(());
+        };
+        let local = self.define_item(f.name, ItemTag::Fn, out, |lx, local, early, id, out| {
+            let func = lx.function(source(FnBody::Block(body), id), name, f.span)?;
             if early {
                 // Declared early for a use before the definition.
                 let c = lx.add_expr(hir::ExprKind::Closure(func), f.span);
@@ -119,7 +201,7 @@ impl Lowerer {
         Ok(())
     }
 
-    fn bind_global(&mut self, sym: StrId) {
+    fn bind_global(&mut self, sym: StrId, id: Sym<'a, M>) {
         self.bind(
             sym,
             Binding {
@@ -127,20 +209,27 @@ impl Lowerer {
                 mutable: true,
                 item: None,
             },
+            id,
         );
     }
 
-    /// Defines a function item. `build` gets its local, and whether that was declared early
-    /// (for a use before the definition), and returns the statement to add, if any. The item is in scope
-    /// inside its own body, so it can recurse.
+    /// Defines a function item. `build` gets its local, whether that was declared early (for
+    /// a use before the definition) and the observer's handle for the item, and returns the
+    /// statement to add, if any. The item is in scope inside its own body, so it can recurse.
     fn define_item(
         &mut self,
         name: ast::Name,
         tag: ItemTag,
         out: &mut Vec<StmtId>,
-        build: impl FnOnce(&mut Self, LocalId, bool, &mut Vec<StmtId>) -> LResult<Option<hir::StmtKind>>,
+        build: impl FnOnce(
+            &mut Self,
+            LocalId,
+            bool,
+            Sym<'a, M>,
+            &mut Vec<StmtId>,
+        ) -> LResult<Option<hir::StmtKind>>,
     ) -> LResult<LocalId> {
-        let (tag, early) = self.take_pending(name.sym).unwrap_or((tag, None));
+        let (tag, early, id) = self.take_pending(name.sym, tag);
         let local = match early {
             Some(l) => l,
             None => self.new_local(Some(name.sym), name.span, LocalKind::Normal),
@@ -152,8 +241,10 @@ impl Lowerer {
                 mutable: false,
                 item: Some(tag),
             },
+            id,
         );
-        if let Some(kind) = build(self, local, early.is_some(), out)? {
+        self.observer.item_defined(id);
+        if let Some(kind) = build(self, local, early.is_some(), id, out)? {
             self.push(out, kind, name.span);
         }
         Ok(local)
@@ -165,7 +256,7 @@ impl Lowerer {
         &mut self,
         name: ast::Name,
         tag: ItemTag,
-        value: &ast::Expr,
+        value: &'a ast::Expr,
         out: &mut Vec<StmtId>,
     ) -> LResult<LocalId> {
         let v = self.single(value, out)?;
@@ -179,7 +270,7 @@ impl Lowerer {
         v: ExprId,
         out: &mut Vec<StmtId>,
     ) -> LocalId {
-        let (tag, early) = self.take_pending(name.sym).unwrap_or((tag, None));
+        let (tag, early, id) = self.take_pending(name.sym, tag);
         let local = match early {
             Some(l) => {
                 self.push(
@@ -212,16 +303,28 @@ impl Lowerer {
                 mutable: false,
                 item: Some(tag),
             },
+            id,
         );
+        self.observer.item_defined(id);
         local
     }
 
     /// `exports.name = name` for a `pub` item.
-    fn export(&mut self, item: &ast::Item, name: ast::Name, local: LocalId, out: &mut Vec<StmtId>) {
+    fn export(
+        &mut self,
+        item: &'a ast::Item,
+        name: ast::Name,
+        local: LocalId,
+        out: &mut Vec<StmtId>,
+    ) {
         if !item.is_pub {
             return;
         }
-        let exports = self.exports.expect("export table for `pub` items");
+        // A `pub` item has an export table, except one nested in a module that has no `pub`
+        // at its top level, which was an error.
+        let Some(exports) = self.exports else {
+            return;
+        };
         let obj = self.local_expr(exports, name.span);
         let key = self.str_expr(name.sym, name.span);
         let v = self.local_expr(local, name.span);
@@ -235,26 +338,24 @@ impl Lowerer {
         );
     }
 
+    /// The error for a stub declaration (`fn f();`, `const N: int;`), which has no body or
+    /// value (`what`) and can't run.
+    fn stub(&mut self, span: Span, what: &str) -> LResult<Continue<'a, M>> {
+        self.report(
+            span,
+            code::STUB_DECLARATION,
+            format!("a stub declaration has no {what} to run"),
+        )
+    }
+
+    /// Brings a stub declaration's name into scope, once its error is reported.
+    fn define_stub(&mut self, name: ast::Name, tag: ItemTag, out: &mut Vec<StmtId>) {
+        let nil = self.error_expr(name.span);
+        self.define_value_item_expr(name, tag, nil, out);
+    }
+
     /// A `const` value must be a literal or another `const`.
-    /// A function's body; a stub declaration (`fn f();`) has none and can't run.
-    fn fn_body<'b>(&self, f: &'b ast::FnDecl) -> LResult<&'b ast::Block> {
-        f.body
-            .as_ref()
-            .ok_or_else(|| self.error(f.span, "a stub declaration has no body to run"))
-    }
-
-    /// A constant's value; a stub declaration (`const N: int;`) has none and can't run.
-    fn const_value<'b>(
-        &self,
-        item: &ast::Item,
-        value: &'b Option<ast::Expr>,
-    ) -> LResult<&'b ast::Expr> {
-        value
-            .as_ref()
-            .ok_or_else(|| self.error(item.span, "a stub declaration has no value to run"))
-    }
-
-    fn check_const(&mut self, value: &ast::Expr) -> LResult<()> {
+    fn check_const(&mut self, value: &'a ast::Expr) -> LResult<()> {
         let ok = match &value.kind {
             K::Nil | K::True | K::False | K::Int(_) | K::Float(_) | K::Str(_) => true,
             K::Unary {
@@ -272,18 +373,24 @@ impl Lowerer {
                         ..
                     },
                     ..
+                } | Resolved::Global {
+                    binding: Some(Binding {
+                        item: Some(ItemTag::Unresolved),
+                        ..
+                    }),
+                    ..
                 }
             ),
             _ => false,
         };
-        if ok {
-            Ok(())
-        } else {
-            Err(self.error(
+        if !ok {
+            self.report(
                 value.span,
+                code::CONST_NOT_LITERAL,
                 "a `const` must be a literal or another `const`; use `let` for other values",
-            ))
+            )?;
         }
+        Ok(())
     }
 
     // ---- functions ----------------------------------------------------------------------------
@@ -291,37 +398,57 @@ impl Lowerer {
     /// Lowers a function or closure into a new HIR function and returns its id.
     pub(super) fn function(
         &mut self,
-        sig: &ast::FnSig,
-        body: FnBody<'_>,
+        source: FnSource<'a, Sym<'a, M>>,
         name: FunctionName,
         span: Span,
     ) -> LResult<FuncId> {
         let id = self.begin_function(name, span);
-        let result = self.function_contents(sig, body, span);
+        self.observer.function_opened(source.item, source.extent);
+        let outer = self.generics.len();
+        for g in source.generics {
+            let id = self.observer.generic(g, source.item);
+            self.generics.push((g.name.sym, id));
+        }
+        let result = self.function_contents(source.sig, source.body, source.extent);
+        self.generics.truncate(outer);
+        self.observer.scope_closed();
         self.end_function(id);
         result.map(|()| id)
     }
 
-    fn function_contents(&mut self, sig: &ast::FnSig, body: FnBody<'_>, span: Span) -> LResult<()> {
+    fn function_contents(
+        &mut self,
+        sig: &'a ast::FnSig,
+        body: FnBody<'a>,
+        extent: Span,
+    ) -> LResult<()> {
         let mut seen: Vec<StrId> = Vec::new();
+        if M::Observer::ACTIVE {
+            for ty in [&sig.self_ty, &sig.rest_ty, &sig.ret] {
+                self.observe_type(ty.as_ref());
+            }
+        }
         if let Some(s) = sig.self_param {
             let sym = self.syms.self_;
             let local = self.f().add_param(Some(sym), s);
-            self.bind_local(sym, local, false);
+            self.bind_local(sym, local, false, M::Observer::NOTHING);
         }
         for p in &sig.params {
+            self.observe_type(p.ty.as_ref());
             if let Some(n) = p.name {
                 if seen.contains(&n.sym) {
-                    return Err(self.error(
+                    self.report(
                         n.span,
+                        code::DUPLICATE_PARAMETER,
                         format!("parameter `{}` is declared twice", self.text(n.sym)),
-                    ));
+                    )?;
                 }
                 seen.push(n.sym);
             }
             let local = self.f().add_param(p.name.map(|n| n.sym), p.span);
             if let Some(n) = p.name {
-                self.bind_local(n.sym, local, p.mutable);
+                let id = self.observer.param(n, p);
+                self.bind_local(n.sym, local, p.mutable, id);
             }
         }
         if let Some(rest) = sig.rest {
@@ -329,7 +456,8 @@ impl Lowerer {
             let local = self.new_local(Some(rest.sym), rest.span, LocalKind::Const);
             self.f().vararg_table = Some(local);
             self.cur().rest = Some(local);
-            self.bind_local(rest.sym, local, false);
+            let id = self.observer.rest_param(rest, sig.rest_ty.as_ref());
+            self.bind_local(rest.sym, local, false, id);
         }
         let mut stmts = Vec::new();
         let body_span = match body {
@@ -341,15 +469,15 @@ impl Lowerer {
                 if let K::Block(b) = &e.kind {
                     self.block_into(b, &Dest::Return, &mut stmts)?;
                 } else {
-                    self.open_scope();
+                    self.open_scope(e.span);
                     let r = self.tail(e, &Dest::Return, &mut stmts);
                     self.close_scope(&mut stmts, e.span);
                     r?;
                 }
                 e.span
             }
+            FnBody::Absent => extent,
         };
-        let _ = span;
         let block = self.new_block(stmts, body_span);
         self.f().body = block;
         Ok(())
@@ -380,7 +508,7 @@ impl Lowerer {
 
     fn struct_def(
         &mut self,
-        s: &ast::StructDecl,
+        s: &'a ast::StructDecl,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<LocalId> {
@@ -389,10 +517,11 @@ impl Lowerer {
         let mut seen = Vec::new();
         for f in &s.fields {
             if seen.contains(&f.name.sym) {
-                return Err(self.error(
+                self.report(
                     f.name.span,
+                    code::DUPLICATE_FIELD,
                     format!("field `{}` is declared twice", self.text(f.name.sym)),
-                ));
+                )?;
             }
             seen.push(f.name.sym);
         }
@@ -412,7 +541,7 @@ impl Lowerer {
 
     fn enum_def(
         &mut self,
-        e: &ast::EnumDecl,
+        e: &'a ast::EnumDecl,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<LocalId> {
@@ -432,10 +561,11 @@ impl Lowerer {
         let mut freeze: Option<LocalId> = None;
         for v in &e.variants {
             if seen.contains(&v.name.sym) {
-                return Err(self.error(
+                self.report(
                     v.name.span,
+                    code::DUPLICATE_VARIANT,
                     format!("variant `{}` is declared twice", self.text(v.name.sym)),
-                ));
+                )?;
             }
             seen.push(v.name.sym);
             let full = format!("{}::{}", self.text(e.name.sym), self.text(v.name.sym));
@@ -541,91 +671,122 @@ impl Lowerer {
     /// `Path { field: value, shorthand }`: `setmetatable({ ... }, Path)`.
     pub(super) fn struct_lit(
         &mut self,
-        path: &ast::Expr,
-        fields: &[ast::FieldInit],
+        path: &'a ast::Expr,
+        fields: &'a [ast::FieldInit],
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
+        // After any of the errors here the literal is lowered as written, a table with the
+        // fields it gives.
         let kind = self.path_kind(path)?;
         match kind {
             PathKind::Enum(idx) => {
-                return Err(self.error(
+                self.report(
                     path.span,
+                    code::ENUM_NEEDS_VARIANT,
                     format!(
                         "`{}` is an enum; build a variant, such as `{}::Variant {{ .. }}`",
                         self.text(self.types[idx].name),
                         self.text(self.types[idx].name)
                     ),
-                ));
+                )?;
             }
             _ if self.is_unit_variant(&kind) => {
-                return Err(self.error(
+                self.report(
                     path.span,
+                    code::VARIANT_SHAPE,
                     "this variant has no fields; write it without braces",
-                ));
+                )?;
             }
             _ => {}
         }
         let mut seen = Vec::new();
         for f in fields {
             if seen.contains(&f.name.sym) {
-                return Err(self.error(
+                self.report(
                     f.name.span,
+                    code::FIELD_GIVEN_TWICE,
                     format!("field `{}` is given twice", self.text(f.name.sym)),
-                ));
+                )?;
             }
             seen.push(f.name.sym);
         }
         if let Some(known) = self.known_fields(&kind) {
             for f in fields {
                 if !known.contains(&f.name.sym) {
-                    return Err(self.error(
+                    self.report(
                         f.name.span,
+                        code::UNKNOWN_FIELD,
                         format!("no field `{}` in this struct", self.text(f.name.sym)),
-                    ));
+                    )?;
                 }
             }
             if let Some(missing) = known.iter().find(|k| !seen.contains(k)) {
-                return Err(self.error(
+                self.report(
                     span,
+                    code::MISSING_FIELD,
                     format!("missing field `{}` in struct literal", self.text(*missing)),
-                ));
+                )?;
             }
         }
-        // Shorthand fields read the local of the same name.
-        let shorthand: Vec<ast::Expr> = fields
-            .iter()
-            .filter(|f| f.value.is_none())
-            .map(|f| ast::Expr {
-                kind: K::Name(f.name.sym),
-                span: f.name.span,
-            })
-            .collect();
-        let mut short = shorthand.iter();
-        let mut parts = Vec::with_capacity(fields.len() + 1);
+        let mut parts = Vec::with_capacity(fields.len());
         for f in fields {
             match &f.value {
                 Some(v) => parts.push(Part::Expr(v)),
-                None => parts.push(Part::Expr(short.next().expect("shorthand"))),
+                // A shorthand field reads the local of the same name.
+                None => parts.push(Part::Name(f.name)),
             }
         }
-        parts.push(Part::Expr(path));
         let (ids, _) = self.parts(&parts, out)?;
+        // The path comes last, and needs no statements that could change the fields' values.
+        let (meta, target) = self.path_expr(path, out)?;
         let mut entries = Vec::with_capacity(fields.len());
         for (f, &v) in fields.iter().zip(&ids) {
+            self.observer.field(target, f.name);
             let k = self.str_expr(f.name.sym, f.name.span);
             entries.push(hir::TableEntry::Keyed(k, v));
         }
         let table = self.add_expr(hir::ExprKind::Table(entries), span);
-        let meta = *ids.last().expect("path");
         let call = self.call_global(self.syms.setmetatable, vec![table, meta], span);
         Ok(self.add_expr(hir::ExprKind::First(call), span))
     }
 
     // ---- impl ---------------------------------------------------------------------------------
 
-    fn impl_block(&mut self, i: &ast::ImplDecl, span: Span, out: &mut Vec<StmtId>) -> LResult<()> {
-        let r = self.resolve(i.target)?;
+    fn impl_block(
+        &mut self,
+        i: &'a ast::ImplDecl,
+        span: Span,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<()> {
+        let (r, target) = self.resolve_observed(i.target)?;
+        // For the observer the block is a scope, which holds its generic parameters.
+        self.observer.scope_opened(span);
+        self.observer.impl_opened(i, target);
+        let outer = self.generics.len();
+        for g in &i.generics {
+            let id = self.observer.impl_generic(g);
+            self.generics.push((g.name.sym, id));
+        }
+        if M::Observer::ACTIVE {
+            for arg in &i.target_args {
+                self.observe_type(Some(arg));
+            }
+        }
+        let result = self.impl_members(i, r, target, out);
+        self.generics.truncate(outer);
+        self.observer.impl_closed();
+        self.observer.scope_closed();
+        result
+    }
+
+    fn impl_members(
+        &mut self,
+        i: &'a ast::ImplDecl,
+        r: Resolved,
+        target: Sym<'a, M>,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<()> {
         let (depth, type_local, idx) = match r {
             Resolved::Local {
                 depth,
@@ -637,28 +798,51 @@ impl Lowerer {
                     },
             } => (depth, local, idx),
             _ => {
-                return Err(self.error(
-                    i.target.span,
-                    format!(
-                        "`{}` is not a struct or enum defined in this module",
-                        self.text(i.target.sym)
-                    ),
-                ));
+                if !r.is_unresolved() {
+                    self.report(
+                        i.target.span,
+                        code::IMPL_TARGET,
+                        format!(
+                            "`{}` is not a struct or enum defined in this module",
+                            self.text(i.target.sym)
+                        ),
+                    )?;
+                }
+                return self.impl_without_type(i, target);
             }
         };
-        let (mfunc, methods) = self.types[idx]
-            .methods
-            .expect("type defined before its impl");
+        let Some((mfunc, methods)) = self.types[idx].methods else {
+            // The type is defined later. In the same function that was an error when the
+            // name resolved; from inside a function, it is one here.
+            if depth != self.funcs.len() - 1 {
+                self.report(
+                    i.target.span,
+                    code::USED_BEFORE_DEFINITION,
+                    format!(
+                        "`impl {0}` comes before the definition of `{0}`; move the definition up",
+                        self.text(i.target.sym)
+                    ),
+                )?;
+            }
+            return self.impl_without_type(i, target);
+        };
         let is_enum = self.types[idx].variants.is_some();
-        self.impls.push(ImplCtx { target: i.target });
+        self.impls.push(ImplCtx {
+            target: i.target,
+            id: target,
+        });
         let result = (|| {
             for m in &i.members {
                 let (name, mspan) = match &m.kind {
                     ast::ItemKind::Fn(f) => (f.name, f.span),
                     ast::ItemKind::Const { name, .. } => (*name, m.span),
-                    ast::ItemKind::Error => return Err(self.unparsed(m.span)),
+                    ast::ItemKind::Error => {
+                        self.unparsed(m.span)?;
+                        continue;
+                    }
                     _ => unreachable!("the parser allows `fn` and `const` in `impl`"),
                 };
+                let member = self.observer.impl_member(m);
                 let text = self.chunk.strings.get(name.sym).to_vec();
                 let is_meta = text.starts_with(b"__");
                 if is_enum
@@ -670,21 +854,23 @@ impl Lowerer {
                         .iter()
                         .any(|v| v.0 == name.sym)
                 {
-                    return Err(self.error(
+                    self.report(
                         name.span,
+                        code::DUPLICATE_MEMBER,
                         format!(
                             "`{}` is already a variant of this enum",
                             self.text(name.sym)
                         ),
-                    ));
+                    )?;
                 }
                 if !is_meta {
                     // Methods and associated functions share the type table.
                     if self.types[idx].members.contains(&name.sym) {
-                        return Err(self.error(
+                        self.report(
                             name.span,
+                            code::DUPLICATE_MEMBER,
                             format!("`{}` is already defined for this type", self.text(name.sym)),
-                        ));
+                        )?;
                     }
                     self.types[idx].members.push(name.sym);
                 }
@@ -696,19 +882,30 @@ impl Lowerer {
                         } else {
                             FunctionName::Field(name.sym)
                         };
-                        let body = self.fn_body(f)?;
-                        let n = self.generics.len();
-                        self.generics.extend(f.generics.iter().map(|g| g.name.sym));
-                        let func = self.function(&f.sig, FnBody::Block(body), fname, f.span);
-                        self.generics.truncate(n);
-                        let func = func?;
+                        let source = |body| FnSource {
+                            sig: &f.sig,
+                            generics: &f.generics,
+                            body,
+                            item: member,
+                            extent: m.span,
+                        };
+                        let Some(body) = &f.body else {
+                            self.stub(f.span, "body")?;
+                            self.function(source(FnBody::Absent), fname, f.span)?;
+                            continue;
+                        };
+                        let func = self.function(source(FnBody::Block(body)), fname, f.span)?;
                         (
                             self.add_expr(hir::ExprKind::Closure(func), f.span),
                             has_self,
                         )
                     }
-                    ast::ItemKind::Const { value, .. } => {
-                        let value = self.const_value(m, value)?;
+                    ast::ItemKind::Const { ty, value, .. } => {
+                        self.observe_type(ty.as_ref());
+                        let Some(value) = value else {
+                            self.stub(m.span, "value")?;
+                            continue;
+                        };
                         self.check_const(value)?;
                         (self.single(value, out)?, false)
                     }
@@ -773,8 +970,47 @@ impl Lowerer {
             Ok(())
         })();
         self.impls.pop();
-        let _ = span;
         result
+    }
+
+    /// What is left of an `impl` block whose target isn't a type it can add to, once that
+    /// error is reported: the errors inside its members. `Self` and the target's name stand
+    /// for nothing in them.
+    fn impl_without_type(&mut self, i: &'a ast::ImplDecl, target: Sym<'a, M>) -> LResult<()> {
+        let mut dropped = Vec::new();
+        self.open_scope(i.target.span);
+        self.bind(i.target.sym, Binding::UNRESOLVED, target);
+        self.impls.push(ImplCtx {
+            target: i.target,
+            id: target,
+        });
+        for m in &i.members {
+            match &m.kind {
+                ast::ItemKind::Fn(f) => {
+                    let member = self.observer.impl_member(m);
+                    let source = FnSource {
+                        sig: &f.sig,
+                        generics: &f.generics,
+                        body: f.body.as_ref().map_or(FnBody::Absent, FnBody::Block),
+                        item: member,
+                        extent: m.span,
+                    };
+                    self.function(source, FunctionName::Field(f.name.sym), f.span)?;
+                }
+                ast::ItemKind::Const { ty, value, .. } => {
+                    self.observer.impl_member(m);
+                    self.observe_type(ty.as_ref());
+                    if let Some(value) = value {
+                        self.check_const(value)?;
+                        self.only_check(value)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.impls.pop();
+        self.close_scope(&mut dropped, i.target.span);
+        Ok(())
     }
 
     /// A user `__index` replaces `__index = methods`, so it is wrapped: methods first, then
@@ -843,9 +1079,9 @@ impl Lowerer {
 
     // ---- use ----------------------------------------------------------------------------------
 
-    fn use_decl(&mut self, u: &ast::UseDecl, span: Span, out: &mut Vec<StmtId>) -> LResult<()> {
+    fn use_decl(&mut self, u: &'a ast::UseDecl, span: Span, out: &mut Vec<StmtId>) -> LResult<()> {
         if !self.at_module_level() {
-            return Err(self.error(span, "`use` must be at module level"));
+            self.report(span, code::NESTED_USE, "`use` must be at module level")?;
         }
         let path: Vec<String> = u.path.iter().map(|n| self.text(n.sym)).collect();
         let module = self.intern(path.join(".").as_bytes());
@@ -864,6 +1100,7 @@ impl Lowerer {
                     },
                     span,
                 );
+                let id = self.observer.module_used(u, name, span);
                 self.bind(
                     name.sym,
                     Binding {
@@ -871,6 +1108,7 @@ impl Lowerer {
                         mutable: false,
                         item: Some(ItemTag::Module),
                     },
+                    id,
                 );
             }
             ast::UseTail::Members(members) => {
@@ -893,6 +1131,7 @@ impl Lowerer {
                 );
                 for ((field, alias), local) in members.iter().zip(locals) {
                     let name = alias.unwrap_or(*field);
+                    let id = self.observer.member_used(u, *field, *alias, span);
                     self.bind(
                         name.sym,
                         Binding {
@@ -900,6 +1139,7 @@ impl Lowerer {
                             mutable: false,
                             item: Some(ItemTag::Module),
                         },
+                        id,
                     );
                 }
             }

@@ -2,6 +2,8 @@
 //! `.expected` files, Lua twins included. `cargo testkit examples` does the same and
 //! can also run the twins under the reference `lua5.5`.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,7 +39,7 @@ fn examples_print_what_they_expect() {
             files.push(twin);
         }
         for file in files {
-            let out = Command::new(env!("CARGO_BIN_EXE_orbit"))
+            let out = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
                 .arg(&file)
                 .current_dir(&cwd)
                 .env_remove("LUA_PATH")

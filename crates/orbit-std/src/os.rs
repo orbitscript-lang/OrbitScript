@@ -1,22 +1,35 @@
 //! The `os` library ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#os)).
 
+use std::ffi::c_int;
 use std::time::Instant;
 
-use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, TableArg, Type};
+use orbit::stack::{Arg, Either, Fail, Return, Stack, StackResult, State, TableArg, Type};
 use orbit::{
-    Call, Error, LocaleCategory, LocaleScope, OrbitStr, OrbitString, Ret, Scope, Table, TimeParts,
-    native,
+    Error, LocaleCategory, LocaleScope, OrbitStr, OrbitString, Scope, Table, TimeParts, native,
 };
 
-use crate::sys::{ExitResults, FileFailure, exit_results, file_failure, os_bytes, os_path, shell};
-use crate::time::{self, TimeLocale, Tm};
-use crate::tz;
+use crate::ctime;
+use crate::sys::{
+    ExitResults, FileFailure, exit_results, file_failure, flush_stdout, os_bytes, os_path, shell,
+};
+use crate::time;
 
-fn clock<'s>(c: &'s Call<'s>, start: Instant) -> Result<Ret, Error> {
+/// When the isolate first asked: `open` asks, so the library's opening.
+#[derive(Clone, Copy)]
+struct ClockStart(Instant);
+
+impl Default for ClockStart {
+    fn default() -> ClockStart {
+        ClockStart(Instant::now())
+    }
+}
+
+#[native(name = "os.clock")]
+fn clock(start: State<ClockStart>) -> f64 {
     // Wall time since the library opened, not CPU time: std has no CPU
     // clock and ADR-7 adds no dependency for one
     // (tests/lua-5.5/DEVIATIONS.md).
-    c.ret(start.elapsed().as_secs_f64())
+    (start.0).0.elapsed().as_secs_f64()
 }
 
 #[native(name = "os.getenv")]
@@ -66,9 +79,7 @@ fn execute(
         return Either::Left(cfg!(windows) || std::path::Path::new("/bin/sh").exists());
     };
     // The child's output mustn't overtake ours.
-    s.with_stdout(|out| {
-        let _ = out.flush();
-    });
+    flush_stdout(s);
     Either::Right(match shell(os_path(&cmd).as_os_str()).status() {
         Ok(status) => Either::Left(exit_results(status)),
         Err(e) => Either::Right(file_failure(&e, None)),
@@ -128,44 +139,12 @@ fn setlocale(
     Ok(s.set_locale(category, locale.as_ref().map(OrbitStr::from), scope))
 }
 
-/// The isolate's time category, for `os.date`.
-struct DateLocale<'a, 's>(&'a Stack<'s>);
-
-impl TimeLocale for DateLocale<'_, '_> {
-    fn pattern(&self, spec: &[u8]) -> Option<Vec<u8>> {
-        self.0
-            .locale_time_pattern(spec)
-            .map(|p| p.as_bytes().to_vec())
-    }
-
-    fn text(&self, spec: &[u8], tm: &Tm) -> Option<Vec<u8>> {
-        let parts = TimeParts {
-            year: tm.year,
-            month: tm.month,
-            day: tm.day,
-            hour: tm.hour,
-            min: tm.min,
-            sec: tm.sec,
-            wday: tm.wday,
-            yday: tm.yday,
-            isdst: tm.isdst,
-        };
-        self.0
-            .locale_time_text(spec, &parts)
-            .map(|t| t.as_bytes().to_vec())
-    }
-}
 /// The current time in seconds since the epoch.
 fn now() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs() as i64,
         Err(e) => -(e.duration().as_secs() as i64),
     }
-}
-
-/// Does a broken-down year fit C's `int tm_year` (years since 1900)?
-fn year_fits(year: i64) -> bool {
-    i32::try_from(year - 1900).is_ok()
 }
 
 #[native(name = "os.date")]
@@ -180,21 +159,34 @@ fn date(
         Some(rest) => (true, rest),
         None => (false, &fmt[..]),
     };
-    let tm = if utc {
-        time::breakdown(t, 0, false, "GMT")
+    let time = if utc {
+        ctime::utc_time(t)
     } else {
-        let l = tz::at(t);
-        time::breakdown(t + l.offset, l.offset, l.isdst, &l.zone)
+        ctime::local_time(t)
     };
-    if !year_fits(tm.year) {
+    let Some(time) = time else {
         return Err("date result cannot be represented in this installation".into());
-    }
+    };
+    let parts = time.parts();
     if fmt == b"*t" {
         s.create_table(0, 9);
-        set_fields(s, -1, &tm)?;
+        set_fields(s, -1, &parts)?;
         return Ok(Either::Left(Return::values(1)));
     }
-    match time::strftime_in(fmt, &tm, &DateLocale(s)) {
+    // Each conversion on its own: the isolate's time locale formats those
+    // that depend on it (ADR-13), the C library in the "C" locale the rest.
+    let out = time::format(fmt, |spec, out| {
+        let localized = if time::is_localized(spec) {
+            s.locale_time_text(spec, &parts)
+        } else {
+            None
+        };
+        match localized {
+            Some(text) => out.extend_from_slice(text.as_bytes()),
+            None => out.extend_from_slice(&time.format(spec)),
+        }
+    });
+    match out {
         Ok(out) => Ok(Either::Right(out.into())),
         Err(bad) => Err(Fail::arg(
             1,
@@ -205,7 +197,7 @@ fn date(
 
 /// Fill the date table at `t` (`os.date("*t")`, and `os.time` normalizing
 /// its argument).
-fn set_fields(s: &mut Stack<'_>, t: i32, tm: &Tm) -> StackResult<()> {
+fn set_fields(s: &mut Stack<'_>, t: i32, tm: &TimeParts) -> StackResult<()> {
     s.raw_put(t, b"year", tm.year)?;
     s.raw_put(t, b"month", tm.month)?;
     s.raw_put(t, b"day", tm.day)?;
@@ -217,16 +209,16 @@ fn set_fields(s: &mut Stack<'_>, t: i32, tm: &Tm) -> StackResult<()> {
     s.raw_put(t, b"isdst", tm.isdst)
 }
 
-/// A field of the date table at `t` as an integer: `default` when absent
-/// (an error when there is none), and it must fit a C `int` after
-/// subtracting `delta`, as `struct tm` stores it.
+/// A field of the date table at `t` as a C `int`, as `struct tm` stores
+/// it: the integer less `delta`, which must fit; `default` when absent
+/// (an error when there is none).
 fn get_field(
     s: &mut Stack<'_>,
     t: i32,
     name: &str,
     default: Option<i64>,
     delta: i64,
-) -> Result<i64, Fail> {
+) -> Result<c_int, Fail> {
     let top = s.top();
     let n = match s.raw_get_field(t, name.as_bytes())? {
         Type::Nil => None,
@@ -235,13 +227,14 @@ fn get_field(
         _ => Some(None),
     };
     s.set_top(top)?;
-    match n {
-        None => default.ok_or_else(|| format!("field '{name}' missing in date table").into()),
-        Some(None) => Err(format!("field '{name}' is not an integer").into()),
-        Some(Some(n)) => match n.checked_sub(delta).map(i32::try_from) {
-            Some(Ok(_)) => Ok(n),
-            _ => Err(format!("field '{name}' is out-of-bound").into()),
-        },
+    let n = match n {
+        None => default.ok_or_else(|| format!("field '{name}' missing in date table"))?,
+        Some(None) => return Err(format!("field '{name}' is not an integer").into()),
+        Some(Some(n)) => n,
+    };
+    match n.checked_sub(delta).map(c_int::try_from) {
+        Some(Ok(n)) => Ok(n),
+        _ => Err(format!("field '{name}' is out-of-bound").into()),
     }
 }
 
@@ -261,31 +254,27 @@ fn time_(s: &mut Stack<'_>, t: Option<TableArg>) -> Result<i64, Fail> {
         _ => Some(s.to_boolean(-1)),
     };
     s.set_top(t)?;
-    let local = time::local_seconds(year, month, day, hour, min, sec);
-    let utc = tz::from_local(local, isdst);
-    let l = tz::at(utc);
-    let tm = time::breakdown(utc + l.offset, l.offset, l.isdst, &l.zone);
-    if !year_fits(tm.year) {
-        return Err("time result cannot be represented in this installation".into());
-    }
-    set_fields(s, t, &tm)?;
-    Ok(utc)
+    let (secs, time) = ctime::make_local_time(year, month, day, hour, min, sec, isdst);
+    // The table gets the fields as `mktime` left them, even when it failed.
+    set_fields(s, t, &time.parts())?;
+    secs.ok_or_else(|| "time result cannot be represented in this installation".into())
 }
 
 /// Open the library. Returns the `os` table.
 pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
     let os = s.create_table();
-    let start = Instant::now();
-    os.raw_set("clock", s.create_function(move |c| clock(c, start)))?;
-    os.raw_set("date", s.create_native::<date>())?;
-    os.raw_set("difftime", s.create_native::<difftime>())?;
-    os.raw_set("execute", s.create_native::<execute>())?;
-    os.raw_set("exit", s.create_native::<exit>())?;
-    os.raw_set("getenv", s.create_native::<getenv>())?;
-    os.raw_set("remove", s.create_native::<remove>())?;
-    os.raw_set("rename", s.create_native::<rename>())?;
-    os.raw_set("setlocale", s.create_native::<setlocale>())?;
-    os.raw_set("time", s.create_native::<time_>())?;
-    os.raw_set("tmpname", s.create_native::<tmpname>())?;
+    // The clock starts now.
+    s.extension(|_: &mut ClockStart| ());
+    os.add_native::<clock>()?;
+    os.add_native::<date>()?;
+    os.add_native::<difftime>()?;
+    os.add_native::<execute>()?;
+    os.add_native::<exit>()?;
+    os.add_native::<getenv>()?;
+    os.add_native::<remove>()?;
+    os.add_native::<rename>()?;
+    os.add_native::<setlocale>()?;
+    os.add_native::<time_>()?;
+    os.add_native::<tmpname>()?;
     Ok(os)
 }

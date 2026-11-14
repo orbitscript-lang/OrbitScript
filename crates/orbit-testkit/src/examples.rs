@@ -170,6 +170,7 @@ pub fn main(args: &[String]) -> Result<bool> {
             let out = process::run(&Spec {
                 program: program.clone(),
                 args: vec![file.as_str().into()],
+                env: Vec::new(),
                 cwd: dir.clone(),
                 timeout,
                 measure_rss: false,

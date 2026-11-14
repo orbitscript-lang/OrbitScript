@@ -5,7 +5,7 @@ use orbit_hir::Span;
 
 use crate::symbols::{CallSite, Module, StructLit, SymbolId};
 use crate::types::TypeId;
-use crate::{Code, Diagnostic, FileId};
+use crate::{Code, Diagnostic};
 
 /// Collects findings while the walk reports, and only counts errors while it is muted.
 ///
@@ -14,7 +14,6 @@ use crate::{Code, Diagnostic, FileId};
 /// muted: nothing is reported or recorded, but errors are still counted, so a caller can tell
 /// whether a declaration fit.
 pub(super) struct Reporter {
-    file: FileId,
     /// Above zero while muted. Mutes nest: the walk can need a type out of order while it is
     /// already computing one.
     muted: u32,
@@ -31,9 +30,8 @@ pub(super) struct Reporter {
 
 impl Reporter {
     /// Continues `m`'s findings (resolution's diagnostics come first).
-    pub fn take(file: FileId, m: &mut Module) -> Reporter {
+    pub fn take(m: &mut Module) -> Reporter {
         Reporter {
-            file,
             muted: 0,
             errors: 0,
             diagnostics: std::mem::take(&mut m.diagnostics),
@@ -78,7 +76,7 @@ impl Reporter {
         self.errors += 1;
         if self.on() {
             self.diagnostics
-                .push(Diagnostic::error(self.file, span, code, message));
+                .push(crate::diag::error(span, code, message));
         }
     }
 

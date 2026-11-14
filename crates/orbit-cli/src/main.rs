@@ -12,19 +12,24 @@
 //!
 //! Compiling, listing bytecode and printing front-end stages are `orbitc`'s
 //! job (`orbitc.rs`). `ORBIT_GC_STRESS=1` collects at
-//! nearly every safe point after an allocation. `ORBIT_MEMORY_LIMIT=64M`
+//! nearly every safe point after an allocation. In debug builds,
+//! `ORBIT_GC_VERIFY=1` checks the heap after markings (`orbit_gc`'s
+//! verifier, minor collections paced by allocation) and panics on an object
+//! the collector missed; `ORBIT_GC_VERIFY=all` checks every marking. `ORBIT_MEMORY_LIMIT=64M`
 //! (bytes, or with a `K`, `M` or `G` suffix) caps the Lua heap: past it,
 //! scripts get the error `not enough memory`.
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod args;
 #[cfg(feature = "dap")]
 mod dap;
 #[cfg(feature = "repl")]
 mod repl;
 
-use orbit::{Call, Chunk, Config, Error, Function, Isolate, Ret, Runtime, Scope, Table, Value};
+use orbit::stack::{FunctionArg, MULTRET, Rest, Return, Stack, StackResult, Status, Type};
+use orbit::{Chunk, Config, Error, Function, Isolate, Runtime, Scope, Table, Value, native};
 
 /// The chunk names `lua` gives command-line code and standard input.
 const COMMAND_LINE: &[u8] = b"=(command line)";
@@ -82,8 +87,8 @@ fn on_interrupt(interrupt: &orbit::Interrupt) {
 
 /// A `-e` or `-l` option, run in command-line order.
 enum Action {
-    Exec(String),
-    Require { global: String, module: String },
+    Exec(Vec<u8>),
+    Require { global: Vec<u8>, module: Vec<u8> },
 }
 
 /// What the command line asks for.
@@ -107,46 +112,47 @@ struct Cli {
 }
 
 enum ParseError {
-    Unrecognized(String),
+    Unrecognized(Vec<u8>),
     NeedsArgument(&'static str),
 }
 
-fn parse(args: &[String]) -> Result<Cli, ParseError> {
+/// The options in `args` (bytes, see [`args`]), up to the script.
+fn parse(args: &[Vec<u8>]) -> Result<Cli, ParseError> {
     let mut cli = Cli::default();
     let mut i = 1;
     while i < args.len() {
-        let a = args[i].as_str();
-        if !a.starts_with('-') || a == "-" {
+        let a = args[i].as_slice();
+        if !a.starts_with(b"-") || a == b"-" {
             cli.script = Some(i);
             break;
         }
         match a {
-            "--" => {
+            b"--" => {
                 if i + 1 < args.len() {
                     cli.script = Some(i + 1);
                 }
                 break;
             }
             #[cfg(feature = "repl")]
-            "-i" => cli.interactive = true,
-            "-v" => cli.version = true,
-            "-E" => cli.ignore_env = true,
-            "-W" => cli.warnings = true,
-            "--lock-cpath" => cli.lock_cpath = true,
-            "--no-ffi" => cli.no_ffi = true,
+            b"-i" => cli.interactive = true,
+            b"-v" => cli.version = true,
+            b"-E" => cli.ignore_env = true,
+            b"-W" => cli.warnings = true,
+            b"--lock-cpath" => cli.lock_cpath = true,
+            b"--no-ffi" => cli.no_ffi = true,
             #[cfg(feature = "dap")]
-            "--debug-listen" => cli.debug_listen = true,
+            b"--debug-listen" => cli.debug_listen = true,
             #[cfg(feature = "dap")]
-            "--no-debug-signal" => cli.no_debug_signal = true,
-            _ if a.starts_with("-e") || a.starts_with("-l") => {
-                let opt = if a.starts_with("-e") { "-e" } else { "-l" };
+            b"--no-debug-signal" => cli.no_debug_signal = true,
+            _ if a.starts_with(b"-e") || a.starts_with(b"-l") => {
+                let opt = if a.starts_with(b"-e") { "-e" } else { "-l" };
                 // The value is glued on (`-eprint(1)`) or the next argument,
                 // which can't look like an option.
                 let value = if a.len() > 2 {
-                    a[2..].to_string()
+                    a[2..].to_vec()
                 } else {
                     match args.get(i + 1) {
-                        Some(v) if !v.starts_with('-') => {
+                        Some(v) if !v.starts_with(b"-") => {
                             i += 1;
                             v.clone()
                         }
@@ -158,19 +164,19 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
                 } else {
                     // `-l g=mod` names the global; otherwise it's the
                     // module name up to any `-` (`lib2-v2` sets `lib2`).
-                    match value.split_once('=') {
-                        Some((g, m)) => Action::Require {
-                            global: g.to_string(),
-                            module: m.to_string(),
+                    match value.iter().position(|&b| b == b'=') {
+                        Some(eq) => Action::Require {
+                            global: value[..eq].to_vec(),
+                            module: value[eq + 1..].to_vec(),
                         },
                         None => Action::Require {
-                            global: value.split('-').next().unwrap_or("").to_string(),
+                            global: value.split(|&b| b == b'-').next().unwrap_or(&[]).to_vec(),
                             module: value,
                         },
                     }
                 });
             }
-            _ => return Err(ParseError::Unrecognized(a.to_string())),
+            _ => return Err(ParseError::Unrecognized(a.to_vec())),
         }
         i += 1;
     }
@@ -191,7 +197,13 @@ fn parse_size(s: &str) -> Option<usize> {
 
 fn usage(prog: &str, e: ParseError) -> ExitCode {
     match e {
-        ParseError::Unrecognized(o) => eprintln!("{prog}: unrecognized option '{o}'"),
+        ParseError::Unrecognized(o) => {
+            // The option's bytes as given, as `lua` prints them.
+            let mut line = format!("{prog}: unrecognized option '").into_bytes();
+            line.extend_from_slice(&o);
+            line.extend_from_slice(b"'\n");
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), &line);
+        }
         ParseError::NeedsArgument(o) => eprintln!("{prog}: '{o}' needs argument"),
     }
     eprint!(
@@ -224,13 +236,22 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    let prog = args.first().cloned().unwrap_or_else(|| "orbit".into());
+    let args = args::args();
+    let prog = args
+        .first()
+        .map_or_else(|| "orbit".into(), |p| args::text(p));
+    // The runtime is in liborbit: it must be the one this program was
+    // built with, checked before anything else of it is used.
+    #[cfg(feature = "shared")]
+    if let Err(m) = orbit_lib::check_build!() {
+        eprintln!("{prog}: {m}");
+        return ExitCode::FAILURE;
+    }
     #[cfg(feature = "dap")]
-    match args.get(1).map(String::as_str) {
-        Some("--debug-server") => return dap::server(&prog),
-        Some("--debug-connect") => return dap::connect(&prog, &args),
-        Some("--debug-attach") => return dap::attach(&prog, &args),
+    match args.get(1).map(Vec::as_slice) {
+        Some(b"--debug-server") => return dap::server(&prog),
+        Some(b"--debug-connect") => return dap::connect(&prog, &args),
+        Some(b"--debug-attach") => return dap::attach(&prog, &args),
         _ => {}
     }
     let cli = match parse(&args) {
@@ -291,6 +312,11 @@ fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         iso.gc().set_stress(true);
     }
+    // Only debug builds have the verifier, so release binaries don't change.
+    #[cfg(debug_assertions)]
+    if let Some(v) = std::env::var_os("ORBIT_GC_VERIFY").filter(|v| v != "0") {
+        iso.gc().set_verify(true, v == "all");
+    }
     Ok(iso)
 }
 
@@ -316,20 +342,7 @@ fn docall<'s>(
     f: Function<'s>,
     args: Vec<Value<'s>>,
 ) -> Result<Vec<Value<'s>>, String> {
-    let driver = s.create_function(|c| {
-        let f: Function = c.check(0)?;
-        let handler = c.create_function(msghandler);
-        match f.call_handled(c.args().split_off(1), handler) {
-            Ok(mut r) => {
-                r.insert(0, Value::Bool(true));
-                c.ret(r)
-            }
-            Err(e) => {
-                let v = e.value().and_then(|v| v.get(c).ok());
-                c.ret((false, v.unwrap_or(Value::Nil)))
-            }
-        }
-    });
+    let driver = s.create_native::<driver>();
     let mut call = vec![f.to_value()];
     call.extend(args);
     let mut r = driver.call(call).map_err(|e| e.to_string())?;
@@ -346,29 +359,42 @@ fn docall<'s>(
     }
 }
 
+/// [`docall`]'s driver: `driver(f, ...)` calls `f(...)` under
+/// [`msghandler`] and returns `true` and its results, or `false` and the
+/// handled error.
+#[native(name = "?")]
+fn driver(s: &mut Stack<'_>, _f: FunctionArg, args: Rest) -> StackResult<Return> {
+    s.push_native::<msghandler>();
+    s.rotate(1, 1)?;
+    // [handler, f, args...]
+    let status = s.pcall(args.count as i32, MULTRET, 1)?;
+    // [handler, results...] or [handler, error]
+    let n = s.top() - 1;
+    s.push_boolean(status == Status::Ok);
+    s.rotate(2, 1)?;
+    Ok(Return::values(n as usize + 1))
+}
+
 /// `lua`'s message handler, run where the error was raised: an error
 /// object with `__tostring` becomes that text; anything else becomes its
 /// message plus a traceback.
-fn msghandler<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let e = c.arg(0);
-    let text = match e {
-        Value::Str(_) | Value::Int(_) | Value::Float(_) => {
-            e.to_display()?.to_string_lossy().into_owned()
-        }
-        _ => {
-            let has_tostring = e
-                .metatable()
-                .and_then(|mt| mt.raw_get::<Value>("__tostring").ok())
-                .is_some_and(|f| !f.is_nil());
+#[native(name = "?")]
+fn msghandler(s: &mut Stack<'_>) -> StackResult<Return> {
+    let text = match s.type_at(1) {
+        Type::String | Type::Number => s.to_display_string(1)?.to_string_lossy().into_owned(),
+        ty => {
+            let has_tostring =
+                s.get_metatable(1) && s.raw_get_field(-1, b"__tostring")? != Type::Nil;
             if has_tostring {
-                if let Ok(t) = e.to_display() {
-                    return c.ret(t);
-                }
+                s.to_display_string(1)?;
+                return Ok(Return::values(1));
             }
-            format!("(error object is a {} value)", e.type_name())
+            let name = if ty == Type::None { Type::Nil } else { ty }.name();
+            format!("(error object is a {name} value)")
         }
     };
-    c.ret(format!("{text}\n{}", c.traceback(1)))
+    s.push_traceback(Some(text.as_bytes().into()), 1);
+    Ok(Return::values(1))
 }
 
 impl Runner {
@@ -384,7 +410,7 @@ impl Runner {
 
     /// Run everything the command line asks for, in `lua`'s order; false
     /// after an error, which has been reported.
-    fn main(&mut self, cli: &Cli, args: &[String]) -> bool {
+    fn main(&mut self, cli: &Cli, args: &[Vec<u8>]) -> bool {
         if cli.version || cli.interactive {
             print_version();
         }
@@ -394,7 +420,7 @@ impl Runner {
         }
         for action in &cli.actions {
             let ok = match action {
-                Action::Exec(stat) => self.run_chunk(stat.as_bytes(), COMMAND_LINE),
+                Action::Exec(stat) => self.run_chunk(stat, COMMAND_LINE),
                 Action::Require { global, module } => self.require(global, module),
             };
             if !ok {
@@ -431,13 +457,13 @@ impl Runner {
 
     /// `arg`: the script at 0 (the interpreter with no script), everything
     /// before it at negative indexes, its arguments from 1.
-    fn set_arg_table(&mut self, args: &[String], script: Option<usize>) {
+    fn set_arg_table(&mut self, args: &[Vec<u8>], script: Option<usize>) {
         let base = script.unwrap_or(0) as i64;
         self.iso
             .scope(|s| {
                 let t = s.create_table();
                 for (k, a) in args.iter().enumerate() {
-                    t.raw_set(k as i64 - base, a.as_str())?;
+                    t.raw_set(k as i64 - base, a.as_slice())?;
                 }
                 s.globals().set("arg", t)
             })
@@ -456,13 +482,13 @@ impl Runner {
             },
         };
         match init.strip_prefix('@') {
-            Some(file) => self.run_file(Some(file), false),
+            Some(file) => self.run_file(Some(file.as_bytes()), false),
             None => self.run_chunk(init.as_bytes(), format!("={name}").as_bytes()),
         }
     }
 
     /// `-l`: `global = require(module)`.
-    fn require(&mut self, global: &str, module: &str) -> bool {
+    fn require(&mut self, global: &[u8], module: &[u8]) -> bool {
         let r = self.iso.scope(|s| {
             let g = s.globals();
             let require: Value = g.get("require").map_err(|e| e.to_string())?;
@@ -478,15 +504,15 @@ impl Runner {
 
     /// The script, with arguments taken from `arg` as it is now: `arg[1]`
     /// to `arg[#arg]` (earlier code may have changed it).
-    fn run_script(&mut self, script: &str) -> bool {
-        let path = (script != "-").then_some(script);
+    fn run_script(&mut self, script: &[u8]) -> bool {
+        let path = (script != b"-").then_some(script);
         self.run_file(path, true)
     }
 
     /// Load a file (`None`: standard input) as `loadfile` does and call it,
     /// with the script arguments from `arg` when `with_args`.
-    fn run_file(&mut self, path: Option<&str>, with_args: bool) -> bool {
-        let (bytes, source) = match read_chunk_file(path.map(str::as_bytes)) {
+    fn run_file(&mut self, path: Option<&[u8]>, with_args: bool) -> bool {
+        let (bytes, source) = match read_chunk_file(path) {
             Ok(r) => r,
             Err(m) => {
                 self.report(&format!("{}: {m}", self.prog));
@@ -568,7 +594,6 @@ fn print_version() {
 
 /// Install `orbit-std`, the C module loader and `ffi`, as this build has
 /// them.
-#[cfg(not(bundled))]
 fn install_libraries(
     iso: &mut Isolate,
     options: &orbit_std::Options,
@@ -585,21 +610,5 @@ fn install_libraries(
     }
     #[cfg(not(feature = "ffi"))]
     let _ = cli.no_ffi;
-    Ok(())
-}
-
-/// Install the copies of `orbit-std`, the C module loader and `ffi` that
-/// liborbit carries, so their functions run without crossing the boundary.
-#[cfg(bundled)]
-fn install_libraries(
-    iso: &mut Isolate,
-    options: &orbit_std::Options,
-    cli: &Cli,
-) -> Result<(), Error> {
-    iso.install_bundled_std(options.base, options.io, options.os, options.ignore_env)?;
-    iso.install_bundled_c_modules(cli.lock_cpath);
-    if !cli.no_ffi {
-        iso.install_bundled_ffi();
-    }
     Ok(())
 }

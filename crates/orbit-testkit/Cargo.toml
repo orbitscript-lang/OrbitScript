@@ -11,6 +11,8 @@ publish = false
 # Development tool only: it drives interpreters as subprocesses and never
 # links the runtime, so it can test any Lua-compatible binary.
 [dependencies]
+# The --json reports. The workspace already builds it for `std.json`.
+serde_json = { version = "1", default-features = false, features = ["std"] }
 
 # getrusage(RUSAGE_CHILDREN) for exact peak RSS, through a safe API (the
 # workspace forbids our own `unsafe`). See DEPS.md.

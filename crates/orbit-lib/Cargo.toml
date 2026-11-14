@@ -13,34 +13,31 @@ publish = false
 # collide. Cargo builds `liborbit_lib.so`; its soname, and the name packaging
 # installs it under, is `liborbit.so.0` (build.rs).
 name = "orbit_lib"
-# `rlib` too, so `cargo test` builds the shared library for tests/host.rs.
-crate-type = ["cdylib", "rlib"]
+# A Rust `dylib`, not a `cdylib`: `orbit`, `orbitc` and `orbit-lsp` link it
+# as a Rust crate (ADR-10). No `rlib` next to it, or rustc would link that
+# into the programs instead.
+crate-type = ["dylib"]
 
 [dependencies]
-orbit = { path = "../orbit", features = ["abi"] }
+orbit = { path = "../orbit" }
 orbit-capi = { path = "../orbit-capi", features = ["host"] }
 orbit-std = { path = "../orbit-std", features = ["json"] }
 # The Lua version (ADR-14): the build script reads it from its `links`
 # metadata, so this must be a direct dependency.
 orbit-lua-version = { path = "../orbit-lua-version" }
-stabby = "72.1.16"
 
 [build-dependencies]
 orbit-lua-version = { path = "../orbit-lua-version" }
 
-[dev-dependencies]
-serde_json = { version = "1", default-features = false, features = ["std"] }
-
 [features]
 default = ["ffi"]
-# The `ffi` library for the programs that install it (ADR-9). Without it
-# `install_bundled_ffi` reports that the library has none.
+# The `ffi` library for the programs that install it (ADR-9).
 ffi = ["orbit-std/ffi"]
 # With `ffi`: link the system's shared libffi rather than a static copy built
 # from bundled sources (`build.sh --system-libffi`).
 system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
-# The debugger engine and its API (ADR-12), for programs on the shared
-# backend, and the DAP server C hosts start (`orbit_debug_listen`,
+# The debugger engine and its API (ADR-12), for the programs built with
+# the library, and the DAP server C hosts start (`orbit_debug_listen`,
 # `ORBIT_DEBUG`).
 debugger = ["orbit/debugger", "orbit-capi/debugger"]
 # Lua 5.4 rather than 5.5: the language, the libraries, the C API and

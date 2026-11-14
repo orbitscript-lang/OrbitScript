@@ -5,12 +5,16 @@
 //! OrbitScript AST (not the HIR), never touches the runtime, and keeps per-module results so an
 //! editor can recheck one file at a time.
 //!
-//! Checking a module takes two passes over its AST: `resolve` binds every name to a symbol and
-//! records where symbols are defined, then `typeck` types the module with those definitions.
+//! Checking a module takes two steps. The module is first lowered as the compiler lowers it,
+//! by the compiler's own lowering, except that this lowering goes on after an error and its
+//! HIR is dropped. That gives everything that stops the module from compiling (a module with
+//! no errors here is one that runs), and on the way lowering tells `observe` about every
+//! name it resolves, which records the module's symbols and where they are defined. Then
+//! `typeck` types the module's AST with those definitions.
 
 mod diag;
+mod observe;
 mod pragma;
-mod resolve;
 mod stdlib;
 mod symbols;
 mod typeck;
@@ -22,7 +26,7 @@ use std::path::{Component, Path, PathBuf};
 use orbit_orb_syntax::ast;
 use orbit_orb_syntax::token::{CONTEXTUAL_KEYWORDS, KEYWORDS};
 
-pub use diag::{Code, Diagnostic, Severity};
+pub use diag::{Code, Diagnostic, Severity, code};
 pub use orbit_hir::Span;
 pub use symbols::{DocumentSymbol, Symbol, SymbolId, SymbolKind};
 pub use types::TypeId;
@@ -187,6 +191,15 @@ fn normalize(path: &Path) -> PathBuf {
         out.push(".");
     }
     out
+}
+
+/// Whether the checker's own diagnostic `d` already tells the user about the compile error
+/// `e`. The checker has rules of its own for a few things lowering also refuses (an unknown
+/// name, a missing field, an `as` target that can't be checked), reported under the same code
+/// and sometimes with what it knows about types in the message; when one of them is reported
+/// at the same place, the compile error would only repeat it.
+fn covers(d: &Diagnostic, e: &Diagnostic) -> bool {
+    d.code == e.code && d.span.start == e.span.start
 }
 
 fn is_word_byte(b: u8) -> bool {
@@ -451,10 +464,7 @@ impl Workspace {
         // The parser goes on after a syntax error, so the rest of a module being edited is
         // still checked; a statement that didn't parse is an `Error` node, typed `any`.
         let (ast, syntax_errors) = orbit_orb_syntax::parse_recovering(&name, &text, &options);
-        let mut diagnostics: Vec<Diagnostic> = syntax_errors
-            .into_iter()
-            .map(|e| Diagnostic::error(file, e.span, Code::Syntax, e.message))
-            .collect();
+        let mut diagnostics: Vec<Diagnostic> = syntax_errors;
         let pragmas = pragma::Pragmas::read(&text, &ast.comments, &ast.source);
         let mode = match pragmas.mode {
             Some(m) => m,
@@ -487,10 +497,9 @@ impl Workspace {
                     if strict && is_lua(&self.files[dep.0 as usize].path) {
                         let span = u.path[0].span.to(u.path[u.path.len() - 1].span);
                         let path = self.files[dep.0 as usize].path.with_extension("orbi");
-                        diagnostics.push(Diagnostic::error(
-                            file,
+                        diagnostics.push(crate::diag::error(
                             span,
-                            Code::UntypedModule,
+                            code::UNTYPED_MODULE,
                             format!(
                                 "`{}` is a Lua module without types; strict mode needs a stub \
                                  beside it ({})",
@@ -505,10 +514,9 @@ impl Workspace {
                 }
                 None => {
                     let span = u.path[0].span.to(u.path[u.path.len() - 1].span);
-                    diagnostics.push(Diagnostic::error(
-                        file,
+                    diagnostics.push(crate::diag::error(
                         span,
-                        Code::ModuleNotFound,
+                        code::MODULE_NOT_FOUND,
                         format!("cannot find module `{}`", segs.join("::")),
                     ));
                 }
@@ -525,15 +533,28 @@ impl Workspace {
             (Some(p), None) => (Some(p.file), &p.names),
             _ => (None, &no_prelude),
         };
-        let (mut m, defs) = resolve::resolve(
+        // The compiler's lowering, which here recovers after each error and passes over what
+        // the parser already reported: it gives every error that stops the module from
+        // compiling, and tells the recorder about every name it resolves.
+        let recorder = observe::Recorder::new(
             file,
             &ast,
-            resolve::Deps {
+            observe::Deps {
                 modules: &modules,
                 prelude: prelude_names,
                 checked: &checked,
             },
         );
+        let (mut compile_errors, recorder) = orbit_orb_syntax::lower_observed(&ast, recorder);
+        let (mut m, defs) = recorder.finish();
+        if is_stub(&path) {
+            // A stub is never compiled: its declarations have no bodies or values, which is the
+            // one thing lowering holds against it that isn't a mistake. The rest of what
+            // lowering finds (an unknown name, a parameter declared twice) is wrong in a stub
+            // too, and is the checker's to report, like its other findings.
+            compile_errors.retain(|e| e.code != code::STUB_DECLARATION);
+            diagnostics.append(&mut compile_errors);
+        }
         typeck::check(
             file,
             &ast,
@@ -550,9 +571,18 @@ impl Workspace {
         drop(defs);
         diagnostics.append(&mut m.diagnostics);
         if mode == pragma::Mode::Off {
-            diagnostics.retain(|d| d.code == Code::Syntax);
+            diagnostics.retain(|d| d.code == code::SYNTAX);
         }
-        pragmas.apply(file, &ast.source, strict, &mut diagnostics);
+        pragmas.apply(&ast.source, strict, &mut diagnostics);
+        // Added after the pragmas so that none can hide them; see `covers`.
+        for e in compile_errors {
+            if !diagnostics.iter().any(|d| covers(d, &e)) {
+                diagnostics.push(e);
+            }
+        }
+        for d in &mut diagnostics {
+            d.line = ast.source.line_of(d.span.start);
+        }
         diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
         m.diagnostics = diagnostics;
         m.deps = deps;

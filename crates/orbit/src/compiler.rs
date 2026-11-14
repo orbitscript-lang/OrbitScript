@@ -64,7 +64,7 @@ impl Compiler {
         options: &ParseOptions,
     ) -> Result<UnlinkedChunk, SyntaxError> {
         let hir = orbit_lua_syntax::to_hir(chunk_name, src, options)
-            .map_err(|d| SyntaxError(d.to_lua_message(chunk_name)))?;
+            .map_err(|d| SyntaxError(d.to_message(chunk_name)))?;
         compile_hir(&hir)
     }
 
@@ -128,7 +128,6 @@ fn compile_hir(hir: &orbit_hir::Chunk) -> Result<UnlinkedChunk, SyntaxError> {
 }
 
 /// The compiler `load` uses for Lua source ([`orbit_runtime::vm::CompileFn`]).
-#[cfg(runtime_backend)]
 pub(crate) fn compile_lua(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
     Compiler
         .compile(src, chunk_name, Language::Lua)
@@ -136,7 +135,6 @@ pub(crate) fn compile_lua(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk,
 }
 
 /// The compiler `load` uses for `.orb` files.
-#[cfg(runtime_backend)]
 pub(crate) fn compile_orb(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
     Compiler
         .compile(src, chunk_name, Language::OrbitScript)

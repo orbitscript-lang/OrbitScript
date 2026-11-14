@@ -3,8 +3,11 @@
 use orbit_hir as hir;
 use orbit_hir::{ExprId, LocalId, LocalKind, Span, StmtId, StrId};
 
+use super::mode::{Mode, Reporter, Sym};
+use super::observe::{Local, Observer};
 use super::{ItemTag, LResult, Lowerer, Resolved};
 use crate::ast::{self, ExprKind as K};
+use crate::code;
 
 /// How to read a value being matched: a hidden local, or a field of one.
 #[derive(Clone)]
@@ -13,8 +16,34 @@ pub(super) enum Access {
     Field(Box<Access>, StrId),
 }
 
-/// A binding a pattern makes: the name, whether it's `mut`, and where its value is.
-pub(super) type Bind = (ast::Name, bool, Access);
+/// A binding a pattern makes: the name, whether it's `mut`, where its value is, and the
+/// pattern that binds it (the name itself for a shorthand field).
+pub(super) type Bind = (ast::Name, bool, Access, Span);
+
+/// Every name a pattern binds, with whether it is `mut` and the pattern that binds it: for
+/// declaring them after an error.
+pub(super) fn names(pat: &ast::Pat, out: &mut Vec<(ast::Name, bool, Span)>) {
+    match &pat.kind {
+        ast::PatKind::Bind { name, mutable } => out.push((*name, *mutable, pat.span)),
+        ast::PatKind::Tuple(items) | ast::PatKind::Or(items) => {
+            for item in items {
+                names(item, out);
+            }
+        }
+        ast::PatKind::Struct { fields, .. } => {
+            for f in fields {
+                match &f.pat {
+                    Some(p) => names(p, out),
+                    None => out.push((f.name, false, f.name.span)),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+const NESTED_TUPLE: &str =
+    "a tuple pattern matches several results, so it can only be a whole `match` arm";
 
 /// What a struct-literal or pattern path names.
 pub(super) enum PathKind {
@@ -28,7 +57,7 @@ pub(super) enum PathKind {
     Unknown,
 }
 
-impl Lowerer {
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     fn access_expr(&mut self, a: &Access, span: Span) -> ExprId {
         match a {
             Access::Local(l) => self.local_expr(*l, span),
@@ -85,25 +114,32 @@ impl Lowerer {
                 let Some(idx) = type_of(self, base)? else {
                     return Ok(PathKind::Unknown);
                 };
+                // After either error the path names nothing known.
                 let Some(variants) = &self.types[idx].variants else {
-                    return Err(self.error(
+                    self.report(
                         name.span,
+                        code::NO_ASSOCIATED_ITEM,
                         format!(
                             "`{}` is a struct, not an enum",
                             self.text(self.types[idx].name)
                         ),
-                    ));
+                    )?;
+                    return Ok(PathKind::Unknown);
                 };
                 match variants.iter().position(|v| v.0 == name.sym) {
                     Some(vi) => Ok(PathKind::Variant(idx, vi)),
-                    None => Err(self.error(
-                        name.span,
-                        format!(
-                            "no variant `{}` in enum `{}`",
-                            self.text(name.sym),
-                            self.text(self.types[idx].name)
-                        ),
-                    )),
+                    None => {
+                        self.report(
+                            name.span,
+                            code::NO_ASSOCIATED_ITEM,
+                            format!(
+                                "no variant `{}` in enum `{}`",
+                                self.text(name.sym),
+                                self.text(self.types[idx].name)
+                            ),
+                        )?;
+                        Ok(PathKind::Unknown)
+                    }
                 }
             }
             _ => Ok(match type_of(self, path)? {
@@ -135,7 +171,11 @@ impl Lowerer {
     }
 
     /// The test that `a` matches `pat` (`None` when it always does).
-    pub(super) fn pattern_test(&mut self, pat: &ast::Pat, a: &Access) -> LResult<Option<ExprId>> {
+    pub(super) fn pattern_test(
+        &mut self,
+        pat: &'a ast::Pat,
+        a: &Access,
+    ) -> LResult<Option<ExprId>> {
         let span = pat.span;
         match &pat.kind {
             ast::PatKind::Wild | ast::PatKind::Bind { .. } => Ok(None),
@@ -156,10 +196,12 @@ impl Lowerer {
                     (K::Str(_), K::Str(_)) => self.syms.string,
                     (K::Int(_) | K::Float(_), K::Int(_) | K::Float(_)) => self.syms.number,
                     _ => {
-                        return Err(self.error(
+                        self.report(
                             span,
+                            code::RANGE_PATTERN_BOUNDS,
                             "range pattern bounds must both be numbers or both be strings",
-                        ));
+                        )?;
+                        return Ok(None);
                     }
                 };
                 let v = self.access_expr(a, span);
@@ -196,16 +238,24 @@ impl Lowerer {
             }
             ast::PatKind::Or(alts) => {
                 let mut test: Option<ExprId> = None;
-                for alt in alts {
+                for (i, alt) in alts.iter().enumerate() {
                     let mut binds = Vec::new();
                     self.pattern_binds(alt, a, &mut binds)?;
                     if !binds.is_empty() {
-                        return Err(self.error(
+                        self.report(
                             alt.span,
+                            code::OR_PATTERN_BINDING,
                             "bindings inside `|` patterns are not supported yet",
-                        ));
+                        )?;
                     }
                     let Some(t) = self.pattern_test(alt, a)? else {
+                        // It always matches, so the alternatives after it are never tested.
+                        // A collecting walk still reads them.
+                        if M::Reporter::RECOVERS {
+                            for unreached in &alts[i + 1..] {
+                                self.pattern_test(unreached, a)?;
+                            }
+                        }
                         return Ok(None);
                     };
                     test = Some(match test {
@@ -215,38 +265,42 @@ impl Lowerer {
                 }
                 Ok(test)
             }
-            ast::PatKind::Tuple(_) => Err(self.error(
-                span,
-                "a tuple pattern matches several results, so it can only be a whole `match` arm",
-            )),
+            ast::PatKind::Tuple(_) => {
+                self.report(span, code::NESTED_TUPLE_PATTERN, NESTED_TUPLE)?;
+                Ok(None)
+            }
             ast::PatKind::Struct { path, fields, rest } => {
                 let kind = self.path_kind(path)?;
+                // After any of the errors here the pattern is lowered as written.
                 if let PathKind::Enum(idx) = kind {
-                    return Err(self.error(
+                    self.report(
                         path.span,
+                        code::ENUM_NEEDS_VARIANT,
                         format!(
                             "`{}` is an enum; name a variant, such as `{}::Variant {{ .. }}`",
                             self.text(self.types[idx].name),
                             self.text(self.types[idx].name)
                         ),
-                    ));
+                    )?;
                 }
                 if self.is_unit_variant(&kind) {
-                    return Err(self.error(
+                    self.report(
                         path.span,
+                        code::VARIANT_SHAPE,
                         "this variant has no fields; match it without braces",
-                    ));
+                    )?;
                 }
                 if let Some(known) = self.known_fields(&kind) {
                     for f in fields {
                         if !known.contains(&f.name.sym) {
-                            return Err(self.error(
+                            self.report(
                                 f.name.span,
+                                code::UNKNOWN_FIELD,
                                 format!(
                                     "no field `{}` in this pattern's type",
                                     self.text(f.name.sym)
                                 ),
-                            ));
+                            )?;
                         }
                     }
                     if !rest {
@@ -254,13 +308,14 @@ impl Lowerer {
                             .iter()
                             .find(|k| !fields.iter().any(|f| f.name.sym == **k))
                         {
-                            return Err(self.error(
-                            span,
-                            format!(
-                                "pattern does not mention field `{}`; add `..` to ignore the rest",
-                                self.text(*missing)
-                            ),
-                        ));
+                            self.report(
+                                span,
+                                code::PATTERN_MISSING_FIELD,
+                                format!(
+                                    "pattern does not mention field `{}`; add `..` to ignore the rest",
+                                    self.text(*missing)
+                                ),
+                            )?;
                         }
                     }
                 }
@@ -269,9 +324,10 @@ impl Lowerer {
                 let mt = self.call_global(self.syms.getmetatable, vec![v], span);
                 let mt = self.add_expr(hir::ExprKind::First(mt), span);
                 let mut none = Vec::new();
-                let ty = self.expr(path, &mut none)?;
+                let (ty, target) = self.path_expr(path, &mut none)?;
                 let mut test = Some(self.compare(hir::BinOp::Eq, mt, ty, span));
                 for f in fields {
+                    self.observer.field(target, f.name);
                     if let Some(p) = &f.pat {
                         let fa = Access::Field(Box::new(a.clone()), f.name.sym);
                         let t = self.pattern_test(p, &fa)?;
@@ -283,7 +339,7 @@ impl Lowerer {
             ast::PatKind::Path(path) => {
                 let kind = self.path_kind(path)?;
                 let mut none = Vec::new();
-                let value = self.expr(path, &mut none)?;
+                let (value, _) = self.path_expr(path, &mut none)?;
                 let v = self.access_expr(a, span);
                 match kind {
                     PathKind::Variant(..) if self.is_unit_variant(&kind) => {
@@ -293,8 +349,12 @@ impl Lowerer {
                         Ok(Some(self.add_expr(hir::ExprKind::First(call), span)))
                     }
                     PathKind::Variant(..) => {
-                        Err(self
-                            .error(path.span, "this variant has fields; match it with `{ .. }`"))
+                        self.report(
+                            path.span,
+                            code::VARIANT_SHAPE,
+                            "this variant has fields; match it with `{ .. }`",
+                        )?;
+                        Ok(None)
                     }
                     _ => Ok(Some(self.compare(hir::BinOp::Eq, v, value, span))),
                 }
@@ -305,22 +365,23 @@ impl Lowerer {
     /// The bindings `pat` makes, reading from `a`.
     pub(super) fn pattern_binds(
         &mut self,
-        pat: &ast::Pat,
+        pat: &'a ast::Pat,
         a: &Access,
         out: &mut Vec<Bind>,
     ) -> LResult<()> {
         match &pat.kind {
             ast::PatKind::Bind { name, mutable } => {
                 if out.iter().any(|b| b.0.sym == name.sym) {
-                    return Err(self.error(
+                    self.report(
                         name.span,
+                        code::DUPLICATE_BINDING,
                         format!(
                             "`{}` is bound more than once in this pattern",
                             self.text(name.sym)
                         ),
-                    ));
+                    )?;
                 }
-                out.push((*name, *mutable, a.clone()));
+                out.push((*name, *mutable, a.clone(), pat.span));
             }
             ast::PatKind::Struct { fields, .. } => {
                 for f in fields {
@@ -329,17 +390,42 @@ impl Lowerer {
                         Some(p) => self.pattern_binds(p, &fa, out)?,
                         None => {
                             if out.iter().any(|b| b.0.sym == f.name.sym) {
-                                return Err(self.error(
+                                self.report(
                                     f.name.span,
+                                    code::DUPLICATE_BINDING,
                                     format!(
                                         "`{}` is bound more than once in this pattern",
                                         self.text(f.name.sym)
                                     ),
-                                ));
+                                )?;
                             }
-                            out.push((f.name, false, fa));
+                            out.push((f.name, false, fa, f.name.span));
                         }
                     }
+                }
+            }
+            // A whole arm's tuple is taken apart by the caller, so this one is inside a
+            // pattern.
+            ast::PatKind::Tuple(items) => {
+                self.report(pat.span, code::NESTED_TUPLE_PATTERN, NESTED_TUPLE)?;
+                for item in items {
+                    self.pattern_binds(item, a, out)?;
+                }
+            }
+            // A name in an alternative is an error where the pattern's test is lowered. A
+            // collecting walk binds it all the same, so its uses aren't errors too.
+            ast::PatKind::Or(alts) if M::Reporter::RECOVERS => {
+                for alt in alts {
+                    // An alternative of a whole arm may be a tuple, one item for each value.
+                    let items = match &alt.kind {
+                        ast::PatKind::Tuple(items) => &items[..],
+                        _ => std::slice::from_ref(alt),
+                    };
+                    let mut inner = Vec::new();
+                    for item in items {
+                        self.pattern_binds(item, a, &mut inner)?;
+                    }
+                    out.append(&mut inner);
                 }
             }
             _ => {}
@@ -347,15 +433,68 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Declares a pattern's bindings with one `Let` and brings them into scope.
-    pub(super) fn emit_binds(&mut self, binds: Vec<Bind>, out: &mut Vec<StmtId>) {
+    /// Shows the observer the paths and fields a destructuring `let` names. Lowering reads
+    /// only the bindings of such a pattern, so nothing is reported here.
+    pub(super) fn observe_pattern(&mut self, pat: &'a ast::Pat) {
+        if !M::Observer::ACTIVE {
+            return;
+        }
+        match &pat.kind {
+            ast::PatKind::Struct { path, fields, .. } => {
+                let target = self.observe_path(path);
+                for f in fields {
+                    self.observer.field(target, f.name);
+                    if let Some(p) = &f.pat {
+                        self.observe_pattern(p);
+                    }
+                }
+            }
+            ast::PatKind::Path(path) => {
+                self.observe_path(path);
+            }
+            ast::PatKind::Tuple(items) | ast::PatKind::Or(items) => {
+                for item in items {
+                    self.observe_pattern(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn observe_path(&mut self, path: &'a ast::Expr) -> Sym<'a, M> {
+        let sym = match &path.kind {
+            K::Name(sym) => *sym,
+            K::SelfType => match self.impls.last() {
+                Some(ctx) => ctx.target.sym,
+                None => return M::Observer::NOTHING,
+            },
+            K::Path { base, name } => {
+                let base_id = self.observe_path(base);
+                let self_base = matches!(base.kind, K::SelfType);
+                return self.observer.member(base_id, self_base, *name);
+            }
+            _ => return M::Observer::NOTHING,
+        };
+        let id = self.observed_value(sym);
+        self.observer.reference(path.span, id);
+        id
+    }
+
+    /// Declares a pattern's bindings with one `Let` and brings them into scope. `let_end` is
+    /// where a `let` that binds them ends.
+    pub(super) fn emit_binds(
+        &mut self,
+        binds: Vec<Bind>,
+        let_end: Option<u32>,
+        out: &mut Vec<StmtId>,
+    ) {
         if binds.is_empty() {
             return;
         }
         let span = binds[0].0.span;
         let mut locals = Vec::with_capacity(binds.len());
         let mut values = Vec::with_capacity(binds.len());
-        for (name, mutable, access) in &binds {
+        for (name, mutable, access, _) in &binds {
             let kind = if *mutable {
                 LocalKind::Normal
             } else {
@@ -372,8 +511,14 @@ impl Lowerer {
             },
             span,
         );
-        for ((name, mutable, _), local) in binds.into_iter().zip(locals) {
-            self.bind_local(name.sym, local, mutable);
+        for ((name, mutable, _, full), local) in binds.into_iter().zip(locals) {
+            let how = Local {
+                full,
+                let_end,
+                def: None,
+            };
+            let id = self.observer.local(name, how);
+            self.bind_local(name.sym, local, mutable, id);
         }
     }
 }

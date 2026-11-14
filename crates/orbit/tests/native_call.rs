@@ -167,3 +167,41 @@ fn host_functions_show_scripts_no_upvalues() {
         .unwrap();
     assert_eq!(out, ["nil", "nil", "0", "7"]);
 }
+
+/// The traceback of an error that leaves through to-be-closed variables is
+/// the stack as the error was raised, not what is left once their
+/// `__close` handlers have run; and a traced call that fails inside one of
+/// those handlers reports its own stack without taking the outer error's.
+#[test]
+fn tracebacks_are_taken_before_variables_close() {
+    const TBC: &str = "local function tbc(f) return setmetatable({}, {__close = f}) end\n";
+    let out = run(&format!(
+        "{TBC}local function raiser()
+           local v <close> = tbc(function() end)
+           local x = nil; return x.y
+         end
+         return tracenow(function() raiser() end)"
+    ));
+    assert_eq!(out[0], "false");
+    assert!(out[1].starts_with("t:4: attempt to index"), "{}", out[1]);
+    assert!(out[2].contains("t:4: in upvalue 'raiser'"), "{}", out[2]);
+
+    let out = run(&format!(
+        "{TBC}local inner
+         local function nested() local x = nil; return x.z end
+         local function raiser()
+           local v <close> = tbc(function() inner = {{tracenow(nested)}} end)
+           local w <close> = tbc(function() pcall(callnow, error, 'ignored') end)
+           local x = nil; return x.y
+         end
+         local ok, msg, trace = tracenow(function() raiser() end)
+         return ok, msg, trace, inner[2], inner[3]"
+    ));
+    assert_eq!(out[0], "false");
+    assert!(out[1].starts_with("t:7: attempt to index"), "{}", out[1]);
+    assert!(out[2].contains("t:7: in upvalue 'raiser'"), "{}", out[2]);
+    assert!(!out[2].contains("'nested'"), "{}", out[2]);
+    assert!(out[3].starts_with("t:3: attempt to index"), "{}", out[3]);
+    assert!(out[4].contains("t:3: in function <t:3>"), "{}", out[4]);
+    assert!(!out[4].contains("'raiser'"), "{}", out[4]);
+}

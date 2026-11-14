@@ -9,7 +9,7 @@ use orbit_lua_syntax::{ParseOptions, parse, parse_with, unparse};
 fn err(src: &str) -> String {
     match parse("s.lua", src.as_bytes()) {
         Ok(_) => panic!("expected an error for {src:?}"),
-        Err(d) => d.to_lua_message("s.lua"),
+        Err(d) => d.to_message("s.lua"),
     }
 }
 
@@ -209,7 +209,7 @@ fn skips_a_first_comment_line() {
     };
     let ast = parse_with("s.lua", b"#!/usr/bin/lua\nx = = 1", &options).unwrap_err();
     assert_eq!(
-        ast.to_lua_message("s.lua"),
+        ast.to_message("s.lua"),
         "s.lua:2: unexpected symbol near '='"
     );
 }
@@ -236,9 +236,9 @@ fn parse_and_round_trip(path: &Path) -> Result<(), String> {
         max_depth: 1000,
         ..ParseOptions::default()
     };
-    let ast = parse_with("f.lua", &src, &options).map_err(|d| d.to_lua_message("f.lua"))?;
+    let ast = parse_with("f.lua", &src, &options).map_err(|d| d.to_message("f.lua"))?;
     let printed = unparse(&ast);
-    let again = parse_with("f.lua", &printed, &options).map_err(|d| d.to_lua_message("printed"))?;
+    let again = parse_with("f.lua", &printed, &options).map_err(|d| d.to_message("printed"))?;
     if unparse(&again) != printed {
         return Err("printing is not a fixed point".into());
     }

@@ -1,67 +1,66 @@
-//! The terminal side of line editing on Unix, through the `stty` command:
-//! the workspace forbids `unsafe`, which the termios calls would need, and
-//! `stty` is on every Unix (BusyBox included).
+//! The terminal side of line editing on Unix: the terminal's modes
+//! (`tcgetattr` and `tcsetattr`), its width (`TIOCGWINSZ`) and stopping
+//! on Ctrl-Z (`SIGTSTP`), through `rustix`'s safe interface, so the CLI
+//! has no `unsafe` of its own (ADR-6, ADR-7).
 
 use std::io;
-use std::process::{Command, Stdio};
+
+use rustix::process::{Signal, getpid, kill_process};
+use rustix::termios::{
+    InputModes, LocalModes, OptionalActions, SpecialCodeIndex, Termios, tcgetattr, tcgetwinsize,
+    tcsetattr,
+};
 
 use super::editor::Terminal;
 
 /// The terminal on standard input, with the settings to restore.
-pub struct Stty {
-    saved: String,
+pub struct Tty {
+    saved: Termios,
 }
 
-/// Run `stty args` on standard input; its output on success.
-fn stty(args: &[&str]) -> Option<String> {
-    let out = Command::new("stty")
-        .args(args)
-        .stdin(Stdio::inherit())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
+impl Tty {
+    /// The terminal, if standard input is one whose settings can be read.
+    pub fn new() -> Option<Tty> {
+        let saved = tcgetattr(io::stdin()).ok()?;
+        Some(Tty { saved })
+    }
 
-impl Stty {
-    /// The terminal, if `stty` can read its settings.
-    pub fn new() -> Option<Stty> {
-        let saved = stty(&["-g"]).filter(|s| !s.is_empty())?;
-        Some(Stty { saved })
+    /// Apply `t` to the terminal once the output written so far is sent,
+    /// as `stty` does.
+    fn set(t: &Termios) -> io::Result<()> {
+        Ok(tcsetattr(io::stdin(), OptionalActions::Drain, t)?)
     }
 }
 
-impl Terminal for Stty {
+impl Terminal for Tty {
     fn raw(&mut self) -> io::Result<()> {
         // One key at a time, no echo, and Ctrl-C, Ctrl-Z and Ctrl-S arrive
         // as keys. Output processing stays on, so `\n` still starts a line.
-        let args = [
-            "-icanon", "-echo", "-isig", "-iexten", "-ixon", "-icrnl", "min", "1", "time", "0",
-        ];
-        match stty(&args) {
-            Some(_) => Ok(()),
-            None => Err(io::Error::other("stty failed")),
-        }
+        let mut t = self.saved.clone();
+        t.local_modes -=
+            LocalModes::ICANON | LocalModes::ECHO | LocalModes::ISIG | LocalModes::IEXTEN;
+        t.input_modes -= InputModes::IXON | InputModes::ICRNL;
+        t.special_codes[SpecialCodeIndex::VMIN] = 1;
+        t.special_codes[SpecialCodeIndex::VTIME] = 0;
+        Tty::set(&t)
     }
 
     fn restore(&mut self) {
-        stty(&[&self.saved]);
+        let _ = Tty::set(&self.saved);
     }
 
     fn width(&mut self) -> usize {
-        stty(&["size"])
-            .and_then(|s| s.split_whitespace().nth(1)?.parse().ok())
+        tcgetwinsize(io::stdin())
+            .map(|w| usize::from(w.ws_col))
+            .ok()
             .filter(|&c| c > 0)
             .unwrap_or(80)
     }
 
     fn suspend(&mut self) {
         self.restore();
-        let _ = Command::new("kill")
-            .args(["-TSTP", &std::process::id().to_string()])
-            .status();
+        // Stops here until the shell continues the process.
+        let _ = kill_process(getpid(), Signal::TSTP);
         let _ = self.raw();
     }
 }

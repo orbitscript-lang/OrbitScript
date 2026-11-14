@@ -10,6 +10,8 @@
 //!   checks a program's `compatibility_version` against them), and Lua's
 //!   names exported next to rustc's list.
 //! - Windows: `capi.c` marks Lua's names `dllexport` (`luaconf.h`).
+//!
+//! It also computes the build's identity (`BUILD_ID` in `lib.rs`).
 
 use std::env::var;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,7 @@ fn main() {
     let os = var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let vendor = var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
     let lua = orbit_lua_version::LuaVersion::from_build_env();
+    build_id();
     if os == "linux" || os == "android" || os.ends_with("bsd") {
         let dir = var("CARGO_MANIFEST_DIR").unwrap_or_default();
         let map = std::fs::read_to_string(format!("{dir}/liborbit.map")).expect("liborbit.map");
@@ -32,10 +35,10 @@ fn main() {
         )
         .expect("OUT_DIR is writable");
         println!(
-            "cargo:rustc-link-arg-cdylib=-Wl,--version-script={}",
+            "cargo:rustc-link-arg=-Wl,--version-script={}",
             out.display()
         );
-        println!("cargo:rustc-link-arg-cdylib=-Wl,-soname,liborbit.so.0");
+        println!("cargo:rustc-link-arg=-Wl,-soname,liborbit.so.0");
         use_lld();
     } else if vendor == "apple" {
         let version = format!("{}.0", lua.dotted());
@@ -49,7 +52,7 @@ fn main() {
             "-exported_symbol,_orbit_newstate",
             "-exported_symbol,_orbit_debug_listen",
         ] {
-            println!("cargo:rustc-link-arg-cdylib=-Wl,{arg}");
+            println!("cargo:rustc-link-arg=-Wl,{arg}");
         }
     }
 }
@@ -67,9 +70,9 @@ fn use_lld() {
     for prefix in [bundled.as_deref(), None] {
         if links_with_lld(&linker, prefix) {
             if let Some(dir) = prefix {
-                println!("cargo:rustc-link-arg-cdylib=-B{}", dir.display());
+                println!("cargo:rustc-link-arg=-B{}", dir.display());
             }
-            println!("cargo:rustc-link-arg-cdylib=-fuse-ld=lld");
+            println!("cargo:rustc-link-arg=-fuse-ld=lld");
             return;
         }
     }
@@ -123,4 +126,86 @@ fn rustc_defaults_to_lld() -> bool {
         .nth(2)
         .and_then(|m| m.parse::<u32>().ok());
     minor.is_some_and(|m| m >= 90)
+}
+
+/// Writes `build_id.rs`: a hash of everything that decides the layout of
+/// the types the programs and the library share. That is the workspace's
+/// sources and manifests, the lock file (the dependencies' versions), the
+/// compiler and the target. Programs compare it with the loaded library's
+/// at start-up (`check_build!`).
+///
+/// `ORBIT_BUILD_SALT` is mixed in, for tests that need a second identity
+/// from the same sources.
+fn build_id() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    println!("cargo:rerun-if-env-changed=ORBIT_BUILD_SALT");
+    let manifest = PathBuf::from(var("CARGO_MANIFEST_DIR").expect("cargo sets it"));
+    let crates = manifest.parent().expect("crates/").to_path_buf();
+    let root = crates.parent().expect("the workspace").to_path_buf();
+    println!("cargo:rerun-if-changed={}", crates.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("Cargo.lock").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("Cargo.toml").display()
+    );
+
+    let mut files = vec![root.join("Cargo.lock"), root.join("Cargo.toml")];
+    source_files(&crates, &mut files);
+    files.sort();
+    // DefaultHasher's algorithm is fixed within one Rust release, and the
+    // compiler's version is part of the identity.
+    let mut h = DefaultHasher::new();
+    for file in &files {
+        file.strip_prefix(&root).unwrap_or(file).hash(&mut h);
+        std::fs::read(file).unwrap_or_default().hash(&mut h);
+    }
+    let rustc = var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
+    if let Ok(v) = Command::new(rustc).arg("-vV").output() {
+        v.stdout.hash(&mut h);
+    }
+    for name in [
+        "TARGET",
+        "PROFILE",
+        "OPT_LEVEL",
+        "DEBUG",
+        "ORBIT_BUILD_SALT",
+    ] {
+        var(name).unwrap_or_default().hash(&mut h);
+    }
+    let mut features: Vec<String> = std::env::vars()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("CARGO_FEATURE_"))
+        .collect();
+    features.sort();
+    features.hash(&mut h);
+
+    let out = PathBuf::from(var("OUT_DIR").expect("cargo sets OUT_DIR")).join("build_id.rs");
+    std::fs::write(out, format!("{:#x}\n", h.finish())).expect("OUT_DIR is writable");
+}
+
+/// The files under `dir` that go into a build: everything but the tests,
+/// examples and build output of each crate.
+fn source_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if path.is_dir() {
+            if !["tests", "examples", "benches", "target"]
+                .iter()
+                .any(|skip| name == *skip)
+            {
+                source_files(&path, files);
+            }
+        } else {
+            files.push(path);
+        }
+    }
 }

@@ -4,9 +4,12 @@ use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, LabelId, LocalId, LocalKind, Span, StmtId};
 
 use super::expr::Part;
+use super::mode::{Mode, Reporter};
+use super::observe::{Local, Observer};
 use super::pattern::Access;
 use super::{Dest, LResult, LoopCtx, Lowerer};
 use crate::ast::{self, ExprKind as K};
+use crate::code;
 
 /// A numeric `for` header: `a..=b`, `(a..=b).rev()`, `(a..=b).step_by(s)`,
 /// `(a..=b).rev().step_by(s)`.
@@ -19,10 +22,10 @@ struct RangeHeader<'a> {
     span: Span,
 }
 
-impl Lowerer {
+impl<'a, M: Mode<'a>> Lowerer<'a, M> {
     pub(super) fn if_expr(
         &mut self,
-        e: &ast::Expr,
+        e: &'a ast::Expr,
         dest: &Dest,
         out: &mut Vec<StmtId>,
     ) -> LResult<()> {
@@ -38,8 +41,8 @@ impl Lowerer {
     fn if_chain(
         &mut self,
         cond: ExprId,
-        then: &ast::Block,
-        mut else_: Option<&ast::Expr>,
+        then: &'a ast::Block,
+        mut else_: Option<&'a ast::Expr>,
         span: Span,
         dest: &Dest,
         out: &mut Vec<StmtId>,
@@ -84,8 +87,8 @@ impl Lowerer {
 
     pub(super) fn match_expr(
         &mut self,
-        scrutinee: &ast::Expr,
-        arms: &[ast::Arm],
+        scrutinee: &'a ast::Expr,
+        arms: &'a [ast::Arm],
         span: Span,
         dest: &Dest,
         out: &mut Vec<StmtId>,
@@ -114,13 +117,14 @@ impl Lowerer {
             // An `if` chain, the first catch-all arm (if any) as its `else`.
             let mut hir_arms = Vec::new();
             let mut else_block = None;
-            for arm in arms {
+            for (i, arm) in arms.iter().enumerate() {
                 let test = self.arm_test(&arm.pat, &subjects)?;
                 let block = self.arm_body(arm, &subjects, dest, None)?;
                 match test {
                     Some(t) => hir_arms.push((t, block)),
                     None => {
                         else_block = Some(block);
+                        self.unreached_arms(&arms[i + 1..], &subjects, dest)?;
                         break;
                     }
                 }
@@ -149,7 +153,7 @@ impl Lowerer {
             let name = self.syms.result;
             let done = self.f().add_label(hir::Label { name, span });
             let mut catch_all = false;
-            for arm in arms {
+            for (i, arm) in arms.iter().enumerate() {
                 let test = self.arm_test(&arm.pat, &subjects)?;
                 let block = self.arm_body(arm, &subjects, dest, Some(done))?;
                 match test {
@@ -165,6 +169,7 @@ impl Lowerer {
                         self.push(&mut stmts, hir::StmtKind::Block(block), arm.span);
                         if arm.guard.is_none() {
                             catch_all = true;
+                            self.unreached_arms(&arms[i + 1..], &subjects, dest)?;
                             break;
                         }
                     }
@@ -180,8 +185,25 @@ impl Lowerer {
         Ok(())
     }
 
+    /// The arms after one that always matches never run, and the compiler drops them unread.
+    /// A collecting walk reads them, for their errors and their names.
+    fn unreached_arms(
+        &mut self,
+        arms: &'a [ast::Arm],
+        subjects: &[LocalId],
+        dest: &Dest,
+    ) -> LResult<()> {
+        if M::Reporter::RECOVERS {
+            for arm in arms {
+                self.arm_test(&arm.pat, subjects)?;
+                self.arm_body(arm, subjects, dest, None)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The test for an arm's pattern (`None` if it always matches).
-    fn arm_test(&mut self, pat: &ast::Pat, subjects: &[LocalId]) -> LResult<Option<ExprId>> {
+    fn arm_test(&mut self, pat: &'a ast::Pat, subjects: &[LocalId]) -> LResult<Option<ExprId>> {
         if let ast::PatKind::Or(alts) = &pat.kind {
             if alts
                 .iter()
@@ -189,7 +211,7 @@ impl Lowerer {
             {
                 // `(0, _) | (_, 0)`: alternatives over all the subjects.
                 let mut test: Option<ExprId> = None;
-                for alt in alts {
+                for (i, alt) in alts.iter().enumerate() {
                     let mut binds = Vec::new();
                     match &alt.kind {
                         ast::PatKind::Tuple(items) => {
@@ -200,12 +222,19 @@ impl Lowerer {
                         _ => self.pattern_binds(alt, &Access::Local(subjects[0]), &mut binds)?,
                     }
                     if !binds.is_empty() {
-                        return Err(self.error(
+                        self.report(
                             alt.span,
+                            code::OR_PATTERN_BINDING,
                             "bindings inside `|` patterns are not supported yet",
-                        ));
+                        )?;
                     }
                     let Some(t) = self.arm_test(alt, subjects)? else {
+                        // As for an alternative of one value that always matches.
+                        if M::Reporter::RECOVERS {
+                            for unreached in &alts[i + 1..] {
+                                self.arm_test(unreached, subjects)?;
+                            }
+                        }
                         return Ok(None);
                     };
                     test = Some(match test {
@@ -232,12 +261,12 @@ impl Lowerer {
     /// An arm's bindings, guard and body. With `done`, the body jumps there when it finishes.
     fn arm_body(
         &mut self,
-        arm: &ast::Arm,
+        arm: &'a ast::Arm,
         subjects: &[LocalId],
         dest: &Dest,
         done: Option<LabelId>,
     ) -> LResult<BlockId> {
-        self.open_scope();
+        self.open_scope(arm.span);
         let mut stmts = Vec::new();
         let result = (|| {
             let mut binds = Vec::new();
@@ -248,7 +277,7 @@ impl Lowerer {
             } else {
                 self.pattern_binds(&arm.pat, &Access::Local(subjects[0]), &mut binds)?;
             }
-            self.emit_binds(binds, &mut stmts);
+            self.emit_binds(binds, None, &mut stmts);
             let mut body = Vec::new();
             self.tail(&arm.body, dest, &mut body)?;
             if let Some(done) = done {
@@ -314,8 +343,8 @@ impl Lowerer {
     pub(super) fn loop_(
         &mut self,
         label: Option<ast::Name>,
-        cond: Option<&ast::Expr>,
-        body: &ast::Block,
+        cond: Option<&'a ast::Expr>,
+        body: &'a ast::Block,
         span: Span,
         dest: &Dest,
         out: &mut Vec<StmtId>,
@@ -391,23 +420,30 @@ impl Lowerer {
     pub(super) fn for_(
         &mut self,
         label: Option<ast::Name>,
-        pat: &ast::Pat,
-        iter: &ast::Expr,
-        body: &ast::Block,
+        pat: &'a ast::Pat,
+        iter: &'a ast::Expr,
+        body: &'a ast::Block,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<()> {
         let header = self.range_header(iter)?;
+        // After an error in the pattern, the names it meant to bind are declared in the loop
+        // as plain variables.
+        let mut recovered: Vec<&'a ast::Pat> = Vec::new();
         // The loop variables, checked before anything is lowered.
         let names: Vec<Option<ast::Name>> = match &pat.kind {
             ast::PatKind::Bind { name, mutable } => {
                 if *mutable {
-                    return Err(self.error(
+                    self.report(
                         pat.span,
+                        code::MUT_LOOP_VARIABLE,
                         "loop variables can't be `mut`; copy into a `let mut` in the body",
-                    ));
+                    )?;
+                    recovered.push(pat);
+                    vec![None]
+                } else {
+                    vec![Some(*name)]
                 }
-                vec![Some(*name)]
             }
             ast::PatKind::Wild => vec![None],
             ast::PatKind::Tuple(items) if header.is_none() => {
@@ -420,18 +456,34 @@ impl Lowerer {
                         } => names.push(Some(*name)),
                         ast::PatKind::Wild => names.push(None),
                         _ => {
-                            return Err(self.error(item.span, "a `for` pattern holds names or `_`"));
+                            self.report(
+                                item.span,
+                                code::FOR_PATTERN,
+                                "a `for` pattern holds names or `_`",
+                            )?;
+                            recovered.push(item);
+                            names.push(None);
                         }
                     }
                 }
                 names
             }
             _ => {
-                return Err(self.error(
+                self.report(
                     pat.span,
+                    code::FOR_PATTERN,
                     "a `for` pattern holds a name, `_` or a tuple of them",
-                ));
+                )?;
+                recovered.push(pat);
+                vec![None]
             }
+        };
+        // The loop variables' scope, as the observer is told of it.
+        let extent = pat.span.to(body.span);
+        let loop_var = |name: ast::Name| Local {
+            full: name.span,
+            let_end: None,
+            def: None,
         };
 
         let (kind, brk) = match header {
@@ -474,14 +526,16 @@ impl Lowerer {
                         h.span,
                     )),
                 };
-                self.open_scope();
+                self.open_scope(extent);
+                self.declare_recovered(&recovered);
                 let var = self.new_local(
                     names[0].map(|n| n.sym),
                     names[0].map_or(pat.span, |n| n.span),
                     LocalKind::ForControl,
                 );
                 if let Some(n) = names[0] {
-                    self.bind_local(n.sym, var, false);
+                    let id = self.observer.local(n, loop_var(n));
+                    self.bind_local(n.sym, var, false, id);
                 }
                 let body = self.for_body(label, body);
                 let mut none = Vec::new();
@@ -500,7 +554,8 @@ impl Lowerer {
             None => {
                 let iter = self.values(iter, out)?;
                 let hidden = [(); 4].map(|_| self.new_local(None, span, LocalKind::Hidden));
-                self.open_scope();
+                self.open_scope(extent);
+                self.declare_recovered(&recovered);
                 let mut vars = Vec::with_capacity(names.len());
                 for (i, n) in names.iter().enumerate() {
                     // Only the first variable is the control variable (as in Lua 5.5); all
@@ -512,8 +567,9 @@ impl Lowerer {
                     };
                     let local =
                         self.new_local(n.map(|n| n.sym), n.map_or(pat.span, |n| n.span), kind);
-                    if let Some(n) = n {
-                        self.bind_local(n.sym, local, false);
+                    if let Some(n) = *n {
+                        let id = self.observer.local(n, loop_var(n));
+                        self.bind_local(n.sym, local, false, id);
                     }
                     vars.push(local);
                 }
@@ -537,11 +593,20 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Declares in the loop's scope the names of the patterns it couldn't have as loop
+    /// variables. Only a collecting walk has any, and its HIR is dropped.
+    fn declare_recovered(&mut self, pats: &[&'a ast::Pat]) {
+        let mut dropped = Vec::new();
+        for pat in pats {
+            self.declare_pattern_names(pat, None, &mut dropped);
+        }
+    }
+
     /// A `for` loop's body, and the label its `break`s jump to, which goes after the loop.
     fn for_body(
         &mut self,
         label: Option<ast::Name>,
-        body: &ast::Block,
+        body: &'a ast::Block,
     ) -> LResult<(BlockId, Option<LabelId>)> {
         self.cur().loops.push(LoopCtx {
             label: label.map(|l| l.sym),
@@ -561,7 +626,7 @@ impl Lowerer {
     }
 
     /// Recognises a numeric `for` header.
-    fn range_header<'a>(&self, iter: &'a ast::Expr) -> LResult<Option<RangeHeader<'a>>> {
+    fn range_header(&mut self, iter: &'a ast::Expr) -> LResult<Option<RangeHeader<'a>>> {
         let mut e = iter;
         let mut step = None;
         let mut rev = false;
@@ -571,9 +636,9 @@ impl Lowerer {
         {
             if name.sym == self.syms.step_by {
                 if args.len() != 1 {
-                    return Err(self.error(e.span, "`step_by` takes one step"));
+                    self.report(e.span, code::RANGE_ADAPTER, "`step_by` takes one step")?;
                 }
-                step = Some(&args[0]);
+                step = args.first();
                 e = obj;
             }
         }
@@ -583,7 +648,7 @@ impl Lowerer {
         {
             if name.sym == self.syms.rev {
                 if !args.is_empty() {
-                    return Err(self.error(e.span, "`rev` takes no arguments"));
+                    self.report(e.span, code::RANGE_ADAPTER, "`rev` takes no arguments")?;
                 }
                 rev = true;
                 e = obj;
@@ -605,52 +670,95 @@ impl Lowerer {
                 step,
                 span: e.span,
             })),
-            _ if rev || step.is_some() => Err(self.error(
-                iter.span,
-                "`.rev()` and `.step_by(s)` apply to a range in a `for` header, in that order",
-            )),
-            _ => Ok(None),
+            _ => {
+                if rev || step.is_some() {
+                    self.report(
+                        iter.span,
+                        code::RANGE_ADAPTER,
+                        "`.rev()` and `.step_by(s)` apply to a range in a `for` header, in that order",
+                    )?;
+                    // Goes on with the range these calls are on, if there is one.
+                    while let K::MethodCall { obj: inner, .. } | K::Paren(inner) = &e.kind {
+                        e = inner;
+                    }
+                    if let K::Range {
+                        start,
+                        end,
+                        inclusive,
+                    } = &e.kind
+                    {
+                        return Ok(Some(RangeHeader {
+                            start,
+                            end,
+                            inclusive: *inclusive,
+                            rev,
+                            step,
+                            span: e.span,
+                        }));
+                    }
+                }
+                Ok(None)
+            }
         }
     }
 
-    fn find_loop(&self, label: Option<ast::Name>, span: Span, what: &str) -> LResult<usize> {
+    /// The loop a `break` or `continue` leaves. `None` is the recovery from the errors here:
+    /// there is no such loop.
+    fn find_loop(
+        &mut self,
+        label: Option<ast::Name>,
+        span: Span,
+        what: &str,
+    ) -> LResult<Option<usize>> {
         let ctx = self.funcs.last().expect("function");
-        let loops = &ctx.loops;
         let found = match label {
-            None => loops.len().checked_sub(1),
-            Some(l) => loops.iter().rposition(|c| c.label == Some(l.sym)),
+            None => ctx.loops.len().checked_sub(1),
+            Some(l) => ctx.loops.iter().rposition(|c| c.label == Some(l.sym)),
         };
-        if found.is_none() && ctx.scope_action {
-            return Err(self.error(span, format!("`{what}` can't leave a `scope` action")));
+        if found.is_some() {
+            return Ok(found);
+        }
+        if ctx.scope_action {
+            self.report(
+                span,
+                code::LEAVES_SCOPE_ACTION,
+                format!("`{what}` can't leave a `scope` action"),
+            )?;
+            return Ok(None);
         }
         match label {
-            None => loops
-                .len()
-                .checked_sub(1)
-                .ok_or_else(|| self.error(span, format!("`{what}` outside of a loop"))),
-            Some(l) => loops
-                .iter()
-                .rposition(|c| c.label == Some(l.sym))
-                .ok_or_else(|| {
-                    self.error(
-                        l.span,
-                        format!("use of undeclared label `'{}`", self.text(l.sym)),
-                    )
-                }),
-        }
+            None => self.report(
+                span,
+                code::OUTSIDE_LOOP,
+                format!("`{what}` outside of a loop"),
+            )?,
+            Some(l) => self.report(
+                l.span,
+                code::UNDECLARED_LABEL,
+                format!("use of undeclared label `'{}`", self.text(l.sym)),
+            )?,
+        };
+        Ok(None)
     }
 
     pub(super) fn break_(
         &mut self,
         label: Option<ast::Name>,
-        value: Option<&ast::Expr>,
+        value: Option<&'a ast::Expr>,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<()> {
-        let i = self.find_loop(label, span, "break")?;
+        let Some(i) = self.find_loop(label, span, "break")? else {
+            return value.map_or(Ok(()), |v| self.only_check(v));
+        };
         if let Some(v) = value {
             if !self.cur().loops[i].is_loop {
-                return Err(self.error(v.span, "`break` with a value is only allowed in `loop`"));
+                self.report(
+                    v.span,
+                    code::BREAK_VALUE,
+                    "`break` with a value is only allowed in `loop`",
+                )?;
+                return self.only_check(v);
             }
             let dest = self.cur().loops[i].dest.clone();
             match dest {
@@ -678,7 +786,9 @@ impl Lowerer {
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<()> {
-        let i = self.find_loop(label, span, "continue")?;
+        let Some(i) = self.find_loop(label, span, "continue")? else {
+            return Ok(());
+        };
         let label = self.loop_label(i, false, span);
         self.push(out, hir::StmtKind::Goto(label), span);
         Ok(())

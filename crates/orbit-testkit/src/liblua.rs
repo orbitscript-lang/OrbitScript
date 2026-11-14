@@ -18,8 +18,9 @@ Runs the Lua test suite through a program built for Lua's shared
 library, with OrbitScript's library installed under Lua's name.
 
 options:
-  --lib PATH    the library (default target/release/liborbit_lib.so; build it
-                with cargo build --release -p orbit-lib)
+  --lib PATH    the library (default target/package/out/lib/liborbit.so.0, or
+                target/package-lua5.4/out/... with --lua 5.4; lay it out
+                with ./build.sh)
   --host PATH   the program (default target/reference-lua/bin/lua5.5-host,
                 from scripts/build-reference-lua.sh; with --lua 5.4,
                 target/reference-lua-5.4/bin/lua5.4-host)
@@ -29,7 +30,7 @@ Other options are conformance's (see conformance --help), for example
 
 pub fn main(args: &[String]) -> Result<bool> {
     let root = util::repo_root();
-    let mut lib = root.join("target/release/liborbit_lib.so");
+    let mut lib = None;
     let mut host = None;
     let mut lua = conformance::VERSIONS[0].to_string();
     let mut rest = Vec::new();
@@ -40,7 +41,7 @@ pub fn main(args: &[String]) -> Result<bool> {
                 lua = it.next().ok_or("--lua needs a value")?.clone();
                 rest.extend(["--lua".to_string(), lua.clone()]);
             }
-            "--lib" => lib = PathBuf::from(it.next().ok_or("--lib needs a value")?),
+            "--lib" => lib = Some(PathBuf::from(it.next().ok_or("--lib needs a value")?)),
             "--host" => host = Some(PathBuf::from(it.next().ok_or("--host needs a value")?)),
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -49,6 +50,14 @@ pub fn main(args: &[String]) -> Result<bool> {
             _ => rest.push(a.clone()),
         }
     }
+    let lib = lib.unwrap_or_else(|| {
+        let package = if lua == conformance::VERSIONS[0] {
+            "package".to_string()
+        } else {
+            format!("package-lua{lua}")
+        };
+        root.join(format!("target/{package}/out/lib/liborbit.so.0"))
+    });
     let host = host.unwrap_or_else(|| {
         let dir = if lua == conformance::VERSIONS[0] {
             "reference-lua".to_string()

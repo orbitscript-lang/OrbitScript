@@ -6,7 +6,7 @@ use orbit_hir::{StrId, StringPool};
 use orbit_orb_syntax::ast::{self, TypeKind};
 
 use super::view::SymbolView;
-use crate::resolve::{Def, Defs, Owner};
+use crate::observe::{Def, Defs, Owner};
 use crate::symbols::{SymbolId, SymbolKind};
 use crate::types::{FnTy, Names, Ty, TypeId, Types};
 

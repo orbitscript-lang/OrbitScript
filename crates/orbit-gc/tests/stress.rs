@@ -9,7 +9,7 @@
 mod common;
 
 use common::*;
-use orbit_gc::{Gc, WeakMode};
+use orbit_gc::{Gc, Verify, WeakMode};
 use std::collections::HashSet;
 
 /// Everything the collector must keep: roots, queued finalizers, and what
@@ -113,6 +113,8 @@ fn run(seed: u64, ops: usize, stress: bool, modes: Modes) {
         ..Default::default()
     });
     h.set_stress(stress);
+    // In debug builds the heap verifier also checks every marking.
+    h.set_verify(Verify::Every);
     let mut roots = Stack(Vec::new());
     if modes == Modes::Generational {
         h.set_mode(orbit_gc::Mode::Generational, &mut roots);

@@ -1,0 +1,17 @@
+Deletes: Pin slots are roots, with no barrier: this deletes them from the roots instead.
+Tests: pinned_value
+
+diff --git a/crates/orbit-runtime/src/vm/mod.rs b/crates/orbit-runtime/src/vm/mod.rs
+index 60e17c6..1ddd157 100644
+--- a/crates/orbit-runtime/src/vm/mod.rs
++++ b/crates/orbit-runtime/src/vm/mod.rs
+@@ -786,9 +786,6 @@ impl Roots<LuaSpace> for Runtime {
+         for &v in &self.pinned {
+             mark(m, v);
+         }
+-        for &v in &self.pin_slots.values {
+-            mark(m, v);
+-        }
+         for &s in self.metas.field_names.all() {
+             m.mark(s);
+         }

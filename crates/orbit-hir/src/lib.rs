@@ -9,6 +9,7 @@
 //! This crate has no dependencies, and in particular none on any front end.
 
 mod analyze;
+mod diag;
 mod ids;
 mod print;
 mod source;
@@ -16,6 +17,7 @@ mod strings;
 mod verify;
 
 pub use analyze::{AnalysisError, analyze};
+pub use diag::{Code, Diagnostic, DiagnosticData, DiagnosticKind, Near, Severity};
 pub use print::print;
 pub use verify::{VerifyError, verify, verify_lowered};
 

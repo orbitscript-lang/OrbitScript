@@ -28,19 +28,32 @@ orbit-hir = { path = "../orbit-hir" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 signal-hook = "0.4.5"
+# liborbit, for the shared layout (`shared`).
+orbit-lib = { path = "../orbit-lib", optional = true }
+
+# The terminal for line editing (`src/repl/tty.rs`).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "termios", "process"], optional = true }
 
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["std"] }
+
+# Finds MSVC's C compiler for the C module tests (`tests/c_modules.rs`).
+[target.'cfg(windows)'.dev-dependencies]
+cc = "1.2"
+
+# A pseudo-terminal for the line editor's tests (`tests/tty.rs`).
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "termios", "process", "pty", "fs"] }
 
 [features]
 default = ["runtime", "c-modules", "ffi", "json", "line-editing", "dap"]
 # The runtime linked into the binaries: one self-contained `orbit`.
 runtime = ["orbit/default"]
-# The runtime in liborbit instead (ADR-10), which also carries `orbit-std`,
-# the C module loader and `ffi` for the binaries to install. Build with
-# `--no-default-features --features shared,line-editing`; `runtime` wins
-# when both are on.
-shared = ["orbit/shared"]
+# The runtime in liborbit instead (ADR-10): the binaries link the library
+# as a Rust `dylib` and hold only their own code. The library and the
+# binaries must come from one build, so only `./build.sh` builds this.
+shared = ["dep:orbit-lib", "orbit/default"]
 # Load C modules (on by default in the CLI).
 c-modules = ["dep:orbit-capi"]
 # The `ffi` library, on unless `--no-ffi` is given (ADR-9).
@@ -55,7 +68,7 @@ ffi-system-libffi = ["ffi", "orbit-std/ffi-system-libffi"]
 # input is read as a script, as a pipe is.
 repl = []
 # Line editing, history and Tab completion in interactive mode.
-line-editing = ["repl"]
+line-editing = ["repl", "dep:rustix"]
 # The debugger engine (ADR-12), without a way in yet.
 debugger = ["orbit/debugger"]
 # `orbit --debug-server`: run a script under an editor's debugger (ADR-12).

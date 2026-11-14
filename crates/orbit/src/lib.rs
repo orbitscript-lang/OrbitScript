@@ -20,26 +20,12 @@
 //! assert_eq!(answer, 42);
 //! ```
 
-// stabby's trait macros nest deeply for the boundary's larger traits.
-#![recursion_limit = "1024"]
-
-#[cfg(not(any(runtime_backend, shared_backend)))]
-compile_error!("orbit needs a backend: enable the `runtime` or the `shared` feature");
-
-/// The `liborbit` boundary, for `orbit-lib` and the shared backend.
-#[cfg(any(feature = "abi", shared_backend))]
-#[doc(hidden)]
-pub mod abi;
 mod chunk;
 mod class;
 mod compiler;
 #[cfg(feature = "debugger")]
 pub mod debugger;
 mod error;
-/// liborbit's side of the boundary, for `orbit-lib`.
-#[cfg(all(feature = "abi", runtime_backend))]
-#[doc(hidden)]
-pub mod export;
 mod host;
 mod isolate;
 mod pin;
@@ -63,6 +49,10 @@ pub use value::{
     FromValue, FromValueError, Function, IntoValue, IntoValues, Pairs, Resumed, Str, Table, Thread,
     ThreadStatus, Userdata, Value,
 };
+
+/// The messages of Lua's argument errors, for natives that raise one
+/// themselves: `s.arg_error(1, arg_errors::NO_INTEGER_REP)`.
+pub use orbit_runtime::arg_errors;
 
 /// Byte strings for natives and embedders (ADR-5): Lua strings need not be
 /// UTF-8.

@@ -5,8 +5,6 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::PathBuf;
 
-use orbit::{Call, Error, Ret};
-
 /// A file name from Lua bytes. On Unix any bytes are a valid name; elsewhere
 /// names must be text, and invalid UTF-8 is replaced.
 pub(crate) fn os_path(bytes: &[u8]) -> PathBuf {
@@ -36,32 +34,20 @@ pub(crate) fn os_bytes(s: &OsStr) -> Vec<u8> {
     }
 }
 
-/// The C library's text for an I/O error (`No such file or directory`),
-/// without the ` (os error 2)` that Rust appends. On Windows, where Rust
-/// gives the system's own message ("The system cannot find the file
-/// specified."), it is the C runtime's text for the error, as Lua reports it.
+/// The C library's text for an I/O error (`No such file or directory`), as
+/// Lua reports it: `strerror` of its `errno` ([`crate::crt`]). An error that
+/// didn't come from the system keeps its own message.
 pub fn os_error_text(e: &io::Error) -> String {
-    #[cfg(windows)]
-    if e.raw_os_error().is_some() {
-        return crate::crt::errno_text(crate::crt::errno(e));
-    }
-    let s = e.to_string();
-    match s.rfind(" (os error ") {
-        Some(i) => s[..i].to_string(),
-        None => s,
+    match crate::crt::errno(e) {
+        Some(errno) => crate::crt::errno_text(errno),
+        None => e.to_string(),
     }
 }
 
 /// The C library's `errno` for an I/O error, the code Lua's file functions
 /// return (0 when the error didn't come from the OS).
 pub(crate) fn os_error_code(e: &io::Error) -> i64 {
-    match e.raw_os_error() {
-        #[cfg(windows)]
-        Some(_) => i64::from(crate::crt::errno(e)),
-        #[cfg(not(windows))]
-        Some(code) => i64::from(code),
-        None => 0,
-    }
+    crate::crt::errno(e).map_or(0, i64::from)
 }
 
 /// Create a new, empty file with a unique name in the temporary directory
@@ -106,17 +92,6 @@ pub(crate) fn temp_file() -> io::Result<(PathBuf, std::fs::File)> {
 /// `nil, message, code` for a failed file operation, as Lua's file
 /// functions return it. `name`, when given, prefixes the message.
 #[cfg(any(feature = "io", feature = "os"))]
-pub(crate) fn file_error<'s>(
-    c: &'s Call<'s>,
-    e: &io::Error,
-    name: Option<&[u8]>,
-) -> Result<Ret, Error> {
-    let (_, msg, code) = file_failure(e, name);
-    c.ret((orbit::Value::Nil, &msg[..], code))
-}
-
-/// [`file_error`]'s results, for natives on the stack API.
-#[cfg(any(feature = "io", feature = "os"))]
 pub(crate) type FileFailure = (orbit::stack::Nil, Vec<u8>, i64);
 
 #[cfg(any(feature = "io", feature = "os"))]
@@ -148,22 +123,10 @@ pub(crate) fn shell(cmd: &OsStr) -> std::process::Command {
     }
 }
 
-/// `true|nil, "exit"|"signal", code` for a finished child, as
-/// `os.execute` and a popen file's `close` return it.
-// used by io and os, which are features
-#[allow(dead_code)]
-pub(crate) fn exit_status<'s>(
-    c: &'s Call<'s>,
-    status: std::process::ExitStatus,
-) -> Result<Ret, Error> {
-    c.ret(exit_results(status))
-}
-
 /// What `os.execute` and `close` on a pipe return for a finished command:
 /// success (`true` or `nil`), `"exit"` or `"signal"`, and the code.
 pub(crate) type ExitResults = (Option<bool>, &'static str, i64);
 
-/// [`exit_status`]'s results, for natives on the stack API.
 // used by io and os, which are features
 #[allow(dead_code)]
 pub(crate) fn exit_results(status: std::process::ExitStatus) -> ExitResults {
@@ -185,8 +148,8 @@ pub(crate) fn exit_results(status: std::process::ExitStatus) -> ExitResults {
 /// the exit doesn't overtake it.
 // used by io and os, which are features
 #[allow(dead_code)]
-pub(crate) fn flush_stdout(c: &orbit::Scope<'_>) {
-    c.with_stdout(|out| {
+pub(crate) fn flush_stdout(s: &mut orbit::stack::Stack<'_>) {
+    s.with_stdout(|out| {
         let _ = out.flush();
     });
 }

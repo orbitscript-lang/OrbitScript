@@ -17,7 +17,7 @@ use crate::chunk::Chunk;
 use crate::error::{Error, ErrorKind};
 use crate::host::HostFunction;
 use crate::pin::{PinKind, Pinned};
-use crate::stack::{REGISTRY_INDEX, RIDX_GLOBALS, Raised, Stack, Status, Type};
+use crate::stack::{REGISTRY_INDEX, RIDX_GLOBALS, Raised, Stack, StackExt, Status, Type};
 use crate::value::{Function, IntoValue, Str, Table, Userdata, Value};
 
 /// Per-isolate state that handles reach without the VM: pinned handles
@@ -40,9 +40,6 @@ pub(crate) struct Shared {
 pub struct Scope<'s> {
     stack: RefCell<Stack<'s>>,
     pub(crate) shared: Rc<Shared>,
-    /// Where the program keeps the isolate's host values.
-    #[cfg(shared_backend)]
-    pub(crate) host: Rc<crate::stack::backend::HostState>,
 }
 
 impl fmt::Debug for Scope<'_> {
@@ -57,8 +54,6 @@ impl<'s> Scope<'s> {
             .find_extension::<Rc<Shared>, _>(Rc::clone)
             .expect("every VM the API reaches belongs to an isolate");
         let scope = Scope {
-            #[cfg(shared_backend)]
-            host: Rc::clone(&stack.host),
             stack: RefCell::new(stack),
             shared,
         };
@@ -172,6 +167,14 @@ impl<'s> Scope<'s> {
     /// `f` must not use the scope: the window is borrowed while it runs.
     pub fn with_stdout<R>(&self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
         self.stack().with_stdout(f)
+    }
+
+    /// Run `f` on the isolate's extension value of type `T`, made with
+    /// `Default` on first use: the per-isolate state natives read with
+    /// [`Stack::extension`](crate::stack::Stack::extension) and
+    /// [`State`](crate::stack::State). `f` must not use the scope.
+    pub fn extension<T: std::any::Any + Default, R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        self.stack().extension(f)
     }
 
     /// The decimal point of the isolate's locale (`.` in the C locale),

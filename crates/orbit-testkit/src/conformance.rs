@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use crate::process::{self, Exit, Spec};
 use crate::ratchet::Expected;
-use crate::util::{self, Result, io_err, json_str};
+use serde_json::{Value, json};
+
+use crate::util::{self, Result, io_err, lua_str};
 
 const USAGE: &str = "\
 usage: orbit-testkit conformance --interp PATH [options] [FILE...]
@@ -162,19 +164,19 @@ pub fn driver_source(entry: &Entry, flags: Flags) -> String {
     }
     // No internal test library, and tests must `require "debug"` themselves.
     s.push_str("T = nil\ndebug = nil\n");
-    let file = json_str(&entry.file); // a JSON string is a valid Lua string here
+    let file = lua_str(&entry.file);
     if entry.yields.is_empty() {
         let _ = writeln!(s, "dofile({file})");
     } else {
         let _ = writeln!(s, "local f = coroutine.wrap(assert(loadfile({file})))");
         for y in &entry.yields {
-            let _ = writeln!(s, "assert(f() == {})", json_str(y));
+            let _ = writeln!(s, "assert(f() == {})", lua_str(y));
         }
     }
     let _ = writeln!(
         s,
         "print({})",
-        json_str(&format!("\n{}", marker(&entry.file)))
+        lua_str(&format!("\n{}", marker(&entry.file)))
     );
     s
 }
@@ -532,6 +534,7 @@ fn run_entry(e: &Entry, interp: &Path, suite_dir: &Path, opts: &Options) -> Resu
         args.push(script.into());
         process::run(&Spec {
             program: program.clone(),
+            env: Vec::new(),
             args,
             cwd: suite_dir.to_path_buf(),
             timeout,
@@ -619,32 +622,29 @@ pub fn error_line(text: &str, file: &str) -> Option<u32> {
 }
 
 fn write_json(path: &Path, interp: &str, results: &[FileResult]) -> Result<()> {
-    let mut s = format!(
-        "{{\n  \"interpreter\": {},\n  \"files\": [\n",
-        json_str(interp)
-    );
-    for (i, r) in results.iter().enumerate() {
-        let status = match (&r.skipped, r.passed) {
-            (Some(_), _) => "skip",
-            (None, true) => "pass",
-            (None, false) => "fail",
-        };
-        let _ = writeln!(
-            s,
-            "    {{\"file\": {}, \"status\": \"{status}\", \"seconds\": {:.3}, \"detail\": {}{}}}{}",
-            json_str(&r.file),
-            r.wall.as_secs_f64(),
-            json_str(r.skipped.as_deref().unwrap_or(&r.detail)),
-            r.reached.as_ref().map_or(String::new(), |x| format!(
-                ", \"reached_line\": {}, \"reached_message\": {}, \"direct\": {}",
-                x.line.map_or("null".to_string(), |n| n.to_string()),
-                json_str(&x.message),
-                x.direct
-            )),
-            if i + 1 < results.len() { "," } else { "" }
-        );
-    }
-    s.push_str("  ]\n}\n");
+    let files: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            let status = match (&r.skipped, r.passed) {
+                (Some(_), _) => "skip",
+                (None, true) => "pass",
+                (None, false) => "fail",
+            };
+            let mut file = json!({
+                "file": r.file,
+                "status": status,
+                "seconds": (r.wall.as_secs_f64() * 1000.0).round() / 1000.0,
+                "detail": r.skipped.as_deref().unwrap_or(&r.detail),
+            });
+            if let Some(x) = &r.reached {
+                file["reached_line"] = json!(x.line);
+                file["reached_message"] = json!(x.message);
+                file["direct"] = json!(x.direct);
+            }
+            file
+        })
+        .collect();
+    let s = util::json_text(&json!({"interpreter": interp, "files": files}));
     fs::write(path, s).map_err(io_err(path.display()))
 }
 

@@ -16,8 +16,9 @@
 //! `orbit-capi`, which builds on this crate.
 
 mod base;
-#[cfg(windows)]
 mod crt;
+#[cfg(feature = "os")]
+mod ctime;
 #[cfg(feature = "io")]
 mod io;
 #[cfg(feature = "json")]
@@ -28,8 +29,6 @@ mod package;
 mod sys;
 #[cfg(feature = "os")]
 mod time;
-#[cfg(feature = "os")]
-mod tz;
 
 use orbit::{Error, Isolate, Scope};
 

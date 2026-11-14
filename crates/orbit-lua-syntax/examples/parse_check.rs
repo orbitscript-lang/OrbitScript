@@ -5,12 +5,12 @@ use std::io::Write;
 
 fn main() {
     let mut out = std::io::stdout().lock();
-    for path in std::env::args().skip(1) {
-        let src = std::fs::read(&path).expect("read source");
+    for arg in std::env::args_os().skip(1) {
+        let src = std::fs::read(&arg).expect("read source");
         let options = orbit_lua_syntax::ParseOptions::default();
         let line = match orbit_lua_syntax::to_hir("s.lua", &src, &options) {
             Ok(_) => b"ok".to_vec(),
-            Err(d) => d.to_lua_message_bytes(b"s.lua"),
+            Err(d) => d.to_message_bytes(b"s.lua"),
         };
         out.write_all(&line).unwrap();
         out.write_all(b"\x1e").unwrap();

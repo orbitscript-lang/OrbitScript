@@ -1,0 +1,3 @@
+fn f() { impl S { fn m(self) { 1 } } } //~ T0102
+struct S { x }
+f();

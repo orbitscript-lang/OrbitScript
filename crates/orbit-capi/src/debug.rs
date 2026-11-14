@@ -24,7 +24,10 @@ static REMOVED_AT_EXIT: AtomicBool = AtomicBool::new(false);
 /// Make `iso`, a new state, debuggable; whether it is.
 #[cfg(feature = "debugger")]
 pub(crate) fn serve(iso: &mut orbit::Isolate) -> bool {
-    let mut args = std::env::args();
+    // The host's command line, for the debugger to show. `args_os`, as
+    // `std::env::args` would panic inside the host on an argument that is
+    // not UTF-8; the description takes text, so it is converted lossily.
+    let mut args = std::env::args_os().map(|a| a.to_string_lossy().into_owned());
     let program = args.next().unwrap_or_default();
     let about = orbit_dap::About {
         program,

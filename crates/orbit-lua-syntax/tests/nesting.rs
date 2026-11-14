@@ -85,7 +85,7 @@ const SHAPES: &[Shape] = &[
 /// Runs the whole front end and the compiler on `src`.
 fn compile(src: &str) -> Result<(), String> {
     let hir = to_hir("test", src.as_bytes(), &ParseOptions::default())
-        .map_err(|d| d.to_lua_message("test"))?;
+        .map_err(|d| d.to_message("test"))?;
     orbit_compiler::compile(&hir).map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -4,12 +4,13 @@ use std::cell::{Ref, RefMut};
 
 use std::fmt;
 
+use orbit_runtime::arg_errors;
 use orbit_runtime::object::number;
 
 use crate::error::Error;
 use crate::pin::Pinned;
 use crate::scope::Scope;
-use crate::stack::{Continuation, Native, Outcome, Return, Stack, StackResult, Type};
+use crate::stack::{Native, Return, Stack, StackResult, Type};
 use crate::{OrbitStr, OrbitString};
 
 /// Any script value. Handles ([`Str`], [`Table`], ...) live as long as the
@@ -416,6 +417,14 @@ impl<'s> Table<'s> {
         self.s.run(|st| st.raw_set(self.idx))
     }
 
+    /// Set native `N` (one written with [`#[native]`](crate::native)) as
+    /// the field its name ends in, without metamethods: for a native named
+    /// `os.date`, `t.date`. The name is written once, in the attribute.
+    pub fn add_native<N: Native>(&self) -> Result<(), Error> {
+        let f = self.s.create_native::<N>();
+        self.raw_set(crate::stack::field_name(N::NAME), f)
+    }
+
     /// `#t`, with `__len`.
     // `#t` is a border, not a count, so `#t == 0` isn't emptiness
     #[allow(clippy::len_without_is_empty)]
@@ -553,9 +562,22 @@ impl<'s> Function<'s> {
             }
         };
         let mut stack = s.stack();
+        // This call may run inside a `__close` handler, while an outer
+        // traced call's error unwinds with its traceback already taken:
+        // that one waits here, out of this call's way.
+        let outer = match handler {
+            Handler::Traceback => stack.extension(|p: &mut PendingTraceback| p.0.take()),
+            _ => None,
+        };
         let r = match handler {
             Handler::None => stack.call(nargs, crate::stack::MULTRET),
             _ => stack.call_handled(nargs, crate::stack::MULTRET, at + 1),
+        };
+        let traceback = match handler {
+            Handler::Traceback => {
+                stack.extension(|p: &mut PendingTraceback| std::mem::replace(&mut p.0, outer))
+            }
+            _ => None,
         };
         match r {
             Ok(()) => {
@@ -569,13 +591,9 @@ impl<'s> Function<'s> {
                 Ok(s.last(n))
             }
             Err(e) => {
-                let tb = match handler {
-                    Handler::Traceback => stack.extension(|p: &mut PendingTraceback| p.0.take()),
-                    _ => None,
-                };
                 let err = s.error_of(&mut stack, e);
                 let _ = stack.set_top(at);
-                Err(err.with_traceback(tb))
+                Err(err.with_traceback(traceback))
             }
         }
     }
@@ -611,30 +629,9 @@ impl Native for TracebackHandler {
     }
 }
 
-/// The end of a [`Call::tail_call`](crate::Call::tail_call): the call's
-/// results, or its error, are the host function's.
-pub(crate) struct TailCalled;
-
-impl Continuation for TailCalled {
-    fn resume(_: &mut Stack<'_>, outcome: Outcome) -> StackResult<Return> {
-        match outcome {
-            Outcome::Ok(n) => Ok(Return::values(n)),
-            Outcome::Err(e) => Err(e),
-        }
-    }
-}
-
 // ---- threads ----------------------------------------------------------------
 
-/// What [`Thread::status`] reports, as `coroutine.status` does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThreadStatus {
-    Suspended,
-    Running,
-    /// It resumed another coroutine and waits for it.
-    Normal,
-    Dead,
-}
+pub use orbit_runtime::stack::ThreadStatus;
 
 /// What a resume ended with.
 #[derive(Debug)]
@@ -683,7 +680,6 @@ impl<'s> Userdata<'s> {
     /// The host value, if it is a `T` this API stored
     /// ([`Scope::create_userdata`], [`Class`](crate::Class)). While the
     /// borrow lives, other operations on the scope panic.
-    #[cfg(runtime_backend)]
     pub fn borrow<T: 'static>(&self) -> Result<Ref<'_, T>, Error> {
         let idx = self.idx;
         Ref::filter_map(self.s.stack_ref(), |stack| {
@@ -693,34 +689,10 @@ impl<'s> Userdata<'s> {
     }
 
     /// The host value, mutably, if it is a `T` this API stored.
-    #[cfg(runtime_backend)]
     pub fn borrow_mut<T: 'static>(&self) -> Result<RefMut<'_, T>, Error> {
         let idx = self.idx;
         RefMut::filter_map(self.s.stack(), |stack| {
             stack.userdata_in_place_mut::<T>(idx)
-        })
-        .map_err(|_| Error::runtime(not_a::<T>()))
-    }
-
-    /// The host value, if it is a `T` this API stored
-    /// ([`Scope::create_userdata`], [`Class`](crate::Class)). While the
-    /// borrow lives, making userdata and calling methods panic.
-    #[cfg(shared_backend)]
-    pub fn borrow<T: 'static>(&self) -> Result<Ref<'_, T>, Error> {
-        let id = self.s.stack().host_value_id(self.idx);
-        Ref::filter_map(self.s.host.values.borrow(), |v| {
-            id.and_then(|id| v.get::<T>(id)).and_then(Option::as_ref)
-        })
-        .map_err(|_| Error::runtime(not_a::<T>()))
-    }
-
-    /// The host value, mutably, if it is a `T` this API stored.
-    #[cfg(shared_backend)]
-    pub fn borrow_mut<T: 'static>(&self) -> Result<RefMut<'_, T>, Error> {
-        let id = self.s.stack().host_value_id(self.idx);
-        RefMut::filter_map(self.s.host.values.borrow_mut(), |v| {
-            id.and_then(|id| v.get_mut::<T>(id))
-                .and_then(Option::as_mut)
         })
         .map_err(|_| Error::runtime(not_a::<T>()))
     }
@@ -750,7 +722,7 @@ impl FromValueError {
     /// The message, given the type name of the value that failed.
     pub(crate) fn message(self, got: &str) -> String {
         match self {
-            FromValueError::Expected(want) => format!("{want} expected, got {got}"),
+            FromValueError::Expected(want) => arg_errors::type_mismatch(want, got),
             FromValueError::Invalid(why) => why.to_owned(),
         }
     }
@@ -806,9 +778,9 @@ impl<'s> FromValue<'s> for i64 {
         };
         match n {
             Some(Value::Int(i)) => Ok(i),
-            Some(Value::Float(f)) => number::float_to_int(f).ok_or(FromValueError::Invalid(
-                "number has no integer representation",
-            )),
+            Some(Value::Float(f)) => {
+                number::float_to_int(f).ok_or(FromValueError::Invalid(arg_errors::NO_INTEGER_REP))
+            }
             _ => Err(FromValueError::Expected("number")),
         }
     }

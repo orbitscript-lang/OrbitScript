@@ -1,0 +1,2 @@
+extern open;
+let scope _ = open(); //~ T0702

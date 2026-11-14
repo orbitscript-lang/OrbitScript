@@ -44,11 +44,11 @@ fn long_chains_fit_a_2_mib_stack() {
             for (shape, chain) in SHAPES {
                 let src = chain(LINKS);
                 let ast = parse_with("test", src.as_bytes(), &options)
-                    .unwrap_or_else(|d| panic!("{shape}: {}", d.to_lua_message("test")));
+                    .unwrap_or_else(|d| panic!("{shape}: {}", d.to_message("test")));
                 assert!(!unparse(&ast).is_empty(), "{shape}");
                 drop(ast);
                 let hir = to_hir("test", src.as_bytes(), &options)
-                    .unwrap_or_else(|d| panic!("{shape}: {}", d.to_lua_message("test")));
+                    .unwrap_or_else(|d| panic!("{shape}: {}", d.to_message("test")));
                 assert!(!orbit_hir::print(&hir).is_empty(), "{shape}");
                 orbit_compiler::compile(&hir).unwrap_or_else(|e| panic!("{shape}: {e}"));
             }

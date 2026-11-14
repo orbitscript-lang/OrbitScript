@@ -78,7 +78,7 @@ fn long_chains_fit_a_2_mib_stack() {
                 let found: Vec<_> = ws
                     .diagnostics(f)
                     .iter()
-                    .map(|d| format!("{}: {}", d.code.as_str(), d.message))
+                    .map(|d| format!("{}: {}", d.code, d.message))
                     .collect();
                 assert!(
                     found.len() < 5 && !found.iter().any(|d| d.starts_with("T0001")),

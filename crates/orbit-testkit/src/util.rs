@@ -114,33 +114,33 @@ pub fn geomean(xs: &[f64]) -> Option<f64> {
     Some((xs.iter().map(|x| x.ln()).sum::<f64>() / xs.len() as f64).exp())
 }
 
-/// Quotes a string as a JSON string literal.
-pub fn json_str(s: &str) -> String {
+/// A report as pretty-printed JSON, ending in a newline.
+pub fn json_text(report: &serde_json::Value) -> String {
+    let mut text = serde_json::to_string_pretty(report).expect("a JSON value always serializes");
+    text.push('\n');
+    text
+}
+
+/// Quotes a string as a Lua string literal. Every byte outside printable
+/// ASCII, and the quote and backslash, become decimal escapes, which Lua
+/// reads back byte for byte.
+pub fn lua_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
+    for &b in s.as_bytes() {
+        match b {
+            b'"' | b'\\' => {
+                out.push('\\');
+                out.push(b as char);
             }
-            c => out.push(c),
+            0x20..=0x7e => out.push(b as char),
+            _ => {
+                let _ = write!(out, "\\{b:03}");
+            }
         }
     }
     out.push('"');
     out
-}
-
-/// A JSON number, or `null` for values JSON can't carry.
-pub fn json_num(x: Option<f64>) -> String {
-    match x {
-        Some(v) if v.is_finite() => format!("{v}"),
-        _ => "null".to_string(),
-    }
 }
 
 /// Splits a manifest line into whitespace-separated fields, dropping a
@@ -158,11 +158,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn json_escapes() {
-        assert_eq!(json_str("a\"b\\c\nd\u{1}"), r#""a\"b\\c\nd\u0001""#);
-        assert_eq!(json_num(Some(1.5)), "1.5");
-        assert_eq!(json_num(Some(f64::NAN)), "null");
-        assert_eq!(json_num(None), "null");
+    fn quoting() {
+        assert_eq!(lua_str("a\"b\\c\nd\u{1}é"), r#""a\"b\\c\010d\001\195\169""#);
+        let report = serde_json::json!({"x": f64::NAN, "y": 1.5, "z": None::<f64>});
+        assert_eq!(
+            json_text(&report),
+            "{\n  \"x\": null,\n  \"y\": 1.5,\n  \"z\": null\n}\n"
+        );
     }
 
     #[test]

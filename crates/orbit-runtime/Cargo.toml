@@ -9,10 +9,14 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# Numerals and extended UTF-8, read the same way in source and by the runtime.
+orbit-lua-text = { path = "../orbit-lua-text" }
 orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-gc = { path = "../orbit-gc" }
 # The Lua version (ADR-14); its `links` metadata also tells the build script.
 orbit-lua-version = { path = "../orbit-lua-version" }
+# `#[native]` for the built-in libraries (build time only: a proc macro).
+orbit-macros = { path = "../orbit-macros" }
 
 # The build script compiles the built-in OrbitScript modules (ADR-11); none
 # of this is linked into the runtime.
@@ -26,6 +30,11 @@ orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 orbit-compiler = { path = "../orbit-compiler" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
+
+# Tests only: `string.pack`'s native alignment checked against the C
+# library's `max_align_t`, where `libc` defines it.
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple", all(windows, target_env = "gnu", target_arch = "x86_64")))'.dev-dependencies]
+libc = { version = "0.2", default-features = false }
 
 [lints]
 workspace = true

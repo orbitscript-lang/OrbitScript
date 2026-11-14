@@ -1,13 +1,15 @@
 //! The command line against the reference `lua`'s observable behaviour
 //! (`main.lua` checks the rest once the libraries it uses land).
 
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 /// Run `orbit` with `args`, `stdin` as its input and a clean environment
 /// apart from `env`.
 fn orbit(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_orbit"));
+    let mut c = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")));
     c.args(args)
         .env_clear()
         .envs(env.iter().copied())
@@ -15,12 +17,12 @@ fn orbit(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = c.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // Options such as `-v` and `-e` end without reading standard input, and
+    // the program may already have exited: a closed pipe is no failure.
+    match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        r => r.unwrap(),
+    }
     child.wait_with_output().unwrap()
 }
 
@@ -119,6 +121,43 @@ fn environment() {
     assert!(out(&o).starts_with("a;") && out(&o).ends_with(";b\n"));
 }
 
+/// On Windows the default paths start in the program's directory, which
+/// a path from the environment can name with `!` too, as in the reference
+/// build.
+#[cfg(windows)]
+#[test]
+fn windows_paths_are_relative_to_the_program() {
+    let exe = common::bin("orbit", env!("CARGO_BIN_EXE_orbit"));
+    let lua = orbit::LUA.dotted();
+    let o = orbit(&["-e", "print(package.path) print(package.cpath)"], "", &[]);
+    // The directory as the system names the program, which may be spelled
+    // differently from the path the test started it by.
+    let dir = out(&o).split("\\lua\\?.lua;").next().unwrap().to_string();
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+    assert_eq!(
+        canonical(std::path::Path::new(&dir)),
+        canonical(exe.parent().unwrap()),
+        "{}",
+        out(&o)
+    );
+    assert_eq!(
+        out(&o),
+        format!(
+            "{dir}\\lua\\?.lua;{dir}\\lua\\?\\init.lua;{dir}\\?.lua;{dir}\\?\\init.lua;\
+             {dir}\\..\\share\\lua\\{lua}\\?.lua;{dir}\\..\\share\\lua\\{lua}\\?\\init.lua;\
+             .\\?.lua;.\\?\\init.lua;{dir}\\..\\share\\orbit\\?.orb;\
+             {dir}\\..\\share\\orbit\\?\\init.orb;.\\?.orb;.\\?\\init.orb\n\
+             {dir}\\?.dll;{dir}\\..\\lib\\lua\\{lua}\\?.dll;{dir}\\loadall.dll;.\\?.dll\n"
+        )
+    );
+    let o = orbit(
+        &["-e", "print(package.cpath)"],
+        "",
+        &[("LUA_CPATH", "!\\x\\?.dll")],
+    );
+    assert_eq!(out(&o), format!("{dir}\\x\\?.dll\n"));
+}
+
 #[test]
 fn error_objects() {
     let o = orbit(&["-e", "error{}"], "", &[]);
@@ -184,7 +223,7 @@ fn print_output_reaches_a_pipe_at_once() {
     use std::io::{BufRead, BufReader};
     // The script keeps running after printing, so the line can only arrive
     // in time if `print` flushed it.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orbit"))
+    let mut child = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .args([
             "-e",
             "print('ready') local t = os.time() while os.time() - t < 20 do end",
@@ -216,7 +255,7 @@ fn second_ctrl_c_ends_a_long_library_call() {
     use std::time::{Duration, Instant};
     // Quadratic in our matcher: every 'a' is a start that scans to the end.
     // Seconds per 100,000 bytes in a release build, so this runs for minutes.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orbit"))
+    let mut child = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .args([
             "-e",
             "print(15) string.find(string.rep('a', 1000000), 'a.*b') print('finished')",
@@ -285,7 +324,7 @@ fn memory_limit_from_the_environment() {
 /// Without the `c-modules` feature, `package.loadlib` gives Lua's result for
 /// a build without dynamic libraries. (A shared build has liborbit's.)
 #[test]
-#[cfg(not(any(feature = "c-modules", bundled)))]
+#[cfg(not(feature = "c-modules"))]
 fn loadlib_is_absent_without_c_modules() {
     let o = orbit(
         &["-e", "print(select(3, package.loadlib('x.so', 'f')))"],
@@ -299,7 +338,7 @@ fn loadlib_is_absent_without_c_modules() {
 #[test]
 #[cfg(not(feature = "repl"))]
 fn no_interactive_mode() {
-    let out = Command::new(env!("CARGO_BIN_EXE_orbit"))
+    let out = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .arg("-i")
         .output()
         .unwrap();
@@ -333,5 +372,71 @@ fn usage_lists_no_ffi() {
         err(&o).contains("--no-ffi  leave out the 'std.ffi' module"),
         "{}",
         err(&o)
+    );
+}
+
+/// Arguments that are not UTF-8 reach the script as the bytes given, as
+/// in `lua`, in `arg`, in `...`, in `-e` code and as the script's name.
+#[cfg(unix)]
+#[test]
+fn arguments_are_bytes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = std::env::temp_dir().join(format!("orbit-args-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let code = "io.write(arg[0]:match('[^/]*$'), '\\t', tostring(arg[1] == '\\xff\\xfe'), '\\t', \
+                select('#', ...), '\\t', tostring((...) == '\\xff\\xfe'), '\\t', tostring(x == '\\xfa'), '\\n')";
+    // Some file systems (APFS) refuse names that are not UTF-8.
+    let mut name: &[u8] = b"s\xff.lua";
+    if std::fs::write(dir.join(OsStr::from_bytes(name)), code).is_err() {
+        name = b"s.lua";
+        std::fs::write(dir.join(OsStr::from_bytes(name)), code).unwrap();
+    }
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg("-e")
+        .arg(OsStr::from_bytes(b"x='\xfa'"))
+        .arg(dir.join(OsStr::from_bytes(name)))
+        .arg(OsStr::from_bytes(b"\xff\xfe"))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(o.status.success(), "{}", err(&o));
+    let mut expected = name.to_vec();
+    expected.extend_from_slice(b"\ttrue\t1\ttrue\ttrue\n");
+    assert_eq!(o.stdout, expected, "{}", out(&o));
+
+    // An unknown option is reported with its bytes.
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg(OsStr::from_bytes(b"-\xff"))
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let needle = b"unrecognized option '-\xff'";
+    assert!(
+        o.stderr.windows(needle.len()).any(|w| w == needle),
+        "{}",
+        err(&o)
+    );
+}
+
+/// On Windows, opening a directory or a name ending in `/` fails with the
+/// errno lua5.5 built with the C runtime reports.
+#[cfg(windows)]
+#[test]
+fn windows_trailing_slash_errors() {
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg("-e")
+        .arg(
+            "for _, c in ipairs{{'/', 'w'}, {'./', 'w'}, {'./', 'r'}, {'.', 'w'}, \
+             {'orbit-no-such-dir/', 'w'}, {'orbit-no-such-dir/', 'r'}} do \
+             print(c[1], c[2], select(3, io.open(c[1], c[2]))) end",
+        )
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(
+        out(&o).replace('\r', ""),
+        "/\tw\t13\n./\tw\t13\n./\tr\t13\n.\tw\t13\n\
+         orbit-no-such-dir/\tw\t22\norbit-no-such-dir/\tr\t2\n"
     );
 }
