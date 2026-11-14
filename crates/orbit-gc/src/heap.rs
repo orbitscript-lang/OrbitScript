@@ -10,6 +10,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
+#[cfg(debug_assertions)]
+pub(crate) mod verify;
+
 /// Collector tuning.
 ///
 /// A cycle starts when the heap reaches [`Params::growth`] percent over the
@@ -108,6 +111,26 @@ impl Default for Params {
             max_objects: crate::arena::MAX_OBJECTS,
         }
     }
+}
+
+/// When the heap verifier runs ([`Heap::set_verify`], debug builds only).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Verify {
+    /// Never, the default.
+    #[default]
+    Off,
+    /// At the end of every marking, minor collections included. A minor
+    /// collection then costs a walk of the whole heap, so under stress mode
+    /// a program with a big heap slows down by its size.
+    Every,
+    /// At the end of every full marking, and of a minor collection once
+    /// the bytes allocated since the last check reach what
+    /// [`Heap::bytes`] was then: the
+    /// walks cost about as much as the allocation between them. A barrier
+    /// missed in a minor collection that is not checked frees an object
+    /// still referred to; a later check reports that handle as stale, as
+    /// long as the object holding it is still reachable.
+    Paced,
 }
 
 /// How the heap collects.
@@ -246,6 +269,17 @@ pub struct Heap<S: Space> {
     /// is done, before any slot is swept: weak references outside the heap
     /// are being cleared in steps.
     sweeping_weak: bool,
+    /// When the heap verifier runs ([`Heap::set_verify`]).
+    #[cfg(debug_assertions)]
+    verifier: Verify,
+    /// Bytes allocated (charged) so far, for [`Verify::Paced`].
+    #[cfg(debug_assertions)]
+    charged: usize,
+    /// `charged` and `bytes` when the verifier last ran.
+    #[cfg(debug_assertions)]
+    charged_at_check: usize,
+    #[cfg(debug_assertions)]
+    bytes_at_check: usize,
 }
 
 impl<S: Space> fmt::Debug for Heap<S> {
@@ -315,6 +349,8 @@ impl<S: Space + Default> Heap<S> {
                 scratch: Vec::new(),
                 marked_bytes: 0,
                 seen: 0,
+                #[cfg(debug_assertions)]
+                check: Default::default(),
             },
             retrace: Vec::new(),
             state: State::Pause,
@@ -348,6 +384,14 @@ impl<S: Space + Default> Heap<S> {
             major_before: 0,
             major_adapt: false,
             sweeping_weak: false,
+            #[cfg(debug_assertions)]
+            verifier: Verify::Off,
+            #[cfg(debug_assertions)]
+            charged: 0,
+            #[cfg(debug_assertions)]
+            charged_at_check: 0,
+            #[cfg(debug_assertions)]
+            bytes_at_check: 0,
         }
     }
 }
@@ -655,6 +699,10 @@ impl<S: Space> Heap<S> {
     // ---- pacing ---------------------------------------------------------
 
     fn charge(&mut self, n: usize) {
+        #[cfg(debug_assertions)]
+        {
+            self.charged = self.charged.wrapping_add(n);
+        }
         self.bytes += n;
         self.debt += n as isize;
     }
@@ -855,6 +903,31 @@ impl<S: Space> Heap<S> {
 
     pub fn is_stress(&self) -> bool {
         self.stress
+    }
+
+    /// Turn the heap verifier on or off ([`Verify`]). In debug builds
+    /// only, at the end of a marking it walks the heap again from the roots
+    /// and panics if it reaches an object the collector did not mark, or
+    /// follows a stale handle, naming the chain of objects that leads
+    /// there. It also checks [`Heap::bytes`] against what the objects add
+    /// up to. Slow: for tests, with [`Heap::set_stress`] so collections are
+    /// frequent. In release builds it does nothing
+    /// ([`VERIFIER`](crate::VERIFIER)).
+    pub fn set_verify(&mut self, when: Verify) {
+        #[cfg(debug_assertions)]
+        {
+            self.verifier = when;
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = when;
+    }
+
+    /// When the verifier runs: always [`Verify::Off`] in release builds.
+    pub fn verify_mode(&self) -> Verify {
+        #[cfg(debug_assertions)]
+        return self.verifier;
+        #[cfg(not(debug_assertions))]
+        Verify::Off
     }
 
     // ---- driving --------------------------------------------------------
@@ -1600,6 +1673,8 @@ impl<S: Space> Heap<S> {
         roots.clear_weak(&live);
         self.weak.clear();
         self.marks.clear_waiting();
+        #[cfg(debug_assertions)]
+        self.verify(roots, MINOR);
     }
 
     // ---- sweeping -------------------------------------------------------

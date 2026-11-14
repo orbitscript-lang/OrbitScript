@@ -26,7 +26,7 @@ pub mod value;
 pub use func::{Cell, Closure, FieldCache, Proto, ProtoCode};
 pub use mem::NoMemory;
 pub use meta::MetaField;
-pub use orbit_gc::{Gc, Heap};
+pub use orbit_gc::{Gc, Heap, Verify};
 pub use orbit_str::{OrbitStr, OrbitString};
 pub use string::{Interner, LuaStr};
 pub use table::Table;

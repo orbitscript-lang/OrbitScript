@@ -445,6 +445,25 @@ impl Gc<'_> {
     pub fn set_stress(&mut self, on: bool) {
         self.vm.heap.set_stress(on);
     }
+
+    /// Check the heap at the end of markings, and panic, naming the chain
+    /// of objects from a root, if the collector missed an object it can
+    /// reach (a missed write barrier) or the byte count is off. Debug
+    /// builds only: slow, for tests, best with [`Gc::set_stress`].
+    ///
+    /// `every`: check every minor collection too, which makes each cost a
+    /// walk of the whole heap. Otherwise a minor collection is checked once
+    /// as many bytes as the heap holds have been allocated since the last
+    /// check, and every full marking is.
+    #[cfg(debug_assertions)]
+    pub fn set_verify(&mut self, on: bool, every: bool) {
+        use orbit_runtime::object::Verify;
+        self.vm.heap.set_verify(match (on, every) {
+            (false, _) => Verify::Off,
+            (true, false) => Verify::Paced,
+            (true, true) => Verify::Every,
+        });
+    }
 }
 
 /// Make `vm` one the API can reach (scopes, handles, host functions), with
