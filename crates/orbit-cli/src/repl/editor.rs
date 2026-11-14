@@ -4,7 +4,7 @@
 //! The editor reads keys from any [`Read`] and draws on any [`Write`], so
 //! the tests drive it without a terminal. [`Terminal`] switches the real
 //! terminal between its normal mode and the character-at-a-time mode the
-//! editor reads in (`crate::tty` does it with `stty`).
+//! editor reads in (`tty.rs` does it on Unix).
 //!
 //! Lines are edited as `char`s. Bytes that aren't UTF-8 become characters
 //! in a private-use range (see [`raw_char`]) and turn back into the same

@@ -113,7 +113,7 @@ On a terminal, interactive mode edits lines with its own editor instead of GNU r
 
 Both are Cargo features of `orbit-cli`, on by default: `line-editing` (the editor) and `repl` (interactive mode itself, which `line-editing` turns on). A build without `line-editing` reads plain lines; one without `repl` has no `-i` (it's an unrecognized option) and runs a terminal on standard input as a script, as it does a pipe.
 
-Why: readline would be the CLI's first C library dependency. Ours is written in safe Rust with no new crates and switches the terminal mode through `stty`, since the workspace forbids `unsafe`.
+Why: readline would be the CLI's first C library dependency. Ours is written in safe Rust and switches the terminal mode through `rustix`'s safe `termios` interface, since the workspace forbids `unsafe`.
 
 Suite: `main.lua` checks the warning, which holds.
 
