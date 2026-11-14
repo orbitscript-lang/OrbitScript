@@ -2,7 +2,9 @@
 //! with the system C compiler and loads it into `orbit`. The same module
 //! loads into the reference `lua5.5`, which passes `cmod/testmod.lua` too.
 //! A shared build loads it through liborbit's C module loader.
-#![cfg(all(target_os = "linux", any(feature = "c-modules", bundled)))]
+#![cfg(all(target_os = "linux", feature = "c-modules"))]
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -42,7 +44,7 @@ fn module_dir() -> &'static Path {
 }
 
 fn orbit(args: &[&str], cpath: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orbit"))
+    Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .args(args)
         .env("LUA_CPATH", cpath)
         .env_remove(orbit_std::versioned_env("LUA_CPATH"))

@@ -14,6 +14,11 @@
 #                     headers and library names
 #   --static          lay out the static `orbit`, `orbitc`, `orbit-lsp` and
 #                     `orbit-fmt` instead of the shared layout
+#   --static-programs lay out the shared layout's files, but with the static
+#                     programs and liborbit as a C library only (liblua),
+#                     built with link-time optimization: for a target that
+#                     can't train a profile, where the Rust `dylib` would be
+#                     slower (ADR-10). The programs don't use that liborbit
 #   --out DIR         where to lay it out (default target/package/out)
 #   --profile NAME    the cargo profile (default release)
 #   --pgo FILE        optimize with the profile FILE (default
@@ -46,12 +51,20 @@
 # trained with the defaults; with other options --pgo-check reports the
 # functions that differ.
 #
-# The shared layout (ADR-10): liborbit holds the runtime once, `orbit`,
-# `orbitc` and the language server `orbit-lsp` are built with `orbit`'s
-# `shared` feature and find it through their run path, and Lua's library
-# names are aliases of it, so programs built for that Lua use it too. The
-# names below are a 5.5 build's; a 5.4 build has the same with 5.4 (lua54.dll). The
-# formatter `orbit-fmt` doesn't link the runtime and is the same in both.
+# The shared layout (ADR-10): liborbit, a Rust `dylib`, holds the runtime
+# once, with Rust's standard library inside it. `orbit`, `orbitc` and the
+# language server `orbit-lsp` are built with their `shared` feature, link
+# it as a Rust crate and find it through their run path, and Lua's library
+# names are aliases of it, so programs built for that Lua use it too.
+# Stable Rust has no link-time optimization for a `dylib`, so this layout
+# is built without it and relies on the profile for its speed: built
+# without a profile it can be up to 30% slower than the static layout
+# (the script says so when that happens). The programs and liborbit must
+# come from one build: they compare their build's identity when they
+# start (tools/check-shared-layout.sh tests that, and the layout). The
+# names below are a 5.5 build's; a 5.4 build has the same with 5.4
+# (lua54.dll). The formatter `orbit-fmt` doesn't link the runtime and is the
+# same in both.
 #   Linux:   bin/orbit, bin/orbitc, bin/orbit-lsp, bin/orbit-fmt
 #            lib/liborbit.so.0, and liborbit.so, liblua5.5.so.0 (Debian),
 #                liblua-5.5.so (Fedora), liblua.so.5.5 (upstream) linking to it
@@ -80,6 +93,7 @@ lua=5.5
 profile=release
 triple=
 layout=shared
+programs=shared
 pgo=
 no_pgo=no
 train=no
@@ -95,6 +109,7 @@ while [ $# -gt 0 ]; do
         --target) triple=${2:?--target needs a value}; shift 2 ;;
         --lua) lua=${2:?--lua needs a value}; shift 2 ;;
         --static) layout=static; shift ;;
+        --static-programs) programs=static; shift ;;
         --pgo) pgo=${2:?--pgo needs a value}; shift 2 ;;
         --no-pgo) no_pgo=yes; shift ;;
         --pgo-train) train=yes; shift ;;
@@ -125,6 +140,10 @@ host=$(rustc -vV | sed -n 's/^host: //p')
 [ -n "$triple" ] || triple=$host
 if [ "$no_pgo" = yes ] && { [ -n "$pgo" ] || [ "$train" = yes ] || [ "$check" = yes ]; }; then
     echo "build.sh: --no-pgo can't be combined with --pgo, --pgo-train or --pgo-check" >&2
+    exit 2
+fi
+if [ "$layout" = static ] && [ "$programs" = static ]; then
+    echo "build.sh: --static and --static-programs can't be combined" >&2
     exit 2
 fi
 if [ "$ffi" = no ] && [ "$system_libffi" = yes ]; then
@@ -209,15 +228,14 @@ join() {
     if [ -n "$1" ] && [ -n "$2" ]; then printf '%s,%s' "$1" "$2"; else printf '%s' "$1$2"; fi
 }
 cli_static=$(defaults orbit-cli)
-cli_shared=shared,line-editing,dap
 lib=$(defaults orbit-lib),debugger
+lsp=$(defaults orbit-lsp)
 [ "$ffi" = yes ] || {
     cli_static=$(without "$cli_static" ffi ffi-system-libffi)
     lib=$(without "$lib" ffi system-libffi)
 }
 [ "$debugger" = yes ] || {
     cli_static=$(without "$cli_static" dap debugger)
-    cli_shared=$(without "$cli_shared" dap debugger)
     lib=$(without "$lib" debugger)
 }
 [ "$system_libffi" = no ] || {
@@ -237,8 +255,8 @@ for f in $(printf '%s' "$features" | tr ',' ' '); do
     esac
 done
 cli_static=$(join "$cli_static" "$cli_extra")
-cli_shared=$(join "$cli_shared" "$cli_extra")
 lib=$(join "$lib" "$lib_extra")
+lsp=$(join "$lsp" "$lsp_extra")
 # `--features ""` is fine with cargo, but leaves a stray word in the log.
 features_arg() {
     [ -z "$1" ] || printf -- '--features %s' "$1"
@@ -259,10 +277,29 @@ package_args() {
 }
 static_args=$(package_args orbit-cli "$cli_static")
 lsp_static_args="-p orbit-lsp $(features_arg "$lsp_extra")"
-lsp_shared_args="-p orbit-lsp --no-default-features $(features_arg "$(join shared "$lsp_extra")")"
 fmt_args="-p orbit-fmt $(features_arg "$fmt_extra")"
-lib_args=$(package_args orbit-lib "$lib")
-shared_args="-p orbit-cli --no-default-features $(features_arg "$cli_shared")"
+# The features $2 as Cargo names them when several packages are built at
+# once: PKG/FEATURE for the package $1's own, and DEP/FEATURE as it is.
+qualified() {
+    list=
+    for f in $(printf '%s' "$2" | tr ',' ' '); do
+        case "$f" in
+            */*) list=$(join "$list" "$f") ;;
+            *) list=$(join "$list" "$1/$f") ;;
+        esac
+    done
+    printf '%s' "$list"
+}
+# The shared layout: liborbit and the programs that link it, in ONE Cargo
+# invocation. Cargo then settles on one feature set for every crate inside
+# liborbit; built by separate commands, the second would rebuild liborbit
+# with other features, and the programs would disagree about it. The
+# programs have the static layout's features, plus `shared`.
+lib_features=$lib
+shared_features=$(qualified orbit-lib "$lib")
+shared_features=$(join "$shared_features" "$(qualified orbit-cli "$(join "$cli_static" shared)")")
+shared_features=$(join "$shared_features" "$(qualified orbit-lsp "$(join "$lsp" shared)")")
+shared_args="-p orbit-lib -p orbit-cli -p orbit-lsp --no-default-features --features $shared_features"
 
 # The rustflags of a build optimized with the profile at $pgo.
 #
@@ -275,6 +312,67 @@ shared_args="-p orbit-cli --no-default-features $(features_arg "$cli_shared")"
 # a scalar remainder.
 use_profile() {
     build "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1"
+}
+
+# The shared layout's builds. Two things differ from the static ones.
+#
+# No link-time optimization: stable rustc has none for a `dylib`. The
+# profile's own setting (`lto = true` in Cargo.toml) stays for static builds.
+#
+# Rust's standard library goes into liborbit. Left alone, rustc sees the
+# toolchain's shared `libstd` and has the programs use that one, which then
+# clashes with the copy inside liborbit (and we don't ship a `libstd`).
+# Naming `std`'s static library leaves rustc only that one. lay_out checks
+# the result.
+profile_var=$(printf '%s' "$profile" | tr 'a-z-' 'A-Z_')
+shared_env="CARGO_PROFILE_${profile_var}_LTO=off"
+std_flags() {
+    libdir="$(rustc --print sysroot)/lib/rustlib/$triple/lib"
+    rlib=$(ls "$libdir"/libstd-*.rlib 2> /dev/null | head -n 1)
+    [ -n "$rlib" ] || {
+        echo "build.sh: no Rust standard library for $triple: rustup target add $triple" >&2
+        exit 1
+    }
+    # Toolchains that keep the metadata in its own file need both named.
+    rmeta=${rlib%.rlib}.rmeta
+    # rustc reads the flags from the environment, where Git Bash doesn't
+    # translate paths.
+    if command -v cygpath > /dev/null 2>&1; then
+        rlib=$(cygpath -w "$rlib")
+        rmeta=$(cygpath -w "$rmeta")
+    fi
+    [ ! -f "$rmeta" ] || printf -- '--extern\nstd=%s\n' "$rmeta"
+    printf -- '--extern\nstd=%s\n' "$rlib"
+}
+# `build` for the shared layout: the same arguments.
+build_shared() {
+    cargo_args=
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do
+        cargo_args="$cargo_args $1"
+        shift
+    done
+    [ $# -gt 0 ] && shift
+    old_ifs=$IFS
+    IFS='
+'
+    # shellcheck disable=SC2046 # one flag per line
+    set -- $(std_flags) "$@"
+    IFS=$old_ifs
+    # shellcheck disable=SC2086 # plain words
+    env "$shared_env" CARGO_TARGET_DIR="$target" CARGO_ENCODED_RUSTFLAGS="$(encoded_rustflags "$@")" \
+        "$cargo" build --profile "$profile" --target "$triple" $cargo_args
+}
+use_profile_shared() {
+    build_shared "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1"
+}
+
+# liborbit as a C library only (--static-programs): the same crate built as
+# a `cdylib`, which exports the C API alone and so can be link-time
+# optimized like a program. The extra rustflags are the arguments.
+build_c_library() {
+    CARGO_TARGET_DIR="$target" CARGO_ENCODED_RUSTFLAGS="$(encoded_rustflags "$@")" \
+        "$cargo" rustc --profile "$profile" --target "$triple" -p orbit-lib \
+        --no-default-features --features "$lib_features" --lib --crate-type cdylib
 }
 
 built_dir() {
@@ -399,6 +497,16 @@ lay_out() {
         cp "$headers/$h" "$dir/include/$h"
     done
     cp "$capi_include/orbit.h" "$dir/include/orbit.h"
+    # Nothing may ask for the toolchain's shared `libstd` (std_flags): its
+    # name would be among the libraries the file needs.
+    for f in $files; do
+        if grep -a -q -E '(lib)?std-[0-9a-f]{16}\.(so|dylib|dll)' "$dir/$f"; then
+            echo "build.sh: $f depends on Rust's shared standard library, which is not" >&2
+            echo "part of the layout: liborbit must hold it. This toolchain did not take" >&2
+            echo "the static one named with --extern std (see std_flags)." >&2
+            exit 1
+        fi
+    done
 }
 
 # Adds the language server and the formatter to the layout lay_out last
@@ -421,13 +529,31 @@ if [ "$train" = yes ]; then
         exit 1
     }
     # One profile covers both layouts: the static `orbit`, then liborbit and
-    # its `orbit`. Trained on the static build alone, liborbit ran 1.3-2.1x
-    # slower than the static build. The first instrumented build clears the
-    # raw counts of earlier runs.
+    # its `orbit`. The two builds' crates have different features, so
+    # different symbol names: with a profile of the static build alone,
+    # liborbit finds nothing for most of its functions and runs 1.1-1.3x
+    # slower. The first instrumented build clears the raw counts of earlier
+    # runs.
     raw="$target/pgo-profiles"
     instrument() {
         # shellcheck disable=SC2086 # $1 holds plain words
         CARGO_TARGET_DIR="$target" "$cargo" pgo instrument --profiles-dir "$raw" $2 build -- \
+            --profile "$profile" --target "$triple" $1
+    }
+    # The shared layout's build (build_shared). cargo-pgo adds its flags to
+    # RUSTFLAGS, which separates flags by spaces.
+    instrument_shared() {
+        flags=$(std_flags | tr '\n' ' ')
+        case "$(std_flags)" in
+            *" "*)
+                echo "build.sh: --pgo-train can't pass the toolchain's path to cargo-pgo:" >&2
+                echo "it has a space in it ($(rustc --print sysroot))" >&2
+                exit 1
+                ;;
+        esac
+        # shellcheck disable=SC2086 # $1 holds plain words
+        env "$shared_env" CARGO_TARGET_DIR="$target" RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$flags" \
+            "$cargo" pgo instrument --profiles-dir "$raw" --keep-profiles build -- \
             --profile "$profile" --target "$triple" $1
     }
     workload() {
@@ -438,9 +564,8 @@ if [ "$train" = yes ]; then
     lay_out static "$target/pgo-train/static"
     workload "$target/pgo-train/static/bin/orbit"
     echo "== training liborbit"
-    instrument "$lib_args" --keep-profiles
+    instrument_shared "$shared_args"
     import_lib
-    instrument "$shared_args" --keep-profiles
     lay_out shared "$target/pgo-train/shared"
     workload "$target/pgo-train/shared/bin/orbit"
     # `cargo pgo optimize` merges the counts with the same llvm-profdata, but
@@ -457,16 +582,21 @@ if [ "$check" = yes ]; then
     target="$root/target/pgo-check"
     mkdir -p "$target"
     log="$target/check.log"
-    # `orbit` only: training never runs `orbitc`, so the profile has nothing
-    # for the functions only it has.
+    # Both layouts: their crates are built with different features, so the
+    # profile holds each function once per layout. `orbit` only: training
+    # never runs `orbitc` or `orbit-lsp`, so the profile has nothing for the
+    # functions only they have.
     # shellcheck disable=SC2086 # plain words
     build $static_args --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" \
         -Cllvm-args=-pgo-warn-missing-function 2> "$log" || { cat "$log" >&2; exit 1; }
+    # shellcheck disable=SC2086 # plain words
+    build_shared $shared_args --lib --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" \
+        -Cllvm-args=-pgo-warn-missing-function 2>> "$log" || { cat "$log" >&2; exit 1; }
     # Only our crates: LLVM warns about dependencies too.
     stale='^warning: orbit.*\((hash mismatch)\|no profile data available for function\)'
-    grep "$stale" "$log" | sed 's/^warning: /  /' || true
-    changed=$(grep -c '^warning: orbit.*(hash mismatch)' "$log" || true)
-    new=$(grep -c '^warning: orbit.*no profile data available for function' "$log" || true)
+    grep "$stale" "$log" | sed 's/^warning: /  /' | sort -u || true
+    changed=$(grep '^warning: orbit.*(hash mismatch)' "$log" | sort -u | wc -l | tr -d ' ')
+    new=$(grep '^warning: orbit.*no profile data available for function' "$log" | sort -u | wc -l | tr -d ' ')
     echo "$changed changed, $new new or renamed"
     if [ "$changed" -eq 0 ] && [ "$new" -eq 0 ]; then
         echo "the profile matches the code"
@@ -479,23 +609,37 @@ fi
 if [ -n "$pgo" ] && [ -f "$pgo" ]; then
     echo "== optimizing with $pgo"
     run=use_profile
+    run_shared=use_profile_shared
+    c_library_flags="-Cprofile-use=$pgo${sep}-Cllvm-args=-vectorizer-min-trip-count=1"
 else
     [ "$no_pgo" = yes ] || echo "== no profile at $pgo: building without one"
     run=build
+    run_shared=build_shared
+    c_library_flags=
+    if [ "$layout" = shared ] && [ "$programs" = shared ]; then
+        echo "== note: the shared layout has no link-time optimization (liborbit is a" >&2
+        echo "   Rust dylib), so without a profile it can be up to 30% slower than the" >&2
+        echo "   static layout. Pass a profile with --pgo FILE (--pgo-train records one" >&2
+        echo "   on this machine; a profile captured on the target device works too)," >&2
+        echo "   or build the static layout with --static." >&2
+    fi
 fi
-if [ "$layout" = static ]; then
+if [ "$layout" = static ] || [ "$programs" = static ]; then
     # shellcheck disable=SC2086 # plain words
     $run $static_args
     # shellcheck disable=SC2086 # plain words
     $run $lsp_static_args
+    if [ "$layout" = shared ]; then
+        old_ifs=$IFS
+        IFS=$sep
+        # shellcheck disable=SC2086 # one flag per field
+        build_c_library $c_library_flags
+        IFS=$old_ifs
+    fi
 else
     # shellcheck disable=SC2086 # plain words
-    $run $lib_args
+    $run_shared $shared_args
     import_lib
-    # shellcheck disable=SC2086 # plain words
-    $run $shared_args
-    # shellcheck disable=SC2086 # plain words
-    $run $lsp_shared_args
 fi
 # shellcheck disable=SC2086 # plain words
 $run $fmt_args

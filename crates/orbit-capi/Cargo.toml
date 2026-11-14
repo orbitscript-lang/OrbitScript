@@ -27,6 +27,12 @@ host = []
 # `ORBIT_DEBUG` start the DAP server.
 debugger = ["host", "orbit/debugger", "dep:orbit-dap"]
 
+[dev-dependencies]
+# The tests run on the runtime backend, as the programs' builds select it.
+orbit = { path = "../orbit" }
+# The C host test speaks DAP to a debugged C state.
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
 [build-dependencies]
 cc = "1.2"
 orbit-lua-version = { path = "../orbit-lua-version" }

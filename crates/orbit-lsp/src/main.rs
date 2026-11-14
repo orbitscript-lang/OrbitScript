@@ -27,6 +27,13 @@ const SCRIPTS: &[(&str, &str)] = &[
 ];
 
 fn main() -> ExitCode {
+    // With the runtime in liborbit, it must be the one this program was
+    // built with, checked before anything else of it is used.
+    #[cfg(feature = "shared")]
+    if let Err(m) = orbit_lib::check_build!() {
+        eprintln!("orbit-lsp: {m}");
+        return ExitCode::FAILURE;
+    }
     if let Some(arg) = std::env::args_os().nth(1) {
         match arg.to_str().unwrap_or("") {
             "--version" => {

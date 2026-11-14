@@ -142,6 +142,7 @@ dependencies = [
  "orbit-dap",
  "orbit-lua-version",
  "orbit-std",
+ "serde_json",
 ]
 
 [[package]]
@@ -164,6 +165,7 @@ dependencies = [
  "orbit-compiler",
  "orbit-dap",
  "orbit-hir",
+ "orbit-lib",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
  "orbit-std",
@@ -228,8 +230,6 @@ dependencies = [
  "orbit-capi",
  "orbit-lua-version",
  "orbit-std",
- "serde_json",
- "stabby",
 ]
 
 [[package]]
@@ -247,6 +247,7 @@ dependencies = [
  "orbit",
  "orbit-check",
  "orbit-fmt",
+ "orbit-lib",
  "orbit-lua-syntax",
  "orbit-orb-syntax",
  "orbit-std",

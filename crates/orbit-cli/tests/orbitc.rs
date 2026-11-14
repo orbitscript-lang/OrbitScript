@@ -1,11 +1,13 @@
 //! `orbitc`, the compiler: options after `luac`, and chunks it writes run
 //! in `orbit`.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn orbitc(args: &[&str], dir: &PathBuf) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orbitc"))
+    Command::new(common::bin("orbitc", env!("CARGO_BIN_EXE_orbitc")))
         .args(args)
         .current_dir(dir)
         .output()
@@ -13,7 +15,7 @@ fn orbitc(args: &[&str], dir: &PathBuf) -> Output {
 }
 
 fn orbit(args: &[&str], dir: &PathBuf) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orbit"))
+    Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .args(args)
         .current_dir(dir)
         .output()

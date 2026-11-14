@@ -2,6 +2,18 @@
 //! (`chost/host.c`), built against orbit-capi's headers for the build's
 //! Lua version (ADR-14) and linked to
 //! `liborbit` as a program built for liblua would be (ADR-10).
+//!
+//! The tests need the library `./build.sh` laid out, named by
+//! `ORBIT_LIBORBIT`, so they are ignored in a plain `cargo test`:
+//!
+//! ```sh
+//! ./build.sh --no-pgo
+//! ORBIT_LIBORBIT=target/package/out/lib/liborbit.so.0 \
+//!     cargo test -p orbit-capi --features debugger --test chost -- --ignored
+//! ```
+//!
+//! Leave `--features debugger` out for a library built with
+//! `--no-debugger`.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -10,15 +22,13 @@ use std::sync::OnceLock;
 
 const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
 
-/// `liborbit_lib.so`, which Cargo builds next to this test (`deps/`).
+/// The laid-out `liborbit.so.0` under test.
 fn library() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let deps = exe.parent().unwrap();
-    [deps, deps.parent().unwrap()]
-        .iter()
-        .map(|d| d.join("liborbit_lib.so"))
-        .find(|p| p.is_file())
-        .expect("liborbit_lib.so built")
+    let path = std::env::var_os("ORBIT_LIBORBIT")
+        .map(PathBuf::from)
+        .expect("ORBIT_LIBORBIT names the liborbit that ./build.sh laid out");
+    assert!(path.is_file(), "no library at {}", path.display());
+    path
 }
 
 /// The host program and the directory holding `liborbit.so.0`, built once.
@@ -32,7 +42,7 @@ fn host() -> &'static (PathBuf, PathBuf) {
         std::fs::copy(library(), &soname).unwrap();
         let exe = dir.join("host");
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-        let include = Path::new(MANIFEST).join("../orbit-capi/csrc/include");
+        let include = Path::new(MANIFEST).join("csrc/include");
         let versioned = orbit::LUA.dotted();
         let out = Command::new(cc)
             .args(["-O1", "-Wall", "-Wextra", "-Werror", "-I"])
@@ -70,6 +80,7 @@ fn run(mode: &str) -> String {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn a_program_creates_uses_and_closes_a_state() {
     assert_eq!(
         run("basic"),
@@ -87,6 +98,7 @@ fn a_program_creates_uses_and_closes_a_state() {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn states_from_c_use_the_process_locale_unless_told_otherwise() {
     let out = run("locale");
     if out.contains("no pt_BR.utf8") {
@@ -105,21 +117,25 @@ fn states_from_c_use_the_process_locale_unless_told_otherwise() {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn libraries_open_one_by_one_or_through_preload() {
     assert_eq!(run("selected"), "table\tnil\tnil\tnil\ntable\t7\tnil\n");
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn an_unprotected_error_goes_to_the_panic_function() {
     assert_eq!(run("panic"), "panic: unprotected\n");
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn warnings_go_to_the_program_piece_by_piece() {
     assert_eq!(run("warn"), "warnings: @on|a+b|c|from +C|\n");
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn string_pointers_last_while_on_the_stack_and_no_longer() {
     assert_eq!(
         run("strings"),
@@ -128,6 +144,7 @@ fn string_pointers_last_while_on_the_stack_and_no_longer() {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn lua_gc_options() {
     assert_eq!(
         run("gc"),
@@ -141,6 +158,7 @@ fn lua_gc_options() {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn pseudo_indices_and_the_registry_follow_the_headers() {
     let mut want = "version: 1\n\
                     absindex: 1 1\n\
@@ -157,16 +175,19 @@ fn pseudo_indices_and_the_registry_follow_the_headers() {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn a_plain_state_keeps_the_allocator_and_drops_warnings() {
     assert_eq!(run("alloc"), "allocator kept: 1\nok\n");
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn states_are_independent() {
     assert_eq!(run("states"), "a\nb\nb still open\n");
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn hooks_set_from_c_run_and_can_stop_code() {
     // The reference liblua prints the same.
     assert_eq!(
@@ -184,6 +205,7 @@ fn hooks_set_from_c_run_and_can_stop_code() {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn locals_of_a_lua_caller_from_c() {
     // The reference liblua prints the same.
     assert_eq!(
@@ -200,6 +222,7 @@ fn locals_of_a_lua_caller_from_c() {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn to_be_closed_slots_from_c() {
     // The reference liblua prints the same.
     assert_eq!(
@@ -221,6 +244,7 @@ fn to_be_closed_slots_from_c() {
 }
 
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn threads_from_c() {
     // The reference liblua prints the same.
     assert_eq!(
@@ -291,6 +315,7 @@ fn spin(name: &str) -> (PathBuf, PathBuf) {
 
 #[cfg(not(feature = "debugger"))]
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn without_the_debugger_nothing_listens() {
     let (exe, dir) = host();
     let (script, stop) = spin("nodebug");
@@ -316,6 +341,7 @@ fn without_the_debugger_nothing_listens() {
 /// test talks to the socket through std).
 #[cfg(all(feature = "debugger", unix))]
 #[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn c_states_are_debugged_through_the_environment_or_the_api() {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixStream;

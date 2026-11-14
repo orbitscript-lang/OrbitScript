@@ -114,6 +114,12 @@ fn main() -> ExitCode {
     let prog = args
         .first()
         .map_or_else(|| "orbitc".into(), |p| args::text(p));
+    // As in `orbit`: liborbit must be the one this program was built with.
+    #[cfg(feature = "shared")]
+    if let Err(m) = orbit_lib::check_build!() {
+        eprintln!("{prog}: {m}");
+        return ExitCode::FAILURE;
+    }
     let cli = match parse(&args) {
         Ok(c) => c,
         Err(e) => return usage(&prog, &e),

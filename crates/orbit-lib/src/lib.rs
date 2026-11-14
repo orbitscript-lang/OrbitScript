@@ -1,75 +1,61 @@
-//! `liborbit`: the runtime as one shared library (ADR-10). It exports the
-//! Lua 5.5 C API under the version node `LUA_5.5` (or, built with the
-//! `lua-5-4` feature, Lua 5.4's under `LUA_5.4`, ADR-14), so programs built
-//! against that Lua run on OrbitScript when it is installed under Lua's
-//! names, and the Rust API's boundary (`orbit`'s `shared` feature): one
-//! check and one constructor, exported with `stabby`.
+//! `liborbit`: the runtime as one shared library (ADR-10).
 //!
-//! The C API lives in `orbit-capi` and the boundary's implementation in
-//! `orbit`; this crate links them into the library, names the library
-//! (`build.rs`), and carries the libraries above the API (`orbit-std`, the
-//! C module loader, and `ffi` unless built without its feature) for shared
-//! programs to install.
+//! It is a Rust `dylib` holding `orbit`, `orbit-std`, `orbit-capi` and
+//! everything under them, with the Rust standard library linked in. It
+//! serves two kinds of program:
+//!
+//! - C programs. The library exports the Lua 5.5 C API under the version
+//!   node `LUA_5.5` (or, built with the `lua-5-4` feature, Lua 5.4's under
+//!   `LUA_5.4`, ADR-14), so programs built against that Lua run on
+//!   OrbitScript when it is installed under Lua's names.
+//! - The Rust programs built together with it (`orbit`, `orbitc`,
+//!   `orbit-lsp` with their `shared` feature). They depend on this crate
+//!   and otherwise use `orbit` as any embedder does; rustc resolves their
+//!   calls into the library.
+//!
+//! Rust has no stable ABI, so those programs and the library must come
+//! from one build: `./build.sh` builds them with one Cargo invocation, and
+//! [`check_build!`] refuses a library from any other build when a program
+//! starts.
 
-// stabby's type reports nest deeply for the isolate's trait.
-#![recursion_limit = "1024"]
-
-use orbit::abi::{ConfigAbi, IsolateBox};
-use orbit::{Error, Isolate};
-use stabby::result::Result as SResult;
-use stabby::string::String as SString;
-
+pub use orbit;
 pub use orbit_capi;
+pub use orbit_std;
 
-/// The libraries this library carries above the API.
-struct Bundled;
+/// The identity of the build this crate is part of: a hash of the
+/// workspace's sources, the lock file, the compiler and the target
+/// (`build.rs`).
+///
+/// A constant, so each program that names it has the value from its own
+/// build compiled in.
+pub const BUILD_ID: u64 = include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
 
-impl orbit::export::Bundled for Bundled {
-    fn install_std(
-        iso: &mut Isolate,
-        base: bool,
-        io: bool,
-        os: bool,
-        ignore_env: bool,
-    ) -> Result<(), Error> {
-        let options = orbit_std::Options {
-            base,
-            io,
-            os,
-            // Not a switch of its own across the boundary: it adds no
-            // global and touches nothing outside the isolate.
-            json: true,
-            ignore_env,
-        };
-        orbit_std::install(iso, &options)
-    }
-
-    fn install_c_modules(iso: &mut Isolate, lock_cpath: bool) {
-        orbit_capi::install(iso, lock_cpath)
-    }
-
-    #[cfg(feature = "ffi")]
-    fn install_ffi(iso: &mut Isolate) -> bool {
-        orbit_std::install_ffi(iso);
-        true
-    }
-
-    /// Built without `ffi`: there is none to install.
-    #[cfg(not(feature = "ffi"))]
-    fn install_ffi(_iso: &mut Isolate) -> bool {
-        false
-    }
+/// [`BUILD_ID`] as the library that is loaded has it. Never inlined, so the
+/// answer comes from the library and not from the caller's build.
+#[inline(never)]
+pub fn build_id() -> u64 {
+    BUILD_ID
 }
 
-/// Whether a program built against the boundary with hash `hash` can use
-/// this library.
-#[stabby::export]
-pub extern "C" fn orbit_check(hash: u64) -> SResult<(), SString> {
-    orbit::export::check(hash)
-}
-
-/// A new isolate, for a program on `orbit`'s shared backend.
-#[stabby::export]
-pub extern "C" fn orbit_new_isolate(config: ConfigAbi) -> IsolateBox {
-    orbit::export::new_isolate::<Bundled>(config)
+/// Checks that the liborbit the program loaded is the one it was built
+/// with: `Err` with a message for the user otherwise.
+///
+/// Rust symbol names carry a crate's name, version and features, not its
+/// contents, so a library built from other sources still loads, and types
+/// whose layout changed would then be read wrongly. Call this before
+/// anything else in the library. A macro, so the comparison is compiled
+/// into the program.
+#[macro_export]
+macro_rules! check_build {
+    () => {{
+        let (program, library) = ($crate::BUILD_ID, $crate::build_id());
+        if program == library {
+            ::core::result::Result::Ok(())
+        } else {
+            ::core::result::Result::Err(::std::format!(
+                "liborbit is from another build (this program {program:016x}, \
+                 the library {library:016x}); install the two from one build"
+            ))
+        }
+    }};
 }
