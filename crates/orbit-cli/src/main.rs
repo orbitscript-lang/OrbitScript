@@ -12,7 +12,10 @@
 //!
 //! Compiling, listing bytecode and printing front-end stages are `orbitc`'s
 //! job (`orbitc.rs`). `ORBIT_GC_STRESS=1` collects at
-//! nearly every safe point after an allocation. `ORBIT_MEMORY_LIMIT=64M`
+//! nearly every safe point after an allocation. In debug builds,
+//! `ORBIT_GC_VERIFY=1` checks the heap after markings (`orbit_gc`'s
+//! verifier, minor collections paced by allocation) and panics on an object
+//! the collector missed; `ORBIT_GC_VERIFY=all` checks every marking. `ORBIT_MEMORY_LIMIT=64M`
 //! (bytes, or with a `K`, `M` or `G` suffix) caps the Lua heap: past it,
 //! scripts get the error `not enough memory`.
 
@@ -308,6 +311,11 @@ fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
     catch_interrupts(iso.interrupt());
     if std::env::var_os("ORBIT_GC_STRESS").is_some_and(|v| v != "0") {
         iso.gc().set_stress(true);
+    }
+    // Only debug builds have the verifier, so release binaries don't change.
+    #[cfg(debug_assertions)]
+    if let Some(v) = std::env::var_os("ORBIT_GC_VERIFY").filter(|v| v != "0") {
+        iso.gc().set_verify(true, v == "all");
     }
     Ok(iso)
 }

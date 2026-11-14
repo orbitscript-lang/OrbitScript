@@ -50,6 +50,10 @@ pub trait Space: Sized {
     fn free_slot(&mut self, kind: u8, index: u32) -> usize;
     #[doc(hidden)]
     fn slot_bytes(kind: u8) -> usize;
+    /// The bytes of the object in slot `index` of arena `kind`: its slot
+    /// plus [`Trace::extra_bytes`]. For the heap verifier.
+    #[doc(hidden)]
+    fn slot_size_of(&self, kind: u8, index: u32) -> usize;
     #[doc(hidden)]
     fn release_page(&mut self, kind: u8, page: u32);
     /// A space whose arenas each reserve address space for `initial`
@@ -533,6 +537,9 @@ pub(crate) struct Marks {
     /// The colors of the objects marked since it was last cleared, ORed:
     /// whether the object being traced refers to a [`NEW`] one.
     pub(crate) seen: u8,
+    /// The heap verifier's state (debug builds only).
+    #[cfg(debug_assertions)]
+    pub(crate) check: crate::heap::verify::Check,
 }
 
 impl Marks {
@@ -647,6 +654,14 @@ impl<'a, S: Space> Marker<'a, S> {
         S: Holds<T>,
     {
         let kind = <S as Holds<T>>::KIND;
+        #[cfg(debug_assertions)]
+        if self.marks.check.active {
+            let current = self.space.arena().is_occupied(gc);
+            let marks = &mut *self.marks;
+            return marks
+                .check
+                .reach::<S>(&marks.meta, kind, gc.index(), current, T::LEAF);
+        }
         if self.marks.mark_raw(kind, gc.index(), T::LEAF) && T::LEAF {
             // Leaves are never traced, so count their bytes here.
             let obj = self.space.arena().get(gc);
@@ -656,6 +671,13 @@ impl<'a, S: Space> Marker<'a, S> {
 
     /// Mark an untyped handle reachable.
     pub fn mark_any(&mut self, gc: AnyGc) {
+        #[cfg(debug_assertions)]
+        if self.marks.check.active {
+            let marks = &mut *self.marks;
+            return marks
+                .check
+                .reach::<S>(&marks.meta, gc.kind, gc.index, true, false);
+        }
         self.marks.mark_raw(gc.kind, gc.index, false);
     }
 
@@ -667,6 +689,11 @@ impl<'a, S: Space> Marker<'a, S> {
     /// A key that can't be collected (a number, or a string if strings count
     /// as values) should not be reported: mark the value directly.
     pub fn ephemeron(&mut self, key: AnyGc, value: AnyGc) {
+        #[cfg(debug_assertions)]
+        if self.marks.check.active {
+            let marks = &mut *self.marks;
+            return marks.check.ephemeron::<S>(&marks.meta, key, value);
+        }
         self.marks.ephemeron(key, value);
     }
 
