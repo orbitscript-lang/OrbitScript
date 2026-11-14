@@ -32,6 +32,8 @@ pub enum Code {
     Syntax,
     /// `use a::b` names no module on the search path.
     ModuleNotFound,
+    /// The module parses but breaks a rule the compiler enforces, so it doesn't run.
+    Compile,
     /// A name that is not a local, an item, a `use`, an `extern` or the prelude.
     UnknownName,
     /// An item used before its definition in the same function.
@@ -101,10 +103,17 @@ pub enum Code {
 }
 
 impl Code {
+    /// Whether the module can't run at all with this error: it doesn't parse or doesn't
+    /// compile. Pragmas never hide these.
+    pub fn stops_the_module(self) -> bool {
+        matches!(self, Code::Syntax | Code::Compile)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Code::Syntax => "T0001",
             Code::ModuleNotFound => "T0002",
+            Code::Compile => "T0003",
             Code::UnknownName => "T0101",
             Code::UsedBeforeDefinition => "T0102",
             Code::NoPublicItem => "T0103",
@@ -145,6 +154,7 @@ impl Code {
     pub const ALL: &'static [Code] = &[
         Code::Syntax,
         Code::ModuleNotFound,
+        Code::Compile,
         Code::UnknownName,
         Code::UsedBeforeDefinition,
         Code::NoPublicItem,

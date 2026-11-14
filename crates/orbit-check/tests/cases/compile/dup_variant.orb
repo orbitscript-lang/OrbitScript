@@ -1,0 +1,2 @@
+enum E { A, A } //~ T0003
+print(1);

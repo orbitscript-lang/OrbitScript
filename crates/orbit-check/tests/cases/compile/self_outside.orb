@@ -1,0 +1,2 @@
+fn f() { self } //~ T0003
+print(f());

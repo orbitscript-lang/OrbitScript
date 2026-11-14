@@ -1,0 +1,2 @@
+fn f(v) { match v { (a, a) => a, } } //~ T0003
+print(f(1));

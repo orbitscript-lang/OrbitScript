@@ -108,8 +108,8 @@ impl Pragmas {
         diags: &mut Vec<Diagnostic>,
     ) {
         diags.retain(|d| {
-            // A syntax error is never ignored: the module wouldn't run.
-            if d.code == Code::Syntax {
+            // A syntax or compile error is never ignored: the module wouldn't run.
+            if d.code.stops_the_module() {
                 return true;
             }
             let line = source.line_of(d.span.start);
