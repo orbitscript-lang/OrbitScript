@@ -23,13 +23,12 @@ enum Target {
 impl Lowerer {
     pub(super) fn cast(
         &mut self,
-        inner: &ast::Expr,
+        value: ExprId,
         ty: &ast::Type,
         soft: bool,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
-        let value = self.single(inner, out)?;
         let (target, nilable) = strip_optional(ty);
         let Some(kind) = target.kind.as_deref() else {
             unreachable!("`as` targets always have a tree")

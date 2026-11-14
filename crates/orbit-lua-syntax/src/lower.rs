@@ -39,6 +39,7 @@ pub fn lower(ast: Ast, src: &[u8]) -> Result<hir::Chunk, Diagnostic> {
         src,
         sym_self: StrId(0),
         sym_env: StrId(0),
+        chain_depth: 0,
     };
     lx.sym_self = lx.chunk.strings.intern(b"self");
     lx.sym_env = lx.chunk.strings.intern(b"_ENV");
@@ -129,7 +130,14 @@ struct Lowerer<'a> {
     src: &'a [u8],
     sym_self: StrId,
     sym_env: StrId,
+    /// How many chain links [`Lowerer::expr`] is lowering, one inside the other.
+    chain_depth: u32,
 }
+
+/// How deep [`Lowerer::expr`] recurses into chains (`a + b + c`, `a.b(c)[d]`) before it
+/// lowers the rest of a chain in a loop. A chain is a tree as deep as it is long, so
+/// recursing all the way could overflow the stack.
+const CHAIN_DEPTH: u32 = 32;
 
 type LResult<T> = Result<T, Diagnostic>;
 
@@ -1103,7 +1111,9 @@ impl Lowerer<'_> {
 
     /// Lowers `e`. The composite kinds are lowered out of line so that this frame, which
     /// every level of a nested expression passes through, stays small (in debug builds
-    /// especially).
+    /// especially). Chains of operators and suffixes (`a + b + c`, `a.b(c)[d]`) are left-deep
+    /// trees as deep as they are long: this recurses into the first [`CHAIN_DEPTH`] links and
+    /// lowers the rest of a longer chain in a loop, innermost link first.
     ///
     /// Each expression records where a runtime error from its own operation is reported.
     /// lua5.5 uses the line of the last token read when it emits the instruction, except that
@@ -1121,50 +1131,108 @@ impl Lowerer<'_> {
             ExprKind::Vararg => hir::ExprKind::Vararg,
             ExprKind::Error => return Err(self.unparsed(span)),
             ExprKind::Name(sym) => return self.name_expr(ast::Name { sym: *sym, span }),
-            ExprKind::Index { obj, key } => return self.index_expr(obj, key, span),
+            ExprKind::Index { obj, key } => {
+                let obj = self.chain_operand(obj)?;
+                return self.index_expr(obj, key, span);
+            }
             ExprKind::Call {
                 callee,
                 args,
                 args_at,
-            } => return self.call_expr(callee, None, args, span, *args_at),
+            } => {
+                let callee = self.chain_operand(callee)?;
+                return self.call_expr(callee, None, args, span, *args_at);
+            }
             ExprKind::Method {
                 obj,
                 name,
                 args,
                 args_at,
-            } => return self.call_expr(obj, Some(*name), args, span, *args_at),
-            ExprKind::Function(body) => return self.function_expr(body, span),
-            ExprKind::Table(fields) => return self.table_expr(fields, span),
+            } => {
+                let obj = self.chain_operand(obj)?;
+                return self.call_expr(obj, Some(*name), args, span, *args_at);
+            }
             ExprKind::Binary {
                 op,
                 op_at,
                 lhs,
                 rhs,
-            } => return self.binary_expr(*op, lhs, rhs, span, *op_at),
+            } => {
+                let lhs = self.chain_operand(lhs)?;
+                return self.binary_expr(*op, lhs, rhs, span, *op_at);
+            }
+            ExprKind::Function(body) => return self.function_expr(body, span),
+            ExprKind::Table(fields) => return self.table_expr(fields, span),
             ExprKind::Unary { op, expr } => return self.unary_expr(*op, expr, span),
             ExprKind::Paren(inner) => return self.paren_expr(inner, span),
         };
         Ok(self.f().add_expr_at(kind, span, span.start))
     }
 
-    /// `obj[key]`.
-    fn index_expr(&mut self, obj: &ast::Expr, key: &ast::Expr, span: Span) -> LResult<ExprId> {
-        let obj = self.expr(obj)?;
+    /// The left operand of a chain link: by recursion for the first [`CHAIN_DEPTH`] links of a
+    /// chain, then the rest of it in a loop, innermost link first.
+    #[inline]
+    fn chain_operand(&mut self, lhs: &ast::Expr) -> LResult<ExprId> {
+        if self.chain_depth == CHAIN_DEPTH {
+            return self.rest_of_chain(lhs);
+        }
+        self.chain_depth += 1;
+        let id = self.expr(lhs);
+        self.chain_depth -= 1;
+        id
+    }
+
+    #[inline(never)]
+    fn rest_of_chain(&mut self, e: &ast::Expr) -> LResult<ExprId> {
+        let mut links = Vec::new();
+        let mut base = e;
+        while let Some(lhs) = base.chain_lhs() {
+            links.push(base);
+            base = lhs;
+        }
+        let mut id = self.expr(base)?;
+        for link in links.into_iter().rev() {
+            id = self.link_expr(link, id)?;
+        }
+        Ok(id)
+    }
+
+    /// The chain link `e` (see [`ast::Expr::chain_lhs`]), whose left operand lowered to `lhs`.
+    fn link_expr(&mut self, e: &ast::Expr, lhs: ExprId) -> LResult<ExprId> {
+        let span = e.span;
+        match &e.kind {
+            ExprKind::Index { key, .. } => self.index_expr(lhs, key, span),
+            ExprKind::Call { args, args_at, .. } => self.call_expr(lhs, None, args, span, *args_at),
+            ExprKind::Method {
+                name,
+                args,
+                args_at,
+                ..
+            } => self.call_expr(lhs, Some(*name), args, span, *args_at),
+            ExprKind::Binary { op, op_at, rhs, .. } => {
+                self.binary_expr(*op, lhs, rhs, span, *op_at)
+            }
+            _ => unreachable!("not a chain link"),
+        }
+    }
+
+    /// `obj[key]`, with `obj` lowered.
+    fn index_expr(&mut self, obj: ExprId, key: &ast::Expr, span: Span) -> LResult<ExprId> {
         let key = self.expr(key)?;
         let kind = hir::ExprKind::Index { obj, key };
         Ok(self.f().add_expr_at(kind, span, span.last_byte()))
     }
 
-    /// `callee(args)`, or the method call `callee:name(args)` when `method` is given.
+    /// `callee(args)`, or the method call `callee:name(args)` when `method` is given, with
+    /// `callee` lowered.
     fn call_expr(
         &mut self,
-        callee: &ast::Expr,
+        callee: ExprId,
         method: Option<ast::Name>,
         args: &[ast::Expr],
         span: Span,
         args_at: u32,
     ) -> LResult<ExprId> {
-        let callee = self.expr(callee)?;
         let args = self.expr_list(args)?;
         let kind = match method {
             None => hir::ExprKind::Call { callee, args },
@@ -1207,12 +1275,11 @@ impl Lowerer<'_> {
     fn binary_expr(
         &mut self,
         op: ast::BinOp,
-        lhs: &ast::Expr,
+        lhs: ExprId,
         rhs: &ast::Expr,
         span: Span,
         op_at: u32,
     ) -> LResult<ExprId> {
-        let lhs = self.expr(lhs)?;
         let rhs = self.expr(rhs)?;
         use ast::BinOp as A;
         use hir::BinOp as H;

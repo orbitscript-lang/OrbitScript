@@ -30,6 +30,15 @@ pub(crate) struct Printer<'a> {
     reserve: usize,
 }
 
+/// A link of a suffix chain, as [`Printer::expr`] prints it.
+#[derive(Clone, Copy)]
+enum Link<'a> {
+    /// Right after what it applies to.
+    Inline(&'a Expr),
+    /// In a method chain, on a line of its own.
+    Chained(&'a Expr),
+}
+
 /// One entry of a sequence printed one per line.
 #[derive(Clone, Copy)]
 enum El<'a> {
@@ -69,12 +78,21 @@ fn width(s: &str) -> usize {
     s.chars().count()
 }
 
-/// The width of the last line of `s`, starting at column `col` when `s` is one line.
+/// The width of the last line of `s`, starting at column `col` when `s` is one line. Columns
+/// only ever decide whether something fits in [`WIDTH`], so any past it is `WIDTH + 1`, and
+/// only that much of `s` is read (a long chain can make a very long line).
 fn end_col(col: usize, s: &str) -> usize {
-    match s.rfind('\n') {
-        Some(i) => width(&s[i + 1..]),
-        None => col + width(s),
+    let mut last = 0;
+    for c in s.chars().rev() {
+        if c == '\n' {
+            return last;
+        }
+        last += 1;
+        if last > WIDTH {
+            return WIDTH + 1;
+        }
     }
+    (col + last).min(WIDTH + 1)
 }
 
 fn spaces(n: usize) -> String {
@@ -851,58 +869,132 @@ impl<'a> Printer<'a> {
     // ---- expressions ------------------------------------------------------------------------
 
     /// `e` starting at column `col`, its later lines indented from `ind`.
+    /// Prints `e` starting at column `col`, one line if it fits.
+    ///
+    /// Suffix chains (`a.b(c)[d]?`) are trees as deep as they are long, so they are printed in
+    /// a loop: down the chain to the first link that fits on one line or prints another way,
+    /// then back up, appending each link's suffix (on a line of its own in a method chain).
     fn expr(&mut self, e: &'a Expr, ind: usize, col: usize) -> String {
-        let reserve = std::mem::take(&mut self.reserve);
-        if let Some(flat) = self.flat(e) {
-            if col + width(&flat) + reserve <= WIDTH {
-                return flat;
+        let top_reserve = std::mem::take(&mut self.reserve);
+        let mut links = Vec::new();
+        let mut e = e;
+        let mut reserve = top_reserve;
+        // The method calls in the method chain from `e` down, when already counted.
+        let mut calls = None;
+        let mut out = loop {
+            if let Some(flat) = self.flat(e) {
+                if col + width(&flat) + reserve <= WIDTH {
+                    break flat;
+                }
+            }
+            match &e.kind {
+                ExprKind::MethodCall { .. } | ExprKind::Field { .. } | ExprKind::Try(_) => {
+                    let n = calls.unwrap_or_else(|| chain_calls(e));
+                    if n >= 2 {
+                        // A method chain broken before each `.`, down to its root.
+                        while let ExprKind::MethodCall { obj: x, .. }
+                        | ExprKind::Field { obj: x, .. }
+                        | ExprKind::Try(x) = &e.kind
+                        {
+                            links.push(Link::Chained(e));
+                            e = x;
+                        }
+                        calls = None;
+                    } else {
+                        links.push(Link::Inline(e));
+                        let method = matches!(e.kind, ExprKind::MethodCall { .. });
+                        calls = Some(n - usize::from(method));
+                        e = e.chain_lhs().expect("a chain link");
+                    }
+                }
+                ExprKind::Call { callee: x, .. }
+                | ExprKind::Path { base: x, .. }
+                | ExprKind::Index { obj: x, .. }
+                | ExprKind::As { expr: x, .. } => {
+                    links.push(Link::Inline(e));
+                    calls = None;
+                    e = x;
+                }
+                _ => break self.unchained(e, ind, col, reserve),
+            }
+            reserve = 0;
+        };
+        let inner = ind + INDENT;
+        for (i, link) in links.into_iter().enumerate().rev() {
+            // Only the whole expression's last line has something after it.
+            let reserve = if i == 0 { top_reserve } else { 0 };
+            match link {
+                Link::Chained(l) => match &l.kind {
+                    ExprKind::MethodCall {
+                        name,
+                        args,
+                        args_at,
+                        ..
+                    } => {
+                        out.push('\n');
+                        out.push_str(&spaces(inner));
+                        let head = format!(".{}", self.name(*name));
+                        let call =
+                            self.call_args(head, args, *args_at, l.span.end, inner, inner, reserve);
+                        out.push_str(&call);
+                    }
+                    ExprKind::Field { name, .. } => {
+                        out.push('\n');
+                        out.push_str(&spaces(inner));
+                        out.push('.');
+                        out.push_str(self.name(*name));
+                    }
+                    _ => out.push('?'),
+                },
+                Link::Inline(l) => match &l.kind {
+                    ExprKind::Call { args, args_at, .. } => {
+                        out = self.call_args(out, args, *args_at, l.span.end, ind, col, reserve);
+                    }
+                    ExprKind::MethodCall {
+                        name,
+                        args,
+                        args_at,
+                        ..
+                    } => {
+                        out.push('.');
+                        out.push_str(self.name(*name));
+                        out = self.call_args(out, args, *args_at, l.span.end, ind, col, reserve);
+                    }
+                    ExprKind::Field { name, .. } => {
+                        out.push('.');
+                        out.push_str(self.name(*name));
+                    }
+                    ExprKind::Path { name, .. } => {
+                        out.push_str("::");
+                        out.push_str(self.name(*name));
+                    }
+                    ExprKind::Index { key, .. } => {
+                        out.push('[');
+                        let c = end_col(col, &out);
+                        out.push_str(&self.expr(key, ind, c));
+                        out.push(']');
+                    }
+                    ExprKind::As { ty, optional, .. } => {
+                        out.push_str(if *optional { " as? " } else { " as " });
+                        out.push_str(&self.ty(ty));
+                    }
+                    _ => out.push('?'),
+                },
             }
         }
+        out
+    }
+
+    /// Prints `e`, which isn't a suffix chain's link, when it doesn't fit on one line.
+    fn unchained(&mut self, e: &'a Expr, ind: usize, col: usize, reserve: usize) -> String {
         match &e.kind {
-            ExprKind::Call {
-                callee,
-                args,
-                args_at,
-            } => {
-                let head = self.expr(callee, ind, col);
-                self.call_args(head, args, *args_at, e.span.end, ind, col, reserve)
-            }
-            ExprKind::MethodCall { .. } | ExprKind::Field { .. } | ExprKind::Try(_)
-                if chain_calls(e) >= 2 =>
-            {
-                self.chain(e, ind, col, reserve)
-            }
-            ExprKind::MethodCall {
-                obj,
-                name,
-                args,
-                args_at,
-            } => {
-                let mut head = self.expr(obj, ind, col);
-                head.push('.');
-                head.push_str(self.name(*name));
-                self.call_args(head, args, *args_at, e.span.end, ind, col, reserve)
-            }
-            ExprKind::Field { obj, name } => {
-                let mut out = self.expr(obj, ind, col);
-                out.push('.');
-                out.push_str(self.name(*name));
-                out
-            }
-            ExprKind::Path { base, name } => {
-                let mut out = self.expr(base, ind, col);
-                out.push_str("::");
-                out.push_str(self.name(*name));
-                out
-            }
-            ExprKind::Index { obj, key } => {
-                let mut out = self.expr(obj, ind, col);
-                out.push('[');
-                let c = end_col(col, &out);
-                out.push_str(&self.expr(key, ind, c));
-                out.push(']');
-                out
-            }
+            ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Path { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::As { .. }
+            | ExprKind::Try(_) => unreachable!("printed by `expr`"),
             ExprKind::Closure(c) => self.closure(c, ind, col),
             ExprKind::Array(items) => {
                 let els: Vec<El> = items.iter().map(El::Expr).collect();
@@ -927,18 +1019,11 @@ impl<'a> Printer<'a> {
                 out
             }
             ExprKind::Paren(inner) => format!("({})", self.expr(inner, ind, col + 1)),
-            ExprKind::As { expr, ty, optional } => {
-                let mut out = self.expr(expr, ind, col);
-                out.push_str(if *optional { " as? " } else { " as " });
-                out.push_str(&self.ty(ty));
-                out
-            }
             ExprKind::Tuple(items) => {
                 let els: Vec<El> = items.iter().map(El::Expr).collect();
                 self.list("(", ")", &els, ind, e.span)
             }
             ExprKind::Spread(inner) => format!("...{}", self.expr(inner, ind, col + 3)),
-            ExprKind::Try(inner) => format!("{}?", self.expr(inner, ind, col)),
             ExprKind::Range {
                 start,
                 end,
@@ -1124,56 +1209,6 @@ impl<'a> Printer<'a> {
         out
     }
 
-    /// A method chain broken before each `.`: `root` on the first line, each call after it
-    /// on a line of its own.
-    fn chain(&mut self, e: &'a Expr, ind: usize, col: usize, reserve: usize) -> String {
-        let mut links = Vec::new();
-        let mut root = e;
-        loop {
-            match &root.kind {
-                ExprKind::MethodCall { obj, .. } | ExprKind::Field { obj, .. } => {
-                    links.push(root);
-                    root = obj;
-                }
-                ExprKind::Try(inner) => {
-                    links.push(root);
-                    root = inner;
-                }
-                _ => break,
-            }
-        }
-        links.reverse();
-        let mut out = self.expr(root, ind, col);
-        let inner = ind + INDENT;
-        let count = links.len();
-        for (n, link) in links.into_iter().enumerate() {
-            let reserve = if n + 1 == count { reserve } else { 0 };
-            match &link.kind {
-                ExprKind::MethodCall {
-                    name,
-                    args,
-                    args_at,
-                    ..
-                } => {
-                    out.push('\n');
-                    out.push_str(&spaces(inner));
-                    let head = format!(".{}", self.name(*name));
-                    let call =
-                        self.call_args(head, args, *args_at, link.span.end, inner, inner, reserve);
-                    out.push_str(&call);
-                }
-                ExprKind::Field { name, .. } => {
-                    out.push('\n');
-                    out.push_str(&spaces(inner));
-                    out.push('.');
-                    out.push_str(self.name(*name));
-                }
-                _ => out.push('?'),
-            }
-        }
-        out
-    }
-
     /// An operator chain broken before each operator of the loosest kind in it.
     fn binary(&mut self, e: &'a Expr, ind: usize, col: usize, reserve: usize) -> String {
         let ExprKind::Binary { op, .. } = &e.kind else {
@@ -1263,20 +1298,25 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// `if c { .. } else ..`. An `else if` chain nests to the right as deep as it is long, so
+    /// its arms are printed in a loop.
     fn if_expr(&mut self, e: &'a Expr, ind: usize, col: usize) -> String {
-        let ExprKind::If { cond, then, else_ } = &e.kind else {
-            unreachable!()
-        };
-        let mut out = "if ".to_owned();
-        out.push_str(&self.expr(cond, ind, col + 3));
-        out.push(' ');
-        out.push_str(&self.block(then, ind));
-        if let Some(other) = else_ {
+        let mut out = String::new();
+        let mut arm = e;
+        while let ExprKind::If { cond, then, else_ } = &arm.kind {
+            let c = end_col(col, &out);
+            out.push_str("if ");
+            out.push_str(&self.expr(cond, ind, c + 3));
+            out.push(' ');
+            out.push_str(&self.block(then, ind));
+            let Some(other) = else_ else {
+                break;
+            };
             out.push_str(" else ");
             match &other.kind {
                 ExprKind::If { .. } => {
-                    let c = end_col(col, &out);
-                    out.push_str(&self.if_expr(other, ind, c));
+                    arm = other;
+                    continue;
                 }
                 ExprKind::Block(b) => out.push_str(&self.block(b, ind)),
                 _ => {
@@ -1284,6 +1324,7 @@ impl<'a> Printer<'a> {
                     out.push_str(&self.expr(other, ind, c));
                 }
             }
+            break;
         }
         out
     }
@@ -1359,6 +1400,17 @@ impl<'a> Printer<'a> {
 
     /// `e` on one line, if it can be: no block bodies, no comments inside.
     fn flat(&self, e: &'a Expr) -> Option<String> {
+        self.flat_in(e, WIDTH)
+    }
+
+    /// [`Printer::flat`], or `None` when `e` is a chain of more than `room` links, whose one
+    /// line, at least a column per link, is wider than any line. That keeps the walk down a
+    /// long chain short.
+    fn flat_in(&self, e: &'a Expr, room: usize) -> Option<String> {
+        let room = match e.chain_lhs() {
+            Some(_) => room.checked_sub(1)?,
+            None => room,
+        };
         if self.has_comment(e.span) {
             return None;
         }
@@ -1373,18 +1425,24 @@ impl<'a> Printer<'a> {
             | ExprKind::Name(_)
             | ExprKind::SelfValue
             | ExprKind::SelfType => self.text(e.span).to_owned(),
-            ExprKind::Path { base, name } => format!("{}::{}", self.flat(base)?, self.name(*name)),
-            ExprKind::Field { obj, name } => format!("{}.{}", self.flat(obj)?, self.name(*name)),
-            ExprKind::Index { obj, key } => format!("{}[{}]", self.flat(obj)?, self.flat(key)?),
+            ExprKind::Path { base, name } => {
+                format!("{}::{}", self.flat_in(base, room)?, self.name(*name))
+            }
+            ExprKind::Field { obj, name } => {
+                format!("{}.{}", self.flat_in(obj, room)?, self.name(*name))
+            }
+            ExprKind::Index { obj, key } => {
+                format!("{}[{}]", self.flat_in(obj, room)?, self.flat(key)?)
+            }
             ExprKind::Call { callee, args, .. } => {
-                format!("{}({})", self.flat(callee)?, self.flat_list(args)?)
+                format!("{}({})", self.flat_in(callee, room)?, self.flat_list(args)?)
             }
             ExprKind::MethodCall {
                 obj, name, args, ..
             } => {
                 format!(
                     "{}.{}({})",
-                    self.flat(obj)?,
+                    self.flat_in(obj, room)?,
                     self.name(*name),
                     self.flat_list(args)?
                 )
@@ -1419,21 +1477,26 @@ impl<'a> Printer<'a> {
                 format!("{path} {{ {} }}", parts?.join(", "))
             }
             ExprKind::Binary { op, lhs, rhs, .. } => {
-                format!("{} {} {}", self.flat(lhs)?, op.as_str(), self.flat(rhs)?)
+                format!(
+                    "{} {} {}",
+                    self.flat_in(lhs, room)?,
+                    op.as_str(),
+                    self.flat(rhs)?
+                )
             }
             ExprKind::Unary { op, expr } => format!("{}{}", op.as_str(), self.flat(expr)?),
             ExprKind::Paren(inner) => format!("({})", self.flat(inner)?),
             ExprKind::As { expr, ty, optional } => {
                 format!(
                     "{} as{} {}",
-                    self.flat(expr)?,
+                    self.flat_in(expr, room)?,
                     if *optional { "?" } else { "" },
                     self.ty(ty)
                 )
             }
             ExprKind::Tuple(items) => format!("({})", self.flat_list(items)?),
             ExprKind::Spread(inner) => format!("...{}", self.flat(inner)?),
-            ExprKind::Try(inner) => format!("{}?", self.flat(inner)?),
+            ExprKind::Try(inner) => format!("{}?", self.flat_in(inner, room)?),
             ExprKind::Range {
                 start,
                 end,
@@ -1613,11 +1676,17 @@ fn space_between(a: TokenKind, b: TokenKind) -> bool {
 
 /// How many method calls a chain ending in `e` holds.
 fn chain_calls(e: &Expr) -> usize {
-    match &e.kind {
-        ExprKind::MethodCall { obj, .. } => 1 + chain_calls(obj),
-        ExprKind::Field { obj, .. } => chain_calls(obj),
-        ExprKind::Try(inner) => chain_calls(inner),
-        _ => 0,
+    let mut calls = 0;
+    let mut e = e;
+    loop {
+        match &e.kind {
+            ExprKind::MethodCall { obj, .. } => {
+                calls += 1;
+                e = obj;
+            }
+            ExprKind::Field { obj: x, .. } | ExprKind::Try(x) => e = x,
+            _ => return calls,
+        }
     }
 }
 

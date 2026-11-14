@@ -389,7 +389,21 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
-    fn expr(&mut self, e: ExprId) -> Check {
+    /// Checks `root` and everything below it. A worklist rather than recursion: chains such
+    /// as `a + b + c` are as deep as they are long.
+    fn expr(&mut self, root: ExprId) -> Check {
+        let mut todo = vec![root];
+        while let Some(e) = todo.pop() {
+            self.expr_node(e)?;
+            self.f.exprs[e.index()]
+                .kind
+                .for_each_child(|c| todo.push(c));
+        }
+        Ok(())
+    }
+
+    /// Checks expression `e` itself, not its children.
+    fn expr_node(&mut self, e: ExprId) -> Check {
         let Some(seen) = self.seen_exprs.get_mut(e.index()) else {
             return Err(format!("expression {} out of range", e.0));
         };
@@ -414,12 +428,6 @@ impl<'a> Checker<'a> {
             ExprKind::Closure(func) => self.child(*func)?,
             _ => {}
         }
-        let mut result = Ok(());
-        kind.for_each_child(|c| {
-            if result.is_ok() {
-                result = self.expr(c);
-            }
-        });
-        result
+        Ok(())
     }
 }

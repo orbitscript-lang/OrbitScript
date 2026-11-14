@@ -66,10 +66,42 @@ fn walk_item<'a>(item: &'a ast::Item, f: &mut dyn FnMut(Node<'a>) -> bool) {
     }
 }
 
+/// Chains of operators and suffixes (`a + b + c`, `a.b(c)[d]`) and `else if` chains are trees
+/// as deep as they are long, so they are walked in a loop: down a chain's left operands, then
+/// back up through each link's other operands, and on along `else`.
 fn walk_expr<'a>(e: &'a ast::Expr, f: &mut dyn FnMut(Node<'a>) -> bool) {
-    if !f(Node::Expr(e)) {
-        return;
+    let mut links = Vec::new();
+    let mut next = Some(e);
+    while let Some(e) = next.take() {
+        if !f(Node::Expr(e)) {
+            break;
+        }
+        if let Some(lhs) = e.chain_lhs() {
+            links.push(e);
+            next = Some(lhs);
+        } else if let ExprKind::If { cond, then, else_ } = &e.kind {
+            walk_expr(cond, f);
+            walk_block(then, f);
+            next = else_.as_deref();
+        } else {
+            walk_children(e, f);
+        }
     }
+    for link in links.into_iter().rev() {
+        match &link.kind {
+            ExprKind::Index { key: x, .. } | ExprKind::Binary { rhs: x, .. } => walk_expr(x, f),
+            ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => {
+                for a in args {
+                    walk_expr(a, f);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walks the children of `e`, which is neither a chain link nor an `if`.
+fn walk_children<'a>(e: &'a ast::Expr, f: &mut dyn FnMut(Node<'a>) -> bool) {
     match &e.kind {
         ExprKind::Nil
         | ExprKind::Error
@@ -89,29 +121,14 @@ fn walk_expr<'a>(e: &'a ast::Expr, f: &mut dyn FnMut(Node<'a>) -> bool) {
                 }
             }
         }
-        ExprKind::Path { base: x, .. }
-        | ExprKind::Field { obj: x, .. }
-        | ExprKind::Unary { expr: x, .. }
-        | ExprKind::Paren(x)
-        | ExprKind::Spread(x)
-        | ExprKind::Try(x)
-        | ExprKind::As { expr: x, .. } => walk_expr(x, f),
-        ExprKind::Index { obj: a, key: b }
-        | ExprKind::Binary { lhs: a, rhs: b, .. }
-        | ExprKind::Range {
+        ExprKind::Unary { expr: x, .. } | ExprKind::Paren(x) | ExprKind::Spread(x) => {
+            walk_expr(x, f)
+        }
+        ExprKind::Range {
             start: a, end: b, ..
         } => {
             walk_expr(a, f);
             walk_expr(b, f);
-        }
-        ExprKind::Call {
-            callee: x, args, ..
-        }
-        | ExprKind::MethodCall { obj: x, args, .. } => {
-            walk_expr(x, f);
-            for a in args {
-                walk_expr(a, f);
-            }
         }
         ExprKind::Closure(c) => walk_expr(&c.body, f),
         ExprKind::Array(items) | ExprKind::Tuple(items) => {
@@ -138,13 +155,15 @@ fn walk_expr<'a>(e: &'a ast::Expr, f: &mut dyn FnMut(Node<'a>) -> bool) {
                 }
             }
         }
-        ExprKind::If { cond, then, else_ } => {
-            walk_expr(cond, f);
-            walk_block(then, f);
-            if let Some(e) = else_ {
-                walk_expr(e, f);
-            }
-        }
+        ExprKind::Path { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::MethodCall { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::As { .. }
+        | ExprKind::Try(_)
+        | ExprKind::If { .. } => unreachable!("walked by `walk_expr`"),
         ExprKind::Match { scrutinee, arms } => {
             walk_expr(scrutinee, f);
             for a in arms {
