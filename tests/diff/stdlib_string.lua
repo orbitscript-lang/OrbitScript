@@ -83,3 +83,14 @@ do
         same((string.gsub(s, ".", function() return nil end))),
         same((string.gsub(s, ".", function(x) return x end))), same((string.gsub(s, "a", "%0"))))
 end
+
+-- A million function replacements (and through `__index`): no stack overflow.
+do
+  local s = string.rep("a", 1000000)
+  local r, n = string.gsub(s, "a", function(c) return c end)
+  print(#r, n, r == s)
+  r, n = string.gsub(s, "a", setmetatable({}, {__index = function(_, c) return c .. "b" end}))
+  print(#r, n, r == string.rep("ab", 1000000))
+  r, n = string.gsub(string.rep("abc ", 200000), "%w+", function(w) if #w % 2 == 1 then return w:upper() end end)
+  print(#r, n, r:sub(1, 12), r:sub(-12))
+end

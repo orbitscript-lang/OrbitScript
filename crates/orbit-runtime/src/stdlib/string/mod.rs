@@ -426,13 +426,48 @@ fn save_state(ctx: &mut NativeCtx<'_>, pos: usize, last: Option<usize>, count: i
     ctx.set(G_COUNT, Value::Int(count));
 }
 
-/// Save the output so far as a piece at window slot `at`, before a call.
+/// Save the output so far as a piece after the pieces in window slots
+/// `G_PIECES..at`, before a call (the call's arguments may follow them).
+///
+/// Earlier pieces no longer than what is being saved are joined into it,
+/// so each piece is more than twice as long as the next: a million
+/// function replacements leave a few dozen pieces in the window, not a
+/// million, and each byte is copied only a logarithmic number of times.
 fn save_piece(ctx: &mut NativeCtx<'_>, out: &mut Vec<u8>, at: usize) {
-    if !out.is_empty() {
+    if out.is_empty() {
+        return;
+    }
+    let mut start = at;
+    let mut len = out.len();
+    while start > G_PIECES {
+        let prev = ctx.bytes(str_at(ctx, start - 1)).len();
+        if prev > len {
+            break;
+        }
+        len += prev;
+        start -= 1;
+    }
+    if start == at {
         let v = ctx.new_str(out);
         out.clear();
         ctx.insert(at, v);
+        return;
     }
+    let mut joined = Vec::with_capacity(len);
+    for i in start..at {
+        joined.extend_from_slice(ctx.bytes(str_at(ctx, i)));
+    }
+    joined.append(out);
+    let v = ctx.new_str_owned(joined);
+    // The joined piece takes the first slot; whatever followed the pieces
+    // moves down after it.
+    ctx.set(start, v);
+    let tail = ctx.len() - at;
+    for j in 0..tail {
+        let v = ctx.arg(at + j);
+        ctx.set(start + 1 + j, v);
+    }
+    ctx.truncate(start + 1 + tail);
 }
 
 /// Add the replacement for one match. Returns a `CallThen` when the
