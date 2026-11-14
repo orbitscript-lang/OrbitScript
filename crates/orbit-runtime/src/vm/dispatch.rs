@@ -1130,7 +1130,7 @@ impl Vm {
                                 (&Value::Int(i), &Value::Int(lim), &Value::Int(s)) if s > 0 => {
                                     if i <= lim {
                                         // The iterations left replace the limit.
-                                        let count = (lim as u64).wrapping_sub(i as u64) / s as u64;
+                                        let count = lim.abs_diff(i) / s as u64;
                                         w[b + 1] = Value::Int(count as i64);
                                         w[b + 3] = Value::Int(i);
                                     } else {

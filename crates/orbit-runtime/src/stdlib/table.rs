@@ -113,11 +113,15 @@ fn unpack(ctx: &mut NativeCtx<'_>) -> R {
     if i > j {
         return Ok(NativeReturn::Return(0));
     }
-    let n = (j as i128 - i as i128 + 1) as u128;
-    let room = ctx.vm.rt.limits.max_stack.saturating_sub(ctx.len()) as u128;
-    if n >= MAX_INT as u128 || n >= room {
+    let room = ctx.vm.rt.limits.max_stack.saturating_sub(ctx.len());
+    let Some(n) = j
+        .checked_sub(i)
+        .and_then(|d| d.checked_add(1))
+        // More results than an integer holds, or the stack.
+        .filter(|&n| n < MAX_INT && (n as u64) < room as u64)
+    else {
         return Err(ctx.error("too many results to unpack"));
-    }
+    };
     let mut k = i;
     loop {
         let v = get(ctx, t, k);
@@ -156,11 +160,11 @@ fn move_(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_int(3)?;
     let a2 = plain(ctx, 4).unwrap_or(a1);
     if e >= f {
-        if !(f > 0 || e < i64::MAX.wrapping_add(f)) {
+        // The elements after the first; their count must fit an integer.
+        let Some(n) = e.checked_sub(f).filter(|&n| n < i64::MAX) else {
             return Err(ctx.arg_error(2, "too many elements to move"));
-        }
-        let n = e - f;
-        if t > i64::MAX - n {
+        };
+        if t.checked_add(n).is_none() {
             return Err(ctx.arg_error(3, "destination wrap around"));
         }
         let overlapping = a1 == a2 && t > f && t <= e;

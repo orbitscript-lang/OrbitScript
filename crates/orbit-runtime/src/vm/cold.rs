@@ -705,11 +705,7 @@ impl Vm {
                 Ok(None) => Ok(false),
                 Ok(Some(lim)) => {
                     // The number of iterations left replaces the limit.
-                    let count = if s > 0 {
-                        (lim as u64).wrapping_sub(i as u64) / s as u64
-                    } else {
-                        (i as u64).wrapping_sub(lim as u64) / ((-(s + 1)) as u64 + 1)
-                    };
+                    let count = i.abs_diff(lim) / s.unsigned_abs();
                     r[1] = Value::Int(count as i64);
                     r[3] = Value::Int(i);
                     Ok(true)
