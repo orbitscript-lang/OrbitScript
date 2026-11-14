@@ -847,12 +847,12 @@ impl Parser<'_> {
     /// The rest of an assignment whose target `e` (starting at `start`) is
     /// parsed, when `=` or a compound operator follows; otherwise `e` back.
     /// The caller takes the `;`.
-    fn assignment(&mut self, start: u32, e: Expr) -> PResult<Result<Stmt, Expr>> {
+    fn assignment(&mut self, start: u32, mut e: Expr) -> PResult<Result<Stmt, Expr>> {
         if self.is(Punct::Assign) {
             self.advance()?;
             let value = self.expr()?;
             let targets = match e.kind {
-                ExprKind::Tuple(items) => items,
+                ExprKind::Tuple(ref mut items) => std::mem::take(items),
                 _ => vec![e],
             };
             for t in &targets {
@@ -2492,10 +2492,10 @@ impl Parser<'_> {
                     return Err(d.at_eof());
                 }
                 _ => {
-                    let e = self.expr()?;
+                    let mut e = self.expr()?;
                     if self.eat(Punct::Colon)? {
                         match e.kind {
-                            ExprKind::Array(mut items)
+                            ExprKind::Array(ref mut items)
                                 if items.len() == 1
                                     && !matches!(items[0].kind, ExprKind::Spread(_)) =>
                             {
@@ -2570,32 +2570,41 @@ impl Parser<'_> {
         })
     }
 
+    /// `if c { .. } else if c { .. } else { .. }`. Each `else if` nests another `If` in the
+    /// `else`, so a long chain is parsed in a loop and the tree built from the last arm out.
     fn if_expr(&mut self) -> PResult<Expr> {
-        let start = self.tok.span.start;
-        self.advance()?; // if
-        let cond = self.expr_ctx(Ctx::NoStruct)?;
-        let then = self.block()?;
-        let else_ = if self.eat_kw(Keyword::Else)? {
-            if self.is_kw(Keyword::If) {
-                Some(Box::new(self.if_expr()?))
-            } else {
+        let mut arms = Vec::new();
+        let mut else_ = None;
+        loop {
+            let start = self.tok.span.start;
+            self.advance()?; // if
+            let cond = self.expr_ctx(Ctx::NoStruct)?;
+            let then = self.block()?;
+            arms.push((start, cond, then));
+            if !self.eat_kw(Keyword::Else)? {
+                break;
+            }
+            if !self.is_kw(Keyword::If) {
                 let block = self.block()?;
-                Some(Box::new(Expr {
+                else_ = Some(Box::new(Expr {
                     span: block.span,
                     kind: ExprKind::Block(block),
-                }))
+                }));
+                break;
             }
-        } else {
-            None
-        };
-        Ok(Expr {
-            kind: ExprKind::If {
-                cond: Box::new(cond),
-                then,
-                else_,
-            },
-            span: self.span_from(start),
-        })
+        }
+        let mut e = None;
+        while let Some((start, cond, then)) = arms.pop() {
+            e = Some(Expr {
+                kind: ExprKind::If {
+                    cond: Box::new(cond),
+                    then,
+                    else_: e.map(Box::new).or(else_.take()),
+                },
+                span: self.span_from(start),
+            });
+        }
+        Ok(e.expect("an `if` arm"))
     }
 
     fn match_expr(&mut self) -> PResult<Expr> {

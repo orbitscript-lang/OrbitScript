@@ -31,6 +31,7 @@ gc.lua
 io.lua
 load.lua
 locale.lua
+long_chains.lua
 lua55.lua
 many_constants.lua
 meta_absent.lua

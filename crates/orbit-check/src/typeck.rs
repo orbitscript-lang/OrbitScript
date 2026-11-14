@@ -53,6 +53,31 @@ use walk::{Node, walk_block};
 /// A function's results: `None` when unknown (any number of `any`).
 type Results = Option<Vec<TypeId>>;
 
+/// Chains of at least this many links below an expression are typed innermost link first,
+/// rather than by recursing once per link (see [`Typer::expr`]).
+const CHAIN_DEPTH: usize = 32;
+
+/// A chain link typed ahead of the link above it, which takes its results instead of typing
+/// it again.
+struct Ready<'a> {
+    e: &'a ast::Expr,
+    results: Results,
+}
+
+/// The left operand of `e` when typing walks it as a chain link (see
+/// [`ast::Expr::chain_lhs`]). A path's base is resolved, not typed, and `&&` and `||` narrow,
+/// so [`Typer::cond`] walks those.
+fn typed_lhs(e: &ast::Expr) -> Option<&ast::Expr> {
+    match &e.kind {
+        ExprKind::Path { .. }
+        | ExprKind::Binary {
+            op: BinOp::And | BinOp::Or,
+            ..
+        } => None,
+        _ => e.chain_lhs(),
+    }
+}
+
 struct FnCtx {
     /// The annotated results, if any.
     results: Option<Vec<TypeId>>,
@@ -83,6 +108,8 @@ struct Typer<'a, 'b, 'c> {
     /// Whether bindings get inlay hints (not under an annotation).
     hinting: bool,
     strict: bool,
+    /// The link of a long chain typed ahead of the one above it.
+    ready: Option<Ready<'a>>,
 }
 
 fn sk(s: Span) -> (u32, u32) {
@@ -134,6 +161,7 @@ pub(crate) fn check<'a, 'b, 'c>(
         self_type: None,
         hinting: true,
         strict: deps.strict,
+        ready: None,
     };
     let declared = declare::types(&ast.body.stmts, &mut c.lowering());
     c.pending_fns = declared.pending;
@@ -229,12 +257,19 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
         }
         fn leaves<'e>(e: &'e ast::Expr, out: &mut Vec<&'e ast::Expr>) {
             match &e.kind {
-                ExprKind::If { then, else_, .. } => {
-                    if let Some(t) = &then.tail {
-                        leaves(t, out);
-                    }
-                    if let Some(e) = else_ {
-                        leaves(e, out);
+                ExprKind::If { .. } => {
+                    // An `else if` chain is walked in a loop.
+                    let mut arm = Some(e);
+                    while let Some(e) = arm.take() {
+                        match &e.kind {
+                            ExprKind::If { then, else_, .. } => {
+                                if let Some(t) = &then.tail {
+                                    leaves(t, out);
+                                }
+                                arm = else_.as_deref();
+                            }
+                            _ => leaves(e, out),
+                        }
                     }
                 }
                 ExprKind::Match { arms, .. } => {
@@ -1115,7 +1150,14 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
 
     // ---- expressions --------------------------------------------------------------------------
 
+    /// Types `e` and records its type. Chains of operators and suffixes (`a + b + c`,
+    /// `a.b(c)[d]`) are trees as deep as they are long, so a long one is typed innermost link
+    /// first, each link taking the one below it ready-typed.
     fn expr(&mut self, e: &'a ast::Expr, expected: Option<TypeId>) -> TypeId {
+        if let Some(rs) = self.take_ready(e) {
+            return self.first(&rs);
+        }
+        self.type_chain_below(e);
         let t = self.expr_inner(e, expected);
         if !e.kind.is_block_like()
             && !matches!(
@@ -1128,8 +1170,53 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
         t
     }
 
+    /// The results of `e` if it is the chain link typed ahead.
+    fn take_ready(&mut self, e: &ast::Expr) -> Option<Results> {
+        match &self.ready {
+            Some(r) if std::ptr::eq(r.e, e) => self.ready.take().map(|r| r.results),
+            _ => None,
+        }
+    }
+
+    /// If `e` sits on a long chain, types the links below it, innermost first, leaving the
+    /// one just below `e` ready.
+    fn type_chain_below(&mut self, e: &'a ast::Expr) {
+        let Some(lhs) = typed_lhs(e) else {
+            return;
+        };
+        if self.ready.as_ref().is_some_and(|r| std::ptr::eq(r.e, lhs)) {
+            return;
+        }
+        let mut depth = 0;
+        let mut link = lhs;
+        while let Some(below) = typed_lhs(link) {
+            depth += 1;
+            if depth == CHAIN_DEPTH {
+                break;
+            }
+            link = below;
+        }
+        if depth < CHAIN_DEPTH {
+            return;
+        }
+        let mut links = Vec::new();
+        let mut link = lhs;
+        while let Some(below) = typed_lhs(link) {
+            links.push(link);
+            link = below;
+        }
+        for link in links.into_iter().rev() {
+            // As the link above would type it: `?` takes all of a call's results.
+            let results = self.expr_multi(link, None);
+            self.ready = Some(Ready { e: link, results });
+        }
+    }
+
     /// All the values of `e`: a call's results, a tuple's items, a spread.
     fn expr_multi(&mut self, e: &'a ast::Expr, expected: Option<TypeId>) -> Results {
+        if let Some(rs) = self.take_ready(e) {
+            return rs;
+        }
         match &e.kind {
             ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
                 let rs = self.call_expr(e, expected);
@@ -1318,29 +1405,45 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
         Key::of(e, &self.syms, self.strings)
     }
 
-    /// How messages name `e`: `` `p` ``, `` `self.next` ``, or "this value".
+    /// How messages name `e`: `` `p` ``, `` `self.next` ``, or "this value" (also for a path
+    /// too long to read).
     fn describe(&self, e: &ast::Expr) -> String {
-        fn path(c: &Typer<'_, '_, '_>, e: &ast::Expr) -> Option<String> {
-            Some(match &e.kind {
-                ExprKind::Name(s) => c.text(*s),
-                ExprKind::SelfValue => "self".into(),
-                ExprKind::SelfType => "Self".into(),
+        const MAX_LINKS: usize = 16;
+        let mut suffixes = Vec::new();
+        let mut e = e;
+        let base = loop {
+            if suffixes.len() > MAX_LINKS {
+                return "this value".into();
+            }
+            match &e.kind {
+                ExprKind::Name(s) => break self.text(*s),
+                ExprKind::SelfValue => break "self".into(),
+                ExprKind::SelfType => break "Self".into(),
                 ExprKind::Path { base, name } => {
-                    format!("{}::{}", path(c, base)?, c.text(name.sym))
+                    suffixes.push(format!("::{}", self.text(name.sym)));
+                    e = base;
                 }
-                ExprKind::Field { obj, name } => format!("{}.{}", path(c, obj)?, c.text(name.sym)),
-                ExprKind::Call { callee, .. } => format!("{}(...)", path(c, callee)?),
+                ExprKind::Field { obj, name } => {
+                    suffixes.push(format!(".{}", self.text(name.sym)));
+                    e = obj;
+                }
+                ExprKind::Call { callee, .. } => {
+                    suffixes.push("(...)".into());
+                    e = callee;
+                }
                 ExprKind::MethodCall { obj, name, .. } => {
-                    format!("{}.{}(...)", path(c, obj)?, c.text(name.sym))
+                    suffixes.push(format!(".{}(...)", self.text(name.sym)));
+                    e = obj;
                 }
-                ExprKind::Paren(e) => path(c, e)?,
-                _ => return None,
-            })
+                ExprKind::Paren(inner) => e = inner,
+                _ => return "this value".into(),
+            }
+        };
+        let mut p = base;
+        for suffix in suffixes.into_iter().rev() {
+            p.push_str(&suffix);
         }
-        match path(self, e) {
-            Some(p) => format!("`{p}`"),
-            None => "this value".into(),
-        }
+        format!("`{p}`")
     }
 
     /// `t` without `nil`, reporting `e` if it may be nil.
@@ -2313,34 +2416,50 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
                 (bool_, no, yes)
             }
             ExprKind::Binary {
-                op: op @ (BinOp::And | BinOp::Or),
-                lhs,
-                rhs,
+                op: BinOp::And | BinOp::Or,
                 ..
             } => {
-                let start = self.env.clone();
-                let (lt, l_yes, l_no) = self.cond(lhs);
-                let and = *op == BinOp::And;
-                self.env = if and { l_yes.clone() } else { l_no.clone() };
-                let (rt, r_yes, r_no) = self.cond(rhs);
-                self.env = start;
-                let t = match (and, falsy_part(self.types, lt)) {
-                    (true, Some(f)) => self.types.union(&[f, rt]),
-                    (true, None) => rt,
-                    (false, Some(_)) => {
-                        let truthy = self.types.non_nil(lt);
-                        self.types.union(&[truthy, rt])
-                    }
-                    (false, None) => lt,
-                };
-                self.report.record(e.span, t);
-                if and {
-                    let no = Env::merge(l_no, r_no, self.types);
-                    (t, r_yes, no)
-                } else {
-                    let yes = Env::merge(l_yes, r_yes, self.types);
-                    (t, yes, r_no)
+                // A chain of `&&` and `||` is a tree as deep as it is long, so it's walked
+                // in a loop, innermost operator first. Each right operand starts from the
+                // narrowing its left operand gives.
+                let mut links = Vec::new();
+                let mut base = e;
+                while let ExprKind::Binary {
+                    op: op @ (BinOp::And | BinOp::Or),
+                    lhs,
+                    rhs,
+                    ..
+                } = &base.kind
+                {
+                    links.push((base.span, *op == BinOp::And, &**rhs));
+                    base = lhs;
                 }
+                let start = self.env.clone();
+                let (mut lt, mut l_yes, mut l_no) = self.cond(base);
+                for (span, and, rhs) in links.into_iter().rev() {
+                    self.env = if and { l_yes.clone() } else { l_no.clone() };
+                    let (rt, r_yes, r_no) = self.cond(rhs);
+                    self.env = start.clone();
+                    let t = match (and, falsy_part(self.types, lt)) {
+                        (true, Some(f)) => self.types.union(&[f, rt]),
+                        (true, None) => rt,
+                        (false, Some(_)) => {
+                            let truthy = self.types.non_nil(lt);
+                            self.types.union(&[truthy, rt])
+                        }
+                        (false, None) => lt,
+                    };
+                    self.report.record(span, t);
+                    lt = t;
+                    if and {
+                        l_no = Env::merge(l_no, r_no, self.types);
+                        l_yes = r_yes;
+                    } else {
+                        l_yes = Env::merge(l_yes, r_yes, self.types);
+                        l_no = r_no;
+                    }
+                }
+                (lt, l_yes, l_no)
             }
             ExprKind::Binary {
                 op: op @ (BinOp::Eq | BinOp::Ne),
@@ -2444,6 +2563,9 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
         None
     }
 
+    /// `if cond { then } else ...`. An `else if` chain nests to the right as deep as it is
+    /// long, so its arms are typed in a loop, top down, and their types and narrowing joined
+    /// bottom up.
     fn if_expr(
         &mut self,
         cond: &'a ast::Expr,
@@ -2451,31 +2573,60 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
         else_: Option<&'a ast::Expr>,
         expected: Option<TypeId>,
     ) -> TypeId {
+        struct Arm {
+            value: TypeId,
+            diverges: bool,
+            env: Env,
+        }
         let nil = self.types.nil;
-        let (_, yes, no) = self.cond(cond);
-        self.env = yes;
-        let tv = self.block(then, expected);
-        let then_out = self.block_diverges(then);
-        let after_then = std::mem::take(&mut self.env);
-        self.env = no;
-        let (ev, else_out) = match else_ {
-            Some(e) => (self.expr(e, expected), self.expr_diverges(e)),
-            None => (nil, false),
+        let mut arms = Vec::new();
+        let (mut cond, mut then, mut else_) = (cond, then, else_);
+        let (mut ev, mut else_out) = loop {
+            let (_, yes, no) = self.cond(cond);
+            self.env = yes;
+            let value = self.block(then, expected);
+            let diverges = self.block_diverges(then);
+            let env = std::mem::take(&mut self.env);
+            arms.push(Arm {
+                value,
+                diverges,
+                env,
+            });
+            self.env = no;
+            match else_ {
+                Some(ast::Expr {
+                    kind:
+                        ExprKind::If {
+                            cond: c,
+                            then: t,
+                            else_: e,
+                        },
+                    ..
+                }) => {
+                    (cond, then, else_) = (c, t, e.as_deref());
+                }
+                Some(e) => break (self.expr(e, expected), self.expr_diverges(e)),
+                None => break (nil, false),
+            }
         };
-        let after_else = std::mem::take(&mut self.env);
-        self.env = match (then_out, else_out) {
-            (true, _) => after_else,
-            (false, true) => after_then,
-            (false, false) => Env::merge(after_then, after_else, self.types),
-        };
-        let mut parts = Vec::new();
-        if !then_out {
-            parts.push(tv);
+        while let Some(arm) = arms.pop() {
+            let after_else = std::mem::take(&mut self.env);
+            self.env = match (arm.diverges, else_out) {
+                (true, _) => after_else,
+                (false, true) => arm.env,
+                (false, false) => Env::merge(arm.env, after_else, self.types),
+            };
+            let mut parts = Vec::new();
+            if !arm.diverges {
+                parts.push(arm.value);
+            }
+            if !else_out {
+                parts.push(ev);
+            }
+            ev = self.types.union(&parts);
+            else_out = arm.diverges && else_out;
         }
-        if !else_out {
-            parts.push(ev);
-        }
-        self.types.union(&parts)
+        ev
     }
 
     fn for_expr(&mut self, pat: &'a ast::Pat, iter: &'a ast::Expr, body: &'a ast::Block) -> TypeId {
@@ -2717,16 +2868,24 @@ impl<'a, 'b, 'c> Typer<'a, 'b, 'c> {
 
     /// Whether control never continues after `e` (`return`, `break`, `error(...)`, ...).
     fn expr_diverges(&self, e: &ast::Expr) -> bool {
+        let mut e = e;
+        // An `else if` chain is walked in a loop.
+        while let ExprKind::If {
+            then,
+            else_: Some(else_),
+            ..
+        } = &e.kind
+        {
+            if !self.block_diverges(then) {
+                return false;
+            }
+            e = else_;
+        }
         match &e.kind {
             ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue { .. } => true,
             ExprKind::Call { callee, .. } => {
                 self.is_prelude(callee, "error") || self.is_prelude(callee, "panic")
             }
-            ExprKind::If {
-                then,
-                else_: Some(e),
-                ..
-            } => self.block_diverges(then) && self.expr_diverges(e),
             ExprKind::Block(b) => self.block_diverges(b),
             ExprKind::Match { arms, .. } => {
                 !arms.is_empty() && arms.iter().all(|a| self.expr_diverges(&a.body))

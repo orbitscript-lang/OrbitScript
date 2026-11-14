@@ -160,6 +160,12 @@ pub(crate) struct FuncState<'a> {
     /// Break targets of the enclosing loops, with how many to-be-closed locals were open
     /// when each loop started.
     pub loops: Vec<(Label, usize)>,
+
+    // Long chains (see `expr::CHAIN_DEPTH`).
+    /// How many chain links `expr_to` is compiling, one inside the other.
+    pub(crate) chain_depth: u32,
+    /// The operand `chain_to` computed for the link it compiles next.
+    pub(crate) ready: Option<crate::expr::Ready>,
 }
 
 /// A goto's `Close` placeholder (its pc) and the to-be-closed locals open at the goto.
@@ -222,6 +228,8 @@ impl<'a> FuncState<'a> {
             labels: Vec::new(),
             goto_targets: vec![GotoTarget::default(); f.labels.len()],
             loops: Vec::new(),
+            chain_depth: 0,
+            ready: None,
         }
     }
 

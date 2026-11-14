@@ -305,10 +305,21 @@ impl<'a> Resolver<'a> {
                 }
                 None => Res::Unknown,
             },
-            ExprKind::Path { base, name } => {
-                let base_res = self.path(base);
-                let res = self.member(base_res, matches!(base.kind, ExprKind::SelfType), *name);
-                self.reference(name.span, res);
+            ExprKind::Path { .. } => {
+                // A long path is a deep tree, so it's resolved in a loop from its base.
+                let mut links = Vec::new();
+                let mut base = e;
+                while let ExprKind::Path { base: lhs, name } = &base.kind {
+                    links.push(*name);
+                    base = lhs;
+                }
+                let mut self_base = matches!(base.kind, ExprKind::SelfType);
+                let mut res = self.path(base);
+                for name in links.into_iter().rev() {
+                    res = self.member(res, self_base, name);
+                    self.reference(name.span, res);
+                    self_base = false;
+                }
                 res
             }
             _ => {
@@ -1055,7 +1066,29 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Resolves `e`. Chains of operators and suffixes (`a + b + c`, `a.b(c)[d]`) are trees as
+    /// deep as they are long, so they are walked in a loop, innermost link first.
     fn expr(&mut self, e: &'a ast::Expr) {
+        let mut links = Vec::new();
+        let mut base = e;
+        while let Some(lhs) = base.chain_lhs().filter(|_| !is_path(base)) {
+            links.push(base);
+            base = lhs;
+        }
+        self.unchained(base);
+        for link in links.into_iter().rev() {
+            match &link.kind {
+                ExprKind::Index { key, .. } => self.expr(key),
+                ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => self.exprs(args),
+                ExprKind::Binary { rhs, .. } => self.expr(rhs),
+                ExprKind::As { ty, .. } => self.ty(ty),
+                _ => {}
+            }
+        }
+    }
+
+    /// Resolves an expression that isn't a chain link (but may be a path).
+    fn unchained(&mut self, e: &'a ast::Expr) {
         match &e.kind {
             ExprKind::Nil
             | ExprKind::True
@@ -1075,19 +1108,6 @@ impl<'a> Resolver<'a> {
                         self.expr(expr);
                     }
                 }
-            }
-            ExprKind::Field { obj, .. } => self.expr(obj),
-            ExprKind::Index { obj, key } => {
-                self.expr(obj);
-                self.expr(key);
-            }
-            ExprKind::Call { callee, args, .. } => {
-                self.expr(callee);
-                self.exprs(args);
-            }
-            ExprKind::MethodCall { obj, args, .. } => {
-                self.expr(obj);
-                self.exprs(args);
             }
             ExprKind::Closure(c) => self.function(&c.sig, &[], None, c.span, |r| r.expr(&c.body)),
             ExprKind::Array(items) | ExprKind::Tuple(items) => self.exprs(items),
@@ -1116,27 +1136,32 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                self.expr(lhs);
-                self.expr(rhs);
+            ExprKind::Unary { expr, .. } | ExprKind::Paren(expr) | ExprKind::Spread(expr) => {
+                self.expr(expr)
             }
-            ExprKind::Unary { expr, .. }
-            | ExprKind::Paren(expr)
-            | ExprKind::Spread(expr)
-            | ExprKind::Try(expr) => self.expr(expr),
-            ExprKind::As { expr, ty, .. } => {
-                self.expr(expr);
-                self.ty(ty);
-            }
+            ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::As { .. }
+            | ExprKind::Try(_) => unreachable!("a chain link"),
             ExprKind::Range { start, end, .. } => {
                 self.expr(start);
                 self.expr(end);
             }
-            ExprKind::If { cond, then, else_ } => {
-                self.expr(cond);
-                self.block(then, false);
-                if let Some(e) = else_ {
-                    self.expr(e);
+            ExprKind::If { .. } => {
+                // `else if` chains nest to the right, so they're walked in a loop too.
+                let mut arm = Some(e);
+                while let Some(e) = arm.take() {
+                    match &e.kind {
+                        ExprKind::If { cond, then, else_ } => {
+                            self.expr(cond);
+                            self.block(then, false);
+                            arm = else_.as_deref();
+                        }
+                        _ => self.expr(e),
+                    }
                 }
             }
             ExprKind::Match { scrutinee, arms } => {
@@ -1178,4 +1203,8 @@ impl<'a> Resolver<'a> {
             }
         }
     }
+}
+
+fn is_path(e: &ast::Expr) -> bool {
+    matches!(e.kind, ExprKind::Path { .. })
 }

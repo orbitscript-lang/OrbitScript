@@ -15,6 +15,22 @@ pub(super) enum Part<'a> {
     Item(&'a ast::Expr, bool),
     /// A list of values (`return`, `let (a, b) = ...`, assignment); must be the last part.
     Values(&'a ast::Expr),
+    /// One value already lowered: the left operand of a chain link.
+    Lowered(ExprId),
+}
+
+/// The left operand of `e` when lowering walks it as a chain link (see
+/// [`ast::Expr::chain_lhs`]). Concatenation lowers its own chain, and `?` on a tuple or a
+/// spread takes several values.
+fn link_lhs(e: &ast::Expr) -> Option<&ast::Expr> {
+    match &e.kind {
+        K::Binary {
+            op: ast::BinOp::Concat,
+            ..
+        } => None,
+        K::Try(inner) if matches!(inner.kind, K::Tuple(_) | K::Spread(_)) => None,
+        _ => e.chain_lhs(),
+    }
 }
 
 pub(super) fn bin_op(op: ast::BinOp) -> hir::BinOp {
@@ -61,6 +77,7 @@ impl Lowerer {
                 Part::Expr(e) => ids.push(self.expr(e, out)?),
                 Part::Item(e, last) => ids.push(self.item_value(e, last, out)?),
                 Part::Values(e) => values = Some(self.values(e, out)?),
+                Part::Lowered(id) => ids.push(id),
             }
             if out.len() > mark {
                 let current = if values.is_some() {
@@ -217,9 +234,78 @@ impl Lowerer {
 
     /// Lowers an expression to one HIR expression (a call may still give several values;
     /// see [`Lowerer::single`]), emitting any statements it needs into `out`.
-    /// Lowers `e`. The larger kinds are lowered out of line so that this frame, which every
-    /// level of a nested expression passes through, stays small (in debug builds especially).
+    ///
+    /// Chains of operators and suffixes (`a + b + c`, `a.b(c)[d]`) are left-deep trees as deep
+    /// as they are long, so they are lowered in a loop, innermost link first, and only
+    /// bracketing (which the parser limits) makes this recurse.
     pub(super) fn expr(&mut self, e: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+        // Most chains are one link long: no list needed.
+        match link_lhs(e) {
+            None => return self.unchained(e, out),
+            Some(lhs) if link_lhs(lhs).is_none() => {
+                let lhs = self.unchained(lhs, out)?;
+                return self.link(e, lhs, out);
+            }
+            Some(_) => {}
+        }
+        let mut links = Vec::new();
+        let mut base = e;
+        while let Some(lhs) = link_lhs(base) {
+            links.push(base);
+            base = lhs;
+        }
+        let mut id = self.unchained(base, out)?;
+        for link in links.into_iter().rev() {
+            id = self.link(link, id, out)?;
+        }
+        Ok(id)
+    }
+
+    /// The chain link `e` (see [`link_lhs`]), whose left operand lowered to `lhs`.
+    fn link(&mut self, e: &ast::Expr, lhs: ExprId, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+        let span = e.span;
+        match &e.kind {
+            K::Path { name, .. } | K::Field { name, .. } => {
+                let obj = self.first(lhs);
+                Ok(self.field(obj, name.sym, span))
+            }
+            K::Index { key, .. } => self.index_expr(lhs, key, span, out),
+            K::Call { args, args_at, .. } => self.call_expr(lhs, None, args, span, *args_at, out),
+            K::MethodCall {
+                name,
+                args,
+                args_at,
+                ..
+            } => self.call_expr(lhs, Some(name), args, span, *args_at, out),
+            K::Binary {
+                op: op @ (ast::BinOp::And | ast::BinOp::Or),
+                op_at,
+                rhs,
+                ..
+            } => {
+                let is_and = *op == ast::BinOp::And;
+                self.logical(is_and, lhs, rhs, span, *op_at, out)
+            }
+            K::Binary { op, op_at, rhs, .. } => self.binary(*op, lhs, rhs, span, *op_at, out),
+            K::As { ty, optional, .. } => {
+                let value = self.first(lhs);
+                self.cast(value, ty, *optional, span, out)
+            }
+            K::Try(inner) => {
+                let values = match inner.kind {
+                    K::Call { .. } | K::MethodCall { .. } => vec![lhs].into(),
+                    _ => vec![self.first(lhs)].into(),
+                };
+                self.try_(values, span, out)
+            }
+            _ => unreachable!("not a chain link"),
+        }
+    }
+
+    /// Lowers an expression that isn't a chain link. The larger kinds are lowered out of line
+    /// so that this frame, which every level of a nested expression passes through, stays
+    /// small (in debug builds especially).
+    fn unchained(&mut self, e: &ast::Expr, out: &mut Vec<StmtId>) -> LResult<ExprId> {
         let span = e.span;
         let kind = match &e.kind {
             K::Nil => hir::ExprKind::Nil,
@@ -233,47 +319,16 @@ impl Lowerer {
             K::Name(sym) => return self.name_expr(ast::Name { sym: *sym, span }),
             K::SelfValue => return self.self_value(span),
             K::SelfType => return self.self_type(span),
-            K::Path { base, name } | K::Field { obj: base, name } => {
-                return self.field_expr(base, name, span, out);
-            }
-            K::Index { obj, key } => return self.index_expr(obj, key, span, out),
-            K::Call {
-                callee,
-                args,
-                args_at,
-            } => return self.call_expr(callee, None, args, span, *args_at, out),
-            K::MethodCall {
-                obj,
-                name,
-                args,
-                args_at,
-            } => return self.call_expr(obj, Some(name), args, span, *args_at, out),
             K::Closure(c) => return self.closure(c, span),
             K::Array(items) => return self.array(items, span, out),
             K::Map(entries) => return self.map(entries, span, out),
             K::StructLit { path, fields } => return self.struct_lit(path, fields, span, out),
             K::Binary {
-                op: op @ (ast::BinOp::And | ast::BinOp::Or),
-                op_at,
-                lhs,
-                rhs,
-            } => {
-                let is_and = *op == ast::BinOp::And;
-                return self.logical(is_and, lhs, rhs, span, *op_at, out);
-            }
-            K::Binary {
                 op: ast::BinOp::Concat,
                 ..
             } => return self.concat(e, out),
-            K::Binary {
-                op,
-                op_at,
-                lhs,
-                rhs,
-            } => return self.binary(*op, lhs, rhs, span, *op_at, out),
             K::Unary { op, expr } => return self.unary(*op, expr, span, out),
             K::Paren(inner) => return self.single(inner, out),
-            K::As { expr, ty, optional } => return self.cast(expr, ty, *optional, span, out),
             K::Tuple(_) => {
                 return Err(self.error(
                     span,
@@ -292,7 +347,18 @@ impl Lowerer {
                     "ranges are only allowed in `for` headers and patterns",
                 ));
             }
-            K::Try(inner) => return self.try_(inner, span, out),
+            K::Try(inner) => {
+                // `(a, b)?` or `...f()?`: the chain links are lowered by `link`.
+                let values = self.values(inner, out)?;
+                return self.try_(values, span, out);
+            }
+            K::Path { .. }
+            | K::Field { .. }
+            | K::Index { .. }
+            | K::Call { .. }
+            | K::MethodCall { .. }
+            | K::Binary { .. }
+            | K::As { .. } => unreachable!("a chain link"),
             K::If { .. }
             | K::Match { .. }
             | K::Block(_)
@@ -317,44 +383,32 @@ impl Lowerer {
         })
     }
 
-    /// `base.name` or `base::name`.
-    fn field_expr(
-        &mut self,
-        base: &ast::Expr,
-        name: &ast::Name,
-        span: Span,
-        out: &mut Vec<StmtId>,
-    ) -> LResult<ExprId> {
-        let obj = self.expr(base, out)?;
-        let obj = self.first(obj);
-        Ok(self.field(obj, name.sym, span))
-    }
-
-    /// `obj[key]`.
+    /// `obj[key]`, with `obj` lowered.
     fn index_expr(
         &mut self,
-        obj: &ast::Expr,
+        obj: ExprId,
         key: &ast::Expr,
         span: Span,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
-        let (ids, _) = self.parts(&[Part::Expr(obj), Part::Expr(key)], out)?;
+        let (ids, _) = self.parts(&[Part::Lowered(obj), Part::Expr(key)], out)?;
         let obj = self.first(ids[0]);
         let key = self.first(ids[1]);
         Ok(self.add_expr(hir::ExprKind::Index { obj, key }, span))
     }
 
-    /// `callee(args)`, or the method call `callee.name(args)` when `method` is given.
+    /// `callee(args)`, or the method call `callee.name(args)` when `method` is given, with
+    /// `callee` lowered.
     fn call_expr(
         &mut self,
-        callee: &ast::Expr,
+        callee: ExprId,
         method: Option<&ast::Name>,
         args: &[ast::Expr],
         span: Span,
         args_at: u32,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
-        let mut parts = vec![Part::Expr(callee)];
+        let mut parts = vec![Part::Lowered(callee)];
         parts.extend(
             args.iter()
                 .enumerate()
@@ -398,17 +452,17 @@ impl Lowerer {
         Ok(self.add_expr(hir::ExprKind::Table(entries), span))
     }
 
-    /// `lhs op rhs`, for the operators that map to one HIR operator.
+    /// `lhs op rhs`, for the operators that map to one HIR operator, with `lhs` lowered.
     fn binary(
         &mut self,
         op: ast::BinOp,
-        lhs: &ast::Expr,
+        lhs: ExprId,
         rhs: &ast::Expr,
         span: Span,
         op_at: u32,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
-        let (ids, _) = self.parts(&[Part::Expr(lhs), Part::Expr(rhs)], out)?;
+        let (ids, _) = self.parts(&[Part::Lowered(lhs), Part::Expr(rhs)], out)?;
         let lhs = self.first(ids[0]);
         let rhs = self.first(ids[1]);
         Ok(self.add_expr_at(
@@ -474,17 +528,17 @@ impl Lowerer {
     }
 
     /// `a && b` and `a || b`, returning an operand as Lua does. When `b` needs statements,
-    /// they run only when `b` is evaluated.
+    /// they run only when `b` is evaluated. `a` is lowered.
     fn logical(
         &mut self,
         is_and: bool,
-        lhs: &ast::Expr,
+        lhs: ExprId,
         rhs: &ast::Expr,
         span: Span,
         op_at: u32,
         out: &mut Vec<StmtId>,
     ) -> LResult<ExprId> {
-        let l = self.single(lhs, out)?;
+        let l = self.first(lhs);
         let mut pre = Vec::new();
         let r = self.single(rhs, &mut pre)?;
         if pre.is_empty() {
@@ -567,10 +621,15 @@ impl Lowerer {
         Ok(acc)
     }
 
-    /// `e?`: if `e`'s first value is nil, the function returns `nil, <second value>`.
-    fn try_(&mut self, inner: &ast::Expr, span: Span, out: &mut Vec<StmtId>) -> LResult<ExprId> {
+    /// `e?`, with `e` lowered to `values`: if the first value is nil, the function returns
+    /// `nil, <second value>`.
+    fn try_(
+        &mut self,
+        values: hir::ExprList,
+        span: Span,
+        out: &mut Vec<StmtId>,
+    ) -> LResult<ExprId> {
         self.check_not_scope_action(span, "?")?;
-        let values = self.values(inner, out)?;
         let value = self.new_local(None, span, LocalKind::Hidden);
         let err = self.new_local(None, span, LocalKind::Hidden);
         self.push(

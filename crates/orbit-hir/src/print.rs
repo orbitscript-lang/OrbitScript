@@ -265,7 +265,64 @@ impl Printer<'_> {
         }
     }
 
+    /// Chains of operators and suffixes (`a + b + c`, `a.b(c)[d]`) are trees as deep as they
+    /// are long, so they are printed in a loop: each link's text before its left operand on
+    /// the way down, the rest on the way back up.
     fn expr(&self, e: ExprId) -> String {
+        let mut out = String::new();
+        let mut links = Vec::new();
+        let mut base = e;
+        while let Some(lhs) = self.f.exprs[base.index()].kind.chain_lhs() {
+            match &self.f.exprs[base.index()].kind {
+                ExprKind::Call { .. } | ExprKind::MethodCall { .. } => out.push_str("call "),
+                ExprKind::Binary { .. } | ExprKind::And { .. } | ExprKind::Or { .. } => {
+                    out.push('(')
+                }
+                ExprKind::First(_) => out.push_str("first("),
+                ExprKind::Cast { cast, .. } => {
+                    out.push_str(&format!("cast<{:?}", cast.kind));
+                    for (on, flag) in [
+                        (cast.nilable, "?"),
+                        (cast.soft, " soft"),
+                        (cast.test, " test"),
+                    ] {
+                        if on {
+                            out.push_str(flag);
+                        }
+                    }
+                    out.push_str(">(");
+                }
+                _ => {}
+            }
+            links.push(base);
+            base = lhs;
+        }
+        out.push_str(&self.unchained(base));
+        for link in links.into_iter().rev() {
+            match &self.f.exprs[link.index()].kind {
+                ExprKind::Index { key, .. } => out.push_str(&format!("[{}]", self.expr(*key))),
+                ExprKind::Call { args, .. } => out.push_str(&format!("({})", self.list(args))),
+                ExprKind::MethodCall { name, args, .. } => out.push_str(&format!(
+                    ":{}({})",
+                    self.chunk.strings.display(*name),
+                    self.list(args)
+                )),
+                ExprKind::Binary { op, rhs, .. } => {
+                    out.push_str(&format!(" {} {})", bin_op(*op), self.expr(*rhs)))
+                }
+                ExprKind::And { rhs, .. } => out.push_str(&format!(" and {})", self.expr(*rhs))),
+                ExprKind::Or { rhs, .. } => out.push_str(&format!(" or {})", self.expr(*rhs))),
+                ExprKind::Cast { ty: Some(ty), .. } => {
+                    out.push_str(&format!(", {})", self.expr(*ty)))
+                }
+                _ => out.push(')'),
+            }
+        }
+        out
+    }
+
+    /// An expression that isn't a chain link.
+    fn unchained(&self, e: ExprId) -> String {
         match &self.f.exprs[e.index()].kind {
             ExprKind::Nil => "nil".into(),
             ExprKind::Bool(b) => b.to_string(),
@@ -279,18 +336,14 @@ impl Printer<'_> {
             ExprKind::Capture(c) => format!("c{}", c.0),
             ExprKind::Global(s) => format!("global {}", self.s(*s)),
             ExprKind::Env => "env".into(),
-            ExprKind::Index { obj, key } => format!("{}[{}]", self.expr(*obj), self.expr(*key)),
-            ExprKind::Call { callee, args } => {
-                format!("call {}({})", self.expr(*callee), self.list(args))
-            }
-            ExprKind::MethodCall { obj, name, args } => {
-                format!(
-                    "call {}:{}({})",
-                    self.expr(*obj),
-                    self.chunk.strings.display(*name),
-                    self.list(args)
-                )
-            }
+            ExprKind::Index { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::And { .. }
+            | ExprKind::Or { .. }
+            | ExprKind::First(_)
+            | ExprKind::Cast { .. } => unreachable!("a chain link"),
             ExprKind::Closure(func) => format!("closure fn{}", func.0),
             ExprKind::Table(entries) => {
                 let items: Vec<_> = entries
@@ -302,30 +355,6 @@ impl Printer<'_> {
                     .collect();
                 format!("{{{}}}", items.join(", "))
             }
-            ExprKind::Binary { op, lhs, rhs } => {
-                let op = match op {
-                    BinOp::Add => "+",
-                    BinOp::Sub => "-",
-                    BinOp::Mul => "*",
-                    BinOp::Div => "/",
-                    BinOp::IDiv => "//",
-                    BinOp::Mod => "%",
-                    BinOp::Pow => "^",
-                    BinOp::Concat => "..",
-                    BinOp::Eq => "==",
-                    BinOp::Ne => "~=",
-                    BinOp::Lt => "<",
-                    BinOp::Le => "<=",
-                    BinOp::Gt => ">",
-                    BinOp::Ge => ">=",
-                    BinOp::BAnd => "&",
-                    BinOp::BOr => "|",
-                    BinOp::BXor => "~",
-                    BinOp::Shl => "<<",
-                    BinOp::Shr => ">>",
-                };
-                format!("({} {op} {})", self.expr(*lhs), self.expr(*rhs))
-            }
             ExprKind::Unary { op, expr } => {
                 let op = match op {
                     UnOp::Neg => "-",
@@ -335,27 +364,30 @@ impl Printer<'_> {
                 };
                 format!("({op}{})", self.expr(*expr))
             }
-            ExprKind::And { lhs, rhs } => format!("({} and {})", self.expr(*lhs), self.expr(*rhs)),
-            ExprKind::Or { lhs, rhs } => format!("({} or {})", self.expr(*lhs), self.expr(*rhs)),
-            ExprKind::First(e) => format!("first({})", self.expr(*e)),
-            ExprKind::Cast { expr, ty, cast } => {
-                let mut out = format!("cast<{:?}", cast.kind);
-                for (on, flag) in [
-                    (cast.nilable, "?"),
-                    (cast.soft, " soft"),
-                    (cast.test, " test"),
-                ] {
-                    if on {
-                        out.push_str(flag);
-                    }
-                }
-                out.push_str(&format!(">({}", self.expr(*expr)));
-                if let Some(ty) = ty {
-                    out.push_str(&format!(", {}", self.expr(*ty)));
-                }
-                out.push(')');
-                out
-            }
         }
+    }
+}
+
+fn bin_op(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::IDiv => "//",
+        BinOp::Mod => "%",
+        BinOp::Pow => "^",
+        BinOp::Concat => "..",
+        BinOp::Eq => "==",
+        BinOp::Ne => "~=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::BAnd => "&",
+        BinOp::BOr => "|",
+        BinOp::BXor => "~",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
     }
 }

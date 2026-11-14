@@ -539,6 +539,24 @@ pub enum CastKind {
 }
 
 impl ExprKind {
+    /// The left operand of a chain link: the object of an index or method call, the callee of
+    /// a call, the left side of a binary operator, `and` or `or`, the value of a cast, or of
+    /// a truncation to one value (which a front end may put between links). Front
+    /// ends build chains (`a + b + c`, `a.b(c)[d]`, `x as int as int`) as trees as deep as
+    /// they are long, so passes over them follow this in a loop rather than recursing once
+    /// per link.
+    pub fn chain_lhs(&self) -> Option<ExprId> {
+        match *self {
+            ExprKind::Index { obj, .. } | ExprKind::MethodCall { obj, .. } => Some(obj),
+            ExprKind::Call { callee, .. } => Some(callee),
+            ExprKind::Binary { lhs, .. } | ExprKind::And { lhs, .. } | ExprKind::Or { lhs, .. } => {
+                Some(lhs)
+            }
+            ExprKind::Cast { expr, .. } | ExprKind::First(expr) => Some(expr),
+            _ => None,
+        }
+    }
+
     /// Calls `f` on each direct sub-expression, in evaluation order.
     pub fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
         match self {
