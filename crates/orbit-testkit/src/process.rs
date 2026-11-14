@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 pub struct Spec {
     pub program: PathBuf,
     pub args: Vec<OsString>,
+    /// Variables set for the program, on top of this process's environment.
+    pub env: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
     pub timeout: Duration,
     /// Record peak RSS (Unix only; ignored elsewhere).
@@ -70,7 +72,9 @@ pub fn run(spec: &Spec) -> std::io::Result<Outcome> {
 
 fn run_plain(spec: &Spec) -> std::io::Result<Outcome> {
     let mut cmd = Command::new(&spec.program);
-    cmd.args(&spec.args).current_dir(&spec.cwd);
+    cmd.args(&spec.args)
+        .envs(spec.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&spec.cwd);
     let (exit, wall, stdout, stderr) = spawn_and_wait(cmd, spec.timeout)?;
     Ok(Outcome {
         exit,
@@ -93,6 +97,7 @@ fn run_measured(spec: &Spec) -> std::io::Result<Outcome> {
         .arg(spec.timeout.as_millis().to_string())
         .arg(&spec.program)
         .args(&spec.args)
+        .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&spec.cwd);
     // The helper enforces the timeout on its child; ours is a backstop.
     let (outer, _, stdout, stderr) = spawn_and_wait(cmd, spec.timeout + Duration::from_secs(10))?;
@@ -169,12 +174,13 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
 
 /// The `__rusage REPORT TIMEOUT_MS PROGRAM ARGS...` helper. It runs PROGRAM
 /// with our stdio, then writes `EXIT WALL_NANOS PEAK_RSS_KIB` to REPORT.
-pub fn rusage_helper(args: &[String]) -> ExitCode {
+pub fn rusage_helper(args: &[OsString]) -> ExitCode {
     let [report, timeout_ms, program, rest @ ..] = args else {
         eprintln!("usage: orbit-testkit __rusage REPORT TIMEOUT_MS PROGRAM [ARGS...]");
         return ExitCode::from(2);
     };
-    let timeout = Duration::from_millis(timeout_ms.parse().unwrap_or(u64::MAX / 4));
+    let timeout_ms = timeout_ms.to_str().and_then(|t| t.parse().ok());
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(u64::MAX / 4));
     let start = Instant::now();
     let exit = Command::new(program)
         .args(rest)
@@ -184,7 +190,10 @@ pub fn rusage_helper(args: &[String]) -> ExitCode {
     let exit = match exit {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("orbit-testkit: cannot run {program}: {e}");
+            eprintln!(
+                "orbit-testkit: cannot run {}: {e}",
+                program.to_string_lossy()
+            );
             return ExitCode::from(2);
         }
     };
@@ -193,7 +202,7 @@ pub fn rusage_helper(args: &[String]) -> ExitCode {
     match std::fs::write(Path::new(report), text) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("orbit-testkit: {report}: {e}");
+            eprintln!("orbit-testkit: {}: {e}", report.to_string_lossy());
             ExitCode::from(2)
         }
     }
@@ -263,6 +272,7 @@ mod tests {
         run(&Spec {
             program: "sh".into(),
             args: vec!["-c".into(), script.into()],
+            env: Vec::new(),
             cwd: ".".into(),
             timeout,
             measure_rss: false,

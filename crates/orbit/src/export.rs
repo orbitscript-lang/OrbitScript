@@ -754,9 +754,6 @@ impl StackAbi for Win<'_, '_> {
     extern "C" fn set_locale_mode(&mut self, mode: u8) {
         self.s.set_locale_mode(locale_mode_of(mode))
     }
-    extern "C" fn locale_time_pattern<'b>(&self, spec: Slice<'b, u8>) -> SOption<SVec<u8>> {
-        bytes(self.s.locale_time_pattern(spec.as_slice()))
-    }
     extern "C" fn locale_time_text<'b>(
         &self,
         spec: Slice<'b, u8>,

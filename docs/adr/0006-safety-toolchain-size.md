@@ -21,6 +21,7 @@ OrbitScript is a showcase of a scripting runtime in safe Rust, aimed first at em
   | `orbit-ffi/src/sys.rs` (feature `ffi`) | `dlopen`/`dlsym`, calls through libffi, memory access through script-supplied pointers | ADR-9 |
   | `orbit-locale/src/sys.rs` (`orbit` feature `locale`) | The C library's locale objects (`newlocale`, `uselocale`, `_create_locale`), `strcoll` and `strftime` in them, reading the strings they return | ADR-13 |
   | `orbit-std/src/crt.rs` | The C library's `strerror` (`strerror_r` on Unix), so I/O errors carry the text Lua reports, from one source on every platform | this ADR |
+  | `orbit-std/src/ctime.rs` (feature `os`) | Local time through the C library (`localtime_r`, `gmtime_r`, `mktime`, `strftime_l` in the "C" locale; the Windows C runtime's `_localtime64_s`, `_gmtime64_s`, `_mktime64`, `_strftime_l`), so `os.date` and `os.time` follow the system's zone rules as Lua's do. Script data reaches it only as numbers; formats are checked in safe Rust and passed one conversion at a time | this ADR |
   | `orbit-dap`'s Windows socket and event wrapper, `orbit-dap/src/process.rs` | AF_UNIX sockets on Windows until `std` has them; signalling and inspecting `orbit` processes for `--debug-attach` | ADR-12 |
 
 - Any other exception needs an ADR. Dependencies may use `unsafe` internally, as `std` does.

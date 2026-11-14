@@ -97,6 +97,7 @@ pub fn main(args: &[String]) -> Result<bool> {
                 let out = process::run(&Spec {
                     program: program.to_path_buf(),
                     args: vec![script.clone().into()],
+                    env: Vec::new(),
                     cwd: work.clone(),
                     timeout,
                     measure_rss: false,

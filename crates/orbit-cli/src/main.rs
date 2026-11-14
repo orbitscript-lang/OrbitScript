@@ -19,6 +19,7 @@
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod args;
 #[cfg(feature = "dap")]
 mod dap;
 #[cfg(feature = "repl")]
@@ -82,8 +83,8 @@ fn on_interrupt(interrupt: &orbit::Interrupt) {
 
 /// A `-e` or `-l` option, run in command-line order.
 enum Action {
-    Exec(String),
-    Require { global: String, module: String },
+    Exec(Vec<u8>),
+    Require { global: Vec<u8>, module: Vec<u8> },
 }
 
 /// What the command line asks for.
@@ -107,46 +108,47 @@ struct Cli {
 }
 
 enum ParseError {
-    Unrecognized(String),
+    Unrecognized(Vec<u8>),
     NeedsArgument(&'static str),
 }
 
-fn parse(args: &[String]) -> Result<Cli, ParseError> {
+/// The options in `args` (bytes, see [`args`]), up to the script.
+fn parse(args: &[Vec<u8>]) -> Result<Cli, ParseError> {
     let mut cli = Cli::default();
     let mut i = 1;
     while i < args.len() {
-        let a = args[i].as_str();
-        if !a.starts_with('-') || a == "-" {
+        let a = args[i].as_slice();
+        if !a.starts_with(b"-") || a == b"-" {
             cli.script = Some(i);
             break;
         }
         match a {
-            "--" => {
+            b"--" => {
                 if i + 1 < args.len() {
                     cli.script = Some(i + 1);
                 }
                 break;
             }
             #[cfg(feature = "repl")]
-            "-i" => cli.interactive = true,
-            "-v" => cli.version = true,
-            "-E" => cli.ignore_env = true,
-            "-W" => cli.warnings = true,
-            "--lock-cpath" => cli.lock_cpath = true,
-            "--no-ffi" => cli.no_ffi = true,
+            b"-i" => cli.interactive = true,
+            b"-v" => cli.version = true,
+            b"-E" => cli.ignore_env = true,
+            b"-W" => cli.warnings = true,
+            b"--lock-cpath" => cli.lock_cpath = true,
+            b"--no-ffi" => cli.no_ffi = true,
             #[cfg(feature = "dap")]
-            "--debug-listen" => cli.debug_listen = true,
+            b"--debug-listen" => cli.debug_listen = true,
             #[cfg(feature = "dap")]
-            "--no-debug-signal" => cli.no_debug_signal = true,
-            _ if a.starts_with("-e") || a.starts_with("-l") => {
-                let opt = if a.starts_with("-e") { "-e" } else { "-l" };
+            b"--no-debug-signal" => cli.no_debug_signal = true,
+            _ if a.starts_with(b"-e") || a.starts_with(b"-l") => {
+                let opt = if a.starts_with(b"-e") { "-e" } else { "-l" };
                 // The value is glued on (`-eprint(1)`) or the next argument,
                 // which can't look like an option.
                 let value = if a.len() > 2 {
-                    a[2..].to_string()
+                    a[2..].to_vec()
                 } else {
                     match args.get(i + 1) {
-                        Some(v) if !v.starts_with('-') => {
+                        Some(v) if !v.starts_with(b"-") => {
                             i += 1;
                             v.clone()
                         }
@@ -158,19 +160,19 @@ fn parse(args: &[String]) -> Result<Cli, ParseError> {
                 } else {
                     // `-l g=mod` names the global; otherwise it's the
                     // module name up to any `-` (`lib2-v2` sets `lib2`).
-                    match value.split_once('=') {
-                        Some((g, m)) => Action::Require {
-                            global: g.to_string(),
-                            module: m.to_string(),
+                    match value.iter().position(|&b| b == b'=') {
+                        Some(eq) => Action::Require {
+                            global: value[..eq].to_vec(),
+                            module: value[eq + 1..].to_vec(),
                         },
                         None => Action::Require {
-                            global: value.split('-').next().unwrap_or("").to_string(),
+                            global: value.split(|&b| b == b'-').next().unwrap_or(&[]).to_vec(),
                             module: value,
                         },
                     }
                 });
             }
-            _ => return Err(ParseError::Unrecognized(a.to_string())),
+            _ => return Err(ParseError::Unrecognized(a.to_vec())),
         }
         i += 1;
     }
@@ -191,7 +193,13 @@ fn parse_size(s: &str) -> Option<usize> {
 
 fn usage(prog: &str, e: ParseError) -> ExitCode {
     match e {
-        ParseError::Unrecognized(o) => eprintln!("{prog}: unrecognized option '{o}'"),
+        ParseError::Unrecognized(o) => {
+            // The option's bytes as given, as `lua` prints them.
+            let mut line = format!("{prog}: unrecognized option '").into_bytes();
+            line.extend_from_slice(&o);
+            line.extend_from_slice(b"'\n");
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), &line);
+        }
         ParseError::NeedsArgument(o) => eprintln!("{prog}: '{o}' needs argument"),
     }
     eprint!(
@@ -224,8 +232,10 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    let prog = args.first().cloned().unwrap_or_else(|| "orbit".into());
+    let args = args::args();
+    let prog = args
+        .first()
+        .map_or_else(|| "orbit".into(), |p| args::text(p));
     // The runtime is in liborbit: it must be the one this program was
     // built with, checked before anything else of it is used.
     #[cfg(feature = "shared")]
@@ -234,10 +244,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     #[cfg(feature = "dap")]
-    match args.get(1).map(String::as_str) {
-        Some("--debug-server") => return dap::server(&prog),
-        Some("--debug-connect") => return dap::connect(&prog, &args),
-        Some("--debug-attach") => return dap::attach(&prog, &args),
+    match args.get(1).map(Vec::as_slice) {
+        Some(b"--debug-server") => return dap::server(&prog),
+        Some(b"--debug-connect") => return dap::connect(&prog, &args),
+        Some(b"--debug-attach") => return dap::attach(&prog, &args),
         _ => {}
     }
     let cli = match parse(&args) {
@@ -391,7 +401,7 @@ impl Runner {
 
     /// Run everything the command line asks for, in `lua`'s order; false
     /// after an error, which has been reported.
-    fn main(&mut self, cli: &Cli, args: &[String]) -> bool {
+    fn main(&mut self, cli: &Cli, args: &[Vec<u8>]) -> bool {
         if cli.version || cli.interactive {
             print_version();
         }
@@ -401,7 +411,7 @@ impl Runner {
         }
         for action in &cli.actions {
             let ok = match action {
-                Action::Exec(stat) => self.run_chunk(stat.as_bytes(), COMMAND_LINE),
+                Action::Exec(stat) => self.run_chunk(stat, COMMAND_LINE),
                 Action::Require { global, module } => self.require(global, module),
             };
             if !ok {
@@ -438,13 +448,13 @@ impl Runner {
 
     /// `arg`: the script at 0 (the interpreter with no script), everything
     /// before it at negative indexes, its arguments from 1.
-    fn set_arg_table(&mut self, args: &[String], script: Option<usize>) {
+    fn set_arg_table(&mut self, args: &[Vec<u8>], script: Option<usize>) {
         let base = script.unwrap_or(0) as i64;
         self.iso
             .scope(|s| {
                 let t = s.create_table();
                 for (k, a) in args.iter().enumerate() {
-                    t.raw_set(k as i64 - base, a.as_str())?;
+                    t.raw_set(k as i64 - base, a.as_slice())?;
                 }
                 s.globals().set("arg", t)
             })
@@ -463,13 +473,13 @@ impl Runner {
             },
         };
         match init.strip_prefix('@') {
-            Some(file) => self.run_file(Some(file), false),
+            Some(file) => self.run_file(Some(file.as_bytes()), false),
             None => self.run_chunk(init.as_bytes(), format!("={name}").as_bytes()),
         }
     }
 
     /// `-l`: `global = require(module)`.
-    fn require(&mut self, global: &str, module: &str) -> bool {
+    fn require(&mut self, global: &[u8], module: &[u8]) -> bool {
         let r = self.iso.scope(|s| {
             let g = s.globals();
             let require: Value = g.get("require").map_err(|e| e.to_string())?;
@@ -485,15 +495,15 @@ impl Runner {
 
     /// The script, with arguments taken from `arg` as it is now: `arg[1]`
     /// to `arg[#arg]` (earlier code may have changed it).
-    fn run_script(&mut self, script: &str) -> bool {
-        let path = (script != "-").then_some(script);
+    fn run_script(&mut self, script: &[u8]) -> bool {
+        let path = (script != b"-").then_some(script);
         self.run_file(path, true)
     }
 
     /// Load a file (`None`: standard input) as `loadfile` does and call it,
     /// with the script arguments from `arg` when `with_args`.
-    fn run_file(&mut self, path: Option<&str>, with_args: bool) -> bool {
-        let (bytes, source) = match read_chunk_file(path.map(str::as_bytes)) {
+    fn run_file(&mut self, path: Option<&[u8]>, with_args: bool) -> bool {
+        let (bytes, source) = match read_chunk_file(path) {
             Ok(r) => r,
             Err(m) => {
                 self.report(&format!("{}: {m}", self.prog));

@@ -145,7 +145,7 @@ pub struct BreakpointAbi {
 /// A broken-down time ([`crate::TimeParts`]).
 #[stabby::stabby]
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TimePartsAbi {
     pub year: i64,
     pub month: i64,
@@ -156,6 +156,8 @@ pub struct TimePartsAbi {
     pub wday: i64,
     pub yday: i64,
     pub isdst: bool,
+    pub offset: i64,
+    pub zone: SVec<u8>,
 }
 
 impl From<&crate::TimeParts> for TimePartsAbi {
@@ -170,6 +172,8 @@ impl From<&crate::TimeParts> for TimePartsAbi {
             wday: t.wday,
             yday: t.yday,
             isdst: t.isdst,
+            offset: t.offset,
+            zone: t.zone.as_slice().into(),
         }
     }
 }
@@ -186,6 +190,8 @@ impl From<TimePartsAbi> for crate::TimeParts {
             wday: t.wday,
             yday: t.yday,
             isdst: t.isdst,
+            offset: t.offset,
+            zone: t.zone.to_vec(),
         }
     }
 }
@@ -435,7 +441,6 @@ pub trait StackAbi {
     /// A [`locale_mode_code`].
     extern "C" fn locale_mode(&self) -> u8;
     extern "C" fn set_locale_mode(&mut self, mode: u8);
-    extern "C" fn locale_time_pattern<'b>(&self, spec: Slice<'b, u8>) -> SOption<SVec<u8>>;
     extern "C" fn locale_time_text<'b>(
         &self,
         spec: Slice<'b, u8>,

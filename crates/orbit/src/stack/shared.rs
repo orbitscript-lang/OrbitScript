@@ -1041,10 +1041,6 @@ impl<'s> Stack<'s> {
         self.w.set_locale_mode(locale_mode_code(mode))
     }
 
-    pub fn locale_time_pattern(&self, spec: &[u8]) -> Option<OrbitString> {
-        bytes(self.w.locale_time_pattern(spec.into()))
-    }
-
     pub fn locale_time_text(&self, spec: &[u8], tm: &crate::TimeParts) -> Option<OrbitString> {
         bytes(self.w.locale_time_text(spec.into(), tm.into()))
     }

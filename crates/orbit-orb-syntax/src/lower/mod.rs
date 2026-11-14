@@ -25,6 +25,9 @@ use crate::code::{self, Code};
 use orbit_hir::Diagnostic;
 
 /// Lowers a parsed module to HIR, before the HIR's shared analysis (`orbit_hir::analyze`).
+///
+/// This is the compiler's entry: the chunk takes over the tree's string pool and line table,
+/// so nothing is copied.
 pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
     let Ast {
         body,
@@ -32,7 +35,23 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
         source,
         ..
     } = ast;
-    let mut strings = strings;
+    lower_module(&body, strings, source)
+}
+
+/// Lowers a module the caller goes on using, as a checker or an editor does: the tree is only
+/// read, and the chunk gets copies of its string pool and line table. Every id in the tree
+/// means the same in the chunk's pool.
+pub fn lower_borrowed(ast: &Ast) -> Result<hir::Chunk, Diagnostic> {
+    lower_module(&ast.body, ast.strings.clone(), ast.source.clone())
+}
+
+/// The walk itself reads the tree and never changes it. `strings` is the pool the tree's names
+/// are interned in; lowering adds the names it introduces.
+fn lower_module(
+    body: &ast::Block,
+    mut strings: hir::StringPool,
+    source: hir::SourceInfo,
+) -> Result<hir::Chunk, Diagnostic> {
     let syms = Syms::new(&mut strings);
     let mut lx = Lowerer {
         chunk: hir::Chunk {
@@ -51,7 +70,7 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
     let span = body.span;
     let main = lx.begin_function(FunctionName::Main, span);
     lx.f().is_vararg = true;
-    let result = lx.module(&body);
+    let result = lx.module(body);
     lx.end_function(main);
     result?;
     Ok(lx.chunk)

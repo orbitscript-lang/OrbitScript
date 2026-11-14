@@ -34,8 +34,8 @@ fn main() -> ExitCode {
         eprintln!("orbit-lsp: {m}");
         return ExitCode::FAILURE;
     }
-    if let Some(arg) = std::env::args().nth(1) {
-        match arg.as_str() {
+    if let Some(arg) = std::env::args_os().nth(1) {
+        match arg.to_str().unwrap_or("") {
             "--version" => {
                 println!("orbit-lsp {}", env!("CARGO_PKG_VERSION"));
                 return ExitCode::SUCCESS;

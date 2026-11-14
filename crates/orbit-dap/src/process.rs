@@ -216,7 +216,7 @@ mod macos {
             assert_ne!(caught & 1 << (libc::SIGBUS - 1), 0, "{caught:#x}");
             assert_eq!(caught & 1 << (libc::SIGUSR1 - 1), 0, "{caught:#x}");
             let args = args(me).unwrap();
-            assert_eq!(args.len(), std::env::args().count(), "{args:?}");
+            assert_eq!(args.len(), std::env::args_os().count(), "{args:?}");
         }
     }
 }

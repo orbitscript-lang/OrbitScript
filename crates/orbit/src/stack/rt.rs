@@ -1876,12 +1876,6 @@ impl<'s> Stack<'s> {
         self.ctx.vm.set_locale_mode(mode)
     }
 
-    /// What `os.date`'s `%c`, `%x`, `%X` or `%r` expands to in the time
-    /// category's locale, or `None` for the C locale's.
-    pub fn locale_time_pattern(&self, spec: &[u8]) -> Option<OrbitString> {
-        self.ctx.vm.locale_time_pattern(spec).map(OrbitString::from)
-    }
-
     /// The text of a locale-dependent `os.date` conversion (`spec` without
     /// its `%`) in the time category's locale, or `None` for the C
     /// locale's.
