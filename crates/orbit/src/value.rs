@@ -562,9 +562,22 @@ impl<'s> Function<'s> {
             }
         };
         let mut stack = s.stack();
+        // This call may run inside a `__close` handler, while an outer
+        // traced call's error unwinds with its traceback already taken:
+        // that one waits here, out of this call's way.
+        let outer = match handler {
+            Handler::Traceback => stack.extension(|p: &mut PendingTraceback| p.0.take()),
+            _ => None,
+        };
         let r = match handler {
             Handler::None => stack.call(nargs, crate::stack::MULTRET),
             _ => stack.call_handled(nargs, crate::stack::MULTRET, at + 1),
+        };
+        let traceback = match handler {
+            Handler::Traceback => {
+                stack.extension(|p: &mut PendingTraceback| std::mem::replace(&mut p.0, outer))
+            }
+            _ => None,
         };
         match r {
             Ok(()) => {
@@ -578,13 +591,9 @@ impl<'s> Function<'s> {
                 Ok(s.last(n))
             }
             Err(e) => {
-                let tb = match handler {
-                    Handler::Traceback => stack.extension(|p: &mut PendingTraceback| p.0.take()),
-                    _ => None,
-                };
                 let err = s.error_of(&mut stack, e);
                 let _ = stack.set_top(at);
-                Err(err.with_traceback(tb))
+                Err(err.with_traceback(traceback))
             }
         }
     }

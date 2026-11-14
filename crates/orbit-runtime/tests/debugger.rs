@@ -460,6 +460,108 @@ return total;
     assert_eq!(got[..2], [("breakpoint", 8), ("step", 2)]);
 }
 
+/// Answers every error stop by calling the program's global `probe`,
+/// which raises and catches errors of its own and then fails, the way an
+/// expression evaluated in the debugger can.
+struct Evaluator {
+    /// Each stop's error message, and what the probe's failure said.
+    stops: Rc<RefCell<Vec<(String, String)>>>,
+}
+
+impl DebugEvents for Evaluator {
+    fn stopped(&mut self, paused: &mut Paused<'_, '_>, reason: StopReason) -> Resume {
+        let StopReason::Error { value, .. } = reason else {
+            return Resume::Continue;
+        };
+        let ctx = paused.ctx();
+        let text = |ctx: &orbit_runtime::vm::NativeCtx<'_>, v: Value| match v {
+            Value::Str(s) => String::from_utf8_lossy(ctx.vm.heap.get(s).as_bytes()).into_owned(),
+            v => format!("{v:?}"),
+        };
+        let message = text(ctx, value);
+        let probe = ctx.vm.global("probe");
+        ctx.push(probe);
+        let failure = match ctx.call(0, None) {
+            Ok(_) => "no error".to_owned(),
+            Err(e) => text(ctx, e.value),
+        };
+        self.stops.borrow_mut().push((message, failure));
+        Resume::Continue
+    }
+}
+
+/// Code the debugger runs while an error is on its way (to its message
+/// handler, through `__close` handlers, out of the VM) has errors of its
+/// own, and leaves the first one exactly as it was: handled once, closing
+/// each variable with the same value, with the traceback of where it was
+/// raised.
+#[test]
+fn evaluating_during_an_error_leaves_the_error_alone() {
+    let src = "\
+local function tbc(f) return setmetatable({}, {__close = f}) end
+local function over() return 1 + over() end
+function probe()
+  assert(not pcall(error, 'p1'))
+  assert(select(2, xpcall(error, function(m) error(m, 0) end, 'p2')) == 'error in error handling')
+  local v <close> = tbc(function() pcall(error, 'p3') end)
+  error('probe failed', 0)
+end
+local calls, closed = 0, {}
+local function handler(m) calls = calls + 1; return 'handled:' .. m end
+local function raiser()
+  local a <close> = tbc(function(_, e) closed[#closed + 1] = e end)
+  local b <close> = tbc(function(_, e) closed[#closed + 1] = e; pcall(error, 'in close', 0) end)
+  error('original', 0)
+end
+local ok, msg = xpcall(raiser, handler)
+assert(not ok and msg == 'handled:original' and calls == 1, msg)
+assert(#closed == 2 and closed[1] == msg and closed[2] == msg)
+local ok, msg = xpcall(error, function(m) error(m, 0) end, 'forever')
+assert(not ok and msg == 'error in error handling', msg)
+local ok, msg = pcall(over)
+assert(not ok and msg:find('stack overflow', 1, true), msg)
+ok, msg = pcall(coroutine.wrap(function() local c <close> = tbc(function() end); error('in co', 0) end))
+assert(not ok and msg == 'in co', msg)
+closed = {}
+raiser()
+";
+    let mut vm = vm();
+    let stops = Rc::new(RefCell::new(Vec::new()));
+    vm.set_debug_events(Some(Box::new(Evaluator {
+        stops: stops.clone(),
+    })));
+    vm.set_error_break(ErrorBreak::All);
+    let e = run(&mut vm, "v.lua", src).expect_err("the last call fails");
+    let Value::Str(m) = e.value else {
+        panic!("{:?}", e.value)
+    };
+    assert_eq!(vm.heap.get(m).as_bytes(), b"original");
+    let tb = e.traceback.expect("a traceback");
+    assert!(tb.contains("in local 'raiser'"), "{tb}");
+    assert!(!tb.contains("'probe'"), "{tb}");
+    let stops = stops.borrow();
+    // Every stop ran the probe to a failure of its own (deep inside the
+    // failing message handlers, running out of stack).
+    for (at, failure) in stops.iter() {
+        assert!(
+            ["probe failed", "C stack overflow", "stack overflow"].contains(&failure.as_str()),
+            "{failure} at {at}"
+        );
+    }
+    assert_eq!(stops[0].1, "probe failed");
+    let messages: Vec<&str> = stops.iter().map(|(m, _)| m.as_str()).collect();
+    // The first protected call: the error, then the one its `__close`
+    // handler raises and catches; the handler's result is no new error.
+    assert_eq!(messages[..2], ["original", "in close"], "{messages:?}");
+    // The last, uncaught one stops the same way.
+    assert_eq!(
+        messages[messages.len() - 2..],
+        ["original", "in close"],
+        "{messages:?}"
+    );
+    assert!(messages.contains(&"in co"), "{messages:?}");
+}
+
 /// What an attached debugger costs code it can't stop in: each benchmark
 /// with no debugger, then with one attached and a breakpoint in a function
 /// the benchmark never calls. Run with
