@@ -649,11 +649,40 @@ pub trait WarnHook {
 
 pub type WarnHookBox = dynptr!(SBox<dyn WarnHook>);
 
-/// An output stream, either side's: errors as their message.
+/// An I/O error crossing the boundary. A system error keeps its code, so
+/// the other side rebuilds the same error and the libraries report the
+/// system's `errno` and text; any other error keeps its message.
+#[stabby::stabby]
+#[derive(Debug)]
+pub struct IoErrorAbi {
+    pub from_os: bool,
+    pub os_code: i32,
+    pub message: SString,
+}
+
+impl IoErrorAbi {
+    pub fn new(e: &std::io::Error) -> IoErrorAbi {
+        IoErrorAbi {
+            from_os: e.raw_os_error().is_some(),
+            os_code: e.raw_os_error().unwrap_or(0),
+            message: e.to_string().as_str().into(),
+        }
+    }
+
+    pub fn into_io(self) -> std::io::Error {
+        if self.from_os {
+            std::io::Error::from_raw_os_error(self.os_code)
+        } else {
+            std::io::Error::other(self.message.to_string())
+        }
+    }
+}
+
+/// An output stream, either side's.
 #[stabby::stabby(checked)]
 pub trait Writer {
-    extern "C" fn write<'b>(&mut self, bytes: Slice<'b, u8>) -> SResult<usize, SString>;
-    extern "C" fn flush(&mut self) -> SResult<(), SString>;
+    extern "C" fn write<'b>(&mut self, bytes: Slice<'b, u8>) -> SResult<usize, IoErrorAbi>;
+    extern "C" fn flush(&mut self) -> SResult<(), IoErrorAbi>;
 }
 
 pub type WriterBox = dynptr!(SBox<dyn Writer>);

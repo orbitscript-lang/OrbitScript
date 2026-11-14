@@ -312,12 +312,10 @@ struct LibOut<'w>(WriterMut<'w>);
 
 impl std::io::Write for LibOut<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        Result::from(self.0.write(buf.into()))
-            .map_err(|m: stabby::string::String| std::io::Error::other(m.to_string()))
+        Result::from(self.0.write(buf.into())).map_err(IoErrorAbi::into_io)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        Result::from(self.0.flush())
-            .map_err(|m: stabby::string::String| std::io::Error::other(m.to_string()))
+        Result::from(self.0.flush()).map_err(IoErrorAbi::into_io)
     }
 }
 
