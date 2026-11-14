@@ -4,6 +4,7 @@
 use std::io::{BufRead, Read, Write};
 
 use orbit::stack::{Either, Nil, Rest, Return, Stack, StackExt, StackResult, Status};
+use orbit::text::TextDecoder;
 use orbit::{Chunk, Error, Mode, OrbitString, Scope, Table, native};
 
 use crate::sys::{os_error_text, os_path};
@@ -157,11 +158,20 @@ fn debug_lines<'s>(c: &'s Scope<'s>) {
         c.with_stdout(|out| {
             let _ = out.flush();
         });
+        let line_endings = c.line_endings();
         let _ = std::io::stderr().write_all(b"lua_debug> ");
         let mut line = Vec::new();
         match std::io::stdin().lock().read_until(b'\n', &mut line) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
+        }
+        if line_endings.translates() {
+            // Standard input is a text stream: a Ctrl-Z ends it.
+            let mut decoder = TextDecoder::default();
+            decoder.decode(&mut line);
+            if line.is_empty() && decoder.ended() {
+                return;
+            }
         }
         if line == b"cont\n" || line == b"cont" {
             return;
@@ -175,9 +185,9 @@ fn debug_lines<'s>(c: &'s Scope<'s>) {
                 Some(Ok(v)) => v.to_display().unwrap_or_else(|e| e.message().into()),
                 _ => e.message().into(),
             };
-            let mut err = std::io::stderr().lock();
-            let _ = err.write_all(&text);
-            let _ = err.write_all(b"\n");
+            let mut text = text.to_vec();
+            text.push(b'\n');
+            crate::sys::write_stderr(line_endings, &text);
         }
     }
 }

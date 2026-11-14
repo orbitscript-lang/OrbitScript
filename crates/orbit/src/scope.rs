@@ -169,6 +169,12 @@ impl<'s> Scope<'s> {
         self.stack().with_stdout(f)
     }
 
+    /// How the isolate's text streams treat line endings
+    /// ([`Config::line_endings`](crate::Config::line_endings)).
+    pub fn line_endings(&self) -> crate::LineEndings {
+        self.stack().line_endings()
+    }
+
     /// Run `f` on the isolate's extension value of type `T`, made with
     /// `Default` on first use: the per-isolate state natives read with
     /// [`Stack::extension`](crate::stack::Stack::extension) and
