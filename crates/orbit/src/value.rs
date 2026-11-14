@@ -10,7 +10,7 @@ use orbit_runtime::object::number;
 use crate::error::Error;
 use crate::pin::Pinned;
 use crate::scope::Scope;
-use crate::stack::{Continuation, Native, Outcome, Return, Stack, StackResult, Type};
+use crate::stack::{Native, Return, Stack, StackResult, Type};
 use crate::{OrbitStr, OrbitString};
 
 /// Any script value. Handles ([`Str`], [`Table`], ...) live as long as the
@@ -620,30 +620,9 @@ impl Native for TracebackHandler {
     }
 }
 
-/// The end of a [`Call::tail_call`](crate::Call::tail_call): the call's
-/// results, or its error, are the host function's.
-pub(crate) struct TailCalled;
-
-impl Continuation for TailCalled {
-    fn resume(_: &mut Stack<'_>, outcome: Outcome) -> StackResult<Return> {
-        match outcome {
-            Outcome::Ok(n) => Ok(Return::values(n)),
-            Outcome::Err(e) => Err(e),
-        }
-    }
-}
-
 // ---- threads ----------------------------------------------------------------
 
-/// What [`Thread::status`] reports, as `coroutine.status` does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThreadStatus {
-    Suspended,
-    Running,
-    /// It resumed another coroutine and waits for it.
-    Normal,
-    Dead,
-}
+pub use orbit_runtime::stack::ThreadStatus;
 
 /// What a resume ended with.
 #[derive(Debug)]

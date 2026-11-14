@@ -7,7 +7,7 @@
 //! reads files. The C searchers and `package.loadlib` come from
 //! `orbit-capi`, which installs itself after this library.
 
-use orbit::stack::{Any, Either, Nil, Stack, StackResult, Status, Type};
+use orbit::stack::{Any, Either, Nil, Stack, StackExt, StackResult, Status, Type};
 use orbit::{Chunk, Error, OrbitStr, OrbitString, Scope, Table, Value, native};
 
 use crate::base::read_chunk_file;

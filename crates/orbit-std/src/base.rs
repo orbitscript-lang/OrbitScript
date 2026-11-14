@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, Read, Write};
 
-use orbit::stack::{Either, Nil, Rest, Return, Stack, StackResult, Status};
+use orbit::stack::{Either, Nil, Rest, Return, Stack, StackExt, StackResult, Status};
 use orbit::{Chunk, Error, Mode, OrbitString, Scope, Table, native};
 
 use crate::sys::{os_error_text, os_path};

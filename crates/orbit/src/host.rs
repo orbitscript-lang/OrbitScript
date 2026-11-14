@@ -7,7 +7,7 @@ use crate::OrbitStr;
 use crate::error::Error;
 use crate::scope::Scope;
 use crate::stack::{Return, Stack, StackResult};
-use crate::value::{FromValue, FromValueError, Function, IntoValues, TailCalled, Value};
+use crate::value::{FromValue, FromValueError, Function, IntoValues, Value};
 
 /// A function scripts can call. Closures implement it:
 ///
@@ -212,7 +212,7 @@ fn run(s: &mut Stack<'_>, f: &dyn HostFunction) -> StackResult<Return> {
             for i in at..at + nargs as i32 {
                 stack.push_copy(i);
             }
-            Ok(Return::call_then::<TailCalled>(nargs, false))
+            Ok(Return::tail_call(nargs))
         }
         Ok(Ret(RetKind::Exit { code, close })) => Ok(Return::exit(code, close)),
         Err(e) => Err(scope.raise(&mut stack, e)),
@@ -234,11 +234,4 @@ fn move_to_end(stack: &mut Stack<'_>, at: i32, n: usize) -> StackResult<()> {
     Ok(())
 }
 
-pub(crate) fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
-    let what = p
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| p.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("panic");
-    format!("host function panicked: {what}")
-}
+pub(crate) use orbit_runtime::stack::panic_message;

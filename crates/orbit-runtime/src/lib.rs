@@ -12,5 +12,6 @@
 pub mod arg_errors;
 pub mod locale;
 pub mod object;
+pub mod stack;
 pub mod stdlib;
 pub mod vm;

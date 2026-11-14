@@ -9,10 +9,6 @@ use crate::scope::Scope;
 use crate::stack::Native;
 use crate::value::{Table, Userdata};
 
-/// How the API stores a host value in a userdata: taken out while a method
-/// runs, so the method can use the whole [`Call`] at the same time.
-pub(crate) struct Slot<T>(pub(crate) Option<T>);
-
 /// A Rust type made visible to scripts: values of `T` become userdata whose
 /// metatable has the class's name (`__name`), methods (through `__index`)
 /// and metamethods. `T`'s `Drop` is the finalizer.
