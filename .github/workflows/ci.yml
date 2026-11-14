@@ -1,26 +1,24 @@
 name: CI
 
-# Checks every pull request into main. Sized to keep Actions minutes low:
+# Checks every pull request into main on Linux x86_64. platforms.yml runs the
+# other operating systems. Sized to keep Actions minutes low: jobs are billed
+# by the whole minute and most of these take two to six, so each job does
+# several things instead of one runner per step.
 #
 # - A new push to a pull request cancels its running checks (concurrency).
 # - Draft pull requests and changes that touch only docs skip it; marking a
 #   draft ready for review starts it.
-# - Every supported OS runs the tests once: Linux on x86_64 and aarch64,
-#   macOS on arm64, Windows on x64. Windows ARM64 runs clippy, which compiles
-#   everything including the tests, and the release workflow runs its tests.
-# - Each Lua version's build (ADR-14) runs its official suite once, on
-#   Linux x86_64 (`conformance`), and the differential tests run against
-#   the 5.5 build. The Lua 5.4 build is linted and tested on Linux x86_64
-#   only, and the MSRV job type-checks it too.
+# - `lint-msrv`: fmt, clippy for both Lua versions (ADR-14), and the MSRV
+#   (`cargo check` with the rust-version from Cargo.toml: catches newer
+#   language features and std APIs) for both, plus the shared layout
+#   (ADR-10) built, linked and tested as laid out with the MSRV.
+# - `conformance`, once per Lua version: `cargo test` for that build, then
+#   its official suite on `orbit`, on the shared layout's `orbit` and
+#   through its liblua, the size budget, and for 5.5 the differential tests.
+#   The corpus tests that platforms.yml skips run here.
 # - Steps several jobs share live in .github/actions: `setup-rust` (the
 #   toolchain and the build cache) and `reference-lua` (the reference
 #   interpreter and what the suite needs from the runner).
-# - The shared layout (ADR-10) is built by ./build.sh, without a profile, and
-#   tested as laid out on every OS (`shared`), and once with the MSRV, which
-#   must build and link it too. The suites run on its `orbit` and through
-#   its liborbit in `conformance`.
-# - The MSRV job only type-checks (`cargo check`): no linking, no tests. It
-#   runs on Linux, macOS and Windows, since each has code only it compiles.
 #
 # bench.yml (full benchmarks) and release.yml (every target, tests and
 # packaging) run by hand or on a tag, not on pull requests.
@@ -53,159 +51,54 @@ defaults:
   run:
     shell: bash
 
+
 jobs:
-  lint:
-    name: fmt + clippy
+  lint-msrv:
+    name: fmt, clippy, MSRV
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # The Lua 5.4 build (ADR-14), in its own target directory so it doesn't
-      # rebuild the 5.5 one.
-      - run: cargo clippy --workspace --all-targets --locked --features orbit/lua-5-4 --target-dir target/lua54 -- -D warnings
-
-  msrv:
-    name: check on MSRV (${{ matrix.name }})
-    if: github.event.pull_request.draft != true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux
-            os: ubuntu-latest
-          - name: macOS
-            os: macos-15
-          - name: Windows
-            os: windows-2025
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - name: Check out with LF line ends
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v7
       - name: Install the MSRV from Cargo.toml
         run: |
           msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
           rustup toolchain install "$msrv" --profile minimal
           echo "MSRV=$msrv" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: msrv
-      # Type-checking catches newer language features and std APIs; linking
-      # and running the tests add nothing the other jobs don't cover.
-      - run: cargo +"$MSRV" check --workspace --all-targets --locked
-      - name: The Lua 5.4 build
-        if: runner.os == 'Linux'
+      # Each later step runs even when an earlier one fails, so one run
+      # reports every problem.
+      - run: cargo fmt --all --check
+      - if: success() || failure()
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The Lua 5.4 build (ADR-14), in its own target directory so it doesn't
+      # rebuild the 5.5 one.
+      - if: success() || failure()
+        run: cargo clippy --workspace --all-targets --locked --features orbit/lua-5-4 --target-dir target/lua54 -- -D warnings
+      # Type-checking with the MSRV catches newer language features and std
+      # APIs; the tests run with the current toolchain.
+      - name: MSRV check
+        if: success() || failure()
+        run: cargo +"$MSRV" check --workspace --all-targets --locked
+      - name: MSRV check, the Lua 5.4 build
+        if: success() || failure()
         run: cargo +"$MSRV" check --workspace --all-targets --locked --features orbit/lua-5-4 --target-dir target/lua54
-
-  test:
-    name: test (${{ matrix.name }})
-    if: github.event.pull_request.draft != true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-          - name: Linux x86_64, Lua 5.4
-            os: ubuntu-latest
-            features: orbit/lua-5-4
-          - name: Linux aarch64
-            os: ubuntu-24.04-arm
-          - name: macOS arm64
-            os: macos-15
-          - name: Windows x64
-            os: windows-2025
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    steps:
-      # Windows runners check text files out with CRLF line ends, but tests
-      # compare output byte for byte and programs embed their .orb sources.
-      - name: Check out with LF line ends
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache-key: ${{ matrix.features }}
-      - run: cargo test --workspace --locked ${{ matrix.features && format('--features {0}', matrix.features) }}
-
-  windows-arm64:
-    name: clippy (Windows ARM64)
-    if: github.event.pull_request.draft != true
-    runs-on: windows-11-arm
-    timeout-minutes: 30
-    steps:
-      - name: Check out with LF line ends
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      # Lints the Windows-only code paths and compiles every test target.
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  shared:
-    name: shared layout (${{ matrix.name }})
-    if: github.event.pull_request.draft != true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-          - name: Linux x86_64, MSRV
-            os: ubuntu-latest
-            msrv: true
-          - name: Linux aarch64
-            os: ubuntu-24.04-arm
-          - name: macOS arm64
-            os: macos-15
-          - name: Windows x64
-            os: windows-2025
-          - name: Windows ARM64
-            os: windows-11-arm
-            # What releases ship for this target, which can't train a
-            # profile (ADR-10).
-            static-programs: true
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    steps:
-      - name: Check out with LF line ends
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache-key: shared${{ matrix.msrv && '-msrv' || '' }}
-      - name: Use the MSRV from Cargo.toml
-        if: matrix.msrv
-        run: |
-          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
-          rustup toolchain install "$msrv" --profile minimal
-          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
-      # liborbit as a Rust `dylib` with the programs that link it: the
-      # library swap, the programs' tests and the C host tests, all on the
-      # layout.
-      - run: tools/check-shared-layout.sh
-      - name: Static programs with liborbit as a C library only
-        if: matrix.static-programs
-        run: |
-          ./build.sh --no-pgo --static-programs --out "$RUNNER_TEMP/static-programs"
-          ORBIT_BIN_DIR="$RUNNER_TEMP/static-programs/bin" cargo test --locked -p orbit-cli -p orbit-lsp
+      # liborbit as a Rust `dylib` with the programs that link it, built with
+      # the MSRV: the library swap, the programs' tests and the C host tests,
+      # all on the layout.
+      - name: Shared layout with the MSRV
+        if: success() || failure()
+        run: RUSTUP_TOOLCHAIN="$MSRV" tools/check-shared-layout.sh
 
   conformance:
-    name: Lua ${{ matrix.lua }} suites${{ matrix.lua == '5.5' && ', differential tests' || '' }}, size
+    name: Lua ${{ matrix.lua }} tests, suites${{ matrix.lua == '5.5' && ', differential tests' || '' }}, size
     if: github.event.pull_request.draft != true
     strategy:
       fail-fast: false
       matrix:
         lua: ['5.5', '5.4']
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       LUA: ${{ matrix.lua }}
       # Selects the build's Lua version (ADR-14); empty for 5.5.
@@ -217,15 +110,24 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: lua${{ matrix.lua }}
+      # Every test, including the corpus tests platforms.yml skips.
+      - run: cargo test --workspace --locked $FEATURES
       - id: reference
+        if: success() || failure()
         uses: ./.github/actions/reference-lua
         with:
           lua: ${{ matrix.lua }}
-      - run: cargo build --release --locked -p orbit-cli -p orbit-testkit $FEATURES
+      - id: build
+        if: success() || failure()
+        run: cargo build --release --locked -p orbit-cli -p orbit-testkit $FEATURES
       # The shared layout (ADR-10), without a profile.
-      - run: ./build.sh --lua "$LUA" --no-pgo
-      - run: echo "LAYOUT=target/package${{ matrix.lua == '5.4' && '-lua5.4' || '' }}/out" >> "$GITHUB_ENV"
+      - id: layout
+        if: success() || failure()
+        run: |
+          ./build.sh --lua "$LUA" --no-pgo
+          echo "LAYOUT=target/package${{ matrix.lua == '5.4' && '-lua5.4' || '' }}/out" >> "$GITHUB_ENV"
       - name: Release orbit binary size
+        if: steps.build.outcome == 'success'
         run: |
           size=$(stat -c %s target/release/orbit)
           echo "### Release \`orbit\` binary (Lua $LUA): $size bytes ($((size / 1024)) KiB)" >> "$GITHUB_STEP_SUMMARY"
@@ -235,6 +137,7 @@ jobs:
           fi
       # Real Lua must pass every file: this checks the harness and manifest.
       - name: Suite against lua${{ matrix.lua }}
+        if: steps.reference.outcome == 'success' && steps.build.outcome == 'success'
         run: >
           cargo testkit conformance --lua "$LUA" --interp "$REF/bin/lua$LUA"
           --c-libs "$REF/libs" --json "target/testkit/conformance-lua$LUA.json"
@@ -242,6 +145,7 @@ jobs:
           REF: ${{ steps.reference.outputs.dir }}
       # orbit fails only on regressions against the expected-pass list.
       - name: Suite against orbit
+        if: steps.reference.outcome == 'success' && steps.build.outcome == 'success'
         run: >
           cargo testkit conformance --lua "$LUA" --interp target/release/orbit
           --c-libs "$REF/libs" --expect "tests/lua-$LUA/expected-orbit.txt"
@@ -250,6 +154,7 @@ jobs:
           REF: ${{ steps.reference.outputs.dir }}
       # The same list for the `orbit` that links liborbit.
       - name: Suite against the shared layout's orbit
+        if: steps.reference.outcome == 'success' && steps.layout.outcome == 'success'
         run: >
           cargo testkit conformance --lua "$LUA" --interp "$LAYOUT/bin/orbit"
           --c-libs "$REF/libs" --expect "tests/lua-$LUA/expected-orbit.txt"
@@ -258,6 +163,7 @@ jobs:
           REF: ${{ steps.reference.outputs.dir }}
       # PUC's own lua.c, built for libluaX.Y, on liborbit (ADR-10).
       - name: Suite through liblua${{ matrix.lua }}
+        if: steps.reference.outcome == 'success' && steps.layout.outcome == 'success'
         run: >
           cargo testkit liblua --lua "$LUA" --lib "$LAYOUT/lib/liborbit.so.0"
           --c-libs "$REF/libs" --expect "tests/lua-$LUA/expected-liblua.txt"
@@ -265,12 +171,12 @@ jobs:
           REF: ${{ steps.reference.outputs.dir }}
       # tests/diff compares orbit with lua5.5.
       - name: Differential tests against lua5.5
-        if: matrix.lua == '5.5'
+        if: matrix.lua == '5.5' && steps.reference.outcome == 'success' && steps.build.outcome == 'success'
         run: >
           cargo testkit diff --reference target/reference-lua/bin/lua5.5
           --interp target/release/orbit --expect tests/diff/expected-orbit.txt
       - name: Compatibility programs against lua5.5
-        if: matrix.lua == '5.5'
+        if: matrix.lua == '5.5' && steps.reference.outcome == 'success' && steps.build.outcome == 'success'
         run: >
           cargo testkit diff --corpus tests/diff/compat --reference target/reference-lua/bin/lua5.5
           --interp target/release/orbit --expect tests/diff/compat/expected-orbit.txt
