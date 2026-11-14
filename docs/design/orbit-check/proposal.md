@@ -33,7 +33,7 @@ flowchart LR
     ast --> lower["lower to HIR"] --> comp["compiler, VM<br/>(orbit, orbitc)"]
     ast --> resolve
     stubs[".orbi stubs<br/>stdlib, Lua modules"] --> parse
-    resolve["resolve names,<br/>build module graph"]
+    resolve["lower once more (errors kept, HIR dropped):<br/>names recorded, module graph built"]
     resolve --> decls["collect declarations<br/>structs, enums, impls, signatures"]
     decls --> bodies["check bodies<br/>inference, narrowing,<br/>exhaustiveness"]
     bodies --> diag["diagnostics"]
@@ -51,7 +51,9 @@ flowchart LR
 - **The HIR ships in the runtime.** Every field the checker needs there (struct and enum tables, generic parameters, type trees) would cost memory during every compile and code size in `orbit`.
 - **Error positions.** The AST has every construct as written, with spans, which is what good messages need. Hidden locals and hoisted temporaries in the HIR would leak into messages.
 
-So the checker parses with the same parser the runtime uses (one grammar, no drift), then does its own name resolution and type checking. The HIR's `Local::ty` and `Function::result_type` stay empty.
+So the checker parses with the same parser the runtime uses (one grammar, no drift) and types the AST itself. The HIR's `Local::ty` and `Function::result_type` stay empty.
+
+What a name refers to is not the checker's to work out a second time. It runs the compiler's own lowering over the AST, in the mode that goes on after an error, and drops the HIR. That lowering reports every definition, reference and scope to an observer as it resolves them, each with the syntax that made it ([the front end](../orbitscript-front-end.md), "Telling a tool about the names"), and the checker's observer (`observe.rs`) records them as the module's symbols. The scoping rules are written once, in lowering, and the same run gives every error that stops the module from compiling.
 
 ### Type trees from the shared parser
 

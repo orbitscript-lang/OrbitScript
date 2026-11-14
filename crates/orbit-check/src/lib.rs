@@ -5,16 +5,16 @@
 //! OrbitScript AST (not the HIR), never touches the runtime, and keeps per-module results so an
 //! editor can recheck one file at a time.
 //!
-//! Checking a module takes two passes over its AST: `resolve` binds every name to a symbol and
-//! records where symbols are defined, then `typeck` types the module with those definitions.
-//! The module is then lowered as the compiler lowers it, except that this lowering goes on
-//! after an error, so the checker reports everything that stops the module from compiling:
-//! a module with no errors here is one that runs.
+//! Checking a module takes two steps. The module is first lowered as the compiler lowers it,
+//! by the compiler's own lowering, except that this lowering goes on after an error and its
+//! HIR is dropped. That gives everything that stops the module from compiling (a module with
+//! no errors here is one that runs), and on the way lowering tells `observe` about every
+//! name it resolves, which records the module's symbols and where they are defined. Then
+//! `typeck` types the module's AST with those definitions.
 
 mod diag;
 mod observe;
 mod pragma;
-mod resolve;
 mod stdlib;
 mod symbols;
 mod typeck;
@@ -33,17 +33,6 @@ pub use types::TypeId;
 
 use symbols::Module;
 use types::{Names, Ty, Types};
-
-static COMPARE_WITH_LOWERING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// For this crate's tests, while the checker still resolves names itself: makes every check
-/// also record the module's names from the front end's lowering, and panic where the two
-/// disagree.
-#[doc(hidden)]
-pub fn compare_with_lowering(on: bool) {
-    COMPARE_WITH_LOWERING.store(on, std::sync::atomic::Ordering::Relaxed);
-}
 
 /// A source file the workspace knows. Ids are stable for a path for the workspace's lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -544,24 +533,26 @@ impl Workspace {
             (Some(p), None) => (Some(p.file), &p.names),
             _ => (None, &no_prelude),
         };
-        let resolve_deps = resolve::Deps {
-            modules: &modules,
-            prelude: prelude_names,
-            checked: &checked,
-        };
-        let (mut m, defs) = resolve::resolve(file, &ast, resolve_deps);
-        if COMPARE_WITH_LOWERING.load(std::sync::atomic::Ordering::Relaxed) {
-            let recorder = observe::Recorder::new(file, &ast, resolve_deps);
-            let (errors, recorder) = orbit_orb_syntax::lower_observed(&ast, recorder);
-            let (recorded, recorded_defs) = recorder.finish();
-            let found =
-                observe::differences(file, (&m, &defs), (&recorded, &recorded_defs), &errors);
-            assert!(
-                found.is_empty(),
-                "{}: the resolver and lowering disagree\n{}",
-                path.display(),
-                found.join("\n")
-            );
+        // The compiler's lowering, which here recovers after each error and passes over what
+        // the parser already reported: it gives every error that stops the module from
+        // compiling, and tells the recorder about every name it resolves.
+        let recorder = observe::Recorder::new(
+            file,
+            &ast,
+            observe::Deps {
+                modules: &modules,
+                prelude: prelude_names,
+                checked: &checked,
+            },
+        );
+        let (mut compile_errors, recorder) = orbit_orb_syntax::lower_observed(&ast, recorder);
+        let (mut m, defs) = recorder.finish();
+        if is_stub(&path) {
+            // A stub has declarations without bodies and is never compiled. What lowering
+            // finds wrong with its names is the checker's to report, like its other findings.
+            compile_errors
+                .retain(|e| e.code == code::UNKNOWN_NAME || e.code == code::USED_BEFORE_DEFINITION);
+            diagnostics.append(&mut compile_errors);
         }
         typeck::check(
             file,
@@ -578,14 +569,6 @@ impl Workspace {
         );
         drop(defs);
         diagnostics.append(&mut m.diagnostics);
-        // Every error the compiler's lowering can give, found by that same lowering, which
-        // here recovers after each and passes over what the parser already reported. A stub
-        // has declarations without bodies and is never compiled.
-        let compile_errors = if is_stub(&path) {
-            Vec::new()
-        } else {
-            orbit_orb_syntax::lower_collecting(&ast)
-        };
         if mode == pragma::Mode::Off {
             diagnostics.retain(|d| d.code == code::SYNTAX);
         }
