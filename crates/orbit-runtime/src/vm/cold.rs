@@ -272,7 +272,7 @@ impl Vm {
         match action {
             MetaAction::Store { dst } => self.rt.stack.regs[base + dst as usize] = res,
             MetaAction::Branch { want, off } => {
-                if !res.is_falsy() == want {
+                if res.is_falsy() != want {
                     caller.pc = (caller.pc as i64 + off as i64) as u32;
                 }
             }
