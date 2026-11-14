@@ -10,6 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde_json::{Value, json};
+
 use crate::conformance::{self, FileResult, Flags};
 use crate::process::{self, Exit, Spec};
 use crate::util::{self, Result, io_err};
@@ -303,42 +305,32 @@ fn render_json(
     compiles: Option<&[(String, Option<String>)]>,
     corpora: &[Corpus],
 ) -> String {
-    let mut s = format!(
-        "{{\n  \"title\": {},\n  \"suite\": [\n",
-        util::json_str(title)
-    );
-    for (i, r) in suite.iter().enumerate() {
-        let (_, why) = stopped(r);
-        let line = r.reached.as_ref().and_then(|x| x.line);
-        let _ = writeln!(
-            s,
-            "    {{\"file\": {}, \"compiles\": {}, \"result\": {}, \"reached_line\": {}, \"direct\": {}, \"message\": {}}}{}",
-            util::json_str(&r.file),
-            util::json_str(compile_status(compiles, &r.file)),
-            util::json_str(result_status(r)),
-            line.map_or("null".to_string(), |n| n.to_string()),
-            r.reached.as_ref().is_some_and(|x| x.direct),
-            util::json_str(&why),
-            if i + 1 < suite.len() { "," } else { "" }
-        );
-    }
-    s.push_str("  ],\n  \"corpora\": [\n");
-    for (i, c) in corpora.iter().enumerate() {
-        let _ = writeln!(s, "    {{\"dir\": {}, \"files\": [", util::json_str(&c.dir));
-        for (j, (f, m)) in c.files.iter().enumerate() {
-            let _ = writeln!(
-                s,
-                "      {{\"file\": {}, \"same\": {}, \"mismatch\": {}}}{}",
-                util::json_str(f),
-                m.is_none(),
-                m.as_deref().map_or("null".to_string(), util::json_str),
-                if j + 1 < c.files.len() { "," } else { "" }
-            );
-        }
-        let _ = writeln!(s, "    ]}}{}", if i + 1 < corpora.len() { "," } else { "" });
-    }
-    s.push_str("  ]\n}\n");
-    s
+    let suite: Vec<Value> = suite
+        .iter()
+        .map(|r| {
+            let (_, why) = stopped(r);
+            json!({
+                "file": r.file,
+                "compiles": compile_status(compiles, &r.file),
+                "result": result_status(r),
+                "reached_line": r.reached.as_ref().and_then(|x| x.line),
+                "direct": r.reached.as_ref().is_some_and(|x| x.direct),
+                "message": why,
+            })
+        })
+        .collect();
+    let corpora: Vec<Value> = corpora
+        .iter()
+        .map(|c| {
+            let files: Vec<Value> = c
+                .files
+                .iter()
+                .map(|(f, m)| json!({"file": f, "same": m.is_none(), "mismatch": m}))
+                .collect();
+            json!({"dir": c.dir, "files": files})
+        })
+        .collect();
+    util::json_text(&json!({"title": title, "suite": suite, "corpora": corpora}))
 }
 
 fn truncate(s: &str, n: usize) -> String {
