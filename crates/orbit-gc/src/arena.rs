@@ -202,6 +202,12 @@ fn stale(i: u32) -> ! {
 impl<T, const SLOTS: usize> Arena<T, SLOTS> {
     const SHIFT: u32 = page_shift(SLOTS);
 
+    /// How many slots the arena reserved address space for, in whole pages.
+    #[doc(hidden)]
+    pub fn capacity(&self) -> usize {
+        self.slots.capacity() / SLOTS * SLOTS
+    }
+
     #[inline(always)]
     fn split(i: u32) -> (usize, usize) {
         ((i >> Self::SHIFT) as usize, i as usize & (SLOTS - 1))

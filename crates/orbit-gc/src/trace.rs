@@ -52,6 +52,10 @@ pub trait Space: Sized {
     fn slot_bytes(kind: u8) -> usize;
     #[doc(hidden)]
     fn release_page(&mut self, kind: u8, page: u32);
+    /// How many slots arena `kind` reserved address space for: the most
+    /// objects of that kind that can be alive at once.
+    #[doc(hidden)]
+    fn slot_capacity(&self, kind: u8) -> usize;
 
     /// The Rust type stored in arena `kind`, for diagnostics.
     fn kind_name(kind: u8) -> &'static str;
@@ -234,11 +238,21 @@ pub(crate) struct KindMeta {
     pub(crate) live: usize,
     /// Pages currently allocated.
     pub(crate) allocated: usize,
+    /// The arena's reserved slots ([`Space::slot_capacity`]), at most what
+    /// 32-bit indexes reach.
+    pub(crate) capacity: usize,
 }
 
+/// The share of an arena's slots kept back for handling running out: past
+/// `capacity - capacity / SLOT_RESERVE` live objects the heap reports
+/// [`Heap::over_limit`](crate::Heap::over_limit), and past half of what is
+/// left, [`Heap::slots_exhausted`](crate::Heap::slots_exhausted).
+pub(crate) const SLOT_RESERVE: usize = 16;
+
 impl KindMeta {
-    pub(crate) fn new(shift: u32) -> Self {
+    pub(crate) fn new(shift: u32, capacity: usize) -> Self {
         KindMeta {
+            capacity: capacity.min(1 << 32),
             shift,
             color: Vec::new(),
             pages: Vec::new(),
@@ -262,9 +276,21 @@ impl KindMeta {
         1 << self.shift
     }
 
-    /// Pick a slot for a new object. Returns its index.
+    /// Live objects past which the heap is short of slots of this kind.
+    pub(crate) fn low_mark(&self) -> usize {
+        self.capacity - self.capacity / SLOT_RESERVE
+    }
+
+    /// Live objects past which the reserve is half used.
+    pub(crate) fn exhausted_mark(&self) -> usize {
+        self.capacity - self.capacity / SLOT_RESERVE / 2
+    }
+
+    /// Pick a slot for a new object in the current page. Returns its index,
+    /// or `None` when there is no current page or it is full: then
+    /// [`KindMeta::take_slot_slow`] picks one.
     #[inline]
-    pub(crate) fn take_slot(&mut self) -> u32 {
+    pub(crate) fn take_slot(&mut self) -> Option<u32> {
         // The usual case: the current page has a free or fresh slot.
         if let Some(p) = self.cur {
             let n = self.page_slots();
@@ -280,17 +306,22 @@ impl KindMeta {
             if let Some(o) = offset {
                 page.live += 1;
                 self.live += 1;
-                return (p << self.shift) | o;
+                return Some((p << self.shift) | o);
             }
         }
-        self.take_slot_slow()
+        None
     }
 
     /// [`KindMeta::take_slot`] when the current page is full or there is
     /// none: move on to the next open page, or open one.
+    ///
+    /// # Panics
+    /// Panics when every reserved slot is in use. The heap reports
+    /// [`Heap::over_limit`](crate::Heap::over_limit) well before that, so
+    /// only an owner that keeps allocating past it gets here.
     #[cold]
     #[inline(never)]
-    fn take_slot_slow(&mut self) -> u32 {
+    pub(crate) fn take_slot_slow(&mut self) -> u32 {
         let n = self.page_slots();
         while let Some(p) = self.cur {
             let page = &mut self.pages[p as usize];
@@ -322,8 +353,9 @@ impl KindMeta {
             }
         };
         assert!(
-            p <= (u32::MAX >> self.shift) as usize,
-            "orbit-gc: arena full"
+            (p + 1) << self.shift <= self.capacity,
+            "orbit-gc: arena full ({} objects of one kind)",
+            self.live
         );
         let end = (p + 1) << self.shift;
         if self.color.len() < end {

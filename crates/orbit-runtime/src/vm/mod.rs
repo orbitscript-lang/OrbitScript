@@ -1196,7 +1196,8 @@ impl Vm {
     /// At a safe point that stepped the collector, with the heap over its
     /// limit: collect in full, and say whether to raise `not enough memory`.
     /// The allocation that passed the limit has already happened, so once
-    /// the error is raised the script may use up to [`LIMIT_GRACE`] more,
+    /// the error is raised the script may use up to [`LIMIT_GRACE`] more
+    /// (or, when an arena ran short of slots, half the slots it keeps back),
     /// to handle it, before every safe point raises it again; the grace
     /// ends when the heap is back under the limit. Finalizers stay queued,
     /// as in an emergency collection of lua5.5's.
@@ -1207,7 +1208,8 @@ impl Vm {
             .limit()
             .map_or(usize::MAX, |l| l.saturating_add(l / LIMIT_GRACE));
         // Inside the grace, collecting at every safe point would thrash.
-        if self.rt.gc.finalizing() || self.rt.limit_grace && self.heap.bytes() <= hard {
+        let past_grace = || self.heap.bytes() > hard || self.heap.slots_exhausted();
+        if self.rt.gc.finalizing() || self.rt.limit_grace && !past_grace() {
             return false;
         }
         self.heap.full_collect(&mut self.rt);
@@ -1219,7 +1221,7 @@ impl Vm {
             self.rt.limit_grace = true;
             return true;
         }
-        self.heap.bytes() > hard
+        self.heap.bytes() > hard || self.heap.slots_exhausted()
     }
 
     /// Room for `bytes` more under the heap's limit, collecting in full

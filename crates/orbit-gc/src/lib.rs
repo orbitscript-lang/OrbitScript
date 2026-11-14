@@ -279,6 +279,15 @@ macro_rules! space {
                     ::core::unreachable!()
                 }
 
+                fn slot_capacity(&self, kind: u8) -> usize {
+                    $(
+                        if kind == __Kind::$field as u8 {
+                            return self.$field.capacity();
+                        }
+                    )+
+                    ::core::unreachable!()
+                }
+
                 fn kind_name(kind: u8) -> &'static str {
                     $(
                         if kind == __Kind::$field as u8 {
