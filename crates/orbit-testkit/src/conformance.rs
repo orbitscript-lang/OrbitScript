@@ -532,6 +532,7 @@ fn run_entry(e: &Entry, interp: &Path, suite_dir: &Path, opts: &Options) -> Resu
         args.push(script.into());
         process::run(&Spec {
             program: program.clone(),
+            env: Vec::new(),
             args,
             cwd: suite_dir.to_path_buf(),
             timeout,
