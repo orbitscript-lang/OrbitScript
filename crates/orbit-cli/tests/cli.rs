@@ -17,12 +17,12 @@ fn orbit(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = c.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // Options such as `-v` and `-e` end without reading standard input, and
+    // the program may already have exited: a closed pipe is no failure.
+    match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        r => r.unwrap(),
+    }
     child.wait_with_output().unwrap()
 }
 
