@@ -43,7 +43,7 @@ Floats are formatted with our own code on top of Rust's correctly rounded `{:e}`
 
 ## pack and unpack
 
-The format parser implements every option of the manual (§6.4.2): endianness `< > =`, maximum alignment `![n]`, `b B h H i[n] I[n] l L j J T f d n s[n] z x X<op>` and spaces. Native endianness is little-endian on every supported target (x86_64, aarch64). Sizes, alignment and limits were read off the reference binary: `i`=4, `l`=`j`=`T`=8 bytes, default `!` alignment 16 (`packsize("!xi16")` is 32, `packsize("!xd")` is 16), integer sizes 1-16 with sign-extension and overflow checks beyond 8 bytes (`16-byte integer does not fit into Lua Integer`).
+The format parser implements every option of the manual (§6.4.2): endianness `< > =`, maximum alignment `![n]`, `b B h H i[n] I[n] l L j J T f d n s[n] z x X<op>` and spaces. Native endianness is little-endian on every supported target (x86_64, aarch64). Sizes, alignment and limits were read off the reference binary: `i`=4, `l`=`j`=`T`=8 bytes, default `!` alignment that of the platform's C `max_align_t`, as the reference binary built there reports: 16 on x86_64 and on aarch64 Linux (`packsize("!xi16")` is 32), 8 on arm64 macOS and on Windows built with MSVC or for arm64 (`packsize("!xi16")` is 24; `packsize("!xd")` is 16 everywhere), integer sizes 1-16 with sign-extension and overflow checks beyond 8 bytes (`16-byte integer does not fit into Lua Integer`).
 
 ## utf8
 
