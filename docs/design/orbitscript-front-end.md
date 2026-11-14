@@ -75,7 +75,7 @@ Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, 
 
 ## Lowering
 
-`lower` (in `src/lower/`) walks the AST once and builds one `hir::Function` per function body; `to_hir` adds the HIR's shared analysis, as the Lua front end does. Apart from `Cast` (runtime `as`), lowering uses only HIR nodes Lua needs too: everything below is plain `Let`, `If`, `Goto`, calls and table constructors.
+`lower` (in `src/lower/`) walks the AST once and builds one `hir::Function` per function body; `to_hir` adds the HIR's shared analysis, as the Lua front end does. The walk only reads the tree. `lower` takes the `Ast` by value so that the chunk can take over its string pool and line table without a copy, which is what the compiler wants. `lower_borrowed` takes `&Ast` and copies the two, for a tool such as the checker that lowers a module and then goes on using its tree. Apart from `Cast` (runtime `as`), lowering uses only HIR nodes Lua needs too: everything below is plain `Let`, `If`, `Goto`, calls and table constructors.
 
 ```mermaid
 flowchart LR
