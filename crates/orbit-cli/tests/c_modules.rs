@@ -1,7 +1,8 @@
 //! C modules (ADR-8): builds `cmod/testmod.c` against orbit-capi's headers
 //! with the system C compiler and loads it into `orbit`. The same module
 //! loads into the reference `lua5.5`, which passes `cmod/testmod.lua` too.
-//! A shared build loads it through liborbit's C module loader.
+//! A shared build loads it through liborbit's C module loader, and an
+//! ignored test runs a module on a second copy of the runtime (`crossmod`).
 #![cfg(all(any(target_os = "linux", target_os = "macos"), feature = "c-modules"))]
 
 mod common;
@@ -17,37 +18,42 @@ fn module_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cmod");
-        std::fs::create_dir_all(&dir).unwrap();
-        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-        let include = Path::new(MANIFEST).join("../orbit-capi/csrc/include");
-        // The headers for the build's Lua version (ADR-14).
-        let versioned = orbit::LUA.dotted();
-        // Lua's names stay undefined, for the program to provide, as
-        // modules for `lua` are built: macOS needs that said.
-        let link: &[&str] = if cfg!(target_os = "macos") {
-            &["-bundle", "-undefined", "dynamic_lookup"]
-        } else {
-            &["-shared"]
-        };
-        let out = Command::new(cc)
-            .args(["-O1", "-fPIC", "-Wall", "-Wextra", "-Werror"])
-            .args(link)
-            .arg("-I")
-            .arg(include.join(versioned))
-            .arg("-I")
-            .arg(include)
-            .arg("-o")
-            .arg(dir.join("testmod.so"))
-            .arg(Path::new(MANIFEST).join("tests/cmod/testmod.c"))
-            .output()
-            .expect("run the C compiler");
-        assert!(
-            out.status.success(),
-            "building testmod.so failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        build_module(&dir, "testmod");
         dir
     })
+}
+
+/// Builds `tests/cmod/NAME.c` into `DIR/NAME.so`.
+fn build_module(dir: &Path, name: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    let include = Path::new(MANIFEST).join("../orbit-capi/csrc/include");
+    // The headers for the build's Lua version (ADR-14).
+    let versioned = orbit::LUA.dotted();
+    // Lua's names stay undefined, for the program to provide, as
+    // modules for `lua` are built: macOS needs that said.
+    let link: &[&str] = if cfg!(target_os = "macos") {
+        &["-bundle", "-undefined", "dynamic_lookup"]
+    } else {
+        &["-shared"]
+    };
+    let out = Command::new(cc)
+        .args(["-O1", "-fPIC", "-Wall", "-Wextra", "-Werror"])
+        .args(link)
+        .arg("-I")
+        .arg(include.join(versioned))
+        .arg("-I")
+        .arg(include)
+        .arg("-o")
+        .arg(dir.join(format!("{name}.so")))
+        .arg(Path::new(MANIFEST).join(format!("tests/cmod/{name}.c")))
+        .output()
+        .expect("run the C compiler");
+    assert!(
+        out.status.success(),
+        "building {name}.so failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn orbit(args: &[&str], cpath: &str) -> Output {
@@ -107,4 +113,29 @@ fn locked_cpath_keeps_c_modules_to_its_templates() {
         &orbit(&["--lock-cpath", "-e", &code], &cpath()),
         &format!("2\t1\t2\nfunction\n{refused}{refused}"),
     );
+}
+
+/// A module whose API calls go to a second copy of the runtime, the
+/// liborbit `./build.sh` laid out (`ORBIT_LIBORBIT`), while the static
+/// `orbit` made the state: each call must reach the runtime that made it.
+/// That is the `--static-programs` layout (ADR-10), where a module's
+/// `lua55.dll` leads to the library and not to the program.
+#[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
+fn calls_through_another_copy_of_the_runtime_reach_the_states_own() {
+    let lib = std::env::var("ORBIT_LIBORBIT")
+        .expect("ORBIT_LIBORBIT names the liborbit that ./build.sh laid out");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("crossmod");
+    build_module(&dir, "crossmod");
+    let script = Path::new(MANIFEST).join("tests/cmod/crossmod.lua");
+    // The static program, whatever ORBIT_BIN_DIR says: a shared one runs
+    // on that liborbit itself.
+    let out = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg(&script)
+        .env("LUA_CPATH", format!("{}/?.so", dir.display()))
+        .env_remove(orbit_std::versioned_env("LUA_CPATH"))
+        .env("ORBIT_LIBORBIT", lib)
+        .output()
+        .unwrap();
+    check(&out, "ok\n");
 }
