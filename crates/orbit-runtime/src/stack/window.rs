@@ -306,9 +306,18 @@ impl<'s> Stack<'s> {
     #[inline]
     fn slot(&self, idx: i32) -> Slot {
         let c = &self.ctx;
+        // A positive index (every argument) first: it is the usual case.
+        if idx > 0 {
+            let at = idx as usize - 1;
+            return if at < c.len() {
+                Slot::Stack(at)
+            } else {
+                Slot::None
+            };
+        }
         let len = c.len() as i64;
-        if idx > REGISTRY_INDEX && idx <= 0 {
-            // Negative stack index (0 is invalid).
+        if idx > REGISTRY_INDEX {
+            // A negative stack index (0 is invalid).
             let at = len + idx as i64;
             if idx < 0 && at >= 0 {
                 Slot::Stack(at as usize)
@@ -317,19 +326,12 @@ impl<'s> Stack<'s> {
             }
         } else if idx == REGISTRY_INDEX {
             Slot::Registry
-        } else if idx < REGISTRY_INDEX {
+        } else {
             // upvalue_index(i), 1-based. An index past the function's
             // upvalues is acceptable but reads as none.
             let i = (REGISTRY_INDEX as i64 - idx as i64) as usize;
             if i <= c.upvalue_count() {
                 Slot::Upvalue(i - 1)
-            } else {
-                Slot::None
-            }
-        } else {
-            let at = idx as i64 - 1;
-            if at < len {
-                Slot::Stack(at as usize)
             } else {
                 Slot::None
             }
@@ -412,6 +414,19 @@ impl<'s> Stack<'s> {
             RawValue::Str(s) => Some(self.ctx.bytes(s)),
             _ => None,
         }
+    }
+
+    /// Argument `arg` (1-based) as a string (a number converts in place),
+    /// as a handle the typed arguments read the bytes through once.
+    #[inline]
+    pub(crate) fn check_string_handle(&mut self, arg: i32) -> StackResult<Gc<LuaStr>> {
+        Ok(self.ctx.check_str((arg.max(1) - 1) as usize)?)
+    }
+
+    /// The bytes of a string the window holds.
+    #[inline]
+    pub(crate) fn handle_bytes(&self, s: Gc<LuaStr>) -> &[u8] {
+        self.ctx.bytes(s)
     }
 
     /// Push a string with `bytes`, for results ([`Push`](super::Push)):

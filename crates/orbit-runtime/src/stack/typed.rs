@@ -16,7 +16,7 @@
 
 use super::{Native, Raised, Return, Stack, StackResult, Type};
 pub use crate::object::number::Number;
-use crate::object::{OrbitStr, OrbitString};
+use crate::object::{Gc, LuaStr, OrbitStr, OrbitString};
 
 /// A type a native's parameter can have: how to read argument `i`
 /// (1-based) as one, raising Lua's argument error when it can't.
@@ -261,50 +261,50 @@ fn not_utf8(s: &mut Stack<'_>, i: i32) -> Raised {
 
 /// A string argument (numbers convert), borrowed from the stack.
 impl<'a> Arg<'a> for OrbitStr<'a> {
-    type Checked = ();
+    type Checked = Gc<LuaStr>;
 
     #[inline(always)]
-    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<()> {
-        s.check_string(i).map(drop)
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<Gc<LuaStr>> {
+        s.check_string_handle(i)
     }
 
     #[inline(always)]
-    fn get(s: &'a Stack<'_>, i: i32, (): ()) -> OrbitStr<'a> {
-        // `check` left a string there.
-        s.string_at(i).unwrap_or_default()
+    fn get(s: &'a Stack<'_>, _: i32, h: Gc<LuaStr>) -> OrbitStr<'a> {
+        s.handle_bytes(h).into()
     }
 }
 
 impl<'a> Arg<'a> for &'a [u8] {
-    type Checked = ();
+    type Checked = Gc<LuaStr>;
 
     #[inline(always)]
-    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<()> {
-        s.check_string(i).map(drop)
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<Gc<LuaStr>> {
+        s.check_string_handle(i)
     }
 
     #[inline(always)]
-    fn get(s: &'a Stack<'_>, i: i32, (): ()) -> &'a [u8] {
-        // `check` left a string there.
-        s.string_at(i).unwrap_or_default().as_bytes()
+    fn get(s: &'a Stack<'_>, _: i32, h: Gc<LuaStr>) -> &'a [u8] {
+        s.handle_bytes(h)
     }
 }
 
 impl<'a> Arg<'a> for &'a str {
-    type Checked = ();
+    type Checked = Gc<LuaStr>;
 
     #[inline(always)]
-    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<()> {
-        let ok = s.check_string(i)?.to_str().is_ok();
-        if ok { Ok(()) } else { Err(not_utf8(s, i)) }
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<Gc<LuaStr>> {
+        let h = s.check_string_handle(i)?;
+        if std::str::from_utf8(s.handle_bytes(h)).is_ok() {
+            Ok(h)
+        } else {
+            Err(not_utf8(s, i))
+        }
     }
 
     #[inline(always)]
-    fn get(s: &'a Stack<'_>, i: i32, (): ()) -> &'a str {
-        s.string_at(i)
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or_default()
+    fn get(s: &'a Stack<'_>, _: i32, h: Gc<LuaStr>) -> &'a str {
+        // `check` found it UTF-8.
+        std::str::from_utf8(s.handle_bytes(h)).unwrap_or_default()
     }
 }
 
