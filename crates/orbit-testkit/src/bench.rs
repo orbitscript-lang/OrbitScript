@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::process::{self, Exit, Spec};
-use crate::util::{self, Result, io_err, json_num, json_str};
+use serde_json::{Value, json};
+
+use crate::util::{self, Result, io_err};
 
 const USAGE: &str = "\
 usage: orbit-testkit bench --interp [NAME=]PATH [--interp ...] [options] [BENCH...]
@@ -375,41 +377,36 @@ fn json_report(
     quick: bool,
     runs: usize,
 ) -> String {
-    let mut s = String::from("{\n");
-    let _ = writeln!(
-        s,
-        "  \"inputs\": \"{}\",",
-        if quick { "quick" } else { "full" }
-    );
-    let _ = writeln!(s, "  \"runs\": {runs},");
-    s.push_str("  \"interpreters\": [\n");
-    for (k, i) in interps.iter().enumerate() {
-        let _ = writeln!(
-            s,
-            "    {{\"name\": {}, \"binary_bytes\": {}}}{}",
-            json_str(&i.name),
-            i.size,
-            if k + 1 < interps.len() { "," } else { "" }
-        );
-    }
-    s.push_str("  ],\n  \"benchmarks\": [\n");
-    for (k, (b, row)) in benches.iter().zip(table).enumerate() {
-        let _ = write!(s, "    {{\"file\": {}, \"results\": [", json_str(&b.name));
-        for (j, (i, m)) in interps.iter().zip(row).enumerate() {
-            let _ = write!(
-                s,
-                "{{\"interpreter\": {}, \"seconds\": {}, \"peak_rss_kib\": {}, \"error\": {}}}{}",
-                json_str(&i.name),
-                json_num(m.seconds),
-                m.peak_rss_kib.map_or("null".to_string(), |v| v.to_string()),
-                m.error.as_deref().map_or("null".to_string(), json_str),
-                if j + 1 < interps.len() { ", " } else { "" }
-            );
-        }
-        let _ = writeln!(s, "]}}{}", if k + 1 < benches.len() { "," } else { "" });
-    }
-    s.push_str("  ]\n}\n");
-    s
+    let interpreters: Vec<Value> = interps
+        .iter()
+        .map(|i| json!({"name": i.name, "binary_bytes": i.size}))
+        .collect();
+    let benchmarks: Vec<Value> = benches
+        .iter()
+        .zip(table)
+        .map(|(b, row)| {
+            let results: Vec<Value> = interps
+                .iter()
+                .zip(row)
+                .map(|(i, m)| {
+                    json!({
+                        "interpreter": i.name,
+                        // NaN and infinities become null.
+                        "seconds": m.seconds,
+                        "peak_rss_kib": m.peak_rss_kib,
+                        "error": m.error,
+                    })
+                })
+                .collect();
+            json!({"file": b.name, "results": results})
+        })
+        .collect();
+    util::json_text(&json!({
+        "inputs": if quick { "quick" } else { "full" },
+        "runs": runs,
+        "interpreters": interpreters,
+        "benchmarks": benchmarks,
+    }))
 }
 
 #[cfg(test)]
