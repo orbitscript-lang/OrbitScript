@@ -12,23 +12,40 @@ defaults:
     shell: bash
 
 jobs:
-  static-programs:
-    name: static programs and a C-only liborbit (${{ matrix.os }})
+  aarch64-gate:
+    name: dylib against main's shared layout (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-11-arm, windows-2025, macos-15]
+        os: [ubuntu-24.04-arm, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 150
     steps:
-      - if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
-      - run: rustup show
-      - run: ./build.sh --no-pgo --static-programs --out "$RUNNER_TEMP/sp"
-      - run: |
-          ls -l "$RUNNER_TEMP/sp"/*
-          "$RUNNER_TEMP/sp/bin/orbit" -e 'print(("orbit"):upper(), 6 * 7)'
-          "$RUNNER_TEMP/sp/bin/orbitc" -v
-          "$RUNNER_TEMP/sp/bin/orbit-lsp" --version
-      - run: ORBIT_BIN_DIR="$RUNNER_TEMP/sp/bin" cargo test --locked -p orbit-cli -p orbit-lsp
+        with:
+          ref: build/dylib-liborbit
+          path: dylib
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          path: main
+      - run: cd dylib && rustup show && rustup component add llvm-tools && cargo install cargo-pgo --version 0.3.0 --locked
+      - name: Build
+        run: |
+          o="$RUNNER_TEMP/o"
+          (cd main && git log --oneline -1 && ./build.sh --pgo-train --pgo "$RUNNER_TEMP/main.profdata" --out "$o/main-shared" && ./build.sh --pgo "$RUNNER_TEMP/main.profdata" --static --out "$o/main-static")
+          (cd dylib && git log --oneline -1 && ./build.sh --pgo-train --pgo "$RUNNER_TEMP/dylib.profdata" --out "$o/dylib-shared")
+          ls -l "$o"/*/bin "$o"/*/lib
+      - name: Benchmarks
+        run: |
+          o="$RUNNER_TEMP/o"
+          cd dylib
+          interps="--interp main-shared=$o/main-shared/bin/orbit --interp dylib-shared=$o/dylib-shared/bin/orbit --interp main-static=$o/main-static/bin/orbit"
+          cargo testkit bench --runs 9 $interps --json "$RUNNER_TEMP/bench.json" --markdown "$GITHUB_STEP_SUMMARY"
+          bench/apps/fetch.sh
+          cargo testkit bench --suite apps --runs 7 $interps --json "$RUNNER_TEMP/apps.json" --markdown "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gate-${{ matrix.os }}
+          path: ${{ runner.temp }}/*.json
