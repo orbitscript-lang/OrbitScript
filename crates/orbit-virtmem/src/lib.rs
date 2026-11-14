@@ -164,13 +164,23 @@ impl<T> VmBuffer<T> {
             return false;
         };
         let old_base = self.base.cast::<u8>();
+        let old_bytes = os::align_up(self.reserved_slots * size, os::page_size());
         let committed = self.committed_slots * size;
+        // Where the old reservation's own pages start once the elements have
+        // moved out of it.
+        let moved = os::align_up(committed, os::page_size());
         if remap && os::move_pages(old_base, new_base, committed) {
-            self.committed_slots = os::align_up(committed, os::page_size()) / size;
+            self.committed_slots = moved / size;
+            // Moving the pages unmapped the start of the old reservation, so
+            // that range is no longer ours: another thread's mmap may already
+            // have been given it. Release only the rest.
+            if moved < old_bytes {
+                os::free_address_space(os::offset(old_base, moved), old_bytes - moved);
+            }
         } else {
             self.copy_to(new_base);
+            os::free_address_space(old_base, old_bytes);
         }
-        os::free_address_space(old_base, self.reserved_slots * size);
         self.base = new_base.cast();
         self.reserved_slots = slots;
         true
