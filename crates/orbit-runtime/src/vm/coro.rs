@@ -201,7 +201,7 @@ impl Vm {
         let from = self.rt.current;
         let top = self.rt.top;
         let gc_cycles = self.rt.gc_cycles;
-        let hooks = self.rt.hooks_touched;
+        let hooks = self.rt.hooks.touched();
         // A parked stack is traced through its thread, which the collector
         // may already have scanned.
         self.heap.barrier_back(from);

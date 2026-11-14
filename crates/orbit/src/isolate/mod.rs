@@ -166,7 +166,7 @@ impl Isolate {
         adopt(&mut vm);
         #[cfg(feature = "locale")]
         vm.set_locale_provider(orbit_locale::provider());
-        vm.rt.warnings = config.warnings;
+        vm.rt.host.set_warnings(config.warnings);
         vm.set_gc_mode(config.gc_mode.raw());
         for lib in Lib::OPEN_ORDER {
             if config.libraries.iter().any(|l| l.lib() == lib) {
@@ -217,7 +217,7 @@ impl Isolate {
 
     /// Send standard output (`print`, `io.stdout`) to `out`.
     pub fn set_stdout(&mut self, out: impl std::io::Write + std::fmt::Debug + 'static) {
-        self.vm.rt.out = Box::new(out);
+        self.vm.rt.host.set_out(Box::new(out));
     }
 
     /// Whether `os.setlocale` changes this isolate's own locale (the
@@ -459,7 +459,11 @@ impl Gc<'_> {
 /// Make `vm` one the API can reach (scopes, handles, host functions), with
 /// both front ends as `load`'s compilers.
 pub(crate) fn adopt(vm: &mut Vm) {
-    vm.rt.ext.get_or_insert_with(|| Rc::new(Shared::default()));
-    vm.rt.compile = Some(compiler::compile_lua);
-    vm.rt.compile_orbitscript = Some(compiler::compile_orb);
+    vm.rt
+        .host
+        .ext_mut()
+        .get_or_insert_with(|| Rc::new(Shared::default()));
+    vm.rt
+        .host
+        .set_compilers(compiler::compile_lua, compiler::compile_orb);
 }

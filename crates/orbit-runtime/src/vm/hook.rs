@@ -121,6 +121,28 @@ impl Hook {
     }
 }
 
+/// Whether any stack's hook may differ from [`Hook::default`]: set (for
+/// good) by `debug.sethook`, an interrupt, or a finalizer turning hooks
+/// off. Until then a coroutine switch skips copying the hooks, which are
+/// all equal.
+#[derive(Debug, Default)]
+pub(crate) struct HookUse {
+    touched: bool,
+}
+
+impl HookUse {
+    /// Some stack's hook is about to change.
+    #[inline]
+    pub(crate) fn touch(&mut self) {
+        self.touched = true;
+    }
+
+    #[inline]
+    pub(crate) fn touched(&self) -> bool {
+        self.touched
+    }
+}
+
 impl Vm {
     /// The hooked loop's check before the instruction at `pc` (`op`) runs.
     /// The frame's saved pc is `pc + 1`, as while the instruction runs.
@@ -130,15 +152,14 @@ impl Vm {
         // Not inside a hook, which runs without events, as the
         // reference's interrupt is one.
         if !self.rt.stack.hook.active
-            && (self.rt.stack.hook.mask & INTERRUPT != 0
-                || self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed))
+            && (self.rt.stack.hook.mask & INTERRUPT != 0 || self.rt.host.interrupt_requested())
         {
             // A debugger's pause rides on the interrupt flag.
             #[cfg(feature = "debugger")]
             if self.take_pause() {
                 return Ok(());
             }
-            let handled = match self.rt.interrupt_handler {
+            let handled = match self.rt.host.interrupt_handler() {
                 Some(handler) => {
                     self.clear_interrupt();
                     handler(self)
@@ -241,9 +262,7 @@ impl Vm {
     #[cold]
     fn interrupted(&mut self) -> LuaError {
         self.rt.stack.hook.mask &= !INTERRUPT;
-        self.rt
-            .interrupt
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.rt.host.clear_interrupt();
         let msg = format!("{}interrupted!", self.rt.where_(&self.heap, None, 2));
         LuaError::new(self.new_str(msg.as_bytes()))
     }

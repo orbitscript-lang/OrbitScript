@@ -113,7 +113,7 @@ fn unpack(ctx: &mut NativeCtx<'_>) -> R {
     if i > j {
         return Ok(NativeReturn::Return(0));
     }
-    let room = ctx.vm.rt.limits.max_stack.saturating_sub(ctx.len());
+    let room = ctx.vm.rt.host.max_stack().saturating_sub(ctx.len());
     let Some(n) = j
         .checked_sub(i)
         .and_then(|d| d.checked_add(1))

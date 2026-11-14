@@ -29,11 +29,11 @@ pub fn strongest() -> Option<Level> {
 /// Set how much `load` checks binary chunks in `vm`, capped at
 /// [`strongest`]. A VM starts at the strongest.
 pub fn set_level(vm: &mut Vm, level: Option<Level>) {
-    vm.rt.binary_checks = level.min(strongest());
+    vm.rt.host.set_binary_checks(level.min(strongest()));
 }
 
 /// The level `load` uses.
 #[cfg(feature = "verify")]
 pub(crate) fn level(rt: &crate::vm::Runtime) -> Option<Level> {
-    rt.binary_checks.min(strongest())
+    rt.host.binary_checks().min(strongest())
 }

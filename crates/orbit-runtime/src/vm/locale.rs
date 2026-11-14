@@ -8,7 +8,7 @@ impl Vm {
     /// Get locales from `provider` from now on, starting with its current
     /// one.
     pub fn set_locale_provider(&mut self, provider: Box<dyn LocaleProvider>) {
-        self.rt.locale_provider = provider;
+        self.rt.host.set_locale_provider(provider);
         self.refresh_locale();
     }
 
@@ -25,7 +25,11 @@ impl Vm {
         name: Option<&[u8]>,
         scope: LocaleScope,
     ) -> Option<Vec<u8>> {
-        let r = self.rt.locale_provider.set(category, name, scope);
+        let r = self
+            .rt
+            .host
+            .locale_provider_mut()
+            .set(category, name, scope);
         if r.is_some() && name.is_some() {
             self.refresh_locale();
         }
@@ -33,18 +37,18 @@ impl Vm {
     }
 
     pub fn locale_mode(&self) -> LocaleMode {
-        self.rt.locale_provider.mode()
+        self.rt.host.locale_provider().mode()
     }
 
     /// Whether scripts change the isolate's own locale or the process's.
     pub fn set_locale_mode(&mut self, mode: LocaleMode) {
-        self.rt.locale_provider.set_mode(mode);
+        self.rt.host.locale_provider_mut().set_mode(mode);
         self.refresh_locale();
     }
 
     /// See [`LocaleProvider::time_text`].
     pub fn locale_time_text(&self, spec: &[u8], tm: &TimeParts) -> Option<Vec<u8>> {
-        self.rt.locale_provider.time_text(spec, tm)
+        self.rt.host.locale_provider().time_text(spec, tm)
     }
 
     /// Run `f`, which runs code, with the isolate's locale on this
@@ -52,15 +56,15 @@ impl Vm {
     /// (`call_at`, nested resumes and closes) goes through here, so native
     /// code needs nothing of its own.
     pub(crate) fn with_thread_locale<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
-        if self.rt.locale_provider.enter() {
+        if self.rt.host.locale_provider_mut().enter() {
             self.refresh_locale();
         }
         let r = f(self);
-        self.rt.locale_provider.leave();
+        self.rt.host.locale_provider_mut().leave();
         r
     }
 
     fn refresh_locale(&mut self) {
-        self.rt.metas.locale = self.rt.locale_provider.locale();
+        self.rt.metas.locale = self.rt.host.locale_provider().locale();
     }
 }

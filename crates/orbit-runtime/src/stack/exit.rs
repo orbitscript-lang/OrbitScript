@@ -17,7 +17,7 @@ impl std::fmt::Debug for ExitHooks {
 
 /// The isolate's exit hooks, made on first use.
 pub fn exit_hooks(vm: &mut Vm) -> &mut ExitHooks {
-    vm.rt.ext.get_or_insert_with(ExitHooks::default)
+    vm.rt.host.ext_mut().get_or_insert_with(ExitHooks::default)
 }
 
 type NativeResult = Result<NativeReturn, LuaError>;
@@ -101,6 +101,6 @@ fn exit_now(ctx: &mut NativeCtx<'_>, code: i32) -> ! {
     for hook in &hooks {
         hook();
     }
-    let _ = std::io::Write::flush(&mut ctx.vm.rt.out);
+    let _ = ctx.vm.rt.host.out().flush();
     std::process::exit(code)
 }
