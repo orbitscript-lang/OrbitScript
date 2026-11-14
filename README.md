@@ -44,7 +44,7 @@ Download the archive for your platform from the repository's Releases page and a
 | macOS on Apple silicon | `aarch64-apple-darwin` |
 | Windows 11 x64 and ARM64 | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
 
-Each target has two archives: `orbitscript-<version>-<target>` (programs plus `liborbit` and the C headers) and `orbitscript-<version>-<target>-static` (the programs only, each one self-contained). The `.vsix` file is the VS Code extension: install it with **Extensions: Install from VSIX...**.
+Each target has two archives: `orbitscript-<version>-<target>` (programs plus `liborbit` and the C headers; the programs and `liborbit` belong to one build, so replace them together) and `orbitscript-<version>-<target>-static` (the programs only, each one self-contained). The `.vsix` file is the VS Code extension: install it with **Extensions: Install from VSIX...**.
 
 The binaries aren't signed yet. On macOS, clear the quarantine flag after unpacking (`xattr -dr com.apple.quarantine <dir>`). On Windows, SmartScreen may ask before the first run.
 

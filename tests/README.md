@@ -35,13 +35,17 @@ Add a file whenever a behavior is subtle enough that a unit test might encode th
 `cargo testkit liblua` runs the suite through `lua5.5-host`, the reference `lua.c` linked against Lua's shared library the way Debian ships it (`liblua5.5.so.0`, symbols versioned `LUA_5.5`), with `liborbit` installed under that name instead (ADR-10). The program is built by `scripts/build-reference-lua.sh` (Linux only for now). `lua-5.5/expected-liblua.txt` lists what passes.
 
 ```sh
-cargo build --release -p orbit-lib
+./build.sh --no-pgo        # lays out target/package/out/lib/liborbit.so.0
 cargo testkit liblua --c-libs target/reference-lua/libs --expect tests/lua-5.5/expected-liblua.txt
 ```
 
-`./build.sh` builds the shared layout of ADR-10 into `target/package/out`: `liborbit.so.0` with Lua's library names as aliases, `orbit`, `orbitc` and the language server `orbit-lsp` built with `orbit`'s `shared` feature, the formatter `orbit-fmt`, and the C headers. Its builds use their own target directory, so the static `target/release/orbit` is left alone; `./build.sh --static` builds the static programs the same way, profile-guided (see below). Run the suite through the packaged `orbit` the same way as the static one (`--interp target/package/out/bin/orbit`), and `cargo testkit liblua --lib target/package/out/lib/liblua5.5.so.0`. `./build.sh --lua 5.4` lays out a Lua 5.4 build (ADR-14) in `target/package-lua5.4/out` instead, which the 5.4 suite checks (`tests/lua-5.4/README.md`).
+`./build.sh` builds the shared layout of ADR-10 into `target/package/out`: `liborbit.so.0` with Lua's library names as aliases, `orbit`, `orbitc` and the language server `orbit-lsp` built with their `shared` feature, which links liborbit as a Rust `dylib`, the formatter `orbit-fmt`, and the C headers. Its builds use their own target directory, so the static `target/release/orbit` is left alone; `./build.sh --static` builds the static programs the same way, profile-guided (see below). Run the suite through the packaged `orbit` the same way as the static one (`--interp target/package/out/bin/orbit`), and `cargo testkit liblua`, which takes the library from there. `./build.sh --lua 5.4` lays out a Lua 5.4 build (ADR-14) in `target/package-lua5.4/out` instead, which the 5.4 suite checks (`tests/lua-5.4/README.md`).
 
-`cargo test -p orbit-lib` also builds a small C host (`crates/orbit-lib/tests/chost/host.c`) against the library and checks states, libraries, panics, warnings, strings and the collector from C.
+`tools/check-shared-layout.sh` builds the layout and tests it as laid out. It takes `build.sh`'s `--lua 5.4` and `--pgo FILE`, and builds without a profile unless one is named:
+
+- **The library swap.** The programs and liborbit must come from one build (ADR-10). The script builds a second liborbit from the same sources with another build identity, puts it under the programs, and checks that each refuses to start and says why.
+- **The programs' tests**, `cargo test -p orbit-cli -p orbit-lsp` with `ORBIT_BIN_DIR` naming the layout's `bin`, so the tests run those programs instead of Cargo's static builds.
+- **The C host tests** (Linux): `crates/orbit-capi/tests/chost/host.c` is built against the headers and linked to the laid-out library, named by `ORBIT_LIBORBIT`, and checks states, libraries, panics, warnings, strings and the collector from C. A plain `cargo test` lists them as ignored.
 
 ## Differential fuzzing
 
@@ -71,14 +75,14 @@ Builds always name the target with `--target`, the way cargo-pgo's builds do. Ru
 `./build.sh --pgo-train` records a new profile with [cargo-pgo](https://github.com/Kobzol/cargo-pgo) (`cargo install cargo-pgo`, and `rustup component add llvm-tools` for `llvm-profdata`), writes it to `pgo/<target>.profdata` (or the `--pgo` file), then builds with it:
 
 1. `cargo pgo instrument` builds an instrumented static `orbit`, and `tools/pgo-workload.sh` runs it over the training set: the benchmarks at their quick inputs, the examples at their `train=` inputs (see `examples/manifest.txt`), `tests/diff`, `tests/diff/compat` and `tests/first-light`.
-2. It does the same for the shared layout (liborbit and the `orbit` that loads it). Without this, liborbit ran 1.3-2.1x slower than the static `orbit` on the benchmarks.
+2. It does the same for the shared layout (liborbit and the `orbit` that links it). The two layouts' symbol names differ, so a profile of the static build alone leaves most of liborbit without counts, and the shared layout has no link-time optimization to fall back on (ADR-10): it ran 1.1-1.3x slower that way.
 3. It merges the counts of both runs with `llvm-profdata`.
 
 Training runs what it builds, so it only trains for the machine's own target. Profiles for other targets (aarch64 Linux, macOS, Windows) are trained on those machines or captured on a device as above.
 
 A stale profile never produces wrong code, but it can make the build much slower than one without a profile. LLVM drops the counts of a function whose code changed and finds none for a function that is new (a move or rename gives it a new symbol), and in a profile-guided build it compiles such a function as if it never ran. When #126 moved the interpreter loop, the profile trained before it made the release build 1.1-1.5x slower than a plain one on most benchmarks until it was retrained.
 
-`./build.sh --pgo-check` builds `orbit` with the profile in `target/pgo-check`, lists every function of our crates that the profile no longer covers, and fails if there is one. Run it before pushing a change to `orbit-runtime`, `orbit-gc` or the compiler, and when it fails, run `./build.sh --pgo-train` and commit the new profile with the change. A freshly trained profile covers every function of `orbit`, including the ones training never ran, so the check passes right after training. Retrain before a release too. A profile written by one LLVM version can be read by the same or a newer one, so retrain after moving the minimum toolchain past the one that wrote it.
+`./build.sh --pgo-check` builds both layouts with the profile in `target/pgo-check`, lists every function of our crates that the profile no longer covers, and fails if there is one. Run it before pushing a change to `orbit-runtime`, `orbit-gc` or the compiler, and when it fails, run `./build.sh --pgo-train` and commit the new profile with the change. A freshly trained profile covers every function of `orbit`, including the ones training never ran, so the check passes right after training. Retrain before a release too. A profile written by one LLVM version can be read by the same or a newer one, so retrain after moving the minimum toolchain past the one that wrote it.
 
 The optimized build also passes `-Cllvm-args=-vectorizer-min-trip-count=1`. When a profile shows that a loop runs fewer than 16 times, LLVM otherwise vectorizes the loop with masked lanes. On x86-64 without AVX-512, a few register clears then cost hundreds of instructions, which made coroutines 12% slower than a build without a profile (`build.sh` has the details).
 

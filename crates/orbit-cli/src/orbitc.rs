@@ -109,6 +109,12 @@ fn usage(prog: &str, message: &str) -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().cloned().unwrap_or_else(|| "orbitc".into());
+    // As in `orbit`: liborbit must be the one this program was built with.
+    #[cfg(feature = "shared")]
+    if let Err(m) = orbit_lib::check_build!() {
+        eprintln!("{prog}: {m}");
+        return ExitCode::FAILURE;
+    }
     let cli = match parse(&args) {
         Ok(c) => c,
         Err(e) => return usage(&prog, &e),

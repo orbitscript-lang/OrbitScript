@@ -226,6 +226,13 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().cloned().unwrap_or_else(|| "orbit".into());
+    // The runtime is in liborbit: it must be the one this program was
+    // built with, checked before anything else of it is used.
+    #[cfg(feature = "shared")]
+    if let Err(m) = orbit_lib::check_build!() {
+        eprintln!("{prog}: {m}");
+        return ExitCode::FAILURE;
+    }
     #[cfg(feature = "dap")]
     match args.get(1).map(String::as_str) {
         Some("--debug-server") => return dap::server(&prog),
@@ -568,7 +575,6 @@ fn print_version() {
 
 /// Install `orbit-std`, the C module loader and `ffi`, as this build has
 /// them.
-#[cfg(not(bundled))]
 fn install_libraries(
     iso: &mut Isolate,
     options: &orbit_std::Options,
@@ -585,21 +591,5 @@ fn install_libraries(
     }
     #[cfg(not(feature = "ffi"))]
     let _ = cli.no_ffi;
-    Ok(())
-}
-
-/// Install the copies of `orbit-std`, the C module loader and `ffi` that
-/// liborbit carries, so their functions run without crossing the boundary.
-#[cfg(bundled)]
-fn install_libraries(
-    iso: &mut Isolate,
-    options: &orbit_std::Options,
-    cli: &Cli,
-) -> Result<(), Error> {
-    iso.install_bundled_std(options.base, options.io, options.os, options.ignore_env)?;
-    iso.install_bundled_c_modules(cli.lock_cpath);
-    if !cli.no_ffi {
-        iso.install_bundled_ffi();
-    }
     Ok(())
 }

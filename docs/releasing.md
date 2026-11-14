@@ -42,7 +42,7 @@ Each target is tested and built on a runner of its own architecture, so `cargo t
 
 For each target there are two archives (`.tar.gz`, or `.zip` on Windows), each with `LICENSE` and `README.md`:
 
-- `orbitscript-<version>-<target>`: the shared layout of ADR-10 (`bin/` with `orbit`, `orbitc`, `orbit-lsp` and `orbit-fmt`, `lib/` with `liborbit` and Lua 5.5's library names, `include/`); on Windows `bin/` also holds `orbit_lib.dll` and `lua55.dll`.
+- `orbitscript-<version>-<target>`: the shared layout of ADR-10 (`bin/` with `orbit`, `orbitc`, `orbit-lsp` and `orbit-fmt`, `lib/` with `liborbit` and Lua 5.5's library names, `include/`); on Windows `bin/` also holds `orbit_lib.dll` and `lua55.dll`. The programs link `liborbit` as a Rust `dylib` and check at start-up that it comes from their own build; the release workflow runs the programs' tests on this layout before archiving it.
 - `orbitscript-<version>-<target>-static`: the static `orbit`, `orbitc`, `orbit-lsp` and `orbit-fmt`, one file each.
 
 Each target is also built as Lua 5.4 (`./build.sh --lua 5.4`, ADR-14), with the same two archives named `orbitscript-<version>-lua5.4-<target>` and `orbitscript-<version>-lua5.4-<target>-static`. Their `lib/` has Lua 5.4's library names (`liblua5.4.so.0`, `liblua.5.4.dylib`, `lua54.dll`, ...) and `include/` Lua 5.4's headers. Each variant runs its own tests and trains its own profile.

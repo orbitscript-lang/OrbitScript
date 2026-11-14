@@ -150,6 +150,10 @@ jobs:
           for d in "$NAME" "$NAME-static"; do
             cp LICENSE README.md "$RUNNER_TEMP/out/$d/"
           done
+      # The programs' tests again, on the shared layout as it will ship.
+      - name: Test the shared layout
+        timeout-minutes: 30
+        run: ORBIT_BIN_DIR="$RUNNER_TEMP/out/$NAME/bin" cargo test --locked -p orbit-cli -p orbit-lsp $FEATURES
       - name: Smoke test
         working-directory: ${{ runner.temp }}/out
         run: |

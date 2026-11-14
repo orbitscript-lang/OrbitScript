@@ -15,6 +15,10 @@ name: CI
 # - Steps several jobs share live in .github/actions: `setup-rust` (the
 #   toolchain and the build cache) and `reference-lua` (the reference
 #   interpreter and what the suite needs from the runner).
+# - The shared layout (ADR-10) is built by ./build.sh, without a profile, and
+#   tested as laid out on every OS (`shared`), and once with the MSRV, which
+#   must build and link it too. The suites run on its `orbit` and through
+#   its liborbit in `conformance`.
 # - The MSRV job only type-checks (`cargo check`): no linking, no tests. It
 #   runs on Linux, macOS and Windows, since each has code only it compiles.
 #
@@ -146,6 +150,47 @@ jobs:
       # Lints the Windows-only code paths and compiles every test target.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  shared:
+    name: shared layout (${{ matrix.name }})
+    if: github.event.pull_request.draft != true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+          - name: Linux x86_64, MSRV
+            os: ubuntu-latest
+            msrv: true
+          - name: Linux aarch64
+            os: ubuntu-24.04-arm
+          - name: macOS arm64
+            os: macos-15
+          - name: Windows x64
+            os: windows-2025
+          - name: Windows ARM64
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out with LF line ends
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: shared${{ matrix.msrv && '-msrv' || '' }}
+      - name: Use the MSRV from Cargo.toml
+        if: matrix.msrv
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      # liborbit as a Rust `dylib` with the programs that link it: the
+      # library swap, the programs' tests and the C host tests, all on the
+      # layout.
+      - run: tools/check-shared-layout.sh
+
   conformance:
     name: Lua ${{ matrix.lua }} suites${{ matrix.lua == '5.5' && ', differential tests' || '' }}, size
     if: github.event.pull_request.draft != true
@@ -170,7 +215,10 @@ jobs:
         uses: ./.github/actions/reference-lua
         with:
           lua: ${{ matrix.lua }}
-      - run: cargo build --release --locked -p orbit-cli -p orbit-lib -p orbit-testkit $FEATURES
+      - run: cargo build --release --locked -p orbit-cli -p orbit-testkit $FEATURES
+      # The shared layout (ADR-10), without a profile.
+      - run: ./build.sh --lua "$LUA" --no-pgo
+      - run: echo "LAYOUT=target/package${{ matrix.lua == '5.4' && '-lua5.4' || '' }}/out" >> "$GITHUB_ENV"
       - name: Release orbit binary size
         run: |
           size=$(stat -c %s target/release/orbit)
@@ -194,10 +242,18 @@ jobs:
           --json target/testkit/conformance-orbit.json
         env:
           REF: ${{ steps.reference.outputs.dir }}
+      # The same list for the `orbit` that links liborbit.
+      - name: Suite against the shared layout's orbit
+        run: >
+          cargo testkit conformance --lua "$LUA" --interp "$LAYOUT/bin/orbit"
+          --c-libs "$REF/libs" --expect "tests/lua-$LUA/expected-orbit.txt"
+          --json target/testkit/conformance-orbit-shared.json
+        env:
+          REF: ${{ steps.reference.outputs.dir }}
       # PUC's own lua.c, built for libluaX.Y, on liborbit (ADR-10).
       - name: Suite through liblua${{ matrix.lua }}
         run: >
-          cargo testkit liblua --lua "$LUA" --lib target/release/liborbit_lib.so
+          cargo testkit liblua --lua "$LUA" --lib "$LAYOUT/lib/liborbit.so.0"
           --c-libs "$REF/libs" --expect "tests/lua-$LUA/expected-liblua.txt"
         env:
           REF: ${{ steps.reference.outputs.dir }}
