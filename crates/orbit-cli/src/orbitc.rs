@@ -20,8 +20,10 @@ use std::process::ExitCode;
 use orbit::Compiler;
 
 mod args;
+mod stderr;
 use orbit_compiler::bytecode::{UnlinkedChunk, format, verify};
 use orbit_lua_syntax::ParseOptions;
+use stderr::{err_print, err_println};
 
 /// The file a chunk is written to without `-o`, as `luac.out` for `luac`.
 const DEFAULT_OUTPUT: &str = "orbitc.out";
@@ -92,8 +94,8 @@ fn parse(args: &[Vec<u8>]) -> Result<Cli, String> {
 }
 
 fn usage(prog: &str, message: &str) -> ExitCode {
-    eprintln!("{prog}: {message}");
-    eprint!(
+    err_println!("{prog}: {message}");
+    err_print!(
         "usage: {prog} [options] [filenames]\n\
          Available options are:\n  \
          -l       list (shows bytecodes)\n  \
@@ -117,7 +119,7 @@ fn main() -> ExitCode {
     // As in `orbit`: liborbit must be the one this program was built with.
     #[cfg(feature = "shared")]
     if let Err(m) = orbit_lib::check_build!() {
-        eprintln!("{prog}: {m}");
+        err_println!("{prog}: {m}");
         return ExitCode::FAILURE;
     }
     let cli = match parse(&args) {
@@ -143,12 +145,13 @@ fn main() -> ExitCode {
     }
     for input in &cli.inputs {
         let path = (input != b"-").then_some(input.as_slice());
-        let result = match orbit_std::read_chunk_file(path) {
+        // Source files are text, as `luac` reads them.
+        let result = match orbit_std::read_chunk_file(path, orbit::LineEndings::Native) {
             Ok((bytes, source)) => run(&cli, &bytes, &source),
             Err(e) => Err(e.to_string()),
         };
         if let Err(m) = result {
-            eprintln!("{prog}: {m}");
+            err_println!("{prog}: {m}");
             return ExitCode::FAILURE;
         }
     }

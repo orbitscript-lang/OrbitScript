@@ -27,7 +27,7 @@ pub(crate) fn server(prog: &str) -> ExitCode {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
-            eprintln!("{prog}: cannot find this program's path: {e}");
+            crate::stderr::err_println!("{prog}: cannot find this program's path: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -39,14 +39,14 @@ pub(crate) fn server(prog: &str) -> ExitCode {
 /// [`server`] starts.
 pub(crate) fn connect(prog: &str, args: &[Vec<u8>]) -> ExitCode {
     let Some(socket) = args.get(2).map(|s| args::path(s)) else {
-        eprintln!("{prog}: '--debug-connect' needs a socket");
+        crate::stderr::err_println!("{prog}: '--debug-connect' needs a socket");
         return ExitCode::FAILURE;
     };
     let mut server = match Server::connect(&socket) {
         Ok(s) => s,
         Err(e) => {
             let socket = socket.display();
-            eprintln!("{prog}: cannot reach the debugger at '{socket}': {e}");
+            crate::stderr::err_println!("{prog}: cannot reach the debugger at '{socket}': {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -54,7 +54,7 @@ pub(crate) fn connect(prog: &str, args: &[Vec<u8>]) -> ExitCode {
         return ExitCode::SUCCESS;
     };
     let fail = |server: &mut Server, msg: String| {
-        eprintln!("{prog}: {msg}");
+        crate::stderr::err_println!("{prog}: {msg}");
         server.output("stderr", &format!("{prog}: {msg}\n"));
         server.finish(1);
         ExitCode::FAILURE
@@ -156,8 +156,8 @@ fn on_debug_request(service: &Service, prog: &str) {
 
 fn announce(s: &Service, prog: &str) {
     match s.start() {
-        Ok(path) => eprintln!("{prog}: debugger listening on {}", path.display()),
-        Err(e) => eprintln!("{prog}: cannot serve debuggers: {e}"),
+        Ok(path) => crate::stderr::err_println!("{prog}: debugger listening on {}", path.display()),
+        Err(e) => crate::stderr::err_println!("{prog}: cannot serve debuggers: {e}"),
     }
 }
 
@@ -173,19 +173,21 @@ pub(crate) fn attach(prog: &str, args: &[Vec<u8>]) -> ExitCode {
                 .ok()
                 .and_then(|p| p.parse::<u32>().ok())
             else {
-                eprintln!("{prog}: '--debug-attach' needs a process id or '--list'");
+                crate::stderr::err_println!(
+                    "{prog}: '--debug-attach' needs a process id or '--list'"
+                );
                 return ExitCode::FAILURE;
             };
             match orbit_dap::attach(pid) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(m) => {
-                    eprintln!("{prog}: {m}");
+                    crate::stderr::err_println!("{prog}: {m}");
                     ExitCode::FAILURE
                 }
             }
         }
         None => {
-            eprintln!("{prog}: '--debug-attach' needs a process id or '--list'");
+            crate::stderr::err_println!("{prog}: '--debug-attach' needs a process id or '--list'");
             ExitCode::FAILURE
         }
     }

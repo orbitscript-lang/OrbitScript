@@ -229,8 +229,8 @@ fn search_lua(
         Ok(f) => f,
         Err(msg) => return Ok(Either::Left(msg)),
     };
-    let (bytes, source) =
-        read_chunk_file(Some(&file)).map_err(|why| load_error(&name, &file, &why))?;
+    let (bytes, source) = read_chunk_file(Some(&file), s.line_endings())
+        .map_err(|why| load_error(&name, &file, &why))?;
     match s.load_chunk(&Chunk::new(&bytes).name(&source), 0) {
         Status::Ok => Ok(Either::Right((Any(s.top()), file))),
         _ => {
