@@ -142,7 +142,8 @@ fn unused(t: &Typed<'_, '_, '_>, out: &mut Vec<Diagnostic>) {
         .iter()
         // A symbol's own definition is among its references.
         .filter(|&&(s, target)| {
-            !in_use(s) && !(target.file == file && m.symbols[target.index as usize].span == s)
+            let is_definition = target.file == file && m.symbols[target.index as usize].span == s;
+            !in_use(s) && !is_definition
         })
         .map(|&(_, target)| target)
         .collect();
