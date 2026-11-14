@@ -207,7 +207,8 @@ fn select(ctx: &mut NativeCtx<'_>) -> R {
     }
     let i = ctx.check_int(0)?;
     let from = if i < 0 {
-        if -i >= n {
+        // `i <= -n` rather than `-i >= n`: negating `math.mininteger` overflows.
+        if i <= -n {
             return Err(ctx.arg_error(0, "index out of range"));
         }
         n + i

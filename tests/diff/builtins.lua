@@ -52,3 +52,9 @@ print(co()) print(co())
 -- __pairs gets exactly four results through.
 print(select("#", pairs(setmetatable({}, {__pairs = function() return 1, 2, 3, 4, 5 end}))))
 print(select("#", pairs({})))
+
+-- Negative indexes at the edge of the integer range are out of range, not a crash.
+err(select, math.mininteger)
+err(select, math.mininteger, 1, 2)
+err(select, -3, 1, 2)
+print(select(-2, "a", "b"))
