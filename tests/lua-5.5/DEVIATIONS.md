@@ -12,14 +12,6 @@ Why: Rust's standard library has no portable CPU-time clock, and we chose to add
 
 Suite: none depends on it. The suite only checks that `os.clock` returns a number that doesn't go backwards.
 
-## Local time on Windows is UTC
-
-On Windows, `os.date` without `!`, `os.date("*t")` and `os.time{...}` use UTC, because our zone reader reads the `TZ` variable and the TZif database, which Windows doesn't have. On Linux and macOS local time matches lua5.5.
-
-Why: same ADR-7 decision; a Windows zone source would need a dependency.
-
-Suite: none depends on it (the suite runs on Unix).
-
 ## Which compile error wins
 
 | Area | lua5.5 | OrbitScript | Why |

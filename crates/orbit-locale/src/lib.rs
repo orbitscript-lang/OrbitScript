@@ -367,22 +367,6 @@ mod libc_locale {
             self.repin();
         }
 
-        fn time_pattern(&self, spec: &[u8]) -> Option<Vec<u8>> {
-            let patterns = self.time.as_ref()?.patterns.as_ref()?;
-            let p = match spec {
-                b"c" => &patterns[0],
-                b"x" => &patterns[1],
-                b"X" => &patterns[2],
-                b"r" => &patterns[3],
-                b"Ec" => &patterns[4],
-                b"Ex" => &patterns[5],
-                b"EX" => &patterns[6],
-                _ => return None,
-            };
-            // An empty `%r` format means the C one, as in glibc.
-            (!p.is_empty()).then(|| p.clone())
-        }
-
         fn time_text(&self, spec: &[u8], tm: &TimeParts) -> Option<Vec<u8>> {
             let names = self.time.as_ref()?;
             let day = tm.wday.clamp(0, 6) as usize;

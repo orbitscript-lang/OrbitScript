@@ -24,7 +24,7 @@ pub(crate) const COUNT: usize = if cfg!(windows) { 5 } else { 6 };
 /// One name per category, in the order of [`COUNT`].
 pub(crate) type Names = [Vec<u8>; COUNT];
 
-/// The day and month names and the formats of the time category.
+/// The day and month names of the time category.
 #[derive(Clone, Default)]
 pub(crate) struct TimeNames {
     pub abday: [Vec<u8>; 7],
@@ -33,10 +33,6 @@ pub(crate) struct TimeNames {
     pub mon: [Vec<u8>; 12],
     pub am: Vec<u8>,
     pub pm: Vec<u8>,
-    /// What `%c`, `%x`, `%X`, `%r`, `%Ec`, `%Ex` and `%EX` expand to, where
-    /// the C library says (not on Windows, where they are formatted with
-    /// `strftime`).
-    pub patterns: Option<[Vec<u8>; 7]>,
 }
 
 /// A C string literal (`c"..."` literals need Rust 1.77).
@@ -62,8 +58,11 @@ unsafe fn copy_c(p: *const libc::c_char) -> Vec<u8> {
     }
 }
 
-/// The broken-down time C's `strftime` takes.
-fn c_tm(tm: &TimeParts) -> libc::tm {
+/// The broken-down time C's `strftime` takes, and the zone abbreviation
+/// its `tm_zone` points to where `struct tm` has that field (Unix), which
+/// the caller keeps alive while it uses the `tm`. Windows' `strftime`
+/// takes the zone from the C runtime's own state instead.
+fn c_tm(tm: &TimeParts) -> (libc::tm, CString) {
     let int = |v: i64| v.clamp(libc::c_int::MIN as i64, libc::c_int::MAX as i64) as libc::c_int;
     // SAFETY: `tm` is plain integers (and on some systems a zone pointer,
     // left null): all-zero is a valid value.
@@ -77,7 +76,13 @@ fn c_tm(tm: &TimeParts) -> libc::tm {
     t.tm_wday = int(tm.wday);
     t.tm_yday = int(tm.yday - 1);
     t.tm_isdst = libc::c_int::from(tm.isdst);
-    t
+    let zone = c_string(&tm.zone);
+    #[cfg(unix)]
+    {
+        t.tm_gmtoff = tm.offset as _;
+        t.tm_zone = zone.as_ptr();
+    }
+    (t, zone)
 }
 
 /// A time on day `wday` (0 is Sunday) of month `month` (1 to 12), at
@@ -96,6 +101,8 @@ fn sample_time(wday: i64, month: i64, hour: i64) -> TimeParts {
         wday,
         yday: 1 + wday,
         isdst: false,
+        offset: 0,
+        zone: Vec::new(),
     }
 }
 
@@ -303,7 +310,7 @@ mod imp {
 
         /// `strftime(fmt, tm)` in this locale.
         pub(crate) fn strftime(&self, fmt: &CStr, tm: &TimeParts) -> Vec<u8> {
-            let t = c_tm(tm);
+            let (t, _zone) = c_tm(tm);
             self.on_thread(|| {
                 grow_strftime(|buf, len| {
                     // SAFETY: `buf` holds `len` bytes; `fmt` and `t` are
@@ -327,26 +334,6 @@ mod imp {
                     mon: std::array::from_fn(from(libc::MON_1)),
                     am: info(libc::AM_STR),
                     pm: info(libc::PM_STR),
-                    patterns: Some({
-                        let plain = [libc::D_T_FMT, libc::D_FMT, libc::T_FMT];
-                        let era = [libc::ERA_D_T_FMT, libc::ERA_D_FMT, libc::ERA_T_FMT];
-                        // A locale without eras, or without an era form of
-                        // one format, uses the plain one for `%E`.
-                        let has_eras = !info(libc::ERA).is_empty();
-                        let alt = |i: usize| match info(era[i]) {
-                            p if has_eras && !p.is_empty() => p,
-                            _ => info(plain[i]),
-                        };
-                        [
-                            info(plain[0]),
-                            info(plain[1]),
-                            info(plain[2]),
-                            info(libc::T_FMT_AMPM),
-                            alt(0),
-                            alt(1),
-                            alt(2),
-                        ]
-                    }),
                 }
             })
         }
@@ -584,7 +571,7 @@ mod imp {
         }
 
         pub(crate) fn strftime(&self, fmt: &CStr, tm: &TimeParts) -> Vec<u8> {
-            let t = c_tm(tm);
+            let (t, _zone) = c_tm(tm);
             grow_strftime(|buf, len| {
                 // SAFETY: `buf` holds `len` bytes; the rest is valid for the
                 // call.
@@ -601,7 +588,6 @@ mod imp {
                 mon: std::array::from_fn(|m| f(lit(b"%B\0"), sample_time(0, m as i64 + 1, 0))),
                 am: f(lit(b"%p\0"), sample_time(0, 1, 1)),
                 pm: f(lit(b"%p\0"), sample_time(0, 1, 13)),
-                patterns: None,
             }
         }
     }

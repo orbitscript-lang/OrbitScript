@@ -54,6 +54,42 @@ stdlib_utf8.lua
 strings.lua
 table_rehash.lua
 tables.lua
+time_zones.lua TZ=
+time_zones.lua TZ=/usr/share/zoneinfo/Asia/Tokyo
+time_zones.lua TZ=:/usr/share/zoneinfo/Asia/Tokyo
+time_zones.lua TZ=:America/Chicago
+time_zones.lua TZ=<+03>-3
+time_zones.lua TZ=<-03>3<-02>,M3.5.0/-2,M10.5.0/-1
+time_zones.lua TZ=AAA4BBB,59,299
+time_zones.lua TZ=Africa/Casablanca
+time_zones.lua TZ=America/New_York
+time_zones.lua TZ=America/New_York,junk
+time_zones.lua TZ=America/Sao_Paulo
+time_zones.lua TZ=America/St_Johns
+time_zones.lua TZ=Antarctica/Troll
+time_zones.lua TZ=Asia/Kathmandu
+time_zones.lua TZ=Asia/Kolkata
+time_zones.lua TZ=Asia/Tehran
+time_zones.lua TZ=Australia/Lord_Howe
+time_zones.lua TZ=CET-1CEST,M3.5.0,M10.5.0/3
+time_zones.lua TZ=EST
+time_zones.lua TZ=EST5EDT
+time_zones.lua TZ=EST5EDT,M3.2.0,M11.1.0
+time_zones.lua TZ=Europe/Dublin
+time_zones.lua TZ=Europe/London
+time_zones.lua TZ=Foo/Bar
+time_zones.lua TZ=IST-1GMT0,M10.5.0,M3.5.0/1
+time_zones.lua TZ=JST-9
+time_zones.lua TZ=NZST-12NZDT,M9.5.0,M4.1.0/3
+time_zones.lua TZ=Pacific/Apia
+time_zones.lua TZ=Pacific/Chatham
+time_zones.lua TZ=Pacific/Kiritimati
+time_zones.lua TZ=UTC
+time_zones.lua TZ=UTC0
+time_zones.lua TZ=WGT3WGST,M3.5.0/-2,M10.5.0/-1
+time_zones.lua TZ=XXX3YYY,J60/2,J300/2
+time_zones.lua TZ=posix/America/New_York
+time_zones.lua TZ=right/America/New_York
 uncaught.lua
 vm_edges.lua
 xpcall.lua

@@ -18,7 +18,7 @@ Everything that touches files, the environment or the process lives in `orbit-st
 | Binary chunk format and verifier | `orbit-bytecode` (`format.rs`, `verify.rs`) | Plain data in, plain data out: no VM needed, so both are unit-testable and fuzzable |
 | `string.dump` | `orbit-runtime` (`stdlib/dump.rs`, feature `dump`) | Rebuilds an `UnlinkedChunk` from a linked prototype, then encodes it |
 | `io` | `orbit-std` (`io.rs`, feature `io`) | `FILE*` is an `orbit::Class` |
-| `os` | `orbit-std` (`os.rs`, `time.rs`, `tz.rs`, feature `os`) | Local time and CPU time: ADR-7 |
+| `os` | `orbit-std` (`os.rs`, `time.rs`, `ctime.rs`, feature `os`) | CPU time: ADR-7 |
 | CLI | `orbit-cli` | Hand-written option parsing, no dependency |
 
 ```mermaid
@@ -135,10 +135,8 @@ File handles are userdata of the `FILE*` class (`__index` methods, `__gc`, `__cl
 
 `os.time`, `os.date` and `os.clock` are where stable `std` falls short (ADR-7):
 
-- **Local time.** `os.date` without `!`, `os.date("*t")` and `os.time{...}` work in the local time zone, which `std` can't read. We read it ourselves, with no dependency: the `TZ` variable's POSIX rules and the TZif files under `/usr/share/zoneinfo`. Windows has no such source and uses UTC.
-- **CPU time.** `os.clock` is wall time since the VM started, because stable `std` has no process CPU-time API and the dependencies that provide one weren't worth their cost. The suite only checks that `os.clock` is a number that doesn't go backwards.
-
-Both gaps (wall-time `os.clock`, UTC on Windows) are in `tests/lua-5.5/DEVIATIONS.md`. `strftime` formatting itself is our own code: every conversion C99 and POSIX `strftime` define, with `invalid conversion specifier` for the rest, as `files.lua` checks.
+- **Local time.** `os.date`, `os.date("*t")` and `os.time{...}` go through the C library, as the reference's do: `localtime_r`, `gmtime_r`, `mktime` and `strftime_l` (on Windows the C runtime's `_localtime64_s`, `_gmtime64_s`, `_mktime64` and `_strftime_l`), in `orbit-std/src/ctime.rs`, an ADR-6 exception. The system's own zone rules and normalization apply on every platform, so results match lua5.5 by construction (`tests/diff/time_zones.lua` compares them in 36 zones). `os.date` checks its format in safe Rust first, every conversion C99 and POSIX `strftime` define, with `invalid conversion specifier` for the rest, as `files.lua` checks; then it formats one conversion at a time, so a script's format string never reaches C. The conversions that depend on the time category's locale go to the isolate's locale (ADR-13); the rest are formatted in the "C" locale, whatever the process's locale is. Like lua5.5, `os.time` fails when the result is exactly -1, which is how `mktime` reports failure.
+- **CPU time.** `os.clock` is wall time since the VM started, because stable `std` has no process CPU-time API and the dependencies that provide one weren't worth their cost. The suite only checks that `os.clock` returns a number that doesn't go backwards. The gap is in `tests/lua-5.5/DEVIATIONS.md`.
 
 ## The command line
 

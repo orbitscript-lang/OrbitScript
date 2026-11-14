@@ -419,8 +419,9 @@ impl LocaleScope {
 }
 
 /// A broken-down time for the locale-dependent `os.date` conversions:
-/// C's `struct tm`, with a full year and 1-based month and year day.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// C's `struct tm`, with a full year and 1-based month and year day, and
+/// the zone a format such as `%c` may show.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TimeParts {
     pub year: i64,
     /// 1 to 12.
@@ -435,6 +436,10 @@ pub struct TimeParts {
     /// 1 to 366.
     pub yday: i64,
     pub isdst: bool,
+    /// Seconds east of UTC (`%z`).
+    pub offset: i64,
+    /// The zone's abbreviation (`%Z`).
+    pub zone: Vec<u8>,
 }
 
 /// Where an isolate's locales come from: `os.setlocale` and the
@@ -459,14 +464,6 @@ pub trait LocaleProvider: fmt::Debug {
     /// [`LocaleMode::Process`] takes on the process's locale, one to
     /// [`LocaleMode::Isolate`] keeps it as the isolate's own.
     fn set_mode(&mut self, mode: LocaleMode);
-
-    /// The pattern a `%c`, `%x`, `%X` or `%r` conversion (`spec`, without
-    /// its `%`, also `Ec`, `Ex` or `EX`) expands to in the time category's
-    /// locale, or `None` to format it the C way (or with
-    /// [`LocaleProvider::time_text`]).
-    fn time_pattern(&self, _spec: &[u8]) -> Option<Vec<u8>> {
-        None
-    }
 
     /// The text of a locale-dependent conversion (`spec` is `a`, `A`, `b`,
     /// `B`, `h`, `p`, `c`, `x`, `X`, `r`, or one with an `E` or `O`
