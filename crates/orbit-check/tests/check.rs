@@ -124,8 +124,14 @@ fn repository_programs_check() {
     assert_eq!(all, known, "findings in examples/");
     // The front end's sample programs. `proposal.orb` is the design document's examples one
     // after another, parsed but never run: it opts out of checking with
-    // `//! orbit-check: off`, which leaves the one thing that stops it compiling.
-    let proposal: BTreeSet<_> = [("proposal.orb".to_string(), 47, "T0102".to_string())].into();
+    // `//! orbit-check: off`, which leaves what stops it compiling: an item used before its
+    // definition, and the names its fragments leave undeclared.
+    let undeclared = [
+        67, 124, 134, 136, 138, 142, 143, 146, 151, 157, 160, 161, 163, 164, 168, 181, 194, 209,
+        217, 221, 227, 248, 265, 266, 267,
+    ];
+    let mut proposal: BTreeSet<_> = [("proposal.orb".to_string(), 47, "T0102".to_string())].into();
+    proposal.extend(undeclared.map(|line| ("proposal.orb".to_string(), line, "T0101".to_string())));
     let (_, found) = check_dir(&root().join("crates/orbit-orb-syntax/tests/programs"));
     assert_eq!(found, proposal, "findings in the front end's programs");
     let (_, found) = check_dir(&root().join("bench/orb"));
@@ -739,10 +745,10 @@ fn compile_errors_cannot_be_hidden() {
     );
     assert_eq!(
         codes("//! orbit-check: off\nlet s: string = 3;\nbreak;\nprint(zzz);\n"),
-        [(3, "T0601")]
+        [(3, "T0601"), (4, "T0101")]
     );
-    // A syntax error leaves nodes lowering can't use, so only the syntax error is reported.
-    assert_eq!(codes("print(1 +);\nbreak;\n"), [(1, "T0001")]);
+    // Lowering passes over what didn't parse and still reports the rest.
+    assert_eq!(codes("print(1 +);\nbreak;\n"), [(1, "T0001"), (2, "T0601")]);
     // A stub declares functions without bodies and is never compiled.
     let mut ws = Workspace::new(Config::default(), Box::new(Memory(vec![])));
     let stub = ws.set_source(

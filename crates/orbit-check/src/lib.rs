@@ -7,8 +7,9 @@
 //!
 //! Checking a module takes two passes over its AST: `resolve` binds every name to a symbol and
 //! records where symbols are defined, then `typeck` types the module with those definitions.
-//! A module that parsed is then lowered as the compiler lowers it, so the checker reports
-//! whatever stops the module from compiling: a module with no errors here is one that runs.
+//! The module is then lowered as the compiler lowers it, except that this lowering goes on
+//! after an error, so the checker reports everything that stops the module from compiling:
+//! a module with no errors here is one that runs.
 
 mod diag;
 mod pragma;
@@ -462,7 +463,6 @@ impl Workspace {
         // The parser goes on after a syntax error, so the rest of a module being edited is
         // still checked; a statement that didn't parse is an `Error` node, typed `any`.
         let (ast, syntax_errors) = orbit_orb_syntax::parse_recovering(&name, &text, &options);
-        let parsed = syntax_errors.is_empty();
         let mut diagnostics: Vec<Diagnostic> = syntax_errors;
         let pragmas = pragma::Pragmas::read(&text, &ast.comments, &ast.source);
         let mode = match pragmas.mode {
@@ -556,19 +556,20 @@ impl Workspace {
         );
         drop(defs);
         diagnostics.append(&mut m.diagnostics);
-        // A stub has declarations without bodies and is never compiled. A module with syntax
-        // errors has `Error` nodes, which lowering would only report a second time.
-        let compile_error = if parsed && !is_stub(&path) {
-            orbit_orb_syntax::lower_borrowed(&ast).err()
+        // Every error the compiler's lowering can give, found by that same lowering, which
+        // here recovers after each and passes over what the parser already reported. A stub
+        // has declarations without bodies and is never compiled.
+        let compile_errors = if is_stub(&path) {
+            Vec::new()
         } else {
-            None
+            orbit_orb_syntax::lower_collecting(&ast)
         };
         if mode == pragma::Mode::Off {
             diagnostics.retain(|d| d.code == code::SYNTAX);
         }
         pragmas.apply(&ast.source, strict, &mut diagnostics);
-        // Added after the pragmas so that none can hide it; see `covers`.
-        if let Some(e) = compile_error {
+        // Added after the pragmas so that none can hide them; see `covers`.
+        for e in compile_errors {
             if !diagnostics.iter().any(|d| covers(d, &e)) {
                 diagnostics.push(e);
             }

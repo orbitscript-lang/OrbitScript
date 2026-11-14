@@ -14,6 +14,7 @@ mod cast;
 mod control;
 mod expr;
 mod items;
+mod mode;
 mod pattern;
 mod template;
 
@@ -22,6 +23,7 @@ use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKi
 
 use crate::ast::{self, Ast};
 use crate::code::{self, Code};
+use mode::{Check, Compile, Continue, Mode, Reporter};
 use orbit_hir::Diagnostic;
 
 /// Lowers a parsed module to HIR, before the HIR's shared analysis (`orbit_hir::analyze`).
@@ -35,25 +37,32 @@ pub fn lower(ast: Ast) -> Result<hir::Chunk, Diagnostic> {
         source,
         ..
     } = ast;
-    lower_module(&body, strings, source)
+    let (chunk, _) = lower_module::<Compile>(&body, strings, source)?;
+    Ok(chunk)
 }
 
-/// Lowers a module the caller goes on using, as a checker or an editor does: the tree is only
-/// read, and the chunk gets copies of its string pool and line table. Every id in the tree
-/// means the same in the chunk's pool.
-pub fn lower_borrowed(ast: &Ast) -> Result<hir::Chunk, Diagnostic> {
-    lower_module(&ast.body, ast.strings.clone(), ast.source.clone())
+/// Every error lowering finds in a module, in the order it meets them: the first is the error
+/// [`lower`] gives. This is the checker's and the editor's entry. Lowering recovers after each
+/// error (see [`mode`]) and the HIR it builds is dropped. The tree is only read, and may come
+/// from an error-recovering parse: its `Error` nodes, which the parser reported, are passed
+/// over.
+pub fn lower_collecting(ast: &Ast) -> Vec<Diagnostic> {
+    match lower_module::<Check>(&ast.body, ast.strings.clone(), ast.source.clone()) {
+        Ok((_, collected)) => collected.found,
+        Err(_) => unreachable!("collecting lowering recovers from every error"),
+    }
 }
 
 /// The walk itself reads the tree and never changes it. `strings` is the pool the tree's names
 /// are interned in; lowering adds the names it introduces.
-fn lower_module(
+fn lower_module<M: Mode>(
     body: &ast::Block,
     mut strings: hir::StringPool,
     source: hir::SourceInfo,
-) -> Result<hir::Chunk, Diagnostic> {
+) -> Result<(hir::Chunk, M::Reporter), Diagnostic> {
     let syms = Syms::new(&mut strings);
-    let mut lx = Lowerer {
+    let mut lx = Lowerer::<M> {
+        reporter: M::Reporter::default(),
         chunk: hir::Chunk {
             source,
             strings,
@@ -73,7 +82,7 @@ fn lower_module(
     let result = lx.module(body);
     lx.end_function(main);
     result?;
-    Ok(lx.chunk)
+    Ok((lx.chunk, lx.reporter))
 }
 
 /// Interned names lowering refers to.
@@ -174,6 +183,9 @@ enum ItemTag {
     Type(usize),
     /// A `use`d module.
     Module,
+    /// Nothing: the stand-in for a name that didn't resolve, after the error is reported
+    /// (see [`mode`]). Rules about what a name is pass over it, so one mistake is one error.
+    Unresolved,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -188,6 +200,16 @@ struct Binding {
     target: Target,
     mutable: bool,
     item: Option<ItemTag>,
+}
+
+impl Binding {
+    /// What a name that didn't resolve is taken for once its error is reported: something
+    /// that can be read and assigned, so the same mistake isn't reported as others.
+    const UNRESOLVED: Binding = Binding {
+        target: Target::Global,
+        mutable: true,
+        item: Some(ItemTag::Unresolved),
+    };
 }
 
 /// An item later in a block, which code before it may refer to (from inside a function).
@@ -262,7 +284,9 @@ struct ImplCtx {
     target: ast::Name,
 }
 
-struct Lowerer {
+struct Lowerer<M: Mode> {
+    /// Where errors go, and whether lowering goes on after one.
+    reporter: M::Reporter,
     chunk: hir::Chunk,
     /// Functions being lowered, innermost last.
     funcs: Vec<FnCtx>,
@@ -296,7 +320,23 @@ enum Resolved {
     },
 }
 
-impl Lowerer {
+impl Resolved {
+    /// The stand-in for a name that didn't resolve (see [`Binding::UNRESOLVED`]).
+    fn is_unresolved(&self) -> bool {
+        matches!(
+            self,
+            Resolved::Global {
+                binding: Some(Binding {
+                    item: Some(ItemTag::Unresolved),
+                    ..
+                }),
+                ..
+            }
+        )
+    }
+}
+
+impl<M: Mode> Lowerer<M> {
     // ---- functions ----------------------------------------------------------------------------
 
     fn cur(&mut self) -> &mut FnCtx {
@@ -330,19 +370,62 @@ impl Lowerer {
     // The small node builders and helpers below are kept out of line: lowering calls them
     // from hundreds of places, and inlined they cost binary size for no measurable compile
     // speed (see the design doc, "Binary size").
+    /// Reports an error. Written `self.report(..)?`: what follows it is the recovery, which
+    /// only a collecting walk reaches (see [`mode`]).
     #[inline(never)]
-    fn error(&self, span: Span, code: Code, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::error(span, self.chunk.source.line_of(span.start), code, message)
+    fn report(
+        &mut self,
+        span: Span,
+        code: Code,
+        message: impl Into<String>,
+    ) -> LResult<Continue<M>> {
+        let line = self.chunk.source.line_of(span.start);
+        self.reporter
+            .report(Diagnostic::error(span, line, code, message))
     }
 
-    /// The error for an `Error` node, which only an error-recovering parse makes.
+    /// Reports an `Error` node, which only an error-recovering parse makes. The parser said
+    /// what is wrong, so a collecting walk only passes over it.
     #[cold]
-    fn unparsed(&self, span: Span) -> Diagnostic {
-        self.error(
+    fn unparsed(&mut self, span: Span) -> LResult<Continue<M>> {
+        let line = self.chunk.source.line_of(span.start);
+        self.reporter.unparsed(Diagnostic::error(
             span,
+            line,
             code::SYNTAX,
             "this code has a syntax error, so it can't run",
-        )
+        ))
+    }
+
+    /// The stand-in for an expression that can't be lowered, once its error is reported.
+    fn error_expr(&mut self, span: Span) -> ExprId {
+        self.add_expr(hir::ExprKind::Nil, span)
+    }
+
+    /// Lowers an expression only for the errors in it, after an error in what holds it.
+    fn only_check(&mut self, e: &ast::Expr) -> LResult<()> {
+        let mut dropped = Vec::new();
+        self.expr(e, &mut dropped)?;
+        Ok(())
+    }
+
+    /// Declares the names a pattern binds, after an error in the pattern or in what holds it,
+    /// so their uses aren't reported as unknown names.
+    fn declare_pattern_names(&mut self, pat: &ast::Pat, out: &mut Vec<hir::StmtId>) {
+        let mut names = Vec::new();
+        pattern::names(pat, &mut names);
+        for (name, mutable) in names {
+            let local = self.new_local(Some(name.sym), name.span, LocalKind::Normal);
+            self.push(
+                out,
+                hir::StmtKind::Let {
+                    locals: vec![local],
+                    values: hir::ExprList::default(),
+                },
+                name.span,
+            );
+            self.bind_local(name.sym, local, mutable);
+        }
     }
 
     fn text(&self, sym: StrId) -> String {
@@ -569,6 +652,22 @@ impl Lowerer {
         Some((p.tag, p.local))
     }
 
+    /// Whether `sym` names a struct or enum of this module where it is used: the question
+    /// [`Lowerer::resolve`] answers, asked without reporting anything.
+    fn names_type(&self, sym: StrId) -> bool {
+        for f in self.funcs.iter().rev() {
+            for scope in f.scopes.iter().rev() {
+                if let Some((_, binding)) = scope.entries.iter().rev().find(|e| e.0 == sym) {
+                    return matches!(binding.item, Some(ItemTag::Type(_)));
+                }
+                if let Some(p) = scope.pending.iter().find(|p| p.sym == sym) {
+                    return matches!(p.tag, ItemTag::Type(_));
+                }
+            }
+        }
+        false
+    }
+
     /// Resolves a name: the innermost binding wins, then an item later in an enclosing block,
     /// then the prelude.
     fn resolve(&mut self, name: ast::Name) -> LResult<Resolved> {
@@ -591,7 +690,7 @@ impl Lowerer {
                 }
                 if let Some(pi) = scope.pending.iter().position(|p| p.sym == name.sym) {
                     if depth == top {
-                        return Err(self.error(
+                        self.report(
                             name.span,
                             code::USED_BEFORE_DEFINITION,
                             format!(
@@ -599,8 +698,11 @@ impl Lowerer {
                                  (functions may refer to items defined after them)",
                                 self.text(name.sym)
                             ),
-                        ));
+                        )?;
+                        // Goes on as a function before the definition does: with the item's
+                        // local, declared early.
                     }
+                    let scope = &self.funcs[depth].scopes[si];
                     let tag = scope.pending[pi].tag;
                     let local = match scope.pending[pi].local {
                         Some(l) => l,
@@ -640,7 +742,7 @@ impl Lowerer {
                 binding: None,
             });
         }
-        Err(self.error(
+        self.report(
             name.span,
             code::UNKNOWN_NAME,
             format!(
@@ -648,7 +750,11 @@ impl Lowerer {
                 self.text(name.sym),
                 self.text(name.sym)
             ),
-        ))
+        )?;
+        Ok(Resolved::Global {
+            name: name.sym,
+            binding: Some(Binding::UNRESOLVED),
+        })
     }
 
     fn resolved_expr(&mut self, r: Resolved, span: Span) -> ExprId {
@@ -673,11 +779,11 @@ impl Lowerer {
         match binding {
             Some(b) if b.mutable => {}
             Some(Binding { item: Some(_), .. }) => {
-                return Err(self.error(
+                self.report(
                     name.span,
                     code::ASSIGN_TO_ITEM,
                     format!("cannot assign to `{}`: it is an item", self.text(name.sym)),
-                ));
+                )?;
             }
             Some(_) => {
                 let is_param = match r {
@@ -696,19 +802,20 @@ impl Lowerer {
                         "cannot assign twice to immutable variable `{text}` (declare it with `let mut`)"
                     )
                 };
-                return Err(self.error(name.span, code::ASSIGN_TO_IMMUTABLE, message));
+                self.report(name.span, code::ASSIGN_TO_IMMUTABLE, message)?;
             }
             None => {
-                return Err(self.error(
+                self.report(
                     name.span,
                     code::ASSIGN_TO_PRELUDE,
                     format!(
                         "cannot assign to prelude name `{0}`; declare it with `extern {0};` first",
                         self.text(name.sym)
                     ),
-                ));
+                )?;
             }
         }
+        // After any of these errors the assignment is lowered as written.
         Ok(match r {
             Resolved::Local { depth, local, .. } => {
                 if depth == self.funcs.len() - 1 {
@@ -743,11 +850,11 @@ impl Lowerer {
             if has_pub {
                 if let ast::StmtKind::Expr(e) = &s.kind {
                     if let ast::ExprKind::Return(_) = e.kind {
-                        return Err(self.error(
+                        self.report(
                             e.span,
                             code::RETURN_WITH_EXPORTS,
                             "a module with `pub` items returns its exports; remove this `return`",
-                        ));
+                        )?;
                     }
                 }
             }
@@ -828,7 +935,10 @@ impl Lowerer {
             } => self.let_stmt(*scope, pat, value.as_ref(), s.span, out),
             ast::StmtKind::Item(item) => self.item(item, out),
             ast::StmtKind::Scope(inner) => self.scope_action(inner, s.span, out),
-            ast::StmtKind::Error => Err(self.unparsed(s.span)),
+            ast::StmtKind::Error => {
+                self.unparsed(s.span)?;
+                Ok(())
+            }
             _ => {
                 // Statements a hoisted operand added stay in a block of their own, so their
                 // temporaries end with the statement.
@@ -869,26 +979,30 @@ impl Lowerer {
     ) -> LResult<()> {
         if scope {
             let ast::PatKind::Bind { name, .. } = pat.kind else {
-                return Err(self.error(
+                self.report(
                     pat.span,
                     code::LET_PATTERN,
                     "`let scope` binds a single name",
-                ));
+                )?;
+                return self.let_recovered(pat, value, out);
             };
-            let Some(value) = value else {
-                return Err(self.error(
-                    span,
-                    code::LET_NEEDS_VALUE,
-                    "`let scope` needs a value to close",
-                ));
+            let values = match value {
+                Some(value) => vec![self.single(value, out)?].into(),
+                None => {
+                    self.report(
+                        span,
+                        code::LET_NEEDS_VALUE,
+                        "`let scope` needs a value to close",
+                    )?;
+                    hir::ExprList::default()
+                }
             };
-            let v = self.single(value, out)?;
             let local = self.new_local(Some(name.sym), name.span, LocalKind::Close);
             self.push(
                 out,
                 hir::StmtKind::Let {
                     locals: vec![local],
-                    values: vec![v].into(),
+                    values,
                 },
                 span,
             );
@@ -901,14 +1015,15 @@ impl Lowerer {
                     Some(v) => vec![self.single(v, out)?].into(),
                     None if *mutable => hir::ExprList::default(),
                     None => {
-                        return Err(self.error(
+                        self.report(
                             span,
                             code::LET_NEEDS_VALUE,
                             format!(
                                 "`let {}` needs a value (only `let mut` may start as nil)",
                                 self.text(name.sym)
                             ),
-                        ));
+                        )?;
+                        hir::ExprList::default()
                     }
                 };
                 let kind = if *mutable {
@@ -936,14 +1051,17 @@ impl Lowerer {
                 Ok(())
             }
             ast::PatKind::Tuple(items) => {
-                let Some(value) = value else {
-                    return Err(self.error(
-                        span,
-                        code::LET_NEEDS_VALUE,
-                        "destructuring `let` needs a value",
-                    ));
+                let values = match value {
+                    Some(value) => self.values(value, out)?,
+                    None => {
+                        self.report(
+                            span,
+                            code::LET_NEEDS_VALUE,
+                            "destructuring `let` needs a value",
+                        )?;
+                        hir::ExprList::default()
+                    }
                 };
-                let values = self.values(value, out)?;
                 let mut locals = Vec::with_capacity(items.len());
                 let mut bindings = Vec::new();
                 for item in items {
@@ -962,11 +1080,13 @@ impl Lowerer {
                             locals.push(self.new_local(None, item.span, LocalKind::Hidden));
                         }
                         _ => {
-                            return Err(self.error(
+                            self.report(
                                 item.span,
                                 code::LET_PATTERN,
                                 "a `let` tuple holds names or `_`; use `match` for other patterns",
-                            ));
+                            )?;
+                            locals.push(self.new_local(None, item.span, LocalKind::Hidden));
+                            self.declare_pattern_names(item, out);
                         }
                     }
                 }
@@ -978,11 +1098,12 @@ impl Lowerer {
             }
             ast::PatKind::Struct { .. } => {
                 let Some(value) = value else {
-                    return Err(self.error(
+                    self.report(
                         span,
                         code::LET_NEEDS_VALUE,
                         "destructuring `let` needs a value",
-                    ));
+                    )?;
+                    return self.let_recovered(pat, None, out);
                 };
                 let v = self.single(value, out)?;
                 let subject = self.temp(Some(v), span, out);
@@ -991,12 +1112,30 @@ impl Lowerer {
                 self.emit_binds(binds, out);
                 Ok(())
             }
-            _ => Err(self.error(
-                pat.span,
-                code::LET_PATTERN,
-                "refutable pattern in `let`; use `match` or `if`",
-            )),
+            _ => {
+                self.report(
+                    pat.span,
+                    code::LET_PATTERN,
+                    "refutable pattern in `let`; use `match` or `if`",
+                )?;
+                self.let_recovered(pat, value, out)
+            }
         }
+    }
+
+    /// What is left of a `let` whose pattern it can't have: the errors in its value, and the
+    /// names it meant to bind.
+    fn let_recovered(
+        &mut self,
+        pat: &ast::Pat,
+        value: Option<&ast::Expr>,
+        out: &mut Vec<hir::StmtId>,
+    ) -> LResult<()> {
+        if let Some(value) = value {
+            self.only_check(value)?;
+        }
+        self.declare_pattern_names(pat, out);
+        Ok(())
     }
 
     fn assign(
@@ -1028,11 +1167,13 @@ impl Lowerer {
                     places.push(None);
                 }
                 _ => {
-                    return Err(self.error(
+                    self.report(
                         t.span,
                         code::INVALID_ASSIGN_TARGET,
                         "invalid left-hand side of assignment",
-                    ));
+                    )?;
+                    // Nothing can be assigned; the value may hold errors of its own.
+                    return self.only_check(value);
                 }
             }
         }
@@ -1101,11 +1242,12 @@ impl Lowerer {
                 (hir::Place::Index { obj: o, key: k }, read)
             }
             _ => {
-                return Err(self.error(
+                self.report(
                     target.span,
                     code::INVALID_ASSIGN_TARGET,
                     "invalid left-hand side of assignment",
-                ));
+                )?;
+                return self.only_check(value);
             }
         };
         let v = self.expr(value, out)?;
@@ -1216,13 +1358,13 @@ impl Lowerer {
     }
 
     /// An error if code in a `scope` action would leave it with `what`.
-    fn check_not_scope_action(&self, span: Span, what: &str) -> LResult<()> {
+    fn check_not_scope_action(&mut self, span: Span, what: &str) -> LResult<()> {
         if self.funcs.last().expect("function").scope_action {
-            return Err(self.error(
+            self.report(
                 span,
                 code::LEAVES_SCOPE_ACTION,
                 format!("`{what}` can't leave a `scope` action"),
-            ));
+            )?;
         }
         Ok(())
     }

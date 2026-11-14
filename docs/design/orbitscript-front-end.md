@@ -75,7 +75,7 @@ Generic parameter lists (`fn f<T>`, `struct S<T>`, `enum E<T>`, `impl<T> S<T>`, 
 
 ## Lowering
 
-`lower` (in `src/lower/`) walks the AST once and builds one `hir::Function` per function body; `to_hir` adds the HIR's shared analysis, as the Lua front end does. The walk only reads the tree. `lower` takes the `Ast` by value so that the chunk can take over its string pool and line table without a copy, which is what the compiler wants. `lower_borrowed` takes `&Ast` and copies the two, for a tool such as the checker that lowers a module and then goes on using its tree. Apart from `Cast` (runtime `as`), lowering uses only HIR nodes Lua needs too: everything below is plain `Let`, `If`, `Goto`, calls and table constructors.
+`lower` (in `src/lower/`) walks the AST once and builds one `hir::Function` per function body; `to_hir` adds the HIR's shared analysis, as the Lua front end does. The walk only reads the tree. `lower` takes the `Ast` by value so that the chunk can take over its string pool and line table without a copy, which is what the compiler wants. Apart from `Cast` (runtime `as`), lowering uses only HIR nodes Lua needs too: everything below is plain `Let`, `If`, `Goto`, calls and table constructors.
 
 ```mermaid
 flowchart LR
@@ -88,6 +88,21 @@ flowchart LR
     control --> hir
     hir --> analyze["orbit_hir::analyze"]
 ```
+
+### Errors: stop or go on
+
+The compiler wants the first error and nothing else; a checker or an editor wants every error in the module. Both run the same walk. What it does at an error is a type parameter of the lowerer (`lower/mode.rs`), not a flag it tests:
+
+| Entry | Mode | At an error |
+|---|---|---|
+| `lower(ast)` | `Compile` | returns it: the result is the HIR or the first error |
+| `lower_collecting(&ast)` | `Check` | keeps it and recovers: the result is every error, and the HIR is dropped |
+
+Each rule reports with `self.report(span, code, message)?`, and the lines after it are the recovery: carry on with a stand-in that keeps one mistake from becoming several. An expression that can't be lowered is `nil`; a name nothing declares is taken for a declared global (so it isn't also "immutable" or "not a type"); a pattern in the wrong place still declares its names; an `Error` node from the parser, already reported, is passed over without a word. The first error collected is always the one `lower` returns.
+
+`report` returns `Result<Continue, Diagnostic>`. When collecting, `Continue` is `()`. In the compiler's mode it is a type with no values, so `report` can only return the error, `?` always leaves, and the recovery after it is unreachable code the compiler's lowering is built without. Recovery costs the compiler nothing at run time: this is measured (instruction counts for compiling the repository's programs) whenever the walk changes. A handful of recovery helpers that are entered without a report of their own (an `impl` block whose target didn't resolve) are still present in the compiler, never called.
+
+`lower_collecting` reads the tree and copies its string pool and line table, since the checker goes on using all three. Lowering reads some nodes twice (a pattern for its test and again for its bindings), so the collector drops a second error with the same code and span.
 
 ### Names
 
@@ -148,5 +163,7 @@ Sharing more code between the two front ends would save little (about 5 to 10 Ki
 ## Testing
 
 `tests/parse.rs` checks tree shapes as S-expressions, every example in the language design (`tests/programs/proposal.orb`), error messages, and a deterministic mutation run that must never panic.
+
+`tests/collect.rs` holds the two modes of lowering together: over every program and checker case in the repository, collecting gives no errors exactly when the compiler accepts the module, its first error is the compiler's, and the tree is untouched. It also checks that a module with several mistakes gets one error for each.
 
 `tests/run.rs` lowers programs, compiles them and runs them on the VM, checking what they print: each construct above, a runnable tour (`tests/programs/tour.orb`), the exports table seen from Lua, and compile errors. Its mutation run lowers mutants of the tour and checks that every one that lowers passes `orbit_hir::verify` and never panics the compiler.

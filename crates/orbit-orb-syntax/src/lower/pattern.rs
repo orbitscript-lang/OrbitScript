@@ -3,6 +3,7 @@
 use orbit_hir as hir;
 use orbit_hir::{ExprId, LocalId, LocalKind, Span, StmtId, StrId};
 
+use super::mode::Mode;
 use super::{ItemTag, LResult, Lowerer, Resolved};
 use crate::ast::{self, ExprKind as K};
 use crate::code;
@@ -17,6 +18,30 @@ pub(super) enum Access {
 /// A binding a pattern makes: the name, whether it's `mut`, and where its value is.
 pub(super) type Bind = (ast::Name, bool, Access);
 
+/// Every name a pattern binds, with whether it is `mut`: for declaring them after an error.
+pub(super) fn names(pat: &ast::Pat, out: &mut Vec<(ast::Name, bool)>) {
+    match &pat.kind {
+        ast::PatKind::Bind { name, mutable } => out.push((*name, *mutable)),
+        ast::PatKind::Tuple(items) | ast::PatKind::Or(items) => {
+            for item in items {
+                names(item, out);
+            }
+        }
+        ast::PatKind::Struct { fields, .. } => {
+            for f in fields {
+                match &f.pat {
+                    Some(p) => names(p, out),
+                    None => out.push((f.name, false)),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+const NESTED_TUPLE: &str =
+    "a tuple pattern matches several results, so it can only be a whole `match` arm";
+
 /// What a struct-literal or pattern path names.
 pub(super) enum PathKind {
     /// A struct defined in this module (index into `types`).
@@ -29,7 +54,7 @@ pub(super) enum PathKind {
     Unknown,
 }
 
-impl Lowerer {
+impl<M: Mode> Lowerer<M> {
     fn access_expr(&mut self, a: &Access, span: Span) -> ExprId {
         match a {
             Access::Local(l) => self.local_expr(*l, span),
@@ -86,27 +111,32 @@ impl Lowerer {
                 let Some(idx) = type_of(self, base)? else {
                     return Ok(PathKind::Unknown);
                 };
+                // After either error the path names nothing known.
                 let Some(variants) = &self.types[idx].variants else {
-                    return Err(self.error(
+                    self.report(
                         name.span,
                         code::NO_ASSOCIATED_ITEM,
                         format!(
                             "`{}` is a struct, not an enum",
                             self.text(self.types[idx].name)
                         ),
-                    ));
+                    )?;
+                    return Ok(PathKind::Unknown);
                 };
                 match variants.iter().position(|v| v.0 == name.sym) {
                     Some(vi) => Ok(PathKind::Variant(idx, vi)),
-                    None => Err(self.error(
-                        name.span,
-                        code::NO_ASSOCIATED_ITEM,
-                        format!(
-                            "no variant `{}` in enum `{}`",
-                            self.text(name.sym),
-                            self.text(self.types[idx].name)
-                        ),
-                    )),
+                    None => {
+                        self.report(
+                            name.span,
+                            code::NO_ASSOCIATED_ITEM,
+                            format!(
+                                "no variant `{}` in enum `{}`",
+                                self.text(name.sym),
+                                self.text(self.types[idx].name)
+                            ),
+                        )?;
+                        Ok(PathKind::Unknown)
+                    }
                 }
             }
             _ => Ok(match type_of(self, path)? {
@@ -159,11 +189,12 @@ impl Lowerer {
                     (K::Str(_), K::Str(_)) => self.syms.string,
                     (K::Int(_) | K::Float(_), K::Int(_) | K::Float(_)) => self.syms.number,
                     _ => {
-                        return Err(self.error(
+                        self.report(
                             span,
                             code::RANGE_PATTERN_BOUNDS,
                             "range pattern bounds must both be numbers or both be strings",
-                        ));
+                        )?;
+                        return Ok(None);
                     }
                 };
                 let v = self.access_expr(a, span);
@@ -204,11 +235,11 @@ impl Lowerer {
                     let mut binds = Vec::new();
                     self.pattern_binds(alt, a, &mut binds)?;
                     if !binds.is_empty() {
-                        return Err(self.error(
+                        self.report(
                             alt.span,
                             code::OR_PATTERN_BINDING,
                             "bindings inside `|` patterns are not supported yet",
-                        ));
+                        )?;
                     }
                     let Some(t) = self.pattern_test(alt, a)? else {
                         return Ok(None);
@@ -220,15 +251,15 @@ impl Lowerer {
                 }
                 Ok(test)
             }
-            ast::PatKind::Tuple(_) => Err(self.error(
-                span,
-                code::NESTED_TUPLE_PATTERN,
-                "a tuple pattern matches several results, so it can only be a whole `match` arm",
-            )),
+            ast::PatKind::Tuple(_) => {
+                self.report(span, code::NESTED_TUPLE_PATTERN, NESTED_TUPLE)?;
+                Ok(None)
+            }
             ast::PatKind::Struct { path, fields, rest } => {
                 let kind = self.path_kind(path)?;
+                // After any of the errors here the pattern is lowered as written.
                 if let PathKind::Enum(idx) = kind {
-                    return Err(self.error(
+                    self.report(
                         path.span,
                         code::ENUM_NEEDS_VARIANT,
                         format!(
@@ -236,26 +267,26 @@ impl Lowerer {
                             self.text(self.types[idx].name),
                             self.text(self.types[idx].name)
                         ),
-                    ));
+                    )?;
                 }
                 if self.is_unit_variant(&kind) {
-                    return Err(self.error(
+                    self.report(
                         path.span,
                         code::VARIANT_SHAPE,
                         "this variant has no fields; match it without braces",
-                    ));
+                    )?;
                 }
                 if let Some(known) = self.known_fields(&kind) {
                     for f in fields {
                         if !known.contains(&f.name.sym) {
-                            return Err(self.error(
+                            self.report(
                                 f.name.span,
                                 code::UNKNOWN_FIELD,
                                 format!(
                                     "no field `{}` in this pattern's type",
                                     self.text(f.name.sym)
                                 ),
-                            ));
+                            )?;
                         }
                     }
                     if !rest {
@@ -263,13 +294,14 @@ impl Lowerer {
                             .iter()
                             .find(|k| !fields.iter().any(|f| f.name.sym == **k))
                         {
-                            return Err(self.error(
-                            span, code::PATTERN_MISSING_FIELD,
-                            format!(
-                                "pattern does not mention field `{}`; add `..` to ignore the rest",
-                                self.text(*missing)
-                            ),
-                        ));
+                            self.report(
+                                span,
+                                code::PATTERN_MISSING_FIELD,
+                                format!(
+                                    "pattern does not mention field `{}`; add `..` to ignore the rest",
+                                    self.text(*missing)
+                                ),
+                            )?;
                         }
                     }
                 }
@@ -301,11 +333,14 @@ impl Lowerer {
                         let call = self.call_global(self.syms.rawequal, vec![v, value], span);
                         Ok(Some(self.add_expr(hir::ExprKind::First(call), span)))
                     }
-                    PathKind::Variant(..) => Err(self.error(
-                        path.span,
-                        code::VARIANT_SHAPE,
-                        "this variant has fields; match it with `{ .. }`",
-                    )),
+                    PathKind::Variant(..) => {
+                        self.report(
+                            path.span,
+                            code::VARIANT_SHAPE,
+                            "this variant has fields; match it with `{ .. }`",
+                        )?;
+                        Ok(None)
+                    }
                     _ => Ok(Some(self.compare(hir::BinOp::Eq, v, value, span))),
                 }
             }
@@ -322,14 +357,14 @@ impl Lowerer {
         match &pat.kind {
             ast::PatKind::Bind { name, mutable } => {
                 if out.iter().any(|b| b.0.sym == name.sym) {
-                    return Err(self.error(
+                    self.report(
                         name.span,
                         code::DUPLICATE_BINDING,
                         format!(
                             "`{}` is bound more than once in this pattern",
                             self.text(name.sym)
                         ),
-                    ));
+                    )?;
                 }
                 out.push((*name, *mutable, a.clone()));
             }
@@ -340,18 +375,26 @@ impl Lowerer {
                         Some(p) => self.pattern_binds(p, &fa, out)?,
                         None => {
                             if out.iter().any(|b| b.0.sym == f.name.sym) {
-                                return Err(self.error(
+                                self.report(
                                     f.name.span,
                                     code::DUPLICATE_BINDING,
                                     format!(
                                         "`{}` is bound more than once in this pattern",
                                         self.text(f.name.sym)
                                     ),
-                                ));
+                                )?;
                             }
                             out.push((f.name, false, fa));
                         }
                     }
+                }
+            }
+            // A whole arm's tuple is taken apart by the caller, so this one is inside a
+            // pattern.
+            ast::PatKind::Tuple(items) => {
+                self.report(pat.span, code::NESTED_TUPLE_PATTERN, NESTED_TUPLE)?;
+                for item in items {
+                    self.pattern_binds(item, a, out)?;
                 }
             }
             _ => {}

@@ -9,7 +9,8 @@
 use orbit_hir as hir;
 use orbit_hir::{CastKind, ExprId, Span, StmtId};
 
-use super::{ItemTag, LResult, Lowerer, Resolved};
+use super::mode::{Continue, Mode};
+use super::{LResult, Lowerer};
 use crate::ast::{self, ExprKind as K, TypeKind};
 use crate::code;
 
@@ -21,7 +22,7 @@ enum Target {
     Named(ExprId),
 }
 
-impl Lowerer {
+impl<M: Mode> Lowerer<M> {
     pub(super) fn cast(
         &mut self,
         inner: &ast::Expr,
@@ -171,28 +172,21 @@ impl Lowerer {
             TypeKind::Path { segments, args } if args.is_empty() => {
                 let first = segments[0];
                 if segments.len() == 1 {
+                    // After any of the errors here the cast checks nothing, as `as any`.
                     if self.generics.contains(&first.sym) {
-                        return Err(self.uncheckable(ty));
+                        self.uncheckable(ty)?;
+                        return Ok(Target::Any);
                     }
                     if self.is_alias(first.sym) {
                         let msg = format!(
                             "`as` can't use the type alias `{}`; name the type it stands for",
                             self.text(first.sym)
                         );
-                        return Err(self.error(ty.span, code::UNCHECKABLE_CAST, msg));
+                        self.report(ty.span, code::UNCHECKABLE_CAST, msg)?;
+                        return Ok(Target::Any);
                     }
                     // A struct or enum of this module may shadow a built-in name.
-                    let local_type = matches!(
-                        self.resolve(first),
-                        Ok(Resolved::Local {
-                            binding: super::Binding {
-                                item: Some(ItemTag::Type(_)),
-                                ..
-                            },
-                            ..
-                        })
-                    );
-                    if !local_type {
+                    if !self.names_type(first.sym) {
                         let scalar = match self.chunk.strings.get(first.sym) {
                             b"int" => Some(Target::Scalar(CastKind::Int)),
                             b"float" => Some(Target::Scalar(CastKind::Float)),
@@ -202,7 +196,8 @@ impl Lowerer {
                             b"any" => Some(Target::Any),
                             // Built-in type names with no cast rule.
                             b"table" | b"function" | b"thread" | b"userdata" => {
-                                return Err(self.uncheckable(ty));
+                                self.uncheckable(ty)?;
+                                return Ok(Target::Any);
                             }
                             _ => None,
                         };
@@ -226,7 +221,10 @@ impl Lowerer {
                 }
                 e
             }
-            _ => return Err(self.uncheckable(ty)),
+            _ => {
+                self.uncheckable(ty)?;
+                return Ok(Target::Any);
+            }
         };
         // Reports a struct used as an enum, or a variant that doesn't exist.
         self.path_kind(&path)?;
@@ -236,12 +234,12 @@ impl Lowerer {
         Ok(Target::Named(e))
     }
 
-    fn uncheckable(&self, ty: &ast::Type) -> orbit_hir::Diagnostic {
+    fn uncheckable(&mut self, ty: &ast::Type) -> LResult<Continue<M>> {
         let msg = format!(
             "`as` can't check `{}` while the program runs; give the value a type annotation instead",
             type_text(self, ty)
         );
-        self.error(ty.span, code::UNCHECKABLE_CAST, msg)
+        self.report(ty.span, code::UNCHECKABLE_CAST, msg)
     }
 
     /// `sym` names a type alias declared in an enclosing block.
@@ -264,13 +262,13 @@ fn strip_optional(mut ty: &ast::Type) -> (&ast::Type, bool) {
 }
 
 /// A type as messages write it: `[int]`, `Shape::Circle`, `int | string`.
-fn type_text(lx: &Lowerer, ty: &ast::Type) -> String {
+fn type_text<M: Mode>(lx: &Lowerer<M>, ty: &ast::Type) -> String {
     let mut s = String::new();
     write_type(lx, ty, &mut s);
     s
 }
 
-fn write_type(lx: &Lowerer, ty: &ast::Type, s: &mut String) {
+fn write_type<M: Mode>(lx: &Lowerer<M>, ty: &ast::Type, s: &mut String) {
     let list = |s: &mut String, items: &[ast::Type]| {
         for (i, t) in items.iter().enumerate() {
             if i > 0 {
