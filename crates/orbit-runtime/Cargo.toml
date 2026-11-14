@@ -15,6 +15,8 @@ orbit-bytecode = { path = "../orbit-bytecode" }
 orbit-gc = { path = "../orbit-gc" }
 # The Lua version (ADR-14); its `links` metadata also tells the build script.
 orbit-lua-version = { path = "../orbit-lua-version" }
+# `#[native]` for the built-in libraries (build time only: a proc macro).
+orbit-macros = { path = "../orbit-macros" }
 
 # The build script compiles the built-in OrbitScript modules (ADR-11); none
 # of this is linked into the runtime.
