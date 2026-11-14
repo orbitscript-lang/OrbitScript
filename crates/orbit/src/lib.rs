@@ -64,6 +64,10 @@ pub use value::{
     ThreadStatus, Userdata, Value,
 };
 
+/// The messages of Lua's argument errors, for natives that raise one
+/// themselves: `s.arg_error(1, arg_errors::NO_INTEGER_REP)`.
+pub use orbit_runtime::arg_errors;
+
 /// Byte strings for natives and embedders (ADR-5): Lua strings need not be
 /// UTF-8.
 pub use orbit_runtime::object::{OrbitStr, OrbitString};

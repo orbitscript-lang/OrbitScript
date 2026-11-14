@@ -749,6 +749,8 @@ struct RTable {
     argerror: extern "C" fn(*mut LState, c_int, *const c_char),
     arith: extern "C" fn(*mut LState, c_int),
     callk: extern "C" fn(*mut LState, c_int, c_int, isize, Option<KFn>),
+    checkany: extern "C" fn(*mut LState, c_int),
+    checkinteger: extern "C" fn(*mut LState, c_int) -> i64,
     checkstack: extern "C" fn(*mut LState, c_int) -> c_int,
     close: extern "C" fn(*mut LState),
     closeslot: extern "C" fn(*mut LState, c_int),
@@ -845,6 +847,8 @@ static TABLE: RTable = RTable {
     argerror: orbit_r_argerror,
     arith: orbit_r_arith,
     callk: orbit_r_callk,
+    checkany: orbit_r_checkany,
+    checkinteger: orbit_r_checkinteger,
     checkstack: orbit_r_checkstack,
     close: orbit_r_close,
     closeslot: orbit_r_closeslot,
@@ -1010,6 +1014,26 @@ extern "C" fn orbit_r_tointegerx(l: *mut LState, idx: c_int, isnum: *mut c_int) 
         let n = c.to_integer(idx);
         set_flag(isnum, n.is_some());
         Ok(n.unwrap_or(0))
+    })
+}
+
+/// `luaL_checkinteger`. `arg` may be any index, as for `lua_tointegerx`.
+extern "C" fn orbit_r_checkinteger(l: *mut LState, arg: c_int) -> i64 {
+    entry!(l, 0, |_b, c| match c.to_integer(arg) {
+        Some(n) => Ok(n),
+        None if c.to_number(arg).is_some() => {
+            Err(c.arg_error(arg, orbit::arg_errors::NO_INTEGER_REP))
+        }
+        None => Err(c.type_error(arg, "number")),
+    })
+}
+
+/// `luaL_checkany`.
+extern "C" fn orbit_r_checkany(l: *mut LState, arg: c_int) {
+    entry!(l, (), |_b, c| if c.type_at(arg) == Type::None {
+        Err(c.arg_error(arg, orbit::arg_errors::VALUE_EXPECTED))
+    } else {
+        Ok(())
     })
 }
 

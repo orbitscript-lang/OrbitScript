@@ -781,7 +781,7 @@ pub(crate) fn op_cast(
             Some(i) => Some(Value::Int(i)),
             None if mode & cast::SOFT != 0 => return Ok(Value::Nil),
             None => {
-                return Err(Exc::Rt("number has no integer representation".into(), None));
+                return Err(Exc::Rt(crate::arg_errors::NO_INTEGER_REP.into(), None));
             }
         },
         (cast::FLOAT, Value::Int(i)) => Some(Value::Float(i as f64)),

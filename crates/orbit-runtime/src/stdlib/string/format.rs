@@ -185,7 +185,7 @@ fn format_from(
         }
         arg += 1;
         if arg >= nargs {
-            return Err(ctx.arg_error(arg, "no value"));
+            return Err(ctx.arg_error(arg, crate::arg_errors::NO_VALUE));
         }
         if blen > MAX_SPEC {
             return Err(ctx.error("invalid format (too long)"));

@@ -14,6 +14,7 @@
 
 use std::sync::OnceLock;
 
+use crate::arg_errors;
 use crate::object::number::float_to_int;
 use crate::object::{LuaHeap, Table, Value};
 use crate::vm::op::{UnlinkedChunk, format};
@@ -70,6 +71,7 @@ macro_rules! intrinsic {
 /// and `type`, the base library's own functions.
 const INTRINSICS: &[(&str, &str, NativeFn)] = &[
     intrinsic!(argerror),
+    intrinsic!(missingarg),
     intrinsic!(typeerror),
     intrinsic!(raise),
     intrinsic!(checktab),
@@ -212,6 +214,13 @@ fn argerror(ctx: &mut NativeCtx<'_>) -> R {
     Err(ctx.builtin_arg_error(n, &msg))
 }
 
+/// `missingarg(n)`: `bad argument #n to 'f' (value expected)`, for a
+/// required argument that is absent.
+fn missingarg(ctx: &mut NativeCtx<'_>) -> R {
+    let n = arg_number(ctx, 0);
+    Err(ctx.builtin_arg_error(n, arg_errors::VALUE_EXPECTED))
+}
+
 /// `typeerror(n, expected, v)`: `bad argument #n to 'f' (expected
 /// expected, got type)`.
 fn typeerror(ctx: &mut NativeCtx<'_>) -> R {
@@ -259,7 +268,7 @@ fn checkint(ctx: &mut NativeCtx<'_>) -> R {
         Some(Value::Int(i)) => ctx.ret([Value::Int(i)]),
         Some(Value::Float(f)) => match float_to_int(f) {
             Some(i) => ctx.ret([Value::Int(i)]),
-            None => Err(ctx.builtin_arg_error(n, "number has no integer representation")),
+            None => Err(ctx.builtin_arg_error(n, arg_errors::NO_INTEGER_REP)),
         },
         _ => Err(ctx.builtin_type_error(n, "number", Some(v))),
     }

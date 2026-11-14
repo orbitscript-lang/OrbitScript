@@ -81,6 +81,8 @@ struct orbit_r_table {
   void (*argerror)(lua_State *L, int arg, const char *extramsg);
   void (*arith)(lua_State *L, int op);
   void (*callk)(lua_State *L, int nargs, int nresults, lua_KContext ctx, lua_KFunction k);
+  void (*checkany)(lua_State *L, int arg);
+  lua_Integer (*checkinteger)(lua_State *L, int arg);
   int (*checkstack)(lua_State *L, int n);
   void (*close)(lua_State *L);
   void (*closeslot)(lua_State *L, int idx);
@@ -744,15 +746,11 @@ LUALIB_API lua_Number luaL_optnumber(lua_State *L, int arg, lua_Number def) {
   return luaL_opt(L, luaL_checknumber, arg, def);
 }
 
+/* The argument errors' messages are written once, in the runtime, so the
+   checks that raise one are made there. */
 LUALIB_API lua_Integer luaL_checkinteger(lua_State *L, int arg) {
-  int ok;
-  lua_Integer d = lua_tointegerx(L, arg, &ok);
-  if (!ok) {
-    if (lua_isnumber(L, arg))
-      luaL_argerror(L, arg, "number has no integer representation");
-    else
-      tag_error(L, arg, LUA_TNUMBER);
-  }
+  lua_Integer d = orbit_r->checkinteger(L, IX(arg));
+  CHECK(L);
   return d;
 }
 
@@ -774,7 +772,8 @@ LUALIB_API void luaL_checktype(lua_State *L, int arg, int t) {
 }
 
 LUALIB_API void luaL_checkany(lua_State *L, int arg) {
-  if (lua_type(L, arg) == LUA_TNONE) luaL_argerror(L, arg, "value expected");
+  orbit_r->checkany(L, IX(arg));
+  CHECK(L);
 }
 
 LUALIB_API int luaL_newmetatable(lua_State *L, const char *tname) {
