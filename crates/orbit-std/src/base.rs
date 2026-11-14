@@ -154,7 +154,9 @@ fn debug_loop(s: &mut Stack<'_>) {
 
 fn debug_lines<'s>(c: &'s Scope<'s>) {
     loop {
-        crate::sys::flush_stdout(c);
+        c.with_stdout(|out| {
+            let _ = out.flush();
+        });
         let _ = std::io::stderr().write_all(b"lua_debug> ");
         let mut line = Vec::new();
         match std::io::stdin().lock().read_until(b'\n', &mut line) {
@@ -183,16 +185,16 @@ fn debug_lines<'s>(c: &'s Scope<'s>) {
 /// Add `print`, `loadfile` and `dofile` to the global table.
 pub fn open<'s>(s: &'s Scope<'s>) -> Result<(), Error> {
     let g = s.globals();
-    g.raw_set("print", s.create_native::<print>())?;
-    g.raw_set("loadfile", s.create_native::<loadfile>())?;
-    g.raw_set("dofile", s.create_native::<dofile>())?;
+    g.add_native::<print>()?;
+    g.add_native::<loadfile>()?;
+    g.add_native::<dofile>()?;
     Ok(())
 }
 
 /// Add `debug.debug` to the `debug` library, if it is open.
 pub fn open_debug<'s>(s: &'s Scope<'s>) -> Result<(), Error> {
     if let Some(debug) = s.globals().raw_get::<Option<Table>>("debug")? {
-        debug.raw_set("debug", s.create_native::<debug_loop>())?;
+        debug.add_native::<debug_loop>()?;
     }
     Ok(())
 }
