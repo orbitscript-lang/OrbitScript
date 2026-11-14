@@ -207,11 +207,11 @@ fn select(ctx: &mut NativeCtx<'_>) -> R {
     }
     let i = ctx.check_int(0)?;
     let from = if i < 0 {
-        // `i <= -n` rather than `-i >= n`: negating `math.mininteger` overflows.
-        if i <= -n {
-            return Err(ctx.arg_error(0, "index out of range"));
+        // Only `math.mininteger` has no negation, and it is out of range too.
+        match i.checked_neg() {
+            Some(back) if back < n => n + i,
+            _ => return Err(ctx.arg_error(0, "index out of range")),
         }
-        n + i
     } else if i == 0 {
         return Err(ctx.arg_error(0, "index out of range"));
     } else {
