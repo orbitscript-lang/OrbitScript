@@ -24,7 +24,8 @@ mod dap;
 #[cfg(feature = "repl")]
 mod repl;
 
-use orbit::{Call, Chunk, Config, Error, Function, Isolate, Ret, Runtime, Scope, Table, Value};
+use orbit::stack::{FunctionArg, MULTRET, Rest, Return, Stack, StackResult, Status, Type};
+use orbit::{Chunk, Config, Error, Function, Isolate, Runtime, Scope, Table, Value, native};
 
 /// The chunk names `lua` gives command-line code and standard input.
 const COMMAND_LINE: &[u8] = b"=(command line)";
@@ -316,20 +317,7 @@ fn docall<'s>(
     f: Function<'s>,
     args: Vec<Value<'s>>,
 ) -> Result<Vec<Value<'s>>, String> {
-    let driver = s.create_function(|c| {
-        let f: Function = c.check(0)?;
-        let handler = c.create_function(msghandler);
-        match f.call_handled(c.args().split_off(1), handler) {
-            Ok(mut r) => {
-                r.insert(0, Value::Bool(true));
-                c.ret(r)
-            }
-            Err(e) => {
-                let v = e.value().and_then(|v| v.get(c).ok());
-                c.ret((false, v.unwrap_or(Value::Nil)))
-            }
-        }
-    });
+    let driver = s.create_native::<driver>();
     let mut call = vec![f.to_value()];
     call.extend(args);
     let mut r = driver.call(call).map_err(|e| e.to_string())?;
@@ -346,29 +334,42 @@ fn docall<'s>(
     }
 }
 
+/// [`docall`]'s driver: `driver(f, ...)` calls `f(...)` under
+/// [`msghandler`] and returns `true` and its results, or `false` and the
+/// handled error.
+#[native(name = "?")]
+fn driver(s: &mut Stack<'_>, _f: FunctionArg, args: Rest) -> StackResult<Return> {
+    s.push_native::<msghandler>();
+    s.rotate(1, 1)?;
+    // [handler, f, args...]
+    let status = s.pcall(args.count as i32, MULTRET, 1)?;
+    // [handler, results...] or [handler, error]
+    let n = s.top() - 1;
+    s.push_boolean(status == Status::Ok);
+    s.rotate(2, 1)?;
+    Ok(Return::values(n as usize + 1))
+}
+
 /// `lua`'s message handler, run where the error was raised: an error
 /// object with `__tostring` becomes that text; anything else becomes its
 /// message plus a traceback.
-fn msghandler<'s>(c: &'s Call<'s>) -> Result<Ret, Error> {
-    let e = c.arg(0);
-    let text = match e {
-        Value::Str(_) | Value::Int(_) | Value::Float(_) => {
-            e.to_display()?.to_string_lossy().into_owned()
-        }
-        _ => {
-            let has_tostring = e
-                .metatable()
-                .and_then(|mt| mt.raw_get::<Value>("__tostring").ok())
-                .is_some_and(|f| !f.is_nil());
+#[native(name = "?")]
+fn msghandler(s: &mut Stack<'_>) -> StackResult<Return> {
+    let text = match s.type_at(1) {
+        Type::String | Type::Number => s.to_display_string(1)?.to_string_lossy().into_owned(),
+        ty => {
+            let has_tostring =
+                s.get_metatable(1) && s.raw_get_field(-1, b"__tostring")? != Type::Nil;
             if has_tostring {
-                if let Ok(t) = e.to_display() {
-                    return c.ret(t);
-                }
+                s.to_display_string(1)?;
+                return Ok(Return::values(1));
             }
-            format!("(error object is a {} value)", e.type_name())
+            let name = if ty == Type::None { Type::Nil } else { ty }.name();
+            format!("(error object is a {name} value)")
         }
     };
-    c.ret(format!("{text}\n{}", c.traceback(1)))
+    s.push_traceback(Some(text.as_bytes().into()), 1);
+    Ok(Return::values(1))
 }
 
 impl Runner {

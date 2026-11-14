@@ -38,9 +38,11 @@ use crate::value::Value;
 
 pub(crate) use backend::{ContRef, cont_ref};
 pub use backend::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
+#[doc(hidden)]
+pub use typed::catch_panic;
 pub use typed::{
-    Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Push, Rest, Results,
-    TableArg, function,
+    Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Number, Push, Rest,
+    Results, State, TableArg, Ud, UserType, field_name, function,
 };
 
 /// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).

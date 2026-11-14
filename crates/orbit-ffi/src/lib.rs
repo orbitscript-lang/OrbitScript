@@ -23,8 +23,8 @@ mod sys;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use orbit::OrbitString;
 use orbit::stack::{Native, NativeRef, REGISTRY_INDEX, Return, Stack, StackResult, Type};
+use orbit::{OrbitString, native};
 
 /// A C type the library converts values to and from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,55 +153,12 @@ thread_local! {
 const LIBRARY_META: &str = "ffi.library";
 const BUFFER_META: &str = "ffi.buffer";
 
-/// A native type for each function the library has.
-macro_rules! natives {
-    ($($native:ident $name:literal $f:ident;)*) => {$(
-        struct $native;
-
-        impl Native for $native {
-            const NAME: &'static str = $name;
-
-            fn call(s: &mut Stack<'_>) -> StackResult<Return> {
-                $f(s)
-            }
-        }
-    )*};
-}
-
-natives! {
-    Open "ffi.open" ffi_open;
-    Bind "ffi.bind" ffi_bind;
-    NewBuffer "ffi.buffer" ffi_buffer;
-    ToString "ffi.string" ffi_string;
-    Get "ffi.get" ffi_get;
-    Set "ffi.set" ffi_set;
-    Offset "ffi.offset" ffi_offset;
-    SizeOf "ffi.sizeof" ffi_sizeof;
-    Errno "ffi.errno" ffi_errno;
-    Call "ffi function" call;
-    LibraryToString "ffi.library.__tostring" library_tostring;
-    BufferToString "ffi.buffer.__tostring" buffer_tostring;
-    BufferLen "ffi.buffer.__len" buffer_len;
-}
-
 /// Pushes a function.
 type Push = for<'a, 'b> fn(&'a mut Stack<'b>);
 
 fn push<N: Native>(s: &mut Stack<'_>) {
     s.push_native::<N>();
 }
-
-const FUNCTIONS: &[(&[u8], Push)] = &[
-    (b"open", push::<Open>),
-    (b"bind", push::<Bind>),
-    (b"buffer", push::<NewBuffer>),
-    (b"string", push::<ToString>),
-    (b"get", push::<Get>),
-    (b"set", push::<Set>),
-    (b"offset", push::<Offset>),
-    (b"sizeof", push::<SizeOf>),
-    (b"errno", push::<Errno>),
-];
 
 /// Open the `ffi` library as the `std.ffi` module: what `require "std.ffi"`
 /// (`use std::ffi;` in OrbitScript) returns. It sets no global.
@@ -213,19 +170,24 @@ pub fn install(s: &mut Stack<'_>) -> StackResult<()> {
     if s.extension(|st: &mut State| std::mem::replace(&mut st.installed, true)) {
         return Ok(());
     }
-    s.create_table(0, FUNCTIONS.len() as i32);
-    for &(name, push) in FUNCTIONS {
-        push(s);
-        s.raw_set_field(-2, name)?;
-    }
+    s.create_table(0, 9);
+    s.raw_put_native::<ffi_open>(-1)?;
+    s.raw_put_native::<ffi_bind>(-1)?;
+    s.raw_put_native::<ffi_buffer>(-1)?;
+    s.raw_put_native::<ffi_string>(-1)?;
+    s.raw_put_native::<ffi_get>(-1)?;
+    s.raw_put_native::<ffi_set>(-1)?;
+    s.raw_put_native::<ffi_offset>(-1)?;
+    s.raw_put_native::<ffi_sizeof>(-1)?;
+    s.raw_put_native::<ffi_errno>(-1)?;
     // [ffi]
-    new_meta(s, LIBRARY_META, push::<LibraryToString>)?;
+    new_meta(s, LIBRARY_META, push::<library_tostring>)?;
     s.raw_get_field(-3, b"bind")?;
     s.raw_set_field(-2, b"bind")?;
     s.set_top(-3)?;
-    new_meta(s, BUFFER_META, push::<BufferToString>)?;
+    new_meta(s, BUFFER_META, push::<buffer_tostring>)?;
     s.set_top(-2)?;
-    s.push_native::<BufferLen>();
+    s.push_native::<buffer_len>();
     s.raw_set_field(-2, b"__len")?;
     s.set_top(-2)?;
     // `package.loaded["std.ffi"]`, what `require "std.ffi"` returns; no global.
@@ -281,6 +243,7 @@ fn is_nil(s: &Stack<'_>, arg: i32) -> bool {
 
 /// `ffi.open([name])`: a shared library by file name or path, or with no
 /// name the symbols already in the process.
+#[native(name = "ffi.open")]
 fn ffi_open(s: &mut Stack<'_>) -> StackResult<Return> {
     let name = if is_nil(s, 1) {
         None
@@ -304,6 +267,7 @@ fn ffi_open(s: &mut Stack<'_>) -> StackResult<Return> {
 
 /// `ffi.bind(lib, name, result, args...)` (also `lib:bind(...)`): the C
 /// function `name` in `lib` as a function value.
+#[native(name = "ffi.bind")]
 fn ffi_bind(s: &mut Stack<'_>) -> StackResult<Return> {
     let handle = s.check_userdata(1, LIBRARY_META, |l: &mut Library| l.handle)?;
     let name = s.check_string(2)?.to_vec();
@@ -343,7 +307,7 @@ fn ffi_bind(s: &mut Stack<'_>) -> StackResult<Return> {
     let f = match known {
         Some(f) => f,
         None => {
-            let f = s.control().register_native::<Call>(data);
+            let f = s.control().register_native::<call>(data);
             s.extension(|st: &mut State| st.functions.push((data, f)));
             f
         }
@@ -457,6 +421,7 @@ fn push_value(s: &mut Stack<'_>, t: Ty, bits: u64) {
 }
 
 /// The native behind every FFI function.
+#[native(name = "ffi function")]
 fn call(s: &mut Stack<'_>) -> StackResult<Return> {
     let [addr, index] = s.native_data();
     let sig = match s.find_extension(|st: &State| Rc::clone(&st.signatures[index as usize])) {
@@ -562,6 +527,7 @@ fn finish(s: &mut Stack<'_>, ret: Ty, r: u64) -> StackResult<Return> {
 }
 
 /// `ffi.errno()`: `errno` as the last FFI call left it.
+#[native(name = "ffi.errno")]
 fn ffi_errno(s: &mut Stack<'_>) -> StackResult<Return> {
     let e = ERRNO.with(Cell::get);
     s.push_integer(i64::from(e));
@@ -573,6 +539,7 @@ const MAX_BUFFER: i64 = 1 << 31;
 
 /// `ffi.buffer(size)` (zeroed) or `ffi.buffer(s)` (the bytes of `s` and a
 /// NUL).
+#[native(name = "ffi.buffer")]
 fn ffi_buffer(s: &mut Stack<'_>) -> StackResult<Return> {
     let bytes: Box<[Cell<u8>]> = if s.type_at(1) == Type::String {
         let b = s.string_at(1).expect("a string");
@@ -620,6 +587,7 @@ fn at(s: &mut Stack<'_>, arg: i32, base: (u64, Option<usize>), len: usize) -> St
 }
 
 /// `ffi.string(p [, len])`: `len` bytes at `p`, or up to the first NUL.
+#[native(name = "ffi.string")]
 fn ffi_string(s: &mut Stack<'_>) -> StackResult<Return> {
     let base = place(s, 1)?;
     let bytes = match (is_nil(s, 2), base.1) {
@@ -655,6 +623,7 @@ fn memory_type(s: &mut Stack<'_>, arg: i32) -> StackResult<(Ty, usize)> {
 
 /// `ffi.get(p, type [, offset])`: the value of `type` at `p + offset`
 /// (a `cstr` field is read as a pointer, then the string at it).
+#[native(name = "ffi.get")]
 fn ffi_get(s: &mut Stack<'_>) -> StackResult<Return> {
     let base = place(s, 1)?;
     let (t, size) = memory_type(s, 2)?;
@@ -667,6 +636,7 @@ fn ffi_get(s: &mut Stack<'_>) -> StackResult<Return> {
 
 /// `ffi.set(p, type, offset, value)`: store `value` as a `type` at
 /// `p + offset`.
+#[native(name = "ffi.set")]
 fn ffi_set(s: &mut Stack<'_>) -> StackResult<Return> {
     let base = place(s, 1)?;
     let (t, size) = memory_type(s, 2)?;
@@ -685,6 +655,7 @@ fn ffi_set(s: &mut Stack<'_>) -> StackResult<Return> {
 /// `ffi.offset(p, n)`: the pointer `n` bytes past `p`. For a buffer, `n`
 /// must be within it; the result is a raw pointer, valid while the buffer
 /// lives.
+#[native(name = "ffi.offset")]
 fn ffi_offset(s: &mut Stack<'_>) -> StackResult<Return> {
     let base = place(s, 1)?;
     let p = at(s, 2, base, 0)?;
@@ -693,18 +664,21 @@ fn ffi_offset(s: &mut Stack<'_>) -> StackResult<Return> {
 }
 
 /// `ffi.sizeof(type)`: its size in bytes.
+#[native(name = "ffi.sizeof")]
 fn ffi_sizeof(s: &mut Stack<'_>) -> StackResult<Return> {
     let (_, n) = memory_type(s, 1)?;
     s.push_integer(n as i64);
     Ok(Return::values(1))
 }
 
+#[native(name = "ffi.library.__tostring")]
 fn library_tostring(s: &mut Stack<'_>) -> StackResult<Return> {
     let h = s.check_userdata(1, LIBRARY_META, |l: &mut Library| l.handle)?;
     s.push_bytes(format!("ffi.library: 0x{h:014x}").as_bytes());
     Ok(Return::values(1))
 }
 
+#[native(name = "ffi.buffer.__tostring")]
 fn buffer_tostring(s: &mut Stack<'_>) -> StackResult<Return> {
     let text = s.check_userdata(1, BUFFER_META, |b: &mut Buffer| {
         format!("ffi.buffer ({} bytes): 0x{:014x}", b.0.len(), b.addr())
@@ -713,6 +687,7 @@ fn buffer_tostring(s: &mut Stack<'_>) -> StackResult<Return> {
     Ok(Return::values(1))
 }
 
+#[native(name = "ffi.buffer.__len")]
 fn buffer_len(s: &mut Stack<'_>) -> StackResult<Return> {
     let n = s.check_userdata(1, BUFFER_META, |b: &mut Buffer| b.0.len())?;
     s.push_integer(n as i64);
