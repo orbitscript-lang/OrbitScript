@@ -507,6 +507,21 @@ mod tests {
         Ok(total)
     }
 
+    /// `NATIVE_ALIGN` is C's `max_align_t` alignment. Rust can't name that
+    /// type, so the constant is a table by target; this checks it against
+    /// the `libc` crate's definition on the targets that have one (not
+    /// MSVC Windows or arm64 Windows).
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        all(windows, target_env = "gnu", target_arch = "x86_64")
+    ))]
+    #[test]
+    fn native_alignment_is_max_align_t() {
+        assert_eq!(NATIVE_ALIGN, std::mem::align_of::<libc::max_align_t>());
+    }
+
     #[test]
     fn sizes_and_alignment() {
         assert_eq!(size("!xi16"), Ok(16 + NATIVE_ALIGN));

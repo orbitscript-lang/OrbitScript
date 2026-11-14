@@ -29,6 +29,11 @@ orbit-compiler = { path = "../orbit-compiler" }
 orbit-lua-syntax = { path = "../orbit-lua-syntax" }
 orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 
+# Tests only: `string.pack`'s native alignment checked against the C
+# library's `max_align_t`, where `libc` defines it.
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple", all(windows, target_env = "gnu", target_arch = "x86_64")))'.dev-dependencies]
+libc = { version = "0.2", default-features = false }
+
 [lints]
 workspace = true
 
