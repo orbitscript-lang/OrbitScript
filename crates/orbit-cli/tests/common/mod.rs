@@ -12,3 +12,16 @@ pub fn bin(name: &str, built: &str) -> PathBuf {
         None => PathBuf::from(built),
     }
 }
+
+/// A program's output as text with `\n` line ends. Standard output and
+/// error are text streams, which end lines with `\r\n` on Windows; the
+/// tests that check those bytes look at them directly.
+#[allow(dead_code)] // not every test program reads output
+pub fn text(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    if cfg!(windows) {
+        s.replace("\r\n", "\n")
+    } else {
+        s.into_owned()
+    }
+}

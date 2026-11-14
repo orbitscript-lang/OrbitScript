@@ -32,7 +32,7 @@ fn dir_with(name: &str, src: &str) -> PathBuf {
 }
 
 fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
+    common::text(b)
 }
 
 #[test]

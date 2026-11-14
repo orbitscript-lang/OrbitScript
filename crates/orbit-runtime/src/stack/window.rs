@@ -1823,6 +1823,13 @@ impl<'s> Stack<'s> {
         self.ctx.vm.free_pin_slot(slot);
     }
 
+    /// How the isolate's text streams treat line endings
+    /// (`orbit::Config::line_endings`). Standard output
+    /// ([`Stack::with_stdout`]) already does what this says.
+    pub fn line_endings(&self) -> crate::text::LineEndings {
+        self.ctx.vm.rt.line_endings
+    }
+
     /// Write to the isolate's standard output, the stream `print` and
     /// `io.stdout` share. `f` must not reach the isolate.
     pub fn with_stdout<R>(&mut self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {

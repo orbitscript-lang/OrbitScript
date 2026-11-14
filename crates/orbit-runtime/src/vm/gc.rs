@@ -238,7 +238,11 @@ impl Runtime {
         text.push(b'\n');
         // Keep the order of output already printed.
         let _ = self.out.flush();
-        let _ = std::io::stderr().write_all(&text);
+        if self.line_endings.translates() {
+            let _ = crate::text::TextWriter::new(std::io::stderr()).write_all(&text);
+        } else {
+            let _ = std::io::stderr().write_all(&text);
+        }
     }
 
     /// Warn about an error raised by a finalizer.

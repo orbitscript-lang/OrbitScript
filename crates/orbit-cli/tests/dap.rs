@@ -36,7 +36,9 @@ fn lines(r: impl Read + Send + 'static) -> Receiver<String> {
         let mut r = BufReader::new(r);
         loop {
             let mut l = String::new();
-            if !matches!(r.read_line(&mut l), Ok(n) if n > 0) || tx.send(l).is_err() {
+            if !matches!(r.read_line(&mut l), Ok(n) if n > 0)
+                || tx.send(common::text(l.as_bytes())).is_err()
+            {
                 break;
             }
         }
@@ -360,8 +362,8 @@ fn scripts_run_in_the_editors_terminal() {
     e.event("terminated");
     assert_eq!(e.disconnect(), 0);
     let out = terminal.wait_with_output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "got\thello\n");
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "to stderr\n");
+    assert_eq!(common::text(&out.stdout), "got\thello\n");
+    assert_eq!(common::text(&out.stderr), "to stderr\n");
 }
 
 #[test]

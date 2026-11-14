@@ -11,7 +11,7 @@ mod analysis;
 
 use std::process::ExitCode;
 
-use orbit::{Chunk, Config, Error, Language, Runtime, Table};
+use orbit::{Chunk, Config, Error, Language, LineEndings, Runtime, Table};
 
 /// The bundled scripts: the module each is `require`d as, and its text. The
 /// first runs the server.
@@ -60,7 +60,10 @@ fn main() -> ExitCode {
 /// Set up the isolate and run the server, which ends the process with
 /// `os.exit` when the editor says `exit`.
 fn run() -> Result<(), Error> {
-    let mut iso = Runtime::new().new_isolate(Config::default());
+    // The protocol runs over standard input and output, its framing in
+    // bytes (`\r\n` written out), so they stay binary on Windows too.
+    let config = Config::default().line_endings(LineEndings::Binary);
+    let mut iso = Runtime::new().new_isolate(config);
     let options = orbit_std::Options {
         json: true,
         ..Default::default()

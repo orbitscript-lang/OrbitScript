@@ -34,6 +34,7 @@ use crate::object::{
     CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table,
     Thread, UserData, Value,
 };
+use crate::text::{LineEndings, TextWriter};
 use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::{CoStatus, WindowSave};
@@ -569,6 +570,9 @@ pub struct Runtime {
     /// Whether `warn` messages are shown (on stderr). Off at start, as in
     /// the reference interpreter; `warn("@on")` and `warn("@off")` switch it.
     pub warnings: bool,
+    /// How text streams treat line endings: [`Runtime::out`] when it is
+    /// the process's standard output, warnings, and `orbit-std`'s streams.
+    pub line_endings: LineEndings,
     /// Where warnings go when the host takes them over (`lua_setwarnf`).
     /// See [`WarnHook`].
     pub warn_hook: Option<WarnHook>,
@@ -743,6 +747,17 @@ impl fmt::Debug for Extensions {
 }
 
 /// `Write` that can be printed with `{:?}`.
+/// The process's standard output, buffered, as a text stream if
+/// `line_endings` translates.
+fn process_stdout(line_endings: LineEndings) -> Box<dyn WriteDebug> {
+    let out = std::io::BufWriter::new(std::io::stdout());
+    if line_endings.translates() {
+        Box::new(TextWriter::new(out))
+    } else {
+        Box::new(out)
+    }
+}
+
 pub trait WriteDebug: Write + fmt::Debug {
     /// `self` as a plain writer (trait upcasting is stable only from Rust 1.86).
     fn as_write(&mut self) -> &mut dyn Write;
@@ -853,8 +868,9 @@ impl Vm {
                 registry,
                 binary_checks: Some(op::verify::Level::STRONGEST),
                 limits: Limits::default(),
-                out: Box::new(std::io::BufWriter::new(std::io::stdout())),
+                out: process_stdout(LineEndings::default()),
                 warnings: false,
+                line_endings: LineEndings::default(),
                 warn_hook: None,
                 host_native: None,
                 interrupt_handler: None,
@@ -1154,6 +1170,15 @@ impl Vm {
     /// Flush `print` output.
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.rt.out.flush()
+    }
+
+    /// How text streams treat line endings ([`LineEndings`]). Standard
+    /// output starts over as the process's, flushed first: set this before
+    /// a host replaces [`Runtime::out`].
+    pub fn set_line_endings(&mut self, line_endings: LineEndings) {
+        let _ = self.rt.out.flush();
+        self.rt.line_endings = line_endings;
+        self.rt.out = process_stdout(line_endings);
     }
 
     /// Run a full collection cycle.

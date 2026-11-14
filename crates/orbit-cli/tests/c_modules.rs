@@ -163,10 +163,7 @@ fn cpath(dir: &Path) -> String {
 }
 
 fn check(out: &Output, stdout: &str) {
-    let (o, e) = (
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    let (o, e) = (common::text(&out.stdout), common::text(&out.stderr));
     assert!(out.status.success(), "stdout:\n{o}\nstderr:\n{e}");
     assert_eq!(o, stdout, "stderr:\n{e}");
 }
