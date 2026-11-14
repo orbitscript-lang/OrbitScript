@@ -67,6 +67,12 @@ fn windows_errno(code: i32, kind: io::ErrorKind) -> i32 {
     if let 32 | 33 = code {
         return libc::EACCES;
     }
+    // ERROR_DIRECTORY (a name ending in `/` that is a file or missing,
+    // opened for writing), which std calls NotADirectory but the C
+    // runtime reports as EINVAL.
+    if code == 267 {
+        return libc::EINVAL;
+    }
     // The kind by its name: std has mapped Win32 codes to all of these
     // since before the MSRV, but most of the variants can only be named
     // from Rust 1.83 on.

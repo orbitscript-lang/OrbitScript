@@ -494,8 +494,27 @@ fn open_file(name: &[u8], mode: &[u8]) -> Option<io::Result<Stream>> {
     let (o, r, w) = open_options(mode)?;
     Some(
         o.open(os_path(name))
+            .map_err(|e| windows_directory_error(e, name))
             .map(|f| Stream::new(Kind::File(f), r, w)),
     )
+}
+
+/// The error Windows gives the C runtime for opening a directory named
+/// with a trailing `/` (`"/"`, `"./"`): access denied. std rewrites a
+/// relative or rooted path into a `\\?\` path with backslashes first, and a
+/// directory with a trailing backslash is "path not found" instead.
+fn windows_directory_error(e: io::Error, name: &[u8]) -> io::Error {
+    const ERROR_PATH_NOT_FOUND: i32 = 3;
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    if !cfg!(windows) || e.raw_os_error() != Some(ERROR_PATH_NOT_FOUND) || !name.ends_with(b"/") {
+        return e;
+    }
+    let dir = &name[..name.iter().rposition(|&b| b != b'/').map_or(0, |i| i + 1)];
+    if dir.is_empty() || os_path(dir).is_dir() {
+        io::Error::from_raw_os_error(ERROR_ACCESS_DENIED)
+    } else {
+        e
+    }
 }
 
 /// The message `io.lines` and `io.input` raise for a file they can't open.
