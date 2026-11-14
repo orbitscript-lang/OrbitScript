@@ -133,3 +133,27 @@ fn binary_isolates_keep_bytes() {
     let want: [&[u8]; 3] = [b"a\n", b"b\r\n\x1ac", b"hi\r\n"];
     assert_eq!(r, want);
 }
+
+#[test]
+fn scripts_are_read_as_text() {
+    let r = run(
+        LineEndings::Native,
+        &script(
+            r#"
+            put("return 1\26 this is not Lua")
+            local ended = loadfile(path)()
+            put("return 'a\26b'")
+            local _, unfinished = loadfile(path)
+            put("local x = 2\r\nreturn [[a\r\r\nb]], x")
+            local long, x = dofile(path)
+            put(string.dump(function() return "q\r\n\26" end))
+            local binary = loadfile(path)()
+            put('#!shebang\r\n' .. string.dump(function() return 7 end))
+            local shebang = loadfile(path)()
+            return ended, unfinished:match("unfinished string") ~= nil, long, x, binary, shebang
+            "#,
+        ),
+    );
+    let want: [&[u8]; 6] = [b"1", b"true", b"a\nb", b"2", b"q\r\n\x1a", b"7"];
+    assert_eq!(r, want);
+}

@@ -5,7 +5,7 @@ use std::io::{BufRead, Read, Write};
 
 use orbit::stack::{Either, Nil, Rest, Return, Stack, StackExt, StackResult, Status};
 use orbit::text::TextDecoder;
-use orbit::{Chunk, Error, Mode, OrbitString, Scope, Table, native};
+use orbit::{Chunk, Error, LineEndings, Mode, OrbitString, Scope, Table, native};
 
 use crate::sys::{os_error_text, os_path};
 
@@ -18,9 +18,15 @@ const BINARY_SIGNATURE: u8 = 0x1b;
 /// Read a script as `loadfile` does: a file (`None`: standard input), less
 /// a UTF-8 byte-order mark and a first line starting with `#` (keeping the
 /// line break, so line numbers stay right, and dropping it too when a
-/// binary chunk follows). Returns the bytes and the chunk's source name
-/// (`@path`, or `=stdin`), or the message `loadfile` gives.
-pub fn read_chunk_file(path: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), OrbitString> {
+/// binary chunk follows). Source is read as a text stream, with
+/// `line_endings` translating (Windows): `\r\n` as `\n`, and a Ctrl-Z
+/// ends it; a binary chunk is read as it is. Returns the bytes and the
+/// chunk's source name (`@path`, or `=stdin`), or the message `loadfile`
+/// gives.
+pub fn read_chunk_file(
+    path: Option<&[u8]>,
+    line_endings: LineEndings,
+) -> Result<(Vec<u8>, Vec<u8>), OrbitString> {
     let (mut bytes, source) = match path {
         None => {
             let mut b = Vec::new();
@@ -63,6 +69,9 @@ pub fn read_chunk_file(path: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), OrbitS
         };
     }
     bytes.drain(..start);
+    if line_endings.translates() && bytes.first() != Some(&BINARY_SIGNATURE) {
+        TextDecoder::default().decode(&mut bytes);
+    }
     Ok((bytes, source))
 }
 
@@ -97,7 +106,7 @@ fn load_file(
     mode: &[u8],
     env: i32,
 ) -> Result<(), OrbitString> {
-    let (bytes, source) = read_chunk_file(path)?;
+    let (bytes, source) = read_chunk_file(path, s.line_endings())?;
     let binary = bytes.first() == Some(&BINARY_SIGNATURE);
     let (want, what) = if binary {
         (b'b', &b"binary"[..])

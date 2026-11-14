@@ -25,6 +25,8 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod args;
+mod stderr;
+use stderr::{err_print, err_println};
 #[cfg(feature = "dap")]
 mod dap;
 #[cfg(feature = "repl")]
@@ -206,18 +208,18 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
             let mut line = format!("{prog}: unrecognized option '").into_bytes();
             line.extend_from_slice(&o);
             line.extend_from_slice(b"'\n");
-            let _ = std::io::Write::write_all(&mut std::io::stderr(), &line);
+            stderr::write(&line);
         }
-        ParseError::NeedsArgument(o) => eprintln!("{prog}: '{o}' needs argument"),
+        ParseError::NeedsArgument(o) => err_println!("{prog}: '{o}' needs argument"),
     }
-    eprint!(
+    err_print!(
         "usage: {prog} [options] [script [args]]\n\
          Available options are:\n  \
          -e stat   execute string 'stat'\n"
     );
     #[cfg(feature = "repl")]
-    eprintln!("  -i        enter interactive mode after executing 'script'");
-    eprint!(
+    err_println!("  -i        enter interactive mode after executing 'script'");
+    err_print!(
         "  -l mod    require library 'mod' into global 'mod'\n  \
          -l g=mod  require library 'mod' into global 'g'\n  \
          -v        show version information\n  \
@@ -229,7 +231,7 @@ fn usage(prog: &str, e: ParseError) -> ExitCode {
          -         stop handling options and execute stdin\n"
     );
     #[cfg(feature = "dap")]
-    eprint!(
+    err_print!(
         "  --debug-listen     serve debuggers from the start (otherwise on SIGUSR1)\n  \
          --no-debug-signal  don't serve debuggers on SIGUSR1\n  \
          --debug-server     (alone) be an editor's debug adapter, over stdio\n  \
@@ -248,7 +250,7 @@ fn main() -> ExitCode {
     // built with, checked before anything else of it is used.
     #[cfg(feature = "shared")]
     if let Err(m) = orbit_lib::check_build!() {
-        eprintln!("{prog}: {m}");
+        err_println!("{prog}: {m}");
         return ExitCode::FAILURE;
     }
     #[cfg(feature = "dap")]
@@ -266,7 +268,7 @@ fn main() -> ExitCode {
     let mut iso = match new_isolate(&cli) {
         Ok(iso) => iso,
         Err(m) => {
-            eprintln!("{prog}: {m}");
+            err_println!("{prog}: {m}");
             return ExitCode::FAILURE;
         }
     };
@@ -531,7 +533,8 @@ impl Runner {
     /// Load a file (`None`: standard input) as `loadfile` does and call it,
     /// with the script arguments from `arg` when `with_args`.
     fn run_file(&mut self, path: Option<&[u8]>, with_args: bool) -> bool {
-        let (bytes, source) = match read_chunk_file(path) {
+        let line_endings = self.iso.scope(|s| s.line_endings());
+        let (bytes, source) = match read_chunk_file(path, line_endings) {
             Ok(r) => r,
             Err(m) => {
                 self.report(&format!("{}: {m}", self.prog));
@@ -585,7 +588,7 @@ impl Runner {
         self.iso.flush();
         match &self.report_to {
             Some(f) => f(&format!("{msg}\n")),
-            None => eprintln!("{msg}"),
+            None => err_println!("{msg}"),
         }
     }
 }
