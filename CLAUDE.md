@@ -22,7 +22,7 @@
 | `orbit-locale` | The C library's locales for `os.setlocale`, one object per isolate (`orbit` feature `locale`, ADR-13) |
 | `orbit-std` | The I/O-facing standard library (`io`, `os`, `print`, `loadfile`, `dofile`, the Lua searcher), built on the public `orbit` API |
 | `orbit-capi` | Lua C API shim for loading C modules, installed above `orbit-std` (`orbit-cli` feature `c-modules`) |
-| `orbit-lib` | `liborbit`, the runtime as one shared library that also serves as liblua 5.5 (ADR-10) |
+| `orbit-lib` | `liborbit`, the runtime as one shared library (a Rust `dylib` the programs link with their `shared` feature) that also serves as liblua 5.5 (ADR-10) |
 | `orbit-ffi` | The `ffi` library: calling C functions in shared libraries (`orbit-std` feature `ffi`) |
 | `orbit-dap` | The Debug Adapter Protocol server behind `orbit --debug-server` (ADR-12), on the public `orbit::debugger` API |
 | `orbit` | Rust embedding API |

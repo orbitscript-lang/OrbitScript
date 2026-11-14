@@ -8,6 +8,15 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use orbit_check::{Config, DiskSources, Severity, Workspace};
 use serde_json::{Value, json};
 
+/// The server under test: Cargo's own build, or, when `ORBIT_BIN_DIR` is
+/// set, the one in that directory (a layout `./build.sh` made).
+fn server() -> PathBuf {
+    match std::env::var_os("ORBIT_BIN_DIR") {
+        Some(dir) => PathBuf::from(dir).join(format!("orbit-lsp{}", std::env::consts::EXE_SUFFIX)),
+        None => PathBuf::from(env!("CARGO_BIN_EXE_orbit-lsp")),
+    }
+}
+
 const GEO: &str = "\
 /// A point in the plane.
 pub struct Vec2 { x: float, y: float }
@@ -47,7 +56,7 @@ impl Server {
         std::fs::create_dir_all(dir.join("cache")).unwrap();
         std::fs::write(dir.join("geo.orb"), GEO).unwrap();
         std::fs::write(dir.join("main.orb"), MAIN).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_orbit-lsp"))
+        let mut child = Command::new(server())
             .arg("--stdio")
             .env("XDG_CACHE_HOME", dir.join("cache"))
             .stdin(Stdio::piped())
