@@ -1,0 +1,15 @@
+Deletes: The raw integer-key table store (`set_int`): `rawset`, the table library, natives.
+Tests: table_raw_store_by_integer_key table_library_insert_and_move
+
+diff --git a/crates/orbit-runtime/src/object/table.rs b/crates/orbit-runtime/src/object/table.rs
+index 9a1d5cf..62cdb6c 100644
+--- a/crates/orbit-runtime/src/object/table.rs
++++ b/crates/orbit-runtime/src/object/table.rs
+@@ -1375,7 +1375,6 @@ pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<boo
+     // The array store needs the barrier, so do it first and look the table
+     // up once. `set_key`'s `Heap::update` barriers again, which only
+     // checks the color of a table already remembered.
+-    heap.barrier_at(t, idx as usize);
+     let tab = heap.get_mut(t);
+     if idx < tab.array.len() as u64 {
+         tab.array.set(idx as usize, v);

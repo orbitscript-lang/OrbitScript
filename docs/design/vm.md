@@ -268,6 +268,7 @@ Covered forms include `attempt to index a nil value (local 't')`, `attempt to ca
 - **Start floor**: in generational mode no major cycle starts below 1 MiB of heap; `ORBIT_GC_MIN_THRESHOLD` (bytes, or with `K`, `M`, `G`; `0` for none) changes it (ADR-2).
 - **Stress mode**: `ORBIT_GC_STRESS=1` collects at nearly every safe point that follows an allocation; the differential tests run under it as well as normally.
 - **Heap verifier**: in debug builds, `ORBIT_GC_VERIFY=1` (`Heap::set_verify`) re-walks the heap from the roots when marking ends and panics on a reachable object the collector left unmarked or a stale handle, naming the chain from a root; it also recounts `Heap::bytes`. Release builds don't contain it. CI runs the suites under it with stress mode ([tests/README.md](../../tests/README.md#the-heap-verifier)).
+- **Barrier tests**: `crates/orbit/tests/gc_barriers.rs` tests each write path under the verifier, and `tests/gc-barriers/check-deletions.sh` proves each test by deleting its barrier ([tests/README.md](../../tests/README.md#write-barrier-tests)). A pull request that changes barrier or collector code pastes the script's output into its description.
 
 Weak tables, finalizers and `collectgarbage` are in [gc-semantics.md](gc-semantics.md).
 

@@ -1,0 +1,15 @@
+Deletes: A coroutine parking its stack in its thread (`switch_to`).
+Tests: coroutine_parked_stack coroutine_resume_and_yield_values
+
+diff --git a/crates/orbit-runtime/src/vm/coro.rs b/crates/orbit-runtime/src/vm/coro.rs
+index 9eac692..b696b80 100644
+--- a/crates/orbit-runtime/src/vm/coro.rs
++++ b/crates/orbit-runtime/src/vm/coro.rs
+@@ -204,7 +204,6 @@ impl Vm {
+         let hooks = self.rt.hooks_touched;
+         // A parked stack is traced through its thread, which the collector
+         // may already have scanned.
+-        self.heap.barrier_back(from);
+         let c = co_mut(&mut self.heap, from);
+         c.status = from_status;
+         // A thread's bytes are its stack's, parked or running: they change

@@ -43,6 +43,19 @@ ORBIT_GC_STRESS=1 ORBIT_GC_VERIFY=1 cargo testkit conformance --interp target/de
 
 CI's `gc-verify` job runs the suite, the differential tests, the compatibility programs and the examples that way on every pull request. Release builds have no verifier and ignore the variable.
 
+## Write-barrier tests
+
+`crates/orbit/tests/gc_barriers.rs` has a test for each way the runtime stores a value into an object the collector may already have traced: table stores by every path, upvalues, metatables, user values, the registry, coroutine stacks and errors, the debug library's writes and pin slots. Each test ages the object, stores a new object into it, collects, and checks the value is still there, with the verifier checking every collection. A plain `cargo test` runs them.
+
+A test that passes proves nothing until it fails without its barrier. Each patch in `tests/gc-barriers` deletes one barrier and names the tests that depend on it, and `tests/gc-barriers/check-deletions.sh` applies each in turn and requires every one of its tests to fail:
+
+```sh
+tests/gc-barriers/check-deletions.sh              # every patch, about a minute
+tests/gc-barriers/check-deletions.sh int-store    # one patch
+```
+
+It needs a clean working tree under `crates/`, which it changes and restores. Paste its output into the description of any pull request that changes barrier or collector code. A pull request that adds a write path adds its test and a patch that deletes its barrier; one that changes the code a patch touches rewrites that patch, since the script fails on a patch that no longer applies.
+
 ## Programs built for liblua
 
 `cargo testkit liblua` runs the suite through `lua5.5-host`, the reference `lua.c` linked against Lua's shared library the way Debian ships it (`liblua5.5.so.0`, symbols versioned `LUA_5.5`), with `liborbit` installed under that name instead (ADR-10). The program is built by `scripts/build-reference-lua.sh` (Linux only for now). `lua-5.5/expected-liblua.txt` lists what passes.
