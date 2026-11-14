@@ -24,7 +24,7 @@
 use std::fmt::Write as _;
 
 use orbit::stack::{
-    Any, Native, Raised, Return, Stack, StackResult, Status, TableArg, Type, field_name,
+    Any, Native, Raised, Return, Stack, StackExt, StackResult, Status, TableArg, Type, field_name,
     upvalue_index,
 };
 use orbit::{Chunk, Language, OrbitString, native};

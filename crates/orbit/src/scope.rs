@@ -17,7 +17,7 @@ use crate::chunk::Chunk;
 use crate::error::{Error, ErrorKind};
 use crate::host::HostFunction;
 use crate::pin::{PinKind, Pinned};
-use crate::stack::{REGISTRY_INDEX, RIDX_GLOBALS, Raised, Stack, Status, Type};
+use crate::stack::{REGISTRY_INDEX, RIDX_GLOBALS, Raised, Stack, StackExt, Status, Type};
 use crate::value::{Function, IntoValue, Str, Table, Userdata, Value};
 
 /// Per-isolate state that handles reach without the VM: pinned handles

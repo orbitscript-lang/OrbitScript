@@ -2,7 +2,7 @@
 //! Rust (ADR-11, phase e).
 //!
 //! A [`Stack`] is the window of values a native function works in, the
-//! same window a [`Scope`](crate::Scope) wraps. Values are addressed by index with Lua's
+//! same window an `orbit::Scope` wraps. Values are addressed by index with Lua's
 //! convention: 1 is the window's first slot, -1 its top, and two kinds of
 //! pseudo-index reach the registry ([`REGISTRY_INDEX`]) and the running
 //! native closure's upvalues ([`upvalue_index`]). An index outside the
@@ -10,7 +10,7 @@
 //! operation needs a table, is an error, never undefined behaviour.
 //!
 //! The typed handles stay the API for Rust hosts, and are written over
-//! this layer: a [`Scope`](crate::Scope) holds a stack and each handle is a slot in it.
+//! this layer: an `orbit::Scope` holds a stack and each handle is a slot in it.
 //! This layer is also for bindings that need Lua's exact semantics, the
 //! Lua C API above all (`orbit-capi`).
 //!
@@ -19,21 +19,26 @@
 //! than function values, so each compiles to its own trampoline with no
 //! indirect call.
 //!
-//! The window itself, over the runtime, is in `window`.
+//! The window itself, over the runtime, is in `window`. The `orbit` crate
+//! re-exports this module as `orbit::stack`, adding what needs its own
+//! types (scopes and chunks) through `orbit::stack::StackExt`.
 
+mod exit;
 mod typed;
 mod window;
 
-use crate::OrbitString;
-use crate::scope::Scope;
-use crate::value::Value;
+use crate::object::OrbitString;
+use crate::stdlib::Lib;
 
 #[doc(hidden)]
-pub use typed::catch_panic;
+pub use exit::exit_hooks;
+
 pub use typed::{
     Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Number, Push, Rest,
     Results, State, TableArg, Ud, UserType, field_name, function,
 };
+#[doc(hidden)]
+pub use typed::{catch_panic, panic_message};
 pub(crate) use window::{ContRef, cont_ref};
 pub use window::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
 
@@ -51,7 +56,11 @@ pub const MULTRET: i32 = -1;
 
 /// The registry entry that holds the main thread (Lua's
 /// `LUA_RIDX_MAINTHREAD`): 3, or 1 in a Lua 5.4 build (ADR-14).
-pub const RIDX_MAINTHREAD: i64 = if crate::LUA.is_5_4() { 1 } else { 3 };
+pub const RIDX_MAINTHREAD: i64 = if orbit_lua_version::LUA.is_5_4() {
+    1
+} else {
+    3
+};
 
 /// The registry index of the global table (`LUA_RIDX_GLOBALS`).
 pub const RIDX_GLOBALS: i64 = 2;
@@ -337,7 +346,7 @@ impl Return {
     /// native's last act: its results, or its error, are the native's, and
     /// code it runs may yield across it (as across `dofile`).
     pub fn tail_call(nargs: usize) -> Return {
-        Return::call_then::<crate::value::TailCalled>(nargs, false)
+        Return::call_then::<TailCalled>(nargs, false)
     }
 
     /// End the process with exit status `code`, as `os.exit` does: first,
@@ -411,39 +420,6 @@ impl<'s> Stack<'s> {
         }
     }
 
-    /// Run `f` with a scope over this window: the typed API, for code that
-    /// builds on it (`orbit-std`'s libraries). What `f` made is dropped
-    /// after.
-    pub fn with_scope<R>(&mut self, f: impl for<'a> FnOnce(&'a Scope<'a>) -> R) -> R {
-        let start = self.top();
-        let scope = Scope::new(self.reborrow());
-        let r = f(&scope);
-        let _ = scope.stack().set_top(start);
-        r
-    }
-
-    /// [`Stack::with_scope`], pushing the value `f` gives, if any.
-    pub fn push_from_scope(
-        &mut self,
-        f: impl for<'a> FnOnce(&'a Scope<'a>) -> Option<Value<'a>>,
-    ) -> bool {
-        let start = self.top();
-        let scope = Scope::new(self.reborrow());
-        let v = f(&scope);
-        let mut stack = scope.stack();
-        let end = match v {
-            Some(v) => {
-                v.push(&mut stack);
-                let r = stack.copy(-1, start + 1);
-                debug_assert!(r.is_ok(), "the slot after the start exists");
-                start + 1
-            }
-            None => start,
-        };
-        let _ = stack.set_top(end);
-        v.is_some()
-    }
-
     /// Run `f` with `t`'s stack as the window ([`Stack::enter_thread`]).
     pub fn on_thread<R>(
         &mut self,
@@ -458,113 +434,133 @@ impl<'s> Stack<'s> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Config, Runtime};
+/// The continuation of [`Return::tail_call`]: the call's results, or its
+/// error, are the native's.
+struct TailCalled;
 
-    /// `add(a, b)`, and a call back into the script through a continuation.
-    struct Add;
-
-    impl Native for Add {
-        const NAME: &'static str = "add";
-
-        fn call(s: &mut Stack<'_>) -> StackResult<Return> {
-            let (Some(a), Some(b)) = (s.to_integer(1), s.to_integer(2)) else {
-                return Err(s.arg_error(1, "integers expected"));
-            };
-            s.push_integer(a + b);
-            Ok(Return::values(1))
+impl Continuation for TailCalled {
+    fn resume(_: &mut Stack<'_>, outcome: Outcome) -> StackResult<Return> {
+        match outcome {
+            Outcome::Ok(n) => Ok(Return::values(n)),
+            Outcome::Err(e) => Err(e),
         }
     }
+}
 
-    /// `twice(f, x)`: `f(f(x))`, calling through continuations, so `f`
-    /// may yield.
-    struct Twice;
+// ---- types the window's operations name ---------------------------------------
 
-    impl Native for Twice {
-        const NAME: &'static str = "twice";
+/// How the API stores a host value in a userdata (`Stack::push_userdata`,
+/// `orbit::Class`): taken out while a method runs, so the method can use
+/// the whole window at the same time.
+#[doc(hidden)]
+pub struct HostValue<T>(pub Option<T>);
 
-        fn call(s: &mut Stack<'_>) -> StackResult<Return> {
-            s.push_copy(1);
-            s.push_copy(2);
-            Ok(Return::call_then::<Again>(1, false))
+impl<T> std::fmt::Debug for HostValue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "HostValue(..)"
+        } else {
+            "HostValue(taken)"
+        })
+    }
+}
+
+/// What [`Stack::thread_status`] reports, as `coroutine.status` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadStatus {
+    Suspended,
+    Running,
+    /// It resumed another coroutine and waits for it.
+    Normal,
+    Dead,
+}
+
+/// A standard library an isolate can open ([`Stack::open_library`],
+/// `orbit::Config::libraries`). The libraries that touch the system (`io`,
+/// `os`, `print`, `loadfile`, `dofile`) are `orbit-std`'s, which hosts
+/// install on top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Library {
+    /// The base functions (`print`, `pairs`, `pcall`, ...), as globals.
+    Base,
+    Package,
+    Coroutine,
+    Debug,
+    Math,
+    String,
+    Table,
+    Utf8,
+}
+
+impl Library {
+    pub const ALL: [Library; 8] = [
+        Library::Base,
+        Library::Package,
+        Library::Coroutine,
+        Library::Debug,
+        Library::Math,
+        Library::String,
+        Library::Table,
+        Library::Utf8,
+    ];
+
+    /// The runtime's name for the library.
+    #[doc(hidden)]
+    pub fn lib(self) -> Lib {
+        match self {
+            Library::Base => Lib::Base,
+            Library::Package => Lib::Package,
+            Library::Coroutine => Lib::Coroutine,
+            Library::Debug => Lib::Debug,
+            Library::Math => Lib::Math,
+            Library::String => Lib::String,
+            Library::Table => Lib::Table,
+            Library::Utf8 => Lib::Utf8,
         }
     }
+}
 
-    struct Again;
+/// The collector's mode ([`Stack::set_gc_mode`], `orbit::Config::gc_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GcMode {
+    /// Every cycle marks the whole heap, in small steps paced by
+    /// allocation: short pauses, more total work.
+    Incremental,
+    /// Frequent minor collections of recently made objects, and major ones
+    /// of everything when the heap has grown: less total work for programs
+    /// that make many short-lived objects. Each collection runs to the end
+    /// once started, so a major one is a longer pause.
+    #[default]
+    Generational,
+}
 
-    impl Continuation for Again {
-        fn resume(s: &mut Stack<'_>, o: Outcome) -> StackResult<Return> {
-            let Outcome::Ok(n) = o else {
-                unreachable!("an unprotected call's error unwinds past us")
-            };
-            s.adjust_results(n, 1);
-            s.push_copy(1);
-            s.rotate(-2, 1)?;
-            Ok(Return::call_then::<Done>(1, false))
+impl GcMode {
+    /// The VM's own value for the mode.
+    #[doc(hidden)]
+    pub fn raw(self) -> crate::vm::GcMode {
+        match self {
+            GcMode::Incremental => crate::vm::GcMode::Incremental,
+            GcMode::Generational => crate::vm::GcMode::Generational,
         }
     }
+}
 
-    struct Done;
+/// Which errors stop the program (`orbit::Isolate::set_error_break`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ErrorBreak {
+    #[default]
+    Never,
+    /// Errors nothing in the script catches.
+    Uncaught,
+    /// Every error.
+    All,
+}
 
-    impl Continuation for Done {
-        fn resume(_: &mut Stack<'_>, o: Outcome) -> StackResult<Return> {
-            match o {
-                Outcome::Ok(n) => Ok(Return::values(n.min(1))),
-                Outcome::Err(e) => Err(e),
-            }
-        }
-    }
-
-    #[test]
-    fn natives_continuations_and_tables() {
-        let mut iso = Runtime::new().new_isolate(Config::default());
-        iso.stack(|s| {
-            s.push_native::<Add>();
-            s.set_global(b"add").unwrap();
-            s.push_native::<Twice>();
-            s.set_global(b"twice").unwrap();
-            s.create_table(0, 1);
-            s.push_bytes(b"v");
-            s.set_field(-2, b"k").unwrap();
-            s.set_global(b"t").unwrap();
-        });
-        let src = "local co = coroutine.wrap(function(x) \
-                     return twice(function(y) return coroutine.yield(y) + 1 end, x) end) \
-                   local a = co(1) local b = co(10) local c = co(20) \
-                   return add(2, 3), t.k, a, b, c, pcall(add, 'x')";
-        iso.stack(|s| {
-            assert_eq!(s.load(src.as_bytes(), b"=test", b"t"), Status::Ok);
-            assert_eq!(s.pcall(0, MULTRET, 0).unwrap(), Status::Ok);
-            assert_eq!(s.top(), 7);
-            assert_eq!(s.to_integer(1), Some(5));
-            assert_eq!(s.string_at(2), Some("v".into()));
-            // The first yield passes 1 out; 10 + 1 goes in again; 20 + 1
-            // comes back.
-            assert_eq!(
-                (s.to_integer(3), s.to_integer(4), s.to_integer(5)),
-                (Some(1), Some(11), Some(21))
-            );
-            assert!(!s.to_boolean(6));
-            assert_eq!(
-                s.string_at(7),
-                Some("bad argument #1 to 'add' (integers expected)".into())
-            );
-        });
-    }
-
-    #[test]
-    fn indices_outside_the_window_read_as_none() {
-        let mut iso = Runtime::new().new_isolate(Config::default());
-        iso.stack(|s| {
-            s.push_integer(1);
-            assert_eq!(s.type_at(2), Type::None);
-            assert_eq!(s.type_at(-2), Type::None);
-            assert_eq!(s.type_at(upvalue_index(1)), Type::None);
-            assert_eq!(s.type_at(REGISTRY_INDEX), Type::Table);
-            assert!(s.copy(1, 5).is_err());
-            assert!(s.raw_get(1).is_err());
-        });
-    }
+/// A breakpoint as set, and where it ended up: the first line at or after
+/// the requested one that has code, or `None` while no loaded function of
+/// its source has code there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Breakpoint {
+    pub requested: u32,
+    pub line: Option<u32>,
 }

@@ -3,25 +3,21 @@
 use std::any::{Any, TypeId};
 use std::ffi::c_void;
 
-use orbit_runtime::locale::{Category, LocaleMode, LocaleScope, TimeParts};
-use orbit_runtime::object::number::float_to_int;
-use orbit_runtime::object::table as tbl;
-use orbit_runtime::object::value::raw_eq;
-use orbit_runtime::object::{
-    self as raw, Gc, LightUserData, LuaStr, NativeId, NoMemory, Table, gc,
-};
-use orbit_runtime::object::{OrbitStr, OrbitString};
-use orbit_runtime::stdlib;
-use orbit_runtime::vm::{
+use crate::locale::{Category, LocaleMode, LocaleScope, TimeParts};
+use crate::object::number::float_to_int;
+use crate::object::table as tbl;
+use crate::object::value::raw_eq;
+use crate::object::{self as raw, Gc, LightUserData, LuaStr, NativeId, NoMemory, Table, gc};
+use crate::object::{OrbitStr, OrbitString};
+use crate::stdlib;
+use crate::vm::{
     self, CallOutcome, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn, Operator, Vm,
 };
 
-use crate::isolate::Library;
-use crate::value::ThreadStatus;
-
 use super::{
-    ArithOp, CompareOp, Continuation, FrameInfo, GcOp, GcParam, InterruptHandler, MULTRET, Native,
-    Outcome, REGISTRY_INDEX, RIDX_MAINTHREAD, Resumed, Ret, Return, StackResult, Status, Type,
+    ArithOp, CompareOp, Continuation, FrameInfo, GcMode, GcOp, GcParam, HostValue,
+    InterruptHandler, Library, MULTRET, Native, Outcome, REGISTRY_INDEX, RIDX_MAINTHREAD, Resumed,
+    Ret, Return, StackResult, Status, ThreadStatus, Type,
 };
 
 type RawValue = raw::Value;
@@ -229,7 +225,8 @@ impl std::fmt::Debug for Stack<'_> {
 }
 
 impl<'s> Stack<'s> {
-    pub(crate) fn new(ctx: NativeCtx<'s>) -> Stack<'s> {
+    #[doc(hidden)]
+    pub fn new(ctx: NativeCtx<'s>) -> Stack<'s> {
         Stack { ctx }
     }
 
@@ -287,7 +284,7 @@ impl<'s> Stack<'s> {
                 }
             }
             Ret::Exit { code, close } => {
-                return crate::isolate::exit_process(c, code, close);
+                return super::exit::exit_process(c, code, close);
             }
         })
     }
@@ -683,7 +680,7 @@ impl<'s> Stack<'s> {
 
     /// The memory of a userdata [`Stack::new_userdata`] made, or a light
     /// userdata's pointer. Null for anything else, including userdata a
-    /// host made with typed values (a [`Class`](crate::Class) instance).
+    /// host made with typed values (an `orbit::Class` instance).
     pub fn to_userdata(&self, idx: i32) -> *mut c_void {
         match self.get(idx) {
             RawValue::UserData(u) => self
@@ -710,7 +707,7 @@ impl<'s> Stack<'s> {
         match self.get(idx) {
             RawValue::UserData(u) => self
                 .ctx
-                .userdata_mut::<crate::class::Slot<T>>(u)
+                .userdata_mut::<HostValue<T>>(u)
                 .map(|s| f(&mut s.0)),
             _ => None,
         }
@@ -718,22 +715,24 @@ impl<'s> Stack<'s> {
 
     /// The host value of type `T` in the userdata at `idx`, in place: for
     /// the typed handles' borrows.
-    pub(crate) fn userdata_in_place<T: Any>(&self, idx: i32) -> Option<&T> {
+    #[doc(hidden)]
+    pub fn userdata_in_place<T: Any>(&self, idx: i32) -> Option<&T> {
         match self.get(idx) {
             RawValue::UserData(u) => self
                 .ctx
-                .userdata_ref::<crate::class::Slot<T>>(u)
+                .userdata_ref::<HostValue<T>>(u)
                 .and_then(|s| s.0.as_ref()),
             _ => None,
         }
     }
 
     /// [`Stack::userdata_in_place`], mutably.
-    pub(crate) fn userdata_in_place_mut<T: Any>(&mut self, idx: i32) -> Option<&mut T> {
+    #[doc(hidden)]
+    pub fn userdata_in_place_mut<T: Any>(&mut self, idx: i32) -> Option<&mut T> {
         match self.get(idx) {
             RawValue::UserData(u) => self
                 .ctx
-                .userdata_mut::<crate::class::Slot<T>>(u)
+                .userdata_mut::<HostValue<T>>(u)
                 .and_then(|s| s.0.as_mut()),
             _ => None,
         }
@@ -920,9 +919,9 @@ impl<'s> Stack<'s> {
     }
 
     /// Push a userdata holding host value `value`, which
-    /// [`Stack::userdata`] reads back.
+    /// [`Stack::with_userdata`] reads back.
     pub fn push_userdata<T: Any>(&mut self, value: T) {
-        let u = self.ctx.new_userdata(crate::class::Slot(Some(value)));
+        let u = self.ctx.new_userdata(HostValue(Some(value)));
         self.ctx.push(RawValue::UserData(u));
     }
 
@@ -965,7 +964,7 @@ impl<'s> Stack<'s> {
     }
 
     /// Push a closure of native `N` over the top `nups` values (popped),
-    /// which it reads at [`upvalue_index`], and over `data`, a word scripts
+    /// which it reads at [`upvalue_index`](super::upvalue_index), and over `data`, a word scripts
     /// can neither see nor change ([`Stack::closure_data`]).
     pub fn push_native_closure<N: Native>(&mut self, nups: usize, data: u64) -> StackResult<()> {
         let id = self.native_index::<N>();
@@ -1466,16 +1465,23 @@ impl<'s> Stack<'s> {
         }
     }
 
-    /// Compile (or decode) `chunk` and push its function, with the value at
-    /// `env` as its `_ENV` (0: the global table); or push the message and
-    /// give [`Status::Syntax`] (or [`Status::Memory`]).
-    pub fn load_chunk(&mut self, chunk: &crate::Chunk<'_>, env: i32) -> Status {
+    /// Load a chunk with `load`, which compiles or decodes it and links it
+    /// with the `_ENV` it is given: the value at `env` (0: the global
+    /// table). Push its function, or push the message and give
+    /// [`Status::Syntax`] (or [`Status::Memory`]). `orbit`'s
+    /// `StackExt::load_chunk` passes its chunk loader here.
+    #[doc(hidden)]
+    pub fn load_with(
+        &mut self,
+        env: i32,
+        load: impl FnOnce(&mut NativeCtx<'s>, RawValue) -> Result<RawValue, String>,
+    ) -> Status {
         let env = if env == 0 {
             RawValue::Table(self.ctx.vm.rt.globals)
         } else {
             self.get(env)
         };
-        match crate::chunk::load(&mut self.ctx, chunk, env) {
+        match load(&mut self.ctx, env) {
             Ok(f) => {
                 self.ctx.push(f);
                 Status::Ok
@@ -1492,9 +1498,16 @@ impl<'s> Stack<'s> {
         }
     }
 
-    /// Push the main function of a chunk [`Compiler`](crate::Compiler)
+    /// The runtime's context under the window, for the `orbit` crate's
+    /// own operations.
+    #[doc(hidden)]
+    pub fn native_ctx(&mut self) -> &mut NativeCtx<'s> {
+        &mut self.ctx
+    }
+
+    /// Push the main function of a chunk `orbit::Compiler`
     /// compiled, linked here with the global table as its `_ENV`.
-    pub fn push_compiled(&mut self, chunk: &crate::UnlinkedChunk) {
+    pub fn push_compiled(&mut self, chunk: &orbit_bytecode::UnlinkedChunk) {
         let env = RawValue::Table(self.ctx.vm.rt.globals);
         let f = self.ctx.link(chunk, env);
         self.ctx.push(f);
@@ -1622,7 +1635,7 @@ impl<'s> Stack<'s> {
     /// The collector, as `lua_gc` drives it. Inside a finalizer every
     /// option does nothing and gives `None`, as in Lua.
     pub fn gc(&mut self, op: GcOp) -> Option<i64> {
-        use orbit_runtime::vm::{GcMode, GcParam as P};
+        use crate::vm::{GcMode, GcParam as P};
         let c = &mut self.ctx;
         if c.vm.rt.gc.finalizing() {
             return None;
@@ -1669,14 +1682,14 @@ impl<'s> Stack<'s> {
 
     /// Switch the collector to `mode` and give the previous one; `None`,
     /// changing nothing, inside a finalizer.
-    pub fn set_gc_mode(&mut self, mode: crate::GcMode) -> Option<crate::GcMode> {
+    pub fn set_gc_mode(&mut self, mode: GcMode) -> Option<GcMode> {
         let vm = &mut *self.ctx.vm;
         if vm.rt.gc.finalizing() {
             return None;
         }
         Some(match vm.set_gc_mode(mode.raw()) {
-            vm::GcMode::Generational => crate::GcMode::Generational,
-            vm::GcMode::Incremental => crate::GcMode::Incremental,
+            vm::GcMode::Generational => GcMode::Generational,
+            vm::GcMode::Incremental => GcMode::Incremental,
         })
     }
 
@@ -1717,12 +1730,9 @@ impl<'s> Stack<'s> {
         self.ctx.vm.rt.warn_hook = Some(vm::WarnHook(Box::new(hook)));
     }
 
-    /// Open standard library `lib` as [`Config::libraries`] would (setting
-    /// its global), and push its table; false, pushing nothing, if this
-    /// build leaves it out. `ignore_env` as [`Config::ignore_env`].
-    ///
-    /// [`Config::libraries`]: crate::Config::libraries
-    /// [`Config::ignore_env`]: crate::Config::ignore_env
+    /// Open standard library `lib` as `orbit::Config::libraries` would
+    /// (setting its global), and push its table; false, pushing nothing, if
+    /// this build leaves it out. `ignore_env` as `orbit::Config::ignore_env`.
     pub fn open_library(&mut self, lib: Library, ignore_env: bool) -> bool {
         let options = stdlib::Options { ignore_env };
         let top = self.ctx.len();
@@ -1768,9 +1778,7 @@ impl<'s> Stack<'s> {
     /// `os.exit`), after the isolate closes (if it does) and before
     /// standard output is flushed.
     pub fn before_exit(&mut self, hook: impl Fn() + 'static) {
-        crate::isolate::exit_hooks(self.ctx.vm)
-            .0
-            .push(Box::new(hook));
+        super::exit::exit_hooks(self.ctx.vm).0.push(Box::new(hook));
     }
 
     /// Let the collector run if it is due, as between statements: for a
@@ -1825,7 +1833,7 @@ impl<'s> Stack<'s> {
         self.ctx.vm.locale_mode()
     }
 
-    /// See [`crate::Isolate::set_locale_mode`].
+    /// See `orbit::Isolate::set_locale_mode`.
     pub fn set_locale_mode(&mut self, mode: LocaleMode) {
         self.ctx.vm.set_locale_mode(mode)
     }
@@ -2178,7 +2186,7 @@ fn light(p: usize) -> RawValue {
 }
 
 /// Reaches the isolate itself rather than a window: from
-/// [`Stack::control`], [`Isolate::control`](crate::Isolate::control), or an
+/// [`Stack::control`], `orbit::Isolate::control`, or an
 /// [`InterruptHandler`].
 pub struct Control<'a> {
     pub(crate) vm: &'a mut Vm,
@@ -2195,7 +2203,8 @@ fn interrupt_entry<H: InterruptHandler>(vm: &mut Vm) -> bool {
 }
 
 impl<'a> Control<'a> {
-    pub(crate) fn new(vm: &'a mut Vm) -> Control<'a> {
+    #[doc(hidden)]
+    pub fn new(vm: &'a mut Vm) -> Control<'a> {
         Control { vm }
     }
 
@@ -2206,7 +2215,7 @@ impl<'a> Control<'a> {
 
     /// The interrupt flag, for code that can only store to memory (a C
     /// signal handler): storing a nonzero byte interrupts running code, as
-    /// [`Interrupt::request`](crate::Interrupt) does. Valid as long as the
+    /// `orbit::Interrupt::request` does. Valid as long as the
     /// isolate.
     pub fn interrupt_flag(&self) -> *mut bool {
         self.vm.interrupt_flag()
@@ -2268,38 +2277,33 @@ impl<'a> Control<'a> {
         ThreadRef(self.vm.main_thread())
     }
 
-    /// [`crate::Isolate::set_breakpoints`], also from inside a stop.
+    /// `orbit::Isolate::set_breakpoints`, also from inside a stop.
     #[cfg(feature = "debugger")]
-    pub fn set_breakpoints(
-        &mut self,
-        source: &[u8],
-        lines: &[u32],
-    ) -> Vec<crate::debugger::Breakpoint> {
+    pub fn set_breakpoints(&mut self, source: &[u8], lines: &[u32]) -> Vec<super::Breakpoint> {
         self.vm
             .set_breakpoints(source, lines)
             .into_iter()
-            .map(|b| crate::debugger::Breakpoint {
+            .map(|b| super::Breakpoint {
                 requested: b.requested,
                 line: b.line,
             })
             .collect()
     }
 
-    /// [`crate::Isolate::stop_on_next_line`].
+    /// `orbit::Isolate::stop_on_next_line`.
     #[cfg(feature = "debugger")]
     pub fn stop_on_next_line(&mut self) {
         self.vm.stop_on_next_line()
     }
 
-    /// [`crate::Isolate::set_error_break`], also from inside a stop.
+    /// `orbit::Isolate::set_error_break`, also from inside a stop.
     #[cfg(feature = "debugger")]
-    pub fn set_error_break(&mut self, on: crate::debugger::ErrorBreak) {
-        use crate::debugger::ErrorBreak;
-        use orbit_runtime::vm::debugger as engine;
+    pub fn set_error_break(&mut self, on: super::ErrorBreak) {
+        use crate::vm::debugger as engine;
         self.vm.set_error_break(match on {
-            ErrorBreak::Never => engine::ErrorBreak::Never,
-            ErrorBreak::Uncaught => engine::ErrorBreak::Uncaught,
-            ErrorBreak::All => engine::ErrorBreak::All,
+            super::ErrorBreak::Never => engine::ErrorBreak::Never,
+            super::ErrorBreak::Uncaught => engine::ErrorBreak::Uncaught,
+            super::ErrorBreak::All => engine::ErrorBreak::All,
         })
     }
 }

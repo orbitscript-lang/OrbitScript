@@ -33,7 +33,7 @@ use crate::OrbitString;
 use crate::error::Error;
 use crate::pin::Pinned;
 use crate::scope::Scope;
-use crate::stack::{FrameInfo, Stack};
+use crate::stack::{FrameInfo, Stack, StackExt};
 use crate::value::{Table, Value};
 
 /// Why the program stopped.
@@ -67,25 +67,7 @@ pub enum Resume {
     StepOut,
 }
 
-/// Which errors stop the program ([`crate::Isolate::set_error_break`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ErrorBreak {
-    #[default]
-    Never,
-    /// Errors nothing in the script catches.
-    Uncaught,
-    /// Every error.
-    All,
-}
-
-/// A breakpoint as set, and where it ended up: the first line at or after
-/// the requested one that has code, or `None` while no loaded function of
-/// its source has code there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Breakpoint {
-    pub requested: u32,
-    pub line: Option<u32>,
-}
+pub use orbit_runtime::stack::{Breakpoint, ErrorBreak};
 
 /// What the host learns from the debugger, on the isolate's own thread.
 pub trait DebugEvents: 'static {

@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 
 use orbit::Library;
-use orbit::stack::{ArithOp, CompareOp, GcOp, GcParam, Raised, Stack, StackResult, Type};
+use orbit::stack::{ArithOp, CompareOp, GcOp, GcParam, Raised, Stack, StackExt, StackResult, Type};
 
 pub(crate) type Res<T> = StackResult<T>;
 

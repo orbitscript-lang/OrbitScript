@@ -16,7 +16,7 @@
 | `orbit-orb-syntax` | OrbitScript lexer, parser, AST, lowering to HIR (always built in, no feature) |
 | `orbit-virtmem` | Low-level OS virtual address reservation and page commit buffer (`VmBuffer`) |
 | `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates |
-| `orbit-runtime` | Values, strings, tables (`object`), the interpreter (`vm`) and the built-in libraries (`stdlib`), built on `orbit-gc`. No I/O |
+| `orbit-runtime` | Values, strings, tables (`object`), the interpreter (`vm`), the stack API natives are written on (`stack`, re-exported as `orbit::stack`) and the built-in libraries (`stdlib`), built on `orbit-gc`. No I/O |
 | `orbit-hir`, `orbit-compiler` | HIR, bytecode compiler |
 | `orbit-lua-version` | The Lua version the build implements (`LuaVersion`, `LUA`; feature `lua-5-4`, ADR-14), and the preprocessor for the built-in modules' version blocks |
 | `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) |

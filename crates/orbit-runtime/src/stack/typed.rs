@@ -15,8 +15,8 @@
 //! dispatch, no `Value` handles.
 
 use super::{Native, Raised, Return, Stack, StackResult, Type};
-use crate::{OrbitStr, OrbitString};
-pub use orbit_runtime::object::number::Number;
+pub use crate::object::number::Number;
+use crate::object::{OrbitStr, OrbitString};
 
 /// A type a native's parameter can have: how to read argument `i`
 /// (1-based) as one, raising Lua's argument error when it can't.
@@ -685,7 +685,7 @@ pub fn field_name(name: &str) -> &str {
 }
 
 /// Run a native's body, raising a panic in it as a script error, as a
-/// [`Call`](crate::Call) closure does. What `#[native]` wraps each function
+/// `orbit::Call` closure does. What `#[native]` wraps each function
 /// in. Where panics abort, it is the body alone.
 #[doc(hidden)]
 #[inline(always)]
@@ -702,5 +702,17 @@ pub fn catch_panic(
 #[cold]
 #[inline(never)]
 fn panicked(s: &mut Stack<'_>, p: &(dyn std::any::Any + Send)) -> Raised {
-    s.error(crate::host::panic_message(p).as_str())
+    s.error(panic_message(p).as_str())
+}
+
+/// The message a caught panic raises: `host function panicked: ...`, with
+/// the panic's own text when it has one.
+#[doc(hidden)]
+pub fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
+    let what = p
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| p.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("panic");
+    format!("host function panicked: {what}")
 }
