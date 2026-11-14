@@ -23,7 +23,7 @@ Hosts embed OrbitScript through Rust, and the same API has to work whether the r
 - **Natives and continuations are types** (`Native`, `Continuation`), so each gets its own trampoline and calling one costs no more than a runtime native. A native closure carries one data word scripts can't reach.
 - **Threads** are opaque `ThreadRef`s; another thread's stack can stand in for the window (`enter_thread`).
 - **`Control`** reaches the isolate itself: hooks, the interrupt handler and flag. Per-isolate state for bindings is an extension value of any type (`Stack::extension`). Userdata memory blocks stay put while the userdata lives.
-- The typed API is written over the stack layer. Only the stack layer and the isolate touch the runtime, so only they have a second implementation for the shared build (ADR-10).
+- The typed API is written over the stack layer. Only the stack layer and the isolate touch the runtime.
 
 ### The standard library
 - **The runtime does no I/O.** `orbit-runtime` provides the base library without `print`, `loadfile` and `dofile`, plus `string`, `table`, `math`, `utf8`, `coroutine`, `debug` without `debug.debug`, `load`, `require`, `package.loaded`, `package.preload` and the preload searcher. It reads no environment variables except `ORBIT_VERIFY`.
@@ -44,7 +44,7 @@ Hosts embed OrbitScript through Rust, and the same API has to work whether the r
 | Host libraries | `orbit-std`, `orbit-capi`, `orbit-ffi`, `orbit-dap` |
 | Programs and tools | `orbit-cli`, `orbit-lib`, `orbit-lsp`, `orbit-check`, `orbit-fmt`, `orbit-testkit` |
 
-The ABI boundary enforces the layering: nothing above `orbit` reaches the runtime directly.
+The layering is kept by the crates' dependencies: nothing above `orbit` depends on the runtime directly.
 
 ## Consequences
 

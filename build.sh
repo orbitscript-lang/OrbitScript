@@ -382,18 +382,6 @@ built_dir() {
     esac
 }
 
-# Windows: `orbit`'s shared backend links with `orbit_lib.lib`, while Cargo
-# names a cdylib's import library `orbit_lib.dll.lib`. Copies it, next to
-# it, under the name the linker looks for.
-import_lib() {
-    case "$triple" in
-        *-windows-msvc)
-            lib_dir=$(built_dir)
-            cp "$lib_dir/orbit_lib.dll.lib" "$lib_dir/orbit_lib.lib"
-            ;;
-    esac
-}
-
 # The function or variable each LUA_API, LUALIB_API and LUAMOD_API
 # declaration in our headers names, one per line.
 # Lua's headers are per version (ADR-14); orbit.h is shared.
@@ -565,7 +553,6 @@ if [ "$train" = yes ]; then
     workload "$target/pgo-train/static/bin/orbit"
     echo "== training liborbit"
     instrument_shared "$shared_args"
-    import_lib
     lay_out shared "$target/pgo-train/shared"
     workload "$target/pgo-train/shared/bin/orbit"
     # `cargo pgo optimize` merges the counts with the same llvm-profdata, but
@@ -639,7 +626,6 @@ if [ "$layout" = static ] || [ "$programs" = static ]; then
 else
     # shellcheck disable=SC2086 # plain words
     $run_shared $shared_args
-    import_lib
 fi
 # shellcheck disable=SC2086 # plain words
 $run $fmt_args

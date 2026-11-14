@@ -28,7 +28,7 @@ host = []
 debugger = ["host", "orbit/debugger", "dep:orbit-dap"]
 
 [dev-dependencies]
-# The tests run on the runtime backend, as the programs' builds select it.
+# The tests need the default libraries, as the programs' builds select them.
 orbit = { path = "../orbit" }
 # The C host test speaks DAP to a debugged C state.
 serde_json = { version = "1", default-features = false, features = ["std"] }

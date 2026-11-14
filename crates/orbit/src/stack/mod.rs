@@ -12,36 +12,28 @@
 //! The typed handles stay the API for Rust hosts, and are written over
 //! this layer: a [`Scope`](crate::Scope) holds a stack and each handle is a slot in it.
 //! This layer is also for bindings that need Lua's exact semantics, the
-//! Lua C API above all (`orbit-capi`), and is what crosses the `liborbit`
-//! boundary.
+//! Lua C API above all (`orbit-capi`).
 //!
 //! Natives written against it implement [`Native`]; one that waits for a
 //! call or a yield continues in a [`Continuation`]. Both are types rather
 //! than function values, so each compiles to its own trampoline with no
 //! indirect call.
 //!
-//! Two backends implement it: the runtime linked into the program (`rt`),
-//! or the one in `liborbit` reached through `stabby` (`shared`, ADR-10).
-
-#[cfg(runtime_backend)]
-#[path = "rt.rs"]
-pub(crate) mod backend;
-#[cfg(shared_backend)]
-#[path = "shared.rs"]
-pub(crate) mod backend;
+//! The window itself, over the runtime, is in `window`.
 
 mod typed;
+mod window;
 
 use crate::OrbitString;
 use crate::scope::Scope;
 use crate::value::Value;
 
-pub(crate) use backend::{ContRef, cont_ref};
-pub use backend::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
 pub use typed::{
     Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Push, Rest, Results,
     TableArg, function,
 };
+pub(crate) use window::{ContRef, cont_ref};
+pub use window::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
 
 /// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).
 pub const REGISTRY_INDEX: i32 = -(i32::MAX / 2 + 1000);
@@ -207,7 +199,6 @@ impl ArithOp {
         ArithOp::ALL.get(usize::from(code)).copied()
     }
 
-    #[cfg(runtime_backend)]
     fn unary(self) -> bool {
         matches!(self, ArithOp::Unm | ArithOp::BNot)
     }
@@ -400,7 +391,7 @@ pub trait InterruptHandler: 'static {
     fn handle(c: &mut Control<'_>) -> bool;
 }
 
-// ---- built on the backend's operations, the same for both -------------------------
+// ---- built on the window's operations ---------------------------------------
 
 impl<'s> Stack<'s> {
     /// Run `f` on argument `arg` (1-based) as the host value of type `T`,
