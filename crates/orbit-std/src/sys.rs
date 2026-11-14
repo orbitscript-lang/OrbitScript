@@ -106,13 +106,19 @@ pub(crate) fn file_failure(e: &io::Error, name: Option<&[u8]>) -> FileFailure {
 }
 
 /// The shell command for `cmd`.
+///
+/// On Windows the command reaches `cmd /C` verbatim, as the C library's
+/// `system` and `_popen` pass it: `cmd` parses its own command line, so the
+/// quoting `Command::arg` adds for programs that split arguments the C
+/// runtime's way (`"` escaped as `\"`) would change what it runs.
 // used by io and os, which are features
 #[allow(dead_code)]
 pub(crate) fn shell(cmd: &OsStr) -> std::process::Command {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let mut c = std::process::Command::new("cmd");
-        c.arg("/C").arg(cmd);
+        c.arg("/C").raw_arg(cmd);
         c
     }
     #[cfg(not(windows))]
