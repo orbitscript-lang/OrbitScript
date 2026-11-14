@@ -381,3 +381,25 @@ fn arguments_are_bytes() {
         err(&o)
     );
 }
+
+/// On Windows, opening a directory or a name ending in `/` fails with the
+/// errno lua5.5 built with the C runtime reports.
+#[cfg(windows)]
+#[test]
+fn windows_trailing_slash_errors() {
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg("-e")
+        .arg(
+            "for _, c in ipairs{{'/', 'w'}, {'./', 'w'}, {'./', 'r'}, {'.', 'w'}, \
+             {'orbit-no-such-dir/', 'w'}, {'orbit-no-such-dir/', 'r'}} do \
+             print(c[1], c[2], select(3, io.open(c[1], c[2]))) end",
+        )
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(
+        out(&o).replace('\r', ""),
+        "/\tw\t13\n./\tw\t13\n./\tr\t13\n.\tw\t13\n\
+         orbit-no-such-dir/\tw\t22\norbit-no-such-dir/\tr\t2\n"
+    );
+}
