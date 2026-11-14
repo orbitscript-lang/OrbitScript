@@ -405,6 +405,8 @@ pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
     let mut n = 0;
     while !p.done() {
         let item = p.next(pos).map_err(|e| e.raise(ctx))?;
+        // One value per item, and the next position after them all.
+        ctx.check_room(2, "too many results")?;
         let short = item
             .pad
             .checked_add(item.size)

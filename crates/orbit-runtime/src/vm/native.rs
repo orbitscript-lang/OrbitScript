@@ -682,6 +682,17 @@ impl NativeCtx<'_> {
         LuaError::new(m)
     }
 
+    /// Room for `n` more values on the stack, or the error
+    /// `stack overflow (<what>)` (`luaL_checkstack`'s), for a native that
+    /// returns as many values as its arguments ask for.
+    pub fn check_room(&mut self, n: usize, what: &str) -> Result<(), LuaError> {
+        let room = self.vm.rt.limits.max_stack.saturating_sub(self.vm.rt.top);
+        if n > room {
+            return Err(self.error(&format!("stack overflow ({what})")));
+        }
+        Ok(())
+    }
+
     /// `msg` as a string with the caller's position in front, as
     /// [`Self::error`] raises it. The bytes are kept as they are.
     // Out of line: inlined into each `error` instantiation it adds about
