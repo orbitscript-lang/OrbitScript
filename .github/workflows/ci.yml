@@ -170,8 +170,11 @@ jobs:
             os: windows-2025
           - name: Windows ARM64
             os: windows-11-arm
+            # What releases ship for this target, which can't train a
+            # profile (ADR-10).
+            static-programs: true
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out with LF line ends
         if: runner.os == 'Windows'
@@ -190,6 +193,11 @@ jobs:
       # library swap, the programs' tests and the C host tests, all on the
       # layout.
       - run: tools/check-shared-layout.sh
+      - name: Static programs with liborbit as a C library only
+        if: matrix.static-programs
+        run: |
+          ./build.sh --no-pgo --static-programs --out "$RUNNER_TEMP/static-programs"
+          ORBIT_BIN_DIR="$RUNNER_TEMP/static-programs/bin" cargo test --locked -p orbit-cli -p orbit-lsp
 
   conformance:
     name: Lua ${{ matrix.lua }} suites${{ matrix.lua == '5.5' && ', differential tests' || '' }}, size

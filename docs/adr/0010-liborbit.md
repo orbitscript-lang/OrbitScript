@@ -23,6 +23,7 @@ Measured, the missing link-time optimization costs nothing in a profile-guided b
 - **A mismatch is caught at start-up.** `orbit-lib`'s build script hashes the workspace's sources, the lock file, the compiler's version, the target, the profile and the features into a build identity. Each program holds the identity it was built with and compares it with the one the library returns before doing anything else (`orbit_lib::check_build!`), and exits with a message naming both when they differ.
 - **Rust's standard library is inside `liborbit`**, linked statically, and `panic = "abort"` stays. `build.sh` names the toolchain's static `std` to the compiler (`--extern std=`), since rustc otherwise has the programs use the toolchain's shared `libstd`, and checks that no laid-out file asks for one.
 - **No link-time optimization, so the profile carries the speed.** The shared layout is built with the profile's `lto` setting off; static builds keep it. One profile is trained on both layouts (their symbol names differ), and `build.sh --pgo-check` checks both. Built without a profile, `build.sh` says that the layout can be slower and names the alternatives (`--pgo`, `--pgo-train`, `--static`).
+- **A target that can't train a profile gets the C library only.** `build.sh --static-programs` lays out the same files with the static programs and `liborbit` built from the same crate as a `cdylib`, which exports the C API alone and is link-time optimized like a program. Releases use it for Windows ARM64, where LLVM's profiling runtime doesn't work and the `dylib` measured 1.12x slower than the static programs. The runtime is then stored once per program again, on that target only.
 - Neither side writes `unsafe`.
 
 ### The C boundary
@@ -50,6 +51,6 @@ Measured, the missing link-time optimization costs nothing in a profile-guided b
 - An install of the programs and `liborbit` stores the runtime once, and the programs are small: the compiler and the front ends are in the library only. `liborbit` itself is about a quarter larger than a link-time optimized `cdylib`, because unused code behind exported Rust symbols can't be dropped.
 - A call from a script into a program's native costs the same in both layouts.
 - The programs and `liborbit` can only be replaced together. A C program that uses `liborbit` as liblua is not affected: the C API is the stable interface.
-- A shared layout built without a profile is slower than a static build by up to 30%. Targets that can't train one need their own decision.
+- A shared layout built without a profile is slower than a static build by up to 30%. `build.sh` says so; `--static-programs` is the layout for a target that can't train one.
 - The compiler's choice between a static and a shared `std` is steered by a flag whose effect `build.sh` verifies after every build, on every toolchain it supports.
 - Changes to the C API's internals must keep working when no C function is running.

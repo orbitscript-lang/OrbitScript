@@ -66,6 +66,7 @@ A mismatch prints the call, both outputs and the `--seed` that reproduces the ba
 ./build.sh --static              # the static orbit, orbitc, orbit-lsp and orbit-fmt
 ./build.sh --target aarch64-unknown-linux-gnu --pgo device.profdata   # cross-compile with a profile from the device
 ./build.sh --no-pgo              # no profile
+./build.sh --no-pgo --static-programs   # no profile: static programs, liborbit as a C library only
 ```
 
 `--target` cross-compiles (the Rust target and a linker for it must be installed). `--pgo FILE` uses another profile, such as one captured on the target device by running an instrumented build there: build it on any machine with `cargo pgo instrument build -- --profile release --target TRIPLE -p orbit-cli`, run `tools/pgo-workload.sh` with it on the device (a checkout of this repository, with `LLVM_PROFILE_FILE=DIR/orbit_%m_%p.profraw` set), and merge the `.profraw` files with `llvm-profdata merge -o FILE`. A plain `cargo build --release` is not profile-guided.
