@@ -594,8 +594,8 @@ pub struct Runtime {
     pub(crate) natives: Vec<Native>,
     /// The runtime's own natives, by name, so each is registered once.
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId, CheapHash>,
-    /// An embedder's natives, by type, sorted ([`Vm::native_for_type`]).
-    pub(crate) native_types: Vec<(std::any::TypeId, NativeId)>,
+    /// Natives pushed by type ([`Vm::native_for_type`]): the stack API's.
+    pub(crate) native_types: std::collections::HashMap<std::any::TypeId, NativeId, CheapHash>,
     pub(crate) stack: Stack,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
@@ -863,7 +863,7 @@ impl Vm {
                 compile_orbitscript: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
-                native_types: Vec::new(),
+                native_types: Default::default(),
                 stack: Stack::default(),
                 prev_code: None,
                 dead_cell,
@@ -1009,14 +1009,12 @@ impl Vm {
         name: &'static str,
         f: NativeFn,
     ) -> NativeId {
-        match self.rt.native_types.binary_search_by_key(&ty, |&(t, _)| t) {
-            Ok(i) => self.rt.native_types[i].1,
-            Err(i) => {
-                let id = self.add_native(name, f, [0; 2]);
-                self.rt.native_types.insert(i, (ty, id));
-                id
-            }
+        if let Some(&id) = self.rt.native_types.get(&ty) {
+            return id;
         }
+        let id = self.add_native(name, f, [0; 2]);
+        self.rt.native_types.insert(ty, id);
+        id
     }
 
     /// Give the native registered under `name` a [`FastFn`]: calls that want

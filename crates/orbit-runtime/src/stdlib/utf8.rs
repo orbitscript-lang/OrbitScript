@@ -2,19 +2,19 @@
 //! points up to `0x7FFFFFFF` are accepted in lax mode; strict mode (the
 //! default) rejects surrogates and values over `0x10FFFF`.
 
-use crate::object::{Gc, LuaStr, Value};
-use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::object::Gc;
+use crate::stack::{Either, Fail, Nil, Rest, Results, Return, Stack, StackResult, library_row};
+use crate::vm::{NativeFn, Vm};
 use orbit_lua_text::push_utf8;
 use orbit_lua_version::LUA;
-
-type R = Result<NativeReturn, LuaError>;
+use orbit_macros::native;
 
 pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("utf8.char", char),
-    ("utf8.codepoint", codepoint),
-    ("utf8.len", len),
-    ("utf8.offset", offset),
-    ("utf8.codes", codes),
+    library_row::<char>(),
+    library_row::<codepoint>(),
+    library_row::<len>(),
+    library_row::<offset>(),
+    library_row::<codes>(),
 ];
 
 /// The largest code point lax mode accepts.
@@ -73,88 +73,112 @@ fn relative(pos: i64, len: usize) -> i64 {
     }
 }
 
-fn char(ctx: &mut NativeCtx<'_>) -> R {
-    let mut out = Vec::with_capacity(ctx.nargs());
-    for i in 0..ctx.nargs() {
-        let c = ctx.check_int(i)?;
+#[native(crate = crate, name = "utf8.char")]
+fn char(s: &mut Stack<'_>, codes: Rest) -> StackResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(codes.count);
+    for i in codes.indices() {
+        let c = s.check_integer(i)?;
         if !(0..=MAX_LAX as i64).contains(&c) {
-            return Err(ctx.arg_error(i, "value out of range"));
+            return Err(s.arg_error(i, "value out of range"));
         }
         push_utf8(&mut out, c as u32);
     }
-    let r = ctx.new_str_owned(out);
-    ctx.ret([r])
+    Ok(out)
 }
 
-fn subject(ctx: &mut NativeCtx<'_>) -> Result<(Gc<LuaStr>, usize), LuaError> {
-    let s = ctx.check_str(0)?;
-    let len = ctx.bytes(s).len();
-    Ok((s, len))
+/// The subject string's bytes; the argument was checked to be a string.
+fn subject<'a>(s: &'a Stack<'_>) -> &'a [u8] {
+    s.string_at(1).unwrap_or_default().as_bytes()
 }
 
-fn codepoint(ctx: &mut NativeCtx<'_>) -> R {
-    let (s, len) = subject(ctx)?;
-    let i = relative(ctx.opt_int(1, 1)?, len);
-    let j = relative(ctx.opt_int(2, i)?, len);
-    let strict = ctx.arg(3).is_falsy();
+#[native(crate = crate, name = "utf8.codepoint")]
+fn codepoint(
+    subject: &[u8],
+    i: Option<i64>,
+    j: Option<i64>,
+    lax: bool,
+) -> Result<CodePoints, Fail> {
+    let len = subject.len();
+    let i = relative(i.unwrap_or(1), len);
+    let j = j.map_or(i, |j| relative(j, len));
     if i < 1 {
-        return Err(ctx.arg_error(1, "out of bounds"));
+        return Err(Fail::arg(2, "out of bounds"));
     }
     if j > len as i64 {
-        return Err(ctx.arg_error(2, "out of bounds"));
+        return Err(Fail::arg(3, "out of bounds"));
     }
-    if i > j {
-        return Ok(NativeReturn::Return(0));
-    }
-    let mut pos = (i - 1) as usize;
-    let mut n = 0;
-    while pos < j as usize {
-        let Some((code, l)) = decode(ctx.bytes(s), pos, strict) else {
-            return Err(ctx.error(MSG_INVALID));
-        };
-        ctx.push(Value::Int(code as i64));
-        pos += l;
-        n += 1;
-    }
-    Ok(NativeReturn::Return(n))
+    Ok(CodePoints {
+        from: (i - 1) as usize,
+        to: j.max(0) as usize,
+        strict: !lax,
+    })
 }
 
-fn len(ctx: &mut NativeCtx<'_>) -> R {
-    let (s, len) = subject(ctx)?;
-    let i = relative(ctx.opt_int(1, 1)?, len);
-    let j = relative(ctx.opt_int(2, -1)?, len);
-    let strict = ctx.arg(3).is_falsy();
+/// `codepoint`'s results: the code points of the subject's characters
+/// that start in bytes `from..to`, decoded as they are pushed.
+struct CodePoints {
+    from: usize,
+    to: usize,
+    strict: bool,
+}
+
+impl Results for CodePoints {
+    fn push_results(self, s: &mut Stack<'_>) -> StackResult<Return> {
+        let mut pos = self.from;
+        let mut n = 0;
+        while pos < self.to {
+            let Some((code, l)) = decode(subject(s), pos, self.strict) else {
+                return Err(s.error(MSG_INVALID));
+            };
+            s.push_integer(i64::from(code));
+            pos += l;
+            n += 1;
+        }
+        Ok(Return::values(n))
+    }
+}
+
+#[native(crate = crate, name = "utf8.len")]
+fn len(
+    subject: &[u8],
+    i: Option<i64>,
+    j: Option<i64>,
+    lax: bool,
+) -> Result<Either<i64, (Nil, i64)>, Fail> {
+    let len = subject.len();
+    let i = relative(i.unwrap_or(1), len);
+    let j = relative(j.unwrap_or(-1), len);
     if i < 1 || i - 1 > len as i64 {
-        return Err(ctx.arg_error(1, "initial position out of bounds"));
+        return Err(Fail::arg(2, "initial position out of bounds"));
     }
     if j > len as i64 {
-        return Err(ctx.arg_error(2, "final position out of bounds"));
+        return Err(Fail::arg(3, "final position out of bounds"));
     }
     let mut pos = (i - 1) as usize;
     let mut n = 0i64;
     while (pos as i64) < j {
-        match decode(ctx.bytes(s), pos, strict) {
+        match decode(subject, pos, !lax) {
             Some((_, l)) => pos += l,
-            None => {
-                ctx.push(Value::Nil);
-                ctx.push(Value::Int(pos as i64 + 1));
-                return Ok(NativeReturn::Return(2));
-            }
+            None => return Ok(Either::Right((Nil, pos as i64 + 1))),
         }
         n += 1;
     }
-    ctx.ret([Value::Int(n)])
+    Ok(Either::Left(n))
 }
 
-fn offset(ctx: &mut NativeCtx<'_>) -> R {
-    let (s, len) = subject(ctx)?;
-    let mut n = ctx.check_int(1)?;
+/// `offset`'s results: the character's first byte and, in Lua 5.5, its
+/// last (fail when there is no such character).
+type Offset = Either<Nil, Either<i64, (i64, i64)>>;
+
+#[native(crate = crate, name = "utf8.offset")]
+fn offset(bytes: &[u8], n: i64, i: Option<i64>) -> Result<Offset, Fail> {
+    let len = bytes.len();
+    let mut n = n;
     let default = if n >= 0 { 1 } else { len as i64 + 1 };
-    let i = relative(ctx.opt_int(2, default)?, len);
+    let i = relative(i.unwrap_or(default), len);
     if i < 1 || i - 1 > len as i64 {
-        return Err(ctx.arg_error(2, "position out of bounds"));
+        return Err(Fail::arg(3, "position out of bounds"));
     }
-    let bytes = ctx.bytes(s);
     let cont = |p: usize| bytes.get(p).copied().is_some_and(is_cont);
     let mut pos = (i - 1) as usize;
     if n == 0 {
@@ -163,7 +187,7 @@ fn offset(ctx: &mut NativeCtx<'_>) -> R {
         }
     } else {
         if cont(pos) {
-            return Err(ctx.error("initial position is a continuation byte"));
+            return Err("initial position is a continuation byte".into());
         }
         if n < 0 {
             while n < 0 && pos > 0 {
@@ -185,10 +209,12 @@ fn offset(ctx: &mut NativeCtx<'_>) -> R {
         }
     }
     if n != 0 {
-        return ctx.ret([Value::Nil]);
+        return Ok(Either::Left(Nil));
     }
-    if cont(pos) {
-        return Err(ctx.error("initial position is a continuation byte"));
+    // Lua 5.5 also checks where it ended (`utf8.offset("\x80", 0)` fails);
+    // Lua 5.4 gives the position.
+    if LUA.is_5_5() && cont(pos) {
+        return Err("initial position is a continuation byte".into());
     }
     // The character's last byte: a non-ASCII lead byte takes every
     // continuation byte after it. At the end, the position itself.
@@ -198,63 +224,72 @@ fn offset(ctx: &mut NativeCtx<'_>) -> R {
             end += 1;
         }
     }
-    ctx.push(Value::Int(pos as i64 + 1));
+    let start = pos as i64 + 1;
     // Lua 5.4 gives only the start.
-    if LUA.is_5_4() {
-        return Ok(NativeReturn::Return(1));
-    }
-    ctx.push(Value::Int(end as i64));
-    Ok(NativeReturn::Return(2))
-}
-
-fn codes(ctx: &mut NativeCtx<'_>) -> R {
-    let (s, _) = subject(ctx)?;
-    let strict = ctx.arg(1).is_falsy();
-    if ctx.bytes(s).first().copied().is_some_and(is_cont) {
-        return Err(ctx.arg_error(0, MSG_INVALID));
-    }
-    let f = if strict {
-        ctx.native("utf8.codes_step", codes_step_strict)
+    Ok(Either::Right(if LUA.is_5_4() {
+        Either::Left(start)
     } else {
-        ctx.native("utf8.codes_step_lax", codes_step_lax)
-    };
-    ctx.push(f);
-    ctx.push(Value::Str(s));
-    ctx.push(Value::Int(0));
-    Ok(NativeReturn::Return(3))
+        Either::Right((start, end as i64))
+    }))
 }
 
-fn codes_step_strict(ctx: &mut NativeCtx<'_>) -> R {
-    codes_step(ctx, true)
+#[native(crate = crate, name = "utf8.codes")]
+fn codes(s: &mut Stack<'_>) -> StackResult<Return> {
+    let starts_with_cont = s
+        .check_string(1)?
+        .as_bytes()
+        .first()
+        .copied()
+        .is_some_and(is_cont);
+    let strict = !s.to_boolean(2);
+    if starts_with_cont {
+        return Err(s.arg_error(1, MSG_INVALID));
+    }
+    if strict {
+        s.push_native::<codes_step_strict>();
+    } else {
+        s.push_native::<codes_step_lax>();
+    }
+    s.push_copy(1);
+    s.push_integer(0);
+    Ok(Return::values(3))
 }
 
-fn codes_step_lax(ctx: &mut NativeCtx<'_>) -> R {
-    codes_step(ctx, false)
+// The iterators are nameless in messages, as in the reference.
+#[native(crate = crate, name = "?")]
+fn codes_step_strict(s: &mut Stack<'_>) -> Result<Either<(), (i64, i64)>, Fail> {
+    codes_step(s, true)
+}
+
+#[native(crate = crate, name = "?")]
+fn codes_step_lax(s: &mut Stack<'_>) -> Result<Either<(), (i64, i64)>, Fail> {
+    codes_step(s, false)
 }
 
 /// The `codes` iterator: from the previous character's position, skip its
 /// continuation bytes and decode the next one.
-fn codes_step(ctx: &mut NativeCtx<'_>, strict: bool) -> R {
-    let (s, len) = subject(ctx)?;
+/// The control value is read as `lua_tointeger` would, so anything that
+/// isn't an integer starts from the beginning.
+fn codes_step(s: &mut Stack<'_>, strict: bool) -> Result<Either<(), (i64, i64)>, Fail> {
+    let n = s.to_integer(2).unwrap_or(0);
+    let bytes = s.check_string(1)?.as_bytes();
+    let len = bytes.len();
     // Negative positions read as huge unsigned values: iteration is over.
-    let mut n = ctx.check_int(1)? as u64;
-    let bytes = ctx.bytes(s);
+    let mut n = n as u64;
     if n < len as u64 {
         while bytes.get(n as usize).copied().is_some_and(is_cont) {
             n += 1;
         }
     }
     if n >= len as u64 {
-        return Ok(NativeReturn::Return(0));
+        return Ok(Either::Left(()));
     }
     let at = n as usize;
     match decode(bytes, at, strict) {
         Some((code, l)) if !bytes.get(at + l).copied().is_some_and(is_cont) => {
-            ctx.push(Value::Int(at as i64 + 1));
-            ctx.push(Value::Int(code as i64));
-            Ok(NativeReturn::Return(2))
+            Ok(Either::Right((at as i64 + 1, i64::from(code))))
         }
-        _ => Err(ctx.error(MSG_INVALID)),
+        _ => Err(MSG_INVALID.into()),
     }
 }
 
