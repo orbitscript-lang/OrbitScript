@@ -15,7 +15,8 @@ name: CI
 # - Steps several jobs share live in .github/actions: `setup-rust` (the
 #   toolchain and the build cache) and `reference-lua` (the reference
 #   interpreter and what the suite needs from the runner).
-# - The MSRV job only type-checks (`cargo check`): no linking, no tests.
+# - The MSRV job only type-checks (`cargo check`): no linking, no tests. It
+#   runs on Linux, macOS and Windows, since each has code only it compiles.
 #
 # bench.yml (full benchmarks) and release.yml (every target, tests and
 # packaging) run by hand or on a tag, not on pull requests.
@@ -66,11 +67,24 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked --features orbit/lua-5-4 --target-dir target/lua54 -- -D warnings
 
   msrv:
-    name: check on MSRV
+    name: check on MSRV (${{ matrix.name }})
     if: github.event.pull_request.draft != true
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-15
+          - name: Windows
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
+      - name: Check out with LF line ends
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
       - name: Install the MSRV from Cargo.toml
         run: |
@@ -84,6 +98,7 @@ jobs:
       # and running the tests add nothing the other jobs don't cover.
       - run: cargo +"$MSRV" check --workspace --all-targets --locked
       - name: The Lua 5.4 build
+        if: runner.os == 'Linux'
         run: cargo +"$MSRV" check --workspace --all-targets --locked --features orbit/lua-5-4 --target-dir target/lua54
 
   test:
