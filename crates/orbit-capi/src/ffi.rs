@@ -1840,14 +1840,102 @@ pub(crate) fn load(
         .map_err(|_| ("not enough memory".into(), "init"))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod win {
+    use std::ffi::{c_char, c_void};
+
+    pub const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 0x1000;
+    pub const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x200;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn LoadLibraryExA(name: *const c_char, file: *mut c_void, flags: u32) -> *mut c_void;
+        pub fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+        pub fn GetLastError() -> u32;
+        pub fn FormatMessageA(
+            flags: u32,
+            source: *const c_void,
+            message: u32,
+            language: u32,
+            buffer: *mut u8,
+            size: u32,
+            args: *mut c_void,
+        ) -> u32;
+    }
+}
+
+/// The system's message for the calling thread's last error.
+#[cfg(windows)]
+fn win_error() -> String {
+    // SAFETY: no arguments; reads the thread's last-error value.
+    let code = unsafe { win::GetLastError() };
+    let mut buf = [0u8; 512];
+    // SAFETY: `buf` is writable for its length; no inserts are expanded.
+    let n = unsafe {
+        win::FormatMessageA(
+            win::FORMAT_MESSAGE_FROM_SYSTEM | win::FORMAT_MESSAGE_IGNORE_INSERTS,
+            std::ptr::null(),
+            code,
+            0,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    // The message as the system words it, its line break included, as the
+    // reference interpreter reports it.
+    let text = &buf[..(n as usize).min(buf.len())];
+    if text.is_empty() {
+        format!("system error {code}")
+    } else {
+        String::from_utf8_lossy(text).into_owned()
+    }
+}
+
+/// The [`crate::LoadFn`] for this crate on Windows. The library is opened
+/// as the reference interpreter opens it, with `LoadLibraryExA` and no
+/// flags: Windows' default search, the path's bytes as given (the ANSI code
+/// page), so modules and the DLLs they need resolve the same way. A module
+/// imports Lua's names from `lua55.dll` (ADR-8, ADR-10). There is no
+/// global symbol namespace, so `"*"` only loads the library. Libraries
+/// stay loaded until the process exits.
+#[cfg(windows)]
+pub(crate) fn load(
+    s: &mut Stack<'_>,
+    path: &[u8],
+    sym: &[u8],
+) -> Result<(), (String, &'static str)> {
+    let cpath =
+        std::ffi::CString::new(path).map_err(|_| ("path contains a NUL byte".into(), "open"))?;
+    // SAFETY: loading the library runs its initializers; the host enabled
+    // C modules, which is consent to run native code from cpath.
+    let h = unsafe { win::LoadLibraryExA(cpath.as_ptr(), std::ptr::null_mut(), 0) };
+    if h.is_null() {
+        return Err((win_error(), "open"));
+    }
+    if sym == b"*" {
+        s.push_boolean(true);
+        return Ok(());
+    }
+    let csym =
+        std::ffi::CString::new(sym).map_err(|_| ("symbol contains a NUL byte".into(), "init"))?;
+    // SAFETY: `h` is a live module handle; the name is NUL-terminated.
+    let f = unsafe { win::GetProcAddress(h, csym.as_ptr()) };
+    if f.is_null() {
+        return Err((win_error(), "init"));
+    }
+    crate::push_c_function(s, f as usize as u64, 0)
+        .map_err(|_| ("not enough memory".into(), "init"))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn load(
     _s: &mut Stack<'_>,
     _path: &[u8],
     _sym: &[u8],
 ) -> Result<(), (String, &'static str)> {
     Err((
-        "dynamic libraries not supported on this platform yet".into(),
+        "dynamic libraries not supported on this platform".into(),
         "absent",
     ))
 }
