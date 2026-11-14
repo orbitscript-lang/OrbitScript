@@ -17,6 +17,7 @@ use crate::sys::os_path;
 /// build, ADR-14), so scripts see the same strings, with OrbitScript modules
 /// after Lua's: the Lua searcher loads whatever file `package.path` finds,
 /// picking the compiler by the `.orb` name.
+#[cfg(not(windows))]
 const DEFAULT_PATH: &str = if orbit::LUA.is_5_4() {
     "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua;\
 /usr/local/lib/lua/5.4/?.lua;/usr/local/lib/lua/5.4/?/init.lua;./?.lua;./?/init.lua;\
@@ -26,11 +27,56 @@ const DEFAULT_PATH: &str = if orbit::LUA.is_5_4() {
 /usr/local/lib/lua/5.5/?.lua;/usr/local/lib/lua/5.5/?/init.lua;./?.lua;./?/init.lua;\
 /usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb"
 };
+#[cfg(not(windows))]
 const DEFAULT_CPATH: &str = if orbit::LUA.is_5_4() {
     "/usr/local/lib/lua/5.4/?.so;/usr/local/lib/lua/5.4/loadall.so;./?.so"
 } else {
     "/usr/local/lib/lua/5.5/?.so;/usr/local/lib/lua/5.5/loadall.so;./?.so"
 };
+
+/// On Windows the reference build's defaults are relative to the program's
+/// directory, which [`EXEC_DIR`] stands for, with OrbitScript's modules in
+/// `share\orbit` beside Lua's `share\lua`.
+#[cfg(windows)]
+const DEFAULT_PATH: &str = if orbit::LUA.is_5_4() {
+    "!\\lua\\?.lua;!\\lua\\?\\init.lua;!\\?.lua;!\\?\\init.lua;\
+!\\..\\share\\lua\\5.4\\?.lua;!\\..\\share\\lua\\5.4\\?\\init.lua;.\\?.lua;.\\?\\init.lua;\
+!\\..\\share\\orbit\\?.orb;!\\..\\share\\orbit\\?\\init.orb;.\\?.orb;.\\?\\init.orb"
+} else {
+    "!\\lua\\?.lua;!\\lua\\?\\init.lua;!\\?.lua;!\\?\\init.lua;\
+!\\..\\share\\lua\\5.5\\?.lua;!\\..\\share\\lua\\5.5\\?\\init.lua;.\\?.lua;.\\?\\init.lua;\
+!\\..\\share\\orbit\\?.orb;!\\..\\share\\orbit\\?\\init.orb;.\\?.orb;.\\?\\init.orb"
+};
+#[cfg(windows)]
+const DEFAULT_CPATH: &str = if orbit::LUA.is_5_4() {
+    "!\\?.dll;!\\..\\lib\\lua\\5.4\\?.dll;!\\loadall.dll;.\\?.dll"
+} else {
+    "!\\?.dll;!\\..\\lib\\lua\\5.5\\?.dll;!\\loadall.dll;.\\?.dll"
+};
+
+/// What a Windows search path writes for the program's directory: every
+/// one in `package.path` and `package.cpath`, the environment's included,
+/// becomes that directory, as in the reference build.
+#[cfg(windows)]
+const EXEC_DIR: &str = "!";
+
+/// `path` with [`EXEC_DIR`] replaced by the directory of the running
+/// program. A path stays as it is when that directory is unknown.
+#[cfg(windows)]
+fn with_exec_dir(path: String) -> String {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.to_string_lossy().into_owned()));
+    match dir {
+        Some(dir) => path.replace(EXEC_DIR, &dir),
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn with_exec_dir(path: String) -> String {
+    path
+}
 
 /// `LUA_PATH_5_5` and the like: `name` with the build's version suffix
 /// (`_5_4` in a 5.4 build), as Lua's `LUA_VERSUFFIX` makes it.
@@ -220,14 +266,14 @@ pub fn open<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<(), Error> {
         DEFAULT_PATH,
         ignore_env,
     );
-    pkg.raw_set("path", path)?;
+    pkg.raw_set("path", with_exec_dir(path))?;
     let cpath = env_path(
         &versioned_env("LUA_CPATH"),
         "LUA_CPATH",
         DEFAULT_CPATH,
         ignore_env,
     );
-    pkg.raw_set("cpath", cpath)?;
+    pkg.raw_set("cpath", with_exec_dir(cpath))?;
     pkg.add_native::<searchpath>()?;
     pkg.add_native::<loadlib_absent>()?;
     if let Some(searchers) = pkg.raw_get::<Option<Table>>("searchers")? {

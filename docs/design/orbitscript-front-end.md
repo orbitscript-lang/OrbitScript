@@ -178,7 +178,7 @@ The compiler's observer is `Nothing`: its handle is `()`, its methods are empty 
 ## Running OrbitScript
 
 - OrbitScript is always built in: it is the runtime's own language, so there is no Cargo feature or runtime switch that leaves it out. `orbit` (the crate) has `Compiler::compile_orbitscript` and `Language::OrbitScript` for chunks, and `orbit::Isolate` installs the VM's second compiler hook, `Runtime::compile_orbitscript`. Source chunks named `@path.orb` use it, so `loadfile`, `dofile` and the CLI's script pick the language by file name. `load` of a string, `-e`, standard input and interactive mode stay Lua.
-- `require` finds `.orb` modules on `package.path`: the default path has `/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb` after `lua`'s entries, and the Lua searcher picks the compiler by the file name. There is no `package.orbpath` and no extra searcher, so `package.searchers` keeps `lua`'s four entries. `use a::b;` becomes `require("a.b")`, so an `.orb` module can load a Lua module and the other way round.
+- `require` finds `.orb` modules on `package.path`: the default path has `/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb` after `lua`'s entries (on Windows, `share\orbit` beside the program's directory and `.\`), and the Lua searcher picks the compiler by the file name. There is no `package.orbpath` and no extra searcher, so `package.searchers` keeps `lua`'s four entries. `use a::b;` becomes `require("a.b")`, so an `.orb` module can load a Lua module and the other way round.
 - `orbit script.orb` runs a script, and `orbitc` compiles and lists `.orb` files and prints their HIR with `--hir`; `--ast` prints Lua syntax trees only.
 
 ## Binary size
