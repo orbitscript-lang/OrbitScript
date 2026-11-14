@@ -847,7 +847,7 @@ impl Vm {
                     } else {
                         Err(e.value)
                     };
-                    match self.co_finished(outcome) {
+                    match self.co_finished(outcome, e.cause) {
                         Ok(flow) => return Ok(flow),
                         Err(x) => e = self.make_error(x),
                     }
@@ -859,8 +859,8 @@ impl Vm {
                     let native = matches!(f.kind, FrameKind::Boundary { native: true, .. });
                     let taken = self.rt.unwind_traceback.take();
                     if e.traceback.is_none() && !native {
-                        e.traceback =
-                            Some(taken.unwrap_or_else(|| self.rt.traceback(&self.heap, None, 1)));
+                        let tb = taken.unwrap_or_else(|| self.rt.traceback(&self.heap, None, 1));
+                        e.traceback = Some(tb.into_boxed_str());
                     }
                     self.rt.stack.cells.truncate(f.cell_base as usize);
                     self.rt.stack.frames.truncate(idx);

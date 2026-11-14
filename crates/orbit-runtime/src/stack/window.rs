@@ -11,7 +11,8 @@ use crate::object::{self as raw, Gc, LightUserData, LuaStr, NativeId, NoMemory, 
 use crate::object::{OrbitStr, OrbitString};
 use crate::stdlib;
 use crate::vm::{
-    self, CallOutcome, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn, Operator, Vm,
+    self, CallOutcome, Cause, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn,
+    Operator, Vm,
 };
 
 use super::{
@@ -1414,6 +1415,12 @@ impl<'s> Stack<'s> {
         self.value_status(e.0.value)
     }
 
+    /// Whether the host's interrupt raised this error (`interrupted!`),
+    /// rather than a script raising that text.
+    pub fn is_interrupt(&self, e: &Raised) -> bool {
+        e.0.cause == Cause::Interrupt
+    }
+
     /// Push an error's value.
     pub fn push_raised(&mut self, e: &Raised) {
         self.ctx.push(e.0.value);
@@ -1424,7 +1431,7 @@ impl<'s> Stack<'s> {
     pub fn take_raised(&mut self, e: Raised) -> (String, Option<String>) {
         let message = self.ctx.vm.error_message(&e.0);
         self.ctx.push(e.0.value);
-        (message, e.0.traceback)
+        (message, e.0.traceback.map(String::from))
     }
 
     /// Lua's `not enough memory` error, to return.
@@ -2028,7 +2035,10 @@ impl<'s> Stack<'s> {
                 vals.iter().for_each(|&v| self.ctx.push(v));
                 Ok((returned, vals.len()))
             }
-            Err(v) => Err(Raised(LuaError::new(v))),
+            Err(v) => {
+                let cause = self.ctx.thread_error_cause(t, v);
+                Err(Raised(LuaError::with_cause(v, cause)))
+            }
         }
     }
 

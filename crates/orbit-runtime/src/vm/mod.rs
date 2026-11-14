@@ -51,8 +51,24 @@ pub use orbit_bytecode as op;
 #[derive(Debug, Clone)]
 pub struct LuaError {
     pub value: Value,
-    /// A traceback, when the error escaped every protected call.
-    pub traceback: Option<String>,
+    /// A traceback, when the error escaped every protected call. Boxed,
+    /// so the error stays small on the paths that return it.
+    pub traceback: Option<Box<str>>,
+    /// What raised it. A script's `error("interrupted!")` is still
+    /// [`Cause::Error`]: the value alone doesn't say.
+    pub cause: Cause,
+}
+
+/// What raised a [`LuaError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cause {
+    /// `error`, or an error in an operation or a library function
+    /// (`not enough memory` too: like the reference, a protected call tells
+    /// it by its message).
+    #[default]
+    Error,
+    /// The host asked the VM to stop ([`Interrupt`]): `interrupted!`.
+    Interrupt,
 }
 
 impl LuaError {
@@ -60,6 +76,15 @@ impl LuaError {
         LuaError {
             value,
             traceback: None,
+            cause: Cause::Error,
+        }
+    }
+
+    /// An error with `value` raised for `cause`.
+    pub fn with_cause(value: Value, cause: Cause) -> Self {
+        LuaError {
+            cause,
+            ..LuaError::new(value)
         }
     }
 }
