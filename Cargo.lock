@@ -137,6 +137,7 @@ dependencies = [
 name = "orbit-cli"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "orbit",
  "orbit-capi",
  "orbit-compiler",

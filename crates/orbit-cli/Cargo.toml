@@ -38,6 +38,10 @@ rustix = { version = "1.1", default-features = false, features = ["std", "termio
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["std"] }
 
+# Finds MSVC's C compiler for the C module tests (`tests/c_modules.rs`).
+[target.'cfg(windows)'.dev-dependencies]
+cc = "1.2"
+
 # A pseudo-terminal for the line editor's tests (`tests/tty.rs`).
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1.1", default-features = false, features = ["std", "termios", "process", "pty", "fs"] }
