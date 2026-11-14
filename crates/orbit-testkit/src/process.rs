@@ -174,12 +174,13 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
 
 /// The `__rusage REPORT TIMEOUT_MS PROGRAM ARGS...` helper. It runs PROGRAM
 /// with our stdio, then writes `EXIT WALL_NANOS PEAK_RSS_KIB` to REPORT.
-pub fn rusage_helper(args: &[String]) -> ExitCode {
+pub fn rusage_helper(args: &[OsString]) -> ExitCode {
     let [report, timeout_ms, program, rest @ ..] = args else {
         eprintln!("usage: orbit-testkit __rusage REPORT TIMEOUT_MS PROGRAM [ARGS...]");
         return ExitCode::from(2);
     };
-    let timeout = Duration::from_millis(timeout_ms.parse().unwrap_or(u64::MAX / 4));
+    let timeout_ms = timeout_ms.to_str().and_then(|t| t.parse().ok());
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(u64::MAX / 4));
     let start = Instant::now();
     let exit = Command::new(program)
         .args(rest)
@@ -189,7 +190,10 @@ pub fn rusage_helper(args: &[String]) -> ExitCode {
     let exit = match exit {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("orbit-testkit: cannot run {program}: {e}");
+            eprintln!(
+                "orbit-testkit: cannot run {}: {e}",
+                program.to_string_lossy()
+            );
             return ExitCode::from(2);
         }
     };
@@ -198,7 +202,7 @@ pub fn rusage_helper(args: &[String]) -> ExitCode {
     match std::fs::write(Path::new(report), text) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("orbit-testkit: {report}: {e}");
+            eprintln!("orbit-testkit: {}: {e}", report.to_string_lossy());
             ExitCode::from(2)
         }
     }

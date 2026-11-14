@@ -152,3 +152,39 @@ fn orbitscript_files_run_compile_and_print_hir() {
         text(&run.stderr)
     );
 }
+
+/// Input and output file names need not be UTF-8.
+#[cfg(unix)]
+#[test]
+fn file_names_are_bytes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = dir_with("bytes", "print('compiled')\n");
+    if std::fs::rename(dir.join("t.lua"), dir.join(OsStr::from_bytes(b"\xff.lua"))).is_err() {
+        // Some file systems (APFS) refuse names that are not UTF-8; then
+        // the name still has to reach the "cannot open" error.
+        let o = Command::new(env!("CARGO_BIN_EXE_orbitc"))
+            .arg(OsStr::from_bytes(b"\xff.lua"))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(o.status.code(), Some(1), "{}", text(&o.stderr));
+        return;
+    }
+    let o = Command::new(env!("CARGO_BIN_EXE_orbitc"))
+        .arg("-o")
+        .arg(OsStr::from_bytes(b"\xfe.out"))
+        .arg(OsStr::from_bytes(b"\xff.lua"))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg(OsStr::from_bytes(b"\xfe.out"))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(text(&o.stdout), "compiled\n", "{}", text(&o.stderr));
+}

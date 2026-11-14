@@ -335,3 +335,47 @@ fn usage_lists_no_ffi() {
         err(&o)
     );
 }
+
+/// Arguments that are not UTF-8 reach the script as the bytes given, as
+/// in `lua`, in `arg`, in `...`, in `-e` code and as the script's name.
+#[cfg(unix)]
+#[test]
+fn arguments_are_bytes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = std::env::temp_dir().join(format!("orbit-args-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let code = "io.write(arg[0]:match('[^/]*$'), '\\t', tostring(arg[1] == '\\xff\\xfe'), '\\t', \
+                select('#', ...), '\\t', tostring((...) == '\\xff\\xfe'), '\\t', tostring(x == '\\xfa'), '\\n')";
+    // Some file systems (APFS) refuse names that are not UTF-8.
+    let mut name: &[u8] = b"s\xff.lua";
+    if std::fs::write(dir.join(OsStr::from_bytes(name)), code).is_err() {
+        name = b"s.lua";
+        std::fs::write(dir.join(OsStr::from_bytes(name)), code).unwrap();
+    }
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg("-e")
+        .arg(OsStr::from_bytes(b"x='\xfa'"))
+        .arg(dir.join(OsStr::from_bytes(name)))
+        .arg(OsStr::from_bytes(b"\xff\xfe"))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(o.status.success(), "{}", err(&o));
+    let mut expected = name.to_vec();
+    expected.extend_from_slice(b"\ttrue\t1\ttrue\ttrue\n");
+    assert_eq!(o.stdout, expected, "{}", out(&o));
+
+    // An unknown option is reported with its bytes.
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg(OsStr::from_bytes(b"-\xff"))
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let needle = b"unrecognized option '-\xff'";
+    assert!(
+        o.stderr.windows(needle.len()).any(|w| w == needle),
+        "{}",
+        err(&o)
+    );
+}

@@ -37,18 +37,20 @@ fn is_stub(path: &Path) -> bool {
 fn main() -> ExitCode {
     let mut check = false;
     let mut paths = Vec::new();
-    for a in std::env::args().skip(1) {
-        match a.as_str() {
+    // `args_os`: a file name need not be UTF-8.
+    for arg in std::env::args_os().skip(1) {
+        match arg.to_str().unwrap_or("") {
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
             "--check" => check = true,
-            a if a.starts_with('-') => {
+            _ if arg.to_string_lossy().starts_with('-') => {
+                let a = arg.to_string_lossy();
                 eprintln!("orbit-fmt: unknown option {a}\n{USAGE}");
                 return ExitCode::from(2);
             }
-            a => paths.push(PathBuf::from(a)),
+            _ => paths.push(PathBuf::from(arg)),
         }
     }
     if paths.is_empty() {
