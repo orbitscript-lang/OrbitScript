@@ -24,7 +24,7 @@ use std::path::{Component, Path, PathBuf};
 use orbit_orb_syntax::ast;
 use orbit_orb_syntax::token::{CONTEXTUAL_KEYWORDS, KEYWORDS};
 
-pub use diag::{Code, Diagnostic, Severity};
+pub use diag::{Code, Diagnostic, Severity, code};
 pub use orbit_hir::Span;
 pub use symbols::{DocumentSymbol, Symbol, SymbolId, SymbolKind};
 pub use types::TypeId;
@@ -192,20 +192,12 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 /// Whether the checker's own diagnostic `d` already tells the user about the compile error
-/// `e`. The checker has rules of its own for a few things lowering also refuses, under a more
-/// specific code and sometimes with what it knows about types in the message; when one of them
-/// is reported at the same place, the compile error would only repeat it.
-fn covers(d: &Diagnostic, e: &orbit_orb_syntax::Diagnostic) -> bool {
-    let also_a_compile_rule = matches!(
-        d.code,
-        Code::UnknownName
-            | Code::UsedBeforeDefinition
-            | Code::NoAssociatedItem
-            | Code::UnknownField
-            | Code::MissingField
-            | Code::UncheckableCast
-    );
-    also_a_compile_rule && d.span.start == e.span.start
+/// `e`. The checker has rules of its own for a few things lowering also refuses (an unknown
+/// name, a missing field, an `as` target that can't be checked), reported under the same code
+/// and sometimes with what it knows about types in the message; when one of them is reported
+/// at the same place, the compile error would only repeat it.
+fn covers(d: &Diagnostic, e: &Diagnostic) -> bool {
+    d.code == e.code && d.span.start == e.span.start
 }
 
 fn is_word_byte(b: u8) -> bool {
@@ -471,10 +463,7 @@ impl Workspace {
         // still checked; a statement that didn't parse is an `Error` node, typed `any`.
         let (ast, syntax_errors) = orbit_orb_syntax::parse_recovering(&name, &text, &options);
         let parsed = syntax_errors.is_empty();
-        let mut diagnostics: Vec<Diagnostic> = syntax_errors
-            .into_iter()
-            .map(|e| Diagnostic::error(file, e.span, Code::Syntax, e.message))
-            .collect();
+        let mut diagnostics: Vec<Diagnostic> = syntax_errors;
         let pragmas = pragma::Pragmas::read(&text, &ast.comments, &ast.source);
         let mode = match pragmas.mode {
             Some(m) => m,
@@ -507,10 +496,9 @@ impl Workspace {
                     if strict && is_lua(&self.files[dep.0 as usize].path) {
                         let span = u.path[0].span.to(u.path[u.path.len() - 1].span);
                         let path = self.files[dep.0 as usize].path.with_extension("orbi");
-                        diagnostics.push(Diagnostic::error(
-                            file,
+                        diagnostics.push(crate::diag::error(
                             span,
-                            Code::UntypedModule,
+                            code::UNTYPED_MODULE,
                             format!(
                                 "`{}` is a Lua module without types; strict mode needs a stub \
                                  beside it ({})",
@@ -525,10 +513,9 @@ impl Workspace {
                 }
                 None => {
                     let span = u.path[0].span.to(u.path[u.path.len() - 1].span);
-                    diagnostics.push(Diagnostic::error(
-                        file,
+                    diagnostics.push(crate::diag::error(
                         span,
-                        Code::ModuleNotFound,
+                        code::MODULE_NOT_FOUND,
                         format!("cannot find module `{}`", segs.join("::")),
                     ));
                 }
@@ -579,14 +566,17 @@ impl Workspace {
             None
         };
         if mode == pragma::Mode::Off {
-            diagnostics.retain(|d| d.code.stops_the_module());
+            diagnostics.retain(|d| d.code == code::SYNTAX);
         }
-        pragmas.apply(file, &source, strict, &mut diagnostics);
+        pragmas.apply(&source, strict, &mut diagnostics);
         // Added after the pragmas so that none can hide it; see `covers`.
         if let Some(e) = compile_error {
             if !diagnostics.iter().any(|d| covers(d, &e)) {
-                diagnostics.push(Diagnostic::error(file, e.span, Code::Compile, e.message));
+                diagnostics.push(e);
             }
+        }
+        for d in &mut diagnostics {
+            d.line = source.line_of(d.span.start);
         }
         diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
         m.diagnostics = diagnostics;

@@ -2,6 +2,7 @@
 //! names and the type the walk found for each expression) and reports what it finds. None of
 //! them changes a type, so they can run in any order.
 
+use crate::diag::code;
 use std::cmp::Reverse;
 
 use orbit_hir::Span;
@@ -12,7 +13,7 @@ use super::view::SymbolView;
 use super::walk::{Node, walk_block};
 use crate::symbols::{SymbolId, SymbolKind};
 use crate::types::{Names, Ty, TypeId, Types};
-use crate::{Code, Diagnostic, FileId};
+use crate::{Diagnostic, FileId};
 
 /// A module after the typing walk: what the passes read.
 pub(super) struct Typed<'x, 'm, 'c> {
@@ -110,12 +111,7 @@ impl Pass for ZeroIndex {
                         if let [a] = m.non_nil_members(t)[..] {
                             if matches!(m.types.get(a), Ty::Array(_)) {
                                 let msg = "arrays start at 1, so `[0]` is never an element; the first is `[1]`";
-                                out.push(Diagnostic::warning(
-                                    m.file,
-                                    key.span,
-                                    Code::ZeroIndex,
-                                    msg,
-                                ));
+                                out.push(crate::diag::warning(key.span, code::ZERO_INDEX, msg));
                             }
                         }
                     }
@@ -148,7 +144,7 @@ impl FloatBitwise {
                 "`{}` on a float: Lua converts only floats with an integral value",
                 op.as_str()
             );
-            Diagnostic::warning(m.file, span, Code::FloatBitwise, msg)
+            crate::diag::warning(span, code::FLOAT_BITWISE, msg)
         })
     }
 }
@@ -165,10 +161,9 @@ impl Pass for FloatBitwise {
                 } => m.type_of(expr).and_then(|t| {
                     let (num, float) = m.numeric(t);
                     (num && float).then(|| {
-                        Diagnostic::warning(
-                            m.file,
+                        crate::diag::warning(
                             expr.span,
-                            Code::FloatBitwise,
+                            code::FLOAT_BITWISE,
                             "`~` on a float: Lua converts only floats with an integral value",
                         )
                     })
@@ -230,12 +225,7 @@ impl Pass for NeverEqual {
                             m.show(l),
                             m.show(r)
                         );
-                        out.push(Diagnostic::warning(
-                            m.file,
-                            e.span,
-                            Code::AlwaysUnequal,
-                            msg,
-                        ));
+                        out.push(crate::diag::warning(e.span, code::ALWAYS_UNEQUAL, msg));
                     }
                 }
             }
@@ -264,7 +254,7 @@ impl Conditions {
                 "this condition has type {}, not `bool` (strict mode); {hint}",
                 m.show(t)
             );
-            return Some(Diagnostic::error(m.file, span, Code::NotBool, msg));
+            return Some(crate::diag::error(span, code::NOT_BOOL, msg));
         }
         let always = ms
             .iter()
@@ -274,7 +264,7 @@ impl Conditions {
                 "this condition has type {}, which is always true",
                 m.show(t)
             );
-            Diagnostic::warning(m.file, span, Code::AlwaysTrue, msg)
+            crate::diag::warning(span, code::ALWAYS_TRUE, msg)
         })
     }
 }
@@ -356,7 +346,7 @@ impl Coverage {
                 "arms for them"
             }
         );
-        Some(Diagnostic::error(m.file, span, Code::NonExhaustive, msg))
+        Some(crate::diag::error(span, code::NON_EXHAUSTIVE, msg))
     }
 
     /// Adds the cases `p` covers to `out`; true if it matches everything.
@@ -440,7 +430,7 @@ impl ScopeClose {
             "`let scope` needs a value with a `__close` method, but {} has none",
             m.show(missing)
         );
-        Some(Diagnostic::error(m.file, span, Code::Mismatch, msg))
+        Some(crate::diag::error(span, code::MISMATCH, msg))
     }
 }
 

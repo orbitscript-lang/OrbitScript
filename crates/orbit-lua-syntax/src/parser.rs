@@ -5,9 +5,9 @@
 //! here, so their messages point where the reference's do.
 
 use crate::ast::*;
-use crate::diag::{Diagnostic, Near};
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Punct, Token, TokenKind};
+use orbit_hir::{Code, Diagnostic, Near};
 use orbit_hir::{Language, SourceInfo, Span, StrId};
 use orbit_lua_version::LUA;
 
@@ -97,7 +97,12 @@ fn parse_chunk(
     recover: bool,
 ) -> Result<(Ast, Vec<Diagnostic>), Diagnostic> {
     if u32::try_from(src.len()).is_err() {
-        return Err(Diagnostic::new(Span::default(), 1, "chunk too large", None));
+        return Err(Diagnostic::error(
+            Span::default(),
+            1,
+            Code::SYNTAX,
+            "chunk too large",
+        ));
     }
     let mut lexer = Lexer::new(src);
     if options.skip_comment_line {
@@ -288,12 +293,8 @@ impl Parser<'_> {
     /// `message near '<current token>'`.
     #[inline(never)]
     fn error_here(&self, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::new(
-            self.tok.span,
-            self.cur_line(),
-            message,
-            Some(self.near(self.tok)),
-        )
+        Diagnostic::error(self.tok.span, self.cur_line(), Code::SYNTAX, message)
+            .near(Some(self.near(self.tok)))
     }
 
     /// `<what> expected near '<current token>'`; `what` is already quoted where Lua quotes it.
@@ -305,7 +306,7 @@ impl Parser<'_> {
     /// An error with no `near` part, reported at `span`'s line.
     #[inline(never)]
     fn error_at(&self, span: Span, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::new(span, self.line_of(span.start), message, None)
+        Diagnostic::error(span, self.line_of(span.start), Code::SYNTAX, message)
     }
 
     #[inline(never)]
@@ -1036,11 +1037,11 @@ impl Parser<'_> {
                     // Reported at the end of the second declaration, as lua5.5 does.
                     let span = span_from(name.span.start, self.prev_end);
                     let line = self.line_of(self.prev_end.saturating_sub(1).max(span.start));
-                    return Err(Diagnostic::new(
+                    return Err(Diagnostic::error(
                         span,
                         line,
+                        Code::SYNTAX,
                         "multiple to-be-closed variables in local list",
-                        None,
                     ));
                 }
                 closing = true;

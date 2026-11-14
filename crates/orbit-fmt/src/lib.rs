@@ -86,10 +86,13 @@ fn parse(src: &[u8], options: Options) -> Result<Ast, Error> {
         stub: options.stub,
         ..ParseOptions::default()
     };
-    parse_with("", src, &opts).map_err(|d| Error {
-        line: d.line,
-        message: d.message,
-        internal: false,
+    parse_with("", src, &opts).map_err(|d| {
+        let d = d.into_data();
+        Error {
+            line: d.line,
+            message: d.message,
+            internal: false,
+        }
     })
 }
 

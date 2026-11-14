@@ -1,2 +1,2 @@
-fn f() { break; } //~ T0003
+fn f() { break; } //~ T0601
 f();

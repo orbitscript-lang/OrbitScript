@@ -1,0 +1,2 @@
+fn f(...xs) { let y = ...xs; y } //~ T0613
+print(f(1));

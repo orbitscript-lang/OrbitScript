@@ -109,7 +109,7 @@ fn main() -> ExitCode {
                 "{}:{line}:{col}: {}[{}]: {}",
                 ws.path(*file).display(),
                 d.severity.as_str(),
-                d.code.as_str(),
+                d.code,
                 d.message
             );
             match d.severity {

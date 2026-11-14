@@ -1,2 +1,2 @@
-const C = print; //~ T0003
+const C = print; //~ T0806
 print(C);

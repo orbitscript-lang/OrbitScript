@@ -1,2 +1,2 @@
 pub fn f() { 1 }
-return 5; //~ T0003
+return 5; //~ T0609

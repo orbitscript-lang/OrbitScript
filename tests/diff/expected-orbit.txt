@@ -29,6 +29,7 @@ finalizer_hooks.lua
 floats.lua
 gc.lua
 io.lua
+io_errors.lua
 load.lua
 locale.lua
 lua55.lua

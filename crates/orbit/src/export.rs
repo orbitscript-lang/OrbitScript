@@ -998,16 +998,16 @@ control_abi!([] LibControl<'_>, |c| c.0.reborrow(), |c| c.0);
 struct LibWriter<'a>(&'a mut dyn std::io::Write);
 
 impl Writer for LibWriter<'_> {
-    extern "C" fn write<'b>(&mut self, bytes: Slice<'b, u8>) -> SResult<usize, SString> {
+    extern "C" fn write<'b>(&mut self, bytes: Slice<'b, u8>) -> SResult<usize, IoErrorAbi> {
         match self.0.write(&bytes) {
             Ok(n) => SResult::Ok(n),
-            Err(e) => SResult::Err(e.to_string().as_str().into()),
+            Err(e) => SResult::Err(IoErrorAbi::new(&e)),
         }
     }
-    extern "C" fn flush(&mut self) -> SResult<(), SString> {
+    extern "C" fn flush(&mut self) -> SResult<(), IoErrorAbi> {
         match self.0.flush() {
             Ok(()) => SResult::Ok(()),
-            Err(e) => SResult::Err(e.to_string().as_str().into()),
+            Err(e) => SResult::Err(IoErrorAbi::new(&e)),
         }
     }
 }
@@ -1023,11 +1023,10 @@ impl std::fmt::Debug for ProgramOut {
 
 impl std::io::Write for ProgramOut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        Result::from(self.0.write(buf.into()))
-            .map_err(|m: SString| std::io::Error::other(m.to_string()))
+        Result::from(self.0.write(buf.into())).map_err(IoErrorAbi::into_io)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        Result::from(self.0.flush()).map_err(|m: SString| std::io::Error::other(m.to_string()))
+        Result::from(self.0.flush()).map_err(IoErrorAbi::into_io)
     }
 }
 

@@ -5,15 +5,14 @@
 //! touches the VM or the GC heap.
 
 pub mod ast;
-mod diag;
 pub mod lexer;
 mod lower;
 mod parser;
 pub mod token;
 mod unparse;
 
-pub use diag::{Diagnostic, DiagnosticKind, Near};
 pub use lower::lower;
+pub use orbit_hir::{Code, Diagnostic, DiagnosticKind, Near, Severity};
 pub use parser::{ParseOptions, parse, parse_recovering, parse_with};
 pub use unparse::unparse;
 

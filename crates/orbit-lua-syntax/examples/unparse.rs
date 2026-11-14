@@ -9,7 +9,7 @@ fn main() {
         match orbit_lua_syntax::parse(&path, &src) {
             Ok(ast) => out.write_all(&orbit_lua_syntax::unparse(&ast)).unwrap(),
             Err(d) => {
-                eprintln!("{}", d.to_lua_message(&path));
+                eprintln!("{}", d.to_message(&path));
                 std::process::exit(1);
             }
         }

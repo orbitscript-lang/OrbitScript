@@ -36,32 +36,20 @@ pub(crate) fn os_bytes(s: &OsStr) -> Vec<u8> {
     }
 }
 
-/// The C library's text for an I/O error (`No such file or directory`),
-/// without the ` (os error 2)` that Rust appends. On Windows, where Rust
-/// gives the system's own message ("The system cannot find the file
-/// specified."), it is the C runtime's text for the error, as Lua reports it.
+/// The C library's text for an I/O error (`No such file or directory`), as
+/// Lua reports it: `strerror` of its `errno` ([`crate::crt`]). An error that
+/// didn't come from the system keeps its own message.
 pub fn os_error_text(e: &io::Error) -> String {
-    #[cfg(windows)]
-    if e.raw_os_error().is_some() {
-        return crate::crt::errno_text(crate::crt::errno(e));
-    }
-    let s = e.to_string();
-    match s.rfind(" (os error ") {
-        Some(i) => s[..i].to_string(),
-        None => s,
+    match crate::crt::errno(e) {
+        Some(errno) => crate::crt::errno_text(errno),
+        None => e.to_string(),
     }
 }
 
 /// The C library's `errno` for an I/O error, the code Lua's file functions
 /// return (0 when the error didn't come from the OS).
 pub(crate) fn os_error_code(e: &io::Error) -> i64 {
-    match e.raw_os_error() {
-        #[cfg(windows)]
-        Some(_) => i64::from(crate::crt::errno(e)),
-        #[cfg(not(windows))]
-        Some(code) => i64::from(code),
-        None => 0,
-    }
+    crate::crt::errno(e).map_or(0, i64::from)
 }
 
 /// Create a new, empty file with a unique name in the temporary directory

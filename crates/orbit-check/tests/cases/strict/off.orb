@@ -1,4 +1,4 @@
 //! orbit-check: off
 let s: string = 3;
 // Still reported: with this, the module doesn't compile.
-undefined_name(); //~ T0003
+undefined_name(); //~ T0101

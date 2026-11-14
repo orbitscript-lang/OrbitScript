@@ -1,2 +1,2 @@
-fn f() { self } //~ T0003
+fn f() { self } //~ T0605
 print(f());

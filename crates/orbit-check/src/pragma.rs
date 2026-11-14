@@ -2,10 +2,11 @@
 //! of a line drops what the checker reports on that line, and `//! orbit-check: strict` or `off`
 //! sets how a whole module is checked.
 
+use crate::diag::code;
 use orbit_hir::{SourceInfo, Span};
 use orbit_orb_syntax::ast::{Comment, CommentKind};
 
-use crate::{Code, Diagnostic, FileId};
+use crate::{Code, Diagnostic};
 
 const PREFIX: &str = "orbit-check:";
 
@@ -68,7 +69,7 @@ impl Pragmas {
                 (CommentKind::Line, r) if r.starts_with("ignore[") && r.ends_with(']') => {
                     let mut codes = Vec::new();
                     for name in r["ignore[".len()..r.len() - 1].split(',').map(str::trim) {
-                        match Code::parse(name) {
+                        match code::parse(name) {
                             Some(code) => codes.push(code),
                             None => p
                                 .bad
@@ -100,16 +101,10 @@ impl Pragmas {
 
     /// Drops what the `ignore` pragmas cover from `diags`, then adds the pragmas' own warnings:
     /// ones it doesn't understand, and in strict mode ones that ignore nothing.
-    pub fn apply(
-        mut self,
-        file: FileId,
-        source: &SourceInfo,
-        strict: bool,
-        diags: &mut Vec<Diagnostic>,
-    ) {
+    pub fn apply(mut self, source: &SourceInfo, strict: bool, diags: &mut Vec<Diagnostic>) {
         diags.retain(|d| {
-            // A syntax or compile error is never ignored: the module wouldn't run.
-            if d.code.stops_the_module() {
+            // A syntax error is never ignored: the module wouldn't run.
+            if d.code == code::SYNTAX {
                 return true;
             }
             let line = source.line_of(d.span.start);
@@ -125,14 +120,13 @@ impl Pragmas {
             }
         });
         for (span, msg) in self.bad {
-            diags.push(Diagnostic::warning(file, span, Code::BadPragma, msg));
+            diags.push(crate::diag::warning(span, code::BAD_PRAGMA, msg));
         }
         if strict {
             for i in self.ignores.iter().filter(|i| !i.used) {
-                diags.push(Diagnostic::warning(
-                    file,
+                diags.push(crate::diag::warning(
                     i.span,
-                    Code::UnusedIgnore,
+                    code::UNUSED_IGNORE,
                     "this `orbit-check: ignore` has nothing to ignore".to_string(),
                 ));
             }

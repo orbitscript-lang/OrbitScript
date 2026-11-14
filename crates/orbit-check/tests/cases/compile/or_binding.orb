@@ -1,2 +1,2 @@
-fn f(v) { match v { 1 | x => 1, _ => 2 } } //~ T0003
+fn f(v) { match v { 1 | x => 1, _ => 2 } } //~ T0705
 print(f(1));

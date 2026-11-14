@@ -7,6 +7,7 @@ use super::expr::Part;
 use super::pattern::Access;
 use super::{Dest, LResult, LoopCtx, Lowerer};
 use crate::ast::{self, ExprKind as K};
+use crate::code;
 
 /// A numeric `for` header: `a..=b`, `(a..=b).rev()`, `(a..=b).step_by(s)`,
 /// `(a..=b).rev().step_by(s)`.
@@ -202,6 +203,7 @@ impl Lowerer {
                     if !binds.is_empty() {
                         return Err(self.error(
                             alt.span,
+                            code::OR_PATTERN_BINDING,
                             "bindings inside `|` patterns are not supported yet",
                         ));
                     }
@@ -404,6 +406,7 @@ impl Lowerer {
                 if *mutable {
                     return Err(self.error(
                         pat.span,
+                        code::MUT_LOOP_VARIABLE,
                         "loop variables can't be `mut`; copy into a `let mut` in the body",
                     ));
                 }
@@ -420,7 +423,11 @@ impl Lowerer {
                         } => names.push(Some(*name)),
                         ast::PatKind::Wild => names.push(None),
                         _ => {
-                            return Err(self.error(item.span, "a `for` pattern holds names or `_`"));
+                            return Err(self.error(
+                                item.span,
+                                code::FOR_PATTERN,
+                                "a `for` pattern holds names or `_`",
+                            ));
                         }
                     }
                 }
@@ -429,6 +436,7 @@ impl Lowerer {
             _ => {
                 return Err(self.error(
                     pat.span,
+                    code::FOR_PATTERN,
                     "a `for` pattern holds a name, `_` or a tuple of them",
                 ));
             }
@@ -571,7 +579,11 @@ impl Lowerer {
         {
             if name.sym == self.syms.step_by {
                 if args.len() != 1 {
-                    return Err(self.error(e.span, "`step_by` takes one step"));
+                    return Err(self.error(
+                        e.span,
+                        code::RANGE_ADAPTER,
+                        "`step_by` takes one step",
+                    ));
                 }
                 step = Some(&args[0]);
                 e = obj;
@@ -583,7 +595,11 @@ impl Lowerer {
         {
             if name.sym == self.syms.rev {
                 if !args.is_empty() {
-                    return Err(self.error(e.span, "`rev` takes no arguments"));
+                    return Err(self.error(
+                        e.span,
+                        code::RANGE_ADAPTER,
+                        "`rev` takes no arguments",
+                    ));
                 }
                 rev = true;
                 e = obj;
@@ -607,6 +623,7 @@ impl Lowerer {
             })),
             _ if rev || step.is_some() => Err(self.error(
                 iter.span,
+                code::RANGE_ADAPTER,
                 "`.rev()` and `.step_by(s)` apply to a range in a `for` header, in that order",
             )),
             _ => Ok(None),
@@ -621,19 +638,27 @@ impl Lowerer {
             Some(l) => loops.iter().rposition(|c| c.label == Some(l.sym)),
         };
         if found.is_none() && ctx.scope_action {
-            return Err(self.error(span, format!("`{what}` can't leave a `scope` action")));
+            return Err(self.error(
+                span,
+                code::LEAVES_SCOPE_ACTION,
+                format!("`{what}` can't leave a `scope` action"),
+            ));
         }
         match label {
-            None => loops
-                .len()
-                .checked_sub(1)
-                .ok_or_else(|| self.error(span, format!("`{what}` outside of a loop"))),
+            None => loops.len().checked_sub(1).ok_or_else(|| {
+                self.error(
+                    span,
+                    code::OUTSIDE_LOOP,
+                    format!("`{what}` outside of a loop"),
+                )
+            }),
             Some(l) => loops
                 .iter()
                 .rposition(|c| c.label == Some(l.sym))
                 .ok_or_else(|| {
                     self.error(
                         l.span,
+                        code::UNDECLARED_LABEL,
                         format!("use of undeclared label `'{}`", self.text(l.sym)),
                     )
                 }),
@@ -650,7 +675,11 @@ impl Lowerer {
         let i = self.find_loop(label, span, "break")?;
         if let Some(v) = value {
             if !self.cur().loops[i].is_loop {
-                return Err(self.error(v.span, "`break` with a value is only allowed in `loop`"));
+                return Err(self.error(
+                    v.span,
+                    code::BREAK_VALUE,
+                    "`break` with a value is only allowed in `loop`",
+                ));
             }
             let dest = self.cur().loops[i].dest.clone();
             match dest {

@@ -156,13 +156,13 @@ fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
     match cli.stage {
         Stage::Ast => {
             let ast = orbit_lua_syntax::parse_with(&name, bytes, &options)
-                .map_err(|d| d.to_lua_message(&name))?;
+                .map_err(|d| d.to_message(&name))?;
             let _ = stdout.write_all(&orbit_lua_syntax::unparse(&ast));
             return Ok(());
         }
         Stage::Hir => {
             let hir = orbit_lua_syntax::to_hir(&name, bytes, &options)
-                .map_err(|d| d.to_lua_message(&name))?;
+                .map_err(|d| d.to_message(&name))?;
             let _ = stdout.write_all(orbit_hir::print(&hir).as_bytes());
             return Ok(());
         }
