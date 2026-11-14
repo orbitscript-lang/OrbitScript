@@ -1,0 +1,15 @@
+Deletes: A string-key store that misses its cache and finds the key (`set_str_miss`).
+Tests: table_store_by_string_key_missing_the_cache
+
+diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
+index a41812b..2fa6b46 100644
+--- a/crates/orbit-runtime/src/vm/cold.rs
++++ b/crates/orbit-runtime/src/vm/cold.rs
+@@ -1012,7 +1012,6 @@ pub(crate) fn set_str_miss(
+         match heap.get(t).find_str_store(heap, &key) {
+             Ok(slot) => {
+                 cache.fill(slot);
+-                heap.barrier_back(t);
+                 heap.get_mut(t).set_slot(slot, v);
+                 return Ok(());
+             }

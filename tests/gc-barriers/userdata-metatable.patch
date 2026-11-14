@@ -1,0 +1,16 @@
+Deletes: `debug.setmetatable` on a userdata (`gc::set_metatable`).
+Tests: userdata_metatable
+
+diff --git a/crates/orbit-runtime/src/object/gc.rs b/crates/orbit-runtime/src/object/gc.rs
+index 4f2457f..d423b69 100644
+--- a/crates/orbit-runtime/src/object/gc.rs
++++ b/crates/orbit-runtime/src/object/gc.rs
+@@ -79,7 +79,7 @@ pub fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>) -> boo
+             }
+         }
+         Value::UserData(u) => {
+-            heap.update(u, |u| u.meta = mt);
++            heap.get_mut(u).meta = mt;
+             if has_gc(heap, mt) {
+                 heap.register_finalizer(u);
+             }

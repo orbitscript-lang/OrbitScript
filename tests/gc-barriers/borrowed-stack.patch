@@ -1,0 +1,15 @@
+Deletes: A suspended coroutine's stack given back after the debug library wrote to it (`return_stack`).
+Tests: debug_setlocal_in_a_suspended_coroutine
+
+diff --git a/crates/orbit-runtime/src/vm/coro.rs b/crates/orbit-runtime/src/vm/coro.rs
+index 9eac692..3ed6166 100644
+--- a/crates/orbit-runtime/src/vm/coro.rs
++++ b/crates/orbit-runtime/src/vm/coro.rs
+@@ -783,7 +783,6 @@ impl Vm {
+     /// Give back the stack [`Vm::borrow_stack`] took from `t`.
+     fn return_stack(&mut self, t: Gc<Thread>, saved_top: usize) {
+         // Values may have been stored into the parked stack.
+-        self.heap.barrier_back(t);
+         let c = co_mut(&mut self.heap, t);
+         c.stack.swap(&mut self.rt.stack);
+         c.top = std::mem::replace(&mut self.rt.top, saved_top);
