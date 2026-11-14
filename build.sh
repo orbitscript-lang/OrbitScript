@@ -14,6 +14,11 @@
 #                     headers and library names
 #   --static          lay out the static `orbit`, `orbitc`, `orbit-lsp` and
 #                     `orbit-fmt` instead of the shared layout
+#   --static-programs lay out the shared layout's files, but with the static
+#                     programs and liborbit as a C library only (liblua),
+#                     built with link-time optimization: for a target that
+#                     can't train a profile, where the Rust `dylib` would be
+#                     slower (ADR-10). The programs don't use that liborbit
 #   --out DIR         where to lay it out (default target/package/out)
 #   --profile NAME    the cargo profile (default release)
 #   --pgo FILE        optimize with the profile FILE (default
@@ -88,6 +93,7 @@ lua=5.5
 profile=release
 triple=
 layout=shared
+programs=shared
 pgo=
 no_pgo=no
 train=no
@@ -103,6 +109,7 @@ while [ $# -gt 0 ]; do
         --target) triple=${2:?--target needs a value}; shift 2 ;;
         --lua) lua=${2:?--lua needs a value}; shift 2 ;;
         --static) layout=static; shift ;;
+        --static-programs) programs=static; shift ;;
         --pgo) pgo=${2:?--pgo needs a value}; shift 2 ;;
         --no-pgo) no_pgo=yes; shift ;;
         --pgo-train) train=yes; shift ;;
@@ -133,6 +140,10 @@ host=$(rustc -vV | sed -n 's/^host: //p')
 [ -n "$triple" ] || triple=$host
 if [ "$no_pgo" = yes ] && { [ -n "$pgo" ] || [ "$train" = yes ] || [ "$check" = yes ]; }; then
     echo "build.sh: --no-pgo can't be combined with --pgo, --pgo-train or --pgo-check" >&2
+    exit 2
+fi
+if [ "$layout" = static ] && [ "$programs" = static ]; then
+    echo "build.sh: --static and --static-programs can't be combined" >&2
     exit 2
 fi
 if [ "$ffi" = no ] && [ "$system_libffi" = yes ]; then
@@ -284,6 +295,7 @@ qualified() {
 # liborbit; built by separate commands, the second would rebuild liborbit
 # with other features, and the programs would disagree about it. The
 # programs have the static layout's features, plus `shared`.
+lib_features=$lib
 shared_features=$(qualified orbit-lib "$lib")
 shared_features=$(join "$shared_features" "$(qualified orbit-cli "$(join "$cli_static" shared)")")
 shared_features=$(join "$shared_features" "$(qualified orbit-lsp "$(join "$lsp" shared)")")
@@ -352,6 +364,15 @@ build_shared() {
 }
 use_profile_shared() {
     build_shared "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1"
+}
+
+# liborbit as a C library only (--static-programs): the same crate built as
+# a `cdylib`, which exports the C API alone and so can be link-time
+# optimized like a program. The extra rustflags are the arguments.
+build_c_library() {
+    CARGO_TARGET_DIR="$target" CARGO_ENCODED_RUSTFLAGS="$(encoded_rustflags "$@")" \
+        "$cargo" rustc --profile "$profile" --target "$triple" -p orbit-lib \
+        --no-default-features --features "$lib_features" --lib --crate-type cdylib
 }
 
 built_dir() {
@@ -589,11 +610,13 @@ if [ -n "$pgo" ] && [ -f "$pgo" ]; then
     echo "== optimizing with $pgo"
     run=use_profile
     run_shared=use_profile_shared
+    c_library_flags="-Cprofile-use=$pgo${sep}-Cllvm-args=-vectorizer-min-trip-count=1"
 else
     [ "$no_pgo" = yes ] || echo "== no profile at $pgo: building without one"
     run=build
     run_shared=build_shared
-    if [ "$layout" = shared ]; then
+    c_library_flags=
+    if [ "$layout" = shared ] && [ "$programs" = shared ]; then
         echo "== note: the shared layout has no link-time optimization (liborbit is a" >&2
         echo "   Rust dylib), so without a profile it can be up to 30% slower than the" >&2
         echo "   static layout. Pass a profile with --pgo FILE (--pgo-train records one" >&2
@@ -601,11 +624,18 @@ else
         echo "   or build the static layout with --static." >&2
     fi
 fi
-if [ "$layout" = static ]; then
+if [ "$layout" = static ] || [ "$programs" = static ]; then
     # shellcheck disable=SC2086 # plain words
     $run $static_args
     # shellcheck disable=SC2086 # plain words
     $run $lsp_static_args
+    if [ "$layout" = shared ]; then
+        old_ifs=$IFS
+        IFS=$sep
+        # shellcheck disable=SC2086 # one flag per field
+        build_c_library $c_library_flags
+        IFS=$old_ifs
+    fi
 else
     # shellcheck disable=SC2086 # plain words
     $run_shared $shared_args
