@@ -321,6 +321,31 @@ fn memory_limit_from_the_environment() {
     assert!(err(&o).contains("ORBIT_MEMORY_LIMIT"), "{}", err(&o));
 }
 
+/// `ORBIT_VERIFY=none` lowers the checks on binary chunks, unless `-E`.
+#[test]
+fn verification_level_from_the_environment() {
+    use orbit_compiler::bytecode::{Op, format};
+    // Fails the structure check: a register past the frame.
+    let mut chunk = orbit::Compiler
+        .compile(b"local a = 1", "t", orbit::Language::Lua)
+        .unwrap();
+    chunk.protos[0].code = vec![Op::Return1 { src: 200 }];
+    chunk.protos[0].debug = Default::default();
+    let path = std::env::temp_dir().join(format!("orbit-verify-{}.out", std::process::id()));
+    std::fs::write(&path, format::encode(&chunk, true)).unwrap();
+    let script = format!(
+        "local f = io.open({:?}, 'rb') print(type(load(f:read('a')))) f:close()",
+        path.to_str().unwrap()
+    );
+    let checked = orbit(&["-e", &script], "", &[]);
+    let unchecked = orbit(&["-e", &script], "", &[("ORBIT_VERIFY", "none")]);
+    let ignored = orbit(&["-E", "-e", &script], "", &[("ORBIT_VERIFY", "none")]);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(out(&checked), "nil\n", "{}", err(&checked));
+    assert_eq!(out(&unchecked), "function\n", "{}", err(&unchecked));
+    assert_eq!(out(&ignored), "nil\n", "{}", err(&ignored));
+}
+
 /// Without the `c-modules` feature, `package.loadlib` gives Lua's result for
 /// a build without dynamic libraries. (A shared build has liborbit's.)
 #[test]

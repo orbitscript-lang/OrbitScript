@@ -115,9 +115,10 @@ The six sites structure alone leaves are all things only data flow can see: the 
 **Levels.**
 
 - **Cargo features.** `orbit-runtime` (and `orbit`, which forwards them) has `verify` for layer 1 and `verify-flow` for both layers, on by default. Layer 2 lives in `orbit_bytecode::verify::flow` behind `orbit-bytecode`'s own `verify-flow` feature, so a build without it doesn't carry the code. Release sizes of the `orbit` CLI when this was built (cloud x86_64): no verifier 1,036,504 bytes, layer 1 1,041,928, both layers 1,047,160.
-- **Environment.** `ORBIT_VERIFY=full`, `structure` or `none` lowers the level at run time (ignored with `-E`); anything else keeps the most the build has. A host can set it per isolate (`Isolate::set_binary_checks`). The level lives in the runtime, not the registry, so scripts can't change it.
+- **Per isolate.** A host sets it with `Isolate::set_binary_checks`; every isolate starts at the most the build has, and the libraries read no environment variable for it, so a variable set in a host's environment can't weaken an embedded isolate. The `orbit` CLI lowers it when `ORBIT_VERIFY=structure` or `none` (`full` or anything else keeps the most; ignored with `-E`). The level lives in the runtime, not the registry, so scripts can't change it.
+- **Always.** Decoding rejects `NativeEntry`, the body of the native stubs the VM makes, at every level including none: in a chunk it would call any native by number, whatever environment the script was given.
 
-Below both layers, a malformed chunk can make the VM panic (and abort the process), but never corrupt memory. Every new instruction needs an encode, a decode and a verify arm; the matches are exhaustive, so adding an `Op` without them doesn't compile.
+Below both layers, a malformed chunk can make the VM panic (and abort the process), but never corrupt memory. It isn't sandboxed, though: it may reach values the script was never given, so lowering the level is only for chunks you trust. Every new instruction needs an encode, a decode and a verify arm; the matches are exhaustive, so adding an `Op` without them doesn't compile.
 
 ## `io`
 
