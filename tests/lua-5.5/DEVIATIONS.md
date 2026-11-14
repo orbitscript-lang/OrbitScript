@@ -124,3 +124,11 @@ Suite: `main.lua` checks the warning, which holds.
 Why: the handlers run as calls from `os.exit`'s own native frame. Running them on the main thread would mean switching stacks out from under a coroutine that never resumes, for a process that exits right after.
 
 Suite: none. `tests/diff/exit_close_tbc.lua` covers the rest of the behavior from a coroutine without asking which thread runs.
+
+## `os.date` takes the same conversions on every platform
+
+`os.date` accepts the C99 conversions (`%a` to `%Z`, including `%e %D %F %T %R %r %G %g %V %h %n %t %u %C`) and the `E` and `O` modifiers POSIX allows (`%Ec %EC %Ex %EX %Ey %EY`, `%Od` and the rest) on every platform. lua5.5 takes that set on Unix, but a lua5.5 built with the Windows C runtime accepts only the C89 conversions and rejects the others with `invalid conversion specifier`.
+
+Why: a script's format should mean the same thing wherever it runs. The Windows C runtime formats every one of these conversions itself, so only the check differs; the text of conversions both accept is the same.
+
+Suite: no suite file uses the extra conversions on Windows. `tests/diff/time_zones.lua` prints `%G` and `%V`, so it differs from a Windows lua5.5; the differential tests run on Linux.

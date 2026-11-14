@@ -4,7 +4,8 @@
 
 /// Is `spec` (what follows a `%`) a conversion `os.date` accepts, and how
 /// many bytes does it take? The C99 conversions plus the `E` and `O`
-/// modifiers POSIX allows.
+/// modifiers POSIX allows, on every platform, although lua5.5 built with
+/// the Windows C runtime takes only the C89 ones (tests/lua-5.5/DEVIATIONS.md).
 fn conversion_len(spec: &[u8]) -> Option<usize> {
     match spec {
         [b'E', c, ..] if b"cCxXyY".contains(c) => Some(2),
