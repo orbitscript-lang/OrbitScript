@@ -229,3 +229,55 @@ fn numbers_userdata_state_and_panics() {
     })
     .unwrap();
 }
+
+/// A `pure` native: its fast path takes exact types and gives up on the
+/// rest (here a string, a missing argument, an odd number), which the
+/// full native then converts or raises.
+#[native(name = "half", pure)]
+fn half(n: i64, scale: Option<f64>) -> Result<Number, Fail> {
+    if n % 2 != 0 {
+        return Err(Fail::arg(1, "odd"));
+    }
+    Ok(match scale {
+        None => Number::Int(n / 2),
+        Some(k) => Number::Float(n as f64 / 2.0 * k),
+    })
+}
+
+#[test]
+fn pure_natives() {
+    use orbit::stack::{Native, PureValue};
+    let fast = <half as Native>::PURE.expect("a fast path");
+    assert!(matches!(fast(&[PureValue::Int(8)]), Some(PureValue::Int(4))));
+    assert!(matches!(
+        fast(&[PureValue::Int(8), PureValue::Int(3)]),
+        Some(PureValue::Float(f)) if f == 12.0
+    ));
+    assert!(matches!(
+        fast(&[PureValue::Int(8), PureValue::Nil]),
+        Some(PureValue::Int(4))
+    ));
+    assert!(fast(&[PureValue::Int(7)]).is_none());
+    assert!(fast(&[PureValue::Float(8.0)]).is_none());
+    assert!(fast(&[]).is_none());
+    assert!(<add as Native>::PURE.is_none());
+
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    iso.scope(|s| {
+        s.globals().set("half", s.create_native::<half>())?;
+        let src = r##"
+            assert(half(8) == 4 and math.type(half(8)) == "integer")
+            assert(half(8, 3) == 12.0 and half("8") == 4 and half(8.0) == 4)
+            assert(select("#", half(8)) == 1)
+            assert(select(2, pcall(half, 7)) == "bad argument #1 to 'half' (odd)")
+            assert(select(2, pcall(half)) == "bad argument #1 to 'half' (number expected, got no value)")
+            assert(select(2, pcall(half, 8, "x")) == "bad argument #2 to 'half' (number expected, got string)")
+            local t = {}
+            for i = 1, 100 do t[i] = half(2 * i) end
+            assert(t[100] == 100)
+        "##;
+        s.load(Chunk::new(src).name("=test"))?.call(())?;
+        Ok::<_, orbit::Error>(())
+    })
+    .unwrap();
+}

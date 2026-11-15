@@ -751,3 +751,121 @@ pub fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or("panic");
     format!("host function panicked: {what}")
 }
+
+// ---- `#[native(pure)]` fast paths ----------------------------------------
+
+/// A value as a `pure` native's fast path reads and returns it.
+#[doc(hidden)]
+pub use crate::object::Value as PureValue;
+
+/// A `pure` native's fast path ([`Native::PURE`]): the result from the
+/// arguments, or `None` to run the full native instead.
+#[doc(hidden)]
+pub type PureFn = fn(&[PureValue]) -> Option<PureValue>;
+
+/// A parameter a `pure` native's fast path can read: `None` when the
+/// argument (`None` if missing) doesn't already have the type, and the
+/// full native then converts it or raises the error.
+#[doc(hidden)]
+pub trait PureArg: Sized {
+    fn from_value(v: Option<PureValue>) -> Option<Self>;
+}
+
+impl PureArg for i64 {
+    #[inline(always)]
+    fn from_value(v: Option<PureValue>) -> Option<i64> {
+        match v {
+            Some(PureValue::Int(i)) => Some(i),
+            _ => None,
+        }
+    }
+}
+
+/// An integer converts as the full native's `check_number` converts it.
+impl PureArg for f64 {
+    #[inline(always)]
+    fn from_value(v: Option<PureValue>) -> Option<f64> {
+        match v {
+            Some(PureValue::Float(f)) => Some(f),
+            Some(PureValue::Int(i)) => Some(i as f64),
+            _ => None,
+        }
+    }
+}
+
+impl PureArg for Number {
+    #[inline(always)]
+    fn from_value(v: Option<PureValue>) -> Option<Number> {
+        match v {
+            Some(PureValue::Int(i)) => Some(Number::Int(i)),
+            Some(PureValue::Float(f)) => Some(Number::Float(f)),
+            _ => None,
+        }
+    }
+}
+
+/// Missing or nil is `None`, as for [`Arg`].
+impl<T: PureArg> PureArg for Option<T> {
+    #[inline(always)]
+    fn from_value(v: Option<PureValue>) -> Option<Option<T>> {
+        match v {
+            None | Some(PureValue::Nil) => Some(None),
+            v => T::from_value(v).map(Some),
+        }
+    }
+}
+
+/// What a `pure` native's body can return: one value, made without the
+/// heap, or `None` to give up (an `Err`).
+#[doc(hidden)]
+pub trait PureResult {
+    fn into_value(self) -> Option<PureValue>;
+}
+
+impl PureResult for i64 {
+    #[inline(always)]
+    fn into_value(self) -> Option<PureValue> {
+        Some(PureValue::Int(self))
+    }
+}
+
+impl PureResult for f64 {
+    #[inline(always)]
+    fn into_value(self) -> Option<PureValue> {
+        Some(PureValue::Float(self))
+    }
+}
+
+impl PureResult for Number {
+    #[inline(always)]
+    fn into_value(self) -> Option<PureValue> {
+        Some(match self {
+            Number::Int(i) => PureValue::Int(i),
+            Number::Float(f) => PureValue::Float(f),
+        })
+    }
+}
+
+impl PureResult for bool {
+    #[inline(always)]
+    fn into_value(self) -> Option<PureValue> {
+        Some(PureValue::Bool(self))
+    }
+}
+
+impl<T: PureResult> PureResult for Option<T> {
+    #[inline(always)]
+    fn into_value(self) -> Option<PureValue> {
+        match self {
+            Some(v) => v.into_value(),
+            None => Some(PureValue::Nil),
+        }
+    }
+}
+
+impl<T: PureResult, E> PureResult for Result<T, E> {
+    #[inline(always)]
+    fn into_value(self) -> Option<PureValue> {
+        self.ok()?.into_value()
+    }
+}

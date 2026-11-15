@@ -7,15 +7,17 @@ pub(crate) mod pattern;
 
 use crate::locale::Locale;
 use crate::object::{Gc, LuaStr, Table, Tag, Value, number};
-use crate::stack::{Buffer, Fail, Raised, Rest, Results, Return, Stack, StackResult, library_row};
-use crate::vm::{LuaError, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::stack::{
+    Buffer, Fail, LibraryRow, Raised, Rest, Results, Return, Stack, StackResult, library_row,
+};
+use crate::vm::{LuaError, MetaField, NativeCtx, NativeReturn, Vm};
 use orbit_macros::native;
 
 use pattern::{Capture, Captures, Matcher, PatternError};
 
 type R = Result<NativeReturn, LuaError>;
 
-pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
+pub(crate) const FUNCTIONS: &[LibraryRow] = &[
     library_row::<len>(),
     library_row::<sub>(),
     library_row::<rep>(),
@@ -24,14 +26,14 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     // `format` and `gsub` call script code (`__tostring`, function
     // replacements), so they stay on the raw interface until the
     // language rule's step moves them.
-    ("string.format", format::format),
+    LibraryRow::raw("string.format", format::format),
     library_row::<reverse>(),
     library_row::<upper>(),
     library_row::<lower>(),
     library_row::<find>(),
     library_row::<match_>(),
     library_row::<gmatch>(),
-    ("string.gsub", gsub),
+    LibraryRow::raw("string.gsub", gsub),
     library_row::<pack::pack>(),
     library_row::<pack::unpack>(),
     library_row::<pack::packsize>(),

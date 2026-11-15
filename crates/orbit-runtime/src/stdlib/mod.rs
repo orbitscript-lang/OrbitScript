@@ -21,7 +21,8 @@ mod string;
 mod table;
 mod utf8;
 
-use crate::vm::{NativeFn, Vm};
+use crate::stack::LibraryRow;
+use crate::vm::Vm;
 
 pub use chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
@@ -170,9 +171,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
                 add_functions(vm, m, math::COMPAT_5_3);
             }
             math::constants(vm, m);
-            for &(name, fast) in math::FAST {
-                vm.set_native_fast_path(name, fast);
-            }
             true
         }
         Lib::Package => {
@@ -232,16 +230,11 @@ pub(crate) fn mark_loaded(vm: &mut Vm, name: &str, lib: crate::object::Value) {
 pub(crate) fn open_lib(
     vm: &mut Vm,
     name: &str,
-    functions: &[(&'static str, NativeFn)],
+    functions: &[LibraryRow],
 ) -> crate::object::Gc<crate::object::Table> {
     let t = vm.new_table();
     vm.pin(crate::object::Value::Table(t));
-    for &(qualified, f) in functions {
-        let short = qualified.rsplit('.').next().unwrap_or(qualified);
-        let fv = vm.register_native(qualified, f);
-        let k = vm.new_str(short.as_bytes());
-        vm.table_set(t, k, fv);
-    }
+    add_functions(vm, t, functions);
     vm.set_global(name, crate::object::Value::Table(t));
     mark_loaded(vm, name, crate::object::Value::Table(t));
     vm.unpin(crate::object::Value::Table(t));
@@ -252,11 +245,15 @@ pub(crate) fn open_lib(
 fn add_functions(
     vm: &mut Vm,
     t: crate::object::Gc<crate::object::Table>,
-    functions: &[(&'static str, NativeFn)],
+    functions: &[LibraryRow],
 ) {
-    for &(qualified, f) in functions {
+    for row in functions {
+        let qualified = row.name;
         let short = qualified.rsplit('.').next().unwrap_or(qualified);
-        let fv = vm.register_native(qualified, f);
+        let fv = vm.register_native(qualified, row.entry);
+        if let Some(fast) = row.fast {
+            vm.set_native_fast_path(qualified, fast);
+        }
         let k = vm.new_str(short.as_bytes());
         vm.table_set(t, k, fv);
     }

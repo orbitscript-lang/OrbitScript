@@ -29,7 +29,7 @@ use crate::scope::Scope;
 use crate::value::Value;
 
 #[doc(hidden)]
-pub use orbit_runtime::stack::catch_panic;
+pub use orbit_runtime::stack::{PureArg, PureFn, PureResult, PureValue, catch_panic};
 pub use orbit_runtime::stack::{
     Any, Arg, ArithOp, CompareOp, Continuation, Control, Either, Fail, FrameInfo, FunctionArg,
     GcOp, GcParam, InterruptHandler, IntoRaised, MULTRET, Native, NativeFunction, NativeRef, Nil,

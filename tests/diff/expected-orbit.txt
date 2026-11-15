@@ -39,6 +39,7 @@ locale.lua
 long_chains.lua
 lua55.lua
 many_constants.lua
+math_pure.lua
 meta_absent.lua
 meta_index.lua
 meta_ops.lua

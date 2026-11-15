@@ -118,9 +118,63 @@ pub(crate) const fn native_fn<N: Native>() -> vm::NativeFn {
     native_entry::<N>
 }
 
-/// A library table's row for native `N`: its name and its entry.
-pub(crate) const fn library_row<N: Native>() -> (&'static str, vm::NativeFn) {
-    (N::NAME, native_entry::<N>)
+/// A row of a built-in library's table: the function's qualified name,
+/// its entry, and the fast path calls wanting one result try first.
+#[derive(Clone, Copy)]
+pub(crate) struct LibraryRow {
+    pub(crate) name: &'static str,
+    pub(crate) entry: vm::NativeFn,
+    pub(crate) fast: Option<vm::FastFn>,
+}
+
+impl LibraryRow {
+    /// A native written on the raw interface.
+    pub(crate) const fn raw(name: &'static str, entry: vm::NativeFn) -> LibraryRow {
+        LibraryRow {
+            name,
+            entry,
+            fast: None,
+        }
+    }
+
+    /// The same function under another name (`math.atan2` for `atan`).
+    pub(crate) const fn named(self, name: &'static str) -> LibraryRow {
+        LibraryRow { name, ..self }
+    }
+
+    /// A hand-written fast path, for a raw native.
+    pub(crate) const fn with_fast(self, fast: vm::FastFn) -> LibraryRow {
+        LibraryRow {
+            fast: Some(fast),
+            ..self
+        }
+    }
+}
+
+/// A library table's row for native `N`: its name, its entry, and the
+/// fast path `#[native(pure)]` gave it.
+pub(crate) const fn library_row<N: Native>() -> LibraryRow {
+    LibraryRow {
+        name: N::NAME,
+        entry: native_entry::<N>,
+        fast: pure_fast::<N>(),
+    }
+}
+
+/// The fast path `#[native(pure)]` gave native `N`, if any.
+const fn pure_fast<N: Native>() -> Option<vm::FastFn> {
+    match N::PURE {
+        Some(_) => Some(pure_entry::<N>),
+        None => None,
+    }
+}
+
+/// The interpreter's fast path for a `pure` native `N`.
+fn pure_entry<N: Native>(_: &crate::object::LuaHeap, args: &[RawValue]) -> Option<RawValue> {
+    match N::PURE {
+        Some(f) => f(args),
+        None => None,
+    }
 }
 
 /// How a [`Return`] names the continuation to run: the runtime's.
@@ -914,11 +968,25 @@ impl<'s> Stack<'s> {
     /// embedder's `tostring` is not the built-in one.
     #[inline]
     fn native_index<N: Native>(&mut self) -> u32 {
-        let ty = TypeId::of::<N>();
-        self.ctx
-            .vm
-            .native_for_type(ty, N::NAME, native_entry::<N>)
+        self.native_id(TypeId::of::<N>(), N::NAME, native_entry::<N>, pure_fast::<N>())
             .0
+    }
+
+    /// The non-generic half of registering a native: its index, with the
+    /// fast path set when it has one.
+    #[inline(never)]
+    fn native_id(
+        &mut self,
+        ty: TypeId,
+        name: &'static str,
+        f: vm::NativeFn,
+        fast: Option<vm::FastFn>,
+    ) -> NativeId {
+        let id = self.ctx.vm.native_for_type(ty, name, f);
+        if fast.is_some() {
+            self.ctx.vm.rt.natives.get_mut(id).fast = fast;
+        }
+        id
     }
 
     /// [`Stack::closure_data_of`] for the native with index `id`.
@@ -1092,14 +1160,12 @@ impl<'s> Stack<'s> {
     /// Push native `N` as a function value.
     #[inline]
     pub fn push_native<N: Native>(&mut self) {
-        self.push_native_fn(TypeId::of::<N>(), N::NAME, native_entry::<N>);
-    }
-
-    /// The non-generic half of [`Stack::push_native`], so each native
-    /// doesn't carry its own copy of the registry lookup.
-    #[inline(never)]
-    fn push_native_fn(&mut self, ty: TypeId, name: &'static str, f: vm::NativeFn) {
-        let id = self.ctx.vm.native_for_type(ty, name, f);
+        let id = self.native_id(
+            TypeId::of::<N>(),
+            N::NAME,
+            native_entry::<N>,
+            pure_fast::<N>(),
+        );
         self.ctx.push(RawValue::Native(id));
     }
 

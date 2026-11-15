@@ -9,7 +9,8 @@ use crate::vm::{LuaError, NativeCtx, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
 
-pub(crate) const FUNCTIONS: &[(&str, crate::vm::NativeFn)] = &[("string.dump", dump)];
+pub(crate) const FUNCTIONS: &[crate::stack::LibraryRow] =
+    &[crate::stack::LibraryRow::raw("string.dump", dump)];
 
 fn dump(ctx: &mut NativeCtx<'_>) -> R {
     // A native closure (a host or C function) is no Lua function, and
