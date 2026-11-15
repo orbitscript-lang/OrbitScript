@@ -71,6 +71,18 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// front ends' library and the C API. The `lua-5-4` feature selects Lua 5.4; without it the
 /// build is Lua 5.5. Ask it through [`LuaVersion`]'s methods: `orbit::LUA.is_5_4()`,
 /// `orbit::LUA.name()` (`_VERSION`), `orbit::LUA.release()`.
+///
+/// The feature selects rather than adds: any crate in the build that enables it makes the whole
+/// program Lua 5.4. A program that depends on the version can make a disagreement fail the build,
+/// with one line:
+///
+/// ```
+/// # #[cfg(not(feature = "lua-5-4"))] // This example also runs in the 5.4 build's tests.
+/// const _: () = assert!(orbit::LUA.is_5_5(), "this program is written for Lua 5.5");
+/// ```
+///
+/// Build tools can state the version instead, in `ORBIT_EXPECT_LUA` (`5.4` or `5.5`), which
+/// `orbit`'s build script checks; `build.sh --lua` sets it.
 pub use orbit_lua_version::{LUA, LuaVersion};
 
 #[cfg(test)]
