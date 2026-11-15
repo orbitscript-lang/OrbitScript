@@ -722,7 +722,9 @@ impl FromValueError {
     /// The message, given the type name of the value that failed.
     pub(crate) fn message(self, got: &str) -> String {
         match self {
-            FromValueError::Expected(want) => arg_errors::type_mismatch(want, got),
+            FromValueError::Expected(want) => arg_errors::type_mismatch(want, got)
+                .to_string_lossy()
+                .into_owned(),
             FromValueError::Invalid(why) => why.to_owned(),
         }
     }

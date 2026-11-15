@@ -24,6 +24,7 @@ debug_setmetatable_gc.lua
 dump.lua
 error_bytes.lua
 error_handling_state.lua
+error_names.lua
 errors.lua
 exit_close.lua
 exit_close_tbc.lua

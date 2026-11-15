@@ -1,7 +1,7 @@
 //! The native-function interface (ADR-3's continuation style).
 
+use crate::object::OrbitString;
 use orbit_lua_version::LUA;
-use std::borrow::Cow;
 use std::rc::Rc;
 
 use crate::arg_errors;
@@ -885,7 +885,7 @@ impl NativeCtx<'_> {
 
     /// The type a type error names for argument `v`, `None` when it is
     /// absent: as `luaL_typename`, but light userdata says so.
-    fn arg_type_name(&self, v: Option<Value>) -> Cow<'static, str> {
+    fn arg_type_name(&self, v: Option<Value>) -> OrbitString {
         match v {
             None => arg_errors::NO_VALUE.into(),
             Some(Value::LightUserData(_)) => "light userdata".into(),
@@ -1140,10 +1140,11 @@ impl NativeCtx<'_> {
             } else {
                 a
             };
-            let msg = format!(
-                "attempt to concatenate a {} value",
-                self.vm.rt.metas.type_name(heap, bad)
-            );
+            let msg = bytes_msg![
+                "attempt to concatenate a ",
+                self.vm.rt.metas.type_name(heap, bad),
+                " value"
+            ];
             return Err(self.error(&msg));
         }
         self.meta_result(Err(Exc::Meta(meta::MetaCall::new(

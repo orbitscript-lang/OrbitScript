@@ -8,6 +8,17 @@
 //!
 //! [VM design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md
 
+/// A message for [`ops::Exc`] built from byte-string pieces (anything
+/// `AsRef<[u8]>`), so a name a script gave keeps bytes that aren't UTF-8:
+/// `bytes_msg!["attempt to index a ", name, " value"]`.
+macro_rules! bytes_msg {
+    ($($piece:expr),+ $(,)?) => {{
+        let mut msg = $crate::object::OrbitString::new();
+        $(msg.push($piece);)+
+        msg
+    }};
+}
+
 mod cold;
 mod coro;
 pub mod debug;

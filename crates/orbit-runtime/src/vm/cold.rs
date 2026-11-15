@@ -11,8 +11,8 @@
 //! instructions' register allocation, independent of how many instructions
 //! there are.
 
+use crate::object::OrbitString;
 use orbit_lua_version::LUA;
-use std::borrow::Cow;
 
 use crate::object::number::float_to_int;
 
@@ -141,11 +141,13 @@ impl Vm {
                 .is_nil()
         {
             return Err(Exc::Rt(
-                format!(
-                    "attempt to call a {} value (metamethod '{}')",
+                bytes_msg![
+                    "attempt to call a ",
                     self.rt.metas.type_name(&self.heap, call.f),
-                    call.field.short_name()
-                ),
+                    " value (metamethod '",
+                    call.field.short_name(),
+                    "')"
+                ],
                 None,
             ));
         }
@@ -337,12 +339,12 @@ impl Vm {
                 unreachable!("Tbc runs in a Lua frame")
             };
             let proto = self.heap.get(self.heap.get(closure).proto);
-            let name = match proto.debug.origin(pc as u32, 0) {
-                Some(orbit_bytecode::Origin::Local(n)) => String::from_utf8_lossy(n).into_owned(),
-                _ => "?".into(),
+            let name: &[u8] = match proto.debug.origin(pc as u32, 0) {
+                Some(orbit_bytecode::Origin::Local(n)) => n,
+                _ => b"?",
             };
             return Err(Exc::Rt(
-                format!("variable '{name}' got a non-closable value"),
+                bytes_msg!["variable '", name, "' got a non-closable value"],
                 None,
             ));
         }
@@ -526,10 +528,11 @@ impl Vm {
                 let j = if strnum(x) { left - 1 } else { left - 2 };
                 let v = regs[from + j];
                 return Err(Exc::Rt(
-                    format!(
-                        "attempt to concatenate a {} value",
-                        self.rt.metas.type_name(&self.heap, v)
-                    ),
+                    bytes_msg![
+                        "attempt to concatenate a ",
+                        self.rt.metas.type_name(&self.heap, v),
+                        " value"
+                    ],
                     Some(j as u8),
                 ));
             }
@@ -837,7 +840,7 @@ fn is_named(heap: &LuaHeap, metas: &Metas, v: Value, ty: Value) -> bool {
 #[cold]
 fn cast_error(heap: &LuaHeap, metas: &Metas, v: Value, ty: Value, mode: u8) -> Exc {
     use orbit_bytecode::cast;
-    let target: Cow<'_, str> = match mode & cast::KIND {
+    let target: OrbitString = match mode & cast::KIND {
         cast::INT => "int".into(),
         cast::FLOAT => "float".into(),
         cast::NUMBER => "number".into(),
@@ -848,13 +851,13 @@ fn cast_error(heap: &LuaHeap, metas: &Metas, v: Value, ty: Value, mode: u8) -> E
     };
     let q = if mode & cast::NILABLE != 0 { "?" } else { "" };
     let from = metas.type_name(heap, v);
-    Exc::Rt(format!("cannot cast {from} to {target}{q}"), None)
+    Exc::Rt(bytes_msg!["cannot cast ", from, " to ", target, q], None)
 }
 
 /// The name of a cast's target `ty`: the string itself, the table's own
 /// `__name` (a struct, data variant or enum), or its metatable's (a unit
 /// variant).
-fn type_text<'a>(heap: &'a LuaHeap, metas: &Metas, ty: Value) -> Cow<'a, str> {
+fn type_text(heap: &LuaHeap, metas: &Metas, ty: Value) -> OrbitString {
     let own = match ty {
         Value::Str(_) => ty,
         Value::Table(t) => {
@@ -864,7 +867,7 @@ fn type_text<'a>(heap: &'a LuaHeap, metas: &Metas, ty: Value) -> Cow<'a, str> {
         _ => Value::Nil,
     };
     match own {
-        Value::Str(s) => String::from_utf8_lossy(heap.get(s).as_bytes()),
+        Value::Str(s) => heap.get(s).as_bytes().into(),
         _ => metas.type_name(heap, ty),
     }
 }
@@ -889,10 +892,11 @@ pub(crate) fn op_len(heap: &LuaHeap, metas: &Metas, v: Value) -> Result<Value, E
         };
         if h.is_nil() {
             return Err(Exc::Rt(
-                format!(
-                    "attempt to get length of a {} value",
-                    metas.type_name(heap, v)
-                ),
+                bytes_msg![
+                    "attempt to get length of a ",
+                    metas.type_name(heap, v),
+                    " value"
+                ],
                 Some(0),
             ));
         }
@@ -1063,10 +1067,7 @@ pub(crate) fn set_str_miss(
 #[cold]
 #[inline(never)]
 pub(crate) fn already_defined(name: &[u8]) -> Exc {
-    Exc::Rt(
-        format!("global '{}' already defined", String::from_utf8_lossy(name)),
-        None,
-    )
+    Exc::Rt(bytes_msg!["global '", name, "' already defined"], None)
 }
 
 /// `_ENV` isn't a table.
@@ -1074,10 +1075,11 @@ pub(crate) fn already_defined(name: &[u8]) -> Exc {
 #[inline(never)]
 pub(crate) fn env_error(heap: &LuaHeap, rt: &Metas, v: Value) -> Exc {
     Exc::Rt(
-        format!(
-            "attempt to index a {} value (upvalue '_ENV')",
-            rt.type_name(heap, v)
-        ),
+        bytes_msg![
+            "attempt to index a ",
+            rt.type_name(heap, v),
+            " value (upvalue '_ENV')"
+        ],
         None,
     )
 }
@@ -1090,10 +1092,13 @@ fn for_error(heap: &LuaHeap, rt: &Metas, what: &str, v: Value) -> Exc {
         what
     };
     Exc::Rt(
-        format!(
-            "bad 'for' {what} (number expected, got {})",
-            rt.type_name(heap, v)
-        ),
+        bytes_msg![
+            "bad 'for' ",
+            what,
+            " (number expected, got ",
+            rt.type_name(heap, v),
+            ")"
+        ],
         None,
     )
 }

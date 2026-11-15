@@ -9,7 +9,7 @@
 //!
 //! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#metamethods
 
-use std::borrow::Cow;
+use crate::object::OrbitString;
 
 use crate::locale::Locale;
 use crate::object::table;
@@ -87,13 +87,13 @@ impl Metas {
     /// userdata's `__name`, when that is a string, else its type name.
     /// (lua5.5 ignores `__name` in the shared metatables of other types.)
     #[cold]
-    pub(crate) fn type_name(&self, heap: &LuaHeap, v: Value) -> Cow<'static, str> {
+    pub(crate) fn type_name(&self, heap: &LuaHeap, v: Value) -> OrbitString {
         if let Value::Table(_) | Value::UserData(_) = v {
             if let Value::Str(s) = self.metamethod(heap, v, MetaField::Name) {
-                return Cow::Owned(String::from_utf8_lossy(heap.get(s).as_bytes()).into_owned());
+                return heap.get(s).as_bytes().into();
             }
         }
-        Cow::Borrowed(v.type_name())
+        v.type_name().into()
     }
 }
 
@@ -335,7 +335,7 @@ pub(crate) fn new_index(
 /// operand has a name to report.
 pub(crate) fn index_type_error(heap: &LuaHeap, rt: &Metas, v: Value, is_operand: bool) -> Exc {
     Exc::Rt(
-        format!("attempt to index a {} value", rt.type_name(heap, v)),
+        bytes_msg!["attempt to index a ", rt.type_name(heap, v), " value"],
         is_operand.then_some(0),
     )
 }
