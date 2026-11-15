@@ -1078,9 +1078,8 @@ impl NativeCtx<'_> {
         self.vm.heap.alloc(Thread::new(c))
     }
 
-    #[cfg(feature = "debug")]
     /// Run `f` with thread `t`'s stack in place of the running one, for
-    /// the debug library's view of another thread. `f` may read and write
+    /// the debug library's and the C API's view of another thread. `f` may read and write
     /// that stack's frames and registers, but must not touch this native's
     /// window or run Lua code. The running thread runs `f` directly.
     pub(crate) fn on_thread<R>(
