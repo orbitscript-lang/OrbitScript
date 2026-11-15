@@ -1,0 +1,50 @@
+-- stack and locals
+level 0
+  C [C]:-1 name inspect (global) nups 0 nparams 0 vararg 1
+level 1
+  Lua [string "local function probe(a, b, ...)..."]:3 name probe (local) nups 1 nparams 2 vararg 1
+level 2
+  main [string "local function probe(a, b, ...)..."]:6 name NULL () nups 1 nparams 0 vararg 1
+level 3
+  C [C]:-1 name NULL () nups 0 nparams 0 vararg 1
+levels 4
+local 1 a = 1
+local 2 b = 'two'
+local 3 (vararg table) = nil
+local 4 c = 2
+vararg -1 (vararg) = 'x'
+vararg -2 (vararg) = 'y'
+setlocal 2 -> b top 0
+setlocal 50 -> NULL top 1
+b is now	changed
+parameter 1 p
+parameter 2 q
+parameter 3 NULL
+getstack past the top: 0
+> what main top 0
+> what C, pushed the function 1
+-- stack and locals status 0
+-- hooks
+no hook: 1 mask 0 count 0
+hook set: 1 mask 1 count 0
+  call main line 3 name NULL
+  line main line 3 name NULL
+  line main line 7 name NULL
+  line main line 8 name NULL
+  tail call Lua line 5 name NULL
+  line Lua line 5 name NULL
+  call Lua line 2 name g
+  line Lua line 2 name g
+  return Lua line 2 name g
+  line Lua line 6 name NULL
+  tail call Lua line 2 name NULL
+  line Lua line 2 name NULL
+  return Lua line 2 name NULL
+result: top=1: 12
+cleared: 1 mask 0
+count hook: mask 1 count 1
+count hook ran: 1
+-- hooks status 0
+-- hook errors
+status 2: 'stopped at line 2'
+-- hook errors status 0

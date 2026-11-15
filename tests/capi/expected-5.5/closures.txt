@@ -1,0 +1,30 @@
+-- C upvalues
+iscfunction 1 tocfunction 1
+getupvalue 0 -> NULL top=1
+getupvalue 1 -> (empty) top=2
+getupvalue 2 -> (empty) top=2
+getupvalue 3 -> NULL top=1
+setupvalue 1 -> (empty) top=1
+setupvalue 9 -> NULL top=2
+closure result: top=2: 'new' 2
+counter: top=1: 12
+no upvalues: getupvalue 1 NULL
+-- C upvalues status 0
+-- Lua upvalues
+names a b
+values: top=4: function function 1 2
+names of the second: b a
+same a: 1
+same b: 1
+a is not b: 1
+upvalueid of a missing upvalue: 1
+after join: top=4: function function 12 12
+joined id same: 1
+setupvalue -> b
+after set: top=4: function function 1 109
+setupvalue env -> _ENV
+env: top=1: 77
+-- Lua upvalues status 0
+-- many upvalues
+255 upvalues: top=2: function 254
+-- many upvalues status 0

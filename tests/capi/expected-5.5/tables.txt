@@ -1,0 +1,48 @@
+-- metamethods
+gettable type 4
+getfield type 4
+geti type 4
+reads: top=4: table 'a!' 'b!' '3!'
+after writes: top=1: table
+rawget type 4
+rawgeti type 4
+raw reads: top=4: table 'v?' 'true?' '5?'
+len 42 rawlen 0 luaL_len 42
+rawset: top=2: table 1
+-- metamethods status 0
+-- raw
+rawgetp type 4 0
+rawgetp: top=3: table 'p1' nil
+rawlen 4 len 4
+rawlen after removing 4: 3
+string len 3 rawlen 3
+rawequal 1 0
+float keys: top=3: table 20 20
+-- raw status 0
+-- metatables
+getmetatable none 0 top 1
+setmetatable 1 top 1
+getmetatable 1
+metatable name: top=3: table table 'M'
+after removing: 0
+string metatable 1
+its __index is string: 1
+number metatable 0
+-- metatables status 0
+-- traversal
+next visited 5, values sum 63, top 1
+cleared 5, next on empty 0 top 1
+-- traversal status 0
+-- nil key
+-- nil key status 2: 'table index is nil'
+-- nan key
+-- nan key status 2: 'table index is NaN'
+-- next with a missing key
+-- next with a missing key status 2: 'invalid key to 'next''
+-- index a number
+-- index a number status 2: 'attempt to index a number value'
+-- globals
+getglobal 3
+getglobal missing 0
+globals: top=2: 9 nil
+-- globals status 0

@@ -44,7 +44,10 @@ fn install_loader(s: &mut Stack<'_>) {
 pub(crate) struct CFunction;
 
 impl Native for CFunction {
-    const NAME: &'static str = "C function";
+    /// What an argument error names a C function by when nothing else
+    /// does (no Lua caller names it and no loaded module holds it): `?`,
+    /// as lua5.5 says.
+    const NAME: &'static str = "?";
 
     fn call(s: &mut Stack<'_>) -> StackResult<Return> {
         let f = s.closure_data();
