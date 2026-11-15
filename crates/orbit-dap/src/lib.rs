@@ -22,6 +22,8 @@
 //! 5. [`Server::finish`] reports the exit and waits for the editor to
 //!    disconnect.
 
+#[cfg(windows)]
+mod acl;
 mod agent;
 mod attach;
 mod launcher;

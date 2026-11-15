@@ -27,6 +27,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_Threading",
 ] }
+# The socket directory's owner and access list (`src/acl.rs`): safe
+# wrappers, so no `unsafe` of our own for it.
+windows-permissions = "0.2"
 
 [dev-dependencies]
 orbit = { path = "../orbit", features = ["debugger"] }
