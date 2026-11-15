@@ -114,15 +114,32 @@ pub(crate) fn dir() -> io::Result<PathBuf> {
 }
 
 /// The directory the sockets go in: `orbit` in the user's temporary
-/// directory (`%TEMP%`, normally `%LOCALAPPDATA%\Temp`), which only its
-/// user can reach. Not `%LOCALAPPDATA%` itself: a process started from a
-/// packaged (MSIX) app sees a virtualized copy of it, where an AF_UNIX
-/// socket can be bound but never connected to (WSAEINVAL) or removed;
-/// `%TEMP%` isn't virtualized.
+/// directory (`%TEMP%`, normally `%LOCALAPPDATA%\Temp`). Not
+/// `%LOCALAPPDATA%` itself: a process started from a packaged (MSIX) app
+/// sees a virtualized copy of it, where an AF_UNIX socket can be bound but
+/// never connected to (WSAEINVAL) or removed; `%TEMP%` isn't virtualized.
+///
+/// `%TEMP%` is normally the user's own, but it can be pointed at a shared
+/// directory. So the directory is created with an access list of its own
+/// (this user, SYSTEM and Administrators, nothing inherited), and refused,
+/// as on Unix, if someone else owns it or its access list lets anyone else
+/// in ([`crate::acl`]).
 #[cfg(windows)]
 pub(crate) fn dir() -> io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join("orbit");
-    std::fs::create_dir_all(&dir)?;
+    let temp = std::env::temp_dir();
+    let me = crate::acl::Owner::of_new_file_in(&temp)?;
+    let dir = temp.join("orbit");
+    match std::fs::create_dir(&dir) {
+        Ok(()) => me.make_private(&dir)?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    if !me.is_private(&dir)? {
+        return Err(io::Error::other(format!(
+            "{} must be a directory only its owner can use",
+            dir.display()
+        )));
+    }
     Ok(dir)
 }
 
@@ -145,7 +162,7 @@ fn my_uid() -> io::Result<u32> {
 }
 
 /// A random number for socket names.
-fn nonce() -> u64 {
+pub(crate) fn nonce() -> u64 {
     use std::hash::BuildHasher;
     std::collections::hash_map::RandomState::new()
         .hash_one((std::process::id(), std::time::SystemTime::now()))

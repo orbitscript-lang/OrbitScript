@@ -4,8 +4,8 @@
 //! (`windows_unix_domain_sockets`); this file goes when they are stable.
 //!
 //! Every Windows that is supported (10 build 17063 and later) has AF_UNIX
-//! stream sockets. A socket is a file in the per-user directory, whose
-//! default ACL already keeps other users out.
+//! stream sockets. A socket is a file in the socket directory, whose
+//! access list lets only this user in (`crate::acl`).
 
 #![allow(unsafe_code)]
 
