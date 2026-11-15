@@ -1,44 +1,34 @@
 //! The Lua 5.5 standard library.
 //!
 //! Every function is a [`NativeFn`] registered with the VM, one table per
-//! library, so hosts can open only the libraries they want. The `string`,
-//! `utf8`, `table` and `math` libraries are each behind a Cargo feature of
-//! the same name ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
+//! library, so hosts can open only the libraries they want
+//! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
+//! Only the `debug` library is behind a Cargo feature (`debug`); `io` and
+//! `os` live in `orbit-std`.
 
 mod base;
 mod builtins;
-#[cfg(feature = "dump")]
 pub mod checks;
 mod chunk;
-#[cfg(feature = "coroutine")]
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
-#[cfg(feature = "dump")]
 mod dump;
-#[cfg(feature = "load")]
 mod load;
-#[cfg(feature = "math")]
 mod math;
-#[cfg(feature = "package")]
 mod package;
-#[cfg(feature = "string")]
 mod string;
-#[cfg(feature = "table")]
 mod table;
-#[cfg(feature = "utf8")]
 mod utf8;
 
 use crate::vm::{NativeFn, Vm};
 
 pub use chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
-#[cfg(feature = "load")]
 pub use load::{load_buffer, load_chunk_in};
 
 /// The first result of a call a native requested with `CallThen` (nil if
 /// none); the call's results are dropped from the window.
-#[cfg(any(feature = "math", feature = "string", feature = "table"))]
 pub(crate) fn first_result(
     ctx: &mut crate::vm::NativeCtx<'_>,
     out: crate::vm::CallOutcome,
@@ -140,7 +130,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
     let opened = match lib {
         Lib::Base => {
             base::open(vm);
-            #[cfg(feature = "load")]
             for &(name, f) in load::FUNCTIONS {
                 let v = vm.register_native(name, f);
                 vm.set_global(name, v);
@@ -149,21 +138,17 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             mark_loaded(vm, "_G", Value::Table(g));
             return Some(Value::Table(g));
         }
-        #[cfg(feature = "string")]
         Lib::String => {
             let st = open_lib(vm, "string", string::FUNCTIONS);
             string::set_metatable_index(vm, st);
-            #[cfg(feature = "dump")]
             add_functions(vm, st, dump::FUNCTIONS);
             true
         }
-        #[cfg(feature = "utf8")]
         Lib::Utf8 => {
             let u = open_lib(vm, "utf8", utf8::FUNCTIONS);
             utf8::constants(vm, u);
             true
         }
-        #[cfg(feature = "table")]
         Lib::Table => {
             let t = open_lib(vm, "table", table::FUNCTIONS);
             if orbit_lua_version::LUA.is_5_5() {
@@ -176,7 +161,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             }
             true
         }
-        #[cfg(feature = "math")]
         Lib::Math => {
             let m = open_lib(vm, "math", math::FUNCTIONS);
             if orbit_lua_version::LUA.is_5_4() {
@@ -188,12 +172,10 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             }
             true
         }
-        #[cfg(feature = "package")]
         Lib::Package => {
             package::open(vm);
             true
         }
-        #[cfg(feature = "coroutine")]
         Lib::Coroutine => {
             open_lib(vm, "coroutine", coroutine::FUNCTIONS);
             true
@@ -264,7 +246,6 @@ pub fn open_lib(
 }
 
 /// Register more `functions` in an open library table.
-#[allow(dead_code)]
 fn add_functions(
     vm: &mut Vm,
     t: crate::object::Gc<crate::object::Table>,

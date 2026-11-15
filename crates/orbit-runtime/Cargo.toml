@@ -40,30 +40,11 @@ libc = { version = "0.2", default-features = false }
 workspace = true
 
 [features]
-default = ["string", "utf8", "table", "math", "load", "package", "coroutine", "debug", "dump", "verify", "verify-flow"]
-string = []
-utf8 = []
-table = []
-math = []
-# `load` (source chunks need the host to install a compiler in
-# `Runtime::compile`).
-load = []
-# `string.dump`, and loading the binary chunks it writes.
-dump = ["load", "string"]
-# Check binary chunks before `load` links them: layer 1 of the verifier
-# (structure). Without it binary chunks run unchecked, and a malformed one
-# can make the VM panic. `ORBIT_VERIFY` can lower the level at run time.
-verify = ["dump"]
-# Layer 2 of the verifier (data flow) as well: with both layers no binary
-# chunk can make the VM panic.
-verify-flow = ["verify", "orbit-bytecode/verify-flow"]
-# `require` and the `package` library.
-package = ["load"]
-# The `coroutine` library.
-coroutine = []
+default = ["debug"]
 # The `debug` library.
 debug = ["hooks"]
 # Debug hooks (`debug.sethook`): a second, hooked copy of the dispatch loop.
+# Internal: turned on by `debug` and `debugger`.
 hooks = []
 # The debugger engine (ADR-12): breakpoints, stepping, pause and stops on
 # errors, reported to a host's `DebugEvents`.

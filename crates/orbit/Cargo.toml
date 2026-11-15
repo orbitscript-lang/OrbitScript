@@ -22,22 +22,16 @@ orbit-locale = { path = "../orbit-locale", optional = true }
 
 [dev-dependencies]
 # The verifier tests and the chunk fuzzer measure layer 2 directly.
-orbit-bytecode = { path = "../orbit-bytecode", features = ["verify-flow"] }
+orbit-bytecode = { path = "../orbit-bytecode" }
 
 [features]
-# The standard library's optional parts (see `orbit-runtime`).
-default = ["locale", "string", "utf8", "table", "math", "load", "package", "coroutine", "debug", "dump", "verify", "verify-flow"]
-string = ["orbit-runtime/string"]
-utf8 = ["orbit-runtime/utf8"]
-table = ["orbit-runtime/table"]
-math = ["orbit-runtime/math"]
-load = ["orbit-runtime/load"]
-package = ["orbit-runtime/package"]
-coroutine = ["orbit-runtime/coroutine"]
+# The optional parts of the runtime. The core libraries (string, utf8,
+# table, math, coroutine, package, load and binary chunks with their
+# verifier) are always built in; a host leaves one out at run time with
+# `Library`.
+default = ["locale", "debug"]
+# The `debug` library and debug hooks.
 debug = ["orbit-runtime/debug"]
-dump = ["orbit-runtime/dump"]
-verify = ["orbit-runtime/verify"]
-verify-flow = ["orbit-runtime/verify-flow"]
 # `os.setlocale` with the C library's locales (ADR-13); without it
 # only the C locale exists.
 locale = ["dep:orbit-locale"]

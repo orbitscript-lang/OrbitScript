@@ -902,7 +902,7 @@ impl Vm {
                 strings,
                 globals,
                 registry,
-                binary_checks: Some(op::verify::Level::STRONGEST),
+                binary_checks: Some(op::verify::Level::Full),
                 limits: Limits::default(),
                 out: process_stdout(LineEndings::default()),
                 warnings: false,

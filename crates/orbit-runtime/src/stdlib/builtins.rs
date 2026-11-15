@@ -46,7 +46,6 @@ impl Module {
 
 pub(crate) static BASE: Module =
     Module::new(include_bytes!(concat!(env!("OUT_DIR"), "/base.orbc")));
-#[cfg(feature = "table")]
 pub(crate) static TABLE: Module =
     Module::new(include_bytes!(concat!(env!("OUT_DIR"), "/table.orbc")));
 

@@ -34,27 +34,15 @@ use crate::{
     UnlinkedProto,
 };
 
-#[cfg(feature = "verify-flow")]
 mod flow;
 
-/// How much to check: the verifier's layers. Layer 2 is compiled only with
-/// the `verify-flow` feature, so a build that never runs it doesn't carry it.
+/// How much to check: the verifier's layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     /// Layer 1 only.
     Structure,
     /// Both layers.
-    #[cfg(feature = "verify-flow")]
     Full,
-}
-
-impl Level {
-    /// The most this build can check.
-    #[cfg(feature = "verify-flow")]
-    pub const STRONGEST: Level = Level::Full;
-    /// The most this build can check.
-    #[cfg(not(feature = "verify-flow"))]
-    pub const STRONGEST: Level = Level::Structure;
 }
 
 /// Why a chunk was rejected.
@@ -175,12 +163,9 @@ impl Function<'_> {
             self.structure(pc)?;
         }
         self.debug_info()?;
-        #[cfg(feature = "verify-flow")]
         if level == Level::Full {
             self.data_flow()?;
         }
-        #[cfg(not(feature = "verify-flow"))]
-        let _ = level;
         Ok(())
     }
 

@@ -6,11 +6,11 @@ The full `string`, `utf8`, `table` and `math` libraries. The official suite's `s
 
 Every behaviour here comes from the reference manual, the reference `lua5.5` binary and the official suite. Where this document states how lua5.5 behaves (seeding, float formatting, packing alignment), it was found by running the reference binary, and the text says how.
 
-## Layout and features
+## Layout
 
-Each library is behind its own Cargo feature of `orbit-runtime`, all on by default, so an embedder can drop what it doesn't need and the size cost of each library is measurable on its own.
+The four libraries are always built into `orbit-runtime`: they are the language's foundation, so they have no Cargo feature. A host that wants to withhold one from scripts leaves it out at run time with `Library`.
 
-| Feature | Module | Contents |
+| Library | Module | Contents |
 |---|---|---|
 | `string` | `string/mod.rs` | Glue: argument checking, `len sub rep byte char reverse upper lower`, the string metatable |
 | | `string/arith.rs` | The string metatable's arithmetic metamethods (`"10" + 1`) |
