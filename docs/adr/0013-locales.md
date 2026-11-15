@@ -1,6 +1,6 @@
 # ADR-13: Locales
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
