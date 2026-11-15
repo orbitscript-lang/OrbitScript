@@ -2,10 +2,10 @@ Deletes: The general table store (`set_key`): `Heap::update` without its barrier
 Tests: table_store_of_a_new_key_that_grows_the_table table_store_of_a_new_object_key registry_field_store
 
 diff --git a/crates/orbit-runtime/src/object/table.rs b/crates/orbit-runtime/src/object/table.rs
-index a76ae43..8f7caa4 100644
+index 326ec63..37b8d87 100644
 --- a/crates/orbit-runtime/src/object/table.rs
 +++ b/crates/orbit-runtime/src/object/table.rs
-@@ -1469,7 +1469,11 @@ pub fn set_key(
+@@ -1463,7 +1463,11 @@ pub(crate) fn set_key(
          return Err(NoMemory);
      }
      if slot != Slot::None {

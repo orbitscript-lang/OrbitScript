@@ -2,10 +2,10 @@ Deletes: `SetField` with its cache filled.
 Tests: table_store_by_cached_string_key
 
 diff --git a/crates/orbit-runtime/src/vm/dispatch.rs b/crates/orbit-runtime/src/vm/dispatch.rs
-index ef5c061..d20d8e5 100644
+index 5ceddbd..2ff5751 100644
 --- a/crates/orbit-runtime/src/vm/dispatch.rs
 +++ b/crates/orbit-runtime/src/vm/dispatch.rs
-@@ -481,7 +481,7 @@ impl Vm {
+@@ -478,7 +478,7 @@ impl Vm {
                              {
                                  // The key is there: overwrite its value. No
                                  // capacity changes, so no byte accounting.

@@ -2,7 +2,7 @@ Deletes: A new string key stored into a free slot (`set_str_miss`).
 Tests: table_store_of_a_new_string_key_into_a_free_slot
 
 diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
-index 9acf1ad..15617ba 100644
+index bcfeb27..e5fe707 100644
 --- a/crates/orbit-runtime/src/vm/cold.rs
 +++ b/crates/orbit-runtime/src/vm/cold.rs
 @@ -1039,7 +1039,7 @@ pub(crate) fn set_str_miss(

@@ -2,10 +2,10 @@ Deletes: `CellSet`: a store into a captured local by its own frame.
 Tests: upvalue_store_through_the_frames_own_cell
 
 diff --git a/crates/orbit-runtime/src/vm/dispatch.rs b/crates/orbit-runtime/src/vm/dispatch.rs
-index ef5c061..f5214e9 100644
+index 5ceddbd..fa9222e 100644
 --- a/crates/orbit-runtime/src/vm/dispatch.rs
 +++ b/crates/orbit-runtime/src/vm/dispatch.rs
-@@ -1075,7 +1075,7 @@ impl Vm {
+@@ -1072,7 +1072,7 @@ impl Vm {
                                  .cell_base as usize;
                              let c = self.rt.stack.cells[cell_base + cell as usize];
                              let v = w[src];

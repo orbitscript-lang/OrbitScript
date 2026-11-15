@@ -2,10 +2,10 @@ Deletes: `CapSet`: a store into an upvalue through a closure.
 Tests: upvalue_store_through_a_closure
 
 diff --git a/crates/orbit-runtime/src/vm/dispatch.rs b/crates/orbit-runtime/src/vm/dispatch.rs
-index ef5c061..badf5cc 100644
+index 5ceddbd..2dfddf7 100644
 --- a/crates/orbit-runtime/src/vm/dispatch.rs
 +++ b/crates/orbit-runtime/src/vm/dispatch.rs
-@@ -417,7 +417,7 @@ impl Vm {
+@@ -414,7 +414,7 @@ impl Vm {
                          Op::CapSelf { dst } => w[dst] = Value::Closure(closure),
                          Op::CapSet { cap, src } => {
                              let c = self.heap.get(closure).captures[cap as usize];

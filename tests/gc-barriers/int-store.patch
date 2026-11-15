@@ -2,14 +2,14 @@ Deletes: The interpreter's integer-key table store (`store_int`).
 Tests: table_store_by_integer_key table_store_by_integer_key_into_a_big_table table_library_sort_of_strings_in_a_big_table
 
 diff --git a/crates/orbit-runtime/src/object/table.rs b/crates/orbit-runtime/src/object/table.rs
-index a76ae43..d09ce28 100644
+index 326ec63..9155135 100644
 --- a/crates/orbit-runtime/src/object/table.rs
 +++ b/crates/orbit-runtime/src/object/table.rs
-@@ -1410,7 +1410,7 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
+@@ -1404,7 +1404,7 @@ pub(crate) fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> I
      let no_limit = heap.limit().is_none();
      // Only stores of a value that can refer to an object barrier
      // (`HoldsHandle`); the hash path below barriers through `Heap::update`.
--    let mut tab = heap.write_at_for(t, idx as usize, &v);
+-    let mut tab = heap.write_at_for(t, idx as usize, v);
 +    let tab = heap.write_no_handles(t).into_untraced();
      if idx < tab.array.len() as u64 {
          let idx = idx as usize;

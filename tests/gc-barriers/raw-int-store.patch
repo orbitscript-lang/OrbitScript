@@ -2,10 +2,10 @@ Deletes: The raw integer-key table store (`set_int`): `rawset`, the table librar
 Tests: table_raw_store_by_integer_key table_library_insert_and_move
 
 diff --git a/crates/orbit-runtime/src/object/table.rs b/crates/orbit-runtime/src/object/table.rs
-index a76ae43..de1d7a0 100644
+index 326ec63..4863cc8 100644
 --- a/crates/orbit-runtime/src/object/table.rs
 +++ b/crates/orbit-runtime/src/object/table.rs
-@@ -1376,7 +1376,7 @@ pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<boo
+@@ -1370,7 +1370,7 @@ pub(crate) fn set_int(
      // up once. `set_key`'s `Heap::update` barriers again, which only
      // checks the color of a table already remembered.
      {

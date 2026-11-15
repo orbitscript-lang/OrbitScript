@@ -2,10 +2,10 @@ Deletes: `SetGlobal` with its cache filled.
 Tests: global_store_by_cached_name
 
 diff --git a/crates/orbit-runtime/src/vm/dispatch.rs b/crates/orbit-runtime/src/vm/dispatch.rs
-index ef5c061..ec64d3f 100644
+index 5ceddbd..2e6e4b3 100644
 --- a/crates/orbit-runtime/src/vm/dispatch.rs
 +++ b/crates/orbit-runtime/src/vm/dispatch.rs
-@@ -1463,7 +1463,7 @@ impl Vm {
+@@ -1460,7 +1460,7 @@ impl Vm {
                          if matches!(tab.cached_str_packed(slot, cache.key),
                              Some((tag, _)) if tab.meta.is_none() || tag != Tag::Nil)
                          {

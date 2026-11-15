@@ -2,7 +2,7 @@ Deletes: A constructor's list store (`SetList`): `Heap::update` without its barr
 Tests: table_constructor_list_store
 
 diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
-index 9acf1ad..52543ad 100644
+index bcfeb27..1473d4e 100644
 --- a/crates/orbit-runtime/src/vm/cold.rs
 +++ b/crates/orbit-runtime/src/vm/cold.rs
 @@ -589,12 +589,18 @@ impl Vm {

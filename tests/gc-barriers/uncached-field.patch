@@ -2,7 +2,7 @@ Deletes: A string-key store that misses its cache and finds the key (`set_str_mi
 Tests: table_store_by_string_key_missing_the_cache
 
 diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
-index 9acf1ad..87d968a 100644
+index bcfeb27..9e9d89f 100644
 --- a/crates/orbit-runtime/src/vm/cold.rs
 +++ b/crates/orbit-runtime/src/vm/cold.rs
 @@ -1034,7 +1034,7 @@ pub(crate) fn set_str_miss(

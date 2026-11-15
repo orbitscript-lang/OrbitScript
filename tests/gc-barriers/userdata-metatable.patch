@@ -2,10 +2,10 @@ Deletes: `debug.setmetatable` on a userdata (`gc::set_metatable`).
 Tests: userdata_metatable
 
 diff --git a/crates/orbit-runtime/src/object/gc.rs b/crates/orbit-runtime/src/object/gc.rs
-index 930d262..82067c7 100644
+index 3fc389b..2b4adb7 100644
 --- a/crates/orbit-runtime/src/object/gc.rs
 +++ b/crates/orbit-runtime/src/object/gc.rs
-@@ -79,7 +79,7 @@ pub fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>) -> boo
+@@ -86,7 +86,7 @@ pub(crate) fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>)
              }
          }
          Value::UserData(u) => {

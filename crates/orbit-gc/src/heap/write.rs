@@ -40,6 +40,12 @@ use crate::arena::AnyGc;
 /// [`Heap::write_for`]: storing one that can't be (a number, say) needs no
 /// barrier. Implement it `#[inline(always)]`, so that when the caller knows
 /// the value's variant the test folds away.
+///
+/// [`Heap::write_for`] takes the value by reference and
+/// [`Heap::write_at_for`] by value. Either works for the barrier; these are
+/// the shapes with which the interpreter loop that inlines both compiles
+/// best on x86-64 and arm64 together (passing the table store's value by
+/// reference made the loop spill registers on paths that store nothing).
 pub trait HoldsHandle {
     /// False only if the value is certainly not a handle.
     fn holds_handle(&self) -> bool;
@@ -266,11 +272,11 @@ impl<S: Space> Heap<S> {
     /// `value` may be a handle.
     #[inline(always)]
     #[track_caller]
-    pub fn write_at_for<T: Trace<S>, V: HoldsHandle + ?Sized>(
+    pub fn write_at_for<T: Trace<S>, V: HoldsHandle>(
         &mut self,
         gc: Gc<T>,
         at: usize,
-        value: &V,
+        value: V,
     ) -> Write<'_, S, T>
     where
         S: Holds<T>,

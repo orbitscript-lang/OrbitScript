@@ -2,10 +2,10 @@ Deletes: `setmetatable` on a table (`gc::set_metatable`).
 Tests: table_metatable
 
 diff --git a/crates/orbit-runtime/src/object/gc.rs b/crates/orbit-runtime/src/object/gc.rs
-index 930d262..39913e7 100644
+index 3fc389b..e6f9406 100644
 --- a/crates/orbit-runtime/src/object/gc.rs
 +++ b/crates/orbit-runtime/src/object/gc.rs
-@@ -73,7 +73,7 @@ pub fn weak_mode<'a>(mt: &Table, str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> O
+@@ -80,7 +80,7 @@ pub(crate) fn weak_mode<'a>(
  pub(crate) fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>) -> bool {
      match v {
          Value::Table(t) => {

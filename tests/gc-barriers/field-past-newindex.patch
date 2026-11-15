@@ -2,7 +2,7 @@ Deletes: A string-key store into an existing key of a table with `__newindex` (`
 Tests: table_store_past_a_newindex_metamethod_into_an_existing_key
 
 diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
-index 9acf1ad..6052d7b 100644
+index bcfeb27..82f9f38 100644
 --- a/crates/orbit-runtime/src/vm/cold.rs
 +++ b/crates/orbit-runtime/src/vm/cold.rs
 @@ -1027,7 +1027,7 @@ pub(crate) fn set_str_miss(

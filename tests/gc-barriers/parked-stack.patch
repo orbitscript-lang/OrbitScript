@@ -2,10 +2,10 @@ Deletes: A coroutine parking its stack in its thread (`switch_to`): `Heap::updat
 Tests: coroutine_parked_stack coroutine_resume_and_yield_values
 
 diff --git a/crates/orbit-runtime/src/vm/coro.rs b/crates/orbit-runtime/src/vm/coro.rs
-index bb910db..6c51887 100644
+index 69c577c..bb97ed0 100644
 --- a/crates/orbit-runtime/src/vm/coro.rs
 +++ b/crates/orbit-runtime/src/vm/coro.rs
-@@ -185,6 +185,20 @@ fn state(t: &mut Thread) -> &mut Coroutine {
+@@ -174,6 +174,20 @@ fn state(t: &mut Thread) -> &mut Coroutine {
      t.state.downcast_mut().expect("threads hold VM coroutines")
  }
  
@@ -26,7 +26,7 @@ index bb910db..6c51887 100644
  /// The continuation a yielding coroutine waits in: the values the next
  /// resume passes become `yield`'s results.
  fn yield_k(_ctx: &mut NativeCtx<'_>, o: CallOutcome) -> Result<NativeReturn, LuaError> {
-@@ -214,7 +228,7 @@ impl Vm {
+@@ -203,7 +217,7 @@ impl Vm {
          // collector may already have traced: the barrier. A thread's bytes
          // are its stack's, parked or running: they change only when the
          // stack's capacity does.
