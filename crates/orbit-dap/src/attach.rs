@@ -778,13 +778,15 @@ mod tests {
 
     #[test]
     fn only_sockets_of_ended_programs_are_removed() {
+        // Short: a socket path has to fit in about 100 bytes, and macOS's
+        // temporary directory is long.
         let dir = std::env::temp_dir().join(format!(
-            "orbit-dap-dead-sockets-{}-{:?}",
+            "od-{}-{:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .subsec_nanos()
         ));
         std::fs::create_dir(&dir).unwrap();
 
