@@ -6,7 +6,7 @@ use std::fmt;
 use crate::locale::{CharTables, class};
 
 /// Most captures one pattern may have.
-pub const MAX_CAPTURES: usize = 32;
+pub(crate) const MAX_CAPTURES: usize = 32;
 
 /// Deepest nesting of matcher calls before `pattern too complex`; the
 /// reference accepts `string.rep("a?", 199)` and rejects 200.
@@ -16,12 +16,12 @@ const MAX_DEPTH: usize = 200;
 const SPECIALS: &[u8] = b"^$*+?.([%-";
 
 /// Whether `pat` has no pattern syntax, so a substring search is enough.
-pub fn is_plain(pat: &[u8]) -> bool {
+pub(crate) fn is_plain(pat: &[u8]) -> bool {
     !pat.iter().any(|b| SPECIALS.contains(b))
 }
 
 /// Find `needle` in `hay` starting at byte offset `from`.
-pub fn find_plain(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+pub(crate) fn find_plain(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() {
         return (from <= hay.len()).then_some(from);
     }
@@ -40,7 +40,7 @@ pub fn find_plain(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 
 /// Why a pattern couldn't be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PatternError {
+pub(crate) enum PatternError {
     EndsWithPercent,
     MissingBracket,
     MissingBalanceArgs,
@@ -87,7 +87,7 @@ enum Extent {
 
 /// A capture's value once a match succeeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Capture {
+pub(crate) enum Capture {
     /// Bytes `start..end` of the subject.
     Span(usize, usize),
     /// A position capture: 0-based byte offset (Lua sees it plus one).
@@ -98,7 +98,7 @@ pub enum Capture {
 /// outlive its borrow of the subject and one set serves every start
 /// position a search tries.
 #[derive(Debug, Clone)]
-pub struct Captures {
+pub(crate) struct Captures {
     level: usize,
     caps: [(usize, Extent); MAX_CAPTURES],
 }
@@ -110,7 +110,7 @@ impl Default for Captures {
 }
 
 impl Captures {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Captures {
             level: 0,
             caps: [(0, Extent::Open); MAX_CAPTURES],
@@ -118,18 +118,18 @@ impl Captures {
     }
 
     /// Number of captures the last successful match made.
-    pub fn level(&self) -> usize {
+    pub(crate) fn level(&self) -> usize {
         self.level
     }
 
     /// How many values a match yields: its captures, or the whole match.
-    pub fn nresults(&self) -> usize {
+    pub(crate) fn nresults(&self) -> usize {
         self.level.max(1)
     }
 
     /// Capture `i` of the last successful match `start..end`. With no
     /// captures, capture 0 is the whole match.
-    pub fn capture(&self, i: usize, start: usize, end: usize) -> Res<Capture> {
+    pub(crate) fn capture(&self, i: usize, start: usize, end: usize) -> Res<Capture> {
         if i >= self.level {
             if i == 0 {
                 return Ok(Capture::Span(start, end));
@@ -176,7 +176,7 @@ enum Suffix {
 /// A matcher over one subject and pattern, recording into a [`Captures`].
 /// Reusable across start positions.
 #[derive(Debug)]
-pub struct Matcher<'a, 'c> {
+pub(crate) struct Matcher<'a, 'c> {
     src: &'a [u8],
     pat: &'a [u8],
     /// The locale's character classes.
@@ -186,7 +186,7 @@ pub struct Matcher<'a, 'c> {
 }
 
 impl<'a, 'c> Matcher<'a, 'c> {
-    pub fn new(
+    pub(crate) fn new(
         src: &'a [u8],
         pat: &'a [u8],
         chars: &'a CharTables,
@@ -203,7 +203,7 @@ impl<'a, 'c> Matcher<'a, 'c> {
 
     /// Try to match the pattern from byte `p` of the pattern at byte `s` of
     /// the subject. Returns where the match ends.
-    pub fn match_at(&mut self, s: usize, p: usize) -> Res<Option<usize>> {
+    pub(crate) fn match_at(&mut self, s: usize, p: usize) -> Res<Option<usize>> {
         self.depth = 0;
         self.caps.level = 0;
         self.go(s, p)
@@ -213,7 +213,7 @@ impl<'a, 'c> Matcher<'a, 'c> {
     /// subject byte `from` (only at `from` if `anchored`), skipping a match
     /// that ends at `reject` (an empty match where the last one ended).
     /// Returns its span; the captures are in the [`Captures`].
-    pub fn find_from(
+    pub(crate) fn find_from(
         &mut self,
         from: usize,
         p: usize,
@@ -660,7 +660,7 @@ fn class(chars: &CharTables, c: u8, cl: u8) -> bool {
 /// One search: the first match of `pat` in `src` at or after `init`
 /// (0-based), honoring a leading `^`. Returns the match span; the captures
 /// are left in `caps`.
-pub fn search(
+pub(crate) fn search(
     src: &[u8],
     pat: &[u8],
     chars: &CharTables,

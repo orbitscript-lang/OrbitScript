@@ -209,7 +209,7 @@ fn protected_native_calls_catch_errors() {
 #[test]
 fn tables_survive_a_stressed_collector() {
     let mut vm = Vm::new();
-    vm.heap.set_stress(true);
+    vm.set_gc_stress(true);
     // local list = nil; for i = 1, 2000 do list = { next = list } end
     // return list.next.next
     let mut main = proto(

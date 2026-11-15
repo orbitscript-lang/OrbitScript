@@ -11,32 +11,35 @@
 //!
 //! [VM design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md
 
-pub mod func;
-pub mod gc;
-pub mod mem;
-pub mod meta;
+pub(crate) mod func;
+pub(crate) mod gc;
+pub(crate) mod mem;
+pub(crate) mod meta;
 pub mod number;
-pub mod orbit_str;
-pub mod string;
-pub mod table;
-pub mod thread;
-pub mod userdata;
-pub mod value;
+pub(crate) mod orbit_str;
+pub(crate) mod string;
+pub(crate) mod table;
+pub(crate) mod thread;
+pub(crate) mod userdata;
+pub(crate) mod value;
 
-pub use func::{Cell, Closure, FieldCache, Proto, ProtoCode};
+pub(crate) use func::{Cell, Closure, FieldCache, Proto, ProtoCode};
 pub use mem::NoMemory;
-pub use meta::MetaField;
-pub use orbit_gc::{Gc, Heap, Verify};
+pub(crate) use meta::MetaField;
+pub use orbit_gc::Gc;
+pub(crate) use orbit_gc::Heap;
+pub use orbit_gc::Verify;
 pub use orbit_str::{OrbitStr, OrbitString};
-pub use string::{CStrings, Interner, LuaStr};
+pub(crate) use string::{CStrings, Interner, LuaStr};
 pub use table::Table;
-pub use thread::{Thread, ThreadState};
-pub use userdata::UserData;
-pub use value::{LightUserData, NativeId, Payload, Tag, Value};
+pub(crate) use thread::{Thread, ThreadState};
+pub(crate) use userdata::UserData;
+pub use value::Value;
+pub(crate) use value::{LightUserData, NativeId, Payload, Tag};
 
 orbit_gc::space! {
     /// Every object type of the Lua heap.
-    pub struct LuaSpace {
+    pub(crate) struct LuaSpace {
         strings: LuaStr,
         tables: Table,
         closures: Closure,
@@ -48,4 +51,4 @@ orbit_gc::space! {
 }
 
 /// The Lua heap.
-pub type LuaHeap = Heap<LuaSpace>;
+pub(crate) type LuaHeap = Heap<LuaSpace>;

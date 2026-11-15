@@ -16,11 +16,11 @@ pub struct NativeId(pub u32);
 pub struct LightUserData(u64);
 
 impl LightUserData {
-    pub const fn new(bits: u64) -> LightUserData {
+    pub(crate) const fn new(bits: u64) -> LightUserData {
         LightUserData(bits)
     }
 
-    pub const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 }
@@ -53,7 +53,7 @@ const _: () = assert!(core::mem::size_of::<Value>() == 16);
 /// Being an enum, a stored tag is always a valid one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
-pub enum Tag {
+pub(crate) enum Tag {
     #[default]
     Nil = 0,
     Bool = 1,
@@ -71,7 +71,7 @@ pub enum Tag {
 impl Tag {
     /// The tag with byte value `b`, if there is one.
     #[inline(always)]
-    pub fn from_u8(b: u8) -> Option<Tag> {
+    pub(crate) fn from_u8(b: u8) -> Option<Tag> {
         Some(match b {
             0 => Tag::Nil,
             1 => Tag::Bool,
@@ -94,7 +94,7 @@ impl Tag {
 /// [`Value::unpack`] reads one, so a payload can't be mistaken for a number
 /// or a handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct Payload(u64);
+pub(crate) struct Payload(u64);
 
 impl Payload {
     /// The raw bits, for hashing and for the array part's single
@@ -113,7 +113,7 @@ impl Payload {
 
 impl Value {
     /// Lua's `type` name.
-    pub fn type_name(self) -> &'static str {
+    pub(crate) fn type_name(self) -> &'static str {
         match self {
             Value::Nil => "nil",
             Value::Bool(_) => "boolean",
@@ -127,24 +127,24 @@ impl Value {
     }
 
     #[inline(always)]
-    pub fn is_nil(self) -> bool {
+    pub(crate) fn is_nil(self) -> bool {
         matches!(self, Value::Nil)
     }
 
     /// `nil` and `false` are falsy; everything else is truthy.
     #[inline(always)]
-    pub fn is_falsy(self) -> bool {
+    pub(crate) fn is_falsy(self) -> bool {
         matches!(self, Value::Nil | Value::Bool(false))
     }
 
     #[inline(always)]
-    pub fn is_function(self) -> bool {
+    pub(crate) fn is_function(self) -> bool {
         matches!(self, Value::Closure(_) | Value::Native(_))
     }
 
     /// The type tag.
     #[inline(always)]
-    pub fn tag(self) -> Tag {
+    pub(crate) fn tag(self) -> Tag {
         match self {
             Value::Nil => Tag::Nil,
             Value::Bool(_) => Tag::Bool,
@@ -162,7 +162,7 @@ impl Value {
 
     /// Split into tag and payload, the form packed storage keeps.
     #[inline(always)]
-    pub fn pack(self) -> (Tag, Payload) {
+    pub(crate) fn pack(self) -> (Tag, Payload) {
         let (tag, bits) = match self {
             Value::Nil => (Tag::Nil, 0),
             Value::Bool(b) => (Tag::Bool, b as u64),
@@ -181,7 +181,7 @@ impl Value {
 
     /// Inverse of [`Value::pack`].
     #[inline(always)]
-    pub fn unpack(tag: Tag, payload: Payload) -> Value {
+    pub(crate) fn unpack(tag: Tag, payload: Payload) -> Value {
         let p = payload.0;
         match tag {
             Tag::Nil => Value::Nil,
@@ -201,7 +201,7 @@ impl Value {
     /// Whether `self` and `other` are the same value bit for bit (identity
     /// for objects, no numeric conversion).
     #[inline]
-    pub fn same(self, other: Value) -> bool {
+    pub(crate) fn same(self, other: Value) -> bool {
         self.pack() == other.pack()
     }
 
@@ -209,7 +209,7 @@ impl Value {
     /// writing a known variant directly is cheaper than building the merged
     /// value first and copying it.
     #[inline(always)]
-    pub fn write_unpacked(out: &mut Value, tag: Tag, payload: Payload) {
+    pub(crate) fn write_unpacked(out: &mut Value, tag: Tag, payload: Payload) {
         let p = payload.0;
         match tag {
             Tag::Nil => *out = Value::Nil,
@@ -228,7 +228,7 @@ impl Value {
 
     /// The number, if this is one (no string coercion).
     #[inline(always)]
-    pub fn as_number(self) -> Option<Number> {
+    pub(crate) fn as_number(self) -> Option<Number> {
         match self {
             Value::Int(i) => Some(Number::Int(i)),
             Value::Float(f) => Some(Number::Float(f)),
@@ -238,7 +238,7 @@ impl Value {
 
     /// The number as a float, if this is one (no string coercion).
     #[inline(always)]
-    pub fn as_f64(self) -> Option<f64> {
+    pub(crate) fn as_f64(self) -> Option<f64> {
         match self {
             Value::Int(i) => Some(i as f64),
             Value::Float(f) => Some(f),
@@ -248,7 +248,7 @@ impl Value {
 
     /// Identity for `table: 0x...` style printing, stable for the object's
     /// lifetime and distinct between live objects of different types.
-    pub fn identity(self) -> Option<u64> {
+    pub(crate) fn identity(self) -> Option<u64> {
         let (tag, payload) = match self {
             Value::Table(t) => (Tag::Table, t.index() as u64),
             Value::Closure(c) => (Tag::Closure, c.index() as u64),
@@ -270,7 +270,7 @@ impl Value {
 /// Raw equality (`rawequal`, and `==` without metamethods): numbers compare
 /// mathematically across subtypes, strings by content, everything else by
 /// identity.
-pub fn raw_eq(heap: &LuaHeap, a: Value, b: Value) -> bool {
+pub(crate) fn raw_eq(heap: &LuaHeap, a: Value, b: Value) -> bool {
     match (a, b) {
         (Value::Nil, Value::Nil) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
@@ -293,7 +293,7 @@ pub fn raw_eq(heap: &LuaHeap, a: Value, b: Value) -> bool {
 /// Content equality of two distinct string handles. Short strings are
 /// interned, so two different short handles are never equal.
 #[inline]
-pub fn str_eq(heap: &LuaHeap, a: Gc<LuaStr>, b: Gc<LuaStr>) -> bool {
+pub(crate) fn str_eq(heap: &LuaHeap, a: Gc<LuaStr>, b: Gc<LuaStr>) -> bool {
     let (x, y) = (heap.get(a), heap.get(b));
     !(x.is_short() && y.is_short()) && x.as_bytes() == y.as_bytes()
 }

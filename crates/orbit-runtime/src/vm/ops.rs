@@ -14,7 +14,7 @@ use crate::object::value::raw_eq;
 use crate::object::{Gc, LuaHeap, LuaStr, NoMemory, Value};
 use orbit_bytecode::number::BitOp;
 
-use crate::vm::Runtime;
+use crate::vm::VmState;
 use crate::vm::meta::{self, MetaCall, MetaField, Metas};
 
 /// An error raised by an instruction, before the interpreter adds the
@@ -459,7 +459,7 @@ fn push_float(locale: &Locale, out: &mut Vec<u8>, f: f64) {
 }
 
 /// `tostring` without metamethods.
-pub(crate) fn display(heap: &LuaHeap, rt: &Runtime, v: Value, out: &mut Vec<u8>) {
+pub(crate) fn display(heap: &LuaHeap, rt: &VmState, v: Value, out: &mut Vec<u8>) {
     match v {
         Value::Nil => out.extend_from_slice(b"nil"),
         Value::Bool(b) => out.extend_from_slice(if b { b"true" } else { b"false" }),

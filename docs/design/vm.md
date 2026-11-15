@@ -139,21 +139,24 @@ Kept beside the code (ADR-4), in `DebugInfo`:
 
 ```rust
 pub struct Vm {
-    pub heap: LuaHeap,
-    pub rt: Runtime,       // everything else, so the heap can be borrowed mutably
-}                          // while the runtime is borrowed as its GC roots
+    heap: LuaHeap,
+    rt: VmState,           // everything else, so the heap can be borrowed mutably
+}                          // while the rest is borrowed as its GC roots
 
-pub struct Runtime {
-    pub strings: Interner,
-    pub globals: Gc<Table>,
-    pub registry: Gc<Table>,   // key 2 holds the globals; `_LOADED` is package.loaded
-    pub limits: Limits,
-    pub out: Box<dyn WriteDebug>,                      // where `print` writes, buffered
-    pub compile: Option<CompileFn>,                    // the Lua front end, installed by `orbit`
-    pub compile_orbitscript: Option<CompileFn>,        // the OrbitScript front end
-    natives: Vec<Native>,
+struct VmState {
+    strings: Interner,
+    globals: Gc<Table>,
+    registry: Gc<Table>,   // key 2 holds the globals; `_LOADED` is package.loaded
     stack: Stack,          // the running thread's stack
-    // ... metatables, coroutine state, caches, warnings, extensions
+    metas: Metas,          // the basic types' metatables and the metamethod names
+    current: Gc<Thread>,
+    // Components with private fields, each with the invariants it keeps:
+    host: Host,            // what the host configures: output, warnings, compilers, limits
+    natives: Natives,      // the registry of native functions
+    gc: GcState,           // collector pacing, the memory limit, pinned values
+    co: Switching,         // coroutine switches: who resumed whom, values in transfer
+    hooks: HookUse,        // whether any hook has been set
+    // ...
 }
 
 struct Stack {
@@ -261,7 +264,7 @@ Covered forms include `attempt to index a nil value (local 't')`, `attempt to ca
 
 ### Garbage collection
 
-- **Roots** (`impl Roots<LuaSpace> for Runtime`): the running stack's registers, cells and frames; parked coroutine stacks are traced through their `Thread` objects; the globals, the registry, the per-type metatables, interned metatable field names, the call cache, and the loader's in-progress prototypes. `clear_weak` and `sweep_weak` prune the string interner.
+- **Roots** (`impl Roots<LuaSpace> for VmState`): the running stack's registers, cells and frames; parked coroutine stacks are traced through their `Thread` objects; the globals, the registry, the per-type metatables, interned metatable field names, the call cache, and the loader's in-progress prototypes. `clear_weak` and `sweep_weak` prune the string interner.
 - **Safe points**: after instructions that allocate (`NewTable`, `Closure`, `CellNew`, `Concat`, table stores that grow, native calls that allocated), the loop checks whether the collector wants to step and runs `heap.step`. A store into an existing array slot allocates nothing and skips the check. At a safe point every live handle is in a register, cell slot, frame or root: the loop itself holds only an `Rc<ProtoCode>` (whose constants the frame's closure keeps alive) and integers. Natives never hold handles across `CallThen`; state they need afterwards goes in their window.
 - **Barriers**: table stores go through `Heap::update` (two-phase, above), and so do `CellSet`, `CapSet` and `SetGlobal`. The running stack is a root and is rescanned when marking finishes, so register writes need no barrier.
 - **Memory release**: `orbit-gc`'s `memory-trimming` feature (on by default) returns freed pages to the OS after cycles that release them (`malloc_trim` on glibc, `malloc_zone_pressure_relief` on macOS).

@@ -21,7 +21,7 @@ use crate::object::gc::finalizer;
 use crate::object::{LuaHeap, Value};
 use orbit_lua_version::LUA;
 
-use crate::vm::{CallOutcome, Continuation, LuaError, NativeCtx, NativeReturn, Runtime, Vm};
+use crate::vm::{CallOutcome, Continuation, LuaError, NativeCtx, NativeReturn, Vm, VmState};
 
 /// The collector mode (`collectgarbage("incremental")` and
 /// `collectgarbage("generational")`), applied to the heap by
@@ -33,7 +33,7 @@ pub enum GcMode {
 }
 
 impl GcMode {
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             GcMode::Incremental => "incremental",
             GcMode::Generational => "generational",
@@ -43,7 +43,7 @@ impl GcMode {
 
 /// A `collectgarbage("param", name)` parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GcParam {
+pub(crate) enum GcParam {
     /// Wait between cycles, as a percentage of the heap the last cycle
     /// found reachable (`Params::growth` + 100).
     Pause,
@@ -65,7 +65,7 @@ pub enum GcParam {
 }
 
 impl GcParam {
-    pub fn from_name(name: &[u8]) -> Option<GcParam> {
+    pub(crate) fn from_name(name: &[u8]) -> Option<GcParam> {
         Some(match name {
             b"pause" => GcParam::Pause,
             b"stepmul" => GcParam::StepMul,
@@ -110,7 +110,7 @@ const STEPMUL_SCALE: u32 = 4;
 /// `collectgarbage` keeps, the memory limit's grace, and the values a host
 /// pinned.
 #[derive(Debug)]
-pub struct GcState {
+pub(crate) struct GcState {
     /// Set with [`Vm::set_gc_mode`], which also moves the heap's floor.
     mode: GcMode,
     /// The floor under the start of a cycle in generational mode
@@ -187,17 +187,17 @@ impl GcState {
     }
 
     /// Whether a finalizer is running: `collectgarbage` must do nothing.
-    pub fn finalizing(&self) -> bool {
+    pub(crate) fn finalizing(&self) -> bool {
         self.finalizing
     }
 
-    pub fn param(&self, p: GcParam) -> i64 {
+    pub(crate) fn param(&self, p: GcParam) -> i64 {
         self.params[p as usize]
     }
 
     /// Set a parameter (a non-negative value) and apply it to the heap.
     /// Returns the old value.
-    pub fn set_param(&mut self, heap: &mut LuaHeap, p: GcParam, v: i64) -> i64 {
+    pub(crate) fn set_param(&mut self, heap: &mut LuaHeap, p: GcParam, v: i64) -> i64 {
         let old = std::mem::replace(&mut self.params[p as usize], v);
         let u32_of = |v: i64| u32::try_from(v).unwrap_or(u32::MAX);
         let params = heap.params_mut();
@@ -233,7 +233,7 @@ impl GcState {
     /// No hook events fire while a finalizer runs (a running hook turns
     /// them off the same way).
     /// The collector's mode ([`Vm::set_gc_mode`]).
-    pub fn mode(&self) -> GcMode {
+    pub(crate) fn mode(&self) -> GcMode {
         self.mode
     }
 
@@ -307,7 +307,7 @@ impl GcState {
     }
 }
 
-impl Runtime {
+impl VmState {
     /// Warn about an error raised by a finalizer.
     fn warn_gc_error(&mut self, heap: &LuaHeap, err: Value) {
         let mut msg = b"error in __gc (".to_vec();
@@ -402,7 +402,7 @@ impl Vm {
     }
 }
 
-impl Runtime {
+impl VmState {
     fn warn_gc_error_text(&mut self, text: &[u8]) {
         let mut msg = b"error in __gc (".to_vec();
         msg.extend_from_slice(text);
@@ -414,7 +414,7 @@ impl Runtime {
 /// From a native: call every pending finalizer, then return `result`. The
 /// finalizers run through [`NativeReturn::CallThen`], so this is the
 /// native's whole return value.
-pub fn finalize_then_return(
+pub(crate) fn finalize_then_return(
     ctx: &mut NativeCtx<'_>,
     result: Value,
 ) -> Result<NativeReturn, LuaError> {
@@ -476,7 +476,7 @@ impl NativeCtx<'_> {
     /// collection runs the finalizers before it returns). A finalizer's
     /// error becomes a warning. Does nothing inside a finalizer. The window
     /// is as it was.
-    pub fn run_finalizers_now(&mut self) {
+    pub(crate) fn run_finalizers_now(&mut self) {
         if self.vm.rt.gc.finalizing {
             return;
         }
@@ -524,7 +524,10 @@ impl NativeCtx<'_> {
 /// never finalized, so the caller ends the process (or drops the VM) next.
 /// Called while the VM is already closing (from a finalizer [`Vm::close`]
 /// runs), it runs the finalizers still waiting.
-pub fn close_then(ctx: &mut NativeCtx<'_>, k: Continuation) -> Result<NativeReturn, LuaError> {
+pub(crate) fn close_then(
+    ctx: &mut NativeCtx<'_>,
+    k: Continuation,
+) -> Result<NativeReturn, LuaError> {
     ctx.truncate(1);
     let gc = &mut ctx.vm.rt.gc;
     if !gc.closed {

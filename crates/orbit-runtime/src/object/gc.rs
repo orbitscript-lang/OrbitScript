@@ -11,7 +11,7 @@ use crate::object::{LuaHeap, LuaSpace, LuaStr, MetaField, Table, UserData, Value
 /// functions, userdata and threads. Strings, numbers, booleans and
 /// native functions are values, never collected out of a weak table.
 #[inline]
-pub fn is_weak_ref(v: Value) -> bool {
+pub(crate) fn is_weak_ref(v: Value) -> bool {
     matches!(
         v,
         Value::Table(_) | Value::Closure(_) | Value::UserData(_) | Value::Thread(_)
@@ -20,7 +20,7 @@ pub fn is_weak_ref(v: Value) -> bool {
 
 /// The heap object `v` refers to, if any (strings included).
 #[inline]
-pub fn object(m: &Marker<'_, LuaSpace>, v: Value) -> Option<AnyGc> {
+pub(crate) fn object(m: &Marker<'_, LuaSpace>, v: Value) -> Option<AnyGc> {
     match v {
         Value::Str(s) => Some(m.erase(s)),
         Value::Table(t) => Some(m.erase(t)),
@@ -34,7 +34,7 @@ pub fn object(m: &Marker<'_, LuaSpace>, v: Value) -> Option<AnyGc> {
 /// Whether `v` survives the cycle `live` describes. Values that are not
 /// heap objects always do.
 #[inline]
-pub fn is_live(live: &Liveness<'_, LuaSpace>, v: Value) -> bool {
+pub(crate) fn is_live(live: &Liveness<'_, LuaSpace>, v: Value) -> bool {
     match v {
         Value::Str(s) => live.is_live(s),
         Value::Table(t) => live.is_live(t),
@@ -47,13 +47,20 @@ pub fn is_live(live: &Liveness<'_, LuaSpace>, v: Value) -> bool {
 
 /// `mt[e.field()]` (raw), reading strings through `str_of`. Works without
 /// the interner, so the collector can call it while tracing.
-pub fn field<'a>(mt: &Table, e: MetaField, str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> Value {
+pub(crate) fn field<'a>(
+    mt: &Table,
+    e: MetaField,
+    str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
+) -> Value {
     mt.meta_field_by_bytes(e, str_of)
 }
 
 /// The weak mode a metatable gives its tables: a string `__mode`
 /// containing `k` makes keys weak, `v` values. Anything else is strong.
-pub fn weak_mode<'a>(mt: &Table, str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> Option<WeakMode> {
+pub(crate) fn weak_mode<'a>(
+    mt: &Table,
+    str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
+) -> Option<WeakMode> {
     let Value::Str(s) = field(mt, MetaField::Mode, &str_of) else {
         return None;
     };
@@ -70,7 +77,7 @@ pub fn weak_mode<'a>(mt: &Table, str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> O
 /// value but nil) now. Adding `__gc` to the metatable later doesn't
 /// register it, as in Lua. Every metatable change that should honour
 /// `__gc` goes through here.
-pub fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>) -> bool {
+pub(crate) fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>) -> bool {
     match v {
         Value::Table(t) => {
             heap.update(t, |t| t.meta = mt);
@@ -95,7 +102,7 @@ fn has_gc(heap: &LuaHeap, mt: Option<Gc<Table>>) -> bool {
 
 /// `obj` as a value and its `__gc` metamethod (raw), read when its
 /// finalizer is due. Nil if it has none any more.
-pub fn finalizer(heap: &LuaHeap, obj: AnyGc) -> (Value, Value) {
+pub(crate) fn finalizer(heap: &LuaHeap, obj: AnyGc) -> (Value, Value) {
     let (v, meta) = if let Some(t) = heap.downcast::<Table>(obj) {
         (Value::Table(t), heap.get(t).meta)
     } else if let Some(u) = heap.downcast::<UserData>(obj) {

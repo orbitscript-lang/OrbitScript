@@ -21,14 +21,14 @@ macro_rules! bytes_msg {
 
 mod cold;
 mod coro;
-pub mod debug;
+pub(crate) mod debug;
 #[cfg(feature = "debugger")]
 pub mod debugger;
 mod dispatch;
 mod fast;
 mod gc;
-pub mod hook;
-pub mod host;
+pub(crate) mod hook;
+pub(crate) mod host;
 mod interp;
 mod link;
 mod locale;
@@ -43,17 +43,18 @@ use crate::locale::Locale;
 use crate::object::table::{self, mark};
 use crate::object::{
     CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Table, Thread,
-    UserData, Value,
+    Value,
 };
 use crate::text::LineEndings;
 use orbit_gc::{Liveness, Marker, Roots};
 
-pub use coro::{CoStatus, WindowSave};
-pub use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
-pub use meta::MetaField;
-pub use native::{
-    CallOutcome, Continuation, FastFn, Meta, NativeCtx, NativeFn, NativeReturn, Operator, ResumeOk,
-};
+pub(crate) use coro::{CoStatus, WindowSave};
+pub(crate) use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
+pub(crate) use meta::MetaField;
+pub use native::CallOutcome;
+pub(crate) use native::{Continuation, FastFn, Meta};
+pub use native::{NativeCtx, NativeFn, NativeReturn};
+pub(crate) use native::{Operator, ResumeOk};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
 pub use orbit_bytecode as op;
 
@@ -68,12 +69,12 @@ pub struct LuaError {
     pub traceback: Option<Box<str>>,
     /// What raised it. A script's `error("interrupted!")` is still
     /// [`Cause::Error`]: the value alone doesn't say.
-    pub cause: Cause,
+    pub(crate) cause: Cause,
 }
 
 /// What raised a [`LuaError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Cause {
+pub(crate) enum Cause {
     /// `error`, or an error in an operation or a library function
     /// (`not enough memory` too: like the reference, a protected call tells
     /// it by its message).
@@ -84,7 +85,7 @@ pub enum Cause {
 }
 
 impl LuaError {
-    pub fn new(value: Value) -> Self {
+    pub(crate) fn new(value: Value) -> Self {
         LuaError {
             value,
             traceback: None,
@@ -93,7 +94,7 @@ impl LuaError {
     }
 
     /// An error with `value` raised for `cause`.
-    pub fn with_cause(value: Value, cause: Cause) -> Self {
+    pub(crate) fn with_cause(value: Value, cause: Cause) -> Self {
         LuaError {
             cause,
             ..LuaError::new(value)
@@ -107,13 +108,13 @@ impl LuaError {
 /// The embedder installs it with [`host::Host::set_compilers`] (`orbit::Isolate`
 /// installs both front ends), so the VM and the libraries don't depend on a
 /// front end and a host can leave the compilers out.
-pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
+pub(crate) type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
 
 /// Configurable limits.
 #[derive(Debug, Clone, Copy)]
-pub struct Limits {
+pub(crate) struct Limits {
     /// Register slots on the stack before `stack overflow`.
-    pub max_stack: usize,
+    pub(crate) max_stack: usize,
 }
 
 impl Default for Limits {
@@ -129,17 +130,17 @@ impl Default for Limits {
 pub(crate) struct Native {
     /// Qualified name (`string.rep`), for messages when the call site gives
     /// none.
-    pub name: &'static str,
-    pub f: NativeFn,
-    pub fast: Option<FastFn>,
+    pub(crate) name: &'static str,
+    pub(crate) f: NativeFn,
+    pub(crate) fast: Option<FastFn>,
     /// Upvalues at the end of each of its closures that scripts can't
     /// see or change (`debug.getupvalue` and friends skip them).
-    pub hidden: u8,
+    pub(crate) hidden: u8,
     /// Two words the native reads on every call
     /// ([`NativeCtx::native_data`]): for natives that are many functions
     /// at once, such as an FFI binding's address and signature. Zero for
     /// natives registered by name.
-    pub data: [u64; 2],
+    pub(crate) data: [u64; 2],
 }
 
 impl fmt::Debug for Native {
@@ -220,28 +221,28 @@ pub(crate) enum Catch {
 /// One activation record.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Frame {
-    pub kind: FrameKind,
+    pub(crate) kind: FrameKind,
     /// Register where the callee was; results go here.
-    pub func: u32,
+    pub(crate) func: u32,
     /// First register (Lua) or first argument (native).
-    pub base: u32,
+    pub(crate) base: u32,
     /// Saved pc: the instruction after the current one.
-    pub pc: u32,
-    pub cell_base: u32,
-    pub nvarargs: u32,
+    pub(crate) pc: u32,
+    pub(crate) cell_base: u32,
+    pub(crate) nvarargs: u32,
     /// Results the caller wants ([`op::MULTI`] for all).
-    pub want: u8,
+    pub(crate) want: u8,
     /// Entered by a tail call (`debug.getinfo`'s `istailcall`).
-    pub tail: bool,
+    pub(crate) tail: bool,
     /// Callables a `__call` chain inserted as extra first arguments
     /// (`extraargs`).
-    pub extra: u8,
+    pub(crate) extra: u8,
     /// How many calls back into the interpreter are open at and below this
     /// frame: library callbacks, metamethods, handlers and hooks, the calls
     /// the reference makes on the C stack. Capped by [`MAX_CCALLS`]. Lua
     /// frames leave it 0, so a call costs nothing; [`Stack::cdepth`] reads
     /// it from the newest other frame.
-    pub cdepth: u8,
+    pub(crate) cdepth: u8,
 }
 
 /// The most calls back into the interpreter that may be open at once,
@@ -255,12 +256,12 @@ pub(crate) const MAX_CCALLS: usize = 200;
 /// running one with a parked one ([`Stack::swap`]), so it is kept small.
 #[derive(Debug, Default)]
 pub(crate) struct Stack {
-    pub regs: Vec<Value>,
-    pub cells: Vec<Gc<Cell>>,
-    pub frames: Vec<Frame>,
-    pub aux: Box<StackAux>,
+    pub(crate) regs: Vec<Value>,
+    pub(crate) cells: Vec<Gc<Cell>>,
+    pub(crate) frames: Vec<Frame>,
+    pub(crate) aux: Box<StackAux>,
     /// The stack's debug hook (`debug.sethook`).
-    pub hook: hook::Hook,
+    pub(crate) hook: hook::Hook,
     /// Registers below this index may hold values written since the last
     /// native returned: a native's pushes and stores, and the registers of
     /// Lua frames entered outside the dispatch loop. When a native returns,
@@ -323,13 +324,13 @@ impl std::hash::Hasher for CheapHasher {
 pub(crate) struct StackAux {
     /// The registers (absolute) of the open to-be-closed variables, oldest
     /// first.
-    pub tbc: Vec<u32>,
+    pub(crate) tbc: Vec<u32>,
     /// Where frames other than Lua frames were pushed ([`Stack::deeper`],
     /// [`Stack::same_depth`]), oldest first, to find the current `cdepth`
     /// without walking Lua frames. Entries whose frame is gone are dropped
     /// lazily: one that now holds a Lua frame is skipped, and any other
     /// frame there has the right `cdepth` anyway.
-    pub depth_at: Vec<u32>,
+    pub(crate) depth_at: Vec<u32>,
     /// The index of the boundary frame below a running finalizer, which
     /// the debug library names `__gc`.
     pub(crate) finalizer_at: Option<u32>,
@@ -573,10 +574,10 @@ impl Stack {
 /// control messages (`@on`, `@off`) included, with `true` for every piece
 /// but a message's last. While one is set, [`host::Host::warnings`] is not
 /// consulted: switching warnings on and off is the host's business.
-pub struct WarnHook(pub Box<WarnFn>);
+pub(crate) struct WarnHook(pub Box<WarnFn>);
 
 /// The function inside a [`WarnHook`]: a piece, and whether more follow.
-pub type WarnFn = dyn FnMut(&[u8], bool);
+pub(crate) type WarnFn = dyn FnMut(&[u8], bool);
 
 impl std::fmt::Debug for WarnHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -587,18 +588,18 @@ impl std::fmt::Debug for WarnHook {
 /// Everything in the VM except the heap, split off so the heap can be
 /// borrowed mutably while this is borrowed as its [`Roots`].
 #[derive(Debug)]
-pub struct Runtime {
-    pub strings: Interner,
+pub(crate) struct VmState {
+    pub(crate) strings: Interner,
     /// NUL-terminated copies of strings handed to C, each kept while its
     /// string is alive.
-    pub c_strings: CStrings,
-    pub globals: Gc<Table>,
+    pub(crate) c_strings: CStrings,
+    pub(crate) globals: Gc<Table>,
     /// The registry (`debug.getregistry()`): key 2 holds the globals, and
     /// `_LOADED` is `package.loaded`.
-    pub registry: Gc<Table>,
+    pub(crate) registry: Gc<Table>,
     /// What the host configured: output, warnings, compilers, limits,
     /// the interrupt flag, the locale provider and library state.
-    pub host: host::Host,
+    pub(crate) host: host::Host,
     /// The native functions: the table calls go through, how they are
     /// found again by name or type, and what their calls share.
     pub(crate) natives: native::Natives,
@@ -619,7 +620,7 @@ pub struct Runtime {
     /// Memory control: the collector's mode and parameters as
     /// `collectgarbage` sees them, finalizer bookkeeping, the memory
     /// limit's grace and the host's pinned values.
-    pub gc: GcState,
+    pub(crate) gc: GcState,
     /// The thread whose stack is `stack`.
     pub(crate) current: Gc<Thread>,
     pub(crate) main_thread: Gc<Thread>,
@@ -684,7 +685,7 @@ impl Extensions {
 
     /// The value of type `T`, if there is one.
     #[inline]
-    pub fn get<T: 'static>(&self) -> Option<&T> {
+    pub(crate) fn get<T: 'static>(&self) -> Option<&T> {
         let id = std::any::TypeId::of::<T>();
         self.entries
             .iter()
@@ -712,7 +713,7 @@ impl<T: Write + fmt::Debug> WriteDebug for T {
     }
 }
 
-impl Roots<LuaSpace> for Runtime {
+impl Roots<LuaSpace> for VmState {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         m.mark(self.globals);
         m.mark(self.registry);
@@ -746,13 +747,13 @@ impl Roots<LuaSpace> for Runtime {
 
 /// After the heap passes its limit and the script gets `not enough memory`,
 /// it may use up to `limit / LIMIT_GRACE` more to handle the error.
-pub const LIMIT_GRACE: usize = 8;
+pub(crate) const LIMIT_GRACE: usize = 8;
 
 /// A Lua virtual machine.
 #[derive(Debug)]
 pub struct Vm {
-    pub heap: LuaHeap,
-    pub rt: Runtime,
+    pub(crate) heap: LuaHeap,
+    pub(crate) rt: VmState,
 }
 
 impl Default for Vm {
@@ -770,7 +771,7 @@ impl Vm {
     }
 
     /// The main thread (`coroutine.running()` outside any coroutine).
-    pub fn main_thread(&self) -> Gc<crate::object::Thread> {
+    pub(crate) fn main_thread(&self) -> Gc<crate::object::Thread> {
         self.rt.main_thread
     }
 
@@ -789,7 +790,7 @@ impl Vm {
         let main_thread = heap.alloc(Thread::new(coro::Coroutine::main()));
         Vm {
             heap,
-            rt: Runtime {
+            rt: VmState {
                 strings,
                 globals,
                 registry,
@@ -824,13 +825,13 @@ impl Vm {
     /// The interrupt flag itself, for code that can only store to memory:
     /// a C signal handler (the C API's `lua_sethook`). Storing a nonzero
     /// byte does what [`Interrupt::request`] does. Valid as long as the VM.
-    pub fn interrupt_flag(&self) -> *mut bool {
+    pub(crate) fn interrupt_flag(&self) -> *mut bool {
         self.rt.host.interrupt_flag().as_ptr()
     }
 
     /// Lower the interrupt flag without raising `interrupted!` (an
     /// [`host::Host::set_interrupt_handler`] handler that handled it).
-    pub fn clear_interrupt(&mut self) {
+    pub(crate) fn clear_interrupt(&mut self) {
         self.rt.stack.hook.mask &= !hook::INTERRUPT;
         self.rt.host.clear_interrupt();
     }
@@ -838,7 +839,7 @@ impl Vm {
     /// Set the running stack's hook, as `debug.sethook` does: `mask` is
     /// [`hook::CALL`] and friends, `count` the count interval. A nil `f`
     /// or an empty mask with no count turns it off.
-    pub fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
+    pub(crate) fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
         self.rt.hooks.touch();
         self.rt.stack.hook.set(f, mask, count);
     }
@@ -889,7 +890,7 @@ impl Vm {
     /// use), and it lives as long as the VM: callers keep one per distinct
     /// `data`. The value is a plain native, so calling it takes the direct
     /// native path, without the frame a native closure costs.
-    pub fn register_native_with_data(
+    pub(crate) fn register_native_with_data(
         &mut self,
         name: &'static str,
         f: NativeFn,
@@ -901,7 +902,7 @@ impl Vm {
     /// The native registered for type `ty`, registering `f` as `name` for
     /// it the first time. For an embedder's natives, which are told apart by
     /// type rather than by name: one named `tostring` is not the built-in.
-    pub fn native_for_type(
+    pub(crate) fn native_for_type(
         &mut self,
         ty: std::any::TypeId,
         name: &'static str,
@@ -913,7 +914,7 @@ impl Vm {
     /// Give the native registered under `name` a [`FastFn`]: calls that want
     /// at most one result try it first. Returns false if no native has
     /// that name.
-    pub fn set_native_fast_path(&mut self, name: &str, fast: FastFn) -> bool {
+    pub(crate) fn set_native_fast_path(&mut self, name: &str, fast: FastFn) -> bool {
         match self.rt.natives.named(name) {
             Some(id) => {
                 self.rt.natives.get_mut(id).fast = Some(fast);
@@ -941,6 +942,16 @@ impl Vm {
         }
     }
 
+    /// `t[k]` (raw).
+    pub fn table_get(&self, t: Gc<Table>, k: Value) -> Value {
+        table::get(&self.heap, t, k)
+    }
+
+    /// A border of `t`, as the `#` operator gives without metamethods.
+    pub fn table_len(&self, t: Gc<Table>) -> i64 {
+        self.heap.get(t).border()
+    }
+
     /// Set a global.
     pub fn set_global(&mut self, name: &str, v: Value) {
         let k = self.new_str(name.as_bytes());
@@ -954,22 +965,6 @@ impl Vm {
         table::get(&self.heap, self.rt.globals, k)
     }
 
-    /// A new userdata holding `data`, with no metatable (unrooted until
-    /// stored somewhere Lua can reach, or pinned).
-    pub fn new_userdata<T: std::any::Any>(&mut self, data: T) -> Gc<UserData> {
-        self.heap.alloc(UserData::new(data))
-    }
-
-    /// The host value of userdata `u`, if it is a `T`.
-    pub fn userdata_ref<T: std::any::Any>(&self, u: Gc<UserData>) -> Option<&T> {
-        self.heap.get(u).downcast_ref()
-    }
-
-    /// The host value of userdata `u`, mutably, if it is a `T`.
-    pub fn userdata_mut<T: std::any::Any>(&mut self, u: Gc<UserData>) -> Option<&mut T> {
-        self.heap.get_mut(u).downcast_mut()
-    }
-
     /// Set (or clear) the metatable of table `t` or userdata `u`.
     /// Registers `v` for finalization when `meta` has a `__gc` field.
     pub fn set_metatable(&mut self, v: Value, meta: Option<Gc<Table>>) -> bool {
@@ -979,17 +974,17 @@ impl Vm {
     /// Keep `v` alive in a slot of its own until [`Vm::free_pin_slot`],
     /// returning the slot. Unlike [`Vm::pin`], slots can be freed in any
     /// order: they back the host API's long-lived handles.
-    pub fn pin_slot(&mut self, v: Value) -> u32 {
+    pub(crate) fn pin_slot(&mut self, v: Value) -> u32 {
         self.rt.gc.pin_slot(v)
     }
 
     /// The value in pin slot `slot`.
-    pub fn pin_slot_value(&self, slot: u32) -> Value {
+    pub(crate) fn pin_slot_value(&self, slot: u32) -> Value {
         self.rt.gc.pin_slot_value(slot)
     }
 
     /// Release pin slot `slot` for reuse.
-    pub fn free_pin_slot(&mut self, slot: u32) {
+    pub(crate) fn free_pin_slot(&mut self, slot: u32) {
         self.rt.gc.free_pin_slot(slot);
     }
 
@@ -999,8 +994,35 @@ impl Vm {
     }
 
     /// Release the most recent [`Vm::pin`] of `v`.
-    pub fn unpin(&mut self, v: Value) {
+    pub(crate) fn unpin(&mut self, v: Value) {
         self.rt.gc.unpin(v);
+    }
+
+    /// [`Vm::host`], to change the settings.
+    pub fn host_mut(&mut self) -> &mut host::Host {
+        &mut self.rt.host
+    }
+
+    /// Bytes of collectable memory in use.
+    pub fn heap_bytes(&self) -> usize {
+        self.heap.bytes()
+    }
+
+    /// Whether the collector is stopped (`collectgarbage("stop")`).
+    pub fn gc_stopped(&self) -> bool {
+        self.heap.is_stopped()
+    }
+
+    /// Stress mode: a full collection at every allocation, to find
+    /// objects that are reachable but not rooted.
+    pub fn set_gc_stress(&mut self, on: bool) {
+        self.heap.set_stress(on);
+    }
+
+    /// How often the heap checks its own invariants (debug builds).
+    #[cfg(debug_assertions)]
+    pub fn set_gc_verify(&mut self, verify: crate::object::Verify) {
+        self.heap.set_verify(verify);
     }
 
     /// The bytes of a string value.
@@ -1028,7 +1050,7 @@ impl Vm {
     }
 
     /// Flush `print` output.
-    pub fn flush(&mut self) -> std::io::Result<()> {
+    pub(crate) fn flush(&mut self) -> std::io::Result<()> {
         self.rt.host.out().flush()
     }
 

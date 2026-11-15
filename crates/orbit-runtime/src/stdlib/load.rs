@@ -9,9 +9,9 @@
 
 use crate::object::Value;
 use crate::vm::op::UnlinkedChunk;
-use crate::vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn, Runtime, Vm};
+use crate::vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn, VmState};
 
-pub use super::chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
+pub(super) use super::chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -64,17 +64,9 @@ pub fn load_chunk_in(
     load_chunk(ctx, bytes, source, &Mode(mode), env)
 }
 
-/// [`load_chunk`] for a host: load `bytes`, source text or a binary chunk,
-/// as a chunk named `source`, with the global table as its `_ENV`, as the
-/// standalone interpreter loads scripts. The function is unrooted.
-pub fn load_buffer(vm: &mut Vm, bytes: &[u8], source: &[u8]) -> Result<Value, String> {
-    let chunk = unlinked(&vm.rt, bytes, source, &Mode(b"bt"))?;
-    Ok(vm.load(&chunk))
-}
-
 /// Decode (and check) or compile `bytes`.
 fn unlinked(
-    rt: &Runtime,
+    rt: &VmState,
     bytes: &[u8],
     source: &[u8],
     mode: &Mode<'_>,

@@ -13,7 +13,7 @@ use orbit_gc::{Marker, Trace};
 use crate::object::LuaSpace;
 
 /// What the VM keeps in a [`Thread`].
-pub trait ThreadState: Any + fmt::Debug {
+pub(crate) trait ThreadState: Any + fmt::Debug {
     /// Mark every object the state refers to.
     fn trace(&self, m: &mut Marker<'_, LuaSpace>);
     /// Heap bytes the state owns, for the collector's accounting. When
@@ -29,14 +29,14 @@ pub trait ThreadState: Any + fmt::Debug {
 /// collector. (A `Box<dyn ThreadState>` would need trait upcasting, Rust
 /// 1.86, to downcast without an extra indirect call.)
 pub struct Thread {
-    pub state: Box<dyn Any>,
+    pub(crate) state: Box<dyn Any>,
     trace: fn(&dyn Any, &mut Marker<'_, LuaSpace>),
     extra_bytes: fn(&dyn Any) -> usize,
     debug: fn(&dyn Any, &mut fmt::Formatter<'_>) -> fmt::Result,
 }
 
 impl Thread {
-    pub fn new<S: ThreadState>(state: S) -> Self {
+    pub(crate) fn new<S: ThreadState>(state: S) -> Self {
         fn get<S: ThreadState>(a: &dyn Any) -> &S {
             a.downcast_ref().expect("a thread's state keeps its type")
         }

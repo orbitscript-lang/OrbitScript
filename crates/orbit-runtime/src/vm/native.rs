@@ -22,7 +22,7 @@ use crate::vm::{FrameKind, LuaError, Vm, ops};
 /// already pushed on the window; return
 /// `NativeReturn::CallThen { f, nargs, k, .. }` and take the result in `k`.
 #[derive(Debug, Clone, Copy)]
-pub enum Meta<T> {
+pub(crate) enum Meta<T> {
     Done(T),
     Call { f: Value, nargs: usize },
 }
@@ -30,7 +30,7 @@ pub enum Meta<T> {
 /// An operator for [`NativeCtx::arith`], in the C API's order
 /// (`LUA_OPADD` is 0 .. `LUA_OPBNOT` is 13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operator {
+pub(crate) enum Operator {
     Add,
     Sub,
     Mul,
@@ -56,11 +56,12 @@ pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 /// the result, or `None` to run the full native instead (wrong types,
 /// errors, anything unusual), so it never changes behavior. It cannot
 /// allocate, call back into Lua, or fail.
-pub type FastFn = fn(&crate::object::LuaHeap, &[Value]) -> Option<Value>;
+pub(crate) type FastFn = fn(&crate::object::LuaHeap, &[Value]) -> Option<Value>;
 
 /// What a native does after a call it requested with
 /// [`NativeReturn::CallThen`] finishes.
-pub type Continuation = fn(&mut NativeCtx<'_>, CallOutcome) -> Result<NativeReturn, LuaError>;
+pub(crate) type Continuation =
+    fn(&mut NativeCtx<'_>, CallOutcome) -> Result<NativeReturn, LuaError>;
 
 /// How a requested call ended.
 #[derive(Debug, Clone, Copy)]
@@ -285,15 +286,10 @@ pub struct NativeCtx<'a> {
 }
 
 impl NativeCtx<'_> {
-    /// The running native's index in the registry.
-    pub fn native_id(&self) -> NativeId {
-        self.id
-    }
-
     /// The data the running native was registered with
     /// ([`Vm::register_native_with_data`](crate::vm::Vm::register_native_with_data)).
     #[inline]
-    pub fn native_data(&self) -> [u64; 2] {
+    pub(crate) fn native_data(&self) -> [u64; 2] {
         self.vm.rt.natives.get(self.id).data
     }
 
@@ -318,7 +314,7 @@ impl NativeCtx<'_> {
     /// Where the window starts on its stack: tells this activation from
     /// others on the same thread, for state kept across continuations.
     #[inline]
-    pub fn window_start(&self) -> usize {
+    pub(crate) fn window_start(&self) -> usize {
         self.base
     }
 
@@ -335,7 +331,7 @@ impl NativeCtx<'_> {
 
     /// Window slot `i` (argument `i` until the native changes it), or nil.
     #[inline]
-    pub fn arg(&self, i: usize) -> Value {
+    pub(crate) fn arg(&self, i: usize) -> Value {
         let at = self.base + i;
         if at < self.vm.rt.top {
             self.vm.rt.stack.regs[at]
@@ -347,7 +343,7 @@ impl NativeCtx<'_> {
     /// A count or position a native saved in window slot `i` as an
     /// integer, for its continuation to pick up; 0 if the slot holds
     /// anything else.
-    pub fn saved_usize(&self, i: usize) -> usize {
+    pub(crate) fn saved_usize(&self, i: usize) -> usize {
         match self.arg(i) {
             Value::Int(n) => n as usize,
             _ => 0,
@@ -356,7 +352,7 @@ impl NativeCtx<'_> {
 
     /// Overwrite window slot `i`, growing the window with nils if needed.
     #[inline]
-    pub fn set(&mut self, i: usize, v: Value) {
+    pub(crate) fn set(&mut self, i: usize, v: Value) {
         let at = self.base + i;
         self.vm.rt.stack.dirty_to = self.vm.rt.stack.dirty_to.max(at + 1);
         if at >= self.vm.rt.top {
@@ -377,7 +373,7 @@ impl NativeCtx<'_> {
     }
 
     /// Insert `v` at window slot `i`, shifting the rest up.
-    pub fn insert(&mut self, i: usize, v: Value) {
+    pub(crate) fn insert(&mut self, i: usize, v: Value) {
         let at = self.base + i;
         self.vm.rt.top = self.vm.rt.stack.insert(at, self.vm.rt.top, v);
     }
@@ -390,14 +386,14 @@ impl NativeCtx<'_> {
     }
 
     /// Shrink the window to `len` values.
-    pub fn truncate(&mut self, len: usize) {
+    pub(crate) fn truncate(&mut self, len: usize) {
         self.vm.rt.top = self.vm.rt.top.min(self.base + len);
     }
 
     /// Mark window slot `i` to be closed when the window shrinks below it
     /// or the native returns or fails, as the C API's `lua_toclose` does.
     /// Nil and false need no closing; anything else needs a `__close`.
-    pub fn to_be_closed(&mut self, i: usize) -> Result<(), LuaError> {
+    pub(crate) fn mark_to_be_closed(&mut self, i: usize) -> Result<(), LuaError> {
         let v = self.arg(i);
         if matches!(v, Value::Nil | Value::Bool(false)) {
             return Ok(());
@@ -410,7 +406,7 @@ impl NativeCtx<'_> {
     }
 
     /// Whether window slot `i` is the newest variable marked to be closed.
-    pub fn is_newest_to_be_closed(&self, i: usize) -> bool {
+    pub(crate) fn is_newest_to_be_closed(&self, i: usize) -> bool {
         self.vm.rt.stack.aux.tbc.last() == Some(&((self.base + i) as u32))
     }
 
@@ -418,7 +414,7 @@ impl NativeCtx<'_> {
     /// above, newest first: each one's `__close(value)`, with no error
     /// argument as lua5.5 calls it (lua5.4 passes nil). An error a
     /// handler raises stops it; the rest close as that error unwinds.
-    pub fn close_from(&mut self, from: usize) -> Result<(), LuaError> {
+    pub(crate) fn close_from(&mut self, from: usize) -> Result<(), LuaError> {
         let at = self.base + from;
         while let Some(&t) = self.vm.rt.stack.aux.tbc.last() {
             if (t as usize) < at {
@@ -444,7 +440,7 @@ impl NativeCtx<'_> {
     }
 
     /// The window's values.
-    pub fn window(&self) -> &[Value] {
+    pub(crate) fn window(&self) -> &[Value] {
         &self.vm.rt.stack.regs[self.base..self.vm.rt.top]
     }
 
@@ -551,7 +547,7 @@ impl NativeCtx<'_> {
     /// The function value of a native registered under `name`, registering
     /// `f` under that name the first time. For natives that return other
     /// natives (`pairs` returns `next`).
-    pub fn native(&mut self, name: &'static str, f: NativeFn) -> Value {
+    pub(crate) fn native(&mut self, name: &'static str, f: NativeFn) -> Value {
         match self.vm.rt.natives.named(name) {
             Some(id) => Value::Native(id),
             None => self.vm.register_native(name, f),
@@ -564,12 +560,12 @@ impl NativeCtx<'_> {
     }
 
     /// A string value from owned bytes.
-    pub fn new_str_owned(&mut self, bytes: Vec<u8>) -> Value {
+    pub(crate) fn new_str_owned(&mut self, bytes: Vec<u8>) -> Value {
         Value::Str(self.vm.rt.strings.new_str_owned(&mut self.vm.heap, bytes))
     }
 
     /// A string value with bytes `a..b` of `s`, copied straight from it.
-    pub fn new_substr(&mut self, s: Gc<LuaStr>, a: usize, b: usize) -> Value {
+    pub(crate) fn new_substr(&mut self, s: Gc<LuaStr>, a: usize, b: usize) -> Value {
         Value::Str(self.vm.rt.strings.new_substr(&mut self.vm.heap, s, a, b))
     }
 
@@ -578,7 +574,7 @@ impl NativeCtx<'_> {
     /// [`NativeCtx::give_buf`]; one that is dropped instead (on an error,
     /// or by a nested native that took it first) only costs an allocation.
     #[inline]
-    pub fn take_buf(&mut self) -> Vec<u8> {
+    pub(crate) fn take_buf(&mut self) -> Vec<u8> {
         self.vm.rt.natives.take_scratch()
     }
 
@@ -586,13 +582,13 @@ impl NativeCtx<'_> {
     /// large buffers are freed instead, so one huge result doesn't stay
     /// allocated.
     #[inline]
-    pub fn give_buf(&mut self, b: Vec<u8>) {
+    pub(crate) fn give_buf(&mut self, b: Vec<u8>) {
         self.vm.rt.natives.give_scratch(b);
     }
 
     /// A string value from a buffer taken with [`NativeCtx::take_buf`],
     /// which goes back for reuse (or, if large, becomes the string's bytes).
-    pub fn new_str_buf(&mut self, b: Vec<u8>) -> Value {
+    pub(crate) fn new_str_buf(&mut self, b: Vec<u8>) -> Value {
         if b.len() > SCRATCH_KEEP {
             return self.new_str_owned(b);
         }
@@ -601,36 +597,37 @@ impl NativeCtx<'_> {
         v
     }
 
-    /// Link a compiled chunk, as [`Vm::load_with_env`](crate::vm::Vm::load_with_env)
-    /// does. The function is unrooted until stored in the window.
+    /// Link a compiled chunk, as [`Vm::load`](crate::vm::Vm::load) does, with
+    /// `env` as the main function's first capture. The function is unrooted
+    /// until stored in the window.
     pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
         crate::vm::link::link(&mut self.vm.heap, &mut self.vm.rt, chunk, env, false)
     }
 
     /// A new table (unrooted until stored in the window).
-    pub fn new_table(&mut self, t: Table) -> Gc<Table> {
+    pub(crate) fn new_table(&mut self, t: Table) -> Gc<Table> {
         self.vm.heap.alloc(t)
     }
 
     /// Bytes of a string.
-    pub fn bytes(&self, s: Gc<LuaStr>) -> &[u8] {
+    pub(crate) fn bytes(&self, s: Gc<LuaStr>) -> &[u8] {
         self.vm.heap.get(s).as_bytes()
     }
 
     /// A NUL-terminated copy of string `s` for C, which stays valid for as
     /// long as `s` is alive ([`CStrings`](crate::object::CStrings)).
-    pub fn c_string(&mut self, s: Gc<LuaStr>) -> *const u8 {
+    pub(crate) fn c_string(&mut self, s: Gc<LuaStr>) -> *const u8 {
         let bytes = self.vm.heap.get(s).as_bytes();
         self.vm.rt.c_strings.copy_of(s, bytes)
     }
 
     /// The isolate's locale.
-    pub fn locale(&self) -> &Locale {
+    pub(crate) fn locale(&self) -> &Locale {
         &self.vm.rt.metas.locale
     }
 
     /// `tostring` without metamethods, appended to `out`.
-    pub fn display(&self, v: Value, out: &mut Vec<u8>) {
+    pub(crate) fn display(&self, v: Value, out: &mut Vec<u8>) {
         ops::display(&self.vm.heap, &self.vm.rt, v, out);
     }
 
@@ -640,7 +637,7 @@ impl NativeCtx<'_> {
     /// `upvals` as its upvalues ([`NativeCtx::upvalue`]). It is a closure
     /// whose prototype is a one-instruction stub, so calling it is an
     /// ordinary Lua call.
-    pub fn new_closure(
+    pub(crate) fn new_closure(
         &mut self,
         name: &'static str,
         f: crate::vm::NativeFn,
@@ -653,7 +650,7 @@ impl NativeCtx<'_> {
     /// see or change through the debug library, for state a native must be
     /// able to trust ([`NativeCtx::hidden_upvalue`]). Every closure of `f`
     /// has the same number of hidden upvalues.
-    pub fn new_closure_hidden(
+    pub(crate) fn new_closure_hidden(
         &mut self,
         name: &'static str,
         f: crate::vm::NativeFn,
@@ -668,7 +665,7 @@ impl NativeCtx<'_> {
 
     /// [`NativeCtx::new_closure_hidden`] for the native already registered
     /// as `id`, for natives not looked up by name (an embedder's).
-    pub fn new_native_closure(
+    pub(crate) fn new_native_closure(
         &mut self,
         id: NativeId,
         upvals: &[Value],
@@ -706,7 +703,7 @@ impl NativeCtx<'_> {
     /// Hidden upvalue `i` of the native closure being called (nil outside
     /// one); see [`NativeCtx::new_closure_hidden`].
     #[inline]
-    pub fn hidden_upvalue(&self, i: usize) -> Value {
+    pub(crate) fn hidden_upvalue(&self, i: usize) -> Value {
         let Some(c) = self.upvals else {
             return Value::Nil;
         };
@@ -720,7 +717,7 @@ impl NativeCtx<'_> {
 
     /// The native behind function `f`: `f` itself, or the native a native
     /// closure runs. `None` for Lua functions and other values.
-    pub fn native_of(&self, f: Value) -> Option<NativeId> {
+    pub(crate) fn native_of(&self, f: Value) -> Option<NativeId> {
         match f {
             Value::Native(id) => Some(id),
             Value::Closure(c) => {
@@ -735,7 +732,7 @@ impl NativeCtx<'_> {
     }
 
     /// Hidden upvalue `i` of native closure `f` (nil if it has none).
-    pub fn hidden_upvalue_of(&self, f: Value, i: usize) -> Value {
+    pub(crate) fn hidden_upvalue_of(&self, f: Value, i: usize) -> Value {
         let Value::Closure(c) = f else {
             return Value::Nil;
         };
@@ -749,7 +746,7 @@ impl NativeCtx<'_> {
     }
 
     /// How many visible upvalues the native closure being called has.
-    pub fn upvalue_count(&self) -> usize {
+    pub(crate) fn upvalue_count(&self) -> usize {
         match self.upvals {
             Some(c) => {
                 self.vm.heap.get(c).captures.len() - self.vm.rt.natives.get(self.id).hidden as usize
@@ -760,7 +757,7 @@ impl NativeCtx<'_> {
 
     /// Upvalue `i` of the native closure being called, or whose
     /// continuation is running (nil outside one).
-    pub fn upvalue(&self, i: usize) -> Value {
+    pub(crate) fn upvalue(&self, i: usize) -> Value {
         match self.upvals {
             Some(c) => match self.vm.heap.get(c).captures.get(i) {
                 Some(&cell) => self.vm.heap.get(cell).value,
@@ -771,7 +768,7 @@ impl NativeCtx<'_> {
     }
 
     /// Set upvalue `i` of the native closure being called.
-    pub fn set_upvalue(&mut self, i: usize, v: Value) {
+    pub(crate) fn set_upvalue(&mut self, i: usize, v: Value) {
         if let Some(c) = self.upvals {
             if let Some(&cell) = self.vm.heap.get(c).captures.get(i) {
                 self.vm.heap.update(cell, |cell| cell.value = v);
@@ -783,7 +780,7 @@ impl NativeCtx<'_> {
 
     /// `chunk:line: ` for the function at `level` (1 is the caller of this
     /// native), or empty if it isn't a Lua function.
-    pub fn where_(&self, level: usize) -> String {
+    pub(crate) fn where_(&self, level: usize) -> String {
         self.vm
             .rt
             .where_(&self.vm.heap, Some(self.running_native()), level)
@@ -808,7 +805,7 @@ impl NativeCtx<'_> {
     /// Room for `n` more values on the stack, or the error
     /// `stack overflow (<what>)` (`luaL_checkstack`'s), for a native that
     /// returns as many values as its arguments ask for.
-    pub fn check_room(&mut self, n: usize, what: &str) -> Result<(), LuaError> {
+    pub(crate) fn check_room(&mut self, n: usize, what: &str) -> Result<(), LuaError> {
         let room = self.vm.rt.host.max_stack().saturating_sub(self.vm.rt.top);
         if n > room {
             return Err(self.error(&format!("stack overflow ({what})")));
@@ -821,7 +818,7 @@ impl NativeCtx<'_> {
     // Out of line: inlined into each `error` instantiation it adds about
     // 12 KB of code.
     #[inline(never)]
-    pub fn positioned(&mut self, msg: &[u8]) -> Value {
+    pub(crate) fn positioned(&mut self, msg: &[u8]) -> Value {
         let mut text = self.where_(1).into_bytes();
         text.extend_from_slice(msg);
         self.new_str_owned(text)
@@ -829,19 +826,19 @@ impl NativeCtx<'_> {
 
     /// Lua's "not enough memory" error, which has no position.
     #[cold]
-    pub fn no_memory(&mut self) -> LuaError {
+    pub(crate) fn no_memory(&mut self) -> LuaError {
         LuaError::new(self.new_str(crate::object::NoMemory::MESSAGE.as_bytes()))
     }
 
     /// An error whose value is `v`, unchanged.
-    pub fn error_value(&self, v: Value) -> LuaError {
+    pub(crate) fn error_value(&self, v: Value) -> LuaError {
         LuaError::new(v)
     }
 
     /// How the call site names this function, and whether it was a method
     /// call. Falls back to the name a loaded module gives it, then to the
     /// registered name.
-    pub fn call_name(&self) -> (Vec<u8>, bool) {
+    pub(crate) fn call_name(&self) -> (Vec<u8>, bool) {
         let me = match self.upvals {
             Some(c) => Value::Closure(c),
             None => Value::Native(self.id),
@@ -984,7 +981,7 @@ impl NativeCtx<'_> {
     }
 
     /// `bad argument #i to 'name' (msg)`, for 0-based argument `i`.
-    pub fn arg_error<'m>(&mut self, i: usize, msg: impl Into<OrbitStr<'m>>) -> LuaError {
+    pub(crate) fn arg_error<'m>(&mut self, i: usize, msg: impl Into<OrbitStr<'m>>) -> LuaError {
         self.arg_error_str(i, msg.into())
     }
 
@@ -999,7 +996,7 @@ impl NativeCtx<'_> {
     /// `bad argument` for a wrong type. What it got is what window slot
     /// `i` holds now, as in Lua, where a C function's arguments are its
     /// stack slots: "no value" only past the top.
-    pub fn type_error(&mut self, i: usize, expected: &str) -> LuaError {
+    pub(crate) fn type_error(&mut self, i: usize, expected: &str) -> LuaError {
         let v = (i < self.len()).then(|| self.arg(i));
         let got = self.arg_type_name(v);
         self.arg_error(i, &arg_errors::type_mismatch(expected, &got))
@@ -1024,7 +1021,7 @@ impl NativeCtx<'_> {
     }
 
     /// A string argument; numbers are converted (in place, as Lua does).
-    pub fn check_str(&mut self, i: usize) -> Result<Gc<LuaStr>, LuaError> {
+    pub(crate) fn check_str(&mut self, i: usize) -> Result<Gc<LuaStr>, LuaError> {
         match self.arg(i) {
             Value::Str(s) => Ok(s),
             v @ (Value::Int(_) | Value::Float(_)) if i < self.nargs => {
@@ -1039,7 +1036,7 @@ impl NativeCtx<'_> {
     }
 
     /// A number argument (strings convertible to numbers are accepted).
-    pub fn check_number(&mut self, i: usize) -> Result<Value, LuaError> {
+    pub(crate) fn check_number(&mut self, i: usize) -> Result<Value, LuaError> {
         match self.arg(i) {
             v @ (Value::Int(_) | Value::Float(_)) => Ok(v),
             Value::Str(s) => match self
@@ -1059,7 +1056,7 @@ impl NativeCtx<'_> {
     /// The integer `v` converts to, as Lua's integer arguments convert: an
     /// integer, a float with an integral value, or a string that reads as
     /// either.
-    pub fn to_integer(&self, v: Value) -> Option<i64> {
+    pub(crate) fn to_integer(&self, v: Value) -> Option<i64> {
         let n = match v {
             Value::Str(s) => self
                 .vm
@@ -1077,12 +1074,12 @@ impl NativeCtx<'_> {
     }
 
     /// A float argument.
-    pub fn check_f64(&mut self, i: usize) -> Result<f64, LuaError> {
+    pub(crate) fn check_f64(&mut self, i: usize) -> Result<f64, LuaError> {
         Ok(self.check_number(i)?.as_f64().unwrap_or(0.0))
     }
 
     /// An integer argument (floats with an integral value are accepted).
-    pub fn check_int(&mut self, i: usize) -> Result<i64, LuaError> {
+    pub(crate) fn check_int(&mut self, i: usize) -> Result<i64, LuaError> {
         match self.check_number(i)? {
             Value::Int(n) => Ok(n),
             Value::Float(f) => match float_to_int(f) {
@@ -1094,7 +1091,7 @@ impl NativeCtx<'_> {
     }
 
     /// An optional integer argument.
-    pub fn opt_int(&mut self, i: usize, default: i64) -> Result<i64, LuaError> {
+    pub(crate) fn opt_int(&mut self, i: usize, default: i64) -> Result<i64, LuaError> {
         if self.arg(i).is_nil() {
             Ok(default)
         } else {
@@ -1103,7 +1100,7 @@ impl NativeCtx<'_> {
     }
 
     /// A function argument.
-    pub fn check_function(&mut self, i: usize) -> Result<Value, LuaError> {
+    pub(crate) fn check_function(&mut self, i: usize) -> Result<Value, LuaError> {
         match self.arg(i) {
             f @ (Value::Closure(_) | Value::Native(_)) => Ok(f),
             _ => Err(self.type_error(i, "function")),
@@ -1121,12 +1118,12 @@ impl NativeCtx<'_> {
     // ---- metatables ------------------------------------------------------
 
     /// The metatable of `v`, if any.
-    pub fn metatable(&self, v: Value) -> Option<Gc<Table>> {
+    pub(crate) fn metatable(&self, v: Value) -> Option<Gc<Table>> {
         self.vm.rt.metatable(&self.vm.heap, v)
     }
 
     /// Field `e` of `v`'s metatable (raw), or nil.
-    pub fn metamethod(&self, v: Value, e: MetaField) -> Value {
+    pub(crate) fn metamethod(&self, v: Value, e: MetaField) -> Value {
         self.vm.rt.metamethod(&self.vm.heap, v, e)
     }
 
@@ -1157,7 +1154,7 @@ impl NativeCtx<'_> {
     }
 
     /// `obj[key]` with metamethods.
-    pub fn index(&mut self, obj: Value, key: Value) -> Result<Meta<Value>, LuaError> {
+    pub(crate) fn index(&mut self, obj: Value, key: Value) -> Result<Meta<Value>, LuaError> {
         let r = match obj {
             Value::Table(t) => {
                 let tab = self.vm.heap.get(t);
@@ -1174,25 +1171,30 @@ impl NativeCtx<'_> {
     }
 
     /// `obj[key] = v` with metamethods.
-    pub fn set_index(&mut self, obj: Value, key: Value, v: Value) -> Result<Meta<()>, LuaError> {
+    pub(crate) fn set_index(
+        &mut self,
+        obj: Value,
+        key: Value,
+        v: Value,
+    ) -> Result<Meta<()>, LuaError> {
         let r = meta::new_index(&mut self.vm.heap, &self.vm.rt.metas, obj, key, v);
         self.meta_result(r)
     }
 
     /// `#v` with `__len`.
-    pub fn length(&mut self, v: Value) -> Result<Meta<Value>, LuaError> {
+    pub(crate) fn length(&mut self, v: Value) -> Result<Meta<Value>, LuaError> {
         let r = crate::vm::cold::op_len(&self.vm.heap, &self.vm.rt.metas, v);
         self.meta_result(r)
     }
 
     /// `a < b` with `__lt`.
-    pub fn less_than(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
+    pub(crate) fn less_than(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
         let r = ops::less_than(&self.vm.heap, &self.vm.rt.metas, a, b);
         self.meta_result(r)
     }
 
     /// `a == b` with `__eq`.
-    pub fn equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
+    pub(crate) fn equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
         let r = ops::equal(&self.vm.heap, &self.vm.rt.metas, a, b);
         self.meta_result(r)
     }
@@ -1200,14 +1202,14 @@ impl NativeCtx<'_> {
     /// `a <= b` with `__le`. In a Lua 5.4 build, when [`Self::le_via_lt`]
     /// says so, a [`Meta::Call`] here is `__lt` for `b < a`, whose result
     /// must be negated.
-    pub fn less_equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
+    pub(crate) fn less_equal(&mut self, a: Value, b: Value) -> Result<Meta<bool>, LuaError> {
         let r = ops::less_equal(&self.vm.heap, &self.vm.rt.metas, a, b);
         self.meta_result(r)
     }
 
     /// Whether [`Self::less_equal`] answers through `__lt` and a negation
     /// (Lua 5.4's 5.3 compatibility, ADR-14). Never in a 5.5 build.
-    pub fn le_via_lt(&self, a: Value, b: Value) -> bool {
+    pub(crate) fn le_via_lt(&self, a: Value, b: Value) -> bool {
         let (heap, metas) = (&self.vm.heap, &self.vm.rt.metas);
         LUA.is_5_4()
             && !matches!(
@@ -1223,7 +1225,12 @@ impl NativeCtx<'_> {
 
     /// `a op b` (for the unary operators, `a` alone) with metamethods, as
     /// the C API's `lua_arith` does it.
-    pub fn arith(&mut self, op: Operator, a: Value, b: Value) -> Result<Meta<Value>, LuaError> {
+    pub(crate) fn arith(
+        &mut self,
+        op: Operator,
+        a: Value,
+        b: Value,
+    ) -> Result<Meta<Value>, LuaError> {
         use orbit_bytecode::number::BitOp;
         let (heap, metas) = (&self.vm.heap, &self.vm.rt.metas);
         let r = match op {
@@ -1246,7 +1253,7 @@ impl NativeCtx<'_> {
     }
 
     /// `a .. b` with `__concat`.
-    pub fn concat(&mut self, a: Value, b: Value) -> Result<Meta<Value>, LuaError> {
+    pub(crate) fn concat(&mut self, a: Value, b: Value) -> Result<Meta<Value>, LuaError> {
         let mut out = Vec::new();
         let heap = &self.vm.heap;
         let locale = &self.vm.rt.metas.locale;
@@ -1279,33 +1286,26 @@ impl NativeCtx<'_> {
     // ---- userdata --------------------------------------------------------
 
     /// The host value of userdata `u`, if it is a `T`.
-    pub fn userdata_ref<T: std::any::Any>(&self, u: Gc<crate::object::UserData>) -> Option<&T> {
+    pub(crate) fn userdata_ref<T: std::any::Any>(
+        &self,
+        u: Gc<crate::object::UserData>,
+    ) -> Option<&T> {
         self.vm.heap.get(u).downcast_ref()
     }
 
     /// The host value of userdata `u`, mutably, if it is a `T`.
-    pub fn userdata_mut<T: std::any::Any>(
+    pub(crate) fn userdata_mut<T: std::any::Any>(
         &mut self,
         u: Gc<crate::object::UserData>,
     ) -> Option<&mut T> {
         self.vm.heap.get_mut(u).downcast_mut()
     }
 
-    /// A userdata argument holding a `T`; `name` is the type the message
-    /// names (`FILE*`).
-    pub fn check_userdata<T: std::any::Any>(
-        &mut self,
-        i: usize,
-        name: &str,
-    ) -> Result<Gc<crate::object::UserData>, LuaError> {
-        match self.arg(i) {
-            Value::UserData(u) if self.vm.heap.get(u).is::<T>() => Ok(u),
-            _ => Err(self.type_error(i, name)),
-        }
-    }
-
     /// A new userdata (unrooted until stored in the window).
-    pub fn new_userdata<T: std::any::Any>(&mut self, data: T) -> Gc<crate::object::UserData> {
+    pub(crate) fn new_userdata<T: std::any::Any>(
+        &mut self,
+        data: T,
+    ) -> Gc<crate::object::UserData> {
         self.vm.heap.alloc(crate::object::UserData::new(data))
     }
 
@@ -1314,7 +1314,7 @@ impl NativeCtx<'_> {
     /// in full first if needed; `not enough memory` if there still isn't.
     /// Call it before a large allocation, with every live value in the
     /// window.
-    pub fn reserve(&mut self, bytes: usize) -> Result<(), LuaError> {
+    pub(crate) fn reserve(&mut self, bytes: usize) -> Result<(), LuaError> {
         if self.vm.heap.would_exceed(bytes) {
             if !self.vm.rt.gc.finalizing() {
                 self.full_collect();
@@ -1328,7 +1328,7 @@ impl NativeCtx<'_> {
 
     /// One generational collection (`collectgarbage("step")`): true if it
     /// was a major one.
-    pub fn gen_step(&mut self) -> bool {
+    pub(crate) fn gen_step(&mut self) -> bool {
         let top = self.vm.rt.top;
         self.vm.rt.stack.regs.truncate(top);
         self.vm.heap.step_with(&mut self.vm.rt, 0)

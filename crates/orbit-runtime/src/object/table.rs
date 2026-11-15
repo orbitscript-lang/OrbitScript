@@ -23,7 +23,7 @@ use crate::object::{LuaHeap, LuaSpace, LuaStr, MetaField, NoMemory, Value, gc, n
 
 /// Why a value can't be a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyError {
+pub(crate) enum KeyError {
     /// `table index is nil`
     Nil,
     /// `table index is NaN`
@@ -31,7 +31,7 @@ pub enum KeyError {
 }
 
 impl KeyError {
-    pub fn message(self) -> &'static str {
+    pub(crate) fn message(self) -> &'static str {
         match self {
             KeyError::Nil => "table index is nil",
             KeyError::NaN => "table index is NaN",
@@ -41,14 +41,14 @@ impl KeyError {
 
 /// Why a [`set`] stored nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StoreError {
+pub(crate) enum StoreError {
     Key(KeyError),
     /// Growing the table failed.
     NoMemory,
 }
 
 impl StoreError {
-    pub fn message(self) -> &'static str {
+    pub(crate) fn message(self) -> &'static str {
         match self {
             StoreError::Key(e) => e.message(),
             StoreError::NoMemory => NoMemory::MESSAGE,
@@ -70,11 +70,11 @@ impl From<NoMemory> for StoreError {
 
 /// The key passed to `next` is not in the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidKey;
+pub(crate) struct InvalidKey;
 
 /// A normalised key with its hash.
 #[derive(Debug, Clone, Copy)]
-pub struct Key {
+pub(crate) struct Key {
     value: Value,
     hash: u32,
 }
@@ -83,7 +83,7 @@ impl Key {
     /// Normalise `v` (a float with an integer value becomes an integer) and
     /// hash it.
     #[inline]
-    pub fn new(heap: &LuaHeap, v: Value) -> Result<Key, KeyError> {
+    pub(crate) fn new(heap: &LuaHeap, v: Value) -> Result<Key, KeyError> {
         Ok(Key::hashed(heap, normalise(v)?))
     }
 
@@ -102,7 +102,7 @@ impl Key {
 
     /// The key for a string, without the float normalisation step.
     #[inline]
-    pub fn str(heap: &LuaHeap, s: Gc<LuaStr>) -> Key {
+    pub(crate) fn str(heap: &LuaHeap, s: Gc<LuaStr>) -> Key {
         Key {
             value: Value::Str(s),
             hash: heap.get(s).hash(),
@@ -111,7 +111,7 @@ impl Key {
 
     /// The key for a string whose hash is already known.
     #[inline]
-    pub fn str_hashed(s: Gc<LuaStr>, hash: u32) -> Key {
+    pub(crate) fn str_hashed(s: Gc<LuaStr>, hash: u32) -> Key {
         Key {
             value: Value::Str(s),
             hash,
@@ -119,14 +119,14 @@ impl Key {
     }
 
     #[inline]
-    pub fn int(i: i64) -> Key {
+    pub(crate) fn int(i: i64) -> Key {
         Key {
             value: Value::Int(i),
             hash: hash_word(i as u64 ^ ((Tag::Int as u64) << 56)),
         }
     }
 
-    pub fn value(&self) -> Value {
+    pub(crate) fn value(&self) -> Value {
         self.value
     }
 }
@@ -271,7 +271,7 @@ impl Entry {
 
 /// Where a store goes, from [`Table::find_slot`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Slot {
+pub(crate) enum Slot {
     /// Array index (0-based).
     Array(usize),
     /// Appends to the array part.
@@ -306,7 +306,7 @@ pub struct Table {
     /// value of that field is nil.
     absent_meta: Cell<u16>,
     /// The metatable. A string `__mode` in it makes the table weak.
-    pub meta: Option<Gc<Table>>,
+    pub(crate) meta: Option<Gc<Table>>,
 }
 
 impl Trace<LuaSpace> for Table {
@@ -463,7 +463,7 @@ impl Table {
     /// `t[name]` (raw) for a string key given by its bytes and hash, reading
     /// key strings through `str_of`. Needs no interner, so the collector can
     /// use it while tracing.
-    pub fn get_by_bytes<'a>(
+    pub(crate) fn get_by_bytes<'a>(
         &self,
         name: &[u8],
         hash: u32,
@@ -502,7 +502,7 @@ impl Table {
     /// the key like an inline cache, so stores, removals and rebuilds need
     /// not maintain it: a stale one costs a probe, which refills it.
     #[inline]
-    pub fn meta_field(&self, heap: &LuaHeap, e: MetaField, name: Gc<LuaStr>) -> Value {
+    pub(crate) fn meta_field(&self, heap: &LuaHeap, e: MetaField, name: Gc<LuaStr>) -> Value {
         debug_assert_eq!(heap.get(name).as_bytes(), e.field().as_bytes());
         if self.absent_meta.get() & e.bit() != 0 {
             return Value::Nil;
@@ -555,7 +555,7 @@ impl Table {
 
     /// [`Table::meta_field`] without the interner, reading key strings
     /// through `str_of`, so the collector can use it while tracing.
-    pub fn meta_field_by_bytes<'a>(
+    pub(crate) fn meta_field_by_bytes<'a>(
         &self,
         e: MetaField,
         str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
@@ -582,7 +582,7 @@ impl Table {
 
 /// Mark whatever `v` references.
 #[inline]
-pub fn mark(m: &mut Marker<'_, LuaSpace>, v: Value) {
+pub(crate) fn mark(m: &mut Marker<'_, LuaSpace>, v: Value) {
     match v {
         Value::Str(s) => m.mark(s),
         Value::Table(t) => m.mark(t),
@@ -594,13 +594,13 @@ pub fn mark(m: &mut Marker<'_, LuaSpace>, v: Value) {
 }
 
 impl Table {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Table::default()
     }
 
     /// A table with room for `array` array slots and `hash` hash entries.
     /// For sizes a program controls, use [`Table::try_with_capacity`].
-    pub fn with_capacity(array: usize, hash: usize) -> Self {
+    pub(crate) fn with_capacity(array: usize, hash: usize) -> Self {
         Table::try_with_capacity(array, hash).unwrap_or_else(|_| {
             crate::object::mem::abort(
                 array
@@ -611,7 +611,7 @@ impl Table {
     }
 
     /// [`Table::with_capacity`], or [`NoMemory`].
-    pub fn try_with_capacity(array: usize, hash: usize) -> Result<Self, NoMemory> {
+    pub(crate) fn try_with_capacity(array: usize, hash: usize) -> Result<Self, NoMemory> {
         let mut t = Table {
             array: ArrayPart::with_capacity(array)?,
             ..Table::default()
@@ -628,7 +628,7 @@ impl Table {
     /// stores that built it, which stalls the CPU, so the VM allocates
     /// `Table::new()` (all constants) and sizes it in place. Use through
     /// [`Heap::update`](orbit_gc::Heap::update), which charges the bytes.
-    pub fn presize(&mut self, array: usize, hash: usize) {
+    pub(crate) fn presize(&mut self, array: usize, hash: usize) {
         debug_assert!(self.array.cap() == 0 && self.entries.is_empty());
         let fail = || -> ! {
             crate::object::mem::abort(
@@ -645,9 +645,10 @@ impl Table {
         }
     }
 
+    #[cfg(test)]
     /// Length of the array part.
     #[inline(always)]
-    pub fn array_len(&self) -> usize {
+    pub(crate) fn array_len(&self) -> usize {
         self.array.len()
     }
 
@@ -658,7 +659,7 @@ impl Table {
 
     /// `t[i]` for an integer key.
     #[inline]
-    pub fn get_int(&self, i: i64) -> Value {
+    pub(crate) fn get_int(&self, i: i64) -> Value {
         let idx = (i as u64).wrapping_sub(1);
         if idx < self.array.len() as u64 {
             return self.array_get(idx as usize);
@@ -677,7 +678,7 @@ impl Table {
     /// value; otherwise returns false and leaves `out` alone, so a caller
     /// whose `out` aliases its operands still has them for the slow path.
     #[inline(always)]
-    pub fn read_int_present(&self, i: i64, out: &mut Value) -> bool {
+    pub(crate) fn read_int_present(&self, i: i64, out: &mut Value) -> bool {
         let idx = (i as u64).wrapping_sub(1);
         let Some((b, p)) = self.array.live(idx) else {
             return false;
@@ -699,7 +700,7 @@ impl Table {
 
     /// `t[s]` for a string key.
     #[inline]
-    pub fn get_str(&self, heap: &LuaHeap, s: Gc<LuaStr>) -> Value {
+    pub(crate) fn get_str(&self, heap: &LuaHeap, s: Gc<LuaStr>) -> Value {
         if self.used == 0 {
             return Value::Nil;
         }
@@ -712,7 +713,7 @@ impl Table {
     /// The hash slot holding string key `key`, if present (for inline
     /// caches that already know the key's hash).
     #[inline]
-    pub fn find_str_key(&self, heap: &LuaHeap, key: &Key) -> Option<usize> {
+    pub(crate) fn find_str_key(&self, heap: &LuaHeap, key: &Key) -> Option<usize> {
         if self.used == 0 {
             return None;
         }
@@ -745,7 +746,7 @@ impl Table {
 
     /// The hash slot holding string key `s`, if present (for inline caches).
     #[inline]
-    pub fn find_str(&self, heap: &LuaHeap, s: Gc<LuaStr>) -> Option<usize> {
+    pub(crate) fn find_str(&self, heap: &LuaHeap, s: Gc<LuaStr>) -> Option<usize> {
         if self.used == 0 {
             return None;
         }
@@ -760,7 +761,7 @@ impl Table {
     /// the store needs the general path. A fresh table's `{x = .., y = ..}`
     /// stores take the `Err(Some(_))` case.
     #[inline]
-    pub fn find_str_store(&self, heap: &LuaHeap, key: &Key) -> Result<usize, Option<usize>> {
+    pub(crate) fn find_str_store(&self, heap: &LuaHeap, key: &Key) -> Result<usize, Option<usize>> {
         let len = self.entries.len();
         let room = (self.used as usize) < max_used(len);
         // An empty home slot ends the probe at once.
@@ -787,7 +788,7 @@ impl Table {
     /// [`Heap::update`](orbit_gc::Heap::update) or after a barrier: it
     /// changes no capacity.
     #[inline]
-    pub fn insert_str_at(&mut self, slot: usize, key: &Key, v: Value) {
+    pub(crate) fn insert_str_at(&mut self, slot: usize, key: &Key, v: Value) {
         debug_assert!(self.entries[slot].is_empty() && !v.is_nil());
         self.forget_absent_meta();
         self.entries[slot].fill(key.value, key.hash, v);
@@ -795,25 +796,14 @@ impl Table {
     }
 
     /// The value in hash slot `slot` if that slot holds exactly key `s` (an
-    /// inline-cache hit). The value can be nil (a dead entry): with a
-    /// metatable, that hit is a miss.
-    #[inline(always)]
-    pub fn cached_str(&self, slot: usize, s: Gc<LuaStr>) -> Option<Value> {
-        match self.entries.get(slot) {
-            Some(e) if e.key_tag == Tag::Str && e.key_payload == Value::Str(s).pack().1 => {
-                Some(e.value())
-            }
-            _ => None,
-        }
-    }
-
-    /// [`Table::cached_str`] as the stored tag and payload, for a reader
+    /// inline-cache hit), which can be nil (a dead entry): with a metatable,
+    /// that hit is a miss. Given as the stored tag and payload, for a reader
     /// that writes the value straight to its destination with
     /// [`Value::write_unpacked`]: a merged `Value` leaves the bytes a short
     /// payload doesn't write to the compiler, which carries them along as
     /// a live value.
     #[inline(always)]
-    pub fn cached_str_packed(&self, slot: usize, s: Gc<LuaStr>) -> Option<(Tag, Payload)> {
+    pub(crate) fn cached_str_packed(&self, slot: usize, s: Gc<LuaStr>) -> Option<(Tag, Payload)> {
         match self.entries.get(slot) {
             Some(e) if e.key_tag == Tag::Str && e.key_payload == Value::Str(s).pack().1 => {
                 Some((e.value_tag, e.value_payload))
@@ -824,14 +814,14 @@ impl Table {
 
     /// The value in hash slot `slot` (from [`Table::find_str`]).
     #[inline(always)]
-    pub fn slot_value(&self, slot: usize) -> Value {
+    pub(crate) fn slot_value(&self, slot: usize) -> Value {
         self.entries[slot].value()
     }
 
     /// [`Table::slot_value`] as the stored tag and payload (see
     /// [`Table::cached_str_packed`]).
     #[inline(always)]
-    pub fn slot_packed(&self, slot: usize) -> (Tag, Payload) {
+    pub(crate) fn slot_packed(&self, slot: usize) -> (Tag, Payload) {
         let e = &self.entries[slot];
         (e.value_tag, e.value_payload)
     }
@@ -840,14 +830,14 @@ impl Table {
     /// [`Table::find_str`] or a cache hit). Storing `nil` leaves a dead
     /// entry. Use through [`Heap::update`](orbit_gc::Heap::update).
     #[inline(always)]
-    pub fn set_slot(&mut self, slot: usize, v: Value) {
+    pub(crate) fn set_slot(&mut self, slot: usize, v: Value) {
         self.forget_absent_meta();
         self.entries[slot].set_value(v);
     }
 
     /// `t[k]` (raw).
     #[inline]
-    pub fn get(&self, heap: &LuaHeap, k: Value) -> Value {
+    pub(crate) fn get(&self, heap: &LuaHeap, k: Value) -> Value {
         match k {
             Value::Int(i) => self.get_int(i),
             Value::Str(s) => self.get_str(heap, s),
@@ -865,7 +855,7 @@ impl Table {
     }
 
     /// `t[key]` for a normalised key.
-    pub fn get_key(&self, heap: &LuaHeap, key: &Key) -> Value {
+    pub(crate) fn get_key(&self, heap: &LuaHeap, key: &Key) -> Value {
         if let Value::Int(i) = key.value {
             return self.get_int(i);
         }
@@ -913,7 +903,7 @@ impl Table {
 
     /// Phase one of a store: where `key` goes. `storing_nil` avoids
     /// inserting keys only to kill them.
-    pub fn find_slot(&self, heap: &LuaHeap, key: &Key, storing_nil: bool) -> Slot {
+    pub(crate) fn find_slot(&self, heap: &LuaHeap, key: &Key, storing_nil: bool) -> Slot {
         if let Value::Int(i) = key.value {
             let idx = (i as u64).wrapping_sub(1);
             if idx < self.array.len() as u64 {
@@ -938,7 +928,7 @@ impl Table {
     /// checking a heap limit first: a full array part doubles, a rebuild
     /// allocates its new hash part and any array growth (the old hash part
     /// is freed only after the new one exists), other stores add nothing.
-    pub fn growth(&self, slot: Slot, key: &Key) -> usize {
+    pub(crate) fn growth(&self, slot: Slot, key: &Key) -> usize {
         match slot {
             Slot::Push if self.array.len() == self.array.cap() => {
                 ArrayPart::bytes_for(self.array.grown(self.array.len() + 1)) - self.array.bytes()
@@ -963,7 +953,7 @@ impl Table {
     /// [`Heap::update`](orbit_gc::Heap::update). Only [`Slot::Push`] and
     /// [`Slot::Grow`] allocate; when that fails the key is not stored and
     /// the table is otherwise unchanged (a rebuild may have happened).
-    pub fn write(&mut self, slot: Slot, key: &Key, v: Value) -> Result<(), NoMemory> {
+    pub(crate) fn write(&mut self, slot: Slot, key: &Key, v: Value) -> Result<(), NoMemory> {
         match slot {
             Slot::Array(i) => self.array.set(i, v),
             Slot::Push => {
@@ -1150,7 +1140,7 @@ impl Table {
     /// Append `v` at `array_len() + 1` or store at an integer key, for
     /// constructors and `table.insert`. Integer keys need no heap.
     #[inline]
-    pub fn set_int(&mut self, i: i64, v: Value) -> Result<(), NoMemory> {
+    pub(crate) fn set_int(&mut self, i: i64, v: Value) -> Result<(), NoMemory> {
         let key = Key::int(i);
         let idx = (i as u64).wrapping_sub(1);
         let slot = if idx < self.array.len() as u64 {
@@ -1169,13 +1159,8 @@ impl Table {
         self.write(slot, &key, v)
     }
 
-    /// A border of the table (`#t`, raw).
-    pub fn len(&self, _heap: &LuaHeap) -> i64 {
-        self.border()
-    }
-
     /// A border: `n` such that `t[n] ~= nil` and `t[n+1] == nil` (or 0).
-    pub fn border(&self) -> i64 {
+    pub(crate) fn border(&self) -> i64 {
         let n = self.array.len();
         if n > 0 && self.array.tag(n - 1) == Tag::Nil {
             return self.array.inner_border() as i64;
@@ -1212,7 +1197,11 @@ impl Table {
 
     /// The entry after `k` in traversal order (array slots, then hash
     /// slots), or `None` at the end. `Err` if `k` is not a key of the table.
-    pub fn next(&self, heap: &LuaHeap, k: Value) -> Result<Option<(Value, Value)>, InvalidKey> {
+    pub(crate) fn next(
+        &self,
+        heap: &LuaHeap,
+        k: Value,
+    ) -> Result<Option<(Value, Value)>, InvalidKey> {
         let n = self.array.len();
         let mut pos = match k {
             Value::Nil => 0,
@@ -1347,7 +1336,7 @@ fn same_key(a: Value, b: Value, long_eq: &impl Fn(Gc<LuaStr>, Gc<LuaStr>) -> boo
 
 /// `t[k] = v` (raw), both phases.
 #[inline]
-pub fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), StoreError> {
+pub(crate) fn set(heap: &mut LuaHeap, t: Gc<Table>, k: Value, v: Value) -> Result<(), StoreError> {
     if let Value::Int(i) = k {
         set_int(heap, t, i, v)?;
         return Ok(());
@@ -1370,7 +1359,12 @@ fn write_other(out: &mut Value, b: u8, p: Payload) {
 /// Returns whether the store went into the array part, which allocates
 /// nothing.
 #[inline(always)]
-pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<bool, NoMemory> {
+pub(crate) fn set_int(
+    heap: &mut LuaHeap,
+    t: Gc<Table>,
+    i: i64,
+    v: Value,
+) -> Result<bool, NoMemory> {
     let idx = (i as u64).wrapping_sub(1);
     // The array store needs the barrier, so do it first and look the table
     // up once. `set_key`'s `Heap::update` barriers again, which only
@@ -1387,7 +1381,7 @@ pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<boo
 
 /// What [`store_int`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntStore {
+pub(crate) enum IntStore {
     /// Stored into the array part; nothing was allocated.
     Array,
     /// Stored through the hash part or by growing (may have allocated).
@@ -1401,7 +1395,7 @@ pub enum IntStore {
 /// `t[i] = v` for the interpreter: like [`set_int`], but leaves the store
 /// to the caller when a metatable could intercept it (the key is absent).
 #[inline(always)]
-pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore {
+pub(crate) fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore {
     let idx = (i as u64).wrapping_sub(1);
     // Storing a value that refers to no object can't make a traced table
     // point at an untraced one, so only those stores barrier; the hash
@@ -1458,7 +1452,7 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
 /// holds the key, when the store found or claimed one without rebuilding
 /// (for inline caches).
 #[inline]
-pub fn set_key(
+pub(crate) fn set_key(
     heap: &mut LuaHeap,
     t: Gc<Table>,
     key: &Key,
@@ -1484,7 +1478,7 @@ pub fn set_key(
 
 /// `t[k]` (raw).
 #[inline]
-pub fn get(heap: &LuaHeap, t: Gc<Table>, k: Value) -> Value {
+pub(crate) fn get(heap: &LuaHeap, t: Gc<Table>, k: Value) -> Value {
     heap.get(t).get(heap, k)
 }
 

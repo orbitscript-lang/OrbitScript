@@ -10,7 +10,9 @@
 
 use crate::object::table as tbl;
 use crate::object::{Gc, Table, Value};
+use crate::stack::{Native, REGISTRY_INDEX, Return, Stack, StackResult, Type, native_fn};
 use crate::vm::{CallOutcome, LuaError, NativeCtx, NativeReturn, Vm};
+use orbit_macros::native;
 
 use crate::stdlib::{LOADED, registry_table};
 
@@ -44,7 +46,12 @@ pub(crate) fn open(vm: &mut Vm) {
     set(vm, "preload", Value::Table(preload));
     let searchers = vm.new_table();
     set(vm, "searchers", Value::Table(searchers));
-    let fv = vm.register_native("package.searchers[1]", search_preload);
+    let id = vm.native_for_type(
+        std::any::TypeId::of::<search_preload>(),
+        <search_preload as Native>::NAME,
+        native_fn::<search_preload>(),
+    );
+    let fv = Value::Native(id);
     vm.table_set(searchers, Value::Int(1), fv);
     let k = vm.new_str(PACKAGE);
     let reg = vm.rt.registry;
@@ -52,11 +59,6 @@ pub(crate) fn open(vm: &mut Vm) {
     let req = vm.register_native("require", require);
     vm.set_global("require", req);
     vm.unpin(Value::Table(pkg));
-}
-
-fn str_arg(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Vec<u8>, LuaError> {
-    let s = ctx.check_str(i)?;
-    Ok(ctx.bytes(s).to_vec())
 }
 
 /// A field of the `package` table (the one `require` was opened with).
@@ -70,31 +72,21 @@ fn package_field(ctx: &mut NativeCtx<'_>, field: &[u8]) -> Value {
     }
 }
 
-/// Return one message string from a searcher.
-fn ret_msg(ctx: &mut NativeCtx<'_>, msg: Vec<u8>) -> R {
-    let m = ctx.new_str_owned(msg);
-    ctx.ret([m])
-}
-
-fn search_preload(ctx: &mut NativeCtx<'_>) -> R {
-    let name = str_arg(ctx, 0)?;
-    let f = match reg_get(ctx, PRELOAD) {
-        Value::Table(t) => {
-            let k = ctx.new_str(&name);
-            tbl::get(&ctx.vm.heap, t, k)
-        }
-        _ => return Err(ctx.error("'package.preload' must be a table")),
-    };
-    if f.is_nil() {
-        let mut msg = b"no field package.preload['".to_vec();
-        msg.extend_from_slice(&name);
-        msg.extend_from_slice(b"']");
-        return ret_msg(ctx, msg);
+// Nameless in messages, as the reference's searchers are. Both lookups
+// are ordinary indexing, so `__index` on `package.preload` applies.
+#[native(crate = crate, name = "?")]
+fn search_preload(s: &mut Stack<'_>) -> StackResult<Return> {
+    s.check_string(1)?;
+    s.get_field(REGISTRY_INDEX, PRELOAD)?;
+    s.push_copy(1);
+    if s.get_table(2)? == Type::Nil {
+        let name = s.string_at(1).map_or(&b""[..], |n| n.as_bytes());
+        let msg = [&b"no field package.preload['"[..], name, b"']"].concat();
+        s.push_bytes(msg.as_slice());
+        return Ok(Return::values(1));
     }
-    let data = ctx.new_str(b":preload:");
-    ctx.push(f);
-    ctx.push(data);
-    Ok(NativeReturn::Return(2))
+    s.push_bytes(":preload:");
+    Ok(Return::values(2))
 }
 
 // `require`'s window while it runs searchers and the loader: the name, the

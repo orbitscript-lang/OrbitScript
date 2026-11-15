@@ -598,7 +598,7 @@ impl<'s> Stack<'s> {
     /// leaves the window (`lua_toclose`).
     pub fn to_close(&mut self, idx: i32) -> StackResult<()> {
         let i = self.stack_slot(idx)?;
-        Ok(self.ctx.to_be_closed(i)?)
+        Ok(self.ctx.mark_to_be_closed(i)?)
     }
 
     /// Close the variable at `idx`, if it is the newest marked one, and set

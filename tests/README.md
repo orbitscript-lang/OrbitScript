@@ -95,6 +95,28 @@ cargo testkit capi --reference target/reference-lua/shared/liblua5.5.so.0 --chec
 On Linux `--reference` also builds each program on the reference library (from `scripts/build-reference-lua.sh`) and checks the committed output against it; `--update` rewrites the output from the reference, after a program changes. macOS and Windows have no reference library and compare with the committed output only. `--check-linked` reads the symbols (Linux, `nm`) and fails unless every C API function liborbit exports is linked by some program or listed with a reason in `capi/not-linked.txt`, so a new export comes with a program that uses it. `--lua 5.4` checks a 5.4 layout against `capi/expected-5.4`, and `--wrap CMD` runs the programs under a tool such as valgrind.
 
 A program that shows a difference from the reference shows a bug to fix, not output to record: where liborbit differs on purpose (ADR-2's generational default, for one), the program sets what it relies on.
+## The memory checker
+
+`tests/memcheck/run.sh` (Linux, needs valgrind) runs the tests of the code that may contain `unsafe` under valgrind's memcheck and fails on any report, whatever the tests themselves say. A passing test only shows the answer was right; this shows the C API, the `ffi` library, the locale objects, the virtual memory buffer and the C library's local time stayed inside their memory while computing it. CI runs it in the Lua 5.5 conformance job, on the layout that job builds.
+
+```sh
+scripts/build-reference-lua.sh       # the liblua part needs the reference lua.c
+tests/memcheck/run.sh                # builds the layout into target/memcheck/layout
+tests/memcheck/run.sh --layout target/package/out chost unit
+```
+
+Its parts, each runnable alone:
+
+- **chost**: the C host tests under valgrind (the test names the wrapper in `ORBIT_TEST_WRAPPER`).
+- **sanitize**: the C host tests again with the host built with AddressSanitizer (`ORBIT_CHOST_SANITIZE=address`), not under valgrind.
+- **cmod**: orbit-cli's C module tests under valgrind, on the layout's `orbit` and, for the ignored one, through a second copy of the runtime.
+- **unit**: the test programs of orbit-std (with `ffi`), orbit-ffi, orbit-locale, orbit-virtmem and orbit-capi, each run by valgrind as Cargo's test runner.
+- **capi**: the C API programs (`tests/capi`) under valgrind (`cargo testkit capi --wrap ...`), which between them call every function liborbit exports.
+- **liblua**: the suite through `lua.c` on liborbit in its soft mode (`cargo testkit liblua --soft --wrap ...`), every file but `all.lua` and `heavy.lua`, which outgrows valgrind's memory.
+
+Valgrind never follows child processes: the C compiler and shells the tests start are not ours, so there is no suppression list. Each process's report goes to its own file in `target/memcheck/logs`.
+
+`tests/memcheck/check-planted.sh` proves the checker, as the write-barrier tests are proven: each patch in `tests/memcheck/planted` plants one memory bug (a string copy freed while the string is alive, a userdata block shorter than asked for, an uninitialised libffi argument, a virtual memory page released under live elements) and names the parts that reach it. The script applies each in turn and requires a valgrind report. Run it after changing `run.sh` or the tests it runs; a planted bug that is no longer reported needs a test that reaches it.
 
 ## Differential fuzzing
 
