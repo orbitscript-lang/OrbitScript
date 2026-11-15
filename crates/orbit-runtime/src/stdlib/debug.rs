@@ -5,26 +5,33 @@
 //!
 //! [debug design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/debug.md
 
-use crate::object::{Gc, LightUserData, Table, Thread, Value};
+use crate::object::{Gc, OrbitString, Table, Thread, Value};
+use crate::stack::{
+    Any, Arg, Either, FunctionArg, REGISTRY_INDEX, Return, Stack, StackResult, Type, library_row,
+};
 use crate::vm::debug::CallName;
 use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
 use orbit_lua_version::LUA;
+use orbit_macros::native;
 
 type R = Result<NativeReturn, LuaError>;
 
+// The functions that take a stack level read another coroutine's
+// activations, which the stack API doesn't reach yet: they stay on the raw
+// interface until it does.
 pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("debug.getinfo", getinfo),
     ("debug.getlocal", getlocal),
     ("debug.setlocal", setlocal),
-    ("debug.getupvalue", getupvalue),
-    ("debug.setupvalue", setupvalue),
-    ("debug.upvalueid", upvalueid),
-    ("debug.upvaluejoin", upvaluejoin),
-    ("debug.getmetatable", getmetatable),
-    ("debug.setmetatable", setmetatable),
-    ("debug.getuservalue", getuservalue),
-    ("debug.setuservalue", setuservalue),
-    ("debug.getregistry", getregistry),
+    library_row::<getupvalue>(),
+    library_row::<setupvalue>(),
+    library_row::<upvalueid>(),
+    library_row::<upvaluejoin>(),
+    library_row::<getmetatable>(),
+    library_row::<setmetatable>(),
+    library_row::<getuservalue>(),
+    library_row::<setuservalue>(),
+    library_row::<getregistry>(),
     ("debug.traceback", traceback),
     ("debug.sethook", sethook),
     ("debug.gethook", gethook),
@@ -251,127 +258,133 @@ fn setlocal(ctx: &mut NativeCtx<'_>) -> R {
     Ok(NativeReturn::Return(1))
 }
 
-fn getupvalue(ctx: &mut NativeCtx<'_>) -> R {
-    let f = ctx.check_function(0)?;
-    let n = ctx.check_int(1)?;
-    match ctx.upvalue_of(f, n) {
-        Some((name, v)) => {
-            push_str(ctx, &name);
-            ctx.push(v);
-            Ok(NativeReturn::Return(2))
-        }
-        None => Ok(NativeReturn::Return(0)),
+/// Make the arguments exactly `n`, dropping or nil-filling the rest
+/// (`set_top` only when needed: it looks for variables to close).
+fn keep_args(s: &mut Stack<'_>, n: i32) -> StackResult<()> {
+    if s.top() != n {
+        s.set_top(n)?;
     }
+    Ok(())
 }
 
-fn setupvalue(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.check_any(2)?;
-    let f = ctx.check_function(0)?;
-    let n = ctx.check_int(1)?;
-    match ctx.set_upvalue_of(f, n, v) {
-        Some(name) => {
-            push_str(ctx, &name);
-            Ok(NativeReturn::Return(1))
-        }
-        None => Ok(NativeReturn::Return(0)),
-    }
+/// Argument `i`, an upvalue or user value index, as the C `int` the
+/// reference converts it to: `1 + 2^32` is index 1.
+fn int_index(s: &mut Stack<'_>, i: i32) -> StackResult<i32> {
+    Ok(s.check_integer(i)? as i32)
 }
 
-fn upvalueid(ctx: &mut NativeCtx<'_>) -> R {
-    let f = ctx.check_function(0)?;
-    let n = ctx.check_int(1)?;
-    match ctx.upvalue_cell(f, n) {
-        // The cell's handle is its identity while it lives.
-        Some((_, cell)) => {
-            let id = LightUserData::new(cell.to_bits() | 1 << 63);
-            ctx.ret([Value::LightUserData(id)])
-        }
-        None => ctx.ret([Value::Nil]),
+// The upvalue functions check the index before the function, as the
+// reference does.
+
+#[native(crate = crate, name = "debug.getupvalue")]
+fn getupvalue(s: &mut Stack<'_>) -> StackResult<Either<(OrbitString, Any), ()>> {
+    let n = int_index(s, 2)?;
+    let f = <FunctionArg as Arg>::check(s, 1)?;
+    Ok(match s.get_upvalue(f.0, n) {
+        // The value is on top.
+        Some(name) => Either::Left((name, Any(s.top()))),
+        None => Either::Right(()),
+    })
+}
+
+#[native(crate = crate, name = "debug.setupvalue")]
+fn setupvalue(s: &mut Stack<'_>) -> StackResult<Either<OrbitString, ()>> {
+    <Any as Arg>::check(s, 3)?;
+    let n = int_index(s, 2)?;
+    let f = <FunctionArg as Arg>::check(s, 1)?;
+    keep_args(s, 3)?;
+    Ok(match s.set_upvalue(f.0, n)? {
+        Some(name) => Either::Left(name),
+        None => Either::Right(()),
+    })
+}
+
+#[native(crate = crate, name = "debug.upvalueid")]
+fn upvalueid(s: &mut Stack<'_>) -> StackResult<Return> {
+    let n = int_index(s, 2)?;
+    let f = <FunctionArg as Arg>::check(s, 1)?;
+    match s.upvalue_id(f.0, n) {
+        0 => s.push_nil(),
+        id => s.push_light_userdata(id),
     }
+    Ok(Return::values(1))
 }
 
 /// Argument `i` (a function) and `i + 1` (an upvalue index it has), for
 /// `upvaluejoin`.
-fn check_upvalue(ctx: &mut NativeCtx<'_>, i: usize) -> Result<(Value, usize), LuaError> {
-    let f = ctx.check_function(i)?;
-    let n = ctx.check_int(i + 1)?;
-    match ctx.upvalue_cell(f, n) {
-        Some(_) => Ok((f, n as usize)),
-        None => Err(ctx.arg_error(i + 1, "invalid upvalue index")),
+fn check_upvalue(s: &mut Stack<'_>, i: i32) -> StackResult<(i32, i32)> {
+    let n = int_index(s, i + 1)?;
+    let f = <FunctionArg as Arg>::check(s, i)?;
+    if s.upvalue_id(f.0, n) == 0 {
+        return Err(s.arg_error(i + 1, "invalid upvalue index"));
     }
+    Ok((f.0, n))
 }
 
-fn upvaluejoin(ctx: &mut NativeCtx<'_>) -> R {
-    let (f1, n1) = check_upvalue(ctx, 0)?;
-    let (f2, n2) = check_upvalue(ctx, 2)?;
-    let Value::Closure(c1) = f1 else {
-        return Err(ctx.arg_error(0, "Lua function expected"));
-    };
-    let Value::Closure(c2) = f2 else {
-        return Err(ctx.arg_error(2, "Lua function expected"));
-    };
-    ctx.join_upvalues(c1, n1, c2, n2);
-    Ok(NativeReturn::Return(0))
-}
-
-fn getmetatable(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.check_any(0)?;
-    let mt = ctx.metatable(v).map_or(Value::Nil, Value::Table);
-    ctx.ret([mt])
-}
-
-fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.arg(0);
-    let mt = match ctx.arg(1) {
-        Value::Nil => None,
-        Value::Table(t) => Some(t),
-        _ => return Err(ctx.type_error(1, "nil or table")),
-    };
-    match v {
-        // Through the collector's hook, so a `__gc` field registers the
-        // object for finalization as `setmetatable` does.
-        Value::Table(_) | Value::UserData(_) => {
-            crate::object::gc::set_metatable(&mut ctx.vm.heap, v, mt);
+#[native(crate = crate, name = "debug.upvaluejoin")]
+fn upvaluejoin(s: &mut Stack<'_>) -> StackResult<()> {
+    let (f1, n1) = check_upvalue(s, 1)?;
+    let (f2, n2) = check_upvalue(s, 3)?;
+    for f in [f1, f2] {
+        if s.is_native_function(f) {
+            return Err(s.arg_error(f, "Lua function expected"));
         }
-        v => ctx.vm.rt.set_type_meta(v.tag(), mt),
     }
-    ctx.truncate(1);
-    Ok(NativeReturn::Return(1))
+    s.join_upvalues(f1, n1, f2, n2)
 }
 
-fn getuservalue(ctx: &mut NativeCtx<'_>) -> R {
-    let n = ctx.opt_int(1, 1)?;
-    let Value::UserData(u) = ctx.arg(0) else {
-        return ctx.ret([Value::Nil]);
-    };
-    if n != 1 {
-        ctx.push(Value::Nil);
-        ctx.push(Value::Bool(false));
-        return Ok(NativeReturn::Return(2));
+#[native(crate = crate, name = "debug.getmetatable")]
+fn getmetatable(s: &mut Stack<'_>, v: Any) -> Return {
+    if !s.get_metatable(v.0) {
+        s.push_nil();
     }
-    let v = ctx.vm.heap.get(u).user_value;
-    ctx.push(v);
-    ctx.push(Value::Bool(true));
-    Ok(NativeReturn::Return(2))
+    Return::values(1)
 }
 
-fn setuservalue(ctx: &mut NativeCtx<'_>) -> R {
-    let Value::UserData(u) = ctx.arg(0) else {
-        return Err(ctx.type_error(0, "userdata"));
-    };
-    let v = ctx.check_any(1)?;
-    let n = ctx.opt_int(2, 1)?;
-    if n != 1 {
-        return ctx.ret([Value::Nil]);
+#[native(crate = crate, name = "debug.setmetatable")]
+fn setmetatable(s: &mut Stack<'_>) -> StackResult<Return> {
+    // Nil, not a missing argument.
+    if !matches!(s.arg_type(2), Type::Nil | Type::Table) {
+        return Err(s.type_error(2, "nil or table"));
     }
-    ctx.vm.heap.update(u, |u| u.user_value = v);
-    ctx.truncate(1);
-    Ok(NativeReturn::Return(1))
+    keep_args(s, 2)?;
+    s.set_metatable(1)?;
+    Ok(Return::values(1))
 }
 
-fn getregistry(ctx: &mut NativeCtx<'_>) -> R {
-    let r = ctx.vm.rt.registry;
-    ctx.ret([Value::Table(r)])
+/// User value `n` and `true`, or a lone nil when the userdata has no such
+/// value (or the argument isn't one).
+#[native(crate = crate, name = "debug.getuservalue")]
+fn getuservalue(s: &mut Stack<'_>) -> StackResult<Return> {
+    let n = s.opt_integer(2, 1)?;
+    if s.arg_type(1) != Type::Userdata {
+        s.push_nil();
+        return Ok(Return::values(1));
+    }
+    if s.get_user_value(1, n as i32) == Type::None {
+        return Ok(Return::values(1));
+    }
+    s.push_boolean(true);
+    Ok(Return::values(2))
+}
+
+#[native(crate = crate, name = "debug.setuservalue")]
+fn setuservalue(s: &mut Stack<'_>) -> StackResult<Return> {
+    if s.arg_type(1) != Type::Userdata {
+        return Err(s.type_error(1, "userdata"));
+    }
+    <Any as Arg>::check(s, 2)?;
+    let n = s.opt_integer(3, 1)?;
+    keep_args(s, 2)?;
+    if !s.set_user_value(1, n as i32)? {
+        s.push_nil();
+    }
+    Ok(Return::values(1))
+}
+
+#[native(crate = crate, name = "debug.getregistry")]
+fn getregistry() -> Any {
+    Any(REGISTRY_INDEX)
 }
 
 fn traceback(ctx: &mut NativeCtx<'_>) -> R {

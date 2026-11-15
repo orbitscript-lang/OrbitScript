@@ -986,18 +986,28 @@ impl crate::vm::NativeCtx<'_> {
             .map(|(name, _)| name.as_bytes().to_vec())
     }
 
-    /// The cell of upvalue `n` (1-based, in Lua's numbering) of `f`, with
-    /// its name.
-    pub(crate) fn upvalue_cell(&self, f: Value, n: i64) -> Option<(Vec<u8>, Gc<Cell>)> {
-        let Value::Closure(c) = f else { return None };
-        let c = self.vm.heap.get(c);
+    /// Where upvalue `n` (1-based, in Lua's numbering) of `f` is: the
+    /// closure, its capture index, and the cell.
+    fn upvalue_capture(&self, f: Value, n: i64) -> Option<(Gc<Closure>, usize, Gc<Cell>)> {
+        let Value::Closure(gc) = f else { return None };
+        let c = self.vm.heap.get(gc);
         let n = usize::try_from(n).ok()?.checked_sub(1)?;
         if n >= c.captures.len() - self.vm.rt.hidden_upvalues(&self.vm.heap, c) {
             return None;
         }
-        let p = self.vm.heap.get(c.proto);
-        let i = p.debug.capture_of_upvalue(n);
-        let cell = c.captures[i];
+        let i = self.vm.heap.get(c.proto).debug.capture_of_upvalue(n);
+        Some((gc, i, c.captures[i]))
+    }
+
+    /// The cell of upvalue `n` (1-based, in Lua's numbering) of `f`.
+    pub(crate) fn upvalue_cell(&self, f: Value, n: i64) -> Option<Gc<Cell>> {
+        self.upvalue_capture(f, n).map(|(_, _, cell)| cell)
+    }
+
+    /// The cell of upvalue `n` of `f`, with its name.
+    fn named_upvalue_cell(&self, f: Value, n: i64) -> Option<(Vec<u8>, Gc<Cell>)> {
+        let (c, i, cell) = self.upvalue_capture(f, n)?;
+        let p = self.vm.heap.get(self.vm.heap.get(c).proto);
         let name = match p.debug.capture_names.get(i) {
             // A native closure's upvalues have no names.
             _ if matches!(p.code.code.first(), Some(Op::NativeEntry { .. })) => Vec::new(),
@@ -1009,13 +1019,13 @@ impl crate::vm::NativeCtx<'_> {
 
     /// Name and value of upvalue `n` of `f`.
     pub(crate) fn upvalue_of(&self, f: Value, n: i64) -> Option<(Vec<u8>, Value)> {
-        let (name, cell) = self.upvalue_cell(f, n)?;
+        let (name, cell) = self.named_upvalue_cell(f, n)?;
         Some((name, self.vm.heap.get(cell).value))
     }
 
     /// Set upvalue `n` of `f`, returning its name.
     pub(crate) fn set_upvalue_of(&mut self, f: Value, n: i64, v: Value) -> Option<Vec<u8>> {
-        let (name, cell) = self.upvalue_cell(f, n)?;
+        let (name, cell) = self.named_upvalue_cell(f, n)?;
         self.vm
             .rt
             .write_place(&mut self.vm.heap, Place::Cell(cell), v);
