@@ -417,7 +417,7 @@ impl Vm {
                         Op::CapSelf { dst } => w[dst] = Value::Closure(closure),
                         Op::CapSet { cap, src } => {
                             let c = self.heap.get(closure).captures[cap as usize];
-                            by_parts!(src, |v| self.heap.write_for(c, &v).value = v);
+                            by_parts!(src, |v| self.heap.write_for(c, v).value = v);
                         }
 
                         Op::GetGlobal { dst, name, ic } => {
@@ -481,7 +481,7 @@ impl Vm {
                             {
                                 // The key is there: overwrite its value. No
                                 // capacity changes, so no byte accounting.
-                                by_parts!(src, |v| self.heap.write_for(t, &v).set_slot(slot, v));
+                                by_parts!(src, |v| self.heap.write_for(t, v).set_slot(slot, v));
                             } else {
                                 let k = const_str(&cur.consts, key);
                                 let v = w[src];
@@ -1075,7 +1075,7 @@ impl Vm {
                                 .cell_base as usize;
                             let c = self.rt.stack.cells[cell_base + cell as usize];
                             let v = w[src];
-                            self.heap.write_for(c, &v).value = v;
+                            self.heap.write_for(c, v).value = v;
                         }
 
                         Op::VarargLen { dst } => {
@@ -1463,7 +1463,7 @@ impl Vm {
                         if matches!(tab.cached_str_packed(slot, cache.key),
                             Some((tag, _)) if tab.meta.is_none() || tag != Tag::Nil)
                         {
-                            self.heap.write_for(t, &v).set_slot(slot, v);
+                            self.heap.write_for(t, v).set_slot(slot, v);
                         } else {
                             let k = const_str(&cur.consts, name);
                             set_str_miss(&mut self.heap, &self.rt.metas, t, k, v, cache)?;

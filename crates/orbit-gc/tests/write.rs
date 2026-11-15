@@ -44,7 +44,7 @@ fn write_for_a_handle_keeps_the_object_stored() {
     let mut h = TestHeap::new();
     let (holder, mut roots) = black_holder(&mut h);
     let fresh = obj(&mut h, 2);
-    h.write_for(holder, &Some(fresh))
+    h.write_for(holder, Some(fresh))
         .strong
         .push(Ref::Obj(fresh));
     finish_cycle(&mut h, &mut roots);

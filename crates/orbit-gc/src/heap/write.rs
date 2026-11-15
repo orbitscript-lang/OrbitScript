@@ -248,10 +248,10 @@ impl<S: Space> Heap<S> {
     /// old object don't remember it.
     #[inline(always)]
     #[track_caller]
-    pub fn write_for<T: Trace<S>, V: HoldsHandle + ?Sized>(
+    pub fn write_for<T: Trace<S>, V: HoldsHandle>(
         &mut self,
         gc: Gc<T>,
-        value: &V,
+        value: V,
     ) -> Write<'_, S, T>
     where
         S: Holds<T>,
@@ -266,11 +266,11 @@ impl<S: Space> Heap<S> {
     /// `value` may be a handle.
     #[inline(always)]
     #[track_caller]
-    pub fn write_at_for<T: Trace<S>, V: HoldsHandle + ?Sized>(
+    pub fn write_at_for<T: Trace<S>, V: HoldsHandle>(
         &mut self,
         gc: Gc<T>,
         at: usize,
-        value: &V,
+        value: V,
     ) -> Write<'_, S, T>
     where
         S: Holds<T>,
