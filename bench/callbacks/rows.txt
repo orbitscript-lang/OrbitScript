@@ -1,0 +1,37 @@
+# The rows of callbacks.lua that `orbit-testkit callbacks` measures, and
+# what each is measured against.
+#   ROW  [base=ROW]  # what one unit is
+# A row's cost is its instructions per unit of N, minus its base row's:
+# the loop around it, or the same work without the callback. Rows without
+# a base (`empty`, `sort_plain`, ...) are reported as they are.
+empty                         # one iteration of the loop the other rows run in
+call          base=empty      # a script function calls a script function
+meta_index    base=empty      # the interpreter runs an `__index` function
+meta_add      base=empty      # the interpreter runs `__add`
+meta_call     base=empty      # the interpreter runs `__call`
+meta_eq       base=empty      # the interpreter runs `__eq`
+pcall         base=empty      # pcall of a script function
+xpcall        base=empty      # xpcall of a script function, no error
+sort          base=empty      # sort with a comparator, per sixteenth of an element
+sort_plain                    # sort without a comparator, per sixteenth of an element
+gsub_fn       base=gsub_str   # string.gsub calls its replacement function, per match
+gsub_str                      # string.gsub with a replacement string, per match
+tostring      base=empty      # tostring with `__tostring`
+format_s      base=empty      # string.format("%s") with `__tostring`
+max_lt        base=empty      # math.max calls `__lt`
+concat_proxy  base=concat_plain # table.concat reads one element through `__index`
+concat_plain                  # table.concat of a plain table, per element
+unpack_proxy  base=unpack_plain # table.unpack reads one element through `__index`
+unpack_plain                  # table.unpack of a plain table, per element
+insert_proxy  base=empty      # table.insert through `__len`, `__index` and `__newindex`
+insert_plain  base=empty      # table.insert on a plain table
+ipairs        base=empty      # ipairs, per element
+ipairs_proxy  base=empty      # ipairs through `__index`, per element
+pairs         base=empty      # pairs, per element
+iter_closure  base=empty      # a generic for with a script iterator, per element
+gmatch        base=empty      # the string.gmatch iterator in a for loop, per match
+load_str                      # load of the same source as one string, per piece
+load_reader   base=load_str   # load calls its reader function, per piece
+coroutine     base=empty      # a coroutine round trip: resume and yield
+select        base=empty      # select("#", ...), a plain native
+native_leaf   base=empty      # math.abs, a native with a fast path
