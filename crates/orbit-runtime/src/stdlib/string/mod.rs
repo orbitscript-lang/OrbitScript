@@ -126,6 +126,7 @@ fn byte(ctx: &mut NativeCtx<'_>) -> R {
     if a > b {
         return Ok(NativeReturn::Return(0));
     }
+    ctx.check_room(b + 1 - a, "string slice too long")?;
     for k in a - 1..b {
         let c = ctx.bytes(s)[k];
         ctx.push(Value::Int(c as i64));

@@ -57,7 +57,7 @@ impl Host {
             ext: Extensions::default(),
             compile: None,
             compile_orbitscript: None,
-            binary_checks: Some(op::verify::Level::STRONGEST),
+            binary_checks: Some(op::verify::Level::Full),
             locale_provider: Box::new(CLocaleProvider::default()),
         }
     }

@@ -270,14 +270,19 @@ impl<T> VmBuffer<T> {
     /// Does not decommit physical memory; use [`shrink_to_fit`](Self::shrink_to_fit) to decommit.
     pub fn truncate(&mut self, new_len: usize) {
         if new_len < self.len {
-            for i in new_len..self.len {
-                // dropping elements in truncated range
-                #[allow(unsafe_code)]
-                unsafe {
-                    std::ptr::drop_in_place(self.base.as_ptr().add(i));
-                }
-            }
+            let tail = self.len - new_len;
+            // Shorten first, as `Vec::truncate` does: if an element's `Drop`
+            // panics, the buffer no longer holds any of the tail, so its own
+            // `Drop` can't drop them a second time. Dropping the tail as one
+            // slice still drops the elements after one that panics.
             self.len = new_len;
+            #[allow(unsafe_code)]
+            // SAFETY: slots `new_len..new_len + tail` were initialised, and
+            // `len` no longer covers them, so nothing reads or drops them again.
+            unsafe {
+                let first = self.base.as_ptr().add(new_len);
+                std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(first, tail));
+            }
         }
     }
 

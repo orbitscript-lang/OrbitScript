@@ -49,13 +49,12 @@ impl Runtime {
 pub use orbit_runtime::stack::Library;
 
 /// How much binary chunks are checked ([`Isolate::set_binary_checks`]).
-#[cfg(feature = "verify")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryChecks {
     /// Their structure: operands in range, jumps inside the function.
     Structure,
     /// Their structure and data flow, after which no binary chunk can make
-    /// the VM panic (feature `verify-flow`; without it, as `Structure`).
+    /// the VM panic.
     Full,
 }
 
@@ -269,17 +268,12 @@ impl Isolate {
     /// How much `load` checks binary chunks before running them (`None`:
     /// not at all: a malformed chunk can then make the VM panic or reach
     /// values the script was never given, so lower it only for chunks you
-    /// trust). Starts at the most this build can check, whatever the
-    /// environment; levels past that are capped.
-    #[cfg(feature = "verify")]
+    /// trust). Starts at [`BinaryChecks::Full`], whatever the environment.
     pub fn set_binary_checks(&mut self, level: Option<BinaryChecks>) {
         use orbit_runtime::vm::op::verify::Level;
         let level = level.map(|l| match l {
             BinaryChecks::Structure => Level::Structure,
-            #[cfg(feature = "verify-flow")]
             BinaryChecks::Full => Level::Full,
-            #[cfg(not(feature = "verify-flow"))]
-            BinaryChecks::Full => Level::Structure,
         });
         stdlib::checks::set_level(&mut self.vm, level);
     }

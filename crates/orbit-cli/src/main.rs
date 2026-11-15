@@ -350,7 +350,6 @@ struct Runner {
     /// Where messages go instead of stderr (`--debug-server`: the editor).
     report_to: Option<Report>,
     #[cfg(feature = "repl")]
-    #[cfg_attr(not(feature = "line-editing"), allow(dead_code))]
     repl: repl::State,
 }
 

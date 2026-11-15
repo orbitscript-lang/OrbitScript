@@ -120,7 +120,7 @@ fn compile_hir(hir: &orbit_hir::Chunk) -> Result<UnlinkedChunk, SyntaxError> {
     #[cfg(debug_assertions)]
     if let Err(e) = orbit_compiler::bytecode::verify::verify(
         &chunk,
-        orbit_compiler::bytecode::verify::Level::STRONGEST,
+        orbit_compiler::bytecode::verify::Level::Full,
     ) {
         panic!("compiler output fails verification: {e}");
     }

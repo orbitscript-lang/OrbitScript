@@ -99,3 +99,11 @@ do
   r, n = string.gsub(string.rep("abc ", 200000), "%w+", function(w) if #w % 2 == 1 then return w:upper() end end)
   print(#r, n, r:sub(1, 12), r:sub(-12))
 end
+
+-- More results than the stack holds: an error, not ten million values.
+do
+  print(pcall(function() return select("#", ("x"):rep(1e7):byte(1, -1)) end))
+  print(pcall(function() return select("#", string.unpack(("b"):rep(1e6), ("x"):rep(1e6))) end))
+  print(select("#", ("x"):rep(500000):byte(1, -1)))
+  print(select("#", string.unpack(("b"):rep(500000), ("x"):rep(500000))))
+end

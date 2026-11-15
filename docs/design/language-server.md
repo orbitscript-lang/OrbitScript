@@ -66,7 +66,7 @@ LSP counts columns in UTF-16 code units unless both sides agree otherwise. The s
 
 ## Building and packaging
 
-`orbit-lsp` is a workspace member but not a default member, so a root `cargo build --release` (and the PGO profile) are unchanged. `cargo build --release -p orbit-lsp` gives a self-contained binary (feature `runtime`, the default). Built with `--no-default-features --features shared` it uses the runtime in `liborbit` instead (ADR-10) and finds it through its run path (`../lib`, then its own directory), as `orbit` does. `./build.sh` puts it in both layouts as `bin/orbit-lsp`: the shared one beside `orbit` and `orbitc` over `liborbit`, and the static one (`--static`) as a third self-contained program. It is built with the same PGO profile, which covers its runtime.
+`orbit-lsp` is a workspace member but not a default member, so a root `cargo build --release` (and the PGO profile) are unchanged. `cargo build --release -p orbit-lsp` gives a self-contained binary. Built with `--features shared` it uses the runtime in `liborbit` instead (ADR-10) and finds it through its run path (`../lib`, then its own directory), as `orbit` does. `./build.sh` puts it in both layouts as `bin/orbit-lsp`: the shared one beside `orbit` and `orbitc` over `liborbit`, and the static one (`--static`) as a third self-contained program. It is built with the same PGO profile, which covers its runtime.
 
 | Build (cloud x86_64, release, no PGO, `./build.sh --no-pgo`, 2026-10-22) | Size |
 |---|---|

@@ -9,7 +9,7 @@
 //! let rt = orbit::Runtime::new();
 //! let mut iso = rt.new_isolate(orbit::Config::default());
 //! orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
-//! iso.exec(orbit::Chunk::new("assert(io.write and os.time and print)")).unwrap();
+//! iso.exec(orbit::Chunk::new("assert(print and loadfile and dofile)")).unwrap();
 //! ```
 //!
 //! C modules (`package.cpath`'s searchers, `package.loadlib`) come from

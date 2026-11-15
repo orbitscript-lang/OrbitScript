@@ -165,10 +165,10 @@ struct Entry {
 }
 
 const _: () = assert!(std::mem::size_of::<Entry>() == 24);
-// Tables fill an arena slot each, so their header stays at 56 bytes in
-// release builds (debug builds' checked handles are larger).
-#[cfg(not(debug_assertions))]
-const _: () = assert!(std::mem::size_of::<Table>() == 56);
+// Tables fill an arena slot each, so their header stays at 56 bytes
+// (checked handles, in debug builds or with `orbit-gc/checked-handles`, are
+// larger).
+const _: () = assert!(orbit_gc::CHECKED_HANDLES || std::mem::size_of::<Table>() == 56);
 
 impl Default for Entry {
     #[inline(always)]

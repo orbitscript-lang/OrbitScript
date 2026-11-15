@@ -89,20 +89,13 @@ fn unlinked(
             chunk_id(source)
         };
         let bad = |e: &dyn std::fmt::Display| format!("{name}: bad binary format ({e})");
-        #[cfg(feature = "dump")]
-        {
-            use crate::vm::op::format;
-            #[cfg(feature = "verify")]
-            use crate::vm::op::verify;
-            let chunk = format::decode(bytes).map_err(|e| bad(&e))?;
-            #[cfg(feature = "verify")]
-            if let Some(level) = crate::stdlib::checks::level(rt) {
-                verify::verify(&chunk, level).map_err(|e| bad(&e))?;
-            }
-            return Ok(chunk);
+        use crate::vm::op::format;
+        use crate::vm::op::verify;
+        let chunk = format::decode(bytes).map_err(|e| bad(&e))?;
+        if let Some(level) = crate::stdlib::checks::level(rt) {
+            verify::verify(&chunk, level).map_err(|e| bad(&e))?;
         }
-        #[cfg(not(feature = "dump"))]
-        return Err(bad(&"binary chunks not enabled"));
+        return Ok(chunk);
     }
     let name = chunk_id(source);
     let compile = rt.host.compiler(is_orbitscript_file(source));

@@ -12,7 +12,7 @@ links = "orbit_capi"
 [dependencies]
 # The public API, for the libraries `orbit-std` builds on it: `luaopen_io`
 # and friends open them, and C states are isolates the API can reach.
-orbit = { path = "../orbit", default-features = false, features = ["package"] }
+orbit = { path = "../orbit", default-features = false }
 orbit-std = { path = "../orbit-std" }
 # The Lua version (ADR-14): the build script reads it from its `links`
 # metadata, so this must be a direct dependency.

@@ -239,7 +239,7 @@ fn load(
     if bytes.first() == format::SIGNATURE.first() {
         let bad = |e: &dyn std::fmt::Display| format!("{name}: bad binary format ({e})");
         let chunk = format::decode(bytes).map_err(|e| bad(&e))?;
-        verify::verify(&chunk, verify::Level::STRONGEST).map_err(|e| bad(&e))?;
+        verify::verify(&chunk, verify::Level::Full).map_err(|e| bad(&e))?;
         return Ok(chunk);
     }
     let mut chunk = Compiler

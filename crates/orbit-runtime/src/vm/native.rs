@@ -1,7 +1,7 @@
 //! The native-function interface (ADR-3's continuation style).
 
+use crate::object::OrbitString;
 use orbit_lua_version::LUA;
-use std::borrow::Cow;
 use std::rc::Rc;
 
 use crate::arg_errors;
@@ -682,6 +682,17 @@ impl NativeCtx<'_> {
         LuaError::new(m)
     }
 
+    /// Room for `n` more values on the stack, or the error
+    /// `stack overflow (<what>)` (`luaL_checkstack`'s), for a native that
+    /// returns as many values as its arguments ask for.
+    pub fn check_room(&mut self, n: usize, what: &str) -> Result<(), LuaError> {
+        let room = self.vm.rt.host.max_stack().saturating_sub(self.vm.rt.top);
+        if n > room {
+            return Err(self.error(&format!("stack overflow ({what})")));
+        }
+        Ok(())
+    }
+
     /// `msg` as a string with the caller's position in front, as
     /// [`Self::error`] raises it. The bytes are kept as they are.
     // Out of line: inlined into each `error` instantiation it adds about
@@ -874,7 +885,7 @@ impl NativeCtx<'_> {
 
     /// The type a type error names for argument `v`, `None` when it is
     /// absent: as `luaL_typename`, but light userdata says so.
-    fn arg_type_name(&self, v: Option<Value>) -> Cow<'static, str> {
+    fn arg_type_name(&self, v: Option<Value>) -> OrbitString {
         match v {
             None => arg_errors::NO_VALUE.into(),
             Some(Value::LightUserData(_)) => "light userdata".into(),
@@ -1129,10 +1140,11 @@ impl NativeCtx<'_> {
             } else {
                 a
             };
-            let msg = format!(
-                "attempt to concatenate a {} value",
-                self.vm.rt.metas.type_name(heap, bad)
-            );
+            let msg = bytes_msg![
+                "attempt to concatenate a ",
+                self.vm.rt.metas.type_name(heap, bad),
+                " value"
+            ];
             return Err(self.error(&msg));
         }
         self.meta_result(Err(Exc::Meta(meta::MetaCall::new(

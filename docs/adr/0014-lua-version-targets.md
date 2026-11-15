@@ -1,6 +1,6 @@
 # ADR-14: Lua version targets
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 

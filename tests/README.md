@@ -43,6 +43,15 @@ ORBIT_GC_STRESS=1 ORBIT_GC_VERIFY=1 cargo testkit conformance --interp target/de
 
 CI's `gc-verify` job runs the suite, the differential tests, the compatibility programs and the examples that way on every pull request. Release builds have no verifier and ignore the variable.
 
+Debug builds also check every handle's generation, so a handle to a freed and reused slot panics instead of reading the new object. `orbit-gc`'s `checked-handles` feature turns that on in an optimized build, which runs the suite in a fraction of the time and exercises the code the release profile generates. Name `orbit-gc` among the packages so Cargo accepts the feature:
+
+```sh
+cargo build --release -p orbit-cli -p orbit-gc --features orbit-gc/checked-handles --target-dir target/checked
+cargo testkit conformance --interp target/checked/release/orbit --expect tests/lua-5.5/expected-orbit.txt
+```
+
+The `gc-verify` job runs the suite and the differential tests on that build too.
+
 ## Write-barrier tests
 
 `crates/orbit/tests/gc_barriers.rs` has a test for each way the runtime stores a value into an object the collector may already have traced: table stores by every path, upvalues, metatables, user values, the registry, coroutine stacks and errors, the debug library's writes and pin slots. Each test ages the object, stores a new object into it, collects, and checks the value is still there, with the verifier checking every collection. A plain `cargo test` runs them.

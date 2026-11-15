@@ -127,24 +127,11 @@ mod loading {
         Ok(ctx.link(&unlinked, env))
     }
 
-    #[cfg(feature = "dump")]
     fn load_binary(
         ctx: &mut NativeCtx<'_>,
         chunk: &Chunk<'_>,
         env: raw::Value,
     ) -> Result<raw::Value, String> {
         orbit_runtime::stdlib::load_chunk_in(ctx, chunk.bytes, chunk.source(), b"b", env)
-    }
-
-    #[cfg(not(feature = "dump"))]
-    fn load_binary(
-        _: &mut NativeCtx<'_>,
-        chunk: &Chunk<'_>,
-        _: raw::Value,
-    ) -> Result<raw::Value, String> {
-        Err(format!(
-            "{}: bad binary format (binary chunks not enabled)",
-            chunk_id(chunk.source())
-        ))
     }
 }

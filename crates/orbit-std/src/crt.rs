@@ -30,6 +30,7 @@ impl std::error::Error for Errno {}
 /// The error the system gives for `errno`, for a failure we detect before
 /// asking the system (a negative seek offset, an operation on a closed
 /// file), so it reads exactly as the system's own would.
+#[cfg(feature = "io")]
 pub(crate) fn system_error(errno: i32) -> io::Error {
     #[cfg(unix)]
     {

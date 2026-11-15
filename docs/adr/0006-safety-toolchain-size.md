@@ -38,7 +38,7 @@ OrbitScript is a showcase of a scripting runtime in safe Rust, aimed first at em
 - Release builds use LTO, one codegen unit, `panic = "abort"` and stripped symbols.
 - `opt-level` stays at `3`. `"s"` or `"z"` for the whole binary cut its size by about 17% but made the benchmarks 5 to 39% slower. Size-only gains (per-crate `opt-level` for cold code, linker flags) are taken where the benchmarks don't move.
 - The `orbit` binary has a soft budget of 10 MiB. A PR that adds a library, feature or dependency reports the release size before and after.
-- Optional costs sit behind Cargo features. Each standard library (`string`, `table`, `math`, `utf8`, `coroutine`, `package`, `debug`, and `io` and `os` in `orbit-std`) has its own feature, and the embedding API opens a chosen subset at run time.
+- Optional costs sit behind Cargo features when an embedder would reasonably turn them off: `debug`, and `io` and `os` in `orbit-std`, among others. The libraries the language rests on (`string`, `table`, `math`, `utf8`, `coroutine`, `package`, `load` with binary chunks and the verifier) are always built, and the embedding API opens a chosen subset at run time.
 
 ## Consequences
 

@@ -226,10 +226,11 @@ impl Vm {
                     let h = self.rt.metamethod(&self.heap, v, MetaField::Call);
                     if h.is_nil() {
                         return Err(Exc::Rt(
-                            format!(
-                                "attempt to call a {} value",
-                                self.rt.metas.type_name(&self.heap, v)
-                            ),
+                            bytes_msg![
+                                "attempt to call a ",
+                                self.rt.metas.type_name(&self.heap, v),
+                                " value"
+                            ],
                             Some(0),
                         ));
                     }
@@ -740,8 +741,8 @@ impl Vm {
                 unreachable!("metamethod requests are finished by `raise`")
             }
             Exc::Rt(msg, operand) => {
-                let mut text = self.rt.error_where(&self.heap, 1);
-                text.push_str(&msg);
+                let mut text = self.rt.error_where(&self.heap, 1).into_bytes();
+                text.extend_from_slice(&msg);
                 if let Some(op) = operand {
                     if let Some(f) = self.rt.stack.frames.last() {
                         if let FrameKind::Lua { closure, .. } = f.kind {
@@ -754,7 +755,7 @@ impl Vm {
                                         Some(Op::GenericCall { .. })
                                     )
                                 {
-                                    text.push_str(" (for iterator 'for iterator')");
+                                    text.extend_from_slice(b" (for iterator 'for iterator')");
                                 } else if let Some(origin) = proto.debug.origin(pc, op) {
                                     let (kind, name) = match origin {
                                         Origin::Local(n) => ("local", n),
@@ -765,25 +766,27 @@ impl Vm {
                                         Origin::Constant(n) => ("constant", n),
                                     };
                                     let described =
-                                        format!(" ({kind} '{}')", String::from_utf8_lossy(name));
+                                        [b" (", kind.as_bytes(), b" '", name, b"')"].concat();
                                     // `number (local 'x') has no integer representation`: the name goes
                                     // after the subject, not at the end.
-                                    match msg.strip_prefix("number ") {
-                                        Some(rest) if msg == ops::NO_INTEGER_REP => {
+                                    match msg.strip_prefix(b"number ") {
+                                        Some(rest)
+                                            if msg.as_bytes() == ops::NO_INTEGER_REP.as_bytes() =>
+                                        {
                                             text.truncate(text.len() - msg.len());
-                                            text.push_str("number");
-                                            text.push_str(&described);
-                                            text.push(' ');
-                                            text.push_str(rest);
+                                            text.extend_from_slice(b"number");
+                                            text.extend_from_slice(&described);
+                                            text.push(b' ');
+                                            text.extend_from_slice(rest);
                                         }
-                                        _ => text.push_str(&described),
+                                        _ => text.extend_from_slice(&described),
                                     }
                                 }
                             }
                         }
                     }
                 }
-                LuaError::new(self.new_str(text.as_bytes()))
+                LuaError::new(self.new_str(&text))
             }
         }
     }
@@ -1030,7 +1033,8 @@ impl Vm {
                 format!(
                     "attempt to call a {} value (metamethod 'close')",
                     h.type_name()
-                ),
+                )
+                .into(),
                 None,
             ));
         }

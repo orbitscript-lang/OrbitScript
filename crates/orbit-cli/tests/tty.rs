@@ -3,7 +3,7 @@
 //! script its normal mode back, after a line, after an error and around
 //! Ctrl-Z, and on the way out.
 
-#![cfg(all(target_os = "linux", feature = "line-editing"))]
+#![cfg(all(target_os = "linux", feature = "repl"))]
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};

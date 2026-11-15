@@ -20,6 +20,9 @@ name: CI
 #   the compatibility programs and the examples under GC stress mode with
 #   the heap verifier on (tests/README.md, "The heap verifier"): a missed
 #   write barrier fails here even when the release build's run passes.
+#   Then an optimized `orbit` with orbit-gc's checked handles runs the 5.5
+#   suite and the differential tests: a stale handle panics there instead
+#   of reading a reused slot, in the build the release profile makes.
 # - Steps several jobs share live in .github/actions: `setup-rust` (the
 #   toolchain and the build cache) and `reference-lua` (the reference
 #   interpreter and what the suite needs from the runner).
@@ -191,10 +194,10 @@ jobs:
           path: target/testkit/*.json
 
   gc-verify:
-    name: Suites under GC stress mode and the heap verifier
+    name: Suites under GC stress mode and the heap verifier, and with checked handles
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -247,3 +250,24 @@ jobs:
         env:
           ORBIT_GC_STRESS: '1'
           ORBIT_GC_VERIFY: '1'
+      # Checked handles are on in debug builds; this is the optimized build
+      # with them, in its own target directory.
+      - id: checked
+        if: (success() || failure()) && steps.build.outcome == 'success'
+        run: >
+          cargo build --release --locked -p orbit-cli -p orbit-gc
+          --features orbit-gc/checked-handles --target-dir target/checked
+      - name: Suite, release build with checked handles
+        if: (success() || failure()) && steps.reference.outcome == 'success' && steps.checked.outcome == 'success'
+        run: >
+          cargo testkit conformance --lua 5.5 --interp target/checked/release/orbit
+          --c-libs "$REF/libs" --expect tests/lua-5.5/expected-orbit.txt
+        env:
+          REF: ${{ steps.reference.outputs.dir }}
+      - name: Differential tests, release build with checked handles
+        if: (success() || failure()) && steps.reference.outcome == 'success' && steps.checked.outcome == 'success'
+        run: >
+          cargo testkit diff --reference "$REF/bin/lua5.5"
+          --interp target/checked/release/orbit --expect tests/diff/expected-orbit.txt
+        env:
+          REF: ${{ steps.reference.outputs.dir }}
