@@ -1,25 +1,47 @@
-Deletes: A coroutine's error kept in its thread (`co_finished`), and `switch_to`'s barrier for a coroutine that finished, which follows with no safe point between and covers the store on its own.
+Deletes: A coroutine's error kept in its thread (`co_finish`), and `switch_to`'s barrier for a coroutine that finished, which follows with no safe point between and covers the store on its own.
 Tests: coroutine_error_value
 
 diff --git a/crates/orbit-runtime/src/vm/coro.rs b/crates/orbit-runtime/src/vm/coro.rs
+index bb910db..d81ebce 100644
 --- a/crates/orbit-runtime/src/vm/coro.rs
 +++ b/crates/orbit-runtime/src/vm/coro.rs
-@@ -209,7 +209,9 @@
-         let hooks = self.rt.hooks.touched();
-         // A parked stack is traced through its thread, which the collector
-         // may already have scanned.
--        self.heap.barrier_back(from);
-+        if !matches!(from_status, CoStatus::Dead) {
-+            self.heap.barrier_back(from);
-+        }
-         let c = co_mut(&mut self.heap, from);
-         c.status = from_status;
-         // A thread's bytes are its stack's, parked or running: they change
-@@ -679,7 +681,6 @@
-         let closing = std::mem::replace(&mut self.rt.stack.aux.closing, Closing::No);
-         if let Err(e) = outcome {
+@@ -185,6 +185,20 @@ fn state(t: &mut Thread) -> &mut Coroutine {
+     t.state.downcast_mut().expect("threads hold VM coroutines")
+ }
+ 
++fn update_by_unbarriered<R>(
++    heap: &mut LuaHeap,
++    t: Gc<Thread>,
++    barrier: bool,
++    f: impl FnOnce(&mut Thread) -> (R, isize),
++) -> R {
++    if barrier {
++        return heap.update_by(t, f);
++    }
++    let (r, delta) = f(heap.write_no_handles(t).into_untraced());
++    heap.adjust_bytes(delta);
++    r
++}
++
+ /// The continuation a yielding coroutine waits in: the values the next
+ /// resume passes become `yield`'s results.
+ fn yield_k(_ctx: &mut NativeCtx<'_>, o: CallOutcome) -> Result<NativeReturn, LuaError> {
+@@ -214,7 +228,7 @@ impl Vm {
+         // collector may already have traced: the barrier. A thread's bytes
+         // are its stack's, parked or running: they change only when the
+         // stack's capacity does.
+-        let (finished, stamp) = self.heap.update_by(from, |th| {
++        let (finished, stamp) = update_by_unbarriered(&mut self.heap, from, from_status != CoStatus::Dead, |th| {
+             let c = state(th);
+             c.status = from_status;
+             let old = c.bytes;
+@@ -688,8 +702,7 @@ impl Vm {
              if closing != Closing::Closer {
--                self.heap.barrier_back(co);
-                 let c = co_mut(&mut self.heap, co);
+                 // `switch_to` barriers the thread again before the next safe
+                 // point; this write states its own.
+-                let mut w = self.heap.write_back(co);
+-                let c = state(&mut w);
++                let c = state(self.heap.write_no_handles(co).into_untraced());
                  c.error = Some(e);
                  c.cause = cause;
+             }

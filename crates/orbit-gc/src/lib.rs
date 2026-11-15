@@ -17,8 +17,9 @@
 //! - **Incremental marking with barriers.** [`Heap::step`] processes heap
 //!   bytes in proportion to bytes allocated, and a cycle starts when the heap
 //!   has grown a set percentage past what the last one found reachable
-//!   ([`Params`]). Stores into already-traced objects need
-//!   [`Heap::barrier_back`] (or [`Heap::update`]) or [`Heap::barrier_forward`].
+//!   ([`Params`]). Objects that can hold handles are changed only through
+//!   a guard their write barrier returns ([`Heap::write_back`] and its
+//!   siblings, or [`Heap::update`]); [`Heap::get_mut`] is for leaf objects.
 //!   Roots are rescanned when marking finishes, so they need no barrier.
 //! - **Pages go back to the allocator.** Each arena is split into pages of
 //!   a fixed number of slots ([`DEFAULT_PAGE_SLOTS`] unless the [`space!`]
@@ -99,6 +100,7 @@ mod os;
 mod trace;
 
 pub use arena::{AnyGc, Arena, CHECKED_HANDLES, DEFAULT_PAGE_SLOTS, Gc, MAX_OBJECTS, Store};
+pub use heap::write::{HoldsHandle, Write};
 pub use heap::{Heap, Mode, Params, Phase, Verify};
 
 /// Whether this build has the heap verifier ([`Heap::set_verify`]): debug

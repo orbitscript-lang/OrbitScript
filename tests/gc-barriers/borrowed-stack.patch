@@ -1,15 +1,27 @@
-Deletes: A suspended coroutine's stack given back after the debug library wrote to it (`return_stack`).
+Deletes: A suspended coroutine's stack given back after the debug library wrote to it (`return_stack`), and the barrier of `borrow_stack`, which parks the running stack in the thread with no safe point before `return_stack` and so covers the store on its own.
 Tests: debug_setlocal_in_a_suspended_coroutine
 
 diff --git a/crates/orbit-runtime/src/vm/coro.rs b/crates/orbit-runtime/src/vm/coro.rs
-index 9eac692..3ed6166 100644
+index bb910db..0ca7011 100644
 --- a/crates/orbit-runtime/src/vm/coro.rs
 +++ b/crates/orbit-runtime/src/vm/coro.rs
-@@ -783,7 +783,6 @@ impl Vm {
+@@ -806,8 +806,7 @@ impl Vm {
+         let gc_cycles = self.rt.gc_cycles;
+         // The running stack waits in `t`, which the collector may already
+         // have traced: the barrier.
+-        let mut w = self.heap.write_back(t);
+-        let c = state(&mut w);
++        let c = state(self.heap.write_no_handles(t).into_untraced());
+         // As when resuming it: after a sweep, the untraced slots above the
+         // parked top may refer to freed objects.
+         if c.cycle != gc_cycles {
+@@ -822,8 +821,7 @@ impl Vm {
      /// Give back the stack [`Vm::borrow_stack`] took from `t`.
      fn return_stack(&mut self, t: Gc<Thread>, saved_top: usize) {
          // Values may have been stored into the parked stack.
--        self.heap.barrier_back(t);
-         let c = co_mut(&mut self.heap, t);
+-        let mut w = self.heap.write_back(t);
+-        let c = state(&mut w);
++        let c = state(self.heap.write_no_handles(t).into_untraced());
          c.stack.swap(&mut self.rt.stack);
          c.top = std::mem::replace(&mut self.rt.top, saved_top);
+     }

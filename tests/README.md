@@ -57,7 +57,7 @@ The `gc-verify` job runs the suite and the differential tests on that build too.
 
 `crates/orbit/tests/gc_barriers.rs` has a test for each way the runtime stores a value into an object the collector may already have traced: table stores by every path, upvalues, metatables, user values, the registry, coroutine stacks and errors, the debug library's writes and pin slots. Each test ages the object, stores a new object into it, collects, and checks the value is still there, with the verifier checking every collection. A plain `cargo test` runs them.
 
-A test that passes proves nothing until it fails without its barrier. Each patch in `tests/gc-barriers` deletes one barrier and names the tests that depend on it, and `tests/gc-barriers/check-deletions.sh` applies each in turn and requires every one of its tests to fail:
+A test that passes proves nothing until it fails without its barrier. Each patch in `tests/gc-barriers` deletes one barrier and names the tests that depend on it, and `tests/gc-barriers/check-deletions.sh` applies each in turn and requires every one of its tests to fail. A patch swaps the write's guard for `write_no_handles(..).into_untraced()`, which has no barrier and skips the guard's own debug check, so that it is the verifier, driven by the test, that has to notice:
 
 ```sh
 tests/gc-barriers/check-deletions.sh              # every patch, about a minute

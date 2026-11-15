@@ -2,15 +2,15 @@ Deletes: `Stack::set_user_value` (the C API's `lua_setiuservalue`) for a userdat
 Tests: userdata_user_value_from_the_stack_api
 
 diff --git a/crates/orbit-runtime/src/stack/window.rs b/crates/orbit-runtime/src/stack/window.rs
-index 755fbf9..7b27595 100644
+index 66c217c..c347392 100644
 --- a/crates/orbit-runtime/src/stack/window.rs
 +++ b/crates/orbit-runtime/src/stack/window.rs
-@@ -1163,7 +1163,7 @@ impl<'s> Stack<'s> {
+@@ -1235,7 +1235,7 @@ impl<'s> Stack<'s> {
          let v = self.ctx.arg(len - 1);
          let r = match self.user_value(idx, n) {
              Some(UserValue::Slot(u)) => {
 -                self.ctx.vm.heap.update(u, |u| u.user_value = v);
-+                self.ctx.vm.heap.get_mut(u).user_value = v;
++                self.ctx.vm.heap.write_no_handles(u).into_untraced().user_value = v;
                  true
              }
              Some(UserValue::InTable(t, i)) => {

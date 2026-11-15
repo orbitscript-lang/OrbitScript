@@ -166,11 +166,12 @@ fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
         .expect("threads hold VM coroutines")
 }
 
-fn co_mut(heap: &mut LuaHeap, t: Gc<Thread>) -> &mut Coroutine {
-    heap.get_mut(t)
-        .state
-        .downcast_mut()
-        .expect("threads hold VM coroutines")
+/// A thread's coroutine, mutably, through the write guard (or `update`)
+/// that fits the change: a write that stores values into it (a stack, an
+/// error) takes the barrier, one that only changes its bookkeeping takes
+/// `write_no_handles`, and one that changes its size `update_by`.
+fn state(t: &mut Thread) -> &mut Coroutine {
+    t.state.downcast_mut().expect("threads hold VM coroutines")
 }
 
 /// The continuation a yielding coroutine waits in: the values the next
@@ -196,43 +197,43 @@ impl Vm {
         let top = self.rt.top;
         let gc_cycles = self.rt.co.gc_cycles;
         let hooks = self.rt.hooks.touched();
-        // A parked stack is traced through its thread, which the collector
-        // may already have scanned.
-        self.heap.barrier_back(from);
-        let c = co_mut(&mut self.heap, from);
-        c.status = from_status;
-        // A thread's bytes are its stack's, parked or running: they change
-        // only when the stack's capacity does.
-        let old = c.bytes;
-        // A coroutine that died with variables still to close keeps its
-        // stack for `coroutine.close`, and one that died with an error keeps
-        // it for the debug library (its traceback, locals) until closed.
-        let finished =
-            from_status == CoStatus::Dead && self.rt.stack.aux.tbc.is_empty() && c.error.is_none();
-        if finished {
-            c.bytes = 0;
-            c.top = 0;
-            // `debug.gethook` still reports a dead coroutine's hook.
-            c.stack.hook = self.rt.stack.hook;
-        } else {
-            c.bytes = self.rt.stack.bytes();
-            // An errored stack's frames stop mid-body, so their locals can
-            // sit above `top`: keep every register (all traced while running).
-            c.top = if from_status == CoStatus::Dead && c.error.is_some() {
-                self.rt.stack.regs.len()
-            } else {
-                top
-            };
-            self.rt.stack.park(&mut c.stack, hooks);
-            c.cycle = gc_cycles;
-        }
-        let delta = c.bytes as isize - old as isize;
         let suspended = from_status == CoStatus::Suspended;
-        c.parks = c.parks.wrapping_add(suspended as u32);
-        let stamp = c.parks;
-        if delta != 0 {
-            self.heap.adjust_bytes(delta);
-        }
+        let running = &mut self.rt.stack;
+        // Parking stores the running stack into the thread, which the
+        // collector may already have traced: the barrier. A thread's bytes
+        // are its stack's, parked or running: they change only when the
+        // stack's capacity does.
+        let (finished, stamp) = self.heap.update_by(from, |th| {
+            let c = state(th);
+            c.status = from_status;
+            let old = c.bytes;
+            // A coroutine that died with variables still to close keeps its
+            // stack for `coroutine.close`, and one that died with an error
+            // keeps it for the debug library (its traceback, locals) until
+            // closed.
+            let finished =
+                from_status == CoStatus::Dead && running.aux.tbc.is_empty() && c.error.is_none();
+            if finished {
+                c.bytes = 0;
+                c.top = 0;
+                // `debug.gethook` still reports a dead coroutine's hook.
+                c.stack.hook = running.hook;
+            } else {
+                c.bytes = running.bytes();
+                // An errored stack's frames stop mid-body, so their locals
+                // can sit above `top`: keep every register (all traced while
+                // running).
+                c.top = if from_status == CoStatus::Dead && c.error.is_some() {
+                    running.regs.len()
+                } else {
+                    top
+                };
+                running.park(&mut c.stack, hooks);
+                c.cycle = gc_cycles;
+            }
+            c.parks = c.parks.wrapping_add(suspended as u32);
+            ((finished, c.parks), c.bytes as isize - old as isize)
+        });
         if suspended {
             self.rt.co.parks = self.rt.co.parks.wrapping_add(1);
             let at = self.rt.co.cooling_at;
@@ -245,26 +246,29 @@ impl Vm {
                 }
             }
         }
-        let c = co_mut(&mut self.heap, to);
+        // Unparking takes `to`'s stack out of its thread, leaving the
+        // running thread's empty one there: no handle is stored.
+        let mut w = self.heap.write_no_handles(to);
+        let c = state(&mut w);
         c.status = CoStatus::Running;
-        if let Some(at) = c.shrunk_at.take() {
-            self.rt.stack.unpark(&mut c.stack, hooks);
-            self.came_back(at);
-        } else {
-            self.rt.stack.unpark(&mut c.stack, hooks);
-        }
-        let c = co_mut(&mut self.heap, to);
+        let shrunk_at = c.shrunk_at.take();
+        self.rt.stack.unpark(&mut c.stack, hooks);
         if finished {
             // The finished stack goes, leaving `to`'s slot empty; it may
             // serve the next new coroutine.
             let dead = std::mem::take(&mut c.stack);
             self.rt.co.spare_stacks.keep(dead);
         }
-        self.rt.top = c.top;
+        let (to_top, cycle) = (c.top, c.cycle);
+        drop(w);
+        if let Some(at) = shrunk_at {
+            self.came_back(at);
+        }
+        self.rt.top = to_top;
         // If a collection swept while it was parked, the dead slots above
         // its top (which aren't traced) may refer to freed objects.
-        if c.cycle != gc_cycles {
-            let live = live_end(&self.rt.stack, c.top);
+        if cycle != gc_cycles {
+            let live = live_end(&self.rt.stack, to_top);
             self.rt.stack.regs.truncate(live);
         }
         self.rt.current = to;
@@ -307,23 +311,26 @@ impl Vm {
     #[inline(never)]
     fn shrink_parked_stack(&mut self, t: Gc<Thread>) {
         let parks = self.rt.co.parks;
-        let c = co_mut(&mut self.heap, t);
-        c.shrunk_at = Some(parks);
-        let before = c.bytes;
-        // A copy of the stack, cut to its live values, takes its place; the
-        // old one, with its big buffers, may serve a new coroutine.
-        let mut old = std::mem::take(&mut c.stack);
-        let s = &mut c.stack;
-        std::mem::swap(&mut s.aux, &mut old.aux);
-        s.regs = old.regs[..c.top].to_vec();
-        s.cells = old.cells.clone();
-        s.frames = old.frames.clone();
-        s.aux.tbc.shrink_to_fit();
-        s.hook = old.hook;
-        s.dirty_to = old.dirty_to;
-        c.bytes = s.bytes();
-        let delta = c.bytes as isize - before as isize;
-        self.heap.adjust_bytes(delta);
+        // The copy holds no value the stack didn't: `update_by` is for the
+        // change of size, and its barrier is not needed.
+        let old = self.heap.update_by(t, |th| {
+            let c = state(th);
+            c.shrunk_at = Some(parks);
+            let before = c.bytes;
+            // A copy of the stack, cut to its live values, takes its place;
+            // the old one, with its big buffers, may serve a new coroutine.
+            let mut old = std::mem::take(&mut c.stack);
+            let s = &mut c.stack;
+            std::mem::swap(&mut s.aux, &mut old.aux);
+            s.regs = old.regs[..c.top].to_vec();
+            s.cells = old.cells.clone();
+            s.frames = old.frames.clone();
+            s.aux.tbc.shrink_to_fit();
+            s.hook = old.hook;
+            s.dirty_to = old.dirty_to;
+            c.bytes = s.bytes();
+            (old, c.bytes as isize - before as isize)
+        });
         self.rt.co.spare_stacks.keep(old);
     }
 
@@ -675,8 +682,10 @@ impl Vm {
         let closing = std::mem::replace(&mut self.rt.stack.aux.closing, Closing::No);
         if let Err(e) = outcome {
             if closing != Closing::Closer {
-                self.heap.barrier_back(co);
-                let c = co_mut(&mut self.heap, co);
+                // `switch_to` barriers the thread again before the next safe
+                // point; this write states its own.
+                let mut w = self.heap.write_back(co);
+                let c = state(&mut w);
                 c.error = Some(e);
                 c.cause = cause;
             }
@@ -715,17 +724,19 @@ impl Vm {
     /// still to close: it is dead and emptied, and the outcome is its
     /// error, if it had one. `None` leaves it for [`Vm::enter_closing`].
     fn close_at_once(&mut self, co: Gc<Thread>) -> Option<Result<(), Value>> {
-        let c = co_mut(&mut self.heap, co);
-        if !c.stack.aux.tbc.is_empty() {
+        if !self::co(&self.heap, co).stack.aux.tbc.is_empty() {
             return None;
         }
-        let error = c.error.take();
-        c.status = CoStatus::Dead;
-        let hook = c.stack.hook;
-        c.stack.clear(hook);
-        c.top = 0;
-        let freed = std::mem::take(&mut c.bytes);
-        self.heap.adjust_bytes(-(freed as isize));
+        let error = self.heap.update_by(co, |th| {
+            let c = state(th);
+            let error = c.error.take();
+            c.status = CoStatus::Dead;
+            let hook = c.stack.hook;
+            c.stack.clear(hook);
+            c.top = 0;
+            let freed = std::mem::take(&mut c.bytes);
+            (error, -(freed as isize))
+        });
         Some(error.map_or(Ok(()), Err))
     }
 
@@ -733,9 +744,11 @@ impl Vm {
     /// its pending `__close` handlers on its own stack with its error (nil
     /// if it has none), as an error unwinding to its base frame would.
     fn enter_closing(&mut self, co: Gc<Thread>) -> Result<Flow, Exc> {
-        let c = co_mut(&mut self.heap, co);
+        let mut w = self.heap.write_no_handles(co);
+        let c = state(&mut w);
         let error = c.error.take();
         c.stack.aux.closing = Closing::Closer;
+        drop(w);
         self.rt.co.resumers.push(self.rt.current);
         self.switch_to(co, CoStatus::Normal);
         self.rt.stack.pop_to_base();
@@ -788,7 +801,10 @@ impl Vm {
     /// waits in `t`'s slot, all of it traced.
     fn borrow_stack(&mut self, t: Gc<Thread>) -> usize {
         let gc_cycles = self.rt.co.gc_cycles;
-        let c = co_mut(&mut self.heap, t);
+        // The running stack waits in `t`, which the collector may already
+        // have traced: the barrier.
+        let mut w = self.heap.write_back(t);
+        let c = state(&mut w);
         // As when resuming it: after a sweep, the untraced slots above the
         // parked top may refer to freed objects.
         if c.cycle != gc_cycles {
@@ -803,8 +819,8 @@ impl Vm {
     /// Give back the stack [`Vm::borrow_stack`] took from `t`.
     fn return_stack(&mut self, t: Gc<Thread>, saved_top: usize) {
         // Values may have been stored into the parked stack.
-        self.heap.barrier_back(t);
-        let c = co_mut(&mut self.heap, t);
+        let mut w = self.heap.write_back(t);
+        let c = state(&mut w);
         c.stack.swap(&mut self.rt.stack);
         c.top = std::mem::replace(&mut self.rt.top, saved_top);
     }
@@ -1174,7 +1190,9 @@ impl NativeCtx<'_> {
     ) -> Result<(bool, Vec<Value>), Value> {
         let vm = &mut *self.vm;
         if t != vm.rt.current {
-            let c = co_mut(&mut vm.heap, t);
+            // Only bookkeeping: the function to call is on its stack already.
+            let mut w = vm.heap.write_no_handles(t);
+            let c = state(&mut w);
             if c.status == CoStatus::Dead
                 && c.error.is_none()
                 && c.stack.frames.is_empty()

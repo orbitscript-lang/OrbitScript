@@ -2,14 +2,15 @@ Deletes: `debug.upvaluejoin` (`join_upvalues`).
 Tests: debug_upvaluejoin
 
 diff --git a/crates/orbit-runtime/src/vm/debug.rs b/crates/orbit-runtime/src/vm/debug.rs
-index fb78ba6..28032b7 100644
+index d3a5b15..65a0ab7 100644
 --- a/crates/orbit-runtime/src/vm/debug.rs
 +++ b/crates/orbit-runtime/src/vm/debug.rs
-@@ -1021,7 +1021,6 @@ impl crate::vm::NativeCtx<'_> {
+@@ -1021,7 +1021,7 @@ impl crate::vm::NativeCtx<'_> {
          if self.vm.heap.get(proto).self_capture == Some(i as u8) {
              deopt_self(&mut self.vm.heap, f1, i as u8);
          }
--        self.vm.heap.barrier_back(f1);
-         self.vm.heap.get_mut(f1).captures[i] = cell;
+-        self.vm.heap.write_back(f1).captures[i] = cell;
++        self.vm.heap.write_no_handles(f1).into_untraced().captures[i] = cell;
      }
  
+     /// `stack traceback:` and the levels from `from` down.
