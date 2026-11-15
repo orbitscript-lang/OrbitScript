@@ -38,7 +38,6 @@ pub use class::{Class, ClassBuilder};
 pub use compiler::{Compiler, Language, SyntaxError};
 pub use error::{Error, ErrorKind};
 pub use host::{Call, HostFunction, Ret};
-#[cfg(feature = "verify")]
 pub use isolate::BinaryChecks;
 pub use isolate::{Config, Debugger, Gc, GcMode, Interrupt, Isolate, Library, Runtime};
 pub use orbit_macros::native;
@@ -97,7 +96,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "load")]
     fn load_compiles_at_run_time() {
         let mut iso = isolate();
         let r: Vec<String> = iso
@@ -276,7 +274,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "coroutine")]
     fn coroutines_resume_from_the_host() {
         let mut iso = isolate();
         iso.scope(|s| {
@@ -302,7 +299,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "string")]
     fn classes_have_methods_and_finalizers() {
         use std::rc::Rc;
 
@@ -371,7 +367,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "package")]
     fn modules_and_environments() {
         let mut iso = isolate();
         iso.scope(|s| {

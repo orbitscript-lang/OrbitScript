@@ -1,8 +1,6 @@
-//! `load` checks binary chunks at the level the build and
-//! `Isolate::set_binary_checks` choose, never the environment, and rejects
-//! VM-internal instructions at every level.
-
-#![cfg(feature = "verify")]
+//! `load` checks binary chunks at the level `Isolate::set_binary_checks`
+//! chooses, never the environment, and rejects VM-internal instructions at
+//! every level.
 
 use orbit::{BinaryChecks, Chunk, Compiler, Config, Error, Isolate, Language, Runtime, Value};
 use orbit_compiler::bytecode::{MULTI, Op, format};

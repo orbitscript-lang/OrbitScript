@@ -44,7 +44,7 @@
 #                     orbit-lib, orbit-lsp or orbit-fmt; a bare FEATURE, or
 #                     DEP/FEATURE for one of orbit-cli's dependencies, goes to
 #                     the `orbit` and `orbitc` build (for example
-#                     --features orbit-lib/system-libffi,orbit-cli/repl).
+#                     --features orbit-lib/system-libffi).
 #                     May be given more than once
 # The options apply to PGO training and checking too, so a profile trained
 # with them matches the build that uses it. The committed profiles are
@@ -206,10 +206,14 @@ build() {
 # Each build's features: what the options leave out is taken away from the
 # package's defaults (read from its Cargo.toml, so a new default feature
 # needs no change here), and what they add, or --features names, is added.
-# The default features of the package in crates/$1, separated by commas.
+# The default features of the package in crates/$1, separated by commas
+# (empty when it has none).
 defaults() {
     list=$(sed -n 's/^default = \[\(.*\)\]$/\1/p' "crates/$1/Cargo.toml" | tr -d '" ')
-    [ -n "$list" ] || { echo "build.sh: no default features in crates/$1/Cargo.toml" >&2; exit 1; }
+    if [ -z "$list" ] && grep -q '^default *=' "crates/$1/Cargo.toml"; then
+        echo "build.sh: can't read the default features in crates/$1/Cargo.toml" >&2
+        exit 1
+    fi
     printf '%s' "$list"
 }
 # $1 with the comma-separated features after it removed.

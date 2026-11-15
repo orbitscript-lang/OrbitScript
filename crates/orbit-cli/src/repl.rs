@@ -1,6 +1,7 @@
 //! Interactive mode, after `lua`'s: read statements or expressions and
-//! print their values. Behind the `repl` feature; with `line-editing` too,
-//! a terminal gets [`editor`]'s line editing, history and completion.
+//! print their values. Behind the `repl` feature. A terminal that allows it
+//! gets [`editor`]'s line editing, history and completion; anything else
+//! is read as plain lines.
 
 use std::io::{BufRead, Write};
 use std::sync::atomic::Ordering;
@@ -9,31 +10,26 @@ use orbit::{Chunk, Function, Pinned, Value};
 
 use crate::{RUNNING, Runner, STDIN, docall};
 
-#[cfg(feature = "line-editing")]
 #[cfg_attr(not(unix), allow(dead_code))]
 mod editor;
-#[cfg(all(feature = "line-editing", unix))]
+#[cfg(unix)]
 mod tty;
 
 /// Interactive mode's state in [`Runner`].
 #[derive(Default)]
 pub struct State {
     /// Line editing, when the terminal allows it.
-    #[cfg(feature = "line-editing")]
     editor: Option<LineEditor>,
     /// The Lua function that lists completions (see [`COMPLETE`]).
-    #[cfg(feature = "line-editing")]
     complete: Option<Pinned<Function<'static>>>,
 }
 
-#[cfg(feature = "line-editing")]
 /// Interactive mode's line editor and the terminal it runs on.
 struct LineEditor {
     editor: editor::Editor,
     term: Box<dyn editor::Terminal>,
 }
 
-#[cfg(feature = "line-editing")]
 impl LineEditor {
     /// A line editor, when standard input and output are both a terminal
     /// that can do more than print lines (`TERM` isn't `dumb`).
@@ -59,7 +55,6 @@ impl LineEditor {
 /// string keys of the table that the path `...` leads to from the globals,
 /// including keys reached through `__index` tables. It reads with
 /// `rawget` and `next` only, so completing runs no metamethods.
-#[cfg(feature = "line-editing")]
 const COMPLETE: &[u8] = include_bytes!("repl/complete.lua");
 
 impl Runner {
@@ -191,7 +186,6 @@ impl Runner {
     }
 }
 
-#[cfg(feature = "line-editing")]
 impl Runner {
     /// On a terminal with line editing, read a line with [`editor`];
     /// `None` when there's no editor, or it can't work this terminal and
@@ -268,17 +262,6 @@ impl Runner {
             }
         })
     }
-}
-
-#[cfg(not(feature = "line-editing"))]
-impl Runner {
-    fn edit_line(&mut self, _prompt: &[u8]) -> Option<Option<Vec<u8>>> {
-        None
-    }
-
-    fn start_editor(&mut self) {}
-
-    fn add_history(&mut self, _line: &[u8]) {}
 }
 
 /// Whether an interactive line declares a local, which the next line can't

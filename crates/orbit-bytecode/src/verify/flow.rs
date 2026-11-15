@@ -1,4 +1,4 @@
-//! Layer 2 of the verifier: data flow (feature `verify-flow`).
+//! Layer 2 of the verifier: data flow.
 
 use super::{Function, Result};
 use crate::{MULTI, Op};
