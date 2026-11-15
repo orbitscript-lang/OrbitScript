@@ -3,6 +3,7 @@
 //! pieces and `for` limits, and the errors or metamethod requests ([`Exc`])
 //! they end in.
 
+use crate::object::OrbitString;
 use orbit_lua_version::LUA;
 use std::io::Write as _;
 
@@ -20,10 +21,11 @@ use crate::vm::meta::{self, MetaCall, MetaField, Metas};
 /// position and the operand's name.
 #[derive(Debug)]
 pub(crate) enum Exc {
-    /// Message plus the operand whose origin to append, if any.
-    Rt(String, Option<u8>),
+    /// Message plus the operand whose origin to append, if any. Messages
+    /// are byte strings: a `__name` or a global's name need not be UTF-8.
+    Rt(OrbitString, Option<u8>),
     /// A message that gets no position.
-    Plain(String),
+    Plain(OrbitString),
     /// A finished error.
     Lua(crate::vm::LuaError),
     /// A finished error that is past its message handler: the handler
@@ -224,21 +226,25 @@ pub(crate) fn arith_slow(
     }
     if strings {
         return Err(Exc::Rt(
-            format!(
-                "attempt to {} a '{}' with a '{}'",
+            bytes_msg![
+                "attempt to ",
                 op.name(),
+                " a '",
                 rt.type_name(heap, a),
-                rt.type_name(heap, b)
-            ),
+                "' with a '",
+                rt.type_name(heap, b),
+                "'"
+            ],
             None,
         ));
     }
     let (bad, which) = if is_num(a) { (b, 1) } else { (a, 0) };
     Err(Exc::Rt(
-        format!(
-            "attempt to perform arithmetic on a {} value",
-            rt.type_name(heap, bad)
-        ),
+        bytes_msg![
+            "attempt to perform arithmetic on a ",
+            rt.type_name(heap, bad),
+            " value"
+        ],
         Some(which),
     ))
 }
@@ -315,10 +321,11 @@ pub(crate) fn bnot_slow(heap: &LuaHeap, rt: &Metas, a: Value) -> Result<Value, E
 
 fn bitwise_type_error(heap: &LuaHeap, rt: &Metas, v: Value, operand: u8) -> Exc {
     Exc::Rt(
-        format!(
-            "attempt to perform bitwise operation on a {} value",
-            rt.type_name(heap, v)
-        ),
+        bytes_msg![
+            "attempt to perform bitwise operation on a ",
+            rt.type_name(heap, v),
+            " value"
+        ],
         Some(operand),
     )
 }
@@ -394,9 +401,9 @@ pub(crate) fn le_fallback(
 fn compare_error(heap: &LuaHeap, rt: &Metas, a: Value, b: Value) -> Exc {
     let (x, y) = (rt.type_name(heap, a), rt.type_name(heap, b));
     let msg = if x == y {
-        format!("attempt to compare two {x} values")
+        bytes_msg!["attempt to compare two ", x, " values"]
     } else {
-        format!("attempt to compare {x} with {y}")
+        bytes_msg!["attempt to compare ", x, " with ", y]
     };
     Exc::Rt(msg, None)
 }

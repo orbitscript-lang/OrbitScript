@@ -22,8 +22,8 @@ pub const VALUE_EXPECTED: &str = "value expected";
 pub const NO_VALUE: &str = "no value";
 
 /// The message of a type error: `number expected, got nil`.
-pub fn type_mismatch(expected: &str, got: &str) -> String {
-    format!("{expected} expected, got {got}")
+pub fn type_mismatch(expected: &str, got: impl AsRef<[u8]>) -> OrbitString {
+    OrbitString::concat(&[expected.as_bytes(), b" expected, got ", got.as_ref()])
 }
 
 /// `bad argument #n to 'name' (msg)` for argument `n` (1-based, counting
@@ -64,7 +64,12 @@ mod tests {
         );
         // A method call doesn't count `self`, and a bad `self` says so.
         assert_eq!(
-            text("m", true, 2, &type_mismatch("number", NO_VALUE)),
+            text(
+                "m",
+                true,
+                2,
+                &type_mismatch("number", NO_VALUE).to_string_lossy()
+            ),
             "bad argument #1 to 'm' (number expected, got no value)"
         );
         assert_eq!(
