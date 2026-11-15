@@ -2,15 +2,15 @@ Deletes: A native closure storing into its upvalue (`NativeCtx::set_upvalue`).
 Tests: native_closure_upvalue_store
 
 diff --git a/crates/orbit-runtime/src/vm/native.rs b/crates/orbit-runtime/src/vm/native.rs
-index 7a9306e..8858a90 100644
+index 3dfccf6..ce5d57b 100644
 --- a/crates/orbit-runtime/src/vm/native.rs
 +++ b/crates/orbit-runtime/src/vm/native.rs
-@@ -644,7 +644,7 @@ impl NativeCtx<'_> {
+@@ -651,7 +651,7 @@ impl NativeCtx<'_> {
      pub fn set_upvalue(&mut self, i: usize, v: Value) {
          if let Some(c) = self.upvals {
              if let Some(&cell) = self.vm.heap.get(c).captures.get(i) {
 -                self.vm.heap.update(cell, |cell| cell.value = v);
-+                self.vm.heap.get_mut(cell).value = v;
++                self.vm.heap.write_no_handles(cell).into_untraced().value = v;
              }
          }
      }

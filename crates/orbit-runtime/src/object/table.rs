@@ -343,7 +343,7 @@ impl Trace<LuaSpace> for Table {
 
     /// The array part traces in parts, for a big table the generational
     /// collector remembers by part (array stores go through
-    /// [`Heap::barrier_at`](orbit_gc::Heap::barrier_at)). A weak table is
+    /// [`Heap::write_at`](orbit_gc::Heap::write_at)). A weak table is
     /// traced whole.
     fn parts(&self) -> usize {
         self.array.len()
@@ -1375,11 +1375,12 @@ pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<boo
     // The array store needs the barrier, so do it first and look the table
     // up once. `set_key`'s `Heap::update` barriers again, which only
     // checks the color of a table already remembered.
-    heap.barrier_at(t, idx as usize);
-    let tab = heap.get_mut(t);
-    if idx < tab.array.len() as u64 {
-        tab.array.set(idx as usize, v);
-        return Ok(true);
+    {
+        let mut tab = heap.write_at(t, idx as usize);
+        if idx < tab.array.len() as u64 {
+            tab.array.set(idx as usize, v);
+            return Ok(true);
+        }
     }
     set_key(heap, t, &Key::int(i), v)?;
     Ok(false)
@@ -1403,18 +1404,13 @@ pub enum IntStore {
 #[inline(always)]
 pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore {
     let idx = (i as u64).wrapping_sub(1);
-    // Storing a value that refers to no object can't make a traced table
-    // point at an untraced one, so only those stores barrier; the hash
-    // path below barriers through `Heap::update`. With the value's
-    // variant known (the interpreter stores numbers by parts) the test
-    // folds away.
-    if !matches!(
-        v,
-        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
-    ) {
-        heap.barrier_at(t, idx as usize);
-    }
-    let tab = heap.get_mut(t);
+    // With a memory limit a store errors once the heap is over it even if
+    // it allocates nothing (`set_key`), so only appends without one take
+    // the in-place path below.
+    let no_limit = heap.limit().is_none();
+    // Only stores of a value that can refer to an object barrier
+    // (`HoldsHandle`); the hash path below barriers through `Heap::update`.
+    let mut tab = heap.write_at_for(t, idx as usize, &v);
     if idx < tab.array.len() as u64 {
         let idx = idx as usize;
         // Metatables are rare: test for one before reading the tag.
@@ -1435,19 +1431,18 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
     }
     // Appending (`t[#t + 1] = v`) with room left in the array part and no
     // hash part that could hold the key: no allocation, so the GC's byte
-    // count is unaffected. With a memory limit a store errors once the heap
-    // is over it even if it allocates nothing (`set_key`), so only appends
-    // without one take this path.
+    // count is unaffected.
     if idx == tab.array.len() as u64
         && tab.array.len() < tab.array.cap()
         && tab.used == 0
         && !v.is_nil()
-        && heap.limit().is_none()
+        && no_limit
     {
-        let pushed = heap.get_mut(t).array.push_in_place(v);
+        let pushed = tab.array.push_in_place(v);
         debug_assert!(pushed, "checked for room above");
         return IntStore::Array;
     }
+    drop(tab);
     match set_key(heap, t, &Key::int(i), v) {
         Ok(_) => IntStore::Other,
         Err(NoMemory) => IntStore::Slow,
@@ -1887,9 +1882,9 @@ mod tests {
         assert!(matches!(lookup(&heap, t, MetaField::Gc), Value::Int(3)));
         // `set_slot` reviving a dead entry (an inline cache hit).
         let slot = heap.get(t).find_str(&heap, name(MetaField::Gc)).unwrap();
-        heap.get_mut(t).set_slot(slot, Value::Nil);
+        heap.write_no_handles(t).set_slot(slot, Value::Nil);
         assert!(lookup(&heap, t, MetaField::Gc).is_nil());
-        heap.get_mut(t).set_slot(slot, Value::Int(4));
+        heap.write_no_handles(t).set_slot(slot, Value::Int(4));
         assert!(matches!(lookup(&heap, t, MetaField::Gc), Value::Int(4)));
         // `insert_str_at` on a table with room.
         let h = heap.alloc(Table::with_capacity(0, 64));
@@ -1898,7 +1893,7 @@ mod tests {
         let Err(Some(slot)) = heap.get(h).find_str_store(&heap, &key) else {
             panic!("room for a new key");
         };
-        heap.get_mut(h).insert_str_at(slot, &key, Value::Int(5));
+        heap.write_back(h).insert_str_at(slot, &key, Value::Int(5));
         assert!(matches!(lookup(&heap, h, MetaField::Mode), Value::Int(5)));
         // `write` with a slot found earlier, and growth through rebuilds:
         // every cached field, stored one at a time after a failed lookup.
@@ -1909,8 +1904,7 @@ mod tests {
             }
             let key = Key::str(&heap, name(e));
             let slot = heap.get(g).find_slot(&heap, &key, false);
-            heap.get_mut(g)
-                .write(slot, &key, Value::Int(i as i64))
+            heap.update(g, |tab| tab.write(slot, &key, Value::Int(i as i64)))
                 .unwrap();
             for (j, &f) in MetaField::ALL.iter().enumerate() {
                 let v = lookup(&heap, g, f);
@@ -2006,7 +2000,7 @@ mod tests {
         // Revival through `set_slot`, at the slot a probe finds.
         for &e in MetaField::ALL.iter().step_by(2) {
             if let Some(slot) = heap.get(t).find_str(&heap, name(e)) {
-                heap.get_mut(t).set_slot(slot, Value::Bool(true));
+                heap.write_no_handles(t).set_slot(slot, Value::Bool(true));
             } else {
                 set(&mut heap, t, Value::Str(name(e)), Value::Bool(true)).unwrap();
             }
@@ -2031,12 +2025,11 @@ mod tests {
             for (i, &e) in MetaField::ALL.iter().enumerate() {
                 let key = Key::str(&heap, name(e));
                 if let Err(Some(slot)) = heap.get(h).find_str_store(&heap, &key) {
-                    heap.get_mut(h)
+                    heap.write_back(h)
                         .insert_str_at(slot, &key, Value::Int(i as i64));
                 } else {
                     let slot = heap.get(h).find_slot(&heap, &key, false);
-                    heap.get_mut(h)
-                        .write(slot, &key, Value::Int(i as i64))
+                    heap.update(h, |tab| tab.write(slot, &key, Value::Int(i as i64)))
                         .unwrap();
                 }
                 check(&heap, h, "small");

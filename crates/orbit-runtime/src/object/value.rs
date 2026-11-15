@@ -298,6 +298,21 @@ pub fn str_eq(heap: &LuaHeap, a: Gc<LuaStr>, b: Gc<LuaStr>) -> bool {
     !(x.is_short() && y.is_short()) && x.as_bytes() == y.as_bytes()
 }
 
+/// Storing a number, a boolean or nil can't make a traced object point at
+/// an untraced one, so [`Heap::write_for`](orbit_gc::Heap::write_for) skips
+/// the barrier for them. With the value's variant known (the interpreter
+/// stores numbers by parts) the test folds away, so number stores into old
+/// objects don't remember them in generational mode.
+impl orbit_gc::HoldsHandle for Value {
+    #[inline(always)]
+    fn holds_handle(&self) -> bool {
+        !matches!(
+            self,
+            Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+        )
+    }
+}
+
 impl From<Number> for Value {
     #[inline(always)]
     fn from(n: Number) -> Value {

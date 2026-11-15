@@ -16,9 +16,9 @@ use crate::object::LuaSpace;
 pub trait ThreadState: Any + fmt::Debug {
     /// Mark every object the state refers to.
     fn trace(&self, m: &mut Marker<'_, LuaSpace>);
-    /// Heap bytes the state owns, for the collector's accounting. When
-    /// this changes, the owner reports the difference
-    /// ([`Heap::adjust_bytes`](orbit_gc::Heap::adjust_bytes)).
+    /// Heap bytes the state owns, for the collector's accounting. A change
+    /// to it goes through [`Heap::update`](orbit_gc::Heap::update) or
+    /// [`Heap::update_by`](orbit_gc::Heap::update_by).
     fn extra_bytes(&self) -> usize;
 }
 

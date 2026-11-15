@@ -153,7 +153,7 @@ mod tests {
         let v = s(heap, h, mode);
         tbl::set(heap, mt, k, v).unwrap();
         let t = heap.alloc(Table::new());
-        heap.get_mut(t).meta = Some(mt);
+        heap.write_back(t).meta = Some(mt);
         h.roots.push(Value::Table(t));
         t
     }

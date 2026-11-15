@@ -1027,22 +1027,19 @@ pub(crate) fn set_str_miss(
             }
             if let Some(slot) = slot {
                 cache.fill(slot);
-                heap.barrier_back(t);
-                heap.get_mut(t).set_slot(slot, v);
+                heap.write_back(t).set_slot(slot, v);
                 return Ok(());
             }
         }
         match heap.get(t).find_str_store(heap, &key) {
             Ok(slot) => {
                 cache.fill(slot);
-                heap.barrier_back(t);
-                heap.get_mut(t).set_slot(slot, v);
+                heap.write_back(t).set_slot(slot, v);
                 return Ok(());
             }
             Err(Some(slot)) if !v.is_nil() => {
                 cache.fill(slot);
-                heap.barrier_back(t);
-                heap.get_mut(t).insert_str_at(slot, &key, v);
+                heap.write_back(t).insert_str_at(slot, &key, v);
                 return Ok(());
             }
             Err(_) => {}

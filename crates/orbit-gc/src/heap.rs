@@ -12,6 +12,7 @@ use std::mem::size_of;
 
 #[cfg(debug_assertions)]
 pub(crate) mod verify;
+pub(crate) mod write;
 
 /// Collector tuning.
 ///
@@ -312,6 +313,11 @@ struct LeafOnly<S, T>(PhantomData<(S, T)>);
 
 impl<S: Space, T: Trace<S>> LeafOnly<S, T> {
     const CHECK: () = assert!(T::LEAF, "orbit-gc: only leaf objects can be revived");
+    const CHECK_GET_MUT: () = assert!(
+        T::LEAF,
+        "orbit-gc: get_mut is for leaf objects; write to others through write_back, write_at, \
+         write_for or write_no_handles"
+    );
 }
 
 /// The bytes one slot of `T` takes: the slot itself and its color byte.
@@ -441,16 +447,37 @@ impl<S: Space> Heap<S> {
         self.space.arena().get(gc)
     }
 
-    /// Mutable access with no write barrier and no byte accounting. Use it
-    /// for writes that store no handles and don't change
-    /// [`Trace::extra_bytes`]; otherwise use [`Heap::update`], or pair it with
-    /// [`Heap::barrier_back`] or [`Heap::barrier_forward`].
+    /// Mutable access to a leaf object ([`Trace::LEAF`]), which holds no
+    /// handles and so needs no write barrier; checked when compiling. It
+    /// does no byte accounting: a change to [`Trace::extra_bytes`] takes
+    /// [`Heap::update`]. Other objects are changed through the guards the
+    /// barriers return ([`Heap::write_back`] and its siblings), and asking
+    /// for one of them here doesn't compile:
+    ///
+    /// ```compile_fail
+    /// # use orbit_gc::{Gc, Heap, Marker, Trace, space};
+    /// struct Node(Option<Gc<Node>>);
+    /// space! { struct Nodes { nodes: Node } }
+    /// impl Trace<Nodes> for Node {
+    ///     fn trace(&self, m: &mut Marker<'_, Nodes>) {
+    ///         if let Some(n) = self.0 {
+    ///             m.mark(n);
+    ///         }
+    ///     }
+    /// }
+    /// let mut heap = Heap::<Nodes>::new();
+    /// let a = heap.alloc(Node(None));
+    /// let b = heap.alloc(Node(None));
+    /// heap.get_mut(a).0 = Some(b); // no barrier: refused
+    /// ```
     #[inline(always)]
     #[track_caller]
-    pub fn get_mut<T>(&mut self, gc: Gc<T>) -> &mut T
+    pub fn get_mut<T: Trace<S>>(&mut self, gc: Gc<T>) -> &mut T
     where
         S: Holds<T>,
     {
+        #[allow(clippy::let_unit_value)]
+        let () = LeafOnly::<S, T>::CHECK_GET_MUT;
         self.space.arena_mut().get_mut(gc)
     }
 
@@ -467,6 +494,42 @@ impl<S: Space> Heap<S> {
         let r = f(obj);
         let after = obj.extra_bytes();
         self.adjust_bytes(after as isize - before as isize);
+        r
+    }
+
+    /// [`Heap::update`] for a change that knows how much it changed the
+    /// object's [`Trace::extra_bytes`]: `f` returns its result and that
+    /// change, which is charged or credited without asking the object.
+    /// Debug builds check the change against the object.
+    #[inline(always)]
+    #[track_caller]
+    pub fn update_by<T: Trace<S>, R>(
+        &mut self,
+        gc: Gc<T>,
+        f: impl FnOnce(&mut T) -> (R, isize),
+    ) -> R
+    where
+        S: Holds<T>,
+    {
+        self.barrier_back(gc);
+        let obj = self.space.arena_mut().get_mut(gc);
+        #[cfg(debug_assertions)]
+        let before = obj.extra_bytes();
+        let (r, delta) = f(obj);
+        #[cfg(debug_assertions)]
+        {
+            let after = self.space.arena().get(gc).extra_bytes();
+            assert!(
+                after as isize - before as isize == delta,
+                "orbit-gc update_by: {}#{}'s extra bytes went from {before} to {after}, \
+                 but the change reported was {delta:+}",
+                S::kind_name(<S as Holds<T>>::KIND),
+                gc.index(),
+            );
+        }
+        if delta != 0 {
+            self.adjust_bytes(delta);
+        }
         r
     }
 

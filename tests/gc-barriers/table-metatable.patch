@@ -2,7 +2,7 @@ Deletes: `setmetatable` on a table (`gc::set_metatable`).
 Tests: table_metatable
 
 diff --git a/crates/orbit-runtime/src/object/gc.rs b/crates/orbit-runtime/src/object/gc.rs
-index 4f2457f..4d1c4f5 100644
+index 930d262..39913e7 100644
 --- a/crates/orbit-runtime/src/object/gc.rs
 +++ b/crates/orbit-runtime/src/object/gc.rs
 @@ -73,7 +73,7 @@ pub fn weak_mode<'a>(mt: &Table, str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> O
@@ -10,7 +10,7 @@ index 4f2457f..4d1c4f5 100644
      match v {
          Value::Table(t) => {
 -            heap.update(t, |t| t.meta = mt);
-+            heap.get_mut(t).meta = mt;
++            heap.write_no_handles(t).into_untraced().meta = mt;
              if has_gc(heap, mt) {
                  heap.register_finalizer(t);
              }

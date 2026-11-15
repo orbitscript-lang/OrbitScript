@@ -2,14 +2,15 @@ Deletes: A string-key store into an existing key of a table with `__newindex` (`
 Tests: table_store_past_a_newindex_metamethod_into_an_existing_key
 
 diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
-index a41812b..a157b4d 100644
+index 9acf1ad..6052d7b 100644
 --- a/crates/orbit-runtime/src/vm/cold.rs
 +++ b/crates/orbit-runtime/src/vm/cold.rs
-@@ -1004,7 +1004,6 @@ pub(crate) fn set_str_miss(
+@@ -1027,7 +1027,7 @@ pub(crate) fn set_str_miss(
              }
              if let Some(slot) = slot {
                  cache.fill(slot);
--                heap.barrier_back(t);
-                 heap.get_mut(t).set_slot(slot, v);
+-                heap.write_back(t).set_slot(slot, v);
++                heap.write_no_handles(t).into_untraced().set_slot(slot, v);
                  return Ok(());
              }
+         }

@@ -2,14 +2,15 @@ Deletes: `SetField` with its cache filled.
 Tests: table_store_by_cached_string_key
 
 diff --git a/crates/orbit-runtime/src/vm/dispatch.rs b/crates/orbit-runtime/src/vm/dispatch.rs
-index 69640fb..8faf57b 100644
+index ef5c061..d20d8e5 100644
 --- a/crates/orbit-runtime/src/vm/dispatch.rs
 +++ b/crates/orbit-runtime/src/vm/dispatch.rs
-@@ -512,7 +512,6 @@ impl Vm {
+@@ -481,7 +481,7 @@ impl Vm {
+                             {
                                  // The key is there: overwrite its value. No
                                  // capacity changes, so no byte accounting.
-                                 by_parts!(src, |v| {
--                                    barrier_for(&mut self.heap, t, v);
-                                     self.heap.get_mut(t).set_slot(slot, v)
-                                 });
+-                                by_parts!(src, |v| self.heap.write_for(t, &v).set_slot(slot, v));
++                                by_parts!(src, |v| self.heap.write_no_handles(t).into_untraced().set_slot(slot, v));
                              } else {
+                                 let k = const_str(&cur.consts, key);
+                                 let v = w[src];

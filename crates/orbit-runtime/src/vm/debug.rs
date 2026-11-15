@@ -453,8 +453,7 @@ impl Runtime {
             }
             Place::Cell(c) => {
                 crate::vm::debug::before_cell_write(heap, c);
-                heap.barrier_back(c);
-                heap.get_mut(c).value = v;
+                heap.write_back(c).value = v;
             }
             Place::Nil => {}
         }
@@ -849,7 +848,8 @@ pub(crate) fn deopt_self(heap: &mut LuaHeap, f: Gc<Closure>, cap: u8) {
         return;
     }
     let new = code.without_cap_self(cap);
-    heap.get_mut(f).code = std::rc::Rc::new(new);
+    // The new code keeps the old one's constants.
+    heap.write_no_handles(f).code = std::rc::Rc::new(new);
 }
 
 /// The debug library's view of the VM.
@@ -1021,8 +1021,7 @@ impl crate::vm::NativeCtx<'_> {
         if self.vm.heap.get(proto).self_capture == Some(i as u8) {
             deopt_self(&mut self.vm.heap, f1, i as u8);
         }
-        self.vm.heap.barrier_back(f1);
-        self.vm.heap.get_mut(f1).captures[i] = cell;
+        self.vm.heap.write_back(f1).captures[i] = cell;
     }
 
     /// `stack traceback:` and the levels from `from` down.

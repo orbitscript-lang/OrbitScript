@@ -181,8 +181,9 @@ impl Vm {
     fn allow_yields(&mut self, c: crate::object::Gc<crate::object::Closure>) {
         let proto = self.heap.get(c).proto;
         let code = std::rc::Rc::new(self.heap.get(proto).code.allowing_yields());
-        self.heap.get_mut(proto).code = code.clone();
-        self.heap.get_mut(c).code = code;
+        // The new code keeps the old one's constants.
+        self.heap.write_no_handles(proto).code = code.clone();
+        self.heap.write_no_handles(c).code = code;
     }
 
     fn table_entries(&self, t: crate::object::Gc<Table>) -> Vec<(Value, Value)> {

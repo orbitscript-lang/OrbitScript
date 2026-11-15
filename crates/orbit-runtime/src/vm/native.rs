@@ -1166,7 +1166,12 @@ impl NativeCtx<'_> {
         &mut self,
         u: Gc<crate::object::UserData>,
     ) -> Option<&mut T> {
-        self.vm.heap.get_mut(u).downcast_mut()
+        // The host value is never traced.
+        self.vm
+            .heap
+            .write_no_handles(u)
+            .into_untraced()
+            .downcast_mut()
     }
 
     /// A userdata argument holding a `T`; `name` is the type the message

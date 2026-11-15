@@ -1127,7 +1127,8 @@ impl Vm {
 
     /// The host value of userdata `u`, mutably, if it is a `T`.
     pub fn userdata_mut<T: std::any::Any>(&mut self, u: Gc<UserData>) -> Option<&mut T> {
-        self.heap.get_mut(u).downcast_mut()
+        // The host value is never traced.
+        self.heap.write_no_handles(u).into_untraced().downcast_mut()
     }
 
     /// Set (or clear) the metatable of table `t` or userdata `u`.
