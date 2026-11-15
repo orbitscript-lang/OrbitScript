@@ -686,7 +686,7 @@ impl NativeCtx<'_> {
     /// `stack overflow (<what>)` (`luaL_checkstack`'s), for a native that
     /// returns as many values as its arguments ask for.
     pub fn check_room(&mut self, n: usize, what: &str) -> Result<(), LuaError> {
-        let room = self.vm.rt.limits.max_stack.saturating_sub(self.vm.rt.top);
+        let room = self.vm.rt.host.max_stack().saturating_sub(self.vm.rt.top);
         if n > room {
             return Err(self.error(&format!("stack overflow ({what})")));
         }

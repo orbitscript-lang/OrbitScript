@@ -1723,7 +1723,7 @@ impl<'s> Stack<'s> {
                 c.full_collect();
                 0
             }
-            GcOp::Step(kb) => match c.vm.rt.gc.mode {
+            GcOp::Step(kb) => match c.vm.rt.gc.mode() {
                 GcMode::Generational => c.gen_step() as i64,
                 GcMode::Incremental => {
                     let bytes = usize::try_from(kb).unwrap_or(0).saturating_mul(1024);
@@ -1779,12 +1779,12 @@ impl<'s> Stack<'s> {
 
     fn warn_str(&mut self, msg: OrbitStr<'_>, more: bool) {
         let msg = msg.as_bytes();
-        let rt = &mut self.ctx.vm.rt;
-        if let Some(hook) = &mut rt.warn_hook {
+        let host = &mut self.ctx.vm.rt.host;
+        if let Some(hook) = host.warn_hook() {
             (hook.0)(msg, more);
             return;
         }
-        let pending = rt.ext.get_or_insert_with(WarnBuffer::default);
+        let pending = host.ext_mut().get_or_insert_with(WarnBuffer::default);
         let first = pending.0.is_empty();
         pending.0.extend_from_slice(msg);
         if more {
@@ -1793,10 +1793,10 @@ impl<'s> Stack<'s> {
         let text = std::mem::take(&mut pending.0);
         // A one-piece message starting with '@' is a control message.
         match (first, text.as_slice()) {
-            (true, b"@on") => rt.warnings = true,
-            (true, b"@off") => rt.warnings = false,
+            (true, b"@on") => host.set_warnings(true),
+            (true, b"@off") => host.set_warnings(false),
             (true, [b'@', ..]) => {}
-            _ => rt.warn(&text),
+            _ => host.warn(&text),
         }
     }
 
@@ -1805,7 +1805,11 @@ impl<'s> Stack<'s> {
     pub fn set_warn_hook(&mut self, hook: impl FnMut(OrbitStr<'_>, bool) + 'static) {
         let mut hook = hook;
         let hook = move |msg: &[u8], more| hook(msg.into(), more);
-        self.ctx.vm.rt.warn_hook = Some(vm::WarnHook(Box::new(hook)));
+        self.ctx
+            .vm
+            .rt
+            .host
+            .set_warn_hook(vm::WarnHook(Box::new(hook)));
     }
 
     /// Open standard library `lib` as `orbit::Config::libraries` would
@@ -1849,13 +1853,13 @@ impl<'s> Stack<'s> {
     /// (`orbit::Config::line_endings`). Standard output
     /// ([`Stack::with_stdout`]) already does what this says.
     pub fn line_endings(&self) -> crate::text::LineEndings {
-        self.ctx.vm.rt.line_endings
+        self.ctx.vm.rt.host.line_endings()
     }
 
     /// Write to the isolate's standard output, the stream `print` and
     /// `io.stdout` share. `f` must not reach the isolate.
     pub fn with_stdout<R>(&mut self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
-        f(self.ctx.vm.rt.out.as_write())
+        f(self.ctx.vm.rt.host.out().as_write())
     }
 
     /// Run `hook` when a script ends the process ([`Return::exit`],
@@ -1876,7 +1880,7 @@ impl<'s> Stack<'s> {
     /// reach the stack.
     #[inline]
     pub fn extension<T: Any + Default, R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(self.ctx.vm.rt.ext.get_or_insert_with(T::default))
+        f(self.ctx.vm.rt.host.ext_mut().get_or_insert_with(T::default))
     }
 
     /// Run `f` on the isolate's extension value of type `T` if one was
@@ -1884,7 +1888,7 @@ impl<'s> Stack<'s> {
     /// path.
     #[inline]
     pub fn find_extension<T: Any, R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
-        self.ctx.vm.rt.ext.get::<T>().map(f)
+        self.ctx.vm.rt.host.ext().get::<T>().map(f)
     }
 
     // ---- the locale (ADR-13) ----------------------------------------------
@@ -2297,7 +2301,7 @@ impl<'a> Control<'a> {
 
     /// See [`Stack::extension`].
     pub fn extension<T: Any + Default, R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(self.vm.rt.ext.get_or_insert_with(T::default))
+        f(self.vm.rt.host.ext_mut().get_or_insert_with(T::default))
     }
 
     /// The interrupt flag, for code that can only store to memory (a C
@@ -2315,7 +2319,7 @@ impl<'a> Control<'a> {
 
     /// Call `H` when the interrupt flag is raised.
     pub fn set_interrupt_handler<H: InterruptHandler>(&mut self) {
-        self.vm.rt.interrupt_handler = Some(interrupt_entry::<H>);
+        self.vm.rt.host.set_interrupt_handler(interrupt_entry::<H>);
     }
 
     /// Register another native `N` that reads `data` on every call

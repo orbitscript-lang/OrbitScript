@@ -28,6 +28,7 @@ mod dispatch;
 mod fast;
 mod gc;
 pub mod hook;
+pub mod host;
 mod interp;
 mod link;
 mod locale;
@@ -37,15 +38,14 @@ pub(crate) mod ops;
 
 use std::fmt;
 use std::io::Write;
-use std::time::Instant;
 
-use crate::locale::{CLocaleProvider, Locale, LocaleProvider};
+use crate::locale::Locale;
 use crate::object::table::{self, mark};
 use crate::object::{
     CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table,
     Thread, UserData, Value,
 };
-use crate::text::{LineEndings, TextWriter};
+use crate::text::LineEndings;
 use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::{CoStatus, WindowSave};
@@ -104,9 +104,9 @@ impl LuaError {
 /// Compiles source text into an unlinked chunk, for `load`, `loadfile`,
 /// `dofile` and `require`. `chunk_name` is the name messages use
 /// (`script.lua` in `script.lua:3:`); an error is the complete message.
-/// The embedder installs it in [`Runtime::compile`] (`orbit::Isolate` installs
-/// the Lua front end), so the VM and the libraries don't depend on a front
-/// end and a host can leave the compiler out.
+/// The embedder installs it with [`host::Host::set_compilers`] (`orbit::Isolate`
+/// installs both front ends), so the VM and the libraries don't depend on a
+/// front end and a host can leave the compilers out.
 pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
 
 /// Configurable limits.
@@ -571,7 +571,7 @@ impl Stack {
 
 /// A host's warning function. It gets every warning piece by piece,
 /// control messages (`@on`, `@off`) included, with `true` for every piece
-/// but a message's last. While one is set, [`Runtime::warnings`] is not
+/// but a message's last. While one is set, [`host::Host::warnings`] is not
 /// consulted: switching warnings on and off is the host's business.
 pub struct WarnHook(pub Box<WarnFn>);
 
@@ -596,44 +596,12 @@ pub struct Runtime {
     /// The registry (`debug.getregistry()`): key 2 holds the globals, and
     /// `_LOADED` is `package.loaded`.
     pub registry: Gc<Table>,
-    /// How much `load` checks binary chunks, before it is capped at what the
-    /// build can check (`stdlib::checks`). Kept here, not in the registry,
-    /// so scripts can't change it.
-    pub binary_checks: Option<op::verify::Level>,
-    pub limits: Limits,
-    /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
-    pub out: Box<dyn WriteDebug>,
-    /// Whether `warn` messages are shown (on stderr). Off at start, as in
-    /// the reference interpreter; `warn("@on")` and `warn("@off")` switch it.
-    pub warnings: bool,
-    /// How text streams treat line endings: [`Runtime::out`] when it is
-    /// the process's standard output, warnings, and `orbit-std`'s streams.
-    pub line_endings: LineEndings,
-    /// Where warnings go when the host takes them over (`lua_setwarnf`).
-    /// See [`WarnHook`].
-    pub warn_hook: Option<WarnHook>,
+    /// What the host configured: output, warnings, compilers, limits,
+    /// the interrupt flag, the locale provider and library state.
+    pub host: host::Host,
     /// The placeholder native under a host's context ([`Vm::host_ctx`]),
     /// which tracebacks and `debug.getinfo` don't show.
     pub host_native: Option<NativeId>,
-    /// Asked first when an interrupt is seen: true if it was the host's
-    /// (the C API's signal-safe `lua_sethook` raises the flag to have its
-    /// hook installed) and has been handled, false to raise `interrupted!`.
-    pub interrupt_handler: Option<fn(&mut Vm) -> bool>,
-    /// When the VM started (for `os.clock`).
-    pub start: Instant,
-    /// Per-VM state of host libraries, one value per type (the `math`
-    /// library's random generator, for example).
-    pub ext: Extensions,
-    /// The Lua compiler. A hook rather than a dependency, so the VM stays
-    /// free of the front ends; `orbit::Isolate` installs it.
-    pub compile: Option<CompileFn>,
-    /// The OrbitScript compiler, installed with [`Runtime::compile`]. Source
-    /// files whose name ends in `.orb` use it; everything else uses
-    /// [`Runtime::compile`].
-    pub compile_orbitscript: Option<CompileFn>,
-    /// Where `os.setlocale` gets locales ([`Vm::set_locale_provider`]).
-    /// Only the C locale exists until a host installs one.
-    pub(crate) locale_provider: Box<dyn LocaleProvider>,
     pub(crate) natives: Vec<Native>,
     /// The runtime's own natives, by name, so each is registered once.
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId, CheapHash>,
@@ -649,16 +617,13 @@ pub struct Runtime {
     pub(crate) prev_code: Option<std::rc::Rc<crate::object::ProtoCode>>,
     /// Placeholder for cell slots not yet initialised by `CellNew`.
     pub(crate) dead_cell: Gc<Cell>,
-    /// Extra roots: values the embedder or loader holds.
-    pub(crate) pinned: Vec<Value>,
-    /// Values a host keeps alive in numbered slots ([`Vm::pin_slot`]).
-    pub(crate) pin_slots: PinSlots,
     /// End of the values of the last open-ended call or `Vararg`.
     pub(crate) top: usize,
     /// MetaField names and per-type metatables.
     pub(crate) metas: meta::Metas,
-    /// Collector mode and parameters as `collectgarbage` sees them, and
-    /// finalizer bookkeeping.
+    /// Memory control: the collector's mode and parameters as
+    /// `collectgarbage` sees them, finalizer bookkeeping, the memory
+    /// limit's grace and the host's pinned values.
     pub gc: GcState,
     /// The thread whose stack is `stack`.
     pub(crate) current: Gc<Thread>,
@@ -672,15 +637,8 @@ pub struct Runtime {
     /// building a string needs no allocation of its own
     /// ([`NativeCtx::take_buf`](crate::vm::NativeCtx::take_buf)).
     pub(crate) scratch: Vec<u8>,
-    /// Whether any stack's hook may differ from [`hook::Hook::default`]:
-    /// set (for good) by `debug.sethook`, an interrupt, or a finalizer
-    /// turning hooks off. Until then a coroutine switch skips copying the
-    /// hooks, which are all equal.
-    pub(crate) hooks_touched: bool,
-    /// `not enough memory` was raised for passing the limit and the heap
-    /// hasn't been back under it since: the script may use up to
-    /// [`LIMIT_GRACE`] more to handle the error.
-    pub(crate) limit_grace: bool,
+    /// Whether hooks were ever used ([`hook::HookUse`]).
+    pub(crate) hooks: hook::HookUse,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>, CheapHash>,
     /// The threads parked suspended most recently, with their park count
@@ -699,8 +657,6 @@ pub struct Runtime {
     /// Collections that reached their sweep, to tell whether a parked
     /// stack's dead slots may now refer to freed objects.
     pub(crate) gc_cycles: u32,
-    /// Set by an [`Interrupt`] handle, from any thread.
-    pub(crate) interrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Breakpoints, steps and the host's debug events.
     #[cfg(feature = "debugger")]
     pub(crate) debug: debugger::Debugger,
@@ -727,13 +683,6 @@ impl Interrupt {
     pub fn pending(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
-}
-
-/// Numbered GC roots that can be freed in any order ([`Vm::pin_slot`]).
-#[derive(Debug, Default)]
-pub(crate) struct PinSlots {
-    values: Vec<Value>,
-    free: Vec<u32>,
 }
 
 /// Library state kept per VM, keyed by type. It holds plain Rust data, never
@@ -783,17 +732,6 @@ impl fmt::Debug for Extensions {
 }
 
 /// `Write` that can be printed with `{:?}`.
-/// The process's standard output, buffered, as a text stream if
-/// `line_endings` translates.
-fn process_stdout(line_endings: LineEndings) -> Box<dyn WriteDebug> {
-    let out = std::io::BufWriter::new(std::io::stdout());
-    if line_endings.translates() {
-        Box::new(TextWriter::new(out))
-    } else {
-        Box::new(out)
-    }
-}
-
 pub trait WriteDebug: Write + fmt::Debug {
     /// `self` as a plain writer (trait upcasting is stable only from Rust 1.86).
     fn as_write(&mut self) -> &mut dyn Write;
@@ -821,12 +759,7 @@ impl Roots<LuaSpace> for Runtime {
         for &p in self.native_protos.values() {
             m.mark(p);
         }
-        for &v in &self.pinned {
-            mark(m, v);
-        }
-        for &v in &self.pin_slots.values {
-            mark(m, v);
-        }
+        self.gc.trace(m);
         for &s in self.metas.field_names.all() {
             m.mark(s);
         }
@@ -902,49 +835,34 @@ impl Vm {
                 strings,
                 globals,
                 registry,
-                binary_checks: Some(op::verify::Level::Full),
-                limits: Limits::default(),
-                out: process_stdout(LineEndings::default()),
-                warnings: false,
-                line_endings: LineEndings::default(),
-                warn_hook: None,
+                host: host::Host::new(),
                 host_native: None,
-                interrupt_handler: None,
-                start: Instant::now(),
-                ext: Extensions::default(),
-                compile: None,
-                compile_orbitscript: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
                 native_types: Default::default(),
                 stack: Stack::default(),
                 prev_code: None,
                 dead_cell,
-                pinned: Vec::new(),
                 c_strings: CStrings::default(),
-                pin_slots: PinSlots::default(),
                 top: 0,
                 metas: meta::Metas {
                     field_names,
                     type_meta: Default::default(),
                     locale: Locale::c(),
                 },
-                locale_provider: Box::new(CLocaleProvider::default()),
                 gc,
                 current: main_thread,
                 main_thread,
                 resumers: Vec::new(),
                 xfer: Vec::new(),
                 scratch: Vec::new(),
-                hooks_touched: false,
-                limit_grace: false,
+                hooks: Default::default(),
                 native_protos: Default::default(),
                 cooling: vec![None; coro::HOT_STACKS],
                 cooling_at: 0,
                 spare_stacks: Default::default(),
                 parks: 0,
                 gc_cycles: 0,
-                interrupt: Default::default(),
                 #[cfg(feature = "debugger")]
                 debug: Default::default(),
             },
@@ -953,30 +871,28 @@ impl Vm {
 
     /// A handle that interrupts this VM ([`Interrupt`]).
     pub fn interrupt_handle(&self) -> Interrupt {
-        Interrupt(self.rt.interrupt.clone())
+        self.rt.host.interrupt_handle()
     }
 
     /// The interrupt flag itself, for code that can only store to memory:
     /// a C signal handler (the C API's `lua_sethook`). Storing a nonzero
     /// byte does what [`Interrupt::request`] does. Valid as long as the VM.
     pub fn interrupt_flag(&self) -> *mut bool {
-        self.rt.interrupt.as_ptr()
+        self.rt.host.interrupt_flag().as_ptr()
     }
 
     /// Lower the interrupt flag without raising `interrupted!` (an
-    /// [`Runtime::interrupt_handler`] that handled it).
+    /// [`host::Host::set_interrupt_handler`] handler that handled it).
     pub fn clear_interrupt(&mut self) {
         self.rt.stack.hook.mask &= !hook::INTERRUPT;
-        self.rt
-            .interrupt
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.rt.host.clear_interrupt();
     }
 
     /// Set the running stack's hook, as `debug.sethook` does: `mask` is
     /// [`hook::CALL`] and friends, `count` the count interval. A nil `f`
     /// or an empty mask with no count turns it off.
     pub fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
-        self.rt.hooks_touched = true;
+        self.rt.hooks.touch();
         self.rt.stack.hook.set(f, mask, count);
     }
 
@@ -1140,41 +1056,27 @@ impl Vm {
     /// returning the slot. Unlike [`Vm::pin`], slots can be freed in any
     /// order: they back the host API's long-lived handles.
     pub fn pin_slot(&mut self, v: Value) -> u32 {
-        let slots = &mut self.rt.pin_slots;
-        match slots.free.pop() {
-            Some(i) => {
-                slots.values[i as usize] = v;
-                i
-            }
-            None => {
-                slots.values.push(v);
-                (slots.values.len() - 1) as u32
-            }
-        }
+        self.rt.gc.pin_slot(v)
     }
 
     /// The value in pin slot `slot`.
     pub fn pin_slot_value(&self, slot: u32) -> Value {
-        self.rt.pin_slots.values[slot as usize]
+        self.rt.gc.pin_slot_value(slot)
     }
 
     /// Release pin slot `slot` for reuse.
     pub fn free_pin_slot(&mut self, slot: u32) {
-        let slots = &mut self.rt.pin_slots;
-        slots.values[slot as usize] = Value::Nil;
-        slots.free.push(slot);
+        self.rt.gc.free_pin_slot(slot);
     }
 
     /// Keep `v` alive until [`Vm::unpin`].
     pub fn pin(&mut self, v: Value) {
-        self.rt.pinned.push(v);
+        self.rt.gc.pin(v);
     }
 
     /// Release the most recent [`Vm::pin`] of `v`.
     pub fn unpin(&mut self, v: Value) {
-        if let Some(i) = self.rt.pinned.iter().rposition(|&p| p.same(v)) {
-            self.rt.pinned.remove(i);
-        }
+        self.rt.gc.unpin(v);
     }
 
     /// The bytes of a string value.
@@ -1203,16 +1105,14 @@ impl Vm {
 
     /// Flush `print` output.
     pub fn flush(&mut self) -> std::io::Result<()> {
-        self.rt.out.flush()
+        self.rt.host.out().flush()
     }
 
     /// How text streams treat line endings ([`LineEndings`]). Standard
     /// output starts over as the process's, flushed first: set this before
-    /// a host replaces [`Runtime::out`].
+    /// a host replaces it ([`host::Host::set_out`]).
     pub fn set_line_endings(&mut self, line_endings: LineEndings) {
-        let _ = self.rt.out.flush();
-        self.rt.line_endings = line_endings;
-        self.rt.out = process_stdout(line_endings);
+        self.rt.host.set_line_endings(line_endings);
     }
 
     /// Run a full collection cycle.
@@ -1252,16 +1152,16 @@ impl Vm {
             .map_or(usize::MAX, |l| l.saturating_add(l / LIMIT_GRACE));
         // Inside the grace, collecting at every safe point would thrash.
         let past_grace = || self.heap.bytes() > hard || self.heap.slots_exhausted();
-        if self.rt.gc.finalizing() || self.rt.limit_grace && !past_grace() {
+        if self.rt.gc.finalizing() || self.rt.gc.in_limit_grace() && !past_grace() {
             return false;
         }
         self.heap.full_collect(&mut self.rt);
         if !self.heap.over_limit() {
-            self.rt.limit_grace = false;
+            self.rt.gc.end_limit_grace();
             return false;
         }
-        if !self.rt.limit_grace {
-            self.rt.limit_grace = true;
+        if !self.rt.gc.in_limit_grace() {
+            self.rt.gc.start_limit_grace();
             return true;
         }
         self.heap.bytes() > hard || self.heap.slots_exhausted()

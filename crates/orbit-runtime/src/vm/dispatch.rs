@@ -287,14 +287,11 @@ impl Vm {
                 ($off:expr) => {{
                     pc = (pc as isize + $off as isize) as usize;
                     #[cfg(feature = "hooks")]
-                    if !HOOKED
-                        && $off < 0
-                        && self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed)
-                    {
+                    if !HOOKED && $off < 0 && self.rt.host.interrupt_requested() {
                         // An interrupt was requested ([`crate::vm::Interrupt`]): the
                         // hooked loop raises it before the jump's target.
                         save_pc!();
-                        self.rt.hooks_touched = true;
+                        self.rt.hooks.touch();
                         self.rt.stack.hook.mask |= crate::vm::hook::INTERRUPT;
                         return Ok(Ran::Switch);
                     }

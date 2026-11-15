@@ -288,9 +288,9 @@ fn warn(ctx: &mut NativeCtx<'_>) -> R {
     for i in 0..n {
         parts.push(ctx.check_str(i)?);
     }
-    if ctx.vm.rt.warn_hook.is_some() {
+    if ctx.vm.rt.host.warn_hook().is_some() {
         let pieces: Vec<Vec<u8>> = parts.iter().map(|&s| ctx.bytes(s).to_vec()).collect();
-        if let Some(hook) = &mut ctx.vm.rt.warn_hook {
+        if let Some(hook) = ctx.vm.rt.host.warn_hook() {
             for (i, p) in pieces.iter().enumerate() {
                 (hook.0)(p, i + 1 < pieces.len());
             }
@@ -302,19 +302,19 @@ fn warn(ctx: &mut NativeCtx<'_>) -> R {
     if let [msg] = parts[..] {
         if let [b'@', control @ ..] = ctx.bytes(msg) {
             match control {
-                b"on" => ctx.vm.rt.warnings = true,
-                b"off" => ctx.vm.rt.warnings = false,
+                b"on" => ctx.vm.rt.host.set_warnings(true),
+                b"off" => ctx.vm.rt.host.set_warnings(false),
                 _ => {}
             }
             return Ok(NativeReturn::Return(0));
         }
     }
-    if ctx.vm.rt.warnings {
+    if ctx.vm.rt.host.warnings() {
         let mut text = Vec::new();
         for &s in &parts {
             text.extend_from_slice(ctx.bytes(s));
         }
-        ctx.vm.rt.warn(&text);
+        ctx.vm.rt.host.warn(&text);
     }
     Ok(NativeReturn::Return(0))
 }
@@ -451,7 +451,7 @@ fn collectgarbage(ctx: &mut NativeCtx<'_>) -> R {
         }
         b"step" => {
             let kb = ctx.opt_int(1, 0)?;
-            let done = match ctx.vm.rt.gc.mode {
+            let done = match ctx.vm.rt.gc.mode() {
                 // A whole minor (or a due major) collection; true if major.
                 GcMode::Generational => ctx.gen_step(),
                 GcMode::Incremental => {
