@@ -12,6 +12,8 @@ fn orbit(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
     let mut c = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")));
     c.args(args)
         .env_clear()
+        // A coverage run's profiles go where the run says (tests/coverage).
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|p| ("LLVM_PROFILE_FILE", p)))
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

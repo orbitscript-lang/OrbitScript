@@ -8,6 +8,7 @@ mod bench;
 mod callbacks;
 mod capi;
 mod conformance;
+mod coverage;
 mod diff;
 mod examples;
 mod fuzz;
@@ -32,6 +33,7 @@ commands:
   examples      run examples/ and check their output (and Lua twins)
   liblua        run the suite through lua.c on liborbit (ADR-10)
   capi          compare C programs on liborbit with the reference liblua
+  coverage      check what the tests ran (tests/coverage/run.sh measures it)
   scoreboard    the whole Lua 5.5 compatibility picture in one report
   fuzz-syntax   compare compile errors on mutated programs with lua5.5
   fuzz          compare random library calls with the reference lua5.5
@@ -70,6 +72,7 @@ fn main() -> ExitCode {
         "fuzz" => libfuzz::main(rest),
         "liblua" => liblua::main(rest),
         "capi" => capi::main(rest),
+        "coverage" => coverage::main(rest),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(true)

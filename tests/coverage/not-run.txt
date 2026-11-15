@@ -1,0 +1,3 @@
+# Functions a rule in rules.txt covers that no test executes, and why:
+#
+#   FILE  FUNCTION  # reason

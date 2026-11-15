@@ -33,6 +33,10 @@ name: CI
 #   Then an optimized `orbit` with orbit-gc's checked handles runs the 5.5
 #   suite and the differential tests: a stale handle panics there instead
 #   of reading a reused slot, in the build the release profile makes.
+# - `coverage`: the tests, instrumented, and a check that each function in
+#   the files that may contain `unsafe`, and each public function of the
+#   embedding API, is run by one, and that line coverage there doesn't drop
+#   (tests/coverage/README.md).
 # - Steps several jobs share live in .github/actions: `setup-rust` (the
 #   toolchain and the build cache) and `reference-lua` (the reference
 #   interpreter and what the suite needs from the runner).
@@ -353,3 +357,22 @@ jobs:
           --interp target/checked/release/orbit --expect tests/diff/expected-orbit.txt
         env:
           REF: ${{ steps.reference.outputs.dir }}
+
+  coverage:
+    name: Coverage of the unsafe code and the embedding API
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: coverage
+      - run: rustup component add llvm-tools
+      # The suite and tests/diff's locale.lua run for what they reach of
+      # the locale objects, with the locales this installs.
+      - uses: ./.github/actions/reference-lua
+        with:
+          lua: '5.5'
+      - name: Every function in the unsafe files and the API is run (tests/coverage)
+        run: tests/coverage/run.sh

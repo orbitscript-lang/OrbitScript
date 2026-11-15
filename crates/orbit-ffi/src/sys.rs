@@ -341,3 +341,57 @@ pub fn errno() -> i32 {
     // SAFETY: `_errno` returns the calling thread's errno location.
     unsafe { *_errno() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each type's size is its Rust counterpart's, which is what libffi
+    /// reads from an argument slot.
+    #[test]
+    fn sizes_match_the_c_types() {
+        use std::mem::size_of;
+        let sizes = [
+            (CType::Void, 0),
+            (CType::I8, size_of::<i8>()),
+            (CType::U8, size_of::<u8>()),
+            (CType::I16, size_of::<i16>()),
+            (CType::U16, size_of::<u16>()),
+            (CType::I32, size_of::<i32>()),
+            (CType::U32, size_of::<u32>()),
+            (CType::I64, size_of::<i64>()),
+            (CType::U64, size_of::<u64>()),
+            (CType::Pointer, size_of::<*const c_void>()),
+            (CType::Float, size_of::<f32>()),
+            (CType::Double, size_of::<f64>()),
+        ];
+        for (t, size) in sizes {
+            assert_eq!(t.size(), size, "{t:?}");
+        }
+    }
+
+    /// A narrow value in a slot is found by a read of its own size from the
+    /// slot's address, and comes back unchanged.
+    #[test]
+    fn narrow_values_sit_where_a_read_finds_them() {
+        let slot = to_memory_order(0x1234, CType::U16);
+        let bytes = slot.to_ne_bytes();
+        assert_eq!(u16::from_ne_bytes([bytes[0], bytes[1]]), 0x1234);
+        assert_eq!(from_memory_order(slot, CType::U16), 0x1234);
+        let slot = to_memory_order(u64::from(1.5f32.to_bits()), CType::Float);
+        let bytes = slot.to_ne_bytes();
+        assert_eq!(
+            f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            1.5
+        );
+    }
+
+    #[test]
+    fn a_call_description_shows_its_signature() {
+        let cif = Cif::new(CType::I32, &[CType::Pointer, CType::Double]).unwrap();
+        assert_eq!(
+            format!("{cif:?}"),
+            "Cif { ret: I32, args: [Pointer, Double] }"
+        );
+    }
+}

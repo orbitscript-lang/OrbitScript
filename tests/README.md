@@ -134,6 +134,10 @@ tests/asan/check-planted.sh       # every planted bug must be reported
 
 `tests/asan/check-planted.sh` proves the run the way the memory checker's does. Each `tests/asan/planted/*.patch` plants one bug, a stack overflow, a use after free, or a page given back too early, and the script expects a report for each. `.github/workflows/sanitizers.yml` runs both once a week and by hand, never on pull requests.
 
+## Coverage
+
+`tests/coverage/run.sh` runs the tests built with coverage instrumentation and checks that every function in the files that may contain `unsafe`, and every public function of the embedding API, is run by one, with any exceptions listed with their reasons, and that line coverage there doesn't drop. CI's `coverage` job runs it; `tests/coverage/README.md` explains the rules and what to do when it fails.
+
 ## Differential fuzzing
 
 `cargo testkit fuzz` generates random library calls, runs each batch under both interpreters and stops at the first call whose results or error differ. The targets are `format` (`string.format` specs and arguments), `pattern` (`find`, `match` and `gsub`), `pack` (`string.pack`, `unpack` and `packsize`) and `utf8`, or `all` for every one. Generators favor edge cases: limits of widths and precisions, halfway floats, malformed patterns, odd integer sizes and alignments, and invalid UTF-8.
