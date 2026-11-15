@@ -80,3 +80,25 @@ show(pcall(package.searchpath))
 -- No dynamic libraries.
 local f, err, when = package.loadlib("donotexist", "xuxu")
 show(f, type(err), when == "absent" or when == "open")
+
+-- The preload searcher: nameless in messages, and package.preload is
+-- indexed as usual, so `__index` applies.
+do
+  local s = package.searchers[1]
+  print(pcall(s))
+  print(pcall(s, {}))
+  print(s("nope"))
+  package.preload.m = function(...) return "loaded", ... end
+  print(type((s("m"))), select(2, s("m")))
+  print(s(12))
+  local preload = package.preload
+  setmetatable(preload, {__index = function(_, n) return function() return "idx " .. n end end})
+  print(pcall(require, "viaindex"))
+  print(select("#", s("other")))
+  local reg = debug.getregistry()
+  reg._PRELOAD = 5
+  print(pcall(s, "m"))
+  reg._PRELOAD = preload
+  setmetatable(preload, nil)
+  preload.m = nil
+end
