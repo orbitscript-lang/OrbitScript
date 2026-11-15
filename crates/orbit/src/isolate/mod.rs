@@ -181,7 +181,7 @@ impl Isolate {
         adopt(&mut vm);
         #[cfg(feature = "locale")]
         vm.set_locale_provider(orbit_locale::provider());
-        vm.rt.host.set_warnings(config.warnings);
+        vm.host_mut().set_warnings(config.warnings);
         vm.set_line_endings(config.line_endings);
         vm.set_gc_mode(config.gc_mode.raw());
         for lib in Lib::OPEN_ORDER {
@@ -235,7 +235,7 @@ impl Isolate {
     /// bytes as scripts write them ([`Config::line_endings`] doesn't
     /// apply).
     pub fn set_stdout(&mut self, out: impl std::io::Write + std::fmt::Debug + 'static) {
-        self.vm.rt.host.set_out(Box::new(out));
+        self.vm.host_mut().set_out(Box::new(out));
     }
 
     /// Whether `os.setlocale` changes this isolate's own locale (the
@@ -427,7 +427,7 @@ impl Gc<'_> {
 
     /// Bytes in use, as `collectgarbage("count")` counts them.
     pub fn used_bytes(&self) -> usize {
-        self.vm.heap.bytes()
+        self.vm.heap_bytes()
     }
 
     pub fn set_mode(&mut self, mode: GcMode) {
@@ -446,7 +446,7 @@ impl Gc<'_> {
     /// Collect at nearly every safe point after an allocation: slow, for
     /// shaking out code that keeps values the collector can't see.
     pub fn set_stress(&mut self, on: bool) {
-        self.vm.heap.set_stress(on);
+        self.vm.set_gc_stress(on);
     }
 
     /// Check the heap at the end of markings, and panic, naming the chain
@@ -461,7 +461,7 @@ impl Gc<'_> {
     #[cfg(debug_assertions)]
     pub fn set_verify(&mut self, on: bool, every: bool) {
         use orbit_runtime::object::Verify;
-        self.vm.heap.set_verify(match (on, every) {
+        self.vm.set_gc_verify(match (on, every) {
             (false, _) => Verify::Off,
             (true, false) => Verify::Paced,
             (true, true) => Verify::Every,
@@ -472,11 +472,9 @@ impl Gc<'_> {
 /// Make `vm` one the API can reach (scopes, handles, host functions), with
 /// both front ends as `load`'s compilers.
 pub(crate) fn adopt(vm: &mut Vm) {
-    vm.rt
-        .host
+    vm.host_mut()
         .ext_mut()
         .get_or_insert_with(|| Rc::new(Shared::default()));
-    vm.rt
-        .host
+    vm.host_mut()
         .set_compilers(compiler::compile_lua, compiler::compile_orb);
 }

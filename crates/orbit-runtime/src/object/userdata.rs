@@ -14,13 +14,13 @@ use crate::object::{LuaSpace, Table, Value};
 /// plus a metatable and one traced user value. A host that wants the
 /// userdata to keep Lua values alive stores them in `user_value`.
 pub struct UserData {
-    pub meta: Option<Gc<Table>>,
-    pub user_value: Value,
+    pub(crate) meta: Option<Gc<Table>>,
+    pub(crate) user_value: Value,
     data: Box<dyn Any>,
 }
 
 impl UserData {
-    pub fn new<T: Any>(data: T) -> Self {
+    pub(crate) fn new<T: Any>(data: T) -> Self {
         UserData {
             meta: None,
             user_value: Value::Nil,
@@ -29,17 +29,17 @@ impl UserData {
     }
 
     /// The host value, if it is a `T`.
-    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+    pub(crate) fn downcast_ref<T: Any>(&self) -> Option<&T> {
         self.data.downcast_ref()
     }
 
     /// The host value, mutably, if it is a `T`.
-    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
+    pub(crate) fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
         self.data.downcast_mut()
     }
 
     /// Whether the host value is a `T`.
-    pub fn is<T: Any>(&self) -> bool {
+    pub(crate) fn is<T: Any>(&self) -> bool {
         self.data.is::<T>()
     }
 }

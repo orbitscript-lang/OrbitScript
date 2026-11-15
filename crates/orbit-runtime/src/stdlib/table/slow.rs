@@ -72,8 +72,8 @@ pub(super) fn len_int(ctx: &mut NativeCtx<'_>, v: Value) -> Result<i64, LuaError
 /// table.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Needs {
-    pub read: bool,
-    pub write: bool,
+    pub(crate) read: bool,
+    pub(crate) write: bool,
 }
 
 pub(super) const READ: Needs = Needs {

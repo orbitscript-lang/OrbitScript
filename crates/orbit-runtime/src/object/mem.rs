@@ -13,10 +13,6 @@ pub struct NoMemory;
 
 impl NoMemory {
     pub const MESSAGE: &'static str = "not enough memory";
-
-    pub fn message(self) -> &'static str {
-        Self::MESSAGE
-    }
 }
 
 impl std::fmt::Display for NoMemory {
@@ -36,7 +32,7 @@ impl From<std::collections::TryReserveError> for NoMemory {
 /// For callers with no way to report [`NoMemory`]: abort the way a failed
 /// infallible allocation of `bytes` does.
 #[cold]
-pub fn abort(bytes: usize) -> ! {
+pub(crate) fn abort(bytes: usize) -> ! {
     std::alloc::handle_alloc_error(
         Layout::from_size_align(bytes.max(1), 8).unwrap_or(Layout::new::<u64>()),
     )

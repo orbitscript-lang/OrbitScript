@@ -454,8 +454,7 @@ impl Continuation for TailCalled {
 /// How the API stores a host value in a userdata (`Stack::push_userdata`,
 /// `orbit::Class`): taken out while a method runs, so the method can use
 /// the whole window at the same time.
-#[doc(hidden)]
-pub struct HostValue<T>(pub Option<T>);
+pub(crate) struct HostValue<T>(pub(crate) Option<T>);
 
 impl<T> std::fmt::Debug for HostValue<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

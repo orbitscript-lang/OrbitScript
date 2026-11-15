@@ -6,7 +6,7 @@ index 7a9306e..8858a90 100644
 --- a/crates/orbit-runtime/src/vm/native.rs
 +++ b/crates/orbit-runtime/src/vm/native.rs
 @@ -644,7 +644,7 @@ impl NativeCtx<'_> {
-     pub fn set_upvalue(&mut self, i: usize, v: Value) {
+     pub(crate) fn set_upvalue(&mut self, i: usize, v: Value) {
          if let Some(c) = self.upvals {
              if let Some(&cell) = self.vm.heap.get(c).captures.get(i) {
 -                self.vm.heap.update(cell, |cell| cell.value = v);

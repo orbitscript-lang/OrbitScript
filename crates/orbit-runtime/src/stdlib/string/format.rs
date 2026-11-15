@@ -15,13 +15,13 @@ const MAX_SPEC: usize = 20;
 /// A parsed and validated conversion specification.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Spec {
-    pub left: bool,
-    pub zero: bool,
-    pub plus: bool,
-    pub space: bool,
-    pub alt: bool,
-    pub width: usize,
-    pub precision: Option<usize>,
+    pub(crate) left: bool,
+    pub(crate) zero: bool,
+    pub(crate) plus: bool,
+    pub(crate) space: bool,
+    pub(crate) alt: bool,
+    pub(crate) width: usize,
+    pub(crate) precision: Option<usize>,
 }
 
 /// What a conversion accepts: its flags and whether it takes a precision.
