@@ -107,3 +107,50 @@ do
   print(select("#", ("x"):rep(500000):byte(1, -1)))
   print(select("#", string.unpack(("b"):rep(500000), ("x"):rep(500000))))
 end
+
+-- Argument checks, in argument order, and results built from the subject.
+do
+  print(pcall(string.len))
+  print(pcall(string.sub))
+  print(pcall(string.sub, "abc", "x"))
+  print(pcall(string.rep))
+  print(pcall(string.rep, "x", 3, {}))
+  print(string.rep("ab", 3, ","), string.rep("", 1e10), string.rep("x", -1), string.rep("x", 0, ","))
+  print(pcall(string.upper))
+  print(pcall(string.char, 256))
+  print(pcall(string.char, "x"))
+  print(string.char(), string.char(72, 105))
+  print(select("#", string.byte("abc", 1, -1)), select("#", string.byte("")), string.byte("abc", -1))
+  print(string.len(12.5), string.sub(12345, 2, -2), string.upper(1e100), string.reverse(123))
+  print(pcall(string.find, "abc", "b", "x"))
+  print(string.find("abc", "b", 1, true), string.find("abc", "(b)()"), string.match("abc", "()b"))
+  print(string.find("abc", "b", 10), string.match("abc", ".", -1), string.find("a.c", ".", 1, 1))
+  print(pcall(string.find, "a", "%"))
+  print(pcall(string.match, "a", "(()"))
+  print(pcall(string.gmatch, "a"))
+  for k, v in string.gmatch("a=1, b=2", "(%w+)=(%w+)") do io.write(k, v, ";") end print()
+  for w in string.gmatch("abc", "", 2) do io.write("[", w, "]") end print()
+  for a, b in string.gmatch(123123, "(2)()") do io.write(a, b, ";") end print()
+  local it = string.gmatch("a", "%")
+  print(pcall(it))
+end
+
+-- pack, unpack and packsize: values are checked as each option needs one.
+do
+  print(pcall(string.pack, "i4"))
+  print(pcall(string.pack, "i4", "x"))
+  print(pcall(string.pack, "z", {}))
+  print(pcall(string.pack, "c2", "abc"))
+  print(pcall(string.pack, "i1", 200))
+  print(pcall(string.pack, "Xz"))
+  print(pcall(string.pack, "!3i4", 1))
+  print(pcall(string.unpack, "i4", "ab"))
+  print(pcall(string.unpack, "i4", "abcd", 10))
+  print(pcall(string.unpack, "z", "abc"))
+  print(pcall(string.packsize, "s"))
+  print(pcall(string.packsize, "q"))
+  print(string.packsize("i4i8"), string.packsize("!8i2d"))
+  print(string.unpack("z B s1 c3 >i2 d", string.pack("z B s1 c3 >i2 d", "hi", 7, "yo", "abc", -2, 1.5)))
+  print(string.unpack("i16", string.pack("i16", -3)))
+  print(pcall(string.unpack, "i9", string.rep("\xff", 8) .. "\x01"))
+end

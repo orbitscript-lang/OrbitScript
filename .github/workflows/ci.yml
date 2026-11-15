@@ -11,15 +11,23 @@ name: CI
 # - `lint-msrv`: fmt, clippy for both Lua versions (ADR-14), and the MSRV
 #   (`cargo check` with the rust-version from Cargo.toml: catches newer
 #   language features and std APIs) for both, plus the shared layout
-#   (ADR-10) built, linked and tested as laid out with the MSRV.
+#   (ADR-10) built, linked and tested as laid out with the MSRV, and
+#   docs/features.md checked against the crates' features.
 # - `conformance`, once per Lua version: `cargo test` for that build, then
 #   its official suite on `orbit`, on the shared layout's `orbit` and
 #   through its liblua, the size budget, and for 5.5 the differential tests.
 #   The corpus tests that platforms.yml skips run here.
+# - `features`: every crate linted with each of its Cargo features on its
+#   own (cargo-hack), the tests of the runtime crates without their default
+#   features, and the slim `build.sh --no-ffi --no-debugger` build through
+#   the 5.5 suite (docs/features.md).
 # - `gc-verify`: a debug `orbit` runs the 5.5 suite, the differential tests,
 #   the compatibility programs and the examples under GC stress mode with
 #   the heap verifier on (tests/README.md, "The heap verifier"): a missed
 #   write barrier fails here even when the release build's run passes.
+#   Then an optimized `orbit` with orbit-gc's checked handles runs the 5.5
+#   suite and the differential tests: a stale handle panics there instead
+#   of reading a reused slot, in the build the release profile makes.
 # - Steps several jobs share live in .github/actions: `setup-rust` (the
 #   toolchain and the build cache) and `reference-lua` (the reference
 #   interpreter and what the suite needs from the runner).
@@ -73,6 +81,9 @@ jobs:
       # Each later step runs even when an earlier one fails, so one run
       # reports every problem.
       - run: cargo fmt --all --check
+      - name: docs/features.md lists every feature
+        if: success() || failure()
+        run: tools/check-features.sh
       - if: success() || failure()
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The Lua 5.4 build (ADR-14), in its own target directory so it doesn't
@@ -190,11 +201,51 @@ jobs:
           name: conformance-results-lua${{ matrix.lua }}
           path: target/testkit/*.json
 
-  gc-verify:
-    name: Suites under GC stress mode and the heap verifier
+  features:
+    name: Each feature alone, slim builds
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      CARGO_HACK_VERSION: 0.6.46
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: features
+      # The release binary, rather than building it from source each run.
+      - name: Install cargo-hack
+        run: >
+          curl -fsSL "https://github.com/taiki-e/cargo-hack/releases/download/v$CARGO_HACK_VERSION/cargo-hack-x86_64-unknown-linux-gnu.tar.gz"
+          | tar xzf - -C "$HOME/.cargo/bin"
+      # Each crate built as a package of its own, so a crate that leans on
+      # a feature another crate turns on fails here. Without dev-dependencies,
+      # which cargo-hack removes from the manifests while it runs (so no
+      # --locked: the lock file changes until it puts them back).
+      - name: Clippy with each feature on its own
+        run: cargo hack clippy --workspace --each-feature --no-dev-deps -- -D warnings
+      - name: Tests without default features
+        if: success() || failure()
+        run: cargo test --locked --no-default-features -p orbit-runtime -p orbit -p orbit-std
+      # What a distribution without libffi or the debugger ships, through
+      # the suite. The expected-pass list needs no C libraries from the
+      # reference build.
+      - id: slim
+        if: success() || failure()
+        run: |
+          ./build.sh --static --no-pgo --no-ffi --no-debugger --out target/slim
+          cargo build --release --locked -p orbit-testkit
+      - name: Suite against the slim orbit
+        if: steps.slim.outcome == 'success'
+        run: >
+          cargo testkit conformance --lua 5.5 --interp target/slim/bin/orbit
+          --expect tests/lua-5.5/expected-orbit.txt
+
+  gc-verify:
+    name: Suites under GC stress mode and the heap verifier, and with checked handles
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -247,3 +298,24 @@ jobs:
         env:
           ORBIT_GC_STRESS: '1'
           ORBIT_GC_VERIFY: '1'
+      # Checked handles are on in debug builds; this is the optimized build
+      # with them, in its own target directory.
+      - id: checked
+        if: (success() || failure()) && steps.build.outcome == 'success'
+        run: >
+          cargo build --release --locked -p orbit-cli -p orbit-gc
+          --features orbit-gc/checked-handles --target-dir target/checked
+      - name: Suite, release build with checked handles
+        if: (success() || failure()) && steps.reference.outcome == 'success' && steps.checked.outcome == 'success'
+        run: >
+          cargo testkit conformance --lua 5.5 --interp target/checked/release/orbit
+          --c-libs "$REF/libs" --expect tests/lua-5.5/expected-orbit.txt
+        env:
+          REF: ${{ steps.reference.outputs.dir }}
+      - name: Differential tests, release build with checked handles
+        if: (success() || failure()) && steps.reference.outcome == 'success' && steps.checked.outcome == 'success'
+        run: >
+          cargo testkit diff --reference "$REF/bin/lua5.5"
+          --interp target/checked/release/orbit --expect tests/diff/expected-orbit.txt
+        env:
+          REF: ${{ steps.reference.outputs.dir }}

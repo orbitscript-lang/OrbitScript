@@ -5,31 +5,37 @@ mod format;
 mod pack;
 pub(crate) mod pattern;
 
+use crate::locale::Locale;
 use crate::object::{Gc, LuaStr, Table, Tag, Value, number};
+use crate::stack::{Buffer, Fail, Raised, Rest, Results, Return, Stack, StackResult, library_row};
 use crate::stdlib::first_result;
 use crate::vm::{CallOutcome, LuaError, Meta, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
+use orbit_macros::native;
 
 use pattern::{Capture, Captures, Matcher, PatternError};
 
 type R = Result<NativeReturn, LuaError>;
 
 pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("string.len", len),
-    ("string.sub", sub),
-    ("string.rep", rep),
-    ("string.byte", byte),
-    ("string.char", char),
+    library_row::<len>(),
+    library_row::<sub>(),
+    library_row::<rep>(),
+    library_row::<byte>(),
+    library_row::<char>(),
+    // `format` and `gsub` call script code (`__tostring`, function
+    // replacements), so they stay on the raw interface until the
+    // language rule's step moves them.
     ("string.format", format::format),
-    ("string.reverse", reverse),
-    ("string.upper", upper),
-    ("string.lower", lower),
-    ("string.find", find),
-    ("string.match", match_),
-    ("string.gmatch", gmatch),
+    library_row::<reverse>(),
+    library_row::<upper>(),
+    library_row::<lower>(),
+    library_row::<find>(),
+    library_row::<match_>(),
+    library_row::<gmatch>(),
     ("string.gsub", gsub),
-    ("string.pack", pack::pack),
-    ("string.unpack", pack::unpack),
-    ("string.packsize", pack::packsize),
+    library_row::<pack::pack>(),
+    library_row::<pack::unpack>(),
+    library_row::<pack::packsize>(),
 ];
 
 /// Largest string the library builds.
@@ -61,120 +67,170 @@ pub(crate) fn end_pos(pos: i64, len: usize) -> usize {
     }
 }
 
-fn len(ctx: &mut NativeCtx<'_>) -> R {
-    let s = ctx.check_str(0)?;
-    let n = ctx.bytes(s).len() as i64;
-    ctx.ret([Value::Int(n)])
+#[native(crate = crate, name = "string.len")]
+fn len(subject: &[u8]) -> i64 {
+    subject.len() as i64
 }
 
-fn sub(ctx: &mut NativeCtx<'_>) -> R {
-    let s = ctx.check_str(0)?;
-    let i = ctx.opt_int(1, 1)?;
-    let j = ctx.opt_int(2, -1)?;
-    let l = ctx.bytes(s).len();
-    let (a, b) = (start_pos(i, l), end_pos(j, l));
-    let r = if a <= b {
-        ctx.new_substr(s, a - 1, b)
+#[native(crate = crate, name = "string.sub")]
+fn sub(subject: &[u8], i: Option<i64>, j: Option<i64>) -> Substring {
+    let l = subject.len();
+    let (a, b) = (start_pos(i.unwrap_or(1), l), end_pos(j.unwrap_or(-1), l));
+    if a <= b {
+        Substring { from: a - 1, to: b }
     } else {
-        ctx.new_str(b"")
-    };
-    ctx.ret([r])
+        Substring { from: 0, to: 0 }
+    }
 }
 
-fn rep(ctx: &mut NativeCtx<'_>) -> R {
-    let s = ctx.check_str(0)?;
-    let n = ctx.check_int(1)?;
-    let sep = if ctx.arg(2).is_nil() {
-        None
-    } else {
-        Some(ctx.check_str(2)?)
-    };
-    let piece = ctx.bytes(s).len() + sep.map_or(0, |g| ctx.bytes(g).len());
+/// The subject string (argument 1), once it was checked.
+fn subject(s: &Stack<'_>) -> Gc<LuaStr> {
+    s.string_handle(1)
+        .expect("argument 1 was checked to be a string")
+}
+
+/// Bytes `from..to` of the subject (argument 1), pushed as a string
+/// copied straight from it.
+struct Substring {
+    from: usize,
+    to: usize,
+}
+
+// `Push` stays unimported: its by-value `push` would shadow `Vec::push`.
+impl crate::stack::Push for Substring {
+    #[inline]
+    fn push(self, s: &mut Stack<'_>) {
+        let subject = subject(s);
+        s.push_substring(subject, self.from, self.to);
+    }
+}
+
+#[native(crate = crate, name = "string.rep")]
+fn rep(subject: &[u8], n: i64, sep: Option<&[u8]>) -> Result<Repeat, Fail> {
+    let piece = subject.len() + sep.map_or(0, <[u8]>::len);
     // Nothing to repeat: the result is empty however large `n` is.
     if n <= 0 || piece == 0 {
-        let e = ctx.new_str(b"");
-        return ctx.ret([e]);
+        return Ok(Repeat { count: 0, total: 0 });
     }
     let total = piece.checked_mul(n as usize).filter(|&t| t <= MAX_STR);
-    let Some(total) = total else {
-        return Err(ctx.error("resulting string too large"));
-    };
-    // The arguments are in the window, so a collection here keeps them.
-    ctx.reserve(total)?;
-    let body = ctx.bytes(s);
-    let sep = sep.map_or(&b""[..], |g| ctx.bytes(g));
-    let mut out = Vec::new();
-    if out.try_reserve_exact(total).is_err() {
-        return Err(ctx.no_memory());
+    match total {
+        Some(total) => Ok(Repeat {
+            count: n as usize,
+            total,
+        }),
+        None => Err("resulting string too large".into()),
     }
-    for k in 0..n {
-        if k > 0 {
-            out.extend_from_slice(sep);
+}
+
+/// `rep`'s result: the subject (argument 1) `count` times, separated by
+/// argument 3 if it is a string, `total` bytes in all.
+struct Repeat {
+    count: usize,
+    total: usize,
+}
+
+impl Results for Repeat {
+    fn push_results(self, s: &mut Stack<'_>) -> StackResult<Return> {
+        // The arguments are in the window, so a collection here keeps them.
+        s.reserve_memory(self.total)?;
+        let mut out = s.take_buffer();
+        if out.try_reserve_exact(self.total).is_err() {
+            return Err(s.memory_error());
         }
-        out.extend_from_slice(body);
+        let body = s.handle_bytes(subject(s));
+        let sep = s.string_handle(3).map_or(&b""[..], |g| s.handle_bytes(g));
+        for k in 0..self.count {
+            if k > 0 {
+                out.extend_from_slice(sep);
+            }
+            out.extend_from_slice(body);
+        }
+        s.push_buffer(out);
+        Ok(Return::values(1))
     }
-    let r = ctx.new_str_owned(out);
-    ctx.ret([r])
 }
 
-fn byte(ctx: &mut NativeCtx<'_>) -> R {
-    let s = ctx.check_str(0)?;
-    let i = ctx.opt_int(1, 1)?;
-    let j = ctx.opt_int(2, i)?;
-    let l = ctx.bytes(s).len();
-    let (a, b) = (start_pos(i, l), end_pos(j, l));
-    if a > b {
-        return Ok(NativeReturn::Return(0));
+#[native(crate = crate, name = "string.byte")]
+fn byte(subject: &[u8], i: Option<i64>, j: Option<i64>) -> ByteCodes {
+    let i = i.unwrap_or(1);
+    let l = subject.len();
+    let (a, b) = (start_pos(i, l), end_pos(j.unwrap_or(i), l));
+    if a <= b {
+        ByteCodes { from: a - 1, to: b }
+    } else {
+        ByteCodes { from: 0, to: 0 }
     }
-    ctx.check_room(b + 1 - a, "string slice too long")?;
-    for k in a - 1..b {
-        let c = ctx.bytes(s)[k];
-        ctx.push(Value::Int(c as i64));
-    }
-    Ok(NativeReturn::Return(b + 1 - a))
 }
 
-fn char(ctx: &mut NativeCtx<'_>) -> R {
-    let mut out = ctx.take_buf();
-    for i in 0..ctx.nargs() {
-        let c = ctx.check_int(i)?;
+/// `byte`'s results: the codes of the subject's bytes `from..to`.
+struct ByteCodes {
+    from: usize,
+    to: usize,
+}
+
+impl Results for ByteCodes {
+    fn push_results(self, s: &mut Stack<'_>) -> StackResult<Return> {
+        let subject = subject(s);
+        s.need_room(self.to - self.from, "string slice too long")?;
+        for k in self.from..self.to {
+            let c = s.handle_bytes(subject)[k];
+            s.push_integer(i64::from(c));
+        }
+        Ok(Return::values(self.to - self.from))
+    }
+}
+
+#[native(crate = crate, name = "string.char")]
+fn char(s: &mut Stack<'_>, codes: Rest) -> StackResult<Buffer> {
+    let mut out = s.take_buffer();
+    for i in codes.indices() {
+        let c = s.check_integer(i)?;
         if !(0..=255).contains(&c) {
-            return Err(ctx.arg_error(i, "value out of range"));
+            return Err(s.arg_error(i, "value out of range"));
         }
         out.push(c as u8);
     }
-    let r = ctx.new_str_buf(out);
-    ctx.ret([r])
+    Ok(Buffer(out))
 }
 
-/// A string made by `f` from the bytes of argument 1 (`f` appends to the
-/// buffer it gets).
-fn map_bytes(ctx: &mut NativeCtx<'_>, f: impl Fn(&[u8], &mut Vec<u8>)) -> R {
-    let s = ctx.check_str(0)?;
-    let mut out = ctx.take_buf();
-    f(ctx.bytes(s), &mut out);
-    let r = ctx.new_str_buf(out);
-    ctx.ret([r])
+/// A string made by `f` from the subject's bytes and the locale (`f`
+/// appends to the buffer it gets).
+#[inline(always)]
+fn map_bytes(
+    s: &mut Stack<'_>,
+    f: impl FnOnce(&Locale, &[u8], &mut Vec<u8>),
+) -> StackResult<Buffer> {
+    let subject = s.check_string_handle(1)?;
+    let mut out = s.take_buffer();
+    f(s.locale(), s.handle_bytes(subject), &mut out);
+    Ok(Buffer(out))
 }
 
-fn reverse(ctx: &mut NativeCtx<'_>) -> R {
-    map_bytes(ctx, |b, out| out.extend(b.iter().rev()))
+#[native(crate = crate, name = "string.reverse")]
+fn reverse(s: &mut Stack<'_>) -> StackResult<Buffer> {
+    map_bytes(s, |_, b, out| out.extend(b.iter().rev()))
 }
 
-fn upper(ctx: &mut NativeCtx<'_>) -> R {
-    let locale = ctx.locale().clone();
-    map_bytes(ctx, |b, out| locale.upper(b, out))
+#[native(crate = crate, name = "string.upper")]
+fn upper(s: &mut Stack<'_>) -> StackResult<Buffer> {
+    map_bytes(s, Locale::upper)
 }
 
-fn lower(ctx: &mut NativeCtx<'_>) -> R {
-    let locale = ctx.locale().clone();
-    map_bytes(ctx, |b, out| locale.lower(b, out))
+#[native(crate = crate, name = "string.lower")]
+fn lower(s: &mut Stack<'_>) -> StackResult<Buffer> {
+    map_bytes(s, Locale::lower)
 }
 
 // ---- patterns ------------------------------------------------------------
 
 fn pattern_error(ctx: &mut NativeCtx<'_>, e: PatternError) -> LuaError {
     ctx.error(&e.to_string())
+}
+
+#[cold]
+#[inline(never)]
+fn raise_pattern_error(s: &mut Stack<'_>, e: PatternError) -> Raised {
+    s.error(e.to_string().as_str())
 }
 
 /// The value of one capture.
@@ -185,8 +241,27 @@ fn capture_value(ctx: &mut NativeCtx<'_>, s: Gc<LuaStr>, c: Capture) -> Value {
     }
 }
 
-/// Push captures `0..n` of the match `a..b` of `s`.
+/// Push captures `0..n` of the match `a..b` of `subject`.
 fn push_captures(
+    s: &mut Stack<'_>,
+    subject: Gc<LuaStr>,
+    caps: &Captures,
+    n: usize,
+    a: usize,
+    b: usize,
+) -> StackResult<()> {
+    for i in 0..n {
+        match caps.capture(i, a, b) {
+            Ok(Capture::Span(from, to)) => s.push_substring(subject, from, to),
+            Ok(Capture::Position(at)) => s.push_integer(at as i64 + 1),
+            Err(e) => return Err(raise_pattern_error(s, e)),
+        }
+    }
+    Ok(())
+}
+
+/// [`push_captures`] for gsub, which isn't on the stack API yet.
+fn push_captures_raw(
     ctx: &mut NativeCtx<'_>,
     s: Gc<LuaStr>,
     caps: &Captures,
@@ -205,39 +280,50 @@ fn push_captures(
     Ok(())
 }
 
-fn find(ctx: &mut NativeCtx<'_>) -> R {
-    find_aux(ctx, true)
+#[native(crate = crate, name = "string.find")]
+fn find(s: &mut Stack<'_>) -> StackResult<Return> {
+    find_aux(s, true)
 }
 
-fn match_(ctx: &mut NativeCtx<'_>) -> R {
-    find_aux(ctx, false)
+#[native(crate = crate, name = "string.match")]
+fn match_(s: &mut Stack<'_>) -> StackResult<Return> {
+    find_aux(s, false)
 }
 
-fn find_aux(ctx: &mut NativeCtx<'_>, find: bool) -> R {
-    let s = ctx.check_str(0)?;
-    let p = ctx.check_str(1)?;
-    let len = ctx.bytes(s).len();
-    let init = start_pos(ctx.opt_int(2, 1)?, len) - 1;
+// Inlined into `find` and `match`, so each tests `find` at compile time.
+#[inline(always)]
+fn find_aux(s: &mut Stack<'_>, find: bool) -> StackResult<Return> {
+    let subject = s.check_string_handle(1)?;
+    let pattern = s.check_string_handle(2)?;
+    let len = s.handle_bytes(subject).len();
+    let init = start_pos(s.opt_integer(3, 1)?, len) - 1;
     if init > len {
-        return ctx.ret([Value::Nil]);
+        s.push_nil();
+        return Ok(Return::values(1));
     }
-    if find && (!ctx.arg(3).is_falsy() || pattern::is_plain(ctx.bytes(p))) {
-        return match pattern::find_plain(ctx.bytes(s), ctx.bytes(p), init) {
+    let (hay, pat) = (s.handle_bytes(subject), s.handle_bytes(pattern));
+    if find && (s.to_boolean(4) || pattern::is_plain(pat)) {
+        let plen = pat.len();
+        return Ok(match pattern::find_plain(hay, pat, init) {
             Some(at) => {
-                let plen = ctx.bytes(p).len();
-                ctx.push(Value::Int(at as i64 + 1));
-                ctx.push(Value::Int((at + plen) as i64));
-                Ok(NativeReturn::Return(2))
+                s.push_integer(at as i64 + 1);
+                s.push_integer((at + plen) as i64);
+                Return::values(2)
             }
-            None => ctx.ret([Value::Nil]),
-        };
+            None => {
+                s.push_nil();
+                Return::values(1)
+            }
+        });
     }
     let mut caps = Captures::new();
-    let chars = ctx.locale().chars_rc();
-    let (a, b) = match pattern::search(ctx.bytes(s), ctx.bytes(p), &chars, init, &mut caps) {
+    let (a, b) = match pattern::search(hay, pat, s.locale().chars(), init, &mut caps) {
         Ok(Some(m)) => m,
-        Ok(None) => return ctx.ret([Value::Nil]),
-        Err(e) => return Err(pattern_error(ctx, e)),
+        Ok(None) => {
+            s.push_nil();
+            return Ok(Return::values(1));
+        }
+        Err(e) => return Err(raise_pattern_error(s, e)),
     };
     // `find` returns only real captures; `match` falls back to the whole
     // match.
@@ -247,68 +333,71 @@ fn find_aux(ctx: &mut NativeCtx<'_>, find: bool) -> R {
         caps.nresults()
     };
     if find {
-        ctx.push(Value::Int(a as i64 + 1));
-        ctx.push(Value::Int(b as i64));
+        s.push_integer(a as i64 + 1);
+        s.push_integer(b as i64);
     }
-    push_captures(ctx, s, &caps, n, a, b)?;
+    push_captures(s, subject, &caps, n, a, b)?;
     if find {
         n += 2;
     }
-    Ok(NativeReturn::Return(n))
+    Ok(Return::values(n))
 }
 
 // ---- gmatch ---------------------------------------------------------------
 //
-// The iterator is a native closure with upvalues: 0 subject, 1 pattern,
-// 2 where the next search starts, 3 end of the last match (or nil). A
+// The iterator is a native closure with upvalues: 1 subject, 2 pattern,
+// 3 where the next search starts, 4 end of the last match (or nil). A
 // leading `^` is an ordinary character here, as in lua5.5.
 
-fn gmatch(ctx: &mut NativeCtx<'_>) -> R {
-    let s = ctx.check_str(0)?;
-    let p = ctx.check_str(1)?;
-    let len = ctx.bytes(s).len();
+const GMATCH_SUBJECT: usize = 1;
+const GMATCH_PATTERN: usize = 2;
+const GMATCH_POS: usize = 3;
+const GMATCH_LAST: usize = 4;
+
+#[native(crate = crate, name = "string.gmatch")]
+fn gmatch(s: &mut Stack<'_>) -> StackResult<Return> {
+    let subject = s.check_string_handle(1)?;
+    s.check_string_handle(2)?;
+    let len = s.handle_bytes(subject).len();
     // A start past the end leaves nothing to match, not even an empty string.
-    let pos = (start_pos(ctx.opt_int(2, 1)?, len) - 1).min(len + 1);
-    let it = ctx.new_closure(
-        "string.gmatch()",
-        gmatch_step,
-        &[
-            Value::Str(s),
-            Value::Str(p),
-            Value::Int(pos as i64),
-            Value::Nil,
-        ],
-    );
-    ctx.ret([it])
+    let pos = (start_pos(s.opt_integer(3, 1)?, len) - 1).min(len + 1);
+    s.set_top(2)?;
+    s.push_integer(pos as i64);
+    s.push_nil();
+    s.push_native_closure::<gmatch_step>(4, 0)?;
+    Ok(Return::values(1))
 }
 
-fn gmatch_step(ctx: &mut NativeCtx<'_>) -> R {
-    let (Value::Str(s), Value::Str(p)) = (ctx.upvalue(0), ctx.upvalue(1)) else {
+// The iterator is nameless in messages, as in the reference.
+#[native(crate = crate, name = "?")]
+fn gmatch_step(s: &mut Stack<'_>) -> StackResult<Return> {
+    let (Some(subject), Some(pattern)) = (
+        s.upvalue_string(GMATCH_SUBJECT),
+        s.upvalue_string(GMATCH_PATTERN),
+    ) else {
         unreachable!("gmatch's upvalues are its subject and pattern")
     };
-    let start = match ctx.upvalue(2) {
-        Value::Int(n) => n as usize,
-        _ => 0,
-    };
-    let last = match ctx.upvalue(3) {
-        Value::Int(n) => Some(n as usize),
-        _ => None,
-    };
+    let start = s.upvalue_integer(GMATCH_POS).unwrap_or(0) as usize;
+    let last = s.upvalue_integer(GMATCH_LAST).map(|n| n as usize);
     let mut caps = Captures::new();
-    let chars = ctx.locale().chars_rc();
     // An empty match where the last one ended doesn't count.
-    let found = Matcher::new(ctx.bytes(s), ctx.bytes(p), &chars, &mut caps)
-        .find_from(start, 0, false, last);
+    let found = Matcher::new(
+        s.handle_bytes(subject),
+        s.handle_bytes(pattern),
+        s.locale().chars(),
+        &mut caps,
+    )
+    .find_from(start, 0, false, last);
     let (a, e) = match found {
         Ok(Some(m)) => m,
-        Ok(None) => return Ok(NativeReturn::Return(0)),
-        Err(err) => return Err(pattern_error(ctx, err)),
+        Ok(None) => return Ok(Return::values(0)),
+        Err(err) => return Err(raise_pattern_error(s, err)),
     };
     let n = caps.nresults();
-    push_captures(ctx, s, &caps, n, a, e)?;
-    ctx.set_upvalue(2, Value::Int(e as i64));
-    ctx.set_upvalue(3, Value::Int(e as i64));
-    Ok(NativeReturn::Return(n))
+    push_captures(s, subject, &caps, n, a, e)?;
+    s.set_upvalue_integer(GMATCH_POS, e as i64);
+    s.set_upvalue_integer(GMATCH_LAST, e as i64);
+    Ok(Return::values(n))
 }
 
 // ---- gsub ----------------------------------------------------------------
@@ -521,7 +610,7 @@ fn add_value(
             ctx.set(G_MSTART, Value::Int(f.start as i64));
             ctx.set(G_MEND, Value::Int(f.end as i64));
             let n = caps.nresults();
-            push_captures(ctx, s, caps, n, f.start, f.end)?;
+            push_captures_raw(ctx, s, caps, n, f.start, f.end)?;
             Ok(Some(NativeReturn::CallThen {
                 f: repl,
                 nargs: n,

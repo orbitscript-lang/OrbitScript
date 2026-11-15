@@ -471,7 +471,7 @@ impl Vm {
             self.run_finalizers();
         }
         if !self.heap.over_limit() {
-            self.rt.limit_grace = false;
+            self.rt.gc.end_limit_grace();
             return false;
         }
         self.over_limit_after_collecting()
@@ -676,7 +676,7 @@ impl Vm {
         };
         let to = base + dst;
         let count = if count == MULTI {
-            if to + n > self.rt.limits.max_stack {
+            if to + n > self.rt.host.max_stack() {
                 return Err(Exc::Rt("stack overflow".into(), None));
             }
             let regs = &mut self.rt.stack.regs;

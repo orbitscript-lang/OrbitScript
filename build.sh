@@ -11,7 +11,8 @@
 #                     own target directory (target/package-lua5.4), default
 #                     --out (target/package-lua5.4/out) and default profile
 #                     (pgo/<target>-lua5.4.profdata), and installs Lua 5.4's
-#                     headers and library names
+#                     headers and library names. The build fails if its
+#                     features choose the other version (ORBIT_EXPECT_LUA)
 #   --static          lay out the static `orbit`, `orbitc`, `orbit-lsp` and
 #                     `orbit-fmt` instead of the shared layout
 #   --static-programs lay out the shared layout's files, but with the static
@@ -45,7 +46,8 @@
 #                     DEP/FEATURE for one of orbit-cli's dependencies, goes to
 #                     the `orbit` and `orbitc` build (for example
 #                     --features orbit-lib/system-libffi).
-#                     May be given more than once
+#                     May be given more than once. docs/features.md lists
+#                     every feature
 # The options apply to PGO training and checking too, so a profile trained
 # with them matches the build that uses it. The committed profiles are
 # trained with the defaults; with other options --pgo-check reports the
@@ -133,6 +135,9 @@ case "$lua" in
     *) echo "build.sh: --lua must be 5.5 or 5.4, not $lua" >&2; exit 2 ;;
 esac
 [ -n "$out" ] || out="$root/target/$package/out"
+# The version every build below must implement: `orbit`'s build script
+# fails if the features chose the other one (ADR-14).
+export ORBIT_EXPECT_LUA="$lua"
 # Lua's library names: 55 or 54, as in lua55.dll.
 lua_nodot=$(printf '%s' "$lua" | tr -d .)
 

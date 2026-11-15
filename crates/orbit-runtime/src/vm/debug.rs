@@ -119,7 +119,7 @@ impl Runtime {
     pub(crate) fn hidden_upvalues(&self, heap: &LuaHeap, c: &Closure) -> usize {
         let p = heap.get(c.proto);
         match p.code.code.first() {
-            Some(Op::NativeEntry { id }) => self.natives[*id as usize].hidden as usize,
+            Some(Op::NativeEntry { id }) => self.natives.get(NativeId(*id)).hidden as usize,
             _ if p.code.builtin => c.captures.len(),
             _ => 0,
         }

@@ -429,6 +429,82 @@ impl<'s> Stack<'s> {
         self.ctx.bytes(s)
     }
 
+    /// The string at `idx` (an argument or an upvalue) as a handle, for
+    /// results built from a string argument after it was checked.
+    #[inline]
+    pub(crate) fn string_handle(&self, idx: i32) -> Option<Gc<LuaStr>> {
+        match self.get(idx) {
+            RawValue::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Push bytes `from..to` of `s`, a string the window or an upvalue
+    /// holds, copied straight from it.
+    #[inline]
+    pub(crate) fn push_substring(&mut self, s: Gc<LuaStr>, from: usize, to: usize) {
+        let v = self.ctx.new_substr(s, from, to);
+        self.ctx.push(v);
+    }
+
+    /// An empty buffer to build a string result in, reusing the isolate's
+    /// scratch buffer: push it with [`Buffer`](super::Buffer) as the
+    /// result, which hands the buffer back. One that is dropped instead
+    /// (on an error) only costs an allocation.
+    #[inline]
+    pub(crate) fn take_buffer(&mut self) -> Vec<u8> {
+        self.ctx.take_buf()
+    }
+
+    /// Push a string with the bytes of a buffer from
+    /// [`Stack::take_buffer`], and keep the buffer for reuse.
+    #[inline]
+    pub(crate) fn push_buffer(&mut self, b: Vec<u8>) {
+        let v = self.ctx.new_str_buf(b);
+        self.ctx.push(v);
+    }
+
+    /// Room for `n` more values on the stack, or the error `stack
+    /// overflow (<what>)`, for a native that returns as many values as its
+    /// arguments ask for.
+    #[inline]
+    pub(crate) fn need_room(&mut self, n: usize, what: &str) -> StackResult<()> {
+        Ok(self.ctx.check_room(n, what)?)
+    }
+
+    /// The isolate's locale (ADR-13), for the libraries that follow it.
+    #[inline]
+    pub(crate) fn locale(&self) -> &crate::locale::Locale {
+        self.ctx.locale()
+    }
+
+    /// Upvalue `i` (1-based) of the running native closure if it is a
+    /// string, as a handle.
+    #[inline]
+    pub(crate) fn upvalue_string(&self, i: usize) -> Option<Gc<LuaStr>> {
+        match self.ctx.upvalue(i - 1) {
+            RawValue::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Upvalue `i` (1-based) of the running native closure if it is an
+    /// integer.
+    #[inline]
+    pub(crate) fn upvalue_integer(&self, i: usize) -> Option<i64> {
+        match self.ctx.upvalue(i - 1) {
+            RawValue::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Set upvalue `i` (1-based) of the running native closure to an
+    /// integer.
+    #[inline]
+    pub(crate) fn set_upvalue_integer(&mut self, i: usize, n: i64) {
+        self.ctx.set_upvalue(i - 1, RawValue::Int(n));
+    }
+
     /// Push a string with `bytes`, for results ([`Push`](super::Push)):
     /// [`Stack::push_bytes`] without reading the string back.
     #[inline]
@@ -1047,9 +1123,18 @@ impl<'s> Stack<'s> {
     pub(crate) fn push_closure_of(&mut self, id: u32, nups: usize, data: u64) -> StackResult<()> {
         self.need(nups)?;
         let len = self.ctx.len();
-        let ups = self.ctx.window()[len - nups..].to_vec();
         let hidden = [RawValue::LightUserData(LightUserData::new(data))];
-        let v = self.ctx.new_native_closure(NativeId(id), &ups, &hidden);
+        // A few upvalues (the usual case) are copied without allocating.
+        let mut few = [RawValue::Nil; 8];
+        let many;
+        let ups = if nups <= few.len() {
+            few[..nups].copy_from_slice(&self.ctx.window()[len - nups..]);
+            &few[..nups]
+        } else {
+            many = self.ctx.window()[len - nups..].to_vec();
+            &many[..]
+        };
+        let v = self.ctx.new_native_closure(NativeId(id), ups, &hidden);
         self.ctx.truncate(len - nups);
         self.ctx.push(v);
         Ok(())
@@ -1168,6 +1253,36 @@ impl<'s> Stack<'s> {
             nrec.max(0) as usize,
         ));
         self.ctx.push(RawValue::Table(t));
+    }
+
+    /// [`Stack::create_table`] with room for `narr` array and `nrec` hash
+    /// entries, or `not enough memory` if they can't be allocated.
+    pub(crate) fn try_create_table(&mut self, narr: usize, nrec: usize) -> StackResult<()> {
+        let Ok(t) = Table::try_with_capacity(narr, nrec) else {
+            return Err(Raised(self.ctx.no_memory()));
+        };
+        let t = self.ctx.new_table(t);
+        self.ctx.push(RawValue::Table(t));
+        Ok(())
+    }
+
+    /// Push a table with the `count` values from index `first` at keys
+    /// `1..=count`, and room for `nrec` more entries.
+    pub(crate) fn push_array_of(
+        &mut self,
+        first: i32,
+        count: usize,
+        nrec: usize,
+    ) -> StackResult<()> {
+        let t = self.ctx.new_table(Table::with_capacity(count, nrec));
+        self.ctx.push(RawValue::Table(t));
+        let from = (first.max(1) - 1) as usize;
+        for i in 0..count {
+            let v = self.ctx.arg(from + i);
+            crate::object::table::set_int(&mut self.ctx.vm.heap, t, i as i64 + 1, v)
+                .map_err(|_| Raised(self.ctx.no_memory()))?;
+        }
+        Ok(())
     }
 
     /// Push a userdata of `size` bytes, zeroed and aligned to 16, with
@@ -1723,7 +1838,7 @@ impl<'s> Stack<'s> {
                 c.full_collect();
                 0
             }
-            GcOp::Step(kb) => match c.vm.rt.gc.mode {
+            GcOp::Step(kb) => match c.vm.rt.gc.mode() {
                 GcMode::Generational => c.gen_step() as i64,
                 GcMode::Incremental => {
                     let bytes = usize::try_from(kb).unwrap_or(0).saturating_mul(1024);
@@ -1779,12 +1894,12 @@ impl<'s> Stack<'s> {
 
     fn warn_str(&mut self, msg: OrbitStr<'_>, more: bool) {
         let msg = msg.as_bytes();
-        let rt = &mut self.ctx.vm.rt;
-        if let Some(hook) = &mut rt.warn_hook {
+        let host = &mut self.ctx.vm.rt.host;
+        if let Some(hook) = host.warn_hook() {
             (hook.0)(msg, more);
             return;
         }
-        let pending = rt.ext.get_or_insert_with(WarnBuffer::default);
+        let pending = host.ext_mut().get_or_insert_with(WarnBuffer::default);
         let first = pending.0.is_empty();
         pending.0.extend_from_slice(msg);
         if more {
@@ -1793,10 +1908,10 @@ impl<'s> Stack<'s> {
         let text = std::mem::take(&mut pending.0);
         // A one-piece message starting with '@' is a control message.
         match (first, text.as_slice()) {
-            (true, b"@on") => rt.warnings = true,
-            (true, b"@off") => rt.warnings = false,
+            (true, b"@on") => host.set_warnings(true),
+            (true, b"@off") => host.set_warnings(false),
             (true, [b'@', ..]) => {}
-            _ => rt.warn(&text),
+            _ => host.warn(&text),
         }
     }
 
@@ -1805,7 +1920,11 @@ impl<'s> Stack<'s> {
     pub fn set_warn_hook(&mut self, hook: impl FnMut(OrbitStr<'_>, bool) + 'static) {
         let mut hook = hook;
         let hook = move |msg: &[u8], more| hook(msg.into(), more);
-        self.ctx.vm.rt.warn_hook = Some(vm::WarnHook(Box::new(hook)));
+        self.ctx
+            .vm
+            .rt
+            .host
+            .set_warn_hook(vm::WarnHook(Box::new(hook)));
     }
 
     /// Open standard library `lib` as `orbit::Config::libraries` would
@@ -1849,13 +1968,13 @@ impl<'s> Stack<'s> {
     /// (`orbit::Config::line_endings`). Standard output
     /// ([`Stack::with_stdout`]) already does what this says.
     pub fn line_endings(&self) -> crate::text::LineEndings {
-        self.ctx.vm.rt.line_endings
+        self.ctx.vm.rt.host.line_endings()
     }
 
     /// Write to the isolate's standard output, the stream `print` and
     /// `io.stdout` share. `f` must not reach the isolate.
     pub fn with_stdout<R>(&mut self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
-        f(self.ctx.vm.rt.out.as_write())
+        f(self.ctx.vm.rt.host.out().as_write())
     }
 
     /// Run `hook` when a script ends the process ([`Return::exit`],
@@ -1876,7 +1995,7 @@ impl<'s> Stack<'s> {
     /// reach the stack.
     #[inline]
     pub fn extension<T: Any + Default, R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(self.ctx.vm.rt.ext.get_or_insert_with(T::default))
+        f(self.ctx.vm.rt.host.ext_mut().get_or_insert_with(T::default))
     }
 
     /// Run `f` on the isolate's extension value of type `T` if one was
@@ -1884,7 +2003,7 @@ impl<'s> Stack<'s> {
     /// path.
     #[inline]
     pub fn find_extension<T: Any, R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
-        self.ctx.vm.rt.ext.get::<T>().map(f)
+        self.ctx.vm.rt.host.ext().get::<T>().map(f)
     }
 
     // ---- the locale (ADR-13) ----------------------------------------------
@@ -2297,7 +2416,7 @@ impl<'a> Control<'a> {
 
     /// See [`Stack::extension`].
     pub fn extension<T: Any + Default, R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(self.vm.rt.ext.get_or_insert_with(T::default))
+        f(self.vm.rt.host.ext_mut().get_or_insert_with(T::default))
     }
 
     /// The interrupt flag, for code that can only store to memory (a C
@@ -2315,7 +2434,7 @@ impl<'a> Control<'a> {
 
     /// Call `H` when the interrupt flag is raised.
     pub fn set_interrupt_handler<H: InterruptHandler>(&mut self) {
-        self.vm.rt.interrupt_handler = Some(interrupt_entry::<H>);
+        self.vm.rt.host.set_interrupt_handler(interrupt_entry::<H>);
     }
 
     /// Register another native `N` that reads `data` on every call

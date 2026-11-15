@@ -3,7 +3,7 @@
 //! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md)).
 //!
 //! Source text goes through the compiler the host installed in
-//! [`Runtime::compile`](crate::vm::Runtime::compile), so this library needs
+//! [`Host::set_compilers`](crate::vm::host::Host::set_compilers), so this library needs
 //! no front end of its own. Binary chunks (`string.dump` output) start with
 //! [`BINARY_SIGNATURE`].
 
@@ -98,11 +98,7 @@ fn unlinked(
         return Ok(chunk);
     }
     let name = chunk_id(source);
-    let compile = if is_orbitscript_file(source) {
-        rt.compile_orbitscript
-    } else {
-        rt.compile
-    };
+    let compile = rt.host.compiler(is_orbitscript_file(source));
     let Some(compile) = compile else {
         return Err(format!("{name}: no compiler for source chunks"));
     };

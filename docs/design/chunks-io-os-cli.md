@@ -12,7 +12,7 @@ Everything that touches files, the environment or the process lives in `orbit-st
 |---|---|---|
 | `load`, `chunk_id` | `orbit-runtime` (`stdlib/load.rs`) | Compiles through a hook, so the runtime stays free of the front ends |
 | `loadfile`, `dofile`, `print`, `debug.debug` | `orbit-std` (`base.rs`) | |
-| The compiler hooks | `orbit-runtime` (`Runtime::compile`, `Runtime::compile_orbitscript`) | Installed by the embedder; `orbit::Isolate` installs both front ends |
+| The compiler hooks | `orbit-runtime` (`Host::set_compilers`, in `vm/host.rs`) | Installed by the embedder; `orbit::Isolate` installs both front ends |
 | Linking with an environment | `orbit-runtime` (`vm/link.rs`) | `Vm::load_with_env` |
 | `require`, `package` | `orbit-runtime` (`stdlib/package.rs`): `require`, `loaded`, `preload`; `orbit-std` (`package.rs`): paths, `searchpath`, the Lua searcher; `orbit-capi` (`searchers.rs`): the C searchers and `loadlib` (ADR-8) | |
 | Binary chunk format and verifier | `orbit-bytecode` (`format.rs`, `verify.rs`) | Plain data in, plain data out: no VM needed, so both are unit-testable and fuzzable |
@@ -23,7 +23,7 @@ Everything that touches files, the environment or the process lives in `orbit-st
 
 ```mermaid
 flowchart LR
-    src["source text"] --> hook["Runtime::compile<br/>(host-installed)"]
+    src["source text"] --> hook["the host's compiler<br/>(Host::set_compilers)"]
     hook --> unl["UnlinkedChunk"]
     bin["binary chunk"] --> dec["decode"] --> ver["verify"] --> unl
     unl --> link["link with env"] --> clo["closure"]
@@ -50,7 +50,7 @@ The runtime must not depend on the front ends: a host that only runs precompiled
 
 ```rust
 pub type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String>;
-// Runtime::compile, Runtime::compile_orbitscript: Option<CompileFn>
+// Host::set_compilers(lua: CompileFn, orbitscript: CompileFn)
 ```
 
 An `orbit::Isolate` installs both: the Lua front end, and the OrbitScript front end, which has no Cargo feature because it is the runtime's own language. A source chunk named `@path.orb` (from `loadfile`, `dofile`, `require` or the CLI's script) uses OrbitScript; everything else, including `load` of a string, `-e`, standard input and interactive mode, is Lua. The default `package.path` has `.orb` entries after the `.lua` ones (`/usr/local/share/orbit/?.orb;/usr/local/share/orbit/?/init.orb;./?.orb;./?/init.orb`; on Windows `!\..\share\orbit\?.orb;!\..\share\orbit\?\init.orb;.\?.orb;.\?\init.orb`, where `!` is the program's directory as in the reference build's defaults), and the Lua searcher loads whichever file it finds, the loader picking the compiler by the name. There is no separate OrbitScript path or searcher, so `#package.searchers` is 4 as in `lua`. A script that sets `package.path` (or `LUA_PATH`) itself decides whether `.orb` files are searched; a missing module's message lists the `.orb` files tried along with the others.

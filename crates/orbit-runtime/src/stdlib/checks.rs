@@ -19,10 +19,10 @@ use crate::vm::op::verify::Level;
 /// Set how much `load` checks binary chunks in `vm` (`None`: not at all).
 /// A VM starts at [`Level::Full`].
 pub fn set_level(vm: &mut Vm, level: Option<Level>) {
-    vm.rt.binary_checks = level;
+    vm.rt.host.set_binary_checks(level);
 }
 
 /// The level `load` uses.
 pub(crate) fn level(rt: &crate::vm::Runtime) -> Option<Level> {
-    rt.binary_checks
+    rt.host.binary_checks()
 }

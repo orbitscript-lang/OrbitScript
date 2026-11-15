@@ -396,7 +396,7 @@ impl Vm {
     pub fn pause_handle(&self) -> PauseHandle {
         PauseHandle {
             pause: self.rt.debug.pause.clone(),
-            interrupt: self.rt.interrupt.clone(),
+            interrupt: self.rt.host.interrupt_flag().clone(),
         }
     }
 

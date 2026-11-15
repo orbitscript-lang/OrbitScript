@@ -106,11 +106,13 @@ fn gc_floor() -> usize {
 /// 800 reads as Lua's default `stepmul` of 200.
 const STEPMUL_SCALE: u32 = 4;
 
-/// What `collectgarbage` keeps besides the collector's own state.
+/// Memory control besides the collector's own state: what
+/// `collectgarbage` keeps, the memory limit's grace, and the values a host
+/// pinned.
 #[derive(Debug)]
 pub struct GcState {
     /// Set with [`Vm::set_gc_mode`], which also moves the heap's floor.
-    pub mode: GcMode,
+    mode: GcMode,
     /// The floor under the start of a cycle in generational mode
     /// ([`gc_floor`]).
     floor: usize,
@@ -128,6 +130,21 @@ pub struct GcState {
     closed: bool,
     /// What [`close_then`] runs once the last finalizer has.
     close_k: Option<Continuation>,
+    /// `not enough memory` was raised for passing the limit and the heap
+    /// hasn't been back under it since: the script may use up to
+    /// [`LIMIT_GRACE`](super::LIMIT_GRACE) more to handle the error.
+    limit_grace: bool,
+    /// Extra roots: values the embedder or loader holds ([`Vm::pin`]).
+    pinned: Vec<Value>,
+    /// Values a host keeps alive in numbered slots ([`Vm::pin_slot`]).
+    pin_slots: PinSlots,
+}
+
+/// Numbered GC roots that can be freed in any order ([`Vm::pin_slot`]).
+#[derive(Debug, Default)]
+struct PinSlots {
+    values: Vec<Value>,
+    free: Vec<u32>,
 }
 
 impl GcState {
@@ -149,6 +166,9 @@ impl GcState {
             hooks_were_off: false,
             closed: false,
             close_k: None,
+            limit_grace: false,
+            pinned: Vec::new(),
+            pin_slots: PinSlots::default(),
         }
     }
 
@@ -212,6 +232,72 @@ impl GcState {
 
     /// No hook events fire while a finalizer runs (a running hook turns
     /// them off the same way).
+    /// The collector's mode ([`Vm::set_gc_mode`]).
+    pub fn mode(&self) -> GcMode {
+        self.mode
+    }
+
+    /// Whether the script is inside the memory limit's grace: the error
+    /// was raised and the heap has not been back under the limit since.
+    pub(crate) fn in_limit_grace(&self) -> bool {
+        self.limit_grace
+    }
+
+    /// `not enough memory` is being raised for passing the limit.
+    pub(crate) fn start_limit_grace(&mut self) {
+        self.limit_grace = true;
+    }
+
+    /// The heap is back under its limit.
+    #[inline]
+    pub(crate) fn end_limit_grace(&mut self) {
+        self.limit_grace = false;
+    }
+
+    pub(crate) fn pin(&mut self, v: Value) {
+        self.pinned.push(v);
+    }
+
+    pub(crate) fn unpin(&mut self, v: Value) {
+        if let Some(i) = self.pinned.iter().rposition(|&p| p.same(v)) {
+            self.pinned.remove(i);
+        }
+    }
+
+    pub(crate) fn pin_slot(&mut self, v: Value) -> u32 {
+        let slots = &mut self.pin_slots;
+        match slots.free.pop() {
+            Some(i) => {
+                slots.values[i as usize] = v;
+                i
+            }
+            None => {
+                slots.values.push(v);
+                (slots.values.len() - 1) as u32
+            }
+        }
+    }
+
+    pub(crate) fn pin_slot_value(&self, slot: u32) -> Value {
+        self.pin_slots.values[slot as usize]
+    }
+
+    pub(crate) fn free_pin_slot(&mut self, slot: u32) {
+        let slots = &mut self.pin_slots;
+        slots.values[slot as usize] = Value::Nil;
+        slots.free.push(slot);
+    }
+
+    /// Mark the pinned values: they are roots.
+    pub(crate) fn trace(&self, m: &mut orbit_gc::Marker<'_, crate::object::LuaSpace>) {
+        for &v in &self.pinned {
+            crate::object::table::mark(m, v);
+        }
+        for &v in &self.pin_slots.values {
+            crate::object::table::mark(m, v);
+        }
+    }
+
     fn hooks_off(&mut self, hook: &mut crate::vm::hook::Hook) {
         self.hooks_were_off = std::mem::replace(&mut hook.active, true);
     }
@@ -222,29 +308,6 @@ impl GcState {
 }
 
 impl Runtime {
-    /// Emit a warning (Lua's `warn`) on stderr, as `Lua warning: msg`, if
-    /// warnings are on ([`Runtime::warnings`]; off by default).
-    pub fn warn(&mut self, msg: &[u8]) {
-        use std::io::Write;
-        if let Some(hook) = &mut self.warn_hook {
-            (hook.0)(msg, false);
-            return;
-        }
-        if !self.warnings {
-            return;
-        }
-        let mut text = b"Lua warning: ".to_vec();
-        text.extend_from_slice(msg);
-        text.push(b'\n');
-        // Keep the order of output already printed.
-        let _ = self.out.flush();
-        if self.line_endings.translates() {
-            let _ = crate::text::TextWriter::new(std::io::stderr()).write_all(&text);
-        } else {
-            let _ = std::io::stderr().write_all(&text);
-        }
-    }
-
     /// Warn about an error raised by a finalizer.
     fn warn_gc_error(&mut self, heap: &LuaHeap, err: Value) {
         let mut msg = b"error in __gc (".to_vec();
@@ -254,7 +317,7 @@ impl Runtime {
             _ => msg.extend_from_slice(b"error object is not a string"),
         }
         msg.push(b')');
-        self.warn(&msg);
+        self.host.warn(&msg);
     }
 }
 
@@ -311,7 +374,7 @@ impl Vm {
                 self.rt.warn_gc_error_text(&msg);
                 continue;
             }
-            self.rt.hooks_touched = true;
+            self.rt.hooks.touch();
             self.rt.gc.enter(&mut self.heap, &mut self.rt.stack.hook);
             let at = self.rt.stack.frames.len() as u32;
             self.rt.stack.aux.finalizer_at = Some(at);
@@ -344,7 +407,7 @@ impl Runtime {
         let mut msg = b"error in __gc (".to_vec();
         msg.extend_from_slice(text);
         msg.push(b')');
-        self.warn(&msg);
+        self.host.warn(&msg);
     }
 }
 
@@ -376,7 +439,7 @@ fn next_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
         }
         ctx.truncate(1);
         ctx.push(o);
-        ctx.vm.rt.hooks_touched = true;
+        ctx.vm.rt.hooks.touch();
         ctx.vm
             .rt
             .gc
@@ -441,7 +504,7 @@ fn next_close_finalizer(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaErro
         ctx.truncate(1);
         ctx.push(o);
         ctx.vm.rt.stack.aux.finalizer_at = Some(ctx.vm.rt.stack.frames.len() as u32);
-        ctx.vm.rt.hooks_touched = true;
+        ctx.vm.rt.hooks.touch();
         ctx.vm.rt.gc.hooks_off(&mut ctx.vm.rt.stack.hook);
         return Ok(NativeReturn::CallThen {
             f,

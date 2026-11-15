@@ -276,7 +276,7 @@ impl Vm {
                 if self.rt.stack.hook.wants(crate::vm::hook::CALL) {
                     self.native_call_hook(func, nargs, id).map_err(Exc::Lua)?;
                 }
-                let f = self.rt.natives[id.0 as usize].f;
+                let f = self.rt.natives.get(id).f;
                 let mut ctx = NativeCtx {
                     vm: self,
                     base: func + 1,
@@ -375,7 +375,7 @@ fn overflow(rt: &mut crate::vm::Runtime, end: usize) -> Option<Exc> {
     if !handling {
         return Some(Exc::Rt("stack overflow".into(), None));
     }
-    if end <= rt.limits.max_stack + HANDLER_HEADROOM {
+    if end <= rt.host.max_stack() + HANDLER_HEADROOM {
         return None;
     }
     Some(Exc::ErrErr)
@@ -417,7 +417,7 @@ pub(crate) fn enter_lua_frame_fast(
         return None;
     }
     let base = func + 1;
-    if base + (proto.nregs as usize).max(nargs) > rt.limits.max_stack {
+    if base + (proto.nregs as usize).max(nargs) > rt.host.max_stack() {
         return None;
     }
     let cells = &mut rt.stack.cells;
@@ -468,7 +468,7 @@ pub(crate) fn enter_lua_frame_general(
         (func + 1, 0)
     };
     let end = base + nregs.max(np);
-    if end > rt.limits.max_stack {
+    if end > rt.host.max_stack() {
         if let Some(x) = overflow(rt, end) {
             return Err(x);
         }
@@ -913,7 +913,7 @@ impl Vm {
                     // The coroutine dies; its resumer (or closer) gets the
                     // error. A close without errors ends with none.
                     let outcome = if closing && e.value.is_nil() {
-                        self.rt.xfer.clear();
+                        self.rt.co.drop_transfer();
                         Ok(())
                     } else {
                         Err(e.value)

@@ -8,19 +8,24 @@ mod slow;
 
 use crate::object::table as tbl;
 use crate::object::{Gc, Table, Value};
+use crate::stack::{Fail, Rest, Results, Return, Stack, StackResult, library_row};
 use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
+use orbit_macros::native;
 
 type R = Result<NativeReturn, LuaError>;
 
+// `concat`, `unpack` and `move` run metamethods on their slow paths, so
+// they stay on the raw interface until the language rule's step gives them
+// a Rust fast path and an OrbitScript slow path.
 pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     ("table.concat", concat),
     ("table.unpack", unpack),
-    ("table.pack", pack),
+    library_row::<pack>(),
     ("table.move", move_),
 ];
 
 /// Lua 5.5's additions, absent from 5.4 builds (ADR-14).
-pub(crate) const FUNCTIONS_5_5: &[(&str, NativeFn)] = &[("table.create", create)];
+pub(crate) const FUNCTIONS_5_5: &[(&str, NativeFn)] = &[library_row::<create>()];
 
 /// Largest array size `create` accepts (a C `int`).
 const MAX_INT: i64 = i32::MAX as i64;
@@ -113,7 +118,7 @@ fn unpack(ctx: &mut NativeCtx<'_>) -> R {
     if i > j {
         return Ok(NativeReturn::Return(0));
     }
-    let room = ctx.vm.rt.limits.max_stack.saturating_sub(ctx.len());
+    let room = ctx.vm.rt.host.max_stack().saturating_sub(ctx.len());
     let Some(n) = j
         .checked_sub(i)
         .and_then(|d| d.checked_add(1))
@@ -134,18 +139,12 @@ fn unpack(ctx: &mut NativeCtx<'_>) -> R {
     Ok(NativeReturn::Return(n as usize))
 }
 
-fn pack(ctx: &mut NativeCtx<'_>) -> R {
-    let n = ctx.nargs();
-    let t = ctx.new_table(Table::with_capacity(n, 1));
-    // Root the table in the window before allocating the key.
-    ctx.push(Value::Table(t));
-    for i in 0..n {
-        let v = ctx.arg(i);
-        set(ctx, t, i as i64 + 1, v)?;
-    }
-    let k = ctx.new_str(b"n");
-    let _ = tbl::set(&mut ctx.vm.heap, t, k, Value::Int(n as i64));
-    Ok(NativeReturn::Return(1))
+#[native(crate = crate, name = "table.pack")]
+fn pack(s: &mut Stack<'_>, values: Rest) -> StackResult<Return> {
+    s.push_array_of(values.first, values.count, 1)?;
+    s.push_integer(values.count as i64);
+    s.raw_set_field(-2, "n")?;
+    Ok(Return::values(1))
 }
 
 fn move_(ctx: &mut NativeCtx<'_>) -> R {
@@ -183,25 +182,42 @@ fn move_(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret([Value::Table(a2)])
 }
 
-fn create(ctx: &mut NativeCtx<'_>) -> R {
-    let n = ctx.check_int(0)?;
+// Both arguments are checked before either's range, as the reference does.
+#[native(crate = crate, name = "table.create")]
+fn create(n: i64, m: Option<i64>) -> Result<NewTable, Fail> {
     if !(0..=MAX_INT).contains(&n) {
-        return Err(ctx.arg_error(0, "out of range"));
+        return Err(Fail::arg(1, "out of range"));
     }
-    let m = ctx.opt_int(1, 0)?;
+    let m = m.unwrap_or(0);
     if !(0..=MAX_INT).contains(&m) {
-        return Err(ctx.arg_error(1, "out of range"));
+        return Err(Fail::arg(2, "out of range"));
     }
     if m > MAX_HASH {
-        return Err(ctx.error("table overflow"));
+        return Err("table overflow".into());
     }
-    let (n, m) = ((n as usize).min(MAX_RESERVE), (m as usize).min(MAX_RESERVE));
-    // About what the parts take: 9 bytes an array slot, a hash entry plus
-    // load-factor slack.
-    ctx.reserve(n.saturating_mul(9).saturating_add(m.saturating_mul(32)))?;
-    let Ok(t) = Table::try_with_capacity(n, m) else {
-        return Err(ctx.no_memory());
-    };
-    let t = ctx.new_table(t);
-    ctx.ret([Value::Table(t)])
+    Ok(NewTable {
+        narr: (n as usize).min(MAX_RESERVE),
+        nrec: (m as usize).min(MAX_RESERVE),
+    })
+}
+
+/// `create`'s result: a table with room for `narr` array and `nrec` hash
+/// entries.
+struct NewTable {
+    narr: usize,
+    nrec: usize,
+}
+
+impl Results for NewTable {
+    fn push_results(self, s: &mut Stack<'_>) -> StackResult<Return> {
+        // About what the parts take: 9 bytes an array slot, a hash entry
+        // plus load-factor slack.
+        let bytes = self
+            .narr
+            .saturating_mul(9)
+            .saturating_add(self.nrec.saturating_mul(32));
+        s.reserve_memory(bytes)?;
+        s.try_create_table(self.narr, self.nrec)?;
+        Ok(Return::values(1))
+    }
 }

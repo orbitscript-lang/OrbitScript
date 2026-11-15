@@ -287,14 +287,11 @@ impl Vm {
                 ($off:expr) => {{
                     pc = (pc as isize + $off as isize) as usize;
                     #[cfg(feature = "hooks")]
-                    if !HOOKED
-                        && $off < 0
-                        && self.rt.interrupt.load(std::sync::atomic::Ordering::Relaxed)
-                    {
+                    if !HOOKED && $off < 0 && self.rt.host.interrupt_requested() {
                         // An interrupt was requested ([`crate::vm::Interrupt`]): the
                         // hooked loop raises it before the jump's target.
                         save_pc!();
-                        self.rt.hooks_touched = true;
+                        self.rt.hooks.touch();
                         self.rt.stack.hook.mask |= crate::vm::hook::INTERRUPT;
                         return Ok(Ran::Switch);
                     }
@@ -1310,7 +1307,7 @@ impl Vm {
             Value::Native(id) if !HOOKED => {
                 // A native's fast path, when it has one and takes these
                 // arguments: no window, no frame.
-                let fast = match self.rt.natives[id.0 as usize].fast {
+                let fast = match self.rt.natives.get(id).fast {
                     Some(fast) if want <= 1 || want == MULTI => self
                         .rt
                         .stack
@@ -1667,7 +1664,7 @@ impl Vm {
         depth: usize,
     ) -> Result<NativeStep, Exc> {
         self.rt.top = fa + 1 + n;
-        let nf = self.rt.natives[id.0 as usize].f;
+        let nf = self.rt.natives.get(id).f;
         let mut ctx = NativeCtx {
             vm: self,
             base: fa + 1,

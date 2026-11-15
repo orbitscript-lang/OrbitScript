@@ -285,7 +285,7 @@ mod unpack {
                     if i > j {
                         return Ok(NativeReturn::Return(0));
                     }
-                    let room = ctx.vm.rt.limits.max_stack.saturating_sub(ctx.len());
+                    let room = ctx.vm.rt.host.max_stack().saturating_sub(ctx.len());
                     // More results than an integer holds, or the stack.
                     let n = j.checked_sub(i).and_then(|d| d.checked_add(1));
                     if n.map_or(true, |n| n >= MAX_INT || n as u64 >= room as u64) {

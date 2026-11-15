@@ -33,6 +33,7 @@ use crate::stdlib::Lib;
 #[doc(hidden)]
 pub use exit::exit_hooks;
 
+pub(crate) use typed::Buffer;
 pub use typed::{
     Any, Arg, Either, Fail, FunctionArg, IntoRaised, NativeFunction, Nil, Number, Push, Rest,
     Results, State, TableArg, Ud, UserType, field_name, function,
