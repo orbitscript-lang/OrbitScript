@@ -1,5 +1,5 @@
-Deletes: `Stack::set_user_value` (the C API's `lua_setiuservalue`) for a userdata with one user value.
-Tests: userdata_user_value_from_the_stack_api
+Deletes: `Stack::set_user_value` (the C API's `lua_setiuservalue`, and `debug.setuservalue`) for a userdata with one user value.
+Tests: userdata_user_value_from_the_stack_api userdata_user_value_from_the_debug_library
 
 diff --git a/crates/orbit-runtime/src/stack/window.rs b/crates/orbit-runtime/src/stack/window.rs
 index 11376c4..fedc7c2 100644
