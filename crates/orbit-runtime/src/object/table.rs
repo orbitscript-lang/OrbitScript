@@ -1410,7 +1410,7 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
     let no_limit = heap.limit().is_none();
     // Only stores of a value that can refer to an object barrier
     // (`HoldsHandle`); the hash path below barriers through `Heap::update`.
-    let mut tab = heap.write_at_for(t, idx as usize, &v);
+    let mut tab = heap.write_at_for(t, idx as usize, v);
     if idx < tab.array.len() as u64 {
         let idx = idx as usize;
         // Metatables are rare: test for one before reading the tag.
