@@ -45,7 +45,8 @@
 #                     DEP/FEATURE for one of orbit-cli's dependencies, goes to
 #                     the `orbit` and `orbitc` build (for example
 #                     --features orbit-lib/system-libffi).
-#                     May be given more than once
+#                     May be given more than once. docs/features.md lists
+#                     every feature
 # The options apply to PGO training and checking too, so a profile trained
 # with them matches the build that uses it. The committed profiles are
 # trained with the defaults; with other options --pgo-check reports the
