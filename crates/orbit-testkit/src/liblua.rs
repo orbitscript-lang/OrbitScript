@@ -12,7 +12,7 @@ use crate::conformance;
 use crate::util::{self, Result};
 
 const USAGE: &str = "\
-usage: orbit-testkit liblua [--lua X.Y] [--lib PATH] [--host PATH] [conformance options] [FILE...]
+usage: orbit-testkit liblua [--lua X.Y] [--lib PATH] [--host PATH] [--wrap CMD] [conformance options] [FILE...]
 
 Runs the Lua test suite through a program built for Lua's shared
 library, with OrbitScript's library installed under Lua's name.
@@ -24,6 +24,8 @@ options:
   --host PATH   the program (default target/reference-lua/bin/lua5.5-host,
                 from scripts/build-reference-lua.sh; with --lua 5.4,
                 target/reference-lua-5.4/bin/lua5.4-host)
+  --wrap CMD    run the program under CMD, a command and its arguments
+                split at spaces (tests/memcheck/run.sh runs valgrind so)
 
 Other options are conformance's (see conformance --help), for example
 --expect tests/lua-5.5/expected-liblua.txt.";
@@ -32,6 +34,7 @@ pub fn main(args: &[String]) -> Result<bool> {
     let root = util::repo_root();
     let mut lib = None;
     let mut host = None;
+    let mut wrap = String::new();
     let mut lua = conformance::VERSIONS[0].to_string();
     let mut rest = Vec::new();
     let mut it = args.iter();
@@ -43,6 +46,7 @@ pub fn main(args: &[String]) -> Result<bool> {
             }
             "--lib" => lib = Some(PathBuf::from(it.next().ok_or("--lib needs a value")?)),
             "--host" => host = Some(PathBuf::from(it.next().ok_or("--host needs a value")?)),
+            "--wrap" => wrap = it.next().ok_or("--wrap needs a value")?.clone(),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -71,7 +75,7 @@ pub fn main(args: &[String]) -> Result<bool> {
             return Err(format!("{what} {} not found\n\n{USAGE}", p.display()));
         }
     }
-    let wrapper = install(&util::absolute(&lib)?, &util::absolute(&host)?, &lua)?;
+    let wrapper = install(&util::absolute(&lib)?, &util::absolute(&host)?, &wrap, &lua)?;
     let mut conf = vec![
         "--interp".to_string(),
         format!("lua-on-liborbit={}", wrapper.display()),
@@ -81,9 +85,9 @@ pub fn main(args: &[String]) -> Result<bool> {
 }
 
 /// A directory where `liblua5.5.so.0` (for `lua` 5.5) is `lib`, and a
-/// script that runs `host` with the loader looking there first. Returns the
-/// script.
-fn install(lib: &Path, host: &Path, lua: &str) -> Result<PathBuf> {
+/// script that runs `host` (under the command `wrap`, if not empty) with
+/// the loader looking there first. Returns the script.
+fn install(lib: &Path, host: &Path, wrap: &str, lua: &str) -> Result<PathBuf> {
     let dir = util::repo_root().join("target/testkit/liblua");
     let libdir = dir.join("lib");
     std::fs::create_dir_all(&libdir).map_err(util::io_err(libdir.display()))?;
@@ -92,8 +96,11 @@ fn install(lib: &Path, host: &Path, lua: &str) -> Result<PathBuf> {
     link(lib, &alias)?;
     let script = dir.join("lua");
     let text = format!(
-        "#!/bin/sh\nLD_LIBRARY_PATH='{}'${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}} exec '{}' \"$@\"\n",
+        "#!/bin/sh\nLD_LIBRARY_PATH='{}'${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}} exec {}'{}' \"$@\"\n",
         libdir.display(),
+        wrap.split_whitespace()
+            .map(|w| format!("'{w}' "))
+            .collect::<String>(),
         host.display()
     );
     std::fs::write(&script, text).map_err(util::io_err(script.display()))?;

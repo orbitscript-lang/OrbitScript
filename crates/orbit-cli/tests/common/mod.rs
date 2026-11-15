@@ -13,6 +13,22 @@ pub fn bin(name: &str, built: &str) -> PathBuf {
     }
 }
 
+/// A command that runs `program`, under the command `ORBIT_TEST_WRAPPER`
+/// names when it is set (words split at spaces), as tests/memcheck/run.sh
+/// runs programs under valgrind.
+#[allow(dead_code)] // not every test program runs one wrapped
+pub fn wrapped(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    use std::process::Command;
+    let wrapper = std::env::var("ORBIT_TEST_WRAPPER").unwrap_or_default();
+    let mut words = wrapper.split_whitespace();
+    let mut command = match words.next() {
+        Some(first) => Command::new(first),
+        None => return Command::new(program),
+    };
+    command.args(words).arg(program);
+    command
+}
+
 /// A program's output as text with `\n` line ends. Standard output and
 /// error are text streams, which end lines with `\r\n` on Windows; the
 /// tests that check those bytes look at them directly.
