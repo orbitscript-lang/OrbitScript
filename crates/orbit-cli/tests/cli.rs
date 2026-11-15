@@ -27,11 +27,43 @@ fn orbit(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
 }
 
 fn out(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stdout).into_owned()
+    common::text(&o.stdout)
 }
 
 fn err(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stderr).into_owned()
+    common::text(&o.stderr)
+}
+
+/// Standard input, output and error are text streams on Windows, as the
+/// reference interpreter's are: `\n` goes out as `\r\n`, and input reads
+/// `\r\n` as `\n` and ends at a Ctrl-Z.
+#[test]
+#[cfg(windows)]
+fn standard_streams_are_text_streams() {
+    let o = orbit(
+        &[
+            "-e",
+            "io.write('a\\n') print('b') io.stderr:write('c\\n') io.write(io.read('a'))",
+        ],
+        "x\r\ny\x1az\r\n",
+        &[],
+    );
+    assert_eq!(o.stdout, b"a\r\nb\r\nx\r\ny");
+    assert_eq!(o.stderr, b"c\r\n");
+}
+
+/// Scripts are read as text on Windows, ending at a Ctrl-Z, and the
+/// program's own messages end lines with `\r\n`, as the reference
+/// interpreter's do.
+#[test]
+#[cfg(windows)]
+fn scripts_and_messages_are_text() {
+    let o = orbit(&["-"], "print('a')\r\n\x1athis is not Lua\r\n", &[]);
+    assert_eq!(o.stdout, b"a\r\n");
+    assert!(o.status.success(), "{}", err(&o));
+    let o = orbit(&["-e", "error('boom')"], "", &[]);
+    assert!(o.stderr.ends_with(b"[C]: in ?\r\n"), "{:?}", o.stderr);
+    assert!(!o.stderr.windows(2).any(|w| w[1] == b'\n' && w[0] != b'\r'));
 }
 
 #[test]
@@ -241,6 +273,7 @@ fn print_output_reaches_a_pipe_at_once() {
     let line = rx.recv_timeout(std::time::Duration::from_secs(10));
     let _ = child.kill();
     let _ = child.wait();
+    let line = line.map(|l| common::text(l.as_bytes()));
     assert_eq!(line.as_deref(), Ok("ready\n"));
 }
 

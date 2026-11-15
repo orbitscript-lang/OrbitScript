@@ -12,3 +12,10 @@ for p, c in utf8.codes("a\u{7FF}\u{10FFFF}") do P(print, p, c) end print()
 P(function() for p,c in utf8.codes("\xF4\x90\x80\x80", true) do print(p,c) end end)
 P(function() for p,c in utf8.codes("ab\xC2") do print(p,c) end end)
 P(function() for p,c in utf8.codes("\xF4\x90\x80\x80") do print(p,c) end end)
+-- The `codes` iterator reads its control value as an integer, or 0, and is
+-- nameless in messages.
+do
+  local f = utf8.codes("ab")
+  print(f("ab", "1")) print(f("ab", 1.5)) print(f("ab", nil)) print(f("ab"))
+  print(pcall(f, {}, 0))
+end

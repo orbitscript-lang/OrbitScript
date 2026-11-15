@@ -31,9 +31,10 @@ use std::io::Write;
 use crate::locale::Locale;
 use crate::object::table::{self, mark};
 use crate::object::{
-    Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table, Thread,
-    UserData, Value,
+    CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table,
+    Thread, UserData, Value,
 };
+use crate::text::LineEndings;
 use orbit_gc::{Liveness, Marker, Roots};
 
 pub use coro::{CoStatus, WindowSave};
@@ -51,8 +52,24 @@ pub use orbit_bytecode as op;
 #[derive(Debug, Clone)]
 pub struct LuaError {
     pub value: Value,
-    /// A traceback, when the error escaped every protected call.
-    pub traceback: Option<String>,
+    /// A traceback, when the error escaped every protected call. Boxed,
+    /// so the error stays small on the paths that return it.
+    pub traceback: Option<Box<str>>,
+    /// What raised it. A script's `error("interrupted!")` is still
+    /// [`Cause::Error`]: the value alone doesn't say.
+    pub cause: Cause,
+}
+
+/// What raised a [`LuaError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cause {
+    /// `error`, or an error in an operation or a library function
+    /// (`not enough memory` too: like the reference, a protected call tells
+    /// it by its message).
+    #[default]
+    Error,
+    /// The host asked the VM to stop ([`Interrupt`]): `interrupted!`.
+    Interrupt,
 }
 
 impl LuaError {
@@ -60,6 +77,15 @@ impl LuaError {
         LuaError {
             value,
             traceback: None,
+            cause: Cause::Error,
+        }
+    }
+
+    /// An error with `value` raised for `cause`.
+    pub fn with_cause(value: Value, cause: Cause) -> Self {
+        LuaError {
+            cause,
+            ..LuaError::new(value)
         }
     }
 }
@@ -552,6 +578,9 @@ impl std::fmt::Debug for WarnHook {
 #[derive(Debug)]
 pub struct Runtime {
     pub strings: Interner,
+    /// NUL-terminated copies of strings handed to C, each kept while its
+    /// string is alive.
+    pub c_strings: CStrings,
     pub globals: Gc<Table>,
     /// The registry (`debug.getregistry()`): key 2 holds the globals, and
     /// `_LOADED` is `package.loaded`.
@@ -565,8 +594,8 @@ pub struct Runtime {
     pub(crate) natives: Vec<Native>,
     /// The runtime's own natives, by name, so each is registered once.
     pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId, CheapHash>,
-    /// An embedder's natives, by type, sorted ([`Vm::native_for_type`]).
-    pub(crate) native_types: Vec<(std::any::TypeId, NativeId)>,
+    /// Natives pushed by type ([`Vm::native_for_type`]): the stack API's.
+    pub(crate) native_types: std::collections::HashMap<std::any::TypeId, NativeId, CheapHash>,
     pub(crate) stack: Stack,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
@@ -732,6 +761,7 @@ impl Roots<LuaSpace> for Runtime {
         // On a big heap, pruning the string table at once was most of the
         // pause at the end of marking: it is done in steps instead.
         self.strings.begin_clear_dead(live);
+        self.c_strings.clear_dead(live);
         for e in &mut self.cooling {
             if e.is_some_and(|(t, _)| !live.is_live(t)) {
                 *e = None;
@@ -798,10 +828,11 @@ impl Vm {
                 host_native: None,
                 natives: Vec::new(),
                 native_ids: Default::default(),
-                native_types: Vec::new(),
+                native_types: Default::default(),
                 stack: Stack::default(),
                 prev_code: None,
                 dead_cell,
+                c_strings: CStrings::default(),
                 top: 0,
                 metas: meta::Metas {
                     field_names,
@@ -936,14 +967,12 @@ impl Vm {
         name: &'static str,
         f: NativeFn,
     ) -> NativeId {
-        match self.rt.native_types.binary_search_by_key(&ty, |&(t, _)| t) {
-            Ok(i) => self.rt.native_types[i].1,
-            Err(i) => {
-                let id = self.add_native(name, f, [0; 2]);
-                self.rt.native_types.insert(i, (ty, id));
-                id
-            }
+        if let Some(&id) = self.rt.native_types.get(&ty) {
+            return id;
         }
+        let id = self.add_native(name, f, [0; 2]);
+        self.rt.native_types.insert(ty, id);
+        id
     }
 
     /// Give the native registered under `name` a [`FastFn`]: calls that want
@@ -1066,6 +1095,13 @@ impl Vm {
     /// Flush `print` output.
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.rt.host.out().flush()
+    }
+
+    /// How text streams treat line endings ([`LineEndings`]). Standard
+    /// output starts over as the process's, flushed first: set this before
+    /// a host replaces it ([`host::Host::set_out`]).
+    pub fn set_line_endings(&mut self, line_endings: LineEndings) {
+        self.rt.host.set_line_endings(line_endings);
     }
 
     /// Run a full collection cycle.

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{CompileFn, Extensions, Interrupt, Limits, Vm, WarnHook, WriteDebug};
 use crate::locale::{CLocaleProvider, LocaleProvider};
+use crate::text::{LineEndings, TextWriter};
 use crate::vm::op;
 
 /// The host's settings, one per VM ([`Runtime::host`](super::Runtime::host)).
@@ -22,6 +23,9 @@ pub struct Host {
     warnings: bool,
     /// Where warnings go when the host takes them over (`lua_setwarnf`).
     warn_hook: Option<WarnHook>,
+    /// How text streams treat line endings: `out` when it is the process's
+    /// standard output, warnings, and `orbit-std`'s streams.
+    line_endings: LineEndings,
     /// Set by an [`Interrupt`] handle, from any thread.
     interrupt: Arc<AtomicBool>,
     /// Asked first when an interrupt is seen ([`Host::set_interrupt_handler`]).
@@ -44,7 +48,8 @@ impl Host {
     pub(super) fn new() -> Self {
         Host {
             limits: Limits::default(),
-            out: Box::new(std::io::BufWriter::new(std::io::stdout())),
+            out: process_stdout(LineEndings::default()),
+            line_endings: LineEndings::default(),
             warnings: false,
             warn_hook: None,
             interrupt: Arc::default(),
@@ -72,6 +77,19 @@ impl Host {
     /// Send `print` output to `out`.
     pub fn set_out(&mut self, out: Box<dyn WriteDebug>) {
         self.out = out;
+    }
+
+    /// How text streams treat line endings ([`LineEndings`]).
+    pub fn line_endings(&self) -> LineEndings {
+        self.line_endings
+    }
+
+    /// Change how text streams treat line endings. Standard output starts
+    /// over as the process's, flushed first.
+    pub(crate) fn set_line_endings(&mut self, line_endings: LineEndings) {
+        let _ = self.out.flush();
+        self.line_endings = line_endings;
+        self.out = process_stdout(line_endings);
     }
 
     /// Whether `warn` messages are shown. Not consulted while a warning
@@ -111,7 +129,11 @@ impl Host {
         text.push(b'\n');
         // Keep the order of output already printed.
         let _ = self.out.flush();
-        let _ = std::io::stderr().write_all(&text);
+        if self.line_endings.translates() {
+            let _ = TextWriter::new(std::io::stderr()).write_all(&text);
+        } else {
+            let _ = std::io::stderr().write_all(&text);
+        }
     }
 
     /// Whether an [`Interrupt`] handle asked for an interrupt that has not
@@ -195,5 +217,16 @@ impl Host {
 
     pub(crate) fn set_locale_provider(&mut self, provider: Box<dyn LocaleProvider>) {
         self.locale_provider = provider;
+    }
+}
+
+/// The process's standard output, buffered, as a text stream if
+/// `line_endings` translates.
+fn process_stdout(line_endings: LineEndings) -> Box<dyn WriteDebug> {
+    let out = std::io::BufWriter::new(std::io::stdout());
+    if line_endings.translates() {
+        Box::new(TextWriter::new(out))
+    } else {
+        Box::new(out)
     }
 }

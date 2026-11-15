@@ -1,5 +1,6 @@
 //! [`Runtime`], [`Config`] and [`Isolate`]: where a host starts.
 
+use crate::LineEndings;
 use crate::LocaleMode;
 use crate::chunk::Chunk;
 use crate::compiler;
@@ -79,6 +80,7 @@ pub struct Config {
     gc_mode: GcMode,
     warnings: bool,
     debugger: Debugger,
+    line_endings: LineEndings,
 }
 
 impl Default for Config {
@@ -91,6 +93,7 @@ impl Default for Config {
             gc_mode: GcMode::Generational,
             warnings: false,
             debugger: Debugger::Allowed,
+            line_endings: LineEndings::Native,
         }
     }
 }
@@ -122,6 +125,19 @@ impl Config {
     /// them with `warn("@on")`).
     pub fn warnings(mut self, on: bool) -> Config {
         self.warnings = on;
+        self
+    }
+
+    /// How text streams treat line endings: standard input, output and
+    /// error, `io.open` without `b`, `io.popen` and script files. With
+    /// [`LineEndings::Native`] (the default) they are the platform's text
+    /// streams, as the C library's: on Windows `\n` is written as `\r\n`,
+    /// `\r\n` reads as `\n` and a Ctrl-Z ends input. A host whose standard
+    /// streams carry a byte protocol chooses [`LineEndings::Binary`]. A
+    /// writer given to [`Isolate::set_stdout`] gets `print`'s bytes as they
+    /// are, whatever this says.
+    pub fn line_endings(mut self, line_endings: LineEndings) -> Config {
+        self.line_endings = line_endings;
         self
     }
 
@@ -167,6 +183,7 @@ impl Isolate {
         #[cfg(feature = "locale")]
         vm.set_locale_provider(orbit_locale::provider());
         vm.rt.host.set_warnings(config.warnings);
+        vm.set_line_endings(config.line_endings);
         vm.set_gc_mode(config.gc_mode.raw());
         for lib in Lib::OPEN_ORDER {
             if config.libraries.iter().any(|l| l.lib() == lib) {
@@ -215,7 +232,9 @@ impl Isolate {
         Control::new(&mut self.vm)
     }
 
-    /// Send standard output (`print`, `io.stdout`) to `out`.
+    /// Send standard output (`print`, `io.stdout`) to `out`, which gets the
+    /// bytes as scripts write them ([`Config::line_endings`] doesn't
+    /// apply).
     pub fn set_stdout(&mut self, out: impl std::io::Write + std::fmt::Debug + 'static) {
         self.vm.rt.host.set_out(Box::new(out));
     }

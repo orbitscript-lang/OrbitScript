@@ -148,7 +148,7 @@ pub(crate) enum MetaAction {
     /// A `__close` handler run while an error unwinds: raise the error
     /// again, past its message handler. Its value waits in the frame's
     /// `func` slot and its traceback, if it has one, in the slot above.
-    Unwind,
+    Unwind { cause: crate::vm::Cause },
 }
 
 impl Runtime {

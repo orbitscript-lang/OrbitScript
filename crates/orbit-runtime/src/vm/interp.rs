@@ -892,7 +892,8 @@ impl Vm {
                             FrameKind::Boundary { native: false, .. } | FrameKind::Hook
                         ) && e.traceback.is_none()
                         {
-                            e.traceback = Some(self.rt.traceback(&self.heap, None, 1));
+                            let tb = self.rt.traceback(&self.heap, None, 1);
+                            e.traceback = Some(tb.into_boxed_str());
                         }
                         match self.start_close(e, idx, closing) {
                             Ok(flow) => return Ok(flow),
@@ -914,7 +915,7 @@ impl Vm {
                     } else {
                         Err(e.value)
                     };
-                    match self.co_finish(outcome) {
+                    match self.co_finish(outcome, e.cause) {
                         Ok(flow) => return Ok(flow),
                         Err(x) => replaced_by!(x),
                     }
@@ -925,7 +926,8 @@ impl Vm {
                     // call, which hands it to the native).
                     let native = matches!(f.kind, FrameKind::Boundary { native: true, .. });
                     if e.traceback.is_none() && !native {
-                        e.traceback = Some(self.rt.traceback(&self.heap, None, 1));
+                        let tb = self.rt.traceback(&self.heap, None, 1);
+                        e.traceback = Some(tb.into_boxed_str());
                     }
                     self.rt.stack.cells.truncate(f.cell_base as usize);
                     self.rt.stack.frames.truncate(idx);
@@ -964,7 +966,7 @@ impl Vm {
     /// meta frame's slots meanwhile: its value, then its traceback if it
     /// has one, as a string.
     fn start_close(&mut self, e: LuaError, catcher: usize, closing: bool) -> Result<Flow, Exc> {
-        let err = e.value;
+        let (err, cause) = (e.value, e.cause);
         let traceback = match e.traceback {
             Some(t) => self.new_str(t.as_bytes()),
             None => Value::Nil,
@@ -993,7 +995,7 @@ impl Vm {
         let cdepth = self.rt.stack.deeper();
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Meta {
-                action: crate::vm::meta::MetaAction::Unwind,
+                action: crate::vm::meta::MetaAction::Unwind { cause },
                 field: MetaField::Close,
             },
             func: at as u32,

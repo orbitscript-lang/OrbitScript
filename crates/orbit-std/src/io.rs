@@ -5,6 +5,12 @@
 //! can interleave, `setvbuf` means what it says, and `read("n")` can look one
 //! byte ahead. Writes to standard output go through the isolate's standard
 //! output, which `print` also writes to, so the two keep their order.
+//!
+//! A stream opened without `b`, a pipe and a standard stream are text
+//! streams: with the isolate's [`LineEndings`] translating (Windows), their
+//! `\n` is written as `\r\n`, `\r\n` reads as `\n` and a Ctrl-Z ends
+//! input, as the C library's text streams do. Standard output's writer
+//! translates for itself.
 
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -16,7 +22,8 @@ use orbit::stack::{
     Any, Arg, Nil, REGISTRY_INDEX, Rest, Results, Return, Stack, StackResult, Type, Ud, UserType,
     upvalue_index,
 };
-use orbit::{Error, OrbitString, Scope, Table, native};
+use orbit::text::{END_OF_TEXT, TextDecoder, encode_into};
+use orbit::{Error, LineEndings, OrbitString, Scope, Table, native};
 
 use crate::sys::{
     exit_results, file_failure, flush_stdout, os_error_code, os_error_text, os_path, shell,
@@ -64,6 +71,9 @@ struct Stream {
     rpos: usize,
     wbuf: Vec<u8>,
     buffering: Buffering,
+    /// The text decoder of a text stream on a platform whose text streams
+    /// translate; `None` for a binary stream.
+    text: Option<TextDecoder>,
 }
 
 type Shared = Rc<RefCell<Stream>>;
@@ -109,7 +119,17 @@ impl Stream {
             rpos: 0,
             wbuf: Vec::new(),
             buffering: Buffering::Full(BUFSIZ),
+            text: None,
         }
+    }
+
+    /// Make this a text stream if `text` and the isolate's line endings
+    /// translate.
+    fn text(mut self, text: bool, line_endings: LineEndings) -> Stream {
+        if text && line_endings.translates() {
+            self.text = Some(TextDecoder::default());
+        }
+        self
     }
 
     fn is_closed(&self) -> bool {
@@ -144,7 +164,16 @@ impl Stream {
     /// Give back read-ahead bytes before writing or seeking: a file's
     /// position moves back over them.
     fn unread(&mut self) -> io::Result<()> {
-        let n = self.rbuf.len() - self.rpos;
+        let n = match &mut self.text {
+            // The raw bytes behind the decoded ones, the Ctrl-Z included:
+            // a file reads it again and ends there again.
+            Some(d) if matches!(self.kind, Kind::File(_)) => {
+                let n = d.raw_len_from(self.rpos, self.rbuf.len());
+                d.reset();
+                n
+            }
+            _ => self.rbuf.len() - self.rpos,
+        };
         self.rbuf.clear();
         self.rpos = 0;
         if n > 0 {
@@ -163,10 +192,15 @@ impl Stream {
             self.unread()?;
         }
         if let Kind::Stdout = self.kind {
-            // The isolate's standard output does the buffering.
+            // The isolate's standard output does the buffering, and the
+            // translation if any.
             return out.write_all(bytes);
         }
-        self.wbuf.extend_from_slice(bytes);
+        if self.text.is_some() {
+            encode_into(bytes, &mut self.wbuf);
+        } else {
+            self.wbuf.extend_from_slice(bytes);
+        }
         match self.buffering {
             Buffering::No => self.flush(out),
             Buffering::Line(_) if bytes.contains(&b'\n') => self.flush(out),
@@ -186,6 +220,9 @@ impl Stream {
         if !self.readable {
             return Err(bad_fd());
         }
+        if self.text.as_ref().is_some_and(TextDecoder::ended) {
+            return Ok(false);
+        }
         if !self.wbuf.is_empty() {
             self.flush(out)?;
         }
@@ -195,29 +232,56 @@ impl Stream {
         }
         self.rbuf.resize(BUFSIZ, 0);
         self.rpos = 0;
-        let r = loop {
+        let r = self.read_raw(0);
+        let n = match r {
+            Ok(n) => n,
+            Err(e) => {
+                self.rbuf.clear();
+                return Err(e);
+            }
+        };
+        self.rbuf.truncate(n);
+        if self.text.is_none() {
+            return Ok(n > 0);
+        }
+        // A `\r` at the end may start a `\r\n`: read on to see.
+        while self.rbuf.last() == Some(&b'\r') {
+            let len = self.rbuf.len();
+            self.rbuf.push(0);
+            match self.read_raw(len) {
+                Ok(1) => {}
+                Ok(_) => {
+                    self.rbuf.truncate(len);
+                    break;
+                }
+                Err(e) => {
+                    self.rbuf.clear();
+                    return Err(e);
+                }
+            }
+        }
+        if let Some(d) = &mut self.text {
+            d.decode(&mut self.rbuf);
+        }
+        Ok(!self.rbuf.is_empty())
+    }
+
+    /// Read raw bytes into `rbuf[at..]`, retrying when interrupted.
+    fn read_raw(&mut self, at: usize) -> io::Result<usize> {
+        loop {
+            let buf = &mut self.rbuf[at..];
             let r = match &mut self.kind {
-                Kind::File(f) => f.read(&mut self.rbuf),
-                Kind::Stdin => io::stdin().read(&mut self.rbuf),
+                Kind::File(f) => f.read(buf),
+                Kind::Stdin => io::stdin().read(buf),
                 Kind::PipeRead(c) => match c.stdout.as_mut() {
-                    Some(r) => r.read(&mut self.rbuf),
+                    Some(r) => r.read(buf),
                     None => Err(bad_fd()),
                 },
                 _ => Err(bad_fd()),
             };
             match r {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                r => break r,
-            }
-        };
-        match r {
-            Ok(n) => {
-                self.rbuf.truncate(n);
-                Ok(n > 0)
-            }
-            Err(e) => {
-                self.rbuf.clear();
-                Err(e)
+                r => return r,
             }
         }
     }
@@ -461,7 +525,8 @@ fn push_default(s: &mut Stack<'_>, input: bool) -> StackResult<Shared> {
     }
 }
 
-/// `io.open`'s mode: `[rwa]%+?b*`.
+/// `io.open`'s mode: `[rwa]%+?b*`. Gives the options and whether the
+/// stream reads and writes.
 fn open_options(mode: &[u8]) -> Option<(OpenOptions, bool, bool)> {
     let (&first, rest) = mode.split_first()?;
     let (plus, rest) = match rest.first() {
@@ -490,13 +555,40 @@ fn open_options(mode: &[u8]) -> Option<(OpenOptions, bool, bool)> {
     Some((o, r, w))
 }
 
-fn open_file(name: &[u8], mode: &[u8]) -> Option<io::Result<Stream>> {
+/// Open `name` with `io.open`'s `mode`; `None` for a bad mode. Without `b`
+/// the stream is a text stream.
+fn open_file(name: &[u8], mode: &[u8], line_endings: LineEndings) -> Option<io::Result<Stream>> {
     let (o, r, w) = open_options(mode)?;
-    Some(
-        o.open(os_path(name))
-            .map_err(|e| windows_directory_error(e, name))
-            .map(|f| Stream::new(Kind::File(f), r, w)),
-    )
+    let text = !mode.contains(&b'b') && line_endings.translates();
+    let path = os_path(name);
+    if text && mode.starts_with(b"a+") {
+        // A handle opened to append can't truncate, so this one does. If
+        // it can't open the file (`a+` creates a missing one), the open
+        // below reports why.
+        if let Ok(mut f) = OpenOptions::new().read(true).write(true).open(&path) {
+            if let Err(e) = drop_end_of_text(&mut f) {
+                return Some(Err(e));
+            }
+        }
+    }
+    let opened = o.open(&path).map_err(|e| windows_directory_error(e, name));
+    Some(opened.map(|f| Stream::new(Kind::File(f), r, w).text(text, line_endings)))
+}
+
+/// Remove a Ctrl-Z that ends `f`, as the C library does when it opens a
+/// text stream with `a+`, so what is appended can be read back.
+fn drop_end_of_text(f: &mut File) -> io::Result<()> {
+    let len = f.seek(SeekFrom::End(0))?;
+    if len == 0 {
+        return Ok(());
+    }
+    f.seek(SeekFrom::End(-1))?;
+    let mut last = [0];
+    f.read_exact(&mut last)?;
+    if last[0] == END_OF_TEXT {
+        f.set_len(len - 1)?;
+    }
+    Ok(())
 }
 
 /// The error Windows gives the C runtime for opening a directory named
@@ -533,7 +625,7 @@ fn push_failure(s: &mut Stack<'_>, e: &io::Error, name: Option<&[u8]>) -> StackR
 #[native(name = "io.open")]
 fn io_open(s: &mut Stack<'_>, name: Vec<u8>, mode: Option<Vec<u8>>) -> StackResult<Return> {
     let mode = mode.unwrap_or_else(|| b"r".to_vec());
-    match open_file(&name, &mode) {
+    match open_file(&name, &mode, s.line_endings()) {
         None => Err(s.arg_error(2, "invalid mode")),
         Some(Ok(stream)) => {
             push_file(s, stream)?;
@@ -565,6 +657,7 @@ fn io_popen(s: &mut Stack<'_>, cmd: Vec<u8>, mode: Option<Vec<u8>>) -> StackResu
             } else {
                 Stream::new(Kind::PipeWrite(child), false, true)
             };
+            let stream = stream.text(true, s.line_endings());
             push_file(s, stream)?;
             Ok(Return::values(1))
         }
@@ -616,7 +709,7 @@ fn set_default(s: &mut Stack<'_>, input: bool) -> StackResult<Return> {
         Type::String | Type::Number => {
             let name = s.check_string(1)?.to_vec();
             let mode: &[u8] = if input { b"r" } else { b"w" };
-            match open_file(&name, mode).expect("valid mode") {
+            match open_file(&name, mode, s.line_endings()).expect("valid mode") {
                 Ok(stream) => {
                     push_file(s, stream)?;
                 }
@@ -974,7 +1067,7 @@ fn io_lines(s: &mut Stack<'_>, formats: Rest) -> StackResult<Return> {
     let close = !matches!(s.type_at(1), Type::None | Type::Nil);
     if close {
         let name = s.check_string(1)?.to_vec();
-        match open_file(&name, b"r").expect("valid mode") {
+        match open_file(&name, b"r", s.line_endings()).expect("valid mode") {
             Ok(stream) => {
                 push_file(s, stream)?;
             }
@@ -1102,12 +1195,15 @@ pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
     meta.raw_set("__gc", s.create_native::<f_gc>())?;
     s.registry().raw_set(FILE_TYPE, meta)?;
     let io = s.create_table();
+    let line_endings = s.line_endings();
     for (name, kind, r, w) in [
         ("stdin", Kind::Stdin, true, false),
         ("stdout", Kind::Stdout, false, true),
         ("stderr", Kind::Stderr, false, true),
     ] {
-        let mut stream = Stream::new(kind, r, w);
+        // Standard output's writer translates for itself.
+        let text = !matches!(kind, Kind::Stdout);
+        let mut stream = Stream::new(kind, r, w).text(text, line_endings);
         if name == "stderr" {
             stream.buffering = Buffering::No;
         }
@@ -1134,4 +1230,125 @@ pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
     io.add_native::<io_write>()?;
     s.before_exit(flush_all);
     Ok(io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A text stream over a temporary file holding `raw`, translating on
+    /// every platform.
+    fn text_file(raw: &[u8], read: bool, write: bool) -> (Stream, std::path::PathBuf) {
+        let (path, _) = crate::sys::temp_file().unwrap();
+        std::fs::write(&path, raw).unwrap();
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut st = Stream::new(Kind::File(f), read, write);
+        st.text = Some(TextDecoder::default());
+        (st, path)
+    }
+
+    fn line(st: &mut Stream, keep: bool) -> Option<Vec<u8>> {
+        let mut v = Vec::new();
+        st.read_line(keep, &mut v, &mut io::sink())
+            .unwrap()
+            .then_some(v)
+    }
+
+    fn bytes(st: &mut Stream, n: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        st.read_bytes(n, &mut v, &mut io::sink()).unwrap();
+        v
+    }
+
+    fn all(st: &mut Stream) -> Vec<u8> {
+        let mut v = Vec::new();
+        st.read_all(&mut v, &mut io::sink()).unwrap();
+        v
+    }
+
+    const R: &[u8] = b"l1\r\nl2\n\r\nl3\rX\x1aafter\r\nend";
+
+    #[test]
+    fn text_reads_translate_and_end_at_ctrl_z() {
+        let (mut st, path) = text_file(R, true, false);
+        assert_eq!(all(&mut st), b"l1\nl2\n\nl3\rX");
+        assert_eq!(all(&mut st), b"");
+        // The end stays until a seek.
+        assert_eq!(st.peek(&mut io::sink()).unwrap(), None);
+        st.seek(SeekFrom::Start(0), &mut io::sink()).unwrap();
+        assert_eq!(line(&mut st, false).unwrap(), b"l1");
+        assert_eq!(line(&mut st, true).unwrap(), b"l2\n");
+        assert_eq!(line(&mut st, false).unwrap(), b"");
+        assert_eq!(line(&mut st, false).unwrap(), b"l3\rX");
+        assert_eq!(line(&mut st, false), None);
+        st.seek(SeekFrom::Start(0), &mut io::sink()).unwrap();
+        assert_eq!(bytes(&mut st, 3), b"l1\n");
+        assert_eq!(bytes(&mut st, 3), b"l2\n");
+        assert_eq!(bytes(&mut st, 3), b"\nl3");
+        // A seek between `\r` and `\n` reads the `\n`.
+        st.seek(SeekFrom::Start(2), &mut io::sink()).unwrap();
+        assert_eq!(bytes(&mut st, 2), b"\nl");
+        assert_eq!(st.seek(SeekFrom::End(0), &mut io::sink()).unwrap(), 24);
+        drop(st);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unread_gives_back_raw_bytes() {
+        // After reading "l1\n", the position is past the raw "l1\r\n".
+        let (mut st, path) = text_file(R, true, true);
+        assert_eq!(line(&mut st, true).unwrap(), b"l1\n");
+        assert_eq!(st.seek(SeekFrom::Current(0), &mut io::sink()).unwrap(), 4);
+        assert_eq!(bytes(&mut st, 5), b"l2\n\nl");
+        assert_eq!(st.seek(SeekFrom::Current(0), &mut io::sink()).unwrap(), 10);
+        // At the end, the position is the Ctrl-Z's, which ends input again.
+        assert_eq!(all(&mut st), b"3\rX");
+        assert_eq!(st.seek(SeekFrom::Current(0), &mut io::sink()).unwrap(), 13);
+        assert_eq!(all(&mut st), b"");
+        drop(st);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn crlf_across_buffers_is_joined() {
+        let mut raw = vec![b'x'; BUFSIZ - 1];
+        raw.extend_from_slice(b"\r\n");
+        raw.extend(std::iter::repeat(b'y').take(BUFSIZ - 2));
+        raw.extend_from_slice(b"\r\nz\r");
+        let (mut st, path) = text_file(&raw, true, false);
+        let got = all(&mut st);
+        assert_eq!(got.len(), raw.len() - 2);
+        assert_eq!(got.iter().filter(|&&b| b == b'\r').count(), 1);
+        assert!(got.ends_with(b"\nz\r"));
+        drop(st);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn text_writes_translate() {
+        let (mut st, path) = text_file(b"", false, true);
+        st.write(b"a\nb\r\nc\rd\x1ae\n", &mut io::sink()).unwrap();
+        st.close(&mut io::sink()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\r\r\nc\rd\x1ae\r\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn append_plus_drops_a_final_ctrl_z() {
+        let (path, _) = crate::sys::temp_file().unwrap();
+        std::fs::write(&path, b"x\x1a").unwrap();
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        drop_end_of_text(&mut f).unwrap();
+        drop(f);
+        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+        let _ = std::fs::remove_file(path);
+    }
 }

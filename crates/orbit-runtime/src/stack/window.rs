@@ -11,7 +11,8 @@ use crate::object::{self as raw, Gc, LightUserData, LuaStr, NativeId, NoMemory, 
 use crate::object::{OrbitStr, OrbitString};
 use crate::stdlib;
 use crate::vm::{
-    self, CallOutcome, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn, Operator, Vm,
+    self, CallOutcome, Cause, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn,
+    Operator, Vm,
 };
 
 use super::{
@@ -305,9 +306,18 @@ impl<'s> Stack<'s> {
     #[inline]
     fn slot(&self, idx: i32) -> Slot {
         let c = &self.ctx;
+        // A positive index (every argument) first: it is the usual case.
+        if idx > 0 {
+            let at = idx as usize - 1;
+            return if at < c.len() {
+                Slot::Stack(at)
+            } else {
+                Slot::None
+            };
+        }
         let len = c.len() as i64;
-        if idx > REGISTRY_INDEX && idx <= 0 {
-            // Negative stack index (0 is invalid).
+        if idx > REGISTRY_INDEX {
+            // A negative stack index (0 is invalid).
             let at = len + idx as i64;
             if idx < 0 && at >= 0 {
                 Slot::Stack(at as usize)
@@ -316,19 +326,12 @@ impl<'s> Stack<'s> {
             }
         } else if idx == REGISTRY_INDEX {
             Slot::Registry
-        } else if idx < REGISTRY_INDEX {
+        } else {
             // upvalue_index(i), 1-based. An index past the function's
             // upvalues is acceptable but reads as none.
             let i = (REGISTRY_INDEX as i64 - idx as i64) as usize;
             if i <= c.upvalue_count() {
                 Slot::Upvalue(i - 1)
-            } else {
-                Slot::None
-            }
-        } else {
-            let at = idx as i64 - 1;
-            if at < len {
-                Slot::Stack(at as usize)
             } else {
                 Slot::None
             }
@@ -411,6 +414,19 @@ impl<'s> Stack<'s> {
             RawValue::Str(s) => Some(self.ctx.bytes(s)),
             _ => None,
         }
+    }
+
+    /// Argument `arg` (1-based) as a string (a number converts in place),
+    /// as a handle the typed arguments read the bytes through once.
+    #[inline]
+    pub(crate) fn check_string_handle(&mut self, arg: i32) -> StackResult<Gc<LuaStr>> {
+        Ok(self.ctx.check_str((arg.max(1) - 1) as usize)?)
+    }
+
+    /// The bytes of a string the window holds.
+    #[inline]
+    pub(crate) fn handle_bytes(&self, s: Gc<LuaStr>) -> &[u8] {
+        self.ctx.bytes(s)
     }
 
     /// Push a string with `bytes`, for results ([`Push`](super::Push)):
@@ -666,6 +682,21 @@ impl<'s> Stack<'s> {
     /// The string at `idx`, converting a number in place (`lua_tolstring`);
     /// `None` for other types.
     pub fn to_str(&mut self, idx: i32) -> StackResult<Option<OrbitStr<'_>>> {
+        Ok(self.converted_str(idx)?.map(|s| self.ctx.bytes(s).into()))
+    }
+
+    /// [`Stack::to_str`] for C (`lua_tolstring`): the address of a
+    /// NUL-terminated copy of the string, and its length in bytes. The copy
+    /// belongs to the string: it is made once, never changes, and stays at
+    /// that address for as long as the string is alive.
+    pub fn to_c_str(&mut self, idx: i32) -> StackResult<Option<(*const u8, usize)>> {
+        Ok(self
+            .converted_str(idx)?
+            .map(|s| (self.ctx.c_string(s), self.ctx.bytes(s).len())))
+    }
+
+    /// The string at `idx`, converting a number in place.
+    fn converted_str(&mut self, idx: i32) -> StackResult<Option<Gc<LuaStr>>> {
         let s = match self.get(idx) {
             RawValue::Str(s) => s,
             v @ (RawValue::Int(_) | RawValue::Float(_)) => {
@@ -681,7 +712,7 @@ impl<'s> Stack<'s> {
             }
             _ => return Ok(None),
         };
-        Ok(Some(self.ctx.bytes(s).into()))
+        Ok(Some(s))
     }
 
     /// The string at `idx`, without converting numbers.
@@ -1455,6 +1486,12 @@ impl<'s> Stack<'s> {
         self.value_status(e.0.value)
     }
 
+    /// Whether the host's interrupt raised this error (`interrupted!`),
+    /// rather than a script raising that text.
+    pub fn is_interrupt(&self, e: &Raised) -> bool {
+        e.0.cause == Cause::Interrupt
+    }
+
     /// Push an error's value.
     pub fn push_raised(&mut self, e: &Raised) {
         self.ctx.push(e.0.value);
@@ -1465,7 +1502,7 @@ impl<'s> Stack<'s> {
     pub fn take_raised(&mut self, e: Raised) -> (String, Option<String>) {
         let message = self.ctx.vm.error_message(&e.0);
         self.ctx.push(e.0.value);
-        (message, e.0.traceback)
+        (message, e.0.traceback.map(String::from))
     }
 
     /// Lua's `not enough memory` error, to return.
@@ -1812,6 +1849,13 @@ impl<'s> Stack<'s> {
         self.ctx.vm.free_pin_slot(slot);
     }
 
+    /// How the isolate's text streams treat line endings
+    /// (`orbit::Config::line_endings`). Standard output
+    /// ([`Stack::with_stdout`]) already does what this says.
+    pub fn line_endings(&self) -> crate::text::LineEndings {
+        self.ctx.vm.rt.host.line_endings()
+    }
+
     /// Write to the isolate's standard output, the stream `print` and
     /// `io.stdout` share. `f` must not reach the isolate.
     pub fn with_stdout<R>(&mut self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
@@ -2072,7 +2116,10 @@ impl<'s> Stack<'s> {
                 vals.iter().for_each(|&v| self.ctx.push(v));
                 Ok((returned, vals.len()))
             }
-            Err(v) => Err(Raised(LuaError::new(v))),
+            Err(v) => {
+                let cause = self.ctx.thread_error_cause(t, v);
+                Err(Raised(LuaError::with_cause(v, cause)))
+            }
         }
     }
 

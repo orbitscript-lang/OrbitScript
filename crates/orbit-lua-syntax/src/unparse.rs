@@ -261,7 +261,53 @@ impl Printer<'_> {
         self.out.push(b'"');
     }
 
+    /// Chains of operators and suffixes (`a + b + c`, `a.b(c)[d]`) are trees as deep as they
+    /// are long, so they are written in a loop: each link's text before its left operand on
+    /// the way down, the rest on the way back up.
     fn expr(&mut self, e: &Expr) {
+        let mut links = Vec::new();
+        let mut base = e;
+        while let Some(lhs) = base.chain_lhs() {
+            if let ExprKind::Binary { .. } = base.kind {
+                self.w("(");
+            }
+            links.push(base);
+            base = lhs;
+        }
+        self.unchained(base);
+        for link in links.into_iter().rev() {
+            match &link.kind {
+                ExprKind::Index { key, .. } => {
+                    self.w("[");
+                    self.expr(key);
+                    self.w("]");
+                }
+                ExprKind::Call { args, .. } => {
+                    self.w("(");
+                    self.exprs(args);
+                    self.w(")");
+                }
+                ExprKind::Method { name, args, .. } => {
+                    self.w(":");
+                    self.name(name.sym);
+                    self.w("(");
+                    self.exprs(args);
+                    self.w(")");
+                }
+                ExprKind::Binary { op, rhs, .. } => {
+                    self.w(" ");
+                    self.w(op.as_str());
+                    self.w(" ");
+                    self.expr(rhs);
+                    self.w(")");
+                }
+                _ => unreachable!("not a chain link"),
+            }
+        }
+    }
+
+    /// Writes an expression that isn't a chain link.
+    fn unchained(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::Nil => self.w("nil"),
             ExprKind::Error => self.w("nil --[[syntax error]]"),
@@ -278,28 +324,10 @@ impl Printer<'_> {
             ExprKind::Str(s) => self.string(*s),
             ExprKind::Vararg => self.w("..."),
             ExprKind::Name(n) => self.name(*n),
-            ExprKind::Index { obj, key } => {
-                self.expr(obj);
-                self.w("[");
-                self.expr(key);
-                self.w("]");
-            }
-            ExprKind::Call { callee, args, .. } => {
-                self.expr(callee);
-                self.w("(");
-                self.exprs(args);
-                self.w(")");
-            }
-            ExprKind::Method {
-                obj, name, args, ..
-            } => {
-                self.expr(obj);
-                self.w(":");
-                self.name(name.sym);
-                self.w("(");
-                self.exprs(args);
-                self.w(")");
-            }
+            ExprKind::Index { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Method { .. }
+            | ExprKind::Binary { .. } => unreachable!("a chain link"),
             ExprKind::Function(f) => {
                 self.w("function");
                 self.func_body(f);
@@ -326,15 +354,6 @@ impl Printer<'_> {
                     }
                 }
                 self.w("}");
-            }
-            ExprKind::Binary { op, lhs, rhs, .. } => {
-                self.w("(");
-                self.expr(lhs);
-                self.w(" ");
-                self.w(op.as_str());
-                self.w(" ");
-                self.expr(rhs);
-                self.w(")");
             }
             ExprKind::Unary { op, expr } => {
                 self.w("(");

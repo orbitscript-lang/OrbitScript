@@ -264,7 +264,7 @@ impl Vm {
         self.rt.stack.hook.mask &= !INTERRUPT;
         self.rt.host.clear_interrupt();
         let msg = format!("{}interrupted!", self.rt.where_(&self.heap, None, 2));
-        LuaError::new(self.new_str(msg.as_bytes()))
+        LuaError::with_cause(self.new_str(msg.as_bytes()), crate::vm::Cause::Interrupt)
     }
 
     /// Call the hook with `(event, line)` above everything on the stack.

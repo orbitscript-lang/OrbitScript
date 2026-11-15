@@ -2,6 +2,7 @@
 //! interned. The types natives and embedders use are in `orbit_str.rs`.
 
 use std::cell::Cell as StdCell;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use orbit_gc::{Gc, Liveness, Marker, Trace};
@@ -650,5 +651,48 @@ mod tests {
         // The revived strings die in the next cycle, which prunes them.
         heap.full_collect(&mut R(&mut i, &roots));
         assert_eq!(i.len(), kept + 50);
+    }
+}
+
+/// NUL-terminated copies of strings handed to C (`lua_tolstring`, ADR-8 and
+/// ADR-10): at most one per string, kept for as long as the string is alive
+/// and dropped once the collector finds it dead. C needs the trailing NUL,
+/// which [`LuaStr`] doesn't store, and a pointer that doesn't move.
+#[derive(Debug, Default)]
+pub struct CStrings {
+    copies: HashMap<Gc<LuaStr>, Box<[u8]>>,
+}
+
+impl CStrings {
+    /// The copy of `s`, whose bytes are `bytes`, made on first use. The
+    /// pointer stays valid until a collection finds `s` dead (see
+    /// [`CStrings::clear_dead`]).
+    pub fn copy_of(&mut self, s: Gc<LuaStr>, bytes: &[u8]) -> *const u8 {
+        self.copies
+            .entry(s)
+            .or_insert_with(|| {
+                let mut copy = Vec::with_capacity(bytes.len() + 1);
+                copy.extend_from_slice(bytes);
+                copy.push(0);
+                copy.into_boxed_slice()
+            })
+            .as_ptr()
+    }
+
+    /// Drop the copies of strings this collection found dead. Call from
+    /// `Roots::clear_weak`, before their slots can be reused.
+    pub fn clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
+        if !self.copies.is_empty() {
+            self.copies.retain(|&s, _| live.is_live(s));
+        }
+    }
+
+    /// How many copies are kept.
+    pub fn len(&self) -> usize {
+        self.copies.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.copies.is_empty()
     }
 }

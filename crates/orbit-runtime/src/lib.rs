@@ -14,4 +14,5 @@ pub mod locale;
 pub mod object;
 pub mod stack;
 pub mod stdlib;
+pub mod text;
 pub mod vm;

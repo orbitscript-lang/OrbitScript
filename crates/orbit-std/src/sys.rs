@@ -105,6 +105,18 @@ pub(crate) fn file_failure(e: &io::Error, name: Option<&[u8]>) -> FileFailure {
     (orbit::stack::Nil, msg, os_error_code(e))
 }
 
+/// Write `bytes` to standard error, a text stream: with `line_endings`
+/// translating, each `\n` as `\r\n`.
+pub(crate) fn write_stderr(line_endings: orbit::LineEndings, bytes: &[u8]) {
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    let _ = if line_endings.translates() {
+        orbit::text::TextWriter::new(err).write_all(bytes)
+    } else {
+        err.write_all(bytes)
+    };
+}
+
 /// The shell command for `cmd`.
 ///
 /// On Windows the command reaches `cmd /C` verbatim, as the C library's

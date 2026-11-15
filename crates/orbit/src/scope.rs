@@ -110,16 +110,15 @@ impl<'s> Scope<'s> {
 
     /// An error raised in the VM, as the API reports it, keeping its value.
     pub(crate) fn error_of(&self, stack: &mut Stack<'_>, e: Raised) -> Error {
-        let kind = match stack.status_of(&e) {
-            Status::Memory => ErrorKind::Memory,
-            _ => ErrorKind::Runtime,
-        };
-        let (message, traceback) = stack.take_raised(e);
-        let kind = if kind == ErrorKind::Runtime && message.ends_with("interrupted!") {
+        let kind = if stack.is_interrupt(&e) {
             ErrorKind::Interrupted
         } else {
-            kind
+            match stack.status_of(&e) {
+                Status::Memory => ErrorKind::Memory,
+                _ => ErrorKind::Runtime,
+            }
         };
+        let (message, traceback) = stack.take_raised(e);
         self.release_pins(stack);
         let slot = stack.pin(-1);
         let _ = stack.set_top(-2);
@@ -167,6 +166,12 @@ impl<'s> Scope<'s> {
     /// `f` must not use the scope: the window is borrowed while it runs.
     pub fn with_stdout<R>(&self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
         self.stack().with_stdout(f)
+    }
+
+    /// How the isolate's text streams treat line endings
+    /// ([`Config::line_endings`](crate::Config::line_endings)).
+    pub fn line_endings(&self) -> crate::LineEndings {
+        self.stack().line_endings()
     }
 
     /// Run `f` on the isolate's extension value of type `T`, made with

@@ -19,6 +19,23 @@ pub(crate) enum Want {
 /// Positional table entries are stored in batches of this many.
 const SETLIST_BATCH: usize = 50;
 
+/// How deep [`FuncState::expr_to`] recurses into chains (`a + b + c`, `a.b(c)[d]`) before it
+/// compiles the rest of a chain in a loop ([`FuncState::chain_to`]). A chain is a tree as deep
+/// as it is long, so recursing all the way could overflow the stack. Shorter chains compile
+/// as before, register for register.
+const CHAIN_DEPTH: u32 = 32;
+
+/// A chain link's left operand, already computed by [`FuncState::chain_to`]: the next
+/// [`FuncState::expr_to`] or [`FuncState::expr_any`] of `e` takes it from `reg`.
+#[derive(Debug)]
+pub(crate) struct Ready {
+    e: ExprId,
+    reg: u8,
+    origin: Option<Origin>,
+    /// Where its instructions start, for [`FuncState::consumed_at`].
+    from: usize,
+}
+
 impl FuncState<'_> {
     /// The compile-time value of `e`, if it has one.
     pub(crate) fn const_of(&self, e: ExprId) -> Option<ConstVal> {
@@ -28,12 +45,88 @@ impl FuncState<'_> {
                 _ => None,
             },
             ExprKind::Capture(c) => self.capture_const(*c),
-            ExprKind::Binary { op, lhs, rhs } => {
+            // A link of a long chain that `chain_to` computed (no other kind folds).
+            ExprKind::Binary { .. } if self.is_ready(e) => None,
+            // Most chains are one link long.
+            ExprKind::Binary { op, lhs, rhs }
+                if !matches!(self.f.expr(*lhs).kind, ExprKind::Binary { .. }) =>
+            {
                 consts::fold_arith(*op, self.const_of(*lhs)?, self.const_of(*rhs)?)
             }
+            ExprKind::Binary { .. } => consts::fold_chain(
+                e,
+                |e| match self.f.expr(e).kind {
+                    ExprKind::Binary { op, lhs, rhs } if !self.is_ready(e) => Some((op, lhs, rhs)),
+                    _ => None,
+                },
+                |e| self.const_of(e),
+            ),
             ExprKind::Unary { op, expr } => consts::fold_unary(*op, self.const_of(*expr)?),
             _ => consts::fold(self.f, &[], e),
         }
+    }
+
+    fn is_ready(&self, e: ExprId) -> bool {
+        self.ready.as_ref().is_some_and(|r| r.e == e)
+    }
+
+    /// `e`'s register and origin if [`FuncState::chain_to`] computed it already.
+    fn take_ready(&mut self, e: ExprId) -> Option<(u8, Option<Origin>)> {
+        if !self.is_ready(e) {
+            return None;
+        }
+        self.ready.take().map(|r| (r.reg, r.origin))
+    }
+
+    /// Where the instructions computing `e` start, or will: for [`FuncState::consumed_at`].
+    fn start_of(&self, e: ExprId) -> usize {
+        match &self.ready {
+            Some(r) if r.e == e => r.from,
+            _ => self.next_pc(),
+        }
+    }
+
+    /// The rest of a long chain, for [`FuncState::expr_to`] past [`CHAIN_DEPTH`]: `e` into
+    /// `dst`, where `e`'s left operand is a chain link too. The links below `e` are computed
+    /// one at a time, innermost first, into one temporary, each taking the one below it from
+    /// there as [`Ready`]; then `e` itself takes the last of them.
+    #[inline(never)]
+    fn chain_to(&mut self, e: ExprId, dst: u8) -> Result<Option<Origin>> {
+        let mut links = Vec::new();
+        let mut link = self.f.expr(e).kind.chain_lhs().expect("a chain link");
+        while let Some(lhs) = self.f.expr(link).kind.chain_lhs() {
+            links.push(link);
+            link = lhs;
+        }
+        self.with_temps(|c| {
+            // `dst` itself when it is the top temporary, as the links' own operands would be.
+            let t = if dst as usize + 1 == c.free && dst as usize >= c.active {
+                dst
+            } else {
+                c.alloc()?
+            };
+            let mut below: Option<Ready> = None;
+            for &link in links.iter().rev() {
+                let from = c.next_pc();
+                c.ready = below.take();
+                let origin = c.expr_to(link, t);
+                // A link that folded or never read its operand leaves it.
+                c.ready = None;
+                below = Some(Ready {
+                    e: link,
+                    reg: t,
+                    origin: origin?,
+                    from,
+                });
+            }
+            // `e` itself as a short chain, its left operand ready.
+            c.ready = below;
+            let depth = std::mem::replace(&mut c.chain_depth, 0);
+            let origin = c.expr_to(e, dst);
+            c.chain_depth = depth;
+            c.ready = None;
+            origin
+        })
     }
 
     fn is_multi(&self, e: ExprId) -> bool {
@@ -43,6 +136,9 @@ impl FuncState<'_> {
     /// Evaluates `e` into some register: an uncaptured local's own register, or a new
     /// temporary on top of the stack.
     pub(crate) fn expr_any(&mut self, e: ExprId) -> Result<(u8, Option<Origin>)> {
+        if let Some(ready) = self.take_ready(e) {
+            return Ok(ready);
+        }
         if let ExprKind::Local(l) = self.f.expr(e).kind {
             if let Slot::Reg(r) = self.slots[l.index()] {
                 return Ok((r, self.local_origin(l)));
@@ -108,6 +204,12 @@ impl FuncState<'_> {
     /// Evaluates `e` (truncated to one value) into register `dst`, which the caller has
     /// allocated or which is a live local. Returns where the value came from, for messages.
     pub(crate) fn expr_to(&mut self, e: ExprId, dst: u8) -> Result<Option<Origin>> {
+        if let Some((reg, origin)) = self.take_ready(e) {
+            if reg != dst {
+                self.emit(Op::Move { dst, src: reg });
+            }
+            return Ok(origin);
+        }
         let expr = self.f.expr(e);
         self.at(expr.span);
         if (dst as usize) < self.active && self.writes_dst_early(e) {
@@ -122,7 +224,21 @@ impl FuncState<'_> {
             // folded values have no name to report.
             return self.load_const(v, dst);
         }
-        self.with_temps(|c| c.expr_kind_to(e, dst))
+        let link = match self.f.expr(e).kind.chain_lhs() {
+            Some(lhs)
+                if self.chain_depth >= CHAIN_DEPTH
+                    && !self.is_ready(lhs)
+                    && self.f.expr(lhs).kind.chain_lhs().is_some() =>
+            {
+                return self.chain_to(e, dst);
+            }
+            lhs => u32::from(lhs.is_some()),
+        };
+        // One call of `expr_kind_to`, so that it stays inlined here.
+        self.chain_depth += link;
+        let origin = self.with_temps(|c| c.expr_kind_to(e, dst));
+        self.chain_depth -= link;
+        origin
     }
 
     /// [`Self::expr_to`] by the expression's kind, leaving its temporaries allocated. The
@@ -434,7 +550,7 @@ impl FuncState<'_> {
                 let mut origins = Vec::with_capacity(parts.len());
                 for (i, part) in parts.into_iter().enumerate() {
                     let r = self.alloc()?;
-                    let from = self.next_pc();
+                    let from = self.start_of(part);
                     origins.push(self.expr_to(part, r)?);
                     if let Some(&op_at) = ops.get(i) {
                         self.consumed_at(part, from, op_at);
@@ -472,7 +588,7 @@ impl FuncState<'_> {
                         return Ok(None);
                     }
                 }
-                let from = self.next_pc();
+                let from = self.start_of(lhs);
                 let (a, a_origin) = self.operand(lhs, dst)?;
                 self.consumed_at(lhs, from, at);
                 // `x + k` and `x - k` with a small integer literal use the immediate forms.
@@ -852,14 +968,12 @@ impl FuncState<'_> {
                     self.place(skip);
                     Ok(())
                 } else {
-                    self.cond(lhs, false, target)?;
-                    self.cond(rhs, false, target)
+                    self.cond_each(e, false, target)
                 }
             }
             ExprKind::Or { lhs, rhs } => {
                 if jump_if {
-                    self.cond(lhs, true, target)?;
-                    self.cond(rhs, true, target)
+                    self.cond_each(e, true, target)
                 } else {
                     let skip = self.label();
                     self.cond(lhs, true, skip)?;
@@ -884,6 +998,35 @@ impl FuncState<'_> {
                 Ok(())
             }),
         }
+    }
+
+    /// [`Self::cond`] for a chain of `or`s that jumps when true, or of `and`s that jumps when
+    /// false: each operand in turn jumps to `target` the same way. In a loop, since the chain
+    /// is a tree as deep as it is long.
+    fn cond_each(&mut self, e: ExprId, jump_if: bool, target: Label) -> Result<()> {
+        let same = |c: &Self, e: ExprId| match c.f.expr(e).kind {
+            ExprKind::Or { lhs, rhs } if jump_if => Some((lhs, rhs)),
+            ExprKind::And { lhs, rhs } if !jump_if => Some((lhs, rhs)),
+            _ => None,
+        };
+        let Some((lhs, rhs)) = same(self, e) else {
+            return self.cond(e, jump_if, target);
+        };
+        if same(self, lhs).is_none() {
+            self.cond(lhs, jump_if, target)?;
+            return self.cond(rhs, jump_if, target);
+        }
+        let mut rest = Vec::new();
+        let mut first = e;
+        while let Some((lhs, rhs)) = same(self, first) {
+            rest.push(rhs);
+            first = lhs;
+        }
+        self.cond(first, jump_if, target)?;
+        for &rhs in rest.iter().rev() {
+            self.cond(rhs, jump_if, target)?;
+        }
+        Ok(())
     }
 
     /// Evaluates `lhs op rhs` (left operand first) and jumps to `target` when the comparison's
