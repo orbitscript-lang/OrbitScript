@@ -2404,7 +2404,7 @@ impl<'s> Stack<'s> {
     /// upvalues have the same one), or 0.
     pub fn upvalue_id(&self, func: i32, n: i32) -> usize {
         match self.ctx.upvalue_cell(self.get(func), n as i64) {
-            Some((_, cell)) => cell.to_bits() as usize | 1 << 63,
+            Some(cell) => cell.to_bits() as usize | 1 << 63,
             None => 0,
         }
     }

@@ -258,6 +258,15 @@ fn setlocal(ctx: &mut NativeCtx<'_>) -> R {
     Ok(NativeReturn::Return(1))
 }
 
+/// Make the arguments exactly `n`, dropping or nil-filling the rest
+/// (`set_top` only when needed: it looks for variables to close).
+fn keep_args(s: &mut Stack<'_>, n: i32) -> StackResult<()> {
+    if s.top() != n {
+        s.set_top(n)?;
+    }
+    Ok(())
+}
+
 /// Argument `i`, an upvalue or user value index, as the C `int` the
 /// reference converts it to: `1 + 2^32` is index 1.
 fn int_index(s: &mut Stack<'_>, i: i32) -> StackResult<i32> {
@@ -283,7 +292,7 @@ fn setupvalue(s: &mut Stack<'_>) -> StackResult<Either<OrbitString, ()>> {
     <Any as Arg>::check(s, 3)?;
     let n = int_index(s, 2)?;
     let f = <FunctionArg as Arg>::check(s, 1)?;
-    s.set_top(3)?;
+    keep_args(s, 3)?;
     Ok(match s.set_upvalue(f.0, n)? {
         Some(name) => Either::Left(name),
         None => Either::Right(()),
@@ -338,7 +347,7 @@ fn setmetatable(s: &mut Stack<'_>) -> StackResult<Return> {
     if !matches!(s.arg_type(2), Type::Nil | Type::Table) {
         return Err(s.type_error(2, "nil or table"));
     }
-    s.set_top(2)?;
+    keep_args(s, 2)?;
     s.set_metatable(1)?;
     Ok(Return::values(1))
 }
@@ -366,7 +375,7 @@ fn setuservalue(s: &mut Stack<'_>) -> StackResult<Return> {
     }
     <Any as Arg>::check(s, 2)?;
     let n = s.opt_integer(3, 1)?;
-    s.set_top(2)?;
+    keep_args(s, 2)?;
     if !s.set_user_value(1, n as i32)? {
         s.push_nil();
     }
