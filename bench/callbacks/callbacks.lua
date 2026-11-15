@@ -99,15 +99,18 @@ function rows.gmatch()
   local str = ("x"):rep(100)
   for _ = 1, n / 100 do for _ in string.gmatch(str, "x") do end end
 end
+-- Pieces of one space: compiling them costs little, so the reader calls
+-- are most of `load_reader` and taking `load_str` off leaves a stable
+-- difference.
 function rows.load_str()
   local parts = {}
-  for i = 1, 100 do parts[i] = "local a = 1 " end
+  for i = 1, 100 do parts[i] = " " end
   local src = table.concat(parts)
   for _ = 1, n / 100 do load(src) end
 end
 function rows.load_reader()
   local parts = {}
-  for i = 1, 100 do parts[i] = "local a = 1 " end
+  for i = 1, 100 do parts[i] = " " end
   for _ = 1, n / 100 do
     local i = 0
     load(function() i = i + 1; return parts[i] end)

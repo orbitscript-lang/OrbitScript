@@ -40,7 +40,7 @@ runs. ROW limits the run.
 
 options:
   --expect FILE        fail when a row costs the measured interpreter more
-                       than 3% above what FILE records
+                       than 10% above what FILE records
                        (bench/callbacks/expected-orbit.txt)
   --update-expected    record this run in the --expect FILE
   --json FILE          write the counts and ratios as JSON
@@ -58,9 +58,11 @@ const SIZES: [u64; 2] = [20_000, 120_000];
 const RUNS: usize = 3;
 
 /// How far above its recorded cost a row may measure before `--expect`
-/// fails: room for a compiler update moving a few instructions, not for a
-/// change that makes a callback slower.
-const TOLERANCE: f64 = 0.03;
+/// fails. An edit anywhere in the dispatch loop can move its register
+/// allocation, and with it every row, by a few percent (up to about 10% has
+/// been seen on cloud x86_64); a change that makes callbacks slower moves
+/// its rows by far more.
+const TOLERANCE: f64 = 0.10;
 
 /// The least a row may move either way before `--expect` reports it, in
 /// instructions per unit: code layout alone moves the cheapest rows (a
@@ -487,9 +489,9 @@ fn expected_text(rows: &[Row], recorded: &BTreeMap<String, Recorded>) -> String 
         "# What each row of bench/callbacks/rows.txt costs `orbit`, in instructions\n\
          # per unit, and its ratio to lua5.5, as CI measures them: `cargo build\n\
          # --release`, no profile, Linux x86_64. CI fails when a row costs more\n\
-         # than 3% (and at least 4 instructions) above its cost here; a change\n\
+         # than 10% (and at least 4 instructions) above its cost here; a change\n\
          # that makes rows cheaper records the new costs with\n\
-         # `--update-expected`.\n",
+         # `--update-expected`, and so does a new stable Rust on the runner.\n",
     );
     let _ = writeln!(text, "# {:<12} {:>5}  ratio", "row", "cost");
     for r in rows {
