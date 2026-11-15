@@ -4,20 +4,25 @@
 //! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use crate::object::{Gc, Thread, Value};
+use crate::stack::{Arg, FunctionArg, Stack, StackResult, ThreadRef, library_row};
 use crate::vm::{
     CallOutcome, Cause, CoStatus, LuaError, NativeCtx, NativeFn, NativeReturn, ResumeOk,
 };
 use orbit_lua_version::LUA;
+use orbit_macros::native;
 
 type R = Result<NativeReturn, LuaError>;
 
+// `resume`, `yield`, `wrap` and `close` hand control to the VM, which
+// switches coroutines: they stay on the raw interface, as the plan keeps
+// the VM's control primitives.
 pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("coroutine.create", create),
+    library_row::<create>(),
     ("coroutine.resume", resume),
     ("coroutine.yield", yield_),
-    ("coroutine.status", status),
-    ("coroutine.running", running),
-    ("coroutine.isyieldable", isyieldable),
+    library_row::<status>(),
+    library_row::<running>(),
+    library_row::<isyieldable>(),
     ("coroutine.wrap", wrap),
     ("coroutine.close", close),
 ];
@@ -29,10 +34,9 @@ fn check_thread(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Gc<Thread>, LuaErro
     }
 }
 
-fn create(ctx: &mut NativeCtx<'_>) -> R {
-    let f = ctx.check_function(0)?;
-    let t = ctx.new_thread(f);
-    ctx.ret([Value::Thread(t)])
+#[native(crate = crate, name = "coroutine.create")]
+fn create(s: &mut Stack<'_>, f: FunctionArg) -> ThreadRef {
+    s.push_new_coroutine(f.0)
 }
 
 fn resume(ctx: &mut NativeCtx<'_>) -> R {
@@ -64,28 +68,27 @@ fn yield_(ctx: &mut NativeCtx<'_>) -> R {
     Ok(NativeReturn::Yield { nvals: ctx.nargs() })
 }
 
-fn status(ctx: &mut NativeCtx<'_>) -> R {
-    let co = check_thread(ctx, 0)?;
-    let name = ctx.thread_status(co).name();
-    let s = ctx.new_str(name.as_bytes());
-    ctx.ret([s])
+#[native(crate = crate, name = "coroutine.status")]
+fn status(s: &mut Stack<'_>, co: ThreadRef) -> &'static str {
+    s.thread_status(co).name()
 }
 
-fn running(ctx: &mut NativeCtx<'_>) -> R {
-    let (t, main) = ctx.running();
-    ctx.push(Value::Thread(t));
-    ctx.push(Value::Bool(main));
-    Ok(NativeReturn::Return(2))
+#[native(crate = crate, name = "coroutine.running")]
+fn running(s: &mut Stack<'_>) -> (ThreadRef, bool) {
+    let t = s.running_thread();
+    (t, t == s.main_thread())
 }
 
-fn isyieldable(ctx: &mut NativeCtx<'_>) -> R {
-    let t = if ctx.nargs() == 0 {
-        ctx.running().0
+// With no argument, the running coroutine; a nil argument is checked as a
+// thread, as the reference does.
+#[native(crate = crate, name = "coroutine.isyieldable")]
+fn isyieldable(s: &mut Stack<'_>) -> StackResult<bool> {
+    let t = if s.top() == 0 {
+        s.running_thread()
     } else {
-        check_thread(ctx, 0)?
+        <ThreadRef as Arg>::check(s, 1)?
     };
-    let y = ctx.thread_yieldable(t);
-    ctx.ret([Value::Bool(y)])
+    Ok(s.thread_yieldable(t))
 }
 
 fn wrap(ctx: &mut NativeCtx<'_>) -> R {

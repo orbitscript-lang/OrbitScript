@@ -2089,6 +2089,15 @@ impl<'s> Stack<'s> {
         }
     }
 
+    /// Push a new coroutine that runs the function at `idx`
+    /// (`coroutine.create`).
+    pub(crate) fn push_new_coroutine(&mut self, idx: i32) -> ThreadRef {
+        let f = self.get(idx);
+        let t = self.ctx.new_thread(f);
+        self.ctx.push(RawValue::Thread(t));
+        ThreadRef(t)
+    }
+
     /// Whether `t` is still alive (not collected).
     pub fn thread_is_live(&self, t: ThreadRef) -> bool {
         self.ctx.vm.heap.is_live(t.0)
