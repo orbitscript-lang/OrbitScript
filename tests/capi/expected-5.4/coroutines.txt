@@ -1,0 +1,65 @@
+-- lua coroutine
+new thread status 0 top 0
+resume -> status 1 nres 2: 3 'first' | status 1 top 0
+resume -> status 1 nres 1: 42 | status 1 top 0
+resume -> status 0 nres 3: 'x' 'y' 'done' | status 0 top 0
+resume -> status 2: 'cannot resume dead coroutine' | status 0
+dead: status 2
+-- lua coroutine status 0
+-- C yields
+yield_all yieldable 1
+resume -> status 1 nres 2: 7 'eight' | status 1 top 0
+resume -> status 0 nres 1: 'back' | status 0 top 0
+resume -> status 1 nres 1: 'kept' | status 1 top 1
+continuation: status 1 ctx 42 top 2
+continuation stack: top=2: 1 'resumed with'
+resume -> status 0 nres 3: 1 'resumed with' 'from continuation' | status 0 top 0
+-- C yields status 0
+-- continuations
+case 0
+resume -> status 1 nres 1: 'inside' | status 1 top 0
+after_call: status 1 ctx 1
+after_call stack: top=2: 'fine' 'returned'
+resume -> status 0 nres 2: 'fine' 'returned' | status 0 top 0
+case 1
+resume -> status 1 nres 1: 'inside' | status 1 top 0
+after_call: status 1 ctx 2
+after_call stack: top=2: 'fine' 'returned'
+resume -> status 0 nres 2: 'fine' 'returned' | status 0 top 0
+case 2
+resume -> status 1 nres 1: 'inside' | status 1 top 0
+after_call: status 2 ctx 2
+after_call stack: top=1: 'failed'
+resume -> status 0 nres 1: 'failed' | status 0 top 0
+resume -> status 1 nres 0: | status 1 top 0
+-- continuations status 0
+-- isyieldable
+C function in the main thread: 0
+fresh thread: 1
+yield_all yieldable 1
+resume -> status 1 nres 0: | status 1 top 0
+suspended thread: 1
+-- isyieldable status 0
+-- closethread
+resume -> status 2: table | status 2
+closethread -> 2 top 1 code 7 status 0
+resume -> status 0 nres 1: 'reused' | status 0 top 0
+resume -> status 1 nres 1: 'holding' | status 1 top 0
+closed with	nil
+closethread -> 0 top 0 status 0
+resume -> status 1 nres 0: | status 1 top 0
+closethread -> 2 'in close'
+-- closethread status 0
+-- resetthread
+resume -> status 2: 'reset me' | status 2
+resetthread -> 2 'reset me' status 0
+-- resetthread status 0
+-- toclose
+marked, top 3
+__close of second, error nil
+after closeslot 2: nil top 3
+__close of first, error nil
+returned: top=1: 'result'
+__close of on error, error 'the error'
+status 2: 'the error'
+-- toclose status 0

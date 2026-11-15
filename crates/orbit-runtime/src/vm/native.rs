@@ -411,7 +411,8 @@ impl NativeCtx<'_> {
     }
 
     /// Close the window's variables marked to be closed at slot `from` and
-    /// above, newest first: each one's `__close(value, nil)`. An error a
+    /// above, newest first: each one's `__close(value)`, with no error
+    /// argument as lua5.5 calls it (lua5.4 passes nil). An error a
     /// handler raises stops it; the rest close as that error unwinds.
     pub(crate) fn close_from(&mut self, from: usize) -> Result<(), LuaError> {
         let at = self.base + from;
@@ -425,8 +426,13 @@ impl NativeCtx<'_> {
             let mark = self.len();
             self.push(h);
             self.push(v);
-            self.push(Value::Nil);
-            let r = self.call(2, None);
+            let nargs = if LUA.is_5_4() {
+                self.push(Value::Nil);
+                2
+            } else {
+                1
+            };
+            let r = self.call(nargs, None);
             self.truncate(mark);
             r?;
         }
@@ -436,6 +442,17 @@ impl NativeCtx<'_> {
     /// The window's values.
     pub(crate) fn window(&self) -> &[Value] {
         &self.vm.rt.stack.regs[self.base..self.vm.rt.top]
+    }
+
+    /// Whether [`NativeCtx::call`] pushes a frame for the native before the
+    /// call's boundary. With hooks on, the native already has its frame.
+    /// The host's own context ([`Vm::host_ctx`]) gets none: its caller is
+    /// outside Lua.
+    pub(crate) fn needs_own_frame(&self) -> bool {
+        let me = self.base - 1;
+        !matches!(self.vm.rt.stack.frames.last(), Some(f) if f.func as usize == me
+            && matches!(f.kind, FrameKind::NativeCall { .. }))
+            && self.vm.rt.natives.host() != Some(self.id)
     }
 
     /// Call the value below the last `nargs` values of the window with
@@ -455,12 +472,8 @@ impl NativeCtx<'_> {
         debug_assert!(self.len() > nargs, "a function below the arguments");
         let func = self.vm.rt.top - nargs - 1;
         let me = self.base - 1;
+        let own = self.needs_own_frame();
         let s = &mut self.vm.rt.stack;
-        // With hooks on, the native already has its frame. The host's own
-        // context ([`Vm::host_ctx`]) gets none: its caller is outside Lua.
-        let own = !matches!(s.frames.last(), Some(f) if f.func as usize == me
-            && matches!(f.kind, FrameKind::NativeCall { .. }))
-            && self.vm.rt.natives.host() != Some(self.id);
         if own {
             let cdepth = s.same_depth();
             s.frames.push(crate::vm::Frame {
@@ -980,9 +993,11 @@ impl NativeCtx<'_> {
         LuaError::new(self.positioned(&text))
     }
 
-    /// `bad argument` for a wrong type.
+    /// `bad argument` for a wrong type. What it got is what window slot
+    /// `i` holds now, as in Lua, where a C function's arguments are its
+    /// stack slots: "no value" only past the top.
     pub(crate) fn type_error(&mut self, i: usize, expected: &str) -> LuaError {
-        let v = (i < self.nargs).then(|| self.arg(i));
+        let v = (i < self.len()).then(|| self.arg(i));
         let got = self.arg_type_name(v);
         self.arg_error(i, &arg_errors::type_mismatch(expected, &got))
     }

@@ -19,5 +19,10 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["resource"] }
 
+# MSVC's cl.exe, found as the cc crate finds it, to build the C API
+# programs (capi). See DEPS.md.
+[target.'cfg(windows)'.dependencies]
+cc = "1.2"
+
 [lints]
 workspace = true

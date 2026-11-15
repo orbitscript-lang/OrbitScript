@@ -469,6 +469,53 @@ fn after_finalizer(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> Result<NativeRe
     next_finalizer(ctx)
 }
 
+impl NativeCtx<'_> {
+    /// Call every pending finalizer now, nesting the interpreter as
+    /// [`NativeCtx::call`] does, for natives that can't return through
+    /// [`finalize_then_return`] (the C API's `lua_gc`, whose full
+    /// collection runs the finalizers before it returns). A finalizer's
+    /// error becomes a warning. Does nothing inside a finalizer. The window
+    /// is as it was.
+    pub(crate) fn run_finalizers_now(&mut self) {
+        if self.vm.rt.gc.finalizing {
+            return;
+        }
+        let len = self.len();
+        while let Some(obj) = self.vm.heap.take_finalizable() {
+            let (o, f) = finalizer(&self.vm.heap, obj);
+            if f.is_nil() {
+                continue;
+            }
+            if !callable(f) {
+                let msg = not_callable_message(f);
+                self.vm.rt.warn_gc_error_text(&msg);
+                continue;
+            }
+            self.push(f);
+            self.push(o);
+            self.vm.rt.hooks.touch();
+            self.vm
+                .rt
+                .gc
+                .enter(&mut self.vm.heap, &mut self.vm.rt.stack.hook);
+            // The boundary `call` pushes, the finalizer's caller, above
+            // the frame it gives the native.
+            let at = self.vm.rt.stack.frames.len() + usize::from(self.needs_own_frame());
+            self.vm.rt.stack.aux.finalizer_at = Some(at as u32);
+            let r = self.call(1, None);
+            self.vm.rt.stack.aux.finalizer_at = None;
+            self.vm
+                .rt
+                .gc
+                .exit(&mut self.vm.heap, &mut self.vm.rt.stack.hook);
+            if let Err(LuaError { value, .. }) = r {
+                self.vm.rt.warn_gc_error(&self.vm.heap, value);
+            }
+            self.truncate(len);
+        }
+    }
+}
+
 /// From a native: close the VM as [`Vm::close`] does, then run `k` (with
 /// `CallOutcome::Ok(0)`) on the window's first slot. This works inside a
 /// finalizer too, as `os.exit(code, true)` needs: the other finalizers

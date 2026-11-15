@@ -1,0 +1,36 @@
+-- blocks
+getiuservalue 1: 0
+getiuservalue 3: 0
+getiuservalue 4: -1
+getiuservalue 0: -1
+absent user values: top=5: userdata nil nil nil nil
+setiuservalue 3: 1 top 1
+setiuservalue 4: 0 top 1
+user values: top=3: userdata 'first' 5
+rawlen 16, block kept 1
+touserdata same 1
+light: touserdata same 1, rawequal to full 0
+two lights equal 1
+zero size: rawlen 0 getiuservalue -1
+-- blocks status 0
+-- named metatables
+newmetatable 1 again 0
+names: top=3: table table 'Widget'
+getmetatable by name: top=2: table nil
+testudata 1 0 0 0
+checkudata 1
+getmetafield __name 4 nope 0 no metatable 0
+metafields: top=4: userdata userdata table 'Widget'
+-- named metatables status 0
+-- checkudata with the wrong type
+-- checkudata with the wrong type status 2: 'bad argument #2 to '?' (Widget expected, got userdata)'
+-- callmeta
+callmeta __tostring 1 __len 0
+callmeta: top=3: table userdata 'W(41)'
+tolstring W(41)
+callmeta on a number 0
+-- callmeta status 0
+-- finalize
+finalizer ran
+after collect
+-- finalize status 0

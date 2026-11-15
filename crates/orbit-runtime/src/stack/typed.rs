@@ -451,6 +451,31 @@ impl Push for Nil {
     }
 }
 
+/// A thread (coroutine) argument.
+impl<'a> Arg<'a> for super::ThreadRef {
+    type Checked = super::ThreadRef;
+
+    #[inline(always)]
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<super::ThreadRef> {
+        match s.to_thread(i) {
+            Some(t) if i <= s.top() => Ok(t),
+            _ => Err(not_a(s, i, Type::Thread)),
+        }
+    }
+
+    #[inline(always)]
+    fn get(_: &'a Stack<'_>, _: i32, t: super::ThreadRef) -> super::ThreadRef {
+        t
+    }
+}
+
+impl Push for super::ThreadRef {
+    #[inline(always)]
+    fn push(self, s: &mut Stack<'_>) {
+        s.push_thread(self);
+    }
+}
+
 /// A string result built in the isolate's scratch buffer
 /// ([`Stack::take_buffer`]), which goes back for reuse once pushed.
 #[derive(Debug)]

@@ -1,0 +1,52 @@
+-- allocators
+newstate 1
+getallocf: same function 1 same data 1
+result 11
+setallocf: same function 1 new data 1
+luaL_alloc grows 1
+luaL_alloc frees 1
+state on luaL_alloc and a made seed: OK
+-- allocators status 0
+-- warnings
+  warning piece 'one ' tocont 1 ud 1
+  warning piece 'message' tocont 0 ud 1
+  warning piece 'from ' tocont 1 ud 1
+  warning piece 'Lua' tocont 0 ud 1
+  warning piece '@on' tocont 0 ud 1
+  warning piece 'x' tocont 0 ud 1
+-- warnings status 0
+-- collector
+isrunning 1
+after stop: isrunning 0
+after restart: isrunning 1
+count is positive 1
+countb below 1024 1, kb 1
+inc: previous is a mode 1
+gen: previous inc
+inc: previous gen
+pause set to 150: 150
+stepmul set to 300: 300
+step finishes a cycle 1
+collect 0
+-- collector status 0
+-- libraries
+_G: table, global table, print function, string nil
+package: table, global table, print nil, string nil
+coroutine: table, global table, print nil, string nil
+table: table, global table, print nil, string nil
+io: table, global table, print nil, string nil
+os: table, global table, print nil, string nil
+string: table, global table, print nil, string table
+math: table, global table, print nil, string nil
+utf8: table, global table, print nil, string nil
+debug: table, global table, print nil, string nil
+table	nil	nil	nil
+run error: status 1: '[string "print(type(string), type(math), type(table), ..."]:2: attempt to index a nil value (global 'package')'
+-- libraries status 0
+-- closing
+closing
+kept one finalized
+finalized at close
+closed
+ident starts with $LuaVersion: 1
+-- closing status 0

@@ -894,7 +894,6 @@ impl crate::vm::NativeCtx<'_> {
         }
     }
 
-    #[cfg(feature = "debug")]
     /// [`NativeCtx::traceback`] for a stack `on_thread` put in place
     /// (`foreign`), whose levels start at 0 for its top activation.
     pub(crate) fn traceback_in(&self, foreign: bool, from: usize) -> String {
