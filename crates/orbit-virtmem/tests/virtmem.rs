@@ -176,3 +176,41 @@ fn growing_leaves_other_threads_mappings_alone() {
     stop.store(true, Ordering::Relaxed);
     other.join().unwrap();
 }
+
+/// Counts its drops, and panics on the drop of the element marked `panics`.
+struct Fragile {
+    drops: Arc<AtomicUsize>,
+    panics: bool,
+}
+
+impl Drop for Fragile {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+        if self.panics {
+            panic!("this element fails to drop");
+        }
+    }
+}
+
+/// An element whose `Drop` panics during `truncate` doesn't get the rest of
+/// the tail dropped twice when the buffer itself is dropped afterwards.
+#[test]
+fn truncate_drops_each_element_once_when_one_panics() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut buf = VmBuffer::with_capacity(100);
+    let mut i = 0;
+    buf.resize_with(10, || {
+        i += 1;
+        Fragile {
+            drops: Arc::clone(&drops),
+            panics: i == 6,
+        }
+    });
+    let truncated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| buf.truncate(3)));
+    assert!(truncated.is_err());
+    assert_eq!(buf.len(), 3);
+    // Every element of the tail was dropped once, the panicking one included.
+    assert_eq!(drops.load(Ordering::SeqCst), 7);
+    drop(buf);
+    assert_eq!(drops.load(Ordering::SeqCst), 10);
+}
