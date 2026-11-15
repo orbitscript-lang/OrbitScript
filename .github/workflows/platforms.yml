@@ -40,6 +40,7 @@ on:
       - 'crates/orbit-fmt/**'
       - 'crates/orbit-hir/**'
       - 'crates/orbit-lua-syntax/**'
+      - 'crates/orbit-lua-unparse/**'
       - 'crates/orbit-macros/**'
       - 'crates/orbit-orb-syntax/**'
   workflow_dispatch:

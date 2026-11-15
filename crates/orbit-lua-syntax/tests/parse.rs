@@ -4,7 +4,7 @@ use orbit_lua_version::LUA;
 use std::path::{Path, PathBuf};
 
 use orbit_lua_syntax::ast::{BinOp, ExprKind, StmtKind};
-use orbit_lua_syntax::{ParseOptions, parse, parse_with, unparse};
+use orbit_lua_syntax::{ParseOptions, parse, parse_with};
 
 fn err(src: &str) -> String {
     match parse("s.lua", src.as_bytes()) {
@@ -125,35 +125,6 @@ fn global_is_contextual() {
 }
 
 #[test]
-fn precedence_and_associativity() {
-    let cases = [
-        ("return 1 + 2 * 3", "return (1 + (2 * 3));"),
-        ("return -2 ^ 2", "return (- (2 ^ 2));"),
-        ("return 2 ^ 3 ^ 2", "return (2 ^ (3 ^ 2));"),
-        ("return 2 ^ -3", "return (2 ^ (- 3));"),
-        ("return 1 .. 2 .. 3", "return (1 .. (2 .. 3));"),
-        ("return 1 - 2 - 3", "return ((1 - 2) - 3);"),
-        ("return a or b and c", "return (a or (b and c));"),
-        ("return not a == b", "return ((not a) == b);"),
-        ("return a < b == c", "return ((a < b) == c);"),
-        ("return a .. b + c", "return (a .. (b + c));"),
-        ("return #t + 1", "return ((# t) + 1);"),
-        (
-            "return a | b ~ c & d << 1",
-            "return (a | (b ~ (c & (d << 1))));",
-        ),
-        ("return (f())", "return (f());"),
-        ("return a.b.c:d(1)[2]", "return a[\"b\"][\"c\"]:d(1)[2];"),
-        ("return f{1} .. f'x'", "return (f({1}) .. f(\"x\"));"),
-    ];
-    for (src, expected) in cases {
-        let ast = parse("s.lua", src.as_bytes()).unwrap();
-        let printed = String::from_utf8(unparse(&ast)).unwrap();
-        assert_eq!(printed.trim(), expected, "source: {src}");
-    }
-}
-
-#[test]
 fn spans_cover_the_source() {
     let src = "local x = 1 +\n  foo(2)";
     let ast = parse("s.lua", src.as_bytes()).unwrap();
@@ -228,20 +199,15 @@ fn lua_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Parses `path`, then checks that printing and re-parsing gives the same text.
-fn parse_and_round_trip(path: &Path) -> Result<(), String> {
+/// Parses `path` (orbit-lua-unparse's tests also print it and parse it again).
+fn parse_file(path: &Path) -> Result<(), String> {
     let src = std::fs::read(path).unwrap();
     let options = ParseOptions {
         skip_comment_line: true,
         max_depth: 1000,
         ..ParseOptions::default()
     };
-    let ast = parse_with("f.lua", &src, &options).map_err(|d| d.to_message("f.lua"))?;
-    let printed = unparse(&ast);
-    let again = parse_with("f.lua", &printed, &options).map_err(|d| d.to_message("printed"))?;
-    if unparse(&again) != printed {
-        return Err("printing is not a fixed point".into());
-    }
+    parse_with("f.lua", &src, &options).map_err(|d| d.to_message("f.lua"))?;
     Ok(())
 }
 
@@ -252,7 +218,7 @@ fn first_light_programs_parse() {
     files.extend(lua_files(&root.join("bench")));
     assert!(files.len() >= 8);
     for path in files {
-        parse_and_round_trip(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        parse_file(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
 }
 
@@ -269,7 +235,7 @@ fn official_suite_parses() {
     let mut parsed = 0;
     for path in lua_files(&suite) {
         let name = path.file_name().unwrap().to_str().unwrap().to_string();
-        if let Err(e) = parse_and_round_trip(&path) {
+        if let Err(e) = parse_file(&path) {
             panic!("{name}: {e}");
         }
         parsed += 1;

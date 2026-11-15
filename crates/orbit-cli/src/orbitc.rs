@@ -171,7 +171,7 @@ fn run(cli: &Cli, bytes: &[u8], source: &[u8]) -> Result<(), String> {
         Stage::Ast => {
             let ast = orbit_lua_syntax::parse_with(&name, bytes, &options)
                 .map_err(|d| d.to_message(&name))?;
-            let _ = stdout.write_all(&orbit_lua_syntax::unparse(&ast));
+            let _ = stdout.write_all(&orbit_lua_unparse::unparse(&ast));
             return Ok(());
         }
         Stage::Hir => {
