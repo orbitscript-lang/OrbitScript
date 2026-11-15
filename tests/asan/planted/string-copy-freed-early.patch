@@ -1,0 +1,35 @@
+Plants: lua_tolstring hands out copies that are freed whenever the collector
+may run, while the string is still alive (the bug the C host's string-lifetime
+mode was written for).
+Parts: chost
+
+diff --git a/crates/orbit-capi/src/ffi.rs b/crates/orbit-capi/src/ffi.rs
+index fa1c089..bab5a3a 100644
+--- a/crates/orbit-capi/src/ffi.rs
++++ b/crates/orbit-capi/src/ffi.rs
+@@ -650,6 +650,7 @@ fn host_prune(b: &Bridge, c: &mut Stack<'static>) {
+         return;
+     }
+     c.safepoint();
++    b.st.borrow_mut().strs.clear();
+ }
+ 
+ /// A NUL-terminated copy of a name or of source text (not a string value:
+@@ -1009,7 +1010,16 @@ extern "C" fn orbit_r_toboolean(l: *mut LState, idx: c_int) -> c_int {
+ }
+ 
+ extern "C" fn orbit_r_tolstring(l: *mut LState, idx: c_int, len: *mut usize) -> *const c_char {
+-    entry!(l, std::ptr::null(), |_b, c| string_value(c, idx, len))
++    entry!(l, std::ptr::null(), |b, c| {
++        let bytes = c.to_c_str(idx)?.map(|(p, n)| {
++            // SAFETY: planted bug.
++            unsafe { std::slice::from_raw_parts(p, n) }.to_vec()
++        });
++        Ok(match bytes {
++            Some(bytes) => hand_out(&b.st, &bytes, len),
++            None => std::ptr::null(),
++        })
++    })
+ }
+ 
+ extern "C" fn orbit_r_rawlen(l: *mut LState, idx: c_int) -> u64 {

@@ -33,6 +33,7 @@ on:
       - '.github/dependabot.yml'
       - '.github/workflows/bench.yml'
       - '.github/workflows/release.yml'
+      - '.github/workflows/sanitizers.yml'
       - '.github/workflows/vscode.yml'
       - 'crates/orbit-bytecode/**'
       - 'crates/orbit-check/**'

@@ -1,0 +1,28 @@
+Plants: Rust's lua_Debug is 16 bytes longer than lua.h's, so lua_getstack
+writes the record's last field past the end of the C caller's lua_Debug,
+which sits on the C stack. valgrind sees nothing: only AddressSanitizer
+puts red zones around stack variables.
+Parts: chost
+
+diff --git a/crates/orbit-capi/src/ffi.rs b/crates/orbit-capi/src/ffi.rs
+index fa1c089..35d4b40 100644
+--- a/crates/orbit-capi/src/ffi.rs
++++ b/crates/orbit-capi/src/ffi.rs
+@@ -1531,7 +1531,7 @@ pub(crate) struct LuaDebug {
+     istailcall: c_char,
+     ftransfer: Transfer,
+     ntransfer: Transfer,
+-    short_src: [c_char; 60],
++    short_src: [c_char; 76],
+     /// The level `lua_getstack` found, plus one (0: none).
+     private: usize,
+ }
+@@ -1544,7 +1544,7 @@ type Transfer = u16;
+ 
+ // The layout `lua.h` declares, on 64-bit targets.
+ #[cfg(target_pointer_width = "64")]
+-const _: () = assert!(std::mem::size_of::<LuaDebug>() == if cfg!(lua_5_4) { 136 } else { 144 });
++const _: () = assert!(std::mem::size_of::<LuaDebug>() == if cfg!(lua_5_4) { 152 } else { 160 });
+ 
+ extern "C" fn orbit_r_getstack(l: *mut LState, level: c_int, ar: *mut LuaDebug) -> c_int {
+     entry!(l, 0, |b, c| {

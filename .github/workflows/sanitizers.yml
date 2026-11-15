@@ -1,0 +1,46 @@
+name: Sanitizers
+
+# Once a week, the tests of the code that may contain `unsafe` under
+# AddressSanitizer (tests/asan/run.sh), which needs a nightly toolchain: the
+# one place a nightly is used, as a test tool, never to build what ships
+# (CLAUDE.md). It sees reads and writes past variables on the stack, Rust's
+# past a C caller's among them, which the valgrind run in ci.yml can't.
+# Then the planted bugs (tests/asan/check-planted.sh), so a nightly that
+# stops seeing them fails here too.
+#
+# It never runs on pull requests, so it gates nothing: a failure shows on
+# the Actions page and in the mail GitHub sends for a failed scheduled run.
+# Run it by hand (workflow_dispatch) to check a change to unsafe code
+# before merging.
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  address:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: asan
+      # The system's libffi, which tests/asan/run.sh links instead of the
+      # bundled copy (it says why).
+      - name: Install a nightly toolchain and libffi
+        run: |
+          rustup toolchain install nightly --profile minimal
+          sudo apt-get install -y -qq --no-install-recommends libffi-dev
+      - name: Tests under AddressSanitizer
+        run: tests/asan/run.sh
+      - name: Planted bugs
+        if: success() || failure()
+        run: tests/asan/check-planted.sh
