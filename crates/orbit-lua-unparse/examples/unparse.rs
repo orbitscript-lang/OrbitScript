@@ -8,7 +8,7 @@ fn main() {
         let src = std::fs::read(&arg).expect("read source");
         let path = arg.to_string_lossy();
         match orbit_lua_syntax::parse(&path, &src) {
-            Ok(ast) => out.write_all(&orbit_lua_syntax::unparse(&ast)).unwrap(),
+            Ok(ast) => out.write_all(&orbit_lua_unparse::unparse(&ast)).unwrap(),
             Err(d) => {
                 eprintln!("{}", d.to_message(&path));
                 std::process::exit(1);

@@ -4,8 +4,8 @@
 //! adds), which makes it a readable AST dump and a way to check the parser against the
 //! reference interpreter: the printed program must behave exactly like the original.
 
-use crate::ast::*;
 use orbit_hir::{StrId, StringPool};
+use orbit_lua_syntax::ast::*;
 
 /// Lua source for `ast`, fully parenthesised.
 pub fn unparse(ast: &Ast) -> Vec<u8> {
