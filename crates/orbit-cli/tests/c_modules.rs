@@ -148,7 +148,7 @@ fn compile_command(
 }
 
 fn orbit(args: &[&str], cpath: &str) -> Output {
-    Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
+    common::wrapped(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
         .args(args)
         .env("LUA_CPATH", cpath)
         .env_remove(orbit_std::versioned_env("LUA_CPATH"))
@@ -251,7 +251,7 @@ fn calls_through_another_copy_of_the_runtime_reach_the_states_own() {
     let script = Path::new(MANIFEST).join("tests/cmod/crossmod.lua");
     // The static program, whatever ORBIT_BIN_DIR says: a shared one runs
     // on that liborbit itself.
-    let out = Command::new(env!("CARGO_BIN_EXE_orbit"))
+    let out = common::wrapped(env!("CARGO_BIN_EXE_orbit"))
         .arg(&script)
         .env("LUA_CPATH", cpath(&dir))
         .env_remove(orbit_std::versioned_env("LUA_CPATH"))

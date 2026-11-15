@@ -15,7 +15,10 @@ name: CI
 #   docs/features.md checked against the crates' features.
 # - `conformance`, once per Lua version: `cargo test` for that build, then
 #   its official suite on `orbit`, on the shared layout's `orbit` and
-#   through its liblua, the size budget, and for 5.5 the differential tests.
+#   through its liblua, the size budget, and for 5.5 the differential tests
+#   and the memory checker (tests/memcheck/run.sh: the tests of the code
+#   that may contain `unsafe` under valgrind, and the C host program with
+#   AddressSanitizer), on the layout the job already built.
 #   The corpus tests that platforms.yml skips run here.
 # - `features`: every crate linted with each of its Cargo features on its
 #   own (cargo-hack), the tests of the runtime crates without their default
@@ -195,6 +198,16 @@ jobs:
         run: >
           cargo testkit diff --corpus tests/diff/compat --reference target/reference-lua/bin/lua5.5
           --interp target/release/orbit --expect tests/diff/compat/expected-orbit.txt
+      # The C API, C module, FFI, locale, virtual memory and C time code
+      # under valgrind, and the suite through liblua in soft mode; fails on
+      # any report (tests/README.md, "The memory checker").
+      - name: Install valgrind
+        id: valgrind
+        if: matrix.lua == '5.5' && (success() || failure())
+        run: sudo apt-get install -y -qq --no-install-recommends valgrind
+      - name: Memory checker
+        if: matrix.lua == '5.5' && steps.valgrind.outcome == 'success' && steps.reference.outcome == 'success' && steps.layout.outcome == 'success'
+        run: tests/memcheck/run.sh --layout "$LAYOUT"
       - uses: actions/upload-artifact@v7
         if: failure()
         with:

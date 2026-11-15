@@ -405,6 +405,46 @@ static int toclose(void) {
   return 0;
 }
 
+/* ---- userdata blocks ------------------------------------------------ */
+
+/* Fills every byte of the block: byte i holds i * 7 + seed. */
+static void fill(unsigned char *p, size_t n, int seed) {
+  for (size_t i = 0; i < n; i++) p[i] = (unsigned char)(i * 7 + (size_t)seed);
+}
+
+/* blocksum(u): the sum of every byte of the userdata's block. */
+static int blocksum(lua_State *L) {
+  unsigned char *p = lua_touserdata(L, 1);
+  size_t n = (size_t)lua_rawlen(L, 1);
+  lua_Integer sum = 0;
+  for (size_t i = 0; i < n; i++) sum += p[i];
+  lua_pushinteger(L, sum);
+  return 1;
+}
+
+/* Blocks of sizes that are not a multiple of any cell size are written and
+   read to their last byte, from C and from a C function Lua calls. */
+static int userdata(void) {
+  static const size_t sizes[] = {0, 1, 15, 17, 20, 33, 100, 4097};
+  lua_State *L = luaL_newstate();
+  luaL_openlibs(L);
+  lua_register(L, "blocksum", blocksum);
+  lua_newtable(L);
+  for (size_t k = 0; k < sizeof sizes / sizeof sizes[0]; k++) {
+    unsigned char *p = lua_newuserdatauv(L, sizes[k], 1);
+    fill(p, sizes[k], (int)k);
+    lua_rawseti(L, -2, (lua_Integer)k + 1);
+  }
+  lua_setglobal(L, "blocks");
+  run(L, "collectgarbage()\n"
+         "for i, u in ipairs(blocks) do\n"
+         "  io.write(i, ':', blocksum(u), ' ')\n"
+         "end\n"
+         "print()");
+  lua_close(L);
+  return 0;
+}
+
 /* ---- threads -------------------------------------------------------- */
 
 static const char *status_name(int s) {
@@ -675,6 +715,7 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "locals") == 0) return locals();
   if (strcmp(mode, "toclose") == 0) return toclose();
   if (strcmp(mode, "threads") == 0) return threads();
+  if (strcmp(mode, "userdata") == 0) return userdata();
   if (strcmp(mode, "locale") == 0) return locale();
   if (strcmp(mode, "debug") == 0 && argc > 2) return debug(argc, argv);
   fprintf(stderr, "unknown mode %s\n", mode);

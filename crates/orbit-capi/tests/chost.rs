@@ -70,9 +70,23 @@ fn host() -> &'static (PathBuf, PathBuf) {
     })
 }
 
+/// A command that runs `program`, under the command `ORBIT_TEST_WRAPPER`
+/// names when it is set (words split at spaces), as tests/memcheck/run.sh
+/// runs the host under valgrind.
+fn wrapped(program: &Path) -> Command {
+    let wrapper = std::env::var("ORBIT_TEST_WRAPPER").unwrap_or_default();
+    let mut words = wrapper.split_whitespace();
+    let mut command = match words.next() {
+        Some(first) => Command::new(first),
+        None => return Command::new(program),
+    };
+    command.args(words).arg(program);
+    command
+}
+
 fn run(mode: &str) -> String {
     let (exe, dir) = host();
-    let mut command = Command::new(exe);
+    let mut command = wrapped(exe);
     command.arg(mode).env("LD_LIBRARY_PATH", dir);
     if std::env::var_os("ORBIT_CHOST_SANITIZE").is_some() {
         // A C panic function ends the program without closing the state,
@@ -81,6 +95,10 @@ fn run(mode: &str) -> String {
         command
             .env("ASAN_OPTIONS", "detect_leaks=0")
             .env("HOST_SANITIZED", "1");
+    }
+    if std::env::var_os("ORBIT_TEST_WRAPPER").is_some() {
+        // Under valgrind the process's memory is valgrind's too.
+        command.env("HOST_SANITIZED", "1");
     }
     let out = command.output().unwrap();
     let (o, e) = (
@@ -252,6 +270,18 @@ fn locals_of_a_lua_caller_from_c() {
     );
 }
 
+/// Userdata blocks hold every byte C asked for, whatever the size: the
+/// memory checker (tests/memcheck) sees a block that is short.
+#[test]
+#[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
+fn userdata_blocks_hold_every_byte_asked_for() {
+    // The reference liblua prints the same.
+    assert_eq!(
+        run("userdata"),
+        "1:0 2:1 3:765 4:1003 5:1410 6:3861 7:11954 8:522247 \n"
+    );
+}
+
 #[test]
 #[ignore = "needs ORBIT_LIBORBIT, the liborbit ./build.sh laid out"]
 fn to_be_closed_slots_from_c() {
@@ -351,7 +381,7 @@ fn without_the_debugger_nothing_listens() {
     let (exe, dir) = host();
     let (script, stop) = spin("nodebug");
     std::fs::write(&stop, "").unwrap();
-    let out = Command::new(exe)
+    let out = wrapped(exe)
         .arg("debug")
         .arg(&script)
         .arg(&stop)
@@ -418,7 +448,7 @@ fn c_states_are_debugged_through_the_environment_or_the_api() {
 
     let (exe, dir) = host();
     let (script, stop) = spin("debug");
-    let mut child = Command::new(exe)
+    let mut child = wrapped(exe)
         .arg("debug")
         .arg(&script)
         .arg(&stop)
