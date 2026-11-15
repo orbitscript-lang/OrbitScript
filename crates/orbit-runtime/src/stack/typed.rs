@@ -451,6 +451,18 @@ impl Push for Nil {
     }
 }
 
+/// A string result built in the isolate's scratch buffer
+/// ([`Stack::take_buffer`]), which goes back for reuse once pushed.
+#[derive(Debug)]
+pub(crate) struct Buffer(pub Vec<u8>);
+
+impl Push for Buffer {
+    #[inline(always)]
+    fn push(self, s: &mut Stack<'_>) {
+        s.push_buffer(self.0);
+    }
+}
+
 /// The value at an index (an argument, an upvalue), pushed again.
 impl Push for Any {
     #[inline(always)]
