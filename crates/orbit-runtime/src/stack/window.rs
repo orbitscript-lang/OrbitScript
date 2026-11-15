@@ -1255,6 +1255,36 @@ impl<'s> Stack<'s> {
         self.ctx.push(RawValue::Table(t));
     }
 
+    /// [`Stack::create_table`] with room for `narr` array and `nrec` hash
+    /// entries, or `not enough memory` if they can't be allocated.
+    pub(crate) fn try_create_table(&mut self, narr: usize, nrec: usize) -> StackResult<()> {
+        let Ok(t) = Table::try_with_capacity(narr, nrec) else {
+            return Err(Raised(self.ctx.no_memory()));
+        };
+        let t = self.ctx.new_table(t);
+        self.ctx.push(RawValue::Table(t));
+        Ok(())
+    }
+
+    /// Push a table with the `count` values from index `first` at keys
+    /// `1..=count`, and room for `nrec` more entries.
+    pub(crate) fn push_array_of(
+        &mut self,
+        first: i32,
+        count: usize,
+        nrec: usize,
+    ) -> StackResult<()> {
+        let t = self.ctx.new_table(Table::with_capacity(count, nrec));
+        self.ctx.push(RawValue::Table(t));
+        let from = (first.max(1) - 1) as usize;
+        for i in 0..count {
+            let v = self.ctx.arg(from + i);
+            crate::object::table::set_int(&mut self.ctx.vm.heap, t, i as i64 + 1, v)
+                .map_err(|_| Raised(self.ctx.no_memory()))?;
+        }
+        Ok(())
+    }
+
     /// Push a userdata of `size` bytes, zeroed and aligned to 16, with
     /// `nuv` user values, and give its memory, which stays put as long as
     /// the userdata lives.
