@@ -12,7 +12,7 @@ use crate::locale::{CLocaleProvider, LocaleProvider};
 use crate::text::{LineEndings, TextWriter};
 use crate::vm::op;
 
-/// The host's settings, one per VM ([`Runtime::host`](super::Runtime::host)).
+/// The host's settings, one per VM ([`VmState::host`](super::VmState::host)).
 #[derive(Debug)]
 pub struct Host {
     limits: Limits,
@@ -69,7 +69,7 @@ impl Host {
     }
 
     /// The stream `print` and `io.stdout` share.
-    pub fn out(&mut self) -> &mut dyn WriteDebug {
+    pub(crate) fn out(&mut self) -> &mut dyn WriteDebug {
         &mut *self.out
     }
 
@@ -79,7 +79,7 @@ impl Host {
     }
 
     /// How text streams treat line endings ([`LineEndings`]).
-    pub fn line_endings(&self) -> LineEndings {
+    pub(crate) fn line_endings(&self) -> LineEndings {
         self.line_endings
     }
 
@@ -93,7 +93,7 @@ impl Host {
 
     /// Whether `warn` messages are shown. Not consulted while a warning
     /// hook is set.
-    pub fn warnings(&self) -> bool {
+    pub(crate) fn warnings(&self) -> bool {
         self.warnings
     }
 
@@ -103,19 +103,19 @@ impl Host {
     }
 
     /// The host's warning function, if it took warnings over.
-    pub fn warn_hook(&mut self) -> Option<&mut WarnHook> {
+    pub(crate) fn warn_hook(&mut self) -> Option<&mut WarnHook> {
         self.warn_hook.as_mut()
     }
 
     /// Send every warning piece to `hook` instead of showing it.
-    pub fn set_warn_hook(&mut self, hook: WarnHook) {
+    pub(crate) fn set_warn_hook(&mut self, hook: WarnHook) {
         self.warn_hook = Some(hook);
     }
 
     /// Emit a warning (Lua's `warn`): to the warning hook if there is one,
     /// otherwise on stderr as `Lua warning: msg` if warnings are on
     /// ([`Host::warnings`]; off by default).
-    pub fn warn(&mut self, msg: &[u8]) {
+    pub(crate) fn warn(&mut self, msg: &[u8]) {
         if let Some(hook) = &mut self.warn_hook {
             (hook.0)(msg, false);
             return;
@@ -165,13 +165,13 @@ impl Host {
     /// if the interrupt was the host's (the C API's signal-safe
     /// `lua_sethook` raises the flag to have its hook installed) and has
     /// been handled, false to raise `interrupted!`.
-    pub fn set_interrupt_handler(&mut self, handler: fn(&mut Vm) -> bool) {
+    pub(crate) fn set_interrupt_handler(&mut self, handler: fn(&mut Vm) -> bool) {
         self.interrupt_handler = Some(handler);
     }
 
     /// Per-VM state of host libraries, one value per type (the `math`
     /// library's random generator, for example).
-    pub fn ext(&self) -> &Extensions {
+    pub(crate) fn ext(&self) -> &Extensions {
         &self.ext
     }
 

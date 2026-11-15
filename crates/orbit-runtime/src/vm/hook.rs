@@ -19,10 +19,10 @@ use orbit_bytecode::{MULTI, Op};
 use crate::vm::{Frame, FrameKind, LuaError, Vm};
 
 /// Hook event bits ([`Hook::mask`]).
-pub const CALL: u8 = 1;
-pub const RETURN: u8 = 2;
-pub const LINE: u8 = 4;
-pub const COUNT: u8 = 8;
+pub(crate) const CALL: u8 = 1;
+pub(crate) const RETURN: u8 = 2;
+pub(crate) const LINE: u8 = 4;
+pub(crate) const COUNT: u8 = 8;
 /// Not an event: an [`crate::vm::Interrupt`] was seen, and the next hook point
 /// raises `interrupted!`. Arms the hooked loop like an event does.
 pub(crate) const INTERRUPT: u8 = 16;
@@ -37,26 +37,26 @@ const FRESH: u32 = u32::MAX;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Hook {
     /// The hook function (nil when off).
-    pub func: Value,
+    pub(crate) func: Value,
     /// Which events fire ([`CALL`], [`RETURN`], [`LINE`], [`COUNT`]).
-    pub mask: u8,
+    pub(crate) mask: u8,
     /// The count interval as given to `sethook` (count events only when
     /// positive).
-    pub base_count: i64,
+    pub(crate) base_count: i64,
     /// Instructions left until the next count event.
-    pub count: u32,
+    pub(crate) count: u32,
     /// A hook is running: no events fire until it returns.
-    pub active: bool,
+    pub(crate) active: bool,
     /// The instruction the line check last saw, and the frame depth it
     /// belongs to.
-    pub old_pc: u32,
-    pub old_depth: u32,
+    pub(crate) old_pc: u32,
+    pub(crate) old_depth: u32,
     /// A Lua frame was just entered (`Some(true)` for a tail call): the
     /// next hook point fires its call event.
-    pub call_pending: Option<bool>,
+    pub(crate) call_pending: Option<bool>,
     /// While a call or return hook runs: the frame index it is for and the
     /// values it transfers (`ftransfer`, `ntransfer`).
-    pub transfer: Option<(usize, u32, u32)>,
+    pub(crate) transfer: Option<(usize, u32, u32)>,
 }
 
 impl Default for Hook {
@@ -78,19 +78,19 @@ impl Default for Hook {
 impl Hook {
     /// Whether the hooked dispatch loop should run.
     #[inline(always)]
-    pub fn armed(&self) -> bool {
+    pub(crate) fn armed(&self) -> bool {
         cfg!(feature = "hooks") && self.mask != 0
     }
 
     /// Whether any of `events` would fire now.
     #[inline(always)]
-    pub fn wants(&self, events: u8) -> bool {
+    pub(crate) fn wants(&self, events: u8) -> bool {
         cfg!(feature = "hooks") && self.mask & events != 0 && !self.active
     }
 
     /// The hook a thread created now starts with: the mask and count, but
     /// no function.
-    pub fn inherited(&self) -> Hook {
+    pub(crate) fn inherited(&self) -> Hook {
         Hook {
             func: Value::Nil,
             mask: self.mask & EVENTS,
@@ -101,7 +101,7 @@ impl Hook {
     }
 
     /// Set the hook (`mask` 0 or a nil `func` turns it off).
-    pub fn set(&mut self, func: Value, mut mask: u8, count: i64) {
+    pub(crate) fn set(&mut self, func: Value, mut mask: u8, count: i64) {
         if count > 0 {
             mask |= COUNT;
         } else {

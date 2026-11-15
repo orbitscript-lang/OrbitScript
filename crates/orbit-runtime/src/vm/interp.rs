@@ -366,7 +366,7 @@ const HANDLER_HEADROOM: usize = 5_000;
 /// unless a message handler is running and stays inside its headroom. Past
 /// that, the error is an error in error handling.
 #[cold]
-fn overflow(rt: &mut crate::vm::Runtime, end: usize) -> Option<Exc> {
+fn overflow(rt: &mut crate::vm::VmState, end: usize) -> Option<Exc> {
     let handling = rt
         .stack
         .frames
@@ -385,7 +385,7 @@ fn overflow(rt: &mut crate::vm::Runtime, end: usize) -> Option<Exc> {
 /// [`Vm::push_lua_frame`], for callers that already hold the code.
 #[inline(always)]
 fn enter_lua_frame(
-    rt: &mut crate::vm::Runtime,
+    rt: &mut crate::vm::VmState,
     proto: Shape,
     c: Gc<Closure>,
     func: usize,
@@ -405,7 +405,7 @@ fn enter_lua_frame(
 /// window to the caller; `None` for any other call.
 #[inline(always)]
 pub(crate) fn enter_lua_frame_fast(
-    rt: &mut crate::vm::Runtime,
+    rt: &mut crate::vm::VmState,
     proto: &Shape,
     c: Gc<Closure>,
     func: usize,
@@ -451,7 +451,7 @@ pub(crate) fn enter_lua_frame_fast(
 /// error.
 #[inline(never)]
 pub(crate) fn enter_lua_frame_general(
-    rt: &mut crate::vm::Runtime,
+    rt: &mut crate::vm::VmState,
     proto: Shape,
     c: Gc<Closure>,
     func: usize,

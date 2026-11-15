@@ -119,7 +119,7 @@ fn a_failing_close_handler_replaces_the_error() {
     let Value::Str(m) = e.value else {
         panic!("{:?}", e.value)
     };
-    assert_eq!(vm.heap.get(m).as_bytes(), b"from close");
+    assert_eq!(vm.str_bytes(m), b"from close");
     let tb = e.traceback.expect("a traceback");
     assert!(tb.starts_with("stack traceback:"), "{tb}");
 }

@@ -11,16 +11,16 @@ macro_rules! meta_fields {
         /// for what they are to a table, a field.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[repr(u8)]
-        pub enum MetaField {
+        pub(crate) enum MetaField {
             $($variant,)*
         }
 
         impl MetaField {
             /// Every field, in ID order.
-            pub const ALL: &'static [MetaField] = &[$(MetaField::$variant,)*];
+            pub(crate) const ALL: &'static [MetaField] = &[$(MetaField::$variant,)*];
 
             /// The metatable field name, such as `__index`.
-            pub fn field(self) -> &'static str {
+            pub(crate) fn field(self) -> &'static str {
                 match self {
                     $(MetaField::$variant => $name,)*
                 }
@@ -74,7 +74,7 @@ const _: () = assert!(CACHED <= u16::BITS as usize && CACHED <= MetaField::ALL.l
 impl MetaField {
     /// The name without the underscores, as messages and tracebacks print
     /// it (`metamethod 'index'`).
-    pub fn short_name(self) -> &'static str {
+    pub(crate) fn short_name(self) -> &'static str {
         &self.field()[2..]
     }
 
