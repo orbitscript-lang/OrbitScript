@@ -2,14 +2,15 @@ Deletes: A new string key stored into a free slot (`set_str_miss`).
 Tests: table_store_of_a_new_string_key_into_a_free_slot
 
 diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
-index a41812b..5b1ae85 100644
+index bcfeb27..e5fe707 100644
 --- a/crates/orbit-runtime/src/vm/cold.rs
 +++ b/crates/orbit-runtime/src/vm/cold.rs
-@@ -1018,7 +1018,6 @@ pub(crate) fn set_str_miss(
+@@ -1039,7 +1039,7 @@ pub(crate) fn set_str_miss(
              }
              Err(Some(slot)) if !v.is_nil() => {
                  cache.fill(slot);
--                heap.barrier_back(t);
-                 heap.get_mut(t).insert_str_at(slot, &key, v);
+-                heap.write_back(t).insert_str_at(slot, &key, v);
++                heap.write_no_handles(t).into_untraced().insert_str_at(slot, &key, v);
                  return Ok(());
              }
+             Err(_) => {}

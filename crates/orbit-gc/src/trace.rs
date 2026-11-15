@@ -656,6 +656,10 @@ impl<'a, S: Space> Marker<'a, S> {
         let kind = <S as Holds<T>>::KIND;
         #[cfg(debug_assertions)]
         if self.marks.check.active {
+            if self.marks.check.collecting {
+                let g = self.erase(gc);
+                return self.marks.check.collected.push(g);
+            }
             let current = self.space.arena().is_occupied(gc);
             let marks = &mut *self.marks;
             return marks
@@ -673,6 +677,9 @@ impl<'a, S: Space> Marker<'a, S> {
     pub fn mark_any(&mut self, gc: AnyGc) {
         #[cfg(debug_assertions)]
         if self.marks.check.active {
+            if self.marks.check.collecting {
+                return self.marks.check.collected.push(gc);
+            }
             let marks = &mut *self.marks;
             return marks
                 .check
@@ -691,6 +698,9 @@ impl<'a, S: Space> Marker<'a, S> {
     pub fn ephemeron(&mut self, key: AnyGc, value: AnyGc) {
         #[cfg(debug_assertions)]
         if self.marks.check.active {
+            if self.marks.check.collecting {
+                return self.marks.check.collected.extend([key, value]);
+            }
             let marks = &mut *self.marks;
             return marks.check.ephemeron::<S>(&marks.meta, key, value);
         }

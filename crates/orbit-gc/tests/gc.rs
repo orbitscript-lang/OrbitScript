@@ -233,11 +233,13 @@ fn long_ephemeron_chain_is_marked_without_recursion() {
     let mut h = TestHeap::new();
     let eph = weak_obj(&mut h, WeakMode::KEYS);
     let keys: Vec<_> = (0..100_000).map(|i| obj(&mut h, i)).collect();
-    h.get_mut(eph).map = keys
-        .windows(2)
-        .rev()
-        .map(|w| (Ref::Obj(w[0]), Ref::Obj(w[1])))
-        .collect();
+    h.update(eph, |o| {
+        o.map = keys
+            .windows(2)
+            .rev()
+            .map(|w| (Ref::Obj(w[0]), Ref::Obj(w[1])))
+            .collect();
+    });
     let mut roots = Stack(vec![Ref::Obj(eph), Ref::Obj(keys[0])]);
     h.full_collect(&mut roots);
     assert!(keys.iter().all(|&k| h.is_live(k)));
@@ -442,12 +444,16 @@ fn backward_barrier_keeps_new_child_alive() {
 
 #[test]
 fn missing_barrier_loses_the_object() {
-    // The control for the test above: the same store through `get_mut`,
-    // which skips the barrier, lets the collector free a reachable object.
+    // The control for the test above: the same store without the barrier
+    // (`into_untraced` skips the guard's checks) lets the collector free a
+    // reachable object.
     let mut h = TestHeap::new();
     let (holder, mut roots) = start_marking(&mut h);
     let fresh = obj(&mut h, 2);
-    h.get_mut(holder).strong.push(Ref::Obj(fresh));
+    h.write_no_handles(holder)
+        .into_untraced()
+        .strong
+        .push(Ref::Obj(fresh));
     finish_cycle(&mut h, &mut roots);
     assert!(!h.is_live(fresh), "without a barrier the object is freed");
 }
@@ -457,7 +463,10 @@ fn forward_barrier_marks_child() {
     let mut h = TestHeap::new();
     let (holder, mut roots) = start_marking(&mut h);
     let fresh = obj(&mut h, 2);
-    h.get_mut(holder).strong.push(Ref::Obj(fresh));
+    h.write_no_handles(holder)
+        .into_untraced()
+        .strong
+        .push(Ref::Obj(fresh));
     h.barrier_forward(holder, fresh);
     finish_cycle(&mut h, &mut roots);
     assert!(h.is_live(fresh));
