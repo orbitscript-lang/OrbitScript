@@ -897,6 +897,41 @@ mod pure_tests {
         assert_eq!(Option::<i64>::from_value(Some(V::Bool(false))), None);
     }
 
+    #[orbit_macros::native(crate = crate, name = "twice", pure)]
+    fn twice(x: i64) -> i64 {
+        x.wrapping_mul(2)
+    }
+
+    #[orbit_macros::native(crate = crate, name = "plain")]
+    fn plain() -> i64 {
+        1
+    }
+
+    fn entry(
+        _: &mut crate::vm::NativeCtx<'_>,
+    ) -> Result<crate::vm::NativeReturn, crate::vm::LuaError> {
+        unreachable!("never called")
+    }
+
+    /// Library rows are built in constants; build them at run time too.
+    #[test]
+    fn library_rows_carry_the_fast_path() {
+        use crate::stack::{LibraryRow, library_row};
+        let heap = crate::object::LuaHeap::new();
+        let row = library_row::<twice>();
+        assert_eq!(row.name, "twice");
+        let fast = row.fast.expect("a fast path");
+        assert!(matches!(fast(&heap, &[V::Int(4)]), Some(V::Int(8))));
+        assert!(fast(&heap, &[V::Float(4.0)]).is_none());
+        assert!(library_row::<plain>().fast.is_none());
+        let named = row.named("double");
+        assert_eq!(named.name, "double");
+        assert!(named.fast.is_some());
+        let raw = LibraryRow::raw("raw", entry);
+        assert!(raw.fast.is_none());
+        assert!(raw.with_fast(fast).fast.is_some());
+    }
+
     #[test]
     fn results_are_one_value_or_give_up() {
         assert!(matches!(7i64.into_value(), Some(V::Int(7))));
