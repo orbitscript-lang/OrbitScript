@@ -30,7 +30,8 @@ ipairs_proxy  base=empty      # ipairs through `__index`, per element
 pairs         base=empty      # pairs, per element
 iter_closure  base=empty      # a generic for with a script iterator, per element
 gmatch        base=empty      # the string.gmatch iterator in a for loop, per match
-load_reader   base=empty      # load calls its reader function, per piece
+load_str                      # load of the same source as one string, per piece
+load_reader   base=load_str   # load calls its reader function, per piece
 coroutine     base=empty      # a coroutine round trip: resume and yield
 select        base=empty      # select("#", ...), a plain native
 native_leaf   base=empty      # math.abs, a native with a fast path

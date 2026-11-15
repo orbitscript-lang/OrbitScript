@@ -99,6 +99,12 @@ function rows.gmatch()
   local str = ("x"):rep(100)
   for _ = 1, n / 100 do for _ in string.gmatch(str, "x") do end end
 end
+function rows.load_str()
+  local parts = {}
+  for i = 1, 100 do parts[i] = "local a = 1 " end
+  local src = table.concat(parts)
+  for _ = 1, n / 100 do load(src) end
+end
 function rows.load_reader()
   local parts = {}
   for i = 1, 100 do parts[i] = "local a = 1 " end

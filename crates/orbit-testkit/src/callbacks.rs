@@ -62,6 +62,11 @@ const RUNS: usize = 3;
 /// change that makes a callback slower.
 const TOLERANCE: f64 = 0.03;
 
+/// The least a row may move either way before `--expect` reports it, in
+/// instructions per unit: code layout alone moves the cheapest rows (a
+/// table.unpack element costs under 100) by more than [`TOLERANCE`].
+const SLACK: f64 = 4.0;
+
 /// A row of `rows.txt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -288,11 +293,11 @@ pub fn main(args: &[String]) -> Result<bool> {
     for (r, c) in &shown {
         let rec = recorded.get(&r.name).copied();
         let mark = match rec {
-            Some(e) if c.measured > e.cost * (1.0 + TOLERANCE) => {
+            Some(e) if c.measured > (e.cost * (1.0 + TOLERANCE)).max(e.cost + SLACK) => {
                 worse.push(r.name.clone());
                 "  WORSE"
             }
-            Some(e) if c.measured < e.cost * (1.0 - TOLERANCE) => {
+            Some(e) if c.measured < (e.cost * (1.0 - TOLERANCE)).min(e.cost - SLACK) => {
                 better.push(r.name.clone());
                 "  cheaper"
             }
@@ -482,8 +487,9 @@ fn expected_text(rows: &[Row], recorded: &BTreeMap<String, Recorded>) -> String 
         "# What each row of bench/callbacks/rows.txt costs `orbit`, in instructions\n\
          # per unit, and its ratio to lua5.5, as CI measures them: `cargo build\n\
          # --release`, no profile, Linux x86_64. CI fails when a row costs more\n\
-         # than 3% above its cost here; a change that makes rows cheaper records\n\
-         # the new costs with `--update-expected`.\n",
+         # than 3% (and at least 4 instructions) above its cost here; a change\n\
+         # that makes rows cheaper records the new costs with\n\
+         # `--update-expected`.\n",
     );
     let _ = writeln!(text, "# {:<12} {:>5}  ratio", "row", "cost");
     for r in rows {
