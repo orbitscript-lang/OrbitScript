@@ -22,8 +22,10 @@ use std::path::{Path, PathBuf};
 
 use crate::util::{self, Result};
 
+mod report;
+
 const USAGE: &str = "\
-usage: orbit-testkit coverage --lcov DIR [--update] [--verbose]
+usage: orbit-testkit coverage --lcov DIR [--report OUT] [--update] [--verbose]
 
 Checks the coverage tests/coverage/run.sh measured (DIR holds its LCOV
 files, one per program or library) against tests/coverage/rules.txt:
@@ -32,9 +34,12 @@ the embedding API, is executed by a test or listed with its reason in
 tests/coverage/not-run.txt; and each rule's line coverage stays within
 0.5 points of tests/coverage/lines.txt.
 
-  --lcov DIR   the LCOV files
-  --update     write the line coverage measured to tests/coverage/lines.txt
-  --verbose    also list the functions the measured build does not contain";
+  --lcov DIR    the LCOV files
+  --report OUT  first write the whole project's coverage to OUT: summary.md
+                (per crate, the least-covered files, per file) and
+                coverage.lcov (merged, test code left out) for genhtml
+  --update      write the line coverage measured to tests/coverage/lines.txt
+  --verbose     also list the functions the measured build does not contain";
 
 /// How far a rule's line coverage may fall below the recorded value, in
 /// percentage points: tests whose paths depend on timing (the debugger's
@@ -43,12 +48,18 @@ const SLACK: f64 = 0.5;
 
 pub fn main(args: &[String]) -> Result<bool> {
     let mut lcov = None;
+    let mut report = None;
     let mut update = false;
     let mut verbose = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--lcov" => lcov = Some(PathBuf::from(it.next().ok_or("--lcov needs a directory")?)),
+            "--report" => {
+                report = Some(PathBuf::from(
+                    it.next().ok_or("--report needs a directory")?,
+                ))
+            }
             "--update" => update = true,
             "--verbose" => verbose = true,
             "-h" | "--help" => {
@@ -61,6 +72,9 @@ pub fn main(args: &[String]) -> Result<bool> {
     let lcov = lcov.ok_or_else(|| format!("--lcov is required\n\n{USAGE}"))?;
     let root = util::repo_root();
     let measured = Measured::read(&lcov, &root)?;
+    if let Some(out) = &report {
+        report::write(&measured, &root, out)?;
+    }
     let rules = read_rules(&root)?;
     let not_run = read_not_run(&root)?;
     let recorded = read_lines(&root)?;
@@ -181,6 +195,9 @@ struct Measured {
 #[derive(Default)]
 struct FileCounts {
     functions: HashMap<usize, u64>,
+    /// A name for each function line, from its `FN:` record (mangled), for
+    /// the merged LCOV file the report writes.
+    names: HashMap<usize, String>,
     lines: HashMap<usize, u64>,
 }
 
@@ -205,8 +222,12 @@ impl Measured {
                     file = Some(files.entry(rel).or_default());
                     starts.clear();
                 } else if let Some(rest) = line.strip_prefix("FN:") {
-                    if let Some((l, name)) = rest.split_once(',') {
-                        starts.insert(name, l.parse().unwrap_or(0));
+                    if let (Some(f), Some((l, name))) = (file.as_deref_mut(), rest.split_once(','))
+                    {
+                        let l = l.parse().unwrap_or(0);
+                        starts.insert(name, l);
+                        f.names.entry(l).or_insert_with(|| name.to_string());
+                        f.functions.entry(l).or_insert(0);
                     }
                 } else if let Some(rest) = line.strip_prefix("FNDA:") {
                     if let (Some(f), Some((c, name))) = (file.as_deref_mut(), rest.split_once(','))
