@@ -134,7 +134,7 @@ impl VmState {
             // A native running a continuation, or any native while hooks
             // are on, has a frame.
             let own = matches!(frames.last(), Some(f)
-                if matches!(f.kind, FrameKind::NativeCall { .. } | FrameKind::Native { .. })
+                if matches!(f.kind, FrameKind::NativeCall { .. } | FrameKind::Native { .. } | FrameKind::Nested { .. })
                     && f.func as usize == r.func);
             if n == 0 {
                 return Some(Level(
@@ -380,7 +380,7 @@ impl VmState {
                         let named = (!c.code.builtin).then_some((c, f));
                         (f.base as usize, limit, named)
                     }
-                    FrameKind::Native { call_at, .. } => {
+                    FrameKind::Native { call_at, .. } | FrameKind::Nested { call_at, .. } => {
                         (f.base as usize, next.unwrap_or(call_at as usize), None)
                     }
                     FrameKind::NativeCall { .. } => {
@@ -634,6 +634,7 @@ fn catches(k: FrameKind) -> bool {
             catch: crate::vm::Catch::Yes | crate::vm::Catch::Handler,
             ..
         } | FrameKind::Boundary { .. }
+            | FrameKind::Nested { .. }
             | FrameKind::CoBase
             | FrameKind::Hook
     )
@@ -642,7 +643,10 @@ fn catches(k: FrameKind) -> bool {
 /// Whether a frame of this kind is a level of its own.
 fn is_activation(k: FrameKind) -> bool {
     match k {
-        FrameKind::Lua { .. } | FrameKind::Native { .. } | FrameKind::NativeCall { .. } => true,
+        FrameKind::Lua { .. }
+        | FrameKind::Native { .. }
+        | FrameKind::Nested { .. }
+        | FrameKind::NativeCall { .. } => true,
         FrameKind::Meta { .. }
         | FrameKind::Handler
         | FrameKind::Boundary { .. }
@@ -662,7 +666,9 @@ fn frame_func(stack: &Stack, i: usize) -> Value {
     let f = &stack.frames[i];
     match f.kind {
         FrameKind::Lua { closure, .. } => Value::Closure(closure),
-        FrameKind::Native { id, .. } | FrameKind::NativeCall { id } => Value::Native(id),
+        FrameKind::Native { id, .. }
+        | FrameKind::Nested { id, .. }
+        | FrameKind::NativeCall { id } => Value::Native(id),
         FrameKind::Meta { .. }
         | FrameKind::Handler
         | FrameKind::Boundary { .. }

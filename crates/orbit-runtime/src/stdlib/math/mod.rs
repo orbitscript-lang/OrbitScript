@@ -5,7 +5,7 @@ mod rng;
 use crate::object::number::{self, Number, float_to_int};
 use crate::object::{Gc, LuaHeap, Table, Value};
 use crate::stack::{Any, Arg, Stack, StackResult, library_row, native_fn};
-use crate::vm::{CallOutcome, FastFn, LuaError, Meta, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::vm::{FastFn, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
 use orbit_macros::native;
 
 use rng::Xoshiro;
@@ -344,74 +344,20 @@ fn less(a: Value, b: Value) -> bool {
 }
 
 /// `max`/`min`: the first argument that no later one beats under `<`
-/// (`__lt` included). State in the last two window slots: the next index
-/// to compare, then the index of the best so far. (Continuations find it
-/// from the end, because they don't see the original argument count.)
+/// (`__lt` included, run nested: nothing may yield across it, as in the
+/// reference).
 fn extreme(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
     ctx.check_any(0)?;
-    let n = ctx.nargs();
-    ctx.truncate(n);
-    ctx.push(Value::Int(1)); // NEXT
-    ctx.push(Value::Int(0)); // BEST
-    extreme_run(ctx, want_max)
-}
-
-/// The argument count of a running `extreme`.
-fn extreme_nargs(ctx: &NativeCtx<'_>) -> usize {
-    ctx.len() - 2
-}
-
-/// Where `extreme`'s two state slots sit, counted from its argument count.
-const NEXT: usize = 0;
-const BEST: usize = 1;
-
-fn extreme_run(ctx: &mut NativeCtx<'_>, want_max: bool) -> R {
-    let n = extreme_nargs(ctx);
-    loop {
-        let (i, best) = (ctx.saved_usize(n + NEXT), ctx.saved_usize(n + BEST));
-        if i >= n {
-            let v = ctx.arg(best);
-            return ctx.ret([v]);
-        }
-        let (a, b) = if want_max {
-            (ctx.arg(best), ctx.arg(i))
-        } else {
-            (ctx.arg(i), ctx.arg(best))
-        };
-        match ctx.less_than(a, b)? {
-            Meta::Done(better) => extreme_step(ctx, better),
-            Meta::Call { f, nargs } => {
-                return Ok(NativeReturn::CallThen {
-                    f,
-                    nargs,
-                    k: if want_max { max_after_lt } else { min_after_lt },
-                    protected: false,
-                });
-            }
+    // Every candidate stays rooted in its argument slot.
+    let mut best = ctx.arg(0);
+    for i in 1..ctx.nargs() {
+        let v = ctx.arg(i);
+        let (a, b) = if want_max { (best, v) } else { (v, best) };
+        if ctx.less_than_now(a, b)? {
+            best = v;
         }
     }
-}
-
-/// Record one comparison: the candidate wins if `better`.
-fn extreme_step(ctx: &mut NativeCtx<'_>, better: bool) {
-    let n = extreme_nargs(ctx);
-    let i = ctx.saved_usize(n + NEXT);
-    if better {
-        ctx.set(n + BEST, Value::Int(i as i64));
-    }
-    ctx.set(n + NEXT, Value::Int(i as i64 + 1));
-}
-
-fn max_after_lt(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> R {
-    let r = crate::stdlib::first_result(ctx, out)?;
-    extreme_step(ctx, !r.is_falsy());
-    extreme_run(ctx, true)
-}
-
-fn min_after_lt(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> R {
-    let r = crate::stdlib::first_result(ctx, out)?;
-    extreme_step(ctx, !r.is_falsy());
-    extreme_run(ctx, false)
+    ctx.ret([best])
 }
 
 fn max(ctx: &mut NativeCtx<'_>) -> R {

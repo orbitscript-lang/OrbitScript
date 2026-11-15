@@ -108,16 +108,16 @@ Meta frames hold no GC references (the action is plain data), are skipped when c
 
 ### Natives
 
-Natives reach metamethods through `CallThen`. `NativeCtx` has helpers that either answer at once or set up the call:
+Natives reach metamethods in two ways. The `*_now` helpers run the metamethod nested and give its result (`index_now`, `set_index_now`, `length_now`, `less_than_now`, `equal_now`); a table whose metamethod is a function has it called straight away, with no lookup result packed in between. The others answer at once or set up the call, for a native that runs it as a continuation:
 
 ```rust
-pub enum Meta<T> { Done(T), Call { f: Value, nargs: usize } }   // arguments already pushed
+pub enum Meta<T> { Done(T), Call { nargs: usize } }   // the handler and its arguments pushed
 ctx.index(obj, key)?; ctx.set_index(obj, key, v)?; ctx.length(v)?; ctx.arith(op, a, b)?
 ctx.equal(a, b)?; ctx.less_than(a, b)?; ctx.less_equal(a, b)?
 ctx.metamethod(v, MetaField::Name) -> Value; ctx.metatable(v) -> Option<Gc<Table>>
 ```
 
-A native returns `CallThen` for `Meta::Call` and picks the result up in its continuation. The table and string libraries use these for `table.insert`, `sort` comparisons and `gsub` with a table replacement.
+A native returns `CallThen` for `Meta::Call` and picks the result up in its continuation, or calls it nested with `ctx.meta_value(nargs)`.
 
 ### Base library
 
@@ -158,7 +158,7 @@ flowchart TB
 - `coroutine.yield(...)` makes the VM push a continuation frame for the yield itself (so the next resume's arguments become its results), move the values to the resumer, swap back and finish the resume with them. Frames in between (`pcall`, metamethods, `for` iterators) stay on the coroutine's stack, which is why yields cross them.
 - The body returning into `CoBase`, or an error reaching it, marks the coroutine dead and delivers the results or the error to the resumer the same way.
 - `coroutine.wrap` returns a **native closure** over its coroutine, whose continuation re-raises errors, adding the position for string errors as the reference does. A native closure is a `Closure` whose prototype is a shared one-instruction stub, `NativeEntry { id }`, and whose captures are its upvalues. Calling one enters the stub like any Lua function, so the call fast path is unchanged; the stub runs native `id` with the arguments in place of its frame, and `ctx.upvalue(i)` reads the captures. `string.gmatch` iterators use them too.
-- **Yieldability matches the reference.** Natives never re-enter the interpreter, so there is no hidden C boundary inside a coroutine; instead, frames that the reference would hold on the C stack refuse yields: `CallThen` from library natives (a `table.sort` comparator, a `gsub` callback), built-ins written in OrbitScript that are C functions in the reference (`ProtoCode::refuses_yield`), message handlers, and boundaries. A yield across one fails with `attempt to yield across a C-call boundary`. `pcall`, `__pairs` and `dofile` use `CallThenYieldable`, as the reference lets them. `isyieldable` reports whether a yield would succeed.
+- **Yieldability matches the reference.** Frames that the reference would hold on the C stack refuse yields: nested calls from natives (a `gsub` callback, `__index` under `table.concat`), `CallThen` from library natives (a `table.sort` comparator), built-ins written in OrbitScript that are C functions in the reference (`ProtoCode::refuses_yield`), message handlers, and boundaries. A yield across one fails with `attempt to yield across a C-call boundary`. `pcall`, `__pairs` and `dofile` use `CallThenYieldable`, as the reference lets them. `isyieldable` reports whether a yield would succeed.
 - **Limits**: nested resumes and calls back into the interpreter are capped where the reference stops (196 nested resumes; 200 open nested calls, a resume counting twice), with `C stack overflow`; each coroutine's own depth is limited by the stack limit.
 
 `coroutine.close(co)` on a suspended coroutine runs its pending `__close` handlers (newest first) on `co`'s stack through the unwinding below, then marks it dead and returns `true`, or `false, err` if a handler failed. On a dead coroutine it does the same with the error it died with.

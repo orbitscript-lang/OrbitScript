@@ -747,7 +747,24 @@ impl Vm {
     /// `NativeReturn::Exit`: the running coroutine closes itself. Its
     /// variables still to close are closed as an error unwinding to its
     /// base would close them, then it ends.
+    ///
+    /// A native's nested call on the coroutine's stack is still running in
+    /// Rust: the close leaves it as an error that only the calls' records
+    /// stop ([`Cause::Exit`]), each native handing it on, and the coroutine
+    /// ends when it reaches the base.
     pub(crate) fn exit_co(&mut self) -> Result<Flow, Exc> {
+        let nested = self.rt.stack.frames.iter().skip(1).any(|f| {
+            matches!(
+                f.kind,
+                FrameKind::Nested { .. }
+                    | FrameKind::Boundary { native: true, .. }
+                    | FrameKind::Hook
+            )
+        });
+        if nested {
+            self.rt.stack.aux.closing = Closing::Itself;
+            return Err(Exc::Lua(LuaError::with_cause(Value::Nil, Cause::Exit)));
+        }
         if self.rt.stack.aux.tbc.is_empty() {
             self.rt.co.xfer.clear();
             return self.co_finished();
@@ -1019,6 +1036,7 @@ pub(crate) fn yieldable(heap: &LuaHeap, stack: &Stack) -> bool {
         }
         | FrameKind::Handler
         | FrameKind::Boundary { .. }
+        | FrameKind::Nested { .. }
         // A hook is a nested call, as a Lua hook is in the reference.
         | FrameKind::Hook => true,
         // Most built-ins refuse, as the C functions they stand for do.

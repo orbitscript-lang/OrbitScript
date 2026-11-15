@@ -529,15 +529,7 @@ impl<'s> Stack<'s> {
     fn finish_meta<T>(&mut self, m: Meta<T>, conv: impl FnOnce(RawValue) -> T) -> StackResult<T> {
         match m {
             Meta::Done(v) => Ok(v),
-            Meta::Call { f, nargs } => {
-                let c = &mut self.ctx;
-                let at = c.len() - nargs;
-                c.insert(at, f);
-                let n = c.call(nargs, None)?;
-                let r = if n > 0 { c.arg(at) } else { RawValue::Nil };
-                c.truncate(at);
-                Ok(conv(r))
-            }
+            Meta::Call { nargs } => Ok(conv(self.ctx.meta_value(nargs)?)),
         }
     }
 
@@ -1580,6 +1572,8 @@ impl<'s> Stack<'s> {
                 self.adjust_results(n, nresults);
                 Ok(Status::Ok)
             }
+            // A coroutine closing itself is not caught.
+            Err(e) if e.is_exit() => Err(e.into()),
             Err(e) => {
                 let status = self.value_status(e.value);
                 self.ctx.push(e.value);

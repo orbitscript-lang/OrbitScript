@@ -4,8 +4,7 @@
 use std::fmt::Write as _;
 
 use crate::object::{Gc, LuaStr, OrbitString, Value, number};
-use crate::stdlib::first_result;
-use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn};
+use crate::vm::{LuaError, MetaField, NativeCtx, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -87,40 +86,11 @@ fn parse_spec(body: &[u8], flags: &[u8], precision_ok: bool) -> Option<Spec> {
     (i == body.len()).then_some(spec)
 }
 
-/// Saved state while a `%s` argument's `__tostring` runs, in the slots
-/// after the arguments: where the conversion starts in the format, how many
-/// arguments were used before it, and the output so far. They are the last
-/// slots of the window, so the continuation finds the argument count from
-/// them.
-const S_POS: usize = 0;
-const S_ARG: usize = 1;
-const S_OUT: usize = 2;
-const STATE_SLOTS: usize = 3;
-
 pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
     ctx.check_str(0)?;
     let nargs = ctx.nargs();
     let out = ctx.take_buf();
     format_from(ctx, nargs, 0, 0, out)
-}
-
-/// After `__tostring` returned: the result replaces the argument, and the
-/// conversion runs again from the start.
-fn format_after_tostring(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let r = first_result(ctx, outcome)?;
-    if !matches!(r, Value::Str(_) | Value::Int(_) | Value::Float(_)) {
-        let msg = ctx.new_str(b"'__tostring' must return a string");
-        return Err(ctx.error_value(msg));
-    }
-    let base = ctx.len() - STATE_SLOTS;
-    let i = ctx.saved_usize(base + S_POS);
-    let arg = ctx.saved_usize(base + S_ARG);
-    let mut out = ctx.take_buf();
-    if let Value::Str(s) = ctx.arg(base + S_OUT) {
-        out.extend_from_slice(ctx.bytes(s));
-    }
-    ctx.set(arg + 1, r);
-    format_from(ctx, base, i, arg, out)
 }
 
 /// An error quoting the conversion at `fmt[start..end]` between `before`
@@ -301,11 +271,15 @@ fn format_from(
                 pad(&mut out, &spec, b"", text.as_bytes(), false);
             }
             b's' => {
-                let v = ctx.check_any(arg)?;
+                let mut v = ctx.check_any(arg)?;
                 if !matches!(v, Value::Str(_)) {
                     let h = ctx.metamethod(v, MetaField::ToString);
                     if !h.is_nil() {
-                        return call_tostring(ctx, nargs, h, v, conv_start, arg - 1, out);
+                        // Called nested: nothing may yield across it, as in
+                        // the reference. The result replaces the argument,
+                        // which keeps it rooted.
+                        v = crate::stdlib::tostring_now(ctx, h, v)?;
+                        ctx.set(arg, v);
                     }
                 }
                 if body.is_empty() {
@@ -327,33 +301,6 @@ fn format_from(
     }
     let r = ctx.new_str_buf(out);
     ctx.ret([r])
-}
-
-/// Save the formatting state and call `__tostring` on a `%s` argument.
-fn call_tostring(
-    ctx: &mut NativeCtx<'_>,
-    base: usize,
-    h: Value,
-    v: Value,
-    pos: usize,
-    arg: usize,
-    out: Vec<u8>,
-) -> R {
-    let out = ctx.new_str_buf(out);
-    ctx.truncate(base);
-    for _ in 0..STATE_SLOTS {
-        ctx.push(Value::Nil);
-    }
-    ctx.set(base + S_POS, Value::Int(pos as i64));
-    ctx.set(base + S_ARG, Value::Int(arg as i64));
-    ctx.set(base + S_OUT, out);
-    ctx.push(v);
-    Ok(NativeReturn::CallThen {
-        f: h,
-        nargs: 1,
-        k: format_after_tostring,
-        protected: false,
-    })
 }
 
 /// Append `sign`/`prefix` and `body`, padded to the spec's width. `zero_ok`

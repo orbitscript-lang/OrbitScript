@@ -8,7 +8,7 @@ use orbit_lua_version::LUA;
 use crate::vm::meta::MetaField;
 use crate::vm::native::{CallOutcome, NativeCtx, NativeReturn};
 use crate::vm::ops::{self, Exc};
-use crate::vm::{Catch, Frame, FrameKind, LuaError, Vm};
+use crate::vm::{Catch, Cause, Frame, FrameKind, LuaError, Vm};
 
 /// The most `__call` handlers one call goes through (observed from lua5.5:
 /// a chain of 15 works, 16 is "too long"). `getinfo`'s `extraargs` counts
@@ -400,9 +400,10 @@ fn enter_lua_frame(
     }
 }
 
-/// The common call: exactly the parameters, no varargs, room for the
-/// frame. Pushes the frame and returns its base, leaving sizing the register
-/// window to the caller; `None` for any other call.
+/// The common call: at least the parameters (extra arguments just sit in
+/// the callee's registers, as in the general path), no varargs, room for
+/// the frame. Pushes the frame and returns its base, leaving sizing the
+/// register window to the caller; `None` for any other call.
 #[inline(always)]
 pub(crate) fn enter_lua_frame_fast(
     rt: &mut crate::vm::VmState,
@@ -413,7 +414,7 @@ pub(crate) fn enter_lua_frame_fast(
     want: u8,
     ret_pc: u32,
 ) -> Option<usize> {
-    if nargs != proto.nparams as usize || proto.is_vararg {
+    if nargs < proto.nparams as usize || proto.is_vararg {
         return None;
     }
     let base = func + 1;
@@ -549,7 +550,7 @@ impl Vm {
     pub(crate) fn after_return(&mut self) -> Result<Flow, Exc> {
         let f = *self.rt.stack.frames.last().expect("frame");
         match f.kind {
-            FrameKind::Boundary { .. } => {
+            FrameKind::Boundary { .. } | FrameKind::Nested { .. } => {
                 self.rt.stack.frames.pop();
                 Ok(Flow::Done)
             }
@@ -803,6 +804,7 @@ impl Vm {
             error: mut e,
             mut stage,
         } = thrown;
+        let exit = e.is_exit();
         // Once per error, before its handler and before anything unwinds
         // (`coroutine.close` unwinding a dead coroutine raises nothing new).
         #[cfg(feature = "debugger")]
@@ -817,7 +819,12 @@ impl Vm {
                     Exc::Left(e) => return Err(e),
                     x => self.thrown(x),
                 };
+                // A coroutine closing itself goes on closing, with the
+                // handler's error.
                 e = t.error;
+                if exit {
+                    e.cause = Cause::Exit;
+                }
                 stage = t.stage;
             }};
         }
@@ -832,7 +839,11 @@ impl Vm {
                         FrameKind::Native {
                             catch: Catch::Yes | Catch::Handler,
                             ..
-                        } | FrameKind::Boundary { .. }
+                        } if !exit
+                    ) || matches!(
+                        f.kind,
+                        FrameKind::Boundary { .. }
+                            | FrameKind::Nested { .. }
                             | FrameKind::CoBase
                             | FrameKind::Hook
                     )
@@ -846,6 +857,7 @@ impl Vm {
                     ..
                 } | FrameKind::Boundary { handler: true, .. }
             ) && stage == Stage::Raised
+                && !exit
             {
                 // An error inside the handler calls it again, up to a limit.
                 let nested = frames[idx..]
@@ -881,7 +893,7 @@ impl Vm {
             // Where the catcher's callee sits: every variable at or above
             // it belongs to a frame the error leaves.
             let limit = match f.kind {
-                FrameKind::Native { call_at, .. } => call_at,
+                FrameKind::Native { call_at, .. } | FrameKind::Nested { call_at, .. } => call_at,
                 _ => f.func,
             };
             if closes {
@@ -923,11 +935,14 @@ impl Vm {
                         Err(x) => replaced_by!(x),
                     }
                 }
-                FrameKind::Boundary { .. } | FrameKind::Hook => {
+                FrameKind::Boundary { .. } | FrameKind::Nested { .. } | FrameKind::Hook => {
                     // The error leaves the VM (or the hook call, which raises
                     // it again where the hook was called, or the native's
                     // call, which hands it to the native).
-                    let native = matches!(f.kind, FrameKind::Boundary { native: true, .. });
+                    let native = matches!(
+                        f.kind,
+                        FrameKind::Boundary { native: true, .. } | FrameKind::Nested { .. }
+                    );
                     if e.traceback.is_none() && !native {
                         let tb = self.rt.traceback(&self.heap, None, 1);
                         e.traceback = Some(tb.into_boxed_str());

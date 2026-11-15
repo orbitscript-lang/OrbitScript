@@ -40,7 +40,7 @@ flowchart LR
 - A reader is called until it returns nil or an empty string. Numbers count as strings. Anything else, or an error in the reader, makes `load` return nil and a message.
 - Text and binary are told apart by the first byte: binary chunks start with `\27`, which text can't.
 
-A reader is driven with `CallThen` continuations (ADR-3), so it never grows the Rust stack and can yield. Pieces read so far stay in the native's window, where the collector sees them.
+`load` calls its reader nested ([`NativeCtx::call_want`](vm.md#natives), ADR-3), as lua5.5 does: nothing may yield across the call. The pieces are joined in a Rust buffer as they arrive, since they are bytes the collector need not see.
 
 `loadfile` and `dofile` read the file, drop a UTF-8 byte-order mark and a first line starting with `#` (keeping its line break, so line numbers stay right), and name the chunk `@path`. With no file name they read standard input as `=stdin`. The CLI reads scripts the same way, so byte-order marks and `#!` lines behave as in `lua`.
 

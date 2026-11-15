@@ -1,8 +1,8 @@
 //! The `table` library.
 //!
 //! Each function has a raw loop for tables without a metatable, the common
-//! case, and a resumable slow path in [`slow`] that honours `__index`,
-//! `__newindex` and `__len` (docs/design/stdlib-string-table-math.md#table).
+//! case, and a slow path in [`slow`] that honours `__index`, `__newindex`
+//! and `__len` (docs/design/stdlib-string-table-math.md#table).
 
 mod slow;
 

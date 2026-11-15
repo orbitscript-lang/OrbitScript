@@ -578,7 +578,9 @@ impl Vm {
                     ..
                 }
                 | FrameKind::CoBase => Some(true),
-                FrameKind::Boundary { .. } | FrameKind::Hook => Some(false),
+                FrameKind::Boundary { .. } | FrameKind::Nested { .. } | FrameKind::Hook => {
+                    Some(false)
+                }
                 _ => None,
             })
             == Some(true);
