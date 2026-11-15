@@ -454,10 +454,15 @@ fn thread_name(thread: i64) -> String {
 
 /// The sockets of programs serving debuggers: `(pid, path)`.
 fn sockets() -> Vec<(u32, PathBuf)> {
-    let Ok(dir) = socket::dir() else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    match socket::dir() {
+        Ok(dir) => sockets_in(&dir),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The sockets in `dir` named for a serving program: `(pid, path)`.
+fn sockets_in(dir: &Path) -> Vec<(u32, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut found: Vec<(u32, PathBuf)> = entries
@@ -485,18 +490,38 @@ fn ask(path: &Path) -> Option<Value> {
     (r["success"] == true).then(|| r["body"].clone())
 }
 
-/// Whether nothing listens at `path` any more (its program ended).
-fn dead(path: &Path) -> bool {
-    matches!(
+/// Whether the socket at `path`, opened by process `pid`, was left by a
+/// program that ended without removing it: nothing listens there and the
+/// process is gone. A refused connection alone doesn't show that: the
+/// file exists from the moment its program binds, before it listens, and
+/// another program looking in that moment must leave it alone.
+fn dead(pid: u32, path: &Path) -> bool {
+    let refused = matches!(
         Stream::connect(path),
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
-    )
+    );
+    refused && !running(pid)
+}
+
+/// Whether a process `pid` is running.
+fn running(pid: u32) -> bool {
+    #[cfg(unix)]
+    return crate::process::running(pid);
+    #[cfg(windows)]
+    return crate::win::running(pid);
 }
 
 /// Remove sockets left by programs that crashed.
 fn remove_dead_sockets() {
-    for (_, path) in sockets() {
-        if dead(&path) {
+    if let Ok(dir) = socket::dir() {
+        remove_dead_sockets_in(&dir);
+    }
+}
+
+/// Remove the sockets in `dir` left by programs that crashed.
+fn remove_dead_sockets_in(dir: &Path) {
+    for (pid, path) in sockets_in(dir) {
+        if dead(pid, &path) {
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -516,7 +541,7 @@ pub fn list() -> String {
                 serving.push(pid);
                 out.push(d);
             }
-            _ if dead(&path) => {
+            _ if dead(pid, &path) => {
                 let _ = std::fs::remove_file(&path);
             }
             _ => {}
@@ -742,5 +767,51 @@ mod tests {
         assert!(catches(0x200, 10));
         assert!(is_orbit(Path::new("/usr/local/bin/orbit")));
         assert!(!is_orbit(Path::new("/usr/bin/orbitc")));
+    }
+
+    /// A socket file nobody listens on yet, as between a program's bind
+    /// and listen: bound, then the listener closed, which leaves the file.
+    fn unlistened(path: &Path) {
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn only_sockets_of_ended_programs_are_removed() {
+        let dir = std::env::temp_dir().join(format!(
+            "orbit-dap-dead-sockets-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+
+        // A program that has bound but isn't listening yet: still running.
+        let starting = dir.join(format!("{}-00000000000000aa.sock", std::process::id()));
+        unlistened(&starting);
+        // A program that is listening.
+        let serving_path = dir.join(format!("{}-00000000000000bb.sock", std::process::id()));
+        let serving = std::os::unix::net::UnixListener::bind(&serving_path).unwrap();
+        // A program that ended without removing its socket.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let ended_pid = child.id();
+        child.wait().unwrap();
+        let ended = dir.join(format!("{ended_pid}-00000000000000cc.sock"));
+        unlistened(&ended);
+
+        assert!(!running(ended_pid));
+        assert!(running(std::process::id()));
+        remove_dead_sockets_in(&dir);
+        assert!(starting.exists(), "a starting program's socket was removed");
+        assert!(
+            serving_path.exists(),
+            "a serving program's socket was removed"
+        );
+        assert!(!ended.exists(), "an ended program's socket was left");
+
+        drop(serving);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
