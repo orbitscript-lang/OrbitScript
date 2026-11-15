@@ -276,7 +276,7 @@ impl Vm {
                 if self.rt.stack.hook.wants(crate::vm::hook::CALL) {
                     self.native_call_hook(func, nargs, id).map_err(Exc::Lua)?;
                 }
-                let f = self.rt.natives[id.0 as usize].f;
+                let f = self.rt.natives.get(id).f;
                 let mut ctx = NativeCtx {
                     vm: self,
                     base: func + 1,
