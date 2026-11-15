@@ -82,6 +82,22 @@ cargo testkit liblua --c-libs target/reference-lua/libs --expect tests/lua-5.5/e
 - **The programs' tests**, `cargo test -p orbit-cli -p orbit-lsp` with `ORBIT_BIN_DIR` naming the layout's `bin`, so the tests run those programs instead of Cargo's static builds.
 - **The C host tests** (Linux): `crates/orbit-capi/tests/chost/host.c` is built against the headers and linked to the laid-out library, named by `ORBIT_LIBORBIT`, and checks states, libraries, panics, warnings, strings and the collector from C. A plain `cargo test` lists them as ignored.
 
+## AddressSanitizer
+
+`tests/asan/run.sh` runs the tests of the code that may contain `unsafe` under AddressSanitizer, which needs a nightly toolchain (`rustup toolchain install nightly`), the one exception to stable Rust, for a test tool only (`CLAUDE.md`). It sees what valgrind can't: reads and writes past variables on the stack, Rust's past a C caller's among them. It has two parts:
+
+- **`unit`**: the tests of orbit-std (with `ffi`), orbit-ffi, orbit-locale, orbit-virtmem, orbit-capi and orbit-dap, built with `-Zsanitizer=address`.
+- **`chost`**: the C host tests, the host built with `-fsanitize=address` (`ORBIT_CHOST_SANITIZE`), on a liborbit `./build.sh` builds with the sanitizer into `target/asan/layout`.
+
+orbit-gc is left out, because its only `unsafe` hands memory back to the allocator, which the sanitizer replaces. Both parts link the system's libffi (`libffi-dev`) rather than the bundled copy, because the sanitizer misreads a libffi built with it: libffi's assembly runs the called function on a stack block that its C part allocates, red zones included, so the sanitizer reports a stack overflow later, in whatever code next uses that stack.
+
+```sh
+tests/asan/run.sh                 # both parts
+tests/asan/check-planted.sh       # every planted bug must be reported
+```
+
+`tests/asan/check-planted.sh` proves the run the way the memory checker's does. Each `tests/asan/planted/*.patch` plants one bug, a stack overflow, a use after free, or a page given back too early, and the script expects a report for each. `.github/workflows/sanitizers.yml` runs both once a week and by hand, never on pull requests.
+
 ## Differential fuzzing
 
 `cargo testkit fuzz` generates random library calls, runs each batch under both interpreters and stops at the first call whose results or error differ. The targets are `format` (`string.format` specs and arguments), `pattern` (`find`, `match` and `gsub`), `pack` (`string.pack`, `unpack` and `packsize`) and `utf8`, or `all` for every one. Generators favor edge cases: limits of widths and precisions, halfway floats, malformed patterns, odd integer sizes and alignments, and invalid UTF-8.

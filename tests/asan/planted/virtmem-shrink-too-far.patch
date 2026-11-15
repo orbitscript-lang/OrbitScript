@@ -1,0 +1,17 @@
+Plants: VmBuffer::shrink_to_fit decommits the page that still holds the
+buffer's last elements, which are then read.
+Parts: unit
+
+diff --git a/crates/orbit-virtmem/src/lib.rs b/crates/orbit-virtmem/src/lib.rs
+index b800975..c08ca48 100644
+--- a/crates/orbit-virtmem/src/lib.rs
++++ b/crates/orbit-virtmem/src/lib.rs
+@@ -295,7 +295,7 @@ impl<T> VmBuffer<T> {
+         let keep_aligned = os::align_up(keep_bytes, ps);
+ 
+         if keep_aligned < committed_bytes {
+-            os::decommit_pages(self.base.cast(), keep_bytes, committed_bytes);
++            os::decommit_pages(self.base.cast(), 0, committed_bytes);
+             self.committed_slots = keep_aligned / size;
+         }
+     }
