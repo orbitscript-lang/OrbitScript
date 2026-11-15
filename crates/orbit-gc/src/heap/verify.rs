@@ -59,6 +59,11 @@ pub(crate) struct Check {
     from: u64,
     /// What kind of collection is being checked, for the report.
     context: String,
+    /// Set (with `active`) while a write guard lists an object's handles:
+    /// [`Marker`] then only collects what it is shown.
+    pub(crate) collecting: bool,
+    /// The handles collected.
+    pub(crate) collected: Vec<AnyGc>,
 }
 
 impl Check {

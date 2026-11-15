@@ -2,10 +2,10 @@ Deletes: A constructor's list store (`SetList`): `Heap::update` without its barr
 Tests: table_constructor_list_store
 
 diff --git a/crates/orbit-runtime/src/vm/cold.rs b/crates/orbit-runtime/src/vm/cold.rs
-index a41812b..7aeff1c 100644
+index bcfeb27..1473d4e 100644
 --- a/crates/orbit-runtime/src/vm/cold.rs
 +++ b/crates/orbit-runtime/src/vm/cold.rs
-@@ -567,12 +567,18 @@ impl Vm {
+@@ -589,12 +589,18 @@ impl Vm {
          start: i64,
      ) -> Result<(), NoMemory> {
          let regs = &self.rt.stack.regs;
@@ -13,7 +13,7 @@ index a41812b..7aeff1c 100644
 -            for (i, &v) in regs[from..from + n].iter().enumerate() {
 -                tab.set_int(start + i as i64, v)?;
 +        let before = orbit_gc::Trace::extra_bytes(self.heap.get(t));
-+        let tab = self.heap.get_mut(t);
++        let tab = self.heap.write_no_handles(t).into_untraced();
 +        let mut r = Ok(());
 +        for (i, &v) in regs[from..from + n].iter().enumerate() {
 +            if let Err(e) = tab.set_int(start + i as i64, v) {

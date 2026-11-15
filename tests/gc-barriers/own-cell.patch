@@ -2,14 +2,15 @@ Deletes: `CellSet`: a store into a captured local by its own frame.
 Tests: upvalue_store_through_the_frames_own_cell
 
 diff --git a/crates/orbit-runtime/src/vm/dispatch.rs b/crates/orbit-runtime/src/vm/dispatch.rs
-index 69640fb..ca760c6 100644
+index 5ceddbd..fa9222e 100644
 --- a/crates/orbit-runtime/src/vm/dispatch.rs
 +++ b/crates/orbit-runtime/src/vm/dispatch.rs
-@@ -1108,7 +1108,6 @@ impl Vm {
+@@ -1072,7 +1072,7 @@ impl Vm {
                                  .cell_base as usize;
                              let c = self.rt.stack.cells[cell_base + cell as usize];
                              let v = w[src];
--                            barrier_for(&mut self.heap, c, v);
-                             self.heap.get_mut(c).value = v;
+-                            self.heap.write_for(c, &v).value = v;
++                            self.heap.write_no_handles(c).into_untraced().value = v;
                          }
  
+                         Op::VarargLen { dst } => {

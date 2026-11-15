@@ -131,7 +131,7 @@ A `Thread` object holds a coroutine's state: its stack, its status (`Suspended`,
 
 **Suspended stacks shrink when they go cold** (ADR-3). The most recently parked coroutines (16 at first) keep their stacks at full size. One that falls out of that set while still suspended has its stack copied into exact-size storage, and resuming it grows the stack again. If a shrunk coroutine comes back soon after it was shrunk, the set doubles, up to 1,024, so a pipeline of more coroutines than the set holds doesn't shrink and regrow a stack on every switch. The list of cooling coroutines is weak.
 
-Garbage collection: a suspended coroutine's stack is traced through its `Thread`. When a stack moves back into a `Thread` object (on a yield, or when the coroutine finishes), the VM calls `heap.barrier_back(thread)`, because the incremental collector may already have scanned that object as black while its stack ran elsewhere. The running stack is a root.
+Garbage collection: a suspended coroutine's stack is traced through its `Thread`. When a stack moves back into a `Thread` object (on a yield, or when the coroutine finishes), the VM writes it through the thread's backward barrier (`Heap::update_by`), because the incremental collector may already have scanned that object as black while its stack ran elsewhere. The running stack is a root.
 
 ### Frames
 

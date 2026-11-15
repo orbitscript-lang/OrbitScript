@@ -22,7 +22,7 @@ fn minor(h: &mut TestHeap, roots: &mut Stack) {
 }
 
 /// An old object, rooted, with room for `n` more strong references so a
-/// store through `get_mut` doesn't change its size.
+/// store doesn't change its size.
 fn old_holder(h: &mut TestHeap, roots: &mut Stack, n: usize) -> orbit_gc::Gc<Obj> {
     let holder = obj(h, 1);
     h.update(holder, |o| o.strong.reserve_exact(n));
@@ -61,7 +61,10 @@ fn a_missed_barrier_in_incremental_mode_is_reported() {
     let mut h = TestHeap::new();
     let (holder, mut roots) = incremental_holder(&mut h);
     let fresh = obj(&mut h, 2);
-    h.get_mut(holder).strong.push(Ref::Obj(fresh));
+    h.write_no_handles(holder)
+        .into_untraced()
+        .strong
+        .push(Ref::Obj(fresh));
     finish_cycle(&mut h, &mut roots);
 }
 
@@ -70,8 +73,7 @@ fn the_same_store_with_its_barrier_passes() {
     let mut h = TestHeap::new();
     let (holder, mut roots) = incremental_holder(&mut h);
     let fresh = obj(&mut h, 2);
-    h.barrier_back(holder);
-    h.get_mut(holder).strong.push(Ref::Obj(fresh));
+    h.write_back(holder).strong.push(Ref::Obj(fresh));
     finish_cycle(&mut h, &mut roots);
     assert!(h.is_live(fresh));
 }
@@ -83,7 +85,10 @@ fn a_missed_barrier_in_generational_mode_is_reported_with_its_chain() {
     let mut h = gen_heap(&mut roots);
     let holder = old_holder(&mut h, &mut roots, 1);
     let young = obj(&mut h, 2);
-    h.get_mut(holder).strong.push(Ref::Obj(young));
+    h.write_no_handles(holder)
+        .into_untraced()
+        .strong
+        .push(Ref::Obj(young));
     minor(&mut h, &mut roots);
 }
 
@@ -93,7 +98,10 @@ fn the_report_names_the_object_stored_into() {
     let mut h = gen_heap(&mut roots);
     let holder = old_holder(&mut h, &mut roots, 1);
     let young = obj(&mut h, 2);
-    h.get_mut(holder).strong.push(Ref::Obj(young));
+    h.write_no_handles(holder)
+        .into_untraced()
+        .strong
+        .push(Ref::Obj(young));
     let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         minor(&mut h, &mut roots);
     }))
@@ -154,7 +162,7 @@ fn a_missed_barrier_by_part_is_reported() {
     minor(&mut h, &mut roots);
     minor(&mut h, &mut roots);
     let young = obj(&mut h, 2);
-    h.get_mut(holder).strong[5] = Ref::Obj(young);
+    h.write_no_handles(holder).into_untraced().strong[5] = Ref::Obj(young);
     minor(&mut h, &mut roots);
 }
 
@@ -183,7 +191,10 @@ fn an_ephemeron_value_whose_key_is_reachable_is_checked() {
     h.step(&mut roots);
     assert_eq!(h.phase(), Phase::Mark);
     let value = obj(&mut h, 2);
-    h.get_mut(table).map.push((Ref::Obj(key), Ref::Obj(value)));
+    h.write_no_handles(table)
+        .into_untraced()
+        .map
+        .push((Ref::Obj(key), Ref::Obj(value)));
     finish_cycle(&mut h, &mut roots);
 }
 
@@ -226,7 +237,10 @@ fn a_stale_handle_left_by_an_earlier_collection_is_reported() {
     let mut h = gen_heap(&mut roots);
     let holder = old_holder(&mut h, &mut roots, 1);
     let young = obj(&mut h, 2);
-    h.get_mut(holder).strong.push(Ref::Obj(young));
+    h.write_no_handles(holder)
+        .into_untraced()
+        .strong
+        .push(Ref::Obj(young));
     // Unchecked, the minor collection frees `young` while `holder` still
     // refers to it.
     h.set_verify(Verify::Off);
@@ -282,7 +296,10 @@ fn paced_checks_report_a_barrier_missed_between_them() {
     roots.0.extend(filler);
     let holder = old_holder(&mut h, &mut roots, 1);
     let young = obj(&mut h, 2);
-    h.get_mut(holder).strong.push(Ref::Obj(young));
+    h.write_no_handles(holder)
+        .into_untraced()
+        .strong
+        .push(Ref::Obj(young));
     // Little was allocated since the last check: this minor collection is
     // not checked, and frees `young`.
     minor(&mut h, &mut roots);
@@ -302,7 +319,10 @@ fn paced_checks_a_minor_collection_after_enough_allocation() {
     h.set_verify(Verify::Paced);
     let holder = old_holder(&mut h, &mut roots, 1);
     let young = obj(&mut h, 2);
-    h.get_mut(holder).strong.push(Ref::Obj(young));
+    h.write_no_handles(holder)
+        .into_untraced()
+        .strong
+        .push(Ref::Obj(young));
     // As many bytes again as the heap holds.
     for i in 0..50 {
         obj(&mut h, 20 + i);

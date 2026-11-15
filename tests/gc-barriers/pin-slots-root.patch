@@ -2,9 +2,10 @@ Deletes: Pin slots are roots, with no barrier: this deletes them from the roots 
 Tests: pinned_value
 
 diff --git a/crates/orbit-runtime/src/vm/gc.rs b/crates/orbit-runtime/src/vm/gc.rs
+index f0d56ce..992c9ec 100644
 --- a/crates/orbit-runtime/src/vm/gc.rs
 +++ b/crates/orbit-runtime/src/vm/gc.rs
-@@ -293,9 +293,6 @@
+@@ -293,9 +293,6 @@ impl GcState {
          for &v in &self.pinned {
              crate::object::table::mark(m, v);
          }

@@ -180,8 +180,7 @@ pub fn link(h: &mut TestHeap, from: Gc<Obj>, to: Ref) {
 
 /// Overwrite an element of the strong half, remembering only that part.
 pub fn set_strong(h: &mut TestHeap, o: Gc<Obj>, i: usize, to: Ref) {
-    h.barrier_at(o, i);
-    h.get_mut(o).strong[i] = to;
+    h.write_at(o, i).strong[i] = to;
 }
 
 pub fn put(h: &mut TestHeap, t: Gc<Obj>, k: Ref, v: Ref) {
