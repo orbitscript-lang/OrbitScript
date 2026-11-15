@@ -1,5 +1,6 @@
 //! Everything unsafe in the debugger on Unix (ADR-12): sending `SIGUSR1` to
-//! a program so it starts its debug server, and on macOS, which has no
+//! a program so it starts its debug server, asking whether a program is
+//! still running, and on macOS, which has no
 //! `/proc`, finding the programs that would (libproc and `sysctl`). All of
 //! it is calls through `libc`; what they write is decoded by safe code.
 
@@ -17,6 +18,22 @@ pub(crate) fn send_debug_signal(pid: u32) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Whether a process `pid` exists (it may belong to another user, or have
+/// ended without being waited for yet).
+pub(crate) fn running(pid: u32) -> bool {
+    // 0 and negative numbers name process groups, not a process.
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill` takes no pointers; signal 0 only checks that `pid`
+    // could be signalled.
+    let r = unsafe { libc::kill(pid, 0) };
+    r == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(target_os = "macos")]
