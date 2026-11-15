@@ -18,3 +18,10 @@ local mix = {3, 1.5, 2, -1, 2.5, math.huge, -math.huge} table.sort(mix) print(sh
 local big = {} for i = 1, 1000 do big[i] = (i * 7919) % 1000 end table.sort(big) local ok = true for i = 2, 1000 do if big[i-1] > big[i] then ok = false end end print(ok, big[1], big[1000])
 local cnt = 0 local big2 = {} for i = 1, 1000 do big2[i] = (i * 7919) % 1001 end table.sort(big2, function(a, b) cnt = cnt + 1 return a < b end) print(big2[1], big2[1000])
 local p = table.pack(1, nil, 3) print(p.n, p[1], p[2], p[3])
+
+-- pack and create: argument order, results, and values that need the heap.
+P(table.create, -1, "x") P(table.create, "x") P(table.create, 2, "x") P(table.create, 2, nil)
+local q = table.pack() print(q.n, #q, next(q))
+q = table.pack("a", {}, 2.5, nil) print(q.n, q[1], type(q[2]), q[3], q[4], #q >= 3)
+q = table.pack(table.unpack({}, 1, 300)) print(q.n, q[300])
+print(#table.create(3, 2), next(table.create(0, 5)))
