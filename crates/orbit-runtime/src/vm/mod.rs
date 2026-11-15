@@ -42,8 +42,8 @@ use std::io::Write;
 use crate::locale::Locale;
 use crate::object::table::{self, mark};
 use crate::object::{
-    CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Proto, Table,
-    Thread, UserData, Value,
+    CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Table, Thread,
+    UserData, Value,
 };
 use crate::text::LineEndings;
 use orbit_gc::{Liveness, Marker, Roots};
@@ -599,14 +599,9 @@ pub struct Runtime {
     /// What the host configured: output, warnings, compilers, limits,
     /// the interrupt flag, the locale provider and library state.
     pub host: host::Host,
-    /// The placeholder native under a host's context ([`Vm::host_ctx`]),
-    /// which tracebacks and `debug.getinfo` don't show.
-    pub host_native: Option<NativeId>,
-    pub(crate) natives: Vec<Native>,
-    /// The runtime's own natives, by name, so each is registered once.
-    pub(crate) native_ids: std::collections::HashMap<&'static str, NativeId, CheapHash>,
-    /// Natives pushed by type ([`Vm::native_for_type`]): the stack API's.
-    pub(crate) native_types: std::collections::HashMap<std::any::TypeId, NativeId, CheapHash>,
+    /// The native functions: the table calls go through, how they are
+    /// found again by name or type, and what their calls share.
+    pub(crate) natives: native::Natives,
     pub(crate) stack: Stack,
     /// The code the dispatch loop ran before its last switch. A call and
     /// its return usually go back and forth between two functions, so a
@@ -630,14 +625,8 @@ pub struct Runtime {
     pub(crate) main_thread: Gc<Thread>,
     /// Coroutine switching: resumers, values in transit, parked stacks.
     pub(crate) co: coro::Switching,
-    /// A byte buffer natives build results in, kept between calls so
-    /// building a string needs no allocation of its own
-    /// ([`NativeCtx::take_buf`](crate::vm::NativeCtx::take_buf)).
-    pub(crate) scratch: Vec<u8>,
     /// Whether hooks were ever used ([`hook::HookUse`]).
     pub(crate) hooks: hook::HookUse,
-    /// The stub prototype of each native that has native closures.
-    pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>, CheapHash>,
     /// Breakpoints, steps and the host's debug events.
     #[cfg(feature = "debugger")]
     pub(crate) debug: debugger::Debugger,
@@ -732,9 +721,7 @@ impl Roots<LuaSpace> for Runtime {
         m.mark(self.current);
         m.mark(self.main_thread);
         self.co.trace(m);
-        for &p in self.native_protos.values() {
-            m.mark(p);
-        }
+        self.natives.trace(m);
         self.gc.trace(m);
         for &s in self.metas.field_names.all() {
             m.mark(s);
@@ -807,10 +794,7 @@ impl Vm {
                 globals,
                 registry,
                 host: host::Host::new(),
-                host_native: None,
-                natives: Vec::new(),
-                native_ids: Default::default(),
-                native_types: Default::default(),
+                natives: native::Natives::default(),
                 stack: Stack::default(),
                 prev_code: None,
                 dead_cell,
@@ -825,9 +809,7 @@ impl Vm {
                 current: main_thread,
                 main_thread,
                 co: coro::Switching::new(),
-                scratch: Vec::new(),
                 hooks: Default::default(),
-                native_protos: Default::default(),
                 #[cfg(feature = "debugger")]
                 debug: Default::default(),
             },
@@ -869,13 +851,11 @@ impl Vm {
         fn host(_: &mut NativeCtx<'_>) -> Result<crate::vm::NativeReturn, LuaError> {
             Ok(crate::vm::NativeReturn::Return(0))
         }
-        let id = match self.rt.host_native {
+        let id = match self.rt.natives.host() {
             Some(id) => id,
             None => {
-                let Value::Native(id) = self.register_native("C host", host) else {
-                    unreachable!()
-                };
-                self.rt.host_native = Some(id);
+                let id = self.rt.natives.add_named("C host", host);
+                self.rt.natives.set_host(id);
                 id
             }
         };
@@ -900,9 +880,7 @@ impl Vm {
     /// (`"print"`, `"string.rep"`), used in messages when the call site
     /// doesn't name it.
     pub fn register_native(&mut self, name: &'static str, f: NativeFn) -> Value {
-        let id = self.add_native(name, f, [0; 2]);
-        self.rt.native_ids.insert(name, id);
-        Value::Native(id)
+        Value::Native(self.rt.natives.add_named(name, f))
     }
 
     /// Register another native running `f` that reads `data` on every call
@@ -917,21 +895,7 @@ impl Vm {
         f: NativeFn,
         data: [u64; 2],
     ) -> Value {
-        Value::Native(self.add_native(name, f, data))
-    }
-
-    /// Add native `f` to the table natives are called through, without
-    /// making it findable by `name`.
-    fn add_native(&mut self, name: &'static str, f: NativeFn, data: [u64; 2]) -> NativeId {
-        let id = NativeId(self.rt.natives.len() as u32);
-        self.rt.natives.push(Native {
-            name,
-            f,
-            fast: None,
-            hidden: 0,
-            data,
-        });
-        id
+        Value::Native(self.rt.natives.add(name, f, data))
     }
 
     /// The native registered for type `ty`, registering `f` as `name` for
@@ -943,21 +907,16 @@ impl Vm {
         name: &'static str,
         f: NativeFn,
     ) -> NativeId {
-        if let Some(&id) = self.rt.native_types.get(&ty) {
-            return id;
-        }
-        let id = self.add_native(name, f, [0; 2]);
-        self.rt.native_types.insert(ty, id);
-        id
+        self.rt.natives.for_type(ty, name, f)
     }
 
     /// Give the native registered under `name` a [`FastFn`]: calls that want
     /// at most one result try it first. Returns false if no native has
     /// that name.
     pub fn set_native_fast_path(&mut self, name: &str, fast: FastFn) -> bool {
-        match self.rt.native_ids.get(name) {
-            Some(&id) => {
-                self.rt.natives[id.0 as usize].fast = Some(fast);
+        match self.rt.natives.named(name) {
+            Some(id) => {
+                self.rt.natives.get_mut(id).fast = Some(fast);
                 true
             }
             None => false,
