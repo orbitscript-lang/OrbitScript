@@ -1,0 +1,17 @@
+Plants: a userdata block rounds its size down to whole 16-byte cells, so C
+reads and writes past the end of a block whose size is not a multiple of 16.
+Parts: chost
+
+diff --git a/crates/orbit-runtime/src/stack/window.rs b/crates/orbit-runtime/src/stack/window.rs
+index f30457e..27131d2 100644
+--- a/crates/orbit-runtime/src/stack/window.rs
++++ b/crates/orbit-runtime/src/stack/window.rs
+@@ -188,7 +188,7 @@ struct Block {
+ 
+ impl Block {
+     fn new(size: usize, nuv: u16) -> Block {
+-        let n = size.div_ceil(16).max(1);
++        let n = (size / 16).max(1);
+         Block {
+             cells: (0..n).map(|_| std::cell::Cell::new(0)).collect(),
+             size,

@@ -15,14 +15,14 @@ use crate::locale::Locale;
 use crate::object::table;
 use crate::object::{Gc, Interner, LuaHeap, LuaStr, Table, Tag, Value};
 
-use crate::vm::Runtime;
+use crate::vm::VmState;
 use crate::vm::ops::Exc;
 
 /// How far `__index` and `__newindex` chains are followed before giving up
 /// (the reference's limit).
 pub(crate) const MAX_CHAIN: usize = 2000;
 
-pub use crate::object::MetaField;
+pub(crate) use crate::object::MetaField;
 
 /// The interned metatable field names, rooted by the runtime, so a metatable lookup
 /// is a handle-keyed probe.
@@ -100,13 +100,13 @@ impl Metas {
 /// A metamethod call a slow path needs before its instruction can finish.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MetaCall {
-    pub f: Value,
-    pub args: [Value; 3],
-    pub nargs: u8,
-    pub field: MetaField,
+    pub(crate) f: Value,
+    pub(crate) args: [Value; 3],
+    pub(crate) nargs: u8,
+    pub(crate) field: MetaField,
     /// Instruction-specific state: for `Concat`, how many values are left;
     /// for a comparison, [`NEGATE`] when the result must be negated.
-    pub aux: u8,
+    pub(crate) aux: u8,
 }
 
 /// [`MetaCall::aux`] of a comparison answered by negating its handler's
@@ -151,29 +151,29 @@ pub(crate) enum MetaAction {
     Unwind { cause: crate::vm::Cause },
 }
 
-impl Runtime {
+impl VmState {
     /// The metatable of `v`, if any.
     #[inline]
-    pub fn metatable(&self, heap: &LuaHeap, v: Value) -> Option<Gc<Table>> {
+    pub(crate) fn metatable(&self, heap: &LuaHeap, v: Value) -> Option<Gc<Table>> {
         self.metas.metatable(heap, v)
     }
 
     /// Field `e` of `v`'s metatable (raw), or nil.
     #[inline]
-    pub fn metamethod(&self, heap: &LuaHeap, v: Value, e: MetaField) -> Value {
+    pub(crate) fn metamethod(&self, heap: &LuaHeap, v: Value, e: MetaField) -> Value {
         self.metas.metamethod(heap, v, e)
     }
 
     /// The metatable shared by every value of `tag`'s type (strings,
     /// numbers, booleans, nil, functions); tables and userdata have their
     /// own.
-    pub fn type_meta(&self, tag: Tag) -> Option<Gc<Table>> {
+    pub(crate) fn type_meta(&self, tag: Tag) -> Option<Gc<Table>> {
         self.metas.type_meta[tag as usize]
     }
 
     /// Set the shared metatable of `tag`'s type. Integers and floats share
     /// one, as do Lua closures and natives.
-    pub fn set_type_meta(&mut self, tag: Tag, meta: Option<Gc<Table>>) {
+    pub(crate) fn set_type_meta(&mut self, tag: Tag, meta: Option<Gc<Table>>) {
         let slots: &[Tag] = match tag {
             Tag::Int | Tag::Float => &[Tag::Int, Tag::Float],
             Tag::Closure | Tag::Native => &[Tag::Closure, Tag::Native],
@@ -185,7 +185,7 @@ impl Runtime {
     }
 
     /// The interned name of metatable field `e`.
-    pub fn field_name(&self, e: MetaField) -> Gc<LuaStr> {
+    pub(crate) fn field_name(&self, e: MetaField) -> Gc<LuaStr> {
         self.metas.field_names.name(e)
     }
 }

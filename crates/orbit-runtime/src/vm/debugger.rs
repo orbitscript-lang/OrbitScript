@@ -373,7 +373,7 @@ impl Vm {
     /// Stop at the next line that runs, in any function, as a step in
     /// would ([`StopReason::Step`]): for stopping on entry to a program.
     /// Does nothing while no events are attached.
-    pub fn stop_on_next_line(&mut self) {
+    pub(crate) fn stop_on_next_line(&mut self) {
         let d = &mut self.rt.debug;
         if d.events.is_none() {
             return;

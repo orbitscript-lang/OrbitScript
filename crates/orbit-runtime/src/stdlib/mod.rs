@@ -25,7 +25,7 @@ use crate::vm::{NativeFn, Vm};
 
 pub use chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
-pub use load::{load_buffer, load_chunk_in};
+pub use load::load_chunk_in;
 
 /// The first result of a call a native requested with `CallThen` (nil if
 /// none); the call's results are dropped from the window.
@@ -72,20 +72,6 @@ pub enum Lib {
 }
 
 impl Lib {
-    /// In the order of `lualib.h`'s masks: [`Lib::mask`] is `1 << index`.
-    pub const ALL: [Lib; 10] = [
-        Lib::Base,
-        Lib::Package,
-        Lib::Coroutine,
-        Lib::Debug,
-        Lib::Io,
-        Lib::Math,
-        Lib::Os,
-        Lib::String,
-        Lib::Table,
-        Lib::Utf8,
-    ];
-
     /// The order [`open_libs`] opens them in.
     pub const OPEN_ORDER: [Lib; 10] = [
         Lib::Base,
@@ -101,7 +87,7 @@ impl Lib {
     ];
 
     /// The library's global name (`_G` for the base library).
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Lib::Base => "_G",
             Lib::Package => "package",
@@ -114,12 +100,6 @@ impl Lib {
             Lib::Table => "table",
             Lib::Utf8 => "utf8",
         }
-    }
-
-    /// The library's bit in `luaL_openselectedlibs`'s masks.
-    pub fn mask(self) -> u32 {
-        let i = Lib::ALL.iter().position(|&l| l == self).unwrap_or(0);
-        1 << i
     }
 }
 
@@ -200,10 +180,10 @@ pub fn flush_files(vm: &mut Vm) {
 
 /// Registry key of the table `require` keeps loaded modules in
 /// (`package.loaded`).
-pub const LOADED: &[u8] = b"_LOADED";
+pub(crate) const LOADED: &[u8] = b"_LOADED";
 
 /// The registry table under `key`, created on first use.
-pub fn registry_table(vm: &mut Vm, key: &[u8]) -> crate::object::Gc<crate::object::Table> {
+pub(crate) fn registry_table(vm: &mut Vm, key: &[u8]) -> crate::object::Gc<crate::object::Table> {
     use crate::object::Value;
     let k = vm.new_str(key);
     match crate::object::table::get(&vm.heap, vm.rt.registry, k) {
@@ -218,7 +198,7 @@ pub fn registry_table(vm: &mut Vm, key: &[u8]) -> crate::object::Gc<crate::objec
 }
 
 /// Record a library as loaded, so `require "name"` returns it.
-pub fn mark_loaded(vm: &mut Vm, name: &str, lib: crate::object::Value) {
+pub(crate) fn mark_loaded(vm: &mut Vm, name: &str, lib: crate::object::Value) {
     let loaded = registry_table(vm, LOADED);
     let k = vm.new_str(name.as_bytes());
     vm.table_set(loaded, k, lib);
@@ -226,7 +206,7 @@ pub fn mark_loaded(vm: &mut Vm, name: &str, lib: crate::object::Value) {
 
 /// Register `functions` (qualified names such as `"string.rep"`) in a new
 /// global table `name`.
-pub fn open_lib(
+pub(crate) fn open_lib(
     vm: &mut Vm,
     name: &str,
     functions: &[(&'static str, NativeFn)],

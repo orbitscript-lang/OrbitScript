@@ -82,9 +82,31 @@ cargo testkit liblua --c-libs target/reference-lua/libs --expect tests/lua-5.5/e
 - **The programs' tests**, `cargo test -p orbit-cli -p orbit-lsp` with `ORBIT_BIN_DIR` naming the layout's `bin`, so the tests run those programs instead of Cargo's static builds.
 - **The C host tests** (Linux): `crates/orbit-capi/tests/chost/host.c` is built against the headers and linked to the laid-out library, named by `ORBIT_LIBORBIT`, and checks states, libraries, panics, warnings, strings and the collector from C. A plain `cargo test` lists them as ignored.
 
+## The memory checker
+
+`tests/memcheck/run.sh` (Linux, needs valgrind) runs the tests of the code that may contain `unsafe` under valgrind's memcheck and fails on any report, whatever the tests themselves say. A passing test only shows the answer was right; this shows the C API, the `ffi` library, the locale objects, the virtual memory buffer and the C library's local time stayed inside their memory while computing it. CI runs it in the Lua 5.5 conformance job, on the layout that job builds.
+
+```sh
+scripts/build-reference-lua.sh       # the liblua part needs the reference lua.c
+tests/memcheck/run.sh                # builds the layout into target/memcheck/layout
+tests/memcheck/run.sh --layout target/package/out chost unit
+```
+
+Its parts, each runnable alone:
+
+- **chost**: the C host tests under valgrind (the test names the wrapper in `ORBIT_TEST_WRAPPER`).
+- **sanitize**: the C host tests again with the host built with AddressSanitizer (`ORBIT_CHOST_SANITIZE=address`), not under valgrind.
+- **cmod**: orbit-cli's C module tests under valgrind, on the layout's `orbit` and, for the ignored one, through a second copy of the runtime.
+- **unit**: the test programs of orbit-std (with `ffi`), orbit-ffi, orbit-locale, orbit-virtmem and orbit-capi, each run by valgrind as Cargo's test runner.
+- **liblua**: the suite through `lua.c` on liborbit in its soft mode (`cargo testkit liblua --soft --wrap ...`), every file but `all.lua` and `heavy.lua`, which outgrows valgrind's memory.
+
+Valgrind never follows child processes: the C compiler and shells the tests start are not ours, so there is no suppression list. Each process's report goes to its own file in `target/memcheck/logs`.
+
+`tests/memcheck/check-planted.sh` proves the checker, as the write-barrier tests are proven: each patch in `tests/memcheck/planted` plants one memory bug (a string copy freed while the string is alive, a userdata block shorter than asked for, an uninitialised libffi argument, a virtual memory page released under live elements) and names the parts that reach it. The script applies each in turn and requires a valgrind report. Run it after changing `run.sh` or the tests it runs; a planted bug that is no longer reported needs a test that reaches it.
+
 ## AddressSanitizer
 
-`tests/asan/run.sh` runs the tests of the code that may contain `unsafe` under AddressSanitizer, which needs a nightly toolchain (`rustup toolchain install nightly`), the one exception to stable Rust, for a test tool only (`CLAUDE.md`). It sees what valgrind can't: reads and writes past variables on the stack, Rust's past a C caller's among them. It has two parts:
+`tests/asan/run.sh` runs the tests of the code that may contain `unsafe` under AddressSanitizer, which needs a nightly toolchain (`rustup toolchain install nightly`), the one exception to stable Rust, for a test tool only (`CLAUDE.md`). It sees what valgrind can't: reads and writes past variables on the stack, Rust's past a C caller's among them. The memory checker's `sanitize` part builds only the C host with the sanitizer; here liborbit and the Rust tests are built with it too. It has two parts:
 
 - **`unit`**: the tests of orbit-std (with `ffi`), orbit-ffi, orbit-locale, orbit-virtmem, orbit-capi and orbit-dap, built with `-Zsanitizer=address`.
 - **`chost`**: the C host tests, the host built with `-fsanitize=address` (`ORBIT_CHOST_SANITIZE`), on a liborbit `./build.sh` builds with the sanitizer into `target/asan/layout`.

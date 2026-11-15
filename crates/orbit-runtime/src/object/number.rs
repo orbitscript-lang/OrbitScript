@@ -5,13 +5,12 @@
 use crate::object::Value;
 use orbit_lua_version::LUA;
 
+pub use orbit_bytecode::number::Number;
 use orbit_bytecode::number::TWO_63;
-pub use orbit_bytecode::number::{
-    ArithError, ArithOp, Number, float_arith, float_idiv, float_mod, float_to_int, int_idiv,
-    int_mod,
-};
+pub use orbit_bytecode::number::float_to_int;
+pub(crate) use orbit_bytecode::number::{ArithError, ArithOp};
 use orbit_lua_text::Numeral;
-pub use orbit_lua_text::ldexp;
+pub(crate) use orbit_lua_text::ldexp;
 
 /// `i == f` mathematically.
 #[inline]
@@ -20,7 +19,7 @@ pub fn int_eq_float(i: i64, f: f64) -> bool {
 }
 
 /// `i < f` mathematically.
-pub fn int_lt_float(i: i64, f: f64) -> bool {
+pub(crate) fn int_lt_float(i: i64, f: f64) -> bool {
     if f >= TWO_63 {
         true
     } else if f > -TWO_63 {
@@ -31,7 +30,7 @@ pub fn int_lt_float(i: i64, f: f64) -> bool {
 }
 
 /// `i <= f` mathematically.
-pub fn int_le_float(i: i64, f: f64) -> bool {
+pub(crate) fn int_le_float(i: i64, f: f64) -> bool {
     if f >= TWO_63 {
         true
     } else if f >= -TWO_63 {
@@ -42,7 +41,7 @@ pub fn int_le_float(i: i64, f: f64) -> bool {
 }
 
 /// `f < i` mathematically.
-pub fn float_lt_int(f: f64, i: i64) -> bool {
+pub(crate) fn float_lt_int(f: f64, i: i64) -> bool {
     if f >= TWO_63 || f.is_nan() {
         false
     } else if f >= -TWO_63 {
@@ -53,7 +52,7 @@ pub fn float_lt_int(f: f64, i: i64) -> bool {
 }
 
 /// `f <= i` mathematically.
-pub fn float_le_int(f: f64, i: i64) -> bool {
+pub(crate) fn float_le_int(f: f64, i: i64) -> bool {
     if f >= TWO_63 || f.is_nan() {
         false
     } else if f >= -TWO_63 {
@@ -69,7 +68,7 @@ fn is_space(b: u8) -> bool {
 
 /// `s` without Lua's whitespace (C's `isspace`) at either end; `None` if
 /// nothing else is left.
-pub fn trim_space(s: &[u8]) -> Option<&[u8]> {
+pub(crate) fn trim_space(s: &[u8]) -> Option<&[u8]> {
     let start = s.iter().position(|&b| !is_space(b))?;
     let end = s.iter().rposition(|&b| !is_space(b))? + 1;
     Some(&s[start..end])
@@ -79,7 +78,7 @@ pub fn trim_space(s: &[u8]) -> Option<&[u8]> {
 /// coercion do: decimal and hexadecimal integers and floats, surrounded by
 /// optional whitespace. Decimal integers that overflow become floats;
 /// hexadecimal ones wrap.
-pub fn str_to_number(s: &[u8]) -> Option<Value> {
+pub(crate) fn str_to_number(s: &[u8]) -> Option<Value> {
     let s = trim_space(s)?;
     let (neg, body) = match s.first() {
         Some(b'-') => (true, &s[1..]),
@@ -93,13 +92,13 @@ pub fn str_to_number(s: &[u8]) -> Option<Value> {
 }
 
 /// Append a float formatted like C's `%.<prec>g`.
-pub fn fmt_g(out: &mut String, x: f64, prec: usize) {
+pub(crate) fn fmt_g(out: &mut String, x: f64, prec: usize) {
     fmt_general(out, x, prec, false);
 }
 
 /// Append a float formatted like C's `%.<prec>g`, or `%#.<prec>g` with
 /// `alt`, which keeps trailing zeros and the decimal point.
-pub fn fmt_general(out: &mut String, x: f64, prec: usize, alt: bool) {
+pub(crate) fn fmt_general(out: &mut String, x: f64, prec: usize, alt: bool) {
     use std::fmt::Write;
     let prec = prec.max(1);
     if x.is_nan() {
@@ -145,7 +144,7 @@ fn strip_zeros(s: &str) -> &str {
 /// Append a float the way Lua prints it, with `.0` added if it looks like an
 /// integer: 5.5 uses `%.15g` if that reads back as the same number, else
 /// `%.17g`; 5.4 always uses `%.14g` (ADR-14).
-pub fn fmt_float(out: &mut String, x: f64) {
+pub(crate) fn fmt_float(out: &mut String, x: f64) {
     let start = out.len();
     if LUA.is_5_4() {
         fmt_g(out, x, 14);
@@ -164,8 +163,9 @@ pub fn fmt_float(out: &mut String, x: f64) {
     }
 }
 
+#[cfg(test)]
 /// A float as Lua prints it.
-pub fn float_to_string(x: f64) -> String {
+pub(crate) fn float_to_string(x: f64) -> String {
     let mut s = String::new();
     fmt_float(&mut s, x);
     s
@@ -208,6 +208,7 @@ pub fn fmt_number(out: &mut String, v: Value) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orbit_bytecode::number::{float_idiv, float_mod, int_idiv, int_mod};
 
     #[test]
     fn push_int_matches_display() {

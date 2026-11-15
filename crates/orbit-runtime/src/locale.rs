@@ -26,10 +26,10 @@ pub mod class {
     pub const ALNUM: u16 = 1 << 8;
     pub const XDIGIT: u16 = 1 << 9;
     /// The zero byte (`%z`), the same in every locale.
-    pub const ZERO: u16 = 1 << 10;
+    pub(crate) const ZERO: u16 = 1 << 10;
 
     /// The bit of a lower-case pattern class letter (`%a` and so on), or 0.
-    pub const fn of_letter(lower: u8) -> u16 {
+    pub(crate) const fn of_letter(lower: u8) -> u16 {
         match lower {
             b'a' => ALPHA,
             b'c' => CNTRL,
@@ -51,9 +51,9 @@ pub mod class {
 /// and lower-case forms (`toupper`, `tolower`).
 #[derive(Clone, PartialEq, Eq)]
 pub struct CharTables {
-    pub classes: [u16; 256],
+    pub(crate) classes: [u16; 256],
     pub upper: [u8; 256],
-    pub lower: [u8; 256],
+    pub(crate) lower: [u8; 256],
 }
 
 impl fmt::Debug for CharTables {
@@ -208,19 +208,12 @@ impl Locale {
     }
 
     /// The character tables, shared.
-    pub fn chars_rc(&self) -> Rc<CharTables> {
+    pub(crate) fn chars_rc(&self) -> Rc<CharTables> {
         Rc::clone(&self.chars)
     }
 
-    /// Whether the character classes and case mappings are the C locale's
-    /// (ASCII).
-    #[inline]
-    pub fn c_chars(&self) -> bool {
-        self.c_chars
-    }
-
     /// `string.upper` of `s`, appended to `out`.
-    pub fn upper(&self, s: &[u8], out: &mut Vec<u8>) {
+    pub(crate) fn upper(&self, s: &[u8], out: &mut Vec<u8>) {
         if self.c_chars {
             out.extend(s.iter().map(u8::to_ascii_uppercase));
         } else {
@@ -229,7 +222,7 @@ impl Locale {
     }
 
     /// `string.lower` of `s`, appended to `out`.
-    pub fn lower(&self, s: &[u8], out: &mut Vec<u8>) {
+    pub(crate) fn lower(&self, s: &[u8], out: &mut Vec<u8>) {
         if self.c_chars {
             out.extend(s.iter().map(u8::to_ascii_lowercase));
         } else {
@@ -248,7 +241,7 @@ impl Locale {
     /// this locale. A field width counts the point as one character, as
     /// glibc's `printf` does, since the padding was done with `.`.
     #[inline]
-    pub fn localize_float(&self, out: &mut Vec<u8>, start: usize) {
+    pub(crate) fn localize_float(&self, out: &mut Vec<u8>, start: usize) {
         if self.c_numbers() {
             return;
         }
@@ -262,13 +255,6 @@ impl Locale {
             let at = start + at;
             out.splice(at..at + 1, self.decimal_point.iter().copied());
         }
-    }
-
-    /// [`Locale::localize_float`] for a `String`. Returns it unchanged in C.
-    pub fn localize_string(&self, s: String) -> Vec<u8> {
-        let mut out = s.into_bytes();
-        self.localize_float(&mut out, 0);
-        out
     }
 
     /// `tostring` of a number in this locale.
@@ -291,7 +277,7 @@ impl Locale {
     /// is the locale's; a `.` is still read when the point is one byte, as
     /// lua5.5 retries with `.` replaced by the point's first byte.
     #[inline]
-    pub fn str_to_number(&self, s: &[u8]) -> Option<Value> {
+    pub(crate) fn str_to_number(&self, s: &[u8]) -> Option<Value> {
         if self.c_numbers() {
             return number::str_to_number(s);
         }

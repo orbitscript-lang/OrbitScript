@@ -7,15 +7,15 @@ use std::sync::OnceLock;
 
 use orbit_gc::{Gc, Liveness, Marker, Trace};
 
-use crate::object::{LuaHeap, LuaSpace, OrbitStr};
+use crate::object::{LuaHeap, LuaSpace};
 
 /// Strings up to this many bytes are interned, so equal short strings are
 /// the same handle.
-pub const MAX_SHORT: usize = 40;
+pub(crate) const MAX_SHORT: usize = 40;
 
 /// Strings up to this many bytes are stored inside the heap slot, with no
 /// separate allocation. The size keeps [`Bytes`] at 24 bytes.
-pub const MAX_INLINE: usize = 22;
+pub(crate) const MAX_INLINE: usize = 22;
 
 /// A string object. Short strings are hashed when interned; long strings the
 /// first time they are used as a table key.
@@ -74,29 +74,24 @@ impl Bytes {
 
 impl LuaStr {
     #[inline(always)]
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         self.bytes.as_slice()
     }
 
     #[inline(always)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.as_bytes().len()
-    }
-
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.as_bytes().is_empty()
     }
 
     /// Whether the string is interned (at most [`MAX_SHORT`] bytes).
     #[inline(always)]
-    pub fn is_short(&self) -> bool {
+    pub(crate) fn is_short(&self) -> bool {
         self.short
     }
 
     /// The string's hash, computed on first use. Never 0.
     #[inline]
-    pub fn hash(&self) -> u32 {
+    pub(crate) fn hash(&self) -> u32 {
         let h = self.hash.get();
         if h != 0 {
             return h;
@@ -104,10 +99,6 @@ impl LuaStr {
         let h = hash_bytes(self.as_bytes());
         self.hash.set(h);
         h
-    }
-
-    pub fn as_orbit_str(&self) -> OrbitStr<'_> {
-        OrbitStr::from(self.as_bytes())
     }
 }
 
@@ -140,7 +131,7 @@ const K0: u64 = 0xa076_1d64_78bd_642f;
 const K1: u64 = 0xe703_7ed1_a0b4_28db;
 
 /// Seeded hash of a byte string. Never returns 0.
-pub fn hash_bytes(b: &[u8]) -> u32 {
+pub(crate) fn hash_bytes(b: &[u8]) -> u32 {
     let mut h = seed() ^ (b.len() as u64).wrapping_mul(K1);
     let mut chunks = b.chunks_exact(8);
     for c in &mut chunks {
@@ -160,7 +151,7 @@ pub fn hash_bytes(b: &[u8]) -> u32 {
 /// Seeded hash of a 64-bit word (numbers, handles, booleans as table keys).
 /// Never returns 0.
 #[inline(always)]
-pub fn hash_word(w: u64) -> u32 {
+pub(crate) fn hash_word(w: u64) -> u32 {
     let h = mix(w ^ K1, K0 ^ seed());
     (h as u32 ^ (h >> 32) as u32).max(1)
 }
@@ -190,11 +181,11 @@ const INTERNER_MIN: usize = 256;
 
 /// The weak set of interned short strings: open addressing with linear
 /// probing, at most 3/4 full. A host prunes it in
-/// [`Roots::clear_weak`](orbit_gc::Roots::clear_weak), either at once
-/// through [`Interner::clear_dead`] or in steps through
-/// [`Interner::begin_clear_dead`] and [`Interner::sweep_dead`].
+/// [`Roots::clear_weak`](orbit_gc::Roots::clear_weak), in steps through
+/// [`Interner::begin_clear_dead`] and [`Interner::sweep_dead`] (the tests
+/// also do it at once, through `Interner::clear_dead`).
 #[derive(Debug, Default)]
-pub struct Interner {
+pub(crate) struct Interner {
     slots: Vec<Interned>,
     len: usize,
     /// Pruning in steps: dead strings may still be in the set, and a lookup
@@ -206,26 +197,23 @@ pub struct Interner {
 }
 
 impl Interner {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Interner {
             slots: vec![Interned::EMPTY; INTERNER_MIN],
             ..Interner::default()
         }
     }
 
+    #[cfg(test)]
     /// Number of interned strings.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     /// A string with these bytes: the interned one if short, else a new long
     /// string. Allocates but never collects; root the result before the next
     /// collection step.
-    pub fn new_str(&mut self, heap: &mut LuaHeap, bytes: &[u8]) -> Gc<LuaStr> {
+    pub(crate) fn new_str(&mut self, heap: &mut LuaHeap, bytes: &[u8]) -> Gc<LuaStr> {
         if bytes.len() <= MAX_SHORT {
             self.intern(heap, bytes)
         } else {
@@ -238,7 +226,7 @@ impl Interner {
     }
 
     /// Like [`Interner::new_str`] but takes ownership of the bytes.
-    pub fn new_str_owned(&mut self, heap: &mut LuaHeap, bytes: Vec<u8>) -> Gc<LuaStr> {
+    pub(crate) fn new_str_owned(&mut self, heap: &mut LuaHeap, bytes: Vec<u8>) -> Gc<LuaStr> {
         if bytes.len() <= MAX_SHORT {
             self.intern(heap, &bytes)
         } else {
@@ -252,7 +240,7 @@ impl Interner {
 
     /// A string with bytes `a..b` of `s`, without copying them into a
     /// temporary first: short results are interned from a stack copy.
-    pub fn new_substr(
+    pub(crate) fn new_substr(
         &mut self,
         heap: &mut LuaHeap,
         s: Gc<LuaStr>,
@@ -277,7 +265,7 @@ impl Interner {
     }
 
     /// The interned short string with these bytes (at most [`MAX_SHORT`]).
-    pub fn intern(&mut self, heap: &mut LuaHeap, bytes: &[u8]) -> Gc<LuaStr> {
+    pub(crate) fn intern(&mut self, heap: &mut LuaHeap, bytes: &[u8]) -> Gc<LuaStr> {
         debug_assert!(bytes.len() <= MAX_SHORT);
         if self.slots.is_empty() {
             self.slots = vec![Interned::EMPTY; INTERNER_MIN];
@@ -373,13 +361,14 @@ impl Interner {
         self.slots[i] = e;
     }
 
+    #[cfg(test)]
     /// Drop the strings the collector found dead, all at once. Call from the
     /// host's `Roots::clear_weak`.
     ///
     /// The set is rehashed in place, so pruning a large set allocates
     /// nothing; it only moves to a smaller allocation when at most an
     /// quarter of what it would take stays in use.
-    pub fn clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
+    pub(crate) fn clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
         if live.is_minor() {
             self.clear_young_dead(live);
             return;
@@ -424,10 +413,10 @@ impl Interner {
         }
     }
 
-    /// Like [`Interner::clear_dead`], but after a full marking only start
+    /// Like `Interner::clear_dead`, but after a full marking only start
     /// pruning: [`Interner::sweep_dead`] does it in steps. For a host that
     /// calls `sweep_dead` from `Roots::sweep_weak`.
-    pub fn begin_clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
+    pub(crate) fn begin_clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
         if live.is_minor() {
             self.clear_young_dead(live);
         } else {
@@ -437,7 +426,7 @@ impl Interner {
 
     /// Check about `budget` slots for dead strings, removing them. Returns
     /// true when the whole set is pruned. Call from `Roots::sweep_weak`.
-    pub fn sweep_dead(&mut self, live: &Liveness<'_, LuaSpace>, budget: usize) -> bool {
+    pub(crate) fn sweep_dead(&mut self, live: &Liveness<'_, LuaSpace>, budget: usize) -> bool {
         if !self.cleaning {
             return true;
         }
@@ -659,7 +648,7 @@ mod tests {
 /// and dropped once the collector finds it dead. C needs the trailing NUL,
 /// which [`LuaStr`] doesn't store, and a pointer that doesn't move.
 #[derive(Debug, Default)]
-pub struct CStrings {
+pub(crate) struct CStrings {
     copies: HashMap<Gc<LuaStr>, Box<[u8]>>,
 }
 
@@ -667,7 +656,7 @@ impl CStrings {
     /// The copy of `s`, whose bytes are `bytes`, made on first use. The
     /// pointer stays valid until a collection finds `s` dead (see
     /// [`CStrings::clear_dead`]).
-    pub fn copy_of(&mut self, s: Gc<LuaStr>, bytes: &[u8]) -> *const u8 {
+    pub(crate) fn copy_of(&mut self, s: Gc<LuaStr>, bytes: &[u8]) -> *const u8 {
         self.copies
             .entry(s)
             .or_insert_with(|| {
@@ -681,18 +670,9 @@ impl CStrings {
 
     /// Drop the copies of strings this collection found dead. Call from
     /// `Roots::clear_weak`, before their slots can be reused.
-    pub fn clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
+    pub(crate) fn clear_dead(&mut self, live: &Liveness<'_, LuaSpace>) {
         if !self.copies.is_empty() {
             self.copies.retain(|&s, _| live.is_live(s));
         }
-    }
-
-    /// How many copies are kept.
-    pub fn len(&self) -> usize {
-        self.copies.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.copies.is_empty()
     }
 }

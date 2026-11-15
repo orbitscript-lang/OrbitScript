@@ -38,7 +38,7 @@ pub(crate) const MAX_HOT_STACKS: usize = 1024;
 
 /// A thread's status, as `coroutine.status` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoStatus {
+pub(crate) enum CoStatus {
     Suspended,
     Running,
     /// It resumed another coroutine and waits for it.
@@ -47,7 +47,7 @@ pub enum CoStatus {
 }
 
 impl CoStatus {
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             CoStatus::Suspended => "suspended",
             CoStatus::Running => "running",
@@ -883,7 +883,7 @@ impl Vm {
 /// [`NativeCtx::leave_thread_window`] to restore.
 #[derive(Debug)]
 #[must_use]
-pub struct WindowSave(Option<(usize, usize, usize)>);
+pub(crate) struct WindowSave(Option<(usize, usize, usize)>);
 
 /// Finished stacks kept at most in [`SpareStacks`]: enough for code that
 /// creates coroutines in a loop or keeps a few taking turns.
@@ -1048,14 +1048,14 @@ fn switched(flow: Flow) -> Flow {
 }
 
 /// Whether the running coroutine is being closed by `coroutine.close`.
-pub(crate) fn closing(rt: &crate::vm::Runtime) -> bool {
+pub(crate) fn closing(rt: &crate::vm::VmState) -> bool {
     rt.stack.aux.closing != Closing::No
 }
 
 impl NativeCtx<'_> {
     /// Whether thread `t` could yield where it is: it isn't the main thread
     /// and no frame on its stack refuses (`coroutine.isyieldable`).
-    pub fn thread_yieldable(&self, t: Gc<Thread>) -> bool {
+    pub(crate) fn thread_yieldable(&self, t: Gc<Thread>) -> bool {
         if t == self.vm.rt.main_thread {
             return false;
         }
@@ -1068,7 +1068,7 @@ impl NativeCtx<'_> {
     }
 
     /// A new suspended coroutine running `f`.
-    pub fn new_thread(&mut self, f: Value) -> Gc<Thread> {
+    pub(crate) fn new_thread(&mut self, f: Value) -> Gc<Thread> {
         let stack = self.vm.rt.co.spare_stacks.take();
         let mut c = Coroutine::fresh(f, stack);
         // A new thread gets its creator's hook mask and count, but not its
@@ -1078,11 +1078,16 @@ impl NativeCtx<'_> {
         self.vm.heap.alloc(Thread::new(c))
     }
 
+    #[cfg(feature = "debug")]
     /// Run `f` with thread `t`'s stack in place of the running one, for
     /// the debug library's view of another thread. `f` may read and write
     /// that stack's frames and registers, but must not touch this native's
     /// window or run Lua code. The running thread runs `f` directly.
-    pub fn on_thread<R>(&mut self, t: Gc<Thread>, f: impl FnOnce(&mut Self, bool) -> R) -> R {
+    pub(crate) fn on_thread<R>(
+        &mut self,
+        t: Gc<Thread>,
+        f: impl FnOnce(&mut Self, bool) -> R,
+    ) -> R {
         if t == self.vm.rt.current {
             return f(self, false);
         }
@@ -1092,26 +1097,13 @@ impl NativeCtx<'_> {
         r
     }
 
-    /// [`NativeCtx::on_thread`] with `t`'s stack as this native's window,
+    /// Make `t`'s stack (as `NativeCtx::on_thread` borrows it) this native's window,
     /// from register `base` (by default where the C API's view of that
-    /// thread starts) to its top: for the C API's calls on a thread that
-    /// isn't running. `f` may push and pop, and should not run Lua code.
-    pub fn on_thread_window<R>(
-        &mut self,
-        t: Gc<Thread>,
-        base: Option<usize>,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let saved = self.enter_thread_window(t, base);
-        let r = f(self);
-        self.leave_thread_window(t, saved);
-        r
-    }
-
-    /// The first half of [`NativeCtx::on_thread_window`]: `t`'s stack is
-    /// this native's window until [`NativeCtx::leave_thread_window`] is
-    /// given what this returns.
-    pub fn enter_thread_window(&mut self, t: Gc<Thread>, base: Option<usize>) -> WindowSave {
+    /// thread starts) to its top, until [`NativeCtx::leave_thread_window`]
+    /// is given what this returns: for the C API's calls on a thread that
+    /// isn't running. The caller may push and pop meanwhile, and should not
+    /// run Lua code.
+    pub(crate) fn enter_thread_window(&mut self, t: Gc<Thread>, base: Option<usize>) -> WindowSave {
         if t == self.vm.rt.current {
             return WindowSave(None);
         }
@@ -1125,7 +1117,7 @@ impl NativeCtx<'_> {
     }
 
     /// Back to the running stack after [`NativeCtx::enter_thread_window`].
-    pub fn leave_thread_window(&mut self, t: Gc<Thread>, saved: WindowSave) {
+    pub(crate) fn leave_thread_window(&mut self, t: Gc<Thread>, saved: WindowSave) {
         let WindowSave(Some((saved_top, base, nargs))) = saved else {
             return;
         };
@@ -1136,7 +1128,7 @@ impl NativeCtx<'_> {
     /// A thread with nothing on its stack, as the C API's `lua_newthread`
     /// makes: it reads as dead until a function is put on its stack and it
     /// is resumed ([`NativeCtx::resume_nested`]).
-    pub fn new_empty_thread(&mut self) -> Gc<Thread> {
+    pub(crate) fn new_empty_thread(&mut self) -> Gc<Thread> {
         let mut c = Coroutine::main();
         c.status = CoStatus::Dead;
         c.stack.hook = self.vm.rt.stack.hook.inherited();
@@ -1145,7 +1137,7 @@ impl NativeCtx<'_> {
 
     /// Whether thread `t` is suspended in a yield (not one that hasn't
     /// started).
-    pub fn thread_yielded(&self, t: Gc<Thread>) -> bool {
+    pub(crate) fn thread_yielded(&self, t: Gc<Thread>) -> bool {
         if t == self.vm.rt.current {
             return false;
         }
@@ -1158,13 +1150,13 @@ impl NativeCtx<'_> {
     }
 
     /// Where thread `t`'s values end (`t` not running), for a window
-    /// ([`NativeCtx::on_thread_window`]) starting there.
-    pub fn thread_top(&self, t: Gc<Thread>) -> usize {
+    /// ([`NativeCtx::enter_thread_window`]) starting there.
+    pub(crate) fn thread_top(&self, t: Gc<Thread>) -> usize {
         co(&self.vm.heap, t).top
     }
 
     /// Whether thread `t` died with an error that no close has cleared.
-    pub fn thread_failed(&self, t: Gc<Thread>) -> bool {
+    pub(crate) fn thread_failed(&self, t: Gc<Thread>) -> bool {
         t != self.vm.rt.current && co(&self.vm.heap, t).error.is_some()
     }
 
@@ -1187,7 +1179,7 @@ impl NativeCtx<'_> {
     /// of its stack; so does a dead one that ended without an error, once
     /// something has put a function there (C reuses threads that way).
     /// Nothing can yield across the native while it waits.
-    pub fn resume_nested(
+    pub(crate) fn resume_nested(
         &mut self,
         t: Gc<Thread>,
         args: &[Value],
@@ -1229,7 +1221,7 @@ impl NativeCtx<'_> {
     /// stack, newest first, with its error (nil if it has none). `Err` has
     /// its error or the last error a handler raised. The thread is left
     /// dead with an empty stack, which C may reuse.
-    pub fn close_nested(&mut self, co: Gc<Thread>) -> Result<(), Value> {
+    pub(crate) fn close_nested(&mut self, co: Gc<Thread>) -> Result<(), Value> {
         let vm = &mut *self.vm;
         match vm.co_status(co) {
             CoStatus::Suspended | CoStatus::Dead => {}
@@ -1252,17 +1244,17 @@ impl NativeCtx<'_> {
     }
 
     /// The status of thread `t`.
-    pub fn thread_status(&self, t: Gc<Thread>) -> CoStatus {
+    pub(crate) fn thread_status(&self, t: Gc<Thread>) -> CoStatus {
         self.vm.co_status(t)
     }
 
     /// The main thread.
-    pub fn running_main_thread(&self) -> Gc<Thread> {
+    pub(crate) fn running_main_thread(&self) -> Gc<Thread> {
         self.vm.rt.main_thread
     }
 
     /// The running thread, and whether it is the main thread.
-    pub fn running(&self) -> (Gc<Thread>, bool) {
+    pub(crate) fn running(&self) -> (Gc<Thread>, bool) {
         (
             self.vm.rt.current,
             self.vm.rt.current == self.vm.rt.main_thread,
@@ -1272,7 +1264,7 @@ impl NativeCtx<'_> {
     /// The values of the main thread's variables still to close, oldest
     /// first, for `os.exit(code, true)`, which closes them as lua5.5 does
     /// when it closes the state.
-    pub fn main_pending_closes(&self) -> Vec<Value> {
+    pub(crate) fn main_pending_closes(&self) -> Vec<Value> {
         let s = if self.vm.rt.current == self.vm.rt.main_thread {
             &self.vm.rt.stack
         } else {

@@ -451,7 +451,7 @@ impl Vm {
     /// earned a step, take it and run the finalizers it made due, as the
     /// interpreter does at its safe points. Everything above the host's top
     /// is dead.
-    pub fn host_safepoint(&mut self) {
+    pub(crate) fn host_safepoint(&mut self) {
         if self.heap.should_step() && self.rt.stack.frames.is_empty() {
             let live = self.rt.top;
             self.gc_safepoint(live);

@@ -6,7 +6,7 @@ index 4f2457f..4d1c4f5 100644
 --- a/crates/orbit-runtime/src/object/gc.rs
 +++ b/crates/orbit-runtime/src/object/gc.rs
 @@ -73,7 +73,7 @@ pub fn weak_mode<'a>(mt: &Table, str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr) -> O
- pub fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>) -> bool {
+ pub(crate) fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>) -> bool {
      match v {
          Value::Table(t) => {
 -            heap.update(t, |t| t.meta = mt);

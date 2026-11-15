@@ -7,7 +7,7 @@ use crate::object::string::MAX_SHORT;
 use crate::object::{Cell, Closure, FieldCache, Gc, LuaHeap, LuaStr, Proto, ProtoCode, Value};
 use orbit_bytecode::{CaptureSource, Constant, Op, UnlinkedChunk};
 
-use crate::vm::{Runtime, Vm};
+use crate::vm::{Vm, VmState};
 
 impl Vm {
     /// Link a compiled chunk and return its main function as a closure whose
@@ -18,12 +18,8 @@ impl Vm {
         link(&mut self.heap, &mut self.rt, chunk, env, false)
     }
 
-    /// [`Vm::load`] with `env` as the main function's first capture.
-    pub fn load_with_env(&mut self, chunk: &UnlinkedChunk, env: Value) -> Value {
-        link(&mut self.heap, &mut self.rt, chunk, env, false)
-    }
-
-    /// [`Vm::load_with_env`] for a chunk of a built-in library: its
+    /// [`Vm::load`] with `env` as the main function's first capture, for a
+    /// chunk of a built-in library: its
     /// functions show as C functions to the debug interface, and as `[C]`
     /// in messages and tracebacks.
     pub(crate) fn load_builtin(&mut self, chunk: &UnlinkedChunk, env: Value) -> Value {
@@ -38,7 +34,7 @@ impl Vm {
 /// a dumped function keeps one capture per upvalue it had.
 pub(crate) fn link(
     heap: &mut LuaHeap,
-    rt: &mut Runtime,
+    rt: &mut VmState,
     chunk: &UnlinkedChunk,
     env: Value,
     builtin: bool,

@@ -8,6 +8,13 @@
 //!
 //! The three stay separate modules so each can be tested on its own; the
 //! public embedding API is the `orbit` crate, built on this one.
+//!
+//! What is `pub` here is what the `orbit` and `orbit-locale` crates use, and
+//! nothing else: the rest is `pub(crate)`, so a field or function can change
+//! without a search through the workspace. The lint below keeps `pub` from
+//! being written where it would not mean that.
+
+#![warn(unreachable_pub)]
 
 pub mod arg_errors;
 pub mod locale;

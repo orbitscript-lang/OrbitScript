@@ -7,14 +7,12 @@ use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn, Vm};
 fn record(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
     let obj = ctx.check_table(0)?;
     let n_key = ctx.new_str(b"n");
-    let n = ctx.vm.heap.get(obj).get(&ctx.vm.heap, n_key);
-    let log_name = ctx.new_str(b"log");
-    let globals = ctx.vm.rt.globals;
-    let Value::Table(log) = ctx.vm.heap.get(globals).get(&ctx.vm.heap, log_name) else {
+    let n = ctx.vm.table_get(obj, n_key);
+    let Value::Table(log) = ctx.vm.global("log") else {
         unreachable!()
     };
-    let len = ctx.vm.heap.get(log).border();
-    orbit_runtime::object::table::set_int(&mut ctx.vm.heap, log, len + 1, n).unwrap();
+    let len = ctx.vm.table_len(log);
+    ctx.vm.table_set(log, Value::Int(len + 1), n);
     Ok(NativeReturn::Return(0))
 }
 
@@ -48,9 +46,8 @@ fn log(vm: &mut Vm) -> Vec<i64> {
     let Value::Table(log) = vm.global("log") else {
         unreachable!()
     };
-    let t = vm.heap.get(log);
-    (1..=t.border())
-        .map(|i| match t.get_int(i) {
+    (1..=vm.table_len(log))
+        .map(|i| match vm.table_get(log, Value::Int(i)) {
             Value::Int(n) => n,
             _ => unreachable!(),
         })
@@ -86,7 +83,7 @@ fn an_error_in_one_finalizer_does_not_stop_the_rest() {
     vm.full_collect();
     vm.run_finalizers();
     assert_eq!(log(&mut vm), [3, 1]);
-    assert!(!vm.heap.is_stopped(), "collection resumes after finalizers");
+    assert!(!vm.gc_stopped(), "collection resumes after finalizers");
 }
 
 #[test]

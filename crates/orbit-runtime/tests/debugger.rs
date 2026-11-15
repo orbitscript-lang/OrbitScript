@@ -475,7 +475,7 @@ impl DebugEvents for Evaluator {
         };
         let ctx = paused.ctx();
         let text = |ctx: &orbit_runtime::vm::NativeCtx<'_>, v: Value| match v {
-            Value::Str(s) => String::from_utf8_lossy(ctx.vm.heap.get(s).as_bytes()).into_owned(),
+            Value::Str(s) => String::from_utf8_lossy(ctx.vm.str_bytes(s)).into_owned(),
             v => format!("{v:?}"),
         };
         let message = text(ctx, value);
@@ -535,7 +535,7 @@ raiser()
     let Value::Str(m) = e.value else {
         panic!("{:?}", e.value)
     };
-    assert_eq!(vm.heap.get(m).as_bytes(), b"original");
+    assert_eq!(vm.str_bytes(m), b"original");
     let tb = e.traceback.expect("a traceback");
     assert!(tb.contains("in local 'raiser'"), "{tb}");
     assert!(!tb.contains("'probe'"), "{tb}");

@@ -23,6 +23,6 @@ pub fn set_level(vm: &mut Vm, level: Option<Level>) {
 }
 
 /// The level `load` uses.
-pub(crate) fn level(rt: &crate::vm::Runtime) -> Option<Level> {
+pub(crate) fn level(rt: &crate::vm::VmState) -> Option<Level> {
     rt.host.binary_checks()
 }

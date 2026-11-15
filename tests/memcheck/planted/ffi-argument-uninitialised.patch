@@ -1,0 +1,19 @@
+Plants: the ffi library hands libffi an uninitialised slot for a call's last
+argument instead of the argument's value.
+Parts: unit
+
+diff --git a/crates/orbit-ffi/src/sys.rs b/crates/orbit-ffi/src/sys.rs
+index 894b03b..9af6088 100644
+--- a/crates/orbit-ffi/src/sys.rs
++++ b/crates/orbit-ffi/src/sys.rs
+@@ -153,6 +153,10 @@ impl Cif {
+         for (p, slot) in pointers.iter_mut().zip(args.iter_mut()) {
+             *p = (slot as *mut u64).cast();
+         }
++        let mut spare = std::mem::MaybeUninit::<u64>::uninit();
++        if let Some(last) = pointers.last_mut() {
++            *last = spare.as_mut_ptr().cast();
++        }
+         // Eight bytes, the width libffi widens integer results to on
+         // 64-bit targets, and the size of every result type here.
+         let mut result = 0u64;

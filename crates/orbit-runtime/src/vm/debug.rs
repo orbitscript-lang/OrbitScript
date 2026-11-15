@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use crate::object::{Cell, Closure, Gc, LuaHeap, NativeId, Proto, Table, Value};
 use orbit_bytecode::{LocalSlot, Op, Origin};
 
-use crate::vm::{FrameKind, Runtime, Stack};
+use crate::vm::{FrameKind, Stack, VmState};
 
 /// The longest traceback printed in full; longer ones keep the first
 /// [`TRACE_HEAD`] and last [`TRACE_TAIL`] levels (observed from `lua5.5`).
@@ -27,8 +27,8 @@ const TRACE_TAIL: usize = 11;
 /// the stack index of its function slot.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Running {
-    pub id: NativeId,
-    pub func: usize,
+    pub(crate) id: NativeId,
+    pub(crate) func: usize,
 }
 
 /// One activation on the stack, as the debug library numbers them, and
@@ -48,16 +48,16 @@ enum LevelAt {
 
 /// How an activation was called, for `getinfo`'s `name` and `namewhat`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallName {
+pub(crate) struct CallName {
     /// `global`, `local`, `method`, `field`, `upvalue`, `constant`,
     /// `for iterator`, `metamethod` or `hook`.
-    pub namewhat: &'static str,
-    pub name: Vec<u8>,
+    pub(crate) namewhat: &'static str,
+    pub(crate) name: Vec<u8>,
 }
 
 /// What a local slot is called.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LocalName<'a> {
+pub(crate) enum LocalName<'a> {
     Named(&'a [u8]),
     /// A register in use with no name (`(temporary)`).
     Temporary,
@@ -70,7 +70,7 @@ pub enum LocalName<'a> {
 }
 
 impl LocalName<'_> {
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         match self {
             LocalName::Named(n) => n,
             LocalName::Temporary => b"(temporary)",
@@ -94,25 +94,25 @@ pub(crate) enum Place {
 
 /// Static facts about a function (`getinfo`'s `S` and `u` options).
 #[derive(Debug, Clone)]
-pub struct FuncInfo {
+pub(crate) struct FuncInfo {
     /// `@file.lua`, `=stdin`, the source text, or `=[C]` for natives.
-    pub source: Vec<u8>,
+    pub(crate) source: Vec<u8>,
     /// The short form used in messages.
-    pub short_src: String,
+    pub(crate) short_src: String,
     /// `Lua`, `C` or `main`.
-    pub what: &'static str,
-    pub line_defined: i64,
-    pub last_line: i64,
-    pub nups: usize,
-    pub nparams: u8,
-    pub is_vararg: bool,
+    pub(crate) what: &'static str,
+    pub(crate) line_defined: i64,
+    pub(crate) last_line: i64,
+    pub(crate) nups: usize,
+    pub(crate) nparams: u8,
+    pub(crate) is_vararg: bool,
     /// The name the function was defined with (`local function f`,
     /// `function t.f`, `fn f`), from the source rather than a call site;
     /// `None` for main chunks, anonymous functions and natives.
-    pub defined_name: Option<Vec<u8>>,
+    pub(crate) defined_name: Option<Vec<u8>>,
 }
 
-impl Runtime {
+impl VmState {
     /// How many hidden upvalues closure `c` has (see [`crate::vm::Native::hidden`]).
     /// A built-in library function hides all of its upvalues, as a C
     /// function with none would.
@@ -304,7 +304,7 @@ impl Runtime {
         }
     }
 
-    /// `chunk:line: ` for activation `n` (as [`Runtime::level`] numbers
+    /// `chunk:line: ` for activation `n` (as [`VmState::level`] numbers
     /// them), or empty if it isn't a Lua function or its line is unknown (a
     /// stripped chunk): the prefix `error` and natives' errors add.
     pub(crate) fn where_(&self, heap: &LuaHeap, running: Option<Running>, n: usize) -> String {
@@ -312,7 +312,7 @@ impl Runtime {
     }
 
     /// The prefix of a runtime error raised by an instruction: like
-    /// [`Runtime::where_`], but a stripped chunk gives `chunk:?: ` (5.4:
+    /// [`VmState::where_`], but a stripped chunk gives `chunk:?: ` (5.4:
     /// `chunk:-1: `), as in the reference.
     pub(crate) fn error_where(&self, heap: &LuaHeap, n: usize) -> String {
         self.position(heap, None, n, true)
@@ -703,7 +703,7 @@ fn temporaries(proto: &Proto, pc: u32) -> (usize, usize) {
     (count, top.max(with_slot))
 }
 
-impl Runtime {
+impl VmState {
     /// The `getlocal` index that reads register `reg` of Lua frame `fi`
     /// (for `getinfo`'s `ftransfer`).
     pub(crate) fn register_local(&self, heap: &LuaHeap, fi: usize, reg: usize) -> u32 {
@@ -758,7 +758,7 @@ fn active_locals(
 }
 
 /// Static facts about function `f`.
-pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
+pub(crate) fn func_info(heap: &LuaHeap, rt: &VmState, f: Value) -> FuncInfo {
     match f {
         Value::Closure(c)
             if !matches!(
@@ -812,6 +812,7 @@ pub(crate) fn func_info(heap: &LuaHeap, rt: &Runtime, f: Value) -> FuncInfo {
     }
 }
 
+#[cfg(feature = "debug")]
 /// Lines with code in `f` (`getinfo`'s `activelines`).
 pub(crate) fn active_lines(heap: &LuaHeap, f: Gc<Closure>) -> Vec<u32> {
     let p = heap.get(heap.get(f).proto);
@@ -854,34 +855,38 @@ pub(crate) fn deopt_self(heap: &mut LuaHeap, f: Gc<Closure>, cap: u8) {
 
 /// The debug library's view of the VM.
 impl crate::vm::NativeCtx<'_> {
+    #[cfg(feature = "debug")]
     /// Set this stack's hook: `mask` is [`crate::vm::hook::CALL`] and friends,
     /// `count` the count interval (count events only when positive). A nil
     /// `f` or an empty mask with no count turns it off.
-    pub fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
+    pub(crate) fn set_hook(&mut self, f: Value, mask: u8, count: i64) {
         self.vm.set_hook(f, mask, count);
     }
 
+    #[cfg(feature = "debug")]
     /// This stack's hook: function (nil when off), event mask without the
     /// count bit, and count.
-    pub fn hook(&self) -> (Value, u8, i64) {
+    pub(crate) fn hook(&self) -> (Value, u8, i64) {
         let h = &self.vm.rt.stack.hook;
         use crate::vm::hook::{CALL, LINE, RETURN};
         (h.func, h.mask & (CALL | RETURN | LINE), h.base_count)
     }
 
+    #[cfg(feature = "debug")]
     /// `getinfo`'s `ftransfer` and `ntransfer` for `l`: the values a call or
     /// return hook running for `l` transfers, else 0 and 0.
-    pub fn transfer(&self, l: Level) -> (u32, u32) {
+    pub(crate) fn transfer(&self, l: Level) -> (u32, u32) {
         match (l.0, self.vm.rt.stack.hook.transfer) {
             (LevelAt::Frame(i), Some((fi, first, n))) if i == fi => (first, n),
             _ => (0, 0),
         }
     }
 
+    #[cfg(feature = "debug")]
     /// Activation `n` of a stack [`NativeCtx::on_thread`] put in place
     /// (`foreign`), where level 0 is its top activation, or of the running
     /// stack ([`NativeCtx::level`]).
-    pub fn level_in(&self, foreign: bool, n: usize) -> Option<Level> {
+    pub(crate) fn level_in(&self, foreign: bool, n: usize) -> Option<Level> {
         if foreign {
             self.vm.rt.level(None, n + 1)
         } else {
@@ -889,9 +894,10 @@ impl crate::vm::NativeCtx<'_> {
         }
     }
 
+    #[cfg(feature = "debug")]
     /// [`NativeCtx::traceback`] for a stack `on_thread` put in place
     /// (`foreign`), whose levels start at 0 for its top activation.
-    pub fn traceback_in(&self, foreign: bool, from: usize) -> String {
+    pub(crate) fn traceback_in(&self, foreign: bool, from: usize) -> String {
         if foreign {
             self.vm.rt.traceback(&self.vm.heap, None, from + 1)
         } else {
@@ -900,12 +906,12 @@ impl crate::vm::NativeCtx<'_> {
     }
 
     /// Activation `n`: 0 is this native, 1 its caller, and so on.
-    pub fn level(&self, n: usize) -> Option<Level> {
+    pub(crate) fn level(&self, n: usize) -> Option<Level> {
         self.vm.rt.level(Some(self.running_native()), n)
     }
 
     /// The function running at `l`.
-    pub fn level_func(&self, l: Level) -> Value {
+    pub(crate) fn level_func(&self, l: Level) -> Value {
         self.vm.rt.level_func(&self.vm.heap, l)
     }
 
@@ -915,27 +921,28 @@ impl crate::vm::NativeCtx<'_> {
     }
 
     /// How `l` was called (`getinfo`'s `name` and `namewhat`).
-    pub fn level_name(&self, l: Level) -> Option<CallName> {
+    pub(crate) fn level_name(&self, l: Level) -> Option<CallName> {
         self.vm.rt.call_name(&self.vm.heap, l)
     }
 
     /// Whether `l` was entered by a tail call.
-    pub fn is_tail_call(&self, l: Level) -> bool {
+    pub(crate) fn is_tail_call(&self, l: Level) -> bool {
         self.vm.rt.is_tail_call(l)
     }
 
     /// Extra arguments a `__call` chain inserted for `l`.
-    pub fn extra_args(&self, l: Level) -> u8 {
+    pub(crate) fn extra_args(&self, l: Level) -> u8 {
         self.vm.rt.extra_args(l)
     }
 
     /// Static facts about function `f` (a closure or native).
-    pub fn func_info(&self, f: Value) -> FuncInfo {
+    pub(crate) fn func_info(&self, f: Value) -> FuncInfo {
         func_info(&self.vm.heap, &self.vm.rt, f)
     }
 
+    #[cfg(feature = "debug")]
     /// Lines of `f` that have code, or `None` for a native.
-    pub fn active_lines(&self, f: Value) -> Option<Vec<u32>> {
+    pub(crate) fn active_lines(&self, f: Value) -> Option<Vec<u32>> {
         match f {
             // A native closure is a C function to scripts: no lines.
             Value::Closure(c) if self.native_of(f).is_none() && !is_builtin(&self.vm.heap, c) => {
@@ -955,7 +962,7 @@ impl crate::vm::NativeCtx<'_> {
     }
 
     /// Set local `n` of `l`, returning its name.
-    pub fn set_local(&mut self, l: Level, n: i64, v: Value) -> Option<Vec<u8>> {
+    pub(crate) fn set_local(&mut self, l: Level, n: i64, v: Value) -> Option<Vec<u8>> {
         let (name, place) = self.vm.rt.local_at(&self.vm.heap, l, n)?;
         let name = name.as_bytes().to_vec();
         self.vm.rt.write_place(&mut self.vm.heap, place, v);
@@ -963,7 +970,7 @@ impl crate::vm::NativeCtx<'_> {
     }
 
     /// Name of parameter `n` (1-based) of Lua function `f`.
-    pub fn param_name(&self, f: Value, n: i64) -> Option<Vec<u8>> {
+    pub(crate) fn param_name(&self, f: Value, n: i64) -> Option<Vec<u8>> {
         let Value::Closure(c) = f else { return None };
         let p = self.vm.heap.get(self.vm.heap.get(c).proto);
         if n < 1 || n > p.code.nparams as i64 {
@@ -976,7 +983,7 @@ impl crate::vm::NativeCtx<'_> {
 
     /// The cell of upvalue `n` (1-based, in Lua's numbering) of `f`, with
     /// its name.
-    pub fn upvalue_cell(&self, f: Value, n: i64) -> Option<(Vec<u8>, Gc<Cell>)> {
+    pub(crate) fn upvalue_cell(&self, f: Value, n: i64) -> Option<(Vec<u8>, Gc<Cell>)> {
         let Value::Closure(c) = f else { return None };
         let c = self.vm.heap.get(c);
         let n = usize::try_from(n).ok()?.checked_sub(1)?;
@@ -996,13 +1003,13 @@ impl crate::vm::NativeCtx<'_> {
     }
 
     /// Name and value of upvalue `n` of `f`.
-    pub fn upvalue_of(&self, f: Value, n: i64) -> Option<(Vec<u8>, Value)> {
+    pub(crate) fn upvalue_of(&self, f: Value, n: i64) -> Option<(Vec<u8>, Value)> {
         let (name, cell) = self.upvalue_cell(f, n)?;
         Some((name, self.vm.heap.get(cell).value))
     }
 
     /// Set upvalue `n` of `f`, returning its name.
-    pub fn set_upvalue_of(&mut self, f: Value, n: i64, v: Value) -> Option<Vec<u8>> {
+    pub(crate) fn set_upvalue_of(&mut self, f: Value, n: i64, v: Value) -> Option<Vec<u8>> {
         let (name, cell) = self.upvalue_cell(f, n)?;
         self.vm
             .rt
@@ -1012,7 +1019,7 @@ impl crate::vm::NativeCtx<'_> {
 
     /// Make upvalue `n1` of `f1` refer to upvalue `n2` of `f2`. Both must
     /// exist (the caller checks).
-    pub fn join_upvalues(&mut self, f1: Gc<Closure>, n1: usize, f2: Gc<Closure>, n2: usize) {
+    pub(crate) fn join_upvalues(&mut self, f1: Gc<Closure>, n1: usize, f2: Gc<Closure>, n2: usize) {
         let p2 = self.vm.heap.get(f2).proto;
         let i2 = self.vm.heap.get(p2).debug.capture_of_upvalue(n2 - 1);
         let cell = self.vm.heap.get(f2).captures[i2];
@@ -1026,7 +1033,7 @@ impl crate::vm::NativeCtx<'_> {
     }
 
     /// `stack traceback:` and the levels from `from` down.
-    pub fn traceback(&self, from: usize) -> String {
+    pub(crate) fn traceback(&self, from: usize) -> String {
         self.vm
             .rt
             .traceback(&self.vm.heap, Some(self.running_native()), from)
