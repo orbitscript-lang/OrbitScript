@@ -869,3 +869,44 @@ impl<T: PureResult, E> PureResult for Result<T, E> {
         self.ok()?.into_value()
     }
 }
+
+#[cfg(test)]
+mod pure_tests {
+    use super::{Number, PureArg, PureResult, PureValue as V};
+
+    #[test]
+    fn arguments_take_exact_types_only() {
+        assert_eq!(i64::from_value(Some(V::Int(3))), Some(3));
+        assert_eq!(i64::from_value(Some(V::Float(3.0))), None);
+        assert_eq!(i64::from_value(None), None);
+        assert_eq!(f64::from_value(Some(V::Float(1.5))), Some(1.5));
+        assert_eq!(f64::from_value(Some(V::Int(2))), Some(2.0));
+        assert_eq!(f64::from_value(Some(V::Bool(true))), None);
+        assert!(matches!(
+            Number::from_value(Some(V::Int(4))),
+            Some(Number::Int(4))
+        ));
+        assert!(matches!(
+            Number::from_value(Some(V::Float(0.5))),
+            Some(Number::Float(f)) if f == 0.5
+        ));
+        assert!(Number::from_value(Some(V::Nil)).is_none());
+        assert_eq!(Option::<i64>::from_value(None), Some(None));
+        assert_eq!(Option::<i64>::from_value(Some(V::Nil)), Some(None));
+        assert_eq!(Option::<i64>::from_value(Some(V::Int(1))), Some(Some(1)));
+        assert_eq!(Option::<i64>::from_value(Some(V::Bool(false))), None);
+    }
+
+    #[test]
+    fn results_are_one_value_or_give_up() {
+        assert!(matches!(7i64.into_value(), Some(V::Int(7))));
+        assert!(matches!(0.25f64.into_value(), Some(V::Float(f)) if f == 0.25));
+        assert!(matches!(Number::Int(1).into_value(), Some(V::Int(1))));
+        assert!(matches!(Number::Float(2.0).into_value(), Some(V::Float(f)) if f == 2.0));
+        assert!(matches!(true.into_value(), Some(V::Bool(true))));
+        assert!(matches!(Some(3i64).into_value(), Some(V::Int(3))));
+        assert!(matches!(None::<i64>.into_value(), Some(V::Nil)));
+        assert!(matches!(Ok::<i64, ()>(5).into_value(), Some(V::Int(5))));
+        assert!(Err::<i64, ()>(()).into_value().is_none());
+    }
+}

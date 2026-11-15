@@ -171,10 +171,7 @@ const fn pure_fast<N: Native>() -> Option<vm::FastFn> {
 
 /// The interpreter's fast path for a `pure` native `N`.
 fn pure_entry<N: Native>(_: &crate::object::LuaHeap, args: &[RawValue]) -> Option<RawValue> {
-    match N::PURE {
-        Some(f) => f(args),
-        None => None,
-    }
+    N::PURE.and_then(|f| f(args))
 }
 
 /// How a [`Return`] names the continuation to run: the runtime's.
