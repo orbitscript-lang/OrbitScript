@@ -1375,12 +1375,11 @@ pub fn set_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> Result<boo
     // The array store needs the barrier, so do it first and look the table
     // up once. `set_key`'s `Heap::update` barriers again, which only
     // checks the color of a table already remembered.
-    {
-        let mut tab = heap.write_at(t, idx as usize);
-        if idx < tab.array.len() as u64 {
-            tab.array.set(idx as usize, v);
-            return Ok(true);
-        }
+    heap.barrier_at(t, idx as usize);
+    let tab = heap.write_no_handles(t).into_untraced();
+    if idx < tab.array.len() as u64 {
+        tab.array.set(idx as usize, v);
+        return Ok(true);
     }
     set_key(heap, t, &Key::int(i), v)?;
     Ok(false)
@@ -1407,10 +1406,13 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
     // With a memory limit a store errors once the heap is over it even if
     // it allocates nothing (`set_key`), so only appends without one take
     // the in-place path below.
-    let no_limit = heap.limit().is_none();
-    // Only stores of a value that can refer to an object barrier
-    // (`HoldsHandle`); the hash path below barriers through `Heap::update`.
-    let mut tab = heap.write_at_for(t, idx as usize, &v);
+    if !matches!(
+        v,
+        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+    ) {
+        heap.barrier_at(t, idx as usize);
+    }
+    let tab = heap.write_no_handles(t).into_untraced();
     if idx < tab.array.len() as u64 {
         let idx = idx as usize;
         // Metatables are rare: test for one before reading the tag.
@@ -1436,13 +1438,12 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
         && tab.array.len() < tab.array.cap()
         && tab.used == 0
         && !v.is_nil()
-        && no_limit
+        && heap.limit().is_none()
     {
-        let pushed = tab.array.push_in_place(v);
+        let pushed = heap.write_no_handles(t).into_untraced().array.push_in_place(v);
         debug_assert!(pushed, "checked for room above");
         return IntStore::Array;
     }
-    drop(tab);
     match set_key(heap, t, &Key::int(i), v) {
         Ok(_) => IntStore::Other,
         Err(NoMemory) => IntStore::Slow,
