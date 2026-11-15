@@ -36,9 +36,8 @@ pub struct Host {
     compile: Option<CompileFn>,
     /// The OrbitScript compiler, for source files whose name ends in `.orb`.
     compile_orbitscript: Option<CompileFn>,
-    /// How much `load` checks binary chunks, before it is capped at what the
-    /// build can check (`stdlib::checks`). Kept here, not in the registry,
-    /// so scripts can't change it.
+    /// How much `load` checks binary chunks (`stdlib::checks`). Kept here,
+    /// not in the registry, so scripts can't change it.
     binary_checks: Option<op::verify::Level>,
     /// Where `os.setlocale` gets locales ([`Vm::set_locale_provider`]).
     locale_provider: Box<dyn LocaleProvider>,
