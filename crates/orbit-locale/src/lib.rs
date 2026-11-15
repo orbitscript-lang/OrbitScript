@@ -208,6 +208,17 @@ mod libc_locale {
         }
     }
 
+    impl Drop for LibcProvider {
+        /// Dropped in the middle of a run (an isolate torn down from its own
+        /// native code, or a panic unwinding past `leave`): give the thread
+        /// its locale back before the object it uses is freed.
+        fn drop(&mut self) {
+            if let Some((_obj, pin)) = self.pin.take() {
+                pin.restore();
+            }
+        }
+    }
+
     impl LibcProvider {
         /// The name `os.setlocale` reports for category `cat` (`None` for
         /// the whole locale).
@@ -561,6 +572,24 @@ mod libc_locale {
             q.leave();
             assert_eq!(point(), b".");
             p.leave();
+            assert_eq!(point(), b".");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn dropped_while_running() {
+            if !has("pt_BR.utf8") {
+                return;
+            }
+            let point = sys::thread_decimal_point;
+            let mut p = LibcProvider::default();
+            p.set(Category::Numeric, Some(b"pt_BR.utf8"), LocaleScope::Default)
+                .unwrap();
+            p.enter();
+            assert_eq!(point(), b",");
+            // No `leave`: the thread gets its own back all the same, and
+            // stops using the object before it is freed.
+            drop(p);
             assert_eq!(point(), b".");
         }
     }
