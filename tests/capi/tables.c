@@ -140,8 +140,10 @@ static int nil_key(lua_State *L) {
 }
 
 static int nan_key(lua_State *L) {
+  /* A NaN made at run time: MSVC refuses a constant division by zero. */
+  volatile double zero = 0.0;
   lua_newtable(L);
-  lua_pushnumber(L, 0.0 / 0.0 == 0.0 / 0.0 ? 1 : (double)(0.0 / 0.0));
+  lua_pushnumber(L, zero / zero);
   lua_pushinteger(L, 1);
   lua_settable(L, 1);
   return 0;

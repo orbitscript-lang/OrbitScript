@@ -147,13 +147,7 @@ pub fn main(args: &[String]) -> Result<bool> {
         let mut problems = Vec::new();
 
         if let Some(reference) = &reference {
-            let exe = build(
-                reference,
-                &source,
-                &work.join("reference"),
-                name,
-                &opts.lua,
-            )?;
+            let exe = build(reference, &source, &work.join("reference"), name, &opts.lua)?;
             let out = run(reference, &exe, &[])?;
             if opts.update {
                 std::fs::write(&expected_path, &out)
@@ -339,8 +333,18 @@ fn compile_command(
         let mut fe = OsString::from("/Fe");
         fe.push(exe);
         // The programs use standard C (`fopen`), which MSVC would rather
-        // see replaced by its own `_s` functions.
-        cmd.args(["/nologo", "/O1", "/W3", "/WX", "/D_CRT_SECURE_NO_WARNINGS"]);
+        // see replaced by its own `_s` functions. `/MD`: the C library as a
+        // DLL, the one liborbit uses, as an embedder links it, so the two
+        // share `errno` (`luaL_fileresult`); `cl` links its own copy into
+        // the program otherwise.
+        cmd.args([
+            "/nologo",
+            "/O1",
+            "/W3",
+            "/WX",
+            "/MD",
+            "/D_CRT_SECURE_NO_WARNINGS",
+        ]);
         for i in includes {
             cmd.arg("/I").arg(i);
         }
