@@ -3,7 +3,7 @@
 //! pass walks it with a loop: 200,000 links must fit a 2 MiB thread stack (Rust's default for
 //! spawned threads), in debug builds too.
 
-use orbit_lua_syntax::{ParseOptions, parse_with, to_hir, unparse};
+use orbit_lua_syntax::{ParseOptions, parse_with, to_hir};
 
 const STACK: usize = 2 << 20;
 const LINKS: usize = 200_000;
@@ -45,7 +45,6 @@ fn long_chains_fit_a_2_mib_stack() {
                 let src = chain(LINKS);
                 let ast = parse_with("test", src.as_bytes(), &options)
                     .unwrap_or_else(|d| panic!("{shape}: {}", d.to_message("test")));
-                assert!(!unparse(&ast).is_empty(), "{shape}");
                 drop(ast);
                 let hir = to_hir("test", src.as_bytes(), &options)
                     .unwrap_or_else(|d| panic!("{shape}: {}", d.to_message("test")));

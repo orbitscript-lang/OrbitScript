@@ -151,6 +151,7 @@ dependencies = [
  "orbit-hir",
  "orbit-lib",
  "orbit-lua-syntax",
+ "orbit-lua-unparse",
  "orbit-orb-syntax",
  "orbit-std",
  "rustix",
@@ -252,6 +253,15 @@ dependencies = [
 [[package]]
 name = "orbit-lua-text"
 version = "0.0.0"
+
+[[package]]
+name = "orbit-lua-unparse"
+version = "0.0.0"
+dependencies = [
+ "orbit-hir",
+ "orbit-lua-syntax",
+ "orbit-lua-version",
+]
 
 [[package]]
 name = "orbit-lua-version"

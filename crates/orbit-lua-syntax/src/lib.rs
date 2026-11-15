@@ -9,12 +9,10 @@ pub mod lexer;
 mod lower;
 mod parser;
 pub mod token;
-mod unparse;
 
 pub use lower::lower;
 pub use orbit_hir::{Code, Diagnostic, DiagnosticKind, Near, Severity};
 pub use parser::{ParseOptions, parse, parse_recovering, parse_with};
-pub use unparse::unparse;
 
 /// Source positions and pools shared with the HIR, re-exported for convenience.
 pub use orbit_hir::{Language, SourceInfo, Span, StrId, StringPool};
