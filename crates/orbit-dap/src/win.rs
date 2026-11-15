@@ -10,12 +10,13 @@
 #![allow(unsafe_code)]
 
 use std::io::{self, Read, Write};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::sync::Once;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_INVALID_PARAMETER, FALSE, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_INVALID_PARAMETER, FALSE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Networking::WinSock::{
     AF_UNIX, FIONBIO, FROM_PROTOCOL_INFO, INVALID_SOCKET, SD_BOTH, SD_RECEIVE, SD_SEND,
@@ -334,17 +335,17 @@ pub(crate) fn request_debugging(pid: u32) -> io::Result<bool> {
 /// Whether a process `pid` is running. One that can't be opened for a
 /// reason other than not existing (another user's) counts as running.
 pub(crate) fn running(pid: u32) -> bool {
-    // SAFETY: no pointers; the handle, if any, is closed below.
+    // SAFETY: no pointers.
     let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, FALSE, pid) };
     if h.is_null() {
-        // SAFETY: no arguments.
-        return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
+        return io::Error::last_os_error().raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32);
     }
-    // SAFETY: `h` was just opened with PROCESS_SYNCHRONIZE. A process that
-    // has ended is signalled, though its pid stays taken while handles
-    // to it are open.
-    let wait = unsafe { WaitForSingleObject(h, 0) };
-    // SAFETY: as above, closed once.
-    unsafe { CloseHandle(h) };
+    // SAFETY: `h` was just opened and nothing else owns it; it is closed
+    // when dropped.
+    let h = unsafe { OwnedHandle::from_raw_handle(h) };
+    // SAFETY: an open handle with PROCESS_SYNCHRONIZE. A process that has
+    // ended is signalled, though its pid stays taken while handles to it
+    // are open.
+    let wait = unsafe { WaitForSingleObject(h.as_raw_handle(), 0) };
     wait == WAIT_TIMEOUT
 }
