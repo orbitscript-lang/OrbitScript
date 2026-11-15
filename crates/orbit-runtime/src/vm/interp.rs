@@ -913,7 +913,7 @@ impl Vm {
                     // The coroutine dies; its resumer (or closer) gets the
                     // error. A close without errors ends with none.
                     let outcome = if closing && e.value.is_nil() {
-                        self.rt.xfer.clear();
+                        self.rt.co.drop_transfer();
                         Ok(())
                     } else {
                         Err(e.value)

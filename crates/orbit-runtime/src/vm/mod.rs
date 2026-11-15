@@ -628,11 +628,8 @@ pub struct Runtime {
     /// The thread whose stack is `stack`.
     pub(crate) current: Gc<Thread>,
     pub(crate) main_thread: Gc<Thread>,
-    /// The threads waiting in `resume` for the one above them, innermost
-    /// last: the running coroutine's resumer is the last.
-    pub(crate) resumers: Vec<Gc<Thread>>,
-    /// Values moving between two stacks during a switch.
-    pub(crate) xfer: Vec<Value>,
+    /// Coroutine switching: resumers, values in transit, parked stacks.
+    pub(crate) co: coro::Switching,
     /// A byte buffer natives build results in, kept between calls so
     /// building a string needs no allocation of its own
     /// ([`NativeCtx::take_buf`](crate::vm::NativeCtx::take_buf)).
@@ -641,22 +638,6 @@ pub struct Runtime {
     pub(crate) hooks: hook::HookUse,
     /// The stub prototype of each native that has native closures.
     pub(crate) native_protos: std::collections::HashMap<NativeId, Gc<Proto>, CheapHash>,
-    /// The threads parked suspended most recently, with their park count
-    /// then (ADR-3): one that leaves this list without being resumed has its
-    /// stack shrunk. A ring: `cooling_at` is the oldest entry, which the
-    /// next park replaces. Weak: an entry dies with its thread.
-    /// It starts with `coro::HOT_STACKS` entries and grows up to
-    /// `coro::MAX_HOT_STACKS` (see `Vm::came_back`).
-    pub(crate) cooling: Vec<Option<(Gc<Thread>, u32)>>,
-    pub(crate) cooling_at: usize,
-    /// Emptied stacks of finished coroutines, for new ones.
-    pub(crate) spare_stacks: coro::SpareStacks,
-    /// Suspended parks so far (wrapping), to tell how soon a shrunk stack
-    /// is resumed.
-    pub(crate) parks: u32,
-    /// Collections that reached their sweep, to tell whether a parked
-    /// stack's dead slots may now refer to freed objects.
-    pub(crate) gc_cycles: u32,
     /// Breakpoints, steps and the host's debug events.
     #[cfg(feature = "debugger")]
     pub(crate) debug: debugger::Debugger,
@@ -750,12 +731,7 @@ impl Roots<LuaSpace> for Runtime {
         self.stack.trace(m, usize::MAX);
         m.mark(self.current);
         m.mark(self.main_thread);
-        for &t in &self.resumers {
-            m.mark(t);
-        }
-        for &v in &self.xfer {
-            mark(m, v);
-        }
+        self.co.trace(m);
         for &p in self.native_protos.values() {
             m.mark(p);
         }
@@ -773,12 +749,7 @@ impl Roots<LuaSpace> for Runtime {
         // pause at the end of marking: it is done in steps instead.
         self.strings.begin_clear_dead(live);
         self.c_strings.clear_dead(live);
-        for e in &mut self.cooling {
-            if e.is_some_and(|(t, _)| !live.is_live(t)) {
-                *e = None;
-            }
-        }
-        self.gc_cycles = self.gc_cycles.wrapping_add(1);
+        self.co.clear_weak(live);
     }
 
     fn sweep_weak(&mut self, live: &Liveness<'_, LuaSpace>, budget: usize) -> bool {
@@ -808,7 +779,7 @@ impl Vm {
     /// too many. As in the reference, a resume counts twice and the
     /// outermost call once more, so the depths match lua5.5's.
     pub(crate) fn c_overflow(&self, cdepth: u8) -> bool {
-        cdepth as usize + 2 * self.rt.resumers.len() + 1 >= MAX_CCALLS
+        cdepth as usize + 2 * self.rt.co.depth() + 1 >= MAX_CCALLS
     }
 
     /// The main thread (`coroutine.running()` outside any coroutine).
@@ -853,16 +824,10 @@ impl Vm {
                 gc,
                 current: main_thread,
                 main_thread,
-                resumers: Vec::new(),
-                xfer: Vec::new(),
+                co: coro::Switching::new(),
                 scratch: Vec::new(),
                 hooks: Default::default(),
                 native_protos: Default::default(),
-                cooling: vec![None; coro::HOT_STACKS],
-                cooling_at: 0,
-                spare_stacks: Default::default(),
-                parks: 0,
-                gc_cycles: 0,
                 #[cfg(feature = "debugger")]
                 debug: Default::default(),
             },
