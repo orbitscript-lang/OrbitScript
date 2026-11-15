@@ -1404,10 +1404,6 @@ pub enum IntStore {
 #[inline(always)]
 pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore {
     let idx = (i as u64).wrapping_sub(1);
-    // With a memory limit a store errors once the heap is over it even if
-    // it allocates nothing (`set_key`), so only appends without one take
-    // the in-place path below.
-    let no_limit = heap.limit().is_none();
     // Only stores of a value that can refer to an object barrier
     // (`HoldsHandle`); the hash path below barriers through `Heap::update`.
     let mut tab = heap.write_at_for(t, idx as usize, &v);
@@ -1432,17 +1428,20 @@ pub fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> IntStore
     // Appending (`t[#t + 1] = v`) with room left in the array part and no
     // hash part that could hold the key: no allocation, so the GC's byte
     // count is unaffected.
-    if idx == tab.array.len() as u64
+    let append = idx == tab.array.len() as u64
         && tab.array.len() < tab.array.cap()
         && tab.used == 0
-        && !v.is_nil()
-        && no_limit
-    {
-        let pushed = tab.array.push_in_place(v);
+        && !v.is_nil();
+    drop(tab);
+    // With a memory limit a store errors once the heap is over it even if
+    // it allocates nothing (`set_key`), so only appends without one take
+    // the in-place path. The limit is read here, after the guard, so that
+    // the array path above keeps nothing extra live.
+    if append && heap.limit().is_none() {
+        let pushed = heap.write_at_for(t, idx as usize, &v).array.push_in_place(v);
         debug_assert!(pushed, "checked for room above");
         return IntStore::Array;
     }
-    drop(tab);
     match set_key(heap, t, &Key::int(i), v) {
         Ok(_) => IntStore::Other,
         Err(NoMemory) => IntStore::Slow,
