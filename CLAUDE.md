@@ -48,6 +48,8 @@ cargo test --workspace
 cargo +1.75.0 check --workspace --all-targets   # rustup toolchain install 1.75.0
 ```
 
+A change that adds, removes or changes the default of a Cargo feature updates `docs/features.md` in the same PR; `tools/check-features.sh` checks it, and CI lints every crate with each feature on its own (`cargo hack clippy --workspace --each-feature --no-dev-deps -- -D warnings`).
+
 A change to write barriers or to `orbit-gc`'s collector also runs `tests/gc-barriers/check-deletions.sh` and pastes its output into the pull request's description (`tests/README.md`, "Write-barrier tests").
 
 A change to behaviour that differs between Lua 5.4 and 5.5 also needs the 5.4 build checked:
