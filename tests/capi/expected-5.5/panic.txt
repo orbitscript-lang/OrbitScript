@@ -1,0 +1,4 @@
+luaL_newstate sets a panic function 1
+atpanic returns the last one 1
+run error: status 1: '[string "error('caught')"]:1: caught'
+panic: 'unprotected'

@@ -1802,6 +1802,32 @@ impl<'s> Stack<'s> {
         self.push_str_value(&out);
     }
 
+    /// [`push_traceback`](Self::push_traceback) for the thread at index
+    /// `thread`, whose levels start at its top activation when it is not
+    /// the running one (`luaL_traceback` of another thread).
+    pub fn push_traceback_of(
+        &mut self,
+        thread: i32,
+        message: Option<OrbitStr<'_>>,
+        level: i32,
+    ) -> StackResult<()> {
+        let RawValue::Thread(t) = self.get(thread) else {
+            return Err(self.error("thread expected"));
+        };
+        let mut out = Vec::new();
+        if let Some(m) = message {
+            out.extend_from_slice(&m);
+            out.push(b'\n');
+        }
+        let level = level.max(0) as usize;
+        let trace = self
+            .ctx
+            .on_thread(t, |ctx, foreign| ctx.traceback_in(foreign, level));
+        out.extend_from_slice(trace.as_bytes());
+        self.push_str_value(&out);
+        Ok(())
+    }
+
     /// Push the value at `idx` as `tostring` converts it (`__tostring`,
     /// then `__name`), and give the string's bytes.
     pub fn to_display_string(&mut self, idx: i32) -> StackResult<OrbitStr<'_>> {
@@ -1836,6 +1862,7 @@ impl<'s> Stack<'s> {
         Some(match op {
             GcOp::Collect => {
                 c.full_collect();
+                c.run_finalizers_now();
                 0
             }
             GcOp::Step(kb) => match c.vm.rt.gc.mode() {
@@ -2350,14 +2377,17 @@ impl<'s> Stack<'s> {
     }
 
     /// Pop the top value into upvalue `n` of the function at `func` and
-    /// give its name.
+    /// give its name; with no upvalue `n`, pop nothing and give `None`.
     pub fn set_upvalue(&mut self, func: i32, n: i32) -> StackResult<Option<OrbitString>> {
         self.need(1)?;
         let f = self.get(func);
         let len = self.ctx.len();
         let v = self.ctx.arg(len - 1);
         let r = self.ctx.set_upvalue_of(f, n as i64, v);
-        self.ctx.truncate(len - 1);
+        // As `lua_setupvalue`: the value is popped only when it was set.
+        if r.is_some() {
+            self.ctx.truncate(len - 1);
+        }
         Ok(r.map(OrbitString::from))
     }
 

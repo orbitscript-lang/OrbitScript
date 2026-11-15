@@ -1,0 +1,39 @@
+-- load
+load 0
+pieces: top=1: 42
+load bad 3
+bad: top=2: 42 'file.lua:1: unexpected symbol near '=''
+load mode b on text 3
+mode: top=3: 42 'file.lua:1: unexpected symbol near '='' 'attempt to load a text chunk (mode is 'b')'
+load empty 0
+empty: top=3: 42 'file.lua:1: unexpected symbol near '='' 'attempt to load a text chunk (mode is 'b')'
+loadbufferx 0
+varargs: top=2: 5 6
+loadbuffer named by the text 0
+pcall 2: [string "error('x')"]:1: x
+loadstring syntax error 3: [string "return +"]:1: unexpected symbol near '+'
+dostring 0 top 2
+-- load status 0
+-- dump
+dump strip=0: 0 top 1, writer called 1
+starts with ESC: 1
+load as text 3
+load as binary 0
+dumped function: top=3: function 42 'kept'
+dump strip=1: 0 top 1, writer called 1
+starts with ESC: 1
+load as text 3
+load as binary 0
+dumped function: top=3: function 42 'kept'
+dump with a failing writer: 7
+stripped: source =? linedefined 0
+-- dump status 0
+-- files
+loadfile 0
+file: top=2: 'from a file' 'arg'
+loadfilex mode b 3: attempt to load a text chunk (mode is 'b')
+dofile 0 top 1
+dofile 0
+bom: top=1: 'after a BOM'
+missing file 6: cannot open capi-missing.lua: No such file or directory
+-- files status 0

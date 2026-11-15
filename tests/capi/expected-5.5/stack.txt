@@ -1,0 +1,59 @@
+-- moves
+rotate 2,2: top=5: 1 4 5 2 3
+rotate 1,-1: top=5: 4 5 2 3 1
+rotate -3,3: top=5: 4 5 2 3 1
+insert 1: top=5: 1 4 5 2 3
+remove 2: top=4: 1 5 2 3
+replace 1: top=3: 3 5 2
+copy 1 3: top=3: 3 5 3
+pushvalue -2: top=4: 3 5 3 5
+absindex 4 2 1 1
+settop -3: top=2: 3 5
+settop 5: top=5: 3 5 nil nil nil
+pop 4: top=1: 3
+checkstack 1 0
+top after 50 pushes 51
+-- moves status 0
+-- pushes
+pushstring returns its copy: copy
+pushstring NULL: 1
+pushes: top=11: nil true false -9223372036854775808 -0 inf 'a\0b' '' 'copy' nil 'lit'
+types: nil boolean boolean number number number string string string nil string no value
+typename none no value
+-- pushes status 0
+-- queries
+1 number: number=1 integer=1 string=1 cfunction=0 userdata=0 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=3,1 tonumberx=3,1 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=0
+2 number: number=1 integer=0 string=1 cfunction=0 userdata=0 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=0,0 tonumberx=3.5,1 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=0
+3 number: number=1 integer=0 string=1 cfunction=0 userdata=0 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=4,1 tonumberx=4,1 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=0
+4 string: number=1 integer=0 string=1 cfunction=0 userdata=0 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=10,1 tonumberx=10,1 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=1
+5 string: number=1 integer=0 string=1 cfunction=0 userdata=0 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=32,1 tonumberx=32,1 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=1
+6 string: number=0 integer=0 string=1 cfunction=0 userdata=0 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=1
+7 function: number=0 integer=0 string=0 cfunction=1 userdata=0 function=1 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=1 tocfunction=1 touserdata=0 tothread=0 topointer=1
+8 userdata: number=0 integer=0 string=0 cfunction=0 userdata=1 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=1 tocfunction=0 touserdata=1 tothread=0 topointer=1
+9 userdata: number=0 integer=0 string=0 cfunction=0 userdata=1 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=1 tointegerx=0,0 tonumberx=0,0 toboolean=1 tocfunction=0 touserdata=1 tothread=0 topointer=1
+10 nil: number=0 integer=0 string=0 cfunction=0 userdata=0 function=0 table=0 nil=1 none=0 noneornil=1 bool=0 thread=0 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=0 tocfunction=0 touserdata=0 tothread=0 topointer=0
+11 boolean: number=0 integer=0 string=0 cfunction=0 userdata=0 function=0 table=0 nil=0 none=0 noneornil=0 bool=1 thread=0 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=0
+12 function: number=0 integer=0 string=0 cfunction=0 userdata=0 function=1 table=0 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=1
+13 table: number=0 integer=0 string=0 cfunction=0 userdata=0 function=0 table=1 nil=0 none=0 noneornil=0 bool=0 thread=0 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=1 tocfunction=0 touserdata=0 tothread=0 topointer=1
+14 thread: number=0 integer=0 string=0 cfunction=0 userdata=0 function=0 table=0 nil=0 none=0 noneornil=0 bool=0 thread=1 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=1 tocfunction=0 touserdata=0 tothread=1 topointer=1
+15 no value: number=0 integer=0 string=0 cfunction=0 userdata=0 function=0 table=0 nil=0 none=1 noneornil=1 bool=0 thread=0 light=0 tointegerx=0,0 tonumberx=0,0 toboolean=0 tocfunction=0 touserdata=0 tothread=0 topointer=0
+tothread is L: 1
+touserdata light is L: 1
+topointer same table twice: 1
+tonumberx NULL: 32
+tointeger 4.0: 4 3.5: 0
+tolstring 3 -> 3 len 1, now string
+tolstring of a table: 1
+-- queries status 0
+-- threads
+thread after xmove: top=2: 1 2
+state after xmove: top=1: thread
+back: top=2: thread 2
+main thread 1, is L 1
+globals same 1
+pushthread main 1 other 0
+-- threads status 0
+-- version
+version 505
+ident starts '$LuaVersi'
+-- version status 0

@@ -1,0 +1,97 @@
+-- stringtonumber
+stringtonumber '10' -> 3 int 10 top=0
+stringtonumber ' 0x10 ' -> 7 int 16 top=0
+stringtonumber '1e1' -> 4 float 10 top=0
+stringtonumber '0x.8p1' -> 7 float 1 top=0
+stringtonumber '1 2' -> 0 top=0
+stringtonumber '' -> 0 top=0
+stringtonumber 'nan' -> 0 top=0
+stringtonumber '1e' -> 0 top=0
+stringtonumber '  ' -> 0 top=0
+stringtonumber '-0' -> 3 int 0 top=0
+stringtonumber '0x' -> 0 top=0
+stringtonumber '1.' -> 3 float 1 top=0
+stringtonumber '.5' -> 3 float 0.5 top=0
+stringtonumber '9223372036854775807' -> 20 int 9223372036854775807 top=0
+stringtonumber '9223372036854775808' -> 20 float 9.2233720368548e+18 top=0
+stringtonumber '0x7fffffffffffffffff' -> 21 int -1 top=0
+stringtonumber '-9223372036854775808' -> 21 int -9223372036854775808 top=0
+stringtonumber 'inf' -> 0 top=0
+stringtonumber '1e400' -> 6 float inf top=0
+stringtonumber '	5
+' -> 4 int 5 top=0
+-- stringtonumber status 0
+-- numbertocstring
+numbertocstring 1 -> 4 '-42'
+numbertocstring 2 -> 4 '0.1'
+numbertocstring 3 -> 7 '1e+100'
+numbertocstring 4 -> 4 '3.0'
+numbertocstring 5 -> 5 '-0.0'
+numbertocstring 6 -> 21 '-9223372036854775808'
+numbertocstring 7 -> 20 '0.33333333333333331'
+numbertocstring 8 -> 0 ''
+numbertocstring 9 -> 0 ''
+buffer size at least 44: 1
+-- numbertocstring status 0
+-- arith
+7 add 2 = 9
+7 sub 2 = 5
+7 mul 2 = 14
+7 mod 2 = 1
+7 pow 2 = 49
+7 div 2 = 3.5
+7 idiv 2 = 3
+7 band 2 = 2
+7 bor 2 = 7
+7 bxor 2 = 5
+7 shl 2 = 28
+7 shr 2 = 1
+7 unm 2 = -7
+7 bnot 2 = -8
+-7 add 2 = -5
+-7 sub 2 = -9
+-7 mul 2 = -14
+-7 mod 2 = 1
+-7 pow 2 = 49
+-7 div 2 = -3.5
+-7 idiv 2 = -4
+-7 band 2 = 0
+-7 bor 2 = -5
+-7 bxor 2 = -5
+-7 shl 2 = -28
+-7 shr 2 = 4611686018427387902
+-7 unm 2 = 7
+-7 bnot 2 = 6
+mixed: top=3: 9.5 -16 inf
+metamethod: top=1: 'meta add'
+-- arith status 0
+-- mod by zero
+-- mod by zero status 2: 'attempt to perform 'n%0''
+-- arith on a table
+-- arith on a table status 2: 'attempt to perform arithmetic on a table value'
+-- compare
+eq 1 1.0: 1
+le 1 1.0: 1
+lt 1 1.0: 0
+eq 1 '1': 0
+lt '1' '2': 1
+le '2' '1': 0
+eq nan nan: 0
+rawequal 1 1.0: 1, 1 '1': 0
+invalid index: eq 0 rawequal 0
+meta eq 1 lt 1 le 0 rawequal 0
+-- compare status 0
+-- compare a number and a string
+-- compare a number and a string status 2: 'attempt to compare number with string'
+-- concat
+concat 3: top=1: 'a12.5'
+concat 1: top=1: 'a12.5'
+concat 0: top=2: 'a12.5' ''
+metamethod: top=3: 'a12.5' '' 'cc'
+-- concat status 0
+-- concat a boolean
+-- concat a boolean status 2: 'attempt to concatenate a boolean value'
+-- fstrings
+vfstring returns its copy: <v 5>
+fstrings: top=10: '-3|abc|q|%|4611686018427387904|\244\143\191\191' '0.1 1e+15 1e+16 -0.0' 'inf 3.0' 'A \223\191 \224\160\128 \253\191\191\191\191\191' '2147483647 -2147483648' '-9223372036854775808' '|x' 'no format' '\0z' '<v 5>'
+-- fstrings status 0

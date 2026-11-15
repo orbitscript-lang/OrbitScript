@@ -1,0 +1,5 @@
+# C API functions liborbit exports that no program in tests/capi links,
+# one per line: "name  # why". `cargo testkit capi --check-linked` fails
+# when an exported function is neither linked nor listed here, or when a
+# listed one is linked or no longer exported. Every function is linked
+# today, so the list is empty.

@@ -15,7 +15,8 @@ name: CI
 #   docs/features.md checked against the crates' features.
 # - `conformance`, once per Lua version: `cargo test` for that build, then
 #   its official suite on `orbit`, on the shared layout's `orbit` and
-#   through its liblua, the size budget, and for 5.5 the differential tests.
+#   through its liblua, the C API programs (tests/capi) on liborbit and the
+#   reference liblua, the size budget, and for 5.5 the differential tests.
 #   The corpus tests that platforms.yml skips run here.
 # - `features`: every crate linted with each of its Cargo features on its
 #   own (cargo-hack), the tests of the runtime crates without their default
@@ -182,6 +183,15 @@ jobs:
         run: >
           cargo testkit liblua --lua "$LUA" --lib "$LAYOUT/lib/liborbit.so.0"
           --c-libs "$REF/libs" --expect "tests/lua-$LUA/expected-liblua.txt"
+        env:
+          REF: ${{ steps.reference.outputs.dir }}
+      # C programs on the C API, on liborbit and the reference liblua; every
+      # function liborbit exports must be linked by one (tests/README.md).
+      - name: C API programs against liblua${{ matrix.lua }}
+        if: steps.reference.outcome == 'success' && steps.layout.outcome == 'success'
+        run: >
+          cargo testkit capi --lua "$LUA" --layout "$LAYOUT"
+          --reference "$REF/shared/liblua$LUA.so.0" --check-linked
         env:
           REF: ${{ steps.reference.outputs.dir }}
       # tests/diff compares orbit with lua5.5.

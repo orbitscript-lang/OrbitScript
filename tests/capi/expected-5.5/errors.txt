@@ -1,0 +1,48 @@
+-- from C
+typeerror: status 2: 'bad argument #1 to '?' (widget expected, got string)'
+argerror: status 2: 'bad argument #2 to '?' (bad thing)'
+checkany: status 2: 'bad argument #1 to '?' (value expected)'
+error object: status 2: table
+error nil: status 2: '<no error object>'
+luaL_error: status 2: 'n=7 s=str f=1.25 c=x p% I=-9'
+checkoption: status 2: 'bad argument #1 to '?' (invalid option 'zzz')'
+checks: status 2: 'bad argument #1 to '?' (number expected, got string)'
+-- from C status 0
+-- from Lua
+1	7	1.5	dflt	3
+bad argument #2 to 'opt' (number has no integer representation)
+bad argument #3 to 'opt' (number expected, got string)
+bad argument #1 to 'opt' (invalid option 'three')
+bad argument #1 to 'typeerr' (widget expected, got table)
+[string "local t = {f = typeerr, g = argerr}..."]:8: bad argument #1 to 'g' (bad thing)
+[string "local t = {f = typeerr, g = argerr}..."]:9: bad argument #2 to 'g' (bad thing)
+[string "local t = {f = typeerr, g = argerr}..."]:10: bad argument #2 to 'f' (bad thing)
+[string "local t = {f = typeerr, g = argerr}..."]:11: n=7 s=str f=1.25 c=x p% I=-9
+bad argument #1 to 'checks' (number has no integer representation)
+bad argument #2 to 'checks' (number expected, got string)
+1	2.0	1
+bad argument #4 to 'checks' (table expected, got number)
+1	2.0	3
+0	7	1.5	dflt	2
+-- from Lua status 0
+-- statuses
+with a handler 2: handled: [string "error('boom')"]:1: boom
+with a failing handler 5
+level 2 from C 2: lvl2
+table error 2: TS
+status of L 0
+-- statuses status 0
+-- where
+where from C: top=3: '' '' ''
+-- where status 0
+-- where from Lua
+where from Lua	[string "local w = where1()..."]:1: 
+-- where from Lua status 0
+-- traceback
+traceback starts 'msg
+stack traceback:
+	[C]'
+traceback without a message starts 'stack traceback:'
+traceback of a new thread: 'other
+stack traceback:'
+-- traceback status 0

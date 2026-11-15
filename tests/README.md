@@ -7,6 +7,7 @@
 | `../bench/` | Benchmarks: time, peak RSS, binary size | `cargo testkit bench` |
 | `diff/compat/` | Lua 5.5 feature programs for the compatibility plan, diffed like `diff/` | `cargo testkit diff --corpus tests/diff/compat` |
 | `../examples/` | Example programs with expected output; Lua twins also run under `lua5.5` | `cargo testkit examples` (and `cargo test -p orbit-cli --test examples`) |
+| `capi/` | C programs on the Lua C API, whose output must match the reference liblua's | `cargo testkit capi` |
 
 `cargo testkit fuzz-syntax` compiles seeded mutants of the suite and the corpora with both interpreters and compares the compile errors. It fails only on mismatches missing from [`fuzz/syntax-mismatches.txt`](fuzz/syntax-mismatches.txt); refresh that list with `--update-expected` when a change fixes some.
 
@@ -81,6 +82,19 @@ cargo testkit liblua --c-libs target/reference-lua/libs --expect tests/lua-5.5/e
 - **The library swap.** The programs and liborbit must come from one build (ADR-10). The script builds a second liborbit from the same sources with another build identity, puts it under the programs, and checks that each refuses to start and says why.
 - **The programs' tests**, `cargo test -p orbit-cli -p orbit-lsp` with `ORBIT_BIN_DIR` naming the layout's `bin`, so the tests run those programs instead of Cargo's static builds.
 - **The C host tests** (Linux): `crates/orbit-capi/tests/chost/host.c` is built against the headers and linked to the laid-out library, named by `ORBIT_LIBORBIT`, and checks states, libraries, panics, warnings, strings and the collector from C. A plain `cargo test` lists them as ignored.
+
+## The C API programs
+
+Each `capi/*.c` program calls the Lua C API and prints what it returns, part by part (`capi/capi.h`): stack operations, tables, numbers, userdata, closures, loading, errors, the auxiliary library, coroutines and continuations, to-be-closed slots, the debug interface and hooks, states, allocators, warnings, the collector and panics. `cargo testkit capi` builds each against the headers and links it to the laid-out liborbit, and the output must equal `capi/expected-X.Y/NAME.txt`, what the reference liblua prints. The programs print nothing that may rightly differ between implementations (addresses, memory amounts, the order of a table's keys), and put at most one call with side effects in each statement, since C leaves the order of a call's arguments to the compiler.
+
+```sh
+./build.sh --no-pgo
+cargo testkit capi --reference target/reference-lua/shared/liblua5.5.so.0 --check-linked
+```
+
+On Linux `--reference` also builds each program on the reference library (from `scripts/build-reference-lua.sh`) and checks the committed output against it; `--update` rewrites the output from the reference, after a program changes. macOS and Windows have no reference library and compare with the committed output only. `--check-linked` reads the symbols (Linux, `nm`) and fails unless every C API function liborbit exports is linked by some program or listed with a reason in `capi/not-linked.txt`, so a new export comes with a program that uses it. `--lua 5.4` checks a 5.4 layout against `capi/expected-5.4`, and `--wrap CMD` runs the programs under a tool such as valgrind.
+
+A program that shows a difference from the reference shows a bug to fix, not output to record: where liborbit differs on purpose (ADR-2's generational default, for one), the program sets what it relies on.
 
 ## Differential fuzzing
 

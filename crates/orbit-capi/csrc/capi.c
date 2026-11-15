@@ -167,10 +167,9 @@ struct orbit_r_table {
   const void * (*topointer)(lua_State *L, int idx);
   lua_State *(*tothread)(lua_State *L, int idx);
   void * (*touserdata)(lua_State *L, int idx);
-  void (*traceback)(lua_State *L, const char *msg, int level);
+  void (*traceback)(lua_State *L, const char *msg, int level, int thread);
   int (*type)(lua_State *L, int idx);
   void (*typeerror)(lua_State *L, int arg, const char *tname);
-  void (*unsupported)(lua_State *L, const char *what);
   void * (*upvalueid)(lua_State *L, int fidx, int n);
   void (*upvaluejoin)(lua_State *L, int fidx1, int n1, int fidx2, int n2);
   lua_Number (*version)(lua_State *L);
@@ -858,9 +857,19 @@ LUALIB_API int luaL_execresult(lua_State *L, int stat) {
   return 3;
 }
 
-/* References: the free list's head lives under a key only this file can
-   make, a light userdata for a static address. */
-static const char freelist_key = 0;
+/* References (luaL_ref). As the reference Lua does, one slot of the table
+   holds the head of the list of freed references, 0 when it is empty, and
+   every freed slot holds the next one. The slot is made at the first
+   reference, which then takes the first free border. lua5.5 uses slot 1,
+   which its registry leaves free (LUA_RIDX_GLOBALS is 2 and
+   LUA_RIDX_MAINTHREAD 3), so the first reference in a fresh table is 2.
+   lua5.4 uses the slot after the registry's own (LUA_RIDX_LAST + 1, slot
+   3), so the first references in a fresh table are 1 and 2, then 4. */
+#if LUA_VERSION_NUM == 504
+#define FREELIST (LUA_RIDX_LAST + 1)
+#else
+#define FREELIST 1
+#endif
 
 LUALIB_API int luaL_ref(lua_State *L, int t) {
   lua_Integer ref;
@@ -869,13 +878,21 @@ LUALIB_API int luaL_ref(lua_State *L, int t) {
     return LUA_REFNIL;
   }
   t = lua_absindex(L, t);
-  if (lua_rawgetp(L, t, &freelist_key) == LUA_TNUMBER && lua_tointeger(L, -1) != 0) {
+  if (lua_rawgeti(L, t, FREELIST) == LUA_TNUMBER) {
     ref = lua_tointeger(L, -1);
     lua_settop(L, -2);
-    lua_rawgeti(L, t, ref);
-    lua_rawsetp(L, t, &freelist_key);
   } else {
+    /* No list yet, or something else in its slot: start one. */
     lua_settop(L, -2);
+    ref = 0;
+    lua_pushinteger(L, 0);
+    lua_rawseti(L, t, FREELIST);
+  }
+  if (ref != 0) {
+    /* Take the first freed reference: its slot holds the next. */
+    lua_rawgeti(L, t, ref);
+    lua_rawseti(L, t, FREELIST);
+  } else {
     ref = (lua_Integer)lua_rawlen(L, t) + 1;
   }
   lua_rawseti(L, t, ref);
@@ -885,14 +902,10 @@ LUALIB_API int luaL_ref(lua_State *L, int t) {
 LUALIB_API void luaL_unref(lua_State *L, int t, int ref) {
   if (ref < 0) return;
   t = lua_absindex(L, t);
-  lua_rawgetp(L, t, &freelist_key);
-  if (lua_isnil(L, -1)) {
-    lua_settop(L, -2);
-    lua_pushinteger(L, 0);
-  }
+  lua_rawgeti(L, t, FREELIST);
   lua_rawseti(L, t, ref);
   lua_pushinteger(L, ref);
-  lua_rawsetp(L, t, &freelist_key);
+  lua_rawseti(L, t, FREELIST);
 }
 
 LUALIB_API lua_Integer luaL_len(lua_State *L, int idx) {
@@ -1158,16 +1171,19 @@ LUALIB_API int luaL_loadfilex(lua_State *L, const char *filename, const char *mo
  * --------------------------------------------------------------------- */
 
 
-static void unsupported(lua_State *L, const char *what) {
-  L->r->unsupported(L, what);
-  CHECK(L);
-}
-
-/* Only this state's own thread has a lua_State. */
+/* Another thread's traceback is made with that thread on L's stack, and
+   its levels start at its top activation. */
 LUALIB_API void luaL_traceback(lua_State *L, lua_State *L1, const char *msg, int level) {
-  if (L1 != L) unsupported(L, "luaL_traceback of another thread");
-  L->r->traceback(L, msg, level);
+  if (L1 == L) {
+    L->r->traceback(L, msg, level, 0);
+    CHECK(L);
+    return;
+  }
+  lua_pushthread(L1);
+  lua_xmove(L1, L, 1);
+  L->r->traceback(L, msg, level, lua_gettop(L));
   CHECK(L);
+  lua_remove(L, -2);
 }
 
 LUA_API int lua_dump(lua_State *L, lua_Writer writer, void *data, int strip) {
