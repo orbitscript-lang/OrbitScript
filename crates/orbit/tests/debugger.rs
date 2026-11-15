@@ -208,6 +208,8 @@ fn set_local_changes_the_program() {
             let sum = p.locals(0).into_iter().find(|v| v.name == b"sum").unwrap();
             p.set_local(0, sum.index, |s| s.value(40)).unwrap();
             assert!(p.set_local(0, 99, |s| s.value(40)).is_err());
+            // The stack API counts the reporting native as level 0.
+            assert_eq!(p.stack().level_info(1).unwrap().currentline, 3);
         })),
         resolved: Rc::default(),
     })))

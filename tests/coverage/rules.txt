@@ -1,0 +1,24 @@
+# What tests/coverage/run.sh checks (cargo testkit coverage):
+#
+#   PATH  every    every function with a body in the file is executed
+#   PATH  public   every `pub fn` in the .rs files under PATH is executed
+#
+# Every file that may contain `unsafe` has an `every` rule; the check finds
+# them and fails on one without. Functions no test can run are listed in
+# not-run.txt with the reason.
+
+# The files that may contain `unsafe` (CLAUDE.md).
+crates/orbit-capi/src/ffi.rs         every   # the C API (ADR-8)
+crates/orbit-ffi/src/sys.rs          every   # the ffi library (ADR-9)
+crates/orbit-std/src/crt.rs          every   # the C library's strerror (ADR-6)
+crates/orbit-std/src/ctime.rs        every   # the C library's local time (ADR-6)
+crates/orbit-locale/src/sys.rs       every   # the C library's locale objects (ADR-13)
+crates/orbit-virtmem/src/lib.rs      every   # the virtual memory buffer (ADR-2)
+crates/orbit-virtmem/src/os.rs       every   # its system calls
+crates/orbit-gc/src/os.rs            every   # memory trimming (ADR-2, ADR-6)
+crates/orbit-dap/src/process.rs      every   # signals and process inspection (ADR-12)
+crates/orbit-dap/src/win.rs          every   # Windows sockets and events (ADR-12)
+
+# The embedding API: the orbit crate, and the stack API it re-exports.
+crates/orbit/src                     public
+crates/orbit-runtime/src/stack       public

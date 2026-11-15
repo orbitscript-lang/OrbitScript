@@ -118,6 +118,15 @@ Valgrind never follows child processes: the C compiler and shells the tests star
 
 `tests/memcheck/check-planted.sh` proves the checker, as the write-barrier tests are proven: each patch in `tests/memcheck/planted` plants one memory bug (a string copy freed while the string is alive, a userdata block shorter than asked for, an uninitialised libffi argument, a virtual memory page released under live elements) and names the parts that reach it. The script applies each in turn and requires a valgrind report. Run it after changing `run.sh` or the tests it runs; a planted bug that is no longer reported needs a test that reaches it.
 
+## Coverage
+
+`tests/coverage/run.sh` runs the tests built with coverage instrumentation
+and checks that every function in the files that may contain `unsafe`, and
+every public function of the embedding API, is run by one, with any
+exceptions listed with their reasons, and that line coverage there doesn't
+drop. CI's `coverage` job runs it; `tests/coverage/README.md` explains the
+rules and what to do when it fails.
+
 ## Differential fuzzing
 
 `cargo testkit fuzz` generates random library calls, runs each batch under both interpreters and stops at the first call whose results or error differ. The targets are `format` (`string.format` specs and arguments), `pattern` (`find`, `match` and `gsub`), `pack` (`string.pack`, `unpack` and `packsize`) and `utf8`, or `all` for every one. Generators favor edge cases: limits of widths and precisions, halfway floats, malformed patterns, odd integer sizes and alignments, and invalid UTF-8.

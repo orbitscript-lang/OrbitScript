@@ -49,6 +49,8 @@ impl Session {
         let child = Command::new(env!("CARGO_BIN_EXE_orbit"))
             .process_group(0)
             .env_clear()
+            // A coverage run's profiles go where the run says (tests/coverage).
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|p| ("LLVM_PROFILE_FILE", p)))
             .env("TERM", "xterm")
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))

@@ -214,3 +214,17 @@ fn truncate_drops_each_element_once_when_one_panics() {
     drop(buf);
     assert_eq!(drops.load(Ordering::SeqCst), 10);
 }
+
+/// The default reservation, and the buffer seen as a slice through the
+/// standard traits.
+#[test]
+fn default_buffer_works_as_a_slice() {
+    let mut buf: VmBuffer<u32> = VmBuffer::default();
+    assert!(buf.is_empty());
+    assert_eq!(buf.capacity(), VmBuffer::<u32>::new().capacity());
+    buf.resize_with(3, || 7);
+    assert!(!buf.is_empty());
+    buf.as_mut()[1] = 8;
+    assert_eq!(buf.as_ref(), &[7, 8, 7]);
+    assert_eq!(format!("{buf:?}"), "[7, 8, 7]");
+}
