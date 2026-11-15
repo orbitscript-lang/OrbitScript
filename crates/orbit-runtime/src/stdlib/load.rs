@@ -9,7 +9,7 @@
 
 use crate::object::Value;
 use crate::vm::op::UnlinkedChunk;
-use crate::vm::{CallOutcome, LuaError, NativeCtx, NativeFn, NativeReturn, VmState};
+use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, VmState};
 
 pub(super) use super::chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
@@ -130,102 +130,69 @@ fn opt_bytes(ctx: &mut NativeCtx<'_>, i: usize, default: &[u8]) -> Result<Vec<u8
     Ok(ctx.bytes(s).to_vec())
 }
 
-// Window slots `load` keeps while it calls a reader function: the four
-// arguments, whether `env` was given, then the pieces read so far.
-const ENV_GIVEN: usize = 4;
-const PIECES: usize = 5;
-
 fn load(ctx: &mut NativeCtx<'_>) -> R {
     let env = if ctx.nargs() >= 4 {
         ctx.arg(3)
     } else {
         Value::Table(ctx.vm.rt.globals)
     };
-    match ctx.arg(0) {
+    let bytes = match ctx.arg(0) {
         Value::Str(_) | Value::Int(_) | Value::Float(_) => {
             let s = ctx.check_str(0)?;
             let bytes = ctx.bytes(s).to_vec();
             let source = opt_bytes(ctx, 1, &bytes)?;
             let mode = load_mode(ctx)?;
             let r = load_chunk(ctx, &bytes, &source, &Mode(&mode), env);
-            ret_loaded(ctx, r)
+            return ret_loaded(ctx, r);
         }
         Value::Closure(_) | Value::Native(_) => {
             // Check the other arguments now, as the reader may run long.
             opt_bytes(ctx, 1, b"")?;
             load_mode(ctx)?;
-            let given = ctx.nargs() >= 4;
-            ctx.truncate(ENV_GIVEN.min(ctx.len()));
-            ctx.set(ENV_GIVEN, Value::Bool(given));
-            read_more(ctx)
-        }
-        _ => Err(ctx.type_error(0, "function")),
-    }
-}
-
-/// Call the reader for the next piece.
-fn read_more(ctx: &mut NativeCtx<'_>) -> R {
-    Ok(NativeReturn::CallThen {
-        f: ctx.arg(0),
-        nargs: 0,
-        k: read_piece,
-        protected: true,
-    })
-}
-
-fn read_piece(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let n = match outcome {
-        CallOutcome::Ok(n) => n,
-        CallOutcome::Err(e) => {
-            ctx.truncate(0);
-            return ctx.ret([Value::Nil, e]);
-        }
-    };
-    let first = ctx.len() - n;
-    let piece = if n > 0 { ctx.arg(first) } else { Value::Nil };
-    ctx.truncate(first);
-    let done = match piece {
-        Value::Nil => true,
-        Value::Str(s) => {
-            let empty = ctx.bytes(s).is_empty();
-            if !empty {
-                ctx.push(piece);
+            ctx.truncate(4.min(ctx.len()));
+            match read_all(ctx)? {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    ctx.truncate(0);
+                    return ctx.ret([Value::Nil, e]);
+                }
             }
-            empty
         }
-        Value::Int(_) | Value::Float(_) => {
-            let mut text = Vec::new();
-            ctx.display(piece, &mut text);
-            let s = ctx.new_str_owned(text);
-            ctx.push(s);
-            false
-        }
-        _ => {
-            // Level 1 is load's caller, from its continuations too.
-            let m = ctx.positioned(b"reader function must return a string");
-            ctx.truncate(0);
-            return ctx.ret([Value::Nil, m]);
-        }
+        _ => return Err(ctx.type_error(0, "function")),
     };
-    if !done {
-        return read_more(ctx);
-    }
-    let mut bytes = Vec::new();
-    for i in PIECES..ctx.len() {
-        if let Value::Str(s) = ctx.arg(i) {
-            bytes.extend_from_slice(ctx.bytes(s));
-        }
-    }
     let source = opt_bytes(ctx, 1, b"=(load)")?;
     let mode = opt_bytes(ctx, 2, b"bt")?;
-    let env = if ctx.arg(ENV_GIVEN).is_falsy() {
-        Value::Table(ctx.vm.rt.globals)
-    } else {
-        ctx.arg(3)
-    };
     let r = load_chunk(ctx, &bytes, &source, &Mode(&mode), env);
     ctx.truncate(0);
     ret_loaded(ctx, r)
+}
+
+/// Call the reader function in window slot 0 until it returns nil or an
+/// empty string, and give the pieces joined, or the error `load` returns:
+/// the reader's own error (the calls are protected, and nested, so nothing
+/// may yield across them, as in the reference) or a bad piece.
+fn read_all(ctx: &mut NativeCtx<'_>) -> Result<Result<Vec<u8>, Value>, LuaError> {
+    let mut bytes = Vec::new();
+    let at = ctx.len();
+    loop {
+        let reader = ctx.arg(0);
+        ctx.push(reader);
+        let piece = match ctx.call_want(0, 1) {
+            Ok(_) => ctx.arg(at),
+            Err(e) if !e.is_exit() => return Ok(Err(e.value)),
+            Err(e) => return Err(e),
+        };
+        ctx.truncate(at);
+        match piece {
+            Value::Nil => return Ok(Ok(bytes)),
+            Value::Str(s) if ctx.bytes(s).is_empty() => return Ok(Ok(bytes)),
+            Value::Str(_) | Value::Int(_) | Value::Float(_) => ctx.display(piece, &mut bytes),
+            _ => {
+                // Level 1 is load's caller.
+                return Ok(Err(ctx.positioned(b"reader function must return a string")));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

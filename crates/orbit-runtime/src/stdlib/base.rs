@@ -57,19 +57,6 @@ pub(crate) fn open(vm: &mut Vm) {
     }
 }
 
-/// The value `__tostring` returned (`got` results from window slot `at`),
-/// which must be a string or a number.
-fn tostring_result(ctx: &mut NativeCtx<'_>, got: usize, at: usize) -> Result<Value, LuaError> {
-    let r = if got > 0 { ctx.arg(at) } else { Value::Nil };
-    match r {
-        Value::Str(_) | Value::Int(_) | Value::Float(_) => Ok(r),
-        _ => {
-            let msg = ctx.new_str(b"'__tostring' must return a string");
-            Err(ctx.error_value(msg))
-        }
-    }
-}
-
 pub(crate) fn type_(ctx: &mut NativeCtx<'_>) -> R {
     let v = ctx.check_any(0)?;
     let s = ctx.new_str(v.type_name().as_bytes());
@@ -84,26 +71,13 @@ fn tostring(ctx: &mut NativeCtx<'_>) -> R {
     let h = ctx.metamethod(v, MetaField::ToString);
     if !h.is_nil() {
         ctx.truncate(1);
-        ctx.push(v);
-        return Ok(NativeReturn::CallThen {
-            f: h,
-            nargs: 1,
-            k: tostring_done,
-            protected: false,
-        });
+        let r = crate::stdlib::tostring_now(ctx, h, v)?;
+        return ctx.ret([r]);
     }
     let mut out = Vec::new();
     ctx.display(v, &mut out);
     let s = ctx.new_str_owned(out);
     ctx.ret([s])
-}
-
-fn tostring_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let CallOutcome::Ok(got) = outcome else {
-        unreachable!("unprotected call")
-    };
-    let r = tostring_result(ctx, got, 1)?;
-    ctx.ret([r])
 }
 
 fn getmetatable(ctx: &mut NativeCtx<'_>) -> R {

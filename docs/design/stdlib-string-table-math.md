@@ -31,7 +31,7 @@ It is a backtracking matcher that interprets the pattern bytes as it goes, rathe
 
 Errors use lua5.5's messages: `malformed pattern (ends with '%')`, `malformed pattern (missing ']')`, `missing '[' after '%f' in pattern`, `invalid capture index %N`, `invalid pattern capture`, `unfinished capture`, `invalid use of '%' in replacement string`, `invalid replacement value (a table)`.
 
-`gsub` with a function replacement calls it through a non-yieldable `CallThen` (one call per match, the match state kept in the native's window; see [yielding](#table)), and with a table replacement it indexes the table with metamethods. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
+`gsub` with a function replacement calls it nested, once per match (`NativeCtx::call_want`, [VM](vm.md#natives)), so the matcher's state stays in Rust locals and nothing may yield across the call, as in lua5.5; with a table replacement it indexes the table with metamethods. A subject in which nothing was replaced is returned as it is. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
 
 ## format
 
@@ -56,20 +56,19 @@ The format parser implements every option of the manual (§6.4.2): endianness `<
 **Metamethods.** Since 5.3 the table functions read and write through `__index`/`__newindex` and take lengths from `__len`, and the suite checks this (sort.lua unpacks a *number* whose metatable has `__len` and `__index`). Each function has two paths:
 
 - a raw fast path when the argument is a table whose metatable (if any) has none of `__index`, `__newindex`, `__len`: plain array reads and writes, no calls;
-- a slow path, written as a resumable native: its loop variables live in its window, and each metamethod call is a `CallThen` whose continuation re-enters the same step function.
+- a slow path (`table/slow.rs`) for `concat`, `unpack` and `move`: a plain loop that runs each metamethod nested as it comes, so nothing may yield across these functions, as in lua5.5.
 
 ```mermaid
 flowchart LR
     entry["native entry"] --> check{"plain table?"}
     check -- yes --> fast["raw loop<br/>(no calls)"] --> done["return"]
-    check -- no --> step["step(state in window)"]
-    step -- "value available" --> step
-    step -- "needs __index/__newindex/__len/__lt" --> call["CallThen(metamethod)"]
-    call -- "continuation" --> step
-    step -- finished --> done
+    check -- no --> slow["loop with index_now,<br/>set_index_now, length_now"]
+    slow -- "__index/__newindex/__len function" --> call["nested call"]
+    call -- "result" --> slow
+    slow -- finished --> done
 ```
 
-`NativeCtx`'s metatable helpers ([VM semantics](vm-semantics.md#natives)) give these step functions `index`, `set_index`, `length` and `less_than` operations that either finish immediately or say a call is needed, so each table function reads like a loop.
+`NativeCtx`'s `*_now` helpers ([VM semantics](vm-semantics.md#natives)) give the slow paths `index`, `set_index`, `length`, `less_than` and `equal` with any metamethod already run, so each function reads as the loop it is. `math.max` and `math.min` compare through `less_than_now` the same way.
 
 **sort.** `sort` is written in OrbitScript (`stdlib/builtins/table.orb`, ADR-11), with a native fast path for arrays of only numbers or only strings and no comparator. The elements are copied into a scratch table, sorted there and written back. The algorithm is a bottom-up merge sort, because every comparison may be a call (a comparator or `__lt`). Merge sort does about n·log₂n − n comparisons, fewer than quicksort's average of about 1.39·n·log₂n, and comparisons dominate when they are Lua calls. Its scratch half needs a second table of n slots.
 

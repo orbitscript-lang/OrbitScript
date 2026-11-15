@@ -8,8 +8,7 @@ pub(crate) mod pattern;
 use crate::locale::Locale;
 use crate::object::{Gc, LuaStr, Table, Tag, Value, number};
 use crate::stack::{Buffer, Fail, Raised, Rest, Results, Return, Stack, StackResult, library_row};
-use crate::stdlib::first_result;
-use crate::vm::{CallOutcome, LuaError, Meta, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::vm::{LuaError, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
 use orbit_macros::native;
 
 use pattern::{Capture, Captures, Matcher, PatternError};
@@ -402,26 +401,13 @@ fn gmatch_step(s: &mut Stack<'_>) -> StackResult<Return> {
 
 // ---- gsub ----------------------------------------------------------------
 //
-// gsub builds its result in a byte buffer. It keeps its state in its window
-// so a function replacement can be called with `CallThen` and the loop
-// resumed afterwards; the buffer is then saved there as a piece:
-//
-//   0 subject, 1 pattern, 2 replacement, 3 max replacements (Int),
-//   4 position, 5 end of the last match (or nil), 6 count,
-//   7 start of the pending match, 8 its end, 9 whether any match was
-//   replaced (Bool), then output pieces (strings).
-
-const G_POS: usize = 4;
-const G_LAST: usize = 5;
-const G_COUNT: usize = 6;
-const G_MSTART: usize = 7;
-const G_MEND: usize = 8;
-const G_CHANGED: usize = 9;
-const G_PIECES: usize = 10;
+// gsub builds its result in a byte buffer. A function replacement (or a
+// table's `__index` function) is called nested, so the loop's state stays
+// in locals; nothing may yield across the call, as in the reference.
 
 fn gsub(ctx: &mut NativeCtx<'_>) -> R {
     let s = ctx.check_str(0)?;
-    let _p = ctx.check_str(1)?;
+    let p = ctx.check_str(1)?;
     let repl = ctx.arg(2);
     match repl {
         Value::Str(_) | Value::Int(_) | Value::Float(_) => {
@@ -430,62 +416,25 @@ fn gsub(ctx: &mut NativeCtx<'_>) -> R {
         Value::Table(_) | Value::Closure(_) | Value::Native(_) => {}
         _ => return Err(ctx.type_error(2, "string/function/table")),
     }
-    let len = ctx.bytes(s).len() as i64;
+    let len = ctx.bytes(s).len();
     let max = if ctx.arg(3).is_nil() {
-        len + 1
+        len as i64 + 1
     } else {
         ctx.check_int(3)?
     };
+    // The subject, the pattern and the replacement stay rooted in the
+    // window's first slots; calls go above them.
     ctx.truncate(3);
-    ctx.push(Value::Int(max));
-    ctx.push(Value::Int(0));
-    ctx.push(Value::Nil);
-    ctx.push(Value::Int(0));
-    ctx.push(Value::Int(0));
-    ctx.push(Value::Int(0));
-    ctx.push(Value::Bool(false));
-    let out = ctx.take_buf();
-    gsub_resume(ctx, false, out)
-}
-
-fn str_at(ctx: &NativeCtx<'_>, i: usize) -> Gc<LuaStr> {
-    match ctx.arg(i) {
-        Value::Str(s) => s,
-        _ => unreachable!("gsub window slot {i} holds a string"),
-    }
-}
-
-/// The span of one match found by the gsub loop.
-struct Found {
-    start: usize,
-    end: usize,
-}
-
-/// Run the gsub loop from the state in the window, appending to `out`.
-/// `after_match` is set when resuming after a function replacement, which
-/// ends an anchored pattern's only iteration.
-fn gsub_resume(ctx: &mut NativeCtx<'_>, after_match: bool, mut out: Vec<u8>) -> R {
-    let s = str_at(ctx, 0);
-    let p = str_at(ctx, 1);
-    let max = match ctx.arg(3) {
-        Value::Int(n) => n,
-        _ => 0,
-    };
     let anchored = ctx.bytes(p).first() == Some(&b'^');
     let pstart = usize::from(anchored);
-    let mut pos = ctx.saved_usize(G_POS);
-    let mut last = match ctx.arg(G_LAST) {
-        Value::Int(n) => Some(n as usize),
-        _ => None,
-    };
-    let mut count = ctx.saved_usize(G_COUNT) as i64;
-    let len = ctx.bytes(s).len();
+    let mut out = ctx.take_buf();
+    let (mut pos, mut last, mut count) = (0, None, 0);
     // Start of the unmatched bytes not yet copied to `out`.
-    let mut gap_start = pos;
-    let mut done = after_match && anchored;
+    let mut gap_start = 0;
+    let mut changed = false;
     let mut caps = Captures::new();
     let chars = ctx.locale().chars_rc();
-    while !done && count < max {
+    while count < max {
         let found = Matcher::new(ctx.bytes(s), ctx.bytes(p), &chars, &mut caps)
             .find_from(pos, pstart, anchored, last);
         let f = match found {
@@ -498,84 +447,43 @@ fn gsub_resume(ctx: &mut NativeCtx<'_>, after_match: bool, mut out: Vec<u8>) -> 
         pos = f.end;
         last = Some(f.end);
         gap_start = pos;
-        if let Some(r) = add_value(ctx, s, &f, &caps, &mut out)? {
-            // The output so far is saved in the window; the empty buffer
-            // goes back for the call to use.
-            ctx.give_buf(out);
-            save_state(ctx, pos, last, count);
-            return Ok(r);
-        }
-        done = anchored;
-    }
-    out.extend_from_slice(&ctx.bytes(s)[gap_start..len]);
-    finish_gsub(ctx, count, out)
-}
-
-fn save_state(ctx: &mut NativeCtx<'_>, pos: usize, last: Option<usize>, count: i64) {
-    ctx.set(G_POS, Value::Int(pos as i64));
-    ctx.set(G_LAST, last.map_or(Value::Nil, |l| Value::Int(l as i64)));
-    ctx.set(G_COUNT, Value::Int(count));
-}
-
-/// Save the output so far as a piece after the pieces in window slots
-/// `G_PIECES..at`, before a call (the call's arguments may follow them).
-///
-/// Earlier pieces no longer than what is being saved are joined into it,
-/// so each piece is more than twice as long as the next: a million
-/// function replacements leave a few dozen pieces in the window, not a
-/// million, and each byte is copied only a logarithmic number of times.
-fn save_piece(ctx: &mut NativeCtx<'_>, out: &mut Vec<u8>, at: usize) {
-    if out.is_empty() {
-        return;
-    }
-    let mut start = at;
-    let mut len = out.len();
-    while start > G_PIECES {
-        let prev = ctx.bytes(str_at(ctx, start - 1)).len();
-        if prev > len {
+        changed |= add_value(ctx, s, &f, &caps, &mut out)?;
+        if anchored {
             break;
         }
-        len += prev;
-        start -= 1;
     }
-    if start == at {
-        let v = ctx.new_str(out);
-        out.clear();
-        ctx.insert(at, v);
-        return;
-    }
-    let mut joined = Vec::with_capacity(len);
-    for i in start..at {
-        joined.extend_from_slice(ctx.bytes(str_at(ctx, i)));
-    }
-    joined.append(out);
-    let v = ctx.new_str_owned(joined);
-    // The joined piece takes the first slot; whatever followed the pieces
-    // moves down after it.
-    ctx.set(start, v);
-    let tail = ctx.len() - at;
-    for j in 0..tail {
-        let v = ctx.arg(at + j);
-        ctx.set(start + 1 + j, v);
-    }
-    ctx.truncate(start + 1 + tail);
+    // Nothing was replaced: return the subject itself, as lua5.5 does
+    // (`string.format("%p")` shows it is the same string).
+    let r = if changed {
+        out.extend_from_slice(&ctx.bytes(s)[gap_start..len]);
+        ctx.new_str_buf(out)
+    } else {
+        ctx.give_buf(out);
+        Value::Str(s)
+    };
+    ctx.ret([r, Value::Int(count)])
 }
 
-/// Add the replacement for one match. Returns a `CallThen` when the
-/// replacement is a function, whose continuation picks the loop up again.
+/// The span of one match found by the gsub loop.
+struct Found {
+    start: usize,
+    end: usize,
+}
+
+/// Append the replacement for one match to `out`; true if it replaced the
+/// match (false or nil from a table or function keeps it).
 fn add_value(
     ctx: &mut NativeCtx<'_>,
     s: Gc<LuaStr>,
     f: &Found,
     caps: &Captures,
     out: &mut Vec<u8>,
-) -> Result<Option<NativeReturn>, LuaError> {
+) -> Result<bool, LuaError> {
     let repl = ctx.arg(2);
-    match repl {
+    let v = match repl {
         Value::Str(r) => {
             expand_replacement(ctx, s, r, f, caps, out)?;
-            ctx.set(G_CHANGED, Value::Bool(true));
-            Ok(None)
+            return Ok(true);
         }
         Value::Table(_) => {
             let c = match caps.capture(0, f.start, f.end) {
@@ -583,76 +491,30 @@ fn add_value(
                 Err(e) => return Err(pattern_error(ctx, e)),
             };
             let key = capture_value(ctx, s, c);
-            match ctx.index(repl, key)? {
-                Meta::Done(v) => {
-                    replacement_result(ctx, s, f, v, out)?;
-                    Ok(None)
-                }
-                // `__index` is a function: call it like a function
-                // replacement.
-                Meta::Call { f: h, nargs } => {
-                    let at = ctx.len() - nargs;
-                    save_piece(ctx, out, at);
-                    ctx.set(G_MSTART, Value::Int(f.start as i64));
-                    ctx.set(G_MEND, Value::Int(f.end as i64));
-                    Ok(Some(NativeReturn::CallThen {
-                        f: h,
-                        nargs,
-                        k: gsub_after_call,
-                        protected: false,
-                    }))
-                }
-            }
+            ctx.index_now(repl, key)?
         }
         _ => {
             let at = ctx.len();
-            save_piece(ctx, out, at);
-            ctx.set(G_MSTART, Value::Int(f.start as i64));
-            ctx.set(G_MEND, Value::Int(f.end as i64));
+            ctx.push(repl);
             let n = caps.nresults();
             push_captures_raw(ctx, s, caps, n, f.start, f.end)?;
-            Ok(Some(NativeReturn::CallThen {
-                f: repl,
-                nargs: n,
-                k: gsub_after_call,
-                protected: false,
-            }))
+            ctx.call_want(n, 1)?;
+            let v = ctx.arg(at);
+            ctx.truncate(at);
+            v
         }
-    }
-}
-
-fn gsub_after_call(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
-    let first = first_result(ctx, outcome)?;
-    let s = str_at(ctx, 0);
-    let f = Found {
-        start: ctx.saved_usize(G_MSTART),
-        end: ctx.saved_usize(G_MEND),
     };
-    let mut out = ctx.take_buf();
-    replacement_result(ctx, s, &f, first, &mut out)?;
-    gsub_resume(ctx, true, out)
-}
-
-/// Append what a table or function replacement produced: false or nil
-/// keeps the original match.
-fn replacement_result(
-    ctx: &mut NativeCtx<'_>,
-    s: Gc<LuaStr>,
-    f: &Found,
-    v: Value,
-    out: &mut Vec<u8>,
-) -> Result<(), LuaError> {
     match v {
-        Value::Nil | Value::Bool(false) => out.extend_from_slice(&ctx.bytes(s)[f.start..f.end]),
+        Value::Nil | Value::Bool(false) => {
+            out.extend_from_slice(&ctx.bytes(s)[f.start..f.end]);
+            Ok(false)
+        }
         Value::Str(_) | Value::Int(_) | Value::Float(_) => {
             ctx.display(v, out);
-            ctx.set(G_CHANGED, Value::Bool(true));
+            Ok(true)
         }
-        _ => {
-            return Err(ctx.error(&format!("invalid replacement value (a {})", v.type_name())));
-        }
+        _ => Err(ctx.error(&format!("invalid replacement value (a {})", v.type_name()))),
     }
-    Ok(())
 }
 
 /// Append the replacement string `r` with `%0`-`%9` and `%%` expanded.
@@ -699,34 +561,6 @@ fn expand_replacement(
         i += 1;
     }
     Ok(())
-}
-
-fn finish_gsub(ctx: &mut NativeCtx<'_>, count: i64, out: Vec<u8>) -> R {
-    // Nothing was replaced: return the subject itself, as lua5.5 does
-    // (`string.format("%p")` shows it is the same string).
-    if !matches!(ctx.arg(G_CHANGED), Value::Bool(true)) {
-        ctx.give_buf(out);
-        let s = ctx.arg(0);
-        ctx.push(s);
-        ctx.push(Value::Int(count));
-        return Ok(NativeReturn::Return(2));
-    }
-    let r = if ctx.len() == G_PIECES {
-        ctx.new_str_buf(out)
-    } else {
-        let mut all = Vec::new();
-        for i in G_PIECES..ctx.len() {
-            if let Value::Str(piece) = ctx.arg(i) {
-                all.extend_from_slice(ctx.bytes(piece));
-            }
-        }
-        all.extend_from_slice(&out);
-        ctx.give_buf(out);
-        ctx.new_str_owned(all)
-    };
-    ctx.push(r);
-    ctx.push(Value::Int(count));
-    Ok(NativeReturn::Return(2))
 }
 
 /// Point the shared string metatable's `__index` at the `string` table and

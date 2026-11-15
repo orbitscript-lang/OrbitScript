@@ -82,6 +82,10 @@ pub(crate) enum Cause {
     Error,
     /// The host asked the VM to stop ([`Interrupt`]): `interrupted!`.
     Interrupt,
+    /// `coroutine.close()` in a coroutine that a native's nested call runs
+    /// in: the coroutine ends, so no protected call catches it, and each
+    /// native it passes hands it on ([`Vm::exit_co`]).
+    Exit,
 }
 
 impl LuaError {
@@ -91,6 +95,12 @@ impl LuaError {
             traceback: None,
             cause: Cause::Error,
         }
+    }
+
+    /// The running coroutine closing itself, on its way out of a native's
+    /// nested call: not to be caught.
+    pub(crate) fn is_exit(&self) -> bool {
+        self.cause == Cause::Exit
     }
 
     /// An error with `value` raised for `cause`.
@@ -198,6 +208,17 @@ pub(crate) enum FrameKind {
     /// The bottom of every coroutine's stack: the body returning into it
     /// finishes the coroutine, and an error reaching it kills it.
     CoBase,
+    /// A native calling a function nested ([`NativeCtx::call`]), in one
+    /// record: tracebacks and the debug library see the native (as for
+    /// [`FrameKind::NativeCall`]), and returning into it ends the call, as
+    /// into a native [`FrameKind::Boundary`]: an error unwinding to it is
+    /// returned to the native, without a traceback. The frame's `func` and
+    /// `base` are the native's.
+    Nested {
+        id: NativeId,
+        /// Where the called function sits.
+        call_at: u32,
+    },
     /// A native that is running without a continuation. Natives normally
     /// run frameless; one gets this frame when it raises an error, so
     /// tracebacks see it (`[C]: in global 'error'`), and while call or
@@ -331,6 +352,13 @@ pub(crate) struct StackAux {
     /// lazily: one that now holds a Lua frame is skipped, and any other
     /// frame there has the right `cdepth` anyway.
     pub(crate) depth_at: Vec<u32>,
+    /// The `cdepth` of the innermost [`FrameKind::Nested`] call running on
+    /// this stack (0 for none). A nested call sets it on entry and puts the
+    /// old value back when it ends, which it always sees (its record stops
+    /// every error and nothing yields across it), so it needs no entry in
+    /// `depth_at`; frames recorded there below it are shallower, those
+    /// above it deeper.
+    pub(crate) nested: u8,
     /// The index of the boundary frame below a running finalizer, which
     /// the debug library names `__gc`.
     pub(crate) finalizer_at: Option<u32>,
@@ -430,15 +458,18 @@ impl Stack {
     /// How many calls back into the interpreter are open: the
     /// [`Frame::cdepth`] of the newest frame that isn't a Lua frame.
     pub(crate) fn cdepth(&mut self) -> u8 {
+        let nested = self.aux.nested;
         while let Some(&i) = self.aux.depth_at.last() {
             match self.frames.get(i as usize) {
-                Some(f) if !matches!(f.kind, FrameKind::Lua { .. }) => return f.cdepth,
+                Some(f) if !matches!(f.kind, FrameKind::Lua { .. }) => {
+                    return f.cdepth.max(nested);
+                }
                 _ => {
                     self.aux.depth_at.pop();
                 }
             }
         }
-        0
+        nested
     }
 
     /// The `cdepth` of a frame about to be pushed at `frames.len()` for a

@@ -27,6 +27,29 @@ pub use chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
 pub use load::load_chunk_in;
 
+/// Call `__tostring` handler `h` on `v` now, nested, for `tostring` and
+/// `string.format`'s `%s`: its result, which must be a string or a number.
+pub(crate) fn tostring_now(
+    ctx: &mut crate::vm::NativeCtx<'_>,
+    h: crate::object::Value,
+    v: crate::object::Value,
+) -> Result<crate::object::Value, crate::vm::LuaError> {
+    use crate::object::Value;
+    let at = ctx.len();
+    ctx.push(h);
+    ctx.push(v);
+    ctx.call_want(1, 1)?;
+    let r = ctx.arg(at);
+    ctx.truncate(at);
+    match r {
+        Value::Str(_) | Value::Int(_) | Value::Float(_) => Ok(r),
+        _ => {
+            let msg = ctx.new_str(b"'__tostring' must return a string");
+            Err(ctx.error_value(msg))
+        }
+    }
+}
+
 /// The first result of a call a native requested with `CallThen` (nil if
 /// none); the call's results are dropped from the window.
 pub(crate) fn first_result(

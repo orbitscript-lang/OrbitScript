@@ -31,3 +31,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# The interpreter loop's frame unoptimized is over 100 KiB, and a native's
+# nested call into script code holds one per level: at the 200-level limit
+# a debug build would need a stack of tens of MiB. Optimizing the runtime
+# crate keeps debug builds (with their assertions and the heap verifier)
+# within an ordinary thread stack.
+[profile.dev.package.orbit-runtime]
+opt-level = 1

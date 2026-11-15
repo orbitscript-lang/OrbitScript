@@ -18,13 +18,14 @@ use crate::vm::ops::Exc;
 use crate::vm::{FrameKind, LuaError, Vm, ops};
 
 /// The outcome of an operation that may need a metamethod: either the
-/// answer, or a function to call. For [`Meta::Call`] the arguments are
-/// already pushed on the window; return
-/// `NativeReturn::CallThen { f, nargs, k, .. }` and take the result in `k`.
+/// answer, or a call to make. For [`Meta::Call`] the handler and then its
+/// `nargs` arguments are pushed on the window; [`NativeCtx::meta_value`]
+/// runs it. The `_now` operations ([`NativeCtx::index_now`] and the rest)
+/// do both.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Meta<T> {
     Done(T),
-    Call { f: Value, nargs: usize },
+    Call { nargs: usize },
 }
 
 /// An operator for [`NativeCtx::arith`], in the C API's order
@@ -340,16 +341,6 @@ impl NativeCtx<'_> {
         }
     }
 
-    /// A count or position a native saved in window slot `i` as an
-    /// integer, for its continuation to pick up; 0 if the slot holds
-    /// anything else.
-    pub(crate) fn saved_usize(&self, i: usize) -> usize {
-        match self.arg(i) {
-            Value::Int(n) => n as usize,
-            _ => 0,
-        }
-    }
-
     /// Overwrite window slot `i`, growing the window with nils if needed.
     #[inline]
     pub(crate) fn set(&mut self, i: usize, v: Value) {
@@ -370,12 +361,6 @@ impl NativeCtx<'_> {
         crate::vm::interp::extend_nil(regs, at + 1);
         regs[top..at].fill(Value::Nil);
         self.vm.rt.top = at + 1;
-    }
-
-    /// Insert `v` at window slot `i`, shifting the rest up.
-    pub(crate) fn insert(&mut self, i: usize, v: Value) {
-        let at = self.base + i;
-        self.vm.rt.top = self.vm.rt.stack.insert(at, self.vm.rt.top, v);
     }
 
     /// Push a value onto the end of the window.
@@ -469,6 +454,117 @@ impl NativeCtx<'_> {
     /// can't yield across it. While the call runs the native has a frame,
     /// so tracebacks, `debug.getinfo` and error positions see it.
     pub fn call(&mut self, nargs: usize, handler: Option<usize>) -> Result<usize, LuaError> {
+        match handler {
+            None => self.call_want(nargs, crate::vm::op::MULTI),
+            Some(_) => self.call_general(nargs, handler),
+        }
+    }
+
+    /// [`NativeCtx::call`] without a message handler, keeping `want`
+    /// results ([`op::MULTI`](crate::vm::op::MULTI) for all): the call a
+    /// native makes to run a callback or a metamethod. Returns how many
+    /// results there are.
+    ///
+    /// The common call, a script function with no hook armed, is entered
+    /// here directly: one [`FrameKind::Nested`] record, the callee's frame,
+    /// and the dispatch loop, with no general call routine on the way and
+    /// no locale to install (the run around the native did that).
+    /// Everything else (natives, `__call`, hooks, the host's own window)
+    /// takes the general path.
+    #[inline]
+    pub(crate) fn call_want(&mut self, nargs: usize, want: u8) -> Result<usize, LuaError> {
+        debug_assert!(self.len() > nargs, "a function below the arguments");
+        let func = self.vm.rt.top - nargs - 1;
+        let s = &self.vm.rt.stack;
+        let me = self.base - 1;
+        let callee = match s.regs[func] {
+            // A native with a frame of its own already (it raised, or a
+            // hook gave it one) and the host's window keep the general
+            // records.
+            Value::Closure(c)
+                if !s.hook.armed()
+                    && !matches!(s.frames.last(), Some(f) if f.func as usize == me
+                        && matches!(f.kind, FrameKind::NativeCall { .. }))
+                    && self.vm.rt.natives.host() != Some(self.id) =>
+            {
+                c
+            }
+            _ => return self.call_general_want(nargs, want),
+        };
+        let s = &mut self.vm.rt.stack;
+        let at = s.frames.len();
+        // The depth goes up and down with the nesting (`StackAux::nested`).
+        let cdepth = s.cdepth().saturating_add(1);
+        if self.vm.c_overflow(cdepth) {
+            return Err(LuaError::new(self.new_str(b"C stack overflow")));
+        }
+        let s = &mut self.vm.rt.stack;
+        let outer = std::mem::replace(&mut s.aux.nested, cdepth);
+        s.frames.push(crate::vm::Frame {
+            kind: FrameKind::Nested {
+                id: self.id,
+                call_at: func as u32,
+            },
+            func: me as u32,
+            base: self.base as u32,
+            pc: 0,
+            cell_base: s.cells.len() as u32,
+            nvarargs: self.nargs as u32,
+            want: 0,
+            tail: false,
+            extra: 0,
+            cdepth,
+        });
+        let r = match self.vm.push_lua_frame(callee, func, nargs, want) {
+            Ok(e) => {
+                // The callee's registers are the native's to clear when it
+                // returns, as for any frame entered outside the loop.
+                let nregs = self.vm.heap.get(callee).code.nregs as usize;
+                let s = &mut self.vm.rt.stack;
+                s.dirty_to = s.dirty_to.max(e.base + nregs);
+                self.vm.run()
+            }
+            Err(x) => match self.vm.settle(x) {
+                Ok(Flow::Done) => Ok(()),
+                Ok(_) => self.vm.run(),
+                Err(e) => Err(e),
+            },
+        };
+        // Returning or unwinding into the record popped it.
+        let s = &mut self.vm.rt.stack;
+        debug_assert_eq!(s.frames.len(), at, "the nested record is gone");
+        s.aux.nested = outer;
+        match r {
+            Ok(()) => Ok(self.vm.rt.top - func),
+            Err(e) => {
+                self.vm.rt.top = func;
+                Err(e)
+            }
+        }
+    }
+
+    /// [`NativeCtx::call_want`] through the general call routine.
+    #[cold]
+    #[inline(never)]
+    fn call_general_want(&mut self, nargs: usize, want: u8) -> Result<usize, LuaError> {
+        let n = self.call_general(nargs, None)?;
+        if want == crate::vm::op::MULTI {
+            return Ok(n);
+        }
+        let want = want as usize;
+        let first = self.len() - n;
+        self.truncate(first + n.min(want));
+        while self.len() < first + want {
+            self.push(Value::Nil);
+        }
+        Ok(want)
+    }
+
+    /// [`NativeCtx::call`] through the general call routine: two frame
+    /// records (the native's, so tracebacks see it, and the boundary), and
+    /// the locale installed for the run.
+    #[inline(never)]
+    fn call_general(&mut self, nargs: usize, handler: Option<usize>) -> Result<usize, LuaError> {
         debug_assert!(self.len() > nargs, "a function below the arguments");
         let func = self.vm.rt.top - nargs - 1;
         let me = self.base - 1;
@@ -1128,19 +1224,18 @@ impl NativeCtx<'_> {
     }
 
     /// Turn a slow path's result into a [`Meta`]: a metamethod call gets
-    /// its arguments pushed, an error gets positioned at the caller.
+    /// its handler and arguments pushed, an error gets positioned at the
+    /// caller.
     fn meta_result<T>(&mut self, r: Result<T, Exc>) -> Result<Meta<T>, LuaError> {
         match r {
             Ok(v) => Ok(Meta::Done(v)),
             Err(Exc::Meta(call)) => {
                 let n = call.nargs as usize;
+                self.push(call.f);
                 for &a in &call.args[..n] {
                     self.push(a);
                 }
-                Ok(Meta::Call {
-                    f: call.f,
-                    nargs: n,
-                })
+                Ok(Meta::Call { nargs: n })
             }
             Err(Exc::Rt(msg, _)) => Err(self.error(&msg)),
             Err(Exc::Plain(msg)) => Err(LuaError::new(self.new_str(msg.as_bytes()))),
@@ -1150,6 +1245,156 @@ impl NativeCtx<'_> {
             Err(Exc::Index { .. } | Exc::NewIndex { .. }) => {
                 unreachable!("only the dispatch loop defers indexing")
             }
+        }
+    }
+
+    /// Run the metamethod call a [`Meta::Call`] pushed, nested, and give
+    /// its first result (nil if none); the call leaves the window as it was
+    /// before the lookup.
+    pub(crate) fn meta_value(&mut self, nargs: usize) -> Result<Value, LuaError> {
+        let at = self.len() - nargs - 1;
+        self.call_want(nargs, 1)?;
+        let v = self.arg(at);
+        self.truncate(at);
+        Ok(v)
+    }
+
+    /// Call metamethod `h` with `args` now and give its first result (nil
+    /// if none); the window is left as it was.
+    #[inline(always)]
+    fn call_handler(&mut self, h: Value, args: &[Value]) -> Result<Value, LuaError> {
+        let at = self.vm.rt.top;
+        let end = at + 1 + args.len();
+        let s = &mut self.vm.rt.stack;
+        if s.regs.len() < end {
+            crate::vm::interp::extend_nil(&mut s.regs, end);
+        }
+        s.regs[at] = h;
+        s.regs[at + 1..end].copy_from_slice(args);
+        s.dirty_to = s.dirty_to.max(end);
+        self.vm.rt.top = end;
+        self.call_want(args.len(), 1)?;
+        self.vm.rt.top = at;
+        Ok(self.vm.rt.stack.regs[at])
+    }
+
+    /// `obj[key]` with metamethods, run now. A table whose `__index` is a
+    /// function calls it straight away; anything else takes the general
+    /// route ([`NativeCtx::index`]).
+    pub(crate) fn index_now(&mut self, obj: Value, key: Value) -> Result<Value, LuaError> {
+        if let Value::Table(t) = obj {
+            let heap = &self.vm.heap;
+            let tab = heap.get(t);
+            let v = tab.get(heap, key);
+            let Some(mt) = tab.meta else {
+                return Ok(v);
+            };
+            if !v.is_nil() {
+                return Ok(v);
+            }
+            let e = MetaField::Index;
+            let h = heap
+                .get(mt)
+                .meta_field(heap, e, self.vm.rt.metas.field_names.name(e));
+            if h.is_nil() {
+                return Ok(Value::Nil);
+            }
+            if h.is_function() {
+                return self.call_handler(h, &[obj, key]);
+            }
+        }
+        match self.index(obj, key)? {
+            Meta::Done(v) => Ok(v),
+            Meta::Call { nargs } => self.meta_value(nargs),
+        }
+    }
+
+    /// `obj[key] = v` with metamethods, run now; a table's `__newindex`
+    /// function is called straight away.
+    pub(crate) fn set_index_now(
+        &mut self,
+        obj: Value,
+        key: Value,
+        v: Value,
+    ) -> Result<(), LuaError> {
+        if let Value::Table(t) = obj {
+            let heap = &self.vm.heap;
+            let tab = heap.get(t);
+            if let Some(mt) = tab.meta {
+                if tab.get(heap, key).is_nil() {
+                    let e = MetaField::NewIndex;
+                    let h = heap
+                        .get(mt)
+                        .meta_field(heap, e, self.vm.rt.metas.field_names.name(e));
+                    if h.is_function() {
+                        return self.call_handler(h, &[obj, key, v]).map(|_| ());
+                    }
+                }
+            }
+        }
+        match self.set_index(obj, key, v)? {
+            Meta::Done(()) => Ok(()),
+            Meta::Call { nargs } => self.meta_value(nargs).map(|_| ()),
+        }
+    }
+
+    /// `#v` with `__len`, run now; a table's `__len` function is called
+    /// straight away.
+    pub(crate) fn length_now(&mut self, v: Value) -> Result<Value, LuaError> {
+        if let Value::Table(t) = v {
+            if self.vm.heap.get(t).meta.is_some() {
+                let h = self
+                    .vm
+                    .rt
+                    .metas
+                    .metamethod(&self.vm.heap, v, MetaField::Len);
+                if h.is_function() {
+                    return self.call_handler(h, &[v, v]);
+                }
+            }
+        }
+        match self.length(v)? {
+            Meta::Done(v) => Ok(v),
+            Meta::Call { nargs } => self.meta_value(nargs),
+        }
+    }
+
+    /// `a < b` with `__lt`, run now; a `__lt` function is called straight
+    /// away.
+    pub(crate) fn less_than_now(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
+        let plain = |v: Value| matches!(v, Value::Int(_) | Value::Float(_) | Value::Str(_));
+        if !(plain(a) && plain(b)) {
+            let heap = &self.vm.heap;
+            let metas = &self.vm.rt.metas;
+            let e = MetaField::Lt;
+            // A table's own metatable first, as `binary_handler` takes it.
+            let h = match a {
+                Value::Table(t) => match heap.get(t).meta {
+                    Some(mt) => heap.get(mt).meta_field(heap, e, metas.field_names.name(e)),
+                    None => Value::Nil,
+                },
+                _ => Value::Nil,
+            };
+            let h = if h.is_nil() {
+                meta::binary_handler(heap, metas, e, a, b)
+            } else {
+                h
+            };
+            if h.is_function() {
+                return Ok(!self.call_handler(h, &[a, b])?.is_falsy());
+            }
+        }
+        match self.less_than(a, b)? {
+            Meta::Done(r) => Ok(r),
+            Meta::Call { nargs } => Ok(!self.meta_value(nargs)?.is_falsy()),
+        }
+    }
+
+    /// `a == b` with `__eq`, run now.
+    pub(crate) fn equal_now(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
+        match self.equal(a, b)? {
+            Meta::Done(r) => Ok(r),
+            Meta::Call { nargs } => Ok(!self.meta_value(nargs)?.is_falsy()),
         }
     }
 
