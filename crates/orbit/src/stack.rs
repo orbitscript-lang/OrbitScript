@@ -28,8 +28,6 @@ use crate::chunk::Chunk;
 use crate::scope::Scope;
 use crate::value::Value;
 
-#[doc(hidden)]
-pub use orbit_runtime::stack::{PureArg, PureFn, PureResult, PureValue, catch_panic};
 pub use orbit_runtime::stack::{
     Any, Arg, ArithOp, CompareOp, Continuation, Control, Either, Fail, FrameInfo, FunctionArg,
     GcOp, GcParam, InterruptHandler, IntoRaised, MULTRET, Native, NativeFunction, NativeRef, Nil,
@@ -37,6 +35,8 @@ pub use orbit_runtime::stack::{
     Resumed, Return, Stack, StackResult, State, Status, TableArg, ThreadRef, ThreadWindow, Type,
     Ud, UserType, field_name, function, upvalue_index,
 };
+#[doc(hidden)]
+pub use orbit_runtime::stack::{PureArg, PureFn, PureResult, PureValue, catch_panic};
 
 /// What this crate adds to a [`Stack`]: scopes over the window, and
 /// chunks. Natives that use them bring the trait into scope

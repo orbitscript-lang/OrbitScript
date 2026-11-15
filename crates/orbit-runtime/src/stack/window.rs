@@ -968,8 +968,13 @@ impl<'s> Stack<'s> {
     /// embedder's `tostring` is not the built-in one.
     #[inline]
     fn native_index<N: Native>(&mut self) -> u32 {
-        self.native_id(TypeId::of::<N>(), N::NAME, native_entry::<N>, pure_fast::<N>())
-            .0
+        self.native_id(
+            TypeId::of::<N>(),
+            N::NAME,
+            native_entry::<N>,
+            pure_fast::<N>(),
+        )
+        .0
     }
 
     /// The non-generic half of registering a native: its index, with the

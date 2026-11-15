@@ -248,7 +248,10 @@ fn half(n: i64, scale: Option<f64>) -> Result<Number, Fail> {
 fn pure_natives() {
     use orbit::stack::{Native, PureValue};
     let fast = <half as Native>::PURE.expect("a fast path");
-    assert!(matches!(fast(&[PureValue::Int(8)]), Some(PureValue::Int(4))));
+    assert!(matches!(
+        fast(&[PureValue::Int(8)]),
+        Some(PureValue::Int(4))
+    ));
     assert!(matches!(
         fast(&[PureValue::Int(8), PureValue::Int(3)]),
         Some(PureValue::Float(f)) if f == 12.0
