@@ -87,15 +87,16 @@ impl Listener {
 }
 
 /// The directory the sockets go in: `$XDG_RUNTIME_DIR/orbit`, else
-/// `$TMPDIR/orbit` on macOS (already per user), else
 /// `$TMPDIR/orbit-<uid>` or `/tmp/orbit-<uid>`. It is created mode 0700
-/// and refused if someone else owns it or can enter it.
+/// and refused if someone else owns it or can enter it. The uid is in the
+/// name on macOS too: its `$TMPDIR` is normally per user, but set to a
+/// shared one like `/tmp`, a plain `orbit` there could be made first by
+/// another user, and debugging would be refused.
 #[cfg(unix)]
 pub(crate) fn dir() -> io::Result<PathBuf> {
     let uid = my_uid()?;
     let dir = match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         Some(d) => PathBuf::from(d).join("orbit"),
-        None if cfg!(target_os = "macos") => std::env::temp_dir().join("orbit"),
         None => std::env::temp_dir().join(format!("orbit-{uid}")),
     };
     match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
