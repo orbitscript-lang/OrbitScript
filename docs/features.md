@@ -13,7 +13,7 @@ Every Cargo feature of the workspace's crates. A feature exists only if an embed
 | `orbit` | `debug` | yes | The `debug` library and the hooked copy of the dispatch loop `debug.sethook` runs on | 16,896 bytes |
 | `orbit` | `locale` | yes | `os.setlocale` with the C library's locales (ADR-13); without it only the C locale exists | 21,016 bytes |
 | `orbit` | `debugger` | no | The debugger engine and its API (ADR-12): breakpoints, stepping, pause, stops on errors | with `dap`, below |
-| `orbit` | `lua-5-4` | no | Lua 5.4 instead of 5.5, for the whole build (ADR-14). It selects rather than adds: any crate that enables it makes the whole program 5.4, so only the program at the top of the build should | |
+| `orbit` | `lua-5-4` | no | Lua 5.4 instead of 5.5, for the whole build (ADR-14). It selects rather than adds: any crate that enables it makes the whole program 5.4, so only the program at the top of the build should. To make a disagreement fail the build, set `ORBIT_EXPECT_LUA` (`5.4` or `5.5`; `build.sh --lua` does) or assert it: `const _: () = assert!(orbit::LUA.is_5_5());` | |
 | `orbit-std` | `io` | yes | The `io` library. Leaving it out takes file access out of the binary, not only out of a script's reach | not measured (the CLI needs it) |
 | `orbit-std` | `os` | yes | The `os` library. Leaving it out takes process and environment access out of the binary | not measured (the CLI needs it) |
 | `orbit-std` | `json` | no | The `std.json` module, over `serde_json` (ADR-12) | 53,664 bytes |
