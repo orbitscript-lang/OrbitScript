@@ -315,6 +315,7 @@ dependencies = [
 name = "orbit-testkit"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "nix",
  "serde_json",
 ]

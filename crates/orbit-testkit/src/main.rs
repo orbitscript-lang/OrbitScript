@@ -5,6 +5,7 @@
 //! `tests/README.md` for how CI uses it.
 
 mod bench;
+mod capi;
 mod conformance;
 mod diff;
 mod examples;
@@ -28,6 +29,7 @@ commands:
   bench         time benchmarks and track peak RSS and binary size
   examples      run examples/ and check their output (and Lua twins)
   liblua        run the suite through lua.c on liborbit (ADR-10)
+  capi          compare C programs on liborbit with the reference liblua
   scoreboard    the whole Lua 5.5 compatibility picture in one report
   fuzz-syntax   compare compile errors on mutated programs with lua5.5
   fuzz          compare random library calls with the reference lua5.5
@@ -64,6 +66,7 @@ fn main() -> ExitCode {
         "fuzz-syntax" => fuzz::main(rest),
         "fuzz" => libfuzz::main(rest),
         "liblua" => liblua::main(rest),
+        "capi" => capi::main(rest),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(true)

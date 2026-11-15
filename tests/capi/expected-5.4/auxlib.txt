@@ -1,0 +1,48 @@
+-- buffers
+bufflen 18
+buffaddr starts '<'
+buffer: top=1: '<abc\0dx::y::z12xy'
+big buffer 100000
+grown buffer 50000
+gsub returns its result: heLLLLo
+gsub: top=2: 'heLLLLo' ''
+-- buffers status 0
+-- refs
+refs 1 2 nil=1 noref=-2 top=1
+values: top=3: table 'a' 'b'
+reused 1
+after freeing two: 1 2 4 rawlen 4
+registry ref above the reserved slots: 1, value in the registry
+globals still in place: 1
+-- refs status 0
+-- subtables
+getsubtable new 0 again 1 same 1
+getsubtable over a number 0
+-- subtables status 0
+-- libraries
+requiref: top=2: table 'mylib'
+mylib	101	mylib	false	true
+again: loaded once	mylib
+not global	nil	true
+-- libraries status 0
+-- tostrings
+luaL_tolstring 1: TS len>0=1 top+1=1
+luaL_tolstring 2: NM len>0=1 top+1=1
+luaL_tolstring 3: ni len>0=1 top+1=1
+luaL_tolstring 4: tr len>0=1 top+1=1
+luaL_tolstring 5: 1. len>0=1 top+1=1
+luaL_tolstring 6: 10 len>0=1 top+1=1
+luaL_tolstring 7: st len>0=1 top+1=1
+luaL_tolstring 8: 1e len>0=1 top+1=1
+luaL_tolstring 9: -0 len>0=1 top+1=1
+-- tostrings status 0
+-- results
+fileresult ok 1 top 1
+ok: top=1: true
+fileresult fail 3 top 3
+fail: top=3: nil 'name: No such file or directory' 2
+fail without a name: top=3: nil 'Permission denied' 13
+exec 0: top=3: true 'exit' 0
+exec exit 3: top=3: nil 'Permission denied' 13
+exec -1: top=3: nil 'No such file or directory' 2
+-- results status 0

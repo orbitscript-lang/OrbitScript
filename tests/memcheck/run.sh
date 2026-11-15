@@ -4,8 +4,8 @@
 #
 #   tests/memcheck/run.sh [--layout DIR] [--quick] [PART...]
 #
-# PART is one or more of chost, sanitize, cmod, unit, liblua (default: all
-# of them, in that order):
+# PART is one or more of chost, sanitize, cmod, unit, capi, liblua
+# (default: all of them, in that order):
 #
 #   chost     the C host program's modes (crates/orbit-capi/tests/chost) on
 #             the laid-out liborbit
@@ -16,6 +16,8 @@
 #   unit      the tests that run the FFI, locale, virtual memory and C API
 #             code in the test process: orbit-std (ffi feature), orbit-ffi,
 #             orbit-locale, orbit-virtmem, orbit-capi
+#   capi      the C API programs (tests/capi, `cargo testkit capi`) on the
+#             laid-out liborbit, which call every function it exports
 #   liblua    the Lua suite through PUC's lua.c on liborbit in the suite's
 #             soft mode, every file but all.lua (which runs them all again)
 #             and heavy.lua (which grows a table until valgrind runs out of
@@ -45,11 +47,11 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --layout) layout=$2; shift 2 ;;
         --quick) quick=1; shift ;;
-        chost | sanitize | cmod | unit | liblua) parts="$parts $1"; shift ;;
+        chost | sanitize | cmod | unit | capi | liblua) parts="$parts $1"; shift ;;
         *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
     esac
 done
-[ -n "$parts" ] || parts="chost sanitize cmod unit liblua"
+[ -n "$parts" ] || parts="chost sanitize cmod unit capi liblua"
 
 logs="$root/target/memcheck/logs"
 rm -rf "$logs"
@@ -102,6 +104,10 @@ for part in $parts; do
             CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$vg" \
                 cargo test --locked -p orbit-std --features orbit-std/ffi \
                 -p orbit-ffi -p orbit-locale -p orbit-virtmem -p orbit-capi || note unit
+            ;;
+        capi)
+            step "the C API programs under valgrind"
+            cargo testkit capi --layout "$layout" --wrap "$vg" || note capi
             ;;
         liblua)
             step "the suite through liblua under valgrind (soft mode)"

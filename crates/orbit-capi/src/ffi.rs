@@ -796,10 +796,9 @@ struct RTable {
     topointer: extern "C" fn(*mut LState, c_int) -> *const c_void,
     tothread: extern "C" fn(*mut LState, c_int) -> *mut LState,
     touserdata: extern "C" fn(*mut LState, c_int) -> *mut c_void,
-    traceback: extern "C" fn(*mut LState, *const c_char, c_int),
+    traceback: extern "C" fn(*mut LState, *const c_char, c_int, c_int),
     r#type: extern "C" fn(*mut LState, c_int) -> c_int,
     typeerror: extern "C" fn(*mut LState, c_int, *const c_char),
-    unsupported: extern "C" fn(*mut LState, *const c_char),
     upvalueid: extern "C" fn(*mut LState, c_int, c_int) -> *mut c_void,
     upvaluejoin: extern "C" fn(*mut LState, c_int, c_int, c_int, c_int),
     version: extern "C" fn(*mut LState) -> f64,
@@ -897,7 +896,6 @@ static TABLE: RTable = RTable {
     traceback: orbit_r_traceback,
     r#type: orbit_r_type,
     typeerror: orbit_r_typeerror,
-    unsupported: orbit_r_unsupported,
     upvalueid: orbit_r_upvalueid,
     upvaluejoin: orbit_r_upvaluejoin,
     version: orbit_r_version,
@@ -1373,13 +1371,19 @@ extern "C" fn orbit_r_warning(l: *mut LState, msg: *const c_char, tocont: c_int)
     })
 }
 
-extern "C" fn orbit_r_traceback(l: *mut LState, msg: *const c_char, level: c_int) {
+/// `luaL_traceback`: of this thread when `thread` is 0, else of the thread
+/// at index `thread`, whose levels count from its top activation.
+extern "C" fn orbit_r_traceback(l: *mut LState, msg: *const c_char, level: c_int, thread: c_int) {
     // SAFETY: NUL-terminated or NULL.
     let text = unsafe { cbytes(msg) };
     let msg = (!msg.is_null()).then_some(OrbitStr::from(text));
     entry!(l, (), |b, c| {
-        c.push_traceback(msg, lua_level(b, level));
-        Ok(())
+        if thread == 0 {
+            c.push_traceback(msg, lua_level(b, level));
+            Ok(())
+        } else {
+            c.push_traceback_of(thread, msg, level)
+        }
     })
 }
 
@@ -1498,14 +1502,6 @@ extern "C" fn orbit_r_yieldk(l: *mut LState, nresults: c_int, kctx: isize, k: Op
     if let Some(r) = req {
         suspend(l, r);
     }
-}
-
-extern "C" fn orbit_r_unsupported(l: *mut LState, what: *const c_char) {
-    // SAFETY: NUL-terminated.
-    let what = String::from_utf8_lossy(unsafe { cbytes(what) }).into_owned();
-    entry!(l, (), |_b, c| Err(
-        c.error(&format!("{what} is not supported by OrbitScript yet"))
-    ))
 }
 
 // ---- debug interface ----------------------------------------------------------

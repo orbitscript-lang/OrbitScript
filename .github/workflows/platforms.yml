@@ -6,7 +6,7 @@ name: Platforms
 #
 # - Linux aarch64, macOS arm64 and Windows x64 run the tests, and the shared
 #   layout (ADR-10) built by ./build.sh without a profile and tested as laid
-#   out. macOS and Windows also type-check with the MSRV, since each has code
+#   out. Every platform runs the C API programs (tests/capi) on its layout. macOS and Windows also type-check with the MSRV, since each has code
 #   only it compiles.
 # - Windows ARM64 runs clippy, which compiles everything including the
 #   tests, and its shared layout, and tests the static programs with
@@ -113,6 +113,11 @@ jobs:
       - name: Shared layout
         if: success() || failure()
         run: tools/check-shared-layout.sh
+      # The C API programs on the layout just built, against the output the
+      # reference liblua gave on Linux (tests/README.md).
+      - name: C API programs
+        if: success() || failure()
+        run: cargo testkit capi
       - name: Static programs with liborbit as a C library only
         if: matrix.static-programs && (success() || failure())
         run: |
