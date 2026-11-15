@@ -46,17 +46,6 @@ pub(crate) enum CoStatus {
     Dead,
 }
 
-impl CoStatus {
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            CoStatus::Suspended => "suspended",
-            CoStatus::Running => "running",
-            CoStatus::Normal => "normal",
-            CoStatus::Dead => "dead",
-        }
-    }
-}
-
 /// Who is closing a coroutine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Closing {

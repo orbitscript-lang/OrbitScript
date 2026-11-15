@@ -118,14 +118,25 @@ Valgrind never follows child processes: the C compiler and shells the tests star
 
 `tests/memcheck/check-planted.sh` proves the checker, as the write-barrier tests are proven: each patch in `tests/memcheck/planted` plants one memory bug (a string copy freed while the string is alive, a userdata block shorter than asked for, an uninitialised libffi argument, a virtual memory page released under live elements) and names the parts that reach it. The script applies each in turn and requires a valgrind report. Run it after changing `run.sh` or the tests it runs; a planted bug that is no longer reported needs a test that reaches it.
 
+## AddressSanitizer
+
+`tests/asan/run.sh` runs the tests of the code that may contain `unsafe` under AddressSanitizer, which needs a nightly toolchain (`rustup toolchain install nightly`), the one exception to stable Rust, for a test tool only (`CLAUDE.md`). It sees what valgrind can't: reads and writes past variables on the stack, Rust's past a C caller's among them. The memory checker's `sanitize` part builds only the C host with the sanitizer; here liborbit and the Rust tests are built with it too. It has two parts:
+
+- **`unit`**: the tests of orbit-std (with `ffi`), orbit-ffi, orbit-locale, orbit-virtmem, orbit-capi and orbit-dap, built with `-Zsanitizer=address`.
+- **`chost`**: the C host tests, the host built with `-fsanitize=address` (`ORBIT_CHOST_SANITIZE`), on a liborbit `./build.sh` builds with the sanitizer into `target/asan/layout`.
+
+orbit-gc is left out, because its only `unsafe` hands memory back to the allocator, which the sanitizer replaces. Both parts link the system's libffi (`libffi-dev`) rather than the bundled copy, because the sanitizer misreads a libffi built with it: libffi's assembly runs the called function on a stack block that its C part allocates, red zones included, so the sanitizer reports a stack overflow later, in whatever code next uses that stack.
+
+```sh
+tests/asan/run.sh                 # both parts
+tests/asan/check-planted.sh       # every planted bug must be reported
+```
+
+`tests/asan/check-planted.sh` proves the run the way the memory checker's does. Each `tests/asan/planted/*.patch` plants one bug, a stack overflow, a use after free, or a page given back too early, and the script expects a report for each. `.github/workflows/sanitizers.yml` runs both once a week and by hand, never on pull requests.
+
 ## Coverage
 
-`tests/coverage/run.sh` runs the tests built with coverage instrumentation
-and checks that every function in the files that may contain `unsafe`, and
-every public function of the embedding API, is run by one, with any
-exceptions listed with their reasons, and that line coverage there doesn't
-drop. CI's `coverage` job runs it; `tests/coverage/README.md` explains the
-rules and what to do when it fails.
+`tests/coverage/run.sh` runs the tests built with coverage instrumentation and checks that every function in the files that may contain `unsafe`, and every public function of the embedding API, is run by one, with any exceptions listed with their reasons, and that line coverage there doesn't drop. CI's `coverage` job runs it; `tests/coverage/README.md` explains the rules and what to do when it fails.
 
 ## Differential fuzzing
 

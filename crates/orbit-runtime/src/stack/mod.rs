@@ -476,6 +476,18 @@ pub enum ThreadStatus {
     Dead,
 }
 
+impl ThreadStatus {
+    /// The status as `coroutine.status` names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ThreadStatus::Suspended => "suspended",
+            ThreadStatus::Running => "running",
+            ThreadStatus::Normal => "normal",
+            ThreadStatus::Dead => "dead",
+        }
+    }
+}
+
 /// A standard library an isolate can open ([`Stack::open_library`],
 /// `orbit::Config::libraries`). The libraries that touch the system (`io`,
 /// `os`, `print`, `loadfile`, `dofile`) are `orbit-std`'s, which hosts
