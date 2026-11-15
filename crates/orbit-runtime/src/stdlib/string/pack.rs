@@ -5,11 +5,9 @@
 //! little-endian. `!` alone sets the maximum alignment to the reference
 //! interpreter's on the same platform (see [`NATIVE_ALIGN`]).
 
-use crate::object::Value;
-use crate::vm::{LuaError, NativeCtx, NativeReturn};
+use crate::stack::{Buffer, Fail, IntoRaised, Raised, Return, Stack, StackResult};
 use orbit_lua_version::LUA;
-
-type R = Result<NativeReturn, LuaError>;
+use orbit_macros::native;
 
 /// Largest integer size an `i`/`I`/`s`/`!` option may name.
 const MAX_INT_SIZE: usize = 16;
@@ -65,24 +63,27 @@ enum FormatError {
     InvalidNextOption,
 }
 
-impl FormatError {
-    fn raise(self, ctx: &mut NativeCtx<'_>) -> LuaError {
-        match self {
+impl From<FormatError> for Fail {
+    #[cold]
+    fn from(e: FormatError) -> Fail {
+        match e {
             FormatError::SizeOutOfLimits(n) => {
-                ctx.error(&format!("integral size ({n}) out of limits [1,16]"))
+                format!("integral size ({n}) out of limits [1,16]").into()
             }
             FormatError::InvalidOption(c) => {
-                ctx.error(&[b"invalid format option '", &[c][..], b"'"].concat())
+                Fail::Message([b"invalid format option '", &[c][..], b"'"].concat().into())
             }
-            FormatError::MissingSize => ctx.error("missing size for format option 'c'"),
-            FormatError::NotPowerOfTwo => {
-                ctx.arg_error(0, "format asks for alignment not power of 2")
-            }
-            FormatError::InvalidNextOption => {
-                ctx.arg_error(0, "invalid next option for option 'X'")
-            }
+            FormatError::MissingSize => "missing size for format option 'c'".into(),
+            FormatError::NotPowerOfTwo => Fail::arg(1, "format asks for alignment not power of 2"),
+            FormatError::InvalidNextOption => Fail::arg(1, "invalid next option for option 'X'"),
         }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn raise(s: &mut Stack<'_>, e: FormatError) -> Raised {
+    Fail::from(e).into_raised(s)
 }
 
 /// One parsed option: what it does, its size, and the padding before it.
@@ -251,72 +252,77 @@ fn get_int(data: &[u8], little: bool, signed: bool) -> Result<i64, usize> {
     Ok(n as i64)
 }
 
-/// `bad argument` for a missing or wrong pack value. The reference reports
-/// a missing value as `nil` here.
-fn value_error(ctx: &mut NativeCtx<'_>, arg: usize, expected: &str) -> LuaError {
-    if arg >= ctx.nargs() {
-        ctx.arg_error(arg, &crate::arg_errors::type_mismatch(expected, "nil"))
+/// `bad argument` for a missing or wrong pack value (`arg` is 1-based).
+/// The reference reports a missing value as `nil` here.
+#[cold]
+#[inline(never)]
+fn value_error(s: &mut Stack<'_>, arg: i32, expected: &str) -> Raised {
+    if arg > s.top() {
+        s.arg_error(arg, &crate::arg_errors::type_mismatch(expected, "nil"))
     } else {
-        ctx.type_error(arg, expected)
+        s.type_error(arg, expected)
     }
 }
 
-fn pack_int(ctx: &mut NativeCtx<'_>, arg: usize) -> Result<i64, LuaError> {
-    if arg >= ctx.nargs() {
-        return Err(value_error(ctx, arg, "number"));
+fn pack_int(s: &mut Stack<'_>, arg: i32) -> StackResult<i64> {
+    if arg > s.top() {
+        return Err(value_error(s, arg, "number"));
     }
-    ctx.check_int(arg)
+    s.check_integer(arg)
 }
 
-fn pack_str(ctx: &mut NativeCtx<'_>, arg: usize) -> Result<Vec<u8>, LuaError> {
-    if arg >= ctx.nargs() {
-        return Err(value_error(ctx, arg, "string"));
+/// The string value `arg`, which stays in the window: read its bytes
+/// through the handle.
+fn pack_str(s: &mut Stack<'_>, arg: i32) -> StackResult<crate::object::Gc<crate::object::LuaStr>> {
+    if arg > s.top() {
+        return Err(value_error(s, arg, "string"));
     }
-    let s = ctx.check_str(arg)?;
-    Ok(ctx.bytes(s).to_vec())
+    s.check_string_handle(arg)
 }
 
-pub(crate) fn pack(ctx: &mut NativeCtx<'_>) -> R {
-    let fmt = ctx.check_str(0)?;
-    let fmt = ctx.bytes(fmt).to_vec();
+#[native(crate = crate, name = "string.pack")]
+pub(super) fn pack(s: &mut Stack<'_>) -> StackResult<Buffer> {
+    let fmt = s.check_string_handle(1)?;
+    let fmt = s.handle_bytes(fmt).to_vec();
     let mut p = Parser::new(&fmt);
-    let mut out = Vec::new();
-    let mut arg = 0;
+    let mut out = s.take_buffer();
+    // Argument 1 is the format; the values follow it.
+    let mut arg = 1;
     while !p.done() {
-        let item = p.next(out.len()).map_err(|e| e.raise(ctx))?;
+        let item = p.next(out.len()).map_err(|e| raise(s, e))?;
         if item
             .size
             .checked_add(item.pad)
             .and_then(|n| n.checked_add(out.len()))
             .map_or(true, |n| n > MAX_SIZE)
         {
-            return Err(ctx.arg_error(0, "result too long"));
+            return Err(s.arg_error(1, "result too long"));
         }
         out.resize(out.len() + item.pad, 0);
         let little = p.little;
         match item.kind {
             Kind::Int { signed } => {
                 arg += 1;
-                let n = pack_int(ctx, arg)?;
+                let n = pack_int(s, arg)?;
                 if item.size < INT_SIZE {
                     let bits = 8 * item.size as u32;
                     if signed {
                         let lim = 1i64 << (bits - 1);
                         if !(-lim..lim).contains(&n) {
-                            return Err(ctx.arg_error(arg, "integer overflow"));
+                            return Err(s.arg_error(arg, "integer overflow"));
                         }
                     } else if (n as u64) >> bits != 0 {
-                        return Err(ctx.arg_error(arg, "unsigned overflow"));
+                        return Err(s.arg_error(arg, "unsigned overflow"));
                     }
                 }
                 put_int(&mut out, n, item.size, little, signed);
             }
             Kind::Float32 | Kind::Float64 => {
                 arg += 1;
-                if arg >= ctx.nargs() {
-                    return Err(value_error(ctx, arg, "number"));
+                if arg > s.top() {
+                    return Err(value_error(s, arg, "number"));
                 }
-                let x = ctx.check_f64(arg)?;
+                let x = s.check_number(arg)?;
                 let start = out.len();
                 if item.kind == Kind::Float32 {
                     out.extend_from_slice(&(x as f32).to_le_bytes());
@@ -329,37 +335,39 @@ pub(crate) fn pack(ctx: &mut NativeCtx<'_>) -> R {
             }
             Kind::Fixed => {
                 arg += 1;
-                let s = pack_str(ctx, arg)?;
-                if s.len() > item.size {
-                    return Err(ctx.arg_error(arg, "string longer than given size"));
+                let h = pack_str(s, arg)?;
+                let v = s.handle_bytes(h);
+                if v.len() > item.size {
+                    return Err(s.arg_error(arg, "string longer than given size"));
                 }
-                out.extend_from_slice(&s);
-                out.resize(out.len() + item.size - s.len(), 0);
+                let pad = item.size - v.len();
+                out.extend_from_slice(v);
+                out.resize(out.len() + pad, 0);
             }
             Kind::Prefixed => {
                 arg += 1;
-                let s = pack_str(ctx, arg)?;
-                if item.size < INT_SIZE && (s.len() as u64) >> (8 * item.size) != 0 {
-                    return Err(ctx.arg_error(arg, "string length does not fit in given size"));
+                let h = pack_str(s, arg)?;
+                let n = s.handle_bytes(h).len();
+                if item.size < INT_SIZE && (n as u64) >> (8 * item.size) != 0 {
+                    return Err(s.arg_error(arg, "string length does not fit in given size"));
                 }
-                put_int(&mut out, s.len() as i64, item.size, little, false);
-                out.extend_from_slice(&s);
+                put_int(&mut out, n as i64, item.size, little, false);
+                out.extend_from_slice(s.handle_bytes(h));
             }
             Kind::Zero => {
                 arg += 1;
-                let s = pack_str(ctx, arg)?;
-                if s.contains(&0) {
-                    return Err(ctx.arg_error(arg, "string contains zeros"));
+                let h = pack_str(s, arg)?;
+                if s.handle_bytes(h).contains(&0) {
+                    return Err(s.arg_error(arg, "string contains zeros"));
                 }
-                out.extend_from_slice(&s);
+                out.extend_from_slice(s.handle_bytes(h));
                 out.push(0);
             }
             Kind::Pad => out.push(0),
             Kind::Align | Kind::Nop => {}
         }
     }
-    let r = ctx.new_str_owned(out);
-    ctx.ret([r])
+    Ok(Buffer(out))
 }
 
 /// The largest size `packsize` reports, and the most a size in a format
@@ -370,115 +378,102 @@ const PACKSIZE_MAX: usize = if LUA.is_5_4() {
     MAX_SIZE
 };
 
-pub(crate) fn packsize(ctx: &mut NativeCtx<'_>) -> R {
-    let fmt = ctx.check_str(0)?;
-    let fmt = ctx.bytes(fmt).to_vec();
-    let mut p = Parser::new(&fmt);
+#[native(crate = crate, name = "string.packsize")]
+pub(super) fn packsize(fmt: &[u8]) -> Result<i64, Fail> {
+    let mut p = Parser::new(fmt);
     let mut total = 0usize;
     while !p.done() {
-        let item = p.next(total).map_err(|e| e.raise(ctx))?;
+        let item = p.next(total)?;
         if matches!(item.kind, Kind::Prefixed | Kind::Zero) {
-            return Err(ctx.arg_error(0, "variable-length format"));
+            return Err(Fail::arg(1, "variable-length format"));
         }
         match total
             .checked_add(item.pad)
             .and_then(|n| n.checked_add(item.size))
         {
             Some(n) if n <= PACKSIZE_MAX => total = n,
-            _ => return Err(ctx.arg_error(0, "format result too large")),
+            _ => return Err(Fail::arg(1, "format result too large")),
         }
     }
-    ctx.ret([Value::Int(total as i64)])
+    Ok(total as i64)
 }
 
-pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
-    let fmt = ctx.check_str(0)?;
-    let data = ctx.check_str(1)?;
-    let len = ctx.bytes(data).len();
-    let init = ctx.opt_int(2, 1)?;
+#[cold]
+#[inline(never)]
+fn too_big(s: &mut Stack<'_>, size: usize) -> Raised {
+    s.error(format!("{size}-byte integer does not fit into Lua Integer").as_str())
+}
+
+#[native(crate = crate, name = "string.unpack")]
+pub(super) fn unpack(s: &mut Stack<'_>) -> StackResult<Return> {
+    let fmt = s.check_string_handle(1)?;
+    let data = s.check_string_handle(2)?;
+    let len = s.handle_bytes(data).len();
+    let init = s.opt_integer(3, 1)?;
     let mut pos = super::start_pos(init, len) - 1;
     if pos > len {
-        return Err(ctx.arg_error(2, "initial position out of string"));
+        return Err(s.arg_error(3, "initial position out of string"));
     }
-    let fmt = ctx.bytes(fmt).to_vec();
+    let fmt = s.handle_bytes(fmt).to_vec();
     let mut p = Parser::new(&fmt);
     let mut n = 0;
     while !p.done() {
-        let item = p.next(pos).map_err(|e| e.raise(ctx))?;
+        let item = p.next(pos).map_err(|e| raise(s, e))?;
         // One value per item, and the next position after them all.
-        ctx.check_room(2, "too many results")?;
+        s.need_room(2, "too many results")?;
         let short = item
             .pad
             .checked_add(item.size)
             .map_or(true, |need| need > len - pos);
         if short {
-            return Err(ctx.arg_error(1, "data string too short"));
+            return Err(s.arg_error(2, "data string too short"));
         }
         pos += item.pad;
         let little = p.little;
-        let v = match item.kind {
-            Kind::Int { signed } => {
-                let r = get_int(&ctx.bytes(data)[pos..pos + item.size], little, signed);
-                match r {
-                    Ok(v) => Value::Int(v),
-                    Err(size) => {
-                        return Err(ctx.error(&format!(
-                            "{size}-byte integer does not fit into Lua Integer"
-                        )));
-                    }
-                }
-            }
+        let field = &s.handle_bytes(data)[pos..pos + item.size];
+        match item.kind {
+            Kind::Int { signed } => match get_int(field, little, signed) {
+                Ok(v) => s.push_integer(v),
+                Err(size) => return Err(too_big(s, size)),
+            },
             Kind::Float32 => {
                 let mut b = [0u8; 4];
-                b.copy_from_slice(&ctx.bytes(data)[pos..pos + 4]);
+                b.copy_from_slice(field);
                 if !little {
                     b.reverse();
                 }
-                Value::Float(f32::from_le_bytes(b) as f64)
+                s.push_number(f64::from(f32::from_le_bytes(b)));
             }
             Kind::Float64 => {
                 let mut b = [0u8; 8];
-                b.copy_from_slice(&ctx.bytes(data)[pos..pos + 8]);
+                b.copy_from_slice(field);
                 if !little {
                     b.reverse();
                 }
-                Value::Float(f64::from_le_bytes(b))
+                s.push_number(f64::from_le_bytes(b));
             }
-            Kind::Fixed => {
-                let s = ctx.bytes(data)[pos..pos + item.size].to_vec();
-                ctx.new_str_owned(s)
-            }
+            Kind::Fixed => s.push_substring(data, pos, pos + item.size),
             Kind::Prefixed => {
-                let r = get_int(&ctx.bytes(data)[pos..pos + item.size], little, false);
-                let strlen = match r {
+                let strlen = match get_int(field, little, false) {
                     Ok(v) => v as u64,
-                    Err(size) => {
-                        return Err(ctx.error(&format!(
-                            "{size}-byte integer does not fit into Lua Integer"
-                        )));
-                    }
+                    Err(size) => return Err(too_big(s, size)),
                 };
                 let start = pos + item.size;
                 if strlen > (len - start) as u64 {
-                    return Err(ctx.arg_error(1, "data string too short"));
+                    return Err(s.arg_error(2, "data string too short"));
                 }
-                let s = ctx.bytes(data)[start..start + strlen as usize].to_vec();
-                pos = start;
-                let v = ctx.new_str_owned(s);
-                pos += strlen as usize;
-                ctx.push(v);
+                s.push_substring(data, start, start + strlen as usize);
+                pos = start + strlen as usize;
                 n += 1;
                 continue;
             }
             Kind::Zero => {
-                let rest = &ctx.bytes(data)[pos..];
+                let rest = &s.handle_bytes(data)[pos..];
                 let Some(end) = rest.iter().position(|&b| b == 0) else {
-                    return Err(ctx.arg_error(1, "unfinished string for format 'z'"));
+                    return Err(s.arg_error(2, "unfinished string for format 'z'"));
                 };
-                let s = rest[..end].to_vec();
+                s.push_substring(data, pos, pos + end);
                 pos += end + 1;
-                let v = ctx.new_str_owned(s);
-                ctx.push(v);
                 n += 1;
                 continue;
             }
@@ -486,13 +481,12 @@ pub(crate) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
                 pos += item.size;
                 continue;
             }
-        };
+        }
         pos += item.size;
-        ctx.push(v);
         n += 1;
     }
-    ctx.push(Value::Int(pos as i64 + 1));
-    Ok(NativeReturn::Return(n + 1))
+    s.push_integer(pos as i64 + 1);
+    Ok(Return::values(n + 1))
 }
 
 #[cfg(test)]

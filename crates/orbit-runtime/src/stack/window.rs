@@ -429,6 +429,82 @@ impl<'s> Stack<'s> {
         self.ctx.bytes(s)
     }
 
+    /// The string at `idx` (an argument or an upvalue) as a handle, for
+    /// results built from a string argument after it was checked.
+    #[inline]
+    pub(crate) fn string_handle(&self, idx: i32) -> Option<Gc<LuaStr>> {
+        match self.get(idx) {
+            RawValue::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Push bytes `from..to` of `s`, a string the window or an upvalue
+    /// holds, copied straight from it.
+    #[inline]
+    pub(crate) fn push_substring(&mut self, s: Gc<LuaStr>, from: usize, to: usize) {
+        let v = self.ctx.new_substr(s, from, to);
+        self.ctx.push(v);
+    }
+
+    /// An empty buffer to build a string result in, reusing the isolate's
+    /// scratch buffer: push it with [`Buffer`](super::Buffer) as the
+    /// result, which hands the buffer back. One that is dropped instead
+    /// (on an error) only costs an allocation.
+    #[inline]
+    pub(crate) fn take_buffer(&mut self) -> Vec<u8> {
+        self.ctx.take_buf()
+    }
+
+    /// Push a string with the bytes of a buffer from
+    /// [`Stack::take_buffer`], and keep the buffer for reuse.
+    #[inline]
+    pub(crate) fn push_buffer(&mut self, b: Vec<u8>) {
+        let v = self.ctx.new_str_buf(b);
+        self.ctx.push(v);
+    }
+
+    /// Room for `n` more values on the stack, or the error `stack
+    /// overflow (<what>)`, for a native that returns as many values as its
+    /// arguments ask for.
+    #[inline]
+    pub(crate) fn need_room(&mut self, n: usize, what: &str) -> StackResult<()> {
+        Ok(self.ctx.check_room(n, what)?)
+    }
+
+    /// The isolate's locale (ADR-13), for the libraries that follow it.
+    #[inline]
+    pub(crate) fn locale(&self) -> &crate::locale::Locale {
+        self.ctx.locale()
+    }
+
+    /// Upvalue `i` (1-based) of the running native closure if it is a
+    /// string, as a handle.
+    #[inline]
+    pub(crate) fn upvalue_string(&self, i: usize) -> Option<Gc<LuaStr>> {
+        match self.ctx.upvalue(i - 1) {
+            RawValue::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Upvalue `i` (1-based) of the running native closure if it is an
+    /// integer.
+    #[inline]
+    pub(crate) fn upvalue_integer(&self, i: usize) -> Option<i64> {
+        match self.ctx.upvalue(i - 1) {
+            RawValue::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Set upvalue `i` (1-based) of the running native closure to an
+    /// integer.
+    #[inline]
+    pub(crate) fn set_upvalue_integer(&mut self, i: usize, n: i64) {
+        self.ctx.set_upvalue(i - 1, RawValue::Int(n));
+    }
+
     /// Push a string with `bytes`, for results ([`Push`](super::Push)):
     /// [`Stack::push_bytes`] without reading the string back.
     #[inline]
@@ -1047,9 +1123,18 @@ impl<'s> Stack<'s> {
     pub(crate) fn push_closure_of(&mut self, id: u32, nups: usize, data: u64) -> StackResult<()> {
         self.need(nups)?;
         let len = self.ctx.len();
-        let ups = self.ctx.window()[len - nups..].to_vec();
         let hidden = [RawValue::LightUserData(LightUserData::new(data))];
-        let v = self.ctx.new_native_closure(NativeId(id), &ups, &hidden);
+        // A few upvalues (the usual case) are copied without allocating.
+        let mut few = [RawValue::Nil; 8];
+        let many;
+        let ups = if nups <= few.len() {
+            few[..nups].copy_from_slice(&self.ctx.window()[len - nups..]);
+            &few[..nups]
+        } else {
+            many = self.ctx.window()[len - nups..].to_vec();
+            &many[..]
+        };
+        let v = self.ctx.new_native_closure(NativeId(id), ups, &hidden);
         self.ctx.truncate(len - nups);
         self.ctx.push(v);
         Ok(())
