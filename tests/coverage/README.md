@@ -31,6 +31,27 @@ judged by the other jobs; here only what they run counts. tests/diff's
 `locale.lua` reaches most of the locale objects when the test locales are
 installed, as the reference-lua CI action does.
 
+## The whole project's coverage
+
+The same run also reports what the tests reach everywhere else, as a
+picture rather than a check: nothing in it can fail. `run.sh` writes it to
+`target/cov/report/`, and CI shows it on the run's summary page and
+uploads it as the `coverage-report` artifact:
+
+- `summary.md`: line and function coverage of each crate, the files with
+  the most lines no test runs, and every file;
+- `html/`: the source with each line's count, by lcov's `genhtml`, when it
+  is installed;
+- `coverage.lcov`: the measurement merged into one LCOV file.
+
+Test code counts as neither covered nor not: files under a crate's
+`tests/`, `benches/` and `examples/`, and `#[cfg(test)]` modules, are left
+out. `orbit-testkit` is shown but left out of the total: it never ships,
+and the run uses an ordinary build of it, so only its unit tests reach it.
+Like the check, it measures Linux x86_64 with the Lua 5.5 build: code for
+other platforms, behind features the run leaves off, and the Lua 5.4 build
+are not in it.
+
 ## The files
 
 | File | What it holds |

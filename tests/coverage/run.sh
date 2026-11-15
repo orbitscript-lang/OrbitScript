@@ -13,9 +13,12 @@
 #    module tests and the suite through liblua on its liborbit.
 #
 # Every instrumented process writes a profile into target/cov/prof; they
-# are merged and exported as target/cov/coverage.lcov, which the check
-# reads. --update passes on to the check, to record the line coverage
-# measured. Needs the llvm-tools component (`rustup component add
+# are merged and exported as LCOV files under target/cov/lcov, which the
+# check reads. Before checking, it writes the whole project's coverage to
+# target/cov/report: summary.md (also appended to the GitHub Actions job
+# summary when run there), coverage.lcov and, when lcov's genhtml is
+# installed, an HTML report in html/. --update passes on to the check, to
+# record the line coverage measured. Needs the llvm-tools component (`rustup component add
 # llvm-tools`) and the reference build (scripts/build-reference-lua.sh).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -89,4 +92,18 @@ while IFS= read -r f; do
 done < <(find "$cov/target/debug" "$cov/target/debug/deps" -maxdepth 1 -type f -executable \
     ! -name '*.so' ! -name '*.d'; find "$layout/bin" "$layout/lib" -type f)
 
-testkit coverage --lcov "$cov/lcov" "${update[@]}"
+rm -rf "$cov/report"
+status=0
+testkit coverage --lcov "$cov/lcov" --report "$cov/report" "${update[@]}" || status=$?
+if [ -f "$cov/report/summary.md" ]; then
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        cat "$cov/report/summary.md" >>"$GITHUB_STEP_SUMMARY"
+    fi
+    if command -v genhtml >/dev/null; then
+        genhtml --quiet --output-directory "$cov/report/html" --title "OrbitScript coverage" \
+            --prefix "$root" "$cov/report/coverage.lcov" >"$cov/report/genhtml.log" 2>&1 ||
+            echo "tests/coverage/run.sh: genhtml failed (target/cov/report/genhtml.log)" >&2
+    fi
+    echo "the whole project's coverage: $cov/report/summary.md" >&2
+fi
+exit "$status"

@@ -36,7 +36,9 @@ name: CI
 # - `coverage`: the tests, instrumented, and a check that each function in
 #   the files that may contain `unsafe`, and each public function of the
 #   embedding API, is run by one, and that line coverage there doesn't drop
-#   (tests/coverage/README.md).
+#   (tests/coverage/README.md). It also shows the whole project's coverage
+#   in the run's summary, per crate and file, and uploads an HTML report
+#   (`coverage-report`); that part checks nothing.
 # - Steps several jobs share live in .github/actions: `setup-rust` (the
 #   toolchain and the build cache) and `reference-lua` (the reference
 #   interpreter and what the suite needs from the runner).
@@ -359,7 +361,7 @@ jobs:
           REF: ${{ steps.reference.outputs.dir }}
 
   coverage:
-    name: Coverage of the unsafe code and the embedding API
+    name: Coverage
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -369,6 +371,8 @@ jobs:
         with:
           cache-key: coverage
       - run: rustup component add llvm-tools
+      # genhtml, for the HTML report.
+      - run: sudo apt-get install -y -qq --no-install-recommends lcov
       # The suite and tests/diff's locale.lua run for what they reach of
       # the locale objects, with the locales this installs.
       - uses: ./.github/actions/reference-lua
@@ -376,3 +380,12 @@ jobs:
           lua: '5.5'
       - name: Every function in the unsafe files and the API is run (tests/coverage)
         run: tests/coverage/run.sh
+      - uses: actions/upload-artifact@v7
+        if: success() || failure()
+        with:
+          name: coverage-report
+          path: |
+            target/cov/report/html
+            target/cov/report/summary.md
+            target/cov/report/coverage.lcov
+          if-no-files-found: ignore
