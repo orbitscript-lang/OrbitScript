@@ -156,6 +156,121 @@ pub enum NativeReturn {
 /// Largest scratch buffer ([`NativeCtx::take_buf`]) kept between calls.
 const SCRATCH_KEEP: usize = 64 * 1024;
 
+/// The native functions of one VM: the table calls go through, how a
+/// native is found again by name or by type, the stub prototypes of native
+/// closures, the host's placeholder native and the buffer natives build
+/// results in.
+#[derive(Debug, Default)]
+pub(crate) struct Natives {
+    table: Vec<crate::vm::Native>,
+    /// The runtime's own natives, by name, so each is registered once.
+    by_name: std::collections::HashMap<&'static str, NativeId, crate::vm::CheapHash>,
+    /// Natives pushed by type ([`Vm::native_for_type`]): the stack API's.
+    by_type: std::collections::HashMap<std::any::TypeId, NativeId, crate::vm::CheapHash>,
+    /// The stub prototype of each native that has native closures.
+    protos: std::collections::HashMap<NativeId, Gc<Proto>, crate::vm::CheapHash>,
+    /// The placeholder native under a host's context ([`Vm::host_ctx`]),
+    /// which tracebacks and `debug.getinfo` don't show.
+    host: Option<NativeId>,
+    /// A byte buffer natives build results in, kept between calls so
+    /// building a string needs no allocation of its own
+    /// ([`NativeCtx::take_buf`]).
+    scratch: Vec<u8>,
+}
+
+impl Natives {
+    /// Native `id`. The dispatch loop calls natives through this.
+    #[inline(always)]
+    pub(crate) fn get(&self, id: NativeId) -> &crate::vm::Native {
+        &self.table[id.0 as usize]
+    }
+
+    #[inline]
+    pub(crate) fn get_mut(&mut self, id: NativeId) -> &mut crate::vm::Native {
+        &mut self.table[id.0 as usize]
+    }
+
+    /// Add native `f` to the table, without making it findable by `name`
+    /// (which messages still use).
+    pub(crate) fn add(&mut self, name: &'static str, f: NativeFn, data: [u64; 2]) -> NativeId {
+        let id = NativeId(self.table.len() as u32);
+        self.table.push(crate::vm::Native {
+            name,
+            f,
+            fast: None,
+            hidden: 0,
+            data,
+        });
+        id
+    }
+
+    /// Add native `f` and make it the one [`Natives::named`] finds for
+    /// `name`.
+    pub(crate) fn add_named(&mut self, name: &'static str, f: NativeFn) -> NativeId {
+        let id = self.add(name, f, [0; 2]);
+        self.by_name.insert(name, id);
+        id
+    }
+
+    /// The native registered under `name`.
+    pub(crate) fn named(&self, name: &str) -> Option<NativeId> {
+        self.by_name.get(name).copied()
+    }
+
+    /// The native registered for type `ty`, adding `f` as `name` for it
+    /// the first time.
+    pub(crate) fn for_type(
+        &mut self,
+        ty: std::any::TypeId,
+        name: &'static str,
+        f: NativeFn,
+    ) -> NativeId {
+        if let Some(&id) = self.by_type.get(&ty) {
+            return id;
+        }
+        let id = self.add(name, f, [0; 2]);
+        self.by_type.insert(ty, id);
+        id
+    }
+
+    pub(crate) fn host(&self) -> Option<NativeId> {
+        self.host
+    }
+
+    pub(crate) fn set_host(&mut self, id: NativeId) {
+        self.host = Some(id);
+    }
+
+    fn stub_proto(&self, id: NativeId) -> Option<Gc<Proto>> {
+        self.protos.get(&id).copied()
+    }
+
+    fn set_stub_proto(&mut self, id: NativeId, proto: Gc<Proto>) {
+        self.protos.insert(id, proto);
+    }
+
+    #[inline]
+    fn take_scratch(&mut self) -> Vec<u8> {
+        let mut b = std::mem::take(&mut self.scratch);
+        b.clear();
+        b
+    }
+
+    #[inline]
+    fn give_scratch(&mut self, b: Vec<u8>) {
+        if b.capacity() <= SCRATCH_KEEP && b.capacity() >= self.scratch.capacity() {
+            self.scratch = b;
+        }
+    }
+
+    /// Mark the stub prototypes: they are roots.
+    pub(crate) fn trace(&self, m: &mut orbit_gc::Marker<'_, crate::object::LuaSpace>) {
+        for &p in self.protos.values() {
+            m.mark(p);
+        }
+    }
+}
+
 /// A native function's view of the VM: its window of the stack (arguments,
 /// then whatever it pushes), the heap and the runtime.
 #[derive(Debug)]
@@ -179,7 +294,7 @@ impl NativeCtx<'_> {
     /// ([`Vm::register_native_with_data`](crate::vm::Vm::register_native_with_data)).
     #[inline]
     pub fn native_data(&self) -> [u64; 2] {
-        self.vm.rt.natives[self.id.0 as usize].data
+        self.vm.rt.natives.get(self.id).data
     }
 
     /// The same window, borrowed for a shorter time: for host code that
@@ -349,7 +464,7 @@ impl NativeCtx<'_> {
         // context ([`Vm::host_ctx`]) gets none: its caller is outside Lua.
         let own = !matches!(s.frames.last(), Some(f) if f.func as usize == me
             && matches!(f.kind, FrameKind::NativeCall { .. }))
-            && self.vm.rt.host_native != Some(self.id);
+            && self.vm.rt.natives.host() != Some(self.id);
         if own {
             let cdepth = s.same_depth();
             s.frames.push(crate::vm::Frame {
@@ -370,7 +485,7 @@ impl NativeCtx<'_> {
         // `c_overflow` already counts, so a host that calls through a
         // function of its own first (as `lua`'s driver does) keeps lua5.5's
         // depths.
-        let cdepth = if below == 0 && self.vm.rt.host_native == Some(self.id) {
+        let cdepth = if below == 0 && self.vm.rt.natives.host() == Some(self.id) {
             s.same_depth()
         } else {
             s.deeper()
@@ -424,8 +539,8 @@ impl NativeCtx<'_> {
     /// `f` under that name the first time. For natives that return other
     /// natives (`pairs` returns `next`).
     pub fn native(&mut self, name: &'static str, f: NativeFn) -> Value {
-        match self.vm.rt.native_ids.get(name) {
-            Some(&id) => Value::Native(id),
+        match self.vm.rt.natives.named(name) {
+            Some(id) => Value::Native(id),
             None => self.vm.register_native(name, f),
         }
     }
@@ -451,9 +566,7 @@ impl NativeCtx<'_> {
     /// or by a nested native that took it first) only costs an allocation.
     #[inline]
     pub fn take_buf(&mut self) -> Vec<u8> {
-        let mut b = std::mem::take(&mut self.vm.rt.scratch);
-        b.clear();
-        b
+        self.vm.rt.natives.take_scratch()
     }
 
     /// Give a buffer from [`NativeCtx::take_buf`] back for reuse. Very
@@ -461,9 +574,7 @@ impl NativeCtx<'_> {
     /// allocated.
     #[inline]
     pub fn give_buf(&mut self, b: Vec<u8>) {
-        if b.capacity() <= SCRATCH_KEEP && b.capacity() >= self.vm.rt.scratch.capacity() {
-            self.vm.rt.scratch = b;
-        }
+        self.vm.rt.natives.give_scratch(b);
     }
 
     /// A string value from a buffer taken with [`NativeCtx::take_buf`],
@@ -551,17 +662,17 @@ impl NativeCtx<'_> {
         hidden: &[Value],
     ) -> Value {
         let n = u8::try_from(hidden.len()).expect("few hidden upvalues");
-        let native = &mut self.vm.rt.natives[id.0 as usize];
+        let natives = &mut self.vm.rt.natives;
         debug_assert!(
-            native.hidden == n || !self.vm.rt.native_protos.contains_key(&id),
+            natives.get(id).hidden == n || natives.stub_proto(id).is_none(),
             "every closure of a native has the same hidden upvalues"
         );
-        native.hidden = n;
-        let proto = match self.vm.rt.native_protos.get(&id) {
-            Some(&p) => p,
+        natives.get_mut(id).hidden = n;
+        let proto = match natives.stub_proto(id) {
+            Some(p) => p,
             None => {
                 let p = self.vm.heap.alloc(stub_proto(id));
-                self.vm.rt.native_protos.insert(id, p);
+                self.vm.rt.natives.set_stub_proto(id, p);
                 p
             }
         };
@@ -587,7 +698,7 @@ impl NativeCtx<'_> {
             return Value::Nil;
         };
         let caps = &self.vm.heap.get(c).captures;
-        let hidden = self.vm.rt.natives[self.id.0 as usize].hidden as usize;
+        let hidden = self.vm.rt.natives.get(self.id).hidden as usize;
         match (i < hidden).then(|| caps[caps.len() - hidden + i]) {
             Some(cell) => self.vm.heap.get(cell).value,
             None => Value::Nil,
@@ -628,8 +739,7 @@ impl NativeCtx<'_> {
     pub fn upvalue_count(&self) -> usize {
         match self.upvals {
             Some(c) => {
-                self.vm.heap.get(c).captures.len()
-                    - self.vm.rt.natives[self.id.0 as usize].hidden as usize
+                self.vm.heap.get(c).captures.len() - self.vm.rt.natives.get(self.id).hidden as usize
             }
             None => 0,
         }
@@ -726,10 +836,7 @@ impl NativeCtx<'_> {
         let caller = self.vm.rt.stack.frames.last().copied();
         self.name_at(caller, me).unwrap_or_else(|| {
             (
-                self.vm.rt.natives[self.id.0 as usize]
-                    .name
-                    .as_bytes()
-                    .to_vec(),
+                self.vm.rt.natives.get(self.id).name.as_bytes().to_vec(),
                 false,
             )
         })
@@ -1262,7 +1369,7 @@ impl Vm {
         let depth = self.rt.stack.frames.len() - 1;
         self.rt.stack.frames.truncate(depth);
         self.rt.top = func + 1 + nargs;
-        let nf = self.rt.natives[id.0 as usize].f;
+        let nf = self.rt.natives.get(id).f;
         let mut ctx = NativeCtx {
             vm: self,
             base: func + 1,

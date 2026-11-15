@@ -126,8 +126,8 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
     let shared: [(&'static str, NativeFn); 2] =
         [("next", super::base::next), ("type", super::base::type_)];
     for (name, f) in shared {
-        let v = match vm.rt.native_ids.get(name) {
-            Some(&id) => Value::Native(id),
+        let v = match vm.rt.natives.named(name) {
+            Some(id) => Value::Native(id),
             None => vm.register_native(name, f),
         };
         vm.raw_set_str(env_t, name, v);
@@ -165,8 +165,8 @@ impl Vm {
 
     /// The native registered as `name`, registering `f` under it the first time.
     fn native_named(&mut self, name: &'static str, f: NativeFn) -> Value {
-        match self.rt.native_ids.get(name) {
-            Some(&id) => Value::Native(id),
+        match self.rt.natives.named(name) {
+            Some(id) => Value::Native(id),
             None => self.register_native(name, f),
         }
     }

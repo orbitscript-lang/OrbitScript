@@ -1307,7 +1307,7 @@ impl Vm {
             Value::Native(id) if !HOOKED => {
                 // A native's fast path, when it has one and takes these
                 // arguments: no window, no frame.
-                let fast = match self.rt.natives[id.0 as usize].fast {
+                let fast = match self.rt.natives.get(id).fast {
                     Some(fast) if want <= 1 || want == MULTI => self
                         .rt
                         .stack
@@ -1664,7 +1664,7 @@ impl Vm {
         depth: usize,
     ) -> Result<NativeStep, Exc> {
         self.rt.top = fa + 1 + n;
-        let nf = self.rt.natives[id.0 as usize].f;
+        let nf = self.rt.natives.get(id).f;
         let mut ctx = NativeCtx {
             vm: self,
             base: fa + 1,
