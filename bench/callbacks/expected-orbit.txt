@@ -1,0 +1,36 @@
+# What each row of bench/callbacks/rows.txt costs `orbit`, in instructions
+# per unit, and its ratio to lua5.5, as CI measures them: `cargo build
+# --release`, no profile, Linux x86_64. CI fails when a row costs more
+# than 3% above its cost here; a change that makes rows cheaper records
+# the new costs with `--update-expected`.
+# row           cost  ratio
+empty            211  1.74
+call             325  1.70
+meta_index      1296  2.58
+meta_add        1042  2.95
+meta_call        672  2.32
+meta_eq         1053  3.72
+pcall           1195  1.77
+xpcall          1139  1.97
+sort             892  4.14
+sort_plain       112  0.66
+gsub_fn         1821  4.93
+gsub_str         468  1.77
+tostring        1249  1.94
+format_s        2614  1.97
+max_lt          1836  3.31
+concat_proxy    1332  3.82
+concat_plain     249  0.28
+unpack_proxy    1318  3.77
+unpack_plain      77  1.33
+insert_proxy    3697  4.24
+insert_plain    1155  2.47
+ipairs           583  2.35
+ipairs_proxy    1525  2.98
+pairs            373  1.43
+iter_closure     325  1.44
+gmatch          1321  3.42
+load_reader     8144  3.69
+coroutine       1899  2.25
+select           451  1.32
+native_leaf      196  0.87

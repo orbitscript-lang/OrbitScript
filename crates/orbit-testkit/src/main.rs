@@ -5,6 +5,7 @@
 //! `tests/README.md` for how CI uses it.
 
 mod bench;
+mod callbacks;
 mod conformance;
 mod diff;
 mod examples;
@@ -26,6 +27,7 @@ commands:
   conformance   run the official Lua 5.5 test suite against an interpreter
   diff          compare an interpreter's behavior with the reference lua5.5
   bench         time benchmarks and track peak RSS and binary size
+  callbacks     count what calls back into script code cost, against lua5.5
   examples      run examples/ and check their output (and Lua twins)
   liblua        run the suite through lua.c on liborbit (ADR-10)
   scoreboard    the whole Lua 5.5 compatibility picture in one report
@@ -59,6 +61,7 @@ fn main() -> ExitCode {
         "conformance" => conformance::main(rest),
         "diff" => diff::main(rest),
         "bench" => bench::main(rest),
+        "callbacks" => callbacks::main(rest),
         "examples" => examples::main(rest),
         "scoreboard" => scoreboard::main(rest),
         "fuzz-syntax" => fuzz::main(rest),

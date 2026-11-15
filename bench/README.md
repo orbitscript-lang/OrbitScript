@@ -32,3 +32,19 @@ cargo testkit bench --suite apps --interp lua5.5=target/reference-lua/bin/lua5.5
 ```
 
 Entries that share a driver are told apart by `name=`, which is also what the `BENCH` arguments match. Havlak takes about 15 s on `lua5.5` whatever its size. Luau's tests use `bench_support.lua` from this directory, which runs each test once and prints only its name, so every interpreter's output is the same.
+
+## Calls back into script code (`callbacks`)
+
+`bench/callbacks` measures what one call back into script code costs, route by route: a script function calling another, the interpreter running a metamethod, a library function calling the function it was given (`string.gsub`, `table.sort`, `load`'s reader), `pcall` and coroutines, and the built-ins written in OrbitScript. Each row of `rows.txt` names a function of `callbacks.lua`.
+
+```sh
+cargo build --release -p orbit-cli
+cargo testkit callbacks --reference lua5.5=target/reference-lua/bin/lua5.5 --interp orbit=target/release/orbit
+cargo testkit callbacks --reference lua5.5=target/reference-lua/bin/lua5.5 --interp orbit=target/release/orbit gsub_fn sort
+```
+
+It counts instructions with callgrind rather than timing, so it needs valgrind and gives the same numbers on a busy machine. Each row runs at two sizes, and the difference between the two counts per unit of size is its cost, so start-up and set-up cancel out. A row with a `base=` has its base's cost taken off: the loop it runs in, or the same work without the callback (`gsub_fn` against `gsub_str`). The result is instructions per unit for each interpreter and their ratio. Each count is the median of three runs: lua5.5's counts move by a few percent from run to run.
+
+CI runs it on its release build (no profile, Linux x86_64) with `--expect expected-orbit.txt`, and fails when a row costs `orbit` more than 3% above the cost recorded there. The file holds `orbit`'s own counts, which are stable, and the ratio beside each for reading. A change that makes a row cheaper records it with `--update-expected`, so the costs only go down. A new stable Rust can move the counts too; re-record them in their own commit.
+
+Judge a change on a profile-guided build (`./build.sh --static --pgo-train --pgo FILE --out DIR`, with a profile trained for the commit measured). A build with a stale profile costs 10 to 25% more on every row. The goal is every row that calls back into script code within 1.5 times lua5.5 on such a build.

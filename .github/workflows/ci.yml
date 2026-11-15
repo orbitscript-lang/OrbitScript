@@ -18,7 +18,8 @@ name: CI
 #   through its liblua, the size budget, and for 5.5 the differential tests
 #   and the memory checker (tests/memcheck/run.sh: the tests of the code
 #   that may contain `unsafe` under valgrind, and the C host program with
-#   AddressSanitizer), on the layout the job already built.
+#   AddressSanitizer), on the layout the job already built, and what calls
+#   back into script code cost against lua5.5 (`testkit callbacks`).
 #   The corpus tests that platforms.yml skips run here.
 # - `features`: every crate linted with each of its Cargo features on its
 #   own (cargo-hack), the tests of the runtime crates without their default
@@ -209,6 +210,15 @@ jobs:
       - name: Memory checker
         if: matrix.lua == '5.5' && steps.valgrind.outcome == 'success' && steps.reference.outcome == 'success' && steps.layout.outcome == 'success'
         run: tests/memcheck/run.sh --layout "$LAYOUT"
+      # What calls back into script code cost against lua5.5, in
+      # instructions (bench/README.md, "Calls back into script code"); fails
+      # when a row costs more than its recorded cost.
+      - name: Callback costs against lua5.5
+        if: matrix.lua == '5.5' && steps.valgrind.outcome == 'success' && steps.reference.outcome == 'success' && steps.build.outcome == 'success'
+        run: >
+          cargo testkit callbacks --reference lua5.5=target/reference-lua/bin/lua5.5
+          --interp orbit=target/release/orbit --expect bench/callbacks/expected-orbit.txt
+          --markdown "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
