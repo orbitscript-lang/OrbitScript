@@ -21,6 +21,7 @@ debug_info.lua
 debug_local_function.lua
 debug_locals.lua
 debug_setmetatable_gc.lua
+debug_values.lua
 dump.lua
 error_bytes.lua
 error_handling_state.lua
