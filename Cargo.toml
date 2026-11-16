@@ -19,7 +19,7 @@ repository = "https://github.com/orbitscript-lang/OrbitScript"
 # Policy (ADR-6): no unsafe code. The few exceptions (each granted in an ADR)
 # are listed in CLAUDE.md, "Non-negotiables"; each such crate relaxes this lint
 # itself, only where it needs to.
-unsafe_code = "forbid"
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]

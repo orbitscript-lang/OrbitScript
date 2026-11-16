@@ -49,6 +49,12 @@ fn grow_window(regs: &mut Vec<Value>, base: usize) -> &mut [Value; WINDOW] {
 pub(crate) struct Window<'a>(&'a mut [Value; WINDOW]);
 
 impl<'a> Window<'a> {
+    /// A window over exactly these registers.
+    #[inline(always)]
+    pub(crate) fn of(regs: &'a mut [Value; WINDOW]) -> Self {
+        Window(regs)
+    }
+
     /// The window at `base` when the stack covers it.
     #[inline(always)]
     pub(crate) fn get(regs: &'a mut [Value], base: usize) -> Option<Self> {

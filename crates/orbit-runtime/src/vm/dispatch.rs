@@ -90,6 +90,12 @@ pub(super) struct LuaFrame {
     pub(super) code_id: usize,
 }
 
+/// Which plain loop this build runs: `ORBIT_LOOP` = match, threaded, quick or raw.
+const LOOP_KIND: u8 = match option_env!("ORBIT_LOOP") {
+    Some(s) => s.as_bytes()[0],
+    None => b'r',
+};
+
 impl Vm {
     /// Run the top frame (a Lua frame) and everything it calls until it
     /// returns into a boundary, in the plain or the hooked
@@ -109,12 +115,13 @@ impl Vm {
             #[cfg(feature = "hooks")]
             let ran = if self.top_hooked() {
                 self.run_loop::<true>()?
-            } else if cfg!(orbit_old_loop) {
-                self.run_loop::<false>()?
-            } else if cfg!(orbit_first_cut) {
-                self.run_threaded()?
             } else {
-                self.run_quick()?
+                match LOOP_KIND {
+                    b'm' => self.run_loop::<false>()?,
+                    b't' => self.run_threaded()?,
+                    b'q' => self.run_quick()?,
+                    _ => self.run_raw()?,
+                }
             };
             #[cfg(not(feature = "hooks"))]
             let ran = self.run_quick()?;
