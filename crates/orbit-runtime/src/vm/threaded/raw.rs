@@ -90,12 +90,26 @@ fn pause(vm: &mut Vm, ip: *const Insn) -> Step {
     out_of_fuel(vm, pc)
 }
 
-/// Leave the instruction before `ip` to the handler with the whole VM.
+/// Run the instruction before `ip` on the handler with the whole VM, then
+/// go on from wherever that leaves the running frame.
 #[inline(never)]
 fn slow(vm: &mut Vm, ip: *const Insn) -> Step {
-    let pc = pc_of(vm, ip);
-    save_pc(vm, pc - 1);
-    std::hint::black_box(Step::Slow)
+    let pc = pc_of(vm, ip) - 1;
+    let base = vm.rt.stack.running().base as usize;
+    let _ = Window::take(&mut vm.rt.stack.regs, base);
+    let i = vm.rt.cur.words[pc];
+    // No fuel, so the handler comes back after its instruction.
+    let step = HANDLERS[i.code()](vm, pc + 1, i, with_base(base, 0));
+    if step != Step::Continue {
+        return step;
+    }
+    let f = vm.rt.stack.running();
+    let (base, pc) = (f.base as usize, f.pc as usize);
+    vm.rt.fuel = vm.rt.fuel.wrapping_sub(1);
+    if vm.rt.fuel == 0 {
+        return Step::Continue;
+    }
+    quick_from(vm, base, pc)
 }
 
 macro_rules! qwin {
@@ -145,32 +159,10 @@ impl Vm {
                 let f = self.rt.stack.running();
                 let (base, pc) = (f.base as usize, f.pc as usize);
                 self.rt.fuel = FUEL as u32;
-                let mut regs = std::mem::take(&mut self.rt.stack.regs);
-                let mut step = quick_from(self, &mut regs, base, pc);
-                while step == Step::Returned {
-                    // A handler returned to its caller's frame, which
-                    // starts below the slice it had.
-                    let f = self.rt.stack.running();
-                    let (base, pc) = (f.base as usize, f.pc as usize);
-                    step = quick_from(self, &mut regs, base, pc);
-                }
-                self.rt.stack.regs = regs;
-                let step = if step == Step::Slow {
-                    // One instruction on the handler with the whole VM: no
-                    // fuel, so it comes back after it.
-                    let f = self.rt.stack.running();
-                    let (base, pc) = (f.base as usize, f.pc as usize);
-                    let _ = Window::take(&mut self.rt.stack.regs, base);
-                    let i = self.rt.cur.words[pc];
-                    HANDLERS[i.code()](self, pc + 1, i, with_base(base, 0))
-                } else {
-                    step
-                };
+                let step = quick_from(self, base, pc);
                 match step {
                     Step::Continue => {}
-                    Step::Slow | Step::Returned => {
-                        unreachable!("the first cut's handlers finish their instruction")
-                    }
+                    Step::Slow | Step::Returned => unreachable!("not a step of this cut"),
                     Step::Reload => continue 'reload,
                     Step::Done => return Ok(Ran::Done),
                     Step::Switch => return Ok(Ran::Switch),
@@ -191,19 +183,20 @@ impl Vm {
 
 /// Run the frame at `base` from `pc` on the handlers of this file.
 #[inline(always)]
-fn quick_from(vm: &mut Vm, regs: &mut [Value], base: usize, pc: usize) -> Step {
+fn quick_from(vm: &mut Vm, base: usize, pc: usize) -> Step {
     if !Rc::ptr_eq(&vm.rt.words, &vm.rt.cur.words) {
         vm.rt.words = vm.rt.cur.words.clone();
     }
+    let _ = Window::take(&mut vm.rt.stack.regs, base);
+    let regs = &mut vm.rt.stack.regs;
     vm.rt.stack_len = regs.len();
-    match (regs.get_mut(base.wrapping_sub(1)..), vm.rt.words.get(pc)) {
-        (Some(w), Some(&i)) if w.len() > WINDOW => {
-            // SAFETY: `pc + 1` is at most the code's length.
-            let ip = unsafe { vm.rt.words.as_ptr().add(pc + 1) };
-            QUICK[i.code()](vm, w.as_mut_ptr(), ip, i)
-        }
-        _ => Step::Slow,
-    }
+    assert!(base >= 1 && pc < vm.rt.words.len());
+    // SAFETY: the stack covers the window at `base` (sized above), and
+    // `pc` is inside the code (checked above). Nothing a handler of this
+    // file calls moves the stack; `slow` comes back through here.
+    let w = unsafe { regs.as_mut_ptr().add(base - 1) };
+    let ip = unsafe { vm.rt.words.as_ptr().add(pc) };
+    next(vm, w, ip)
 }
 
 // Loads.
@@ -768,6 +761,7 @@ q! {fn q_return1(vm, w, pc, i) {
         return slow(vm, pc);
     }
     let top = f.base as usize;
+    let (up, to) = ((f.base - caller.base) as usize, caller.pc as usize);
     // SAFETY: `w` is the register below the frame's window.
     let result = unsafe { &mut *w };
     let r = unsafe { &*(w.add(1) as *const [Value; WINDOW]) };
@@ -775,19 +769,52 @@ q! {fn q_return1(vm, w, pc, i) {
     vm.rt.top = top;
     vm.rt.stack.frames.pop();
     if code_id != Rc::as_ptr(&vm.rt.cur) as usize {
-        return return_other(vm, closure, code_id);
+        return return_other(vm, w, up, to, closure, code_id);
     }
     vm.rt.closure = closure;
-    Step::Returned
+    // SAFETY: the caller's frame starts `up` registers below, and `to`
+    // is the instruction after its call.
+    next(vm, unsafe { w.sub(up) }, unsafe { vm.rt.words.as_ptr().add(to) })
+}}
+
+q! {fn q_return0(vm, w, pc, _i) {
+    let [.., caller, f] = &vm.rt.stack.frames[..] else {
+        return slow(vm, pc);
+    };
+    let FrameKind::Lua { closure, code_id } = caller.kind else {
+        return slow(vm, pc);
+    };
+    if f.want > 1 || f.base != f.func + 1 || vm.rt.stack.cells.len() != f.cell_base as usize {
+        return slow(vm, pc);
+    }
+    let (up, to) = ((f.base - caller.base) as usize, caller.pc as usize);
+    // SAFETY: `w` is the register below the frame's window. Writing nil
+    // there is right for one wanted result and harmless for none.
+    unsafe { *w = Value::Nil };
+    vm.rt.top = f.func as usize + f.want as usize;
+    vm.rt.stack.frames.pop();
+    if code_id != Rc::as_ptr(&vm.rt.cur) as usize {
+        return return_other(vm, w, up, to, closure, code_id);
+    }
+    vm.rt.closure = closure;
+    next(vm, unsafe { w.sub(up) }, unsafe { vm.rt.words.as_ptr().add(to) })
 }}
 
 /// The rest of a return to a function with other code than the callee's.
 #[inline(never)]
-fn return_other(vm: &mut Vm, closure: Gc<Closure>, code_id: usize) -> Step {
+fn return_other(
+    vm: &mut Vm,
+    w: *mut Value,
+    up: usize,
+    to: usize,
+    closure: Gc<Closure>,
+    code_id: usize,
+) -> Step {
     if switch_code(vm, closure, code_id) {
         return Step::Reload;
     }
-    Step::Returned
+    vm.rt.words = vm.rt.cur.words.clone();
+    next(vm, unsafe { w.sub(up) }, unsafe { vm.rt.words.as_ptr().add(to) })
 }
 
 // Loops.
@@ -910,6 +937,7 @@ static QUICK: [Quick; 256] = {
     t[Opcode::JumpGeInt as usize] = q_jump_ge_int;
     t[Opcode::Call as usize] = q_call;
     t[Opcode::Return1 as usize] = q_return1;
+    t[Opcode::Return0 as usize] = q_return0;
     t[Opcode::ForPrep as usize] = q_for_prep;
     t[Opcode::ForLoop as usize] = q_for_loop;
     t[Opcode::GenericLoop as usize] = q_generic_loop;
