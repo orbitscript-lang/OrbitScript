@@ -31,7 +31,7 @@ It is a backtracking matcher that interprets the pattern bytes as it goes, rathe
 
 Errors use lua5.5's messages: `malformed pattern (ends with '%')`, `malformed pattern (missing ']')`, `missing '[' after '%f' in pattern`, `invalid capture index %N`, `invalid pattern capture`, `unfinished capture`, `invalid use of '%' in replacement string`, `invalid replacement value (a table)`.
 
-`gsub` with a function replacement calls it nested, once per match (`NativeCtx::call_want`, [VM](vm.md#natives)), so the matcher's state stays in Rust locals and nothing may yield across the call, as in lua5.5; with a table replacement it indexes the table with metamethods. A subject in which nothing was replaced is returned as it is. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
+`gsub` has two loops. With a string replacement it calls nothing, so it reads the subject, pattern and replacement once and expands each match straight into the result. With a function replacement it calls the function nested, once per match (`NativeCtx::call_want`, [VM](vm.md#natives)), so the matcher's state stays in Rust locals and nothing may yield across the call, as in lua5.5; with a table replacement it indexes the table with metamethods. A subject in which nothing was replaced is returned as it is. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
 
 ## format
 

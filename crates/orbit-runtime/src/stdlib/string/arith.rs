@@ -3,12 +3,12 @@
 //! that doesn't convert hands the operation to the other operand's
 //! metamethod, or fails with `attempt to add a 'string' with a 'table'`.
 
-use crate::object::Value;
-use crate::object::number::{ArithOp, Number};
-use crate::stack::LibraryRow;
-use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn};
-
-type R = Result<NativeReturn, LuaError>;
+use crate::object::number::ArithOp;
+use crate::stack::{
+    Continuation, LibraryRow, Outcome, Push, Return, Stack, StackResult, Type, library_row,
+};
+use crate::vm::MetaField;
+use orbit_macros::native;
 
 /// The operation of each metamethod: an arithmetic operator, or `None` for
 /// negation.
@@ -51,95 +51,93 @@ const UNM: Op = Op {
     arith: None,
 };
 
-fn add(ctx: &mut NativeCtx<'_>) -> R {
-    arith(ctx, ADD)
+#[native(crate = crate, name = "string.__add")]
+fn add(s: &mut Stack<'_>) -> StackResult<Return> {
+    arith(s, ADD)
 }
-fn sub(ctx: &mut NativeCtx<'_>) -> R {
-    arith(ctx, SUB)
+#[native(crate = crate, name = "string.__sub")]
+fn sub(s: &mut Stack<'_>) -> StackResult<Return> {
+    arith(s, SUB)
 }
-fn mul(ctx: &mut NativeCtx<'_>) -> R {
-    arith(ctx, MUL)
+#[native(crate = crate, name = "string.__mul")]
+fn mul(s: &mut Stack<'_>) -> StackResult<Return> {
+    arith(s, MUL)
 }
-fn mod_(ctx: &mut NativeCtx<'_>) -> R {
-    arith(ctx, MOD)
+#[native(crate = crate, name = "string.__mod")]
+fn mod_(s: &mut Stack<'_>) -> StackResult<Return> {
+    arith(s, MOD)
 }
-fn pow(ctx: &mut NativeCtx<'_>) -> R {
-    arith(ctx, POW)
+#[native(crate = crate, name = "string.__pow")]
+fn pow(s: &mut Stack<'_>) -> StackResult<Return> {
+    arith(s, POW)
 }
-fn div(ctx: &mut NativeCtx<'_>) -> R {
-    arith(ctx, DIV)
+#[native(crate = crate, name = "string.__div")]
+fn div(s: &mut Stack<'_>) -> StackResult<Return> {
+    arith(s, DIV)
 }
-fn idiv(ctx: &mut NativeCtx<'_>) -> R {
-    arith(ctx, IDIV)
+#[native(crate = crate, name = "string.__idiv")]
+fn idiv(s: &mut Stack<'_>) -> StackResult<Return> {
+    arith(s, IDIV)
 }
-fn unm(ctx: &mut NativeCtx<'_>) -> R {
-    arith(ctx, UNM)
+#[native(crate = crate, name = "string.__unm")]
+fn unm(s: &mut Stack<'_>) -> StackResult<Return> {
+    arith(s, UNM)
 }
 
 /// The string metatable's arithmetic metamethods, each named
 /// `string.<field>`.
 pub(in crate::stdlib) const METAMETHODS: &[LibraryRow] = &[
-    LibraryRow::raw("string.__add", add),
-    LibraryRow::raw("string.__sub", sub),
-    LibraryRow::raw("string.__mul", mul),
-    LibraryRow::raw("string.__mod", mod_),
-    LibraryRow::raw("string.__pow", pow),
-    LibraryRow::raw("string.__div", div),
-    LibraryRow::raw("string.__idiv", idiv),
-    LibraryRow::raw("string.__unm", unm),
+    library_row::<add>(),
+    library_row::<sub>(),
+    library_row::<mul>(),
+    library_row::<mod_>(),
+    library_row::<pow>(),
+    library_row::<div>(),
+    library_row::<idiv>(),
+    library_row::<unm>(),
 ];
 
-/// A number, or a string that converts to one.
-fn to_number(ctx: &NativeCtx<'_>, v: Value) -> Option<Number> {
-    match v {
-        Value::Str(s) => ctx
-            .locale()
-            .str_to_number(ctx.bytes(s))
-            .and_then(Value::as_number),
-        _ => v.as_number(),
-    }
-}
-
-fn arith(ctx: &mut NativeCtx<'_>, op: Op) -> R {
-    let (a, b) = (ctx.arg(0), ctx.arg(1));
+fn arith(s: &mut Stack<'_>, op: Op) -> StackResult<Return> {
     // Negation looks at its operand only.
-    let r = match (op.arith, to_number(ctx, a), to_number(ctx, b)) {
+    let r = match (op.arith, s.coerced_number(1), s.coerced_number(2)) {
         (None, Some(x), _) => Some(Ok(-x)),
         (Some(o), Some(x), Some(y)) => Some(x.arith(o, y)),
         _ => None,
     };
     if let Some(r) = r {
-        let r = r.map_err(|e| ctx.error(e.message()))?;
-        return ctx.ret([Value::from(r)]);
+        let r = r.map_err(|e| s.error(e.message()))?;
+        r.push(s);
+        return Ok(Return::values(1));
     }
     // The second operand's own metamethod gets a turn, unless it is a
     // string (whose metamethod is this one).
-    let h = if matches!(b, Value::Str(_)) {
-        Value::Nil
-    } else {
-        ctx.metamethod(b, op.field)
-    };
-    if h.is_nil() {
-        return Err(ctx.error(&format!(
+    if s.type_at(2) == Type::String || !s.push_metamethod(2, op.field) {
+        let message = format!(
             "attempt to {} a '{}' with a '{}'",
             op.field.short_name(),
-            a.type_name(),
-            b.type_name()
-        )));
+            s.type_name_at(1),
+            s.type_name_at(2)
+        );
+        return Err(s.error(message.as_str()));
     }
-    ctx.truncate(0);
-    ctx.push(a);
-    ctx.push(b);
-    Ok(NativeReturn::CallThen {
-        f: h,
-        nargs: 2,
-        k: forward,
-        protected: false,
-    })
+    s.push_copy(1);
+    s.push_copy(2);
+    Ok(Return::call_then::<Forward>(2, false))
 }
 
 /// Return the first value the other operand's metamethod returned.
-fn forward(ctx: &mut NativeCtx<'_>, out: CallOutcome) -> R {
-    let v = crate::stdlib::first_result(ctx, out)?;
-    ctx.ret([v])
+struct Forward;
+
+impl Continuation for Forward {
+    fn resume(s: &mut Stack<'_>, outcome: Outcome) -> StackResult<Return> {
+        let Outcome::Ok(n) = outcome else {
+            unreachable!("an unprotected call")
+        };
+        if n == 0 {
+            s.push_nil();
+        } else if n > 1 {
+            s.push_copy(s.top() - n as i32 + 1);
+        }
+        Ok(Return::values(1))
+    }
 }

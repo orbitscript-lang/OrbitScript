@@ -48,26 +48,6 @@ pub(crate) fn tostring_now(
     }
 }
 
-/// The first result of a call a native requested with `CallThen` (nil if
-/// none); the call's results are dropped from the window.
-pub(crate) fn first_result(
-    ctx: &mut crate::vm::NativeCtx<'_>,
-    out: crate::vm::CallOutcome,
-) -> Result<crate::object::Value, crate::vm::LuaError> {
-    let n = match out {
-        crate::vm::CallOutcome::Ok(n) => n,
-        crate::vm::CallOutcome::Err(v) => return Err(ctx.error_value(v)),
-    };
-    let len = ctx.len();
-    let v = if n > 0 {
-        ctx.arg(len - n)
-    } else {
-        crate::object::Value::Nil
-    };
-    ctx.truncate(len - n);
-    Ok(v)
-}
-
 /// Open every library this build has: base functions as globals, plus the
 /// library tables.
 pub fn open_libs(vm: &mut Vm) {
