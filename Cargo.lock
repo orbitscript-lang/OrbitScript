@@ -307,6 +307,7 @@ dependencies = [
  "libc",
  "orbit",
  "orbit-ffi",
+ "orbit-lua-text",
  "serde",
  "serde_json",
 ]

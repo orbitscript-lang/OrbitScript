@@ -2,22 +2,21 @@
 //! points up to `0x7FFFFFFF` are accepted in lax mode; strict mode (the
 //! default) rejects surrogates and values over `0x10FFFF`.
 
-use crate::object::Gc;
-use crate::stack::{
-    Either, Fail, LibraryRow, Nil, Rest, Results, Return, Stack, StackResult, library_row,
-};
-use crate::vm::Vm;
+use orbit::stack::{Either, Fail, Nil, Rest, Results, Return, Stack, StackResult};
+use orbit::{Error, LUA, Scope, Table, native};
 use orbit_lua_text::push_utf8;
-use orbit_lua_version::LUA;
-use orbit_macros::native;
 
-pub(crate) const FUNCTIONS: &[LibraryRow] = &[
-    library_row::<char>(),
-    library_row::<codepoint>(),
-    library_row::<len>(),
-    library_row::<offset>(),
-    library_row::<codes>(),
-];
+/// Open the library. Returns the `utf8` table.
+pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
+    let utf8 = s.create_table();
+    utf8.add_native::<char>()?;
+    utf8.add_native::<codepoint>()?;
+    utf8.add_native::<len>()?;
+    utf8.add_native::<offset>()?;
+    utf8.add_native::<codes>()?;
+    utf8.raw_set("charpattern", &b"[\0-\x7F\xC2-\xFD][\x80-\xBF]*"[..])?;
+    Ok(utf8)
+}
 
 /// The largest code point lax mode accepts.
 const MAX_LAX: u32 = 0x7FFF_FFFF;
@@ -25,18 +24,12 @@ const MAX_LAX: u32 = 0x7FFF_FFFF;
 const MAX_STRICT: u32 = 0x10_FFFF;
 const MSG_INVALID: &str = "invalid UTF-8 code";
 
-pub(crate) fn constants(vm: &mut Vm, t: Gc<crate::object::Table>) {
-    let k = vm.new_str(b"charpattern");
-    let v = vm.new_str(b"[\0-\x7F\xC2-\xFD][\x80-\xBF]*");
-    vm.table_set(t, k, v);
-}
-
 fn is_cont(b: u8) -> bool {
     b & 0xC0 == 0x80
 }
 
 /// Decode the sequence starting at `s[i]`: its code point and length.
-pub(crate) fn decode(s: &[u8], i: usize, strict: bool) -> Option<(u32, usize)> {
+fn decode(s: &[u8], i: usize, strict: bool) -> Option<(u32, usize)> {
     let c = *s.get(i)?;
     if c < 0x80 {
         return Some((c as u32, 1));
@@ -75,7 +68,7 @@ fn relative(pos: i64, len: usize) -> i64 {
     }
 }
 
-#[native(crate = crate, name = "utf8.char")]
+#[native(name = "utf8.char")]
 fn char(s: &mut Stack<'_>, codes: Rest) -> StackResult<Vec<u8>> {
     let mut out = Vec::with_capacity(codes.count);
     for i in codes.indices() {
@@ -93,7 +86,7 @@ fn subject<'a>(s: &'a Stack<'_>) -> &'a [u8] {
     s.string_at(1).unwrap_or_default().as_bytes()
 }
 
-#[native(crate = crate, name = "utf8.codepoint")]
+#[native(name = "utf8.codepoint")]
 fn codepoint(
     subject: &[u8],
     i: Option<i64>,
@@ -140,7 +133,7 @@ impl Results for CodePoints {
     }
 }
 
-#[native(crate = crate, name = "utf8.len")]
+#[native(name = "utf8.len")]
 fn len(
     subject: &[u8],
     i: Option<i64>,
@@ -172,7 +165,7 @@ fn len(
 /// last (fail when there is no such character).
 type Offset = Either<Nil, Either<i64, (i64, i64)>>;
 
-#[native(crate = crate, name = "utf8.offset")]
+#[native(name = "utf8.offset")]
 fn offset(bytes: &[u8], n: i64, i: Option<i64>) -> Result<Offset, Fail> {
     let len = bytes.len();
     let mut n = n;
@@ -235,7 +228,7 @@ fn offset(bytes: &[u8], n: i64, i: Option<i64>) -> Result<Offset, Fail> {
     }))
 }
 
-#[native(crate = crate, name = "utf8.codes")]
+#[native(name = "utf8.codes")]
 fn codes(s: &mut Stack<'_>) -> StackResult<Return> {
     let starts_with_cont = s
         .check_string(1)?
@@ -258,12 +251,12 @@ fn codes(s: &mut Stack<'_>) -> StackResult<Return> {
 }
 
 // The iterators are nameless in messages, as in the reference.
-#[native(crate = crate, name = "?")]
+#[native(name = "?")]
 fn codes_step_strict(s: &mut Stack<'_>) -> Result<Either<(), (i64, i64)>, Fail> {
     codes_step(s, true)
 }
 
-#[native(crate = crate, name = "?")]
+#[native(name = "?")]
 fn codes_step_lax(s: &mut Stack<'_>) -> Result<Either<(), (i64, i64)>, Fail> {
     codes_step(s, false)
 }

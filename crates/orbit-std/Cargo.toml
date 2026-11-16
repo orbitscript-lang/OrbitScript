@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 orbit = { path = "../orbit", default-features = false }
+orbit-lua-text = { path = "../orbit-lua-text" }
 orbit-ffi = { path = "../orbit-ffi", optional = true }
 serde = { version = "1", default-features = false, features = ["std"], optional = true }
 serde_json = { version = "1", default-features = false, features = ["std"], optional = true }

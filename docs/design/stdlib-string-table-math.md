@@ -1,6 +1,6 @@
 # The string, utf8, table and math libraries
 
-Status: Implemented. Crate: `orbit-runtime` (`stdlib`).
+Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for `utf8`.
 
 The full `string`, `utf8`, `table` and `math` libraries. The official suite's `strings.lua`, `pm.lua`, `tpack.lua`, `utf8.lua`, `math.lua` and `sort.lua` test them.
 
@@ -8,7 +8,7 @@ Every behaviour here comes from the reference manual, the reference `lua5.5` bin
 
 ## Layout
 
-The four libraries are always built into `orbit-runtime`: they are the language's foundation, so they have no Cargo feature. A host that wants to withhold one from scripts leaves it out at run time with `Library`.
+`string`, `table` and `math` are always built into `orbit-runtime`: they are the language's foundation, so they have no Cargo feature. A host that wants to withhold one from scripts leaves it out at run time with `Library`. `utf8` is written on the public API in `orbit-std` (ADR-11), which installs it unless `orbit_std::Options::utf8` is false.
 
 | Library | Module | Contents |
 |---|---|---|
@@ -17,7 +17,7 @@ The four libraries are always built into `orbit-runtime`: they are the language'
 | | `string/pattern.rs` | The pattern matcher (`find match gmatch gsub`) |
 | | `string/format.rs` | `string.format`, including `%a` and `%q` |
 | | `string/pack.rs` | `pack unpack packsize` |
-| `utf8` | `utf8.rs` | The `utf8` library |
+| `utf8` | `orbit-std/src/utf8.rs` | The `utf8` library |
 | `table` | `table.rs`, `table/slow.rs`, `builtins/table.orb` | The `table` library (`insert`, `remove` and `sort` are written in OrbitScript, ADR-11) |
 | `math` | `math/mod.rs`, `math/rng.rs` | The `math` library and its xoshiro256** generator |
 

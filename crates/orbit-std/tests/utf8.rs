@@ -1,12 +1,13 @@
-//! Library behaviour that differs between the Lua 5.5 build and the Lua
-//! 5.4 one (ADR-14), as the reference `lua5.5` and `lua5.4` show it. The
-//! differential tests (`tests/diff`) only run against `lua5.5`, so the 5.4
-//! side of each difference is checked here.
+//! The `utf8` library's behaviour that differs between the Lua 5.5 build
+//! and the Lua 5.4 one (ADR-14), as the reference `lua5.5` and `lua5.4`
+//! show it. The differential tests (`tests/diff`) only run against
+//! `lua5.5`, so the 5.4 side of each difference is checked here.
 
 use orbit::{Chunk, Config, Runtime};
 
 fn run(src: &str) -> String {
     let mut iso = Runtime::new().new_isolate(Config::default());
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     iso.scope(|s| {
         let out = s.load(Chunk::new(src.as_bytes()).name("=test"))?.call(())?;
         out[0].get()

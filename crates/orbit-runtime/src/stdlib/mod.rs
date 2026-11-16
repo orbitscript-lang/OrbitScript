@@ -20,7 +20,6 @@ mod math;
 mod package;
 mod string;
 mod table;
-mod utf8;
 
 use crate::stack::LibraryRow;
 use crate::vm::Vm;
@@ -93,15 +92,13 @@ pub enum Lib {
     Os,
     String,
     Table,
-    Utf8,
 }
 
 impl Lib {
     /// The order [`open_libs`] opens them in.
-    pub const OPEN_ORDER: [Lib; 10] = [
+    pub const OPEN_ORDER: [Lib; 9] = [
         Lib::Base,
         Lib::String,
-        Lib::Utf8,
         Lib::Table,
         Lib::Math,
         Lib::Os,
@@ -123,7 +120,6 @@ impl Lib {
             Lib::Os => "os",
             Lib::String => "string",
             Lib::Table => "table",
-            Lib::Utf8 => "utf8",
         }
     }
 }
@@ -147,11 +143,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             let st = open_lib(vm, "string", string::FUNCTIONS);
             string::set_metatable_index(vm, st);
             add_functions(vm, st, dump::FUNCTIONS);
-            true
-        }
-        Lib::Utf8 => {
-            let u = open_lib(vm, "utf8", utf8::FUNCTIONS);
-            utf8::constants(vm, u);
             true
         }
         Lib::Table => {
