@@ -66,11 +66,14 @@ fn operator(op: ArithOp) -> Operator {
 /// An error raised in the isolate, to return from a native (an `Err`
 /// unwinds to the nearest protected call). Holds the error value.
 #[derive(Debug)]
-pub struct Raised(pub(crate) LuaError);
+pub struct Raised(pub(crate) Box<LuaError>);
 
 impl From<LuaError> for Raised {
+    // Errors are rare: keep the boxing out of the callers' fast paths.
+    #[cold]
+    #[inline(never)]
     fn from(e: LuaError) -> Raised {
-        Raised(e)
+        Raised(Box::new(e))
     }
 }
 
@@ -99,7 +102,7 @@ fn function_entry(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
     };
     match f(&mut s) {
         Ok(r) => s.finish(r),
-        Err(Raised(e)) => Err(e),
+        Err(Raised(e)) => Err(*e),
     }
 }
 
@@ -110,7 +113,7 @@ fn native_entry<N: Native>(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaE
     };
     match N::call(&mut s) {
         Ok(r) => s.finish(r),
-        Err(Raised(e)) => Err(e),
+        Err(Raised(e)) => Err(*e),
     }
 }
 
@@ -183,11 +186,11 @@ fn continue_in<K: Continuation>(
     };
     let o = match o {
         CallOutcome::Ok(n) => Outcome::Ok(n),
-        CallOutcome::Err(v) => Outcome::Err(Raised(s.ctx.error_value(v))),
+        CallOutcome::Err(v) => Outcome::Err(Raised::from(s.ctx.error_value(v))),
     };
     match K::resume(&mut s, o) {
         Ok(r) => s.finish(r),
-        Err(Raised(e)) => Err(e),
+        Err(Raised(e)) => Err(*e),
     }
 }
 
@@ -397,9 +400,21 @@ impl<'s> Stack<'s> {
     #[inline(always)]
     pub(crate) fn given(&self, idx: i32) -> Option<RawValue> {
         if idx > 0 {
-            let at = idx as usize - 1;
-            return if at < self.ctx.len() {
-                Some(self.ctx.arg(at))
+            // One check against the top, rather than `len` and then `arg`.
+            let at = self.ctx.base + idx as usize - 1;
+            let rt = &self.ctx.vm.rt;
+            return if at < rt.top {
+                Some(rt.stack.regs[at])
+            } else {
+                None
+            };
+        }
+        if idx < 0 && idx > REGISTRY_INDEX {
+            // A negative index counts down from the top.
+            let rt = &self.ctx.vm.rt;
+            let back = idx.unsigned_abs() as usize;
+            return if back <= rt.top - self.ctx.base {
+                Some(rt.stack.regs[rt.top - back])
             } else {
                 None
             };
@@ -470,7 +485,7 @@ impl<'s> Stack<'s> {
     }
 
     fn store_error(&mut self, e: tbl::StoreError) -> Raised {
-        Raised(match e {
+        Raised::from(match e {
             tbl::StoreError::NoMemory => self.ctx.no_memory(),
             e => self.ctx.error(e.message()),
         })
@@ -532,9 +547,51 @@ impl<'s> Stack<'s> {
         self.ctx.take_buf()
     }
 
+    /// Give a buffer from [`Stack::take_buffer`] back unused.
+    #[inline]
+    pub(crate) fn give_buffer(&mut self, b: Vec<u8>) {
+        self.ctx.give_buf(b);
+    }
+
+    /// Room for a pattern's captures, kept on the heap: see
+    /// [`NativeCtx::take_captures`].
+    #[inline]
+    pub(crate) fn take_captures(&mut self) -> Box<crate::stdlib::string::pattern::Captures> {
+        self.ctx.take_captures()
+    }
+
+    /// Give captures from [`Stack::take_captures`] back for reuse.
+    #[inline]
+    pub(crate) fn give_captures(&mut self, c: Box<crate::stdlib::string::pattern::Captures>) {
+        self.ctx.give_captures(c);
+    }
+
+    /// Append the value at `idx` to `out` as `tostring` shows it without
+    /// metamethods.
+    #[inline(always)]
+    pub(crate) fn display_into(&self, idx: i32, out: &mut Vec<u8>) {
+        self.ctx.display(self.get(idx), out);
+    }
+
+    /// Replace argument `arg` with what its `__tostring` gives, if it is
+    /// not a string and has one (`string.format`'s `%s`); called nested,
+    /// so nothing may yield across it.
+    pub(crate) fn tostring_in_place(&mut self, arg: i32) -> StackResult<()> {
+        let v = self.get(arg);
+        if matches!(v, RawValue::Str(_)) {
+            return Ok(());
+        }
+        let h = self.ctx.metamethod(v, MetaField::ToString);
+        if !h.is_nil() {
+            let r = crate::stdlib::tostring_now(&mut self.ctx, h, v)?;
+            self.ctx.set((arg - 1) as usize, r);
+        }
+        Ok(())
+    }
+
     /// Push a string with the bytes of a buffer from
     /// [`Stack::take_buffer`], and keep the buffer for reuse.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn push_buffer(&mut self, b: Vec<u8>) {
         let v = self.ctx.new_str_buf(b);
         self.ctx.push(v);
@@ -613,12 +670,20 @@ impl<'s> Stack<'s> {
     // away, as the runtime's own natives call it.
     #[inline]
     fn index(&mut self, obj: RawValue, key: RawValue) -> StackResult<RawValue> {
-        Ok(self.ctx.index_now(obj, key)?)
+        // A `match` rather than `?`: the value comes back without being
+        // copied through a second result.
+        match self.ctx.index_now(obj, key) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(e.into()),
+        }
     }
 
     #[inline]
     fn set_index(&mut self, obj: RawValue, key: RawValue, v: RawValue) -> StackResult<()> {
-        Ok(self.ctx.set_index_now(obj, key, v)?)
+        match self.ctx.set_index_now(obj, key, v) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     // ---- slots -----------------------------------------------------------------
@@ -1117,6 +1182,18 @@ impl<'s> Stack<'s> {
         Ok(())
     }
 
+    /// The length of the value at `idx`, as `#` gives it, if it is an
+    /// integer or converts to one (a float with an integral value or a
+    /// numeric string): the table functions' lengths.
+    #[inline]
+    pub(crate) fn length_integer(&mut self, idx: i32) -> StackResult<Option<i64>> {
+        let v = self.get(idx);
+        Ok(match self.ctx.length_now(v)? {
+            RawValue::Int(n) => Some(n),
+            n => self.ctx.to_integer(n),
+        })
+    }
+
     /// Push the length of the value at `idx`, as `#` gives it.
     pub fn len(&mut self, idx: i32) -> StackResult<()> {
         let v = self.get(idx);
@@ -1318,13 +1395,18 @@ impl<'s> Stack<'s> {
     }
 
     /// Push `t[n]` for the value at `idx`.
-    #[inline]
+    #[inline(always)]
     pub fn get_index(&mut self, idx: i32, n: i64) -> StackResult<Type> {
         // An integer key needs no rooting while metamethods run.
         let obj = self.get(idx);
-        let v = self.index(obj, RawValue::Int(n))?;
-        self.ctx.push(v);
-        Ok(type_of(v))
+        // Pushing in the `Ok` arm saves copying the value out first.
+        match self.ctx.index_now(obj, RawValue::Int(n)) {
+            Ok(v) => {
+                self.ctx.push(v);
+                Ok(type_of(v))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Push the global `name`.
@@ -1389,7 +1471,7 @@ impl<'s> Stack<'s> {
     /// entries, or `not enough memory` if they can't be allocated.
     pub(crate) fn try_create_table(&mut self, narr: usize, nrec: usize) -> StackResult<()> {
         let Ok(t) = Table::try_with_capacity(narr, nrec) else {
-            return Err(Raised(self.ctx.no_memory()));
+            return Err(Raised::from(self.ctx.no_memory()));
         };
         let t = self.ctx.new_table(t);
         self.ctx.push(RawValue::Table(t));
@@ -1414,13 +1496,13 @@ impl<'s> Stack<'s> {
                 .vm
                 .heap
                 .update(t, |tab| tab.lengthen_array(seed, 1, count))
-                .map_err(|_| Raised(self.ctx.no_memory()))?;
+                .map_err(|_| self.memory_error())?;
         }
         let from = (first.max(1) - 1) as usize;
         for i in 0..count {
             let v = self.ctx.arg(from + i);
             crate::object::table::set_int(&mut self.ctx.vm.heap, t, i as i64 + 1, v)
-                .map_err(|_| Raised(self.ctx.no_memory()))?;
+                .map_err(|_| Raised::from(self.ctx.no_memory()))?;
         }
         Ok(())
     }
@@ -1498,7 +1580,7 @@ impl<'s> Stack<'s> {
             }
             Some(UserValue::InTable(t, i)) => {
                 if tbl::set_int(&mut self.ctx.vm.heap, t, i, v).is_err() {
-                    return Err(Raised(self.ctx.no_memory()));
+                    return Err(Raised::from(self.ctx.no_memory()));
                 }
                 true
             }
@@ -1551,6 +1633,170 @@ impl<'s> Stack<'s> {
         }
         self.ctx.push(h);
         true
+    }
+
+    /// The table at `idx` if it has no metatable, for the table
+    /// library's raw loops.
+    #[inline]
+    pub(crate) fn plain_table(&self, idx: i32) -> Option<Gc<crate::object::Table>> {
+        match self.get(idx) {
+            RawValue::Table(t) if self.ctx.vm.heap.get(t).meta.is_none() => Some(t),
+            _ => None,
+        }
+    }
+
+    /// `t[i]` without metamethods, for a table the window holds.
+    #[inline]
+    pub(crate) fn push_raw_index(&mut self, t: Gc<crate::object::Table>, i: i64) {
+        let heap = &self.ctx.vm.heap;
+        let v = heap.get(t).get_int(crate::object::HashSeed::of(heap), i);
+        self.ctx.push(v);
+    }
+
+    /// Push a new table with room for `n` array elements (up to a cap;
+    /// bigger arrays grow as they fill), and give it.
+    pub(crate) fn push_array_table(&mut self, n: i64) -> StackResult<Gc<Table>> {
+        /// Most slots reserved up front.
+        const MAX_RESERVE: usize = 1 << 24;
+        let n = (n.max(0) as usize).min(MAX_RESERVE);
+        self.ctx.reserve(n.saturating_mul(9))?;
+        let Ok(t) = Table::try_with_capacity(n, 0) else {
+            return Err(self.memory_error());
+        };
+        let t = self.ctx.new_table(t);
+        self.ctx.push(RawValue::Table(t));
+        Ok(t)
+    }
+
+    /// `table.sort`'s fast path for a table the window holds; see
+    /// [`stdlib::table::sort_primitive`].
+    pub(crate) fn sort_primitive(&mut self, t: Gc<Table>, n: i64) -> StackResult<bool> {
+        match stdlib::table::sort_primitive(self.ctx.vm, t, n) {
+            Ok(sorted) => Ok(sorted),
+            Err(NoMemory) => Err(self.memory_error()),
+        }
+    }
+
+    /// The border of a table the window holds (`#t` without `__len`).
+    #[inline]
+    pub(crate) fn raw_border(&self, t: Gc<crate::object::Table>) -> i64 {
+        let heap = &self.ctx.vm.heap;
+        heap.get(t).border(crate::object::HashSeed::of(heap))
+    }
+
+    /// Room left on the stack, in values.
+    #[inline]
+    pub(crate) fn room(&self) -> usize {
+        self.ctx
+            .vm
+            .rt
+            .host
+            .max_stack()
+            .saturating_sub(self.ctx.len())
+    }
+
+    /// Copy `src[from]` to `dst[to]` without metamethods, for tables the
+    /// window holds.
+    #[inline]
+    pub(crate) fn raw_copy_int(
+        &mut self,
+        src: Gc<crate::object::Table>,
+        from: i64,
+        dst: Gc<crate::object::Table>,
+        to: i64,
+    ) -> StackResult<()> {
+        let heap = &self.ctx.vm.heap;
+        let v = heap
+            .get(src)
+            .get_int(crate::object::HashSeed::of(heap), from);
+        self.raw_put_int(dst, to, v)
+    }
+
+    /// `t[i] = ` the value at `idx`, without metamethods, for a table the
+    /// window holds.
+    #[inline]
+    pub(crate) fn raw_set_int_from(
+        &mut self,
+        t: Gc<crate::object::Table>,
+        i: i64,
+        idx: i32,
+    ) -> StackResult<()> {
+        let v = self.get(idx);
+        self.raw_put_int(t, i, v)
+    }
+
+    #[inline]
+    fn raw_put_int(&mut self, t: Gc<crate::object::Table>, i: i64, v: RawValue) -> StackResult<()> {
+        match crate::object::table::set_int(&mut self.ctx.vm.heap, t, i, v) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(self.memory_error()),
+        }
+    }
+
+    /// Append `t[i]` (no metamethods) to `out` as `concat` writes it, with
+    /// room for `extra` bytes more; `Err` with the value's type name if it
+    /// is neither a string nor a number.
+    #[inline(always)]
+    pub(crate) fn append_raw_index(
+        &mut self,
+        t: Gc<crate::object::Table>,
+        i: i64,
+        extra: usize,
+        out: &mut Vec<u8>,
+    ) -> StackResult<Result<(), &'static str>> {
+        let heap = &self.ctx.vm.heap;
+        let v = heap.get(t).get_int(crate::object::HashSeed::of(heap), i);
+        self.append_text(v, extra, out)
+    }
+
+    /// Append `t[i]` for the value at `idx` (metamethods included) to `out`
+    /// as `concat` writes it; see [`Stack::append_raw_index`]. The value is
+    /// written before anything else runs, so it needs no slot.
+    #[inline(always)]
+    pub(crate) fn append_index(
+        &mut self,
+        idx: i32,
+        i: i64,
+        extra: usize,
+        out: &mut Vec<u8>,
+    ) -> StackResult<Result<(), &'static str>> {
+        let obj = self.get(idx);
+        let v = self.index(obj, RawValue::Int(i))?;
+        self.append_text(v, extra, out)
+    }
+
+    /// Append the value at `idx` to `out` as `concat` writes it; see
+    /// [`Stack::append_raw_index`].
+    #[inline(always)]
+    pub(crate) fn append_text_at(
+        &mut self,
+        idx: i32,
+        extra: usize,
+        out: &mut Vec<u8>,
+    ) -> StackResult<Result<(), &'static str>> {
+        let v = self.get(idx);
+        self.append_text(v, extra, out)
+    }
+
+    #[inline(always)]
+    fn append_text(
+        &mut self,
+        v: RawValue,
+        extra: usize,
+        out: &mut Vec<u8>,
+    ) -> StackResult<Result<(), &'static str>> {
+        // Long pieces grow the buffer by a lot: reserve first, so running
+        // out of memory is an error rather than an abort.
+        let piece = match v {
+            RawValue::Str(s) => self.ctx.bytes(s).len(),
+            RawValue::Int(_) | RawValue::Float(_) => 0,
+            _ => return Ok(Err(v.type_name())),
+        };
+        if out.try_reserve(piece + extra).is_err() {
+            return Err(self.memory_error());
+        }
+        self.ctx.display(v, out);
+        Ok(Ok(()))
     }
 
     /// The type name of the value at `idx`, as operator errors give it
@@ -1607,9 +1853,26 @@ impl<'s> Stack<'s> {
     }
 
     /// `t[n] = top` (popped) for the value at `idx`.
+    #[inline]
     pub fn set_index_int(&mut self, idx: i32, n: i64) -> StackResult<()> {
+        // An integer key needs no rooting while metamethods run; the value
+        // stays on the window until the store is done.
+        self.need(1)?;
         let obj = self.get(idx);
-        self.set_popping(obj, RawValue::Int(n))
+        let len = self.ctx.len();
+        let v = self.ctx.arg(len - 1);
+        self.set_index(obj, RawValue::Int(n), v)?;
+        self.ctx.truncate(len - 1);
+        Ok(())
+    }
+
+    /// `t[n] = v` for the value at `idx` and the value at `from`, which
+    /// stays where it is: [`Stack::set_index_int`] without the push.
+    #[inline]
+    pub(crate) fn set_index_int_from(&mut self, idx: i32, n: i64, from: i32) -> StackResult<()> {
+        let obj = self.get(idx);
+        let v = self.get(from);
+        self.set_index(obj, RawValue::Int(n), v)
     }
 
     /// Pop the top value into global `name`.
@@ -1700,7 +1963,7 @@ impl<'s> Stack<'s> {
             Ok(None) => Ok(false),
             Err(_) => {
                 let msg = c.new_str(b"invalid key to 'next'");
-                Err(Raised(c.error_value(msg)))
+                Err(Raised::from(c.error_value(msg)))
             }
         }
     }
@@ -1826,7 +2089,7 @@ impl<'s> Stack<'s> {
 
     /// Lua's `not enough memory` error, to return.
     pub fn memory_error(&mut self) -> Raised {
-        Raised(self.ctx.no_memory())
+        Raised::from(self.ctx.no_memory())
     }
 
     /// Compile (or decode) `bytes` as a chunk named `name`, with the global
@@ -1916,25 +2179,25 @@ impl<'s> Stack<'s> {
     /// empty), to return.
     pub fn error_from_top(&mut self) -> Raised {
         let v = self.top_value();
-        Raised(self.ctx.error_value(v))
+        Raised::from(self.ctx.error_value(v))
     }
 
     /// A runtime error with `message`, positioned at the caller as Lua's
     /// `error` does at level 1.
     pub fn error<'m>(&mut self, message: impl Into<OrbitStr<'m>>) -> Raised {
-        Raised(self.ctx.error(message))
+        Raised::from(self.ctx.error(message))
     }
 
     /// Lua's argument error for argument `arg` (1-based): `bad argument #1
     /// to 'f' (message)`.
     pub fn arg_error<'m>(&mut self, arg: i32, message: impl Into<OrbitStr<'m>>) -> Raised {
-        Raised(self.ctx.arg_error((arg.max(1) - 1) as usize, message))
+        Raised::from(self.ctx.arg_error((arg.max(1) - 1) as usize, message))
     }
 
     /// Lua's type error for argument `arg` (1-based): `bad argument #1 to
     /// 'f' (number expected, got nil)`.
     pub fn type_error(&mut self, arg: i32, expected: &str) -> Raised {
-        Raised(self.ctx.type_error((arg.max(1) - 1) as usize, expected))
+        Raised::from(self.ctx.type_error((arg.max(1) - 1) as usize, expected))
     }
 
     /// Argument `arg` (1-based) as a string (numbers convert), or Lua's
@@ -2474,7 +2737,7 @@ impl<'s> Stack<'s> {
             }
             Err(v) => {
                 let cause = self.ctx.thread_error_cause(t, v);
-                Err(Raised(LuaError::with_cause(v, cause)))
+                Err(Raised::from(LuaError::with_cause(v, cause)))
             }
         }
     }

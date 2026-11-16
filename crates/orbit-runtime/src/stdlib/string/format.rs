@@ -3,10 +3,9 @@
 
 use std::fmt::Write as _;
 
-use crate::object::{Gc, LuaStr, OrbitString, Value, number};
-use crate::vm::{LuaError, MetaField, NativeCtx, NativeReturn};
-
-type R = Result<NativeReturn, LuaError>;
+use crate::object::{Gc, LuaStr, OrbitString, number};
+use crate::stack::{Raised, Return, Stack, StackResult, Type};
+use orbit_macros::native;
 
 /// Longest run of flag, width and precision characters in one spec.
 const MAX_SPEC: usize = 20;
@@ -86,48 +85,53 @@ fn parse_spec(body: &[u8], flags: &[u8], precision_ok: bool) -> Option<Spec> {
     (i == body.len()).then_some(spec)
 }
 
-pub(crate) fn format(ctx: &mut NativeCtx<'_>) -> R {
-    ctx.check_str(0)?;
-    let nargs = ctx.nargs();
-    let out = ctx.take_buf();
-    format_from(ctx, nargs, 0, 0, out)
+#[native(crate = crate, name = "string.format")]
+pub(crate) fn format(s: &mut Stack<'_>) -> StackResult<Return> {
+    let fmt = s.check_string_handle(1)?;
+    let nargs = s.top() as usize;
+    let mut out = s.take_buffer();
+    format_into(s, fmt, nargs, &mut out)?;
+    s.push_buffer(out);
+    Ok(Return::values(1))
 }
 
 /// An error quoting the conversion at `fmt[start..end]` between `before`
 /// and `after`, byte for byte.
+#[cold]
+#[inline(never)]
 fn spec_error(
-    ctx: &mut NativeCtx<'_>,
+    s: &mut Stack<'_>,
     fmt: Gc<LuaStr>,
     (start, end): (usize, usize),
     before: &str,
     after: &str,
-) -> LuaError {
+) -> Raised {
     let msg = OrbitString::concat(&[
         before.as_bytes(),
-        &ctx.bytes(fmt)[start..end],
+        &s.handle_bytes(fmt)[start..end],
         after.as_bytes(),
     ]);
-    ctx.error(&msg)
+    s.error(&msg)
 }
 
-/// Format from byte `i` of the format with `arg` of the `nargs` arguments
-/// used so far.
-fn format_from(
-    ctx: &mut NativeCtx<'_>,
+/// Append the format `fmt` (argument 1) applied to the other `nargs - 1`
+/// arguments to `out`.
+fn format_into(
+    s: &mut Stack<'_>,
+    fmt: Gc<LuaStr>,
     nargs: usize,
-    mut i: usize,
-    mut arg: usize,
-    mut out: Vec<u8>,
-) -> R {
-    let Value::Str(fmt) = ctx.arg(0) else {
-        unreachable!("checked by format")
-    };
-    let fmt_len = ctx.bytes(fmt).len();
+    out: &mut Vec<u8>,
+) -> StackResult<()> {
+    let mut i = 0;
+    // Arguments used so far, the format's not counted; argument `arg`
+    // is at index `arg + 1`.
+    let mut arg = 0;
+    let fmt_len = s.handle_bytes(fmt).len();
     // The format is read again after every call that could move its bytes;
     // what a conversion needs of it is copied here.
     let mut body_buf = [0u8; MAX_SPEC];
     while i < fmt_len {
-        let f = ctx.bytes(fmt);
+        let f = s.handle_bytes(fmt);
         let plain = f[i..]
             .iter()
             .position(|&c| c == b'%')
@@ -155,15 +159,15 @@ fn format_from(
         }
         arg += 1;
         if arg >= nargs {
-            return Err(ctx.arg_error(arg, crate::arg_errors::NO_VALUE));
+            return Err(s.arg_error(arg as i32 + 1, crate::arg_errors::NO_VALUE));
         }
         if blen > MAX_SPEC {
-            return Err(ctx.error("invalid format (too long)"));
+            return Err(s.error("invalid format (too long)"));
         }
         let Some(conv) = conv else {
             let at = (conv_start, i);
             return Err(spec_error(
-                ctx,
+                s,
                 fmt,
                 at,
                 "invalid conversion '",
@@ -174,7 +178,7 @@ fn format_from(
         let Some((flags, precision_ok)) = grammar(conv) else {
             let at = (conv_start, i);
             return Err(spec_error(
-                ctx,
+                s,
                 fmt,
                 at,
                 "invalid conversion '",
@@ -184,17 +188,17 @@ fn format_from(
         let body = &body_buf[..blen];
         if conv == b'q' {
             if !body.is_empty() {
-                return Err(ctx.error("specifier '%q' cannot have modifiers"));
+                return Err(s.error("specifier '%q' cannot have modifiers"));
             }
-            quote(ctx, arg, &mut out)?;
+            quote(s, arg as i32 + 1, out)?;
             continue;
         }
         // Most numeric conversions check their argument before their spec
         // (`%a` checks its spec first).
         let int_arg = match conv {
-            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => ctx.check_int(arg)?,
+            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => s.check_integer(arg as i32 + 1)?,
             b'e' | b'E' | b'f' | b'g' | b'G' => {
-                ctx.check_f64(arg)?;
+                s.check_number(arg as i32 + 1)?;
                 0
             }
             _ => 0,
@@ -202,7 +206,7 @@ fn format_from(
         let Some(spec) = parse_spec(body, flags, precision_ok) else {
             let at = (conv_start, i);
             return Err(spec_error(
-                ctx,
+                s,
                 fmt,
                 at,
                 "invalid conversion specification: '",
@@ -214,25 +218,13 @@ fn format_from(
                 let n = int_arg;
                 let mut buf = [0u8; DIGITS];
                 let digits = radix_digits(&mut buf, n.unsigned_abs(), 10, false);
-                fmt_int(
-                    &mut out,
-                    &spec,
-                    sign(&spec, n < 0).as_bytes(),
-                    digits,
-                    false,
-                );
+                fmt_int(out, &spec, sign(&spec, n < 0).as_bytes(), digits, false);
             }
             b'u' => {
                 let n = int_arg as u64;
                 let mut buf = [0u8; DIGITS];
                 let digits = radix_digits(&mut buf, n, 10, false);
-                fmt_int(
-                    &mut out,
-                    &spec,
-                    sign(&spec, false).as_bytes(),
-                    digits,
-                    false,
-                );
+                fmt_int(out, &spec, sign(&spec, false).as_bytes(), digits, false);
             }
             b'o' | b'x' | b'X' => {
                 let n = int_arg as u64;
@@ -250,57 +242,52 @@ fn format_from(
                     (true, b'x' | b'X') if n != 0 => prefix,
                     _ => b"",
                 };
-                fmt_int(&mut out, &spec, prefix, digits, conv == b'o');
+                fmt_int(out, &spec, prefix, digits, conv == b'o');
             }
             b'c' => {
-                let n = ctx.check_int(arg)?;
-                pad(&mut out, &spec, b"", &[n as u8], false);
+                let n = s.check_integer(arg as i32 + 1)?;
+                pad(out, &spec, b"", &[n as u8], false);
             }
             b'a' | b'A' | b'e' | b'E' | b'f' | b'g' | b'G' => {
-                let x = ctx.check_f64(arg)?;
+                let x = s.check_number(arg as i32 + 1)?;
                 let start = out.len();
-                printf_float(&mut out, &spec, conv, x);
-                ctx.locale().localize_float(&mut out, start);
+                printf_float(out, &spec, conv, x);
+                s.locale().localize_float(out, start);
             }
             b'p' => {
-                let v = ctx.arg(arg);
-                let text = match v.identity() {
+                let text = match s.identity(arg as i32 + 1) {
                     Some(id) => format!("0x{id:x}"),
                     None => "(null)".to_owned(),
                 };
-                pad(&mut out, &spec, b"", text.as_bytes(), false);
+                pad(out, &spec, b"", text.as_bytes(), false);
             }
             b's' => {
-                let mut v = ctx.check_any(arg)?;
-                if !matches!(v, Value::Str(_)) {
-                    let h = ctx.metamethod(v, MetaField::ToString);
-                    if !h.is_nil() {
-                        // Called nested: nothing may yield across it, as in
-                        // the reference. The result replaces the argument,
-                        // which keeps it rooted.
-                        v = crate::stdlib::tostring_now(ctx, h, v)?;
-                        ctx.set(arg, v);
-                    }
+                let a = arg as i32 + 1;
+                if s.type_at(a) == Type::None {
+                    return Err(s.arg_error(a, crate::arg_errors::VALUE_EXPECTED));
                 }
+                // Called nested: nothing may yield across `__tostring`, as
+                // in the reference. Its result replaces the argument, which
+                // keeps it rooted.
+                s.tostring_in_place(a)?;
                 if body.is_empty() {
-                    ctx.display(v, &mut out);
+                    s.display_into(a, out);
                     continue;
                 }
                 let mut text = Vec::new();
-                ctx.display(v, &mut text);
+                s.display_into(a, &mut text);
                 if text.contains(&0) {
-                    return Err(ctx.arg_error(arg, "string contains zeros"));
+                    return Err(s.arg_error(a, "string contains zeros"));
                 }
                 if let Some(p) = spec.precision {
                     text.truncate(p);
                 }
-                pad(&mut out, &spec, b"", &text, false);
+                pad(out, &spec, b"", &text, false);
             }
             _ => unreachable!("grammar() accepted '{}'", conv as char),
         }
     }
-    let r = ctx.new_str_buf(out);
-    ctx.ret([r])
+    Ok(())
 }
 
 /// Append `sign`/`prefix` and `body`, padded to the spec's width. `zero_ok`
@@ -517,17 +504,22 @@ pub(crate) fn hex_float(x: f64, precision: Option<usize>, alt: bool) -> (&'stati
 }
 
 /// `%q`: a Lua literal that reads back as the same value.
-fn quote(ctx: &mut NativeCtx<'_>, arg: usize, out: &mut Vec<u8>) -> Result<(), LuaError> {
-    match ctx.arg(arg) {
-        Value::Str(s) => quote_str(ctx.bytes(s), out),
-        Value::Int(n) => {
+fn quote(s: &mut Stack<'_>, arg: i32, out: &mut Vec<u8>) -> StackResult<()> {
+    match s.type_at(arg) {
+        Type::String => {
+            let h = s.string_handle(arg).expect("a string");
+            quote_str(s.handle_bytes(h), out);
+        }
+        Type::Number if s.is_integer(arg) => {
+            let n = s.to_integer(arg).expect("an integer");
             if n == i64::MIN {
                 out.extend_from_slice(b"0x8000000000000000");
             } else {
                 out.extend_from_slice(n.to_string().as_bytes());
             }
         }
-        Value::Float(x) => {
+        Type::Number => {
+            let x = s.to_number(arg).expect("a float");
             if x.is_nan() {
                 out.extend_from_slice(b"(0/0)");
             } else if x.is_infinite() {
@@ -537,8 +529,8 @@ fn quote(ctx: &mut NativeCtx<'_>, arg: usize, out: &mut Vec<u8>) -> Result<(), L
                 printf_float(out, &spec, b'a', x);
             }
         }
-        v @ (Value::Nil | Value::Bool(_)) => ctx.display(v, out),
-        _ => return Err(ctx.arg_error(arg, "value has no literal form")),
+        Type::Nil | Type::Boolean => s.display_into(arg, out),
+        _ => return Err(s.arg_error(arg, "value has no literal form")),
     }
     Ok(())
 }

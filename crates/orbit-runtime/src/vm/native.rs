@@ -1348,14 +1348,6 @@ impl NativeCtx<'_> {
         }
     }
 
-    /// `a == b` with `__eq`, run now.
-    pub(crate) fn equal_now(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
-        match self.equal(a, b)? {
-            Meta::Done(r) => Ok(r),
-            Meta::Call { nargs } => Ok(!self.meta_value(nargs)?.is_falsy()),
-        }
-    }
-
     /// `obj[key]` with metamethods.
     pub(crate) fn index(&mut self, obj: Value, key: Value) -> Result<Meta<Value>, LuaError> {
         let r = match obj {
