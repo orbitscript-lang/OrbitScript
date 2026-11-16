@@ -3,7 +3,7 @@
 mod rng;
 
 use orbit::stack::{
-    Any, Arg, CompareOp, Number, PureArg, PureResult, PureValue, Stack, StackResult, Type,
+    Any, Arg, CompareOp, Number, PureArg, PureResult, PureValue, Stack, StackResult, Type, View,
 };
 use orbit::{Error, LUA, Scope, Table, native};
 
@@ -103,11 +103,11 @@ fn extreme_fast(args: &[PureValue], want_max: bool) -> Option<PureValue> {
     best.into_value()
 }
 
-fn max_fast(args: &[PureValue]) -> Option<PureValue> {
+fn max_fast(_: View<'_>, args: &[PureValue]) -> Option<PureValue> {
     extreme_fast(args, true)
 }
 
-fn min_fast(args: &[PureValue]) -> Option<PureValue> {
+fn min_fast(_: View<'_>, args: &[PureValue]) -> Option<PureValue> {
     extreme_fast(args, false)
 }
 
@@ -189,7 +189,7 @@ fn modf(x: Number) -> (Number, f64) {
 }
 
 /// `tointeger`'s fast path: a number argument.
-fn tointeger_fast(args: &[PureValue]) -> Option<PureValue> {
+fn tointeger_fast(_: View<'_>, args: &[PureValue]) -> Option<PureValue> {
     let n = Number::from_value(args.first().copied())?;
     n.to_int_exact().into_value()
 }
