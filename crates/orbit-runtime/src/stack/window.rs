@@ -499,7 +499,7 @@ impl<'s> Stack<'s> {
     }
 
     /// The bytes of a string the window holds.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn handle_bytes(&self, s: Gc<LuaStr>) -> &[u8] {
         self.ctx.bytes(s)
     }
@@ -642,7 +642,20 @@ impl<'s> Stack<'s> {
     /// Grow the window with nils or cut it back to `idx` values (negative:
     /// relative to the top). Variables marked with [`Stack::to_close`]
     /// above the new top close first.
+    #[inline]
     pub fn set_top(&mut self, idx: i32) -> StackResult<()> {
+        // Dropping values none of which is to be closed, the common case.
+        if let Ok(new) = usize::try_from(idx) {
+            if new <= self.ctx.len() && !self.ctx.closes_from(new) {
+                self.ctx.truncate(new);
+                return Ok(());
+            }
+        }
+        self.set_top_general(idx)
+    }
+
+    #[inline(never)]
+    fn set_top_general(&mut self, idx: i32) -> StackResult<()> {
         let len = self.ctx.len() as i64;
         let new = if idx >= 0 {
             idx as i64
@@ -686,6 +699,7 @@ impl<'s> Stack<'s> {
     }
 
     /// Push a copy of the value at `idx`.
+    #[inline]
     pub fn push_copy(&mut self, idx: i32) {
         let v = self.get(idx);
         self.ctx.push(v);
@@ -734,11 +748,11 @@ impl<'s> Stack<'s> {
         }
     }
 
+    #[inline]
     pub fn type_at(&self, idx: i32) -> Type {
-        if self.is_none(idx) {
-            Type::None
-        } else {
-            type_of(self.get(idx))
+        match self.given(idx) {
+            Some(v) => type_of(v),
+            None => Type::None,
         }
     }
 
@@ -1484,6 +1498,51 @@ impl<'s> Stack<'s> {
         !self.ctx.metamethod(self.get(idx), e).is_nil()
     }
 
+    /// The prototype of the Lua function at `idx`; `None` for anything
+    /// else, a native closure (a host or C function) included.
+    pub(crate) fn lua_function_proto(&self, idx: i32) -> Option<Gc<crate::object::Proto>> {
+        let f = self.get(idx);
+        match (f, self.ctx.native_of(f)) {
+            (RawValue::Closure(c), None) => Some(self.ctx.vm.heap.get(c).proto),
+            _ => None,
+        }
+    }
+
+    /// The heap, for the runtime's own natives that read objects directly.
+    pub(crate) fn heap(&self) -> &crate::object::LuaHeap {
+        &self.ctx.vm.heap
+    }
+
+    /// The number at `idx`, or the number a string there converts to
+    /// (with the locale's decimal point), as arithmetic coerces it.
+    pub(crate) fn coerced_number(&self, idx: i32) -> Option<crate::object::number::Number> {
+        match self.get(idx) {
+            RawValue::Str(s) => self
+                .ctx
+                .locale()
+                .str_to_number(self.ctx.bytes(s))
+                .and_then(RawValue::as_number),
+            v => v.as_number(),
+        }
+    }
+
+    /// Push the value at `idx`'s metamethod for `event`; false, pushing
+    /// nothing, when it has none.
+    pub(crate) fn push_metamethod(&mut self, idx: i32, event: crate::vm::MetaField) -> bool {
+        let h = self.ctx.metamethod(self.get(idx), event);
+        if h.is_nil() {
+            return false;
+        }
+        self.ctx.push(h);
+        true
+    }
+
+    /// The type name of the value at `idx`, as operator errors give it
+    /// (no `__name`).
+    pub(crate) fn type_name_at(&self, idx: i32) -> &'static str {
+        self.get(idx).type_name()
+    }
+
     /// Push the metatable of the value at `idx`, if it has one.
     pub fn get_metatable(&mut self, idx: i32) -> bool {
         match self.ctx.metatable(self.get(idx)) {
@@ -1663,8 +1722,16 @@ impl<'s> Stack<'s> {
     /// `nresults` results. Nothing can yield across the call.
     pub fn call(&mut self, nargs: i32, nresults: i32) -> StackResult<()> {
         let nargs = self.check_call(nargs)?;
-        let n = self.ctx.call(nargs, None)?;
-        self.adjust_results(n, nresults);
+        // A fixed count the callee's return can leave in place.
+        match u8::try_from(nresults) {
+            Ok(want) if want != crate::vm::op::MULTI => {
+                self.ctx.call_want(nargs, want)?;
+            }
+            _ => {
+                let n = self.ctx.call(nargs, None)?;
+                self.adjust_results(n, nresults);
+            }
+        }
         Ok(())
     }
 

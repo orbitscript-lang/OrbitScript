@@ -449,6 +449,13 @@ impl NativeCtx<'_> {
         self.vm.rt.stack.aux.tbc.last() == Some(&((self.base + i) as u32))
     }
 
+    /// Whether a variable marked to be closed is at window slot `from` or
+    /// above.
+    #[inline]
+    pub(crate) fn closes_from(&self, from: usize) -> bool {
+        matches!(self.vm.rt.stack.aux.tbc.last(), Some(&t) if t as usize >= self.base + from)
+    }
+
     /// Close the window's variables marked to be closed at slot `from` and
     /// above, newest first: each one's `__close(value)`, with no error
     /// argument as lua5.5 calls it (lua5.4 passes nil). An error a

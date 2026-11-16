@@ -4,26 +4,20 @@
 use std::collections::VecDeque;
 
 use crate::object::{Gc, LuaHeap, Proto, Value};
+use crate::stack::{Buffer, LibraryRow, Stack, StackResult, library_row};
 use crate::vm::op::{CaptureSource, Constant, UnlinkedChunk, UnlinkedProto, format};
-use crate::vm::{LuaError, NativeCtx, NativeReturn};
+use orbit_macros::native;
 
-type R = Result<NativeReturn, LuaError>;
+pub(crate) const FUNCTIONS: &[LibraryRow] = &[library_row::<dump>()];
 
-pub(crate) const FUNCTIONS: &[crate::stack::LibraryRow] =
-    &[crate::stack::LibraryRow::raw("string.dump", dump)];
-
-fn dump(ctx: &mut NativeCtx<'_>) -> R {
-    // A native closure (a host or C function) is no Lua function.
-    let f = ctx.arg(0);
-    let (Value::Closure(c), None) = (f, ctx.native_of(f)) else {
-        return Err(ctx.arg_error(0, "Lua function expected"));
+#[native(crate = crate, name = "string.dump")]
+fn dump(s: &mut Stack<'_>) -> StackResult<Buffer> {
+    let Some(root) = s.lua_function_proto(1) else {
+        return Err(s.arg_error(1, "Lua function expected"));
     };
-    let strip = !ctx.arg(1).is_falsy();
-    let root = ctx.vm.heap.get(c).proto;
-    let chunk = unlink(&ctx.vm.heap, root);
-    let bytes = format::encode(&chunk, strip);
-    let s = ctx.new_str_owned(bytes);
-    ctx.ret([s])
+    let strip = s.to_boolean(2);
+    let chunk = unlink(s.heap(), root);
+    Ok(Buffer(format::encode(&chunk, strip)))
 }
 
 /// Rebuild the plain-data chunk whose main function is `root`. Prototypes

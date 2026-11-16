@@ -15,8 +15,8 @@ pcall           1060  1.61
 xpcall          1037  1.79
 sort             599  2.78
 sort_plain       103  0.61
-gsub_fn          791  2.15
-gsub_str         448  1.69
+gsub_fn          897  2.43
+gsub_str         355  1.34
 tostring         954  1.48
 format_s        1614  1.23
 max_lt          1248  2.27
