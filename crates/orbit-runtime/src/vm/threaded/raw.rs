@@ -200,10 +200,10 @@ fn watched(_vm: &Vm) -> bool {
 #[inline(never)]
 fn slow(vm: &mut Vm, ip: *const Insn) -> Step {
     let pc = pc_of(vm, ip) - 1;
+    // SAFETY: the instruction whose handler called this.
+    let i = unsafe { *ip.sub(1) };
     sync(vm);
     let base = vm.rt.stack.running().base as usize;
-    let _ = Window::take(&mut vm.rt.stack.regs, base);
-    let i = vm.rt.cur.words[pc];
     // No fuel, so the handler comes back after its instruction.
     #[cfg(feature = "hooks")]
     let depth = vm.rt.stack.depth();
@@ -889,7 +889,7 @@ q_cmp_jump!(q_jump_le, r_jump_le, true, |x, y| x <= y);
 q_cmp_jump!(q_jump_not_le, r_jump_not_le, false, |x, y| x <= y);
 
 macro_rules! q_eq_jump {
-    ($name:ident, $read:ident, $want:expr) => {
+    ($name:ident, $other:ident, $read:ident, $want:expr) => {
         q! {fn $name(vm, w, pc, i) {
             let (a, b, off) = i.$read();
             let r = qwin!(vm, w, pc);
@@ -899,15 +899,30 @@ macro_rules! q_eq_jump {
                 (&Value::Bool(x), &Value::Bool(y)) => x == y,
                 (&Value::Nil, &Value::Nil) => true,
                 (&Value::Nil, _) | (_, &Value::Nil) => false,
-                _ => return slow(vm, pc),
+                // The same string, table or function.
+                (&Value::Str(x), &Value::Str(y)) if x == y => true,
+                (&Value::Table(x), &Value::Table(y)) if x == y => true,
+                _ => return $other(vm, w, pc, i),
             };
             branch!(vm, w, pc, off, c == $want)
         }}
+
+        /// The comparisons that may need a call: long strings, mixed
+        /// numbers, `__eq`.
+        #[inline(never)]
+        fn $other(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+            let (a, b, off) = i.$read();
+            let r = qwin!(vm, w, pc);
+            match fast::equal(&r, a, b, &vm.heap, &vm.rt.metas) {
+                Ok(c) => branch!(vm, w, pc, off, c == $want),
+                Err(_) => slow(vm, pc),
+            }
+        }
     };
 }
 
-q_eq_jump!(q_jump_eq, r_jump_eq, true);
-q_eq_jump!(q_jump_ne, r_jump_ne, false);
+q_eq_jump!(q_jump_eq, eq_other, r_jump_eq, true);
+q_eq_jump!(q_jump_ne, ne_other, r_jump_ne, false);
 
 q! {fn q_jump_eq_int(vm, w, pc, i) {
     let (a, imm, want, off) = i.r_jump_eq_int();
@@ -953,8 +968,10 @@ q_cmp_int_jump!(q_jump_ge_int, r_jump_ge_int, |x, y| x >= y);
 q! {fn q_call(vm, w, pc, i) {
     let (func, nargs, nresults) = i.r_call();
     let r = qwin!(vm, w, pc);
-    let Value::Closure(c) = r[func] else {
-        return slow(vm, pc);
+    let c = match r[func] {
+        Value::Closure(c) => c,
+        Value::Native(_) => return call_native(vm, w, pc, i),
+        _ => return slow(vm, pc),
     };
     let code: &ProtoCode = if c == vm.rt.closure {
         code!(vm)
@@ -1012,6 +1029,33 @@ q! {fn q_call(vm, w, pc, i) {
     // SAFETY: the callee's window is covered (checked above).
     next_counted(vm, unsafe { w.add(func as usize + 1) }, ip)
 }}
+
+/// A call of a native function that has a fast path and takes it: the
+/// result goes where the function was, with no frame.
+#[inline(never)]
+fn call_native(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+    let (func, nargs, want) = i.r_call();
+    let mut r = qwin!(vm, w, pc);
+    let Value::Native(id) = r[func] else {
+        return slow(vm, pc);
+    };
+    let (at, n) = (func as usize, nargs as usize);
+    if nargs == MULTI || (want > 1 && want != MULTI) {
+        return slow(vm, pc);
+    }
+    let (Some(fast), Some(args)) = (vm.rt.natives.get(id).fast, r.get(at + 1..at + 1 + n)) else {
+        return slow(vm, pc);
+    };
+    let Some(v) = fast(FastCtx::new(vm, want), args) else {
+        return slow(vm, pc);
+    };
+    if want != 0 {
+        r[func] = v;
+    }
+    let fa = vm.rt.stack.running().base as usize + at;
+    vm.rt.top = fa + want.min(1) as usize;
+    next(vm, w, pc)
+}
 
 /// Go on in the caller's frame, `up` registers below, at its instruction
 /// `to`, after a return popped the frame above it.
