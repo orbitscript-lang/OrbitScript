@@ -50,3 +50,34 @@ fn execute_passes_quotes_through() {
     let out = run(&format!("return os.execute([==[{cmd}]==])"));
     assert_eq!(out, ["nil", "exit", "3"]);
 }
+
+#[test]
+fn popen_flushes_open_files_first() {
+    // A file written but not flushed or closed, by a handle and through
+    // the default output: the child reads what was written.
+    let cat = if cfg!(windows) { "type" } else { "cat" };
+    let out = run(&format!(
+        r#"
+        local function child_reads(name)
+            local p = assert(io.popen('{cat} "' .. name .. '"'))
+            local s = p:read("a")
+            p:close()
+            return s
+        end
+        local a, b = os.tmpname(), os.tmpname()
+        local f = assert(io.open(a, "w"))
+        f:write("by handle")
+        local by_handle = child_reads(a)
+        f:close()
+        io.output(b)
+        io.write("by default output")
+        local by_default = child_reads(b)
+        io.close()
+        io.output(io.stdout)
+        os.remove(a)
+        os.remove(b)
+        return by_handle, by_default
+    "#
+    ));
+    assert_eq!(out, ["by handle", "by default output"]);
+}
