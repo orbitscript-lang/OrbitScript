@@ -1,6 +1,6 @@
 # The string, utf8, table and math libraries
 
-Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for `utf8`.
+Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for `utf8` and `math`.
 
 The full `string`, `utf8`, `table` and `math` libraries. The official suite's `strings.lua`, `pm.lua`, `tpack.lua`, `utf8.lua`, `math.lua` and `sort.lua` test them.
 
@@ -8,7 +8,7 @@ Every behaviour here comes from the reference manual, the reference `lua5.5` bin
 
 ## Layout
 
-`string`, `table` and `math` are always built into `orbit-runtime`: they are the language's foundation, so they have no Cargo feature. A host that wants to withhold one from scripts leaves it out at run time with `Library`. `utf8` is written on the public API in `orbit-std` (ADR-11), which installs it unless `orbit_std::Options::utf8` is false.
+`string` and `table` are always built into `orbit-runtime`: they are the language's foundation, so they have no Cargo feature. A host that wants to withhold one from scripts leaves it out at run time with `Library`. `utf8` and `math` are written on the public API in `orbit-std` (ADR-11), which installs each unless `orbit_std::Options::utf8` or `Options::math` is false.
 
 | Library | Module | Contents |
 |---|---|---|
@@ -19,7 +19,7 @@ Every behaviour here comes from the reference manual, the reference `lua5.5` bin
 | | `string/pack.rs` | `pack unpack packsize` |
 | `utf8` | `orbit-std/src/utf8.rs` | The `utf8` library |
 | `table` | `table.rs`, `table/slow.rs`, `builtins/table.orb` | The `table` library (`insert`, `remove` and `sort` are written in OrbitScript, ADR-11) |
-| `math` | `math/mod.rs`, `math/rng.rs` | The `math` library and its xoshiro256** generator |
+| `math` | `orbit-std/src/math/mod.rs`, `math/rng.rs` | The `math` library and its xoshiro256** generator |
 
 The engines (`pattern`, `format`, `pack`, `rng`, UTF-8 decoding) are plain functions over bytes and numbers with no VM access. The glue converts arguments, calls the engine and turns its typed errors into Lua errors with lua5.5's wording. Keeping the engines pure lets unit tests and the differential fuzzers drive them directly, and keeps them independent of Lua's calling conventions.
 
@@ -68,7 +68,7 @@ flowchart LR
     slow -- finished --> done
 ```
 
-`NativeCtx`'s `*_now` helpers ([VM semantics](vm-semantics.md#natives)) give the slow paths `index`, `set_index`, `length`, `less_than` and `equal` with any metamethod already run, so each function reads as the loop it is. `math.max` and `math.min` compare through `less_than_now` the same way.
+`NativeCtx`'s `*_now` helpers ([VM semantics](vm-semantics.md#natives)) give the slow paths `index`, `set_index`, `length`, `less_than` and `equal` with any metamethod already run, so each function reads as the loop it is. `math.max` and `math.min`, on the public API, compare with `Stack::compare`, which runs `__lt` nested too.
 
 **sort.** `sort` is written in OrbitScript (`stdlib/builtins/table.orb`, ADR-11), with a native fast path for arrays of only numbers or only strings and no comparator. The elements are copied into a scratch table, sorted there and written back. The algorithm is a bottom-up merge sort, because every comparison may be a call (a comparator or `__lt`). Merge sort does about n·log₂n − n comparisons, fewer than quicksort's average of about 1.39·n·log₂n, and comparisons dominate when they are Lua calls. Its scratch half needs a second table of n slots.
 

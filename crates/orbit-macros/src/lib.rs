@@ -32,6 +32,12 @@
 //!   gives up; either way the full native runs instead, so the body runs
 //!   again with the same arguments, and so must have no side effects. It
 //!   must not panic: only the full native catches panics.
+//! - `fast = path`: a hand-written fast path instead (an
+//!   `orbit::stack::PureFn`), for a native that `pure` can't express, such
+//!   as one that runs metamethods for some arguments. It gets the argument
+//!   values and gives the native's one result, or `None` to run the full
+//!   native, under the same rules as `pure`'s: it must give what the full
+//!   native would, with no side effects and no panic. Not with `pure`.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -50,15 +56,16 @@ pub fn native(attr: TokenStream, item: TokenStream) -> TokenStream {
     quote!(#f #generated).into()
 }
 
-/// The attribute's options: `name = "lib.f"` and `crate = path`, each at
-/// most once, in any order.
+/// The attribute's options: `name = "lib.f"`, `crate = path`, `pure` and
+/// `fast = path`, each at most once, in any order.
 struct Options {
     name: Option<LitStr>,
     krate: Option<Path>,
     pure: bool,
+    fast: Option<Path>,
 }
 
-const USAGE: &str = "#[native] takes `name = \"lib.f\"`, `crate = path` and `pure`";
+const USAGE: &str = "#[native] takes `name = \"lib.f\"`, `crate = path`, `pure` and `fast = path`";
 
 impl syn::parse::Parse for Options {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Options> {
@@ -66,6 +73,7 @@ impl syn::parse::Parse for Options {
             name: None,
             krate: None,
             pure: false,
+            fast: None,
         };
         while !input.is_empty() {
             if input.peek(Token![crate]) {
@@ -82,6 +90,12 @@ impl syn::parse::Parse for Options {
                         return Err(Error::new(key.span(), "`pure` given twice"));
                     }
                     options.pure = true;
+                } else if key == "fast" {
+                    input.parse::<Token![=]>()?;
+                    if options.fast.is_some() {
+                        return Err(Error::new(key.span(), "`fast` given twice"));
+                    }
+                    options.fast = Some(input.parse()?);
                 } else if key != "name" {
                     return Err(Error::new(key.span(), USAGE));
                 } else {
@@ -96,6 +110,12 @@ impl syn::parse::Parse for Options {
                 break;
             }
             input.parse::<Token![,]>()?;
+        }
+        if let (true, Some(fast)) = (options.pure, &options.fast) {
+            return Err(Error::new(
+                fast.span(),
+                "`fast` names a hand-written fast path; `pure` generates one: give one of them",
+            ));
         }
         Ok(options)
     }
@@ -249,6 +269,11 @@ fn expand(f: &ItemFn, options: Options) -> syn::Result<proc_macro2::TokenStream>
 
     let pure = if options.pure {
         pure_path(&krate, ident, &types)?
+    } else if let Some(fast) = &options.fast {
+        quote_spanned! {fast.span()=>
+            const PURE: ::core::option::Option<#krate::stack::PureFn> =
+                ::core::option::Option::Some(#fast);
+        }
     } else {
         quote!()
     };

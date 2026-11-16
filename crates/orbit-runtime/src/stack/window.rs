@@ -137,11 +137,6 @@ impl LibraryRow {
         }
     }
 
-    /// The same function under another name (`math.atan2` for `atan`).
-    pub(crate) const fn named(self, name: &'static str) -> LibraryRow {
-        LibraryRow { name, ..self }
-    }
-
     /// A hand-written fast path, for a raw native.
     pub(crate) const fn with_fast(self, fast: vm::FastFn) -> LibraryRow {
         LibraryRow {
@@ -395,21 +390,32 @@ impl<'s> Stack<'s> {
 
     #[inline]
     fn get(&self, idx: i32) -> RawValue {
-        match self.slot(idx) {
+        self.given(idx).unwrap_or(RawValue::Nil)
+    }
+
+    /// The value at `idx`, or `None` when the index is outside the window.
+    /// An argument's index (positive) is resolved in place, as every
+    /// native's argument checks and [`Stack::compare`] ask for one.
+    #[inline(always)]
+    pub(crate) fn given(&self, idx: i32) -> Option<RawValue> {
+        if idx > 0 {
+            let at = idx as usize - 1;
+            return if at < self.ctx.len() {
+                Some(self.ctx.arg(at))
+            } else {
+                None
+            };
+        }
+        self.given_slot(idx)
+    }
+
+    fn given_slot(&self, idx: i32) -> Option<RawValue> {
+        Some(match self.slot(idx) {
             Slot::Stack(i) => self.ctx.arg(i),
             Slot::Registry => RawValue::Table(self.ctx.vm.rt.registry),
             Slot::Upvalue(i) => self.ctx.upvalue(i),
-            Slot::None => RawValue::Nil,
-        }
-    }
-
-    /// Argument `i` as it came, or `None` when it is absent.
-    #[inline]
-    pub(crate) fn given(&self, i: i32) -> Option<RawValue> {
-        match self.slot(i) {
-            Slot::None => None,
-            _ => Some(self.get(i)),
-        }
+            Slot::None => return None,
+        })
     }
 
     /// Push a value the window already holds (an intrinsic's result).
@@ -1038,10 +1044,14 @@ impl<'s> Stack<'s> {
     /// Compare the values at `a` and `b` as the operator would, metamethods
     /// included; false if either index is outside the window.
     pub fn compare(&mut self, a: i32, b: i32, op: CompareOp) -> StackResult<bool> {
-        if self.is_none(a) || self.is_none(b) {
+        let (Some(x), Some(y)) = (self.given(a), self.given(b)) else {
             return Ok(false);
+        };
+        if op == CompareOp::Lt {
+            // A `__lt` function is called straight away, as `math.max`,
+            // `math.min` and the like call it once per argument.
+            return Ok(self.ctx.less_than_now(x, y)?);
         }
-        let (x, y) = (self.get(a), self.get(b));
         // A Lua 5.4 build answers a missing `__le` with `__lt` (ADR-14).
         let negate = op == CompareOp::Le && self.ctx.le_via_lt(x, y);
         let m = match op {

@@ -1399,37 +1399,6 @@ impl NativeCtx<'_> {
         }
     }
 
-    /// `a < b` with `__lt`, run now; a `__lt` function is called straight
-    /// away.
-    pub(crate) fn less_than_now(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
-        let plain = |v: Value| matches!(v, Value::Int(_) | Value::Float(_) | Value::Str(_));
-        if !(plain(a) && plain(b)) {
-            let heap = &self.vm.heap;
-            let metas = &self.vm.rt.metas;
-            let e = MetaField::Lt;
-            // A table's own metatable first, as `binary_handler` takes it.
-            let h = match a {
-                Value::Table(t) => match heap.get(t).meta {
-                    Some(mt) => heap.get(mt).meta_field(heap, e, metas.field_names.name(e)),
-                    None => Value::Nil,
-                },
-                _ => Value::Nil,
-            };
-            let h = if h.is_nil() {
-                meta::binary_handler(heap, metas, e, a, b)
-            } else {
-                h
-            };
-            if h.is_function() {
-                return Ok(!self.call_handler(h, &[a, b])?.is_falsy());
-            }
-        }
-        match self.less_than(a, b)? {
-            Meta::Done(r) => Ok(r),
-            Meta::Call { nargs } => Ok(!self.meta_value(nargs)?.is_falsy()),
-        }
-    }
-
     /// `a == b` with `__eq`, run now.
     pub(crate) fn equal_now(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
         match self.equal(a, b)? {
@@ -1470,6 +1439,37 @@ impl NativeCtx<'_> {
     pub(crate) fn length(&mut self, v: Value) -> Result<Meta<Value>, LuaError> {
         let r = crate::vm::cold::op_len(&self.vm.heap, &self.vm.rt.metas, v);
         self.meta_result(r)
+    }
+
+    /// `a < b` with `__lt`, run now; a `__lt` function is called straight
+    /// away.
+    pub(crate) fn less_than_now(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
+        let plain = |v: Value| matches!(v, Value::Int(_) | Value::Float(_) | Value::Str(_));
+        if !(plain(a) && plain(b)) {
+            let heap = &self.vm.heap;
+            let metas = &self.vm.rt.metas;
+            let e = MetaField::Lt;
+            // A table's own metatable first, as `binary_handler` takes it.
+            let h = match a {
+                Value::Table(t) => match heap.get(t).meta {
+                    Some(mt) => heap.get(mt).meta_field(heap, e, metas.field_names.name(e)),
+                    None => Value::Nil,
+                },
+                _ => Value::Nil,
+            };
+            let h = if h.is_nil() {
+                meta::binary_handler(heap, metas, e, a, b)
+            } else {
+                h
+            };
+            if h.is_function() {
+                return Ok(!self.call_handler(h, &[a, b])?.is_falsy());
+            }
+        }
+        match self.less_than(a, b)? {
+            Meta::Done(r) => Ok(r),
+            Meta::Call { nargs } => Ok(!self.meta_value(nargs)?.is_falsy()),
+        }
     }
 
     /// `a < b` with `__lt`.

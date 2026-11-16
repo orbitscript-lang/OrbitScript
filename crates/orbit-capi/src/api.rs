@@ -173,6 +173,7 @@ enum Lib {
     /// `orbit-std`'s: the ones that touch the system, and the ones written
     /// on the public API.
     Io,
+    Math,
     Os,
     Utf8,
 }
@@ -185,7 +186,7 @@ const LIBS: [(Lib, &[u8]); 10] = [
     (Lib::Runtime(Library::Coroutine), b"coroutine"),
     (Lib::Runtime(Library::Debug), b"debug"),
     (Lib::Io, b"io"),
-    (Lib::Runtime(Library::Math), b"math"),
+    (Lib::Math, b"math"),
     (Lib::Os, b"os"),
     (Lib::Runtime(Library::String), b"string"),
     (Lib::Runtime(Library::Table), b"table"),
@@ -216,6 +217,7 @@ pub(crate) fn openlib(c: &mut Stack<'_>, lib: i32) -> Res<i32> {
     let opened = match lib {
         Lib::Io => c.push_from_scope(|s| orbit_std::open_io(s).ok().map(|t| t.to_value())),
         Lib::Os => c.push_from_scope(|s| orbit_std::open_os(s).ok().map(|t| t.to_value())),
+        Lib::Math => c.push_from_scope(|s| orbit_std::open_math(s).ok().map(|t| t.to_value())),
         Lib::Utf8 => c.push_from_scope(|s| orbit_std::open_utf8(s).ok().map(|t| t.to_value())),
         Lib::Runtime(l) => {
             let opened = c.open_library(l);

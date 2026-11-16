@@ -188,6 +188,68 @@ impl Number {
     }
 }
 
+/// `i < f` mathematically.
+#[inline]
+pub fn int_lt_float(i: i64, f: f64) -> bool {
+    if f >= TWO_63 {
+        true
+    } else if f > -TWO_63 {
+        i < f.ceil() as i64
+    } else {
+        false // f is NaN or below every integer
+    }
+}
+
+/// `i <= f` mathematically.
+#[inline]
+pub fn int_le_float(i: i64, f: f64) -> bool {
+    if f >= TWO_63 {
+        true
+    } else if f >= -TWO_63 {
+        i <= f.floor() as i64
+    } else {
+        false
+    }
+}
+
+/// `f < i` mathematically.
+#[inline]
+pub fn float_lt_int(f: f64, i: i64) -> bool {
+    if f >= TWO_63 || f.is_nan() {
+        false
+    } else if f >= -TWO_63 {
+        (f.floor() as i64) < i
+    } else {
+        true
+    }
+}
+
+/// `f <= i` mathematically.
+#[inline]
+pub fn float_le_int(f: f64, i: i64) -> bool {
+    if f >= TWO_63 || f.is_nan() {
+        false
+    } else if f >= -TWO_63 {
+        f.ceil() as i64 <= i
+    } else {
+        true
+    }
+}
+
+impl Number {
+    /// `self < rhs` mathematically, as Lua's `<` compares numbers: an
+    /// integer and a float compare exactly, without converting either.
+    #[inline]
+    pub fn less_than(self, rhs: Number) -> bool {
+        match (self, rhs) {
+            (Number::Int(a), Number::Int(b)) => a < b,
+            (Number::Int(a), Number::Float(b)) => int_lt_float(a, b),
+            (Number::Float(a), Number::Int(b)) => float_lt_int(a, b),
+            (Number::Float(a), Number::Float(b)) => a < b,
+        }
+    }
+}
+
 /// Floored modulo of floats.
 #[inline]
 pub fn float_mod(a: f64, b: f64) -> f64 {
@@ -209,6 +271,21 @@ pub fn float_idiv(a: f64, b: f64) -> f64 {
 mod tests {
     use super::Number::{Float, Int};
     use super::*;
+
+    #[test]
+    fn mixed_comparisons() {
+        assert!(int_lt_float(1, 1.5));
+        assert!(!int_lt_float(2, 1.5));
+        assert!(int_le_float(1, 1.0));
+        assert!(!int_lt_float(1, f64::NAN));
+        assert!(int_lt_float(i64::MAX, TWO_63));
+        assert!(float_lt_int(-TWO_63 * 2.0, i64::MIN));
+        assert!(float_le_int(-TWO_63, i64::MIN));
+        assert!(!float_lt_int(-TWO_63, i64::MIN));
+        assert!(Int(1).less_than(Float(1.5)));
+        assert!(!Float(f64::NAN).less_than(Int(0)));
+        assert!(Float(-1.0).less_than(Float(0.0)));
+    }
 
     #[test]
     fn bitwise() {

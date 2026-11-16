@@ -16,7 +16,6 @@ mod debug;
 mod dump;
 mod intrinsics;
 mod load;
-mod math;
 mod package;
 mod string;
 mod table;
@@ -88,7 +87,6 @@ pub enum Lib {
     Coroutine,
     Debug,
     Io,
-    Math,
     Os,
     String,
     Table,
@@ -96,11 +94,10 @@ pub enum Lib {
 
 impl Lib {
     /// The order [`open_libs`] opens them in.
-    pub const OPEN_ORDER: [Lib; 9] = [
+    pub const OPEN_ORDER: [Lib; 8] = [
         Lib::Base,
         Lib::String,
         Lib::Table,
-        Lib::Math,
         Lib::Os,
         Lib::Io,
         Lib::Package,
@@ -116,7 +113,6 @@ impl Lib {
             Lib::Coroutine => "coroutine",
             Lib::Debug => "debug",
             Lib::Io => "io",
-            Lib::Math => "math",
             Lib::Os => "os",
             Lib::String => "string",
             Lib::Table => "table",
@@ -155,14 +151,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
                 let k = vm.new_str(&name);
                 vm.table_set(t, k, f);
             }
-            true
-        }
-        Lib::Math => {
-            let m = open_lib(vm, "math", math::FUNCTIONS);
-            if orbit_lua_version::LUA.is_5_4() {
-                add_functions(vm, m, math::COMPAT_5_3);
-            }
-            math::constants(vm, m);
             true
         }
         Lib::Package => {

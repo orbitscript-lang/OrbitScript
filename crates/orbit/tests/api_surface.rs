@@ -217,7 +217,7 @@ fn host_function_calls() {
             "local _, e = pcall(positive, -1)
              local _, m = pcall(oom)
              local function where() return trace() end
-             return count(1, nil, 3), e, via(math.max, 3, 9), m, where()",
+             return count(1, nil, 3), e, via(select, -1, 9), m, where()",
         )?;
         assert_eq!(out[0], "3");
         assert_eq!(out[1], "bad argument #1 to 'positive' (not positive)");

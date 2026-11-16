@@ -15,6 +15,8 @@ orbit-hir = { path = "../orbit-hir" }
 # The run tests compile lowered programs and execute them on the VM.
 orbit = { path = "../orbit" }
 orbit-compiler = { path = "../orbit-compiler" }
+# For `math`, which the programs use.
+orbit-std = { path = "../orbit-std", default-features = false }
 
 [lints]
 workspace = true

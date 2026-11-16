@@ -6,60 +6,15 @@ use crate::object::Value;
 use orbit_lua_version::LUA;
 
 pub use orbit_bytecode::number::Number;
-use orbit_bytecode::number::TWO_63;
 pub use orbit_bytecode::number::float_to_int;
 pub(crate) use orbit_bytecode::number::{ArithError, ArithOp};
+pub(crate) use orbit_bytecode::number::{float_le_int, float_lt_int, int_le_float, int_lt_float};
 use orbit_lua_text::Numeral;
-pub(crate) use orbit_lua_text::ldexp;
 
 /// `i == f` mathematically.
 #[inline]
 pub fn int_eq_float(i: i64, f: f64) -> bool {
     float_to_int(f) == Some(i)
-}
-
-/// `i < f` mathematically.
-pub(crate) fn int_lt_float(i: i64, f: f64) -> bool {
-    if f >= TWO_63 {
-        true
-    } else if f > -TWO_63 {
-        i < f.ceil() as i64
-    } else {
-        false // f is NaN or below every integer
-    }
-}
-
-/// `i <= f` mathematically.
-pub(crate) fn int_le_float(i: i64, f: f64) -> bool {
-    if f >= TWO_63 {
-        true
-    } else if f >= -TWO_63 {
-        i <= f.floor() as i64
-    } else {
-        false
-    }
-}
-
-/// `f < i` mathematically.
-pub(crate) fn float_lt_int(f: f64, i: i64) -> bool {
-    if f >= TWO_63 || f.is_nan() {
-        false
-    } else if f >= -TWO_63 {
-        (f.floor() as i64) < i
-    } else {
-        true
-    }
-}
-
-/// `f <= i` mathematically.
-pub(crate) fn float_le_int(f: f64, i: i64) -> bool {
-    if f >= TWO_63 || f.is_nan() {
-        false
-    } else if f >= -TWO_63 {
-        f.ceil() as i64 <= i
-    } else {
-        true
-    }
 }
 
 fn is_space(b: u8) -> bool {
@@ -334,15 +289,8 @@ mod tests {
     }
 
     #[test]
-    fn mixed_comparisons() {
-        assert!(int_lt_float(1, 1.5));
-        assert!(!int_lt_float(2, 1.5));
-        assert!(int_le_float(1, 1.0));
-        assert!(!int_lt_float(1, f64::NAN));
-        assert!(int_lt_float(i64::MAX, TWO_63));
-        assert!(float_lt_int(-TWO_63 * 2.0, i64::MIN));
-        assert!(float_le_int(-TWO_63, i64::MIN));
-        assert!(!float_lt_int(-TWO_63, i64::MIN));
+    fn int_float_equality() {
+        use orbit_bytecode::number::TWO_63;
         assert!(int_eq_float(3, 3.0));
         assert!(!int_eq_float(i64::MAX, TWO_63));
     }

@@ -35,7 +35,7 @@ fn interrupt_stops_endless_loops() {
     for body in [
         "while true do end",
         "repeat local x = 1 until false",
-        "for i = 1, math.maxinteger do end",
+        "for i = 1, 0x7fffffffffffffff do end",
         "for k in function() return 1 end do end",
     ] {
         let src = format!(

@@ -7,7 +7,7 @@ assert(s == 600000)
 
 -- Growing a live table past the cap raises a catchable error, and the
 -- handler has room to run.
-local function grow(t) for i = 1, math.huge do t[i] = {} end end
+local function grow(t) for i = 1, 1 << 62 do t[i] = {} end end
 local a = {}
 local ok, msg = pcall(grow, a)
 assert(not ok and msg == "not enough memory" and #a > 1000)
@@ -54,7 +54,7 @@ collectgarbage()
 do
   local held = {}
   local ok, msg = pcall(function()
-    for i = 1, math.huge do
+    for i = 1, 1 << 62 do
       held[i] = {}
       if i == 1000 then debug.sethook(function() end, "", 1000) end
     end
@@ -73,7 +73,7 @@ collectgarbage()
 do
   local cap = 16 * 1024
   local list
-  local function chain() for i = 1, math.huge do list = {list} end end
+  local function chain() for i = 1, 1 << 62 do list = {list} end end
   local ok, msg = pcall(chain)
   assert(not ok and msg == NOMEM)
   assert(collectgarbage("count") > cap)
@@ -121,7 +121,7 @@ do
   local pad = string.rep("x", 4 << 20)
   local here = debug.getinfo(1, "l").currentline
   co = coroutine.create(function()
-    for i = 1, math.huge do
+    for i = 1, 1 << 62 do
       list = {list}
     end
   end)
