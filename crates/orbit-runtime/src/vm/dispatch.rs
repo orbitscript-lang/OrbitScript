@@ -1227,12 +1227,6 @@ impl Vm {
                 } else {
                     exc
                 };
-                // A metamethod that is a Lua function: its frame runs next.
-                if let (false, Exc::Meta(call)) = (HOOKED, &exc) {
-                    if self.enter_meta(call, code[pc - 1], pc) {
-                        continue 'reload;
-                    }
-                }
                 break 'run exc;
             };
             // The instruction at `pc - 1` raised `exc`.
@@ -1363,13 +1357,13 @@ impl Vm {
     /// results. Anything else is the general return.
     #[inline(always)]
     fn return_from_loop(&mut self, src: usize, n: usize) -> Result<Frames, Exc> {
-        let Some((caller, f)) = self.lua_caller() else {
-            return Ok(Frames::Flow(self.do_return(src, n)?));
+        // A metamethod handler's frame returns the way a frame with a
+        // native caller does, out of line, so the loop has no path of
+        // its own for it.
+        let Some((caller, f)) = self.lua_caller().filter(|(_, f)| f.want != META_WANT) else {
+            return Ok(Frames::Flow(self.return_out_of_line(src, n)?));
         };
         let (func, want) = (f.func as usize, f.want);
-        if want == META_WANT {
-            return Ok(Frames::Lua(self.finish_meta(src, n)));
-        }
         self.pop_frame(&f);
         let regs = &mut self.rt.stack.regs;
         if want == MULTI {
@@ -1387,6 +1381,19 @@ impl Vm {
             self.rt.top = func + want;
         }
         Ok(Frames::Lua(caller))
+    }
+
+    /// [`Vm::return_from_loop`] for a frame whose caller isn't a Lua frame,
+    /// or that is a metamethod handler's ([`MetaReturn`]).
+    #[inline(never)]
+    fn return_out_of_line(&mut self, src: usize, n: usize) -> Result<Flow, Exc> {
+        if self.rt.stack.frames.last().map(|f| f.want) == Some(META_WANT)
+            && self.lua_caller().is_some()
+        {
+            self.finish_meta(src, n);
+            return Ok(Flow::Reload);
+        }
+        self.do_return(src, n)
     }
 
     /// [`Vm::return_from_loop`] for a frame that really wants

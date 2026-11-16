@@ -36,6 +36,12 @@ impl Vm {
         if let Exc::Left(e) = x {
             return Err(e);
         }
+        // A metamethod that is a Lua function: its frame runs next.
+        if let Exc::Meta(call) = &x {
+            if self.enter_meta(call, pc) {
+                return Ok(Flow::Reload);
+            }
+        }
         self.rt.stack.frames.last_mut().expect("a frame").pc = pc as u32;
         self.raise(x)
     }
@@ -212,30 +218,31 @@ impl Vm {
         self.call_value(at, n, 1)
     }
 
-    /// Start metamethod call `call`, which instruction `op` (before `pc`)
-    /// of the running (Lua) frame asked for, when its handler is a Lua
+    /// Start metamethod call `call`, which the instruction before `pc` of
+    /// the running (Lua) frame asked for, when its handler is a Lua
     /// function, no hook is armed and the instruction finishes with a
     /// store, a branch or a discard: push the handler's frame alone,
     /// carrying how to finish ([`MetaReturn`]), for the dispatch loop to
     /// run next. False, with nothing changed, for everything else, which
     /// [`Vm::call_meta`] handles.
     #[inline(never)]
-    pub(crate) fn enter_meta(&mut self, call: &MetaCall, op: Op, pc: usize) -> bool {
+    pub(crate) fn enter_meta(&mut self, call: &MetaCall, pc: usize) -> bool {
         let Value::Closure(c) = call.f else {
             return false;
         };
         if self.rt.stack.hook.armed() {
             return false;
         }
+        let f = self.rt.stack.frames.last().expect("a frame");
+        let (base, FrameKind::Lua { closure, .. }) = (f.base as usize, f.kind) else {
+            unreachable!("metamethods are requested by Lua frames")
+        };
+        let op = self.heap.get(closure).code.code[pc - 1];
         let Some(ret) = MetaReturn::of(self.action_of(op, call.aux), call.field) else {
             return false;
         };
         let s = &mut self.rt.stack;
-        let f = s.frames.last_mut().expect("a frame");
-        f.pc = pc as u32;
-        let (base, FrameKind::Lua { closure, .. }) = (f.base as usize, f.kind) else {
-            unreachable!("metamethods are requested by Lua frames")
-        };
+        s.frames.last_mut().expect("a frame").pc = pc as u32;
         let at = base + self.heap.get(closure).code.nregs as usize;
         let n = call.nargs as usize;
         let cdepth = s.cdepth().saturating_add(1);
