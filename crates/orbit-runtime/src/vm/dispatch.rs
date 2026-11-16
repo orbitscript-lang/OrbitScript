@@ -1781,7 +1781,7 @@ pub(super) fn method_lookup(
 /// is a table. Read packed: a merged `Value` would leave the handle's upper
 /// payload bytes to the compiler (see [`Table::cached_str_packed`]).
 #[inline(always)]
-fn cached_table(tab: &Table, cache: &FieldCache) -> Option<Gc<Table>> {
+pub(in crate::vm) fn cached_table(tab: &Table, cache: &FieldCache) -> Option<Gc<Table>> {
     match tab.cached_str_packed(cache.slot.get() as usize, cache.key) {
         Some((Tag::Table, p)) => Some(Gc::from_bits(p.bits())),
         _ => None,

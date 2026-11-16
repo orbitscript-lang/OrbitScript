@@ -9,6 +9,7 @@
 //! Everything else is the second cut: same two tiers, same exits.
 #![allow(unsafe_code)]
 
+use crate::object::ProtoCode;
 use super::*;
 use crate::vm::Frame;
 use std::rc::Rc;
@@ -50,7 +51,7 @@ fn write_packed(dst: &mut Value, tag: Tag, p: crate::object::value::Payload) {
 #[inline(always)]
 fn pc_of(vm: &Vm, ip: *const Insn) -> usize {
     // SAFETY: `ip` points into `vm.rt.words`, the running code.
-    unsafe { ip.offset_from(vm.rt.words.as_ptr()) as usize }
+    unsafe { ip.offset_from(vm.rt.wp) as usize }
 }
 
 #[inline(always)]
@@ -87,7 +88,41 @@ fn next_counted(vm: &mut Vm, w: *mut Value, ip: *const Insn) -> Step {
 #[inline(never)]
 fn pause(vm: &mut Vm, ip: *const Insn) -> Step {
     let pc = pc_of(vm, ip);
+    sync(vm);
     out_of_fuel(vm, pc)
+}
+
+/// The running code as the handlers of this file see it.
+macro_rules! code {
+    ($vm:ident) => {
+        // SAFETY: the code of the running closure, which its frame keeps
+        // alive.
+        unsafe { &*$vm.rt.code }
+    };
+}
+
+/// Make the VM's own idea of the running code match this file's, which
+/// calls and returns here change without it.
+#[inline(always)]
+fn sync(vm: &mut Vm) {
+    if vm.rt.code != Rc::as_ptr(&vm.rt.cur) {
+        sync_cold(vm);
+    }
+}
+
+#[inline(never)]
+fn sync_cold(vm: &mut Vm) {
+    let (closure, code_id) = (vm.rt.closure, vm.rt.code as usize);
+    let _ = switch_code(vm, closure, code_id);
+}
+
+/// Whether moving to other code has to go through the VM's own handlers.
+#[inline(always)]
+fn watched(_vm: &Vm) -> bool {
+    #[cfg(feature = "debugger")]
+    return _vm.rt.debug.watch;
+    #[cfg(not(feature = "debugger"))]
+    false
 }
 
 /// Run the instruction before `ip` on the handler with the whole VM, then
@@ -95,6 +130,7 @@ fn pause(vm: &mut Vm, ip: *const Insn) -> Step {
 #[inline(never)]
 fn slow(vm: &mut Vm, ip: *const Insn) -> Step {
     let pc = pc_of(vm, ip) - 1;
+    sync(vm);
     let base = vm.rt.stack.running().base as usize;
     let _ = Window::take(&mut vm.rt.stack.regs, base);
     let i = vm.rt.cur.words[pc];
@@ -184,18 +220,17 @@ impl Vm {
 /// Run the frame at `base` from `pc` on the handlers of this file.
 #[inline(always)]
 fn quick_from(vm: &mut Vm, base: usize, pc: usize) -> Step {
-    if !Rc::ptr_eq(&vm.rt.words, &vm.rt.cur.words) {
-        vm.rt.words = vm.rt.cur.words.clone();
-    }
+    vm.rt.code = Rc::as_ptr(&vm.rt.cur);
+    vm.rt.wp = vm.rt.cur.words.as_ptr();
     let _ = Window::take(&mut vm.rt.stack.regs, base);
     let regs = &mut vm.rt.stack.regs;
     vm.rt.stack_len = regs.len();
-    assert!(base >= 1 && pc < vm.rt.words.len());
+    assert!(base >= 1 && pc < vm.rt.cur.words.len());
     // SAFETY: the stack covers the window at `base` (sized above), and
     // `pc` is inside the code (checked above). Nothing a handler of this
     // file calls moves the stack; `slow` comes back through here.
     let w = unsafe { regs.as_mut_ptr().add(base - 1) };
-    let ip = unsafe { vm.rt.words.as_ptr().add(pc) };
+    let ip = unsafe { vm.rt.wp.add(pc) };
     next(vm, w, ip)
 }
 
@@ -238,7 +273,7 @@ q! {fn q_load_int(vm, w, pc, i) {
 q! {fn q_load_const(vm, w, pc, i) {
     let (dst, k) = i.r_load_const();
     let mut r = qwin!(vm, w, pc);
-    match vm.rt.cur.consts.get(k as usize) {
+    match code!(vm).consts.get(k as usize) {
         Some(&v) => r[dst] = v,
         None => return slow(vm, pc),
     }
@@ -305,7 +340,7 @@ q! {fn q_get_global(vm, w, pc, i) {
     let Value::Table(t) = vm.heap.get(env_cell).value else {
         return slow(vm, pc);
     };
-    let Some(cache) = vm.rt.cur.caches.get(ic as usize) else {
+    let Some(cache) = code!(vm).caches.get(ic as usize) else {
         return slow(vm, pc);
     };
     let tab = vm.heap.get(t);
@@ -325,7 +360,7 @@ q! {fn q_get_field(vm, w, pc, i) {
     let &Value::Table(t) = &r[obj] else {
         return slow(vm, pc);
     };
-    let Some(cache) = vm.rt.cur.caches.get(ic as usize) else {
+    let Some(cache) = code!(vm).caches.get(ic as usize) else {
         return slow(vm, pc);
     };
     let tab = vm.heap.get(t);
@@ -344,20 +379,40 @@ q! {fn q_set_field(vm, w, pc, i) {
     let &Value::Table(t) = &r[obj] else {
         return slow(vm, pc);
     };
-    let Some(cache) = vm.rt.cur.caches.get(ic as usize) else {
+    let Some(cache) = code!(vm).caches.get(ic as usize) else {
         return slow(vm, pc);
     };
     let slot = cache.slot.get() as usize;
     let tab = vm.heap.get(t);
-    if matches!(tab.cached_str_packed(slot, cache.key),
+    if !matches!(tab.cached_str_packed(slot, cache.key),
         Some((tag, _)) if tab.meta.is_none() || tag != Tag::Nil)
     {
-        by_parts!(r, src, |v| vm.heap.write_for(t, &v).set_slot(slot, v));
-    } else {
         return slow(vm, pc);
     }
+    // A number needs no barrier, and so no call; anything else goes on in
+    // a function that can afford one.
+    let v = match r[src] {
+        Value::Int(n) => Value::Int(n),
+        Value::Float(f) => Value::Float(f),
+        _ => return set_field_handle(vm, w, pc, i),
+    };
+    vm.heap.write_for(t, &v).set_slot(slot, v);
     next(vm, w, pc)
 }}
+
+/// The store of [`q_set_field`], cache hit already known, for a value that
+/// may need the write barrier.
+#[inline(never)]
+fn set_field_handle(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+    let (obj, _key, src, ic) = i.r_set_field();
+    let r = qwin!(vm, w, pc);
+    let (&Value::Table(t), Some(cache)) = (&r[obj], code!(vm).caches.get(ic as usize)) else {
+        return slow(vm, pc);
+    };
+    let slot = cache.slot.get() as usize;
+    by_parts!(r, src, |v| vm.heap.write_for(t, &v).set_slot(slot, v));
+    next(vm, w, pc)
+}
 
 /// Store a register into the array part of `t`; `false` when the store
 /// is not that simple. Out of line and given the register by reference: a
@@ -413,9 +468,44 @@ q! {fn q_set_index_int(vm, w, pc, i) {
 }}
 
 q! {fn q_self_call(vm, w, pc, i) {
+    let (dst, obj, _key, ic) = i.r_self_call();
+    let mut r = qwin!(vm, w, pc);
+    let cur = code!(vm);
+    let (Value::Table(t), Some([cm, ci])) = (r[obj], cur.caches.get(ic as usize..ic as usize + 2)) else {
+        return self_call_miss(vm, w, pc, i);
+    };
+    // The two cache hits: the method in the object itself, or in the
+    // table its metatable's `__index` names.
+    let heap = &vm.heap;
+    let tab = heap.get(t);
+    let slot = cm.slot.get() as usize;
+    let m = match tab.cached_str_packed(slot, cm.key) {
+        Some(m) if m.0 != Tag::Nil => m,
+        Some(_) => return self_call_miss(vm, w, pc, i),
+        None => {
+            let Some(mt) = tab.meta else {
+                return self_call_miss(vm, w, pc, i);
+            };
+            let Some(c) = crate::vm::dispatch::cached_table(heap.get(mt), ci) else {
+                return self_call_miss(vm, w, pc, i);
+            };
+            match heap.get(c).cached_str_packed(slot, cm.key) {
+                Some(m) if m.0 != Tag::Nil => m,
+                _ => return self_call_miss(vm, w, pc, i),
+            }
+        }
+    };
+    r[dst + 1] = Value::Table(t);
+    write_packed(&mut r[dst], m.0, m.1);
+    next(vm, w, pc)
+}}
+
+/// A method call whose caches miss: the whole lookup.
+#[inline(never)]
+fn self_call_miss(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
     let (dst, obj, key, ic) = i.r_self_call();
     let mut r = qwin!(vm, w, pc);
-    let cur = &vm.rt.cur;
+    let cur = code!(vm);
     let (Some(&Value::Str(k)), Value::Table(t)) = (cur.consts.get(key as usize), r[obj]) else {
         return slow(vm, pc);
     };
@@ -427,7 +517,7 @@ q! {fn q_self_call(vm, w, pc, i) {
         None => return slow(vm, pc),
     }
     next(vm, w, pc)
-}}
+}
 
 // Arithmetic. The handlers take the number cases that need no call;
 // anything else is slow.
@@ -470,7 +560,7 @@ macro_rules! q_arith {
 
 macro_rules! kk {
     ($vm:ident, $pc:ident, $k:expr) => {
-        match $vm.rt.cur.consts.get($k as usize) {
+        match code!($vm).consts.get($k as usize) {
             Some(k) => k,
             None => return slow($vm, $pc),
         }
@@ -682,14 +772,17 @@ q! {fn q_call(vm, w, pc, i) {
     let Value::Closure(c) = r[func] else {
         return slow(vm, pc);
     };
-    let same = c == vm.rt.closure;
-    let shape = if same {
-        Shape::of(&vm.rt.cur)
+    let code: &ProtoCode = if c == vm.rt.closure {
+        code!(vm)
     } else {
-        Shape::of(&vm.heap.get(c).code)
+        // SAFETY: the callee's frame, pushed below, keeps it alive.
+        unsafe { &*Rc::as_ptr(&vm.heap.get(c).code) }
     };
+    let code_ptr = code as *const ProtoCode;
+    let other_watched = code_ptr != vm.rt.code && watched(vm);
     let frames = &mut vm.rt.stack.frames;
-    let room = frames.len() < frames.capacity();
+    let depth = frames.len();
+    let room = depth < frames.capacity();
     let Some(caller) = frames.last_mut() else {
         return slow(vm, pc);
     };
@@ -697,54 +790,57 @@ q! {fn q_call(vm, w, pc, i) {
     let covered = fa + 1 + WINDOW <= vm.rt.stack_len;
     // The cases with something to grow or fill are the slow handler's.
     if nargs == MULTI
-        || nargs < shape.nparams
-        || shape.is_vararg
-        || shape.ncells > 0
+        || nargs < code.nparams
+        || code.is_vararg
+        || code.ncells > 0
         || !room
         || !covered
-        || fa + 1 + (shape.nregs as usize).max(nargs as usize) > vm.rt.host.max_stack()
+        || fa + 1 + (code.nregs as usize).max(nargs as usize) > vm.rt.host.max_stack()
+        || other_watched
     {
         return slow(vm, pc);
     }
-    caller.pc = unsafe { pc.offset_from(vm.rt.words.as_ptr()) } as u32;
+    caller.pc = unsafe { pc.offset_from(vm.rt.wp) } as u32;
     let cell_base = vm.rt.stack.cells.len() as u32;
-    frames.push(Frame {
-        kind: FrameKind::Lua {
-            closure: c,
-            code_id: shape.code_id,
-        },
-        func: fa as u32,
-        base: fa as u32 + 1,
-        pc: 0,
-        cell_base,
-        nvarargs: 0,
-        want: nresults,
-        tail: false,
-        extra: 0,
-        cdepth: 0,
-    });
-    if shape.code_id != Rc::as_ptr(&vm.rt.cur) as usize {
-        return enter_other(vm, w, pc, i);
+    // SAFETY: there is room for one more frame (checked above).
+    unsafe {
+        frames.as_mut_ptr().add(depth).write(Frame {
+            kind: FrameKind::Lua {
+                closure: c,
+                code_id: code_ptr as usize,
+            },
+            func: fa as u32,
+            base: fa as u32 + 1,
+            pc: 0,
+            cell_base,
+            nvarargs: 0,
+            want: nresults,
+            tail: false,
+            extra: 0,
+            cdepth: 0,
+        });
+        frames.set_len(depth + 1);
     }
     vm.rt.closure = c;
+    vm.rt.code = code_ptr;
+    let ip = code.words.as_ptr();
+    vm.rt.wp = ip;
     // SAFETY: the callee's window is covered (checked above).
-    let ip = vm.rt.words.as_ptr();
     next_counted(vm, unsafe { w.add(func as usize + 1) }, ip)
 }}
 
-/// The rest of a call of a function with other code than the caller's.
-#[inline(never)]
-fn enter_other(vm: &mut Vm, w: *mut Value, _pc: *const Insn, i: Insn) -> Step {
-    let (func, _, _) = i.r_call();
-    let FrameKind::Lua { closure, code_id } = vm.rt.stack.running().kind else {
-        unreachable!("the frame just pushed")
-    };
-    if switch_code(vm, closure, code_id) {
-        return Step::Reload;
-    }
-    vm.rt.words = vm.rt.cur.words.clone();
-    let ip = vm.rt.words.as_ptr();
-    next_counted(vm, unsafe { w.add(func as usize + 1) }, ip)
+/// Go on in the caller's frame, `up` registers below, at its instruction
+/// `to`, after a return popped the frame above it.
+#[inline(always)]
+fn back(vm: &mut Vm, w: *mut Value, up: usize, to: usize, closure: Gc<Closure>, code_id: usize) -> Step {
+    vm.rt.closure = closure;
+    let code = code_id as *const ProtoCode;
+    vm.rt.code = code;
+    // SAFETY: the caller's code, which its closure keeps alive; `to` is
+    // the instruction after its call, and its frame starts `up` below.
+    let ip = unsafe { (*code).words.as_ptr() };
+    vm.rt.wp = ip;
+    next(vm, unsafe { w.sub(up) }, unsafe { ip.add(to) })
 }
 
 q! {fn q_return1(vm, w, pc, i) {
@@ -757,7 +853,11 @@ q! {fn q_return1(vm, w, pc, i) {
     };
     // Only a frame whose function sits just below its registers, with
     // nothing of its own to release.
-    if f.want != 1 || f.base != f.func + 1 || vm.rt.stack.cells.len() != f.cell_base as usize {
+    if f.want != 1
+        || f.base != f.func + 1
+        || vm.rt.stack.cells.len() != f.cell_base as usize
+        || (code_id != vm.rt.code as usize && watched(vm))
+    {
         return slow(vm, pc);
     }
     let top = f.base as usize;
@@ -768,13 +868,7 @@ q! {fn q_return1(vm, w, pc, i) {
     copy_value(result, &r[src as usize]);
     vm.rt.top = top;
     vm.rt.stack.frames.pop();
-    if code_id != Rc::as_ptr(&vm.rt.cur) as usize {
-        return return_other(vm, w, up, to, closure, code_id);
-    }
-    vm.rt.closure = closure;
-    // SAFETY: the caller's frame starts `up` registers below, and `to`
-    // is the instruction after its call.
-    next(vm, unsafe { w.sub(up) }, unsafe { vm.rt.words.as_ptr().add(to) })
+    back(vm, w, up, to, closure, code_id)
 }}
 
 q! {fn q_return0(vm, w, pc, _i) {
@@ -784,7 +878,11 @@ q! {fn q_return0(vm, w, pc, _i) {
     let FrameKind::Lua { closure, code_id } = caller.kind else {
         return slow(vm, pc);
     };
-    if f.want > 1 || f.base != f.func + 1 || vm.rt.stack.cells.len() != f.cell_base as usize {
+    if f.want > 1
+        || f.base != f.func + 1
+        || vm.rt.stack.cells.len() != f.cell_base as usize
+        || (code_id != vm.rt.code as usize && watched(vm))
+    {
         return slow(vm, pc);
     }
     let (up, to) = ((f.base - caller.base) as usize, caller.pc as usize);
@@ -793,29 +891,8 @@ q! {fn q_return0(vm, w, pc, _i) {
     unsafe { *w = Value::Nil };
     vm.rt.top = f.func as usize + f.want as usize;
     vm.rt.stack.frames.pop();
-    if code_id != Rc::as_ptr(&vm.rt.cur) as usize {
-        return return_other(vm, w, up, to, closure, code_id);
-    }
-    vm.rt.closure = closure;
-    next(vm, unsafe { w.sub(up) }, unsafe { vm.rt.words.as_ptr().add(to) })
+    back(vm, w, up, to, closure, code_id)
 }}
-
-/// The rest of a return to a function with other code than the callee's.
-#[inline(never)]
-fn return_other(
-    vm: &mut Vm,
-    w: *mut Value,
-    up: usize,
-    to: usize,
-    closure: Gc<Closure>,
-    code_id: usize,
-) -> Step {
-    if switch_code(vm, closure, code_id) {
-        return Step::Reload;
-    }
-    vm.rt.words = vm.rt.cur.words.clone();
-    next(vm, unsafe { w.sub(up) }, unsafe { vm.rt.words.as_ptr().add(to) })
-}
 
 // Loops.
 

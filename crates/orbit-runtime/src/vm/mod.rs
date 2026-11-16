@@ -649,6 +649,9 @@ pub(crate) struct VmState {
     pub(crate) words: std::rc::Rc<[orbit_bytecode::insn::Insn]>,
     pub(crate) fuel: u32,
     pub(crate) stack_len: usize,
+    /// The raw cut's running code and its first instruction.
+    pub(crate) code: *const crate::object::func::ProtoCode,
+    pub(crate) wp: *const orbit_bytecode::insn::Insn,
     /// An error on its way from an instruction to the trampoline, with the pc after it.
     pub(crate) pending: Option<(ops::Exc, usize)>,
     /// Placeholder for cell slots not yet initialised by `CellNew`.
@@ -843,6 +846,8 @@ impl Vm {
                 words: std::rc::Rc::new([]),
                 fuel: 0,
                 stack_len: 0,
+                code: std::ptr::null(),
+                wp: std::ptr::null(),
                 pending: None,
                 dead_cell,
                 c_strings: CStrings::default(),
