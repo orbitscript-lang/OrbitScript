@@ -847,7 +847,7 @@ impl Vm {
     fn push_wait_boundary(&mut self) -> Result<usize, LuaError> {
         let at = self.rt.top;
         let cdepth = self.rt.stack.deeper();
-        if self.c_overflow(cdepth) {
+        if self.c_overflow_nested(cdepth) {
             return Err(LuaError::new(self.new_str(b"C stack overflow")));
         }
         let s = &mut self.rt.stack;

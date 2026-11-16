@@ -212,6 +212,9 @@ pub(crate) struct Natives {
     /// building a string needs no allocation of its own
     /// ([`NativeCtx::take_buf`]).
     scratch: Vec<u8>,
+    /// Pattern captures `string.gsub` keeps between calls
+    /// ([`NativeCtx::take_captures`]), off the native stack.
+    captures: Option<Box<crate::stdlib::string::pattern::Captures>>,
 }
 
 impl Natives {
@@ -529,7 +532,7 @@ impl NativeCtx<'_> {
         let at = s.frames.len();
         // The depth goes up and down with the nesting (`StackAux::nested`).
         let cdepth = s.cdepth().saturating_add(1);
-        if self.vm.c_overflow(cdepth) {
+        if self.vm.c_overflow_nested(cdepth) {
             return Err(LuaError::new(self.new_str(b"C stack overflow")));
         }
         let s = &mut self.vm.rt.stack;
@@ -549,20 +552,10 @@ impl NativeCtx<'_> {
             extra: 0,
             cdepth,
         });
-        let r = match self.vm.push_lua_frame(callee, func, nargs, want) {
-            Ok(e) => {
-                // The callee's registers are the native's to clear when it
-                // returns, as for any frame entered outside the loop.
-                let nregs = self.vm.heap.get(callee).code.nregs as usize;
-                let s = &mut self.vm.rt.stack;
-                s.dirty_to = s.dirty_to.max(e.base + nregs);
-                self.vm.run()
-            }
-            Err(x) => match self.vm.settle(x) {
-                Ok(Flow::Done) => Ok(()),
-                Ok(_) => self.vm.run(),
-                Err(e) => Err(e),
-            },
+        let r = match self.vm.enter_nested(callee, func, nargs, want) {
+            Ok(true) => self.vm.run(),
+            Ok(false) => Ok(()),
+            Err(e) => Err(e),
         };
         // Returning or unwinding into the record popped it.
         let s = &mut self.vm.rt.stack;
@@ -620,6 +613,12 @@ impl NativeCtx<'_> {
             });
         }
         let below = s.frames.len();
+        if below == 0 {
+            // The host's outermost call: the native stack budget counts
+            // from here.
+            self.vm.mark_stack_base();
+        }
+        let s = &mut self.vm.rt.stack;
         // As in `Vm::call`, the host's outermost call is the one
         // `c_overflow` already counts, so a host that calls through a
         // function of its own first (as `lua`'s driver does) keeps lua5.5's
@@ -629,7 +628,7 @@ impl NativeCtx<'_> {
         } else {
             s.deeper()
         };
-        let r = if self.vm.c_overflow(cdepth) {
+        let r = if self.vm.c_overflow_nested(cdepth) {
             Err(self.error("C stack overflow"))
         } else {
             let s = &mut self.vm.rt.stack;
@@ -706,6 +705,23 @@ impl NativeCtx<'_> {
     #[inline]
     pub(crate) fn take_buf(&mut self) -> Vec<u8> {
         self.vm.rt.natives.take_scratch()
+    }
+
+    /// Room for a pattern's captures, kept on the heap: `string.gsub`
+    /// holds them while it calls a replacement function, and every level
+    /// of such nesting would otherwise keep them on the native stack.
+    #[inline]
+    pub(crate) fn take_captures(&mut self) -> Box<crate::stdlib::string::pattern::Captures> {
+        match self.vm.rt.natives.captures.take() {
+            Some(c) => c,
+            None => new_captures(),
+        }
+    }
+
+    /// Give captures from [`NativeCtx::take_captures`] back for reuse.
+    #[inline]
+    pub(crate) fn give_captures(&mut self, c: Box<crate::stdlib::string::pattern::Captures>) {
+        self.vm.rt.natives.captures = Some(c);
     }
 
     /// Give a buffer from [`NativeCtx::take_buf`] back for reuse. Very
@@ -1690,4 +1706,12 @@ impl Vm {
         }
         self.native_returned(r, None, func, want, id)
     }
+}
+
+/// Captures for [`NativeCtx::take_captures`]: built out of line, so the
+/// value made before it moves to the heap isn't in the caller's frame.
+#[cold]
+#[inline(never)]
+fn new_captures() -> Box<crate::stdlib::string::pattern::Captures> {
+    Box::default()
 }

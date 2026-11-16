@@ -21,7 +21,13 @@ pub enum ErrorKind {
 
 /// Why something failed. Errors that come from a script keep the script's
 /// error value ([`Error::value`]), whatever its type.
-pub struct Error {
+///
+/// One pointer wide: results that may hold one stay small in the frames of
+/// host functions, which stay on the native stack while scripts they call
+/// run.
+pub struct Error(Box<Inner>);
+
+struct Inner {
     kind: ErrorKind,
     message: String,
     traceback: Option<String>,
@@ -51,56 +57,56 @@ impl Error {
     }
 
     pub(crate) fn new(kind: ErrorKind, message: String) -> Error {
-        Error {
+        Error(Box::new(Inner {
             kind,
             message,
             traceback: None,
             value: None,
-        }
+        }))
     }
 
     pub(crate) fn with_value(mut self, value: Pinned<Value<'static>>) -> Error {
-        self.value = Some(value);
+        self.0.value = Some(value);
         self
     }
 
     pub(crate) fn with_traceback(mut self, traceback: Option<String>) -> Error {
-        self.traceback = traceback;
+        self.0.traceback = traceback;
         self
     }
 
     pub fn kind(&self) -> ErrorKind {
-        self.kind
+        self.0.kind
     }
 
     /// The message, as the standalone interpreter prints it.
     pub fn message(&self) -> &str {
-        &self.message
+        &self.0.message
     }
 
     /// A traceback, for errors from [`Function::call_traced`](crate::Function::call_traced).
     pub fn traceback(&self) -> Option<&str> {
-        self.traceback.as_deref()
+        self.0.traceback.as_deref()
     }
 
     /// The error value the script raised, when it came from a script.
     pub fn value(&self) -> Option<&Pinned<Value<'static>>> {
-        self.value.as_ref()
+        self.0.value.as_ref()
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(&self.0.message)
     }
 }
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Error")
-            .field("kind", &self.kind)
-            .field("message", &self.message)
-            .field("traceback", &self.traceback)
+            .field("kind", &self.0.kind)
+            .field("message", &self.0.message)
+            .field("traceback", &self.0.traceback)
             .finish_non_exhaustive()
     }
 }

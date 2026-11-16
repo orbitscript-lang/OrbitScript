@@ -17,7 +17,7 @@ mod dump;
 mod load;
 mod math;
 mod package;
-mod string;
+pub(crate) mod string;
 mod table;
 mod utf8;
 
