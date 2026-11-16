@@ -8,8 +8,8 @@ mod slow;
 
 use crate::object::table as tbl;
 use crate::object::{Gc, Table, Value};
-use crate::stack::{Fail, Rest, Results, Return, Stack, StackResult, library_row};
-use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
+use crate::stack::{Fail, LibraryRow, Rest, Results, Return, Stack, StackResult, library_row};
+use crate::vm::{LuaError, NativeCtx, NativeReturn};
 use orbit_macros::native;
 
 type R = Result<NativeReturn, LuaError>;
@@ -17,15 +17,15 @@ type R = Result<NativeReturn, LuaError>;
 // `concat`, `unpack` and `move` run metamethods on their slow paths, so
 // they stay on the raw interface until the language rule's step gives them
 // a Rust fast path and an OrbitScript slow path.
-pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("table.concat", concat),
-    ("table.unpack", unpack),
+pub(crate) const FUNCTIONS: &[LibraryRow] = &[
+    LibraryRow::raw("table.concat", concat),
+    LibraryRow::raw("table.unpack", unpack),
     library_row::<pack>(),
-    ("table.move", move_),
+    LibraryRow::raw("table.move", move_),
 ];
 
 /// Lua 5.5's additions, absent from 5.4 builds (ADR-14).
-pub(crate) const FUNCTIONS_5_5: &[(&str, NativeFn)] = &[library_row::<create>()];
+pub(crate) const FUNCTIONS_5_5: &[LibraryRow] = &[library_row::<create>()];
 
 /// Largest array size `create` accepts (a C `int`).
 const MAX_INT: i64 = i32::MAX as i64;

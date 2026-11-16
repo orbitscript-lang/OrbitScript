@@ -22,6 +22,15 @@
 //!   the field it is registered under. The function's name by default.
 //! - `crate = path`: where the `orbit` API is, `::orbit` by default; for
 //!   code that reaches it under another name.
+//! - `pure`: also generate a fast path, which the interpreter calls with
+//!   the argument values themselves, without setting up the stack. For a
+//!   function whose parameters are all scalars (`i64`, `f64`, `Number`,
+//!   or an `Option` of one) and whose result is one scalar (those, `bool`,
+//!   an `Option` of one, or a `Result` of one). The fast path reads only
+//!   arguments that already have the parameter's type, and an `Err` result
+//!   gives up; either way the full native runs instead, so the body runs
+//!   again with the same arguments, and so must have no side effects. It
+//!   must not panic: only the full native catches panics.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -45,15 +54,17 @@ pub fn native(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct Options {
     name: Option<LitStr>,
     krate: Option<Path>,
+    pure: bool,
 }
 
-const USAGE: &str = "#[native] takes `name = \"lib.f\"` and `crate = path`";
+const USAGE: &str = "#[native] takes `name = \"lib.f\"`, `crate = path` and `pure`";
 
 impl syn::parse::Parse for Options {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Options> {
         let mut options = Options {
             name: None,
             krate: None,
+            pure: false,
         };
         while !input.is_empty() {
             if input.peek(Token![crate]) {
@@ -65,14 +76,20 @@ impl syn::parse::Parse for Options {
                 options.krate = Some(input.call(Path::parse_mod_style)?);
             } else {
                 let key: syn::Ident = input.parse()?;
-                if key != "name" {
+                if key == "pure" {
+                    if options.pure {
+                        return Err(Error::new(key.span(), "`pure` given twice"));
+                    }
+                    options.pure = true;
+                } else if key != "name" {
                     return Err(Error::new(key.span(), USAGE));
+                } else {
+                    input.parse::<Token![=]>()?;
+                    if options.name.is_some() {
+                        return Err(Error::new(key.span(), "`name` given twice"));
+                    }
+                    options.name = Some(input.parse()?);
                 }
-                input.parse::<Token![=]>()?;
-                if options.name.is_some() {
-                    return Err(Error::new(key.span(), "`name` given twice"));
-                }
-                options.name = Some(input.parse()?);
             }
             if input.is_empty() {
                 break;
@@ -213,6 +230,12 @@ fn expand(f: &ItemFn, options: Options) -> syn::Result<proc_macro2::TokenStream>
         _ => quote_spanned!(Span::call_site()=> #krate::stack::Results::push_results),
     };
 
+    let pure = if options.pure {
+        pure_path(&krate, ident, &types)?
+    } else {
+        quote!()
+    };
+
     Ok(quote! {
         #[allow(non_camel_case_types)]
         #[doc(hidden)]
@@ -220,6 +243,7 @@ fn expand(f: &ItemFn, options: Options) -> syn::Result<proc_macro2::TokenStream>
 
         impl #krate::stack::Native for #ident {
             const NAME: &'static str = #lua_name;
+            #pure
 
             #[inline]
             fn call(
@@ -235,5 +259,36 @@ fn expand(f: &ItemFn, options: Options) -> syn::Result<proc_macro2::TokenStream>
                 })
             }
         }
+    })
+}
+
+/// `pure`'s fast path: each argument as its parameter's type, or give up.
+fn pure_path(
+    krate: &proc_macro2::TokenStream,
+    ident: &syn::Ident,
+    types: &[&Type],
+) -> syn::Result<proc_macro2::TokenStream> {
+    if let Some(t) = types.iter().find(|t| is_stack(t) || is_state(t)) {
+        return Err(Error::new(
+            t.span(),
+            "a `pure` native takes only its arguments: no stack and no state",
+        ));
+    }
+    let names: Vec<_> = (0..types.len()).map(|k| format_ident!("__v{k}")).collect();
+    let reads = types.iter().zip(&names).enumerate().map(|(k, (ty, v))| {
+        quote_spanned! {ty.span()=>
+            let #v = <#ty as #krate::stack::PureArg>::from_value(__a.get(#k).copied())?;
+        }
+    });
+    Ok(quote! {
+        const PURE: ::core::option::Option<#krate::stack::PureFn> = ::core::option::Option::Some({
+            fn __pure(
+                __a: &[#krate::stack::PureValue],
+            ) -> ::core::option::Option<#krate::stack::PureValue> {
+                #(#reads)*
+                #krate::stack::PureResult::into_value(#ident(#(#names),*))
+            }
+            __pure
+        });
     })
 }

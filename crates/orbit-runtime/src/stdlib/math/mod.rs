@@ -4,8 +4,8 @@ mod rng;
 
 use crate::object::number::{self, Number, float_to_int};
 use crate::object::{Gc, LuaHeap, Table, Value};
-use crate::stack::{Any, Arg, Stack, StackResult, library_row, native_fn};
-use crate::vm::{FastFn, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::stack::{Any, Arg, LibraryRow, Stack, StackResult, library_row};
+use crate::vm::{LuaError, NativeCtx, NativeReturn, Vm};
 use orbit_macros::native;
 
 use rng::Xoshiro;
@@ -14,8 +14,8 @@ type R = Result<NativeReturn, LuaError>;
 
 /// Lua 5.3's functions that Lua 5.4 keeps when built with its 5.3
 /// compatibility, as Debian builds it: only in 5.4 builds (ADR-14).
-pub(crate) const COMPAT_5_3: &[(&str, NativeFn)] = &[
-    ("math.atan2", native_fn::<atan>()),
+pub(crate) const COMPAT_5_3: &[LibraryRow] = &[
+    library_row::<atan>().named("math.atan2"),
     library_row::<cosh>(),
     library_row::<sinh>(),
     library_row::<tanh>(),
@@ -23,37 +23,37 @@ pub(crate) const COMPAT_5_3: &[(&str, NativeFn)] = &[
     library_row::<log10>(),
 ];
 
-#[native(crate = crate, name = "math.cosh")]
+#[native(crate = crate, name = "math.cosh", pure)]
 fn cosh(x: f64) -> f64 {
     x.cosh()
 }
 
-#[native(crate = crate, name = "math.sinh")]
+#[native(crate = crate, name = "math.sinh", pure)]
 fn sinh(x: f64) -> f64 {
     x.sinh()
 }
 
-#[native(crate = crate, name = "math.tanh")]
+#[native(crate = crate, name = "math.tanh", pure)]
 fn tanh(x: f64) -> f64 {
     x.tanh()
 }
 
-#[native(crate = crate, name = "math.log10")]
+#[native(crate = crate, name = "math.log10", pure)]
 fn log10(x: f64) -> f64 {
     x.log10()
 }
 
-#[native(crate = crate, name = "math.pow")]
+#[native(crate = crate, name = "math.pow", pure)]
 fn pow(x: f64, y: f64) -> f64 {
     x.powf(y)
 }
 
-pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
+pub(crate) const FUNCTIONS: &[LibraryRow] = &[
     library_row::<floor>(),
     library_row::<ceil>(),
     library_row::<abs>(),
-    ("math.max", max),
-    ("math.min", min),
+    LibraryRow::raw("math.max", max).with_fast(max_fast),
+    LibraryRow::raw("math.min", min).with_fast(min_fast),
     library_row::<sqrt>(),
     library_row::<type_>(),
     library_row::<fmod>(),
@@ -75,35 +75,6 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     library_row::<random>(),
     library_row::<randomseed>(),
 ];
-
-/// Fast paths for the number cases (see [`FastFn`]). Each returns `None`
-/// for anything else, and the full native then handles it.
-pub(crate) const FAST: &[(&str, FastFn)] = &[
-    ("math.floor", floor_fast),
-    ("math.abs", abs_fast),
-    ("math.max", max_fast),
-    ("math.min", min_fast),
-    ("math.sqrt", sqrt_fast),
-];
-
-fn floor_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
-    match *args.first()? {
-        Value::Float(f) => {
-            let r = f.floor();
-            Some(float_to_int(r).map_or(Value::Float(r), Value::Int))
-        }
-        v @ Value::Int(_) => Some(v),
-        _ => None,
-    }
-}
-
-fn abs_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
-    match *args.first()? {
-        Value::Int(i) => Some(Value::Int(i.wrapping_abs())),
-        Value::Float(f) => Some(Value::Float(f.abs())),
-        _ => None,
-    }
-}
 
 fn extreme_fast(args: &[Value], want_max: bool) -> Option<Value> {
     let (&first, rest) = args.split_first()?;
@@ -135,14 +106,6 @@ fn min_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
     extreme_fast(args, false)
 }
 
-fn sqrt_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
-    match *args.first()? {
-        Value::Float(f) => Some(Value::Float(f.sqrt())),
-        Value::Int(i) => Some(Value::Float((i as f64).sqrt())),
-        _ => None,
-    }
-}
-
 pub(crate) fn constants(vm: &mut Vm, m: Gc<Table>) {
     for (name, v) in [
         ("huge", Value::Float(f64::INFINITY)),
@@ -160,7 +123,7 @@ fn int_if_fits(f: f64) -> Number {
     float_to_int(f).map_or(Number::Float(f), Number::Int)
 }
 
-#[native(crate = crate, name = "math.floor")]
+#[native(crate = crate, name = "math.floor", pure)]
 fn floor(x: Number) -> Number {
     match x {
         Number::Int(_) => x,
@@ -168,7 +131,7 @@ fn floor(x: Number) -> Number {
     }
 }
 
-#[native(crate = crate, name = "math.ceil")]
+#[native(crate = crate, name = "math.ceil", pure)]
 fn ceil(x: Number) -> Number {
     match x {
         Number::Int(_) => x,
@@ -178,7 +141,7 @@ fn ceil(x: Number) -> Number {
 
 /// Integer-typed values keep integer arithmetic; anything else (including
 /// numeric strings) goes through floats, as in the reference.
-#[native(crate = crate, name = "math.abs")]
+#[native(crate = crate, name = "math.abs", pure)]
 fn abs(x: Number) -> Number {
     match x {
         Number::Int(i) => Number::Int(i.wrapping_abs()),
@@ -239,57 +202,57 @@ fn tointeger(s: &mut Stack<'_>, v: Any) -> Option<i64> {
     }
 }
 
-#[native(crate = crate, name = "math.ult")]
+#[native(crate = crate, name = "math.ult", pure)]
 fn ult(a: i64, b: i64) -> bool {
     (a as u64) < (b as u64)
 }
 
-#[native(crate = crate, name = "math.exp")]
+#[native(crate = crate, name = "math.exp", pure)]
 fn exp(x: f64) -> f64 {
     x.exp()
 }
 
-#[native(crate = crate, name = "math.sin")]
+#[native(crate = crate, name = "math.sin", pure)]
 fn sin(x: f64) -> f64 {
     x.sin()
 }
 
-#[native(crate = crate, name = "math.cos")]
+#[native(crate = crate, name = "math.cos", pure)]
 fn cos(x: f64) -> f64 {
     x.cos()
 }
 
-#[native(crate = crate, name = "math.tan")]
+#[native(crate = crate, name = "math.tan", pure)]
 fn tan(x: f64) -> f64 {
     x.tan()
 }
 
-#[native(crate = crate, name = "math.asin")]
+#[native(crate = crate, name = "math.asin", pure)]
 fn asin(x: f64) -> f64 {
     x.asin()
 }
 
-#[native(crate = crate, name = "math.acos")]
+#[native(crate = crate, name = "math.acos", pure)]
 fn acos(x: f64) -> f64 {
     x.acos()
 }
 
-#[native(crate = crate, name = "math.deg")]
+#[native(crate = crate, name = "math.deg", pure)]
 fn deg(x: f64) -> f64 {
     x * (180.0 / std::f64::consts::PI)
 }
 
-#[native(crate = crate, name = "math.rad")]
+#[native(crate = crate, name = "math.rad", pure)]
 fn rad(x: f64) -> f64 {
     x * (std::f64::consts::PI / 180.0)
 }
 
-#[native(crate = crate, name = "math.atan")]
+#[native(crate = crate, name = "math.atan", pure)]
 fn atan(y: f64, x: Option<f64>) -> f64 {
     y.atan2(x.unwrap_or(1.0))
 }
 
-#[native(crate = crate, name = "math.log")]
+#[native(crate = crate, name = "math.log", pure)]
 fn log(x: f64, base: Option<f64>) -> f64 {
     let Some(base) = base else {
         return x.ln();
@@ -327,7 +290,7 @@ fn split_float(x: f64) -> (f64, i32) {
     (m, exp + bias)
 }
 
-#[native(crate = crate, name = "math.ldexp")]
+#[native(crate = crate, name = "math.ldexp", pure)]
 fn ldexp(m: f64, e: i64) -> f64 {
     // The reference takes the exponent as a C `int`, truncating it.
     number::ldexp(m, i64::from(e as i32))
@@ -402,7 +365,7 @@ fn randomseed(s: &mut Stack<'_>) -> StackResult<(i64, i64)> {
     Ok((n1 as i64, n2 as i64))
 }
 
-#[native(crate = crate, name = "math.sqrt")]
+#[native(crate = crate, name = "math.sqrt", pure)]
 fn sqrt(x: f64) -> f64 {
     x.sqrt()
 }
