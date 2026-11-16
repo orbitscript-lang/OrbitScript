@@ -241,6 +241,24 @@ pub(crate) fn open_lib(
     t
 }
 
+/// Register the native in a library table's `row`, with its fast path.
+pub(crate) fn register_row(vm: &mut Vm, row: &LibraryRow) -> crate::object::Value {
+    let v = vm.register_native(row.name, row.entry);
+    if let Some(fast) = row.fast {
+        vm.set_native_fast_path(row.name, fast);
+    }
+    v
+}
+
+/// Make a native's arguments exactly `n`, dropping or nil-filling the
+/// rest (`set_top` only when needed: it looks for variables to close).
+fn keep_args(s: &mut crate::stack::Stack<'_>, n: i32) -> crate::stack::StackResult<()> {
+    if s.top() != n {
+        s.set_top(n)?;
+    }
+    Ok(())
+}
+
 /// Register more `functions` in an open library table.
 fn add_functions(
     vm: &mut Vm,
@@ -250,10 +268,7 @@ fn add_functions(
     for row in functions {
         let qualified = row.name;
         let short = qualified.rsplit('.').next().unwrap_or(qualified);
-        let fv = vm.register_native(qualified, row.entry);
-        if let Some(fast) = row.fast {
-            vm.set_native_fast_path(qualified, fast);
-        }
+        let fv = register_row(vm, row);
         let k = vm.new_str(short.as_bytes());
         vm.table_set(t, k, fv);
     }

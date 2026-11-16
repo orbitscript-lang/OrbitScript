@@ -25,18 +25,27 @@ pub(crate) const MAX_CHAIN: usize = 2000;
 pub(crate) use crate::object::MetaField;
 
 /// The interned metatable field names, rooted by the runtime, so a metatable lookup
-/// is a handle-keyed probe.
+/// is a handle-keyed probe; and the type names, so `type` needs no string
+/// of its own.
 #[derive(Debug)]
 pub(crate) struct MetaFieldNames {
+    /// The field names in [`MetaField::ALL`] order, then [`TYPE_NAMES`].
     names: Box<[Gc<LuaStr>]>,
 }
 
+/// The names [`Value::type_name`] gives, in the order
+/// [`MetaFieldNames::type_name`] finds them.
+const TYPE_NAMES: [&str; 8] = [
+    "nil", "boolean", "number", "string", "table", "function", "thread", "userdata",
+];
+
 impl MetaFieldNames {
     pub(crate) fn new(heap: &mut LuaHeap, strings: &mut Interner) -> MetaFieldNames {
+        let fields = MetaField::ALL.iter().map(|e| e.field());
         MetaFieldNames {
-            names: MetaField::ALL
-                .iter()
-                .map(|e| strings.new_str(heap, e.field().as_bytes()))
+            names: fields
+                .chain(TYPE_NAMES)
+                .map(|n| strings.new_str(heap, n.as_bytes()))
                 .collect(),
         }
     }
@@ -46,6 +55,23 @@ impl MetaFieldNames {
         self.names[e as usize]
     }
 
+    /// The interned [`Value::type_name`] of `v`.
+    #[inline]
+    pub(crate) fn type_name(&self, v: Value) -> Gc<LuaStr> {
+        let i = match v {
+            Value::Nil => 0,
+            Value::Bool(_) => 1,
+            Value::Int(_) | Value::Float(_) => 2,
+            Value::Str(_) => 3,
+            Value::Table(_) => 4,
+            Value::Closure(_) | Value::Native(_) => 5,
+            Value::Thread(_) => 6,
+            Value::UserData(_) | Value::LightUserData(_) => 7,
+        };
+        self.names[MetaField::ALL.len() + i]
+    }
+
+    /// Every name, for the collector's roots.
     pub(crate) fn all(&self) -> &[Gc<LuaStr>] {
         &self.names
     }

@@ -170,7 +170,7 @@ const fn pure_fast<N: Native>() -> Option<vm::FastFn> {
 }
 
 /// The interpreter's fast path for a `pure` native `N`.
-fn pure_entry<N: Native>(_: &crate::object::LuaHeap, args: &[RawValue]) -> Option<RawValue> {
+fn pure_entry<N: Native>(_: vm::FastCtx<'_>, args: &[RawValue]) -> Option<RawValue> {
     N::PURE.and_then(|f| f(args))
 }
 
@@ -272,7 +272,11 @@ enum UserValue {
 
 /// A warning whose pieces are still arriving ([`Stack::warn`]).
 #[derive(Debug, Default)]
-struct WarnBuffer(Vec<u8>);
+struct WarnBuffer {
+    text: Vec<u8>,
+    /// A piece came with `more` set, so the next one continues it.
+    continued: bool,
+}
 
 /// The window of a native function, or the host's window between calls.
 pub struct Stack<'s> {
@@ -1425,6 +1429,12 @@ impl<'s> Stack<'s> {
         Ok(r)
     }
 
+    /// Whether the metatable of the value at `idx` has field `e` (raw),
+    /// without interning its name: `__metatable` for the base library.
+    pub(crate) fn has_meta_field(&self, idx: i32, e: crate::vm::MetaField) -> bool {
+        !self.ctx.metamethod(self.get(idx), e).is_nil()
+    }
+
     /// Push the metatable of the value at `idx`, if it has one.
     pub fn get_metatable(&mut self, idx: i32) -> bool {
         match self.ctx.metatable(self.get(idx)) {
@@ -1989,12 +1999,13 @@ impl<'s> Stack<'s> {
             return;
         }
         let pending = host.ext_mut().get_or_insert_with(WarnBuffer::default);
-        let first = pending.0.is_empty();
-        pending.0.extend_from_slice(msg);
+        let first = !pending.continued;
+        pending.text.extend_from_slice(msg);
+        pending.continued = more;
         if more {
             return;
         }
-        let text = std::mem::take(&mut pending.0);
+        let text = std::mem::take(&mut pending.text);
         // A one-piece message starting with '@' is a control message.
         match (first, text.as_slice()) {
             (true, b"@on") => host.set_warnings(true),

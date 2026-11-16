@@ -1,44 +1,57 @@
 //! Base functions: `type`, `pcall`, `error`, `pairs` and friends.
+//!
+//! The leaf functions are `#[native]`, and the ones loops call most have a
+//! fast path ([`FastFn`](crate::vm::FastFn)) for calls that keep one result. The rest work
+//! the VM's control (`pcall`, `xpcall`, `error`), run metamethods
+//! (`tostring`) or finalizers (`collectgarbage`), and stay raw natives.
 
 use crate::object::Tag;
 use crate::object::Value;
 use crate::object::table as tbl;
 use crate::object::value::raw_eq;
+use crate::stack::{Any, LibraryRow, Return, Stack, StackResult, TableArg, Type, library_row};
 use crate::vm::{
-    CallOutcome, GcMode, GcParam, LuaError, MetaField, NativeCtx, NativeFn, NativeReturn, Vm,
+    CallOutcome, FastCtx, GcMode, GcParam, LuaError, MetaField, NativeCtx, NativeReturn, Vm,
     finalize_then_return,
 };
 use orbit_lua_version::LUA;
+use orbit_macros::native;
+
+use super::keep_args;
 
 type R = Result<NativeReturn, LuaError>;
 
-const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("type", type_),
-    ("tostring", tostring),
-    ("tonumber", tonumber),
-    ("select", select),
-    ("error", error),
-    ("pcall", pcall),
-    ("xpcall", xpcall),
-    ("warn", warn),
-    ("assert", assert),
-    ("rawequal", rawequal),
-    ("rawget", rawget),
-    ("rawset", rawset),
-    ("rawlen", rawlen),
-    ("getmetatable", getmetatable),
-    ("setmetatable", setmetatable),
-    ("collectgarbage", collectgarbage),
+const FUNCTIONS: &[LibraryRow] = &[
+    TYPE,
+    LibraryRow::raw("tostring", tostring),
+    library_row::<tonumber>().with_fast(tonumber_fast),
+    library_row::<select>().with_fast(select_fast),
+    LibraryRow::raw("error", error),
+    LibraryRow::raw("pcall", pcall),
+    LibraryRow::raw("xpcall", xpcall),
+    library_row::<warn>(),
+    library_row::<assert>().with_fast(assert_fast),
+    library_row::<rawequal>().with_fast(rawequal_fast),
+    library_row::<rawget>().with_fast(rawget_fast),
+    library_row::<rawset>(),
+    library_row::<rawlen>().with_fast(rawlen_fast),
+    library_row::<getmetatable>().with_fast(getmetatable_fast),
+    LibraryRow::raw("setmetatable", setmetatable),
+    LibraryRow::raw("collectgarbage", collectgarbage),
+    NEXT,
 ];
 
+/// `type`, which the built-in modules share.
+pub(crate) const TYPE: LibraryRow = library_row::<type_>().with_fast(type_fast);
+
+/// `next`, which `pairs` returns and the built-in modules share.
+pub(crate) const NEXT: LibraryRow = LibraryRow::raw("next", next).with_fast(next_fast);
+
 pub(crate) fn open(vm: &mut Vm) {
-    for &(name, f) in FUNCTIONS {
-        let v = vm.register_native(name, f);
-        vm.set_global(name, v);
+    for row in FUNCTIONS {
+        let v = super::register_row(vm, row);
+        vm.set_global(row.name, v);
     }
-    // `next` is shared with `pairs`.
-    let next_fn = vm.register_native("next", next);
-    vm.set_global("next", next_fn);
     let g = vm.rt.globals;
     vm.set_global("_G", Value::Table(g));
     // The shared string metatable: `("x"):upper()` finds `string`'s
@@ -57,10 +70,14 @@ pub(crate) fn open(vm: &mut Vm) {
     }
 }
 
-pub(crate) fn type_(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.check_any(0)?;
-    let s = ctx.new_str(v.type_name().as_bytes());
-    ctx.ret([s])
+#[native(crate = crate, name = "type")]
+fn type_(s: &mut Stack<'_>, v: Any) -> &'static str {
+    s.type_at(v.0).name()
+}
+
+fn type_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    let &v = args.first()?;
+    Some(Value::Str(cx.metas().field_names.type_name(v)))
 }
 
 fn tostring(ctx: &mut NativeCtx<'_>) -> R {
@@ -80,18 +97,33 @@ fn tostring(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret([s])
 }
 
-fn getmetatable(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.check_any(0)?;
-    let Some(mt) = ctx.metatable(v) else {
-        return ctx.ret([Value::Nil]);
-    };
-    let protected = ctx.metamethod(v, MetaField::Metatable);
-    if !protected.is_nil() {
-        return ctx.ret([protected]);
+#[native(crate = crate, name = "getmetatable")]
+fn getmetatable(s: &mut Stack<'_>, v: Any) -> StackResult<Return> {
+    // A `__metatable` field stands in for the metatable.
+    if s.has_meta_field(v.0, MetaField::Metatable) {
+        s.get_metatable(v.0);
+        s.raw_get_field(-1, "__metatable")?;
+    } else if !s.get_metatable(v.0) {
+        s.push_nil();
     }
-    ctx.ret([Value::Table(mt)])
+    Ok(Return::values(1))
 }
 
+fn getmetatable_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    let &v = args.first()?;
+    let Some(mt) = cx.metas().metatable(cx.heap(), v) else {
+        return Some(Value::Nil);
+    };
+    Some(
+        match cx.metas().metamethod(cx.heap(), v, MetaField::Metatable) {
+            Value::Nil => Value::Table(mt),
+            protected => protected,
+        },
+    )
+}
+
+/// A raw native: constructors call it, and the stack API's form costs
+/// about a fifth more per call.
 fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_table(0)?;
     let mt = match ctx.arg(1) {
@@ -109,29 +141,51 @@ fn setmetatable(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret([Value::Table(t)])
 }
 
-fn tonumber(ctx: &mut NativeCtx<'_>) -> R {
-    if ctx.arg(1).is_nil() {
-        let v = ctx.check_any(0)?;
-        let r = match v {
-            Value::Int(_) | Value::Float(_) => v,
-            Value::Str(s) => ctx
-                .locale()
-                .str_to_number(ctx.bytes(s))
-                .unwrap_or(Value::Nil),
-            _ => Value::Nil,
-        };
-        return ctx.ret([r]);
+#[native(crate = crate, name = "tonumber")]
+fn tonumber(s: &mut Stack<'_>) -> StackResult<Return> {
+    if matches!(s.type_at(2), Type::None | Type::Nil) {
+        match s.type_at(1) {
+            Type::None => return Err(s.arg_error(1, "value expected")),
+            Type::Number => s.push_copy(1),
+            Type::String => {
+                let text = s.string_at(1).map(|t| t.as_bytes().to_vec());
+                if s.push_numeral(&text.unwrap_or_default()[..]) == 0 {
+                    s.push_nil();
+                }
+            }
+            _ => s.push_nil(),
+        }
+        return Ok(Return::values(1));
     }
-    let base = ctx.check_int(1)?;
-    let s = match ctx.arg(0) {
-        Value::Str(s) => s,
-        _ => return Err(ctx.type_error(0, "string")),
-    };
+    let base = s.check_integer(2)?;
+    if s.type_at(1) != Type::String {
+        return Err(s.type_error(1, "string"));
+    }
     if !(2..=36).contains(&base) {
-        return Err(ctx.arg_error(1, "base out of range"));
+        return Err(s.arg_error(2, "base out of range"));
     }
-    let r = parse_in_base(ctx.bytes(s), base as u32).map_or(Value::Nil, Value::Int);
-    ctx.ret([r])
+    let n = s
+        .string_at(1)
+        .and_then(|t| parse_in_base(t.as_bytes(), base as u32));
+    match n {
+        Some(n) => s.push_integer(n),
+        None => s.push_nil(),
+    }
+    Ok(Return::values(1))
+}
+
+/// `tonumber(v)` with no base.
+fn tonumber_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    match *args {
+        [v @ (Value::Int(_) | Value::Float(_))] => Some(v),
+        [Value::Str(s)] => Some(
+            cx.metas()
+                .locale
+                .str_to_number(cx.heap().get(s).as_bytes())
+                .unwrap_or(Value::Nil),
+        ),
+        _ => None,
+    }
 }
 
 fn parse_in_base(s: &[u8], base: u32) -> Option<i64> {
@@ -154,6 +208,8 @@ fn parse_in_base(s: &[u8], base: u32) -> Option<i64> {
     Some(if neg { n.wrapping_neg() } else { n })
 }
 
+/// A raw native: `pairs` loops call it for two results, which the stack
+/// API's `next` makes about half again as costly.
 pub(crate) fn next(ctx: &mut NativeCtx<'_>) -> R {
     let t = ctx.check_table(0)?;
     let k = ctx.arg(1);
@@ -172,26 +228,62 @@ pub(crate) fn next(ctx: &mut NativeCtx<'_>) -> R {
     }
 }
 
-fn select(ctx: &mut NativeCtx<'_>) -> R {
-    let n = ctx.nargs() as i64;
-    if let Value::Str(s) = ctx.arg(0) {
-        if ctx.bytes(s) == b"#" {
-            return ctx.ret([Value::Int(n - 1)]);
-        }
+/// `next` at the end of a table, or when the call keeps only the key.
+fn next_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    let (&Value::Table(t), k) = (args.first()?, args.get(1).copied()) else {
+        return None;
+    };
+    match cx.heap().get(t).next(cx.heap(), k.unwrap_or(Value::Nil)) {
+        Ok(None) => Some(Value::Nil),
+        Ok(Some((k, _))) if cx.one() => Some(k),
+        _ => None,
     }
-    let i = ctx.check_int(0)?;
-    let from = if i < 0 {
+}
+
+#[native(crate = crate, name = "select")]
+fn select(s: &mut Stack<'_>) -> StackResult<Return> {
+    let n = s.top() as i64;
+    if s.string_at(1).is_some_and(|t| t.as_bytes() == b"#") {
+        s.push_integer(n - 1);
+        return Ok(Return::values(1));
+    }
+    let i = s.check_integer(1)?;
+    let from = select_from(i, n).ok_or_else(|| s.arg_error(1, "index out of range"))?;
+    Ok(Return::values((n - from) as usize))
+}
+
+/// Where `select(i, ...)`'s results start among its `n` arguments
+/// (counting `i`, from 0), or `None` if `i` is out of range.
+fn select_from(i: i64, n: i64) -> Option<i64> {
+    if i < 0 {
         // Only `math.mininteger` has no negation, and it is out of range too.
         match i.checked_neg() {
-            Some(back) if back < n => n + i,
-            _ => return Err(ctx.arg_error(0, "index out of range")),
+            Some(back) if back < n => Some(n + i),
+            _ => None,
         }
     } else if i == 0 {
-        return Err(ctx.arg_error(0, "index out of range"));
+        None
     } else {
-        i.min(n)
+        Some(i.min(n))
+    }
+}
+
+/// `select('#', ...)`, and `select(i, ...)` with one result (or when the
+/// call keeps one).
+fn select_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    let n = args.len() as i64;
+    let i = match *args.first()? {
+        Value::Int(i) => i,
+        Value::Str(s) if cx.heap().get(s).as_bytes() == b"#" => return Some(Value::Int(n - 1)),
+        _ => return None,
     };
-    Ok(NativeReturn::Return((n - from) as usize))
+    let from = select_from(i, n)?;
+    match n - from {
+        1 => Some(args[from as usize]),
+        0 if cx.one() => Some(Value::Nil),
+        _ if cx.one() => Some(args[from as usize]),
+        _ => None,
+    }
 }
 
 fn error(ctx: &mut NativeCtx<'_>) -> R {
@@ -256,90 +348,90 @@ fn xpcall(ctx: &mut NativeCtx<'_>) -> R {
     })
 }
 
-fn warn(ctx: &mut NativeCtx<'_>) -> R {
-    let n = ctx.nargs().max(1);
-    let mut parts = Vec::with_capacity(n);
-    for i in 0..n {
-        parts.push(ctx.check_str(i)?);
+#[native(crate = crate, name = "warn")]
+fn warn(s: &mut Stack<'_>) -> StackResult<()> {
+    let n = s.top().max(1);
+    for i in 1..=n {
+        s.check_string(i)?;
     }
-    if ctx.vm.rt.host.warn_hook().is_some() {
-        let pieces: Vec<Vec<u8>> = parts.iter().map(|&s| ctx.bytes(s).to_vec()).collect();
-        if let Some(hook) = ctx.vm.rt.host.warn_hook() {
-            for (i, p) in pieces.iter().enumerate() {
-                (hook.0)(p, i + 1 < pieces.len());
-            }
-        }
-        return Ok(NativeReturn::Return(0));
+    for i in 1..=n {
+        let piece = s.to_str(i)?.map(|t| t.as_bytes().to_vec());
+        s.warn(&piece.unwrap_or_default()[..], i < n);
     }
-    // A single message starting with `@` is a control message; unknown ones
-    // are ignored.
-    if let [msg] = parts[..] {
-        if let [b'@', control @ ..] = ctx.bytes(msg) {
-            match control {
-                b"on" => ctx.vm.rt.host.set_warnings(true),
-                b"off" => ctx.vm.rt.host.set_warnings(false),
-                _ => {}
-            }
-            return Ok(NativeReturn::Return(0));
-        }
-    }
-    if ctx.vm.rt.host.warnings() {
-        let mut text = Vec::new();
-        for &s in &parts {
-            text.extend_from_slice(ctx.bytes(s));
-        }
-        ctx.vm.rt.host.warn(&text);
-    }
-    Ok(NativeReturn::Return(0))
+    Ok(())
 }
 
-fn assert(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.check_any(0)?;
-    if !v.is_falsy() {
-        return Ok(NativeReturn::Return(ctx.nargs()));
+#[native(crate = crate, name = "assert")]
+fn assert(s: &mut Stack<'_>, v: Any) -> StackResult<Return> {
+    if s.to_boolean(v.0) {
+        return Ok(Return::values(s.top() as usize));
     }
-    if ctx.nargs() >= 2 {
-        let msg = ctx.arg(1);
-        return Err(ctx.error_value(msg));
+    if s.top() >= 2 {
+        s.set_top(2)?;
+        return Err(s.error_from_top());
     }
     // Like other library errors, the default message names the caller's
     // position (none when called straight from a native such as `pcall`).
-    Err(ctx.error("assertion failed!"))
+    Err(s.error("assertion failed!"))
 }
 
-fn rawequal(ctx: &mut NativeCtx<'_>) -> R {
-    let a = ctx.check_any(0)?;
-    let b = ctx.check_any(1)?;
-    let eq = raw_eq(&ctx.vm.heap, a, b);
-    ctx.ret([Value::Bool(eq)])
-}
-
-fn rawget(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
-    let k = ctx.check_any(1)?;
-    let v = tbl::get(&ctx.vm.heap, t, k);
-    ctx.ret([v])
-}
-
-fn rawset(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.check_table(0)?;
-    let k = ctx.check_any(1)?;
-    let v = ctx.check_any(2)?;
-    match tbl::set(&mut ctx.vm.heap, t, k, v) {
-        Ok(()) => {}
-        Err(tbl::StoreError::NoMemory) => return Err(ctx.no_memory()),
-        Err(e) => return Err(ctx.error(e.message())),
+/// `assert` that holds, with one argument or when the call keeps one.
+fn assert_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    match *args {
+        [v, ..] if v.is_falsy() => None,
+        [v] => Some(v),
+        [v, ..] if cx.one() => Some(v),
+        _ => None,
     }
-    ctx.ret([Value::Table(t)])
 }
 
-fn rawlen(ctx: &mut NativeCtx<'_>) -> R {
-    let n = match ctx.arg(0) {
-        Value::Table(t) => ctx.vm.heap.get(t).border(),
-        Value::Str(s) => ctx.bytes(s).len() as i64,
-        _ => return Err(ctx.type_error(0, "table or string")),
-    };
-    ctx.ret([Value::Int(n)])
+#[native(crate = crate, name = "rawequal")]
+fn rawequal(s: &mut Stack<'_>, a: Any, b: Any) -> bool {
+    s.raw_equal(a.0, b.0)
+}
+
+fn rawequal_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    match *args {
+        [a, b, ..] => Some(Value::Bool(raw_eq(cx.heap(), a, b))),
+        _ => None,
+    }
+}
+
+#[native(crate = crate, name = "rawget")]
+fn rawget(s: &mut Stack<'_>, t: TableArg, k: Any) -> StackResult<Return> {
+    s.push_copy(k.0);
+    s.raw_get(t.0)?;
+    Ok(Return::values(1))
+}
+
+fn rawget_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    match *args {
+        [Value::Table(t), k, ..] => Some(tbl::get(cx.heap(), t, k)),
+        _ => None,
+    }
+}
+
+#[native(crate = crate, name = "rawset")]
+fn rawset(s: &mut Stack<'_>, t: TableArg, _k: Any, _v: Any) -> StackResult<Return> {
+    keep_args(s, 3)?;
+    s.raw_set(t.0)?;
+    Ok(Return::values(1))
+}
+
+#[native(crate = crate, name = "rawlen")]
+fn rawlen(s: &mut Stack<'_>) -> StackResult<i64> {
+    match s.type_at(1) {
+        Type::Table | Type::String => Ok(s.raw_len(1) as i64),
+        _ => Err(s.type_error(1, "table or string")),
+    }
+}
+
+fn rawlen_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
+    Some(Value::Int(match *args.first()? {
+        Value::Table(t) => cx.heap().get(t).border(),
+        Value::Str(s) => cx.heap().get(s).as_bytes().len() as i64,
+        _ => return None,
+    }))
 }
 
 /// Lua 5.4's `collectgarbage("incremental", pause, stepmul, stepsize)` and

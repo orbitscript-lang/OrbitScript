@@ -37,7 +37,7 @@ use crate::vm::interp::{
     Flow, Ran, Shape, WINDOW, Window, const_str, enter_lua_frame_fast, enter_lua_frame_general,
 };
 use crate::vm::meta::{META_WANT, MetaReturn, Metas};
-use crate::vm::native::{NativeCtx, NativeReturn};
+use crate::vm::native::{FastCtx, NativeCtx, NativeReturn};
 use crate::vm::ops::{self, Arith, Exc};
 use crate::vm::{Frame, FrameKind, LuaError, Vm};
 
@@ -1307,12 +1307,14 @@ impl Vm {
                 // A native's fast path, when it has one and takes these
                 // arguments: no window, no frame.
                 let fast = match self.rt.natives.get(id).fast {
-                    Some(fast) if want <= 1 || want == MULTI => self
-                        .rt
-                        .stack
-                        .regs
-                        .get(fa + 1..fa + 1 + n)
-                        .and_then(|a| fast(&self.heap, a)),
+                    Some(fast) if want <= 1 || want == MULTI => {
+                        let cx = FastCtx::new(self, want);
+                        self.rt
+                            .stack
+                            .regs
+                            .get(fa + 1..fa + 1 + n)
+                            .and_then(|a| fast(cx, a))
+                    }
                     _ => None,
                 };
                 if let Some(v) = fast {

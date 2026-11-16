@@ -917,12 +917,13 @@ mod pure_tests {
     #[test]
     fn library_rows_carry_the_fast_path() {
         use crate::stack::{LibraryRow, library_row};
-        let heap = crate::object::LuaHeap::new();
+        let vm = crate::vm::Vm::new();
+        let cx = crate::vm::FastCtx::new(&vm, 1);
         let row = library_row::<twice>();
         assert_eq!(row.name, "twice");
         let fast = row.fast.expect("a fast path");
-        assert!(matches!(fast(&heap, &[V::Int(4)]), Some(V::Int(8))));
-        assert!(fast(&heap, &[V::Float(4.0)]).is_none());
+        assert!(matches!(fast(cx, &[V::Int(4)]), Some(V::Int(8))));
+        assert!(fast(cx, &[V::Float(4.0)]).is_none());
         assert!(library_row::<plain>().fast.is_none());
         let named = row.named("double");
         assert_eq!(named.name, "double");
