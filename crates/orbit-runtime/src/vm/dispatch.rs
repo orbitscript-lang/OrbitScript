@@ -1365,9 +1365,6 @@ impl Vm {
             return Ok(Frames::Flow(self.do_return(src, n)?));
         };
         let (func, want) = (f.func as usize, f.want);
-        if want == META_WANT {
-            return Ok(Frames::Lua(self.finish_meta(src, n)));
-        }
         self.pop_frame(&f);
         let regs = &mut self.rt.stack.regs;
         if want == MULTI {
