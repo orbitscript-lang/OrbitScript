@@ -170,9 +170,11 @@ pub(crate) fn gc(c: &mut Stack<'_>, what: i32, a: i32, b: i32) -> i32 {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lib {
     Runtime(Library),
-    /// `orbit-std`'s, which touch the system.
+    /// `orbit-std`'s: the ones that touch the system, and the ones written
+    /// on the public API.
     Io,
     Os,
+    Utf8,
 }
 
 /// The libraries by the index `csrc/capi.c` passes (the order of
@@ -187,7 +189,7 @@ const LIBS: [(Lib, &[u8]); 10] = [
     (Lib::Os, b"os"),
     (Lib::Runtime(Library::String), b"string"),
     (Lib::Runtime(Library::Table), b"table"),
-    (Lib::Runtime(Library::Utf8), b"utf8"),
+    (Lib::Utf8, b"utf8"),
 ];
 
 /// `luaopen_*`: open standard library `lib` and push its table, as
@@ -214,6 +216,7 @@ pub(crate) fn openlib(c: &mut Stack<'_>, lib: i32) -> Res<i32> {
     let opened = match lib {
         Lib::Io => c.push_from_scope(|s| orbit_std::open_io(s).ok().map(|t| t.to_value())),
         Lib::Os => c.push_from_scope(|s| orbit_std::open_os(s).ok().map(|t| t.to_value())),
+        Lib::Utf8 => c.push_from_scope(|s| orbit_std::open_utf8(s).ok().map(|t| t.to_value())),
         Lib::Runtime(l) => {
             let opened = c.open_library(l);
             if opened {

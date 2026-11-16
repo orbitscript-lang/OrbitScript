@@ -496,8 +496,8 @@ impl ThreadStatus {
 
 /// A standard library an isolate can open ([`Stack::open_library`],
 /// `orbit::Config::libraries`). The libraries that touch the system (`io`,
-/// `os`, `print`, `loadfile`, `dofile`) are `orbit-std`'s, which hosts
-/// install on top.
+/// `os`, `print`, `loadfile`, `dofile`) and the ones written on the public
+/// API (`utf8`) are `orbit-std`'s, which hosts install on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Library {
     /// The base functions (`print`, `pairs`, `pcall`, ...), as globals.
@@ -508,11 +508,10 @@ pub enum Library {
     Math,
     String,
     Table,
-    Utf8,
 }
 
 impl Library {
-    pub const ALL: [Library; 8] = [
+    pub const ALL: [Library; 7] = [
         Library::Base,
         Library::Package,
         Library::Coroutine,
@@ -520,7 +519,6 @@ impl Library {
         Library::Math,
         Library::String,
         Library::Table,
-        Library::Utf8,
     ];
 
     /// The runtime's name for the library.
@@ -534,7 +532,6 @@ impl Library {
             Library::Math => Lib::Math,
             Library::String => Lib::String,
             Library::Table => Lib::Table,
-            Library::Utf8 => Lib::Utf8,
         }
     }
 }

@@ -1,6 +1,6 @@
-//! The standard library's I/O-facing parts, built on the public `orbit` API
-//! only (ADR-11): `print`, `loadfile`, `dofile`, `debug.debug`, the `io`
-//! and `os` libraries, and `require` finding files on `package.path`.
+//! The standard library's parts built on the public `orbit` API only
+//! (ADR-11): `print`, `loadfile`, `dofile`, `debug.debug`, the `io`, `os`
+//! and `utf8` libraries, and `require` finding files on `package.path`.
 //!
 //! The runtime reads no files and touches no process state; a host that
 //! wants scripts to do so installs this crate:
@@ -29,6 +29,7 @@ mod package;
 mod sys;
 #[cfg(feature = "os")]
 mod time;
+mod utf8;
 
 use orbit::{Error, Isolate, Scope};
 
@@ -46,6 +47,8 @@ pub struct Options {
     pub io: bool,
     /// The `os` library (feature `os`).
     pub os: bool,
+    /// The `utf8` library.
+    pub utf8: bool,
     /// The `std.json` module (feature `json`), reached through `require`
     /// only.
     pub json: bool,
@@ -60,6 +63,7 @@ impl Default for Options {
             base: true,
             io: cfg!(feature = "io"),
             os: cfg!(feature = "os"),
+            utf8: true,
             json: cfg!(feature = "json"),
             ignore_env: false,
         }
@@ -84,6 +88,10 @@ pub fn install(iso: &mut Isolate, options: &Options) -> Result<(), Error> {
         if options.os {
             let t = open_os(s)?;
             publish(s, "os", t)?;
+        }
+        if options.utf8 {
+            let t = open_utf8(s)?;
+            publish(s, "utf8", t)?;
         }
         Ok::<(), Error>(())
     })?;
@@ -124,7 +132,6 @@ fn set_loaded(s: &mut orbit::stack::Stack<'_>, name: &[u8]) -> orbit::stack::Sta
 }
 
 /// Make `lib` the global `name` and what `require(name)` returns.
-#[cfg(any(feature = "io", feature = "os"))]
 fn publish<'s>(s: &'s Scope<'s>, name: &str, lib: orbit::Table<'s>) -> Result<(), Error> {
     s.globals().raw_set(name, lib)?;
     s.register_module(name, lib);
@@ -173,6 +180,11 @@ pub fn open_io<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
 #[cfg(feature = "os")]
 pub fn open_os<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
     os::open(s)
+}
+
+/// The `utf8` library's table.
+pub fn open_utf8<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
+    utf8::open(s)
 }
 
 /// Flush every open file's buffer, as the C library does at exit (standard
