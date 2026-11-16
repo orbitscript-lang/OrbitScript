@@ -48,7 +48,8 @@ pub(crate) fn load_chunk(
     mode: &Mode<'_>,
     env: Value,
 ) -> Result<Value, String> {
-    let chunk = unlinked(&ctx.vm.rt, bytes, source, mode)?;
+    let seed = ctx.vm.hash_seed();
+    let chunk = unlinked(&ctx.vm.rt, seed, bytes, source, mode)?;
     Ok(ctx.link(&chunk, env))
 }
 
@@ -65,8 +66,10 @@ pub fn load_chunk_in(
 }
 
 /// Decode (and check) or compile `bytes`.
+/// `seed` is the isolate's hash seed, for the compiler's maps.
 fn unlinked(
     rt: &VmState,
+    seed: u64,
     bytes: &[u8],
     source: &[u8],
     mode: &Mode<'_>,
@@ -94,7 +97,7 @@ fn unlinked(
     let Some(compile) = compile else {
         return Err(format!("{name}: no compiler for source chunks"));
     };
-    let mut chunk = compile(bytes, &name)?;
+    let mut chunk = compile(bytes, &name, seed)?;
     // `debug.getinfo`'s `source` is the name as given, not its short form.
     chunk.source = source.into();
     Ok(chunk)

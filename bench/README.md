@@ -21,6 +21,18 @@ An interpreter whose output differs from the baseline's counts as failing that b
 
 `--json FILE` writes everything for tracking over time, and `--markdown FILE` appends a table (CI passes `$GITHUB_STEP_SUMMARY`). `.github/workflows/bench.yml` runs the full sizes on x86_64 Linux, aarch64 Linux and macOS and keeps the JSON as an artifact. It runs only when started by hand from the Actions tab: shared runners are too noisy to judge performance on every pull request.
 
+## Repeatable runs
+
+`orbit` hashes strings and table keys with a random seed, so a program whose tables have string keys meets different collisions on each run and runs a different number of instructions: Richards, List, CD, Json and DeltaBlue move by up to 4.6% under callgrind on one binary. `cargo testkit bench` and `cargo testkit callbacks` run `orbit` with a fixed seed (`ORBIT_HASH_SEED`, unless already set, which tries another seed), and so does the PGO training workload (`tools/pgo-workload.sh`), so profiles repeat too. When measuring by hand (callgrind, `perf stat`, wall time), set it yourself:
+
+```sh
+export ORBIT_HASH_SEED=8030589290619822962
+cd bench/apps
+valgrind --tool=callgrind --callgrind-out-file=/dev/null ../../target/release/orbit awfy.lua ../../target/bench-apps Richards 50
+```
+
+Any fixed value gives repeatable counts; compare builds with the same one. The reference `lua5.5` ignores the variable.
+
 ## Larger programs (`apps`)
 
 `bench/apps` runs bigger third-party Lua programs, which behave more like real workloads than the scripts above: the Are We Fast Yet suite, the Teal compiler, luacheck, LibDeflate, the plc crypto library, lunajson and the plain-Lua part of Luau's benchmark suite. Their source is never committed. `sources.txt` pins each project to a commit, and `fetch.sh` clones them into `target/bench-apps`. What the repository holds is the small driver per project, the input lists and the manifest.
@@ -43,7 +55,7 @@ cargo testkit callbacks --reference lua5.5=target/reference-lua/bin/lua5.5 --int
 cargo testkit callbacks --reference lua5.5=target/reference-lua/bin/lua5.5 --interp orbit=target/release/orbit gsub_fn sort
 ```
 
-It counts instructions with callgrind rather than timing, so it needs valgrind and gives the same numbers on a busy machine. Each row runs at two sizes, and the difference between the two counts per unit of size is its cost, so start-up and set-up cancel out. A row with a `base=` has its base's cost taken off: the loop it runs in, or the same work without the callback (`gsub_fn` against `gsub_str`). The result is instructions per unit for each interpreter and their ratio. Each count is the median of three runs: lua5.5's counts move by a few percent from run to run.
+It counts instructions with callgrind rather than timing, so it needs valgrind and gives the same numbers on a busy machine. Each row runs at two sizes, and the difference between the two counts per unit of size is its cost, so start-up and set-up cancel out. A row with a `base=` has its base's cost taken off: the loop it runs in, or the same work without the callback (`gsub_fn` against `gsub_str`). The result is instructions per unit for each interpreter and their ratio. Each count is the median of three runs: lua5.5's counts move by a few percent from run to run (its hash seed is random), while `orbit`'s repeat exactly (Repeatable runs, above).
 
 CI runs it on its release build (no profile, Linux x86_64) with `--expect expected-orbit.txt`, and fails when a row costs `orbit` more than 10% (and at least 4 instructions) above the cost recorded there: an edit anywhere in the dispatch loop can move every row by a few percent through register allocation, while a change that makes callbacks slower moves its rows by far more. The file holds `orbit`'s own counts, which are stable, and the ratio beside each for reading. A change that makes a row cheaper records it with `--update-expected`, so the costs only go down. A new stable Rust on the runner moves the counts too; record them with the runner's Rust (`cargo +VERSION`), in a commit of their own.
 

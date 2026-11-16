@@ -1,19 +1,32 @@
 //! The chunk's string pool: names and string constants, deduplicated.
 
-use std::collections::HashMap;
-
-use crate::StrId;
+use crate::{HashSeed, SeededMap, StrId};
 
 /// Byte strings (Lua strings need not be UTF-8), each stored once.
 #[derive(Debug, Clone, Default)]
 pub struct StringPool {
     strings: Vec<Box<[u8]>>,
-    index: HashMap<Box<[u8]>, StrId>,
+    index: SeededMap<Box<[u8]>, StrId>,
 }
 
 impl StringPool {
+    /// An empty pool hashed with a random seed.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty pool hashed with `seed`, which the compiler's maps for the
+    /// same chunk then share ([`StringPool::seed`]).
+    pub fn with_seed(seed: HashSeed) -> Self {
+        StringPool {
+            strings: Vec::new(),
+            index: SeededMap::with_hasher(seed),
+        }
+    }
+
+    /// The seed the pool hashes with.
+    pub fn seed(&self) -> HashSeed {
+        *self.index.hasher()
     }
 
     /// Returns the id of `bytes`, adding it if it's new.

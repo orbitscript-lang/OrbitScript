@@ -12,6 +12,10 @@
 # (PGO_EXCLUDE="fib.lua calc"), e.g. to time a program the profile has
 # never seen.
 set -u
+# A fixed hash seed, so the counts (and the profile) repeat from run to run
+# (bench/README.md, "Repeatable runs").
+ORBIT_HASH_SEED="${ORBIT_HASH_SEED:-8030589290619822962}"
+export ORBIT_HASH_SEED
 orbit="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 # macOS has no `timeout`.

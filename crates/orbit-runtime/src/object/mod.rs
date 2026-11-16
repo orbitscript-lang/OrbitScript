@@ -30,7 +30,7 @@ pub use orbit_gc::Gc;
 pub(crate) use orbit_gc::Heap;
 pub use orbit_gc::Verify;
 pub use orbit_str::{OrbitStr, OrbitString};
-pub(crate) use string::{CStrings, Interner, LuaStr};
+pub(crate) use string::{CStrings, HashSeed, Interner, LuaStr};
 pub use table::Table;
 pub(crate) use thread::Thread;
 pub(crate) use userdata::UserData;

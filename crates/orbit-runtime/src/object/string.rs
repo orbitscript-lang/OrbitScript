@@ -3,7 +3,6 @@
 
 use std::cell::Cell as StdCell;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 use orbit_gc::{Gc, Liveness, Marker, Trace};
 
@@ -91,12 +90,12 @@ impl LuaStr {
 
     /// The string's hash, computed on first use. Never 0.
     #[inline]
-    pub(crate) fn hash(&self) -> u32 {
+    pub(crate) fn hash(&self, seed: HashSeed) -> u32 {
         let h = self.hash.get();
         if h != 0 {
             return h;
         }
-        let h = hash_bytes(self.as_bytes());
+        let h = hash_bytes(seed, self.as_bytes());
         self.hash.set(h);
         h
     }
@@ -112,13 +111,24 @@ impl Trace<LuaSpace> for LuaStr {
     }
 }
 
-fn seed() -> u64 {
-    static SEED: OnceLock<u64> = OnceLock::new();
-    *SEED.get_or_init(|| {
-        use std::collections::hash_map::RandomState;
-        use std::hash::BuildHasher;
-        RandomState::new().hash_one(0x6f72_6269_7473_6372_u64) | 1
-    })
+/// The isolate's hash seed: its heap's [`Heap::seed`](orbit_gc::Heap::seed),
+/// random unless the isolate was made for a run that must repeat exactly.
+/// Every string and table key hash mixes it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HashSeed(u64);
+
+impl HashSeed {
+    /// The seed of the isolate that owns `heap`.
+    #[inline(always)]
+    pub(crate) fn of(heap: &LuaHeap) -> HashSeed {
+        HashSeed(heap.seed())
+    }
+
+    /// The seed of the heap being traced.
+    #[inline(always)]
+    pub(crate) fn tracing(m: &Marker<'_, LuaSpace>) -> HashSeed {
+        HashSeed(m.seed())
+    }
 }
 
 #[inline(always)]
@@ -131,8 +141,8 @@ const K0: u64 = 0xa076_1d64_78bd_642f;
 const K1: u64 = 0xe703_7ed1_a0b4_28db;
 
 /// Seeded hash of a byte string. Never returns 0.
-pub(crate) fn hash_bytes(b: &[u8]) -> u32 {
-    let mut h = seed() ^ (b.len() as u64).wrapping_mul(K1);
+pub(crate) fn hash_bytes(seed: HashSeed, b: &[u8]) -> u32 {
+    let mut h = seed.0 ^ (b.len() as u64).wrapping_mul(K1);
     let mut chunks = b.chunks_exact(8);
     for c in &mut chunks {
         let w = u64::from_le_bytes(c.try_into().unwrap_or([0; 8]));
@@ -151,8 +161,8 @@ pub(crate) fn hash_bytes(b: &[u8]) -> u32 {
 /// Seeded hash of a 64-bit word (numbers, handles, booleans as table keys).
 /// Never returns 0.
 #[inline(always)]
-pub(crate) fn hash_word(w: u64) -> u32 {
-    let h = mix(w ^ K1, K0 ^ seed());
+pub(crate) fn hash_word(seed: HashSeed, w: u64) -> u32 {
+    let h = mix(w ^ K1, K0 ^ seed.0);
     (h as u32 ^ (h >> 32) as u32).max(1)
 }
 
@@ -270,7 +280,7 @@ impl Interner {
         if self.slots.is_empty() {
             self.slots = vec![Interned::EMPTY; INTERNER_MIN];
         }
-        let hash = hash_bytes(bytes);
+        let hash = hash_bytes(HashSeed::of(heap), bytes);
         let mask = self.slots.len() - 1;
         let mut i = hash as usize & mask;
         loop {
@@ -501,7 +511,8 @@ mod tests {
         let c = i.new_str(&mut heap, &long);
         let d = i.new_str(&mut heap, &long);
         assert_ne!(c, d);
-        assert_eq!(heap.get(c).hash(), heap.get(d).hash());
+        let seed = HashSeed::of(&heap);
+        assert_eq!(heap.get(c).hash(seed), heap.get(d).hash(seed));
         assert_eq!(
             i.new_substr(&mut heap, c, 1, 6),
             i.new_str(&mut heap, b"xxxxx")

@@ -137,7 +137,9 @@ impl FieldCache {
     pub(crate) fn new(heap: &crate::object::LuaHeap, key: Gc<LuaStr>) -> FieldCache {
         FieldCache {
             key,
-            hash: heap.get(key).hash(),
+            hash: heap
+                .get(key)
+                .hash(crate::object::string::HashSeed::of(heap)),
             slot: StdCell::new(u32::MAX),
             shared: false,
         }

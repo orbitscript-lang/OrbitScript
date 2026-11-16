@@ -19,7 +19,10 @@
 //! (bytes, or with a `K`, `M` or `G` suffix) caps the Lua heap: past it,
 //! scripts get the error `not enough memory`. `ORBIT_VERIFY=structure` or
 //! `none` lowers how much `load` checks binary chunks (`-E` ignores it):
-//! only for chunks you trust.
+//! only for chunks you trust. `ORBIT_HASH_SEED=N` (a decimal `u64`) hashes
+//! strings and table keys with seed `N` instead of a random one, so
+//! benchmark runs repeat exactly (`-E` ignores it): never for scripts that
+//! read untrusted input, whose keys could then be chosen to collide.
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -303,6 +306,20 @@ fn binary_checks_from_env() -> Option<Option<BinaryChecks>> {
     }
 }
 
+/// `ORBIT_HASH_SEED`'s value, if it is set and `-E` wasn't given.
+fn hash_seed_from_env(cli: &Cli) -> Result<Option<u64>, String> {
+    if cli.ignore_env {
+        return Ok(None);
+    }
+    match std::env::var_os("ORBIT_HASH_SEED") {
+        None => Ok(None),
+        Some(seed) => match seed.to_str().and_then(|s| s.parse::<u64>().ok()) {
+            Some(seed) => Ok(Some(seed)),
+            None => Err("ORBIT_HASH_SEED: expected a whole number from 0 to 2^64-1".into()),
+        },
+    }
+}
+
 /// The isolate the command line asks for, with its libraries installed and
 /// Ctrl-C hooked up.
 fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
@@ -315,9 +332,12 @@ fn new_isolate(cli: &Cli) -> Result<Isolate, String> {
             }
         },
     };
-    let config = Config::default()
+    let mut config = Config::default()
         .warnings(cli.warnings)
         .memory_limit(memory_limit);
+    if let Some(seed) = hash_seed_from_env(cli)? {
+        config = config.fixed_hash_seed(seed);
+    }
     let mut iso = Runtime::new().new_isolate(config);
     if !cli.ignore_env {
         if let Some(level) = binary_checks_from_env() {
