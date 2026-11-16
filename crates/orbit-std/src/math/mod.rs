@@ -188,7 +188,13 @@ fn modf(x: Number) -> (Number, f64) {
     (int, frac)
 }
 
-#[native(name = "math.tointeger")]
+/// `tointeger`'s fast path: a number argument.
+fn tointeger_fast(args: &[PureValue]) -> Option<PureValue> {
+    let n = Number::from_value(args.first().copied())?;
+    n.to_int_exact().into_value()
+}
+
+#[native(name = "math.tointeger", fast = tointeger_fast)]
 fn tointeger(s: &mut Stack<'_>, v: Any) -> Option<i64> {
     match s.type_at(v.0) {
         // A float converts only if it holds an integer exactly.

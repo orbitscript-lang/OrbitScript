@@ -422,7 +422,14 @@ impl<'s> Table<'s> {
     /// `os.date`, `t.date`. The name is written once, in the attribute.
     pub fn add_native<N: Native>(&self) -> Result<(), Error> {
         let f = self.s.create_native::<N>();
-        self.raw_set(crate::stack::field_name(N::NAME), f)
+        self.set_native_field(N::NAME, f)
+    }
+
+    /// The non-generic half of [`Table::add_native`]: one copy for every
+    /// native a library adds.
+    #[inline(never)]
+    fn set_native_field(&self, name: &'static str, f: Function<'s>) -> Result<(), Error> {
+        self.raw_set(crate::stack::field_name(name), f)
     }
 
     /// `#t`, with `__len`.
