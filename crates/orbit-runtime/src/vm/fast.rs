@@ -104,7 +104,7 @@ pub(crate) enum Cmp {
 
 impl Cmp {
     #[inline(always)]
-    fn test<T: PartialOrd>(self, x: T, y: T) -> bool {
+    pub(crate) fn test<T: PartialOrd>(self, x: T, y: T) -> bool {
         match self {
             Cmp::Lt => x < y,
             Cmp::Le => x <= y,

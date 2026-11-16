@@ -98,10 +98,13 @@ impl Vm {
     pub(crate) fn run(&mut self) -> Result<(), LuaError> {
         // A nested run (a native calling back into script code) leaves
         // the outer run's function as it found it.
-        let saved = (self.rt.cur.clone(), self.rt.closure);
+        // That includes its fuel: the outer chain must run out of it no
+        // matter how many nested runs it starts.
+        let saved = (self.rt.cur.clone(), self.rt.closure, self.rt.fuel);
         let r = self.run_frames();
         self.rt.cur = saved.0;
         self.rt.closure = saved.1;
+        self.rt.fuel = saved.2;
         r
     }
 
@@ -111,10 +114,10 @@ impl Vm {
             let ran = if self.top_hooked() {
                 self.run_loop::<true>()?
             } else {
-                self.run_raw()?
+                self.run_handlers()?
             };
             #[cfg(not(feature = "hooks"))]
-            let ran = self.run_raw()?;
+            let ran = self.run_handlers()?;
             match ran {
                 Ran::Done => return Ok(()),
                 Ran::NoMemory => {

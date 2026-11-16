@@ -17,7 +17,6 @@
 //! [VM design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md
 
 pub mod format;
-pub mod insn;
 pub mod number;
 pub mod verify;
 
@@ -78,6 +77,7 @@ pub type Offset = i32;
 
 /// One instruction. Always 8 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Op {
     // Loads.
     /// `R[dst] = R[src]`

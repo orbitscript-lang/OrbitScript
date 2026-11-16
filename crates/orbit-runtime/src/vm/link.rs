@@ -137,7 +137,6 @@ pub(crate) fn link(
             let proto = Proto {
                 code: Rc::new(ProtoCode {
                     code: u.code.as_slice().into(),
-                    words: u.code.iter().map(|op| op.encode()).collect(),
                     consts: consts.into(),
                     caches,
                     nparams: u.nparams,

@@ -37,9 +37,9 @@ orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 libc = { version = "0.2", default-features = false }
 
 # The workspace lints, except that `unsafe_code` is denied rather than
-# forbidden, so `src/vm/threaded/raw.rs` can allow its raw register and
-# code pointers (ADR-15). Keep the rest in step with the workspace
-# `Cargo.toml`.
+# forbidden, so `src/vm/handlers/regs.rs` and `src/vm/handlers/calls.rs`
+# can allow the interpreter's raw register and code pointers (ADR-15).
+# Keep the rest in step with the workspace `Cargo.toml`.
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

@@ -51,6 +51,31 @@ fn a_small_thread_stack_gets_an_error_not_a_crash() {
     eprintln!("levels before the budget ran out: {}", out[2]);
 }
 
+/// A loop that calls a native which calls back into script code uses no
+/// more native stack on its last iteration than on its first. The plain
+/// interpreter gives its handlers fuel so that a build whose handlers
+/// call each other (a debug build) still returns to its trampoline, and
+/// the callback's own run must not refill the fuel of the run around it.
+#[test]
+fn a_loop_of_callbacks_does_not_grow_the_native_stack() {
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    let count = iso
+        .scope(|s| {
+            let src = "local gsub = string.gsub
+                 local n = 0
+                 local function f(text)
+                   local r = gsub(text, 'a', function() n = n + 1 end)
+                   return r
+                 end
+                 for i = 1, 100000 do f('a') end
+                 return n";
+            let out = s.load(Chunk::new(src).name("=t"))?.call(())?;
+            Ok::<_, Error>(String::from_utf8_lossy(&out[0].to_display()?).into_owned())
+        })
+        .unwrap();
+    assert_eq!(count, "100000");
+}
+
 /// Each kind of nested call, as a chunk that defines `f(d)`: `f` calls
 /// `mark()` and then, while `d > 0`, calls itself one level deeper through
 /// that kind of call. A row the interpreter runs without nesting on the

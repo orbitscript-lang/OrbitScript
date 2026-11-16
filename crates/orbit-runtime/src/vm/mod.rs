@@ -28,6 +28,7 @@ pub mod debugger;
 mod dispatch;
 mod fast;
 mod gc;
+mod handlers;
 pub(crate) mod hook;
 pub(crate) mod host;
 mod interp;
@@ -36,7 +37,6 @@ mod locale;
 mod meta;
 mod native;
 pub(crate) mod ops;
-mod threaded;
 
 use std::fmt;
 use std::io::Write;
@@ -669,21 +669,22 @@ pub(crate) struct VmState {
     /// machine register. A cache, not part of any thread's stack, so it
     /// stays across coroutine switches.
     pub(crate) prev_code: Option<std::rc::Rc<crate::object::ProtoCode>>,
-    /// The running function's code and closure, as the handlers that work
-    /// on the whole VM see them (`vm::threaded`).
+    /// The running function's closure and code, as the plain
+    /// interpreter's handlers (`vm::handlers`) see them when they work on
+    /// the whole VM.
     pub(crate) cur: std::rc::Rc<crate::object::ProtoCode>,
     pub(crate) closure: Gc<crate::object::Closure>,
-    /// What is left of the handler chain's allowance of jumps and calls
-    /// before it returns to the trampoline.
+    /// What is left of a handler chain's allowance of backward jumps and
+    /// calls before it returns to the trampoline.
     pub(crate) fuel: u32,
     /// The register stack's length while a handler chain runs.
     pub(crate) stack_len: usize,
-    /// The running code and its first instruction as the chained handlers
-    /// see them (`vm::threaded::raw`). Calls and returns there change
-    /// these alone; `cur` follows when an instruction needs the whole VM.
-    /// Valid while the frame of `closure` is on the stack.
+    /// The running code and its first instruction as a handler chain
+    /// keeps them: calls and returns between handlers change these
+    /// alone, and `cur` follows when a handler needs the whole VM. Valid
+    /// while the frame of `closure` is on the stack.
     pub(crate) code: *const crate::object::func::ProtoCode,
-    pub(crate) wp: *const orbit_bytecode::insn::Insn,
+    pub(crate) first_op: *const orbit_bytecode::Op,
     /// An error (or metamethod request) on its way from an instruction to
     /// the trampoline, with the pc after it.
     pub(crate) pending: Option<(ops::Exc, usize)>,
@@ -921,7 +922,7 @@ impl Vm {
                 fuel: 0,
                 stack_len: 0,
                 code: std::ptr::null(),
-                wp: std::ptr::null(),
+                first_op: std::ptr::null(),
                 pending: None,
                 dead_cell,
                 c_strings: CStrings::default(),

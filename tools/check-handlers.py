@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prologues.py BINARY SUBSTR: handlers whose entry saves registers or makes a stack frame, and their non-tail calls."""
+"""check-handlers.py BINARY SUBSTR (for the interpreter: 8handlers): functions whose entry saves registers or makes a stack frame, and their non-tail calls."""
 import sys, subprocess, re
 out = subprocess.run(['objdump', '-d', '--no-show-raw-insn', sys.argv[1]], capture_output=True, text=True).stdout
 name = None; rows = {}

@@ -55,13 +55,6 @@ impl<'a> Window<'a> {
         Window(regs)
     }
 
-    /// The window at `base` when the stack covers it.
-    #[inline(always)]
-    pub(crate) fn get(regs: &'a mut [Value], base: usize) -> Option<Self> {
-        regs.get_mut(base..base + WINDOW)
-            .map(|s| Window(<&mut [Value; WINDOW]>::try_from(s).expect("a full window")))
-    }
-
     /// The window at `base`, extending the stack to cover it when it does
     /// not yet.
     #[inline(always)]
