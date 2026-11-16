@@ -608,14 +608,16 @@ impl<'s> Stack<'s> {
         }
     }
 
+    // A table's `__index` or `__newindex` function is called straight
+    // away, as the runtime's own natives call it.
+    #[inline]
     fn index(&mut self, obj: RawValue, key: RawValue) -> StackResult<RawValue> {
-        let m = self.ctx.index(obj, key)?;
-        self.finish_meta(m, |v| v)
+        Ok(self.ctx.index_now(obj, key)?)
     }
 
+    #[inline]
     fn set_index(&mut self, obj: RawValue, key: RawValue, v: RawValue) -> StackResult<()> {
-        let m = self.ctx.set_index(obj, key, v)?;
-        self.finish_meta(m, |_| ())
+        Ok(self.ctx.set_index_now(obj, key, v)?)
     }
 
     // ---- slots -----------------------------------------------------------------
@@ -1117,8 +1119,7 @@ impl<'s> Stack<'s> {
     /// Push the length of the value at `idx`, as `#` gives it.
     pub fn len(&mut self, idx: i32) -> StackResult<()> {
         let v = self.get(idx);
-        let m = self.ctx.length(v)?;
-        let r = self.finish_meta(m, |v| v)?;
+        let r = self.ctx.length_now(v)?;
         self.ctx.push(r);
         Ok(())
     }
@@ -1316,9 +1317,13 @@ impl<'s> Stack<'s> {
     }
 
     /// Push `t[n]` for the value at `idx`.
+    #[inline]
     pub fn get_index(&mut self, idx: i32, n: i64) -> StackResult<Type> {
+        // An integer key needs no rooting while metamethods run.
         let obj = self.get(idx);
-        self.get_with(obj, RawValue::Int(n))
+        let v = self.index(obj, RawValue::Int(n))?;
+        self.ctx.push(v);
+        Ok(type_of(v))
     }
 
     /// Push the global `name`.
@@ -1535,6 +1540,123 @@ impl<'s> Stack<'s> {
         }
         self.ctx.push(h);
         true
+    }
+
+    /// The table at `idx` if it has no metatable, for the table
+    /// library's raw loops.
+    #[inline]
+    pub(crate) fn plain_table(&self, idx: i32) -> Option<Gc<crate::object::Table>> {
+        match self.get(idx) {
+            RawValue::Table(t) if self.ctx.vm.heap.get(t).meta.is_none() => Some(t),
+            _ => None,
+        }
+    }
+
+    /// `t[i]` without metamethods, for a table the window holds.
+    #[inline]
+    pub(crate) fn push_raw_index(&mut self, t: Gc<crate::object::Table>, i: i64) {
+        let heap = &self.ctx.vm.heap;
+        let v = heap.get(t).get_int(crate::object::HashSeed::of(heap), i);
+        self.ctx.push(v);
+    }
+
+    /// The border of a table the window holds (`#t` without `__len`).
+    #[inline]
+    pub(crate) fn raw_border(&self, t: Gc<crate::object::Table>) -> i64 {
+        let heap = &self.ctx.vm.heap;
+        heap.get(t).border(crate::object::HashSeed::of(heap))
+    }
+
+    /// Room left on the stack, in values.
+    #[inline]
+    pub(crate) fn room(&self) -> usize {
+        self.ctx.vm.rt.host.max_stack().saturating_sub(self.ctx.len())
+    }
+
+    /// Copy `src[from]` to `dst[to]` without metamethods, for tables the
+    /// window holds.
+    #[inline]
+    pub(crate) fn raw_copy_int(
+        &mut self,
+        src: Gc<crate::object::Table>,
+        from: i64,
+        dst: Gc<crate::object::Table>,
+        to: i64,
+    ) -> StackResult<()> {
+        let heap = &self.ctx.vm.heap;
+        let v = heap.get(src).get_int(crate::object::HashSeed::of(heap), from);
+        self.raw_put_int(dst, to, v)
+    }
+
+    /// `t[i] = ` the value at `idx`, without metamethods, for a table the
+    /// window holds.
+    #[inline]
+    pub(crate) fn raw_set_int_from(
+        &mut self,
+        t: Gc<crate::object::Table>,
+        i: i64,
+        idx: i32,
+    ) -> StackResult<()> {
+        let v = self.get(idx);
+        self.raw_put_int(t, i, v)
+    }
+
+    #[inline]
+    fn raw_put_int(&mut self, t: Gc<crate::object::Table>, i: i64, v: RawValue) -> StackResult<()> {
+        match crate::object::table::set_int(&mut self.ctx.vm.heap, t, i, v) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(self.memory_error()),
+        }
+    }
+
+    /// Append `t[i]` (no metamethods) to `out` as `concat` writes it, with
+    /// room for `extra` bytes more; `Err` with the value's type name if it
+    /// is neither a string nor a number.
+    #[inline]
+    pub(crate) fn append_raw_index(
+        &mut self,
+        t: Gc<crate::object::Table>,
+        i: i64,
+        extra: usize,
+        out: &mut Vec<u8>,
+    ) -> StackResult<Result<(), &'static str>> {
+        let heap = &self.ctx.vm.heap;
+        let v = heap.get(t).get_int(crate::object::HashSeed::of(heap), i);
+        self.append_text(v, extra, out)
+    }
+
+    /// Append the value at `idx` to `out` as `concat` writes it; see
+    /// [`Stack::append_raw_index`].
+    #[inline]
+    pub(crate) fn append_text_at(
+        &mut self,
+        idx: i32,
+        extra: usize,
+        out: &mut Vec<u8>,
+    ) -> StackResult<Result<(), &'static str>> {
+        let v = self.get(idx);
+        self.append_text(v, extra, out)
+    }
+
+    #[inline]
+    fn append_text(
+        &mut self,
+        v: RawValue,
+        extra: usize,
+        out: &mut Vec<u8>,
+    ) -> StackResult<Result<(), &'static str>> {
+        // Long pieces grow the buffer by a lot: reserve first, so running
+        // out of memory is an error rather than an abort.
+        let piece = match v {
+            RawValue::Str(s) => self.ctx.bytes(s).len(),
+            RawValue::Int(_) | RawValue::Float(_) => 0,
+            _ => return Ok(Err(v.type_name())),
+        };
+        if out.try_reserve(piece + extra).is_err() {
+            return Err(self.memory_error());
+        }
+        self.ctx.display(v, out);
+        Ok(Ok(()))
     }
 
     /// The type name of the value at `idx`, as operator errors give it

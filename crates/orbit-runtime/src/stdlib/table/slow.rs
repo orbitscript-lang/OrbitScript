@@ -6,6 +6,7 @@
 //! plain loop; as in the reference, nothing may yield across them.
 
 use crate::object::{Gc, HashSeed, Table, Value};
+use crate::stack::{Buffer, CompareOp, Return, Stack, StackResult, Type};
 use crate::vm::{LuaError, MetaField, NativeCtx, NativeReturn, Vm};
 
 use super::{MAX_INT, R};
@@ -71,149 +72,166 @@ fn window(ctx: &mut NativeCtx<'_>, n: usize) {
     }
 }
 
-pub(super) fn concat(ctx: &mut NativeCtx<'_>) -> R {
-    let t = check_tab(ctx, 0, READ)?;
-    window(ctx, 4);
+/// Argument `arg` is a table, or has the metamethods `needs` names.
+fn check_table(s: &mut Stack<'_>, arg: i32, needs: Needs) -> StackResult<()> {
+    if s.type_at(arg) == Type::Table {
+        return Ok(());
+    }
+    let ok = s.get_metatable(arg)
+        && (!needs.read || s.has_meta_field(arg, MetaField::Index))
+        && (!needs.write || s.has_meta_field(arg, MetaField::NewIndex));
+    if ok {
+        s.set_top(-2)?;
+        Ok(())
+    } else {
+        Err(s.type_error(arg, "table"))
+    }
+}
+
+/// `#t` with `__len` for the value at `idx`, as the table functions take
+/// it: an integer, a float with an integral value, or a string that
+/// converts to one.
+fn table_length(s: &mut Stack<'_>, idx: i32) -> StackResult<i64> {
+    s.len(idx)?;
+    let n = s.to_integer(-1);
+    s.set_top(-2)?;
+    match n {
+        Some(n) => Ok(n),
+        None => Err(s.error("object length is not an integer")),
+    }
+}
+
+pub(super) fn concat(s: &mut Stack<'_>) -> StackResult<Buffer> {
+    check_table(s, 1, READ)?;
+    s.set_top(4)?;
     // The length comes first, even when the range is given.
-    let last = length(ctx, t)?;
-    let sep = match ctx.arg(1) {
-        Value::Nil => Vec::new(),
-        _ => {
-            let s = ctx.check_str(1)?;
-            ctx.bytes(s).to_vec()
-        }
+    let last = table_length(s, 1)?;
+    let sep = if s.type_at(2) == Type::Nil {
+        Vec::new()
+    } else {
+        let sep = s.check_string_handle(2)?;
+        s.handle_bytes(sep).to_vec()
     };
-    let mut i = ctx.opt_int(2, 1)?;
-    let last = ctx.opt_int(3, last)?;
+    let mut i = s.opt_integer(3, 1)?;
+    let last = s.opt_integer(4, last)?;
     let mut out = Vec::new();
     while i <= last {
-        let v = ctx.index_now(t, Value::Int(i))?;
-        let piece = match v {
-            Value::Str(s) => ctx.bytes(s).len(),
-            Value::Int(_) | Value::Float(_) => 0,
-            _ => {
-                return Err(ctx.error(&format!(
-                    "invalid value ({}) at index {i} in table for 'concat'",
-                    v.type_name()
-                )));
-            }
-        };
-        // Long pieces grow the buffer by a lot: reserve first, so running
-        // out of memory is an error rather than an abort.
-        if out.try_reserve(piece + sep.len()).is_err() {
-            return Err(ctx.no_memory());
+        s.get_index(1, i)?;
+        if let Err(type_name) = s.append_text_at(-1, sep.len(), &mut out)? {
+            return Err(super::invalid_value(s, type_name, i));
         }
-        ctx.display(v, &mut out);
+        s.set_top(4)?;
         if i == last {
             break;
         }
         out.extend_from_slice(&sep);
         i += 1;
     }
-    let r = ctx.new_str_owned(out);
-    ctx.ret([r])
+    Ok(Buffer(out))
 }
 
-pub(super) fn unpack(ctx: &mut NativeCtx<'_>) -> R {
-    let t = check_tab(ctx, 0, READ)?;
-    window(ctx, 3);
-    let len = length(ctx, t)?;
-    let i = ctx.opt_int(1, 1)?;
-    let j = ctx.opt_int(2, len)?;
+pub(super) fn unpack(s: &mut Stack<'_>) -> StackResult<Return> {
+    check_table(s, 1, READ)?;
+    s.set_top(3)?;
+    let len = table_length(s, 1)?;
+    let i = s.opt_integer(2, 1)?;
+    let j = s.opt_integer(3, len)?;
     if i > j {
-        return Ok(NativeReturn::Return(0));
+        return Ok(Return::values(0));
     }
-    let room = ctx.vm.rt.host.max_stack().saturating_sub(ctx.len());
+    let room = s.room();
     let Some(n) = j
         .checked_sub(i)
         .and_then(|d| d.checked_add(1))
         // More results than an integer holds, or the stack.
         .filter(|&n| n < MAX_INT && (n as u64) < room as u64)
     else {
-        return Err(ctx.error("too many results to unpack"));
+        return Err(s.error("too many results to unpack"));
     };
     // Each value goes on the window as it arrives, rooted while the next
     // metamethods run.
     let mut k = i;
     loop {
-        let v = ctx.index_now(t, Value::Int(k))?;
-        ctx.push(v);
+        s.get_index(1, k)?;
         if k == j {
             break;
         }
         k += 1;
     }
-    Ok(NativeReturn::Return(n as usize))
+    Ok(Return::values(n as usize))
 }
 
-pub(super) fn move_(ctx: &mut NativeCtx<'_>) -> R {
-    let a1 = check_tab(ctx, 0, READ)?;
-    let f = ctx.check_int(1)?;
-    let e = ctx.check_int(2)?;
-    let t = ctx.check_int(3)?;
-    let explicit = !ctx.arg(4).is_nil();
-    let a2 = if explicit {
-        check_tab(ctx, 4, WRITE)?
-    } else {
-        a1
-    };
+pub(super) fn move_(s: &mut Stack<'_>) -> StackResult<Return> {
+    check_table(s, 1, READ)?;
+    let f = s.check_integer(2)?;
+    let e = s.check_integer(3)?;
+    let t = s.check_integer(4)?;
+    let explicit = !matches!(s.type_at(5), Type::None | Type::Nil);
+    if explicit {
+        check_table(s, 5, WRITE)?;
+    }
+    s.set_top(5)?;
+    if !explicit {
+        s.copy(1, 5)?;
+    }
     if e < f {
-        return ctx.ret([a2]);
+        s.push_copy(5);
+        return Ok(Return::values(1));
     }
     // The elements after the first; their count must fit an integer.
     let Some(n) = e.checked_sub(f).filter(|&n| n < i64::MAX) else {
-        return Err(ctx.arg_error(2, "too many elements to move"));
+        return Err(s.arg_error(3, "too many elements to move"));
     };
     if t.checked_add(n).is_none() {
-        return Err(ctx.arg_error(3, "destination wrap around"));
+        return Err(s.arg_error(4, "destination wrap around"));
     }
-    window(ctx, 5);
-    ctx.set(4, a2);
     // Moving up is safe unless the destination starts inside the source of
     // the same table (`__eq` included when the tables were given apart).
-    let down = !(t > e || t <= f) && (!explicit || ctx.equal_now(a1, a2)?);
-    let step = |ctx: &mut NativeCtx<'_>, i: i64| -> Result<(), LuaError> {
-        let v = ctx.index_now(a1, Value::Int(f + i))?;
-        ctx.set_index_now(a2, Value::Int(t + i), v)
+    let down = !(t > e || t <= f) && (!explicit || s.compare(1, 5, CompareOp::Eq)?);
+    let step = |s: &mut Stack<'_>, i: i64| -> StackResult<()> {
+        s.get_index(1, f + i)?;
+        s.set_index_int(5, t + i)
     };
     if down {
         for i in (0..=n).rev() {
-            step(ctx, i)?;
+            step(s, i)?;
         }
     } else {
         for i in 0..=n {
-            step(ctx, i)?;
+            step(s, i)?;
         }
     }
-    ctx.ret([a2])
+    s.push_copy(5);
+    Ok(Return::values(1))
 }
 
-pub(super) fn insert(ctx: &mut NativeCtx<'_>) -> R {
-    let t = check_tab(ctx, 0, READ_WRITE)?;
-    let e = length(ctx, t)?.wrapping_add(1);
-    match ctx.nargs() {
+pub(super) fn insert(s: &mut Stack<'_>) -> StackResult<Return> {
+    check_table(s, 1, READ_WRITE)?;
+    let nargs = s.top();
+    let e = table_length(s, 1)?.wrapping_add(1);
+    match nargs {
         2 => {
-            let v = ctx.arg(1);
-            ctx.set_index_now(t, Value::Int(e), v)?;
+            s.push_copy(2);
+            s.set_index_int(1, e)?;
         }
         3 => {
-            let pos = ctx.check_int(1)?;
+            let pos = s.check_integer(2)?;
             // `pos - 1` as unsigned: 1..=e is valid.
             if (pos.wrapping_sub(1) as u64) >= e as u64 {
-                return Err(ctx.arg_error(1, "position out of bounds"));
+                return Err(s.arg_error(2, "position out of bounds"));
             }
             let mut i = e;
             while i > pos {
-                let v = ctx.index_now(t, Value::Int(i - 1))?;
-                ctx.set_index_now(t, Value::Int(i), v)?;
+                s.get_index(1, i - 1)?;
+                s.set_index_int(1, i)?;
                 i -= 1;
             }
-            let v = ctx.arg(2);
-            ctx.set_index_now(t, Value::Int(pos), v)?;
+            s.push_copy(3);
+            s.set_index_int(1, pos)?;
         }
-        _ => return Err(ctx.error("wrong number of arguments to 'insert'")),
+        _ => return Err(s.error("wrong number of arguments to 'insert'")),
     }
-    Ok(NativeReturn::Return(0))
+    Ok(Return::values(0))
 }
 
 /// The largest array `sort` accepts (a C `int`).
@@ -365,66 +383,51 @@ fn write_back(
 }
 
 /// `table.remove`, on a plain table or through metamethods.
-pub(super) fn remove(ctx: &mut NativeCtx<'_>) -> R {
-    let t = ctx.arg(0);
-    let plain = match t {
-        Value::Table(h) if ctx.vm.heap.get(h).meta.is_none() => Some(h),
-        _ => None,
-    };
+pub(super) fn remove(s: &mut Stack<'_>) -> StackResult<Return> {
+    let plain = s.plain_table(1);
     let size = match plain {
-        Some(h) => ctx.vm.heap.get(h).border(HashSeed::of(&ctx.vm.heap)),
+        Some(t) => s.raw_border(t),
         None => {
-            let t = check_tab(ctx, 0, READ_WRITE)?;
-            length(ctx, t)?
+            check_table(s, 1, READ_WRITE)?;
+            table_length(s, 1)?
         }
     };
     let mut pos = size;
-    if !ctx.arg(1).is_nil() {
-        pos = ctx.check_int(1)?;
+    if !matches!(s.type_at(2), Type::None | Type::Nil) {
+        pos = s.check_integer(2)?;
         // `pos - 1` as unsigned: 1..=size+1 is valid.
         if pos != size && (size as u64) < (pos.wrapping_sub(1) as u64) {
-            return Err(ctx.arg_error(1, "position out of bounds"));
+            return Err(s.arg_error(2, "position out of bounds"));
         }
     }
-    window(ctx, 2);
-    let v = get_at(ctx, t, plain, pos)?;
-    // Rooted while the moves below run metamethods.
-    ctx.set(1, v);
+    s.set_top(1)?;
+    // The removed value, slot 2, stays rooted while the moves below run
+    // metamethods.
+    match plain {
+        Some(t) => s.push_raw_index(t, pos),
+        None => {
+            s.get_index(1, pos)?;
+        }
+    }
     while pos < size {
-        let next = get_at(ctx, t, plain, pos + 1)?;
-        set_at(ctx, t, plain, pos, next)?;
+        match plain {
+            Some(t) => s.raw_copy_int(t, pos + 1, t, pos)?,
+            None => {
+                s.get_index(1, pos + 1)?;
+                s.set_index_int(1, pos)?;
+            }
+        }
         pos += 1;
     }
-    set_at(ctx, t, plain, pos, Value::Nil)?;
-    let v = ctx.arg(1);
-    ctx.ret([v])
-}
-
-/// `t[i]`, raw when `plain` is `t` itself.
-fn get_at(
-    ctx: &mut NativeCtx<'_>,
-    t: Value,
-    plain: Option<crate::object::Gc<crate::object::Table>>,
-    i: i64,
-) -> Result<Value, LuaError> {
+    s.push_nil();
     match plain {
-        Some(h) => Ok(at(ctx, h, i)),
-        None => ctx.index_now(t, Value::Int(i)),
+        Some(t) => s.raw_set_int_from(t, pos, -1)?,
+        None => s.set_index_int(1, pos)?,
     }
-}
-
-/// `t[i] = v`, raw when `plain` is `t` itself.
-fn set_at(
-    ctx: &mut NativeCtx<'_>,
-    t: Value,
-    plain: Option<crate::object::Gc<crate::object::Table>>,
-    i: i64,
-    v: Value,
-) -> Result<(), LuaError> {
-    match plain {
-        Some(h) => put(ctx, h, i, v),
-        None => ctx.set_index_now(t, Value::Int(i), v),
+    if plain.is_some() {
+        s.set_top(2)?;
     }
+    Ok(Return::values(1))
 }
 
 /// `sort`'s fast path, for no comparator: sort `a[1..=n]` by `<` if they are all numbers
