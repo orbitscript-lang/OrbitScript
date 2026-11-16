@@ -14,7 +14,6 @@ mod coroutine;
 mod debug;
 mod dump;
 mod load;
-mod package;
 pub(crate) mod string;
 mod table;
 
@@ -81,7 +80,6 @@ pub fn open_libs(vm: &mut Vm) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lib {
     Base,
-    Package,
     Coroutine,
     Debug,
     Io,
@@ -92,13 +90,12 @@ pub enum Lib {
 
 impl Lib {
     /// The order [`open_libs`] opens them in.
-    pub const OPEN_ORDER: [Lib; 8] = [
+    pub const OPEN_ORDER: [Lib; 7] = [
         Lib::Base,
         Lib::String,
         Lib::Table,
         Lib::Os,
         Lib::Io,
-        Lib::Package,
         Lib::Coroutine,
         Lib::Debug,
     ];
@@ -107,7 +104,6 @@ impl Lib {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Lib::Base => "_G",
-            Lib::Package => "package",
             Lib::Coroutine => "coroutine",
             Lib::Debug => "debug",
             Lib::Io => "io",
@@ -144,10 +140,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             if orbit_lua_version::LUA.is_5_5() {
                 add_functions(vm, t, table::FUNCTIONS_5_5);
             }
-            true
-        }
-        Lib::Package => {
-            package::open(vm);
             true
         }
         Lib::Coroutine => {

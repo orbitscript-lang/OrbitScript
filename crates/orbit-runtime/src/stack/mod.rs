@@ -42,7 +42,7 @@ pub use typed::{
 pub use typed::{PureArg, PureFn, PureResult, PureValue, catch_panic, panic_message};
 pub(crate) use window::{ContRef, cont_ref};
 pub use window::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
-pub(crate) use window::{LibraryRow, library_row, native_fn};
+pub(crate) use window::{LibraryRow, library_row};
 
 /// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).
 pub const REGISTRY_INDEX: i32 = -(i32::MAX / 2 + 1000);
@@ -497,12 +497,11 @@ impl ThreadStatus {
 /// A standard library an isolate can open ([`Stack::open_library`],
 /// `orbit::Config::libraries`). The libraries that touch the system (`io`,
 /// `os`, `print`, `loadfile`, `dofile`) and the ones written on the public
-/// API (`math`, `utf8`) are `orbit-std`'s, which hosts install on top.
+/// API (`math`, `package`, `utf8`) are `orbit-std`'s, which hosts install on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Library {
     /// The base functions (`print`, `pairs`, `pcall`, ...), as globals.
     Base,
-    Package,
     Coroutine,
     Debug,
     String,
@@ -510,9 +509,8 @@ pub enum Library {
 }
 
 impl Library {
-    pub const ALL: [Library; 6] = [
+    pub const ALL: [Library; 5] = [
         Library::Base,
-        Library::Package,
         Library::Coroutine,
         Library::Debug,
         Library::String,
@@ -524,7 +522,6 @@ impl Library {
     pub fn lib(self) -> Lib {
         match self {
             Library::Base => Lib::Base,
-            Library::Package => Lib::Package,
             Library::Coroutine => Lib::Coroutine,
             Library::Debug => Lib::Debug,
             Library::String => Lib::String,

@@ -11,6 +11,7 @@
 //! instructions' register allocation, independent of how many instructions
 //! there are.
 
+use crate::object::HashSeed;
 use crate::object::OrbitString;
 use orbit_lua_version::LUA;
 
@@ -589,9 +590,10 @@ impl Vm {
         start: i64,
     ) -> Result<(), NoMemory> {
         let regs = &self.rt.stack.regs;
+        let seed = HashSeed::of(&self.heap);
         self.heap.update(t, |tab| {
             for (i, &v) in regs[from..from + n].iter().enumerate() {
-                tab.set_int(start + i as i64, v)?;
+                tab.set_int(seed, start + i as i64, v)?;
             }
             Ok(())
         })
@@ -691,7 +693,7 @@ impl Vm {
         let tab = self.heap.get(t);
         for i in 0..count {
             self.rt.stack.regs[to + i] = if i < n {
-                tab.get_int(i as i64 + 1)
+                tab.get_int(HashSeed::of(&self.heap), i as i64 + 1)
             } else {
                 Value::Nil
             };
@@ -881,9 +883,9 @@ pub(crate) fn op_len(heap: &LuaHeap, metas: &Metas, v: Value) -> Result<Value, E
             Value::Table(t) => {
                 let tab = heap.get(t);
                 match tab.meta {
-                    None => return Ok(Value::Int(tab.border())),
+                    None => return Ok(Value::Int(tab.border(HashSeed::of(heap)))),
                     Some(_) => match metas.metamethod(heap, v, MetaField::Len) {
-                        Value::Nil => return Ok(Value::Int(tab.border())),
+                        Value::Nil => return Ok(Value::Int(tab.border(HashSeed::of(heap)))),
                         h => h,
                     },
                 }

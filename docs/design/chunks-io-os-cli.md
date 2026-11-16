@@ -1,6 +1,6 @@
 # Chunks, modules, IO, OS and the CLI
 
-Status: Implemented. Crates: `orbit-runtime` (`load`, `require`, `string.dump`), `orbit-bytecode` (binary chunks and the verifier), `orbit-std` (`io`, `os`, files and the Lua searcher), `orbit-capi` (C modules), `orbit-cli`.
+Status: Implemented. Crates: `orbit-runtime` (`load`, `string.dump`), `orbit-bytecode` (binary chunks and the verifier), `orbit-std` (`io`, `os`, files, `require` and `package`), `orbit-capi` (C modules), `orbit-cli`.
 
 This covers the parts of Lua 5.5 that move code and data across the VM's edge: loading chunks (`load`, `loadfile`, `dofile`), modules (`require` and `package`), binary chunks (`string.dump` and loading its output), the `io` and `os` libraries, and the `orbit` command line. Everything here is observable behaviour taken from the manual, the reference `lua5.5` binary and the official suite (`literals.lua`, `constructs.lua`, `attrib.lua`, `files.lua`, `verybig.lua`, `main.lua`, `calls.lua`).
 
@@ -14,7 +14,7 @@ Everything that touches files, the environment or the process lives in `orbit-st
 | `loadfile`, `dofile`, `print`, `debug.debug` | `orbit-std` (`base.rs`) | |
 | The compiler hooks | `orbit-runtime` (`Host::set_compilers`, in `vm/host.rs`) | Installed by the embedder; `orbit::Isolate` installs both front ends |
 | Linking with an environment | `orbit-runtime` (`vm/link.rs`) | `Vm::load_with_env` |
-| `require`, `package` | `orbit-runtime` (`stdlib/package.rs`): `require`, `loaded`, `preload`; `orbit-std` (`package.rs`): paths, `searchpath`, the Lua searcher; `orbit-capi` (`searchers.rs`): the C searchers and `loadlib` (ADR-8) | |
+| `require`, `package` | `orbit-std` (`package.rs`): `require`, `loaded`, `preload`, paths, `searchpath`, the preload and Lua searchers; `orbit-capi` (`searchers.rs`): the C searchers and `loadlib` (ADR-8) | |
 | Binary chunk format and verifier | `orbit-bytecode` (`format.rs`, `verify.rs`) | Plain data in, plain data out: no VM needed, so both are unit-testable and fuzzable |
 | `string.dump` | `orbit-runtime` (`stdlib/dump.rs`) | Rebuilds an `UnlinkedChunk` from a linked prototype, then encodes it |
 | `io` | `orbit-std` (`io.rs`, feature `io`) | `FILE*` is an `orbit::Class` |
@@ -143,6 +143,8 @@ File handles are userdata of the `FILE*` class (`__index` methods, `__gc`, `__cl
 ## The command line
 
 `orbit` follows `lua`'s documented options so `main.lua` passes against it: `-e stat`, `-l mod` and `-l g=mod`, `-i`, `-v`, `-E`, `-W`, `--`, `-` for standard input, and the script with its arguments. `LUA_INIT_5_5` or `LUA_INIT` run first (`@file` runs a file), unless `-E`. The `arg` table puts the script at 0, the interpreter and options at negative indexes, and the arguments from 1. With no script, `orbit` runs interactively when standard input is a terminal and reads standard input as a script otherwise, as `lua` does. OrbitScript's own options: `--no-ffi` ([ffi.md](ffi.md)), `--lock-cpath` (ADR-8), and the debugger's `--debug-listen`, `--no-debug-signal`, `--debug-server` and `--debug-attach` ([debug.md](debug.md)).
+
+`ORBIT_HASH_SEED=N` (a decimal `u64`, ignored with `-E`) gives the isolate a fixed hash seed for strings and table keys (`Config::fixed_hash_seed`) instead of a random one. It is for measurements: with a random seed, a program whose tables have string keys meets different collisions each run and runs a different number of instructions, by several percent on some benchmarks. The benchmark tools set it (`bench/README.md`). The seed is per isolate and the libraries never read the variable, so it can't fix the seed of an embedded isolate; only a script that sees untrusted input is at risk from a known seed, whose keys could then be chosen to collide.
 
 Interactive mode prints `_PROMPT` and `_PROMPT2` (defaults `> ` and `>> `), tries a line as `return line` first so expressions print their values, and keeps reading while the error says the chunk ended early (`<eof>`). On a terminal, lines are edited with the CLI's own line editor (`crates/orbit-cli/src/repl/editor.rs`): Emacs keys, history, Ctrl-R search and Tab completion of Lua names. It puts the terminal in character-at-a-time mode through `rustix`'s safe `termios` interface (`crates/orbit-cli/src/repl/tty.rs`), so it needs no `unsafe` of its own; without a terminal it reads plain lines. Interactive mode, editor included, is the `orbit-cli` feature `repl` (default), so a distribution can leave it out: about 57 KiB on x86_64 Linux, 49.5 KiB of it the editor. Exit status is 0 on success and 1 after an uncaught error, with `lua`'s message format (`orbit: msg` plus a traceback on standard error).
 

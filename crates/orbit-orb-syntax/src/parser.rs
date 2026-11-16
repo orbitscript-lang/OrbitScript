@@ -32,6 +32,10 @@ pub struct ParseOptions {
     /// [`parse_recovering`] to get every error; [`parse_with`] ignores it and gives only the
     /// first.
     pub recover: bool,
+    /// The seed for the string pool and the compiler's maps (`None`: a random one). Only for runs
+    /// that must repeat exactly, such as benchmarks: whoever knows it can write a module whose
+    /// names and constants all collide (`orbit_hir::HashSeed`).
+    pub hash_seed: Option<u64>,
 }
 
 impl Default for ParseOptions {
@@ -43,6 +47,7 @@ impl Default for ParseOptions {
             doc_comments: false,
             keep_trivia: false,
             recover: false,
+            hash_seed: None,
         }
     }
 }
@@ -117,7 +122,8 @@ fn parse_module(
             "chunk too large",
         ));
     }
-    let mut lx = Lexer::new(chunk_name, src);
+    let seed = orbit_hir::HashSeed::fixed_or_random(options.hash_seed);
+    let mut lx = Lexer::with_seed(chunk_name, src, seed);
     let sym_scope = lx.strings_mut().intern(b"scope");
     let sym_underscore = lx.strings_mut().intern(b"_");
     let sym_type = lx.strings_mut().intern(b"type");

@@ -7,8 +7,15 @@
 use orbit::{Chunk, Config, Error, Isolate, Runtime};
 
 fn lua() -> Isolate {
-    let mut iso = Runtime::new().new_isolate(Config::default());
+    let mut iso = bare();
     orbit_std::install_ffi(&mut iso);
+    iso
+}
+
+/// An isolate with the standard library, without `ffi`.
+fn bare() -> Isolate {
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     iso
 }
 
@@ -42,7 +49,7 @@ const LIBC: &str = "local libc = ffi.open() ";
 
 #[test]
 fn absent_until_the_host_enables_it() {
-    let mut lua = Runtime::new().new_isolate(Config::default());
+    let mut lua = bare();
     assert_eq!(
         run_in(
             &mut lua,

@@ -5,6 +5,7 @@
 //! the VM's control (`pcall`, `xpcall`, `error`), run metamethods
 //! (`tostring`) or finalizers (`collectgarbage`), and stay raw natives.
 
+use crate::object::HashSeed;
 use crate::object::Tag;
 use crate::object::Value;
 use crate::object::table as tbl;
@@ -136,7 +137,10 @@ fn ipairs_next(ctx: &mut NativeCtx<'_>) -> R {
     .wrapping_add(1);
     let t = ctx.arg(0);
     let v = match t {
-        Value::Table(h) if ctx.vm.heap.get(h).meta.is_none() => ctx.vm.heap.get(h).get_int(i),
+        Value::Table(h) if ctx.vm.heap.get(h).meta.is_none() => {
+            let heap = &ctx.vm.heap;
+            heap.get(h).get_int(HashSeed::of(heap), i)
+        }
         _ => ctx.index_now(t, Value::Int(i))?,
     };
     if v.is_nil() {
@@ -533,7 +537,7 @@ fn rawlen(s: &mut Stack<'_>) -> StackResult<i64> {
 
 fn rawlen_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
     Some(Value::Int(match *args.first()? {
-        Value::Table(t) => cx.heap().get(t).border(),
+        Value::Table(t) => cx.heap().get(t).border(HashSeed::of(cx.heap())),
         Value::Str(s) => cx.heap().get(s).as_bytes().len() as i64,
         _ => return None,
     }))

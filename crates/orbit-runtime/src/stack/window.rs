@@ -4,6 +4,7 @@ use std::any::{Any, TypeId};
 use std::ffi::c_void;
 
 use crate::locale::{Category, LocaleMode, LocaleScope, TimeParts};
+use crate::object::HashSeed;
 use crate::object::number::float_to_int;
 use crate::object::table as tbl;
 use crate::object::value::raw_eq;
@@ -110,12 +111,6 @@ fn native_entry<N: Native>(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaE
         Ok(r) => s.finish(r),
         Err(Raised(e)) => Err(e),
     }
-}
-
-/// The runtime's entry for native `N`, for the built-in libraries'
-/// tables of `(name, entry)` rows.
-pub(crate) const fn native_fn<N: Native>() -> vm::NativeFn {
-    native_entry::<N>
 }
 
 /// A row of a built-in library's table: the function's qualified name,
@@ -886,7 +881,10 @@ impl<'s> Stack<'s> {
     pub fn raw_len(&self, idx: i32) -> u64 {
         match self.get(idx) {
             RawValue::Str(s) => self.ctx.bytes(s).len() as u64,
-            RawValue::Table(t) => self.ctx.vm.heap.get(t).border() as u64,
+            RawValue::Table(t) => {
+                let heap = &self.ctx.vm.heap;
+                heap.get(t).border(HashSeed::of(heap)) as u64
+            }
             RawValue::UserData(u) => self
                 .ctx
                 .vm
@@ -1425,7 +1423,10 @@ impl<'s> Stack<'s> {
     pub fn get_user_value(&mut self, idx: i32, n: i32) -> Type {
         let v = match self.user_value(idx, n) {
             Some(UserValue::Slot(u)) => self.ctx.vm.heap.get(u).user_value,
-            Some(UserValue::InTable(t, i)) => self.ctx.vm.heap.get(t).get_int(i),
+            Some(UserValue::InTable(t, i)) => {
+                let heap = &self.ctx.vm.heap;
+                heap.get(t).get_int(HashSeed::of(heap), i)
+            }
             None => {
                 self.ctx.push(RawValue::Nil);
                 return Type::None;

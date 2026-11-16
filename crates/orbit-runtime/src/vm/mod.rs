@@ -41,6 +41,7 @@ use std::fmt;
 use std::io::Write;
 
 use crate::locale::Locale;
+use crate::object::HashSeed;
 use crate::object::table::{self, mark};
 use crate::object::{
     CStrings, Cell, Closure, Gc, Interner, LuaHeap, LuaSpace, LuaStr, NativeId, Table, Thread,
@@ -116,10 +117,13 @@ impl LuaError {
 /// Compiles source text into an unlinked chunk, for `load`, `loadfile`,
 /// `dofile` and `require`. `chunk_name` is the name messages use
 /// (`script.lua` in `script.lua:3:`); an error is the complete message.
+/// `hash_seed` is the isolate's, for the compiler's own hash maps, so that
+/// an isolate with a fixed seed compiles the same way every run.
 /// The embedder installs it with [`host::Host::set_compilers`] (`orbit::Isolate`
 /// installs both front ends), so the VM and the libraries don't depend on a
 /// front end and a host can leave the compilers out.
-pub(crate) type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::UnlinkedChunk, String>;
+pub(crate) type CompileFn =
+    fn(src: &[u8], chunk_name: &str, hash_seed: u64) -> Result<op::UnlinkedChunk, String>;
 
 /// Configurable limits.
 #[derive(Debug, Clone, Copy)]
@@ -860,10 +864,22 @@ impl Vm {
 
     /// A VM with an empty global table and no libraries.
     pub fn new() -> Self {
-        let mut heap = LuaHeap::new();
+        Vm::with_hash_seed(None)
+    }
+
+    /// [`Vm::new`] with this hash seed for strings and table keys, or a
+    /// random one (`None`, what [`Vm::new`] does). A fixed seed makes runs
+    /// repeat exactly, as benchmarks need, but anyone who knows it can pick
+    /// keys that collide and slow every table they land in, so never fix
+    /// it for a VM that runs on untrusted input.
+    pub fn with_hash_seed(seed: Option<u64>) -> Self {
+        let mut heap = match seed {
+            Some(seed) => LuaHeap::with_seed(orbit_gc::Params::default(), seed),
+            None => LuaHeap::new(),
+        };
         let globals = heap.alloc(Table::new());
         let mut reg = Table::new();
-        reg.set_int(2, Value::Table(globals))
+        reg.set_int(HashSeed::of(&heap), 2, Value::Table(globals))
             .expect("a new table has room for one key");
         let registry = heap.alloc(reg);
         let dead_cell = heap.alloc(Cell::default());
@@ -1030,9 +1046,15 @@ impl Vm {
         table::get(&self.heap, t, k)
     }
 
+    /// The seed this VM hashes strings and table keys with ([`Vm::with_hash_seed`]),
+    /// which its compilers use for their maps too.
+    pub fn hash_seed(&self) -> u64 {
+        self.heap.seed()
+    }
+
     /// A border of `t`, as the `#` operator gives without metamethods.
     pub fn table_len(&self, t: Gc<Table>) -> i64 {
-        self.heap.get(t).border()
+        self.heap.get(t).border(HashSeed::of(&self.heap))
     }
 
     /// Set a global.

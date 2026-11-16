@@ -6,6 +6,7 @@
 
 mod slow;
 
+use crate::object::HashSeed;
 use crate::object::table as tbl;
 use crate::object::{Gc, Table, Value};
 use crate::stack::{Fail, LibraryRow, Rest, Results, Return, Stack, StackResult, library_row};
@@ -39,7 +40,8 @@ const MAX_HASH: i64 = 1 << 30;
 const MAX_RESERVE: usize = 1 << 24;
 
 fn get(ctx: &NativeCtx<'_>, t: Gc<Table>, i: i64) -> Value {
-    ctx.vm.heap.get(t).get_int(i)
+    let heap = &ctx.vm.heap;
+    heap.get(t).get_int(HashSeed::of(heap), i)
 }
 
 fn set(ctx: &mut NativeCtx<'_>, t: Gc<Table>, i: i64, v: Value) -> Result<(), LuaError> {
@@ -57,7 +59,8 @@ fn plain(ctx: &NativeCtx<'_>, i: usize) -> Option<Gc<Table>> {
 
 /// `#t` for the table functions.
 fn length(ctx: &NativeCtx<'_>, t: Gc<Table>) -> i64 {
-    ctx.vm.heap.get(t).border()
+    let heap = &ctx.vm.heap;
+    heap.get(t).border(HashSeed::of(heap))
 }
 
 fn concat(ctx: &mut NativeCtx<'_>) -> R {

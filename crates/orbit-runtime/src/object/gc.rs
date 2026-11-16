@@ -5,6 +5,7 @@
 
 use orbit_gc::{AnyGc, Gc, Liveness, Marker, WeakMode};
 
+use crate::object::string::HashSeed;
 use crate::object::{LuaHeap, LuaSpace, LuaStr, MetaField, Table, UserData, Value};
 
 /// Whether a weak table may drop an entry because of `v`: tables, Lua
@@ -50,18 +51,20 @@ pub(crate) fn is_live(live: &Liveness<'_, LuaSpace>, v: Value) -> bool {
 pub(crate) fn field<'a>(
     mt: &Table,
     e: MetaField,
+    seed: HashSeed,
     str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
 ) -> Value {
-    mt.meta_field_by_bytes(e, str_of)
+    mt.meta_field_by_bytes(e, seed, str_of)
 }
 
 /// The weak mode a metatable gives its tables: a string `__mode`
 /// containing `k` makes keys weak, `v` values. Anything else is strong.
 pub(crate) fn weak_mode<'a>(
     mt: &Table,
+    seed: HashSeed,
     str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
 ) -> Option<WeakMode> {
-    let Value::Str(s) = field(mt, MetaField::Mode, &str_of) else {
+    let Value::Str(s) = field(mt, MetaField::Mode, seed, &str_of) else {
         return None;
     };
     let bytes = str_of(s).as_bytes();
@@ -97,7 +100,12 @@ pub(crate) fn set_metatable(heap: &mut LuaHeap, v: Value, mt: Option<Gc<Table>>)
 }
 
 fn has_gc(heap: &LuaHeap, mt: Option<Gc<Table>>) -> bool {
-    mt.is_some_and(|mt| !field(heap.get(mt), MetaField::Gc, |s| heap.get(s)).is_nil())
+    mt.is_some_and(|mt| {
+        !field(heap.get(mt), MetaField::Gc, HashSeed::of(heap), |s| {
+            heap.get(s)
+        })
+        .is_nil()
+    })
 }
 
 /// `obj` as a value and its `__gc` metamethod (raw), read when its
@@ -111,7 +119,12 @@ pub(crate) fn finalizer(heap: &LuaHeap, obj: AnyGc) -> (Value, Value) {
         return (Value::Nil, Value::Nil);
     };
     match meta {
-        Some(mt) => (v, field(heap.get(mt), MetaField::Gc, |s| heap.get(s))),
+        Some(mt) => (
+            v,
+            field(heap.get(mt), MetaField::Gc, HashSeed::of(heap), |s| {
+                heap.get(s)
+            }),
+        ),
         None => (v, Value::Nil),
     }
 }
@@ -192,13 +205,19 @@ mod tests {
         ] {
             let t = weak_table(&mut heap, &mut h, mode);
             let mt = heap.get(t).meta.unwrap();
-            assert_eq!(weak_mode(heap.get(mt), |s| heap.get(s)), want);
+            assert_eq!(
+                weak_mode(heap.get(mt), HashSeed::of(&heap), |s| heap.get(s)),
+                want
+            );
         }
         // A non-string __mode means strong.
         let mt = heap.alloc(Table::new());
         let k = s(&mut heap, &mut h, b"__mode");
         tbl::set(&mut heap, mt, k, Value::Int(34)).unwrap();
-        assert_eq!(weak_mode(heap.get(mt), |s| heap.get(s)), None);
+        assert_eq!(
+            weak_mode(heap.get(mt), HashSeed::of(&heap), |s| heap.get(s)),
+            None
+        );
     }
 
     #[test]
@@ -218,11 +237,14 @@ mod tests {
         tbl::set(&mut heap, t, Value::Int(100), Value::Float(1.5)).unwrap();
         heap.full_collect(&mut h);
         let tab = heap.get(t);
-        assert!(tab.get_int(1).same(str_v));
-        assert!(tab.get_int(2).is_nil());
-        assert!(tab.get_int(3).same(Value::Table(kept)));
+        assert!(tab.get_int(HashSeed::of(&heap), 1).same(str_v));
+        assert!(tab.get_int(HashSeed::of(&heap), 2).is_nil());
+        assert!(tab.get_int(HashSeed::of(&heap), 3).same(Value::Table(kept)));
         assert!(tab.get(&heap, key).is_nil());
-        assert!(tab.get_int(100).same(Value::Float(1.5)));
+        assert!(
+            tab.get_int(HashSeed::of(&heap), 100)
+                .same(Value::Float(1.5))
+        );
     }
 
     #[test]

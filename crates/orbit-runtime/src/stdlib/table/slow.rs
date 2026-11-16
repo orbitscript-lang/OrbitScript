@@ -5,7 +5,7 @@
 //! Metamethods run nested ([`NativeCtx::call_want`]), so each function is a
 //! plain loop; as in the reference, nothing may yield across them.
 
-use crate::object::{Gc, Table, Value};
+use crate::object::{Gc, HashSeed, Table, Value};
 use crate::vm::{LuaError, MetaField, NativeCtx, NativeReturn, Vm};
 
 use super::{MAX_INT, R};
@@ -230,7 +230,7 @@ pub(super) fn sort(ctx: &mut NativeCtx<'_>) -> R {
         _ => None,
     };
     let n = match plain {
-        Some(h) => ctx.vm.heap.get(h).border(),
+        Some(h) => ctx.vm.heap.get(h).border(HashSeed::of(&ctx.vm.heap)),
         None => length(ctx, t)?,
     };
     if n <= 1 {
@@ -248,7 +248,7 @@ pub(super) fn sort(ctx: &mut NativeCtx<'_>) -> R {
     let mut dst = new_array(ctx, n)?;
     for i in 1..=n {
         let v = match plain {
-            Some(h) => ctx.vm.heap.get(h).get_int(i),
+            Some(h) => ctx.vm.heap.get(h).get_int(HashSeed::of(&ctx.vm.heap), i),
             None => ctx.index_now(t, Value::Int(i))?,
         };
         put(ctx, src, i, v)?;
@@ -318,7 +318,7 @@ fn new_array(
 }
 
 fn at(ctx: &NativeCtx<'_>, a: crate::object::Gc<crate::object::Table>, i: i64) -> Value {
-    ctx.vm.heap.get(a).get_int(i)
+    ctx.vm.heap.get(a).get_int(HashSeed::of(&ctx.vm.heap), i)
 }
 
 fn put(
@@ -372,7 +372,7 @@ pub(super) fn remove(ctx: &mut NativeCtx<'_>) -> R {
         _ => None,
     };
     let size = match plain {
-        Some(h) => ctx.vm.heap.get(h).border(),
+        Some(h) => ctx.vm.heap.get(h).border(HashSeed::of(&ctx.vm.heap)),
         None => {
             let t = check_tab(ctx, 0, READ_WRITE)?;
             length(ctx, t)?
@@ -433,7 +433,8 @@ fn set_at(
 fn sort_primitive(ctx: &mut NativeCtx<'_>, a: Gc<Table>, n: i64) -> Result<bool, LuaError> {
     let heap = &ctx.vm.heap;
     let tab = heap.get(a);
-    let values: Vec<Value> = (1..=n).map(|i| tab.get_int(i)).collect();
+    let seed = HashSeed::of(heap);
+    let values: Vec<Value> = (1..=n).map(|i| tab.get_int(seed, i)).collect();
     let numbers = values.iter().all(|v| match *v {
         Value::Int(_) => true,
         Value::Float(f) => !f.is_nan(),

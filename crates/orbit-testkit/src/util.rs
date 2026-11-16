@@ -153,6 +153,22 @@ pub fn manifest_fields(line: &str) -> (Vec<&str>, &str) {
     (body.split_whitespace().collect(), comment)
 }
 
+/// The hash seed measurements give `orbit` (its `ORBIT_HASH_SEED`). With
+/// the default random seed, programs whose tables have string keys run a
+/// different number of instructions each time (other collisions, other
+/// probe lengths), so one binary varies by several percent run to run.
+pub const BENCH_HASH_SEED: u64 = 0x6f72_6269_7473_6372;
+
+/// The environment a measured interpreter runs in: [`BENCH_HASH_SEED`],
+/// unless the caller's environment already sets `ORBIT_HASH_SEED` (to try
+/// another seed). Other interpreters ignore the variable.
+pub fn bench_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    if std::env::var_os("ORBIT_HASH_SEED").is_some() {
+        return Vec::new();
+    }
+    vec![("ORBIT_HASH_SEED".into(), BENCH_HASH_SEED.to_string().into())]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

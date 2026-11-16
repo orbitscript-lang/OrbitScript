@@ -634,6 +634,8 @@ impl Marks {
 /// Passed to [`Trace::trace`] and [`Roots::trace`] to mark what they reach.
 pub struct Marker<'a, S: Space> {
     pub(crate) space: &'a S,
+    /// The heap's [`Heap::seed`](crate::Heap::seed).
+    pub(crate) seed: u64,
     pub(crate) marks: &'a mut Marks,
     /// Set by `weak` while tracing a heap object, if registration is on.
     pub(crate) weak: Option<WeakMode>,
@@ -729,6 +731,12 @@ impl<'a, S: Space> Marker<'a, S> {
         S: Holds<T>,
     {
         self.space.arena().get(gc)
+    }
+
+    /// The heap's [`Heap::seed`](crate::Heap::seed).
+    #[inline]
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 
     /// Declare that the object being traced holds weak references, so the

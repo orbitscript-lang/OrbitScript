@@ -18,6 +18,7 @@
 
 use std::rc::Rc;
 
+use crate::object::HashSeed;
 use crate::object::number::{ArithOp, Number};
 use crate::object::table::{self, IntStore};
 use crate::object::{
@@ -509,7 +510,7 @@ impl Vm {
                             match w[key] {
                                 Value::Int(i) => {
                                     if !tab.read_int_present(i, &mut w[dst]) {
-                                        let v = tab.get_int(i);
+                                        let v = tab.get_int(HashSeed::of(&self.heap), i);
                                         if v.is_nil() && tab.meta.is_some() {
                                             throw!(Exc::index(Value::Table(t), Value::Int(i)))
                                         }
@@ -561,7 +562,7 @@ impl Vm {
                             };
                             let tab = self.heap.get(t);
                             if !tab.read_int_present(key as i64, &mut w[dst]) {
-                                let v = tab.get_int(key as i64);
+                                let v = tab.get_int(HashSeed::of(&self.heap), key as i64);
                                 if v.is_nil() && tab.meta.is_some() {
                                     throw!(Exc::index(Value::Table(t), Value::Int(key as i64)))
                                 }
