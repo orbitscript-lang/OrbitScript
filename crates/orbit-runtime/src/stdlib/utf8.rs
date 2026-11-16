@@ -3,13 +3,15 @@
 //! default) rejects surrogates and values over `0x10FFFF`.
 
 use crate::object::Gc;
-use crate::stack::{Either, Fail, Nil, Rest, Results, Return, Stack, StackResult, library_row};
-use crate::vm::{NativeFn, Vm};
+use crate::stack::{
+    Either, Fail, LibraryRow, Nil, Rest, Results, Return, Stack, StackResult, library_row,
+};
+use crate::vm::Vm;
 use orbit_lua_text::push_utf8;
 use orbit_lua_version::LUA;
 use orbit_macros::native;
 
-pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
+pub(crate) const FUNCTIONS: &[LibraryRow] = &[
     library_row::<char>(),
     library_row::<codepoint>(),
     library_row::<len>(),

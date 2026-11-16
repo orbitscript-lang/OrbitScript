@@ -39,10 +39,10 @@ pub use typed::{
     Results, State, TableArg, Ud, UserType, field_name, function,
 };
 #[doc(hidden)]
-pub use typed::{catch_panic, panic_message};
+pub use typed::{PureArg, PureFn, PureResult, PureValue, catch_panic, panic_message};
 pub(crate) use window::{ContRef, cont_ref};
 pub use window::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
-pub(crate) use window::{library_row, native_fn};
+pub(crate) use window::{LibraryRow, library_row, native_fn};
 
 /// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).
 pub const REGISTRY_INDEX: i32 = -(i32::MAX / 2 + 1000);
@@ -273,6 +273,12 @@ pub trait Native: 'static {
     /// The native's name in messages, when the call site doesn't name it.
     /// Natives are told apart by type, so two may share a name.
     const NAME: &'static str;
+
+    /// A fast path for calls that want one result, which `#[native(pure)]`
+    /// generates: no window, no frame. The interpreter tries it first, and
+    /// runs [`Native::call`] when it gives up.
+    #[doc(hidden)]
+    const PURE: Option<PureFn> = None;
 
     fn call(s: &mut Stack<'_>) -> StackResult<Return>;
 }

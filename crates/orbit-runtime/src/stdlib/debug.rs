@@ -7,10 +7,11 @@
 
 use crate::object::{Gc, OrbitString, Table, Thread, Value};
 use crate::stack::{
-    Any, Arg, Either, FunctionArg, REGISTRY_INDEX, Return, Stack, StackResult, Type, library_row,
+    Any, Arg, Either, FunctionArg, LibraryRow, REGISTRY_INDEX, Return, Stack, StackResult, Type,
+    library_row,
 };
 use crate::vm::debug::CallName;
-use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn};
+use crate::vm::{LuaError, NativeCtx, NativeReturn};
 use orbit_lua_version::LUA;
 use orbit_macros::native;
 
@@ -19,10 +20,10 @@ type R = Result<NativeReturn, LuaError>;
 // The functions that take a stack level read another coroutine's
 // activations, which the stack API doesn't reach yet: they stay on the raw
 // interface until it does.
-pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
-    ("debug.getinfo", getinfo),
-    ("debug.getlocal", getlocal),
-    ("debug.setlocal", setlocal),
+pub(crate) const FUNCTIONS: &[LibraryRow] = &[
+    LibraryRow::raw("debug.getinfo", getinfo),
+    LibraryRow::raw("debug.getlocal", getlocal),
+    LibraryRow::raw("debug.setlocal", setlocal),
     library_row::<getupvalue>(),
     library_row::<setupvalue>(),
     library_row::<upvalueid>(),
@@ -32,9 +33,9 @@ pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
     library_row::<getuservalue>(),
     library_row::<setuservalue>(),
     library_row::<getregistry>(),
-    ("debug.traceback", traceback),
-    ("debug.sethook", sethook),
-    ("debug.gethook", gethook),
+    LibraryRow::raw("debug.traceback", traceback),
+    LibraryRow::raw("debug.sethook", sethook),
+    LibraryRow::raw("debug.gethook", gethook),
 ];
 
 /// Push `s` as a string.

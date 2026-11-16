@@ -4,10 +4,8 @@
 //! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use crate::object::{Gc, Thread, Value};
-use crate::stack::{Arg, FunctionArg, Stack, StackResult, ThreadRef, library_row};
-use crate::vm::{
-    CallOutcome, Cause, CoStatus, LuaError, NativeCtx, NativeFn, NativeReturn, ResumeOk,
-};
+use crate::stack::{Arg, FunctionArg, LibraryRow, Stack, StackResult, ThreadRef, library_row};
+use crate::vm::{CallOutcome, Cause, CoStatus, LuaError, NativeCtx, NativeReturn, ResumeOk};
 use orbit_lua_version::LUA;
 use orbit_macros::native;
 
@@ -16,15 +14,15 @@ type R = Result<NativeReturn, LuaError>;
 // `resume`, `yield`, `wrap` and `close` hand control to the VM, which
 // switches coroutines: they stay on the raw interface, as the plan keeps
 // the VM's control primitives.
-pub(crate) const FUNCTIONS: &[(&str, NativeFn)] = &[
+pub(crate) const FUNCTIONS: &[LibraryRow] = &[
     library_row::<create>(),
-    ("coroutine.resume", resume),
-    ("coroutine.yield", yield_),
+    LibraryRow::raw("coroutine.resume", resume),
+    LibraryRow::raw("coroutine.yield", yield_),
     library_row::<status>(),
     library_row::<running>(),
     library_row::<isyieldable>(),
-    ("coroutine.wrap", wrap),
-    ("coroutine.close", close),
+    LibraryRow::raw("coroutine.wrap", wrap),
+    LibraryRow::raw("coroutine.close", close),
 ];
 
 fn check_thread(ctx: &mut NativeCtx<'_>, i: usize) -> Result<Gc<Thread>, LuaError> {
