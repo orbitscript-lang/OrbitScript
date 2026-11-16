@@ -35,6 +35,18 @@ fn copy_value(dst: &mut Value, src: &Value) {
 }
 
 /// Write the value with this tag and payload, without a branch on the tag.
+/// `*dst` = the value with tag byte `tag` and payload `p`.
+#[inline(always)]
+fn write_raw(dst: &mut Value, tag: u8, p: crate::object::value::Payload) {
+    let d = dst as *mut Value as *mut u8;
+    // SAFETY: as `write_packed`; `tag` is the tag byte of a stored value.
+    unsafe {
+        *d = tag;
+        *d.add(1) = (p.bits() != 0) as u8;
+        *(d.add(8) as *mut u64) = p.bits();
+    }
+}
+
 #[inline(always)]
 fn write_packed(dst: &mut Value, tag: Tag, p: crate::object::value::Payload) {
     let d = dst as *mut Value as *mut u8;
@@ -90,6 +102,16 @@ fn pause(vm: &mut Vm, ip: *const Insn) -> Step {
     let pc = pc_of(vm, ip);
     sync(vm);
     out_of_fuel(vm, pc)
+}
+
+/// The object a handle read from a register, a capture or a table names:
+/// those are roots or reachable from one, so the object is live, and the
+/// heap's own check of that is left out.
+macro_rules! live {
+    ($heap:expr, $gc:expr) => {
+        // SAFETY: see above.
+        unsafe { $heap.get_unchecked($gc) }
+    };
 }
 
 /// The running code as the handlers of this file see it.
@@ -288,17 +310,17 @@ q! {fn q_cell_get(vm, w, pc, i) {
         return slow(vm, pc);
     };
     let mut r = qwin!(vm, w, pc);
-    r[dst] = vm.heap.get(c).value;
+    r[dst] = live!(vm.heap, c).value;
     next(vm, w, pc)
 }}
 
 q! {fn q_cap_get(vm, w, pc, i) {
     let (dst, cap) = i.r_cap_get();
-    let Some(&c) = vm.heap.get(vm.rt.closure).captures.get(cap as usize) else {
+    let Some(&c) = live!(vm.heap, vm.rt.closure).captures.get(cap as usize) else {
         return slow(vm, pc);
     };
     let mut r = qwin!(vm, w, pc);
-    r[dst] = vm.heap.get(c).value;
+    r[dst] = live!(vm.heap, c).value;
     next(vm, w, pc)
 }}
 
@@ -311,7 +333,7 @@ q! {fn q_cap_self(vm, w, pc, i) {
 
 q! {fn q_cap_set(vm, w, pc, i) {
     let (cap, src) = i.r_cap_set();
-    let Some(&c) = vm.heap.get(vm.rt.closure).captures.get(cap as usize) else {
+    let Some(&c) = live!(vm.heap, vm.rt.closure).captures.get(cap as usize) else {
         return slow(vm, pc);
     };
     let r = qwin!(vm, w, pc);
@@ -334,16 +356,16 @@ q! {fn q_cell_set(vm, w, pc, i) {
 
 q! {fn q_get_global(vm, w, pc, i) {
     let (dst, _name, ic) = i.r_get_global();
-    let Some(&env_cell) = vm.heap.get(vm.rt.closure).captures.first() else {
+    let Some(&env_cell) = live!(vm.heap, vm.rt.closure).captures.first() else {
         return slow(vm, pc);
     };
-    let Value::Table(t) = vm.heap.get(env_cell).value else {
+    let Value::Table(t) = live!(vm.heap, env_cell).value else {
         return slow(vm, pc);
     };
     let Some(cache) = code!(vm).caches.get(ic as usize) else {
         return slow(vm, pc);
     };
-    let tab = vm.heap.get(t);
+    let tab = live!(vm.heap, t);
     let mut r = qwin!(vm, w, pc);
     match tab.cached_str_packed(cache.slot.get() as usize, cache.key) {
         Some((tag, p)) if tag != Tag::Nil || tab.meta.is_none() => {
@@ -363,7 +385,7 @@ q! {fn q_get_field(vm, w, pc, i) {
     let Some(cache) = code!(vm).caches.get(ic as usize) else {
         return slow(vm, pc);
     };
-    let tab = vm.heap.get(t);
+    let tab = live!(vm.heap, t);
     match tab.cached_str_packed(cache.slot.get() as usize, cache.key) {
         Some((tag, p)) if tag != Tag::Nil || tab.meta.is_none() => {
             write_packed(&mut r[dst], tag, p)
@@ -383,7 +405,7 @@ q! {fn q_set_field(vm, w, pc, i) {
         return slow(vm, pc);
     };
     let slot = cache.slot.get() as usize;
-    let tab = vm.heap.get(t);
+    let tab = live!(vm.heap, t);
     if !matches!(tab.cached_str_packed(slot, cache.key),
         Some((tag, _)) if tab.meta.is_none() || tag != Tag::Nil)
     {
@@ -427,7 +449,7 @@ q! {fn q_get_index(vm, w, pc, i) {
     let (dst, obj, key) = i.r_get_index();
     let mut r = qwin!(vm, w, pc);
     if let (&Value::Table(t), &Value::Int(k)) = (&r[obj], &r[key]) {
-        if vm.heap.get(t).read_int_present(k, &mut r[dst]) {
+        if live!(vm.heap, t).read_int_raw(k).map(|(b, p)| write_raw(&mut r[dst], b, p)).is_some() {
             return next(vm, w, pc);
         }
     }
@@ -449,7 +471,7 @@ q! {fn q_get_index_int(vm, w, pc, i) {
     let (dst, obj, key) = i.r_get_index_int();
     let mut r = qwin!(vm, w, pc);
     if let &Value::Table(t) = &r[obj] {
-        if vm.heap.get(t).read_int_present(key as i64, &mut r[dst]) {
+        if live!(vm.heap, t).read_int_raw(key as i64).map(|(b, p)| write_raw(&mut r[dst], b, p)).is_some() {
             return next(vm, w, pc);
         }
     }
@@ -477,7 +499,7 @@ q! {fn q_self_call(vm, w, pc, i) {
     // The two cache hits: the method in the object itself, or in the
     // table its metatable's `__index` names.
     let heap = &vm.heap;
-    let tab = heap.get(t);
+    let tab = live!(heap, t);
     let slot = cm.slot.get() as usize;
     let m = match tab.cached_str_packed(slot, cm.key) {
         Some(m) if m.0 != Tag::Nil => m,
@@ -486,10 +508,10 @@ q! {fn q_self_call(vm, w, pc, i) {
             let Some(mt) = tab.meta else {
                 return self_call_miss(vm, w, pc, i);
             };
-            let Some(c) = crate::vm::dispatch::cached_table(heap.get(mt), ci) else {
+            let Some(c) = crate::vm::dispatch::cached_table(live!(heap, mt), ci) else {
                 return self_call_miss(vm, w, pc, i);
             };
-            match heap.get(c).cached_str_packed(slot, cm.key) {
+            match live!(heap, c).cached_str_packed(slot, cm.key) {
                 Some(m) if m.0 != Tag::Nil => m,
                 _ => return self_call_miss(vm, w, pc, i),
             }

@@ -325,6 +325,12 @@ pub trait Store<T> {
     /// The object `gc` points to. Panics if its slot is free or, with
     /// checked handles, was freed and reused since the handle was made.
     fn get(&self, gc: Gc<T>) -> &T;
+    /// [`Store::get`] without its checks.
+    ///
+    /// # Safety
+    /// `gc` must point to a live object of this store.
+    #[allow(unsafe_code)]
+    unsafe fn get_unchecked(&self, gc: Gc<T>) -> &T;
     fn get_mut(&mut self, gc: Gc<T>) -> &mut T;
     /// A handle to the object now in slot `i`.
     fn handle_at(&self, i: u32) -> Gc<T>;
@@ -342,6 +348,18 @@ impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
     fn get(&self, gc: Gc<T>) -> &T {
         self.check(gc);
         self.get_slot(gc.index)
+    }
+
+    #[inline(always)]
+    #[allow(unsafe_code)]
+    unsafe fn get_unchecked(&self, gc: Gc<T>) -> &T {
+        // SAFETY: the caller's promise: the slot exists and is occupied.
+        unsafe {
+            match self.slots.get_unchecked(gc.index as usize) {
+                Some(v) => v,
+                None => std::hint::unreachable_unchecked(),
+            }
+        }
     }
 
     #[inline(always)]

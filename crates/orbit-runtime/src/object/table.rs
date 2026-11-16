@@ -698,6 +698,13 @@ impl Table {
         true
     }
 
+    /// The tag byte and payload of `t[i]` when `i` is in the array part and
+    /// that slot holds a value.
+    #[inline(always)]
+    pub(crate) fn read_int_raw(&self, i: i64) -> Option<(u8, Payload)> {
+        self.array.live((i as u64).wrapping_sub(1))
+    }
+
     /// `t[s]` for a string key.
     #[inline]
     pub(crate) fn get_str(&self, heap: &LuaHeap, s: Gc<LuaStr>) -> Value {
