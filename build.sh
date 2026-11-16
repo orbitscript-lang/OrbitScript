@@ -321,7 +321,7 @@ shared_args="-p orbit-lib -p orbit-cli -p orbit-lsp --no-default-features --feat
 # a build without a profile. A minimum of 1 keeps the usual vector loop with
 # a scalar remainder.
 use_profile() {
-    build "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1"
+    build "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" ${ORBIT_EXTRA_RUSTFLAG:+"$ORBIT_EXTRA_RUSTFLAG"}
 }
 
 # The shared layout's builds. Two things differ from the static ones.
@@ -373,7 +373,7 @@ build_shared() {
         "$cargo" build --profile "$profile" --target "$triple" $cargo_args
 }
 use_profile_shared() {
-    build_shared "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1"
+    build_shared "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" ${ORBIT_EXTRA_RUSTFLAG:+"$ORBIT_EXTRA_RUSTFLAG"}
 }
 
 # liborbit as a C library only (--static-programs): the same crate built as
@@ -590,10 +590,10 @@ if [ "$check" = yes ]; then
     # never runs `orbitc` or `orbit-lsp`, so the profile has nothing for the
     # functions only they have.
     # shellcheck disable=SC2086 # plain words
-    build $static_args --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" \
+    build $static_args --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" ${ORBIT_EXTRA_RUSTFLAG:+"$ORBIT_EXTRA_RUSTFLAG"} \
         -Cllvm-args=-pgo-warn-missing-function 2> "$log" || { cat "$log" >&2; exit 1; }
     # shellcheck disable=SC2086 # plain words
-    build_shared $shared_args --lib --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" \
+    build_shared $shared_args --lib --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" ${ORBIT_EXTRA_RUSTFLAG:+"$ORBIT_EXTRA_RUSTFLAG"} \
         -Cllvm-args=-pgo-warn-missing-function 2>> "$log" || { cat "$log" >&2; exit 1; }
     # Only our crates: LLVM warns about dependencies too.
     stale='^warning: orbit.*\((hash mismatch)\|no profile data available for function\)'

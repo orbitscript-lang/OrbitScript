@@ -474,6 +474,8 @@ impl Vm {
 
 // Loads.
 
+#[inline(never)]
+
 fn h_move(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, src) = i.r_move();
     let mut w = win!(vm, pc, i, bf);
@@ -489,6 +491,8 @@ fn h_move(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_load_nil(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, count) = i.r_load_nil();
     let mut w = win!(vm, pc, i, bf);
@@ -499,6 +503,8 @@ fn h_load_nil(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_load_bool(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, value) = i.r_load_bool();
     let mut w = win!(vm, pc, i, bf);
@@ -506,12 +512,16 @@ fn h_load_bool(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_load_int(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, value) = i.r_load_int();
     let mut w = win!(vm, pc, i, bf);
     w[dst] = Value::Int(value as i64);
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_load_const(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, k) = i.r_load_const();
@@ -527,6 +537,8 @@ fn cell_base(vm: &Vm) -> usize {
     vm.rt.stack.running().cell_base as usize
 }
 
+#[inline(never)]
+
 fn h_cell_get(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, cell) = i.r_cell_get();
     let c = vm.rt.stack.cells[cell_base(vm) + cell as usize];
@@ -534,6 +546,8 @@ fn h_cell_get(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     w[dst] = vm.heap.get(c).value;
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_cap_get(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, cap) = i.r_cap_get();
@@ -543,12 +557,16 @@ fn h_cap_get(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_cap_self(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let dst = i.r_cap_self();
     let mut w = win!(vm, pc, i, bf);
     w[dst] = Value::Closure(vm.rt.closure);
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_cap_set(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (cap, src) = i.r_cap_set();
@@ -558,6 +576,8 @@ fn h_cap_set(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_cell_set(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (cell, src) = i.r_cell_set();
     let c = vm.rt.stack.cells[cell_base(vm) + cell as usize];
@@ -566,6 +586,8 @@ fn h_cell_set(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     vm.heap.write_for(c, &v).value = v;
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_cell_new(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (cell, src) = i.r_cell_new();
@@ -578,6 +600,8 @@ fn h_cell_new(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 }
 
 // Globals and tables.
+
+#[inline(never)]
 
 fn h_get_global(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, _name, ic) = i.r_get_global();
@@ -618,6 +642,8 @@ fn get_global_miss(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_get_field(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, obj, _key, ic) = i.r_get_field();
     let mut w = win!(vm, pc, i, bf);
@@ -648,6 +674,8 @@ fn get_field_miss(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     w[dst] = tri!(vm, pc, i, bf; get_str_miss(&vm.heap, &vm.rt.metas, t, k, cache));
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_set_field(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (obj, _key, src, ic) = i.r_set_field();
@@ -683,6 +711,8 @@ fn set_field_miss(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     safepoint!(vm, pc, bf);
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_get_index(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, obj, key) = i.r_get_index();
@@ -722,6 +752,8 @@ fn get_index_slow(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     }
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_set_index(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (obj, key, src) = i.r_set_index();
@@ -765,6 +797,8 @@ fn set_index_slow(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_get_index_int(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, obj, key) = i.r_get_index_int();
     let mut w = win!(vm, pc, i, bf);
@@ -791,6 +825,8 @@ fn get_index_int_slow(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     w[dst] = v;
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_set_index_int(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (obj, key, src) = i.r_set_index_int();
@@ -822,6 +858,8 @@ fn set_index_int_slow(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_self_call(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, obj, key, ic) = i.r_self_call();
     let mut w = win!(vm, pc, i, bf);
@@ -849,6 +887,7 @@ fn h_self_call(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 
 macro_rules! arith_rr {
     ($name:ident, $slow:ident, $read:ident, $op:expr, |$x:ident, $y:ident| $int:expr, $flt:expr) => {
+        #[inline(never)]
         fn $name(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
             let (dst, a, b) = i.$read();
             let mut w = win!(vm, pc, i, bf);
@@ -877,6 +916,7 @@ arith_rr!(h_mul, mul_slow, r_mul, Arith::Mul, |x, y| Value::Int(x.wrapping_mul(y
 /// remainder, a constant operand): one function, as the old loop's arm.
 macro_rules! arith_gen {
     ($name:ident, $read:ident, |$w:ident, $cur:ident, $p:ident| $x:expr, $y:expr, $op:expr) => {
+        #[inline(never)]
         fn $name(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
             let $p = i.$read();
             let mut $w = win!(vm, pc, i, bf);
@@ -894,6 +934,8 @@ arith_gen!(h_mod_k, r_mod_k, |w, cur, p| R(p.1), K(&cur.consts[p.2 as usize]), A
 arith_gen!(h_k_add, r_k_add, |w, cur, p| K(&cur.consts[p.1 as usize]), R(p.2), Arith::Add);
 arith_gen!(h_k_mul, r_k_mul, |w, cur, p| K(&cur.consts[p.1 as usize]), R(p.2), Arith::Mul);
 arith_gen!(h_k_div, r_k_div, |w, cur, p| K(&cur.consts[p.1 as usize]), R(p.2), Arith::Div);
+
+#[inline(never)]
 
 fn h_add_int(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, a, imm) = i.r_add_int();
@@ -914,6 +956,8 @@ fn add_int_slow(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     w[dst] = tri!(vm, pc, i, bf; ops::arith_slow(&vm.heap, &vm.rt.metas, Arith::Add, x, Value::Int(imm as i64)));
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_sub_int(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, a, imm) = i.r_sub_int();
@@ -938,6 +982,7 @@ fn sub_int_slow(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 
 macro_rules! bitwise {
     ($name:ident, $read:ident, $op:expr) => {
+        #[inline(never)]
         fn $name(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
             let (dst, a, b) = i.$read();
             let mut w = win!(vm, pc, i, bf);
@@ -953,12 +998,16 @@ bitwise!(h_b_xor, r_b_xor, BitOp::Xor);
 bitwise!(h_shl, r_shl, BitOp::Shl);
 bitwise!(h_shr, r_shr, BitOp::Shr);
 
+#[inline(never)]
+
 fn h_not(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, src) = i.r_not();
     let mut w = win!(vm, pc, i, bf);
     w[dst] = Value::Bool(w[src].is_falsy());
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_len(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, src) = i.r_len();
@@ -970,9 +1019,13 @@ fn h_len(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 
 // Branches.
 
+#[inline(never)]
+
 fn h_jump(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, jump(pc, i.r_jump()), bf)
 }
+
+#[inline(never)]
 
 fn h_jump_if_true(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (src, off) = i.r_jump_if_true();
@@ -980,6 +1033,8 @@ fn h_jump_if_true(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let pc = if !w[src].is_falsy() { jump(pc, off) } else { pc };
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_jump_if_false(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (src, off) = i.r_jump_if_false();
@@ -993,6 +1048,7 @@ fn h_jump_if_false(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 /// jumps.
 macro_rules! cmp_jump {
     ($name:ident, $slow:ident, $read:ident, $cmp:expr, $want:expr, |$x:ident, $y:ident| $test:expr) => {
+        #[inline(never)]
         fn $name(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
             let (a, b, off) = i.$read();
             let w = win!(vm, pc, i, bf);
@@ -1022,6 +1078,7 @@ cmp_jump!(h_jump_not_le, jump_not_le_slow, r_jump_not_le, Cmp::Le, false, |x, y|
 
 macro_rules! eq_jump {
     ($name:ident, $slow:ident, $read:ident, $want:expr) => {
+        #[inline(never)]
         fn $name(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
             let (a, b, off) = i.$read();
             let w = win!(vm, pc, i, bf);
@@ -1049,6 +1106,8 @@ macro_rules! eq_jump {
 eq_jump!(h_jump_eq, jump_eq_slow, r_jump_eq, true);
 eq_jump!(h_jump_ne, jump_ne_slow, r_jump_ne, false);
 
+#[inline(never)]
+
 fn h_jump_eq_int(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (a, imm, want, off) = i.r_jump_eq_int();
     let w = win!(vm, pc, i, bf);
@@ -1063,6 +1122,7 @@ fn h_jump_eq_int(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 
 macro_rules! cmp_int_jump {
     ($name:ident, $slow:ident, $read:ident, $cmp:expr, |$x:ident, $y:ident| $test:expr) => {
+        #[inline(never)]
         fn $name(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
             let (a, imm, want, off) = i.$read();
             let w = win!(vm, pc, i, bf);
@@ -1098,6 +1158,8 @@ cmp_int_jump!(h_jump_ge_int, jump_ge_int_slow, r_jump_ge_int, Cmp::Ge, |x, y| x 
 
 // Calls and returns.
 
+#[inline(never)]
+
 fn h_call(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (func, nargs, nresults) = i.r_call();
     let base = base_of(bf);
@@ -1112,6 +1174,8 @@ fn h_call(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     frames_step(vm, pc, i, bf, r)
 }
 
+#[inline(never)]
+
 fn h_generic_call(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (b, nvars) = i.r_generic_call();
     let base = base_of(bf);
@@ -1122,6 +1186,8 @@ fn h_generic_call(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let r = vm.call_threaded(callee, base, pc, at + 4, 2, nvars);
     frames_step(vm, pc, i, bf, r)
 }
+
+#[inline(never)]
 
 fn h_tail_call(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (func, nargs) = i.r_tail_call();
@@ -1153,6 +1219,8 @@ fn h_tail_call(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     frames_step(vm, pc, i, bf, r)
 }
 
+#[inline(never)]
+
 fn h_return(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (first, count) = i.r_return();
     let src = base_of(bf) + first as usize;
@@ -1165,10 +1233,14 @@ fn h_return(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     frames_step(vm, pc, i, bf, r)
 }
 
+#[inline(never)]
+
 fn h_return0(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let r = vm.return_from_loop(base_of(bf), 0);
     frames_step(vm, pc, i, bf, r)
 }
+
+#[inline(never)]
 
 fn h_return1(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let src = i.r_return1();
@@ -1187,6 +1259,8 @@ fn h_return1(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 
 // Allocating instructions.
 
+#[inline(never)]
+
 fn h_new_table(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, array_hint, hash_hint) = i.r_new_table();
     let t = vm.op_new_table(array_hint as usize, hash_hint as usize);
@@ -1195,6 +1269,8 @@ fn h_new_table(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     safepoint!(vm, pc, bf);
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_set_list(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (tr, first, count, start) = i.r_set_list();
@@ -1216,6 +1292,8 @@ fn h_set_list(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_concat(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, first, count) = i.r_concat();
     let v = tri!(vm, pc, i, bf; vm.op_concat(base_of(bf) + first as usize, count as usize));
@@ -1224,6 +1302,8 @@ fn h_concat(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     safepoint!(vm, pc, bf);
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_closure(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (dst, proto) = i.r_closure();
@@ -1235,6 +1315,8 @@ fn h_closure(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, pc, bf)
 }
 
+#[inline(never)]
+
 fn h_vararg_len(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let dst = i.r_vararg_len();
     let nvarargs = vm.rt.stack.running().nvarargs;
@@ -1244,6 +1326,8 @@ fn h_vararg_len(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 }
 
 // Loops.
+
+#[inline(never)]
 
 fn h_for_prep(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (b, exit) = i.r_for_prep();
@@ -1270,6 +1354,8 @@ fn for_prep_slow(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let pc = if runs { pc } else { jump(pc, exit) };
     next(vm, pc, bf)
 }
+
+#[inline(never)]
 
 fn h_for_loop(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (b, back) = i.r_for_loop();
@@ -1298,6 +1384,8 @@ fn h_for_loop(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     next(vm, to, bf)
 }
 
+#[inline(never)]
+
 fn h_generic_loop(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let (b, back) = i.r_generic_loop();
     let mut w = win!(vm, pc, i, bf);
@@ -1311,6 +1399,7 @@ fn h_generic_loop(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
 }
 
 /// The rare instructions, through the old loop's out-of-line function.
+#[inline(never)]
 fn h_cold(vm: &mut Vm, pc: usize, i: Insn, bf: u64) -> Step {
     let cur = vm.rt.cur.clone();
     let op = cur.code[pc - 1];
