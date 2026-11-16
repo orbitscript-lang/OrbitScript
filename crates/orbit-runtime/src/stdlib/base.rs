@@ -62,11 +62,44 @@ pub(crate) fn open(vm: &mut Vm) {
     vm.unpin(Value::Table(mt));
     let v = vm.new_str(LUA.name().as_bytes());
     vm.set_global("_VERSION", v);
-    // `ipairs` and `pairs` are written in OrbitScript.
+    // `ipairs` returns the same iterator every time: the native `ipairs`
+    // carries its id.
+    let Value::Native(next) = vm.register_native_with_data("?", ipairs_next, [0, 0]) else {
+        unreachable!("natives are registered as natives")
+    };
+    let v = vm.register_native_with_data("ipairs", ipairs, [u64::from(next.0), 0]);
+    vm.set_global("ipairs", v);
+    // `pairs` is written in OrbitScript.
     for (name, f) in super::builtins::load(vm, &super::builtins::BASE) {
         let k = vm.new_str(&name);
         let g = vm.rt.globals;
         vm.table_set(g, k, f);
+    }
+}
+
+fn ipairs(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_any(0)?;
+    let next = Value::Native(crate::object::NativeId(ctx.native_data()[0] as u32));
+    ctx.ret([next, t, Value::Int(0)])
+}
+
+/// The iterator `ipairs` returns: the next index and its value, or nil at
+/// the first nil, through `__index` when the table has one.
+fn ipairs_next(ctx: &mut NativeCtx<'_>) -> R {
+    let i = match ctx.arg(1) {
+        Value::Int(i) => i,
+        _ => ctx.check_int(1)?,
+    }
+    .wrapping_add(1);
+    let t = ctx.arg(0);
+    let v = match t {
+        Value::Table(h) if ctx.vm.heap.get(h).meta.is_none() => ctx.vm.heap.get(h).get_int(i),
+        _ => ctx.index_now(t, Value::Int(i))?,
+    };
+    if v.is_nil() {
+        ctx.ret([Value::Nil])
+    } else {
+        ctx.ret([Value::Int(i), v])
     }
 }
 

@@ -1,4 +1,4 @@
-// The base library's `ipairs` and `pairs`, written in OrbitScript (ADR-11).
+// The base library's `pairs`, written in OrbitScript (ADR-11).
 //
 // Built-in modules are compiled when orbit-runtime is built and loaded with
 // the intrinsics as their only globals, so scripts can't reach or replace
@@ -11,24 +11,6 @@
 // file still parses as it is, for orbit-fmt and the language server.
 
 use intrinsics::{metafield, missingarg};
-
-// The iterator `ipairs` returns: one function, so every call returns the
-// same one, as the reference does.
-fn ipairs_next(t, i) {
-    let i = i + 1;
-    let v = t[i];
-    if v == nil {
-        return nil;
-    }
-    (i, v)
-}
-
-pub fn ipairs(...args) {
-    if args.n == 0 {
-        missingarg(1);
-    }
-    (ipairs_next, args[1], 0)
-}
 
 //#if lua-5.4
 // Lua 5.4: three values.
