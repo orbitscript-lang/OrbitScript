@@ -17,7 +17,7 @@ use orbit_bytecode::Op;
 #[inline(never)]
 pub(super) fn jump(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Jump { off } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     jump_by(vm, regs, ip, off)
 }
@@ -25,7 +25,7 @@ pub(super) fn jump(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn jump_if_true(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::JumpIfTrue { src, off } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let truthy = !regs.window()[src].is_falsy();
     branch(vm, regs, ip, off, truthy)
@@ -34,7 +34,7 @@ pub(super) fn jump_if_true(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step 
 #[inline(never)]
 pub(super) fn jump_if_false(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::JumpIfFalse { src, off } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let falsy = regs.window()[src].is_falsy();
     branch(vm, regs, ip, off, falsy)
@@ -55,7 +55,7 @@ fn compare_registers(
     | Op::JumpLe { a, b, off }
     | Op::JumpNotLe { a, b, off }) = op
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     let holds = match (&r[a], &r[b]) {
@@ -94,7 +94,7 @@ fn compare_with_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op, cmp: Cmp) -> St
     | Op::JumpGtInt { a, imm, want, off }
     | Op::JumpGeInt { a, imm, want, off }) = op
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let holds = match regs.window()[a] {
         Value::Int(x) => cmp.test(x, imm as i64),
@@ -170,7 +170,7 @@ fn compare_general(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
 #[inline(always)]
 fn compare_equal(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op, jump_when: bool) -> Step {
     let (Op::JumpEq { a, b, off } | Op::JumpNe { a, b, off }) = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     let equal = match (&r[a], &r[b]) {
@@ -217,7 +217,7 @@ fn equality_general(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn jump_eq_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::JumpEqInt { a, imm, want, off } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let equal = match regs.window()[a] {
         Value::Int(x) => x == imm as i64,

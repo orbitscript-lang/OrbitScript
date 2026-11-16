@@ -63,7 +63,7 @@ pub(super) fn call(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
         nresults,
     } = op
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let callee = match regs.window()[func] {
         Value::Closure(c) => c,
@@ -81,7 +81,7 @@ pub(super) fn call(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let depth = frames.len();
     let room_for_a_frame = depth < frames.capacity();
     let Some(caller) = frames.last_mut() else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let func_slot = caller.base as usize + func as usize;
     let window_covered = func_slot + 1 + WINDOW <= vm.rt.stack_len;
@@ -135,7 +135,7 @@ fn call_native(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
         nresults,
     } = op
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     // A fast path gives one value.
     if nargs == MULTI || (nresults > 1 && nresults != MULTI) {
@@ -174,7 +174,7 @@ fn call_general(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
         nresults,
     } = op
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let at = leave(vm, regs, ip);
     let func = func as usize;
@@ -237,7 +237,7 @@ fn after_frames_change(vm: &mut Vm, at: Place, frames: Result<Frames, Exc>) -> S
 #[inline(never)]
 pub(super) fn tail_call(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::TailCall { func, nargs } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let Value::Closure(callee) = regs.window()[func] else {
         return tail_call_general(vm, regs, ip);
@@ -249,7 +249,7 @@ pub(super) fn tail_call(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let cells = vm.rt.stack.cells.len();
     let max_stack = vm.rt.host.max_stack();
     let Some(frame) = vm.rt.stack.frames.last_mut() else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     if nargs == MULTI
         || nargs < code.nparams
@@ -292,7 +292,7 @@ pub(super) fn tail_call(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn tail_call_general(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::TailCall { func, nargs } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let at = leave(vm, regs, ip);
     let func = func as usize;
@@ -347,7 +347,7 @@ fn return_values(vm: &mut Vm, mut regs: Regs, ip: Ip, first: usize, count: u8) -
     let returned = if count == MULTI {
         match vm.rt.top.checked_sub(source) {
             Some(n) => n,
-            None => return Step::Invalid,
+            None => unsafe { std::hint::unreachable_unchecked() },
         }
     } else {
         count as usize
@@ -390,7 +390,7 @@ fn return_values(vm: &mut Vm, mut regs: Regs, ip: Ip, first: usize, count: u8) -
 #[inline(never)]
 pub(super) fn return_(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Return { first, count } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     return_values(vm, regs, ip, first as usize, count)
 }
@@ -402,7 +402,7 @@ pub(super) fn return_(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn return1(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Return1 { src } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let [.., caller, frame] = &vm.rt.stack.frames[..] else {
         return return_general(vm, regs, ip);
@@ -436,7 +436,7 @@ pub(super) fn return1(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn return1_any_frame(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::Return1 { src } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     return_values(vm, regs, ip, src as usize, 1)
 }
@@ -504,10 +504,10 @@ fn return_general(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn vararg_len(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::VarargLen { dst } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let Some(frame) = vm.rt.stack.frames.last() else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     regs.window()[dst] = Value::Int(frame.nvarargs as i64);
     next(vm, regs, ip)
@@ -517,10 +517,10 @@ pub(super) fn vararg_len(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn vararg_get_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::VarargGetInt { dst, index } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let Some(frame) = vm.rt.stack.frames.last() else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let (nvarargs, index) = (frame.nvarargs as usize, index as usize);
     if nvarargs >= frame.base as usize {

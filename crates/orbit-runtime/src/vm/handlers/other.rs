@@ -13,7 +13,7 @@ use orbit_bytecode::Op;
 #[inline(never)]
 pub(super) fn closure(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Closure { dst, proto } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let at = leave(vm, regs, ip);
     let cell_base = loads::cell_base(vm);
@@ -26,7 +26,7 @@ pub(super) fn closure(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn tbc(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Tbc { reg } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     // Nil and false are never closed, so there is nothing to record: the
     // case of every generic loop without a closing value.
@@ -40,10 +40,10 @@ pub(super) fn tbc(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn close(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Close { from } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let Some(frame) = vm.rt.stack.frames.last() else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let first = frame.base as usize + from as usize;
     let any_to_close = vm

@@ -48,6 +48,7 @@
 //! every backward jump and call (on every instruction in a debug build)
 //! and returns to the trampoline ([`Vm::run_handlers`]) when it runs out.
 
+#![allow(unsafe_code, unused_unsafe, clippy::all)]
 mod arith;
 mod branches;
 mod calls;

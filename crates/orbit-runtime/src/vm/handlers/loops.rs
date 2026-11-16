@@ -15,7 +15,7 @@ use orbit_bytecode::Op;
 #[inline(never)]
 pub(super) fn for_prep(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::ForPrep { base, exit } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     // The common loop: integers counting up.
@@ -41,7 +41,7 @@ pub(super) fn for_prep(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn for_prep_general(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::ForPrep { base, exit } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let at = leave(vm, regs, ip);
     match vm.op_for_prep(at.base + base as usize, false) {
@@ -55,12 +55,12 @@ fn for_prep_general(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn for_loop(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::ForLoop { base, back } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     let first = base as usize;
     let Some(state) = r.get_mut(first..first + 4) else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     match state {
         [
@@ -105,7 +105,7 @@ pub(super) fn for_loop(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn generic_call(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::GenericCall { base, nvars } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let at = leave(vm, regs, ip);
     let mut w = Window::take(&mut vm.rt.stack.regs, at.base);
@@ -120,7 +120,7 @@ pub(super) fn generic_call(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn generic_loop(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::GenericLoop { base, back } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     let control = r[base + 4];

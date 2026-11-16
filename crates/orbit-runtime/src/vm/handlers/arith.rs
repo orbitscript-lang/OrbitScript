@@ -51,7 +51,7 @@ fn on_numbers(
     let mut r = regs.window();
     let consts = &running_code(&vm.rt).consts;
     let (Some(x), Some(y)) = (x.value(&r, consts), y.value(&r, consts)) else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let result = match (x, y) {
         (&Value::Int(x), &Value::Int(y)) => int(x, y),
@@ -98,7 +98,7 @@ fn on_integers_mod(
 #[inline(never)]
 pub(super) fn add(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Add { dst, a, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_add(y));
     on_numbers(
@@ -116,7 +116,7 @@ pub(super) fn add(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn sub(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Sub { dst, a, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_sub(y));
     on_numbers(
@@ -134,7 +134,7 @@ pub(super) fn sub(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn mul(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Mul { dst, a, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_mul(y));
     on_numbers(
@@ -152,7 +152,7 @@ pub(super) fn mul(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn div(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Div { dst, a, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Float(x as f64 / y as f64);
     on_numbers(
@@ -170,7 +170,7 @@ pub(super) fn div(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn mod_(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Mod { dst, a, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     on_integers_mod(vm, regs, ip, dst, (R(a), R(b)))
 }
@@ -179,7 +179,7 @@ pub(super) fn mod_(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn add_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::AddInt { dst, a, imm } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     match r[a] {
@@ -194,7 +194,7 @@ pub(super) fn add_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn sub_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::SubInt { dst, a, imm } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     match r[a] {
@@ -211,7 +211,7 @@ pub(super) fn sub_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn add_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::AddK { dst, a, k } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_add(y));
     on_numbers(
@@ -229,7 +229,7 @@ pub(super) fn add_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn sub_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::SubK { dst, a, k } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_sub(y));
     on_numbers(
@@ -247,7 +247,7 @@ pub(super) fn sub_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn mul_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::MulK { dst, a, k } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_mul(y));
     on_numbers(
@@ -265,7 +265,7 @@ pub(super) fn mul_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn div_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::DivK { dst, a, k } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Float(x as f64 / y as f64);
     on_numbers(
@@ -283,7 +283,7 @@ pub(super) fn div_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn mod_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::ModK { dst, a, k } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     on_integers_mod(vm, regs, ip, dst, (R(a), K(k)))
 }
@@ -293,7 +293,7 @@ pub(super) fn mod_k(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn k_add(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::KAdd { dst, k, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_add(y));
     on_numbers(
@@ -311,7 +311,7 @@ pub(super) fn k_add(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn k_sub(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::KSub { dst, k, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_sub(y));
     on_numbers(
@@ -329,7 +329,7 @@ pub(super) fn k_sub(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn k_mul(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::KMul { dst, k, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Int(x.wrapping_mul(y));
     on_numbers(
@@ -347,7 +347,7 @@ pub(super) fn k_mul(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn k_div(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::KDiv { dst, k, b } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let int = |x: i64, y: i64| Value::Float(x as f64 / y as f64);
     on_numbers(
@@ -408,7 +408,7 @@ fn on_integers(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op, operator: BitOp) -> 
     | Op::Shl { dst, a, b }
     | Op::Shr { dst, a, b }) = op
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     match (&r[a], &r[b]) {
@@ -467,7 +467,7 @@ fn bitwise_general(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn not(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Not { dst, src } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     r[dst] = Value::Bool(r[src].is_falsy());
@@ -478,7 +478,7 @@ pub(super) fn not(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn len(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Len { dst, src } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     match op_len(&vm.heap, &vm.rt.metas, r[src]) {
@@ -493,7 +493,7 @@ pub(super) fn len(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn concat(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::Concat { dst, first, count } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let at = leave(vm, regs, ip);
     match vm.op_concat(at.base + first as usize, count as usize) {

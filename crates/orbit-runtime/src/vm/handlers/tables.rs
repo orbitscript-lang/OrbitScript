@@ -19,16 +19,16 @@ use orbit_bytecode::{MULTI, Op};
 #[inline(never)]
 pub(super) fn get_global(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::GetGlobal { dst, ic, .. } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let Some(&env_cell) = vm.heap.get(vm.rt.closure).captures.first() else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let Value::Table(env) = vm.heap.get(env_cell).value else {
         return get_global_uncached(vm, regs, ip);
     };
     let Some(cache) = running_code(&vm.rt).caches.get(ic as usize) else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let env = vm.heap.get(env);
     match env.cached_str_packed(cache.slot.get() as usize, cache.key) {
@@ -44,13 +44,13 @@ pub(super) fn get_global(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn get_global_uncached(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::GetGlobal { dst, name, ic } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let code = running_code(&vm.rt);
     let (Some(cache), Some(&Value::Str(name))) =
         (code.caches.get(ic as usize), code.consts.get(name as usize))
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let env_cell = vm.heap.get(vm.rt.closure).captures[0];
     let exc = match vm.heap.get(env_cell).value {
@@ -75,7 +75,7 @@ pub(super) fn new_table(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
         hash_hint,
     } = op
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let t = vm.op_new_table(array_hint as usize, hash_hint as usize);
     regs.window()[dst] = Value::Table(t);
@@ -86,14 +86,14 @@ pub(super) fn new_table(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn get_field(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::GetField { dst, obj, ic, .. } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     let &Value::Table(t) = &r[obj] else {
         return get_field_uncached(vm, regs, ip);
     };
     let Some(cache) = running_code(&vm.rt).caches.get(ic as usize) else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let t = vm.heap.get(t);
     match t.cached_str_packed(cache.slot.get() as usize, cache.key) {
@@ -109,12 +109,12 @@ pub(super) fn get_field(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn get_field_uncached(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::GetField { dst, obj, key, ic } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let code = running_code(&vm.rt);
     let (Some(cache), Some(&key)) = (code.caches.get(ic as usize), code.consts.get(key as usize))
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     let exc = match (r[obj], key) {
@@ -136,14 +136,14 @@ fn get_field_uncached(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn set_field(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::SetField { obj, src, ic, .. } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     let &Value::Table(t) = &r[obj] else {
         return set_field_uncached(vm, regs, ip);
     };
     let Some(cache) = running_code(&vm.rt).caches.get(ic as usize) else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let slot = cache.slot.get() as usize;
     let table = vm.heap.get(t);
@@ -168,12 +168,12 @@ pub(super) fn set_field(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn set_field_with_barrier(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::SetField { obj, src, ic, .. } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     let (&Value::Table(t), Some(cache)) = (&r[obj], running_code(&vm.rt).caches.get(ic as usize))
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let slot = cache.slot.get() as usize;
     with_known_variant(&r[src], |v| vm.heap.write_for(t, &v).set_slot(slot, v));
@@ -184,12 +184,12 @@ fn set_field_with_barrier(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
 fn set_field_uncached(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::SetField { obj, key, src, ic } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let code = running_code(&vm.rt);
     let (Some(cache), Some(&key)) = (code.caches.get(ic as usize), code.consts.get(key as usize))
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     let v = r[src];
@@ -209,7 +209,7 @@ fn set_field_uncached(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn get_index(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::GetIndex { dst, obj, key } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     if let (&Value::Table(t), &Value::Int(k)) = (&r[obj], &r[key]) {
@@ -228,7 +228,7 @@ pub(super) fn get_index(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn get_index_general(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::GetIndex { dst, obj, key } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     let key = r[key];
@@ -254,7 +254,7 @@ fn get_index_general(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn set_index(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::SetIndex { obj, key, src } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     if let (&Value::Table(t), &Value::Int(k)) = (&r[obj], &r[key]) {
@@ -277,7 +277,7 @@ pub(super) fn set_index(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn set_index_general(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::SetIndex { obj, key, src } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     let (object, key, v) = (r[obj], r[key], r[src]);
@@ -302,7 +302,7 @@ fn set_index_general(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn get_index_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::GetIndexInt { dst, obj, key } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     if let &Value::Table(t) = &r[obj] {
@@ -318,7 +318,7 @@ pub(super) fn get_index_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step
 fn get_index_int_general(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::GetIndexInt { dst, obj, key } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     let key = key as i64;
@@ -341,7 +341,7 @@ fn get_index_int_general(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
 #[inline(never)]
 pub(super) fn set_index_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::SetIndexInt { obj, key, src } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     if let &Value::Table(t) = &r[obj] {
@@ -362,7 +362,7 @@ pub(super) fn set_index_int(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step
 fn set_index_int_general(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::SetIndexInt { obj, key, src } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let r = regs.window();
     let (object, key, v) = (r[obj], key as i64, r[src]);
@@ -388,7 +388,7 @@ pub(super) fn set_list(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
         start,
     } = op
     else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let at = leave(vm, regs, ip);
     let Value::Table(t) = Window::take(&mut vm.rt.stack.regs, at.base)[table] else {
@@ -411,7 +411,7 @@ pub(super) fn set_list(vm: &mut Vm, regs: Regs, ip: Ip, op: Op) -> Step {
 #[inline(never)]
 pub(super) fn self_call(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
     let Op::SelfCall { dst, obj, ic, .. } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     // Two caches: one for the method's slot, one for the slot of
@@ -452,11 +452,11 @@ pub(super) fn self_call(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
 fn self_call_uncached(vm: &mut Vm, mut regs: Regs, ip: Ip) -> Step {
     let op = ip.handled();
     let Op::SelfCall { dst, obj, key, ic } = op else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let code = running_code(&vm.rt);
     let Some(&Value::Str(name)) = code.consts.get(key as usize) else {
-        return Step::Invalid;
+        unsafe { std::hint::unreachable_unchecked() }
     };
     let mut r = regs.window();
     let object = r[obj];
