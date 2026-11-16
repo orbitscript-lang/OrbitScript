@@ -146,11 +146,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             if orbit_lua_version::LUA.is_5_5() {
                 add_functions(vm, t, table::FUNCTIONS_5_5);
             }
-            // `insert`, `remove` and `sort` are written in OrbitScript.
-            for (name, f) in builtins::load(vm, &builtins::TABLE) {
-                let k = vm.new_str(&name);
-                vm.table_set(t, k, f);
-            }
             true
         }
         Lib::Package => {

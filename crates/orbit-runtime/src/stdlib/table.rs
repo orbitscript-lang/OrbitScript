@@ -22,6 +22,9 @@ pub(crate) const FUNCTIONS: &[LibraryRow] = &[
     LibraryRow::raw("table.unpack", unpack),
     library_row::<pack>(),
     LibraryRow::raw("table.move", move_),
+    LibraryRow::raw("table.insert", insert),
+    LibraryRow::raw("table.sort", slow::sort),
+    LibraryRow::raw("table.remove", slow::remove),
 ];
 
 /// Lua 5.5's additions, absent from 5.4 builds (ADR-14).
@@ -137,6 +140,36 @@ fn unpack(ctx: &mut NativeCtx<'_>) -> R {
         k += 1;
     }
     Ok(NativeReturn::Return(n as usize))
+}
+
+fn insert(ctx: &mut NativeCtx<'_>) -> R {
+    let Some(t) = plain(ctx, 0) else {
+        return slow::insert(ctx);
+    };
+    let e = length(ctx, t).wrapping_add(1);
+    match ctx.nargs() {
+        2 => {
+            let v = ctx.arg(1);
+            set(ctx, t, e, v)?;
+        }
+        3 => {
+            let pos = ctx.check_int(1)?;
+            // `pos - 1` as unsigned: 1..=e is valid.
+            if (pos.wrapping_sub(1) as u64) >= e as u64 {
+                return Err(ctx.arg_error(1, "position out of bounds"));
+            }
+            let mut i = e;
+            while i > pos {
+                let v = get(ctx, t, i - 1);
+                set(ctx, t, i, v)?;
+                i -= 1;
+            }
+            let v = ctx.arg(2);
+            set(ctx, t, pos, v)?;
+        }
+        _ => return Err(ctx.error("wrong number of arguments to 'insert'")),
+    }
+    Ok(NativeReturn::Return(0))
 }
 
 #[native(crate = crate, name = "table.pack")]

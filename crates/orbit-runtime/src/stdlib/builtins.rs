@@ -41,8 +41,6 @@ impl Module {
 
 pub(crate) static BASE: Module =
     Module::new(include_bytes!(concat!(env!("OUT_DIR"), "/base.orbc")));
-pub(crate) static TABLE: Module =
-    Module::new(include_bytes!(concat!(env!("OUT_DIR"), "/table.orbc")));
 
 /// The name of a native only built-in modules see (their `require`):
 /// never shown, since a built-in's errors name the built-in.

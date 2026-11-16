@@ -5,8 +5,8 @@
 //! Metamethods run nested ([`NativeCtx::call_want`]), so each function is a
 //! plain loop; as in the reference, nothing may yield across them.
 
-use crate::object::Value;
-use crate::vm::{LuaError, MetaField, NativeCtx, NativeReturn};
+use crate::object::{Gc, Table, Value};
+use crate::vm::{LuaError, MetaField, NativeCtx, NativeReturn, Vm};
 
 use super::{MAX_INT, R};
 
@@ -39,6 +39,10 @@ const READ: Needs = Needs {
 };
 const WRITE: Needs = Needs {
     read: false,
+    write: true,
+};
+const READ_WRITE: Needs = Needs {
+    read: true,
     write: true,
 };
 
@@ -182,4 +186,291 @@ pub(super) fn move_(ctx: &mut NativeCtx<'_>) -> R {
         }
     }
     ctx.ret([a2])
+}
+
+pub(super) fn insert(ctx: &mut NativeCtx<'_>) -> R {
+    let t = check_tab(ctx, 0, READ_WRITE)?;
+    let e = length(ctx, t)?.wrapping_add(1);
+    match ctx.nargs() {
+        2 => {
+            let v = ctx.arg(1);
+            ctx.set_index_now(t, Value::Int(e), v)?;
+        }
+        3 => {
+            let pos = ctx.check_int(1)?;
+            // `pos - 1` as unsigned: 1..=e is valid.
+            if (pos.wrapping_sub(1) as u64) >= e as u64 {
+                return Err(ctx.arg_error(1, "position out of bounds"));
+            }
+            let mut i = e;
+            while i > pos {
+                let v = ctx.index_now(t, Value::Int(i - 1))?;
+                ctx.set_index_now(t, Value::Int(i), v)?;
+                i -= 1;
+            }
+            let v = ctx.arg(2);
+            ctx.set_index_now(t, Value::Int(pos), v)?;
+        }
+        _ => return Err(ctx.error("wrong number of arguments to 'insert'")),
+    }
+    Ok(NativeReturn::Return(0))
+}
+
+/// The largest array `sort` accepts (a C `int`).
+const MAX_SORT: i64 = i32::MAX as i64;
+
+/// `table.sort`: a stable bottom-up merge sort over a copy of the
+/// elements, so each element is read and written once whatever
+/// metamethods the table has. The copies live in two tables on the
+/// window, where the collector sees them while comparisons run.
+pub(super) fn sort(ctx: &mut NativeCtx<'_>) -> R {
+    let t = check_tab(ctx, 0, READ_WRITE)?;
+    let plain = match t {
+        Value::Table(h) if ctx.vm.heap.get(h).meta.is_none() => Some(h),
+        _ => None,
+    };
+    let n = match plain {
+        Some(h) => ctx.vm.heap.get(h).border(),
+        None => length(ctx, t)?,
+    };
+    if n <= 1 {
+        return Ok(NativeReturn::Return(0));
+    }
+    if n >= MAX_SORT {
+        return Err(ctx.arg_error(0, "array too big"));
+    }
+    let lt = ctx.arg(1);
+    if !lt.is_nil() && !lt.is_function() {
+        return Err(ctx.type_error(1, "function"));
+    }
+    window(ctx, 2);
+    let mut src = new_array(ctx, n)?;
+    let mut dst = new_array(ctx, n)?;
+    for i in 1..=n {
+        let v = match plain {
+            Some(h) => ctx.vm.heap.get(h).get_int(i),
+            None => ctx.index_now(t, Value::Int(i))?,
+        };
+        put(ctx, src, i, v)?;
+    }
+    if lt.is_nil() && sort_primitive(ctx, src, n)? {
+        return write_back(ctx, t, plain, src, n);
+    }
+    let mut width = 1;
+    while width < n {
+        let mut lo = 1;
+        while lo <= n {
+            let mid = if lo + width <= n { lo + width } else { n + 1 };
+            let hi = if lo + 2 * width <= n {
+                lo + 2 * width
+            } else {
+                n + 1
+            };
+            let (mut i, mut j) = (lo, mid);
+            for k in lo..hi {
+                // Take the right element only if it is strictly smaller,
+                // which keeps the sort stable.
+                let right = i >= mid
+                    || (j < hi && {
+                        let (a, b) = (at(ctx, src, j), at(ctx, src, i));
+                        less(ctx, lt, a, b)?
+                    });
+                let v = if right {
+                    j += 1;
+                    at(ctx, src, j - 1)
+                } else {
+                    i += 1;
+                    at(ctx, src, i - 1)
+                };
+                put(ctx, dst, k, v)?;
+            }
+            lo = hi;
+        }
+        std::mem::swap(&mut src, &mut dst);
+        width *= 2;
+    }
+    // A comparator or `__lt` must be a strict order: no neighbour may come
+    // out smaller than the one before it.
+    for i in 2..=n {
+        let (a, b) = (at(ctx, src, i), at(ctx, src, i - 1));
+        if less(ctx, lt, a, b)? {
+            return Err(ctx.error("invalid order function for sorting"));
+        }
+    }
+    write_back(ctx, t, plain, src, n)
+}
+
+/// A table with room for `n` array elements, kept on the window.
+fn new_array(
+    ctx: &mut NativeCtx<'_>,
+    n: i64,
+) -> Result<crate::object::Gc<crate::object::Table>, LuaError> {
+    /// Most slots reserved up front; bigger arrays grow as they fill.
+    const MAX_RESERVE: usize = 1 << 24;
+    let n = (n as usize).min(MAX_RESERVE);
+    ctx.reserve(n.saturating_mul(9))?;
+    let Ok(t) = crate::object::Table::try_with_capacity(n, 0) else {
+        return Err(ctx.no_memory());
+    };
+    let t = ctx.new_table(t);
+    ctx.push(Value::Table(t));
+    Ok(t)
+}
+
+fn at(ctx: &NativeCtx<'_>, a: crate::object::Gc<crate::object::Table>, i: i64) -> Value {
+    ctx.vm.heap.get(a).get_int(i)
+}
+
+fn put(
+    ctx: &mut NativeCtx<'_>,
+    a: crate::object::Gc<crate::object::Table>,
+    i: i64,
+    v: Value,
+) -> Result<(), LuaError> {
+    crate::object::table::set_int(&mut ctx.vm.heap, a, i, v).map_err(|_| ctx.no_memory())?;
+    Ok(())
+}
+
+/// `a < b` by the comparator `lt`, or by `<` when it is nil.
+fn less(ctx: &mut NativeCtx<'_>, lt: Value, a: Value, b: Value) -> Result<bool, LuaError> {
+    if lt.is_nil() {
+        return ctx.less_than_now(a, b);
+    }
+    let at = ctx.len();
+    ctx.push(lt);
+    ctx.push(a);
+    ctx.push(b);
+    ctx.call_want(2, 1)?;
+    let r = ctx.arg(at);
+    ctx.truncate(at);
+    Ok(!r.is_falsy())
+}
+
+/// Store the sorted copy back into `t`.
+fn write_back(
+    ctx: &mut NativeCtx<'_>,
+    t: Value,
+    plain: Option<crate::object::Gc<crate::object::Table>>,
+    src: crate::object::Gc<crate::object::Table>,
+    n: i64,
+) -> R {
+    for i in 1..=n {
+        let v = at(ctx, src, i);
+        match plain {
+            Some(h) => put(ctx, h, i, v)?,
+            None => ctx.set_index_now(t, Value::Int(i), v)?,
+        }
+    }
+    Ok(NativeReturn::Return(0))
+}
+
+/// `table.remove`, on a plain table or through metamethods.
+pub(super) fn remove(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.arg(0);
+    let plain = match t {
+        Value::Table(h) if ctx.vm.heap.get(h).meta.is_none() => Some(h),
+        _ => None,
+    };
+    let size = match plain {
+        Some(h) => ctx.vm.heap.get(h).border(),
+        None => {
+            let t = check_tab(ctx, 0, READ_WRITE)?;
+            length(ctx, t)?
+        }
+    };
+    let mut pos = size;
+    if !ctx.arg(1).is_nil() {
+        pos = ctx.check_int(1)?;
+        // `pos - 1` as unsigned: 1..=size+1 is valid.
+        if pos != size && (size as u64) < (pos.wrapping_sub(1) as u64) {
+            return Err(ctx.arg_error(1, "position out of bounds"));
+        }
+    }
+    window(ctx, 2);
+    let v = get_at(ctx, t, plain, pos)?;
+    // Rooted while the moves below run metamethods.
+    ctx.set(1, v);
+    while pos < size {
+        let next = get_at(ctx, t, plain, pos + 1)?;
+        set_at(ctx, t, plain, pos, next)?;
+        pos += 1;
+    }
+    set_at(ctx, t, plain, pos, Value::Nil)?;
+    let v = ctx.arg(1);
+    ctx.ret([v])
+}
+
+/// `t[i]`, raw when `plain` is `t` itself.
+fn get_at(
+    ctx: &mut NativeCtx<'_>,
+    t: Value,
+    plain: Option<crate::object::Gc<crate::object::Table>>,
+    i: i64,
+) -> Result<Value, LuaError> {
+    match plain {
+        Some(h) => Ok(at(ctx, h, i)),
+        None => ctx.index_now(t, Value::Int(i)),
+    }
+}
+
+/// `t[i] = v`, raw when `plain` is `t` itself.
+fn set_at(
+    ctx: &mut NativeCtx<'_>,
+    t: Value,
+    plain: Option<crate::object::Gc<crate::object::Table>>,
+    i: i64,
+    v: Value,
+) -> Result<(), LuaError> {
+    match plain {
+        Some(h) => put(ctx, h, i, v),
+        None => ctx.set_index_now(t, Value::Int(i), v),
+    }
+}
+
+/// `sort`'s fast path, for no comparator: sort `a[1..=n]` by `<` if they are all numbers
+/// (none NaN) or all strings in byte order, and return true; otherwise
+/// leave `a` alone and return false.
+fn sort_primitive(ctx: &mut NativeCtx<'_>, a: Gc<Table>, n: i64) -> Result<bool, LuaError> {
+    let heap = &ctx.vm.heap;
+    let tab = heap.get(a);
+    let values: Vec<Value> = (1..=n).map(|i| tab.get_int(i)).collect();
+    let numbers = values.iter().all(|v| match *v {
+        Value::Int(_) => true,
+        Value::Float(f) => !f.is_nan(),
+        _ => false,
+    });
+    // Strings in byte order only: a locale's collation goes through `<`
+    // with the built-in's own sort.
+    let strings = !numbers
+        && ctx.vm.rt.metas.locale.byte_order()
+        && values.iter().all(|v| matches!(v, Value::Str(_)));
+    if !numbers && !strings {
+        return Ok(false);
+    }
+    let mut values = values;
+    values.sort_by(|&x, &y| {
+        let lt = |x, y| sort_lt(ctx.vm, x, y);
+        if lt(x, y) {
+            std::cmp::Ordering::Less
+        } else if lt(y, x) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    for (i, v) in values.into_iter().enumerate() {
+        crate::object::table::set_int(&mut ctx.vm.heap, a, i as i64 + 1, v)
+            .map_err(|_| ctx.no_memory())?;
+    }
+    Ok(true)
+}
+
+/// `<` for [`sort_primitive`], whose strings compare in byte order.
+fn sort_lt(vm: &Vm, x: Value, y: Value) -> bool {
+    match (x, y) {
+        (Value::Int(a), Value::Int(b)) => a < b,
+        (Value::Float(a), Value::Float(b)) => a < b,
+        (Value::Str(a), Value::Str(b)) => vm.heap.get(a).as_bytes() < vm.heap.get(b).as_bytes(),
+        _ => crate::vm::ops::less_than(&vm.heap, &vm.rt.metas, x, y).unwrap_or(false),
+    }
 }

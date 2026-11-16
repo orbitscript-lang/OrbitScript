@@ -2,7 +2,7 @@
 //!
 //! Every way of raising one (a native's context, the `orbit` crate's
 //! `Stack` and `Call`, typed `#[native]` parameters, the OrbitScript
-//! built-ins' `argerror` and `typeerror` intrinsics, the Lua C API's
+//! built-ins' `missingarg` intrinsic, the Lua C API's
 //! `luaL_argerror` and `luaL_typeerror`) ends in [`bad_argument`], and the
 //! messages more than one of them raise are the constants and functions
 //! here. A message only one library raises (`position out of bounds`)

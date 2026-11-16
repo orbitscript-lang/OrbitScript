@@ -792,23 +792,6 @@ impl<'a> View<'a> {
     pub(crate) fn metatable(self, v: PureValue) -> Option<Gc<crate::object::Table>> {
         self.metas().metatable(self.heap(), v)
     }
-
-    /// `v` as `lua_tointeger` takes it: integral floats and numeric
-    /// strings convert.
-    pub(crate) fn to_integer(self, v: PureValue) -> Option<i64> {
-        let n = match v {
-            PureValue::Str(s) => self
-                .metas()
-                .locale
-                .str_to_number(self.heap().get(s).as_bytes())?,
-            _ => v,
-        };
-        match n {
-            PureValue::Int(i) => Some(i),
-            PureValue::Float(f) => crate::object::number::float_to_int(f),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Debug for View<'_> {

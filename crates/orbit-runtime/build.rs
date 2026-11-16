@@ -11,7 +11,7 @@
 use orbit_lua_version::LuaVersion;
 use std::path::Path;
 
-const MODULES: &[&str] = &["base", "table"];
+const MODULES: &[&str] = &["base"];
 
 fn main() {
     let out = std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR");

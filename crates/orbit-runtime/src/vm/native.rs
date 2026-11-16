@@ -1131,18 +1131,6 @@ impl NativeCtx<'_> {
         self.builtin_error_str(text.as_orbit_str())
     }
 
-    /// `bad argument` for a wrong type: `v` is the argument, `None` when it
-    /// is absent.
-    pub(crate) fn builtin_type_error(
-        &mut self,
-        n: usize,
-        expected: &str,
-        v: Option<Value>,
-    ) -> LuaError {
-        let got = self.arg_type_name(v);
-        self.builtin_arg_error(n, &arg_errors::type_mismatch(expected, &got))
-    }
-
     /// `bad argument #i to 'name' (msg)`, for 0-based argument `i`.
     pub(crate) fn arg_error<'m>(&mut self, i: usize, msg: impl Into<OrbitStr<'m>>) -> LuaError {
         self.arg_error_str(i, msg.into())
@@ -1469,7 +1457,9 @@ impl NativeCtx<'_> {
     }
 
     /// `a < b` with `__lt`, run now; a `__lt` function is called straight
-    /// away.
+    /// away. Inlined into its two callers, `Stack::compare` and `sort`:
+    /// a call costs `math.max` with `__lt` about 30 instructions more.
+    #[inline(always)]
     pub(crate) fn less_than_now(&mut self, a: Value, b: Value) -> Result<bool, LuaError> {
         let plain = |v: Value| matches!(v, Value::Int(_) | Value::Float(_) | Value::Str(_));
         if !(plain(a) && plain(b)) {
