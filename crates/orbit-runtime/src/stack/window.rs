@@ -608,14 +608,16 @@ impl<'s> Stack<'s> {
         }
     }
 
+    // A table's `__index` or `__newindex` function is called straight
+    // away, as the runtime's own natives call it.
+    #[inline]
     fn index(&mut self, obj: RawValue, key: RawValue) -> StackResult<RawValue> {
-        let m = self.ctx.index(obj, key)?;
-        self.finish_meta(m, |v| v)
+        Ok(self.ctx.index_now(obj, key)?)
     }
 
+    #[inline]
     fn set_index(&mut self, obj: RawValue, key: RawValue, v: RawValue) -> StackResult<()> {
-        let m = self.ctx.set_index(obj, key, v)?;
-        self.finish_meta(m, |_| ())
+        Ok(self.ctx.set_index_now(obj, key, v)?)
     }
 
     // ---- slots -----------------------------------------------------------------
@@ -1117,8 +1119,7 @@ impl<'s> Stack<'s> {
     /// Push the length of the value at `idx`, as `#` gives it.
     pub fn len(&mut self, idx: i32) -> StackResult<()> {
         let v = self.get(idx);
-        let m = self.ctx.length(v)?;
-        let r = self.finish_meta(m, |v| v)?;
+        let r = self.ctx.length_now(v)?;
         self.ctx.push(r);
         Ok(())
     }
@@ -1316,9 +1317,13 @@ impl<'s> Stack<'s> {
     }
 
     /// Push `t[n]` for the value at `idx`.
+    #[inline]
     pub fn get_index(&mut self, idx: i32, n: i64) -> StackResult<Type> {
+        // An integer key needs no rooting while metamethods run.
         let obj = self.get(idx);
-        self.get_with(obj, RawValue::Int(n))
+        let v = self.index(obj, RawValue::Int(n))?;
+        self.ctx.push(v);
+        Ok(type_of(v))
     }
 
     /// Push the global `name`.
