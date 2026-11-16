@@ -306,12 +306,6 @@ macro_rules! op_table {
             }
         }
 
-        /// One instruction of every kind, with every operand zero: what a
-        /// table with an entry per kind of instruction is built from.
-        pub fn one_of_each() -> Vec<Op> {
-            vec![$(Op::$name $({ $($f: Default::default()),* })?,)*]
-        }
-
         fn get_op(r: &mut Reader<'_>) -> Result<Op> {
             let op = match r.byte()? {
                 $($tag => Op::$name $({ $($f: Field::get(r)?),* })?,)*

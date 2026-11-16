@@ -102,36 +102,10 @@ type General = fn(&mut Vm, Regs, Ip) -> Step;
 /// chain uses.
 const FUEL: u32 = 256;
 
-/// The handler of each kind of instruction, indexed by [`regs::kind`].
-/// Each VM holds one, so a handler finds the next one at a fixed offset
-/// from the VM it is handed. (Dispatching through [`handler`] directly
-/// compiles to the same table, but to a separate copy of it in every
-/// handler.)
-pub(crate) struct Handlers([Handler; 256]);
-
-impl Handlers {
-    pub(crate) fn new() -> Handlers {
-        let mut table: [Handler; 256] = [not_an_instruction; 256];
-        for op in orbit_bytecode::format::one_of_each() {
-            table[regs::kind(&op)] = handler(&op);
-        }
-        Handlers(table)
-    }
-}
-
-impl std::fmt::Debug for Handlers {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Handlers")
-    }
-}
-
-/// What the table holds for a byte that is no instruction's kind.
-fn not_an_instruction(_vm: &mut Vm, _regs: Regs, _ip: Ip, _op: Op) -> Step {
-    Step::Invalid
-}
-
 /// The handler of each instruction. Written as a `match` so that a new
-/// instruction does not compile until it has one.
+/// instruction does not compile until it has one; the compiler makes a
+/// table of it, indexed by the instruction's tag byte.
+#[inline(always)]
 fn handler(op: &Op) -> Handler {
     match op {
         Op::Move { .. } => loads::move_,
@@ -245,8 +219,7 @@ fn next(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
         return out_of_fuel(vm, regs, ip);
     }
     let op = ip.op();
-    let handler = vm.rt.handlers.0[ip.kind()];
-    handler(vm, regs, ip.after(), op)
+    handler(&op)(vm, regs, ip.after(), op)
 }
 
 /// [`next`] where a chain could otherwise go round for ever: after a
