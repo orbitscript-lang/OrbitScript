@@ -1279,8 +1279,9 @@ impl NativeCtx<'_> {
     }
 
     /// Turn a slow path's result into a [`Meta`]: a metamethod call gets
-    /// its handler and arguments pushed, an error gets positioned at the
-    /// caller.
+    /// its handler and arguments pushed. An operation's error gets no
+    /// position, as in Lua, where it is raised inside the native and not in
+    /// the script that called it.
     fn meta_result<T>(&mut self, r: Result<T, Exc>) -> Result<Meta<T>, LuaError> {
         match r {
             Ok(v) => Ok(Meta::Done(v)),
@@ -1292,8 +1293,9 @@ impl NativeCtx<'_> {
                 }
                 Ok(Meta::Call { nargs: n })
             }
-            Err(Exc::Rt(msg, _)) => Err(self.error(&msg)),
-            Err(Exc::Plain(msg)) => Err(LuaError::new(self.new_str(msg.as_bytes()))),
+            Err(Exc::Rt(msg, _) | Exc::Plain(msg)) => {
+                Err(LuaError::new(self.new_str(msg.as_bytes())))
+            }
             Err(Exc::NoMemory) => Err(self.no_memory()),
             Err(Exc::Lua(e) | Exc::Handled(e) | Exc::Left(e)) => Err(e),
             Err(x @ Exc::ErrErr) => Err(self.vm.make_error(x)),
