@@ -771,6 +771,9 @@ pub struct View<'a> {
     vm: &'a crate::vm::Vm,
 }
 
+// What a `pure` body reads through its `View`. No native in the runtime
+// takes one now that the intrinsics are gone; the attribute still passes it.
+#[allow(dead_code)]
 impl<'a> View<'a> {
     #[inline(always)]
     pub(crate) fn new(vm: &'a crate::vm::Vm) -> View<'a> {
@@ -797,48 +800,6 @@ impl<'a> View<'a> {
 impl std::fmt::Debug for View<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("View")
-    }
-}
-
-/// An argument as it came, any value or none: for the intrinsics, which
-/// check their arguments themselves and report them as the built-in
-/// calling them would.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Given(pub(crate) Option<PureValue>);
-
-impl Arg<'_> for Given {
-    type Checked = ();
-
-    #[inline(always)]
-    fn check(_: &mut Stack<'_>, _: i32) -> StackResult<()> {
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn get(s: &Stack<'_>, i: i32, _: ()) -> Given {
-        Given(s.given(i))
-    }
-}
-
-impl PureArg for Given {
-    #[inline(always)]
-    fn from_value(v: Option<PureValue>) -> Option<Given> {
-        Some(Given(v))
-    }
-}
-
-/// The value, or nil for none.
-impl Push for Given {
-    #[inline(always)]
-    fn push(self, s: &mut Stack<'_>) {
-        s.push_given(self.0.unwrap_or(PureValue::Nil));
-    }
-}
-
-impl PureResult for Given {
-    #[inline(always)]
-    fn into_value(self) -> Option<PureValue> {
-        Some(self.0.unwrap_or(PureValue::Nil))
     }
 }
 

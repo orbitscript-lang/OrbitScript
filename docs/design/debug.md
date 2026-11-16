@@ -70,7 +70,7 @@ Tracebacks print a named activation as `in local 'f'`, `in method 'm'`, `in meta
 | `L` | `activelines` | Every line in the line table, minus the lines of instructions the compiler marks as function-entry bookkeeping |
 | `f` | `func` | The frame's closure or native |
 
-An invalid option raises `bad argument #2 to 'getinfo' (invalid option)`. Out-of-range levels return `nil`. Stripped binary chunks (`string.dump(f, true)`) have empty debug info and `source = "=?"`; every function here handles that (`currentline` -1, `?` as `short_src`, `(temporary)` names, `(no name)` upvalues), as `db.lua` checks. Built-ins written in OrbitScript (ADR-11) report themselves as C functions.
+An invalid option raises `bad argument #2 to 'getinfo' (invalid option)`. Out-of-range levels return `nil`. Stripped binary chunks (`string.dump(f, true)`) have empty debug info and `source = "=?"`; every function here handles that (`currentline` -1, `?` as `short_src`, `(temporary)` names, `(no name)` upvalues), as `db.lua` checks.
 
 ## Locals
 

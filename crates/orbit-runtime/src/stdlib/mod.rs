@@ -7,14 +7,12 @@
 //! `os` live in `orbit-std`.
 
 mod base;
-mod builtins;
 pub mod checks;
 mod chunk;
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
 mod dump;
-mod intrinsics;
 mod load;
 mod package;
 pub(crate) mod string;

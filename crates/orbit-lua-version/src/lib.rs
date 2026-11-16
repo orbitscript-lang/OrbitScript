@@ -18,8 +18,8 @@
 //! ```
 //!
 //! The build scripts of crates that depend on this one directly read the
-//! version with [`LuaVersion::from_build_env`], and the built-in OrbitScript
-//! modules select their lines for it with [`preprocess`].
+//! version with [`LuaVersion::from_build_env`], and OrbitScript sources
+//! select their lines for it with [`preprocess`].
 
 /// A Lua version OrbitScript can implement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

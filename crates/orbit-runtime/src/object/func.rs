@@ -62,13 +62,6 @@ pub(crate) struct ProtoCode {
     pub(crate) is_vararg: bool,
     pub(crate) nregs: u8,
     pub(crate) ncells: u8,
-    /// Part of a built-in library written in OrbitScript: the debug
-    /// interface shows its activations as C functions (ADR-11).
-    pub(crate) builtin: bool,
-    /// Nothing may yield across its activations (`attempt to yield across
-    /// a C-call boundary`): set for every built-in but the few whose C
-    /// counterparts in the reference allow it.
-    pub(crate) refuses_yield: bool,
     /// The debugger's mark: the breakpoint generation this code was last
     /// checked against, shifted left one, and whether it has a breakpoint
     /// in bit 0 (0 when never checked).
@@ -91,14 +84,6 @@ impl ProtoCode {
         self.with_code(code)
     }
 
-    /// A copy that code it calls may yield across.
-    pub(crate) fn allowing_yields(&self) -> ProtoCode {
-        ProtoCode {
-            refuses_yield: false,
-            ..self.with_code(self.code.clone())
-        }
-    }
-
     fn with_code(&self, code: Box<[Op]>) -> ProtoCode {
         ProtoCode {
             code,
@@ -108,8 +93,6 @@ impl ProtoCode {
             is_vararg: self.is_vararg,
             nregs: self.nregs,
             ncells: self.ncells,
-            builtin: self.builtin,
-            refuses_yield: self.refuses_yield,
             #[cfg(feature = "debugger")]
             debug_mark: StdCell::new(0),
         }

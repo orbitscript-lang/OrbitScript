@@ -41,11 +41,11 @@ const FUNCTIONS: &[LibraryRow] = &[
     NEXT,
 ];
 
-/// `type`, which the built-in modules share.
-pub(crate) const TYPE: LibraryRow = library_row::<type_>().with_fast(type_fast);
+/// `type`.
+const TYPE: LibraryRow = library_row::<type_>().with_fast(type_fast);
 
-/// `next`, which `pairs` returns and the built-in modules share.
-pub(crate) const NEXT: LibraryRow = LibraryRow::raw("next", next).with_fast(next_fast);
+/// `next`, which `pairs` returns.
+const NEXT: LibraryRow = LibraryRow::raw("next", next).with_fast(next_fast);
 
 pub(crate) fn open(vm: &mut Vm) {
     for row in FUNCTIONS {

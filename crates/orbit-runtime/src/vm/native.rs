@@ -52,8 +52,8 @@ pub(crate) enum Operator {
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 
 /// An optional fast path for a native that returns one value and needs
-/// nothing but its arguments and a look at the heap (most of `math`, the
-/// base library's leaf functions, and the intrinsics built-ins call most).
+/// nothing but its arguments and a look at the heap (most of `math` and the
+/// base library's leaf functions).
 /// It gets the arguments and returns the result, or `None` to run the
 /// full native instead (wrong types, errors, anything unusual), so it
 /// never changes behavior. It cannot allocate, call back into Lua, or
@@ -764,7 +764,7 @@ impl NativeCtx<'_> {
     /// `env` as the main function's first capture. The function is unrooted
     /// until stored in the window.
     pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
-        crate::vm::link::link(&mut self.vm.heap, &mut self.vm.rt, chunk, env, false)
+        crate::vm::link::link(&mut self.vm.heap, &mut self.vm.rt, chunk, env)
     }
 
     /// A new table (unrooted until stored in the window).
@@ -1020,7 +1020,7 @@ impl NativeCtx<'_> {
     fn name_at(&self, caller: Option<crate::vm::Frame>, me: Value) -> Option<(Vec<u8>, bool)> {
         if let Some(f) = caller {
             if let FrameKind::Lua { closure, .. } = f.kind {
-                if f.pc > 0 && !crate::vm::debug::is_builtin(&self.vm.heap, closure) {
+                if f.pc > 0 {
                     let proto = self.vm.heap.get(self.vm.heap.get(closure).proto);
                     let pc = f.pc - 1;
                     if matches!(
@@ -1054,81 +1054,6 @@ impl NativeCtx<'_> {
             .rt
             .global_name(&self.vm.heap, me)
             .map(|name| (name.to_vec(), false))
-    }
-
-    // ---- intrinsics' errors ----------------------------------------------
-
-    /// For an intrinsic: the frame of the built-in library function calling
-    /// it, the newest Lua frame (an intrinsic has none of its own).
-    fn builtin_frame(&self) -> Option<usize> {
-        self.vm
-            .rt
-            .stack
-            .frames
-            .iter()
-            .rposition(|f| matches!(f.kind, FrameKind::Lua { .. }))
-    }
-
-    /// The environment (`_ENV`) of the built-in calling this intrinsic: its
-    /// first capture.
-    pub(crate) fn builtin_env(&self) -> Value {
-        let Some(i) = self.builtin_frame() else {
-            return Value::Nil;
-        };
-        let FrameKind::Lua { closure, .. } = self.vm.rt.stack.frames[i].kind else {
-            unreachable!("builtin_frame finds a Lua frame")
-        };
-        match self.vm.heap.get(closure).captures.first() {
-            Some(&cell) => self.vm.heap.get(cell).value,
-            None => Value::Nil,
-        }
-    }
-
-    /// An error with a message, positioned at the caller of the built-in
-    /// calling this intrinsic: `luaL_error` from that built-in.
-    pub(crate) fn builtin_error<'m>(&mut self, msg: impl Into<OrbitStr<'m>>) -> LuaError {
-        self.builtin_error_str(msg.into())
-    }
-
-    // One out-of-line body for every message type.
-    #[inline(never)]
-    fn builtin_error_str(&mut self, msg: OrbitStr<'_>) -> LuaError {
-        let mut text = self.where_(2).into_bytes();
-        text.extend_from_slice(&msg);
-        LuaError::new(self.new_str_owned(text))
-    }
-
-    /// `bad argument #n to 'name' (msg)` for argument `n` (1-based) of the
-    /// built-in calling this intrinsic, named as [`NativeCtx::call_name`]
-    /// names a native.
-    pub(crate) fn builtin_arg_error<'m>(
-        &mut self,
-        n: usize,
-        msg: impl Into<OrbitStr<'m>>,
-    ) -> LuaError {
-        self.builtin_arg_error_str(n, msg.into())
-    }
-
-    // One out-of-line body for every message type.
-    #[inline(never)]
-    fn builtin_arg_error_str(&mut self, n: usize, msg: OrbitStr<'_>) -> LuaError {
-        let frames = &self.vm.rt.stack.frames;
-        let named = self.builtin_frame().and_then(|i| {
-            let f = frames[i];
-            let FrameKind::Lua { closure, .. } = f.kind else {
-                return None;
-            };
-            // A built-in entered by a tail call has no call site.
-            let caller = if f.tail {
-                None
-            } else {
-                i.checked_sub(1).map(|c| frames[c])
-            };
-            self.name_at(caller, Value::Closure(closure))
-        });
-        let (name, method) = named.unwrap_or_else(|| (b"?".to_vec(), false));
-        let text = arg_errors::bad_argument(&name, method, n, msg);
-        self.builtin_error_str(text.as_orbit_str())
     }
 
     /// `bad argument #i to 'name' (msg)`, for 0-based argument `i`.
@@ -1665,8 +1590,6 @@ fn stub_proto(id: NativeId) -> Proto {
             is_vararg: true,
             nregs: 0,
             ncells: 0,
-            builtin: false,
-            refuses_yield: false,
             #[cfg(feature = "debugger")]
             debug_mark: Default::default(),
         }),
