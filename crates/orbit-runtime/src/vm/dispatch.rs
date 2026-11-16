@@ -942,17 +942,6 @@ impl Vm {
                                     }
                                     let g = self.rt.stack.frames.last_mut().expect("frame");
                                     g.tail = true;
-                                    // A metamethod handler's tail call
-                                    // finishes the instruction in its place.
-                                    if let FrameKind::Lua {
-                                        meta: Some(ret), ..
-                                    } = f.kind
-                                    {
-                                        if let FrameKind::Lua { meta, .. } = &mut g.kind {
-                                            *meta = Some(ret);
-                                        }
-                                        g.cdepth = f.cdepth;
-                                    }
                                     if HOOKED {
                                         self.rt.stack.hook.call_pending = Some(true);
                                     }
