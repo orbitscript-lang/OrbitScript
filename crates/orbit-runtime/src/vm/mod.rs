@@ -685,6 +685,8 @@ pub(crate) struct VmState {
     /// while the frame of `closure` is on the stack.
     pub(crate) code: *const crate::object::func::ProtoCode,
     pub(crate) first_op: *const orbit_bytecode::Op,
+    /// The plain interpreter's handler of each kind of instruction.
+    pub(crate) handlers: handlers::Handlers,
     /// An error (or metamethod request) on its way from an instruction to
     /// the trampoline, with the pc after it.
     pub(crate) pending: Option<(ops::Exc, usize)>,
@@ -923,6 +925,7 @@ impl Vm {
                 stack_len: 0,
                 code: std::ptr::null(),
                 first_op: std::ptr::null(),
+                handlers: handlers::Handlers::new(),
                 pending: None,
                 dead_cell,
                 c_strings: CStrings::default(),

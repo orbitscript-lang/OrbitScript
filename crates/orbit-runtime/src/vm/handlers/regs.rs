@@ -25,6 +25,14 @@ use crate::vm::VmState;
 use crate::vm::interp::{WINDOW, Window};
 use orbit_bytecode::{Offset, Op, Reg};
 
+/// Which kind of instruction `op` is, as an index: `Op` is `#[repr(u8)]`,
+/// so this is its first byte.
+#[inline(always)]
+pub(super) fn kind(op: &Op) -> usize {
+    // SAFETY: a `#[repr(u8)]` enum starts with its discriminant, a `u8`.
+    unsafe { *(op as *const Op).cast::<u8>() as usize }
+}
+
 /// The registers of the running frame: a pointer to the stack slot just
 /// below the frame's base, where its function sits and where a single
 /// result goes.
@@ -132,6 +140,16 @@ impl Ip {
     pub(super) fn op(self) -> Op {
         // SAFETY: inside the running code (the second rule of this module).
         unsafe { *self.0 }
+    }
+
+    /// Which kind of instruction is here ([`kind`]), read from the code
+    /// and not from a copy of the instruction, which the compiler would
+    /// then take apart byte by byte.
+    #[inline(always)]
+    pub(super) fn kind(self) -> usize {
+        // SAFETY: inside the running code (the second rule of this
+        // module), and `Op` starts with its discriminant, a `u8`.
+        unsafe { *self.0.cast::<u8>() as usize }
     }
 
     /// The instruction before this one. A handler is handed the place
