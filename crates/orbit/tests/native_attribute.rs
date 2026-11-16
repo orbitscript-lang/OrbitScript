@@ -209,9 +209,9 @@ fn numbers_userdata_state_and_panics() {
         })?;
         s.registry().raw_set("Counter", class.metatable(s)?)?;
         let src = r##"
-            assert(math.type(num.abs(-3)) == "integer" and num.abs(-3) == 3)
-            assert(math.type(num.abs(-2.5)) == "float" and num.abs(-2.5) == 2.5)
-            assert(math.type(num.abs("-3")) == "float" and num.abs("-3") == 3.0)
+            assert(tostring(num.abs(-3)) == "3")
+            assert(tostring(num.abs(-2.5)) == "2.5")
+            assert(tostring(num.abs("-3")) == "3.0")
             assert(select(2, pcall(num.abs, {})) == "bad argument #1 to 'num.abs' (number expected, got table)")
             assert(num.twice(21) == 42)
             local c = new_counter()
@@ -255,7 +255,7 @@ fn pure_natives() {
     iso.scope(|s| {
         s.globals().set("half", s.create_native::<half>())?;
         let src = r##"
-            assert(half(8) == 4 and math.type(half(8)) == "integer")
+            assert(tostring(half(8)) == "4")
             assert(half(8, 3) == 12.0 and half("8") == 4 and half(8.0) == 4)
             assert(select("#", half(8)) == 1)
             assert(select(2, pcall(half, 7)) == "bad argument #1 to 'half' (odd)")

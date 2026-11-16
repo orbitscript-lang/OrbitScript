@@ -6,7 +6,9 @@ use orbit_compiler::bytecode::{UnlinkedChunk, format};
 use orbit_orb_syntax::{ParseOptions, to_hir};
 
 fn isolate() -> Isolate {
-    Runtime::new().new_isolate(Config::default())
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
+    iso
 }
 
 /// `chunk` as a binary chunk the isolate loads (keeping its debug info).

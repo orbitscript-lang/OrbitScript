@@ -1,6 +1,6 @@
 //! The standard library's parts built on the public `orbit` API only
-//! (ADR-11): `print`, `loadfile`, `dofile`, `debug.debug`, the `io`, `os`
-//! and `utf8` libraries, and `require` finding files on `package.path`.
+//! (ADR-11): `print`, `loadfile`, `dofile`, `debug.debug`, the `io`, `os`,
+//! `math` and `utf8` libraries, and `require` finding files on `package.path`.
 //!
 //! The runtime reads no files and touches no process state; a host that
 //! wants scripts to do so installs this crate:
@@ -23,6 +23,7 @@ mod ctime;
 mod io;
 #[cfg(feature = "json")]
 mod json;
+mod math;
 #[cfg(feature = "os")]
 mod os;
 mod package;
@@ -47,6 +48,8 @@ pub struct Options {
     pub io: bool,
     /// The `os` library (feature `os`).
     pub os: bool,
+    /// The `math` library.
+    pub math: bool,
     /// The `utf8` library.
     pub utf8: bool,
     /// The `std.json` module (feature `json`), reached through `require`
@@ -63,6 +66,7 @@ impl Default for Options {
             base: true,
             io: cfg!(feature = "io"),
             os: cfg!(feature = "os"),
+            math: true,
             utf8: true,
             json: cfg!(feature = "json"),
             ignore_env: false,
@@ -88,6 +92,10 @@ pub fn install(iso: &mut Isolate, options: &Options) -> Result<(), Error> {
         if options.os {
             let t = open_os(s)?;
             publish(s, "os", t)?;
+        }
+        if options.math {
+            let t = open_math(s)?;
+            publish(s, "math", t)?;
         }
         if options.utf8 {
             let t = open_utf8(s)?;
@@ -180,6 +188,11 @@ pub fn open_io<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
 #[cfg(feature = "os")]
 pub fn open_os<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
     os::open(s)
+}
+
+/// The `math` library's table.
+pub fn open_math<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
+    math::open(s)
 }
 
 /// The `utf8` library's table.

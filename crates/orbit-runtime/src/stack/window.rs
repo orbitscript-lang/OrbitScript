@@ -137,11 +137,6 @@ impl LibraryRow {
         }
     }
 
-    /// The same function under another name (`math.atan2` for `atan`).
-    pub(crate) const fn named(self, name: &'static str) -> LibraryRow {
-        LibraryRow { name, ..self }
-    }
-
     /// A hand-written fast path, for a raw native.
     pub(crate) const fn with_fast(self, fast: vm::FastFn) -> LibraryRow {
         LibraryRow {

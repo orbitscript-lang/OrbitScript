@@ -1021,9 +1021,6 @@ mod pure_tests {
         assert!(matches!(fast(cx, &[V::Int(4)]), Some(V::Int(8))));
         assert!(fast(cx, &[V::Float(4.0)]).is_none());
         assert!(library_row::<plain>().fast.is_none());
-        let named = row.named("double");
-        assert_eq!(named.name, "double");
-        assert!(named.fast.is_some());
         let raw = LibraryRow::raw("raw", entry);
         assert!(raw.fast.is_none());
         assert!(raw.with_fast(fast).fast.is_some());

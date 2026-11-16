@@ -283,6 +283,7 @@ dependencies = [
  "orbit",
  "orbit-compiler",
  "orbit-hir",
+ "orbit-std",
 ]
 
 [[package]]
