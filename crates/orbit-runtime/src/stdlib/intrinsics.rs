@@ -11,6 +11,7 @@
 use std::borrow::Cow;
 
 use crate::arg_errors;
+use crate::object::HashSeed;
 use crate::object::number::float_to_int;
 use crate::object::{Table, Value};
 use crate::stack::{
@@ -234,7 +235,7 @@ fn metafield(view: View<'_>, v: Given, name: Given) -> Given {
 fn plainlen(view: View<'_>, t: Given) -> Option<i64> {
     match t.0 {
         Some(Value::Table(t)) if view.heap().get(t).meta.is_none() => {
-            Some(view.heap().get(t).border())
+            Some(view.heap().get(t).border(HashSeed::of(view.heap())))
         }
         _ => None,
     }
@@ -253,7 +254,8 @@ fn sortprim(s: &mut Stack<'_>, a: Given, n: Given) -> StackResult<bool> {
     let ctx = s.native_ctx();
     let heap = &ctx.vm.heap;
     let tab = heap.get(a);
-    let values: Vec<Value> = (1..=n).map(|i| tab.get_int(i)).collect();
+    let seed = HashSeed::of(heap);
+    let values: Vec<Value> = (1..=n).map(|i| tab.get_int(seed, i)).collect();
     let numbers = values.iter().all(|v| match *v {
         Value::Int(_) => true,
         Value::Float(f) => !f.is_nan(),

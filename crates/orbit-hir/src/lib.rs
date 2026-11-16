@@ -10,6 +10,7 @@
 
 mod analyze;
 mod diag;
+mod hash;
 mod ids;
 mod print;
 mod source;
@@ -21,6 +22,7 @@ pub use diag::{Code, Diagnostic, DiagnosticData, DiagnosticKind, Near, Severity}
 pub use print::print;
 pub use verify::{VerifyError, verify, verify_lowered};
 
+pub use hash::{HashSeed, SeededHasher, SeededMap, SeededSet};
 pub use ids::{BlockId, CaptureId, ExprId, FuncId, LabelId, LocalId, StmtId, StrId, TypeId};
 pub use source::{Language, SourceInfo, Span};
 pub use strings::StringPool;

@@ -314,6 +314,7 @@ impl<S: Space> Heap<S> {
         check.collected.clear();
         let mut m = crate::trace::Marker {
             space: &self.space,
+            seed: self.seed,
             marks: &mut self.marks,
             weak: None,
             can_register: false,

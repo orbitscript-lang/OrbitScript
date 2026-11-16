@@ -119,8 +119,9 @@ mod loading {
             return load_binary(ctx, chunk, env);
         }
         let name = chunk_id(chunk.source());
+        let seed = ctx.vm.hash_seed();
         let mut unlinked = Compiler
-            .compile(chunk.bytes, &name, chunk.resolved_language())
+            .compile_seeded(chunk.bytes, &name, chunk.resolved_language(), Some(seed))
             .map_err(|e| e.0)?;
         // `debug.getinfo`'s `source` is the name as given, not its short form.
         unlinked.source = chunk.source().into();

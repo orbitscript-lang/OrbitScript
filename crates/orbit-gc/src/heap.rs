@@ -194,6 +194,8 @@ const STRESS_MINORS: u64 = 64;
 /// when [`Heap::should_step`] says a step is due.
 pub struct Heap<S: Space> {
     space: S,
+    /// See [`Heap::seed`].
+    seed: u64,
     marks: Marks,
     /// Objects a write barrier turned back to gray. They are traced again
     /// when marking finishes, not straight away, so a table written in a
@@ -341,13 +343,22 @@ impl<S: Space + Default> Heap<S> {
         Self::with_params(Params::default())
     }
 
+    /// A heap with these parameters and a random [`Heap::seed`].
     pub fn with_params(params: Params) -> Self {
+        Self::with_seed(params, random_seed())
+    }
+
+    /// A heap with these parameters and this [`Heap::seed`]. Only for runs
+    /// that must repeat exactly, such as benchmarks: a fixed seed lets
+    /// whoever knows it choose keys that collide.
+    pub fn with_seed(params: Params, seed: u64) -> Self {
         let space = S::with_slot_capacity(params.reserved_objects, params.max_objects);
         let meta = (0..S::KINDS)
             .map(|kind| KindMeta::new(PageShift::<S>::SHIFT, space.slot_capacity(kind as u8)))
             .collect();
         Heap {
             space,
+            seed,
             marks: Marks {
                 meta,
                 gray: Vec::new(),
@@ -402,7 +413,24 @@ impl<S: Space + Default> Heap<S> {
     }
 }
 
+/// A seed no one outside the process can predict: std's per-process random
+/// keys, which also differ for each call.
+fn random_seed() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+    RandomState::new().hash_one(0x6f72_6269_7473_6372_u64)
+}
+
 impl<S: Space> Heap<S> {
+    /// A number fixed for the heap's life, random unless the heap was made
+    /// with [`Heap::with_seed`]. Owners that hash what objects hold (string
+    /// keys, say) mix it in, so inputs whose hashes collide can't be worked
+    /// out in advance. [`Marker::seed`] gives it while tracing.
+    #[inline(always)]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
     // ---- objects --------------------------------------------------------
 
     /// Move `v` into the heap. Never collects.
@@ -701,6 +729,7 @@ impl<S: Space> Heap<S> {
             }
             let mut m = Marker {
                 space: &self.space,
+                seed: self.seed,
                 marks: &mut self.marks,
                 weak: None,
                 can_register: false,
@@ -1430,6 +1459,7 @@ impl<S: Space> Heap<S> {
     fn marker(&mut self, can_register: bool) -> Marker<'_, S> {
         Marker {
             space: &self.space,
+            seed: self.seed,
             marks: &mut self.marks,
             weak: None,
             can_register,
@@ -1458,6 +1488,7 @@ impl<S: Space> Heap<S> {
         *c = (*c & !COLOR) | BLACK;
         let mut m = Marker {
             space: &self.space,
+            seed: self.seed,
             marks: &mut self.marks,
             weak: None,
             can_register: true,
@@ -1499,6 +1530,7 @@ impl<S: Space> Heap<S> {
             }
             let mut m = Marker {
                 space: &self.space,
+                seed: self.seed,
                 marks: &mut self.marks,
                 weak: None,
                 can_register: true,
@@ -1551,6 +1583,7 @@ impl<S: Space> Heap<S> {
             }
             let mut m = Marker {
                 space: &self.space,
+                seed: self.seed,
                 marks: &mut self.marks,
                 weak: None,
                 can_register: true,
@@ -1583,6 +1616,7 @@ impl<S: Space> Heap<S> {
         let slots = self.params.card_slots.max(1);
         let mut m = Marker {
             space: &self.space,
+            seed: self.seed,
             marks: &mut self.marks,
             weak: None,
             can_register: true,

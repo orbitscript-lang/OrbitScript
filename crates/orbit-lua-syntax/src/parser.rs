@@ -8,7 +8,7 @@ use crate::ast::*;
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Punct, Token, TokenKind};
 use orbit_hir::{Code, Diagnostic, Near};
-use orbit_hir::{Language, SourceInfo, Span, StrId};
+use orbit_hir::{HashSeed, Language, SourceInfo, Span, StrId, StringPool};
 use orbit_lua_version::LUA;
 
 /// Parser settings.
@@ -26,6 +26,10 @@ pub struct ParseOptions {
     /// [`parse_recovering`] to get every error; [`parse_with`] ignores it and gives only the
     /// first, as the reference reports it.
     pub recover: bool,
+    /// The seed for the string pool and the compiler's maps (`None`: a random one). Only for runs
+    /// that must repeat exactly, such as benchmarks: whoever knows it can write a chunk whose
+    /// names and constants all collide (`orbit_hir::HashSeed`).
+    pub hash_seed: Option<u64>,
 }
 
 impl Default for ParseOptions {
@@ -35,6 +39,7 @@ impl Default for ParseOptions {
             skip_comment_line: false,
             keep_trivia: false,
             recover: false,
+            hash_seed: None,
         }
     }
 }
@@ -104,7 +109,8 @@ fn parse_chunk(
             "chunk too large",
         ));
     }
-    let mut lexer = Lexer::new(src);
+    let seed = HashSeed::fixed_or_random(options.hash_seed);
+    let mut lexer = Lexer::with_pool(src, StringPool::with_seed(seed));
     if options.skip_comment_line {
         lexer.skip_comment_line();
     }

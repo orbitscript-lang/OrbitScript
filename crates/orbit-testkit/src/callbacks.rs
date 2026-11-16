@@ -453,7 +453,7 @@ fn count(valgrind: &Path, interp: &Path, script: &Path, row: &str, n: u64) -> Re
     let spec = Spec {
         program: valgrind.to_path_buf(),
         args,
-        env: Vec::new(),
+        env: util::bench_env(),
         cwd: script.parent().expect("a directory").to_path_buf(),
         timeout: Duration::from_secs(600),
         measure_rss: false,

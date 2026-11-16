@@ -5,6 +5,7 @@
 //! the VM's control (`pcall`, `xpcall`, `error`), run metamethods
 //! (`tostring`) or finalizers (`collectgarbage`), and stay raw natives.
 
+use crate::object::HashSeed;
 use crate::object::Tag;
 use crate::object::Value;
 use crate::object::table as tbl;
@@ -457,7 +458,7 @@ fn rawlen(s: &mut Stack<'_>) -> StackResult<i64> {
 
 fn rawlen_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
     Some(Value::Int(match *args.first()? {
-        Value::Table(t) => cx.heap().get(t).border(),
+        Value::Table(t) => cx.heap().get(t).border(HashSeed::of(cx.heap())),
         Value::Str(s) => cx.heap().get(s).as_bytes().len() as i64,
         _ => return None,
     }))

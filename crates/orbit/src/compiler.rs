@@ -32,15 +32,34 @@ impl Compiler {
         chunk_name: &str,
         language: Language,
     ) -> Result<UnlinkedChunk, SyntaxError> {
+        self.compile_seeded(src, chunk_name, language, None)
+    }
+
+    /// [`Compiler::compile`] with the isolate's hash seed for the front
+    /// end's and the compiler's maps, so an isolate with a fixed seed
+    /// compiles the same way every run (`None`: a random seed).
+    pub(crate) fn compile_seeded(
+        &self,
+        src: &[u8],
+        chunk_name: &str,
+        language: Language,
+        hash_seed: Option<u64>,
+    ) -> Result<UnlinkedChunk, SyntaxError> {
         match language {
             Language::Auto | Language::Lua => {
-                self.compile_lua(src, chunk_name, &ParseOptions::default())
+                let options = ParseOptions {
+                    hash_seed,
+                    ..ParseOptions::default()
+                };
+                self.compile_lua(src, chunk_name, &options)
             }
-            Language::OrbitScript => self.compile_orbitscript(
-                src,
-                chunk_name,
-                &orbit_orb_syntax::ParseOptions::default(),
-            ),
+            Language::OrbitScript => {
+                let options = orbit_orb_syntax::ParseOptions {
+                    hash_seed,
+                    ..orbit_orb_syntax::ParseOptions::default()
+                };
+                self.compile_orbitscript(src, chunk_name, &options)
+            }
         }
     }
 
@@ -128,15 +147,23 @@ fn compile_hir(hir: &orbit_hir::Chunk) -> Result<UnlinkedChunk, SyntaxError> {
 }
 
 /// The compiler `load` uses for Lua source ([`orbit_runtime::vm::CompileFn`]).
-pub(crate) fn compile_lua(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
+pub(crate) fn compile_lua(
+    src: &[u8],
+    chunk_name: &str,
+    hash_seed: u64,
+) -> Result<UnlinkedChunk, String> {
     Compiler
-        .compile(src, chunk_name, Language::Lua)
+        .compile_seeded(src, chunk_name, Language::Lua, Some(hash_seed))
         .map_err(|e| e.to_string())
 }
 
 /// The compiler `load` uses for `.orb` files.
-pub(crate) fn compile_orb(src: &[u8], chunk_name: &str) -> Result<UnlinkedChunk, String> {
+pub(crate) fn compile_orb(
+    src: &[u8],
+    chunk_name: &str,
+    hash_seed: u64,
+) -> Result<UnlinkedChunk, String> {
     Compiler
-        .compile(src, chunk_name, Language::OrbitScript)
+        .compile_seeded(src, chunk_name, Language::OrbitScript, Some(hash_seed))
         .map_err(|e| e.to_string())
 }

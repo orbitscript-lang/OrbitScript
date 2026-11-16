@@ -6,7 +6,7 @@
 use crate::ast::{Comment, CommentKind};
 use crate::token::{Keyword, Punct, Token, TokenKind};
 use orbit_hir::{Code, Diagnostic};
-use orbit_hir::{Language, SourceInfo, Span, StringPool};
+use orbit_hir::{HashSeed, Language, SourceInfo, Span, StringPool};
 
 /// One piece of an `f"..."` template.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,12 +68,17 @@ fn is_ident_char(c: u8) -> bool {
 impl<'a> Lexer<'a> {
     /// A lexer over `src`. Sources must be under 4 GiB.
     pub fn new(chunk_name: &str, src: &'a [u8]) -> Lexer<'a> {
+        Lexer::with_seed(chunk_name, src, HashSeed::random())
+    }
+
+    /// [`Lexer::new`] with its string pool hashed with `seed`.
+    pub fn with_seed(chunk_name: &str, src: &'a [u8], seed: HashSeed) -> Lexer<'a> {
         assert!(u32::try_from(src.len()).is_ok(), "source larger than 4 GiB");
         let mut lx = Lexer {
             src,
             pos: 0,
             limit: src.len(),
-            strings: StringPool::new(),
+            strings: StringPool::with_seed(seed),
             source: SourceInfo::new(chunk_name, Language::OrbitScript, src),
             templates: Vec::new(),
             buf: Vec::new(),

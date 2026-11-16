@@ -17,9 +17,9 @@ mod pool;
 
 use array::ArrayPart;
 
-use crate::object::string::hash_word;
+use crate::object::string::{hash_bytes, hash_word};
 use crate::object::value::{Payload, Tag, str_eq};
-use crate::object::{LuaHeap, LuaSpace, LuaStr, MetaField, NoMemory, Value, gc, number};
+use crate::object::{HashSeed, LuaHeap, LuaSpace, LuaStr, MetaField, NoMemory, Value, gc, number};
 
 /// Why a value can't be a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,11 +90,12 @@ impl Key {
     /// The key for an already normalised value.
     #[inline]
     fn hashed(heap: &LuaHeap, value: Value) -> Key {
+        let seed = HashSeed::of(heap);
         let hash = match value {
-            Value::Str(s) => heap.get(s).hash(),
+            Value::Str(s) => heap.get(s).hash(seed),
             other => {
                 let (tag, payload) = other.pack();
-                hash_word(payload.bits() ^ ((tag as u64) << 56))
+                hash_word(seed, payload.bits() ^ ((tag as u64) << 56))
             }
         };
         Key { value, hash }
@@ -105,7 +106,7 @@ impl Key {
     pub(crate) fn str(heap: &LuaHeap, s: Gc<LuaStr>) -> Key {
         Key {
             value: Value::Str(s),
-            hash: heap.get(s).hash(),
+            hash: heap.get(s).hash(HashSeed::of(heap)),
         }
     }
 
@@ -119,10 +120,10 @@ impl Key {
     }
 
     #[inline]
-    pub(crate) fn int(i: i64) -> Key {
+    pub(crate) fn int(seed: HashSeed, i: i64) -> Key {
         Key {
             value: Value::Int(i),
-            hash: hash_word(i as u64 ^ ((Tag::Int as u64) << 56)),
+            hash: hash_word(seed, i as u64 ^ ((Tag::Int as u64) << 56)),
         }
     }
 
@@ -315,7 +316,7 @@ impl Trace<LuaSpace> for Table {
             Some(meta) => {
                 m.mark(meta);
                 let mt = m.get(meta);
-                gc::weak_mode(mt, |s| m.get(s))
+                gc::weak_mode(mt, HashSeed::tracing(m), |s| m.get(s))
             }
             None => None,
         };
@@ -355,7 +356,7 @@ impl Trace<LuaSpace> for Table {
         range: Option<std::ops::Range<usize>>,
     ) -> bool {
         if let Some(meta) = self.meta {
-            if gc::weak_mode(m.get(meta), |s| m.get(s)).is_some() {
+            if gc::weak_mode(m.get(meta), HashSeed::tracing(m), |s| m.get(s)).is_some() {
                 return false;
             }
         }
@@ -558,6 +559,7 @@ impl Table {
     pub(crate) fn meta_field_by_bytes<'a>(
         &self,
         e: MetaField,
+        seed: HashSeed,
         str_of: impl Fn(Gc<LuaStr>) -> &'a LuaStr,
     ) -> Value {
         let absent = self.absent_meta.get();
@@ -565,7 +567,7 @@ impl Table {
             return Value::Nil;
         }
         let name = e.field().as_bytes();
-        let v = self.get_by_bytes(name, crate::object::string::hash_bytes(name), str_of);
+        let v = self.get_by_bytes(name, hash_bytes(seed, name), str_of);
         if v.is_nil() {
             self.absent_meta.set(absent | e.bit());
         }
@@ -659,7 +661,7 @@ impl Table {
 
     /// `t[i]` for an integer key.
     #[inline]
-    pub(crate) fn get_int(&self, i: i64) -> Value {
+    pub(crate) fn get_int(&self, seed: HashSeed, i: i64) -> Value {
         let idx = (i as u64).wrapping_sub(1);
         if idx < self.array.len() as u64 {
             return self.array_get(idx as usize);
@@ -667,7 +669,7 @@ impl Table {
         if self.used == 0 {
             return Value::Nil;
         }
-        let key = Key::int(i);
+        let key = Key::int(seed, i);
         match self.probe(&key, |_, _| false) {
             Ok(slot) => self.entries[slot].value(),
             Err(_) => Value::Nil,
@@ -839,7 +841,7 @@ impl Table {
     #[inline]
     pub(crate) fn get(&self, heap: &LuaHeap, k: Value) -> Value {
         match k {
-            Value::Int(i) => self.get_int(i),
+            Value::Int(i) => self.get_int(HashSeed::of(heap), i),
             Value::Str(s) => self.get_str(heap, s),
             Value::Nil => Value::Nil,
             _ => {
@@ -857,7 +859,7 @@ impl Table {
     /// `t[key]` for a normalised key.
     pub(crate) fn get_key(&self, heap: &LuaHeap, key: &Key) -> Value {
         if let Value::Int(i) = key.value {
-            return self.get_int(i);
+            return self.get_int(HashSeed::of(heap), i);
         }
         if self.used == 0 {
             return Value::Nil;
@@ -953,12 +955,18 @@ impl Table {
     /// [`Heap::update`](orbit_gc::Heap::update). Only [`Slot::Push`] and
     /// [`Slot::Grow`] allocate; when that fails the key is not stored and
     /// the table is otherwise unchanged (a rebuild may have happened).
-    pub(crate) fn write(&mut self, slot: Slot, key: &Key, v: Value) -> Result<(), NoMemory> {
+    pub(crate) fn write(
+        &mut self,
+        seed: HashSeed,
+        slot: Slot,
+        key: &Key,
+        v: Value,
+    ) -> Result<(), NoMemory> {
         match slot {
             Slot::Array(i) => self.array.set(i, v),
             Slot::Push => {
                 self.array.push(v)?;
-                self.migrate_to_array();
+                self.migrate_to_array(seed);
             }
             Slot::Existing(i) => {
                 self.forget_absent_meta();
@@ -981,14 +989,14 @@ impl Table {
                         return Ok(());
                     }
                     if idx == self.array.len() as u64 {
-                        return self.write(Slot::Push, key, v);
+                        return self.write(seed, Slot::Push, key, v);
                     }
                 }
                 let slot = match self.probe(key, |_, _| false) {
                     Err(Some(slot)) => slot,
                     _ => unreachable!("rebuilt table has room and lacks the key"),
                 };
-                return self.write(Slot::New(slot), key, v);
+                return self.write(seed, Slot::New(slot), key, v);
             }
             Slot::None => {}
         }
@@ -998,9 +1006,9 @@ impl Table {
     /// After the array part grew, move the integer keys that now continue it
     /// out of the hash part, leaving dead entries behind. Stops early if the
     /// array part can't grow: the rest stay in the hash part, which is fine.
-    fn migrate_to_array(&mut self) {
+    fn migrate_to_array(&mut self, seed: HashSeed) {
         while self.used > 0 {
-            let key = Key::int(self.array.len() as i64 + 1);
+            let key = Key::int(seed, self.array.len() as i64 + 1);
             match self.probe(&key, |_, _| false) {
                 Ok(slot) if !self.entries[slot].value_is_nil() => {
                     if self.array.push(self.entries[slot].value()).is_err() {
@@ -1140,8 +1148,8 @@ impl Table {
     /// Append `v` at `array_len() + 1` or store at an integer key, for
     /// constructors and `table.insert`. Integer keys need no heap.
     #[inline]
-    pub(crate) fn set_int(&mut self, i: i64, v: Value) -> Result<(), NoMemory> {
-        let key = Key::int(i);
+    pub(crate) fn set_int(&mut self, seed: HashSeed, i: i64, v: Value) -> Result<(), NoMemory> {
+        let key = Key::int(seed, i);
         let idx = (i as u64).wrapping_sub(1);
         let slot = if idx < self.array.len() as u64 {
             Slot::Array(idx as usize)
@@ -1156,28 +1164,28 @@ impl Table {
                 Err(_) => Slot::Grow,
             }
         };
-        self.write(slot, &key, v)
+        self.write(seed, slot, &key, v)
     }
 
     /// A border: `n` such that `t[n] ~= nil` and `t[n+1] == nil` (or 0).
-    pub(crate) fn border(&self) -> i64 {
+    pub(crate) fn border(&self, seed: HashSeed) -> i64 {
         let n = self.array.len();
         if n > 0 && self.array.tag(n - 1) == Tag::Nil {
             return self.array.inner_border() as i64;
         }
-        if self.used == 0 || self.get_int(n as i64 + 1).is_nil() {
+        if self.used == 0 || self.get_int(seed, n as i64 + 1).is_nil() {
             return n as i64;
         }
         // Search upward through the hash part: find a nil by doubling, then
         // bisect.
         let mut lo = n as u64 + 1;
         let mut hi = lo * 2;
-        while !self.get_int(hi as i64).is_nil() {
+        while !self.get_int(seed, hi as i64).is_nil() {
             lo = hi;
             if hi > (i64::MAX as u64) / 2 {
                 // Pathological: linear search.
                 let mut i = lo;
-                while !self.get_int(i as i64 + 1).is_nil() {
+                while !self.get_int(seed, i as i64 + 1).is_nil() {
                     i += 1;
                 }
                 return i as i64;
@@ -1186,7 +1194,7 @@ impl Table {
         }
         while hi - lo > 1 {
             let mid = (lo + hi) / 2;
-            if self.get_int(mid as i64).is_nil() {
+            if self.get_int(seed, mid as i64).is_nil() {
                 hi = mid;
             } else {
                 lo = mid;
@@ -1376,7 +1384,7 @@ pub(crate) fn set_int(
             return Ok(true);
         }
     }
-    set_key(heap, t, &Key::int(i), v)?;
+    set_key(heap, t, &Key::int(HashSeed::of(heap), i), v)?;
     Ok(false)
 }
 
@@ -1437,7 +1445,7 @@ pub(crate) fn store_int(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> I
         return IntStore::Array;
     }
     drop(tab);
-    match set_key(heap, t, &Key::int(i), v) {
+    match set_key(heap, t, &Key::int(HashSeed::of(heap), i), v) {
         Ok(_) => IntStore::Other,
         Err(NoMemory) => IntStore::Slow,
     }
@@ -1463,7 +1471,8 @@ pub(crate) fn set_key(
         return Err(NoMemory);
     }
     if slot != Slot::None {
-        heap.update(t, |tab| tab.write(slot, key, v))?;
+        let seed = HashSeed::of(heap);
+        heap.update(t, |tab| tab.write(seed, slot, key, v))?;
     }
     Ok(match slot {
         Slot::Existing(i) | Slot::New(i) => Some(i),
@@ -1502,7 +1511,7 @@ mod tests {
         assert!(matches!(get(&heap, t, Value::Str(x2)), Value::Bool(true)));
         assert!(matches!(get(&heap, t, Value::Int(3)), Value::Int(33)));
         assert!(matches!(get(&heap, t, Value::Float(3.0)), Value::Int(33)));
-        assert_eq!(heap.get(t).border(), 10);
+        assert_eq!(heap.get(t).border(HashSeed::of(&heap)), 10);
         assert_eq!(
             set(&mut heap, t, Value::Nil, Value::Int(1)),
             Err(StoreError::Key(KeyError::Nil))
@@ -1519,9 +1528,9 @@ mod tests {
         for i in (1..=100).rev() {
             set(&mut heap, t, Value::Int(i), Value::Int(i)).unwrap();
         }
-        assert_eq!(heap.get(t).border(), 100);
+        assert_eq!(heap.get(t).border(HashSeed::of(&heap)), 100);
         for i in 1..=100 {
-            assert!(matches!(heap.get(t).get_int(i), Value::Int(j) if j == i));
+            assert!(matches!(heap.get(t).get_int(HashSeed::of(&heap), i), Value::Int(j) if j == i));
         }
         // Growing moved the contiguous keys into the array part.
         assert!(heap.get(t).array_len() > 50);
@@ -1560,17 +1569,17 @@ mod tests {
     #[test]
     fn borders() {
         let (mut heap, _, t) = setup();
-        assert_eq!(heap.get(t).border(), 0);
+        assert_eq!(heap.get(t).border(HashSeed::of(&heap)), 0);
         for i in 1..=8 {
             set(&mut heap, t, Value::Int(i), Value::Int(i)).unwrap();
         }
         set(&mut heap, t, Value::Int(8), Value::Nil).unwrap();
-        assert_eq!(heap.get(t).border(), 7);
+        assert_eq!(heap.get(t).border(HashSeed::of(&heap)), 7);
         let h = heap.alloc(Table::new());
         set(&mut heap, h, Value::Int(2), Value::Int(2)).unwrap();
-        assert_eq!(heap.get(h).border(), 0);
+        assert_eq!(heap.get(h).border(HashSeed::of(&heap)), 0);
         set(&mut heap, h, Value::Int(1), Value::Int(1)).unwrap();
-        assert_eq!(heap.get(h).border(), 2);
+        assert_eq!(heap.get(h).border(HashSeed::of(&heap)), 2);
     }
 
     #[test]
@@ -1653,7 +1662,7 @@ mod tests {
             }
         }
         set(&mut heap, t, Value::Int(100), Value::Nil).unwrap();
-        assert_eq!(heap.get(t).border(), 99);
+        assert_eq!(heap.get(t).border(HashSeed::of(&heap)), 99);
     }
 
     #[test]
@@ -1668,7 +1677,7 @@ mod tests {
             for i in -2..=tab.array.cap() as i64 + 9 {
                 let mut out = Value::Nil;
                 let present = tab.read_int_present(i, &mut out);
-                let v = tab.get_int(i);
+                let v = tab.get_int(HashSeed::of(heap), i);
                 let in_array = i >= 1 && i <= tab.array_len() as i64;
                 assert_eq!(present, in_array && !v.is_nil(), "{what}: key {i}");
                 if present {
@@ -1697,8 +1706,8 @@ mod tests {
         }
     }
 
-    fn is_border(t: &Table, n: i64) -> bool {
-        (n == 0 || !t.get_int(n).is_nil()) && t.get_int(n + 1).is_nil()
+    fn is_border(t: &Table, seed: HashSeed, n: i64) -> bool {
+        (n == 0 || !t.get_int(seed, n).is_nil()) && t.get_int(seed, n + 1).is_nil()
     }
 
     #[test]
@@ -1718,7 +1727,9 @@ mod tests {
         let tab = heap.get(t);
         assert_eq!(tab.array_len(), n as usize - 1);
         for i in 1..=n {
-            assert!(matches!(tab.get_int((i * 7919) % n), Value::Int(j) if j == i));
+            assert!(
+                matches!(tab.get_int(HashSeed::of(&heap), (i * 7919) % n), Value::Int(j) if j == i)
+            );
         }
     }
 
@@ -1740,15 +1751,21 @@ mod tests {
         assert_eq!(tab.array_len(), n as usize - 1);
         assert_eq!(tab.used, 1, "only key 0 stays in the hash part");
         for i in 1..=n {
-            assert!(matches!(tab.get_int((i * 7919) % n), Value::Int(j) if j == i));
+            assert!(
+                matches!(tab.get_int(HashSeed::of(&heap), (i * 7919) % n), Value::Int(j) if j == i)
+            );
         }
-        assert_eq!(tab.border(), n - 1);
+        assert_eq!(tab.border(HashSeed::of(&heap)), n - 1);
         // Holes: every other key deleted.
         for k in (1..n).step_by(2) {
             set(&mut heap, t, Value::Int(k), Value::Nil).unwrap();
         }
         let tab = heap.get(t);
-        assert!(is_border(tab, tab.border()));
+        assert!(is_border(
+            tab,
+            HashSeed::of(&heap),
+            tab.border(HashSeed::of(&heap))
+        ));
         let mut k = Value::Nil;
         let mut count = 0;
         while let Some((key, _)) = tab.next(&heap, k).unwrap() {
@@ -1770,9 +1787,13 @@ mod tests {
         let tab = heap.get(t);
         assert!(tab.array_len() <= 3);
         assert!(tab.array.cap() <= 4);
-        assert!(is_border(tab, tab.border()));
-        assert!(matches!(tab.get_int(3), Value::Int(3)));
-        assert!(tab.get_int(2).is_nil());
+        assert!(is_border(
+            tab,
+            HashSeed::of(&heap),
+            tab.border(HashSeed::of(&heap))
+        ));
+        assert!(matches!(tab.get_int(HashSeed::of(&heap), 3), Value::Int(3)));
+        assert!(tab.get_int(HashSeed::of(&heap), 2).is_nil());
     }
 
     #[test]
@@ -1847,7 +1868,7 @@ mod tests {
             let tab = heap.get(t);
             let v = tab.meta_field(heap, e, name(e));
             // The collector's lookup by bytes agrees.
-            assert!(v.same(tab.meta_field_by_bytes(e, |s| heap.get(s))));
+            assert!(v.same(tab.meta_field_by_bytes(e, HashSeed::of(heap), |s| heap.get(s))));
             v
         };
         // Empty: every field absent, and asking twice gives the same.
@@ -1897,8 +1918,9 @@ mod tests {
                 lookup(&heap, g, f);
             }
             let key = Key::str(&heap, name(e));
+            let seed = HashSeed::of(&heap);
             let slot = heap.get(g).find_slot(&heap, &key, false);
-            heap.update(g, |tab| tab.write(slot, &key, Value::Int(i as i64)))
+            heap.update(g, |tab| tab.write(seed, slot, &key, Value::Int(i as i64)))
                 .unwrap();
             for (j, &f) in MetaField::ALL.iter().enumerate() {
                 let v = lookup(&heap, g, f);
@@ -2022,8 +2044,9 @@ mod tests {
                     heap.write_back(h)
                         .insert_str_at(slot, &key, Value::Int(i as i64));
                 } else {
+                    let seed = HashSeed::of(&heap);
                     let slot = heap.get(h).find_slot(&heap, &key, false);
-                    heap.update(h, |tab| tab.write(slot, &key, Value::Int(i as i64)))
+                    heap.update(h, |tab| tab.write(seed, slot, &key, Value::Int(i as i64)))
                         .unwrap();
                 }
                 check(&heap, h, "small");

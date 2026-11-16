@@ -238,7 +238,7 @@ fn measure(
         let out = process::run(&Spec {
             program: i.path.clone(),
             args: argv,
-            env: Vec::new(),
+            env: util::bench_env(),
             cwd: dir.to_path_buf(),
             timeout,
             measure_rss: true,

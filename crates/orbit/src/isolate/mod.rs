@@ -81,6 +81,7 @@ pub struct Config {
     debugger: Debugger,
     line_endings: LineEndings,
     native_stack_limit: usize,
+    hash_seed: Option<u64>,
 }
 
 impl Default for Config {
@@ -95,6 +96,7 @@ impl Default for Config {
             debugger: Debugger::Allowed,
             line_endings: LineEndings::Native,
             native_stack_limit: orbit_runtime::vm::DEFAULT_NATIVE_STACK,
+            hash_seed: None,
         }
     }
 }
@@ -164,6 +166,17 @@ impl Config {
         self
     }
 
+    /// Hash strings and table keys with this seed instead of a random one,
+    /// so that a run repeats exactly: the same collisions, the same probes,
+    /// the same instruction count. Only for benchmarks and other
+    /// measurements. Whoever knows the seed can choose keys that all
+    /// collide and make every lookup in a table slow, so an isolate that
+    /// sees untrusted input keeps the random seed (the default).
+    pub fn fixed_hash_seed(mut self, seed: u64) -> Config {
+        self.hash_seed = Some(seed);
+        self
+    }
+
     /// Whether a debugger may ever attach. Only set when the isolate is
     /// made: there is no turning it off later.
     pub fn debugger(mut self, debugger: Debugger) -> Config {
@@ -201,7 +214,7 @@ pub struct Isolate {
 
 impl Isolate {
     pub(crate) fn new(config: Config) -> Isolate {
-        let mut vm = Vm::new();
+        let mut vm = Vm::with_hash_seed(config.hash_seed);
         adopt(&mut vm);
         #[cfg(feature = "locale")]
         vm.set_locale_provider(orbit_locale::provider());

@@ -229,6 +229,7 @@ impl<S: Space> Heap<S> {
         self.marks.check.begin(&self.marks.meta, context);
         let mut m = Marker {
             space: &self.space,
+            seed: self.seed,
             marks: &mut self.marks,
             weak: None,
             can_register: false,

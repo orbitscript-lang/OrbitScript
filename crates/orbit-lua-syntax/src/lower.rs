@@ -9,8 +9,6 @@ use orbit_hir as hir;
 use orbit_hir::{BlockId, ExprId, FuncId, FunctionName, LabelId, LocalId, LocalKind, Span, StrId};
 use orbit_lua_version::LUA;
 
-use std::collections::HashSet;
-
 use crate::ast::{self, Ast, AttribKind, ExprKind, Field, StmtKind};
 use crate::lexer::Lexer;
 use crate::parser::near_token;
@@ -56,7 +54,7 @@ struct FnCtx {
     id: FuncId,
     f: hir::Function,
     /// The enclosing functions' variables this one uses, as lua5.5 counts its upvalues.
-    upvalues: HashSet<Upvalue>,
+    upvalues: hir::SeededSet<Upvalue>,
     /// Innermost last. Each scope lists the declarations made in it, in order.
     scopes: Vec<Vec<Entry>>,
     /// `goto` bookkeeping for each block being lowered, innermost last.
@@ -183,7 +181,7 @@ impl Lowerer<'_> {
         self.funcs.push(FnCtx {
             id,
             f,
-            upvalues: HashSet::new(),
+            upvalues: hir::SeededSet::with_hasher(self.chunk.strings.seed()),
             scopes: vec![Vec::new()],
             blocks: Vec::new(),
         });

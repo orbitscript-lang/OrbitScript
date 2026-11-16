@@ -10,11 +10,11 @@ mod expr;
 mod func;
 mod stmt;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 
 use orbit_bytecode::{CaptureSource, UnlinkedChunk, UnlinkedProto};
-use orbit_hir::{CaptureFrom, Chunk, StmtKind};
+use orbit_hir::{CaptureFrom, Chunk, SeededMap, StmtKind};
 
 pub use disasm::disassemble;
 
@@ -63,15 +63,17 @@ pub fn compile(chunk: &Chunk) -> Result<UnlinkedChunk, CompileError> {
         proto.captures = captures;
         // The local each `local function` statement defines, found in one pass so a
         // function with many children compiles in linear time.
-        let local_functions: HashMap<_, _> = chunk
-            .function(id)
-            .stmts
-            .iter()
-            .filter_map(|s| match s.kind {
-                StmtKind::LocalFunction { local, func } => Some((func, local)),
-                _ => None,
-            })
-            .collect();
+        let mut local_functions = SeededMap::with_hasher(chunk.strings.seed());
+        local_functions.extend(
+            chunk
+                .function(id)
+                .stmts
+                .iter()
+                .filter_map(|s| match s.kind {
+                    StmtKind::LocalFunction { local, func } => Some((func, local)),
+                    _ => None,
+                }),
+        );
         for child in out.children {
             let child_index = protos.len();
             protos.push(None);

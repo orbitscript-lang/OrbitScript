@@ -1,15 +1,13 @@
 //! Per-function compiler state: emission, registers, cell slots, labels, constants and debug
 //! info. Expressions and statements are in `expr.rs` and `stmt.rs`.
 
-use std::collections::HashMap;
-
 use orbit_bytecode::{
     Const, Constant, DebugInfo, FunctionName, LocalInfo, LocalSlot, MAX_CAPTURES, MAX_CONSTS,
     MAX_REGS, Offset, Op, OperandOrigin, Origin, UnlinkedProto,
 };
 use orbit_hir::{
-    CaptureFrom, CaptureId, Chunk, ExprId, ExprKind, FuncId, Function, LocalId, Span, StmtKind,
-    StrId,
+    CaptureFrom, CaptureId, Chunk, ExprId, ExprKind, FuncId, Function, LocalId, SeededMap, Span,
+    StmtKind, StrId,
 };
 
 use crate::CompileError;
@@ -46,10 +44,9 @@ enum ConstKey {
 }
 
 /// The function's constant table, each value in it once.
-#[derive(Default)]
 struct ConstPool {
     list: Vec<Constant>,
-    index: HashMap<ConstKey, u32>,
+    index: SeededMap<ConstKey, u32>,
 }
 
 impl ConstPool {
@@ -111,7 +108,7 @@ pub(crate) struct FuncState<'a> {
     ncaches: u32,
     pub children: Vec<FuncId>,
     /// Each child's index in `children`.
-    child_index: HashMap<FuncId, u16>,
+    child_index: SeededMap<FuncId, u16>,
 
     // Debug info.
     /// The line instructions emitted from now on belong to.
@@ -205,10 +202,13 @@ impl<'a> FuncState<'a> {
             const_locals,
             self_capture: self_local.and_then(|l| self_capture(chunk, id, l)),
             code: Vec::new(),
-            consts: ConstPool::default(),
+            consts: ConstPool {
+                list: Vec::new(),
+                index: SeededMap::with_hasher(chunk.strings.seed()),
+            },
             ncaches: 0,
             children: Vec::new(),
-            child_index: HashMap::new(),
+            child_index: SeededMap::with_hasher(chunk.strings.seed()),
             line: chunk.source.line_of(f.span.start),
             lines: Vec::new(),
             clear_pending: None,
