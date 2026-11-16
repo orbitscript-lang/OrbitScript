@@ -15,6 +15,7 @@ use crate::vm::{
     self, CallOutcome, Cause, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn,
     Operator, Vm,
 };
+use orbit_lua_version::LUA;
 
 use super::{
     ArithOp, CompareOp, Continuation, FrameInfo, GcMode, GcOp, GcParam, HostValue,
@@ -1400,6 +1401,16 @@ impl<'s> Stack<'s> {
     ) -> StackResult<()> {
         let t = self.ctx.new_table(Table::with_capacity(count, nrec));
         self.ctx.push(RawValue::Table(t));
+        if LUA.is_5_4() {
+            // As a 5.4 constructor does: all `count` positions in the
+            // array part, nils included (`Table::lengthen_array`).
+            let seed = HashSeed::of(&self.ctx.vm.heap);
+            self.ctx
+                .vm
+                .heap
+                .update(t, |tab| tab.lengthen_array(seed, 1, count))
+                .map_err(|_| Raised(self.ctx.no_memory()))?;
+        }
         let from = (first.max(1) - 1) as usize;
         for i in 0..count {
             let v = self.ctx.arg(from + i);

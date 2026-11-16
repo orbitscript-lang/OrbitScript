@@ -1167,6 +1167,44 @@ impl Table {
         self.write(seed, slot, &key, v)
     }
 
+    /// Make room in the array part for keys `first..first + count`, for
+    /// Lua 5.4's table constructors and `table.pack`: there a table built
+    /// from `n` values keeps all `n` positions in its array part, nils
+    /// included, so `#t` is `n` whenever the last value is not nil (as
+    /// `lua5.4` gives). The new slots are nil unless the hash part holds
+    /// their key, which then moves into the array part. Does nothing unless
+    /// the array part reaches `first - 1`, or if it already covers the
+    /// keys. On failure nothing changes.
+    pub(crate) fn lengthen_array(
+        &mut self,
+        seed: HashSeed,
+        first: i64,
+        count: usize,
+    ) -> Result<(), NoMemory> {
+        let old = self.array.len();
+        if first < 1 || (first - 1) as u64 > old as u64 {
+            return Ok(());
+        }
+        let len = first as usize - 1 + count;
+        if len <= old {
+            return Ok(());
+        }
+        if len > self.array.cap() {
+            self.array.realloc(len)?;
+        }
+        self.array.extend_nil(len);
+        if self.used > 0 {
+            for i in old..len {
+                if let Ok(slot) = self.probe(&Key::int(seed, i as i64 + 1), |_, _| false) {
+                    self.array.set(i, self.entries[slot].value());
+                    // Leaves a dead entry, as `migrate_to_array` does.
+                    self.entries[slot].set_value(Value::Nil);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A border: `n` such that `t[n] ~= nil` and `t[n+1] == nil` (or 0).
     pub(crate) fn border(&self, seed: HashSeed) -> i64 {
         let n = self.array.len();

@@ -592,6 +592,11 @@ impl Vm {
         let regs = &self.rt.stack.regs;
         let seed = HashSeed::of(&self.heap);
         self.heap.update(t, |tab| {
+            // Lua 5.4 keeps a constructor's nils in the array part (see
+            // `Table::lengthen_array`); 5.5 stores only the values present.
+            if LUA.is_5_4() {
+                tab.lengthen_array(seed, start, n)?;
+            }
             for (i, &v) in regs[from..from + n].iter().enumerate() {
                 tab.set_int(seed, start + i as i64, v)?;
             }
