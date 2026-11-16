@@ -388,10 +388,10 @@ co()
 #[test]
 fn step_in_through_a_builtin_stops_in_the_callback() {
     let src = "\
-local s = \"abc\"
-local r = string.gsub(s, \"b\", function(c)
-  return c
-end)
+local t = {}
+local r = tostring(setmetatable(t, {__tostring = function(x)
+  return \"x\"
+end}))
 return r
 ";
     let mut vm = vm();
@@ -399,9 +399,9 @@ return r
     let main = loaded(&mut vm, "s.lua", src);
     vm.set_breakpoints(b"@s.lua", &[2]);
     vm.call(main, &[]).unwrap();
-    // The replacement function is made on line 4 and the call is on
-    // line 2. `string.gsub` is native: stepping in stops at the function
-    // it calls, never inside `gsub`.
+    // The metamethod is made on line 4 and the call is on line 2.
+    // `tostring` is native: stepping in stops at the `__tostring` it
+    // calls, never inside `tostring`.
     assert_eq!(
         lines(&s)[..4],
         [("breakpoint", 2), ("step", 4), ("step", 2), ("step", 3)]
@@ -519,7 +519,7 @@ assert(#closed == 2 and closed[1] == msg and closed[2] == msg)
 local ok, msg = xpcall(error, function(m) error(m, 0) end, 'forever')
 assert(not ok and msg == 'error in error handling', msg)
 local ok, msg = pcall(over)
-assert(not ok and msg:find('stack overflow', 1, true), msg)
+assert(not ok and msg == 'v.lua:2: stack overflow', msg)
 ok, msg = pcall(coroutine.wrap(function() local c <close> = tbc(function() end); error('in co', 0) end))
 assert(not ok and msg == 'in co', msg)
 closed = {}

@@ -55,6 +55,7 @@ fn no_cap_by_default() {
 fn garbage_from_host_calls_and_caught_errors_is_collected() {
     const N: usize = 200_000;
     let mut iso = Runtime::new().new_isolate(Config::default());
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     iso.scope(|s| {
         // A long string (not interned) on every call.
         s.globals()

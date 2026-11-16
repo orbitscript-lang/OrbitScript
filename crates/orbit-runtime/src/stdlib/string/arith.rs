@@ -3,9 +3,10 @@
 //! that doesn't convert hands the operation to the other operand's
 //! metamethod, or fails with `attempt to add a 'string' with a 'table'`.
 
+use crate::object::Value;
 use crate::object::number::{ArithOp, Number};
-use crate::object::{Gc, Table, Value};
-use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::stack::LibraryRow;
+use crate::vm::{CallOutcome, LuaError, MetaField, NativeCtx, NativeReturn};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -75,25 +76,18 @@ fn unm(ctx: &mut NativeCtx<'_>) -> R {
     arith(ctx, UNM)
 }
 
-const METAMETHODS: &[(&str, MetaField, NativeFn)] = &[
-    ("string.__add", MetaField::Add, add),
-    ("string.__sub", MetaField::Sub, sub),
-    ("string.__mul", MetaField::Mul, mul),
-    ("string.__mod", MetaField::Mod, mod_),
-    ("string.__pow", MetaField::Pow, pow),
-    ("string.__div", MetaField::Div, div),
-    ("string.__idiv", MetaField::IDiv, idiv),
-    ("string.__unm", MetaField::Unm, unm),
+/// The string metatable's arithmetic metamethods, each named
+/// `string.<field>`.
+pub(in crate::stdlib) const METAMETHODS: &[LibraryRow] = &[
+    LibraryRow::raw("string.__add", add),
+    LibraryRow::raw("string.__sub", sub),
+    LibraryRow::raw("string.__mul", mul),
+    LibraryRow::raw("string.__mod", mod_),
+    LibraryRow::raw("string.__pow", pow),
+    LibraryRow::raw("string.__div", div),
+    LibraryRow::raw("string.__idiv", idiv),
+    LibraryRow::raw("string.__unm", unm),
 ];
-
-/// Put the arithmetic metamethods in the string metatable.
-pub(crate) fn install(vm: &mut Vm, mt: Gc<Table>) {
-    for &(name, field, f) in METAMETHODS {
-        let k = Value::Str(vm.rt.field_name(field));
-        let v = vm.register_native(name, f);
-        vm.table_set(mt, k, v);
-    }
-}
 
 /// A number, or a string that converts to one.
 fn to_number(ctx: &NativeCtx<'_>, v: Value) -> Option<Number> {

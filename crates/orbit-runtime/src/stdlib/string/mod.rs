@@ -1,16 +1,16 @@
 //! The `string` library.
 
-mod arith;
+pub(super) mod arith;
 mod format;
 mod pack;
 pub(crate) mod pattern;
 
 use crate::locale::Locale;
-use crate::object::{Gc, LuaStr, Table, Tag, Value, number};
+use crate::object::{Gc, LuaStr, Value, number};
 use crate::stack::{
     Buffer, Fail, LibraryRow, Raised, Rest, Results, Return, Stack, StackResult, library_row,
 };
-use crate::vm::{LuaError, MetaField, NativeCtx, NativeReturn, Vm};
+use crate::vm::{LuaError, NativeCtx, NativeReturn};
 use orbit_macros::native;
 
 use pattern::{Capture, Captures, Matcher, PatternError};
@@ -599,14 +599,4 @@ fn expand_replacement(
         i += 1;
     }
     Ok(())
-}
-
-/// Point the shared string metatable's `__index` at the `string` table and
-/// add its arithmetic metamethods.
-pub(crate) fn set_metatable_index(vm: &mut Vm, string: Gc<Table>) {
-    if let Some(mt) = vm.rt.type_meta(Tag::Str) {
-        let k = Value::Str(vm.rt.field_name(MetaField::Index));
-        vm.table_set(mt, k, Value::Table(string));
-        arith::install(vm, mt);
-    }
 }

@@ -174,6 +174,7 @@ enum Lib {
     /// on the public API.
     Io,
     Math,
+    String,
     Table,
     Os,
     Package,
@@ -190,7 +191,7 @@ const LIBS: [(Lib, &[u8]); 10] = [
     (Lib::Io, b"io"),
     (Lib::Math, b"math"),
     (Lib::Os, b"os"),
-    (Lib::Runtime(Library::String), b"string"),
+    (Lib::String, b"string"),
     (Lib::Table, b"table"),
     (Lib::Utf8, b"utf8"),
 ];
@@ -230,6 +231,7 @@ pub(crate) fn openlib(c: &mut Stack<'_>, lib: i32) -> Res<i32> {
             }
             opened
         }
+        Lib::String => c.push_from_scope(|s| orbit_std::open_string(s).ok().map(|t| t.to_value())),
         Lib::Table => c.push_from_scope(|s| orbit_std::open_table(s).ok().map(|t| t.to_value())),
         Lib::Math => c.push_from_scope(|s| orbit_std::open_math(s).ok().map(|t| t.to_value())),
         Lib::Utf8 => c.push_from_scope(|s| orbit_std::open_utf8(s).ok().map(|t| t.to_value())),
