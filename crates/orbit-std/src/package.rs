@@ -344,11 +344,12 @@ fn push_loaded(s: &mut Stack<'_>) -> StackResult<()> {
 #[native(name = "require")]
 fn require(s: &mut Stack<'_>) -> StackResult<Return> {
     s.check_string(NAME)?;
-    s.set_top(NAME)?;
+    // Extra arguments stay below until a module has to be loaded: setting
+    // the top costs more than the lookup of one that already is.
     push_loaded(s)?;
     s.push_copy(NAME);
-    s.raw_get(2)?;
-    if s.to_boolean(3) {
+    s.raw_get(-2)?;
+    if s.to_boolean(-1) {
         return Ok(Return::values(1));
     }
     s.set_top(NAME)?;
@@ -411,7 +412,7 @@ impl Continuation for SearcherDone {
             Type::String | Type::Number => {
                 let mut all = OrbitString::from(s.string_at(MSGS).unwrap_or_default());
                 all.push("\n\t");
-                all.push(&s.display(first));
+                all.push(s.display(first));
                 s.set_top(MSGS)?;
                 s.push_bytes(&all);
                 s.copy(-1, MSGS)?;
