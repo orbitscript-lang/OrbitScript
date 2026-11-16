@@ -15,6 +15,37 @@ use std::rc::Rc;
 
 type Quick = fn(&mut Vm, *mut Value, *const Insn, Insn) -> Step;
 
+/// `*dst = *src`, as the tag byte, the byte a boolean lives in and the
+/// payload word: no branch on the tag, and each load matches the size of
+/// the store that last wrote it.
+#[inline(always)]
+fn copy_value(dst: &mut Value, src: &Value) {
+    use std::mem::MaybeUninit;
+    let s = src as *const Value as *const MaybeUninit<u8>;
+    let d = dst as *mut Value as *mut MaybeUninit<u8>;
+    // SAFETY: `Value` is `repr(C, u8)`, 16 bytes: the tag at 0, a `bool`
+    // at 1, every other payload at 8. Bytes are copied as possibly
+    // uninitialised, so padding is never read as a value.
+    unsafe {
+        *d = *s;
+        *d.add(1) = *s.add(1);
+        *(d.add(8) as *mut MaybeUninit<u64>) = *(s.add(8) as *const MaybeUninit<u64>);
+    }
+}
+
+/// Write the value with this tag and payload, without a branch on the tag.
+#[inline(always)]
+fn write_packed(dst: &mut Value, tag: Tag, p: crate::object::value::Payload) {
+    let d = dst as *mut Value as *mut u8;
+    // SAFETY: as `copy_value`; a payload's bits are the variant's field,
+    // and a boolean's are 0 or 1.
+    unsafe {
+        *d = tag as u8;
+        *d.add(1) = (p.bits() != 0) as u8;
+        *(d.add(8) as *mut u64) = p.bits();
+    }
+}
+
 /// The index of the instruction `ip` points at.
 #[inline(always)]
 fn pc_of(vm: &Vm, ip: *const Insn) -> usize {
@@ -180,15 +211,9 @@ fn quick_from(vm: &mut Vm, regs: &mut [Value], base: usize, pc: usize) -> Step {
 q! {fn q_move(vm, w, pc, i) {
     let (dst, src) = i.r_move();
     let mut r = qwin!(vm, w, pc);
-    match r[src] {
-        Value::Int(x) => r[dst] = Value::Int(x),
-        Value::Float(f) => r[dst] = Value::Float(f),
-        Value::Table(t) => r[dst] = Value::Table(t),
-        Value::Str(x) => r[dst] = Value::Str(x),
-        Value::Closure(c) => r[dst] = Value::Closure(c),
-        Value::Bool(b) => r[dst] = Value::Bool(b),
-        v => r[dst] = v,
-    }
+    let v: *const Value = &r[src];
+    // SAFETY: a register of the window; `dst` may be the same one.
+    copy_value(&mut r[dst], unsafe { &*v });
     next(vm, w, pc)
 }}
 
@@ -294,7 +319,7 @@ q! {fn q_get_global(vm, w, pc, i) {
     let mut r = qwin!(vm, w, pc);
     match tab.cached_str_packed(cache.slot.get() as usize, cache.key) {
         Some((tag, p)) if tag != Tag::Nil || tab.meta.is_none() => {
-            Value::write_unpacked(&mut r[dst], tag, p)
+            write_packed(&mut r[dst], tag, p)
         }
         _ => return slow(vm, pc),
     }
@@ -313,7 +338,7 @@ q! {fn q_get_field(vm, w, pc, i) {
     let tab = vm.heap.get(t);
     match tab.cached_str_packed(cache.slot.get() as usize, cache.key) {
         Some((tag, p)) if tag != Tag::Nil || tab.meta.is_none() => {
-            Value::write_unpacked(&mut r[dst], tag, p)
+            write_packed(&mut r[dst], tag, p)
         }
         _ => return slow(vm, pc),
     }
@@ -404,7 +429,7 @@ q! {fn q_self_call(vm, w, pc, i) {
     match method_lookup(&vm.heap, &vm.rt.metas, cur, ic, k, t) {
         Some((tag, p)) => {
             r[dst + 1] = Value::Table(t);
-            Value::write_unpacked(&mut r[dst], tag, p)
+            write_packed(&mut r[dst], tag, p)
         }
         None => return slow(vm, pc),
     }
@@ -746,12 +771,7 @@ q! {fn q_return1(vm, w, pc, i) {
     // SAFETY: `w` is the register below the frame's window.
     let result = unsafe { &mut *w };
     let r = unsafe { &*(w.add(1) as *const [Value; WINDOW]) };
-    match r[src as usize] {
-        Value::Int(x) => *result = Value::Int(x),
-        Value::Float(x) => *result = Value::Float(x),
-        Value::Bool(x) => *result = Value::Bool(x),
-        v => *result = v,
-    }
+    copy_value(result, &r[src as usize]);
     vm.rt.top = top;
     vm.rt.stack.frames.pop();
     if code_id != Rc::as_ptr(&vm.rt.cur) as usize {
