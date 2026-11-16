@@ -386,9 +386,10 @@ mod tests {
             m.set("answer", 42)?;
             s.register_module("deep", m);
             let env = s.create_table();
-            env.set("require", s.globals().get::<Value>("require")?)?;
+            // `package.loaded`, which orbit-std's `package` library shows.
+            env.set("loaded", s.registry().get::<Value>("_LOADED")?)?;
             let r = s
-                .load_in(Chunk::new("x = require('deep').answer return x"), env)?
+                .load_in(Chunk::new("x = loaded.deep.answer return x"), env)?
                 .call(())?;
             assert_eq!(r[0].get::<i64>()?, 42);
             assert_eq!(env.get::<i64>("x")?, 42);

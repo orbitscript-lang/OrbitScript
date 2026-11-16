@@ -1,6 +1,6 @@
 # Chunks, modules, IO, OS and the CLI
 
-Status: Implemented. Crates: `orbit-runtime` (`load`, `require`, `string.dump`), `orbit-bytecode` (binary chunks and the verifier), `orbit-std` (`io`, `os`, files and the Lua searcher), `orbit-capi` (C modules), `orbit-cli`.
+Status: Implemented. Crates: `orbit-runtime` (`load`, `string.dump`), `orbit-bytecode` (binary chunks and the verifier), `orbit-std` (`io`, `os`, files, `require` and `package`), `orbit-capi` (C modules), `orbit-cli`.
 
 This covers the parts of Lua 5.5 that move code and data across the VM's edge: loading chunks (`load`, `loadfile`, `dofile`), modules (`require` and `package`), binary chunks (`string.dump` and loading its output), the `io` and `os` libraries, and the `orbit` command line. Everything here is observable behaviour taken from the manual, the reference `lua5.5` binary and the official suite (`literals.lua`, `constructs.lua`, `attrib.lua`, `files.lua`, `verybig.lua`, `main.lua`, `calls.lua`).
 
@@ -14,7 +14,7 @@ Everything that touches files, the environment or the process lives in `orbit-st
 | `loadfile`, `dofile`, `print`, `debug.debug` | `orbit-std` (`base.rs`) | |
 | The compiler hooks | `orbit-runtime` (`Host::set_compilers`, in `vm/host.rs`) | Installed by the embedder; `orbit::Isolate` installs both front ends |
 | Linking with an environment | `orbit-runtime` (`vm/link.rs`) | `Vm::load_with_env` |
-| `require`, `package` | `orbit-runtime` (`stdlib/package.rs`): `require`, `loaded`, `preload`; `orbit-std` (`package.rs`): paths, `searchpath`, the Lua searcher; `orbit-capi` (`searchers.rs`): the C searchers and `loadlib` (ADR-8) | |
+| `require`, `package` | `orbit-std` (`package.rs`): `require`, `loaded`, `preload`, paths, `searchpath`, the preload and Lua searchers; `orbit-capi` (`searchers.rs`): the C searchers and `loadlib` (ADR-8) | |
 | Binary chunk format and verifier | `orbit-bytecode` (`format.rs`, `verify.rs`) | Plain data in, plain data out: no VM needed, so both are unit-testable and fuzzable |
 | `string.dump` | `orbit-runtime` (`stdlib/dump.rs`) | Rebuilds an `UnlinkedChunk` from a linked prototype, then encodes it |
 | `io` | `orbit-std` (`io.rs`, feature `io`) | `FILE*` is an `orbit::Class` |

@@ -1,13 +1,18 @@
-//! `require` finding files: `package.path` and `package.cpath`,
-//! `package.searchpath`, and the Lua searcher
+//! `require` and the `package` library: `package.loaded`,
+//! `package.preload`, `package.path` and `package.cpath`,
+//! `package.searchpath`, and the preload and Lua searchers
 //! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/chunks-io-os-cli.md#modules-require-and-package)).
 //!
-//! The runtime's `package` library keeps `require`, `package.loaded`,
-//! `package.preload` and the preload searcher; this adds the searcher that
-//! reads files. The C searchers and `package.loadlib` come from
-//! `orbit-capi`, which installs itself after this library.
+//! `package.loaded` and `package.preload` are also kept in the registry
+//! (`_LOADED`, `_PRELOAD`), and the `package` table itself (`_PACKAGE`), so
+//! `require` keeps working when scripts replace those fields, as in Lua.
+//! The C searchers and `package.loadlib` come from `orbit-capi`, which
+//! installs itself after this library.
 
-use orbit::stack::{Any, Either, Nil, Stack, StackExt, StackResult, Status, Type};
+use orbit::stack::{
+    Any, Continuation, Either, Nil, Outcome, REGISTRY_INDEX, Return, Stack, StackExt, StackResult,
+    Status, Type,
+};
 use orbit::{Chunk, Error, OrbitStr, OrbitString, Scope, Table, Value, native};
 
 use crate::base::read_chunk_file;
@@ -252,14 +257,34 @@ fn loadlib_absent(_lib: OrbitStr<'_>, _func: OrbitStr<'_>) -> (Nil, &'static str
     )
 }
 
-/// Set `package.path` and `package.cpath` (from the environment unless
-/// `ignore_env`), and add `package.searchpath`, `package.loadlib` (which
-/// reports C modules absent until `orbit-capi` replaces it) and the Lua
-/// searcher. Does nothing without the `package` library.
-pub fn open<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<(), Error> {
-    let Some(pkg) = s.registry().raw_get::<Option<Table>>("_PACKAGE")? else {
-        return Ok(());
-    };
+/// Registry keys.
+const LOADED: &str = "_LOADED";
+const PRELOAD: &str = "_PRELOAD";
+const PACKAGE: &str = "_PACKAGE";
+
+/// The registry table under `key`, made the first time.
+fn registry_table<'s>(s: &'s Scope<'s>, key: &str) -> Result<Table<'s>, Error> {
+    let reg = s.registry();
+    if let Some(t) = reg.raw_get::<Option<Table>>(key)? {
+        return Ok(t);
+    }
+    let t = s.create_table();
+    reg.raw_set(key, t)?;
+    Ok(t)
+}
+
+/// Open the `package` library and the global `require`, with
+/// `package.path` and `package.cpath` from the environment unless
+/// `ignore_env`. Returns the `package` table.
+pub fn open<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<Table<'s>, Error> {
+    let pkg = s.create_table();
+    pkg.raw_set("config", format!("{DIRSEP}\n;\n?\n!\n-\n"))?;
+    pkg.raw_set("loaded", registry_table(s, LOADED)?)?;
+    pkg.raw_set("preload", registry_table(s, PRELOAD)?)?;
+    let searchers = s.create_table();
+    searchers.push(s.create_native::<search_preload>())?;
+    searchers.push(s.create_native::<search_lua>())?;
+    pkg.raw_set("searchers", searchers)?;
     let path = env_path(
         &versioned_env("LUA_PATH"),
         "LUA_PATH",
@@ -276,8 +301,154 @@ pub fn open<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<(), Error> {
     pkg.raw_set("cpath", with_exec_dir(cpath))?;
     pkg.add_native::<searchpath>()?;
     pkg.add_native::<loadlib_absent>()?;
-    if let Some(searchers) = pkg.raw_get::<Option<Table>>("searchers")? {
-        searchers.push(s.create_native::<search_lua>())?;
+    s.registry().raw_set(PACKAGE, pkg)?;
+    s.globals()
+        .raw_set("require", s.create_native::<require>())?;
+    Ok(pkg)
+}
+
+// Nameless in messages, as the reference's searchers are. Both lookups
+// are ordinary indexing, so `__index` on `package.preload` applies.
+#[native(name = "?")]
+fn search_preload(s: &mut Stack<'_>) -> StackResult<Return> {
+    s.check_string(1)?;
+    s.get_field(REGISTRY_INDEX, PRELOAD)?;
+    s.push_copy(1);
+    if s.get_table(2)? == Type::Nil {
+        let name = s.string_at(1).map_or(&b""[..], |n| n.as_bytes());
+        let msg = [&b"no field package.preload['"[..], name, b"']"].concat();
+        s.push_bytes(msg.as_slice());
+        return Ok(Return::values(1));
+    }
+    s.push_bytes(":preload:");
+    Ok(Return::values(2))
+}
+
+// `require`'s window while it runs searchers and the loader: the name, the
+// searchers table, the next searcher's index and the messages so far; then
+// the loader's extra value once a searcher succeeds.
+const NAME: i32 = 1;
+const SEARCHERS: i32 = 2;
+const NEXT: i32 = 3;
+const MSGS: i32 = 4;
+const EXTRA: i32 = 5;
+
+/// Push `package.loaded` (the registry's), which must be a table.
+fn push_loaded(s: &mut Stack<'_>) -> StackResult<()> {
+    if s.raw_get_field(REGISTRY_INDEX, LOADED)? != Type::Table {
+        return Err(s.error("'package.loaded' must be a table"));
     }
     Ok(())
+}
+
+#[native(name = "require")]
+fn require(s: &mut Stack<'_>) -> StackResult<Return> {
+    s.check_string(NAME)?;
+    s.set_top(NAME)?;
+    push_loaded(s)?;
+    s.push_copy(NAME);
+    s.raw_get(2)?;
+    if s.to_boolean(3) {
+        return Ok(Return::values(1));
+    }
+    s.set_top(NAME)?;
+    // The `searchers` of the `package` table `require` was opened with.
+    let found = s.raw_get_field(REGISTRY_INDEX, PACKAGE)? == Type::Table
+        && s.raw_get_field(2, "searchers")? == Type::Table;
+    if !found {
+        return Err(s.error("'package.searchers' must be a table"));
+    }
+    s.copy(3, SEARCHERS)?;
+    s.set_top(SEARCHERS)?;
+    s.push_integer(1);
+    s.push_bytes("");
+    next_searcher(s)
+}
+
+/// Call the next searcher.
+fn next_searcher(s: &mut Stack<'_>) -> StackResult<Return> {
+    let i = s.to_integer(NEXT).unwrap_or(1);
+    s.set_top(MSGS)?;
+    if s.raw_get_index(SEARCHERS, i)? == Type::Nil {
+        let mut msg = OrbitString::from("module '");
+        msg.push(s.string_at(NAME).unwrap_or_default());
+        msg.push("' not found:");
+        msg.push(s.string_at(MSGS).unwrap_or_default());
+        return Err(s.error(&msg));
+    }
+    s.push_integer(i + 1);
+    s.copy(-1, NEXT)?;
+    s.set_top(-2)?;
+    s.push_copy(NAME);
+    Ok(Return::call_then::<SearcherDone>(1, false))
+}
+
+struct SearcherDone;
+
+impl Continuation for SearcherDone {
+    fn resume(s: &mut Stack<'_>, outcome: Outcome) -> StackResult<Return> {
+        let Outcome::Ok(n) = outcome else {
+            unreachable!("an unprotected call")
+        };
+        if n < 2 {
+            // The loader and its extra value, nil when missing.
+            for _ in n..2 {
+                s.push_nil();
+            }
+        }
+        let first = s.top() - n.max(2) as i32 + 1;
+        match s.type_at(first) {
+            Type::Function => {
+                // [.., results] -> [.., extra, loader, name, extra]
+                s.push_copy(first + 1);
+                s.push_copy(first);
+                s.push_copy(NAME);
+                s.push_copy(first + 1);
+                s.rotate(EXTRA, 4)?;
+                s.set_top(EXTRA + 3)?;
+                Ok(Return::call_then::<LoaderDone>(2, false))
+            }
+            Type::String | Type::Number => {
+                let mut all = OrbitString::from(s.string_at(MSGS).unwrap_or_default());
+                all.push("\n\t");
+                all.push(&s.display(first));
+                s.set_top(MSGS)?;
+                s.push_bytes(&all);
+                s.copy(-1, MSGS)?;
+                next_searcher(s)
+            }
+            _ => next_searcher(s),
+        }
+    }
+}
+
+struct LoaderDone;
+
+impl Continuation for LoaderDone {
+    fn resume(s: &mut Stack<'_>, outcome: Outcome) -> StackResult<Return> {
+        let Outcome::Ok(n) = outcome else {
+            unreachable!("an unprotected call")
+        };
+        if n == 0 {
+            s.push_nil();
+        }
+        let result = s.top() - n.max(1) as i32 + 1;
+        push_loaded(s)?;
+        let loaded = s.top();
+        if s.type_at(result) != Type::Nil {
+            s.push_copy(NAME);
+            s.push_copy(result);
+            s.raw_set(loaded)?;
+        }
+        s.push_copy(NAME);
+        if s.raw_get(loaded)? == Type::Nil {
+            s.set_top(-2)?;
+            s.push_boolean(true);
+            s.push_copy(NAME);
+            s.push_copy(-2);
+            s.raw_set(loaded)?;
+        }
+        s.push_copy(EXTRA);
+        Ok(Return::values(2))
+    }
 }

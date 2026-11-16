@@ -112,12 +112,6 @@ fn native_entry<N: Native>(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaE
     }
 }
 
-/// The runtime's entry for native `N`, for the built-in libraries'
-/// tables of `(name, entry)` rows.
-pub(crate) const fn native_fn<N: Native>() -> vm::NativeFn {
-    native_entry::<N>
-}
-
 /// A row of a built-in library's table: the function's qualified name,
 /// its entry, and the fast path calls wanting one result try first.
 #[derive(Clone, Copy)]

@@ -130,10 +130,13 @@ fn argument_errors_name_the_function_by_its_module() {
                 c.ret(())
             });
             s.globals().set("f", f)?;
+            // `package.loaded`, which orbit-std's `package` library shows.
+            s.globals()
+                .set("loaded", s.registry().get::<Value>("_LOADED")?)?;
             let r = s
                 .load(Chunk::new(
-                    "package.loaded.mymod = {check = f}; f = nil
-                     return select(2, pcall(package.loaded.mymod.check, 1))",
+                    "loaded.mymod = {check = f}; f = nil
+                     return select(2, pcall(loaded.mymod.check, 1))",
                 ))?
                 .call(())?;
             r[0].get()
