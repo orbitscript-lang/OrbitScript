@@ -33,7 +33,10 @@ fn define<'s>(s: &'s Scope<'s>) -> Result<(), Error> {
 }
 
 fn isolate() -> Isolate {
-    Runtime::new().new_isolate(Config::default())
+    let mut iso = Runtime::new().new_isolate(Config::default());
+    // The scripts call string methods.
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
+    iso
 }
 
 #[test]

@@ -23,13 +23,13 @@ orbit-locale = { path = "../orbit-locale", optional = true }
 [dev-dependencies]
 # The verifier tests and the chunk fuzzer measure layer 2 directly.
 orbit-bytecode = { path = "../orbit-bytecode" }
-# The tests that need the standard library's `table` install it.
+# The tests that need the standard library's `string` or `table` install it.
 orbit-std = { path = "../orbit-std", default-features = false }
 
 [features]
-# The optional parts of the runtime. The core libraries (string,
-# coroutine, load and binary chunks with their verifier) are always built
-# in; a host leaves one out at run time with `Library`. `math`, `package`,
+# The optional parts of the runtime. The core libraries (coroutine, load
+# and binary chunks with their verifier) are always built in; a host
+# leaves one out at run time with `Library`. `math`, `package`, `string`,
 # `table` and `utf8` come with orbit-std.
 default = ["locale", "debug"]
 # The `debug` library and debug hooks.

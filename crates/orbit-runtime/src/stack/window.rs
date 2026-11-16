@@ -1203,12 +1203,14 @@ impl<'s> Stack<'s> {
     }
 
     /// Push a function the runtime keeps for a library written above it
-    /// (ADR-11), by its qualified name: `table.concat`, `table.insert`,
-    /// `table.move`, `table.pack`, `table.remove`, `table.sort`,
-    /// `table.unpack` and, in Lua 5.5 builds, `table.create`. These work on
-    /// a table's parts directly. False, pushing nothing, for any other name.
+    /// (ADR-11), by its qualified name: the `table` and `string` libraries'
+    /// functions (`table.concat`, `string.gsub`, ...; `table.create` only
+    /// in Lua 5.5 builds) and the string metatable's arithmetic
+    /// metamethods (`string.__add`, `string.__sub`, `string.__mul`,
+    /// `string.__mod`, `string.__pow`, `string.__div`, `string.__idiv`,
+    /// `string.__unm`). False, pushing nothing, for any other name.
     pub fn push_library_function(&mut self, name: &str) -> bool {
-        let Some(row) = crate::stdlib::table::library_function(name) else {
+        let Some(row) = crate::stdlib::library_function(name) else {
             return false;
         };
         let v = match self.ctx.vm.rt.natives.named(row.name) {

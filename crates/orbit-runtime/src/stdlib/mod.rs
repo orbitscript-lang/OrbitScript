@@ -3,8 +3,9 @@
 //! Every function is a [`NativeFn`] registered with the VM, one table per
 //! library, so hosts can open only the libraries they want
 //! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
-//! Only the `debug` library is behind a Cargo feature (`debug`); `io` and
-//! `os` live in `orbit-std`.
+//! Only the `debug` library is behind a Cargo feature (`debug`). `orbit-std`
+//! opens the rest, building `string` and `table` from the functions kept
+//! here ([`library_function`]).
 
 mod base;
 pub mod checks;
@@ -12,7 +13,7 @@ mod chunk;
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
-mod dump;
+pub(crate) mod dump;
 mod load;
 pub(crate) mod string;
 pub(crate) mod table;
@@ -84,19 +85,11 @@ pub enum Lib {
     Debug,
     Io,
     Os,
-    String,
 }
 
 impl Lib {
     /// The order [`open_libs`] opens them in.
-    pub const OPEN_ORDER: [Lib; 6] = [
-        Lib::Base,
-        Lib::String,
-        Lib::Os,
-        Lib::Io,
-        Lib::Coroutine,
-        Lib::Debug,
-    ];
+    pub const OPEN_ORDER: [Lib; 5] = [Lib::Base, Lib::Os, Lib::Io, Lib::Coroutine, Lib::Debug];
 
     /// The library's global name (`_G` for the base library).
     pub(crate) fn name(self) -> &'static str {
@@ -106,7 +99,6 @@ impl Lib {
             Lib::Debug => "debug",
             Lib::Io => "io",
             Lib::Os => "os",
-            Lib::String => "string",
         }
     }
 }
@@ -125,12 +117,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             let g = vm.rt.globals;
             mark_loaded(vm, "_G", Value::Table(g));
             return Some(Value::Table(g));
-        }
-        Lib::String => {
-            let st = open_lib(vm, "string", string::FUNCTIONS);
-            string::set_metatable_index(vm, st);
-            add_functions(vm, st, dump::FUNCTIONS);
-            true
         }
         Lib::Coroutine => {
             open_lib(vm, "coroutine", coroutine::FUNCTIONS);
@@ -194,6 +180,28 @@ pub(crate) fn open_lib(
     mark_loaded(vm, name, crate::object::Value::Table(t));
     vm.unpin(crate::object::Value::Table(t));
     t
+}
+
+/// The function the runtime keeps under `name` for a library written
+/// above it (ADR-11): `table`'s and `string`'s functions, and the string
+/// metatable's arithmetic metamethods (`string.__add`, ...). `None` for
+/// any other name, and for a function this build's Lua version lacks.
+pub(crate) fn library_function(name: &str) -> Option<&'static LibraryRow> {
+    let table_5_5: &'static [LibraryRow] = if orbit_lua_version::LUA.is_5_5() {
+        table::FUNCTIONS_5_5
+    } else {
+        &[]
+    };
+    [
+        table::FUNCTIONS,
+        table_5_5,
+        string::FUNCTIONS,
+        dump::FUNCTIONS,
+        string::arith::METAMETHODS,
+    ]
+    .into_iter()
+    .flatten()
+    .find(|row| row.name == name)
 }
 
 /// Register the native in a library table's `row`, with its fast path.

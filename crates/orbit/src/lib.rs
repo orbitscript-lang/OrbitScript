@@ -341,17 +341,20 @@ mod tests {
             )?;
             s.globals().set("c", c)?;
             let r = s
-                .load(Chunk::new(
-                    "c:inc() local n = c:inc() \
-                     return n, select(2, pcall(function() return c.inc({}) end)), tostring(c):match('^Counter')",
-                ).name("=c"))?
+                .load(
+                    Chunk::new(
+                        "c:inc() local n = c:inc() \
+                     return n, select(2, pcall(function() return c.inc({}) end)), tostring(c)",
+                    )
+                    .name("=c"),
+                )?
                 .call(())?;
             assert_eq!(r[0].get::<i64>()?, 42);
             assert_eq!(
                 r[1].get::<String>()?,
                 "c:1: bad argument #1 to 'inc' (Counter expected, got table)"
             );
-            assert_eq!(r[2].get::<String>()?, "Counter");
+            assert!(r[2].get::<String>()?.starts_with("Counter: "));
             assert_eq!(c.borrow::<Counter>()?.n, 42);
             s.globals().set("c", Value::Nil)?;
             Ok::<_, Error>(())

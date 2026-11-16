@@ -1,7 +1,7 @@
 //! The standard library's parts built on the public `orbit` API only
 //! (ADR-11): `print`, `loadfile`, `dofile`, `debug.debug`, the `io`, `os`,
-//! `math`, `package`, `table` and `utf8` libraries, and `require` finding
-//! files on `package.path`.
+//! `math`, `package`, `string`, `table` and `utf8` libraries, and
+//! `require` finding files on `package.path`.
 //!
 //! The runtime reads no files and touches no process state; a host that
 //! wants scripts to do so installs this crate:
@@ -28,6 +28,7 @@ mod math;
 #[cfg(feature = "os")]
 mod os;
 mod package;
+mod string;
 mod sys;
 mod table;
 #[cfg(feature = "os")]
@@ -53,6 +54,9 @@ pub struct Options {
     pub io: bool,
     /// The `os` library (feature `os`).
     pub os: bool,
+    /// The `string` library, and the string metatable's `__index` and
+    /// arithmetic metamethods.
+    pub string: bool,
     /// The `table` library.
     pub table: bool,
     /// The `math` library.
@@ -74,6 +78,7 @@ impl Default for Options {
             package: true,
             io: cfg!(feature = "io"),
             os: cfg!(feature = "os"),
+            string: true,
             table: true,
             math: true,
             utf8: true,
@@ -94,6 +99,10 @@ pub fn install(iso: &mut Isolate, options: &Options) -> Result<(), Error> {
         if options.package {
             let t = open_package(s, options.ignore_env)?;
             publish(s, "package", t)?;
+        }
+        if options.string {
+            let t = open_string(s)?;
+            publish(s, "string", t)?;
         }
         if options.table {
             let t = open_table(s)?;
@@ -210,6 +219,11 @@ pub fn open_os<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
 /// The `math` library's table.
 pub fn open_math<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
     math::open(s)
+}
+
+/// The `string` library's table. Also points the string metatable at it.
+pub fn open_string<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
+    string::open(s)
 }
 
 /// The `table` library's table.

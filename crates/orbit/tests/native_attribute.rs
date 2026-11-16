@@ -194,6 +194,7 @@ mod renamed {
 #[test]
 fn numbers_userdata_state_and_panics() {
     let mut iso = Runtime::new().new_isolate(Config::default());
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     iso.scope(|s| {
         let g = s.globals();
         let num = s.create_table();

@@ -1,6 +1,6 @@
 # The string, utf8, table and math libraries
 
-Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for `utf8`, `math` and `table`.
+Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for all four.
 
 The full `string`, `utf8`, `table` and `math` libraries. The official suite's `strings.lua`, `pm.lua`, `tpack.lua`, `utf8.lua`, `math.lua` and `sort.lua` test them.
 
@@ -8,11 +8,11 @@ Every behaviour here comes from the reference manual, the reference `lua5.5` bin
 
 ## Layout
 
-`string` is always built into `orbit-runtime`: it is the language's foundation, so it has no Cargo feature. A host that wants to withhold it from scripts leaves it out at run time with `Library`. `utf8`, `math` and `table` are installed by `orbit-std` (ADR-11), each unless its `orbit_std::Options` field (`utf8`, `math`, `table`) is false. `utf8` and `math` are written on the public API; `table`'s functions work on a table's parts directly, so they stay in the runtime and `orbit-std` takes each by name (`Scope::library_function`).
+All four are installed by `orbit-std` (ADR-11), each unless its `orbit_std::Options` field (`string`, `utf8`, `math`, `table`) is false. `utf8` and `math` are written on the public API. `string`'s functions share the runtime's string internals (substrings, the pattern engine and its capture cache, the locale's character tables), and `table`'s work on a table's parts directly, so both stay in the runtime and `orbit-std` takes each by name (`Scope::library_function`). Opening `string` also points the shared string metatable's `__index` at the `string` table and gives it the arithmetic metamethods, when the base library made that metatable.
 
 | Library | Module | Contents |
 |---|---|---|
-| `string` | `string/mod.rs` | Glue: argument checking, `len sub rep byte char reverse upper lower`, the string metatable |
+| `string` | `orbit-std/src/string.rs`; the runtime's `string/mod.rs` | `orbit-std` builds the table and fills the string metatable; the runtime's glue: argument checking, `len sub rep byte char reverse upper lower` |
 | | `string/arith.rs` | The string metatable's arithmetic metamethods (`"10" + 1`) |
 | | `string/pattern.rs` | The pattern matcher (`find match gmatch gsub`) |
 | | `string/format.rs` | `string.format`, including `%a` and `%q` |
