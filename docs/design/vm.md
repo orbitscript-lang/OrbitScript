@@ -184,7 +184,15 @@ The frame kinds beyond `Lua` and `Native` are described in [VM semantics](vm-sem
 
 ### Dispatch
 
-`Vm::run` is one loop over the current frame's code (ADR-4), in `vm/dispatch.rs`:
+There are two interpreters for the same bytecode. The plain one, which runs everything unless a hook, breakpoint or step is armed, is a chain of handlers, one function per instruction (ADR-15):
+
+- **`vm/threaded/raw.rs`** holds a handler for the common case of each common instruction. A handler gets the VM, a pointer to the register below the frame's base, a pointer to the next instruction and its own packed instruction word (`orbit_bytecode::insn::Insn`), and ends by jumping to the next instruction's handler through a table. Each handler is compiled on its own, so an edit to one does not change the machine code of another.
+- **`vm/threaded.rs`** holds one complete handler per instruction that works on the whole VM. A chained handler that meets anything uncommon (an error, a metamethod, an allocation) runs the instruction there and resumes the chain.
+- A chain returns to its trampoline (`Vm::run_raw`) when it runs out of fuel, which it spends on backward jumps and calls, and when the frame stack changes in a way it does not handle itself.
+
+The hooked interpreter is the loop described below, `run_loop::<true>`. The points about reading registers in place and copying by parts hold for the handlers too.
+
+The loop is one function over the current frame's code (ADR-4), in `vm/dispatch.rs`:
 
 ```rust
 loop {

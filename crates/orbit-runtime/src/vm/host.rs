@@ -132,6 +132,7 @@ impl Host {
     /// Whether an [`Interrupt`] handle asked for an interrupt that has not
     /// been raised yet. Read on every backward jump.
     #[inline(always)]
+    #[cfg_attr(not(feature = "hooks"), allow(dead_code))]
     pub(crate) fn interrupt_requested(&self) -> bool {
         self.interrupt.load(Ordering::Relaxed)
     }
@@ -151,6 +152,7 @@ impl Host {
         self.interrupt.store(false, Ordering::Relaxed);
     }
 
+    #[cfg_attr(not(feature = "hooks"), allow(dead_code))]
     pub(crate) fn interrupt_handler(&self) -> Option<fn(&mut Vm) -> bool> {
         self.interrupt_handler
     }

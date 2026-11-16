@@ -1667,6 +1667,7 @@ fn stub_proto(id: NativeId) -> Proto {
     Proto {
         code: Rc::new(ProtoCode {
             code: code.as_slice().into(),
+            words: code.iter().map(|op| op.encode()).collect(),
             consts: Box::new([]),
             caches: Box::new([]),
             nparams: 0,

@@ -36,6 +36,7 @@ mod locale;
 mod meta;
 mod native;
 pub(crate) mod ops;
+mod threaded;
 
 use std::fmt;
 use std::io::Write;
@@ -668,6 +669,24 @@ pub(crate) struct VmState {
     /// machine register. A cache, not part of any thread's stack, so it
     /// stays across coroutine switches.
     pub(crate) prev_code: Option<std::rc::Rc<crate::object::ProtoCode>>,
+    /// The running function's code and closure, as the handlers that work
+    /// on the whole VM see them (`vm::threaded`).
+    pub(crate) cur: std::rc::Rc<crate::object::ProtoCode>,
+    pub(crate) closure: Gc<crate::object::Closure>,
+    /// What is left of the handler chain's allowance of jumps and calls
+    /// before it returns to the trampoline.
+    pub(crate) fuel: u32,
+    /// The register stack's length while a handler chain runs.
+    pub(crate) stack_len: usize,
+    /// The running code and its first instruction as the chained handlers
+    /// see them (`vm::threaded::raw`). Calls and returns there change
+    /// these alone; `cur` follows when an instruction needs the whole VM.
+    /// Valid while the frame of `closure` is on the stack.
+    pub(crate) code: *const crate::object::func::ProtoCode,
+    pub(crate) wp: *const orbit_bytecode::insn::Insn,
+    /// An error (or metamethod request) on its way from an instruction to
+    /// the trampoline, with the pc after it.
+    pub(crate) pending: Option<(ops::Exc, usize)>,
     /// Placeholder for cell slots not yet initialised by `CellNew`.
     pub(crate) dead_cell: Gc<Cell>,
     /// End of the values of the last open-ended call or `Vararg`.
@@ -897,6 +916,13 @@ impl Vm {
                 natives: native::Natives::default(),
                 stack: Stack::default(),
                 prev_code: None,
+                cur: std::rc::Rc::new(crate::object::ProtoCode::empty()),
+                closure: Gc::from_bits(0),
+                fuel: 0,
+                stack_len: 0,
+                code: std::ptr::null(),
+                wp: std::ptr::null(),
+                pending: None,
                 dead_cell,
                 c_strings: CStrings::default(),
                 top: 0,

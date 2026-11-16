@@ -36,8 +36,17 @@ orbit-orb-syntax = { path = "../orbit-orb-syntax" }
 [target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple", all(windows, target_env = "gnu", target_arch = "x86_64")))'.dev-dependencies]
 libc = { version = "0.2", default-features = false }
 
-[lints]
-workspace = true
+# The workspace lints, except that `unsafe_code` is denied rather than
+# forbidden, so `src/vm/threaded/raw.rs` can allow its raw register and
+# code pointers (ADR-15). Keep the rest in step with the workspace
+# `Cargo.toml`.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
 
 [features]
 default = ["debug"]
