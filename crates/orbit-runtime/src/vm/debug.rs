@@ -261,6 +261,18 @@ impl VmState {
         if self.is_tail_call(l) {
             return None;
         }
+        // A metamethod handler entered without a meta frame below it.
+        if let LevelAt::Frame(i) = l.0 {
+            if let FrameKind::Lua {
+                meta: Some(ret), ..
+            } = self.stack.frames[i].kind
+            {
+                return Some(CallName {
+                    namewhat: "metamethod",
+                    name: ret.field().short_name().as_bytes().to_vec(),
+                });
+            }
+        }
         let ci = self.caller_index(l)?;
         let caller = &self.stack.frames[ci];
         let named = |namewhat: &'static str, name: &[u8]| {

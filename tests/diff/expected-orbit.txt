@@ -40,6 +40,7 @@ long_chains.lua
 lua55.lua
 many_constants.lua
 meta_absent.lua
+meta_handler_frames.lua
 meta_index.lua
 meta_ops.lua
 meta_slots.lua

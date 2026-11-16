@@ -9,7 +9,7 @@ This extends the [VM design](vm.md) and keeps its two structural rules: the inte
 | Area | Design |
 |---|---|
 | Metatables | `Table::meta` and `UserData::meta`; one metatable per other type, in the runtime. Metatable field names are interned once, so a lookup is a handle-keyed probe |
-| Metamethod calls | A slow path that needs a metamethod returns a request. The cold error path pushes a **meta frame** that records how to finish the instruction, then calls the handler like any function. When it returns, the meta frame stores the result, takes the branch, or runs the instruction again |
+| Metamethod calls | A slow path that needs a metamethod returns a request. The cold error path pushes a **meta frame** that records how to finish the instruction, then calls the handler like any function. When it returns, the meta frame stores the result, takes the branch, or runs the instruction again. A Lua handler that finishes with a store, branch or discard runs on its own frame, which carries that action |
 | Fast paths | Unchanged except for one test where a raw miss can mean "ask the metatable": an inline-cache hit on a `nil` value, or an integer read or store that finds `nil`, checks `meta` |
 | Userdata | `Value::UserData` (tag 8), a GC object holding any `'static` Rust value, a metatable and one user value. No `Send` requirement. `Value::LightUserData` (tag 10) is an opaque word compared by identity |
 | Coroutines | `Value::Thread` (tag 9). Each coroutine owns a stack (registers, cells, frames, to-be-closed list); the running one is swapped into the runtime. Resume and yield are continuation frames, so yields cross `pcall`, metamethods, iterators and natives that allow it |
@@ -88,23 +88,26 @@ enum MetaAction {
 }
 ```
 
-When the handler returns, its result lands in the slot it was called from; the return path finds the meta frame on top, applies the action to the Lua frame below (store a register, adjust the saved `pc`, or continue the concatenation), pops it and reloads. A native handler (say `__index = rawget`) returns through the same path. So a metamethod is an ordinary stackless call: it can recurse (deep `__index` recursion raises `stack overflow`), it can yield, and an error in it unwinds through the meta frame like any other frame.
+When the handler returns, its result lands in the slot it was called from; the return path finds the meta frame on top, applies the action to the Lua frame below (store a register, adjust the saved `pc`, or continue the concatenation), pops it and reloads. A native handler (say `__index = rawget`) returns through the same path. So a metamethod is an ordinary stackless call: it can yield, and an error in it unwinds through the meta frame like any other frame.
+
+### One frame for a Lua handler
+
+Most metamethods are Lua functions finishing an instruction with a store, a branch or a discard. Those skip the meta frame: the handler's own Lua frame carries how to finish (`FrameKind::Lua { meta: Some(MetaReturn), .. }`, in the room the Lua variant leaves, so a frame stays 48 bytes), and its `want` is `META_WANT`, which no one-result return matches. The dispatch loop hands a request it can't resolve to `enter_meta`, out of line, which pushes that frame and comes back to reload; the return path sees the frame's `meta` and calls `finish_meta`, also out of line, which applies it to the caller and hands the caller back to the loop. Everything else (a native or callable-table handler, a concatenation, `Close`, `__tostring` under `Cast`, `__close` while unwinding, any request while a hook is armed) still takes the meta frame.
+
+The loop's own code is unchanged apart from those two calls: adding a shared frame-switch tail or carrying the request further inside the loop changed its register allocation and cost ordinary calls 2 to 9% (cloud x86_64, PGO). The remaining cost of a Lua handler is mostly the loop's request path and frame switch, which plain calls pay too.
 
 ```mermaid
 sequenceDiagram
     participant L as Lua frame (t.x + 1)
-    participant R as raise (out of line)
-    participant M as meta frame Store{dst}
-    participant H as __index handler
-    L->>L: GetField: cache miss, raw miss
-    L->>R: metamethod request { f, args: [t, "x"] }
-    R->>M: push meta frame (action from the instruction)
-    R->>H: call f(t, "x"), want 1
-    H-->>M: return v
-    M->>L: R[dst] = v, pop meta frame, reload at saved pc
+    participant E as enter_meta (out of line)
+    participant H as __index handler frame, meta Store{dst}
+    L->>L: GetField: cache miss, raw miss, __index is a Lua function
+    L->>E: request { f, args: [t, "x"] }
+    E->>H: push the handler's frame alone, reload
+    H-->>L: return v: finish_meta stores R[dst] = v, pops, reloads the caller
 ```
 
-Meta frames hold no GC references (the action is plain data), are skipped when counting levels for `error(msg, level)` and the `debug` functions, and show as `in metamethod 'index'` in tracebacks, as the reference prints them.
+Handler frames count one level towards the 200-level C depth limit, as a meta frame does, so deep `__index` recursion raises "C stack overflow" as in the reference. `debug.getinfo` and tracebacks name them as metamethods (`in metamethod 'index'`). Meta frames hold no GC references (the action is plain data), are skipped when counting levels for `error(msg, level)` and the `debug` functions, and show the same way in tracebacks, as the reference prints them.
 
 ### Natives
 

@@ -127,6 +127,52 @@ impl MetaCall {
     }
 }
 
+/// How a Lua frame entered as a metamethod handler finishes the instruction
+/// that asked for it when it returns, without a meta frame below it: the
+/// common requests, whose handler is a Lua function. A return from that
+/// frame applies it; the frame's `want` is [`META_WANT`] so that the
+/// one-result fast return passes it by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetaReturn {
+    /// `R[dst] = result`.
+    Store { dst: u8, field: MetaField },
+    /// Jump by `off` when the result's truthiness equals `want`.
+    Branch {
+        want: bool,
+        field: MetaField,
+        off: i32,
+    },
+    /// Nothing (`__newindex`).
+    Discard { field: MetaField },
+}
+
+impl MetaReturn {
+    /// The metamethod the frame runs, for its name in tracebacks.
+    pub(crate) fn field(self) -> MetaField {
+        match self {
+            MetaReturn::Store { field, .. }
+            | MetaReturn::Branch { field, .. }
+            | MetaReturn::Discard { field } => field,
+        }
+    }
+
+    /// `action` of a `field` handler, when it is one of these.
+    pub(crate) fn of(action: MetaAction, field: MetaField) -> Option<MetaReturn> {
+        match action {
+            MetaAction::Store { dst } => Some(MetaReturn::Store { dst, field }),
+            MetaAction::Branch { want, off } => Some(MetaReturn::Branch { want, field, off }),
+            MetaAction::Discard => Some(MetaReturn::Discard { field }),
+            _ => None,
+        }
+    }
+}
+
+/// The `want` of a metamethod handler's Lua frame ([`MetaReturn`]): not
+/// one result, so the one-result fast return leaves the frame to the
+/// general return, which finds its [`MetaReturn`]. A call that really
+/// wants this many results is told apart by the frame's kind.
+pub(crate) const META_WANT: u8 = 254;
+
 /// How to finish an instruction once its metamethod returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MetaAction {
@@ -233,6 +279,37 @@ pub(crate) fn index(heap: &LuaHeap, rt: &Metas, obj: Value, key: Value) -> Resul
         "'__index' chain too long; possible loop".into(),
         None,
     ))
+}
+
+/// [`index`] when `obj`, if it is a table, was already looked `key` up in
+/// raw and missed (the dispatch loop's index requests): starts at its
+/// metatable instead of looking the key up again.
+#[cold]
+#[inline(never)]
+pub(crate) fn index_after_miss(
+    heap: &LuaHeap,
+    rt: &Metas,
+    obj: Value,
+    key: Value,
+) -> Result<Value, Exc> {
+    let Value::Table(t) = obj else {
+        return index(heap, rt, obj, key);
+    };
+    let Some(mt) = heap.get(t).meta else {
+        return Ok(Value::Nil);
+    };
+    let h = heap.get(mt).meta_field(
+        heap,
+        MetaField::Index,
+        rt.field_names.name(MetaField::Index),
+    );
+    if h.is_nil() {
+        return Ok(Value::Nil);
+    }
+    if h.is_function() {
+        return Err(Exc::Meta(MetaCall::new(h, MetaField::Index, &[obj, key])));
+    }
+    index(heap, rt, h, key)
 }
 
 /// [`index`] for table `obj`, whose raw lookup of string key `key` found

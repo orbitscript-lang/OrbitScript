@@ -36,7 +36,7 @@ use crate::vm::fast::{
 use crate::vm::interp::{
     Flow, Ran, Shape, WINDOW, Window, const_str, enter_lua_frame_fast, enter_lua_frame_general,
 };
-use crate::vm::meta::Metas;
+use crate::vm::meta::{MetaReturn, Metas};
 use crate::vm::native::{NativeCtx, NativeReturn};
 use crate::vm::ops::{self, Arith, Exc};
 use crate::vm::{Frame, FrameKind, LuaError, Vm};
@@ -149,6 +149,7 @@ impl Vm {
             let FrameKind::Lua {
                 mut closure,
                 code_id,
+                ..
             } = frame.kind
             else {
                 unreachable!("run starts on a Lua frame")
@@ -939,7 +940,19 @@ impl Vm {
                                         self.rt.stack.frames.push(f);
                                         throw!(x);
                                     }
-                                    self.rt.stack.frames.last_mut().expect("frame").tail = true;
+                                    let g = self.rt.stack.frames.last_mut().expect("frame");
+                                    g.tail = true;
+                                    // A metamethod handler's tail call
+                                    // finishes the instruction in its place.
+                                    if let FrameKind::Lua {
+                                        meta: Some(ret), ..
+                                    } = f.kind
+                                    {
+                                        if let FrameKind::Lua { meta, .. } = &mut g.kind {
+                                            *meta = Some(ret);
+                                        }
+                                        g.cdepth = f.cdepth;
+                                    }
                                     if HOOKED {
                                         self.rt.stack.hook.call_pending = Some(true);
                                     }
@@ -1189,10 +1202,12 @@ impl Vm {
                 // An `__index` request (a raw miss on a table with a
                 // metatable, or indexing a value that isn't a table):
                 // follow the metatable chain here and finish the
-                // instruction without leaving the loop. A metamethod
-                // call, or an error, still goes out through `raise`.
-                if let Exc::Index { obj, key } = exc {
-                    match crate::vm::meta::index(&self.heap, &self.rt.metas, obj, key) {
+                // instruction without leaving the loop. A Lua metamethod
+                // handler's frame is pushed out of line and runs next;
+                // anything else, an error included, goes out through
+                // `raise`.
+                let exc = if let Exc::Index { obj, key } = exc {
+                    match crate::vm::meta::index_after_miss(&self.heap, &self.rt.metas, obj, key) {
                         Ok(v) => {
                             let dst = match code[pc - 1] {
                                 Op::GetField { dst, .. }
@@ -1207,7 +1222,15 @@ impl Vm {
                             w[dst] = v;
                             continue 'run;
                         }
-                        Err(e) => break 'run e,
+                        Err(e) => e,
+                    }
+                } else {
+                    exc
+                };
+                // A metamethod that is a Lua function: its frame runs next.
+                if let (false, Exc::Meta(call)) = (HOOKED, &exc) {
+                    if self.enter_meta(call, code[pc - 1], pc) {
+                        continue 'reload;
                     }
                 }
                 break 'run exc;
@@ -1342,6 +1365,9 @@ impl Vm {
             return Ok(Frames::Flow(self.do_return(src, n)?));
         };
         let (func, want) = (f.func as usize, f.want);
+        if let FrameKind::Lua { meta: Some(_), .. } = f.kind {
+            return Ok(Frames::Lua(self.finish_meta(src, n, caller, &f)));
+        }
         self.pop_frame(&f);
         let regs = &mut self.rt.stack.regs;
         if want == MULTI {
@@ -1361,6 +1387,38 @@ impl Vm {
         Ok(Frames::Lua(caller))
     }
 
+    /// The running frame `f`, a metamethod handler's ([`MetaReturn`]),
+    /// returns `n` values from absolute register `src` into its Lua
+    /// `caller`: pop it, finish the caller's instruction with the first
+    /// value, and hand the caller back to the loop.
+    #[inline(never)]
+    fn finish_meta(&mut self, src: usize, n: usize, mut caller: LuaFrame, f: &Frame) -> LuaFrame {
+        let FrameKind::Lua {
+            meta: Some(ret), ..
+        } = f.kind
+        else {
+            unreachable!("a metamethod handler's frame")
+        };
+        let res = if n == 0 {
+            Value::Nil
+        } else {
+            self.rt.stack.regs[src]
+        };
+        self.pop_frame(f);
+        match ret {
+            MetaReturn::Store { dst, .. } => self.rt.stack.regs[caller.base + dst as usize] = res,
+            MetaReturn::Branch { want, off, .. } => {
+                if res.is_falsy() != want {
+                    caller.pc = (caller.pc as i64 + off as i64) as usize;
+                    self.rt.stack.frames.last_mut().expect("the caller").pc = caller.pc as u32;
+                }
+            }
+            MetaReturn::Discard { .. } => {}
+        }
+        self.rt.top = f.func as usize + 1;
+        caller
+    }
+
     /// The running frame's caller when it is a Lua frame, as the loop's
     /// state for it, with the running frame.
     #[inline(always)]
@@ -1368,7 +1426,10 @@ impl Vm {
         let [.., caller, f] = &self.rt.stack.frames[..] else {
             return None;
         };
-        let FrameKind::Lua { closure, code_id } = caller.kind else {
+        let FrameKind::Lua {
+            closure, code_id, ..
+        } = caller.kind
+        else {
             return None;
         };
         Some((

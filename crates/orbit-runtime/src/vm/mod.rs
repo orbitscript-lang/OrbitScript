@@ -167,6 +167,9 @@ pub(crate) enum FrameKind {
         /// only ever compared: when it matches the code the dispatch loop
         /// already holds, resuming this frame skips the heap.
         code_id: usize,
+        /// Set when the frame runs a metamethod handler for the Lua frame
+        /// below it: how to finish that frame's instruction on return.
+        meta: Option<meta::MetaReturn>,
     },
     /// A native waiting for a call it asked for with `CallThen`.
     Native {
@@ -265,6 +268,10 @@ pub(crate) struct Frame {
     /// it from the newest other frame.
     pub(crate) cdepth: u8,
 }
+
+// Frames are copied on every call and return: a metamethod handler's
+// return action fits in the room a Lua frame's kind leaves.
+const _: () = assert!(orbit_gc::CHECKED_HANDLES || std::mem::size_of::<Frame>() == 48);
 
 /// The most calls back into the interpreter that may be open at once,
 /// counting the resumes below the running coroutine (more is "C stack
@@ -461,7 +468,7 @@ impl Stack {
         let nested = self.aux.nested;
         while let Some(&i) = self.aux.depth_at.last() {
             match self.frames.get(i as usize) {
-                Some(f) if !matches!(f.kind, FrameKind::Lua { .. }) => {
+                Some(f) if !matches!(f.kind, FrameKind::Lua { meta: None, .. }) => {
                     return f.cdepth.max(nested);
                 }
                 _ => {

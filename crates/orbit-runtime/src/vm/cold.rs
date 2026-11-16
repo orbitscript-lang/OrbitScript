@@ -20,8 +20,8 @@ use crate::object::table::{self, Key};
 use crate::object::{Cell, Closure, FieldCache, Gc, LuaHeap, LuaStr, NoMemory, Table, Value};
 use orbit_bytecode::{CaptureSource, MULTI, Op};
 
-use crate::vm::interp::Flow;
-use crate::vm::meta::{self, MetaAction, MetaCall, MetaField, Metas};
+use crate::vm::interp::{Flow, Shape, enter_lua_frame_fast};
+use crate::vm::meta::{self, META_WANT, MetaAction, MetaCall, MetaField, MetaReturn, Metas};
 use crate::vm::ops::{self, Exc};
 use crate::vm::{Frame, FrameKind, LuaError, Vm};
 
@@ -171,6 +171,29 @@ impl Vm {
         if self.c_overflow(cdepth) {
             return Err(Exc::Rt("C stack overflow".into(), None));
         }
+        // The common case, a Lua handler with no hook armed finishing a
+        // store, a branch or a discard: one frame, the handler's, which
+        // carries the action and counts the depth.
+        if let (Value::Closure(c), false, Some(ret)) = (
+            call.f,
+            self.rt.stack.hook.armed(),
+            MetaReturn::of(action, call.field),
+        ) {
+            let shape = Shape::of(&self.heap.get(c).code);
+            if enter_lua_frame_fast(&mut self.rt, &shape, c, at, n, META_WANT, f.pc).is_some() {
+                let h = self
+                    .rt
+                    .stack
+                    .frames
+                    .last_mut()
+                    .expect("the handler's frame");
+                if let FrameKind::Lua { meta, .. } = &mut h.kind {
+                    *meta = Some(ret);
+                }
+                h.cdepth = cdepth;
+                return Ok(Flow::Reload);
+            }
+        }
         self.rt.stack.frames.push(Frame {
             kind: FrameKind::Meta {
                 action,
@@ -189,6 +212,60 @@ impl Vm {
         self.call_value(at, n, 1)
     }
 
+    /// Start metamethod call `call`, which instruction `op` (before `pc`)
+    /// of the running (Lua) frame asked for, when its handler is a Lua
+    /// function, no hook is armed and the instruction finishes with a
+    /// store, a branch or a discard: push the handler's frame alone,
+    /// carrying how to finish ([`MetaReturn`]), for the dispatch loop to
+    /// run next. False, with nothing changed, for everything else, which
+    /// [`Vm::call_meta`] handles.
+    #[inline(never)]
+    pub(crate) fn enter_meta(&mut self, call: &MetaCall, op: Op, pc: usize) -> bool {
+        let Value::Closure(c) = call.f else {
+            return false;
+        };
+        if self.rt.stack.hook.armed() {
+            return false;
+        }
+        let Some(ret) = MetaReturn::of(self.action_of(op, call.aux), call.field) else {
+            return false;
+        };
+        let s = &mut self.rt.stack;
+        let f = s.frames.last_mut().expect("a frame");
+        f.pc = pc as u32;
+        let (base, FrameKind::Lua { closure, .. }) = (f.base as usize, f.kind) else {
+            unreachable!("metamethods are requested by Lua frames")
+        };
+        let at = base + self.heap.get(closure).code.nregs as usize;
+        let n = call.nargs as usize;
+        let cdepth = s.cdepth().saturating_add(1);
+        if self.c_overflow(cdepth) {
+            return false;
+        }
+        let shape = Shape::of(&self.heap.get(c).code);
+        let s = &mut self.rt.stack;
+        let regs = &mut s.regs;
+        if regs.len() < at + 1 + n {
+            regs.resize(at + 1 + n, Value::Nil);
+        }
+        regs[at] = call.f;
+        for (r, &v) in regs[at + 1..at + 1 + n].iter_mut().zip(&call.args) {
+            *r = v;
+        }
+        let i = s.frames.len() as u32;
+        if enter_lua_frame_fast(&mut self.rt, &shape, c, at, n, META_WANT, pc as u32).is_none() {
+            return false;
+        }
+        let s = &mut self.rt.stack;
+        s.aux.depth_at.push(i);
+        let h = s.frames.last_mut().expect("the handler's frame");
+        if let FrameKind::Lua { meta, .. } = &mut h.kind {
+            *meta = Some(ret);
+        }
+        h.cdepth = cdepth;
+        true
+    }
+
     /// How to finish the instruction the top (Lua) frame is running once
     /// its metamethod returns; `aux` as in [`MetaCall`].
     fn pending_action(&self, aux: u8) -> MetaAction {
@@ -197,6 +274,13 @@ impl Vm {
             unreachable!("metamethods are requested by Lua frames")
         };
         let op = self.heap.get(closure).code.code[f.pc as usize - 1];
+        self.action_of(op, aux)
+    }
+
+    /// How to finish instruction `op` of the top (Lua) frame once its
+    /// metamethod returns; `aux` as in [`MetaCall`].
+    #[inline]
+    pub(crate) fn action_of(&self, op: Op, aux: u8) -> MetaAction {
         match op {
             Op::GetGlobal { dst, .. }
             | Op::GetField { dst, .. }

@@ -434,6 +434,7 @@ pub(crate) fn enter_lua_frame_fast(
         kind: FrameKind::Lua {
             closure: c,
             code_id: proto.code_id,
+            meta: None,
         },
         func: func as u32,
         base: base as u32,
@@ -494,6 +495,7 @@ pub(crate) fn enter_lua_frame_general(
         kind: FrameKind::Lua {
             closure: c,
             code_id,
+            meta: None,
         },
         func: func as u32,
         base: base as u32,
