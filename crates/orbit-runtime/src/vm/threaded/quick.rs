@@ -331,6 +331,15 @@ q! {fn q_set_field(vm, w, pc, i) {
     next(vm, w, pc)
 }}
 
+/// Store a register into the array part of `t`; `false` when the store
+/// is not that simple. Out of line and given the register by reference: a
+/// value built on the handler's own stack and passed on would cost the
+/// handler its jump to the next one.
+#[inline(never)]
+fn store_reg(heap: &mut crate::object::LuaHeap, t: Gc<crate::object::Table>, k: i64, v: &Value) -> bool {
+    matches!(table::store_int(heap, t, k, *v), IntStore::Array)
+}
+
 q! {fn q_get_index(vm, w, pc, i) {
     let (dst, obj, key) = i.r_get_index();
     let mut r = qwin!(vm, w, pc);
@@ -346,7 +355,7 @@ q! {fn q_set_index(vm, w, pc, i) {
     let (obj, key, src) = i.r_set_index();
     let r = qwin!(vm, w, pc);
     if let (&Value::Table(t), &Value::Int(k)) = (&r[obj], &r[key]) {
-        if let IntStore::Array = by_parts!(r, src, |v| table::store_int(&mut vm.heap, t, k, v)) {
+        if store_reg(&mut vm.heap, t, k, &r[src]) {
             return next(vm, w, pc);
         }
     }
@@ -368,9 +377,7 @@ q! {fn q_set_index_int(vm, w, pc, i) {
     let (obj, key, src) = i.r_set_index_int();
     let r = qwin!(vm, w, pc);
     if let &Value::Table(t) = &r[obj] {
-        if let IntStore::Array =
-            by_parts!(r, src, |v| table::store_int(&mut vm.heap, t, key as i64, v))
-        {
+        if store_reg(&mut vm.heap, t, key as i64, &r[src]) {
             return next(vm, w, pc);
         }
     }
