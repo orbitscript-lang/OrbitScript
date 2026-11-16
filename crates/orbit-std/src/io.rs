@@ -643,10 +643,12 @@ fn io_popen(s: &mut Stack<'_>, cmd: Vec<u8>, mode: Option<Vec<u8>>) -> StackResu
         _ => return Err(s.arg_error(2, "invalid mode")),
     };
     // The child may read files we wrote and writes to the same terminal:
-    // flush every open file, then standard output, first, as `lua5.4` and
+    // flush every open file, then standard output, then the C library's
+    // streams that C modules write through, first, as `lua5.4` and
     // `lua5.5` do (`os.execute` flushes nothing, in both).
     flush_all();
     flush_stdout(s);
+    crate::crt::flush_c_streams();
     let mut command = shell(os_path(&cmd).as_os_str());
     if reading {
         command.stdout(Stdio::piped());
