@@ -42,11 +42,11 @@ const FUNCTIONS: &[LibraryRow] = &[
     NEXT,
 ];
 
-/// `type`, which the built-in modules share.
-pub(crate) const TYPE: LibraryRow = library_row::<type_>().with_fast(type_fast);
+/// `type`.
+const TYPE: LibraryRow = library_row::<type_>().with_fast(type_fast);
 
-/// `next`, which `pairs` returns and the built-in modules share.
-pub(crate) const NEXT: LibraryRow = LibraryRow::raw("next", next).with_fast(next_fast);
+/// `next`, which `pairs` returns.
+const NEXT: LibraryRow = LibraryRow::raw("next", next).with_fast(next_fast);
 
 pub(crate) fn open(vm: &mut Vm) {
     for row in FUNCTIONS {
@@ -63,11 +63,90 @@ pub(crate) fn open(vm: &mut Vm) {
     vm.unpin(Value::Table(mt));
     let v = vm.new_str(LUA.name().as_bytes());
     vm.set_global("_VERSION", v);
-    // `ipairs` and `pairs` are written in OrbitScript.
-    for (name, f) in super::builtins::load(vm, &super::builtins::BASE) {
-        let k = vm.new_str(&name);
-        let g = vm.rt.globals;
-        vm.table_set(g, k, f);
+    // `ipairs` returns the same iterator every time: the native `ipairs`
+    // carries its id.
+    let Value::Native(next) = vm.register_native_with_data("?", ipairs_next, [0, 0]) else {
+        unreachable!("natives are registered as natives")
+    };
+    let v = vm.register_native_with_data("ipairs", ipairs, [u64::from(next.0), 0]);
+    vm.set_global("ipairs", v);
+    // `pairs` gives `next` for a table without `__pairs`: the native
+    // carries its id.
+    let Value::Native(next) = vm.global("next") else {
+        unreachable!("`next` is a native, registered above")
+    };
+    let v = vm.register_native_with_data("pairs", pairs, [u64::from(next.0), 0]);
+    vm.set_global("pairs", v);
+}
+
+/// How many values `pairs` gives: Lua 5.5's generic `for` takes a fourth,
+/// its to-be-closed value.
+const PAIRS_RESULTS: usize = if LUA.is_5_5() { 4 } else { 3 };
+
+fn pairs(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_any(0)?;
+    let h = ctx.metamethod(t, MetaField::Pairs);
+    if h.is_nil() {
+        let next = Value::Native(crate::object::NativeId(ctx.native_data()[0] as u32));
+        ctx.truncate(0);
+        ctx.push(next);
+        ctx.push(t);
+        for _ in 2..PAIRS_RESULTS {
+            ctx.push(Value::Nil);
+        }
+        return Ok(NativeReturn::Return(PAIRS_RESULTS));
+    }
+    // `__pairs` may yield, as in lua5.5.
+    ctx.truncate(1);
+    Ok(NativeReturn::CallThenYieldable {
+        f: h,
+        nargs: 1,
+        k: pairs_done,
+        protected: false,
+        ok: ResumeOk::Continue,
+        in_place: false,
+    })
+}
+
+/// After `__pairs`: exactly its first [`PAIRS_RESULTS`] results.
+fn pairs_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(n) = outcome else {
+        unreachable!("the call is unprotected")
+    };
+    let len = ctx.len();
+    ctx.truncate(len - n + n.min(PAIRS_RESULTS));
+    for _ in n..PAIRS_RESULTS {
+        ctx.push(Value::Nil);
+    }
+    Ok(NativeReturn::Return(PAIRS_RESULTS))
+}
+
+fn ipairs(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_any(0)?;
+    let next = Value::Native(crate::object::NativeId(ctx.native_data()[0] as u32));
+    ctx.ret([next, t, Value::Int(0)])
+}
+
+/// The iterator `ipairs` returns: the next index and its value, or nil at
+/// the first nil, through `__index` when the table has one.
+fn ipairs_next(ctx: &mut NativeCtx<'_>) -> R {
+    let i = match ctx.arg(1) {
+        Value::Int(i) => i,
+        _ => ctx.check_int(1)?,
+    }
+    .wrapping_add(1);
+    let t = ctx.arg(0);
+    let v = match t {
+        Value::Table(h) if ctx.vm.heap.get(h).meta.is_none() => {
+            let heap = &ctx.vm.heap;
+            heap.get(h).get_int(HashSeed::of(heap), i)
+        }
+        _ => ctx.index_now(t, Value::Int(i))?,
+    };
+    if v.is_nil() {
+        ctx.ret([Value::Nil])
+    } else {
+        ctx.ret([Value::Int(i), v])
     }
 }
 

@@ -20,7 +20,7 @@
 | `orbit-gc` | Garbage collector: typed arenas, handles, incremental mark-sweep (ADR-2). Independent of the other crates |
 | `orbit-runtime` | Values, strings, tables (`object`), the interpreter (`vm`), the stack API natives are written on (`stack`, re-exported as `orbit::stack`) and the built-in libraries (`stdlib`), built on `orbit-gc`. No I/O |
 | `orbit-hir`, `orbit-compiler` | HIR, bytecode compiler |
-| `orbit-lua-version` | The Lua version the build implements (`LuaVersion`, `LUA`; feature `lua-5-4`, ADR-14), and the preprocessor for the built-in modules' version blocks |
+| `orbit-lua-version` | The Lua version the build implements (`LuaVersion`, `LUA`; feature `lua-5-4`, ADR-14), and the preprocessor for OrbitScript sources' version blocks |
 | `orbit-bytecode` | Instruction set and unlinked prototypes shared by compiler, core and VM (no dependencies) |
 | `orbit-locale` | The C library's locales for `os.setlocale`, one object per isolate (`orbit` feature `locale`, ADR-13) |
 | `orbit-std` | The standard library written on the public `orbit` API: the I/O-facing parts (`io`, `os`, `print`, `loadfile`, `dofile`, the Lua searcher) and the libraries moved up from the runtime (`utf8`, `math`, `package`) |

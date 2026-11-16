@@ -771,6 +771,9 @@ pub struct View<'a> {
     vm: &'a crate::vm::Vm,
 }
 
+// What a `pure` body reads through its `View`. No native in the runtime
+// takes one now that the intrinsics are gone; the attribute still passes it.
+#[allow(dead_code)]
 impl<'a> View<'a> {
     #[inline(always)]
     pub(crate) fn new(vm: &'a crate::vm::Vm) -> View<'a> {
@@ -792,70 +795,11 @@ impl<'a> View<'a> {
     pub(crate) fn metatable(self, v: PureValue) -> Option<Gc<crate::object::Table>> {
         self.metas().metatable(self.heap(), v)
     }
-
-    /// `v` as `lua_tointeger` takes it: integral floats and numeric
-    /// strings convert.
-    pub(crate) fn to_integer(self, v: PureValue) -> Option<i64> {
-        let n = match v {
-            PureValue::Str(s) => self
-                .metas()
-                .locale
-                .str_to_number(self.heap().get(s).as_bytes())?,
-            _ => v,
-        };
-        match n {
-            PureValue::Int(i) => Some(i),
-            PureValue::Float(f) => crate::object::number::float_to_int(f),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Debug for View<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("View")
-    }
-}
-
-/// An argument as it came, any value or none: for the intrinsics, which
-/// check their arguments themselves and report them as the built-in
-/// calling them would.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Given(pub(crate) Option<PureValue>);
-
-impl Arg<'_> for Given {
-    type Checked = ();
-
-    #[inline(always)]
-    fn check(_: &mut Stack<'_>, _: i32) -> StackResult<()> {
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn get(s: &Stack<'_>, i: i32, _: ()) -> Given {
-        Given(s.given(i))
-    }
-}
-
-impl PureArg for Given {
-    #[inline(always)]
-    fn from_value(v: Option<PureValue>) -> Option<Given> {
-        Some(Given(v))
-    }
-}
-
-/// The value, or nil for none.
-impl Push for Given {
-    #[inline(always)]
-    fn push(self, s: &mut Stack<'_>) {
-        s.push_given(self.0.unwrap_or(PureValue::Nil));
-    }
-}
-
-impl PureResult for Given {
-    #[inline(always)]
-    fn into_value(self) -> Option<PureValue> {
-        Some(self.0.unwrap_or(PureValue::Nil))
     }
 }
 
@@ -1024,6 +968,29 @@ mod pure_tests {
         let raw = LibraryRow::raw("raw", entry);
         assert!(raw.fast.is_none());
         assert!(raw.with_fast(fast).fast.is_some());
+    }
+
+    /// Whether numbers have a metatable, read through the `View` the
+    /// attribute passes.
+    #[orbit_macros::native(crate = crate, name = "numbers_have_meta", pure)]
+    fn numbers_have_meta(view: super::View<'_>, x: i64) -> bool {
+        view.metatable(V::Int(x)).is_some()
+    }
+
+    /// A `View` reaches both paths: the fast path with an integer, the
+    /// full native with a float it converts.
+    #[test]
+    fn a_view_reaches_both_paths() {
+        use crate::stack::library_row;
+        let mut vm = crate::vm::Vm::new();
+        let row = library_row::<numbers_have_meta>();
+        let fast = row.fast.expect("a fast path");
+        let cx = crate::vm::FastCtx::new(&vm, 1);
+        assert!(matches!(fast(cx, &[V::Int(1)]), Some(V::Bool(false))));
+        assert!(fast(cx, &[V::Float(1.0)]).is_none());
+        let f = crate::stdlib::register_row(&mut vm, &row);
+        let r = vm.call(f, &[V::Float(1.0)]).expect("no error");
+        assert!(matches!(r[..], [V::Bool(false)]));
     }
 
     #[test]

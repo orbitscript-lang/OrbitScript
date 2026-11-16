@@ -7,14 +7,12 @@
 //! `os` live in `orbit-std`.
 
 mod base;
-mod builtins;
 pub mod checks;
 mod chunk;
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
 mod dump;
-mod intrinsics;
 mod load;
 pub(crate) mod string;
 mod table;
@@ -141,11 +139,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             let t = open_lib(vm, "table", table::FUNCTIONS);
             if orbit_lua_version::LUA.is_5_5() {
                 add_functions(vm, t, table::FUNCTIONS_5_5);
-            }
-            // `insert`, `remove` and `sort` are written in OrbitScript.
-            for (name, f) in builtins::load(vm, &builtins::TABLE) {
-                let k = vm.new_str(&name);
-                vm.table_set(t, k, f);
             }
             true
         }

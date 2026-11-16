@@ -937,14 +937,11 @@ impl Vm {
                             } else {
                                 nargs as usize
                             };
-                            // A native closure or a built-in in tail position
-                            // is called like a native, keeping this frame, as
-                            // natives are.
+                            // A native closure in tail position is called like
+                            // a native, keeping this frame, as natives are.
                             if let Value::Closure(c) = w[func as usize] {
                                 let code = &self.heap.get(c).code;
-                                if !code.builtin
-                                    && !matches!(code.code.first(), Some(Op::NativeEntry { .. }))
-                                {
+                                if !matches!(code.code.first(), Some(Op::NativeEntry { .. })) {
                                     let f = self.rt.stack.frames.pop().expect("frame");
                                     self.rt.stack.cells.truncate(f.cell_base as usize);
                                     let dst = f.func as usize;

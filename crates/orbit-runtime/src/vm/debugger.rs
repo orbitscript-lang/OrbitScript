@@ -219,7 +219,7 @@ impl Debugger {
         if mark >> 1 == self.generation {
             return mark & 1 != 0;
         }
-        let has = !code.builtin && self.proto_has_breakpoint(heap.get(heap.get(closure).proto));
+        let has = self.proto_has_breakpoint(heap.get(heap.get(closure).proto));
         code.debug_mark.set(self.generation << 1 | u32::from(has));
         has
     }
@@ -346,7 +346,7 @@ impl Vm {
         }
         let mut code = Vec::new();
         self.heap.for_each(|p: &Proto| {
-            if *p.source == *source && !p.code.builtin {
+            if *p.source == *source {
                 code.extend(p.debug.lines.iter().map(|&(_, line)| line));
             }
         });
@@ -495,9 +495,9 @@ impl Vm {
             unreachable!("debug points are in Lua frames")
         };
         let c = self.heap.get(closure);
-        // Built-ins run like C functions; stripped code has no lines.
+        // Stripped code has no lines.
         let proto = self.heap.get(c.proto);
-        if c.code.builtin || proto.debug.lines.is_empty() {
+        if proto.debug.lines.is_empty() {
             return Ok(());
         }
         let lines = &proto.debug;

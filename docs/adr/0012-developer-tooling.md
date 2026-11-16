@@ -43,7 +43,6 @@ flowchart LR
 - **The hooked loop runs only in functions with breakpoints, or while stepping**. Setting a breakpoint resolves `(source, line)` to the prototypes whose line tables contain the line and flags them; the run loop's existing switch points (frame entry at `'reload`, return from a native) pick the hooked loop for flagged functions. Other functions run at full speed. Prototypes compiled later (`require`, `load`) are matched by source name when they are linked.
 - **No opcode patching**. A `Break` opcode written into the bytecode would cost nothing even inside debugged functions, but could conflict with a future JIT that translates from the bytecode.
 - **Stepping** compares frame depth and line with where the program stopped. **Pause** reuses the interrupt flag (`Control::interrupt_flag`), stopping at the next line instead of raising the interrupt error. **Break on error** is a pre-unwind event raised before any frame is popped, saying whether a `pcall`, `xpcall` or boundary will catch the error. Conditions, hit counts and logpoints are evaluated in the engine.
-- **Built-ins written in OrbitScript** carry the built-in mark and look like C: no breakpoints or line events inside them, and step in stops only at user callbacks they call (a `table.sort` comparator).
 - **Lua and OrbitScript are debugged alike**, since both produce the same bytecode and line tables. Watch expressions compile in the frame's language. C module functions and `ffi` calls are `[C]` frames.
 
 ### Debugger API

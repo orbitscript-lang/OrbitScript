@@ -415,12 +415,6 @@ impl<'s> Stack<'s> {
         })
     }
 
-    /// Push a value the window already holds (an intrinsic's result).
-    #[inline]
-    pub(crate) fn push_given(&mut self, v: RawValue) {
-        self.ctx.push(v);
-    }
-
     /// A read-only look at the isolate, for a `pure` native's
     /// [`View`](super::View) parameter.
     #[doc(hidden)]
@@ -2069,8 +2063,8 @@ impl<'s> Stack<'s> {
     pub fn open_library(&mut self, lib: Library) -> bool {
         let top = self.ctx.len();
         let opened = stdlib::open_one(self.ctx.vm, lib.lib());
-        // Running the built-in modules can leave the VM's top above the
-        // window's; what lies there is no value of ours.
+        // Opening a library can leave the VM's top above the window's;
+        // what lies there is no value of ours.
         self.ctx.truncate(top);
         match opened {
             Some(t) => {

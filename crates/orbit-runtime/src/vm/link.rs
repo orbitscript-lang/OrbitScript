@@ -15,15 +15,7 @@ impl Vm {
     /// it) before running anything else.
     pub fn load(&mut self, chunk: &UnlinkedChunk) -> Value {
         let env = Value::Table(self.rt.globals);
-        link(&mut self.heap, &mut self.rt, chunk, env, false)
-    }
-
-    /// [`Vm::load`] with `env` as the main function's first capture, for a
-    /// chunk of a built-in library: its
-    /// functions show as C functions to the debug interface, and as `[C]`
-    /// in messages and tracebacks.
-    pub(crate) fn load_builtin(&mut self, chunk: &UnlinkedChunk, env: Value) -> Value {
-        link(&mut self.heap, &mut self.rt, chunk, env, true)
+        link(&mut self.heap, &mut self.rt, chunk, env)
     }
 }
 
@@ -37,13 +29,10 @@ pub(crate) fn link(
     rt: &mut VmState,
     chunk: &UnlinkedChunk,
     env: Value,
-    builtin: bool,
 ) -> Value {
     {
-        let name: Rc<str> = Rc::from(if builtin { "[C]" } else { &*chunk.name });
-        let source: Rc<[u8]> = if builtin {
-            Rc::from(b"=[C]".as_slice())
-        } else if chunk.source.is_empty() {
+        let name: Rc<str> = Rc::from(&*chunk.name);
+        let source: Rc<[u8]> = if chunk.source.is_empty() {
             let mut s = b"@".to_vec();
             s.extend_from_slice(chunk.name.as_bytes());
             s.into()
@@ -143,8 +132,6 @@ pub(crate) fn link(
                     is_vararg: u.is_vararg,
                     nregs: u.nregs,
                     ncells: u.ncells,
-                    builtin,
-                    refuses_yield: builtin,
                     #[cfg(feature = "debugger")]
                     debug_mark: Default::default(),
                 }),
@@ -161,7 +148,7 @@ pub(crate) fn link(
             linked[i] = Some(heap.alloc(proto));
         }
         #[cfg(feature = "debugger")]
-        if rt.debug.watch && !builtin {
+        if rt.debug.watch {
             let protos: Vec<Gc<Proto>> = linked.iter().flatten().copied().collect();
             rt.debug.linked(heap, &protos);
         }
