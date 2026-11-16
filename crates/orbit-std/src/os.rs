@@ -110,7 +110,7 @@ fn exit(code: ExitCode, close: bool) -> Return {
     Return::exit(code.0, close)
 }
 
-#[native(name = "os.difftime")]
+#[native(name = "os.difftime", pure)]
 fn difftime(t2: i64, t1: i64) -> f64 {
     t2 as f64 - t1 as f64
 }

@@ -91,12 +91,6 @@ impl Host {
         self.out = process_stdout(line_endings);
     }
 
-    /// Whether `warn` messages are shown. Not consulted while a warning
-    /// hook is set.
-    pub(crate) fn warnings(&self) -> bool {
-        self.warnings
-    }
-
     /// Show `warn` messages or not, as `warn("@on")` and `warn("@off")` do.
     pub fn set_warnings(&mut self, on: bool) {
         self.warnings = on;

@@ -5,6 +5,7 @@
 //!
 //! [debug design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/debug.md
 
+use super::keep_args;
 use crate::object::{Gc, OrbitString, Table, Thread, Value};
 use crate::stack::{
     Any, Arg, Either, FunctionArg, LibraryRow, REGISTRY_INDEX, Return, Stack, StackResult, Type,
@@ -257,15 +258,6 @@ fn setlocal(ctx: &mut NativeCtx<'_>) -> R {
         Some(None) => ctx.push(Value::Nil),
     }
     Ok(NativeReturn::Return(1))
-}
-
-/// Make the arguments exactly `n`, dropping or nil-filling the rest
-/// (`set_top` only when needed: it looks for variables to close).
-fn keep_args(s: &mut Stack<'_>, n: i32) -> StackResult<()> {
-    if s.top() != n {
-        s.set_top(n)?;
-    }
-    Ok(())
 }
 
 /// Argument `i`, an upvalue or user value index, as the C `int` the
