@@ -84,6 +84,12 @@ impl<'a> FastCtx<'a> {
         &self.vm.rt.metas
     }
 
+    /// The same look, as a `pure` native's fast path takes it.
+    #[inline(always)]
+    pub(crate) fn view(self) -> crate::stack::View<'a> {
+        crate::stack::View::new(self.vm)
+    }
+
     /// The call keeps at most one result, so a fast path may answer with
     /// the first of several. Otherwise it keeps them all, and a fast path
     /// answers only when there is exactly one.

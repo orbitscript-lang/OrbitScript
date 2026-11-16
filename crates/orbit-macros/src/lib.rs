@@ -13,8 +13,9 @@
 //! argument `i` as the `i`th parameter's type (`orbit::stack::Arg`), calls
 //! the function, and pushes what it returns (`orbit::stack::Results`). Two
 //! kinds of parameter take no argument: `&mut Stack<'_>` gets the stack
-//! itself, and `State<T>` the isolate's per-isolate state of type `T`
-//! (`orbit::stack::State`). A panic in the function is caught at its entry
+//! itself, `State<T>` the isolate's per-isolate state of type `T`
+//! (`orbit::stack::State`), and `View<'_>` a read-only look at the
+//! isolate (`orbit::stack::View`), which a `pure` function may take. A panic in the function is caught at its entry
 //! and raised as a script error, as a `Call` closure's is.
 //!
 //! Options, comma-separated:
@@ -25,8 +26,8 @@
 //! - `pure`: also generate a fast path, which the interpreter calls with
 //!   the argument values themselves, without setting up the stack. For a
 //!   function whose parameters are all scalars (`i64`, `f64`, `Number`,
-//!   or an `Option` of one) and whose result is one scalar (those, `bool`,
-//!   an `Option` of one, or a `Result` of one). The fast path reads only
+//!   or an `Option` of one), besides a `View`, and whose result is one
+//!   scalar (those, `bool`, an `Option` of one, or a `Result` of one). The fast path reads only
 //!   arguments that already have the parameter's type, and an `Err` result
 //!   gives up; either way the full native runs instead, so the body runs
 //!   again with the same arguments, and so must have no side effects. It
@@ -124,6 +125,11 @@ fn is_state(ty: &Type) -> bool {
     is_named(ty, "State")
 }
 
+/// Whether `ty` is `View<'_>` (any path ending in `View`).
+fn is_view(ty: &Type) -> bool {
+    is_named(ty, "View")
+}
+
 /// Whether `ty` borrows anything (`&[u8]`, `Option<&str>`).
 fn borrows(ty: &Type) -> bool {
     struct Finder(bool);
@@ -178,6 +184,12 @@ fn expand(f: &ItemFn, options: Options) -> syn::Result<proc_macro2::TokenStream>
     // Borrowed arguments are read through a shared borrow of the stack, so
     // the body can't also have the stack mutably.
     if types.iter().any(|t| is_stack(t)) {
+        if let Some(t) = types.iter().find(|t| is_view(t)) {
+            return Err(Error::new(
+                t.span(),
+                "a function that takes the stack reads the isolate through it, not a `View`",
+            ));
+        }
         if let Some(t) = types.iter().find(|t| !is_stack(t) && borrows(t)) {
             return Err(Error::new(
                 t.span(),
@@ -202,6 +214,11 @@ fn expand(f: &ItemFn, options: Options) -> syn::Result<proc_macro2::TokenStream>
             continue;
         }
         let v = format_ident!("__v{k}");
+        if is_view(ty) {
+            gets.push(quote!(let #v = __s.view();));
+            args.push(quote!(#v));
+            continue;
+        }
         if is_state(ty) {
             // Read before the arguments, which may borrow the stack.
             checks.push(quote_spanned! {ty.span()=>
@@ -275,14 +292,22 @@ fn pure_path(
         ));
     }
     let names: Vec<_> = (0..types.len()).map(|k| format_ident!("__v{k}")).collect();
-    let reads = types.iter().zip(&names).enumerate().map(|(k, (ty, v))| {
-        quote_spanned! {ty.span()=>
-            let #v = <#ty as #krate::stack::PureArg>::from_value(__a.get(#k).copied())?;
+    let mut reads = Vec::new();
+    let mut arg = 0usize;
+    for (ty, v) in types.iter().zip(&names) {
+        if is_view(ty) {
+            reads.push(quote!(let #v = __view;));
+            continue;
         }
-    });
+        reads.push(quote_spanned! {ty.span()=>
+            let #v = <#ty as #krate::stack::PureArg>::from_value(__a.get(#arg).copied())?;
+        });
+        arg += 1;
+    }
     Ok(quote! {
         const PURE: ::core::option::Option<#krate::stack::PureFn> = ::core::option::Option::Some({
             fn __pure(
+                __view: #krate::stack::View<'_>,
                 __a: &[#krate::stack::PureValue],
             ) -> ::core::option::Option<#krate::stack::PureValue> {
                 #(#reads)*

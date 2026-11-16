@@ -14,6 +14,7 @@ mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
 mod dump;
+mod intrinsics;
 mod load;
 mod math;
 mod package;

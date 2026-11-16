@@ -50,7 +50,7 @@ use orbit_gc::{Liveness, Marker, Roots};
 
 pub(crate) use coro::{CoStatus, WindowSave};
 pub(crate) use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
-pub(crate) use meta::MetaField;
+pub(crate) use meta::{MetaField, Metas};
 pub use native::CallOutcome;
 pub(crate) use native::{Continuation, FastCtx, FastFn, Meta};
 pub use native::{NativeCtx, NativeFn, NativeReturn};
