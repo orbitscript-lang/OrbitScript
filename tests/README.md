@@ -74,7 +74,7 @@ A call back into script code from native code (a host function calling `Function
 cargo test --release -p orbit --test native_stack -- --nocapture
 ```
 
-It fails when a level takes more than its record in `tests/native-stack/expected.txt` allows (10%, or 64 bytes). Records are kept per platform, and a platform without one only prints its numbers. A row that runs without nesting, such as `pcall` or `table.sort`'s comparison, records 0 and stays there. A pull request that makes a level larger on purpose records the new sizes with `UPDATE_EXPECTED=1` and says why; one that shrinks a level records them too, so the check holds the gain.
+It fails when a level takes more than its record in `tests/native-stack/expected.txt` allows (10%, or 64 bytes). Records are kept per platform, and a platform without one only prints its numbers. Frame sizes move between compiler versions (by a quarter or more), so record with the toolchain CI uses, current stable (`cargo +stable` after `rustup update stable`); a toolchain update that moves them records again. A row that runs without nesting, such as `pcall` or `table.sort`'s comparison, records 0 and stays there. A pull request that makes a level larger on purpose records the new sizes with `UPDATE_EXPECTED=1` and says why; one that shrinks a level records them too, so the check holds the gain.
 
 The same file's 128 KiB test checks that the native stack budget (`Config::native_stack_limit`) turns a nest too deep for the thread into a script error rather than a crash.
 

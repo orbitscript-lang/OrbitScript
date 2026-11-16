@@ -155,9 +155,10 @@ impl Config {
     /// spawns (2 MiB) and the main thread on Linux and macOS (8 MiB). On
     /// a smaller stack, such as the main thread on Windows (1 MiB) or a
     /// thread spawned with a set size, set about half the thread's size.
-    /// A nested level takes about 2.5 KiB in an optimised x86_64 build, so
-    /// 512 KiB still reaches the 200-level limit; an unoptimised build
-    /// takes several times as much per level and stops sooner.
+    /// A nested level takes about 3.5 KiB in an optimised x86_64 build, so
+    /// 768 KiB reaches the 200-level limit and 512 KiB about 150 levels;
+    /// an unoptimised build takes several times as much per level and
+    /// stops sooner.
     pub fn native_stack_limit(mut self, bytes: usize) -> Config {
         self.native_stack_limit = bytes;
         self
