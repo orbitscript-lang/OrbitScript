@@ -36,7 +36,7 @@ use crate::vm::fast::{
 use crate::vm::interp::{
     Flow, Ran, Shape, WINDOW, Window, const_str, enter_lua_frame_fast, enter_lua_frame_general,
 };
-use crate::vm::meta::{MetaReturn, Metas};
+use crate::vm::meta::{META_WANT, MetaReturn, Metas};
 use crate::vm::native::{NativeCtx, NativeReturn};
 use crate::vm::ops::{self, Arith, Exc};
 use crate::vm::{Frame, FrameKind, LuaError, Vm};
@@ -1365,8 +1365,8 @@ impl Vm {
             return Ok(Frames::Flow(self.do_return(src, n)?));
         };
         let (func, want) = (f.func as usize, f.want);
-        if let FrameKind::Lua { meta: Some(_), .. } = f.kind {
-            return Ok(Frames::Lua(self.finish_meta(src, n, caller, &f)));
+        if want == META_WANT {
+            return Ok(Frames::Lua(self.finish_meta(src, n)));
         }
         self.pop_frame(&f);
         let regs = &mut self.rt.stack.regs;
@@ -1387,24 +1387,43 @@ impl Vm {
         Ok(Frames::Lua(caller))
     }
 
-    /// The running frame `f`, a metamethod handler's ([`MetaReturn`]),
+    /// [`Vm::return_from_loop`] for a frame that really wants
+    /// [`META_WANT`] results and isn't a metamethod handler's.
+    #[cold]
+    #[inline(never)]
+    fn finish_wanting(&mut self, src: usize, n: usize, caller: LuaFrame, f: &Frame) -> LuaFrame {
+        let (func, want) = (f.func as usize, f.want as usize);
+        self.pop_frame(f);
+        let regs = &mut self.rt.stack.regs;
+        let k = n.min(want);
+        regs.copy_within(src..src + k, func);
+        regs[func + k..func + want].fill(Value::Nil);
+        self.rt.top = func + want;
+        caller
+    }
+
+    /// The running frame, a metamethod handler's ([`MetaReturn`]),
     /// returns `n` values from absolute register `src` into its Lua
     /// `caller`: pop it, finish the caller's instruction with the first
     /// value, and hand the caller back to the loop.
     #[inline(never)]
-    fn finish_meta(&mut self, src: usize, n: usize, mut caller: LuaFrame, f: &Frame) -> LuaFrame {
+    fn finish_meta(&mut self, src: usize, n: usize) -> LuaFrame {
+        let Some((mut caller, f)) = self.lua_caller() else {
+            unreachable!("the caller of a frame that wants META_WANT is a Lua frame")
+        };
         let FrameKind::Lua {
             meta: Some(ret), ..
         } = f.kind
         else {
-            unreachable!("a metamethod handler's frame")
+            // A call that wants this many results.
+            return self.finish_wanting(src, n, caller, &f);
         };
         let res = if n == 0 {
             Value::Nil
         } else {
             self.rt.stack.regs[src]
         };
-        self.pop_frame(f);
+        self.pop_frame(&f);
         match ret {
             MetaReturn::Store { dst, .. } => self.rt.stack.regs[caller.base + dst as usize] = res,
             MetaReturn::Branch { want, off, .. } => {
