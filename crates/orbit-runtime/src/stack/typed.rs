@@ -970,6 +970,29 @@ mod pure_tests {
         assert!(raw.with_fast(fast).fast.is_some());
     }
 
+    /// Whether numbers have a metatable, read through the `View` the
+    /// attribute passes.
+    #[orbit_macros::native(crate = crate, name = "numbers_have_meta", pure)]
+    fn numbers_have_meta(view: super::View<'_>, x: i64) -> bool {
+        view.metatable(V::Int(x)).is_some()
+    }
+
+    /// A `View` reaches both paths: the fast path with an integer, the
+    /// full native with a float it converts.
+    #[test]
+    fn a_view_reaches_both_paths() {
+        use crate::stack::library_row;
+        let mut vm = crate::vm::Vm::new();
+        let row = library_row::<numbers_have_meta>();
+        let fast = row.fast.expect("a fast path");
+        let cx = crate::vm::FastCtx::new(&vm, 1);
+        assert!(matches!(fast(cx, &[V::Int(1)]), Some(V::Bool(false))));
+        assert!(fast(cx, &[V::Float(1.0)]).is_none());
+        let f = crate::stdlib::register_row(&mut vm, &row);
+        let r = vm.call(f, &[V::Float(1.0)]).expect("no error");
+        assert!(matches!(r[..], [V::Bool(false)]));
+    }
+
     #[test]
     fn results_are_one_value_or_give_up() {
         assert!(matches!(7i64.into_value(), Some(V::Int(7))));
