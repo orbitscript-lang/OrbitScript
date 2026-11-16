@@ -235,6 +235,13 @@ jobs:
           cargo testkit callbacks --reference lua5.5=target/reference-lua/bin/lua5.5
           --interp orbit=target/release/orbit --expect bench/callbacks/expected-orbit.txt
           --markdown "$GITHUB_STEP_SUMMARY"
+      # How much native stack one more level of each kind of call back
+      # into script code takes in a release build; fails when a level
+      # grows past its record (tests/README.md, "Native stack per nested
+      # call").
+      - name: Native stack per nested call
+        if: matrix.lua == '5.5' && (success() || failure())
+        run: cargo test --release --locked -p orbit --test native_stack -- --nocapture
       - uses: actions/upload-artifact@v7
         if: failure()
         with:

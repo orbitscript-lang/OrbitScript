@@ -1,0 +1,9 @@
+# Native stack one more level of each kind of nested call takes, in bytes,
+# in a release build: crates/orbit/tests/native_stack.rs (tests/README.md,
+# "Native stack per nested call"). One line per platform and row.
+x86_64-linux host 2480
+x86_64-linux gsub 1872
+x86_64-linux sort 0
+x86_64-linux index 0
+x86_64-linux pcall 0
+x86_64-linux resume 0
