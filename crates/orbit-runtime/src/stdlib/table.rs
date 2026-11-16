@@ -1,4 +1,5 @@
-//! The `table` library.
+//! The `table` library's functions. `orbit-std` builds the library's
+//! table from them, taking each by name ([`library_function`]).
 //!
 //! Each function has a raw loop for tables without a metatable, the common
 //! case, and a slow path in [`slow`] that honours `__index`, `__newindex`
@@ -18,7 +19,7 @@ type R = Result<NativeReturn, LuaError>;
 // `concat`, `unpack` and `move` run metamethods on their slow paths, so
 // they stay on the raw interface until the language rule's step gives them
 // a Rust fast path and an OrbitScript slow path.
-pub(crate) const FUNCTIONS: &[LibraryRow] = &[
+const FUNCTIONS: &[LibraryRow] = &[
     LibraryRow::raw("table.concat", concat),
     LibraryRow::raw("table.unpack", unpack),
     library_row::<pack>(),
@@ -29,7 +30,18 @@ pub(crate) const FUNCTIONS: &[LibraryRow] = &[
 ];
 
 /// Lua 5.5's additions, absent from 5.4 builds (ADR-14).
-pub(crate) const FUNCTIONS_5_5: &[LibraryRow] = &[library_row::<create>()];
+const FUNCTIONS_5_5: &[LibraryRow] = &[library_row::<create>()];
+
+/// The function named `name` (`table.concat`, ...), if this build's Lua
+/// version has it.
+pub(crate) fn library_function(name: &str) -> Option<&'static LibraryRow> {
+    let extra: &'static [LibraryRow] = if orbit_lua_version::LUA.is_5_5() {
+        FUNCTIONS_5_5
+    } else {
+        &[]
+    };
+    FUNCTIONS.iter().chain(extra).find(|row| row.name == name)
+}
 
 /// Largest array size `create` accepts (a C `int`).
 const MAX_INT: i64 = i32::MAX as i64;

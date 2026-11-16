@@ -15,7 +15,7 @@ mod debug;
 mod dump;
 mod load;
 pub(crate) mod string;
-mod table;
+pub(crate) mod table;
 
 use crate::stack::LibraryRow;
 use crate::vm::Vm;
@@ -85,15 +85,13 @@ pub enum Lib {
     Io,
     Os,
     String,
-    Table,
 }
 
 impl Lib {
     /// The order [`open_libs`] opens them in.
-    pub const OPEN_ORDER: [Lib; 7] = [
+    pub const OPEN_ORDER: [Lib; 6] = [
         Lib::Base,
         Lib::String,
-        Lib::Table,
         Lib::Os,
         Lib::Io,
         Lib::Coroutine,
@@ -109,7 +107,6 @@ impl Lib {
             Lib::Io => "io",
             Lib::Os => "os",
             Lib::String => "string",
-            Lib::Table => "table",
         }
     }
 }
@@ -133,13 +130,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             let st = open_lib(vm, "string", string::FUNCTIONS);
             string::set_metatable_index(vm, st);
             add_functions(vm, st, dump::FUNCTIONS);
-            true
-        }
-        Lib::Table => {
-            let t = open_lib(vm, "table", table::FUNCTIONS);
-            if orbit_lua_version::LUA.is_5_5() {
-                add_functions(vm, t, table::FUNCTIONS_5_5);
-            }
             true
         }
         Lib::Coroutine => {

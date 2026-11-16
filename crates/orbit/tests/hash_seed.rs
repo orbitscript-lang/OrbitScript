@@ -12,9 +12,9 @@ const ORDER: &str = "
         t[i * 1000003] = true
         t[i + 0.5] = true
     end
-    local keys = {}
-    for k in pairs(t) do keys[#keys + 1] = tostring(k) end
-    return table.concat(keys, ' ')
+    local keys = ''
+    for k in pairs(t) do keys = keys .. ' ' .. tostring(k) end
+    return keys
 ";
 
 fn order(config: Config) -> String {

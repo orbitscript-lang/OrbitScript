@@ -117,8 +117,8 @@ mod tests {
                         "local f = load('return 1 + ...') \
                          local env = {} \
                          load('y = 5', 'c', 't', env)() \
-                         local parts = {'return ', '4', '2'} \
-                         local h = load(function() return table.remove(parts, 1) end) \
+                         local parts, i = {'return ', '4', '2'}, 0 \
+                         local h = load(function() i = i + 1 return parts[i] end) \
                          return f(41), select(2, load('x = = 1')), env.y, h()",
                     ))?
                     .call(())?;

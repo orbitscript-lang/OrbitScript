@@ -110,6 +110,7 @@ dependencies = [
  "orbit-macros",
  "orbit-orb-syntax",
  "orbit-runtime",
+ "orbit-std",
 ]
 
 [[package]]
