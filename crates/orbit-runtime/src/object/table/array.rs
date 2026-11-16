@@ -16,6 +16,7 @@
 use super::pool::{self, Recycled};
 use crate::object::value::{Payload, Tag};
 use crate::object::{NoMemory, Value};
+use orbit_lua_version::LUA;
 
 /// One array slot. The payload is a byte array so a slot is 9 bytes, not
 /// 16: payloads are read and written unaligned, which x86-64 and aarch64
@@ -125,13 +126,22 @@ impl ArrayPart {
     /// slot `b` nil and slot `b - 1` not (or `b = 0`). A table used as a
     /// stack moves its border one slot at a time, so the slot of the last
     /// nil stored and the one after it are tried before bisecting.
+    ///
+    /// Lua 5.4 tries the slot before the last instead of the hint, which
+    /// gives the border `lua5.4` gives for every table its constructors
+    /// build (`{1, 2, nil}` and `{nil, 2, nil}` both have length 2).
     pub(super) fn inner_border(&self) -> usize {
         let n = self.len();
         debug_assert!(n > 0 && self.tag(n - 1) == Tag::Nil);
         let is_border =
             |b: usize| b < n && self.tag(b) == Tag::Nil && (b == 0 || self.tag(b - 1) != Tag::Nil);
         let h = self.nil_hint as usize;
-        for b in [h, h + 1] {
+        let candidates = if LUA.is_5_4() {
+            [n - 1, n - 1]
+        } else {
+            [h, h + 1]
+        };
+        for b in candidates {
             if is_border(b) {
                 return b;
             }
