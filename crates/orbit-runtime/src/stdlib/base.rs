@@ -69,12 +69,55 @@ pub(crate) fn open(vm: &mut Vm) {
     };
     let v = vm.register_native_with_data("ipairs", ipairs, [u64::from(next.0), 0]);
     vm.set_global("ipairs", v);
-    // `pairs` is written in OrbitScript.
-    for (name, f) in super::builtins::load(vm, &super::builtins::BASE) {
-        let k = vm.new_str(&name);
-        let g = vm.rt.globals;
-        vm.table_set(g, k, f);
+    // `pairs` gives `next` for a table without `__pairs`: the native
+    // carries its id.
+    let Value::Native(next) = vm.global("next") else {
+        unreachable!("`next` is a native, registered above")
+    };
+    let v = vm.register_native_with_data("pairs", pairs, [u64::from(next.0), 0]);
+    vm.set_global("pairs", v);
+}
+
+/// How many values `pairs` gives: Lua 5.5's generic `for` takes a fourth,
+/// its to-be-closed value.
+const PAIRS_RESULTS: usize = if LUA.is_5_5() { 4 } else { 3 };
+
+fn pairs(ctx: &mut NativeCtx<'_>) -> R {
+    let t = ctx.check_any(0)?;
+    let h = ctx.metamethod(t, MetaField::Pairs);
+    if h.is_nil() {
+        let next = Value::Native(crate::object::NativeId(ctx.native_data()[0] as u32));
+        ctx.truncate(0);
+        ctx.push(next);
+        ctx.push(t);
+        for _ in 2..PAIRS_RESULTS {
+            ctx.push(Value::Nil);
+        }
+        return Ok(NativeReturn::Return(PAIRS_RESULTS));
     }
+    // `__pairs` may yield, as in lua5.5.
+    ctx.truncate(1);
+    Ok(NativeReturn::CallThenYieldable {
+        f: h,
+        nargs: 1,
+        k: pairs_done,
+        protected: false,
+        ok: ResumeOk::Continue,
+        in_place: false,
+    })
+}
+
+/// After `__pairs`: exactly its first [`PAIRS_RESULTS`] results.
+fn pairs_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    let CallOutcome::Ok(n) = outcome else {
+        unreachable!("the call is unprotected")
+    };
+    let len = ctx.len();
+    ctx.truncate(len - n + n.min(PAIRS_RESULTS));
+    for _ in n..PAIRS_RESULTS {
+        ctx.push(Value::Nil);
+    }
+    Ok(NativeReturn::Return(PAIRS_RESULTS))
 }
 
 fn ipairs(ctx: &mut NativeCtx<'_>) -> R {
