@@ -761,7 +761,103 @@ pub use crate::object::Value as PureValue;
 /// A `pure` native's fast path ([`Native::PURE`]): the result from the
 /// arguments, or `None` to run the full native instead.
 #[doc(hidden)]
-pub type PureFn = fn(&[PureValue]) -> Option<PureValue>;
+pub type PureFn = fn(View<'_>, &[PureValue]) -> Option<PureValue>;
+
+/// What a `pure` native may read besides its arguments: the isolate, read
+/// only, so the body still allocates nothing and changes nothing. A
+/// `View` parameter takes no argument: the attribute passes it.
+#[derive(Clone, Copy)]
+pub struct View<'a> {
+    vm: &'a crate::vm::Vm,
+}
+
+impl<'a> View<'a> {
+    #[inline(always)]
+    pub(crate) fn new(vm: &'a crate::vm::Vm) -> View<'a> {
+        View { vm }
+    }
+
+    #[inline(always)]
+    pub(crate) fn heap(self) -> &'a crate::object::LuaHeap {
+        &self.vm.heap
+    }
+
+    #[inline(always)]
+    pub(crate) fn metas(self) -> &'a crate::vm::Metas {
+        &self.vm.rt.metas
+    }
+
+    /// The metatable of `v`, if any.
+    #[inline]
+    pub(crate) fn metatable(self, v: PureValue) -> Option<Gc<crate::object::Table>> {
+        self.metas().metatable(self.heap(), v)
+    }
+
+    /// `v` as `lua_tointeger` takes it: integral floats and numeric
+    /// strings convert.
+    pub(crate) fn to_integer(self, v: PureValue) -> Option<i64> {
+        let n = match v {
+            PureValue::Str(s) => self
+                .metas()
+                .locale
+                .str_to_number(self.heap().get(s).as_bytes())?,
+            _ => v,
+        };
+        match n {
+            PureValue::Int(i) => Some(i),
+            PureValue::Float(f) => crate::object::number::float_to_int(f),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for View<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("View")
+    }
+}
+
+/// An argument as it came, any value or none: for the intrinsics, which
+/// check their arguments themselves and report them as the built-in
+/// calling them would.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Given(pub(crate) Option<PureValue>);
+
+impl Arg<'_> for Given {
+    type Checked = ();
+
+    #[inline(always)]
+    fn check(_: &mut Stack<'_>, _: i32) -> StackResult<()> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn get(s: &Stack<'_>, i: i32, _: ()) -> Given {
+        Given(s.given(i))
+    }
+}
+
+impl PureArg for Given {
+    #[inline(always)]
+    fn from_value(v: Option<PureValue>) -> Option<Given> {
+        Some(Given(v))
+    }
+}
+
+/// The value, or nil for none.
+impl Push for Given {
+    #[inline(always)]
+    fn push(self, s: &mut Stack<'_>) {
+        s.push_given(self.0.unwrap_or(PureValue::Nil));
+    }
+}
+
+impl PureResult for Given {
+    #[inline(always)]
+    fn into_value(self) -> Option<PureValue> {
+        Some(self.0.unwrap_or(PureValue::Nil))
+    }
+}
 
 /// A parameter a `pure` native's fast path can read: `None` when the
 /// argument (`None` if missing) doesn't already have the type, and the

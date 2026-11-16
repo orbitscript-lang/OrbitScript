@@ -1,5 +1,5 @@
-//! Built-in library functions written in OrbitScript, and the intrinsics
-//! they use (ADR-11).
+//! Built-in library functions written in OrbitScript (ADR-11), loaded over
+//! the intrinsics ([`super::intrinsics`]).
 //!
 //! The modules in `builtins/` are compiled by the build script and embedded
 //! as binary chunks. Each loads with its own environment holding only the
@@ -8,17 +8,12 @@
 //! calls, and returns its exports. Their prototypes are
 //! marked built-in, so the debug interface, error messages and tracebacks
 //! show them as C functions.
-//!
-//! An intrinsic raises its errors as the built-in calling it would:
-//! `bad argument #2 to 'insert'`, positioned at the built-in's caller.
 
 use std::sync::OnceLock;
 
-use crate::arg_errors;
-use crate::object::number::float_to_int;
 use crate::object::{Table, Value};
 use crate::vm::op::{UnlinkedChunk, format};
-use crate::vm::{FastCtx, FastFn, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -49,49 +44,13 @@ pub(crate) static BASE: Module =
 pub(crate) static TABLE: Module =
     Module::new(include_bytes!(concat!(env!("OUT_DIR"), "/table.orbc")));
 
-/// An intrinsic's name in the natives table: never shown, since a
-/// built-in's errors name the built-in.
+/// The name of a native only built-in modules see (their `require`):
+/// never shown, since a built-in's errors name the built-in.
 macro_rules! native_name {
     ($name:ident) => {
         concat!("(intrinsic ", stringify!($name), ")")
     };
 }
-
-/// An intrinsic: its name in the intrinsics table, its name in the natives
-/// table, and the native.
-macro_rules! intrinsic {
-    ($name:ident) => {
-        (stringify!($name), native_name!($name), $name as NativeFn)
-    };
-}
-
-/// The intrinsics a built-in module takes with `use intrinsics::{...}`,
-/// copying each once when the module loads. Its other globals are `next`
-/// and `type`, the base library's own functions.
-const INTRINSICS: &[(&str, &str, NativeFn)] = &[
-    intrinsic!(argerror),
-    intrinsic!(missingarg),
-    intrinsic!(typeerror),
-    intrinsic!(raise),
-    intrinsic!(checktab),
-    intrinsic!(checkint),
-    intrinsic!(lenint),
-    intrinsic!(ult),
-    intrinsic!(newarray),
-    intrinsic!(metafield),
-    intrinsic!(plainlen),
-    intrinsic!(sortprim),
-];
-
-/// Fast paths for the intrinsics built-ins call on every call (see
-/// [`FastFn`]): a call through one skips the native's context, which costs
-/// more than the intrinsic's own work.
-const FAST_INTRINSICS: &[(&str, FastFn)] = &[
-    (native_name!(checkint), checkint_fast),
-    (native_name!(lenint), lenint_fast),
-    (native_name!(ult), ult_fast),
-    (native_name!(plainlen), plainlen_fast),
-];
 
 /// Where a module's environment keeps the intrinsics table for
 /// [`require`]. Not a name a module can use: OrbitScript has no implicit
@@ -109,17 +68,7 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
     let Value::Table(env_t) = env else {
         unreachable!("a new table")
     };
-    let intrinsics = vm.new_table_value();
-    let Value::Table(intrinsics_t) = intrinsics else {
-        unreachable!("a new table")
-    };
-    for &(name, native, f) in INTRINSICS {
-        let v = vm.native_named(native, f);
-        vm.raw_set_str(intrinsics_t, name, v);
-    }
-    for &(native, fast) in FAST_INTRINSICS {
-        vm.set_native_fast_path(native, fast);
-    }
+    let intrinsics = Value::Table(super::intrinsics::table(vm));
     vm.raw_set_str(env_t, INTRINSICS_KEY, intrinsics);
     let require = vm.native_named(native_name!(require), require);
     vm.raw_set_str(env_t, "require", require);
@@ -193,223 +142,6 @@ impl Vm {
             k = nk;
         }
         out
-    }
-}
-
-/// The 1-based argument number intrinsics take, from slot `i`.
-fn arg_number(ctx: &NativeCtx<'_>, i: usize) -> usize {
-    match ctx.arg(i) {
-        Value::Int(n) if n > 0 => n as usize,
-        _ => 1,
-    }
-}
-
-/// `argerror(n, msg)`: `bad argument #n to 'f' (msg)`.
-fn argerror(ctx: &mut NativeCtx<'_>) -> R {
-    let n = arg_number(ctx, 0);
-    let mut msg = Vec::new();
-    ctx.display(ctx.arg(1), &mut msg);
-    Err(ctx.builtin_arg_error(n, &msg))
-}
-
-/// `missingarg(n)`: `bad argument #n to 'f' (value expected)`, for a
-/// required argument that is absent.
-fn missingarg(ctx: &mut NativeCtx<'_>) -> R {
-    let n = arg_number(ctx, 0);
-    Err(ctx.builtin_arg_error(n, arg_errors::VALUE_EXPECTED))
-}
-
-/// `typeerror(n, expected, v)`: `bad argument #n to 'f' (expected
-/// expected, got type)`.
-fn typeerror(ctx: &mut NativeCtx<'_>) -> R {
-    let n = arg_number(ctx, 0);
-    let mut expected = Vec::new();
-    ctx.display(ctx.arg(1), &mut expected);
-    let v = ctx.arg(2);
-    Err(ctx.builtin_type_error(n, &String::from_utf8_lossy(&expected), Some(v)))
-}
-
-/// `raise(msg)`: an error positioned at the built-in's caller.
-fn raise(ctx: &mut NativeCtx<'_>) -> R {
-    let mut msg = Vec::new();
-    ctx.display(ctx.arg(0), &mut msg);
-    Err(ctx.builtin_error(&msg))
-}
-
-/// `checktab(t)`: argument 1 is a table, or has `__index` and `__newindex`
-/// to stand in for one.
-fn checktab(ctx: &mut NativeCtx<'_>) -> R {
-    use crate::vm::MetaField;
-    let v = ctx.arg(0);
-    let ok = matches!(v, Value::Table(_))
-        || (ctx.metatable(v).is_some()
-            && !ctx.metamethod(v, MetaField::Index).is_nil()
-            && !ctx.metamethod(v, MetaField::NewIndex).is_nil());
-    if ok {
-        Ok(NativeReturn::Return(0))
-    } else {
-        Err(ctx.builtin_type_error(1, "table", Some(v)))
-    }
-}
-
-/// `checkint(v, n)`: argument `n` as an integer, as `luaL_checkinteger`
-/// takes it (integral floats and numeric strings convert).
-fn checkint(ctx: &mut NativeCtx<'_>) -> R {
-    let n = arg_number(ctx, 1);
-    let v = ctx.arg(0);
-    let num = match v {
-        Value::Int(_) | Value::Float(_) => Some(v),
-        Value::Str(s) => ctx.locale().str_to_number(ctx.bytes(s)),
-        _ => None,
-    };
-    match num {
-        Some(Value::Int(i)) => ctx.ret([Value::Int(i)]),
-        Some(Value::Float(f)) => match float_to_int(f) {
-            Some(i) => ctx.ret([Value::Int(i)]),
-            None => Err(ctx.builtin_arg_error(n, arg_errors::NO_INTEGER_REP)),
-        },
-        _ => Err(ctx.builtin_type_error(n, "number", Some(v))),
-    }
-}
-
-/// `checkint`'s integer case.
-fn checkint_fast(_: FastCtx<'_>, args: &[Value]) -> Option<Value> {
-    match args.first() {
-        Some(&v @ Value::Int(_)) => Some(v),
-        _ => None,
-    }
-}
-
-/// `lenint(len)`: a length (`#t`, which may come from `__len`) as an
-/// integer.
-fn lenint(ctx: &mut NativeCtx<'_>) -> R {
-    match ctx.to_integer(ctx.arg(0)) {
-        Some(n) => ctx.ret([Value::Int(n)]),
-        None => Err(ctx.builtin_error("object length is not an integer")),
-    }
-}
-
-/// `lenint`'s integer case.
-fn lenint_fast(_: FastCtx<'_>, args: &[Value]) -> Option<Value> {
-    match args.first() {
-        Some(&v @ Value::Int(_)) => Some(v),
-        _ => None,
-    }
-}
-
-/// `ult(a, b)`: unsigned `a < b` for integers.
-fn ult(ctx: &mut NativeCtx<'_>) -> R {
-    let (Value::Int(a), Value::Int(b)) = (ctx.arg(0), ctx.arg(1)) else {
-        return ctx.ret([Value::Bool(false)]);
-    };
-    ctx.ret([Value::Bool((a as u64) < (b as u64))])
-}
-
-fn ult_fast(_: FastCtx<'_>, args: &[Value]) -> Option<Value> {
-    Some(Value::Bool(match args {
-        [Value::Int(a), Value::Int(b), ..] => (*a as u64) < (*b as u64),
-        _ => false,
-    }))
-}
-
-/// `newarray(n)`: an empty table with room for `n` array elements.
-fn newarray(ctx: &mut NativeCtx<'_>) -> R {
-    /// Most slots reserved up front; bigger arrays grow as they fill.
-    const MAX_RESERVE: usize = 1 << 24;
-    let n = match ctx.arg(0) {
-        Value::Int(n) if n > 0 => (n as usize).min(MAX_RESERVE),
-        _ => 0,
-    };
-    ctx.reserve(n.saturating_mul(9))?;
-    let Ok(t) = Table::try_with_capacity(n, 0) else {
-        return Err(ctx.no_memory());
-    };
-    let t = ctx.new_table(t);
-    ctx.ret([Value::Table(t)])
-}
-
-/// `metafield(v, name)`: field `name` of `v`'s metatable, raw, or nil.
-fn metafield(ctx: &mut NativeCtx<'_>) -> R {
-    let v = ctx.arg(0);
-    let r = match (ctx.metatable(v), ctx.arg(1)) {
-        (Some(mt), k @ Value::Str(_)) => ctx.vm.heap.get(mt).get(&ctx.vm.heap, k),
-        _ => Value::Nil,
-    };
-    ctx.ret([r])
-}
-
-/// `plainlen(t)`: `#t` for a table without a metatable, so nothing can
-/// change what indexing and `#` do; otherwise nil, and the built-in takes
-/// its general path.
-fn plainlen(ctx: &mut NativeCtx<'_>) -> R {
-    let r = match ctx.arg(0) {
-        Value::Table(t) if ctx.vm.heap.get(t).meta.is_none() => {
-            Value::Int(ctx.vm.heap.get(t).border())
-        }
-        _ => Value::Nil,
-    };
-    ctx.ret([r])
-}
-
-fn plainlen_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
-    Some(match args.first() {
-        Some(&Value::Table(t)) if cx.heap().get(t).meta.is_none() => {
-            Value::Int(cx.heap().get(t).border())
-        }
-        _ => Value::Nil,
-    })
-}
-
-/// `sortprim(a, n)`: sort `a[1..=n]` in place by `<` if they are all
-/// numbers (none NaN) or all strings, where `<` is a total order and runs
-/// no metamethod, and return true; otherwise leave `a` alone and return
-/// false. The sort is stable, as the built-in's own merge sort is, so
-/// equal elements (`1` and `1.0`) keep their order either way.
-fn sortprim(ctx: &mut NativeCtx<'_>) -> R {
-    let (Value::Table(a), Value::Int(n)) = (ctx.arg(0), ctx.arg(1)) else {
-        return ctx.ret([Value::Bool(false)]);
-    };
-    let heap = &ctx.vm.heap;
-    let tab = heap.get(a);
-    let values: Vec<Value> = (1..=n).map(|i| tab.get_int(i)).collect();
-    let numbers = values.iter().all(|v| match *v {
-        Value::Int(_) => true,
-        Value::Float(f) => !f.is_nan(),
-        _ => false,
-    });
-    // Strings in byte order only: a locale's collation goes through `<`
-    // with the built-in's own sort.
-    let strings = !numbers
-        && ctx.vm.rt.metas.locale.byte_order()
-        && values.iter().all(|v| matches!(v, Value::Str(_)));
-    if !numbers && !strings {
-        return ctx.ret([Value::Bool(false)]);
-    }
-    let mut values = values;
-    values.sort_by(|&x, &y| {
-        let lt = |x, y| sort_lt(ctx.vm, x, y);
-        if lt(x, y) {
-            std::cmp::Ordering::Less
-        } else if lt(y, x) {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    });
-    for (i, v) in values.into_iter().enumerate() {
-        crate::object::table::set_int(&mut ctx.vm.heap, a, i as i64 + 1, v)
-            .map_err(|_| ctx.no_memory())?;
-    }
-    ctx.ret([Value::Bool(true)])
-}
-
-/// `<` for [`sortprim`], whose strings compare in byte order.
-fn sort_lt(vm: &Vm, x: Value, y: Value) -> bool {
-    match (x, y) {
-        (Value::Int(a), Value::Int(b)) => a < b,
-        (Value::Float(a), Value::Float(b)) => a < b,
-        (Value::Str(a), Value::Str(b)) => vm.heap.get(a).as_bytes() < vm.heap.get(b).as_bytes(),
-        _ => crate::vm::ops::less_than(&vm.heap, &vm.rt.metas, x, y).unwrap_or(false),
     }
 }
 

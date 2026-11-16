@@ -170,8 +170,8 @@ const fn pure_fast<N: Native>() -> Option<vm::FastFn> {
 }
 
 /// The interpreter's fast path for a `pure` native `N`.
-fn pure_entry<N: Native>(_: vm::FastCtx<'_>, args: &[RawValue]) -> Option<RawValue> {
-    N::PURE.and_then(|f| f(args))
+fn pure_entry<N: Native>(cx: vm::FastCtx<'_>, args: &[RawValue]) -> Option<RawValue> {
+    N::PURE.and_then(|f| f(cx.view(), args))
 }
 
 /// How a [`Return`] names the continuation to run: the runtime's.
@@ -401,6 +401,29 @@ impl<'s> Stack<'s> {
             Slot::Upvalue(i) => self.ctx.upvalue(i),
             Slot::None => RawValue::Nil,
         }
+    }
+
+    /// Argument `i` as it came, or `None` when it is absent.
+    #[inline]
+    pub(crate) fn given(&self, i: i32) -> Option<RawValue> {
+        match self.slot(i) {
+            Slot::None => None,
+            _ => Some(self.get(i)),
+        }
+    }
+
+    /// Push a value the window already holds (an intrinsic's result).
+    #[inline]
+    pub(crate) fn push_given(&mut self, v: RawValue) {
+        self.ctx.push(v);
+    }
+
+    /// A read-only look at the isolate, for a `pure` native's
+    /// [`View`](super::View) parameter.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn view(&self) -> super::View<'_> {
+        super::View::new(&*self.ctx.vm)
     }
 
     fn is_none(&self, idx: i32) -> bool {

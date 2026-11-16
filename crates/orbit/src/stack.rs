@@ -33,7 +33,7 @@ pub use orbit_runtime::stack::{
     GcOp, GcParam, InterruptHandler, IntoRaised, MULTRET, Native, NativeFunction, NativeRef, Nil,
     Number, Outcome, Push, REGISTRY_INDEX, RIDX_GLOBALS, RIDX_MAINTHREAD, Raised, Rest, Results,
     Resumed, Return, Stack, StackResult, State, Status, TableArg, ThreadRef, ThreadWindow, Type,
-    Ud, UserType, field_name, function, upvalue_index,
+    Ud, UserType, View, field_name, function, upvalue_index,
 };
 #[doc(hidden)]
 pub use orbit_runtime::stack::{PureArg, PureFn, PureResult, PureValue, catch_panic};
