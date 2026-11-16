@@ -17,6 +17,7 @@
 //! [VM design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md
 
 pub mod format;
+pub mod insn;
 pub mod number;
 pub mod verify;
 

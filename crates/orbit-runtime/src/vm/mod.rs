@@ -34,6 +34,7 @@ mod link;
 mod locale;
 mod meta;
 mod native;
+mod threaded;
 pub(crate) mod ops;
 
 use std::fmt;
@@ -642,6 +643,11 @@ pub(crate) struct VmState {
     /// machine register. A cache, not part of any thread's stack, so it
     /// stays across coroutine switches.
     pub(crate) prev_code: Option<std::rc::Rc<crate::object::ProtoCode>>,
+    /// The threaded interpreter's running code and closure.
+    pub(crate) cur: std::rc::Rc<crate::object::ProtoCode>,
+    pub(crate) closure: Gc<crate::object::Closure>,
+    /// An error on its way from an instruction to the trampoline, with the pc after it.
+    pub(crate) pending: Option<(ops::Exc, usize)>,
     /// Placeholder for cell slots not yet initialised by `CellNew`.
     pub(crate) dead_cell: Gc<Cell>,
     /// End of the values of the last open-ended call or `Vararg`.
@@ -829,6 +835,9 @@ impl Vm {
                 natives: native::Natives::default(),
                 stack: Stack::default(),
                 prev_code: None,
+                cur: std::rc::Rc::new(crate::object::ProtoCode::empty()),
+                closure: Gc::from_bits(0),
+                pending: None,
                 dead_cell,
                 c_strings: CStrings::default(),
                 top: 0,

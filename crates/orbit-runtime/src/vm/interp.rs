@@ -49,6 +49,17 @@ fn grow_window(regs: &mut Vec<Value>, base: usize) -> &mut [Value; WINDOW] {
 pub(crate) struct Window<'a>(&'a mut [Value; WINDOW]);
 
 impl<'a> Window<'a> {
+    /// The window at `base` when the stack covers it.
+    #[inline(always)]
+    pub(crate) fn get(regs: &'a mut [Value], base: usize) -> Option<Self> {
+        match regs.get_mut(base..base + WINDOW) {
+            Some(s) => Some(Window(
+                <&mut [Value; WINDOW]>::try_from(s).expect("a full window"),
+            )),
+            None => None,
+        }
+    }
+
     /// The window at `base`, extending the stack to cover it when it does
     /// not yet.
     #[inline(always)]

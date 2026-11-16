@@ -53,6 +53,9 @@ impl Trace<LuaSpace> for Closure {
 #[derive(Debug)]
 pub(crate) struct ProtoCode {
     pub(crate) code: Box<[Op]>,
+    /// The same instructions as packed words, which the threaded
+    /// interpreter runs.
+    pub(crate) words: Box<[orbit_bytecode::insn::Insn]>,
     /// Kept alive for the collector by the owning [`Proto`], which traces
     /// them.
     pub(crate) consts: Box<[Value]>,
@@ -77,6 +80,24 @@ pub(crate) struct ProtoCode {
 }
 
 impl ProtoCode {
+    /// No code: what the interpreter holds before it runs anything.
+    pub(crate) fn empty() -> ProtoCode {
+        ProtoCode {
+            code: Box::new([]),
+            words: Box::new([]),
+            consts: Box::new([]),
+            caches: Box::new([]),
+            nparams: 0,
+            is_vararg: false,
+            nregs: 0,
+            ncells: 0,
+            builtin: false,
+            refuses_yield: false,
+            #[cfg(feature = "debugger")]
+            debug_mark: Default::default(),
+        }
+    }
+
     /// A copy in which [`Op::CapSelf`] reads capture `cap` instead, for a
     /// closure whose self capture no longer holds it (a `debug` write).
     pub(crate) fn without_cap_self(&self, cap: u8) -> ProtoCode {
@@ -101,6 +122,7 @@ impl ProtoCode {
 
     fn with_code(&self, code: Box<[Op]>) -> ProtoCode {
         ProtoCode {
+            words: code.iter().map(|op| op.encode()).collect(),
             code,
             consts: self.consts.clone(),
             caches: self.caches.clone(),
