@@ -11,8 +11,8 @@ use crate::object::table as tbl;
 use crate::object::value::raw_eq;
 use crate::stack::{Any, LibraryRow, Return, Stack, StackResult, TableArg, Type, library_row};
 use crate::vm::{
-    CallOutcome, FastCtx, GcMode, GcParam, LuaError, MetaField, NativeCtx, NativeReturn, Vm,
-    finalize_then_return,
+    CallOutcome, FastCtx, GcMode, GcParam, LuaError, MetaField, NativeCtx, NativeReturn, ResumeOk,
+    Vm, finalize_then_return,
 };
 use orbit_lua_version::LUA;
 use orbit_macros::native;
@@ -305,47 +305,76 @@ fn error(ctx: &mut NativeCtx<'_>) -> R {
 
 fn pcall(ctx: &mut NativeCtx<'_>) -> R {
     let f = ctx.check_any(0)?;
-    // Window [f, args...] becomes [true, args...]; the call's results land
-    // after `true`.
-    ctx.set(0, Value::Bool(true));
+    // The window [f, args...] is the call as it stands: its results replace
+    // it, and the VM puts `true` before them in `pcall`'s own slot.
     Ok(NativeReturn::CallThenYieldable {
         f,
         nargs: ctx.nargs() - 1,
-        k: protected_done,
+        k: pcall_done,
         protected: true,
+        ok: ResumeOk::ReturnTrue,
+        in_place: true,
     })
 }
 
-/// After `pcall`'s or `xpcall`'s call: `true` (already in the window) and
-/// the results, or `false` and the error.
-fn protected_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+/// After `pcall`'s call, when the VM didn't finish it itself (a return
+/// hook is set, or the call failed): `true` and the results (the whole
+/// window), or `false` and the error.
+fn pcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
     match outcome {
-        CallOutcome::Ok(n) => Ok(NativeReturn::Return(n + 1)),
-        CallOutcome::Err(e) => {
-            // Lua 5.4 keeps a `nil` error as it is.
-            let e = if e.is_nil() && LUA.is_5_5() {
-                ctx.new_str(b"<no error object>")
-            } else {
-                e
-            };
-            ctx.truncate(0);
-            ctx.ret([Value::Bool(false), e])
+        CallOutcome::Ok(n) => {
+            ctx.push(Value::Nil);
+            for i in (0..n).rev() {
+                let v = ctx.arg(i);
+                ctx.set(i + 1, v);
+            }
+            ctx.set(0, Value::Bool(true));
+            Ok(NativeReturn::Return(n + 1))
         }
+        CallOutcome::Err(e) => protected_failed(ctx, e),
     }
+}
+
+/// `pcall`'s or `xpcall`'s call failed with `e`: `false` and the error.
+fn protected_failed(ctx: &mut NativeCtx<'_>, e: Value) -> R {
+    // Lua 5.4 keeps a `nil` error as it is.
+    let e = if e.is_nil() && LUA.is_5_5() {
+        ctx.new_str(b"<no error object>")
+    } else {
+        e
+    };
+    ctx.truncate(0);
+    ctx.ret([Value::Bool(false), e])
 }
 
 fn xpcall(ctx: &mut NativeCtx<'_>) -> R {
     let h = ctx.check_function(1)?;
     let f = ctx.arg(0);
-    // Window [f, h, args...] becomes [h, true, args...]: the VM finds the
-    // handler in the first slot, and the call's results land after `true`.
+    // Window [f, h, args...] becomes [h, f, args...]: the VM finds the
+    // handler in the first slot and calls `f` where it is. Its results
+    // replace it, and the VM puts `true` before them in the handler's slot.
     ctx.set(0, h);
-    ctx.set(1, Value::Bool(true));
+    ctx.set(1, f);
     Ok(NativeReturn::CallHandled {
         f,
         nargs: ctx.nargs() - 2,
-        k: protected_done,
+        k: xpcall_done,
+        ok: ResumeOk::ReturnTrue,
+        in_place: true,
     })
+}
+
+/// After `xpcall`'s call, when the VM didn't finish it itself: `true` (in
+/// the handler's slot, which is done with) and the results, or `false` and
+/// the error.
+fn xpcall_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> R {
+    match outcome {
+        CallOutcome::Ok(n) => {
+            ctx.set(0, Value::Bool(true));
+            Ok(NativeReturn::Return(n + 1))
+        }
+        CallOutcome::Err(e) => protected_failed(ctx, e),
+    }
 }
 
 #[native(crate = crate, name = "warn")]

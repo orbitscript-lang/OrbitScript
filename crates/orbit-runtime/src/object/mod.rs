@@ -32,7 +32,7 @@ pub use orbit_gc::Verify;
 pub use orbit_str::{OrbitStr, OrbitString};
 pub(crate) use string::{CStrings, Interner, LuaStr};
 pub use table::Table;
-pub(crate) use thread::{Thread, ThreadState};
+pub(crate) use thread::Thread;
 pub(crate) use userdata::UserData;
 pub use value::Value;
 pub(crate) use value::{LightUserData, NativeId, Payload, Tag};

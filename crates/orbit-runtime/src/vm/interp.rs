@@ -6,7 +6,7 @@ use orbit_bytecode::{MULTI, Op, Origin};
 use orbit_lua_version::LUA;
 
 use crate::vm::meta::MetaField;
-use crate::vm::native::{CallOutcome, NativeCtx, NativeReturn};
+use crate::vm::native::{CallOutcome, NativeCtx, NativeReturn, ResumeOk};
 use crate::vm::ops::{self, Exc};
 use crate::vm::{Catch, Cause, Frame, FrameKind, LuaError, Vm};
 
@@ -565,20 +565,65 @@ impl Vm {
                 self.rt.stack.frames.pop();
                 Ok(Flow::Done)
             }
-            FrameKind::Native { id, k, call_at, .. } => {
-                let top = self.rt.top;
-                let upvals = self.rt.stack.closure_at(f.func as usize);
-                let mut ctx = NativeCtx {
-                    vm: self,
-                    base: f.base as usize,
-                    nargs: f.nvarargs as usize,
-                    id,
-                    upvals,
-                };
-                let r = k(&mut ctx, CallOutcome::Ok(top - call_at as usize))?;
-                self.native_returned(r, Some(f), f.func as usize, f.want, id)
-            }
+            FrameKind::Native { .. } => self.native_frame_returned(f),
         }
+    }
+
+    /// Results have been placed for native frame `f`, now on top, which
+    /// waits in a continuation. Out of line, as the loop's return path
+    /// reaches it through [`Vm::after_return`].
+    #[inline(never)]
+    fn native_frame_returned(&mut self, f: Frame) -> Result<Flow, Exc> {
+        let FrameKind::Native {
+            id, k, call_at, ok, ..
+        } = f.kind
+        else {
+            unreachable!("a native frame")
+        };
+        if ok == ResumeOk::ReturnTrue && !self.rt.stack.hook.wants(crate::vm::hook::RETURN) {
+            // `pcall`'s results without its continuation: `true` below
+            // the call's results.
+            let at = call_at as usize - 1;
+            self.rt.stack.regs[at] = Value::Bool(true);
+            self.rt.stack.frames.pop();
+            return self.return_results(self.rt.top - at, f.func as usize, f.want);
+        }
+        let top = self.rt.top;
+        let upvals = self.rt.stack.closure_at(f.func as usize);
+        let mut ctx = NativeCtx {
+            vm: self,
+            base: f.base as usize,
+            nargs: f.nvarargs as usize,
+            id,
+            upvals,
+        };
+        let r = k(&mut ctx, CallOutcome::Ok(top - call_at as usize))?;
+        self.native_returned(r, Some(f), f.func as usize, f.want, id)
+    }
+
+    /// A native's last `n` values are its results, its frame (if it had
+    /// one) is gone: place them for the caller and return to it.
+    #[inline(always)]
+    fn return_results(&mut self, n: usize, func: usize, want: u8) -> Result<Flow, Exc> {
+        let src = self.rt.top - n;
+        self.place_results(src, n, func, want);
+        // Clear the native's arguments and pushes along with any extra
+        // results, so stale copies don't keep objects alive (a finalizer
+        // waiting on an object only a dead argument slot still holds would
+        // never run). Clearing rather than truncating keeps the caller's
+        // register window allocated.
+        let end = if want == MULTI {
+            self.rt.top
+        } else {
+            func + want as usize
+        };
+        let s = &mut self.rt.stack;
+        let stop = s.dirty_to.max(self.rt.top).min(s.regs.len());
+        if end < stop {
+            s.regs[end..stop].fill(Value::Nil);
+        }
+        s.dirty_to = end;
+        self.after_return()
     }
 
     /// Act on what a native returned. `frame` is its continuation frame, if
@@ -602,57 +647,58 @@ impl Vm {
                     }
                     self.rt.stack.frames.pop();
                 }
-                let src = self.rt.top - n;
-                self.place_results(src, n, func, want);
-                // Clear the native's arguments and pushes along with any
-                // extra results, so stale copies don't keep objects alive
-                // (a finalizer waiting on an object only a dead argument
-                // slot still holds would never run). Clearing rather than
-                // truncating keeps the caller's register window allocated.
-                let end = if want == MULTI {
-                    self.rt.top
-                } else {
-                    func + want as usize
-                };
-                let s = &mut self.rt.stack;
-                let stop = s.dirty_to.max(self.rt.top).min(s.regs.len());
-                if end < stop {
-                    s.regs[end..stop].fill(Value::Nil);
-                }
-                s.dirty_to = end;
-                self.after_return()
+                self.return_results(n, func, want)
             }
             NativeReturn::CallThen { .. }
             | NativeReturn::CallThenYieldable { .. }
             | NativeReturn::CallHandled { .. } => {
                 let catch = |protected| if protected { Catch::Yes } else { Catch::No };
-                let (f, nargs, k, catch, yieldable) = match r {
+                let (f, nargs, k, catch, yieldable, ok, in_place) = match r {
                     NativeReturn::CallThen {
                         f,
                         nargs,
                         k,
                         protected,
-                    } => (f, nargs, k, catch(protected), false),
+                    } => (
+                        f,
+                        nargs,
+                        k,
+                        catch(protected),
+                        false,
+                        ResumeOk::Continue,
+                        false,
+                    ),
                     NativeReturn::CallThenYieldable {
                         f,
                         nargs,
                         k,
                         protected,
-                    } => (f, nargs, k, catch(protected), true),
-                    NativeReturn::CallHandled { f, nargs, k } => {
-                        (f, nargs, k, Catch::Handler, true)
-                    }
+                        ok,
+                        in_place,
+                    } => (f, nargs, k, catch(protected), true, ok, in_place),
+                    NativeReturn::CallHandled {
+                        f,
+                        nargs,
+                        k,
+                        ok,
+                        in_place,
+                    } => (f, nargs, k, Catch::Handler, true, ok, in_place),
                     _ => unreachable!(),
                 };
-                let at = self.rt.top - nargs;
-                self.rt.stack.insert(at, self.rt.top, f);
+                let at = if in_place {
+                    self.rt.top - nargs - 1
+                } else {
+                    let at = self.rt.top - nargs;
+                    self.rt.stack.insert(at, self.rt.top, f);
+                    at
+                };
                 let kind = FrameKind::Native {
                     id,
                     k,
                     catch,
                     yieldable,
                     call_at: at as u32,
-                    ok: crate::vm::ResumeOk::Continue,
+                    ok,
                 };
                 match frame {
                     Some(_) => {

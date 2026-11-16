@@ -21,6 +21,7 @@ macro_rules! bytes_msg {
 
 mod cold;
 mod coro;
+pub(crate) use coro::Coroutine;
 pub(crate) mod debug;
 #[cfg(feature = "debugger")]
 pub mod debugger;

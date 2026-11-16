@@ -343,6 +343,8 @@ impl<'s> Stack<'s> {
                     nargs,
                     k,
                     protected,
+                    ok: crate::vm::ResumeOk::Continue,
+                    in_place: false,
                 }
             }
             Ret::Exit { code, close } => {
