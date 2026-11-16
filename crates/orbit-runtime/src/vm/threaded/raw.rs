@@ -460,12 +460,31 @@ q! {fn q_set_index(vm, w, pc, i) {
     let (obj, key, src) = i.r_set_index();
     let r = qwin!(vm, w, pc);
     if let (&Value::Table(t), &Value::Int(k)) = (&r[obj], &r[key]) {
+        // A number into the array part needs no barrier and no call.
+        let v = match r[src] {
+            Value::Int(n) => Value::Int(n),
+            Value::Float(f) => Value::Float(f),
+            Value::Bool(b) => Value::Bool(b),
+            _ => return set_index_other(vm, w, pc, i),
+        };
+        if table::store_in_array(&mut vm.heap, t, k, v) {
+            return next(vm, w, pc);
+        }
+    }
+    set_index_other(vm, w, pc, i)
+}}
+
+#[inline(never)]
+fn set_index_other(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+    let (obj, key, src) = i.r_set_index();
+    let r = qwin!(vm, w, pc);
+    if let (&Value::Table(t), &Value::Int(k)) = (&r[obj], &r[key]) {
         if store_reg(&mut vm.heap, t, k, &r[src]) {
             return next(vm, w, pc);
         }
     }
     slow(vm, pc)
-}}
+}
 
 q! {fn q_get_index_int(vm, w, pc, i) {
     let (dst, obj, key) = i.r_get_index_int();
@@ -481,13 +500,32 @@ q! {fn q_get_index_int(vm, w, pc, i) {
 q! {fn q_set_index_int(vm, w, pc, i) {
     let (obj, key, src) = i.r_set_index_int();
     let r = qwin!(vm, w, pc);
-    if let &Value::Table(t) = &r[obj] {
-        if store_reg(&mut vm.heap, t, key as i64, &r[src]) {
+    if let (&Value::Table(t), k) = (&r[obj], key as i64) {
+        // A number into the array part needs no barrier and no call.
+        let v = match r[src] {
+            Value::Int(n) => Value::Int(n),
+            Value::Float(f) => Value::Float(f),
+            Value::Bool(b) => Value::Bool(b),
+            _ => return set_index_int_other(vm, w, pc, i),
+        };
+        if table::store_in_array(&mut vm.heap, t, k, v) {
+            return next(vm, w, pc);
+        }
+    }
+    set_index_int_other(vm, w, pc, i)
+}}
+
+#[inline(never)]
+fn set_index_int_other(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+    let (obj, key, src) = i.r_set_index_int();
+    let r = qwin!(vm, w, pc);
+    if let (&Value::Table(t), k) = (&r[obj], key as i64) {
+        if store_reg(&mut vm.heap, t, k, &r[src]) {
             return next(vm, w, pc);
         }
     }
     slow(vm, pc)
-}}
+}
 
 q! {fn q_self_call(vm, w, pc, i) {
     let (dst, obj, _key, ic) = i.r_self_call();
