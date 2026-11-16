@@ -162,6 +162,24 @@ fn pause(vm: &mut Vm, ip: *const Insn) -> Step {
     out_of_fuel(vm, pc)
 }
 
+/// Run the instruction at `ip` after one that allocated: a collection
+/// step that has come due runs first, from the trampoline.
+#[inline(always)]
+fn next_allocated(vm: &mut Vm, w: *mut Value, ip: *const Insn) -> Step {
+    if vm.heap.should_step() {
+        return collect(vm, ip);
+    }
+    next(vm, w, ip)
+}
+
+#[cold]
+#[inline(never)]
+fn collect(vm: &mut Vm, ip: *const Insn) -> Step {
+    let pc = pc_of(vm, ip);
+    save_pc(vm, pc);
+    Step::Reload
+}
+
 /// The running code as the handlers of this file see it.
 macro_rules! code {
     ($vm:ident) => {
@@ -445,10 +463,31 @@ q! {fn q_get_field(vm, w, pc, i) {
         Some((tag, p)) if tag != Tag::Nil || tab.meta.is_none() => {
             write_packed(&mut r[dst], tag, p)
         }
-        _ => return slow(vm, pc),
+        _ => return get_field_miss(vm, w, pc, i),
     }
     next(vm, w, pc)
 }}
+
+/// A field read whose cache misses: the lookup, which refills the cache.
+/// What it cannot answer alone (an `__index` to call) is slow.
+#[inline(never)]
+fn get_field_miss(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+    let (dst, obj, key, ic) = i.r_get_field();
+    let mut r = qwin!(vm, w, pc);
+    let cur = code!(vm);
+    let (&Value::Table(t), Some(cache), Some(&Value::Str(k))) = (
+        &r[obj],
+        cur.caches.get(ic as usize),
+        cur.consts.get(key as usize),
+    ) else {
+        return slow(vm, pc);
+    };
+    match get_str_miss(&vm.heap, &vm.rt.metas, t, k, cache) {
+        Ok(v) => r[dst] = v,
+        Err(_) => return slow(vm, pc),
+    }
+    next(vm, w, pc)
+}
 
 q! {fn q_set_field(vm, w, pc, i) {
     let (obj, _key, src, ic) = i.r_set_field();
@@ -464,7 +503,7 @@ q! {fn q_set_field(vm, w, pc, i) {
     if !matches!(tab.cached_str_packed(slot, cache.key),
         Some((tag, _)) if tab.meta.is_none() || tag != Tag::Nil)
     {
-        return slow(vm, pc);
+        return set_field_miss(vm, w, pc, i);
     }
     // A number needs no barrier, and so no call; anything else goes on in
     // a function that can afford one.
@@ -491,8 +530,30 @@ fn set_field_handle(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Ste
     next(vm, w, pc)
 }
 
-/// Store a register into the array part of `t`; `false` when the store
-/// is not that simple. Out of line and given the register by reference: a
+/// A field store whose cache misses: the store, which refills the cache
+/// and may add the key. What it cannot do alone (a `__newindex` to call, a
+/// table that cannot grow) is slow, which starts the store again.
+#[inline(never)]
+fn set_field_miss(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+    let (obj, key, src, ic) = i.r_set_field();
+    let r = qwin!(vm, w, pc);
+    let cur = code!(vm);
+    let (&Value::Table(t), Some(cache), Some(&Value::Str(k))) = (
+        &r[obj],
+        cur.caches.get(ic as usize),
+        cur.consts.get(key as usize),
+    ) else {
+        return slow(vm, pc);
+    };
+    let v = r[src];
+    match set_str_miss(&mut vm.heap, &vm.rt.metas, t, k, v, cache) {
+        Ok(()) => next_allocated(vm, w, pc),
+        Err(_) => slow(vm, pc),
+    }
+}
+
+/// Store a register under an integer key of `t`. Out of line and given
+/// the register by reference: a Out of line and given the register by reference: a
 /// value built on the handler's own stack and passed on would cost the
 /// handler its jump to the next one.
 #[inline(never)]
@@ -501,8 +562,20 @@ fn store_reg(
     t: Gc<crate::object::Table>,
     k: i64,
     v: &Value,
+) -> IntStore {
+    table::store_int(heap, t, k, *v)
+}
+
+/// `t[k] = v` for a table without a metatable and a key that is not an
+/// integer; `false` when the store is not that simple.
+#[inline(never)]
+fn store_key(
+    heap: &mut crate::object::LuaHeap,
+    t: Gc<crate::object::Table>,
+    k: &Value,
+    v: &Value,
 ) -> bool {
-    matches!(table::store_int(heap, t, k, *v), IntStore::Array)
+    heap.get(t).meta.is_none() && table::set(heap, t, *k, *v).is_ok()
 }
 
 q! {fn q_get_index(vm, w, pc, i) {
@@ -513,8 +586,29 @@ q! {fn q_get_index(vm, w, pc, i) {
             return next(vm, w, pc);
         }
     }
-    slow(vm, pc)
+    get_index_other(vm, w, pc, i)
 }}
+
+/// An indexed read outside the array part or with another kind of key.
+/// A missing key in a table with a metatable is slow.
+#[inline(never)]
+fn get_index_other(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+    let (dst, obj, key) = i.r_get_index();
+    let mut r = qwin!(vm, w, pc);
+    let &Value::Table(t) = &r[obj] else {
+        return slow(vm, pc);
+    };
+    let tab = vm.heap.get(t);
+    let v = match r[key] {
+        Value::Int(k) => tab.get_int(crate::object::HashSeed::of(&vm.heap), k),
+        k => tab.get(&vm.heap, k),
+    };
+    if v.is_nil() && tab.meta.is_some() {
+        return slow(vm, pc);
+    }
+    r[dst] = v;
+    next(vm, w, pc)
+}
 
 q! {fn q_set_index(vm, w, pc, i) {
     let (obj, key, src) = i.r_set_index();
@@ -539,12 +633,21 @@ q! {fn q_set_index(vm, w, pc, i) {
 fn set_index_other(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
     let (obj, key, src) = i.r_set_index();
     let r = qwin!(vm, w, pc);
-    if let (&Value::Table(t), &Value::Int(k)) = (&r[obj], &r[key]) {
-        if store_reg(&mut vm.heap, t, k, &r[src]) {
-            return next(vm, w, pc);
+    match (&r[obj], &r[key]) {
+        (&Value::Table(t), &Value::Int(k)) => match store_reg(&mut vm.heap, t, k, &r[src]) {
+            IntStore::Array => next(vm, w, pc),
+            IntStore::Other => next_allocated(vm, w, pc),
+            IntStore::Slow => slow(vm, pc),
+        },
+        (&Value::Table(t), k) => {
+            if store_key(&mut vm.heap, t, k, &r[src]) {
+                next_allocated(vm, w, pc)
+            } else {
+                slow(vm, pc)
+            }
         }
+        _ => slow(vm, pc),
     }
-    slow(vm, pc)
 }
 
 q! {fn q_get_index_int(vm, w, pc, i) {
@@ -581,12 +684,14 @@ q! {fn q_set_index_int(vm, w, pc, i) {
 fn set_index_int_other(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
     let (obj, key, src) = i.r_set_index_int();
     let r = qwin!(vm, w, pc);
-    if let (&Value::Table(t), k) = (&r[obj], key as i64) {
-        if store_reg(&mut vm.heap, t, k, &r[src]) {
-            return next(vm, w, pc);
-        }
+    let &Value::Table(t) = &r[obj] else {
+        return slow(vm, pc);
+    };
+    match store_reg(&mut vm.heap, t, key as i64, &r[src]) {
+        IntStore::Array => next(vm, w, pc),
+        IntStore::Other => next_allocated(vm, w, pc),
+        IntStore::Slow => slow(vm, pc),
     }
-    slow(vm, pc)
 }
 
 q! {fn q_self_call(vm, w, pc, i) {
@@ -758,6 +863,38 @@ q_arith!(
     kk!(vm, pc, p.2),
     |x, y| Value::Int(x.wrapping_mul(y)),
     x * y
+);
+q_arith!(
+    q_add_k,
+    r_add_k,
+    |vm, pc, r, p| &r[p.1],
+    kk!(vm, pc, p.2),
+    |x, y| Value::Int(x.wrapping_add(y)),
+    x + y
+);
+q_arith!(
+    q_sub_k,
+    r_sub_k,
+    |vm, pc, r, p| &r[p.1],
+    kk!(vm, pc, p.2),
+    |x, y| Value::Int(x.wrapping_sub(y)),
+    x - y
+);
+q_arith!(
+    q_div_k,
+    r_div_k,
+    |vm, pc, r, p| &r[p.1],
+    kk!(vm, pc, p.2),
+    |x, y| Value::Float(x as f64 / y as f64),
+    x / y
+);
+q_arith!(
+    q_k_sub,
+    r_k_sub,
+    |vm, pc, r, p| kk!(vm, pc, p.1),
+    &r[p.2],
+    |x, y| Value::Int(x.wrapping_sub(y)),
+    x - y
 );
 q_int_mod!(q_mod_k, r_mod_k, |vm, pc, r, p| &r[p.1], kk!(vm, pc, p.2));
 q_arith!(
@@ -1093,7 +1230,7 @@ q! {fn q_return1(vm, w, pc, i) {
         || vm.rt.stack.cells.len() != f.cell_base as usize
         || (code_id != vm.rt.code as usize && watched(vm))
     {
-        return slow(vm, pc);
+        return return1_other(vm, w, pc, i);
     }
     let top = f.base as usize;
     let (up, to) = ((f.base - caller.base) as usize, caller.pc as usize);
@@ -1106,7 +1243,7 @@ q! {fn q_return1(vm, w, pc, i) {
     back(vm, w, up, to, closure, code_id)
 }}
 
-q! {fn q_return0(vm, w, pc, _i) {
+q! {fn q_return0(vm, w, pc, i) {
     let [.., caller, f] = &vm.rt.stack.frames[..] else {
         return slow(vm, pc);
     };
@@ -1118,7 +1255,7 @@ q! {fn q_return0(vm, w, pc, _i) {
         || vm.rt.stack.cells.len() != f.cell_base as usize
         || (code_id != vm.rt.code as usize && watched(vm))
     {
-        return slow(vm, pc);
+        return return0_other(vm, w, pc, i);
     }
     let (up, to) = ((f.base - caller.base) as usize, caller.pc as usize);
     // SAFETY: `w` is the register below the frame's window. Writing nil
@@ -1127,6 +1264,198 @@ q! {fn q_return0(vm, w, pc, _i) {
     vm.rt.top = f.func as usize + f.want as usize;
     vm.rt.stack.frames.pop();
     back(vm, w, up, to, closure, code_id)
+}}
+
+/// Return `count` values from register `first` to a Lua caller, whatever
+/// the frame looks like: the results go where its function was, cut or
+/// padded with nil to what the caller wants, and its cells are dropped.
+#[inline(always)]
+fn return_values(vm: &mut Vm, w: *mut Value, pc: *const Insn, first: usize, count: u8) -> Step {
+    let [.., caller, f] = &vm.rt.stack.frames[..] else {
+        return slow(vm, pc);
+    };
+    let FrameKind::Lua { closure, code_id } = caller.kind else {
+        return slow(vm, pc);
+    };
+    if code_id != vm.rt.code as usize && watched(vm) {
+        return slow(vm, pc);
+    }
+    let (func, base, want) = (f.func as usize, f.base as usize, f.want);
+    let src = base + first;
+    let n = if count == MULTI {
+        match vm.rt.top.checked_sub(src) {
+            Some(n) => n,
+            None => return slow(vm, pc),
+        }
+    } else {
+        count as usize
+    };
+    if src + n > vm.rt.stack_len || func >= base {
+        return slow(vm, pc);
+    }
+    let (up, to) = ((f.base - caller.base) as usize, caller.pc as usize);
+    let cell_base = f.cell_base as usize;
+    let kept = if want == MULTI {
+        n
+    } else {
+        n.min(want as usize)
+    };
+    let total = if want == MULTI { n } else { want as usize };
+    // SAFETY: the `n` values lie inside the stack (checked above). The
+    // function's slot is below the frame's base, so the results move down
+    // and a forward copy never overwrites one it has yet to read. A caller
+    // wants at most 255 values, which end inside the window of the frame
+    // that returns.
+    unsafe {
+        let from = w.add(1 + first);
+        let dst = w.add(1).sub(base - func);
+        for k in 0..kept {
+            copy_value(&mut *dst.add(k), &*from.add(k));
+        }
+        for k in kept..total {
+            dst.add(k).write(Value::Nil);
+        }
+    }
+    vm.rt.top = func + total;
+    vm.rt.stack.cells.truncate(cell_base);
+    vm.rt.stack.frames.pop();
+    back(vm, w, up, to, closure, code_id)
+}
+
+q! {fn q_return(vm, w, pc, i) {
+    let (first, count) = i.r_return();
+    return_values(vm, w, pc, first as usize, count)
+}}
+
+#[inline(never)]
+fn return1_other(vm: &mut Vm, w: *mut Value, pc: *const Insn, i: Insn) -> Step {
+    return_values(vm, w, pc, i.r_return1() as usize, 1)
+}
+
+#[inline(never)]
+fn return0_other(vm: &mut Vm, w: *mut Value, pc: *const Insn, _i: Insn) -> Step {
+    return_values(vm, w, pc, 0, 0)
+}
+
+q! {fn q_tail_call(vm, w, pc, i) {
+    let (func, nargs) = i.r_tail_call();
+    let r = qwin!(vm, w, pc);
+    let Value::Closure(c) = r[func] else {
+        return slow(vm, pc);
+    };
+    let code: &ProtoCode = if c == vm.rt.closure {
+        code!(vm)
+    } else {
+        // SAFETY: the callee's frame, written below, keeps it alive.
+        unsafe { &*Rc::as_ptr(&vm.heap.get(c).code) }
+    };
+    let code_ptr = code as *const ProtoCode;
+    let other_watched = code_ptr != vm.rt.code && watched(vm);
+    let cells = vm.rt.stack.cells.len();
+    let max_stack = vm.rt.host.max_stack();
+    let Some(f) = vm.rt.stack.frames.last_mut() else {
+        return slow(vm, pc);
+    };
+    // The callee takes over this frame when neither has anything to
+    // release, grow or fill; the rest is slow.
+    if nargs == MULTI
+        || nargs < code.nparams
+        || code.is_vararg
+        || code.ncells > 0
+        || code.builtin
+        || matches!(code.code.first(), Some(Op::NativeEntry { .. }))
+        || f.base != f.func + 1
+        || cells != f.cell_base as usize
+        || f.base as usize + (code.nregs as usize).max(nargs as usize) > max_stack
+        || other_watched
+    {
+        return slow(vm, pc);
+    }
+    f.kind = FrameKind::Lua {
+        closure: c,
+        code_id: code_ptr as usize,
+    };
+    f.pc = 0;
+    f.nvarargs = 0;
+    f.tail = true;
+    f.extra = 0;
+    f.cdepth = 0;
+    // SAFETY: the function and its arguments are registers of the window,
+    // and move down to the frame's function slot and first registers.
+    unsafe {
+        let from = w.add(1 + func as usize);
+        for k in 0..nargs as usize + 1 {
+            copy_value(&mut *w.add(k), &*from.add(k));
+        }
+    }
+    vm.rt.closure = c;
+    vm.rt.code = code_ptr;
+    let ip = code.words.as_ptr();
+    vm.rt.wp = ip;
+    next_counted(vm, w, ip)
+}}
+
+// Tables made, and the instructions around varargs and closing.
+
+q! {fn q_new_table(vm, w, pc, i) {
+    let (dst, array_hint, hash_hint) = i.r_new_table();
+    let t = vm.op_new_table(array_hint as usize, hash_hint as usize);
+    let mut r = qwin!(vm, w, pc);
+    r[dst] = Value::Table(t);
+    next_allocated(vm, w, pc)
+}}
+
+q! {fn q_vararg_len(vm, w, pc, i) {
+    let dst = i.r_vararg_len();
+    let Some(f) = vm.rt.stack.frames.last() else {
+        return slow(vm, pc);
+    };
+    let mut r = qwin!(vm, w, pc);
+    r[dst] = Value::Int(f.nvarargs as i64);
+    next(vm, w, pc)
+}}
+
+q! {fn q_vararg_get_int(vm, w, pc, i) {
+    let (dst, index) = i.r_vararg_get_int();
+    let Some(f) = vm.rt.stack.frames.last() else {
+        return slow(vm, pc);
+    };
+    let (n, k) = (f.nvarargs as usize, index as usize);
+    if n >= f.base as usize {
+        return slow(vm, pc);
+    }
+    let mut r = qwin!(vm, w, pc);
+    if (1..=n).contains(&k) {
+        // SAFETY: the extra arguments sit just below the frame's base,
+        // above its function.
+        let v = unsafe { &*w.add(1).sub(n).add(k - 1) };
+        copy_value(&mut r[dst], v);
+    } else {
+        r[dst] = Value::Nil;
+    }
+    next(vm, w, pc)
+}}
+
+q! {fn q_tbc(vm, w, pc, i) {
+    let reg = i.r_tbc();
+    let r = qwin!(vm, w, pc);
+    // Nothing to close later: nothing to record.
+    if matches!(r[reg], Value::Nil | Value::Bool(false)) {
+        return next(vm, w, pc);
+    }
+    slow(vm, pc)
+}}
+
+q! {fn q_close(vm, w, pc, i) {
+    let from = i.r_close();
+    let Some(f) = vm.rt.stack.frames.last() else {
+        return slow(vm, pc);
+    };
+    let first = f.base as usize + from as usize;
+    if vm.rt.stack.aux.tbc.last().is_some_and(|&t| t as usize >= first) {
+        return slow(vm, pc);
+    }
+    next(vm, w, pc)
 }}
 
 // Loops.
@@ -1223,6 +1552,10 @@ static QUICK: [Quick; 256] = {
     t[Opcode::SubInt as usize] = q_sub_int;
     t[Opcode::MulK as usize] = q_mul_k;
     t[Opcode::ModK as usize] = q_mod_k;
+    t[Opcode::AddK as usize] = q_add_k;
+    t[Opcode::SubK as usize] = q_sub_k;
+    t[Opcode::DivK as usize] = q_div_k;
+    t[Opcode::KSub as usize] = q_k_sub;
     t[Opcode::KAdd as usize] = q_k_add;
     t[Opcode::KMul as usize] = q_k_mul;
     t[Opcode::KDiv as usize] = q_k_div;
@@ -1250,6 +1583,13 @@ static QUICK: [Quick; 256] = {
     t[Opcode::Call as usize] = q_call;
     t[Opcode::Return1 as usize] = q_return1;
     t[Opcode::Return0 as usize] = q_return0;
+    t[Opcode::Return as usize] = q_return;
+    t[Opcode::TailCall as usize] = q_tail_call;
+    t[Opcode::NewTable as usize] = q_new_table;
+    t[Opcode::VarargLen as usize] = q_vararg_len;
+    t[Opcode::VarargGetInt as usize] = q_vararg_get_int;
+    t[Opcode::Tbc as usize] = q_tbc;
+    t[Opcode::Close as usize] = q_close;
     t[Opcode::ForPrep as usize] = q_for_prep;
     t[Opcode::ForLoop as usize] = q_for_loop;
     t[Opcode::GenericLoop as usize] = q_generic_loop;
