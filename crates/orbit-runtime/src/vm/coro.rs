@@ -11,7 +11,7 @@
 //! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
 use crate::object::table::mark;
-use crate::object::{Gc, LuaHeap, LuaSpace, NativeId, Thread, ThreadState, Value};
+use crate::object::{Gc, LuaHeap, LuaSpace, NativeId, Thread, Value};
 use orbit_bytecode::MULTI;
 use orbit_gc::Marker;
 
@@ -138,8 +138,9 @@ impl Coroutine {
     }
 }
 
-impl ThreadState for Coroutine {
-    fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
+impl Coroutine {
+    /// Mark every object the coroutine refers to.
+    pub(crate) fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
         // The values above a parked stack's top are dead; `switch_to` cuts
         // them off before they can be read again.
         self.stack.trace(m, self.live());
@@ -148,7 +149,10 @@ impl ThreadState for Coroutine {
         }
     }
 
-    fn extra_bytes(&self) -> usize {
+    /// Heap bytes the coroutine owns (its parked stack), for the
+    /// collector's accounting. A change to it goes through
+    /// [`Heap::update_by`](orbit_gc::Heap::update_by).
+    pub(crate) fn extra_bytes(&self) -> usize {
         self.bytes
     }
 }
@@ -160,10 +164,7 @@ fn live_end(s: &Stack, top: usize) -> usize {
 }
 
 fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
-    heap.get(t)
-        .state
-        .downcast_ref()
-        .expect("threads hold VM coroutines")
+    &heap.get(t).state
 }
 
 /// A thread's coroutine, mutably, through the write guard (or `update`)
@@ -171,7 +172,7 @@ fn co(heap: &LuaHeap, t: Gc<Thread>) -> &Coroutine {
 /// error) takes the barrier, one that only changes its bookkeeping takes
 /// `write_no_handles`, and one that changes its size `update_by`.
 fn state(t: &mut Thread) -> &mut Coroutine {
-    t.state.downcast_mut().expect("threads hold VM coroutines")
+    &mut t.state
 }
 
 /// The continuation a yielding coroutine waits in: the values the next

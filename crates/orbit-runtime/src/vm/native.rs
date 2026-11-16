@@ -109,9 +109,11 @@ pub enum CallOutcome {
 }
 
 /// What a [`NativeReturn::Resume`] does when the coroutine yields or
-/// returns values. Anything but [`ResumeOk::Continue`] promises that `k`
-/// would do exactly that with `Ok`, so the VM may skip calling it (it still
-/// does when a return hook needs the native's frame).
+/// returns values, or a [`NativeReturn::CallThenYieldable`] or
+/// [`NativeReturn::CallHandled`] when the call returns. Anything but
+/// [`ResumeOk::Continue`] promises that `k` would do exactly that with
+/// `Ok`, so the VM may skip calling it (it still does when a return hook
+/// needs the native's frame).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeOk {
     /// Run the continuation.
@@ -119,7 +121,9 @@ pub enum ResumeOk {
     /// The values are the native's results (`coroutine.wrap`).
     Return,
     /// `true`, then the values, are the native's results
-    /// (`coroutine.resume`).
+    /// (`coroutine.resume`, `pcall`). For a call, `true` goes in the slot
+    /// just below the call's function, which must be the native's own (in
+    /// its window, or its function's slot).
     ReturnTrue,
 }
 
@@ -142,22 +146,29 @@ pub enum NativeReturn {
     },
     /// [`NativeReturn::CallThen`], but code the call runs may yield across
     /// it: for the few library functions lua5.5 lets callbacks yield
-    /// through (`pcall`, `pairs` calling `__pairs`, `dofile`).
+    /// through (`pcall`, `pairs` calling `__pairs`, `dofile`). With
+    /// `in_place`, `f` is already in the window just below its arguments
+    /// and is called there, so its results start where it is.
     CallThenYieldable {
         f: Value,
         nargs: usize,
         k: Continuation,
         protected: bool,
+        ok: ResumeOk,
+        in_place: bool,
     },
     /// [`NativeReturn::CallThen`] with `protected`, yieldable (only the
     /// call itself, not the handler), but an error first goes
     /// to the message handler in the window's first slot, which runs on top
     /// of the frames that raised (so it can see them); its result is the
-    /// error `k` gets (`xpcall`).
+    /// error `k` gets (`xpcall`). `in_place` as for
+    /// [`NativeReturn::CallThenYieldable`].
     CallHandled {
         f: Value,
         nargs: usize,
         k: Continuation,
+        ok: ResumeOk,
+        in_place: bool,
     },
     /// Resume coroutine `co` with the last `nargs` values of the window,
     /// then run `k` when it yields (`Ok` with the yielded values), returns

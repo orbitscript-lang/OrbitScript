@@ -1,50 +1,27 @@
 //! Thread values: coroutines ([VM semantics]).
 //!
-//! The VM owns what a coroutine is (its stack and status); this crate only
-//! knows that a thread is a heap object whose state the collector traces.
+//! The VM owns what a coroutine is (its stack and status,
+//! [`Coroutine`]); the object layer only holds it.
 //!
 //! [VM semantics]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm-semantics.md#coroutines
 
-use std::any::Any;
 use std::fmt;
 
 use orbit_gc::{Marker, Trace};
 
 use crate::object::LuaSpace;
+use crate::vm::Coroutine;
 
-/// What the VM keeps in a [`Thread`].
-pub(crate) trait ThreadState: Any + fmt::Debug {
-    /// Mark every object the state refers to.
-    fn trace(&self, m: &mut Marker<'_, LuaSpace>);
-    /// Heap bytes the state owns, for the collector's accounting. A change
-    /// to it goes through [`Heap::update`](orbit_gc::Heap::update) or
-    /// [`Heap::update_by`](orbit_gc::Heap::update_by).
-    fn extra_bytes(&self) -> usize;
-}
-
-/// A thread (coroutine) value.
-///
-/// The state is kept as `dyn Any`, so the VM reaches it with one type check
-/// on every switch, with [`ThreadState`]'s methods beside it for the
-/// collector. (A `Box<dyn ThreadState>` would need trait upcasting, Rust
-/// 1.86, to downcast without an extra indirect call.)
+/// A thread (coroutine) value: the VM's [`Coroutine`], boxed so a thread's
+/// arena slot stays small.
 pub struct Thread {
-    pub(crate) state: Box<dyn Any>,
-    trace: fn(&dyn Any, &mut Marker<'_, LuaSpace>),
-    extra_bytes: fn(&dyn Any) -> usize,
-    debug: fn(&dyn Any, &mut fmt::Formatter<'_>) -> fmt::Result,
+    pub(crate) state: Box<Coroutine>,
 }
 
 impl Thread {
-    pub(crate) fn new<S: ThreadState>(state: S) -> Self {
-        fn get<S: ThreadState>(a: &dyn Any) -> &S {
-            a.downcast_ref().expect("a thread's state keeps its type")
-        }
+    pub(crate) fn new(state: Coroutine) -> Self {
         Thread {
             state: Box::new(state),
-            trace: |a, m| get::<S>(a).trace(m),
-            extra_bytes: |a| get::<S>(a).extra_bytes(),
-            debug: |a, f| fmt::Debug::fmt(get::<S>(a), f),
         }
     }
 }
@@ -52,25 +29,17 @@ impl Thread {
 impl fmt::Debug for Thread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Thread")
-            .field("state", &DebugState(self))
+            .field("state", &self.state)
             .finish()
-    }
-}
-
-struct DebugState<'a>(&'a Thread);
-
-impl fmt::Debug for DebugState<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        (self.0.debug)(&*self.0.state, f)
     }
 }
 
 impl Trace<LuaSpace> for Thread {
     fn trace(&self, m: &mut Marker<'_, LuaSpace>) {
-        (self.trace)(&*self.state, m);
+        self.state.trace(m);
     }
 
     fn extra_bytes(&self) -> usize {
-        (self.extra_bytes)(&*self.state)
+        self.state.extra_bytes()
     }
 }
