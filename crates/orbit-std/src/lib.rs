@@ -1,6 +1,7 @@
 //! The standard library's parts built on the public `orbit` API only
 //! (ADR-11): `print`, `loadfile`, `dofile`, `debug.debug`, the `io`, `os`,
-//! `math` and `utf8` libraries, and `require` finding files on `package.path`.
+//! `math`, `package` and `utf8` libraries, and `require` finding files on
+//! `package.path`.
 //!
 //! The runtime reads no files and touches no process state; a host that
 //! wants scripts to do so installs this crate:
@@ -42,8 +43,11 @@ pub use sys::os_error_text;
 /// has, as `lua` gives.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// `print`, `loadfile`, `dofile`, `debug.debug`, and the Lua searcher.
+    /// `print`, `loadfile`, `dofile` and `debug.debug`.
     pub base: bool,
+    /// The `package` library and `require`, with the preload and Lua
+    /// searchers.
+    pub package: bool,
     /// The `io` library (feature `io`).
     pub io: bool,
     /// The `os` library (feature `os`).
@@ -64,6 +68,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             base: true,
+            package: true,
             io: cfg!(feature = "io"),
             os: cfg!(feature = "os"),
             math: true,
@@ -80,8 +85,11 @@ pub fn install(iso: &mut Isolate, options: &Options) -> Result<(), Error> {
     iso.scope(|s| {
         if options.base {
             open_base(s)?;
-            open_package(s, options.ignore_env)?;
             open_debug(s)?;
+        }
+        if options.package {
+            let t = open_package(s, options.ignore_env)?;
+            publish(s, "package", t)?;
         }
         #[cfg(feature = "io")]
         if options.io {
@@ -164,11 +172,12 @@ pub fn open_base<'s>(s: &'s Scope<'s>) -> Result<(), Error> {
     base::open(s)
 }
 
-/// Set `package.path` and `package.cpath` (from the environment unless
-/// `ignore_env`) and add `package.searchpath`, a `package.loadlib` that
-/// reports C modules absent (until `orbit-capi` replaces it), and the Lua
-/// searcher. Does nothing unless the `package` library is open.
-pub fn open_package<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<(), Error> {
+/// The `package` library's table, also opening the global `require`:
+/// `package.path` and `package.cpath` from the environment unless
+/// `ignore_env`, `package.searchpath`, a `package.loadlib` that reports C
+/// modules absent (until `orbit-capi` replaces it), and the preload and Lua
+/// searchers.
+pub fn open_package<'s>(s: &'s Scope<'s>, ignore_env: bool) -> Result<orbit::Table<'s>, Error> {
     package::open(s, ignore_env)
 }
 

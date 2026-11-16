@@ -175,6 +175,7 @@ enum Lib {
     Io,
     Math,
     Os,
+    Package,
     Utf8,
 }
 
@@ -182,7 +183,7 @@ enum Lib {
 /// `lualib.h`'s masks), with their global names.
 const LIBS: [(Lib, &[u8]); 10] = [
     (Lib::Runtime(Library::Base), b"_G"),
-    (Lib::Runtime(Library::Package), b"package"),
+    (Lib::Package, b"package"),
     (Lib::Runtime(Library::Coroutine), b"coroutine"),
     (Lib::Runtime(Library::Debug), b"debug"),
     (Lib::Io, b"io"),
@@ -217,6 +218,17 @@ pub(crate) fn openlib(c: &mut Stack<'_>, lib: i32) -> Res<i32> {
     let opened = match lib {
         Lib::Io => c.push_from_scope(|s| orbit_std::open_io(s).ok().map(|t| t.to_value())),
         Lib::Os => c.push_from_scope(|s| orbit_std::open_os(s).ok().map(|t| t.to_value())),
+        Lib::Package => {
+            let opened = c.push_from_scope(|s| {
+                orbit_std::open_package(s, ignore_env)
+                    .ok()
+                    .map(|t| t.to_value())
+            });
+            if opened {
+                crate::searchers::install_searchers(c, false);
+            }
+            opened
+        }
         Lib::Math => c.push_from_scope(|s| orbit_std::open_math(s).ok().map(|t| t.to_value())),
         Lib::Utf8 => c.push_from_scope(|s| orbit_std::open_utf8(s).ok().map(|t| t.to_value())),
         Lib::Runtime(l) => {
@@ -225,14 +237,10 @@ pub(crate) fn openlib(c: &mut Stack<'_>, lib: i32) -> Res<i32> {
                 // What `orbit-std` adds to the runtime's own libraries.
                 let added = c.with_scope(|s| match l {
                     Library::Base => orbit_std::open_base(s),
-                    Library::Package => orbit_std::open_package(s, ignore_env),
                     Library::Debug => orbit_std::open_debug(s),
                     _ => Ok(()),
                 });
                 debug_assert!(added.is_ok(), "opening a library raised {added:?}");
-                if l == Library::Package {
-                    crate::searchers::install_searchers(c, false);
-                }
             }
             opened
         }
