@@ -16,9 +16,9 @@ use std::sync::OnceLock;
 
 use crate::arg_errors;
 use crate::object::number::float_to_int;
-use crate::object::{LuaHeap, Table, Value};
+use crate::object::{Table, Value};
 use crate::vm::op::{UnlinkedChunk, format};
-use crate::vm::{FastFn, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
+use crate::vm::{FastCtx, FastFn, LuaError, NativeCtx, NativeFn, NativeReturn, Vm};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -123,14 +123,12 @@ pub(crate) fn load(vm: &mut Vm, module: &Module) -> Vec<(Vec<u8>, Value)> {
     vm.raw_set_str(env_t, INTRINSICS_KEY, intrinsics);
     let require = vm.native_named(native_name!(require), require);
     vm.raw_set_str(env_t, "require", require);
-    let shared: [(&'static str, NativeFn); 2] =
-        [("next", super::base::next), ("type", super::base::type_)];
-    for (name, f) in shared {
-        let v = match vm.rt.natives.named(name) {
+    for row in [super::base::NEXT, super::base::TYPE] {
+        let v = match vm.rt.natives.named(row.name) {
             Some(id) => Value::Native(id),
-            None => vm.register_native(name, f),
+            None => super::register_row(vm, &row),
         };
-        vm.raw_set_str(env_t, name, v);
+        vm.raw_set_str(env_t, row.name, v);
     }
     let main = vm.load_builtin(module.chunk(), env);
     let exports = match vm.call(main, &[]) {
@@ -275,7 +273,7 @@ fn checkint(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 /// `checkint`'s integer case.
-fn checkint_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
+fn checkint_fast(_: FastCtx<'_>, args: &[Value]) -> Option<Value> {
     match args.first() {
         Some(&v @ Value::Int(_)) => Some(v),
         _ => None,
@@ -292,7 +290,7 @@ fn lenint(ctx: &mut NativeCtx<'_>) -> R {
 }
 
 /// `lenint`'s integer case.
-fn lenint_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
+fn lenint_fast(_: FastCtx<'_>, args: &[Value]) -> Option<Value> {
     match args.first() {
         Some(&v @ Value::Int(_)) => Some(v),
         _ => None,
@@ -307,7 +305,7 @@ fn ult(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret([Value::Bool((a as u64) < (b as u64))])
 }
 
-fn ult_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
+fn ult_fast(_: FastCtx<'_>, args: &[Value]) -> Option<Value> {
     Some(Value::Bool(match args {
         [Value::Int(a), Value::Int(b), ..] => (*a as u64) < (*b as u64),
         _ => false,
@@ -353,9 +351,11 @@ fn plainlen(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret([r])
 }
 
-fn plainlen_fast(heap: &LuaHeap, args: &[Value]) -> Option<Value> {
+fn plainlen_fast(cx: FastCtx<'_>, args: &[Value]) -> Option<Value> {
     Some(match args.first() {
-        Some(&Value::Table(t)) if heap.get(t).meta.is_none() => Value::Int(heap.get(t).border()),
+        Some(&Value::Table(t)) if cx.heap().get(t).meta.is_none() => {
+            Value::Int(cx.heap().get(t).border())
+        }
         _ => Value::Nil,
     })
 }

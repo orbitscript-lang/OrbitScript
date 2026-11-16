@@ -3,9 +3,9 @@
 mod rng;
 
 use crate::object::number::{self, Number, float_to_int};
-use crate::object::{Gc, LuaHeap, Table, Value};
+use crate::object::{Gc, Table, Value};
 use crate::stack::{Any, Arg, LibraryRow, Stack, StackResult, library_row};
-use crate::vm::{LuaError, NativeCtx, NativeReturn, Vm};
+use crate::vm::{FastCtx, LuaError, NativeCtx, NativeReturn, Vm};
 use orbit_macros::native;
 
 use rng::Xoshiro;
@@ -98,11 +98,11 @@ fn extreme_fast(args: &[Value], want_max: bool) -> Option<Value> {
     Some(best)
 }
 
-fn max_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
+fn max_fast(_: FastCtx<'_>, args: &[Value]) -> Option<Value> {
     extreme_fast(args, true)
 }
 
-fn min_fast(_: &LuaHeap, args: &[Value]) -> Option<Value> {
+fn min_fast(_: FastCtx<'_>, args: &[Value]) -> Option<Value> {
     extreme_fast(args, false)
 }
 

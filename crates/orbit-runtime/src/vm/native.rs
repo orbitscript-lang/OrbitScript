@@ -52,12 +52,46 @@ pub(crate) enum Operator {
 pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 
 /// An optional fast path for a native that returns one value and needs
-/// nothing but its arguments and a look at the heap (most of `math`, and
-/// the intrinsics built-ins call most). It gets the arguments and returns
-/// the result, or `None` to run the full native instead (wrong types,
-/// errors, anything unusual), so it never changes behavior. It cannot
-/// allocate, call back into Lua, or fail.
-pub(crate) type FastFn = fn(&crate::object::LuaHeap, &[Value]) -> Option<Value>;
+/// nothing but its arguments and a look at the heap (most of `math`, the
+/// base library's leaf functions, and the intrinsics built-ins call most).
+/// It gets the arguments and returns the result, or `None` to run the
+/// full native instead (wrong types, errors, anything unusual), so it
+/// never changes behavior. It cannot allocate, call back into Lua, or
+/// fail.
+pub(crate) type FastFn = fn(FastCtx<'_>, &[Value]) -> Option<Value>;
+
+/// What a [`FastFn`] can see: the heap and the metatables, read only, and
+/// how many results the call keeps. Two words, so it travels in registers.
+#[derive(Clone, Copy)]
+pub(crate) struct FastCtx<'a> {
+    vm: &'a Vm,
+    want: u8,
+}
+
+impl<'a> FastCtx<'a> {
+    #[inline(always)]
+    pub(crate) fn new(vm: &'a Vm, want: u8) -> FastCtx<'a> {
+        FastCtx { vm, want }
+    }
+
+    #[inline(always)]
+    pub(crate) fn heap(self) -> &'a crate::object::LuaHeap {
+        &self.vm.heap
+    }
+
+    #[inline(always)]
+    pub(crate) fn metas(self) -> &'a super::meta::Metas {
+        &self.vm.rt.metas
+    }
+
+    /// The call keeps at most one result, so a fast path may answer with
+    /// the first of several. Otherwise it keeps them all, and a fast path
+    /// answers only when there is exactly one.
+    #[inline(always)]
+    pub(crate) fn one(self) -> bool {
+        self.want <= 1
+    }
+}
 
 /// What a native does after a call it requested with
 /// [`NativeReturn::CallThen`] finishes.
