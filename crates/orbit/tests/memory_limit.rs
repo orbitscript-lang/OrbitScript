@@ -16,6 +16,7 @@ fn scripts_stay_under_the_cap() {
     assert_eq!(iso.gc().limit(), None);
     drop(iso);
     let mut iso = rt.new_isolate(Config::default().memory_limit(Some(CAP)));
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     assert_eq!(iso.gc().limit(), Some(CAP));
     // The script checks each case with `assert`.
     let n = iso
@@ -32,6 +33,7 @@ fn scripts_stay_under_the_cap() {
 #[test]
 fn no_cap_by_default() {
     let mut iso = Runtime::new().new_isolate(Config::default());
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     let ok: bool = iso
         .scope(|s| {
             // `table.create` is Lua 5.5 only.

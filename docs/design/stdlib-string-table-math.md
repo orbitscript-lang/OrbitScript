@@ -1,6 +1,6 @@
 # The string, utf8, table and math libraries
 
-Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for `utf8` and `math`.
+Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for `utf8`, `math` and `table`.
 
 The full `string`, `utf8`, `table` and `math` libraries. The official suite's `strings.lua`, `pm.lua`, `tpack.lua`, `utf8.lua`, `math.lua` and `sort.lua` test them.
 
@@ -8,7 +8,7 @@ Every behaviour here comes from the reference manual, the reference `lua5.5` bin
 
 ## Layout
 
-`string` and `table` are always built into `orbit-runtime`: they are the language's foundation, so they have no Cargo feature. A host that wants to withhold one from scripts leaves it out at run time with `Library`. `utf8` and `math` are written on the public API in `orbit-std` (ADR-11), which installs each unless `orbit_std::Options::utf8` or `Options::math` is false.
+`string` is always built into `orbit-runtime`: it is the language's foundation, so it has no Cargo feature. A host that wants to withhold it from scripts leaves it out at run time with `Library`. `utf8`, `math` and `table` are installed by `orbit-std` (ADR-11), each unless its `orbit_std::Options` field (`utf8`, `math`, `table`) is false. `utf8` and `math` are written on the public API; `table`'s functions work on a table's parts directly, so they stay in the runtime and `orbit-std` takes each by name (`Scope::library_function`).
 
 | Library | Module | Contents |
 |---|---|---|
@@ -18,7 +18,7 @@ Every behaviour here comes from the reference manual, the reference `lua5.5` bin
 | | `string/format.rs` | `string.format`, including `%a` and `%q` |
 | | `string/pack.rs` | `pack unpack packsize` |
 | `utf8` | `orbit-std/src/utf8.rs` | The `utf8` library |
-| `table` | `table.rs`, `table/slow.rs` | The `table` library: fast paths for tables without a metatable in `table.rs`, the general paths through metamethods in `table/slow.rs` |
+| `table` | `orbit-std/src/table.rs`; the runtime's `table.rs`, `table/slow.rs` | The `table` library: `orbit-std` builds its table; fast paths for tables without a metatable in `table.rs`, the general paths through metamethods in `table/slow.rs` |
 | `math` | `orbit-std/src/math/mod.rs`, `math/rng.rs` | The `math` library and its xoshiro256** generator |
 
 The engines (`pattern`, `format`, `pack`, `rng`, UTF-8 decoding) are plain functions over bytes and numbers with no VM access. The glue converts arguments, calls the engine and turns its typed errors into Lua errors with lua5.5's wording. Keeping the engines pure lets unit tests and the differential fuzzers drive them directly, and keeps them independent of Lua's calling conventions.

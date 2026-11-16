@@ -1202,6 +1202,23 @@ impl<'s> Stack<'s> {
         self.ctx.push(RawValue::Native(id));
     }
 
+    /// Push a function the runtime keeps for a library written above it
+    /// (ADR-11), by its qualified name: `table.concat`, `table.insert`,
+    /// `table.move`, `table.pack`, `table.remove`, `table.sort`,
+    /// `table.unpack` and, in Lua 5.5 builds, `table.create`. These work on
+    /// a table's parts directly. False, pushing nothing, for any other name.
+    pub fn push_library_function(&mut self, name: &str) -> bool {
+        let Some(row) = crate::stdlib::table::library_function(name) else {
+            return false;
+        };
+        let v = match self.ctx.vm.rt.natives.named(row.name) {
+            Some(id) => RawValue::Native(id),
+            None => crate::stdlib::register_row(self.ctx.vm, row),
+        };
+        self.ctx.push(v);
+        true
+    }
+
     /// Push a closure of native `N` over the top `nups` values (popped),
     /// which it reads at [`upvalue_index`](super::upvalue_index), and over `data`, a word scripts
     /// can neither see nor change ([`Stack::closure_data`]).

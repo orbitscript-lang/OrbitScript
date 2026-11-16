@@ -388,20 +388,20 @@ co()
 #[test]
 fn step_in_through_a_builtin_stops_in_the_callback() {
     let src = "\
-local t = {3, 1, 2}
-table.sort(t, function(a, b)
-  return a < b
+local s = \"abc\"
+local r = string.gsub(s, \"b\", function(c)
+  return c
 end)
-return t[1]
+return r
 ";
     let mut vm = vm();
     let s = attach(&mut vm, &[Resume::StepIn; 3]);
     let main = loaded(&mut vm, "s.lua", src);
     vm.set_breakpoints(b"@s.lua", &[2]);
     vm.call(main, &[]).unwrap();
-    // The comparator is made on line 4 and the call is on line 2.
-    // `table.sort` is written in OrbitScript but runs like C: stepping in
-    // stops at the comparator, never inside the sort.
+    // The replacement function is made on line 4 and the call is on
+    // line 2. `string.gsub` is native: stepping in stops at the function
+    // it calls, never inside `gsub`.
     assert_eq!(
         lines(&s)[..4],
         [("breakpoint", 2), ("step", 4), ("step", 2), ("step", 3)]
