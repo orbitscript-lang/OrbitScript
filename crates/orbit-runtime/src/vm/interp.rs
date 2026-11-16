@@ -60,11 +60,11 @@ impl<'a> Window<'a> {
         }
     }
 
-    /// The window at the front of `regs`, a frame's slice of the stack,
-    /// when it is long enough.
+    /// The window of a frame given the stack from the register below its
+    /// base, when that is long enough.
     #[inline(always)]
-    pub(crate) fn front(regs: &'a mut [Value]) -> Option<Self> {
-        match regs.get_mut(..WINDOW) {
+    pub(crate) fn frame(regs: &'a mut [Value]) -> Option<Self> {
+        match regs.get_mut(1..WINDOW + 1) {
             Some(s) => Some(Window(
                 <&mut [Value; WINDOW]>::try_from(s).expect("a full window"),
             )),
@@ -358,10 +358,10 @@ pub(crate) fn const_str(consts: &[Value], k: u16) -> Gc<crate::object::LuaStr> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Shape {
     pub(crate) code_id: usize,
-    nparams: u8,
-    is_vararg: bool,
-    nregs: u8,
-    ncells: u8,
+    pub(crate) nparams: u8,
+    pub(crate) is_vararg: bool,
+    pub(crate) nregs: u8,
+    pub(crate) ncells: u8,
 }
 
 impl Shape {

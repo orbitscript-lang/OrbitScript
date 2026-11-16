@@ -15,6 +15,7 @@
 //! So a handler here has no error path at all.
 
 use super::*;
+use crate::vm::Frame;
 use std::rc::Rc;
 
 type Quick = fn(&mut Vm, &mut [Value], usize, Insn) -> Step;
@@ -53,12 +54,14 @@ fn next_counted(vm: &mut Vm, w: &mut [Value], pc: usize) -> Step {
 #[inline(never)]
 fn slow(vm: &mut Vm, pc: usize) -> Step {
     save_pc(vm, pc - 1);
-    Step::Slow
+    // Not a constant: a call whose result the caller replaces with a
+    // constant is no longer a call in tail position.
+    std::hint::black_box(Step::Slow)
 }
 
 macro_rules! qwin {
     ($vm:ident, $w:ident, $pc:ident) => {
-        match Window::front($w) {
+        match Window::frame($w) {
             Some(r) => r,
             None => return slow($vm, $pc),
         }
@@ -103,15 +106,16 @@ impl Vm {
             loop {
                 let f = self.rt.stack.running();
                 let (base, pc) = (f.base as usize, f.pc as usize);
-                if !Rc::ptr_eq(&self.rt.words, &self.rt.cur.words) {
-                    self.rt.words = self.rt.cur.words.clone();
-                }
                 self.rt.fuel = FUEL as u32;
                 let mut regs = std::mem::take(&mut self.rt.stack.regs);
-                let step = match (regs.get_mut(base..), self.rt.words.get(pc)) {
-                    (Some(w), Some(&i)) => QUICK[i.code()](self, w, pc + 1, i),
-                    _ => Step::Slow,
-                };
+                let mut step = quick_from(self, &mut regs, base, pc);
+                while step == Step::Returned {
+                    // A handler returned to its caller's frame, which
+                    // starts below the slice it had.
+                    let f = self.rt.stack.running();
+                    let (base, pc) = (f.base as usize, f.pc as usize);
+                    step = quick_from(self, &mut regs, base, pc);
+                }
                 self.rt.stack.regs = regs;
                 let step = if step == Step::Slow {
                     // One instruction on the handler with the whole VM: no
@@ -126,7 +130,9 @@ impl Vm {
                 };
                 match step {
                     Step::Continue => {}
-                    Step::Slow => unreachable!("the first cut's handlers finish their instruction"),
+                    Step::Slow | Step::Returned => {
+                        unreachable!("the first cut's handlers finish their instruction")
+                    }
                     Step::Reload => continue 'reload,
                     Step::Done => return Ok(Ran::Done),
                     Step::Switch => return Ok(Ran::Switch),
@@ -142,6 +148,20 @@ impl Vm {
                 }
             }
         }
+    }
+}
+
+/// Run the frame at `base` from `pc` on the handlers of this file.
+#[inline(always)]
+fn quick_from(vm: &mut Vm, regs: &mut [Value], base: usize, pc: usize) -> Step {
+    if !Rc::ptr_eq(&vm.rt.words, &vm.rt.cur.words) {
+        vm.rt.words = vm.rt.cur.words.clone();
+    }
+    // The slice starts at the register below the frame's: where the
+    // function was, and where its first result goes.
+    match (regs.get_mut(base.wrapping_sub(1)..), vm.rt.words.get(pc)) {
+        (Some(w), Some(&i)) => QUICK[i.code()](vm, w, pc + 1, i),
+        _ => Step::Slow,
     }
 }
 
@@ -374,35 +394,39 @@ q! {fn q_self_call(vm, w, pc, i) {
     next(vm, w, pc)
 }}
 
-// Arithmetic.
+// Arithmetic. The handlers take the number cases that need no call;
+// anything else is slow.
 
-macro_rules! q_arith_rr {
-    ($name:ident, $read:ident, |$x:ident, $y:ident| $int:expr, $flt:expr) => {
-        q! {fn $name(vm, w, pc, i) {
-            let (dst, a, b) = i.$read();
-            let mut r = qwin!(vm, w, pc);
-            match (&r[a], &r[b]) {
-                (&Value::Int($x), &Value::Int($y)) => r[dst] = $int,
-                (&Value::Float($x), &Value::Float($y)) => r[dst] = Value::Float($flt),
-                _ => return slow(vm, pc),
+/// `x op y` for two numbers: `$int` on two integers, `$flt` on two floats
+/// after converting an integer operand.
+macro_rules! num2 {
+    ($vm:ident, $pc:ident, $x:expr, $y:expr, |$a:ident, $b:ident| $int:expr, $flt:expr) => {
+        match ($x, $y) {
+            (&Value::Int($a), &Value::Int($b)) => $int,
+            (&Value::Float($a), &Value::Float($b)) => Value::Float($flt),
+            (&Value::Int($a), &Value::Float($b)) => {
+                let $a = $a as f64;
+                Value::Float($flt)
             }
-            next(vm, w, pc)
-        }}
+            (&Value::Float($a), &Value::Int($b)) => {
+                let $b = $b as f64;
+                Value::Float($flt)
+            }
+            _ => return slow($vm, $pc),
+        }
     };
 }
 
-q_arith_rr!(q_add, r_add, |x, y| Value::Int(x.wrapping_add(y)), x + y);
-q_arith_rr!(q_sub, r_sub, |x, y| Value::Int(x.wrapping_sub(y)), x - y);
-q_arith_rr!(q_mul, r_mul, |x, y| Value::Int(x.wrapping_mul(y)), x * y);
-
-macro_rules! q_arith_gen {
-    ($name:ident, $read:ident, |$vm:ident, $pc:ident, $cur:ident, $p:ident| $x:expr, $y:expr, $op:expr) => {
+macro_rules! q_arith {
+    ($name:ident, $read:ident, |$vm:ident, $pc:ident, $r:ident, $p:ident| $x:expr, $y:expr, |$a:ident, $b:ident| $int:expr, $flt:expr) => {
         q! {fn $name($vm, w, $pc, i) {
             let $p = i.$read();
-            let mut r = qwin!($vm, w, $pc);
-            let $cur = &$vm.rt.cur;
-            if fast::arith(&mut r, $p.0, $x, $y, $op, &$vm.heap, &$vm.rt.metas).is_err() {
-                return slow($vm, $pc);
+            let mut $r = qwin!($vm, w, $pc);
+            let v = num2!($vm, $pc, $x, $y, |$a, $b| $int, $flt);
+            match v {
+                Value::Int(n) => $r[$p.0] = Value::Int(n),
+                Value::Float(f) => $r[$p.0] = Value::Float(f),
+                _ => return slow($vm, $pc),
             }
             next($vm, w, $pc)
         }}
@@ -410,21 +434,41 @@ macro_rules! q_arith_gen {
 }
 
 macro_rules! kk {
-    ($vm:ident, $pc:ident, $cur:ident, $k:expr) => {
-        match $cur.consts.get($k as usize) {
-            Some(k) => K(k),
+    ($vm:ident, $pc:ident, $k:expr) => {
+        match $vm.rt.cur.consts.get($k as usize) {
+            Some(k) => k,
             None => return slow($vm, $pc),
         }
     };
 }
 
-q_arith_gen!(q_div, r_div, |vm, pc, _cur, p| R(p.1), R(p.2), Arith::Div);
-q_arith_gen!(q_mod, r_mod, |vm, pc, _cur, p| R(p.1), R(p.2), Arith::Mod);
-q_arith_gen!(q_mul_k, r_mul_k, |vm, pc, cur, p| R(p.1), kk!(vm, pc, cur, p.2), Arith::Mul);
-q_arith_gen!(q_mod_k, r_mod_k, |vm, pc, cur, p| R(p.1), kk!(vm, pc, cur, p.2), Arith::Mod);
-q_arith_gen!(q_k_add, r_k_add, |vm, pc, cur, p| kk!(vm, pc, cur, p.1), R(p.2), Arith::Add);
-q_arith_gen!(q_k_mul, r_k_mul, |vm, pc, cur, p| kk!(vm, pc, cur, p.1), R(p.2), Arith::Mul);
-q_arith_gen!(q_k_div, r_k_div, |vm, pc, cur, p| kk!(vm, pc, cur, p.1), R(p.2), Arith::Div);
+/// Lua's integer `%`, where the result takes the divisor's sign; `Nil`
+/// for the divisors the slow path handles.
+#[inline(always)]
+fn int_mod(a: i64, b: i64) -> Value {
+    if b == 0 || b == -1 {
+        return Value::Nil;
+    }
+    let m = a % b;
+    Value::Int(if m != 0 && (m ^ b) < 0 { m + b } else { m })
+}
+
+q_arith!(q_add, r_add, |vm, pc, r, p| &r[p.1], &r[p.2], |x, y| Value::Int(x.wrapping_add(y)), x + y);
+q_arith!(q_sub, r_sub, |vm, pc, r, p| &r[p.1], &r[p.2], |x, y| Value::Int(x.wrapping_sub(y)), x - y);
+q_arith!(q_mul, r_mul, |vm, pc, r, p| &r[p.1], &r[p.2], |x, y| Value::Int(x.wrapping_mul(y)), x * y);
+q_arith!(q_div, r_div, |vm, pc, r, p| &r[p.1], &r[p.2], |x, y| Value::Float(x as f64 / y as f64), x / y);
+q_arith!(q_mod, r_mod, |vm, pc, r, p| &r[p.1], &r[p.2], |x, y| int_mod(x, y), {
+    let _ = (x, y);
+    return slow(vm, pc)
+});
+q_arith!(q_mul_k, r_mul_k, |vm, pc, r, p| &r[p.1], kk!(vm, pc, p.2), |x, y| Value::Int(x.wrapping_mul(y)), x * y);
+q_arith!(q_mod_k, r_mod_k, |vm, pc, r, p| &r[p.1], kk!(vm, pc, p.2), |x, y| int_mod(x, y), {
+    let _ = (x, y);
+    return slow(vm, pc)
+});
+q_arith!(q_k_add, r_k_add, |vm, pc, r, p| kk!(vm, pc, p.1), &r[p.2], |x, y| Value::Int(x.wrapping_add(y)), x + y);
+q_arith!(q_k_mul, r_k_mul, |vm, pc, r, p| kk!(vm, pc, p.1), &r[p.2], |x, y| Value::Int(x.wrapping_mul(y)), x * y);
+q_arith!(q_k_div, r_k_div, |vm, pc, r, p| kk!(vm, pc, p.1), &r[p.2], |x, y| Value::Float(x as f64 / y as f64), x / y);
 
 q! {fn q_add_int(vm, w, pc, i) {
     let (dst, a, imm) = i.r_add_int();
@@ -537,9 +581,13 @@ macro_rules! q_eq_jump {
         q! {fn $name(vm, w, pc, i) {
             let (a, b, off) = i.$read();
             let r = qwin!(vm, w, pc);
-            let c = match fast::equal(&r, a, b, &vm.heap, &vm.rt.metas) {
-                Ok(c) => c,
-                Err(_) => return slow(vm, pc),
+            let c = match (&r[a], &r[b]) {
+                (&Value::Int(x), &Value::Int(y)) => x == y,
+                (&Value::Float(x), &Value::Float(y)) => x == y,
+                (&Value::Bool(x), &Value::Bool(y)) => x == y,
+                (&Value::Nil, &Value::Nil) => true,
+                (&Value::Nil, _) | (_, &Value::Nil) => false,
+                _ => return slow(vm, pc),
             };
             let pc = if c == $want { jump(pc, off) } else { pc };
             next(vm, w, pc)
@@ -590,7 +638,8 @@ q_cmp_int_jump!(q_jump_gt_int, r_jump_gt_int, |x, y| x > y);
 q_cmp_int_jump!(q_jump_ge_int, r_jump_ge_int, |x, y| x >= y);
 
 // Calls. A Lua function called with its parameters covered gets the tail
-// of this frame's slice; anything else, and every return, is slow.
+// of this frame's slice; a return of one value writes it below the frame
+// and leaves the caller's frame to the trampoline. Anything else is slow.
 
 q! {fn q_call(vm, w, pc, i) {
     let (func, nargs, nresults) = i.r_call();
@@ -598,22 +647,47 @@ q! {fn q_call(vm, w, pc, i) {
     let Value::Closure(c) = r[func] else {
         return slow(vm, pc);
     };
-    if nargs == MULTI {
-        return slow(vm, pc);
-    }
-    let shape = if c == vm.rt.closure {
+    let same = c == vm.rt.closure;
+    let shape = if same {
         Shape::of(&vm.rt.cur)
     } else {
         Shape::of(&vm.heap.get(c).code)
     };
-    let fa = vm.rt.stack.running().base as usize + func as usize;
-    if enter_lua_frame_fast(&mut vm.rt, &shape, c, fa, nargs as usize, nresults, pc as u32)
-        .is_none()
+    let frames = &mut vm.rt.stack.frames;
+    let room = frames.len() < frames.capacity();
+    let Some(caller) = frames.last_mut() else {
+        return slow(vm, pc);
+    };
+    let fa = caller.base as usize + func as usize;
+    // The cases with something to grow or fill are the slow handler's.
+    if nargs == MULTI
+        || nargs < shape.nparams
+        || shape.is_vararg
+        || shape.ncells > 0
+        || !room
+        || fa + 1 + (shape.nregs as usize).max(nargs as usize) > vm.rt.host.max_stack()
     {
         return slow(vm, pc);
     }
+    caller.pc = pc as u32;
+    let cell_base = vm.rt.stack.cells.len() as u32;
+    frames.push(Frame {
+        kind: FrameKind::Lua {
+            closure: c,
+            code_id: shape.code_id,
+        },
+        func: fa as u32,
+        base: fa as u32 + 1,
+        pc: 0,
+        cell_base,
+        nvarargs: 0,
+        want: nresults,
+        tail: false,
+        extra: 0,
+        cdepth: 0,
+    });
     if shape.code_id != Rc::as_ptr(&vm.rt.cur) as usize {
-        return enter_other(vm, w, c, shape.code_id, func);
+        return enter_other(vm, w, pc, i);
     }
     vm.rt.closure = c;
     next_counted(vm, &mut w[func as usize + 1..], 0)
@@ -621,12 +695,60 @@ q! {fn q_call(vm, w, pc, i) {
 
 /// The rest of a call of a function with other code than the caller's.
 #[inline(never)]
-fn enter_other(vm: &mut Vm, w: &mut [Value], c: Gc<Closure>, code_id: usize, func: u8) -> Step {
-    if switch_code(vm, c, code_id) {
+fn enter_other(vm: &mut Vm, w: &mut [Value], _pc: usize, i: Insn) -> Step {
+    let (func, _, _) = i.r_call();
+    let FrameKind::Lua { closure, code_id } = vm.rt.stack.running().kind else {
+        unreachable!("the frame just pushed")
+    };
+    if switch_code(vm, closure, code_id) {
         return Step::Reload;
     }
     vm.rt.words = vm.rt.cur.words.clone();
     next_counted(vm, &mut w[func as usize + 1..], 0)
+}
+
+q! {fn q_return1(vm, w, pc, i) {
+    let src = i.r_return1();
+    let [.., caller, f] = &vm.rt.stack.frames[..] else {
+        return slow(vm, pc);
+    };
+    let FrameKind::Lua { closure, code_id } = caller.kind else {
+        return slow(vm, pc);
+    };
+    // Only a frame whose function sits just below its registers, with
+    // nothing of its own to release.
+    if f.want != 1 || f.base != f.func + 1 || vm.rt.stack.cells.len() != f.cell_base as usize {
+        return slow(vm, pc);
+    }
+    let top = f.base as usize;
+    let Some((result, rest)) = w.split_first_mut() else {
+        return slow(vm, pc);
+    };
+    let Some(r) = rest.get(..WINDOW) else {
+        return slow(vm, pc);
+    };
+    match r[src as usize] {
+        Value::Int(x) => *result = Value::Int(x),
+        Value::Float(x) => *result = Value::Float(x),
+        Value::Bool(x) => *result = Value::Bool(x),
+        v => *result = v,
+    }
+    vm.rt.top = top;
+    vm.rt.stack.frames.pop();
+    if code_id != Rc::as_ptr(&vm.rt.cur) as usize {
+        return return_other(vm, closure, code_id);
+    }
+    vm.rt.closure = closure;
+    Step::Returned
+}}
+
+/// The rest of a return to a function with other code than the callee's.
+#[inline(never)]
+fn return_other(vm: &mut Vm, closure: Gc<Closure>, code_id: usize) -> Step {
+    if switch_code(vm, closure, code_id) {
+        return Step::Reload;
+    }
+    Step::Returned
 }
 
 // Loops.
@@ -748,6 +870,7 @@ static QUICK: [Quick; 256] = {
     t[Opcode::JumpGtInt as usize] = q_jump_gt_int;
     t[Opcode::JumpGeInt as usize] = q_jump_ge_int;
     t[Opcode::Call as usize] = q_call;
+    t[Opcode::Return1 as usize] = q_return1;
     t[Opcode::ForPrep as usize] = q_for_prep;
     t[Opcode::ForLoop as usize] = q_for_loop;
     t[Opcode::GenericLoop as usize] = q_generic_loop;

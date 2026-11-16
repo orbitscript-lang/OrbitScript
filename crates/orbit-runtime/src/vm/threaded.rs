@@ -53,6 +53,8 @@ pub(crate) enum Step {
     Throw,
     /// The second cut left the instruction at the frame's pc alone.
     Slow,
+    /// The second cut returned to the caller's frame.
+    Returned,
 }
 
 type Handler = fn(&mut Vm, usize, Insn, u64) -> Step;
@@ -354,7 +356,7 @@ impl Vm {
                     Step::Done => return Ok(Ran::Done),
                     Step::Switch => return Ok(Ran::Switch),
                     Step::NoMemory => return Ok(Ran::NoMemory),
-                    Step::Slow => unreachable!("only the second cut"),
+                    Step::Slow | Step::Returned => unreachable!("only the second cut"),
                     Step::Throw => {
                         let (exc, at) = self.rt.pending.take().expect("a pending error");
                         match self.raise_at(exc, at) {
