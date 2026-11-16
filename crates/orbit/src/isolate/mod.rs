@@ -80,6 +80,7 @@ pub struct Config {
     warnings: bool,
     debugger: Debugger,
     line_endings: LineEndings,
+    native_stack_limit: usize,
 }
 
 impl Default for Config {
@@ -93,6 +94,7 @@ impl Default for Config {
             warnings: false,
             debugger: Debugger::Allowed,
             line_endings: LineEndings::Native,
+            native_stack_limit: orbit_runtime::vm::DEFAULT_NATIVE_STACK,
         }
     }
 }
@@ -137,6 +139,28 @@ impl Config {
     /// are, whatever this says.
     pub fn line_endings(mut self, line_endings: LineEndings) -> Config {
         self.line_endings = line_endings;
+        self
+    }
+
+    /// How many bytes of native stack calls back into scripts may use
+    /// below the host's outermost call (1 MiB by default). Each time a
+    /// native function, a library function such as `string.gsub`, or a C
+    /// module calls a script function, the call nests on the native stack.
+    /// Past this budget, or past 200 nested levels, the call that would go
+    /// deeper raises the script error `C stack overflow`.
+    ///
+    /// The thread that runs scripts needs this budget plus room for the
+    /// host's own frames above its call into the isolate, and some 16 KiB
+    /// for the last level and the error. The default suits threads Rust
+    /// spawns (2 MiB) and the main thread on Linux and macOS (8 MiB). On
+    /// a smaller stack, such as the main thread on Windows (1 MiB) or a
+    /// thread spawned with a set size, set about half the thread's size.
+    /// A nested level takes about 3.5 KiB in an optimised x86_64 build, so
+    /// 768 KiB reaches the 200-level limit and 512 KiB about 150 levels;
+    /// an unoptimised build takes several times as much per level and
+    /// stops sooner.
+    pub fn native_stack_limit(mut self, bytes: usize) -> Config {
+        self.native_stack_limit = bytes;
         self
     }
 
@@ -190,6 +214,7 @@ impl Isolate {
             }
         }
         vm.set_memory_limit(config.memory_limit);
+        vm.set_native_stack_limit(config.native_stack_limit);
         #[cfg(feature = "debugger")]
         if config.debugger == super::Debugger::Disabled {
             vm.disable_debugger();

@@ -66,6 +66,18 @@ tests/gc-barriers/check-deletions.sh int-store    # one patch
 
 It needs a clean working tree under `crates/`, which it changes and restores. Paste its output into the description of any pull request that changes barrier or collector code. A pull request that adds a write path adds its test and a patch that deletes its barrier; one that changes the code a patch touches rewrites that patch, since the script fails on a patch that no longer applies.
 
+## Native stack per nested call
+
+A call back into script code from native code (a host function calling `Function::call`, `string.gsub` with a function, a C module's `lua_call`) runs a nested interpreter on the thread's native stack, so how deep scripts can nest depends on how many bytes each level takes. `crates/orbit/tests/native_stack.rs` measures it for each kind of nested call: the test `bytes_per_level` nests a dozen levels and records the address of a local at each. Frame sizes only mean something with optimisation, so that test runs only in a release build, and CI's `conformance` job runs it:
+
+```sh
+cargo test --release -p orbit --test native_stack -- --nocapture
+```
+
+It fails when a level takes more than its record in `tests/native-stack/expected.txt` allows (10%, or 64 bytes). Records are kept per platform, and a platform without one only prints its numbers. Frame sizes move between compiler versions (by a quarter or more), so record with the toolchain CI uses, current stable (`cargo +stable` after `rustup update stable`); a toolchain update that moves them records again. A row that runs without nesting, such as `pcall` or `table.sort`'s comparison, records 0 and stays there. A pull request that makes a level larger on purpose records the new sizes with `UPDATE_EXPECTED=1` and says why; one that shrinks a level records them too, so the check holds the gain.
+
+The same file's 128 KiB test checks that the native stack budget (`Config::native_stack_limit`) turns a nest too deep for the thread into a script error rather than a crash.
+
 ## Programs built for liblua
 
 `cargo testkit liblua` runs the suite through `lua5.5-host`, the reference `lua.c` linked against Lua's shared library the way Debian ships it (`liblua5.5.so.0`, symbols versioned `LUA_5.5`), with `liborbit` installed under that name instead (ADR-10). The program is built by `scripts/build-reference-lua.sh` (Linux only for now). `lua-5.5/expected-liblua.txt` lists what passes.

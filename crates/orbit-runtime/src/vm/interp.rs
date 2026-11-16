@@ -721,6 +721,44 @@ impl Vm {
         }
     }
 
+    /// Enter Lua function `c` at `func` for a nested call: true when its
+    /// frame is ready to run. When it can't be entered, the error is
+    /// settled here (false: whatever caught it has run). Out of line, so
+    /// the entry's result isn't held in the frame of the native that
+    /// called while the callee runs.
+    #[inline(always)]
+    pub(crate) fn enter_nested(
+        &mut self,
+        c: Gc<crate::object::Closure>,
+        func: usize,
+        nargs: usize,
+        want: u8,
+    ) -> Result<bool, LuaError> {
+        match self.push_lua_frame(c, func, nargs, want) {
+            Ok(e) => {
+                // The callee's registers are the native's to clear when it
+                // returns, as for any frame entered outside the loop.
+                let nregs = self.heap.get(c).code.nregs as usize;
+                let s = &mut self.rt.stack;
+                s.dirty_to = s.dirty_to.max(e.base + nregs);
+                Ok(true)
+            }
+            Err(x) => self.entry_failed(x).map(|()| false),
+        }
+    }
+
+    /// A nested call whose frame couldn't be entered (`x`): settle the
+    /// error and run whatever catches it. Out of line, so the error isn't
+    /// held in the frame of the native that called.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn entry_failed(&mut self, x: Exc) -> Result<(), LuaError> {
+        match self.settle(x)? {
+            Flow::Done => Ok(()),
+            _ => self.run(),
+        }
+    }
+
     /// Raise `x` on the running stack: resume whatever catches it, or
     /// return the error once it has left the run.
     pub(crate) fn settle(&mut self, x: Exc) -> Result<Flow, LuaError> {

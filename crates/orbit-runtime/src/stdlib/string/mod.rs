@@ -434,11 +434,10 @@ fn gsub(ctx: &mut NativeCtx<'_>) -> R {
     // Start of the unmatched bytes not yet copied to `out`.
     let mut gap_start = 0;
     let mut changed = false;
-    let mut caps = Captures::new();
+    let mut caps = ctx.take_captures();
     let chars = ctx.locale().chars_rc();
     while count < max {
-        let found = Matcher::new(ctx.bytes(s), ctx.bytes(p), &chars, &mut caps)
-            .find_from(pos, pstart, anchored, last);
+        let found = find_next(ctx, s, p, &chars, &mut caps, pos, pstart, anchored, last);
         let f = match found {
             Ok(Some((start, end))) => Found { start, end },
             Ok(None) => break,
@@ -456,6 +455,7 @@ fn gsub(ctx: &mut NativeCtx<'_>) -> R {
     }
     // Nothing was replaced: return the subject itself, as lua5.5 does
     // (`string.format("%p")` shows it is the same string).
+    ctx.give_captures(caps);
     let r = if changed {
         out.extend_from_slice(&ctx.bytes(s)[gap_start..len]);
         ctx.new_str_buf(out)
@@ -466,6 +466,24 @@ fn gsub(ctx: &mut NativeCtx<'_>) -> R {
     ctx.ret([r, Value::Int(count)])
 }
 
+/// The gsub loop's next match. Out of line, so the matcher's state isn't
+/// part of gsub's frame, which stays on the native stack while a
+/// replacement function runs.
+#[allow(clippy::too_many_arguments)]
+fn find_next(
+    ctx: &NativeCtx<'_>,
+    s: Gc<LuaStr>,
+    p: Gc<LuaStr>,
+    chars: &crate::locale::CharTables,
+    caps: &mut Captures,
+    pos: usize,
+    pstart: usize,
+    anchored: bool,
+    last: Option<usize>,
+) -> Result<Option<(usize, usize)>, PatternError> {
+    Matcher::new(ctx.bytes(s), ctx.bytes(p), chars, caps).find_from(pos, pstart, anchored, last)
+}
+
 /// The span of one match found by the gsub loop.
 struct Found {
     start: usize,
@@ -473,7 +491,9 @@ struct Found {
 }
 
 /// Append the replacement for one match to `out`; true if it replaced the
-/// match (false or nil from a table or function keeps it).
+/// match (false or nil from a table or function keeps it). Out of line
+/// and small, like [`find_next`]: its frame is below a replacement
+/// function's call.
 fn add_value(
     ctx: &mut NativeCtx<'_>,
     s: Gc<LuaStr>,
@@ -487,14 +507,7 @@ fn add_value(
             expand_replacement(ctx, s, r, f, caps, out)?;
             return Ok(true);
         }
-        Value::Table(_) => {
-            let c = match caps.capture(0, f.start, f.end) {
-                Ok(c) => c,
-                Err(e) => return Err(pattern_error(ctx, e)),
-            };
-            let key = capture_value(ctx, s, c);
-            ctx.index_now(repl, key)?
-        }
+        Value::Table(_) => index_replacement(ctx, s, f, caps)?,
         _ => {
             let at = ctx.len();
             ctx.push(repl);
@@ -515,8 +528,31 @@ fn add_value(
             ctx.display(v, out);
             Ok(true)
         }
-        _ => Err(ctx.error(&format!("invalid replacement value (a {})", v.type_name()))),
+        _ => Err(invalid_replacement(ctx, v)),
     }
+}
+
+/// A table replacement's value for one match: the table indexed by the
+/// first capture.
+#[inline(never)]
+fn index_replacement(
+    ctx: &mut NativeCtx<'_>,
+    s: Gc<LuaStr>,
+    f: &Found,
+    caps: &Captures,
+) -> Result<Value, LuaError> {
+    let c = match caps.capture(0, f.start, f.end) {
+        Ok(c) => c,
+        Err(e) => return Err(pattern_error(ctx, e)),
+    };
+    let key = capture_value(ctx, s, c);
+    ctx.index_now(ctx.arg(2), key)
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_replacement(ctx: &mut NativeCtx<'_>, v: Value) -> LuaError {
+    ctx.error(&format!("invalid replacement value (a {})", v.type_name()))
 }
 
 /// Append the replacement string `r` with `%0`-`%9` and `%%` expanded.

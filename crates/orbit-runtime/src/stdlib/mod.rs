@@ -17,7 +17,7 @@ mod dump;
 mod intrinsics;
 mod load;
 mod package;
-mod string;
+pub(crate) mod string;
 mod table;
 
 use crate::stack::LibraryRow;

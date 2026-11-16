@@ -15,7 +15,7 @@ use crate::vm::op;
 /// The host's settings, one per VM ([`VmState::host`](super::VmState::host)).
 #[derive(Debug)]
 pub struct Host {
-    limits: Limits,
+    pub(crate) limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
     out: Box<dyn WriteDebug>,
     /// Whether `warn` messages are shown (on stderr). Off at start, as in

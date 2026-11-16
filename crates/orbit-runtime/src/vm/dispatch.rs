@@ -106,13 +106,26 @@ impl Vm {
             let ran = self.run_loop::<false>()?;
             match ran {
                 Ran::Done => return Ok(()),
-                Ran::NoMemory => match self.raise(crate::object::NoMemory.into())? {
-                    Flow::Done => return Ok(()),
-                    Flow::Reload | Flow::Switched => {}
-                },
+                Ran::NoMemory => {
+                    if self.raise_no_memory()? {
+                        return Ok(());
+                    }
+                }
                 Ran::Switch => {}
             }
         }
+    }
+
+    /// Raise `not enough memory` for [`Vm::run`]; true when that ends the
+    /// run. Out of line, so the error isn't built in `run`'s frame, which
+    /// stays on the native stack under every nested call.
+    #[cold]
+    #[inline(never)]
+    fn raise_no_memory(&mut self) -> Result<bool, LuaError> {
+        Ok(matches!(
+            self.raise(crate::object::NoMemory.into())?,
+            Flow::Done
+        ))
     }
 
     /// The dispatch loop. `HOOKED` adds a hook point before each
@@ -1407,6 +1420,28 @@ impl Vm {
         base: usize,
         pc: usize,
     ) -> Result<Cold, Exc> {
+        // A native closure's entry runs the native, which can call back
+        // into the interpreter: it stays out of the large frame the other
+        // instructions need, so each level of such nesting costs less
+        // native stack.
+        if let Op::NativeEntry { id } = op {
+            return Ok(Cold::Flow(
+                self.native_entry(closure, crate::object::NativeId(id))?,
+            ));
+        }
+        self.cold_op_rest(op, cur, closure, base, pc)
+    }
+
+    /// [`Vm::cold_op`] for every instruction but `NativeEntry`.
+    #[inline(never)]
+    fn cold_op_rest(
+        &mut self,
+        op: Op,
+        cur: &ProtoCode,
+        closure: Gc<Closure>,
+        base: usize,
+        pc: usize,
+    ) -> Result<Cold, Exc> {
         let frame = *self.rt.stack.running();
         let cell_base = frame.cell_base as usize;
         let nvarargs = frame.nvarargs as usize;
@@ -1597,11 +1632,6 @@ impl Vm {
                 }
             }
 
-            Op::NativeEntry { id } => {
-                return Ok(Cold::Flow(
-                    self.native_entry(closure, crate::object::NativeId(id))?,
-                ));
-            }
             Op::Tbc { reg } => {
                 if !reg!(reg).is_falsy() {
                     self.op_tbc(base + reg as usize, pc - 1)?;

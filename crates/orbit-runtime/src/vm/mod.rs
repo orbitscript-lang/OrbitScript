@@ -125,14 +125,35 @@ pub(crate) type CompileFn = fn(src: &[u8], chunk_name: &str) -> Result<op::Unlin
 pub(crate) struct Limits {
     /// Register slots on the stack before `stack overflow`.
     pub(crate) max_stack: usize,
+    /// Bytes of native (Rust) stack calls back into the interpreter may
+    /// use below the host's outermost call before `C stack overflow`.
+    pub(crate) native_stack: usize,
+    /// The lowest address the native stack may reach: `native_stack`
+    /// below where the host's outermost call started (0 before the first
+    /// call). The stack grows down on every target we build for.
+    pub(crate) stack_floor: usize,
 }
+
+/// [`Limits::native_stack`] unless the host sets it: enough for the
+/// 200-level limit with room to spare, in a thread with 2 MiB of stack.
+pub const DEFAULT_NATIVE_STACK: usize = 1 << 20;
 
 impl Default for Limits {
     fn default() -> Self {
         Limits {
             max_stack: 1_000_000,
+            native_stack: DEFAULT_NATIVE_STACK,
+            stack_floor: 0,
         }
     }
+}
+
+/// The address of a local of the caller's frame: where the native stack
+/// is now.
+#[inline(always)]
+pub(crate) fn stack_here() -> usize {
+    let here = 0u8;
+    std::hint::black_box(&here) as *const u8 as usize
 }
 
 /// A registered native function.
@@ -801,6 +822,36 @@ impl Vm {
         cdepth as usize + 2 * self.rt.co.depth() + 1 >= MAX_CCALLS
     }
 
+    /// [`Vm::c_overflow`] for a call that nests on the native stack: a
+    /// native calling a script function and waiting for it. That is also
+    /// one too many when the native stack below the host's outermost call
+    /// has passed the host's budget ([`Vm::set_native_stack_limit`]), so a
+    /// thread with a small stack gets the same script error instead of a
+    /// crash. Calls the loop runs itself (metamethods, `pcall`) don't
+    /// nest, so they only count.
+    #[inline]
+    pub(crate) fn c_overflow_nested(&self, cdepth: u8) -> bool {
+        self.c_overflow(cdepth) || stack_here() < self.rt.host.limits.stack_floor
+    }
+
+    /// Record that the host's outermost call starts here: the native stack
+    /// budget counts from this point.
+    #[inline(always)]
+    pub(crate) fn mark_stack_base(&mut self) {
+        let l = &mut self.rt.host.limits;
+        l.stack_floor = stack_here().saturating_sub(l.native_stack);
+    }
+
+    /// Let calls back into the interpreter use at most `bytes` of native
+    /// stack below the host's outermost call ([`DEFAULT_NATIVE_STACK`]
+    /// unless set). Past it, the call that would go deeper raises `C stack
+    /// overflow`, as the 200-level limit does. The thread running the VM
+    /// needs this much stack, plus what the host itself uses, plus a
+    /// margin for the deepest single call.
+    pub fn set_native_stack_limit(&mut self, bytes: usize) {
+        self.rt.host.limits.native_stack = bytes;
+    }
+
     /// The main thread (`coroutine.running()` outside any coroutine).
     pub(crate) fn main_thread(&self) -> Gc<crate::object::Thread> {
         self.rt.main_thread
@@ -1166,6 +1217,7 @@ impl Vm {
         // so a host that calls through one native of its own first (as the
         // `orbit` command does, like lua5.5's) keeps lua5.5's depths.
         let cdepth = if self.rt.stack.frames.is_empty() {
+            self.mark_stack_base();
             self.rt.stack.same_depth()
         } else {
             self.rt.stack.deeper()
