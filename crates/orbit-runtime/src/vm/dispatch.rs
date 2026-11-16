@@ -1227,12 +1227,6 @@ impl Vm {
                 } else {
                     exc
                 };
-                // A metamethod that is a Lua function: its frame runs next.
-                if let (false, Exc::Meta(call)) = (HOOKED, &exc) {
-                    if self.enter_meta(call, code[pc - 1], pc) {
-                        continue 'reload;
-                    }
-                }
                 break 'run exc;
             };
             // The instruction at `pc - 1` raised `exc`.
