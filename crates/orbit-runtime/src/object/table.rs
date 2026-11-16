@@ -705,6 +705,15 @@ impl Table {
         self.array.live((i as u64).wrapping_sub(1))
     }
 
+    /// `t[i] = ` the value with tag byte `tag` (not nil) and payload `p`,
+    /// when `i` is in the array part and no metatable could intercept the
+    /// store; `false`, with nothing done, otherwise.
+    #[inline(always)]
+    pub(crate) fn store_int_raw(&mut self, i: i64, tag: u8, p: Payload) -> bool {
+        let filled_only = self.meta.is_some();
+        self.array.set_raw((i as u64).wrapping_sub(1), tag, p, filled_only)
+    }
+
     /// `t[s]` for a string key.
     #[inline]
     pub(crate) fn get_str(&self, heap: &LuaHeap, s: Gc<LuaStr>) -> Value {

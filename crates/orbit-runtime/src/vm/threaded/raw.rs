@@ -47,6 +47,18 @@ fn write_raw(dst: &mut Value, tag: u8, p: crate::object::value::Payload) {
     }
 }
 
+/// The tag byte and payload of a number or a boolean.
+#[inline(always)]
+fn plain(v: &Value) -> Option<(u8, crate::object::value::Payload)> {
+    use crate::object::value::Payload;
+    match *v {
+        Value::Int(n) => Some((Tag::Int as u8, Payload::from_bits(n as u64))),
+        Value::Float(f) => Some((Tag::Float as u8, Payload::from_bits(f.to_bits()))),
+        Value::Bool(b) => Some((Tag::Bool as u8, Payload::from_bits(b as u64))),
+        _ => None,
+    }
+}
+
 #[inline(always)]
 fn write_packed(dst: &mut Value, tag: Tag, p: crate::object::value::Payload) {
     let d = dst as *mut Value as *mut u8;
@@ -460,15 +472,14 @@ q! {fn q_set_index(vm, w, pc, i) {
     let (obj, key, src) = i.r_set_index();
     let r = qwin!(vm, w, pc);
     if let (&Value::Table(t), &Value::Int(k)) = (&r[obj], &r[key]) {
-        // A number into the array part needs no barrier and no call.
-        let v = match r[src] {
-            Value::Int(n) => Value::Int(n),
-            Value::Float(f) => Value::Float(f),
-            Value::Bool(b) => Value::Bool(b),
-            _ => return set_index_other(vm, w, pc, i),
-        };
-        if table::store_in_array(&mut vm.heap, t, k, v) {
-            return next(vm, w, pc);
+        // A number or a boolean into the array part needs no barrier and
+        // no call.
+        if let Some((tag, p)) = plain(&r[src]) {
+            // SAFETY: the table is live (a register names it), and what
+            // is stored holds no handle.
+            if unsafe { vm.heap.get_mut_unchecked(t) }.store_int_raw(k, tag, p) {
+                return next(vm, w, pc);
+            }
         }
     }
     set_index_other(vm, w, pc, i)
@@ -501,15 +512,14 @@ q! {fn q_set_index_int(vm, w, pc, i) {
     let (obj, key, src) = i.r_set_index_int();
     let r = qwin!(vm, w, pc);
     if let (&Value::Table(t), k) = (&r[obj], key as i64) {
-        // A number into the array part needs no barrier and no call.
-        let v = match r[src] {
-            Value::Int(n) => Value::Int(n),
-            Value::Float(f) => Value::Float(f),
-            Value::Bool(b) => Value::Bool(b),
-            _ => return set_index_int_other(vm, w, pc, i),
-        };
-        if table::store_in_array(&mut vm.heap, t, k, v) {
-            return next(vm, w, pc);
+        // A number or a boolean into the array part needs no barrier and
+        // no call.
+        if let Some((tag, p)) = plain(&r[src]) {
+            // SAFETY: the table is live (a register names it), and what
+            // is stored holds no handle.
+            if unsafe { vm.heap.get_mut_unchecked(t) }.store_int_raw(k, tag, p) {
+                return next(vm, w, pc);
+            }
         }
     }
     set_index_int_other(vm, w, pc, i)

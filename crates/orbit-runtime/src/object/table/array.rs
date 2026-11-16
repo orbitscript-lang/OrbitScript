@@ -114,6 +114,29 @@ impl ArrayPart {
         };
     }
 
+    /// Store the value with tag byte `tag` (of a [`Tag`], not nil) and
+    /// payload `p` in slot `idx` when that is below the length and, if
+    /// `filled_only`, holds a value already; `false`, with nothing done,
+    /// otherwise.
+    #[inline(always)]
+    pub(super) fn set_raw(&mut self, idx: u64, tag: u8, p: Payload, filled_only: bool) -> bool {
+        if idx >= self.len as u64 {
+            return false;
+        }
+        // Slots below the length exist.
+        let Some(s) = self.slots.get_mut(idx as usize) else {
+            return false;
+        };
+        if filled_only && s.tag == Tag::Nil as u8 {
+            return false;
+        }
+        *s = Slot {
+            payload: p.bits().to_ne_bytes(),
+            tag,
+        };
+        true
+    }
+
     /// Stores nil in slot `i` and remembers it as a border candidate.
     #[inline(always)]
     pub(super) fn set_nil_hinted(&mut self, i: usize) {

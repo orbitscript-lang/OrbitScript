@@ -461,6 +461,21 @@ impl<S: Space> Heap<S> {
         unsafe { self.space.arena().get_unchecked(gc) }
     }
 
+    /// The object itself, with no check and no write barrier.
+    ///
+    /// # Safety
+    /// `gc` must point to a live object of this heap, and the caller must
+    /// store no handle through the result.
+    #[inline(always)]
+    #[allow(unsafe_code)]
+    pub unsafe fn get_mut_unchecked<T>(&mut self, gc: Gc<T>) -> &mut T
+    where
+        S: Holds<T>,
+    {
+        // SAFETY: the caller's promise.
+        unsafe { self.space.arena_mut().get_mut_unchecked(gc) }
+    }
+
     /// Mutable access to a leaf object ([`Trace::LEAF`]), which holds no
     /// handles and so needs no write barrier; checked when compiling. It
     /// does no byte accounting: a change to [`Trace::extra_bytes`] takes

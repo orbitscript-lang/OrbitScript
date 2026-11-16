@@ -332,6 +332,12 @@ pub trait Store<T> {
     #[allow(unsafe_code)]
     unsafe fn get_unchecked(&self, gc: Gc<T>) -> &T;
     fn get_mut(&mut self, gc: Gc<T>) -> &mut T;
+    /// [`Store::get_mut`] without its checks.
+    ///
+    /// # Safety
+    /// `gc` must point to a live object of this store.
+    #[allow(unsafe_code)]
+    unsafe fn get_mut_unchecked(&mut self, gc: Gc<T>) -> &mut T;
     /// A handle to the object now in slot `i`.
     fn handle_at(&self, i: u32) -> Gc<T>;
     fn is_occupied(&self, gc: Gc<T>) -> bool;
@@ -367,6 +373,18 @@ impl<T, const SLOTS: usize> Store<T> for Arena<T, SLOTS> {
     fn get_mut(&mut self, gc: Gc<T>) -> &mut T {
         self.check(gc);
         self.get_slot_mut(gc.index)
+    }
+
+    #[inline(always)]
+    #[allow(unsafe_code)]
+    unsafe fn get_mut_unchecked(&mut self, gc: Gc<T>) -> &mut T {
+        // SAFETY: the caller's promise: the slot exists and is occupied.
+        unsafe {
+            match self.slots.get_unchecked_mut(gc.index as usize) {
+                Some(v) => v,
+                None => std::hint::unreachable_unchecked(),
+            }
+        }
     }
 
     #[track_caller]
