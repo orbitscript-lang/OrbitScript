@@ -111,11 +111,13 @@ impl Vm {
                 self.run_loop::<true>()?
             } else if cfg!(orbit_old_loop) {
                 self.run_loop::<false>()?
-            } else {
+            } else if cfg!(orbit_first_cut) {
                 self.run_threaded()?
+            } else {
+                self.run_quick()?
             };
             #[cfg(not(feature = "hooks"))]
-            let ran = self.run_threaded()?;
+            let ran = self.run_quick()?;
             match ran {
                 Ran::Done => return Ok(()),
                 Ran::NoMemory => match self.raise(crate::object::NoMemory.into())? {

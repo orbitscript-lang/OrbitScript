@@ -60,6 +60,18 @@ impl<'a> Window<'a> {
         }
     }
 
+    /// The window at the front of `regs`, a frame's slice of the stack,
+    /// when it is long enough.
+    #[inline(always)]
+    pub(crate) fn front(regs: &'a mut [Value]) -> Option<Self> {
+        match regs.get_mut(..WINDOW) {
+            Some(s) => Some(Window(
+                <&mut [Value; WINDOW]>::try_from(s).expect("a full window"),
+            )),
+            None => None,
+        }
+    }
+
     /// The window at `base`, extending the stack to cover it when it does
     /// not yet.
     #[inline(always)]

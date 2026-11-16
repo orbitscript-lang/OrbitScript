@@ -51,6 +51,8 @@ pub(crate) enum Step {
     NoMemory,
     /// An error (or metamethod request) is in `rt.pending`.
     Throw,
+    /// The second cut left the instruction at the frame's pc alone.
+    Slow,
 }
 
 type Handler = fn(&mut Vm, usize, Insn, u64) -> Step;
@@ -352,6 +354,7 @@ impl Vm {
                     Step::Done => return Ok(Ran::Done),
                     Step::Switch => return Ok(Ran::Switch),
                     Step::NoMemory => return Ok(Ran::NoMemory),
+                    Step::Slow => unreachable!("only the second cut"),
                     Step::Throw => {
                         let (exc, at) = self.rt.pending.take().expect("a pending error");
                         match self.raise_at(exc, at) {
@@ -1516,3 +1519,5 @@ static HANDLERS: [Handler; 256] = {
     t[Opcode::NativeEntry as usize] = h_cold;
     t
 };
+
+mod quick;

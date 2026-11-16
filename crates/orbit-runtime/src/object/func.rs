@@ -55,7 +55,7 @@ pub(crate) struct ProtoCode {
     pub(crate) code: Box<[Op]>,
     /// The same instructions as packed words, which the threaded
     /// interpreter runs.
-    pub(crate) words: Box<[orbit_bytecode::insn::Insn]>,
+    pub(crate) words: std::rc::Rc<[orbit_bytecode::insn::Insn]>,
     /// Kept alive for the collector by the owning [`Proto`], which traces
     /// them.
     pub(crate) consts: Box<[Value]>,
@@ -84,7 +84,7 @@ impl ProtoCode {
     pub(crate) fn empty() -> ProtoCode {
         ProtoCode {
             code: Box::new([]),
-            words: Box::new([]),
+            words: std::rc::Rc::new([]),
             consts: Box::new([]),
             caches: Box::new([]),
             nparams: 0,

@@ -646,6 +646,8 @@ pub(crate) struct VmState {
     /// The threaded interpreter's running code and closure.
     pub(crate) cur: std::rc::Rc<crate::object::ProtoCode>,
     pub(crate) closure: Gc<crate::object::Closure>,
+    pub(crate) words: std::rc::Rc<[orbit_bytecode::insn::Insn]>,
+    pub(crate) fuel: u32,
     /// An error on its way from an instruction to the trampoline, with the pc after it.
     pub(crate) pending: Option<(ops::Exc, usize)>,
     /// Placeholder for cell slots not yet initialised by `CellNew`.
@@ -837,6 +839,8 @@ impl Vm {
                 prev_code: None,
                 cur: std::rc::Rc::new(crate::object::ProtoCode::empty()),
                 closure: Gc::from_bits(0),
+                words: std::rc::Rc::new([]),
+                fuel: 0,
                 pending: None,
                 dead_cell,
                 c_strings: CStrings::default(),
