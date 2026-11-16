@@ -71,6 +71,12 @@ Why: Rust's standard library can't seek its standard streams, and reopening the 
 
 Suite: `files.lua` seeks `io.stdin` only to check that a seek can fail.
 
+## Standard output and C modules' `stdout` are buffered apart
+
+`print`, `io.write` and `io.stdout` write through the isolate's own buffer, not the C library's `stdout`. A C module (or a C function called through `std.ffi`) that writes with `printf`, `fputs(..., stdout)` and the like fills the C library's buffer instead. Where the two mix, they can come out in another order than in lua5.5, where both share one buffer: `out("C1") print("L1") out("C2") io.write("L2\n")`, with `out` a C function writing to `stdout`, prints C1 L1 C2 L2 in lua5.5 and L1 L2 C1 C2 here, on a terminal or a pipe. `io.flush()` and `io.stdout:flush()` don't flush the C library's buffer, and at exit the C output comes after ours. Nothing is lost: the C library flushes its buffers at exit, and `io.popen` flushes them (and ours) before it starts the command. Standard input is buffered apart in the same way, so a C module that reads `stdin` with the C library after the script read from it doesn't see what the script's buffer already holds.
+
+Why: the isolate's output belongs to its host (an embedder can give it its own writer) and the `io` library is written in Rust. Interleaving output from both sides is rare, and a module that needs a precise order can flush its own output.
+
 ## Binary chunk layout
 
 `string.dump` writes OrbitScript's own binary format (`crates/orbit-bytecode/src/format.rs`): the signature `\27Orbit`, a format version, flags, the chunk, and a checksum. lua5.5's header instead starts `\27Lua`, a version byte 0x55 and a fixed run of size and test values (`int`, instruction, `lua_Integer`, `lua_Number`). Code that reads a dump's header with `string.unpack` sees different bytes. Like lua5.5, `load` rejects a chunk with any damaged header byte (the checksum covers every byte, not only the header) and reports a cut-short chunk as `truncated`.

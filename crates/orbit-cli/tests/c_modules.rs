@@ -122,7 +122,9 @@ fn compile_command(
         fo.push(&objects);
         let mut fe = std::ffi::OsString::from("/Fe");
         fe.push(output);
-        cmd.args(["/nologo", "/LD", "/O1", "/W3", "/I"])
+        // `/MD`: the shared C runtime, as modules are usually built (and
+        // as Rust links it), so the module's stdio is the program's.
+        cmd.args(["/nologo", "/LD", "/MD", "/O1", "/W3", "/I"])
             .arg(versioned)
             .arg("/I")
             .arg(include)
