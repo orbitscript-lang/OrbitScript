@@ -376,11 +376,13 @@ fn second_ctrl_c_ends_a_long_library_call() {
         let _ = child.kill();
         let _ = child.wait();
     }
-    // Exit status 130 here means the first Ctrl-C ended orbit; a success,
-    // that the search finished and a slower call is needed.
+    // Ending here means the first Ctrl-C ended orbit; a success, that the
+    // search finished and a slower call is needed.
     assert!(still_running, "orbit exited after one Ctrl-C: {status:?}");
     let status = status.expect("a second Ctrl-C didn't end orbit");
-    assert_eq!(status.code(), Some(130));
+    // Killed by SIGINT, as `lua` is (a shell reports status 130).
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(2), "{status:?}");
 }
 
 #[test]
