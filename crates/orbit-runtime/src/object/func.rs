@@ -70,6 +70,21 @@ pub(crate) struct ProtoCode {
 }
 
 impl ProtoCode {
+    /// No code: what the interpreter holds before it runs anything.
+    pub(crate) fn empty() -> ProtoCode {
+        ProtoCode {
+            code: Box::new([]),
+            consts: Box::new([]),
+            caches: Box::new([]),
+            nparams: 0,
+            is_vararg: false,
+            nregs: 0,
+            ncells: 0,
+            #[cfg(feature = "debugger")]
+            debug_mark: Default::default(),
+        }
+    }
+
     /// A copy in which [`Op::CapSelf`] reads capture `cap` instead, for a
     /// closure whose self capture no longer holds it (a `debug` write).
     pub(crate) fn without_cap_self(&self, cap: u8) -> ProtoCode {

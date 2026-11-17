@@ -699,6 +699,7 @@ fn temporaries(proto: &Proto, pc: u32) -> (usize, usize) {
 impl VmState {
     /// The `getlocal` index that reads register `reg` of Lua frame `fi`
     /// (for `getinfo`'s `ftransfer`).
+    #[cfg_attr(not(feature = "hooks"), allow(dead_code))]
     pub(crate) fn register_local(&self, heap: &LuaHeap, fi: usize, reg: usize) -> u32 {
         let f = &self.stack.frames[fi];
         let FrameKind::Lua { closure, .. } = f.kind else {

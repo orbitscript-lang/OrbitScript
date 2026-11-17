@@ -184,7 +184,16 @@ The frame kinds beyond `Lua` and `Native` are described in [VM semantics](vm-sem
 
 ### Dispatch
 
-`Vm::run` is one loop over the current frame's code (ADR-4), in `vm/dispatch.rs`:
+There are two interpreters for the same bytecode. The plain one, which runs everything unless a hook, breakpoint or step is armed, is a chain of handlers, one function per instruction (ADR-16):
+
+- **`vm/handlers/`** holds one handler per instruction, grouped by kind (`loads.rs`, `tables.rs`, `arith.rs`, `branches.rs`, `calls.rs`, `loops.rs`, `other.rs`). A handler gets the VM, the running frame's registers (`Regs`), the place in the code after its instruction (`Ip`) and the instruction itself (`Op`), and ends by jumping to the next instruction's handler. Each handler is compiled on its own, so an edit to one does not change the machine code of another.
+- A handler does the common case of its instruction. For anything else (an error, a metamethod, a stack that must grow) it jumps to the general case written next to it, which gives the registers up, works on the whole VM and returns to the trampoline.
+- `Regs` and `Ip` are raw pointers behind safe methods (`vm/handlers/regs.rs`). ADR-16 lists what they rest on.
+- A chain returns to its trampoline (`Vm::run_handlers`) when it runs out of fuel, which it spends on backward jumps and calls, and when the frame stack changes in a way it does not handle itself.
+
+The hooked interpreter is the loop described below, `run_loop::<true>`. The points about reading registers in place and copying by parts hold for the handlers too.
+
+The loop is one function over the current frame's code (ADR-4), in `vm/dispatch.rs`:
 
 ```rust
 loop {

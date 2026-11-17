@@ -31,6 +31,7 @@ const EVENTS: u8 = CALL | RETURN | LINE | COUNT;
 
 /// `old_pc` when the frame at `old_depth` was just entered: its first
 /// instruction always starts a line.
+#[cfg_attr(not(feature = "hooks"), allow(dead_code))]
 const FRESH: u32 = u32::MAX;
 
 /// A stack's hook.
@@ -49,6 +50,7 @@ pub(crate) struct Hook {
     pub(crate) active: bool,
     /// The instruction the line check last saw, and the frame depth it
     /// belongs to.
+    #[cfg_attr(not(feature = "hooks"), allow(dead_code))]
     pub(crate) old_pc: u32,
     pub(crate) old_depth: u32,
     /// A Lua frame was just entered (`Some(true)` for a tail call): the
@@ -148,6 +150,7 @@ impl Vm {
     /// The frame's saved pc is `pc + 1`, as while the instruction runs.
     #[cold]
     #[inline(never)]
+    #[cfg_attr(not(feature = "hooks"), allow(dead_code))]
     pub(crate) fn hook_point(&mut self, pc: usize, op: Op) -> Result<(), LuaError> {
         // Not inside a hook, which runs without events, as the
         // reference's interrupt is one.
@@ -258,6 +261,7 @@ impl Vm {
     /// reference's, it names the position of the interrupted function's
     /// caller.
     #[cold]
+    #[cfg_attr(not(feature = "hooks"), allow(dead_code))]
     fn interrupted(&mut self) -> LuaError {
         self.rt.stack.hook.mask &= !INTERRUPT;
         self.rt.host.clear_interrupt();

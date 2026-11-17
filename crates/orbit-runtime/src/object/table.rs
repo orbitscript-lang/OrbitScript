@@ -700,6 +700,13 @@ impl Table {
         true
     }
 
+    /// The tag byte and payload of `t[i]` when `i` is in the array part and
+    /// that slot holds a value.
+    #[inline(always)]
+    pub(crate) fn read_int_raw(&self, i: i64) -> Option<(u8, Payload)> {
+        self.array.live((i as u64).wrapping_sub(1))
+    }
+
     /// `t[s]` for a string key.
     #[inline]
     pub(crate) fn get_str(&self, heap: &LuaHeap, s: Gc<LuaStr>) -> Value {
@@ -1437,6 +1444,24 @@ pub(crate) enum IntStore {
     /// a metatable and the key is absent, so `__newindex` may apply, or the
     /// table could not grow and the slow path's retry raises the error.
     Slow,
+}
+
+/// `t[i] = v` when `i` is in the array part, `v` is not nil and no
+/// metatable could intercept the store; `false`, with nothing done,
+/// otherwise.
+#[inline(always)]
+pub(crate) fn store_in_array(heap: &mut LuaHeap, t: Gc<Table>, i: i64, v: Value) -> bool {
+    let idx = (i as u64).wrapping_sub(1);
+    let mut tab = heap.write_at_for(t, idx as usize, v);
+    if idx >= tab.array.len() as u64 || v.is_nil() {
+        return false;
+    }
+    let idx = idx as usize;
+    if tab.meta.is_some() && tab.array.tag(idx) == Tag::Nil {
+        return false;
+    }
+    tab.array.set(idx, v);
+    true
 }
 
 /// `t[i] = v` for the interpreter: like [`set_int`], but leaves the store

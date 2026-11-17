@@ -49,6 +49,12 @@ fn grow_window(regs: &mut Vec<Value>, base: usize) -> &mut [Value; WINDOW] {
 pub(crate) struct Window<'a>(&'a mut [Value; WINDOW]);
 
 impl<'a> Window<'a> {
+    /// A window over exactly these registers.
+    #[inline(always)]
+    pub(crate) fn of(regs: &'a mut [Value; WINDOW]) -> Self {
+        Window(regs)
+    }
+
     /// The window at `base`, extending the stack to cover it when it does
     /// not yet.
     #[inline(always)]
@@ -335,10 +341,10 @@ pub(crate) fn const_str(consts: &[Value], k: u16) -> Gc<crate::object::LuaStr> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Shape {
     pub(crate) code_id: usize,
-    nparams: u8,
-    is_vararg: bool,
-    nregs: u8,
-    ncells: u8,
+    pub(crate) nparams: u8,
+    pub(crate) is_vararg: bool,
+    pub(crate) nregs: u8,
+    pub(crate) ncells: u8,
 }
 
 impl Shape {

@@ -28,6 +28,7 @@ pub mod debugger;
 mod dispatch;
 mod fast;
 mod gc;
+mod handlers;
 pub(crate) mod hook;
 pub(crate) mod host;
 mod interp;
@@ -668,6 +669,25 @@ pub(crate) struct VmState {
     /// machine register. A cache, not part of any thread's stack, so it
     /// stays across coroutine switches.
     pub(crate) prev_code: Option<std::rc::Rc<crate::object::ProtoCode>>,
+    /// The running function's closure and code, as the plain
+    /// interpreter's handlers (`vm::handlers`) see them when they work on
+    /// the whole VM.
+    pub(crate) cur: std::rc::Rc<crate::object::ProtoCode>,
+    pub(crate) closure: Gc<crate::object::Closure>,
+    /// What is left of a handler chain's allowance of backward jumps and
+    /// calls before it returns to the trampoline.
+    pub(crate) fuel: u32,
+    /// The register stack's length while a handler chain runs.
+    pub(crate) stack_len: usize,
+    /// The running code and its first instruction as a handler chain
+    /// keeps them: calls and returns between handlers change these
+    /// alone, and `cur` follows when a handler needs the whole VM. Valid
+    /// while the frame of `closure` is on the stack.
+    pub(crate) code: *const crate::object::func::ProtoCode,
+    pub(crate) first_op: *const orbit_bytecode::Op,
+    /// An error (or metamethod request) on its way from an instruction to
+    /// the trampoline, with the pc after it.
+    pub(crate) pending: Option<(ops::Exc, usize)>,
     /// Placeholder for cell slots not yet initialised by `CellNew`.
     pub(crate) dead_cell: Gc<Cell>,
     /// End of the values of the last open-ended call or `Vararg`.
@@ -905,6 +925,13 @@ impl Vm {
                 natives: native::Natives::default(),
                 stack: Stack::default(),
                 prev_code: None,
+                cur: std::rc::Rc::new(crate::object::ProtoCode::empty()),
+                closure: Gc::from_bits(0),
+                fuel: 0,
+                stack_len: 0,
+                code: std::ptr::null(),
+                first_op: std::ptr::null(),
+                pending: None,
                 dead_cell,
                 c_strings: CStrings::default(),
                 top: 0,

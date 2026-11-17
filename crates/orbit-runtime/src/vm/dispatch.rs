@@ -43,7 +43,7 @@ use crate::vm::ops::{self, Arith, Exc};
 use crate::vm::{Frame, FrameKind, LuaError, Vm};
 
 /// What [`Vm::cold_op`] tells the loop to do next.
-enum Cold {
+pub(super) enum Cold {
     /// Go on at `pc`; `safepoint` says the instruction allocated.
     Next { pc: usize, safepoint: bool },
     /// The frame stack changed.
@@ -51,7 +51,7 @@ enum Cold {
 }
 
 /// What [`Vm::call_native_in_loop`] tells the loop to do next.
-enum NativeStep {
+pub(super) enum NativeStep {
     /// The native returned into the running frame with no hook armed:
     /// take the window again.
     Returned,
@@ -65,7 +65,7 @@ enum NativeStep {
 /// Where the frame stack stands after a call or a return made from the
 /// loop ([`Vm::call_from_loop`], [`Vm::return_from_loop`]): the loop
 /// picks its state up from here.
-enum Frames {
+pub(super) enum Frames {
     /// A Lua frame runs now, the callee or the caller: the loop switches
     /// to it in place.
     Lua(LuaFrame),
@@ -84,11 +84,11 @@ enum Frames {
 
 /// The loop's state for a Lua frame, as a call or return hands it over.
 #[derive(Clone, Copy)]
-struct LuaFrame {
-    closure: Gc<Closure>,
-    base: usize,
-    pc: usize,
-    code_id: usize,
+pub(super) struct LuaFrame {
+    pub(super) closure: Gc<Closure>,
+    pub(super) base: usize,
+    pub(super) pc: usize,
+    pub(super) code_id: usize,
 }
 
 impl Vm {
@@ -96,15 +96,28 @@ impl Vm {
     /// returns into a boundary, in the plain or the hooked
     /// dispatch loop as the stack's hook requires.
     pub(crate) fn run(&mut self) -> Result<(), LuaError> {
+        // A nested run (a native calling back into script code) leaves
+        // the outer run's function as it found it.
+        // That includes its fuel: the outer chain must run out of it no
+        // matter how many nested runs it starts.
+        let saved = (self.rt.cur.clone(), self.rt.closure, self.rt.fuel);
+        let r = self.run_frames();
+        self.rt.cur = saved.0;
+        self.rt.closure = saved.1;
+        self.rt.fuel = saved.2;
+        r
+    }
+
+    fn run_frames(&mut self) -> Result<(), LuaError> {
         loop {
             #[cfg(feature = "hooks")]
             let ran = if self.top_hooked() {
                 self.run_loop::<true>()?
             } else {
-                self.run_loop::<false>()?
+                self.run_handlers()?
             };
             #[cfg(not(feature = "hooks"))]
-            let ran = self.run_loop::<false>()?;
+            let ran = self.run_handlers()?;
             match ran {
                 Ran::Done => return Ok(()),
                 Ran::NoMemory => {
@@ -132,6 +145,7 @@ impl Vm {
     /// The dispatch loop. `HOOKED` adds a hook point before each
     /// instruction ([`crate::vm::hook`]); either loop returns
     /// [`Ran::Switch`] when the hook's state no longer matches it.
+    #[cfg_attr(not(feature = "hooks"), allow(dead_code))]
     fn run_loop<const HOOKED: bool>(&mut self) -> Result<Ran, LuaError> {
         // The running function's code, constants and caches. Returning to or
         // calling the same function (recursion) keeps the `Rc` instead of
@@ -1238,6 +1252,7 @@ impl Vm {
     /// a native runs here, in place.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(feature = "hooks"), allow(dead_code))]
     fn call_from_loop<const HOOKED: bool>(
         &mut self,
         callee: Value,
@@ -1350,7 +1365,7 @@ impl Vm {
     /// below this frame's, so the stack is already long enough for its
     /// results. Anything else is the general return.
     #[inline(always)]
-    fn return_from_loop(&mut self, src: usize, n: usize) -> Result<Frames, Exc> {
+    pub(super) fn return_from_loop(&mut self, src: usize, n: usize) -> Result<Frames, Exc> {
         let Some((caller, f)) = self.lua_caller() else {
             return Ok(Frames::Flow(self.do_return(src, n)?));
         };
@@ -1377,7 +1392,7 @@ impl Vm {
     /// The running frame's caller when it is a Lua frame, as the loop's
     /// state for it, with the running frame.
     #[inline(always)]
-    fn lua_caller(&self) -> Option<(LuaFrame, Frame)> {
+    pub(super) fn lua_caller(&self) -> Option<(LuaFrame, Frame)> {
         let [.., caller, f] = &self.rt.stack.frames[..] else {
             return None;
         };
@@ -1397,7 +1412,7 @@ impl Vm {
 
     /// Pop the running frame `f` and its cells.
     #[inline(always)]
-    fn pop_frame(&mut self, f: &Frame) {
+    pub(super) fn pop_frame(&mut self, f: &Frame) {
         self.rt.stack.frames.pop();
         let own_cells = f.cell_base as usize;
         if self.rt.stack.cells.len() > own_cells {
@@ -1410,7 +1425,7 @@ impl Vm {
     /// that leave the loop anyway to allocate or call. `pc` is the
     /// instruction after `op`; the result says where to go on.
     #[inline(never)]
-    fn cold_op(
+    pub(super) fn cold_op(
         &mut self,
         op: Op,
         cur: &ProtoCode,
@@ -1660,7 +1675,7 @@ impl Vm {
     /// so a plain return comes straight back to the loop. The caller saved
     /// its pc and tried the native's fast path.
     #[inline(always)]
-    fn call_native_in_loop(
+    pub(super) fn call_native_in_loop(
         &mut self,
         fa: usize,
         n: usize,
@@ -1743,7 +1758,7 @@ fn number_value(r: Result<Number, crate::object::number::ArithError>) -> Result<
 /// superclass). `None` when the lookup has to go through `__index` the
 /// general way.
 #[inline(always)]
-fn method_lookup(
+pub(super) fn method_lookup(
     heap: &LuaHeap,
     metas: &Metas,
     cur: &ProtoCode,
@@ -1788,7 +1803,7 @@ fn method_lookup(
 /// is a table. Read packed: a merged `Value` would leave the handle's upper
 /// payload bytes to the compiler (see [`Table::cached_str_packed`]).
 #[inline(always)]
-fn cached_table(tab: &Table, cache: &FieldCache) -> Option<Gc<Table>> {
+pub(in crate::vm) fn cached_table(tab: &Table, cache: &FieldCache) -> Option<Gc<Table>> {
     match tab.cached_str_packed(cache.slot.get() as usize, cache.key) {
         Some((Tag::Table, p)) => Some(Gc::from_bits(p.bits())),
         _ => None,

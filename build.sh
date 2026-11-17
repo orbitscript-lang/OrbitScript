@@ -321,7 +321,7 @@ shared_args="-p orbit-lib -p orbit-cli -p orbit-lsp --no-default-features --feat
 # a build without a profile. A minimum of 1 keeps the usual vector loop with
 # a scalar remainder.
 use_profile() {
-    build "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1"
+    build "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" "-Cllvm-args=-disable-icp"
 }
 
 # The shared layout's builds. Two things differ from the static ones.
@@ -373,7 +373,7 @@ build_shared() {
         "$cargo" build --profile "$profile" --target "$triple" $cargo_args
 }
 use_profile_shared() {
-    build_shared "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1"
+    build_shared "$@" -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" "-Cllvm-args=-disable-icp"
 }
 
 # liborbit as a C library only (--static-programs): the same crate built as
@@ -590,10 +590,10 @@ if [ "$check" = yes ]; then
     # never runs `orbitc` or `orbit-lsp`, so the profile has nothing for the
     # functions only they have.
     # shellcheck disable=SC2086 # plain words
-    build $static_args --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" \
+    build $static_args --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" "-Cllvm-args=-disable-icp" \
         -Cllvm-args=-pgo-warn-missing-function 2> "$log" || { cat "$log" >&2; exit 1; }
     # shellcheck disable=SC2086 # plain words
-    build_shared $shared_args --lib --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" \
+    build_shared $shared_args --lib --bin orbit -- "-Cprofile-use=$pgo" "-Cllvm-args=-vectorizer-min-trip-count=1" "-Cllvm-args=-disable-icp" \
         -Cllvm-args=-pgo-warn-missing-function 2>> "$log" || { cat "$log" >&2; exit 1; }
     # Only our crates: LLVM warns about dependencies too.
     stale='^warning: orbit.*\((hash mismatch)\|no profile data available for function\)'
@@ -613,7 +613,7 @@ if [ -n "$pgo" ] && [ -f "$pgo" ]; then
     echo "== optimizing with $pgo"
     run=use_profile
     run_shared=use_profile_shared
-    c_library_flags="-Cprofile-use=$pgo${sep}-Cllvm-args=-vectorizer-min-trip-count=1"
+    c_library_flags="-Cprofile-use=$pgo${sep}-Cllvm-args=-vectorizer-min-trip-count=1${sep}-Cllvm-args=-disable-icp"
 else
     [ "$no_pgo" = yes ] || echo "== no profile at $pgo: building without one"
     run=build
