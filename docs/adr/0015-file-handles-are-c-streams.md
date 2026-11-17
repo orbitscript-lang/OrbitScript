@@ -1,6 +1,6 @@
 # ADR-15: File handles are C streams
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
