@@ -17,6 +17,10 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 # that would (src/process.rs); already in the tree for orbit-virtmem and
 # signal-hook.
 libc = { version = "0.2", default-features = false }
+# Socket writes that never raise SIGPIPE (`send` with `MSG_NOSIGNAL`,
+# `SO_NOSIGPIPE`) in src/socket.rs, through a safe interface; already in
+# the tree for orbit-cli's terminal.
+rustix = { version = "1.1", default-features = false, features = ["std", "net"] }
 
 [target.'cfg(windows)'.dependencies]
 # AF_UNIX sockets and the debug-request event until std's Windows Unix
