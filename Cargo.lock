@@ -178,6 +178,7 @@ dependencies = [
  "libc",
  "orbit",
  "orbit-std",
+ "rustix",
  "serde_json",
  "windows-permissions",
  "windows-sys",

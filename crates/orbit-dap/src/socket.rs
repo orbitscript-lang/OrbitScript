@@ -1,6 +1,12 @@
 //! Local sockets for the debugger (ADR-12): a per-user directory only
 //! its owner can enter, and sockets named so a reused pid never lands on
 //! an old name. No TCP. On Windows the sockets come from [`crate::win`].
+//!
+//! Writing to an editor that has gone never raises `SIGPIPE`, which ends a
+//! program that runs scripts with its default action (`orbit` restores it,
+//! as `lua` has it): on Linux each write is a `send` with `MSG_NOSIGNAL`,
+//! on macOS the socket is set `SO_NOSIGPIPE`. Recent std writes Unix
+//! sockets that way itself, but older releases the MSRV allows don't.
 
 use std::io::{self, Read, Write};
 #[cfg(unix)]
@@ -23,7 +29,13 @@ pub(crate) struct Stream(RawStream);
 
 impl Stream {
     pub(crate) fn connect(path: &Path) -> io::Result<Stream> {
-        RawStream::connect(path).map(Stream)
+        RawStream::connect(path).and_then(Stream::new)
+    }
+
+    fn new(s: RawStream) -> io::Result<Stream> {
+        #[cfg(target_vendor = "apple")]
+        rustix::net::sockopt::set_socket_nosigpipe(&s, true)?;
+        Ok(Stream(s))
     }
 
     pub(crate) fn try_clone(&self) -> io::Result<Stream> {
@@ -56,6 +68,12 @@ impl Read for &Stream {
 }
 
 impl Write for Stream {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        use rustix::net::{SendFlags, send};
+        Ok(send(&self.0, buf, SendFlags::NOSIGNAL)?)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.write(buf)
     }
@@ -74,7 +92,7 @@ impl Listener {
         let s = self.0.accept().map(|(s, _)| s);
         #[cfg(windows)]
         let s = self.0.accept();
-        s.map(Stream)
+        s.and_then(Stream::new)
     }
 
     pub(crate) fn try_clone(&self) -> io::Result<Listener> {
