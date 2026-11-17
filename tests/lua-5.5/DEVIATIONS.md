@@ -123,6 +123,14 @@ Why: readline would be the CLI's first C library dependency. Ours is written in 
 
 Suite: `main.lua` checks the warning, which holds.
 
+## `SIGUSR1` starts the debug server
+
+`orbit` catches `SIGUSR1`: it starts serving debuggers, so `orbit --debug-attach <pid>` can attach to a running script (ADR-12). lua5.5 doesn't catch it, so `kill -USR1` ends it. `--no-debug-signal` leaves `SIGUSR1` at its default action, as in lua5.5. A process a script forks (through a C module such as luaposix) still catches the signal but has no debug server to start, so there `kill -USR1` does nothing.
+
+Why: attaching an editor to a script that didn't start under a debugger needs a way to ask it, and on Unix that's a signal. A forked child keeps the parent's handler but not the thread that answers it, and it has no editor to serve.
+
+Suite: none. `orbit-cli`'s `dap.rs` tests cover attaching.
+
 ## `os.exit(code, true)` from a coroutine
 
 `os.exit(code, true)` closes the main thread's variables still to close before it runs the finalizers, as lua5.5 does. When it is called from a coroutine, their `__close` handlers run on that coroutine: `coroutine.running()` inside one returns the coroutine (and `false`), where lua5.5 returns the main thread (and `true`). Called from the main thread, they match.
