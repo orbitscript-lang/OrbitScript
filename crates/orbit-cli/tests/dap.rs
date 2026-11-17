@@ -572,3 +572,31 @@ fn an_editor_that_vanishes_releases_the_program() {
     assert_eq!(code, 0);
     assert_eq!(out, "done\ttrue\n");
 }
+
+/// `orbit` gives SIGPIPE its default action, as `lua` has it, so the
+/// debugger's writes to an editor that has gone must not raise it: the
+/// program carries on. Here the editor sends a request and closes its
+/// socket before the answer is written. (std's Unix sockets write without
+/// SIGPIPE: `MSG_NOSIGNAL` on Linux, `SO_NOSIGPIPE` on macOS.)
+#[test]
+#[cfg(unix)]
+fn an_editor_that_closes_before_the_answer_leaves_the_program_running() {
+    use std::os::unix::net::UnixStream;
+    let mut run = Running::start("closes", &["--debug-listen"]);
+    let line = run.err_line();
+    let path = line
+        .split_once("debugger listening on ")
+        .map(|(_, p)| p.trim_end().to_owned())
+        .unwrap_or_else(|| panic!("no socket in {line:?}"));
+    for _ in 0..3 {
+        let mut s = UnixStream::connect(&path).unwrap();
+        let body = json!({"seq": 1, "type": "request", "command": "initialize", "arguments": {}})
+            .to_string();
+        write!(s, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        drop(s);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let (code, out) = run.finish();
+    assert_eq!(code, 0);
+    assert_eq!(out, "done\ttrue\n");
+}

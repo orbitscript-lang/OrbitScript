@@ -325,6 +325,46 @@ fn first_fault_signal_ends_orbit() {
     }
 }
 
+/// A script writing to a pipe whose reader has gone ends with SIGPIPE, as
+/// `lua` does (`orbit script | head -1`). Rust's runtime ignores SIGPIPE,
+/// and `print` ignores write errors, so before `signals::default_pipe_signal` such
+/// a script ran forever.
+#[test]
+#[cfg(unix)]
+fn writing_to_a_closed_pipe_ends_orbit() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+    let mut child = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
+        .args(["-e", "while true do print(1) end"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "1\n");
+    // The reader is dropped: the pipe has no reader left.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break Some(s);
+        }
+        if Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = status.expect("orbit kept running with no reader");
+    assert_eq!(status.signal(), Some(13), "{status:?}");
+}
+
 /// One Ctrl-C can't stop a long library call, which never reaches an
 /// interrupt check; a second ends the process, as it ends `lua`. This is
 /// what `main.lua`'s "long unbreakable search" checks, but its `.*b` search

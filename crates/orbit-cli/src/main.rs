@@ -269,6 +269,9 @@ fn main() -> ExitCode {
         Some(b"--debug-attach") => return dap::attach(&prog, &args),
         _ => {}
     }
+    // A script that writes to a closed pipe ends, as in `lua`.
+    #[cfg(unix)]
+    signals::default_pipe_signal();
     let cli = match parse(&args) {
         Ok(c) => c,
         Err(e) => return usage(&prog, e),
