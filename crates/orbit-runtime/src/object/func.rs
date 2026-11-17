@@ -80,8 +80,6 @@ impl ProtoCode {
             is_vararg: false,
             nregs: 0,
             ncells: 0,
-            builtin: false,
-            refuses_yield: false,
             #[cfg(feature = "debugger")]
             debug_mark: Default::default(),
         }

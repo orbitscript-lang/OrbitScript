@@ -255,7 +255,6 @@ pub(super) fn tail_call(vm: &mut Vm, mut regs: Regs, ip: Ip, op: Op) -> Step {
         || nargs < code.nparams
         || code.is_vararg
         || code.ncells > 0
-        || code.builtin
         || matches!(code.code.first(), Some(Op::NativeEntry { .. }))
         || frame.base != frame.func + 1
         || cells != frame.cell_base as usize
@@ -305,7 +304,7 @@ fn tail_call_general(vm: &mut Vm, regs: Regs, ip: Ip) -> Step {
     let callee = Window::take(&mut vm.rt.stack.regs, at.base)[func];
     if let Value::Closure(c) = callee {
         let code = &vm.heap.get(c).code;
-        if !code.builtin && !matches!(code.code.first(), Some(Op::NativeEntry { .. })) {
+        if !matches!(code.code.first(), Some(Op::NativeEntry { .. })) {
             // Replace the running frame with the callee's.
             let frame = vm.rt.stack.frames.pop().expect("the running frame");
             vm.rt.stack.cells.truncate(frame.cell_base as usize);

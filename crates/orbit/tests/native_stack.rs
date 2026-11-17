@@ -59,6 +59,7 @@ fn a_small_thread_stack_gets_an_error_not_a_crash() {
 #[test]
 fn a_loop_of_callbacks_does_not_grow_the_native_stack() {
     let mut iso = Runtime::new().new_isolate(Config::default());
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     let count = iso
         .scope(|s| {
             let src = "local gsub = string.gsub
