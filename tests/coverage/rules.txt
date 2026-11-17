@@ -18,6 +18,7 @@ crates/orbit-virtmem/src/os.rs       every   # its system calls
 crates/orbit-gc/src/os.rs            every   # memory trimming (ADR-2, ADR-6)
 crates/orbit-dap/src/process.rs      every   # signals and process inspection (ADR-12)
 crates/orbit-dap/src/win.rs          every   # Windows sockets and events (ADR-12)
+crates/orbit-cli/src/signals.rs      every   # the CLI's default signal actions (ADR-6)
 
 # The embedding API: the orbit crate, and the stack API it re-exports.
 crates/orbit/src                     public
