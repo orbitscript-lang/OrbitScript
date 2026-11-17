@@ -25,7 +25,6 @@
 //! read untrusted input, whose keys could then be chosen to collide.
 
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 mod args;
 #[cfg(unix)]
@@ -46,33 +45,29 @@ use orbit::{
 const COMMAND_LINE: &[u8] = b"=(command line)";
 use orbit_std::{STDIN, read_chunk_file};
 
-/// Whether Ctrl-C interrupts Lua code; false while interactive mode waits
-/// for input, when Ctrl-C ends `orbit` as it ends `lua`.
-static RUNNING: AtomicBool = AtomicBool::new(true);
-
 /// Ctrl-C raises `interrupted!` in the running Lua code, which `pcall` can
-/// catch, as in `lua`. A second one before the VM reaches a check (inside a
-/// long library call, say) ends the process, as it does `lua`.
+/// catch, as in `lua`. A second one while the first is still pending (inside
+/// a long library call, say) ends the process by `SIGINT`, as it does `lua`;
+/// so does one while interactive mode waits for input ([`awaiting_input`]).
+///
+/// The handlers only test and set the interrupt's flag, with no thread to
+/// serve them, so they keep working in a child forked by a C module.
 #[cfg(unix)]
 fn catch_interrupts(interrupt: orbit::Interrupt) {
-    let mut signals = match signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT]) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let _ = std::thread::Builder::new()
-        .name("interrupt".into())
-        .spawn(move || {
-            for _ in signals.forever() {
-                on_interrupt(&interrupt);
-            }
-        });
+    use signal_hook::{consts::SIGINT, flag};
+    let pending = interrupt.flag();
+    // Registered first, so it runs first: SIGINT's default action when a
+    // request is already pending; otherwise the next handler makes one.
+    let _ = flag::register_conditional_default(SIGINT, std::sync::Arc::clone(&pending))
+        .and_then(|_| flag::register(SIGINT, pending));
 }
 
-/// [`catch_interrupts`] where signal-hook has no signal iterator
+/// [`catch_interrupts`] where signal-hook has no default actions to run
 /// (Windows): the handler raises a flag, which a thread watches.
 #[cfg(not(unix))]
 fn catch_interrupts(interrupt: orbit::Interrupt) {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let flag = Arc::new(AtomicBool::new(false));
     if signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag)).is_err() {
         return;
@@ -83,17 +78,26 @@ fn catch_interrupts(interrupt: orbit::Interrupt) {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 if flag.swap(false, Ordering::Relaxed) {
-                    on_interrupt(&interrupt);
+                    if interrupt.pending() {
+                        std::process::exit(130);
+                    }
+                    interrupt.request();
                 }
             }
         });
 }
 
-fn on_interrupt(interrupt: &orbit::Interrupt) {
-    if !RUNNING.load(Ordering::Relaxed) || interrupt.pending() {
-        std::process::exit(130);
-    }
-    interrupt.request();
+/// Run `wait`, which waits for interactive input, with Ctrl-C ending
+/// `orbit` as it ends `lua`: a request is marked pending meanwhile, so any
+/// Ctrl-C counts as the second ([`catch_interrupts`]).
+#[cfg(feature = "repl")]
+fn awaiting_input<T>(interrupt: &orbit::Interrupt, wait: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::Ordering;
+    let pending = interrupt.flag();
+    pending.store(true, Ordering::Relaxed);
+    let r = wait();
+    pending.store(false, Ordering::Relaxed);
+    r
 }
 
 /// A `-e` or `-l` option, run in command-line order.
@@ -269,6 +273,9 @@ fn main() -> ExitCode {
         Some(b"--debug-attach") => return dap::attach(&prog, &args),
         _ => {}
     }
+    // A script that writes to a closed pipe ends, as in `lua`.
+    #[cfg(unix)]
+    signals::default_pipe_signal();
     let cli = match parse(&args) {
         Ok(c) => c,
         Err(e) => return usage(&prog, e),

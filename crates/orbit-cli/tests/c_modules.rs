@@ -276,3 +276,39 @@ fn calls_through_another_copy_of_the_runtime_reach_the_states_own() {
         .unwrap();
     check(&out, "ok\n");
 }
+
+/// A child a script forks (through a module like luaposix) gets
+/// `interrupted!` on Ctrl-C (`SIGINT`) as `lua`'s do. The handler must not
+/// need a thread: a forked child has only the thread that forked.
+#[test]
+#[cfg(unix)]
+fn forked_children_are_interrupted() {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cmod-posix");
+        assert!(build_module(&dir, "posixmod"));
+        dir
+    });
+    let code = "local px = require 'posixmod'
+        local pid = px.fork()
+        if pid == 0 then
+          local ok, e = pcall(function() while true do end end)
+          io.write('child: ', tostring(ok), ' ', tostring(e):match('interrupted!') or e, '\\n')
+          io.flush()
+          px.exit(0)
+        end
+        px.sleep(0.3)
+        px.kill(pid, 2)
+        for _ = 1, 100 do
+          local how, n = px.wait(pid, true)
+          if how then print('parent:', how, n) return end
+          px.sleep(0.1)
+        end
+        px.kill(pid, 9)
+        px.wait(pid)
+        print('parent: the child ignored SIGINT')";
+    check(
+        &orbit(&["-e", code], &cpath(dir)),
+        "child: false interrupted!\nparent:\texit\t0\n",
+    );
+}

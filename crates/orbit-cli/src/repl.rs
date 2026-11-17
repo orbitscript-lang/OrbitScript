@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 use orbit::{Chunk, Function, Pinned, Value};
 
-use crate::{RUNNING, Runner, STDIN, docall};
+use crate::{Runner, STDIN, awaiting_input, docall};
 
 #[cfg_attr(not(unix), allow(dead_code))]
 mod editor;
@@ -87,9 +87,8 @@ impl Runner {
         let _ = out.write_all(&prompt);
         let _ = out.flush();
         let mut line = Vec::new();
-        RUNNING.store(false, Ordering::Relaxed);
-        let read = self.stdin().read_line(&mut line);
-        RUNNING.store(true, Ordering::Relaxed);
+        let mut input = self.stdin();
+        let read = awaiting_input(&self.iso.interrupt(), || input.read_line(&mut line));
         match read {
             Ok(0) | Err(_) => None,
             Ok(_) => {
@@ -201,15 +200,16 @@ impl Runner {
     fn edit_line(&mut self, prompt: &[u8]) -> Option<Option<Vec<u8>>> {
         let mut le = self.repl.editor.take()?;
         let mut input = self.stdin();
-        RUNNING.store(false, Ordering::Relaxed);
-        let r = le.editor.read_line(
-            prompt,
-            &mut *le.term,
-            &mut input,
-            &mut std::io::stdout(),
-            &mut |path, frag| self.completions(path, frag),
-        );
-        RUNNING.store(true, Ordering::Relaxed);
+        let interrupt = self.iso.interrupt();
+        let r = awaiting_input(&interrupt, || {
+            le.editor.read_line(
+                prompt,
+                &mut *le.term,
+                &mut input,
+                &mut std::io::stdout(),
+                &mut |path, frag| self.completions(path, frag),
+            )
+        });
         let line = match r {
             Ok(editor::Outcome::Line(l)) => Some(l),
             Ok(editor::Outcome::Eof) => None,
@@ -252,7 +252,12 @@ impl Runner {
         let Some(complete) = &self.repl.complete else {
             return Vec::new();
         };
-        self.iso.scope(|s| {
+        // The completion function runs while interactive mode waits for
+        // input, when Ctrl-C would end `orbit` ([`awaiting_input`]); let it
+        // interrupt the function instead, then wait as before.
+        let pending = self.iso.interrupt().flag();
+        pending.store(false, Ordering::Relaxed);
+        let found = self.iso.scope(|s| {
             let Ok(complete) = complete.get(s) else {
                 return Vec::new();
             };
@@ -269,7 +274,9 @@ impl Runner {
                     .collect(),
                 Err(_) => Vec::new(),
             }
-        })
+        });
+        pending.store(true, Ordering::Relaxed);
+        found
     }
 }
 
