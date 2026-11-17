@@ -10,11 +10,6 @@
 //! those streams, and their buffers are out of the `io` library's reach.
 //! It takes no arguments.
 //!
-//! And it gives `SIGSEGV` and `SIGBUS` their default action back, for a
-//! program whose `main` is Rust (`orbit`): Rust's runtime catches them to
-//! report stack overflows, so a `SIGSEGV` sent with `kill()` is survived
-//! once, where it ends a C program such as `lua`.
-//!
 //! These are orbit-std's only unsafe calls apart from `ctime.rs` (ADR-6).
 
 #![allow(unsafe_code)]
@@ -149,15 +144,4 @@ pub(crate) fn flush_c_streams() {
     // SAFETY: a null stream asks the C library to flush every open output
     // stream; no pointer of ours is passed or kept.
     unsafe { libc::fflush(std::ptr::null_mut()) };
-}
-
-/// Give `SIGSEGV` and `SIGBUS` their default action (`SIG_DFL`), which
-/// ends the process on the first delivery, however it was sent.
-#[cfg(unix)]
-pub(crate) fn default_fault_signals() {
-    for signal in [libc::SIGSEGV, libc::SIGBUS] {
-        // SAFETY: `SIG_DFL` installs no handler: no code of ours runs on
-        // the signal, and nothing is passed but two constants.
-        unsafe { libc::signal(signal, libc::SIG_DFL) };
-    }
 }
