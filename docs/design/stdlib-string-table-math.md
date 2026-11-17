@@ -31,7 +31,7 @@ It is a backtracking matcher that interprets the pattern bytes as it goes, rathe
 
 Errors use lua5.5's messages: `malformed pattern (ends with '%')`, `malformed pattern (missing ']')`, `missing '[' after '%f' in pattern`, `invalid capture index %N`, `invalid pattern capture`, `unfinished capture`, `invalid use of '%' in replacement string`, `invalid replacement value (a table)`.
 
-`gsub` has two loops. With a string replacement it calls nothing, so it reads the subject, pattern and replacement once and expands each match straight into the result. With a function replacement it calls the function nested, once per match (`NativeCtx::call_want`, [VM](vm.md#natives)), so the matcher's state stays in Rust locals and nothing may yield across the call, as in lua5.5; with a table replacement it indexes the table with metamethods. A subject in which nothing was replaced is returned as it is. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
+`gsub` has two loops. With a string replacement it calls nothing, so it reads the subject, pattern and replacement once and expands each match straight into the result. With a function replacement it calls the function nested, once per match (`Stack::call`, which calls it in place, [VM](vm.md#natives)), so the matcher's state stays in Rust locals and nothing may yield across the call, as in lua5.5; with a table replacement it indexes the table with metamethods. A subject in which nothing was replaced is returned as it is. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
 
 ## format
 
@@ -56,19 +56,19 @@ The format parser implements every option of the manual (§6.4.2): endianness `<
 **Metamethods.** Since 5.3 the table functions read and write through `__index`/`__newindex` and take lengths from `__len`, and the suite checks this (sort.lua unpacks a *number* whose metatable has `__len` and `__index`). Each function has two paths:
 
 - a raw fast path when the argument is a table whose metatable (if any) has none of `__index`, `__newindex`, `__len`: plain array reads and writes, no calls;
-- a slow path (`table/slow.rs`) for `concat`, `unpack` and `move`: a plain loop that runs each metamethod nested as it comes, so nothing may yield across these functions, as in lua5.5.
+- a slow path (`table/slow.rs`) for each of them, written on the stack interface like the rest of the library: a plain loop that runs each metamethod nested as it comes, so nothing may yield across these functions, as in lua5.5.
 
 ```mermaid
 flowchart LR
     entry["native entry"] --> check{"plain table?"}
     check -- yes --> fast["raw loop<br/>(no calls)"] --> done["return"]
-    check -- no --> slow["loop with index_now,<br/>set_index_now, length_now"]
+    check -- no --> slow["loop with get_index,<br/>set_index_int, length"]
     slow -- "__index/__newindex/__len function" --> call["nested call"]
     call -- "result" --> slow
     slow -- finished --> done
 ```
 
-`NativeCtx`'s `*_now` helpers ([VM semantics](vm-semantics.md#natives)) give the slow paths `index`, `set_index`, `length`, `less_than` and `equal` with any metamethod already run, so each function reads as the loop it is. `math.max` and `math.min`, on the public API, compare with `Stack::compare`, which runs `__lt` nested too.
+The stack interface's `get_index`, `set_index_int`, `len` and `compare` run any metamethod nested, through the VM's `*_now` helpers ([VM semantics](vm-semantics.md#natives)), so each function reads as the loop it is; `math.max`, `math.min` and `sort` compare with `Stack::compare` the same way.
 
 **sort.** `sort` (`table/slow.rs`) is a bottom-up merge sort, because every comparison may be a call (a comparator or `__lt`, each a nested call). Merge sort does about n·log₂n − n comparisons, fewer than quicksort's average of about 1.39·n·log₂n, and comparisons dominate when they are Lua calls. The elements are copied into a scratch table, sorted there and written back; the scratch half needs a second table of n slots. Arrays of only numbers or only strings with no comparator take a fast path that sorts them with Rust's own stable sort.
 

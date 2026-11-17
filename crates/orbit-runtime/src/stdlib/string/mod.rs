@@ -6,11 +6,11 @@ mod pack;
 pub(crate) mod pattern;
 
 use crate::locale::Locale;
-use crate::object::{Gc, LuaStr, Value, number};
+use crate::object::{Gc, LuaStr, number};
 use crate::stack::{
-    Buffer, Fail, LibraryRow, Raised, Rest, Results, Return, Stack, StackResult, library_row,
+    Buffer, Fail, LibraryRow, Raised, Rest, Results, Return, Stack, StackResult, Type, library_row,
 };
-use crate::vm::{LuaError, NativeCtx, NativeReturn};
+
 use orbit_macros::native;
 
 use pattern::{Capture, Captures, Matcher, PatternError};
@@ -21,18 +21,14 @@ pub(crate) const FUNCTIONS: &[LibraryRow] = &[
     library_row::<rep>(),
     library_row::<byte>(),
     library_row::<char>(),
-    // `format` and `gsub` with a table or function call script code
-    // (`__tostring`, replacements) once per conversion or match; on the
-    // stack interface that costs measurably more, so they stay on the raw
-    // one.
-    LibraryRow::raw("string.format", format::format),
+    library_row::<format::format>(),
     library_row::<reverse>(),
     library_row::<upper>(),
     library_row::<lower>(),
     library_row::<find>(),
     library_row::<match_>(),
     library_row::<gmatch>(),
-    LibraryRow::raw("string.gsub", gsub),
+    library_row::<gsub>(),
     library_row::<pack::pack>(),
     library_row::<pack::unpack>(),
     library_row::<pack::packsize>(),
@@ -230,6 +226,7 @@ fn raise_pattern_error(s: &mut Stack<'_>, e: PatternError) -> Raised {
 }
 
 /// Push captures `0..n` of the match `a..b` of `subject`.
+#[inline(always)]
 fn push_captures(
     s: &mut Stack<'_>,
     subject: Gc<LuaStr>,
@@ -376,50 +373,48 @@ fn gmatch_step(s: &mut Stack<'_>) -> StackResult<Return> {
 // so the loop's state stays in locals; nothing may yield across the call,
 // as in the reference.
 
-fn gsub(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
-    let s = ctx.check_str(0)?;
-    let p = ctx.check_str(1)?;
-    let text = match ctx.arg(2) {
-        Value::Str(_) | Value::Int(_) | Value::Float(_) => Some(ctx.check_str(2)?),
-        Value::Table(_) | Value::Closure(_) | Value::Native(_) => None,
-        _ => return Err(ctx.type_error(2, "string/function/table")),
+#[native(crate = crate, name = "string.gsub")]
+fn gsub(s: &mut Stack<'_>) -> StackResult<Return> {
+    let subject = s.check_string_handle(1)?;
+    let pat = s.check_string_handle(2)?;
+    let text = match s.type_at(3) {
+        Type::String | Type::Number => Some(s.check_string_handle(3)?),
+        Type::Table | Type::Function => None,
+        _ => return Err(s.type_error(3, "string/function/table")),
     };
-    let len = ctx.bytes(s).len();
-    let max = if ctx.arg(3).is_nil() {
-        len as i64 + 1
-    } else {
-        ctx.check_int(3)?
-    };
+    let len = s.handle_bytes(subject).len();
+    let max = s.opt_integer(4, len as i64 + 1)?;
     // The subject, the pattern and the replacement stay rooted in the
     // window's first slots; calls go above them.
-    ctx.truncate(3);
-    let mut out = ctx.take_buf();
-    let mut caps = ctx.take_captures();
+    s.set_top(3)?;
+    let mut out = s.take_buffer();
+    let mut caps = s.take_captures();
     let done = match text {
         Some(r) => gsub_text(
-            ctx.bytes(s),
-            ctx.bytes(p),
-            ctx.bytes(r),
-            ctx.locale().chars(),
+            s.handle_bytes(subject),
+            s.handle_bytes(pat),
+            s.handle_bytes(r),
+            s.locale().chars(),
             &mut caps,
             max,
             &mut out,
         )
-        .map_err(|e| replacement_error(ctx, e)),
-        None => gsub_calls(ctx, s, p, &mut caps, max, &mut out),
+        .map_err(|e| replacement_error(s, e)),
+        None => gsub_calls(s, subject, pat, &mut caps, max, &mut out),
     };
-    ctx.give_captures(caps);
+    s.give_captures(caps);
     let done = done?;
     // Nothing was replaced: return the subject itself, as lua5.5 does
     // (`string.format("%p")` shows it is the same string).
-    let r = if done.changed {
-        out.extend_from_slice(&ctx.bytes(s)[done.tail..len]);
-        ctx.new_str_buf(out)
+    if done.changed {
+        out.extend_from_slice(&s.handle_bytes(subject)[done.tail..len]);
+        s.push_buffer(out);
     } else {
-        ctx.give_buf(out);
-        Value::Str(s)
-    };
-    ctx.ret([r, Value::Int(done.count)])
+        s.give_buffer(out);
+        s.push_copy(1);
+    }
+    s.push_integer(done.count);
+    Ok(Return::values(2))
 }
 
 /// What a gsub loop did.
@@ -480,15 +475,16 @@ fn gsub_text(
 /// gsub's loop for a table or function replacement, whose values may call
 /// script code.
 fn gsub_calls(
-    ctx: &mut NativeCtx<'_>,
-    s: Gc<LuaStr>,
-    p: Gc<LuaStr>,
+    s: &mut Stack<'_>,
+    subject: Gc<LuaStr>,
+    pat: Gc<LuaStr>,
     caps: &mut Captures,
     max: i64,
     out: &mut Vec<u8>,
-) -> Result<Done, LuaError> {
-    let anchored = ctx.bytes(p).first() == Some(&b'^');
-    let chars = ctx.locale().chars_rc();
+) -> StackResult<Done> {
+    let anchored = s.handle_bytes(pat).first() == Some(&b'^');
+    let chars = s.locale().chars_rc();
+    let table = s.type_at(3) == Type::Table;
     let mut done = Done {
         count: 0,
         changed: false,
@@ -496,17 +492,17 @@ fn gsub_calls(
     };
     let mut last = None;
     while done.count < max {
-        let found = find_next(ctx, s, p, &chars, caps, done.tail, anchored, last);
+        let found = find_next(s, subject, pat, &chars, caps, done.tail, anchored, last);
         let f = match found {
             Ok(Some((start, end))) => Found { start, end },
             Ok(None) => break,
-            Err(e) => return Err(pattern_error(ctx, e)),
+            Err(e) => return Err(raise_pattern_error(s, e)),
         };
-        out.extend_from_slice(&ctx.bytes(s)[done.tail..f.start]);
+        out.extend_from_slice(&s.handle_bytes(subject)[done.tail..f.start]);
         done.count += 1;
         done.tail = f.end;
         last = Some(f.end);
-        done.changed |= add_value(ctx, s, &f, caps, out)?;
+        done.changed |= add_value(s, table, subject, &f, caps, out)?;
         if anchored {
             break;
         }
@@ -519,7 +515,7 @@ fn gsub_calls(
 /// replacement function runs.
 #[allow(clippy::too_many_arguments)]
 fn find_next(
-    ctx: &NativeCtx<'_>,
+    st: &Stack<'_>,
     s: Gc<LuaStr>,
     p: Gc<LuaStr>,
     chars: &crate::locale::CharTables,
@@ -528,7 +524,7 @@ fn find_next(
     anchored: bool,
     last: Option<usize>,
 ) -> Result<Option<(usize, usize)>, PatternError> {
-    Matcher::new(ctx.bytes(s), ctx.bytes(p), chars, caps).find_from(
+    Matcher::new(st.handle_bytes(s), st.handle_bytes(p), chars, caps).find_from(
         pos,
         usize::from(anchored),
         anchored,
@@ -536,71 +532,43 @@ fn find_next(
     )
 }
 
-fn pattern_error(ctx: &mut NativeCtx<'_>, e: PatternError) -> LuaError {
-    ctx.error(&e.to_string())
-}
-
-/// The value of one capture.
-fn capture_value(ctx: &mut NativeCtx<'_>, s: Gc<LuaStr>, c: Capture) -> Value {
-    match c {
-        Capture::Span(a, b) => ctx.new_substr(s, a, b),
-        Capture::Position(at) => Value::Int(at as i64 + 1),
-    }
-}
-
 /// Append the table's or function's value for one match to `out`; true if
 /// it replaced the match (false or nil keeps it). Out of line and small,
 /// like [`find_next`]: its frame is below a replacement function's call.
 fn add_value(
-    ctx: &mut NativeCtx<'_>,
-    s: Gc<LuaStr>,
+    s: &mut Stack<'_>,
+    table: bool,
+    subject: Gc<LuaStr>,
     f: &Found,
     caps: &Captures,
     out: &mut Vec<u8>,
-) -> Result<bool, LuaError> {
-    let repl = ctx.arg(2);
-    let v = if let Value::Table(_) = repl {
+) -> StackResult<bool> {
+    if table {
         // The table indexed by the first capture.
-        let c = match caps.capture(0, f.start, f.end) {
-            Ok(c) => c,
-            Err(e) => return Err(pattern_error(ctx, e)),
-        };
-        let key = capture_value(ctx, s, c);
-        ctx.index_now(repl, key)?
+        push_captures(s, subject, caps, 1, f.start, f.end)?;
+        s.get_table(3)?;
     } else {
-        let at = ctx.len();
-        ctx.push(repl);
+        s.push_copy(3);
         let n = caps.nresults();
-        for i in 0..n {
-            let c = match caps.capture(i, f.start, f.end) {
-                Ok(c) => c,
-                Err(e) => return Err(pattern_error(ctx, e)),
-            };
-            let v = capture_value(ctx, s, c);
-            ctx.push(v);
-        }
-        ctx.call_want(n, 1)?;
-        let v = ctx.arg(at);
-        ctx.truncate(at);
-        v
-    };
-    match v {
-        Value::Nil | Value::Bool(false) => {
-            out.extend_from_slice(&ctx.bytes(s)[f.start..f.end]);
-            Ok(false)
-        }
-        Value::Str(_) | Value::Int(_) | Value::Float(_) => {
-            ctx.display(v, out);
-            Ok(true)
-        }
-        _ => Err(invalid_replacement(ctx, v)),
+        push_captures(s, subject, caps, n, f.start, f.end)?;
+        s.call(n as i32, 1)?;
     }
+    let replaced = if !s.to_boolean(-1) {
+        out.extend_from_slice(&s.handle_bytes(subject)[f.start..f.end]);
+        false
+    } else if let Err(type_name) = s.append_text_at(-1, 0, out)? {
+        return Err(invalid_replacement(s, type_name));
+    } else {
+        true
+    };
+    s.set_top(3)?;
+    Ok(replaced)
 }
 
 #[cold]
 #[inline(never)]
-fn invalid_replacement(ctx: &mut NativeCtx<'_>, v: Value) -> LuaError {
-    ctx.error(&format!("invalid replacement value (a {})", v.type_name()))
+fn invalid_replacement(s: &mut Stack<'_>, type_name: &str) -> Raised {
+    s.error(format!("invalid replacement value (a {type_name})").as_str())
 }
 
 /// Why a replacement string can't be expanded.
@@ -619,10 +587,10 @@ impl From<PatternError> for ReplacementError {
 
 #[cold]
 #[inline(never)]
-fn replacement_error(ctx: &mut NativeCtx<'_>, e: ReplacementError) -> LuaError {
+fn replacement_error(s: &mut Stack<'_>, e: ReplacementError) -> Raised {
     match e {
-        ReplacementError::Pattern(e) => pattern_error(ctx, e),
-        ReplacementError::Percent => ctx.error("invalid use of '%' in replacement string"),
+        ReplacementError::Pattern(e) => raise_pattern_error(s, e),
+        ReplacementError::Percent => s.error("invalid use of '%' in replacement string"),
     }
 }
 

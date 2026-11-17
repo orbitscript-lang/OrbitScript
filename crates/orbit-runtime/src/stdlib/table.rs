@@ -7,26 +7,21 @@
 
 mod slow;
 
-use crate::object::HashSeed;
-use crate::object::table as tbl;
-use crate::object::{Gc, Table, Value};
-use crate::stack::{Fail, LibraryRow, Rest, Results, Return, Stack, StackResult, library_row};
-use crate::vm::{LuaError, NativeCtx, NativeReturn};
+pub(crate) use slow::sort_primitive;
+
+use crate::stack::{
+    Buffer, Fail, LibraryRow, Rest, Results, Return, Stack, StackResult, Type, library_row,
+};
 use orbit_macros::native;
 
-type R = Result<NativeReturn, LuaError>;
-
-// `concat`, `unpack` and `move` run metamethods on their slow paths, so
-// they stay on the raw interface until the language rule's step gives them
-// a Rust fast path and an OrbitScript slow path.
 pub(super) const FUNCTIONS: &[LibraryRow] = &[
-    LibraryRow::raw("table.concat", concat),
-    LibraryRow::raw("table.unpack", unpack),
+    library_row::<concat>(),
+    library_row::<unpack>(),
     library_row::<pack>(),
-    LibraryRow::raw("table.move", move_),
-    LibraryRow::raw("table.insert", insert),
-    LibraryRow::raw("table.sort", slow::sort),
-    LibraryRow::raw("table.remove", slow::remove),
+    library_row::<move_>(),
+    library_row::<insert>(),
+    library_row::<sort>(),
+    library_row::<remove>(),
 ];
 
 /// Lua 5.5's additions, absent from 5.4 builds (ADR-14).
@@ -40,67 +35,28 @@ const MAX_HASH: i64 = 1 << 30;
 /// demand instead of failing the allocation outright.
 const MAX_RESERVE: usize = 1 << 24;
 
-fn get(ctx: &NativeCtx<'_>, t: Gc<Table>, i: i64) -> Value {
-    let heap = &ctx.vm.heap;
-    heap.get(t).get_int(HashSeed::of(heap), i)
+/// Whether argument `arg` is absent or nil.
+fn absent(s: &Stack<'_>, arg: i32) -> bool {
+    matches!(s.type_at(arg), Type::None | Type::Nil)
 }
 
-fn set(ctx: &mut NativeCtx<'_>, t: Gc<Table>, i: i64, v: Value) -> Result<(), LuaError> {
-    tbl::set_int(&mut ctx.vm.heap, t, i, v).map_err(|_| ctx.no_memory())?;
-    Ok(())
-}
-
-/// Argument `i` as a table without a metatable: the raw loops apply.
-fn plain(ctx: &NativeCtx<'_>, i: usize) -> Option<Gc<Table>> {
-    match ctx.arg(i) {
-        Value::Table(t) if ctx.vm.heap.get(t).meta.is_none() => Some(t),
-        _ => None,
-    }
-}
-
-/// `#t` for the table functions.
-fn length(ctx: &NativeCtx<'_>, t: Gc<Table>) -> i64 {
-    let heap = &ctx.vm.heap;
-    heap.get(t).border(HashSeed::of(heap))
-}
-
-fn concat(ctx: &mut NativeCtx<'_>) -> R {
-    let Some(t) = plain(ctx, 0) else {
-        return slow::concat(ctx);
+#[native(crate = crate, name = "table.concat")]
+fn concat(s: &mut Stack<'_>) -> StackResult<Buffer> {
+    let Some(t) = s.plain_table(1) else {
+        return slow::concat(s);
     };
-    let sep = if ctx.arg(1).is_nil() {
-        Vec::new()
+    let sep = separator(s)?;
+    let i = s.opt_integer(3, 1)?;
+    let j = if absent(s, 4) {
+        s.raw_border(t)
     } else {
-        let s = ctx.check_str(1)?;
-        ctx.bytes(s).to_vec()
-    };
-    let i = ctx.opt_int(2, 1)?;
-    let j = if ctx.arg(3).is_nil() {
-        length(ctx, t)
-    } else {
-        ctx.check_int(3)?
+        s.check_integer(4)?
     };
     let mut out = Vec::new();
     let mut k = i;
     while k <= j {
-        let v = get(ctx, t, k);
-        // Long pieces grow the buffer by a lot: reserve first, so running
-        // out of memory is an error rather than an abort.
-        let piece = match v {
-            Value::Str(s) => ctx.bytes(s).len(),
-            _ => 0,
-        };
-        if out.try_reserve(piece + sep.len()).is_err() {
-            return Err(ctx.no_memory());
-        }
-        match v {
-            Value::Str(_) | Value::Int(_) | Value::Float(_) => ctx.display(v, &mut out),
-            _ => {
-                return Err(ctx.error(&format!(
-                    "invalid value ({}) at index {k} in table for 'concat'",
-                    v.type_name()
-                )));
-            }
+        if let Err(type_name) = s.append_raw_index(t, k, sep.len(), &mut out)? {
+            return Err(invalid_value(s, type_name, k));
         }
         if k == j {
             break;
@@ -108,72 +64,96 @@ fn concat(ctx: &mut NativeCtx<'_>) -> R {
         out.extend_from_slice(&sep);
         k += 1;
     }
-    let r = ctx.new_str_owned(out);
-    ctx.ret([r])
+    Ok(Buffer(out))
 }
 
-fn unpack(ctx: &mut NativeCtx<'_>) -> R {
-    let Some(t) = plain(ctx, 0) else {
-        return slow::unpack(ctx);
+/// `concat`'s separator, argument 2.
+fn separator(s: &mut Stack<'_>) -> StackResult<Vec<u8>> {
+    if absent(s, 2) {
+        return Ok(Vec::new());
+    }
+    let sep = s.check_string_handle(2)?;
+    Ok(s.handle_bytes(sep).to_vec())
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_value(s: &mut Stack<'_>, type_name: &str, k: i64) -> crate::stack::Raised {
+    let message = format!("invalid value ({type_name}) at index {k} in table for 'concat'");
+    s.error(message.as_str())
+}
+
+#[native(crate = crate, name = "table.unpack")]
+fn unpack(s: &mut Stack<'_>) -> StackResult<Return> {
+    let Some(t) = s.plain_table(1) else {
+        return slow::unpack(s);
     };
-    let i = ctx.opt_int(1, 1)?;
-    let j = if ctx.arg(2).is_nil() {
-        length(ctx, t)
+    let i = s.opt_integer(2, 1)?;
+    let j = if matches!(
+        s.type_at(3),
+        crate::stack::Type::None | crate::stack::Type::Nil
+    ) {
+        s.raw_border(t)
     } else {
-        ctx.check_int(2)?
+        s.check_integer(3)?
     };
     if i > j {
-        return Ok(NativeReturn::Return(0));
+        return Ok(Return::values(0));
     }
-    let room = ctx.vm.rt.host.max_stack().saturating_sub(ctx.len());
+    let room = s.room();
     let Some(n) = j
         .checked_sub(i)
         .and_then(|d| d.checked_add(1))
         // More results than an integer holds, or the stack.
         .filter(|&n| n < MAX_INT && (n as u64) < room as u64)
     else {
-        return Err(ctx.error("too many results to unpack"));
+        return Err(s.error("too many results to unpack"));
     };
     let mut k = i;
     loop {
-        let v = get(ctx, t, k);
-        ctx.push(v);
+        s.push_raw_index(t, k);
         if k == j {
             break;
         }
         k += 1;
     }
-    Ok(NativeReturn::Return(n as usize))
+    Ok(Return::values(n as usize))
 }
 
-fn insert(ctx: &mut NativeCtx<'_>) -> R {
-    let Some(t) = plain(ctx, 0) else {
-        return slow::insert(ctx);
+#[native(crate = crate, name = "table.insert")]
+fn insert(s: &mut Stack<'_>) -> StackResult<Return> {
+    let Some(t) = s.plain_table(1) else {
+        return slow::insert(s);
     };
-    let e = length(ctx, t).wrapping_add(1);
-    match ctx.nargs() {
-        2 => {
-            let v = ctx.arg(1);
-            set(ctx, t, e, v)?;
-        }
+    let e = s.raw_border(t).wrapping_add(1);
+    match s.top() {
+        2 => s.raw_set_int_from(t, e, 2)?,
         3 => {
-            let pos = ctx.check_int(1)?;
+            let pos = s.check_integer(2)?;
             // `pos - 1` as unsigned: 1..=e is valid.
             if (pos.wrapping_sub(1) as u64) >= e as u64 {
-                return Err(ctx.arg_error(1, "position out of bounds"));
+                return Err(s.arg_error(2, "position out of bounds"));
             }
             let mut i = e;
             while i > pos {
-                let v = get(ctx, t, i - 1);
-                set(ctx, t, i, v)?;
+                s.raw_copy_int(t, i - 1, t, i)?;
                 i -= 1;
             }
-            let v = ctx.arg(2);
-            set(ctx, t, pos, v)?;
+            s.raw_set_int_from(t, pos, 3)?;
         }
-        _ => return Err(ctx.error("wrong number of arguments to 'insert'")),
+        _ => return Err(s.error("wrong number of arguments to 'insert'")),
     }
-    Ok(NativeReturn::Return(0))
+    Ok(Return::values(0))
+}
+
+#[native(crate = crate, name = "table.sort")]
+fn sort(s: &mut Stack<'_>) -> StackResult<Return> {
+    slow::sort(s)
+}
+
+#[native(crate = crate, name = "table.remove")]
+fn remove(s: &mut Stack<'_>) -> StackResult<Return> {
+    slow::remove(s)
 }
 
 #[native(crate = crate, name = "table.pack")]
@@ -184,39 +164,37 @@ fn pack(s: &mut Stack<'_>, values: Rest) -> StackResult<Return> {
     Ok(Return::values(1))
 }
 
-fn move_(ctx: &mut NativeCtx<'_>) -> R {
-    let (Some(a1), true) = (
-        plain(ctx, 0),
-        ctx.arg(4).is_nil() || plain(ctx, 4).is_some(),
-    ) else {
-        return slow::move_(ctx);
+#[native(crate = crate, name = "table.move")]
+fn move_(s: &mut Stack<'_>) -> StackResult<Return> {
+    let explicit = !absent(s, 5);
+    let (Some(a1), true) = (s.plain_table(1), !explicit || s.plain_table(5).is_some()) else {
+        return slow::move_(s);
     };
-    let f = ctx.check_int(1)?;
-    let e = ctx.check_int(2)?;
-    let t = ctx.check_int(3)?;
-    let a2 = plain(ctx, 4).unwrap_or(a1);
+    let f = s.check_integer(2)?;
+    let e = s.check_integer(3)?;
+    let t = s.check_integer(4)?;
+    let a2 = s.plain_table(5).unwrap_or(a1);
     if e >= f {
         // The elements after the first; their count must fit an integer.
         let Some(n) = e.checked_sub(f).filter(|&n| n < i64::MAX) else {
-            return Err(ctx.arg_error(2, "too many elements to move"));
+            return Err(s.arg_error(3, "too many elements to move"));
         };
         if t.checked_add(n).is_none() {
-            return Err(ctx.arg_error(3, "destination wrap around"));
+            return Err(s.arg_error(4, "destination wrap around"));
         }
         let overlapping = a1 == a2 && t > f && t <= e;
         if overlapping {
             for i in (0..=n).rev() {
-                let v = get(ctx, a1, f + i);
-                set(ctx, a2, t + i, v)?;
+                s.raw_copy_int(a1, f + i, a2, t + i)?;
             }
         } else {
             for i in 0..=n {
-                let v = get(ctx, a1, f + i);
-                set(ctx, a2, t + i, v)?;
+                s.raw_copy_int(a1, f + i, a2, t + i)?;
             }
         }
     }
-    ctx.ret([Value::Table(a2)])
+    s.push_copy(if explicit { 5 } else { 1 });
+    Ok(Return::values(1))
 }
 
 // Both arguments are checked before either's range, as the reference does.
