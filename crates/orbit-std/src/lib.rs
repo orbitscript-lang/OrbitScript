@@ -236,6 +236,18 @@ pub fn open_utf8<'s>(s: &'s Scope<'s>) -> Result<orbit::Table<'s>, Error> {
     utf8::open(s)
 }
 
+/// Give `SIGSEGV` and `SIGBUS` their default action back, as a C program
+/// such as `lua` has them, for a host whose `main` is Rust. Rust's runtime
+/// catches both to report a stack overflow; any other `SIGSEGV`, such as
+/// one sent with `kill()`, only resets the handler, so the process survives
+/// it once, and so do processes it forks. Call this before running scripts.
+/// Afterwards a stack overflow ends the process with a plain `SIGSEGV`
+/// rather than Rust's message. Does nothing on Windows.
+pub fn default_fault_signals() {
+    #[cfg(unix)]
+    crt::default_fault_signals();
+}
+
 /// Flush every open file's buffer, as the C library does at exit (standard
 /// output is the isolate's to flush: [`Isolate::flush`]).
 #[cfg(feature = "io")]

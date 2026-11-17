@@ -256,6 +256,9 @@ fn main() -> ExitCode {
         err_println!("{prog}: {m}");
         return ExitCode::FAILURE;
     }
+    // `lua` ends on the first SIGSEGV or SIGBUS, however it was sent, and
+    // so do the processes a script forks.
+    orbit_std::default_fault_signals();
     #[cfg(feature = "dap")]
     match args.get(1).map(Vec::as_slice) {
         Some(b"--debug-server") => return dap::server(&prog),

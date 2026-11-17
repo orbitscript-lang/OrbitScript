@@ -279,6 +279,52 @@ fn print_output_reaches_a_pipe_at_once() {
     assert_eq!(line.as_deref(), Ok("ready\n"));
 }
 
+/// The first `SIGSEGV` or `SIGBUS` ends `orbit`, as it ends `lua`, even
+/// one sent with `kill()`. Rust's runtime catches both to report stack
+/// overflows, and without `orbit_std::default_fault_signals` a signal that
+/// isn't a fault only reset its handler, so `orbit` carried on (and so did
+/// the processes a script forked).
+#[test]
+#[cfg(unix)]
+fn first_fault_signal_ends_orbit() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+    for (name, number) in [
+        ("SEGV", 11),
+        ("BUS", if cfg!(target_os = "linux") { 7 } else { 10 }),
+    ] {
+        let mut child = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
+            .args(["-e", "io.write('ready\\n') io.flush() while true do end"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut ready = [0u8; 6];
+        std::io::Read::read_exact(child.stdout.as_mut().unwrap(), &mut ready).unwrap();
+        let pid = child.id().to_string();
+        let sent = Command::new("kill")
+            .args([&format!("-{name}"), &pid])
+            .status();
+        assert!(sent.is_ok_and(|s| s.success()), "kill -{name} {pid} failed");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break Some(s);
+            }
+            if Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let status = status.unwrap_or_else(|| panic!("orbit survived SIG{name}"));
+        assert_eq!(status.signal(), Some(number), "SIG{name}: {status:?}");
+    }
+}
+
 /// One Ctrl-C can't stop a long library call, which never reaches an
 /// interrupt check; a second ends the process, as it ends `lua`. This is
 /// what `main.lua`'s "long unbreakable search" checks, but its `.*b` search
