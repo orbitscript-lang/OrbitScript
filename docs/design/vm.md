@@ -223,7 +223,7 @@ The loop keeps the running frame's state in locals (base, pc, code and a fixed-s
 ### Native functions
 
 ```rust
-pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
+pub(crate) type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 pub type FastFn = fn(FastCtx<'_>, &[Value]) -> Option<Value>; // FastCtx: the heap, the metatables, the wanted results
 pub type Continuation = fn(&mut NativeCtx<'_>, CallOutcome) -> Result<NativeReturn, LuaError>;
 
@@ -236,6 +236,8 @@ pub enum NativeReturn {
     // ... yield, close
 }
 ```
+
+**Two ways to write one.** A native is written one of two ways: in Rust as a `#[native]` function on the stack interface (`Stack`, the same API C modules and embedders use), or as OrbitScript. The raw interface above, `NativeCtx` and `NativeReturn`, is private to `orbit-runtime`, and the raw natives are all in `vm/natives/`: the ones that work the VM's control or switch coroutines (`pcall`, `xpcall`, `error`, `pairs`, `ipairs`, `coroutine.resume`, `yield`, `wrap` and `close`), the `debug` functions that read another coroutine's frames (`getinfo`, `getlocal`, `setlocal`, `traceback`, `sethook`, `gethook`), `load`, `os.exit`'s closing of the state, `tostring` (which calls `__tostring`), `collectgarbage` (which runs finalizers by continuation), and `next` and `setmetatable`, which measured faster raw. Hosts reach the VM through `Stack` too (`Vm::host_stack`), and `orbit`'s chunk loading through the narrow `ChunkLoader`. The `orbit` crate's `Call` closures stay for embedders; the first-party libraries (`orbit-std`, `orbit-ffi`) can't use them, which their `clippy.toml` enforces.
 
 `NativeCtx` is the native's window of the register stack: its arguments first, then whatever it pushes. It has argument access and checks (`arg`, `check_str`, `check_int`, with Lua's `bad argument #2 to 'format' (...)` messages, the function name coming from the call site), window editing (`set`, `push`, `truncate`), allocation, and metatable helpers. A native calls script code in one of two ways (ADR-3):
 

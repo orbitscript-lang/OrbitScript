@@ -14,7 +14,6 @@ mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
 pub(crate) mod dump;
-mod load;
 pub(crate) mod string;
 pub(crate) mod table;
 
@@ -22,31 +21,6 @@ use crate::stack::LibraryRow;
 use crate::vm::Vm;
 
 pub use chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
-
-pub use load::load_chunk_in;
-
-/// Call `__tostring` handler `h` on `v` now, nested, for `tostring` and
-/// `string.format`'s `%s`: its result, which must be a string or a number.
-pub(crate) fn tostring_now(
-    ctx: &mut crate::vm::NativeCtx<'_>,
-    h: crate::object::Value,
-    v: crate::object::Value,
-) -> Result<crate::object::Value, crate::vm::LuaError> {
-    use crate::object::Value;
-    let at = ctx.len();
-    ctx.push(h);
-    ctx.push(v);
-    ctx.call_want(1, 1)?;
-    let r = ctx.arg(at);
-    ctx.truncate(at);
-    match r {
-        Value::Str(_) | Value::Int(_) | Value::Float(_) => Ok(r),
-        _ => {
-            let msg = ctx.new_str(b"'__tostring' must return a string");
-            Err(ctx.error_value(msg))
-        }
-    }
-}
 
 /// Open every library this build has: base functions as globals, plus the
 /// library tables.
@@ -90,7 +64,7 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
     let opened = match lib {
         Lib::Base => {
             base::open(vm);
-            for &(name, f) in load::FUNCTIONS {
+            for &(name, f) in crate::vm::natives::load::FUNCTIONS {
                 let v = vm.register_native(name, f);
                 vm.set_global(name, v);
             }

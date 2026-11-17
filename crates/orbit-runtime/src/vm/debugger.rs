@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::object::{Closure, Gc, LuaHeap, NativeId, Proto, ProtoCode, Thread, Value};
+#[cfg(test)]
 use crate::vm::debug::Level;
 use crate::vm::{FrameKind, LuaError, NativeCtx, NativeReturn, Vm};
 
@@ -105,21 +106,30 @@ impl std::fmt::Debug for Paused<'_, '_> {
 impl<'v> Paused<'_, 'v> {
     /// Activation `n` of the stopped stack: 0 is the function that stopped,
     /// 1 its caller, and so on.
-    pub fn level(&self, n: usize) -> Option<Level> {
+    #[cfg(test)]
+    pub(crate) fn level(&self, n: usize) -> Option<Level> {
         // Level 0 of the context is the native reporting the stop; the
         // hook marker below it is no activation.
         self.ctx.level(n + 1)
     }
 
-    /// [`Paused::ctx`], read only.
-    pub fn ctx_ref(&self) -> &NativeCtx<'v> {
+    /// The stack window the stop is reported from: the error value of a
+    /// [`StopReason::Error`] can be pushed on it.
+    pub fn stack(&mut self) -> crate::stack::Stack<'_> {
+        crate::stack::Stack::new(self.ctx.reborrow())
+    }
+
+    /// The context the stop is reported from, for the tests to read the
+    /// stopped frames. Its own level 0 is the reporting native: add one to
+    /// [`Paused::level`]'s numbers.
+    #[cfg(test)]
+    pub(crate) fn ctx_ref(&self) -> &NativeCtx<'v> {
         self.ctx
     }
 
-    /// The context the stop is reported from, for the rest of the debug
-    /// interface (locals, upvalues, calling functions). Its own level 0 is
-    /// the reporting native: add one to [`Paused::level`]'s numbers.
-    pub fn ctx(&mut self) -> &mut NativeCtx<'v> {
+    /// [`Paused::ctx_ref`], to change locals and call functions.
+    #[cfg(test)]
+    pub(crate) fn ctx(&mut self) -> &mut NativeCtx<'v> {
         self.ctx
     }
 }

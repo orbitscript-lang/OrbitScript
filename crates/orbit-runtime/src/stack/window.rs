@@ -300,7 +300,7 @@ impl std::fmt::Debug for Stack<'_> {
 
 impl<'s> Stack<'s> {
     #[doc(hidden)]
-    pub fn new(ctx: NativeCtx<'s>) -> Stack<'s> {
+    pub(crate) fn new(ctx: NativeCtx<'s>) -> Stack<'s> {
         Stack { ctx }
     }
 
@@ -360,7 +360,7 @@ impl<'s> Stack<'s> {
                 }
             }
             Ret::Exit { code, close } => {
-                return super::exit::exit_process(c, code, close);
+                return crate::vm::natives::exit::exit_process(c, code, close);
             }
         })
     }
@@ -596,7 +596,7 @@ impl<'s> Stack<'s> {
         }
         let h = self.ctx.metamethod(v, MetaField::ToString);
         if !h.is_nil() {
-            let r = crate::stdlib::tostring_now(&mut self.ctx, h, v)?;
+            let r = crate::vm::natives::base::tostring_now(&mut self.ctx, h, v)?;
             self.ctx.set((arg - 1) as usize, r);
         }
         Ok(())
@@ -2172,7 +2172,7 @@ impl<'s> Stack<'s> {
         let name = name.as_bytes();
         let mode = mode.as_bytes();
         let env = RawValue::Table(self.ctx.vm.rt.globals);
-        match stdlib::load_chunk_in(&mut self.ctx, bytes, name, mode, env) {
+        match crate::vm::natives::load::load_chunk_in(&mut self.ctx, bytes, name, mode, env) {
             Ok(f) => {
                 self.ctx.push(f);
                 Status::Ok
@@ -2198,14 +2198,14 @@ impl<'s> Stack<'s> {
     pub fn load_with(
         &mut self,
         env: i32,
-        load: impl FnOnce(&mut NativeCtx<'s>, RawValue) -> Result<RawValue, String>,
+        load: impl FnOnce(&mut ChunkLoader<'_, 's>, RawValue) -> Result<RawValue, String>,
     ) -> Status {
         let env = if env == 0 {
             RawValue::Table(self.ctx.vm.rt.globals)
         } else {
             self.get(env)
         };
-        match load(&mut self.ctx, env) {
+        match load(&mut ChunkLoader { ctx: &mut self.ctx }, env) {
             Ok(f) => {
                 self.ctx.push(f);
                 Status::Ok
@@ -2222,11 +2222,11 @@ impl<'s> Stack<'s> {
         }
     }
 
-    /// The runtime's context under the window, for the `orbit` crate's
-    /// own operations.
+    /// Push a runtime value as it is, for the `orbit` crate's own
+    /// operations (a debugger stop's error value).
     #[doc(hidden)]
-    pub fn native_ctx(&mut self) -> &mut NativeCtx<'s> {
-        &mut self.ctx
+    pub fn push_raw_value(&mut self, v: RawValue) {
+        self.ctx.push(v);
     }
 
     /// Push the main function of a chunk `orbit::Compiler`
@@ -2546,7 +2546,9 @@ impl<'s> Stack<'s> {
     /// `os.exit`), after the isolate closes (if it does) and before
     /// standard output is flushed.
     pub fn before_exit(&mut self, hook: impl Fn() + 'static) {
-        super::exit::exit_hooks(self.ctx.vm).0.push(Box::new(hook));
+        crate::vm::natives::exit::exit_hooks(self.ctx.vm)
+            .0
+            .push(Box::new(hook));
     }
 
     /// Let the collector run if it is due, as between statements: for a
@@ -3088,5 +3090,43 @@ impl<'a> Control<'a> {
             super::ErrorBreak::Uncaught => engine::ErrorBreak::Uncaught,
             super::ErrorBreak::All => engine::ErrorBreak::All,
         })
+    }
+}
+
+/// What a host's chunk loader may do while [`Stack::load_with`] runs it:
+/// read the isolate's hash seed, link a compiled chunk, or load a binary
+/// one. `orbit`'s chunk loading is written on it.
+#[doc(hidden)]
+pub struct ChunkLoader<'a, 's> {
+    ctx: &'a mut NativeCtx<'s>,
+}
+
+impl ChunkLoader<'_, '_> {
+    /// The isolate's hash seed, for the compiler's maps.
+    pub fn hash_seed(&self) -> u64 {
+        self.ctx.vm.hash_seed()
+    }
+
+    /// Link `chunk` with `env` as its `_ENV` and give its main function
+    /// (not yet rooted).
+    pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: RawValue) -> RawValue {
+        self.ctx.link(chunk, env)
+    }
+
+    /// Decode and check the binary chunk `bytes` (named `source`), and
+    /// link it with `env`; or the message.
+    pub fn load_binary(
+        &mut self,
+        bytes: &[u8],
+        source: &[u8],
+        env: RawValue,
+    ) -> Result<RawValue, String> {
+        crate::vm::natives::load::load_chunk_in(self.ctx, bytes, source, b"b", env)
+    }
+}
+
+impl std::fmt::Debug for ChunkLoader<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChunkLoader").finish_non_exhaustive()
     }
 }

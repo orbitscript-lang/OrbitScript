@@ -1,0 +1,7 @@
+# A first-party library writes its functions with `#[native]` on the stack
+# interface, like the runtime's own (docs/design/vm.md, "Native functions"):
+# the `Call` closures stay for embedders.
+disallowed-types = [
+    { path = "orbit::Call", reason = "first-party libraries write natives with #[native]" },
+    { path = "orbit::HostFunction", reason = "first-party libraries write natives with #[native]" },
+]

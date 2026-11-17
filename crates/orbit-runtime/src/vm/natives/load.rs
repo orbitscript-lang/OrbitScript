@@ -11,7 +11,7 @@ use crate::object::Value;
 use crate::vm::op::UnlinkedChunk;
 use crate::vm::{LuaError, NativeCtx, NativeFn, NativeReturn, VmState};
 
-pub(super) use super::chunk::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
+use crate::stdlib::{BINARY_SIGNATURE, chunk_id, is_orbitscript_file};
 
 type R = Result<NativeReturn, LuaError>;
 
@@ -55,7 +55,7 @@ pub(crate) fn load_chunk(
 
 /// [`load_chunk`] for other libraries (the C API's `lua_load`): `mode` is
 /// `load`'s mode string (`b"bt"` for both kinds of chunk).
-pub fn load_chunk_in(
+pub(crate) fn load_chunk_in(
     ctx: &mut NativeCtx<'_>,
     bytes: &[u8],
     source: &[u8],

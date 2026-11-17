@@ -35,7 +35,7 @@ pub(crate) struct Running {
 /// for the top frame under a running native without a frame, that
 /// native's function slot (where the frame's registers end).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Level(LevelAt, Option<usize>);
+pub(crate) struct Level(LevelAt, Option<usize>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LevelAt {
@@ -909,7 +909,7 @@ impl crate::vm::NativeCtx<'_> {
     }
 
     /// The current line of `l` (-1 for natives).
-    pub fn current_line(&self, l: Level) -> i64 {
+    pub(crate) fn current_line(&self, l: Level) -> i64 {
         self.vm.rt.current_line(&self.vm.heap, l)
     }
 
@@ -946,7 +946,7 @@ impl crate::vm::NativeCtx<'_> {
     }
 
     /// Name and value of local `n` of `l` (negative: varargs).
-    pub fn get_local(&self, l: Level, n: i64) -> Option<(Vec<u8>, Value)> {
+    pub(crate) fn get_local(&self, l: Level, n: i64) -> Option<(Vec<u8>, Value)> {
         let (name, place) = self.vm.rt.local_at(&self.vm.heap, l, n)?;
         Some((
             name.as_bytes().to_vec(),

@@ -1,8 +1,8 @@
 //! What an error carries out of the VM when no message handler is set:
 //! the traceback of where it was raised.
 
-use orbit_runtime::object::Value;
-use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn, Vm};
+use crate::object::Value;
+use crate::vm::{LuaError, NativeCtx, NativeReturn, Vm};
 
 /// `callnow(f, ...)`: calls `f(...)` to the end before returning, the way a
 /// host function does, and returns its results.
@@ -13,7 +13,7 @@ fn callnow(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {
 
 fn run(src: &str) -> Result<Vec<Value>, LuaError> {
     let mut vm = Vm::new();
-    orbit_runtime::stdlib::open_libs(&mut vm);
+    crate::stdlib::open_libs(&mut vm);
     let f = vm.register_native("callnow", callnow);
     vm.set_global("callnow", f);
     let hir = orbit_lua_syntax::to_hir("=t", src.as_bytes(), &Default::default())
@@ -104,7 +104,7 @@ fn errors_through_native_calls_inside_close_handlers_leave_the_traceback_alone()
 #[test]
 fn a_failing_close_handler_replaces_the_error() {
     let mut vm = Vm::new();
-    orbit_runtime::stdlib::open_libs(&mut vm);
+    crate::stdlib::open_libs(&mut vm);
     let src = format!(
         "{TBC}local function raiser()
            local v <close> = tbc(function() error('from close', 0) end)
