@@ -1,4 +1,5 @@
-//! The `table` library.
+//! The `table` library's functions. `orbit-std` builds the library's
+//! table from them, taking each by name ([`super::library_function`]).
 //!
 //! Each function has a raw loop for tables without a metatable, the common
 //! case, and a slow path in [`slow`] that honours `__index`, `__newindex`
@@ -18,15 +19,18 @@ type R = Result<NativeReturn, LuaError>;
 // `concat`, `unpack` and `move` run metamethods on their slow paths, so
 // they stay on the raw interface until the language rule's step gives them
 // a Rust fast path and an OrbitScript slow path.
-pub(crate) const FUNCTIONS: &[LibraryRow] = &[
+pub(super) const FUNCTIONS: &[LibraryRow] = &[
     LibraryRow::raw("table.concat", concat),
     LibraryRow::raw("table.unpack", unpack),
     library_row::<pack>(),
     LibraryRow::raw("table.move", move_),
+    LibraryRow::raw("table.insert", insert),
+    LibraryRow::raw("table.sort", slow::sort),
+    LibraryRow::raw("table.remove", slow::remove),
 ];
 
 /// Lua 5.5's additions, absent from 5.4 builds (ADR-14).
-pub(crate) const FUNCTIONS_5_5: &[LibraryRow] = &[library_row::<create>()];
+pub(super) const FUNCTIONS_5_5: &[LibraryRow] = &[library_row::<create>()];
 
 /// Largest array size `create` accepts (a C `int`).
 const MAX_INT: i64 = i32::MAX as i64;
@@ -140,6 +144,36 @@ fn unpack(ctx: &mut NativeCtx<'_>) -> R {
         k += 1;
     }
     Ok(NativeReturn::Return(n as usize))
+}
+
+fn insert(ctx: &mut NativeCtx<'_>) -> R {
+    let Some(t) = plain(ctx, 0) else {
+        return slow::insert(ctx);
+    };
+    let e = length(ctx, t).wrapping_add(1);
+    match ctx.nargs() {
+        2 => {
+            let v = ctx.arg(1);
+            set(ctx, t, e, v)?;
+        }
+        3 => {
+            let pos = ctx.check_int(1)?;
+            // `pos - 1` as unsigned: 1..=e is valid.
+            if (pos.wrapping_sub(1) as u64) >= e as u64 {
+                return Err(ctx.arg_error(1, "position out of bounds"));
+            }
+            let mut i = e;
+            while i > pos {
+                let v = get(ctx, t, i - 1);
+                set(ctx, t, i, v)?;
+                i -= 1;
+            }
+            let v = ctx.arg(2);
+            set(ctx, t, pos, v)?;
+        }
+        _ => return Err(ctx.error("wrong number of arguments to 'insert'")),
+    }
+    Ok(NativeReturn::Return(0))
 }
 
 #[native(crate = crate, name = "table.pack")]

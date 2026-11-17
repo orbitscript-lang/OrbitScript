@@ -2,6 +2,7 @@
 # recorded it (`--update`). A run may not fall more than half a point
 # below it.
 crates/orbit-capi/src/ffi.rs     94.8%
+crates/orbit-cli/src/signals.rs  100.0%
 crates/orbit-dap/src/process.rs  91.8%
 crates/orbit-ffi/src/sys.rs      95.5%
 crates/orbit-gc/src/os.rs        100.0%

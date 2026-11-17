@@ -190,13 +190,6 @@ impl VmState {
         self.metas.metamethod(heap, v, e)
     }
 
-    /// The metatable shared by every value of `tag`'s type (strings,
-    /// numbers, booleans, nil, functions); tables and userdata have their
-    /// own.
-    pub(crate) fn type_meta(&self, tag: Tag) -> Option<Gc<Table>> {
-        self.metas.type_meta[tag as usize]
-    }
-
     /// Set the shared metatable of `tag`'s type. Integers and floats share
     /// one, as do Lua closures and natives.
     pub(crate) fn set_type_meta(&mut self, tag: Tag, meta: Option<Gc<Table>>) {

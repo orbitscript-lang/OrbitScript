@@ -3,21 +3,20 @@
 //! Every function is a [`NativeFn`] registered with the VM, one table per
 //! library, so hosts can open only the libraries they want
 //! ([design](https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/stdlib-string-table-math.md)).
-//! Only the `debug` library is behind a Cargo feature (`debug`); `io` and
-//! `os` live in `orbit-std`.
+//! Only the `debug` library is behind a Cargo feature (`debug`). `orbit-std`
+//! opens the rest, building `string` and `table` from the functions kept
+//! here ([`library_function`]).
 
 mod base;
-mod builtins;
 pub mod checks;
 mod chunk;
 mod coroutine;
 #[cfg(feature = "debug")]
 mod debug;
-mod dump;
-mod intrinsics;
+pub(crate) mod dump;
 mod load;
 pub(crate) mod string;
-mod table;
+pub(crate) mod table;
 
 use crate::stack::LibraryRow;
 use crate::vm::Vm;
@@ -49,26 +48,6 @@ pub(crate) fn tostring_now(
     }
 }
 
-/// The first result of a call a native requested with `CallThen` (nil if
-/// none); the call's results are dropped from the window.
-pub(crate) fn first_result(
-    ctx: &mut crate::vm::NativeCtx<'_>,
-    out: crate::vm::CallOutcome,
-) -> Result<crate::object::Value, crate::vm::LuaError> {
-    let n = match out {
-        crate::vm::CallOutcome::Ok(n) => n,
-        crate::vm::CallOutcome::Err(v) => return Err(ctx.error_value(v)),
-    };
-    let len = ctx.len();
-    let v = if n > 0 {
-        ctx.arg(len - n)
-    } else {
-        crate::object::Value::Nil
-    };
-    ctx.truncate(len - n);
-    Ok(v)
-}
-
 /// Open every library this build has: base functions as globals, plus the
 /// library tables.
 pub fn open_libs(vm: &mut Vm) {
@@ -86,21 +65,11 @@ pub enum Lib {
     Debug,
     Io,
     Os,
-    String,
-    Table,
 }
 
 impl Lib {
     /// The order [`open_libs`] opens them in.
-    pub const OPEN_ORDER: [Lib; 7] = [
-        Lib::Base,
-        Lib::String,
-        Lib::Table,
-        Lib::Os,
-        Lib::Io,
-        Lib::Coroutine,
-        Lib::Debug,
-    ];
+    pub const OPEN_ORDER: [Lib; 5] = [Lib::Base, Lib::Os, Lib::Io, Lib::Coroutine, Lib::Debug];
 
     /// The library's global name (`_G` for the base library).
     pub(crate) fn name(self) -> &'static str {
@@ -110,8 +79,6 @@ impl Lib {
             Lib::Debug => "debug",
             Lib::Io => "io",
             Lib::Os => "os",
-            Lib::String => "string",
-            Lib::Table => "table",
         }
     }
 }
@@ -130,24 +97,6 @@ pub fn open_one(vm: &mut Vm, lib: Lib) -> Option<crate::object::Value> {
             let g = vm.rt.globals;
             mark_loaded(vm, "_G", Value::Table(g));
             return Some(Value::Table(g));
-        }
-        Lib::String => {
-            let st = open_lib(vm, "string", string::FUNCTIONS);
-            string::set_metatable_index(vm, st);
-            add_functions(vm, st, dump::FUNCTIONS);
-            true
-        }
-        Lib::Table => {
-            let t = open_lib(vm, "table", table::FUNCTIONS);
-            if orbit_lua_version::LUA.is_5_5() {
-                add_functions(vm, t, table::FUNCTIONS_5_5);
-            }
-            // `insert`, `remove` and `sort` are written in OrbitScript.
-            for (name, f) in builtins::load(vm, &builtins::TABLE) {
-                let k = vm.new_str(&name);
-                vm.table_set(t, k, f);
-            }
-            true
         }
         Lib::Coroutine => {
             open_lib(vm, "coroutine", coroutine::FUNCTIONS);
@@ -211,6 +160,28 @@ pub(crate) fn open_lib(
     mark_loaded(vm, name, crate::object::Value::Table(t));
     vm.unpin(crate::object::Value::Table(t));
     t
+}
+
+/// The function the runtime keeps under `name` for a library written
+/// above it (ADR-11): `table`'s and `string`'s functions, and the string
+/// metatable's arithmetic metamethods (`string.__add`, ...). `None` for
+/// any other name, and for a function this build's Lua version lacks.
+pub(crate) fn library_function(name: &str) -> Option<&'static LibraryRow> {
+    let table_5_5: &'static [LibraryRow] = if orbit_lua_version::LUA.is_5_5() {
+        table::FUNCTIONS_5_5
+    } else {
+        &[]
+    };
+    [
+        table::FUNCTIONS,
+        table_5_5,
+        string::FUNCTIONS,
+        dump::FUNCTIONS,
+        string::arith::METAMETHODS,
+    ]
+    .into_iter()
+    .flatten()
+    .find(|row| row.name == name)
 }
 
 /// Register the native in a library table's `row`, with its fast path.

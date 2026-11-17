@@ -15,6 +15,7 @@ use crate::vm::{
     self, CallOutcome, Cause, CoStatus, LuaError, Meta, MetaField, NativeCtx, NativeReturn,
     Operator, Vm,
 };
+use orbit_lua_version::LUA;
 
 use super::{
     ArithOp, CompareOp, Continuation, FrameInfo, GcMode, GcOp, GcParam, HostValue,
@@ -415,12 +416,6 @@ impl<'s> Stack<'s> {
         })
     }
 
-    /// Push a value the window already holds (an intrinsic's result).
-    #[inline]
-    pub(crate) fn push_given(&mut self, v: RawValue) {
-        self.ctx.push(v);
-    }
-
     /// A read-only look at the isolate, for a `pure` native's
     /// [`View`](super::View) parameter.
     #[doc(hidden)]
@@ -505,7 +500,7 @@ impl<'s> Stack<'s> {
     }
 
     /// The bytes of a string the window holds.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn handle_bytes(&self, s: Gc<LuaStr>) -> &[u8] {
         self.ctx.bytes(s)
     }
@@ -614,14 +609,16 @@ impl<'s> Stack<'s> {
         }
     }
 
+    // A table's `__index` or `__newindex` function is called straight
+    // away, as the runtime's own natives call it.
+    #[inline]
     fn index(&mut self, obj: RawValue, key: RawValue) -> StackResult<RawValue> {
-        let m = self.ctx.index(obj, key)?;
-        self.finish_meta(m, |v| v)
+        Ok(self.ctx.index_now(obj, key)?)
     }
 
+    #[inline]
     fn set_index(&mut self, obj: RawValue, key: RawValue, v: RawValue) -> StackResult<()> {
-        let m = self.ctx.set_index(obj, key, v)?;
-        self.finish_meta(m, |_| ())
+        Ok(self.ctx.set_index_now(obj, key, v)?)
     }
 
     // ---- slots -----------------------------------------------------------------
@@ -648,7 +645,20 @@ impl<'s> Stack<'s> {
     /// Grow the window with nils or cut it back to `idx` values (negative:
     /// relative to the top). Variables marked with [`Stack::to_close`]
     /// above the new top close first.
+    #[inline]
     pub fn set_top(&mut self, idx: i32) -> StackResult<()> {
+        // Dropping values none of which is to be closed, the common case.
+        if let Ok(new) = usize::try_from(idx) {
+            if new <= self.ctx.len() && !self.ctx.closes_from(new) {
+                self.ctx.truncate(new);
+                return Ok(());
+            }
+        }
+        self.set_top_general(idx)
+    }
+
+    #[inline(never)]
+    fn set_top_general(&mut self, idx: i32) -> StackResult<()> {
         let len = self.ctx.len() as i64;
         let new = if idx >= 0 {
             idx as i64
@@ -692,6 +702,7 @@ impl<'s> Stack<'s> {
     }
 
     /// Push a copy of the value at `idx`.
+    #[inline]
     pub fn push_copy(&mut self, idx: i32) {
         let v = self.get(idx);
         self.ctx.push(v);
@@ -740,11 +751,11 @@ impl<'s> Stack<'s> {
         }
     }
 
+    #[inline]
     pub fn type_at(&self, idx: i32) -> Type {
-        if self.is_none(idx) {
-            Type::None
-        } else {
-            type_of(self.get(idx))
+        match self.given(idx) {
+            Some(v) => type_of(v),
+            None => Type::None,
         }
     }
 
@@ -1109,8 +1120,7 @@ impl<'s> Stack<'s> {
     /// Push the length of the value at `idx`, as `#` gives it.
     pub fn len(&mut self, idx: i32) -> StackResult<()> {
         let v = self.get(idx);
-        let m = self.ctx.length(v)?;
-        let r = self.finish_meta(m, |v| v)?;
+        let r = self.ctx.length_now(v)?;
         self.ctx.push(r);
         Ok(())
     }
@@ -1208,6 +1218,25 @@ impl<'s> Stack<'s> {
         self.ctx.push(RawValue::Native(id));
     }
 
+    /// Push a function the runtime keeps for a library written above it
+    /// (ADR-11), by its qualified name: the `table` and `string` libraries'
+    /// functions (`table.concat`, `string.gsub`, ...; `table.create` only
+    /// in Lua 5.5 builds) and the string metatable's arithmetic
+    /// metamethods (`string.__add`, `string.__sub`, `string.__mul`,
+    /// `string.__mod`, `string.__pow`, `string.__div`, `string.__idiv`,
+    /// `string.__unm`). False, pushing nothing, for any other name.
+    pub fn push_library_function(&mut self, name: &str) -> bool {
+        let Some(row) = crate::stdlib::library_function(name) else {
+            return false;
+        };
+        let v = match self.ctx.vm.rt.natives.named(row.name) {
+            Some(id) => RawValue::Native(id),
+            None => crate::stdlib::register_row(self.ctx.vm, row),
+        };
+        self.ctx.push(v);
+        true
+    }
+
     /// Push a closure of native `N` over the top `nups` values (popped),
     /// which it reads at [`upvalue_index`](super::upvalue_index), and over `data`, a word scripts
     /// can neither see nor change ([`Stack::closure_data`]).
@@ -1289,9 +1318,13 @@ impl<'s> Stack<'s> {
     }
 
     /// Push `t[n]` for the value at `idx`.
+    #[inline]
     pub fn get_index(&mut self, idx: i32, n: i64) -> StackResult<Type> {
+        // An integer key needs no rooting while metamethods run.
         let obj = self.get(idx);
-        self.get_with(obj, RawValue::Int(n))
+        let v = self.index(obj, RawValue::Int(n))?;
+        self.ctx.push(v);
+        Ok(type_of(v))
     }
 
     /// Push the global `name`.
@@ -1373,6 +1406,16 @@ impl<'s> Stack<'s> {
     ) -> StackResult<()> {
         let t = self.ctx.new_table(Table::with_capacity(count, nrec));
         self.ctx.push(RawValue::Table(t));
+        if LUA.is_5_4() {
+            // As a 5.4 constructor does: all `count` positions in the
+            // array part, nils included (`Table::lengthen_array`).
+            let seed = HashSeed::of(&self.ctx.vm.heap);
+            self.ctx
+                .vm
+                .heap
+                .update(t, |tab| tab.lengthen_array(seed, 1, count))
+                .map_err(|_| Raised(self.ctx.no_memory()))?;
+        }
         let from = (first.max(1) - 1) as usize;
         for i in 0..count {
             let v = self.ctx.arg(from + i);
@@ -1469,6 +1512,51 @@ impl<'s> Stack<'s> {
     /// without interning its name: `__metatable` for the base library.
     pub(crate) fn has_meta_field(&self, idx: i32, e: crate::vm::MetaField) -> bool {
         !self.ctx.metamethod(self.get(idx), e).is_nil()
+    }
+
+    /// The prototype of the Lua function at `idx`; `None` for anything
+    /// else, a native closure (a host or C function) included.
+    pub(crate) fn lua_function_proto(&self, idx: i32) -> Option<Gc<crate::object::Proto>> {
+        let f = self.get(idx);
+        match (f, self.ctx.native_of(f)) {
+            (RawValue::Closure(c), None) => Some(self.ctx.vm.heap.get(c).proto),
+            _ => None,
+        }
+    }
+
+    /// The heap, for the runtime's own natives that read objects directly.
+    pub(crate) fn heap(&self) -> &crate::object::LuaHeap {
+        &self.ctx.vm.heap
+    }
+
+    /// The number at `idx`, or the number a string there converts to
+    /// (with the locale's decimal point), as arithmetic coerces it.
+    pub(crate) fn coerced_number(&self, idx: i32) -> Option<crate::object::number::Number> {
+        match self.get(idx) {
+            RawValue::Str(s) => self
+                .ctx
+                .locale()
+                .str_to_number(self.ctx.bytes(s))
+                .and_then(RawValue::as_number),
+            v => v.as_number(),
+        }
+    }
+
+    /// Push the value at `idx`'s metamethod for `event`; false, pushing
+    /// nothing, when it has none.
+    pub(crate) fn push_metamethod(&mut self, idx: i32, event: crate::vm::MetaField) -> bool {
+        let h = self.ctx.metamethod(self.get(idx), event);
+        if h.is_nil() {
+            return false;
+        }
+        self.ctx.push(h);
+        true
+    }
+
+    /// The type name of the value at `idx`, as operator errors give it
+    /// (no `__name`).
+    pub(crate) fn type_name_at(&self, idx: i32) -> &'static str {
+        self.get(idx).type_name()
     }
 
     /// Push the metatable of the value at `idx`, if it has one.
@@ -1650,8 +1738,16 @@ impl<'s> Stack<'s> {
     /// `nresults` results. Nothing can yield across the call.
     pub fn call(&mut self, nargs: i32, nresults: i32) -> StackResult<()> {
         let nargs = self.check_call(nargs)?;
-        let n = self.ctx.call(nargs, None)?;
-        self.adjust_results(n, nresults);
+        // A fixed count the callee's return can leave in place.
+        match u8::try_from(nresults) {
+            Ok(want) if want != crate::vm::op::MULTI => {
+                self.ctx.call_want(nargs, want)?;
+            }
+            _ => {
+                let n = self.ctx.call(nargs, None)?;
+                self.adjust_results(n, nresults);
+            }
+        }
         Ok(())
     }
 
@@ -2069,8 +2165,8 @@ impl<'s> Stack<'s> {
     pub fn open_library(&mut self, lib: Library) -> bool {
         let top = self.ctx.len();
         let opened = stdlib::open_one(self.ctx.vm, lib.lib());
-        // Running the built-in modules can leave the VM's top above the
-        // window's; what lies there is no value of ours.
+        // Opening a library can leave the VM's top above the window's;
+        // what lies there is no value of ours.
         self.ctx.truncate(top);
         match opened {
             Some(t) => {

@@ -69,8 +69,8 @@ fn errors_inside_close_handlers_leave_the_traceback_alone() {
     let tb = traceback(&format!(
         "{TBC}local function fails() local x = nil; return x.z end
          local function raiser()
-           local a <close> = tbc(function() pcall(string.gsub, 'a', 'a', fails) end)
-           local b <close> = tbc(function() pcall(table.sort, {{2, 1}}, fails) end)
+           local a <close> = tbc(function() pcall(coroutine.wrap(fails)) end)
+           local b <close> = tbc(function() pcall(pairs, setmetatable({{}}, {{__pairs = fails}})) end)
            local c <close> = tbc(function() pcall(fails) end)
            local d <close> = tbc(function() pcall(tostring, setmetatable({{}}, {{__tostring = fails}})) end)
            local e <close> = tbc(function() coroutine.wrap(function() pcall(fails) end)() end)

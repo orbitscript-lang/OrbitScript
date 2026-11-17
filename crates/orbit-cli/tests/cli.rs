@@ -279,6 +279,92 @@ fn print_output_reaches_a_pipe_at_once() {
     assert_eq!(line.as_deref(), Ok("ready\n"));
 }
 
+/// The first `SIGSEGV` or `SIGBUS` ends `orbit`, as it ends `lua`, even
+/// one sent with `kill()`. Rust's runtime catches both to report stack
+/// overflows, and without `orbit_std::default_fault_signals` a signal that
+/// isn't a fault only reset its handler, so `orbit` carried on (and so did
+/// the processes a script forked).
+#[test]
+#[cfg(unix)]
+fn first_fault_signal_ends_orbit() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+    for (name, number) in [
+        ("SEGV", 11),
+        ("BUS", if cfg!(target_os = "linux") { 7 } else { 10 }),
+    ] {
+        let mut child = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
+            .args(["-e", "io.write('ready\\n') io.flush() while true do end"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut ready = [0u8; 6];
+        std::io::Read::read_exact(child.stdout.as_mut().unwrap(), &mut ready).unwrap();
+        let pid = child.id().to_string();
+        let sent = Command::new("kill")
+            .args([&format!("-{name}"), &pid])
+            .status();
+        assert!(sent.is_ok_and(|s| s.success()), "kill -{name} {pid} failed");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break Some(s);
+            }
+            if Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let status = status.unwrap_or_else(|| panic!("orbit survived SIG{name}"));
+        assert_eq!(status.signal(), Some(number), "SIG{name}: {status:?}");
+    }
+}
+
+/// A script writing to a pipe whose reader has gone ends with SIGPIPE, as
+/// `lua` does (`orbit script | head -1`). Rust's runtime ignores SIGPIPE,
+/// and `print` ignores write errors, so before `signals::default_pipe_signal` such
+/// a script ran forever.
+#[test]
+#[cfg(unix)]
+fn writing_to_a_closed_pipe_ends_orbit() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+    let mut child = Command::new(common::bin("orbit", env!("CARGO_BIN_EXE_orbit")))
+        .args(["-e", "while true do print(1) end"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "1\n");
+    // The reader is dropped: the pipe has no reader left.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break Some(s);
+        }
+        if Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = status.expect("orbit kept running with no reader");
+    assert_eq!(status.signal(), Some(13), "{status:?}");
+}
+
 /// One Ctrl-C can't stop a long library call, which never reaches an
 /// interrupt check; a second ends the process, as it ends `lua`. This is
 /// what `main.lua`'s "long unbreakable search" checks, but its `.*b` search
@@ -330,11 +416,13 @@ fn second_ctrl_c_ends_a_long_library_call() {
         let _ = child.kill();
         let _ = child.wait();
     }
-    // Exit status 130 here means the first Ctrl-C ended orbit; a success,
-    // that the search finished and a slower call is needed.
+    // Ending here means the first Ctrl-C ended orbit; a success, that the
+    // search finished and a slower call is needed.
     assert!(still_running, "orbit exited after one Ctrl-C: {status:?}");
     let status = status.expect("a second Ctrl-C didn't end orbit");
-    assert_eq!(status.code(), Some(130));
+    // Killed by SIGINT, as `lua` is (a shell reports status 130).
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(2), "{status:?}");
 }
 
 #[test]

@@ -731,6 +731,14 @@ impl Interrupt {
     pub fn pending(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// The flag behind the handle: setting it is [`request`](Self::request)
+    /// and clearing it withdraws a request. For a signal handler that only
+    /// sets a flag, such as `signal_hook::flag::register`'s, which needs no
+    /// thread to serve it and so still works in a forked child.
+    pub fn flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.0)
+    }
 }
 
 /// Library state kept per VM, keyed by type. It holds plain Rust data, never

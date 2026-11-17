@@ -837,41 +837,39 @@ impl Vm {
                 if let Some(op) = operand {
                     if let Some(f) = self.rt.stack.frames.last() {
                         if let FrameKind::Lua { closure, .. } = f.kind {
-                            if !crate::vm::debug::is_builtin(&self.heap, closure) {
-                                let proto = self.heap.get(self.heap.get(closure).proto);
-                                let pc = f.pc.saturating_sub(1);
-                                if op == 0
-                                    && matches!(
-                                        proto.code.code.get(pc as usize),
-                                        Some(Op::GenericCall { .. })
-                                    )
-                                {
-                                    text.extend_from_slice(b" (for iterator 'for iterator')");
-                                } else if let Some(origin) = proto.debug.origin(pc, op) {
-                                    let (kind, name) = match origin {
-                                        Origin::Local(n) => ("local", n),
-                                        Origin::Global(n) => ("global", n),
-                                        Origin::Field(n) => ("field", n),
-                                        Origin::Upvalue(n) => ("upvalue", n),
-                                        Origin::Method(n) => ("method", n),
-                                        Origin::Constant(n) => ("constant", n),
-                                    };
-                                    let described =
-                                        [b" (", kind.as_bytes(), b" '", name, b"')"].concat();
-                                    // `number (local 'x') has no integer representation`: the name goes
-                                    // after the subject, not at the end.
-                                    match msg.strip_prefix(b"number ") {
-                                        Some(rest)
-                                            if msg.as_bytes() == ops::NO_INTEGER_REP.as_bytes() =>
-                                        {
-                                            text.truncate(text.len() - msg.len());
-                                            text.extend_from_slice(b"number");
-                                            text.extend_from_slice(&described);
-                                            text.push(b' ');
-                                            text.extend_from_slice(rest);
-                                        }
-                                        _ => text.extend_from_slice(&described),
+                            let proto = self.heap.get(self.heap.get(closure).proto);
+                            let pc = f.pc.saturating_sub(1);
+                            if op == 0
+                                && matches!(
+                                    proto.code.code.get(pc as usize),
+                                    Some(Op::GenericCall { .. })
+                                )
+                            {
+                                text.extend_from_slice(b" (for iterator 'for iterator')");
+                            } else if let Some(origin) = proto.debug.origin(pc, op) {
+                                let (kind, name) = match origin {
+                                    Origin::Local(n) => ("local", n),
+                                    Origin::Global(n) => ("global", n),
+                                    Origin::Field(n) => ("field", n),
+                                    Origin::Upvalue(n) => ("upvalue", n),
+                                    Origin::Method(n) => ("method", n),
+                                    Origin::Constant(n) => ("constant", n),
+                                };
+                                let described =
+                                    [b" (", kind.as_bytes(), b" '", name, b"')"].concat();
+                                // `number (local 'x') has no integer representation`: the name goes
+                                // after the subject, not at the end.
+                                match msg.strip_prefix(b"number ") {
+                                    Some(rest)
+                                        if msg.as_bytes() == ops::NO_INTEGER_REP.as_bytes() =>
+                                    {
+                                        text.truncate(text.len() - msg.len());
+                                        text.extend_from_slice(b"number");
+                                        text.extend_from_slice(&described);
+                                        text.push(b' ');
+                                        text.extend_from_slice(rest);
                                     }
+                                    _ => text.extend_from_slice(&described),
                                 }
                             }
                         }

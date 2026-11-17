@@ -52,3 +52,9 @@ Suite: `gc.lua` 473 and 475-476 compare the count with the size of the strings; 
 An assignment with very many targets (`a, a, a, ... = 1`, about 200 or more) fails to compile with `chunk has too many syntax levels`, as one with many nested parentheses does. `lua5.4` parses each extra target with a recursive call and reports the same limit as `C stack overflow`. The limit (200 levels) is the same; only the message differs.
 
 Suite: `errors.lua` 650 builds such an assignment and accepts either message (`too many` or `overflow`).
+
+## The length of a table with holes after it grows
+
+The manual lets `#t` return any border of a table with holes. For a table built by a constructor, by `{...}` or by `table.pack`, the 5.4 build gives the border `lua5.4` gives: all the positions the table was built with count, nils included, so `#{nil, "b", "c"}` is 3 and `table.unpack` returns all three. Stores into those positions afterwards keep `lua5.4`'s answer too.
+
+Once the table grows past them, the borders can differ. `lua5.4` resizes the part of a table that holds its integer keys when it rehashes, and may shrink it: after `local t = {nil, "b", "c"}; t[5] = "e"` or adding a few string keys, `lua5.4` gives 0 and the 5.4 build gives 3. The 5.4 build never shrinks that part, and rehashes at different sizes, so which border a grown table reports follows its own layout, as in the 5.5 build. Both answers are borders.

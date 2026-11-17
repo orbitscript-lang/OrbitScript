@@ -3,8 +3,14 @@
 //! directory"), on every platform. Rust's own message for an error is not
 //! used: its format is not promised, and on Windows it is the system's
 //! message ("The system cannot find the file specified.") rather than the
-//! C runtime's. `strerror` is the one unsafe call in orbit-std (ADR-6); it
-//! takes an error number and no script data.
+//! C runtime's. `strerror` takes an error number and no script data.
+//!
+//! It also flushes the C library's own output streams (`fflush(NULL)`)
+//! before `io.popen` starts a command, as Lua does: C modules write through
+//! those streams, and their buffers are out of the `io` library's reach.
+//! It takes no arguments.
+//!
+//! These are orbit-std's only unsafe calls apart from `ctime.rs` (ADR-6).
 
 #![allow(unsafe_code)]
 
@@ -127,4 +133,15 @@ pub(crate) fn errno_text(errno: i32) -> String {
     unsafe { std::ffi::CStr::from_ptr(text) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Flush every output stream of the C library (`fflush(NULL)`): buffers
+/// that C modules wrote through `FILE*` streams, the C library's `stdout`
+/// among them. Failures are ignored, as `io.popen` has nothing to report
+/// them through.
+#[cfg(feature = "io")]
+pub(crate) fn flush_c_streams() {
+    // SAFETY: a null stream asks the C library to flush every open output
+    // stream; no pointer of ours is passed or kept.
+    unsafe { libc::fflush(std::ptr::null_mut()) };
 }

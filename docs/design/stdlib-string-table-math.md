@@ -1,6 +1,6 @@
 # The string, utf8, table and math libraries
 
-Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for `utf8` and `math`.
+Status: Implemented. Crates: `orbit-runtime` (`stdlib`), and `orbit-std` for all four.
 
 The full `string`, `utf8`, `table` and `math` libraries. The official suite's `strings.lua`, `pm.lua`, `tpack.lua`, `utf8.lua`, `math.lua` and `sort.lua` test them.
 
@@ -8,17 +8,17 @@ Every behaviour here comes from the reference manual, the reference `lua5.5` bin
 
 ## Layout
 
-`string` and `table` are always built into `orbit-runtime`: they are the language's foundation, so they have no Cargo feature. A host that wants to withhold one from scripts leaves it out at run time with `Library`. `utf8` and `math` are written on the public API in `orbit-std` (ADR-11), which installs each unless `orbit_std::Options::utf8` or `Options::math` is false.
+All four are installed by `orbit-std` (ADR-11), each unless its `orbit_std::Options` field (`string`, `utf8`, `math`, `table`) is false. `utf8` and `math` are written on the public API. `string`'s functions share the runtime's string internals (substrings, the pattern engine and its capture cache, the locale's character tables), and `table`'s work on a table's parts directly, so both stay in the runtime and `orbit-std` takes each by name (`Scope::library_function`). Opening `string` also points the shared string metatable's `__index` at the `string` table and gives it the arithmetic metamethods, when the base library made that metatable.
 
 | Library | Module | Contents |
 |---|---|---|
-| `string` | `string/mod.rs` | Glue: argument checking, `len sub rep byte char reverse upper lower`, the string metatable |
+| `string` | `orbit-std/src/string.rs`; the runtime's `string/mod.rs` | `orbit-std` builds the table and fills the string metatable; the runtime's glue: argument checking, `len sub rep byte char reverse upper lower` |
 | | `string/arith.rs` | The string metatable's arithmetic metamethods (`"10" + 1`) |
 | | `string/pattern.rs` | The pattern matcher (`find match gmatch gsub`) |
 | | `string/format.rs` | `string.format`, including `%a` and `%q` |
 | | `string/pack.rs` | `pack unpack packsize` |
 | `utf8` | `orbit-std/src/utf8.rs` | The `utf8` library |
-| `table` | `table.rs`, `table/slow.rs`, `builtins/table.orb` | The `table` library (`insert`, `remove` and `sort` are written in OrbitScript, ADR-11) |
+| `table` | `orbit-std/src/table.rs`; the runtime's `table.rs`, `table/slow.rs` | The `table` library: `orbit-std` builds its table; fast paths for tables without a metatable in `table.rs`, the general paths through metamethods in `table/slow.rs` |
 | `math` | `orbit-std/src/math/mod.rs`, `math/rng.rs` | The `math` library and its xoshiro256** generator |
 
 The engines (`pattern`, `format`, `pack`, `rng`, UTF-8 decoding) are plain functions over bytes and numbers with no VM access. The glue converts arguments, calls the engine and turns its typed errors into Lua errors with lua5.5's wording. Keeping the engines pure lets unit tests and the differential fuzzers drive them directly, and keeps them independent of Lua's calling conventions.
@@ -31,7 +31,7 @@ It is a backtracking matcher that interprets the pattern bytes as it goes, rathe
 
 Errors use lua5.5's messages: `malformed pattern (ends with '%')`, `malformed pattern (missing ']')`, `missing '[' after '%f' in pattern`, `invalid capture index %N`, `invalid pattern capture`, `unfinished capture`, `invalid use of '%' in replacement string`, `invalid replacement value (a table)`.
 
-`gsub` with a function replacement calls it nested, once per match (`NativeCtx::call_want`, [VM](vm.md#natives)), so the matcher's state stays in Rust locals and nothing may yield across the call, as in lua5.5; with a table replacement it indexes the table with metamethods. A subject in which nothing was replaced is returned as it is. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
+`gsub` has two loops. With a string replacement it calls nothing, so it reads the subject, pattern and replacement once and expands each match straight into the result. With a function replacement it calls the function nested, once per match (`NativeCtx::call_want`, [VM](vm.md#natives)), so the matcher's state stays in Rust locals and nothing may yield across the call, as in lua5.5; with a table replacement it indexes the table with metamethods. A subject in which nothing was replaced is returned as it is. `gmatch` returns an iterator closure whose state (subject, pattern, position, last match end) lives in its upvalues.
 
 ## format
 
@@ -70,13 +70,13 @@ flowchart LR
 
 `NativeCtx`'s `*_now` helpers ([VM semantics](vm-semantics.md#natives)) give the slow paths `index`, `set_index`, `length`, `less_than` and `equal` with any metamethod already run, so each function reads as the loop it is. `math.max` and `math.min`, on the public API, compare with `Stack::compare`, which runs `__lt` nested too.
 
-**sort.** `sort` is written in OrbitScript (`stdlib/builtins/table.orb`, ADR-11), with a native fast path for arrays of only numbers or only strings and no comparator. The elements are copied into a scratch table, sorted there and written back. The algorithm is a bottom-up merge sort, because every comparison may be a call (a comparator or `__lt`). Merge sort does about n·log₂n − n comparisons, fewer than quicksort's average of about 1.39·n·log₂n, and comparisons dominate when they are Lua calls. Its scratch half needs a second table of n slots.
+**sort.** `sort` (`table/slow.rs`) is a bottom-up merge sort, because every comparison may be a call (a comparator or `__lt`, each a nested call). Merge sort does about n·log₂n − n comparisons, fewer than quicksort's average of about 1.39·n·log₂n, and comparisons dominate when they are Lua calls. The elements are copied into a scratch table, sorted there and written back; the scratch half needs a second table of n slots. Arrays of only numbers or only strings with no comparator take a fast path that sorts them with Rust's own stable sort.
 
 lua5.5 raises `invalid order function for sorting` when the comparator is inconsistent (sort.lua checks `function (a, b) return true end` on 4, 5 and 6 elements). A merge sort never runs out of bounds on such a comparator, so after sorting with a user comparator or `__lt` we check each adjacent pair once (n − 1 extra comparisons) and raise that error if any pair is out of order. Plain number and string comparisons are a total order (NaN aside) and skip the check. If the sort raises, the table is left as it was, where lua5.5 leaves it partly sorted; the manual leaves this unspecified.
 
 `sort` also checks the length against `INT_MAX`-style limits (`array too big`), and a length below 2 compares nothing.
 
-**Yielding from a comparator.** The rule is to match lua5.5's yieldability exactly. errors.lua and coroutine.lua expect `table.sort({1,2,3}, coroutine.yield)` to fail with `attempt to yield across a C-call boundary`, so built-in frames refuse yields and the comparator calls are non-yieldable. `gsub` callbacks and metamethods called from these libraries are non-yieldable too. Making any of them yieldable would be an extension, recorded in `tests/lua-5.5/DEVIATIONS.md` with a maintainer's approval.
+**Yielding from a comparator.** The rule is to match lua5.5's yieldability exactly. errors.lua and coroutine.lua expect `table.sort({1,2,3}, coroutine.yield)` to fail with `attempt to yield across a C-call boundary`, so the comparator calls, nested like every callback from a native, are non-yieldable. `gsub` callbacks and metamethods called from these libraries are non-yieldable too. Making any of them yieldable would be an extension, recorded in `tests/lua-5.5/DEVIATIONS.md` with a maintainer's approval.
 
 `table.create(n, m)` preallocates the array and hash parts (sort.lua measures the memory), checking `out of range` against `INT_MAX` and `table overflow` for the hash part.
 

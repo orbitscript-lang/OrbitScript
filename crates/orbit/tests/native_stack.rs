@@ -149,6 +149,8 @@ fn allowed(recorded: usize) -> usize {
 fn measure() -> Vec<(&'static str, usize)> {
     let marks: Rc<RefCell<Vec<usize>>> = Rc::default();
     let mut iso = Runtime::new().new_isolate(Config::default());
+    // The `sort` row needs the standard library's `table`.
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     iso.scope(|s| {
         let g = s.globals();
         let m = marks.clone();

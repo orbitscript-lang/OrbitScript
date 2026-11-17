@@ -110,6 +110,7 @@ dependencies = [
  "orbit-macros",
  "orbit-orb-syntax",
  "orbit-runtime",
+ "orbit-std",
 ]
 
 [[package]]
@@ -144,6 +145,7 @@ name = "orbit-cli"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "libc",
  "orbit",
  "orbit-capi",
  "orbit-compiler",
@@ -176,6 +178,7 @@ dependencies = [
  "libc",
  "orbit",
  "orbit-std",
+ "rustix",
  "serde_json",
  "windows-permissions",
  "windows-sys",

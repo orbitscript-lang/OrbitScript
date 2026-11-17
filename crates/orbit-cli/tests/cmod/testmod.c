@@ -1,5 +1,6 @@
 /* A C module for tests/c_modules.rs: exercises the C API the way real
  * modules use it. Built against orbit-capi's own headers. */
+#include <stdio.h>
 #include <string.h>
 
 #include "lua.h"
@@ -215,6 +216,27 @@ static const luaL_Reg point_methods[] = {
   {NULL, NULL}
 };
 
+/* Writes text to a file through C stdio and leaves it open and unflushed,
+ * as a module that keeps a log open would; cclose closes it. */
+static FILE *cfile = NULL;
+
+static int t_cwrite(lua_State *L) {
+  const char *path = luaL_checkstring(L, 1);
+  size_t len;
+  const char *text = luaL_checklstring(L, 2, &len);
+  cfile = fopen(path, "w");
+  if (cfile == NULL) return luaL_error(L, "cannot open %s", path);
+  fwrite(text, 1, len, cfile);
+  return 0;
+}
+
+static int t_cclose(lua_State *L) {
+  (void)L;
+  if (cfile != NULL) fclose(cfile);
+  cfile = NULL;
+  return 0;
+}
+
 static const luaL_Reg funcs[] = {
   {"reverse", t_reverse},
   {"describe", t_describe},
@@ -230,6 +252,8 @@ static const luaL_Reg funcs[] = {
   {"ref", t_ref},
   {"load", t_load},
   {"arith", t_arith},
+  {"cwrite", t_cwrite},
+  {"cclose", t_cclose},
   {NULL, NULL}
 };
 

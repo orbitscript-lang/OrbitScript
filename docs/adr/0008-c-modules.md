@@ -25,7 +25,7 @@ Lua code expects `require` to load C modules (LuaFileSystem, lua-cjson, LPeg and
 ### Strings and pointers
 - `lua_tolstring` hands C a NUL-terminated copy that stays valid while the string is alive (ADR-5 strings have no trailing NUL and can move).
 - C pointers pushed with `lua_pushlightuserdata` are light userdata (ADR-1).
-- **C never gets a pointer to Rust data.** `lua_touserdata` on a userdata Rust created (an `io` file) returns `NULL`, and `luaL_checkudata(L, i, "FILE*")` raises "FILE* expected".
+- **C never gets a pointer to Rust data.** `lua_touserdata` on a userdata Rust created with a typed value (an `orbit::Class` instance) returns `NULL`. `io` files are C data instead (ADR-15): their memory is a `luaL_Stream` over a C `FILE*`, so `luaL_checkudata(L, i, "FILE*")` returns it, and a `luaL_Stream` that C code makes with the `FILE*` metatable is a file to `io`.
 
 ### Containment
 - **`unsafe`** is allowed only in `orbit-capi/src/ffi.rs`: the `extern "C"` entry points, raw pointers handed to C, and `dlopen` (ADR-6).

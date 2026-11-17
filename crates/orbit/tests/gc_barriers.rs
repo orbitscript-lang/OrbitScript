@@ -164,6 +164,7 @@ fn install<'s>(s: &'s Scope<'s>) -> Result<(), orbit::Error> {
 /// checks every marking.
 fn run(name: &str, src: &str) {
     let mut iso = Runtime::new().new_isolate(Config::default());
+    orbit_std::install(&mut iso, &orbit_std::Options::default()).unwrap();
     #[cfg(debug_assertions)]
     iso.gc().set_verify(true, true);
     iso.scope(|s| {

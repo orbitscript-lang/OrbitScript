@@ -35,6 +35,8 @@ orbit-lib = { path = "../orbit-lib", optional = true }
 
 # The terminal for line editing in interactive mode (`src/repl/tty.rs`).
 [target.'cfg(unix)'.dependencies]
+# `signal` in `src/signals.rs` (ADR-6).
+libc = "0.2"
 rustix = { version = "1.1", default-features = false, features = ["std", "termios", "process"], optional = true }
 
 [dev-dependencies]
@@ -82,5 +84,14 @@ dap = ["debugger", "dep:orbit-dap"]
 # modules the binaries load (`build.sh --lua 5.4`, ADR-14).
 lua-5-4 = ["orbit/lua-5-4"]
 
-[lints]
-workspace = true
+# The workspace lints, except that `unsafe_code` is denied rather than
+# forbidden, so `src/signals.rs` (giving signals their default action back)
+# can allow its own (ADR-6). Keep the rest in step with the workspace
+# `Cargo.toml`.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"

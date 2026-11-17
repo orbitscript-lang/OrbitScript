@@ -239,6 +239,19 @@ impl<'s> Scope<'s> {
         Function::top(self)
     }
 
+    /// A function the runtime keeps for a library written above it, by
+    /// its qualified name ([`Stack::push_library_function`]); `None` for a
+    /// name that isn't one.
+    ///
+    /// [`Stack::push_library_function`]: crate::stack::Stack::push_library_function
+    pub fn library_function(&'s self, name: &str) -> Option<Function<'s>> {
+        if self.stack().push_library_function(name) {
+            Some(Function::top(self))
+        } else {
+            None
+        }
+    }
+
     /// A userdata holding `value`, with no class: scripts can pass it
     /// around but not call methods on it. See [`Class`](crate::Class) for
     /// userdata with methods.

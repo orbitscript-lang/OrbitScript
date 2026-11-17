@@ -3,9 +3,9 @@
 # "Native stack per nested call"). One line per platform and row, measured
 # with the toolchain CI uses (current stable): frame sizes move between
 # compiler versions.
-x86_64-linux host 3312
-x86_64-linux gsub 2656
-x86_64-linux sort 0
+x86_64-linux host 3296
+x86_64-linux gsub 2672
+x86_64-linux sort 2768
 x86_64-linux index 0
 x86_64-linux pcall 0
 x86_64-linux resume 0

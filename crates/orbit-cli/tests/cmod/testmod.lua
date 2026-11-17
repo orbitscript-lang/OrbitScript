@@ -85,6 +85,18 @@ assert(sum == "added" and lt == true and req == false)
 sum, lt, req = t.arith(2, 2.0)
 assert(sum == 4 and lt == false and req == true)
 
+-- io.popen flushes the C library's streams first, so a command reads what
+-- a C module wrote through stdio without flushing.
+local name = os.tmpname()
+t.cwrite(name, "from C")
+local show = package.config:sub(1, 1) == "\\" and "type " or "cat "
+local p = assert(io.popen(show .. '"' .. name .. '"'))
+local seen = p:read("a")
+p:close()
+t.cclose()
+os.remove(name)
+assert(seen == "from C", seen)
+
 -- Functions from C modules are C functions to the debug library.
 assert(debug.getinfo(t.reverse, "S").what == "C")
 print("ok")
