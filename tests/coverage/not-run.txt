@@ -1,3 +1,4 @@
 # Functions a rule in rules.txt covers that no test executes, and why:
 #
 #   FILE  FUNCTION  # reason
+crates/orbit-std/src/stdio.rs  no_closef  # an open handle's closef while no C code can run, so nothing can call it (ADR-15)

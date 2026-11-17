@@ -1249,17 +1249,21 @@ fn io_setup(s: &mut Stack<'_>) -> StackResult<Return> {
 fn push_library(s: &mut Stack<'_>) -> StackResult<Return> {
     s.create_table(0, 14);
     let io = s.top();
-    let binary_std = cfg!(windows) && !s.line_endings().translates();
+    #[cfg(windows)]
+    let binary_std = !s.line_endings().translates();
     for (name, which) in [
         ("stdin", Std::In),
         ("stdout", Std::Out),
         ("stderr", Std::Err),
     ] {
+        #[cfg(windows)]
         let file = if binary_std {
             CFile::standard_binary(which)
         } else {
             CFile::standard(which)
         };
+        #[cfg(not(windows))]
+        let file = CFile::standard(which);
         let Some(file) = file else { continue };
         push_file(s, file, Kind::Std(which))?;
         s.push_copy(-1);

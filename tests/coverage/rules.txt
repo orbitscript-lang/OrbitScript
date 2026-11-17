@@ -12,6 +12,7 @@ crates/orbit-capi/src/ffi.rs         every   # the C API (ADR-8)
 crates/orbit-ffi/src/sys.rs          every   # the ffi library (ADR-9)
 crates/orbit-std/src/crt.rs          every   # the C library's strerror (ADR-6)
 crates/orbit-std/src/ctime.rs        every   # the C library's local time (ADR-6)
+crates/orbit-std/src/stdio.rs        every   # C stdio behind io's file handles (ADR-15)
 crates/orbit-locale/src/sys.rs       every   # the C library's locale objects (ADR-13)
 crates/orbit-virtmem/src/lib.rs      every   # the virtual memory buffer (ADR-2)
 crates/orbit-virtmem/src/os.rs       every   # its system calls

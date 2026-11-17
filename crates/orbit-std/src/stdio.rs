@@ -229,13 +229,6 @@ impl CFile {
         }
     }
 
-    /// [`CFile::standard`] where the C library's standard streams carry
-    /// bytes as they are.
-    #[cfg(not(windows))]
-    pub(crate) fn standard_binary(which: Std) -> Option<CFile> {
-        CFile::standard(which)
-    }
-
     /// The stream in a `luaL_Stream` block that C code made: its `f`.
     /// `None` if `f` is null. `block` is the userdata's memory, at least
     /// [`STREAM_BLOCK_SIZE`] bytes long, which the caller checked.

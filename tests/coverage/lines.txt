@@ -8,8 +8,9 @@ crates/orbit-ffi/src/sys.rs      95.5%
 crates/orbit-gc/src/os.rs        100.0%
 crates/orbit-locale/src/sys.rs   90.1%
 crates/orbit-runtime/src/stack   94.0%
-crates/orbit-std/src/crt.rs      93.3%
+crates/orbit-std/src/crt.rs      95.6%
 crates/orbit-std/src/ctime.rs    96.0%
+crates/orbit-std/src/stdio.rs    93.6%
 crates/orbit-virtmem/src/lib.rs  96.1%
 crates/orbit-virtmem/src/os.rs   93.8%
 crates/orbit/src                 90.7%
