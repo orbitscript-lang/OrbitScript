@@ -459,11 +459,15 @@ impl Locked<'_> {
             let at = into.len();
             into.try_reserve(want)
                 .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
-            into.resize(at + want, 0);
-            // SAFETY: the slice is writable for its length; the stream is
-            // open and locked.
-            let got = unsafe { fread_nolock(&mut into[at..], self.raw()) };
-            into.truncate(at + got);
+            let spare = &mut into.spare_capacity_mut()[..want];
+            // SAFETY: `spare` is writable for `want` bytes; the stream is
+            // open and locked. `fread` initialised the `got` bytes it
+            // reports, which the length then takes in.
+            let got = unsafe {
+                let got = fread_nolock(spare.as_mut_ptr().cast(), want, self.raw());
+                into.set_len(at + got);
+                got
+            };
             any |= got > 0;
             left -= got;
             if got < want {
@@ -592,9 +596,8 @@ unsafe fn unlock(f: *mut FILE) {
     };
 }
 
-unsafe fn fread_nolock(buf: &mut [u8], f: *mut FILE) -> usize {
-    let (p, n) = (buf.as_mut_ptr().cast(), buf.len());
-    // SAFETY: `buf` is writable for its length; as for every call here.
+unsafe fn fread_nolock(p: *mut c_void, n: usize, f: *mut FILE) -> usize {
+    // SAFETY: `p` is writable for `n` bytes; as for every call here.
     unsafe {
         #[cfg(target_os = "linux")]
         return fread_unlocked(p, 1, n, f);
