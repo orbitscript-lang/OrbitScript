@@ -1,7 +1,7 @@
 //! The base library's I/O: `print`, `loadfile`, `dofile`, and
 //! `debug.debug`'s command loop.
 
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 
 use orbit::stack::{Either, Nil, Rest, Return, Stack, StackExt, StackResult, Status};
 use orbit::text::TextDecoder;
@@ -30,7 +30,7 @@ pub fn read_chunk_file(
     let (mut bytes, source) = match path {
         None => {
             let mut b = Vec::new();
-            std::io::stdin()
+            crate::stdin(line_endings)
                 .read_to_end(&mut b)
                 .map_err(|_| OrbitString::from("cannot read stdin"))?;
             (b, STDIN.to_vec())
@@ -170,7 +170,7 @@ fn debug_lines<'s>(c: &'s Scope<'s>) {
         let line_endings = c.line_endings();
         let _ = std::io::stderr().write_all(b"lua_debug> ");
         let mut line = Vec::new();
-        match std::io::stdin().lock().read_until(b'\n', &mut line) {
+        match crate::stdin(line_endings).read_line(&mut line) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }

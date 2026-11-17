@@ -8,7 +8,7 @@ Bugs are not deviations: a difference that isn't listed here, or in the 5.5 list
 
 Every entry in [`tests/lua-5.5/DEVIATIONS.md`](../lua-5.5/DEVIATIONS.md) applies to the 5.4 build, reading `lua5.4` for `lua5.5`, except where the entry is about something 5.4 doesn't have (`collectgarbage("param")`, `global` declarations). In particular:
 
-- **Debug library.** Count hooks count our instructions, and every full userdata has one user value. Suite: `db.lua` 597 and 429-431.
+- **Debug library.** Count hooks count our instructions, and a host's typed userdata has one user value. Suite: `db.lua` 597.
 - **Binary chunk layout.** A dump's header is OrbitScript's, not lua5.4's `\27Lua` header with version byte 0x54. Suite: `calls.lua` 474-478.
 - **Interactive mode's own line editor.** See the next section for the suite check this affects.
 - **Garbage collector.** Its tuning and memory accounting are ours. See below for what that means for the 5.3-style options.

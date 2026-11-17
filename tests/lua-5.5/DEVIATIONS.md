@@ -57,25 +57,11 @@ Suite: `heavy.lua` checks the error (one table grows until allocation fails) and
 Hooks follow [docs/design/debug.md](../../docs/design/debug.md).
 
 - **Count hooks.** A count hook with interval N fires every N of OrbitScript's bytecode instructions. The bytecode is our own design (ADR-4), so the events land at different points in the source than lua5.5's, and a different number of them fire for the same code. Events still fire before the instruction, and the line event that follows a count event fires as in lua5.5.
-- **Every full userdata has one user value.** `debug.getuservalue(u, 1)` and `debug.setuservalue(u, v, 1)` work on any full userdata, including the `io` library's files. In lua5.5 the number of user values is fixed when the userdata is created, and its files have none, so `debug.setuservalue(io.stdin, 10)` fails there and succeeds here. Other indexes fail as in lua5.5. Embedders get the one slot (`UserData::user_value`) for every userdata they create.
+- **A host's typed userdata has one user value.** `debug.getuservalue(u, 1)` and `debug.setuservalue(u, v, 1)` work on any userdata a Rust host made with a typed value (an `orbit::Class` instance), which has no count of user values to fix: embedders get the one slot (`UserData::user_value`) for every such userdata. Other indexes fail as in lua5.5. Userdata made as memory blocks, the `io` library's files and C modules' userdata among them, have the count they were made with, as in lua5.5.
 - **`ftransfer` for `debug.sethook`'s own return event.** When `debug.sethook` turns on return hooks, the return event for that same call reports `ftransfer` from the native's own argument window. lua5.5 reports a value that reflects its C stack (4 where we report 3). Other natives' return events match.
 - **Locals assigned early in a multiple assignment.** In `a, b = f(), g()` with one value per target, a value may go straight into its target local when no later value reads that local. A metamethod or function that runs while a later value is computed (`g` here) can then see, through `debug.getlocal`, that `a` already holds its new value; lua5.5 shows the old value until every value is computed. Ordinary code can't observe the difference, since nothing later in the statement reads `a`. It saves the temporary copies (nbody runs 4.5% fewer instructions).
 
-Suite: `db.lua` 603 expects a count hook with interval 1 to fire fewer than 1012 times over a 1000-iteration loop and its `assert`; lua5.5 fires 1011 times and we fire 1015. `db.lua` 434-436 check that `io.stdin` has no user value. The manifest disables these lines (see SKIPS.md).
-
-## Standard streams don't seek
-
-`io.stdin:seek()`, `io.stdout:seek()` and `io.stderr:seek()` always fail with `Illegal seek`. lua5.5 can seek a standard stream when it is redirected to a regular file (`lua script.lua < data.txt`).
-
-Why: Rust's standard library can't seek its standard streams, and reopening the file behind them would need `unsafe` or platform paths such as `/dev/stdin`, which behave differently.
-
-Suite: `files.lua` seeks `io.stdin` only to check that a seek can fail.
-
-## Standard output and C modules' `stdout` are buffered apart
-
-`print`, `io.write` and `io.stdout` write through the isolate's own buffer, not the C library's `stdout`. A C module (or a C function called through `std.ffi`) that writes with `printf`, `fputs(..., stdout)` and the like fills the C library's buffer instead. Where the two mix, they can come out in another order than in lua5.5, where both share one buffer: `out("C1") print("L1") out("C2") io.write("L2\n")`, with `out` a C function writing to `stdout`, prints C1 L1 C2 L2 in lua5.5 and L1 L2 C1 C2 here, on a terminal or a pipe. `io.flush()` and `io.stdout:flush()` don't flush the C library's buffer, and at exit the C output comes after ours. Nothing is lost: the C library flushes its buffers at exit, and `io.popen` flushes them (and ours) before it starts the command. Standard input is buffered apart in the same way, so a C module that reads `stdin` with the C library after the script read from it doesn't see what the script's buffer already holds.
-
-Why: the isolate's output belongs to its host (an embedder can give it its own writer) and the `io` library is written in Rust. Interleaving output from both sides is rare, and a module that needs a precise order can flush its own output.
+Suite: `db.lua` 603 expects a count hook with interval 1 to fire fewer than 1012 times over a 1000-iteration loop and its `assert`; lua5.5 fires 1011 times and we fire 1015. The manifest disables that line (see SKIPS.md).
 
 ## Binary chunk layout
 

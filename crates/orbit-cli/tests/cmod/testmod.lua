@@ -94,8 +94,48 @@ local p = assert(io.popen(show .. '"' .. name .. '"'))
 local seen = p:read("a")
 p:close()
 t.cclose()
-os.remove(name)
 assert(seen == "from C", seen)
+
+-- io's handles are luaL_Streams over C streams: C code shares their
+-- buffer and position, and can close them through closef.
+assert(t.fileno(io.stdin) == 0 and t.fileno(io.stdout) == 1 and t.fileno(io.stderr) == 2)
+do
+  local tmp = io.tmpfile()
+  assert(t.fileno(tmp) >= 0)
+  tmp:close()
+  assert(t.fileno(tmp) == nil)
+  local pipe = assert(io.popen(show .. '"' .. name .. '"'))
+  assert(t.fileno(pipe) >= 0)
+  pipe:close()
+end
+do
+  local f = assert(io.open(name, "w"))
+  f:write("ab")
+  assert(t.fwrite(f, "cd"))
+  f:write("ef")
+  f:close()
+  f = assert(io.open(name, "r"))
+  assert(f:read(1) == "a")
+  assert(t.fread(f, 2) == "bc")
+  assert(f:read("a") == "def")
+  assert(t.closef(f) == true)
+  assert(io.type(f) == "closed file")
+  assert(not pcall(f.read, f))
+
+  -- A stream made in C is a file to io, closed through its own closef.
+  local closes = t.closes()
+  local g = t.wrap(name, "r")
+  assert(io.type(g) == "file" and tostring(g):find("^file %("))
+  assert(g:read(2) == "ab" and t.fread(g, 2) == "cd" and g:read("a") == "ef")
+  assert(g:close() == true)
+  assert(t.closes() == closes + 1 and io.type(g) == "closed file")
+  do local _ = t.wrap(name, "r") end
+  collectgarbage()
+  collectgarbage()
+  assert(t.closes() == closes + 2)
+  for l in t.wrap(name, "r"):lines() do assert(l == "abcdef") end
+  os.remove(name)
+end
 
 -- Functions from C modules are C functions to the debug library.
 assert(debug.getinfo(t.reverse, "S").what == "C")
