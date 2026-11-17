@@ -2,7 +2,7 @@
 //! ([`Regs`]) and its place in the running code ([`Ip`]).
 //!
 //! Their methods are safe to call, and rest on two rules the compiler
-//! does not check. ADR-15 lists who establishes each.
+//! does not check. ADR-16 lists who establishes each.
 //!
 //! - **The stack does not move under a [`Regs`].** A `Regs` is made from
 //!   the register stack when it covers the frame's whole window

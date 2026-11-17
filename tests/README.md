@@ -190,7 +190,7 @@ A stale profile never produces wrong code, but it can make the build much slower
 
 The optimized build also passes `-Cllvm-args=-vectorizer-min-trip-count=1`. When a profile shows that a loop runs fewer than 16 times, LLVM otherwise vectorizes the loop with masked lanes. On x86-64 without AVX-512, a few register clears then cost hundreds of instructions, which made coroutines 12% slower than a build without a profile (`build.sh` has the details).
 
-It passes `-Cllvm-args=-disable-icp` as well. With a profile LLVM otherwise turns a hot indirect call into a chain of compares against the targets it saw and inlines them. The interpreter dispatches through a table of handlers (ADR-15), and that promotion would put a compare chain at the end of every handler and merge handlers into each other, which is what the design is there to prevent.
+It passes `-Cllvm-args=-disable-icp` as well. With a profile LLVM otherwise turns a hot indirect call into a chain of compares against the targets it saw and inlines them. The interpreter dispatches through a table of handlers (ADR-16), and that promotion would put a compare chain at the end of every handler and merge handlers into each other, which is what the design is there to prevent.
 
 The feature options (`--system-libffi`, `--no-ffi`, `--no-debugger`, `--features`) apply to `--pgo-train` and `--pgo-check` too, so a profile trained with them matches the build that uses it. The committed profiles are trained with the defaults. Leaving parts out changes little of the interpreter, so a default profile still serves such a build, but `--pgo-check` with those options lists the functions that differ.
 

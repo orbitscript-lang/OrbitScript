@@ -1,4 +1,4 @@
-//! The plain interpreter: one function per instruction (ADR-15).
+//! The plain interpreter: one function per instruction (ADR-16).
 //!
 //! A handler is `fn(&mut Vm, Regs, Ip, Op) -> Step`: the VM, the running
 //! frame's registers, the instruction after its own, and its own

@@ -16,6 +16,6 @@
 | [0012](0012-developer-tooling.md) | Developer tooling: language server and debugger | Accepted |
 | [0013](0013-locales.md) | Locales | Accepted |
 | [0014](0014-lua-version-targets.md) | Lua version targets (5.4 or 5.5 per build) | Accepted |
-| [0015](0015-interpreter-handlers.md) | The plain interpreter as chained handlers with raw pointers | Proposed |
+| [0016](0016-interpreter-handlers.md) | The plain interpreter as chained handlers with raw pointers | Proposed |
 
 Each record states a decision and the technical reasons for it; git history shows how it changed. Statuses: **Proposed** (open for edits), **Accepted** (changes need a maintainer's approval), **Superseded**.

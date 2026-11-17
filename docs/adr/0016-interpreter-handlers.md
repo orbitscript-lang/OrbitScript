@@ -1,4 +1,4 @@
-# ADR-15: The plain interpreter as chained handlers with raw pointers
+# ADR-16: The plain interpreter as chained handlers with raw pointers
 
 Status: Proposed
 
