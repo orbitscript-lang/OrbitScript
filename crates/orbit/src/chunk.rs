@@ -88,8 +88,8 @@ pub(crate) use loading::load;
 /// Loading: sources through the compiler, binary chunks through the verifier.
 mod loading {
     use orbit_runtime::object as raw;
+    use orbit_runtime::stack::ChunkLoader;
     use orbit_runtime::stdlib::chunk_id;
-    use orbit_runtime::vm::NativeCtx;
 
     use super::{Chunk, Mode};
     use crate::compiler::Compiler;
@@ -97,7 +97,7 @@ mod loading {
     /// Compile or decode `chunk` and link it with `env` as its `_ENV`,
     /// returning its main function (not yet rooted), or the message.
     pub(crate) fn load(
-        ctx: &mut NativeCtx<'_>,
+        loader: &mut ChunkLoader<'_, '_>,
         chunk: &Chunk<'_>,
         env: raw::Value,
     ) -> Result<raw::Value, String> {
@@ -116,23 +116,15 @@ mod loading {
             return Err(format!("attempt to load a {what} chunk (mode is '{mode}')"));
         }
         if binary {
-            return load_binary(ctx, chunk, env);
+            return loader.load_binary(chunk.bytes, chunk.source(), env);
         }
         let name = chunk_id(chunk.source());
-        let seed = ctx.vm.hash_seed();
+        let seed = loader.hash_seed();
         let mut unlinked = Compiler
             .compile_seeded(chunk.bytes, &name, chunk.resolved_language(), Some(seed))
             .map_err(|e| e.0)?;
         // `debug.getinfo`'s `source` is the name as given, not its short form.
         unlinked.source = chunk.source().into();
-        Ok(ctx.link(&unlinked, env))
-    }
-
-    fn load_binary(
-        ctx: &mut NativeCtx<'_>,
-        chunk: &Chunk<'_>,
-        env: raw::Value,
-    ) -> Result<raw::Value, String> {
-        orbit_runtime::stdlib::load_chunk_in(ctx, chunk.bytes, chunk.source(), b"b", env)
+        Ok(loader.link(&unlinked, env))
     }
 }

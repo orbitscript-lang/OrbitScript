@@ -1,7 +1,7 @@
 //! Running `__gc` finalizers from Rust: order, errors, closing.
 
-use orbit_runtime::object::{Gc, Table, Value};
-use orbit_runtime::vm::{LuaError, NativeCtx, NativeReturn, Vm};
+use crate::object::{Gc, Table, Value};
+use crate::vm::{LuaError, NativeCtx, NativeReturn, Vm};
 
 /// A finalizer that appends its object's `n` field to the global `log`.
 fn record(ctx: &mut NativeCtx<'_>) -> Result<NativeReturn, LuaError> {

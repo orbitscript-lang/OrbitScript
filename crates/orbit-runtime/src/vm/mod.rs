@@ -35,7 +35,10 @@ mod link;
 mod locale;
 mod meta;
 mod native;
+pub(crate) mod natives;
 pub(crate) mod ops;
+#[cfg(test)]
+mod tests;
 
 use std::fmt;
 use std::io::Write;
@@ -53,9 +56,9 @@ use orbit_gc::{Liveness, Marker, Roots};
 pub(crate) use coro::{CoStatus, WindowSave};
 pub(crate) use gc::{GcMode, GcParam, GcState, close_then, finalize_then_return};
 pub(crate) use meta::{MetaField, Metas};
-pub use native::CallOutcome;
+pub(crate) use native::CallOutcome;
 pub(crate) use native::{Continuation, FastCtx, FastFn, Meta};
-pub use native::{NativeCtx, NativeFn, NativeReturn};
+pub(crate) use native::{NativeCtx, NativeFn, NativeReturn};
 pub(crate) use native::{Operator, ResumeOk};
 /// The instruction set and unlinked prototypes (`orbit-bytecode`).
 pub use orbit_bytecode as op;
@@ -951,11 +954,22 @@ impl Vm {
         self.rt.stack.hook.set(f, mask, count);
     }
 
-    /// A native context over the host's own stack window,
-    /// for a C program that embeds the VM and calls the C API between
-    /// calls. The window starts above a placeholder native in register 0
-    /// of the main thread's stack, so `NativeCtx::call` sees a caller.
-    pub fn host_ctx(&mut self) -> NativeCtx<'_> {
+    /// The host's own stack window, for a program that embeds the VM and
+    /// drives it between calls (the C API's host). The window starts
+    /// above a placeholder native in register 0 of the main thread's
+    /// stack, so calls from it see a caller.
+    pub fn host_stack(&mut self) -> crate::stack::Stack<'_> {
+        crate::stack::Stack::new(self.host_ctx())
+    }
+
+    /// Run a full collection cycle from the host's window, which drops
+    /// dead values above it first.
+    pub fn collect_from_host(&mut self) {
+        self.host_ctx().full_collect();
+    }
+
+    /// The native context under [`Vm::host_stack`].
+    pub(crate) fn host_ctx(&mut self) -> NativeCtx<'_> {
         fn host(_: &mut NativeCtx<'_>) -> Result<crate::vm::NativeReturn, LuaError> {
             Ok(crate::vm::NativeReturn::Return(0))
         }
@@ -987,7 +1001,7 @@ impl Vm {
     /// Register a native function. `name` is its qualified name
     /// (`"print"`, `"string.rep"`), used in messages when the call site
     /// doesn't name it.
-    pub fn register_native(&mut self, name: &'static str, f: NativeFn) -> Value {
+    pub(crate) fn register_native(&mut self, name: &'static str, f: NativeFn) -> Value {
         Value::Native(self.rt.natives.add_named(name, f))
     }
 

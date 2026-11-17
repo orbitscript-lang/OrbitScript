@@ -23,7 +23,6 @@
 //! re-exports this module as `orbit::stack`, adding what needs its own
 //! types (scopes and chunks) through `orbit::stack::StackExt`.
 
-mod exit;
 mod typed;
 mod window;
 
@@ -31,7 +30,7 @@ use crate::object::OrbitString;
 use crate::stdlib::Lib;
 
 #[doc(hidden)]
-pub use exit::exit_hooks;
+pub use crate::vm::natives::exit::exit_hooks;
 
 pub(crate) use typed::Buffer;
 pub use typed::{
@@ -40,8 +39,8 @@ pub use typed::{
 };
 #[doc(hidden)]
 pub use typed::{PureArg, PureFn, PureResult, PureValue, catch_panic, panic_message};
+pub use window::{ChunkLoader, Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
 pub(crate) use window::{ContRef, cont_ref};
-pub use window::{Control, NativeRef, Raised, Stack, ThreadRef, ThreadWindow};
 pub(crate) use window::{LibraryRow, library_row};
 
 /// The pseudo-index of the registry (Lua's `LUA_REGISTRYINDEX`).

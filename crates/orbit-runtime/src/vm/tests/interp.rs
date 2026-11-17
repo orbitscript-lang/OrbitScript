@@ -1,11 +1,11 @@
 //! Interpreter tests on hand-assembled chunks, so the VM is tested without
 //! the compiler. End-to-end programs live in `tests/first-light`.
 
+use crate::object::Value;
+use crate::vm::{CallOutcome, LuaError, NativeCtx, NativeReturn, Vm};
 use orbit_bytecode::{
     CaptureSource, Constant, DebugInfo, FunctionName, Op, UnlinkedChunk, UnlinkedProto,
 };
-use orbit_runtime::object::Value;
-use orbit_runtime::vm::{CallOutcome, LuaError, NativeCtx, NativeReturn, Vm};
 
 fn proto(nregs: u8, code: Vec<Op>) -> UnlinkedProto {
     UnlinkedProto {
@@ -147,7 +147,7 @@ fn try_done(ctx: &mut NativeCtx<'_>, outcome: CallOutcome) -> Result<NativeRetur
 /// `nil + x` when `fail` is set.
 fn native_calls_lua(
     name: &'static str,
-    f: orbit_runtime::vm::NativeFn,
+    f: crate::vm::NativeFn,
     fail: bool,
 ) -> Result<Value, String> {
     let mut vm = Vm::new();

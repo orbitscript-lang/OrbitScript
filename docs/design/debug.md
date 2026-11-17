@@ -191,7 +191,7 @@ The debugger engine (`orbit-runtime` feature `debugger`, `vm/debugger.rs`) sits 
 - **Pause** rides on the interrupt flag: the hooked loop's interrupt check takes a pending pause instead of raising `interrupted!` and stops at the next script instruction.
 - **Errors** stop before anything unwinds, once per error, saying whether a `pcall`, `xpcall` or `coroutine.resume` catches it.
 
-Cost, measured on cloud x86_64 without PGO: the feature on and nothing attached changes instruction counts by -1.4% to +1.0% across the benchmarks (callgrind); attached, with a breakpoint in a function the benchmark never calls, run times are 0.96x to 1.06x (`tests/debugger.rs`, `overhead_outside_breakpoints`).
+Cost, measured on cloud x86_64 without PGO: the feature on and nothing attached changes instruction counts by -1.4% to +1.0% across the benchmarks (callgrind); attached, with a breakpoint in a function the benchmark never calls, run times are 0.96x to 1.06x (`orbit-runtime`'s `vm/tests/debugger.rs`, `overhead_outside_breakpoints`).
 
 ### Embedding API
 

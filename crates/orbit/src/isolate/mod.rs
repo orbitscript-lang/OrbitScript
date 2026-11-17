@@ -238,7 +238,7 @@ impl Isolate {
     /// Run `f` with a scope for making and using handles. Everything the
     /// scope made is released when `f` returns.
     pub fn scope<R>(&mut self, f: impl for<'s> FnOnce(&'s Scope<'s>) -> R) -> R {
-        let stack = Stack::new(self.vm.host_ctx());
+        let stack = self.vm.host_stack();
         let start = stack.top();
         let scope = Scope::new(stack);
         let r = f(&scope);
@@ -249,11 +249,10 @@ impl Isolate {
     /// Run `f` on the host's window ([`Stack`]); what `f` leaves there is
     /// dropped after.
     pub fn stack<R>(&mut self, f: impl FnOnce(&mut Stack<'_>) -> R) -> R {
-        let ctx = self.vm.host_ctx();
-        let start = ctx.len();
-        let mut s = Stack::new(ctx);
+        let mut s = self.vm.host_stack();
+        let start = s.top();
         let r = f(&mut s);
-        let _ = s.set_top(start as i32);
+        let _ = s.set_top(start);
         r
     }
 
@@ -261,7 +260,7 @@ impl Isolate {
     /// drives the isolate through the stack API alone, as a C program does
     /// through the Lua C API.
     pub fn host_stack(&mut self) -> Stack<'_> {
-        Stack::new(self.vm.host_ctx())
+        self.vm.host_stack()
     }
 
     /// What reaches the isolate itself ([`Control`]).
@@ -346,7 +345,6 @@ mod debug {
         Breakpoint, DebugEvents, ErrorBreak, PauseHandle, Paused, Resume, StopReason,
     };
     use crate::error::Error;
-    use crate::stack::Stack;
 
     /// [`PauseHandle`]'s state: none in an isolate no debugger may attach
     /// to.
@@ -370,13 +368,13 @@ mod debug {
             p: &mut engine::Paused<'_, '_>,
             reason: engine::StopReason,
         ) -> engine::Resume {
-            let mut s = Stack::new(p.ctx().reborrow());
+            let mut s = p.stack();
             let reason = match reason {
                 engine::StopReason::Breakpoint { line } => StopReason::Breakpoint { line },
                 engine::StopReason::Step => StopReason::Step,
                 engine::StopReason::Pause => StopReason::Pause,
                 engine::StopReason::Error { value, caught } => {
-                    s.native_ctx().push(value);
+                    s.push_raw_value(value);
                     StopReason::Error { caught }
                 }
             };
@@ -471,7 +469,7 @@ impl Gc<'_> {
     /// Run a full collection cycle.
     pub fn collect(&mut self) {
         // Through the host window, which drops dead values above it first.
-        self.vm.host_ctx().full_collect();
+        self.vm.collect_from_host();
     }
 
     /// Bytes in use, as `collectgarbage("count")` counts them.

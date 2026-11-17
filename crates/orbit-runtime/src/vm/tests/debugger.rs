@@ -4,13 +4,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use orbit_runtime::object::Value;
-use orbit_runtime::vm::debugger::{
-    Breakpoint, DebugEvents, ErrorBreak, Paused, Resume, StopReason,
-};
-use orbit_runtime::vm::{LuaError, NativeReturn, Vm};
+use crate::object::Value;
+use crate::vm::debugger::{Breakpoint, DebugEvents, ErrorBreak, Paused, Resume, StopReason};
+use crate::vm::{LuaError, NativeReturn, Vm};
 
-fn compile(name: &str, src: &str) -> orbit_runtime::vm::op::UnlinkedChunk {
+fn compile(name: &str, src: &str) -> crate::vm::op::UnlinkedChunk {
     let hir = if name.ends_with(".orb") {
         orbit_orb_syntax::to_hir(name, src.as_bytes(), &Default::default())
             .unwrap_or_else(|d| panic!("{d:?}"))
@@ -108,7 +106,7 @@ fn attach(vm: &mut Vm, answers: &[Resume]) -> Session {
 
 fn vm() -> Vm {
     let mut vm = Vm::new();
-    orbit_runtime::stdlib::open_libs(&mut vm);
+    crate::stdlib::open_libs(&mut vm);
     vm
 }
 
@@ -474,7 +472,7 @@ impl DebugEvents for Evaluator {
             return Resume::Continue;
         };
         let ctx = paused.ctx();
-        let text = |ctx: &orbit_runtime::vm::NativeCtx<'_>, v: Value| match v {
+        let text = |ctx: &crate::vm::NativeCtx<'_>, v: Value| match v {
             Value::Str(s) => String::from_utf8_lossy(ctx.vm.str_bytes(s)).into_owned(),
             v => format!("{v:?}"),
         };

@@ -49,7 +49,7 @@ pub(crate) enum Operator {
 }
 
 /// A native function.
-pub type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
+pub(crate) type NativeFn = fn(&mut NativeCtx<'_>) -> Result<NativeReturn, LuaError>;
 
 /// An optional fast path for a native that returns one value and needs
 /// nothing but its arguments and a look at the heap (most of `math` and the
@@ -106,7 +106,7 @@ pub(crate) type Continuation =
 
 /// How a requested call ended.
 #[derive(Debug, Clone, Copy)]
-pub enum CallOutcome {
+pub(crate) enum CallOutcome {
     /// It returned this many values, now the last values of the window.
     Ok(usize),
     /// It raised this error (only for `protected` calls). The window is as
@@ -121,7 +121,7 @@ pub enum CallOutcome {
 /// `Ok`, so the VM may skip calling it (it still does when a return hook
 /// needs the native's frame).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResumeOk {
+pub(crate) enum ResumeOk {
     /// Run the continuation.
     Continue,
     /// The values are the native's results (`coroutine.wrap`).
@@ -135,7 +135,7 @@ pub enum ResumeOk {
 
 /// What a native function returns.
 #[derive(Debug, Clone, Copy)]
-pub enum NativeReturn {
+pub(crate) enum NativeReturn {
     /// The last `n` values of the window are the results.
     Return(usize),
     /// Call `f` with the last `nargs` values of the window, then run `k`
@@ -330,9 +330,9 @@ impl Natives {
 /// A native function's view of the VM: its window of the stack (arguments,
 /// then whatever it pushes), the heap and the runtime.
 #[derive(Debug)]
-pub struct NativeCtx<'a> {
+pub(crate) struct NativeCtx<'a> {
     /// The VM: its heap and runtime.
-    pub vm: &'a mut crate::vm::Vm,
+    pub(crate) vm: &'a mut crate::vm::Vm,
     pub(crate) base: usize,
     pub(crate) nargs: usize,
     pub(crate) id: NativeId,
@@ -350,7 +350,7 @@ impl NativeCtx<'_> {
 
     /// The same window, borrowed for a shorter time: for host code that
     /// keeps a context in a value of its own while the native runs.
-    pub fn reborrow(&mut self) -> NativeCtx<'_> {
+    pub(crate) fn reborrow(&mut self) -> NativeCtx<'_> {
         NativeCtx {
             vm: self.vm,
             base: self.base,
@@ -362,7 +362,7 @@ impl NativeCtx<'_> {
 
     /// Number of arguments the native was called with.
     #[inline]
-    pub fn nargs(&self) -> usize {
+    pub(crate) fn nargs(&self) -> usize {
         self.nargs
     }
 
@@ -375,13 +375,8 @@ impl NativeCtx<'_> {
 
     /// Values currently in the window.
     #[inline]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.vm.rt.top - self.base
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// Window slot `i` (argument `i` until the native changes it), or nil.
@@ -419,7 +414,7 @@ impl NativeCtx<'_> {
 
     /// Push a value onto the end of the window.
     #[inline]
-    pub fn push(&mut self, v: Value) {
+    pub(crate) fn push(&mut self, v: Value) {
         self.vm.rt.stack.put(self.vm.rt.top, v);
         self.vm.rt.top += 1;
     }
@@ -514,7 +509,7 @@ impl NativeCtx<'_> {
     /// nests the interpreter on the native stack, and code the call runs
     /// can't yield across it. While the call runs the native has a frame,
     /// so tracebacks, `debug.getinfo` and error positions see it.
-    pub fn call(&mut self, nargs: usize, handler: Option<usize>) -> Result<usize, LuaError> {
+    pub(crate) fn call(&mut self, nargs: usize, handler: Option<usize>) -> Result<usize, LuaError> {
         match handler {
             None => self.call_want(nargs, crate::vm::op::MULTI),
             Some(_) => self.call_general(nargs, handler),
@@ -690,7 +685,10 @@ impl NativeCtx<'_> {
     /// Return `N` values, as in `ctx.ret([v])` or, for failing library
     /// functions, `ctx.ret([Value::Nil, msg])`.
     #[inline]
-    pub fn ret<const N: usize>(&mut self, vals: [Value; N]) -> Result<NativeReturn, LuaError> {
+    pub(crate) fn ret<const N: usize>(
+        &mut self,
+        vals: [Value; N],
+    ) -> Result<NativeReturn, LuaError> {
         for v in &vals {
             self.push(*v);
         }
@@ -708,7 +706,7 @@ impl NativeCtx<'_> {
     }
 
     /// A string value (allocated, unrooted until stored in the window).
-    pub fn new_str(&mut self, bytes: &[u8]) -> Value {
+    pub(crate) fn new_str(&mut self, bytes: &[u8]) -> Value {
         Value::Str(self.vm.rt.strings.new_str(&mut self.vm.heap, bytes))
     }
 
@@ -770,7 +768,7 @@ impl NativeCtx<'_> {
     /// Link a compiled chunk, as [`Vm::load`](crate::vm::Vm::load) does, with
     /// `env` as the main function's first capture. The function is unrooted
     /// until stored in the window.
-    pub fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
+    pub(crate) fn link(&mut self, chunk: &orbit_bytecode::UnlinkedChunk, env: Value) -> Value {
         crate::vm::link::link(&mut self.vm.heap, &mut self.vm.rt, chunk, env)
     }
 
@@ -967,7 +965,7 @@ impl NativeCtx<'_> {
     /// An error with a message, positioned at the caller (like
     /// `luaL_error`). The message is a byte string, so names a script gave
     /// keep bytes that aren't UTF-8.
-    pub fn error<'m>(&mut self, msg: impl Into<OrbitStr<'m>>) -> LuaError {
+    pub(crate) fn error<'m>(&mut self, msg: impl Into<OrbitStr<'m>>) -> LuaError {
         let m = self.positioned(msg.into().as_bytes());
         LuaError::new(m)
     }
@@ -1096,7 +1094,7 @@ impl NativeCtx<'_> {
     }
 
     /// Any value (`value expected` if absent).
-    pub fn check_any(&mut self, i: usize) -> Result<Value, LuaError> {
+    pub(crate) fn check_any(&mut self, i: usize) -> Result<Value, LuaError> {
         if i >= self.nargs {
             return Err(self.arg_error(i, arg_errors::VALUE_EXPECTED));
         }
@@ -1191,7 +1189,7 @@ impl NativeCtx<'_> {
     }
 
     /// A table argument.
-    pub fn check_table(&mut self, i: usize) -> Result<Gc<Table>, LuaError> {
+    pub(crate) fn check_table(&mut self, i: usize) -> Result<Gc<Table>, LuaError> {
         match self.arg(i) {
             Value::Table(t) => Ok(t),
             _ => Err(self.type_error(i, "table")),
@@ -1568,7 +1566,7 @@ impl NativeCtx<'_> {
     }
 
     /// Run a full collection (`collectgarbage("collect")`).
-    pub fn full_collect(&mut self) {
+    pub(crate) fn full_collect(&mut self) {
         // Values above the window are dead.
         let top = self.vm.rt.top;
         self.vm.rt.stack.regs.truncate(top);
