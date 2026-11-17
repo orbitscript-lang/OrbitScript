@@ -110,6 +110,7 @@ struct orbit_r_table {
   int (*gettable)(lua_State *L, int idx);
   int (*gettop)(lua_State *L);
   const char * (*getupvalue)(lua_State *L, int funcindex, int n);
+  int (*ioclose)(lua_State *L);
   int (*iscfunction)(lua_State *L, int idx);
   int (*isinteger)(lua_State *L, int idx);
   int (*isnumber)(lua_State *L, int idx);
@@ -1303,6 +1304,14 @@ const char lua_ident[] = "$LuaVersion: " LUA_COPYRIGHT " $";
 /* print's output in a state C created goes through C's stdout. */
 size_t orbit_capi_write_stdout(const char *p, size_t n) {
   return fwrite(p, 1, n, stdout);
+}
+
+/* The closef of every open luaL_Stream the io library made: close the
+   file at index 1 as its close method does, and return what that does. */
+int orbit_capi_io_closef(lua_State *L) {
+  int n = L->r->ioclose(L);
+  CHECK(L);
+  return n;
 }
 
 int orbit_capi_flush_stdout(void) {

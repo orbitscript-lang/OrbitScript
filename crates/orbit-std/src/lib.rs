@@ -28,6 +28,8 @@ mod math;
 #[cfg(feature = "os")]
 mod os;
 mod package;
+#[cfg(feature = "io")]
+mod stdio;
 mod string;
 mod sys;
 mod table;
@@ -38,6 +40,8 @@ mod utf8;
 use orbit::{Error, Isolate, Scope};
 
 pub use base::{STDIN, read_chunk_file};
+#[cfg(feature = "io")]
+pub use io::{CallCloseF, close_file, share_streams_with_c};
 pub use package::{DIRSEP, load_error, path_field, search_path, versioned_env};
 pub use sys::os_error_text;
 
@@ -128,6 +132,17 @@ pub fn install(iso: &mut Isolate, options: &Options) -> Result<(), Error> {
         }
         Ok::<(), Error>(())
     })?;
+    // `print`, `io.write` and C's `printf` share the C library's `stdout`
+    // and its buffer, unless the host sent standard output elsewhere, or
+    // its standard streams carry bytes where the C library's are text
+    // streams (Windows).
+    #[cfg(feature = "io")]
+    if options.io {
+        let text = iso.stack(|s| s.line_endings().translates());
+        if (!cfg!(windows) || text) && iso.set_process_stdout(stdio::CStdout) {
+            iso.stack(io::set_c_stdout);
+        }
+    }
     #[cfg(feature = "json")]
     if options.json {
         let r = iso.stack(|s| {

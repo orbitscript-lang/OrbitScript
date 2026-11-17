@@ -219,13 +219,25 @@ pub struct NativeRef(pub(crate) RawValue);
 /// Memory a binding asked for with [`Stack::new_userdata`], aligned to 16
 /// bytes. The cells never move while the userdata lives, so the binding can
 /// keep the pointer.
-#[derive(Debug)]
 struct Block {
     cells: Box<[std::cell::Cell<u128>]>,
     size: usize,
     /// How many user values it has. One lives in the userdata's own slot;
     /// two or more live in a table there.
     nuv: u16,
+    /// A host value only Rust reaches ([`Stack::new_userdata_with_host`]),
+    /// which neither scripts nor C code can see or forge.
+    host: Option<Box<dyn Any>>,
+}
+
+impl std::fmt::Debug for Block {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Block")
+            .field("size", &self.size)
+            .field("nuv", &self.nuv)
+            .field("host", &self.host.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Block {
@@ -235,6 +247,7 @@ impl Block {
             cells: (0..n).map(|_| std::cell::Cell::new(0)).collect(),
             size,
             nuv,
+            host: None,
         }
     }
 
@@ -1429,11 +1442,52 @@ impl<'s> Stack<'s> {
     /// `nuv` user values, and give its memory, which stays put as long as
     /// the userdata lives.
     pub fn new_userdata(&mut self, size: usize, nuv: i32) -> StackResult<*mut c_void> {
+        self.new_block(size, nuv, None)
+    }
+
+    /// [`Stack::new_userdata`] whose userdata also carries `host`, a value
+    /// only Rust reaches, through [`Stack::userdata_host`]: for a library
+    /// whose objects are memory C code reads (a `luaL_Stream`) and also
+    /// hold Rust state. Scripts and C code see a plain block.
+    pub fn new_userdata_with_host<T: Any>(
+        &mut self,
+        size: usize,
+        nuv: i32,
+        host: T,
+    ) -> StackResult<*mut c_void> {
+        self.new_block(size, nuv, Some(Box::new(host)))
+    }
+
+    /// The host value of type `T` that the userdata at `idx` carries
+    /// ([`Stack::new_userdata_with_host`]), or `None`.
+    #[inline]
+    pub fn userdata_host<T: Any>(&self, idx: i32) -> Option<&T> {
+        match self.get(idx) {
+            RawValue::UserData(u) => self
+                .ctx
+                .vm
+                .heap
+                .get(u)
+                .downcast_ref::<Block>()?
+                .host
+                .as_deref()?
+                .downcast_ref::<T>(),
+            _ => None,
+        }
+    }
+
+    fn new_block(
+        &mut self,
+        size: usize,
+        nuv: i32,
+        host: Option<Box<dyn Any>>,
+    ) -> StackResult<*mut c_void> {
         if nuv < 0 || nuv > u16::MAX as i32 {
             return Err(self.error("invalid number of user values"));
         }
         self.ctx.reserve(size)?;
-        let block = Block::new(size, nuv as u16);
+        let mut block = Block::new(size, nuv as u16);
+        block.host = host;
         let p = block.as_ptr();
         let u = self.ctx.new_userdata(block);
         self.ctx.push(RawValue::UserData(u));
@@ -1568,6 +1622,16 @@ impl<'s> Stack<'s> {
             }
             None => false,
         }
+    }
+
+    /// The identity of the metatable of the value at `idx` ([`Stack::identity`]),
+    /// without pushing it: for a binding that checks a userdata's type on
+    /// every call.
+    pub fn metatable_identity(&mut self, idx: i32) -> Option<u64> {
+        let v = self.get(idx);
+        self.ctx
+            .metatable(v)
+            .and_then(|mt| RawValue::Table(mt).identity())
     }
 
     /// `t[k] = v` for the value at `idx` and the key and value on top (both
@@ -2207,6 +2271,12 @@ impl<'s> Stack<'s> {
     /// `io.stdout` share. `f` must not reach the isolate.
     pub fn with_stdout<R>(&mut self, f: impl FnOnce(&mut dyn std::io::Write) -> R) -> R {
         f(self.ctx.vm.rt.host.out().as_write())
+    }
+
+    /// Whether the host sent standard output somewhere other than the
+    /// process's own (`orbit::Isolate::set_stdout`).
+    pub fn stdout_redirected(&self) -> bool {
+        self.ctx.vm.rt.host.out_redirected()
     }
 
     /// Run `hook` when a script ends the process ([`Return::exit`],
