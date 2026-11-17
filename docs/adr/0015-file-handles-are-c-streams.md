@@ -54,6 +54,7 @@ flowchart LR
 
 ### The standard streams
 - **`io.stdin`, `io.stdout` and `io.stderr` are C's `stdin`, `stdout` and `stderr`**, reached through `extern` declarations per platform (glibc and musl `stdin`, Apple's `__stdinp`, the UCRT's `__acrt_iob_func`). `orbit-std` needs no C compiler. They are never closed.
+- **Everything else that reads standard input reads C's `stdin` too**: `loadfile()` and `dofile()` without a name, `debug.debug`, and `orbit -` and interactive mode, through `orbit_std::stdin`. A script's `io.read` and these readers then never split one input between two buffers.
 - **The isolate's standard output becomes C's `stdout`.** `orbit_std::install` makes C's `stdout` the isolate's default writer unless the host set one (`Isolate::set_stdout`), so `print`, `io.write` and a C module's `printf` share one buffer.
 - **A host that redirects standard output** still gets `print` and `io.write` to `io.stdout`; a C module that writes to `io.stdout`'s `FILE*` reaches the process's real standard output. A `FILE*` that writes into the host's writer exists on glibc (`fopencookie`) and macOS (`funopen`) but not on Windows, so it isn't offered.
 - **An isolate with `LineEndings::Binary` on Windows** (`orbit-lsp`) keeps its Rust writer, and its standard handles are binary streams of their own over copies of the standard descriptors: C's standard streams are text streams process-wide there, and changing them would change the host's.
