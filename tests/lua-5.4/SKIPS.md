@@ -40,7 +40,6 @@ Each is in [DEVIATIONS.md](DEVIATIONS.md). Like the 5.5 suite's `deviates=` line
 | File | Lines | Deviation |
 |---|---|---|
 | `db.lua` | 124-131 | No line event for the `then` line of an `if` |
-| `db.lua` | 429-431 | Every full userdata has one user value, `io.stdin` included |
 | `db.lua` | 597 | Count hooks count OrbitScript's instructions |
 | `calls.lua` | 474-478 | Binary chunk layout: a dump's header is OrbitScript's, not lua5.4's |
 | `gc.lua` | 473, 475-476 | A weak table's cleared string key is freed one collection later |

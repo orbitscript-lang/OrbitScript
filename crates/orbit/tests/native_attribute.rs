@@ -206,6 +206,9 @@ fn numbers_userdata_state_and_panics() {
         g.set("boom", s.create_native::<boom>())?;
         let class = s.define_class::<Counter>("Counter", |b| {
             b.native::<bump>("bump")?;
+            // A native metamethod gets the object first, as a method does.
+            b.native_metamethod::<bump>("__call")?;
+            assert!(b.native_metamethod::<bump>("__index").is_err());
             Ok(())
         })?;
         s.registry().raw_set("Counter", class.metatable(s)?)?;
@@ -217,6 +220,7 @@ fn numbers_userdata_state_and_panics() {
             assert(num.twice(21) == 42)
             local c = new_counter()
             assert(c:bump() == 1 and c:bump(10) == 11)
+            assert(c(5) == 16)
             assert(select(2, pcall(c.bump, {})) == "bad argument #1 to 'Counter.bump' (Counter expected, got table)")
             assert(select(2, pcall(function() return c.bump(nil) end)):find("Counter expected, got nil", 1, true))
             assert(calls("ab") == 2 and calls("cde") == 5)

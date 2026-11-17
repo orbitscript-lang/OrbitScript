@@ -6,6 +6,10 @@
 #include "lua.h"
 #include "lauxlib.h"
 
+#ifdef _WIN32
+#define fileno _fileno
+#endif
+
 /* Stack basics: returns its arguments reversed, plus the count. */
 static int t_reverse(lua_State *L) {
   int n = lua_gettop(L);
@@ -237,6 +241,80 @@ static int t_cclose(lua_State *L) {
   return 0;
 }
 
+/* File handles are luaL_Streams: the io library's, and ones made here. */
+
+/* The descriptor behind a file handle, or nil once it is closed. */
+static int t_fileno(lua_State *L) {
+  luaL_Stream *p = (luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
+  if (p->closef == NULL) lua_pushnil(L);
+  else lua_pushinteger(L, fileno(p->f));
+  return 1;
+}
+
+/* Writes a string to a file handle's stream. */
+static int t_fwrite(lua_State *L) {
+  luaL_Stream *p = (luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
+  size_t len;
+  const char *s = luaL_checklstring(L, 2, &len);
+  lua_pushboolean(L, fwrite(s, 1, len, p->f) == len);
+  return 1;
+}
+
+/* Reads up to n bytes from a file handle's stream. */
+static int t_fread(lua_State *L) {
+  luaL_Stream *p = (luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
+  char buf[64];
+  size_t n = (size_t)luaL_checkinteger(L, 2);
+  if (n > sizeof buf) n = sizeof buf;
+  lua_pushlstring(L, buf, fread(buf, 1, n, p->f));
+  return 1;
+}
+
+/* Closes a file handle through its own closef, marking it closed first,
+ * as C code that closes a file does. */
+static int t_closef(lua_State *L) {
+  luaL_Stream *p = (luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
+  lua_CFunction cf = p->closef;
+  p->closef = NULL;
+  lua_settop(L, 1);
+  return cf(L);
+}
+
+static int wrapped_closes = 0;
+
+static int wrapped_close(lua_State *L) {
+  luaL_Stream *p = (luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
+  int ok = fclose(p->f) == 0;
+  wrapped_closes++;
+  lua_pushboolean(L, ok);
+  return 1;
+}
+
+/* Opens a file as a stream of its own, with its own closef. */
+static int t_wrap(lua_State *L) {
+  const char *path = luaL_checkstring(L, 1);
+  const char *mode = luaL_checkstring(L, 2);
+  luaL_Stream *p = (luaL_Stream *)lua_newuserdatauv(L, sizeof(luaL_Stream), 0);
+  p->closef = NULL;
+  luaL_setmetatable(L, LUA_FILEHANDLE);
+  p->f = fopen(path, mode);
+  if (p->f == NULL) return luaL_error(L, "cannot open %s", path);
+  p->closef = wrapped_close;
+  return 1;
+}
+
+/* How many streams t_wrap made have been closed. */
+static int t_closes(lua_State *L) {
+  lua_pushinteger(L, wrapped_closes);
+  return 1;
+}
+
+/* Writes to C's stdout without flushing. */
+static int t_printf(lua_State *L) {
+  printf("%s", luaL_checkstring(L, 1));
+  return 0;
+}
+
 static const luaL_Reg funcs[] = {
   {"reverse", t_reverse},
   {"describe", t_describe},
@@ -254,6 +332,13 @@ static const luaL_Reg funcs[] = {
   {"arith", t_arith},
   {"cwrite", t_cwrite},
   {"cclose", t_cclose},
+  {"fileno", t_fileno},
+  {"fwrite", t_fwrite},
+  {"fread", t_fread},
+  {"closef", t_closef},
+  {"wrap", t_wrap},
+  {"closes", t_closes},
+  {"printf", t_printf},
   {NULL, NULL}
 };
 

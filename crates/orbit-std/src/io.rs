@@ -1,35 +1,45 @@
-//! The `io` library: file handles as `FILE*` userdata.
+//! The `io` library: file handles as the Lua C API defines them, a full
+//! userdata whose memory is a `luaL_Stream` (`FILE *f; lua_CFunction
+//! closef`) with the `FILE*` metatable (ADR-15).
 //!
-//! A handle owns a [`Stream`]: a file, a standard stream or a child process
-//! from `io.popen`, with our own read and write buffers so reads and writes
-//! can interleave, `setvbuf` means what it says, and `read("n")` can look one
-//! byte ahead. Writes to standard output go through the isolate's standard
-//! output, which `print` also writes to, so the two keep their order.
+//! Every handle's stream is a C library stream ([`CFile`]) and every read
+//! and write goes through it, so a C module that takes a handle with
+//! `luaL_checkudata(L, i, LUA_FILEHANDLE)` shares its buffer and position
+//! with scripts, as in Lua. Rust still opens files, pipes and temporary
+//! files and hands the descriptor to the C library, so paths, errors and
+//! the shell are the same as elsewhere in `orbit-std`.
 //!
-//! A stream opened without `b`, a pipe and a standard stream are text
-//! streams: with the isolate's [`LineEndings`] translating (Windows), their
-//! `\n` is written as `\r\n`, `\r\n` reads as `\n` and a Ctrl-Z ends
-//! input, as the C library's text streams do. Standard output's writer
-//! translates for itself.
+//! What Rust keeps about a handle (its stream, a pipe's child process) is
+//! in the isolate's [`IoState`], by the handle's memory, never in the
+//! memory C sees: Rust writes `f` and `closef` there for C and never reads
+//! them back for its own handles. A `luaL_Stream` a C module made (not in
+//! [`IoState`]) is a foreign stream, which the `io` functions use through
+//! its `f` and close through its `closef`, once `orbit-capi` has said C
+//! code may run ([`share_streams_with_c`]).
+//!
+//! On Windows a stream opened without `b`, a pipe and a standard stream
+//! are the C runtime's text streams when the isolate's [`LineEndings`]
+//! translate.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::ffi::{CString, c_void};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::process::{Child, Stdio};
 use std::rc::{Rc, Weak};
 
 use orbit::stack::{
-    Any, Arg, Nil, REGISTRY_INDEX, Rest, Results, Return, Stack, StackResult, Type, Ud, UserType,
-    upvalue_index,
+    Any, Arg, Nil, REGISTRY_INDEX, Rest, Results, Return, Stack, StackResult, Type, upvalue_index,
 };
-use orbit::text::{END_OF_TEXT, TextDecoder, encode_into};
+use orbit::text::END_OF_TEXT;
 use orbit::{Error, LineEndings, OrbitString, Scope, Table, native};
 
+use crate::stdio::{self, Buffering, CFile, Locked, STREAM_BLOCK_SIZE, Std, Whence};
 use crate::sys::{
     exit_results, file_failure, flush_stdout, os_error_code, os_error_text, os_path, shell,
 };
 
-/// The C library's `BUFSIZ`, the default buffer size.
+/// The C library's `BUFSIZ`, the default buffer size for `setvbuf`.
 const BUFSIZ: usize = 8192;
 
 /// The most formats `lines` takes, as in the reference.
@@ -38,437 +48,212 @@ const MAX_LINE_FORMATS: usize = 250;
 /// The longest numeral `read("n")` reads.
 const MAX_NUMERAL: usize = 200;
 
-/// The handles' type name, also the registry key of their metatable.
+/// The handles' type name, also the registry key of their metatable
+/// (`LUA_FILEHANDLE`).
 const FILE_TYPE: &str = "FILE*";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Buffering {
-    No,
-    Line(usize),
-    Full(usize),
-}
-
+/// What a handle's stream is.
 #[derive(Debug)]
 enum Kind {
-    File(File),
-    Stdin,
-    Stdout,
-    Stderr,
-    /// `io.popen(cmd, "r")`: we read the child's output.
-    PipeRead(Child),
-    /// `io.popen(cmd, "w")`: we write the child's input.
-    PipeWrite(Child),
-    Closed,
+    File,
+    Std(Std),
+    /// `io.popen(cmd, "r")` or `"w"`: the child, waited for at close.
+    Pipe(Child),
 }
 
-/// An open stream and its buffers.
+/// One of our handles, as Rust knows it.
 #[derive(Debug)]
 struct Stream {
+    /// `None` once closed.
+    file: Option<CFile>,
     kind: Kind,
-    readable: bool,
-    writable: bool,
-    rbuf: Vec<u8>,
-    rpos: usize,
-    wbuf: Vec<u8>,
-    buffering: Buffering,
-    /// The text decoder of a text stream on a platform whose text streams
-    /// translate; `None` for a binary stream.
-    text: Option<TextDecoder>,
+    /// The handle's `luaL_Stream` block, which C sees.
+    block: usize,
+    /// The identity of the `FILE*` metatable it was made with, which it
+    /// must still have to be a file (as `luaL_checkudata` checks).
+    meta: u64,
+    /// A buffer reads fill before their bytes become a string, kept for
+    /// the next read.
+    spare: Vec<u8>,
 }
+
+/// The most a handle keeps in [`Stream::spare`] between reads.
+const SPARE_MAX: usize = 8 * 1024;
 
 type Shared = Rc<RefCell<Stream>>;
 
-/// A `FILE*` userdata's payload. Shared, so `os.exit` can flush every open
-/// stream ([`flush_all`]).
-#[derive(Debug, Clone)]
-struct LuaFile(Shared);
+/// A C function C code can call as an open handle's `closef`, and the
+/// way to call a foreign stream's `closef` ([`share_streams_with_c`]).
+pub type CallCloseF = fn(&mut Stack<'_>, i32, usize) -> StackResult<Return>;
 
-thread_local! {
-    static OPEN: RefCell<Vec<Weak<RefCell<Stream>>>> = const { RefCell::new(Vec::new()) };
+/// The `io` library's per-isolate state.
+#[derive(Debug, Default)]
+struct IoState {
+    /// The handles made while no C code could run, whose blocks get
+    /// `orbit-capi`'s `closef` when it installs ([`share_streams_with_c`]).
+    early: RefCell<Vec<Weak<RefCell<Stream>>>>,
+    /// The identity of the `FILE*` metatable.
+    meta: Cell<u64>,
+    /// What an open handle's `closef` holds: `orbit-capi`'s C function,
+    /// or [`stdio::no_closef_address`] while no C code can run.
+    closef: Cell<usize>,
+    /// How to call a foreign stream's `closef`; `None` while no C code can
+    /// run, when blocks we didn't make are no files.
+    call_closef: Cell<Option<CallCloseF>>,
+    /// Whether the isolate's standard output is the C library's `stdout`
+    /// ([`stdio::CStdout`]), so `io.stdout` can use it directly.
+    c_stdout: Cell<bool>,
 }
 
-/// Flush every open file's buffer, as the C library does at exit. Standard
-/// output's buffer is the isolate's, which flushes it itself.
-pub fn flush_all() {
-    OPEN.with(|open| {
-        for s in open.borrow().iter().filter_map(Weak::upgrade) {
-            if let Ok(mut s) = s.try_borrow_mut() {
-                let _ = s.flush(&mut io::sink());
-            }
-        }
+/// Run `f` on the isolate's [`IoState`], made on first use.
+fn io_state<R>(s: &mut Stack<'_>, f: impl FnOnce(&IoState) -> R) -> R {
+    s.extension(|io: &mut IoState| f(io))
+}
+
+/// Let C code and the `io` library share streams: open handles get
+/// `closef` (a C function that closes the handle at index 1), and a
+/// `luaL_Stream` C code made with the `FILE*` metatable becomes a file
+/// `io` uses, closing it through `call_closef`. `orbit-capi` calls this
+/// when it installs.
+pub fn share_streams_with_c(s: &mut Stack<'_>, closef: usize, call_closef: CallCloseF) {
+    let early = io_state(s, |io| {
+        io.closef.set(closef);
+        io.call_closef.set(Some(call_closef));
+        io.early.take()
     });
+    for st in early.iter().filter_map(Weak::upgrade) {
+        let st = st.borrow();
+        if let Some(f) = &st.file {
+            stdio::write_stream_block(st.block as *mut c_void, f.as_raw(), closef);
+        }
+    }
 }
 
-/// `EBADF`, for an operation on a closed standard stream.
-fn bad_fd() -> io::Error {
-    crate::crt::system_error(libc::EBADF)
+/// Record that the isolate's standard output is the C library's `stdout`.
+pub(crate) fn set_c_stdout(s: &mut Stack<'_>) {
+    io_state(s, |io| io.c_stdout.set(true));
 }
 
-/// `ESPIPE`, for seeking a stream that can't seek.
-fn illegal_seek() -> io::Error {
-    crate::crt::system_error(libc::ESPIPE)
+/// A file handle argument.
+#[derive(Debug, Clone)]
+enum Handle {
+    Ours(Shared),
+    /// A `luaL_Stream` C code made, by its block's address.
+    Foreign(usize),
 }
 
-impl Stream {
-    fn new(kind: Kind, readable: bool, writable: bool) -> Stream {
-        Stream {
-            kind,
-            readable,
-            writable,
-            rbuf: Vec::new(),
-            rpos: 0,
-            wbuf: Vec::new(),
-            buffering: Buffering::Full(BUFSIZ),
-            text: None,
+/// The handle at `idx`, if it is a userdata with the `FILE*` metatable
+/// that we made, or one C code made while C code can run
+/// (`luaL_testudata`).
+fn handle_at(s: &mut Stack<'_>, idx: i32) -> Option<Handle> {
+    let idx = s.abs_index(idx);
+    let meta = s.metatable_identity(idx)?;
+    // Ours carry their state where only Rust reaches it, so a script
+    // can't pass anything else off as one.
+    if let Some(st) = s.userdata_host::<Shared>(idx) {
+        return (st.borrow().meta == meta).then(|| Handle::Ours(st.clone()));
+    }
+    if s.type_at(idx) != Type::Userdata {
+        return None;
+    }
+    let block = s.to_userdata(idx) as usize;
+    let foreign =
+        s.find_extension(|io: &IoState| meta == io.meta.get() && io.call_closef.get().is_some())?;
+    if foreign && block != 0 && s.raw_len(idx) as usize >= STREAM_BLOCK_SIZE {
+        Some(Handle::Foreign(block))
+    } else {
+        None
+    }
+}
+
+/// A file handle parameter: Lua's type error naming `FILE*` otherwise.
+#[derive(Debug, Clone)]
+struct FileArg(Handle);
+
+impl<'a> Arg<'a> for FileArg {
+    type Checked = FileArg;
+
+    fn check(s: &mut Stack<'_>, i: i32) -> StackResult<FileArg> {
+        match handle_at(s, i) {
+            Some(h) => Ok(FileArg(h)),
+            None => Err(s.type_error(i, FILE_TYPE)),
         }
     }
 
-    /// Make this a text stream if `text` and the isolate's line endings
-    /// translate.
-    fn text(mut self, text: bool, line_endings: LineEndings) -> Stream {
-        if text && line_endings.translates() {
-            self.text = Some(TextDecoder::default());
-        }
-        self
+    fn get(_: &'a Stack<'_>, _: i32, v: FileArg) -> FileArg {
+        v
     }
+}
 
+impl Handle {
     fn is_closed(&self) -> bool {
-        matches!(self.kind, Kind::Closed)
+        match self {
+            Handle::Ours(st) => st.borrow().file.is_none(),
+            Handle::Foreign(block) => stdio::read_stream_block(*block as *mut c_void).1 == 0,
+        }
     }
 
     fn is_std(&self) -> bool {
-        matches!(self.kind, Kind::Stdin | Kind::Stdout | Kind::Stderr)
+        matches!(self, Handle::Ours(st) if matches!(st.borrow().kind, Kind::Std(_)))
     }
 
-    /// Write the write buffer out.
-    fn flush(&mut self, out: &mut dyn Write) -> io::Result<()> {
-        if self.wbuf.is_empty() {
-            return match self.kind {
-                Kind::Stdout => out.flush(),
-                _ => Ok(()),
-            };
-        }
-        let buf = std::mem::take(&mut self.wbuf);
-        match &mut self.kind {
-            Kind::File(f) => f.write_all(&buf),
-            Kind::Stdout => out.write_all(&buf).and_then(|()| out.flush()),
-            Kind::Stderr => io::stderr().write_all(&buf),
-            Kind::PipeWrite(c) => match c.stdin.as_mut() {
-                Some(w) => w.write_all(&buf),
-                None => Err(bad_fd()),
-            },
-            Kind::Stdin | Kind::PipeRead(_) | Kind::Closed => Err(bad_fd()),
+    /// Whether this is `io.stdout` with the isolate's standard output not
+    /// the C library's, so writes go through the isolate's writer.
+    fn routed_stdout(&self, s: &mut Stack<'_>) -> bool {
+        match self {
+            Handle::Ours(st) if matches!(st.borrow().kind, Kind::Std(Std::Out)) => {
+                s.stdout_redirected() || !io_state(s, |io| io.c_stdout.get())
+            }
+            _ => false,
         }
     }
 
-    /// Give back read-ahead bytes before writing or seeking: a file's
-    /// position moves back over them.
-    fn unread(&mut self) -> io::Result<()> {
-        let n = match &mut self.text {
-            // The raw bytes behind the decoded ones, the Ctrl-Z included:
-            // a file reads it again and ends there again.
-            Some(d) if matches!(self.kind, Kind::File(_)) => {
-                let n = d.raw_len_from(self.rpos, self.rbuf.len());
-                d.reset();
-                n
-            }
-            _ => self.rbuf.len() - self.rpos,
-        };
-        self.rbuf.clear();
-        self.rpos = 0;
-        if n > 0 {
-            if let Kind::File(f) = &mut self.kind {
-                f.seek(SeekFrom::Current(-(n as i64)))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn write(&mut self, bytes: &[u8], out: &mut dyn Write) -> io::Result<()> {
-        if !self.writable {
-            return Err(bad_fd());
-        }
-        if self.rpos < self.rbuf.len() {
-            self.unread()?;
-        }
-        if let Kind::Stdout = self.kind {
-            // The isolate's standard output does the buffering, and the
-            // translation if any.
-            return out.write_all(bytes);
-        }
-        if self.text.is_some() {
-            encode_into(bytes, &mut self.wbuf);
-        } else {
-            self.wbuf.extend_from_slice(bytes);
-        }
-        match self.buffering {
-            Buffering::No => self.flush(out),
-            Buffering::Line(_) if bytes.contains(&b'\n') => self.flush(out),
-            Buffering::Full(n) | Buffering::Line(n) if self.wbuf.len() >= n.max(1) => {
-                self.flush(out)
-            }
-            _ => Ok(()),
+    /// A buffer for a read: the handle's spare one, empty.
+    fn take_buffer(&self) -> Vec<u8> {
+        match self {
+            Handle::Ours(st) => std::mem::take(&mut st.borrow_mut().spare),
+            Handle::Foreign(_) => Vec::new(),
         }
     }
 
-    /// Make sure there is a byte to read, unless at the end. Returns
-    /// whether there is.
-    fn fill(&mut self, out: &mut dyn Write) -> io::Result<bool> {
-        if self.rpos < self.rbuf.len() {
-            return Ok(true);
-        }
-        if !self.readable {
-            return Err(bad_fd());
-        }
-        if self.text.as_ref().is_some_and(TextDecoder::ended) {
-            return Ok(false);
-        }
-        if !self.wbuf.is_empty() {
-            self.flush(out)?;
-        }
-        if let Kind::Stdin = self.kind {
-            // Input from a terminal should see the prompt first.
-            let _ = out.flush();
-        }
-        self.rbuf.resize(BUFSIZ, 0);
-        self.rpos = 0;
-        let r = self.read_raw(0);
-        let n = match r {
-            Ok(n) => n,
-            Err(e) => {
-                self.rbuf.clear();
-                return Err(e);
+    /// Give back [`Handle::take_buffer`]'s buffer, unless it grew large.
+    fn give_back_buffer(&self, mut buf: Vec<u8>) {
+        if let Handle::Ours(st) = self {
+            if buf.capacity() <= SPARE_MAX {
+                buf.clear();
+                st.borrow_mut().spare = buf;
             }
-        };
-        self.rbuf.truncate(n);
-        if self.text.is_none() {
-            return Ok(n > 0);
         }
-        // A `\r` at the end may start a `\r\n`: read on to see.
-        while self.rbuf.last() == Some(&b'\r') {
-            let len = self.rbuf.len();
-            self.rbuf.push(0);
-            match self.read_raw(len) {
-                Ok(1) => {}
-                Ok(_) => {
-                    self.rbuf.truncate(len);
-                    break;
+    }
+
+    /// Run `f` on the open stream; `None` if closed.
+    fn with_file<R>(&self, f: impl FnOnce(&mut CFile) -> R) -> Option<R> {
+        match self {
+            Handle::Ours(st) => st.borrow_mut().file.as_mut().map(f),
+            Handle::Foreign(block) => {
+                let block = *block as *mut c_void;
+                if stdio::read_stream_block(block).1 == 0 {
+                    return None;
                 }
-                Err(e) => {
-                    self.rbuf.clear();
-                    return Err(e);
-                }
+                CFile::foreign(block).as_mut().map(f)
             }
         }
-        if let Some(d) = &mut self.text {
-            d.decode(&mut self.rbuf);
-        }
-        Ok(!self.rbuf.is_empty())
-    }
-
-    /// Read raw bytes into `rbuf[at..]`, retrying when interrupted.
-    fn read_raw(&mut self, at: usize) -> io::Result<usize> {
-        loop {
-            let buf = &mut self.rbuf[at..];
-            let r = match &mut self.kind {
-                Kind::File(f) => f.read(buf),
-                Kind::Stdin => io::stdin().read(buf),
-                Kind::PipeRead(c) => match c.stdout.as_mut() {
-                    Some(r) => r.read(buf),
-                    None => Err(bad_fd()),
-                },
-                _ => Err(bad_fd()),
-            };
-            match r {
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                r => return r,
-            }
-        }
-    }
-
-    fn peek(&mut self, out: &mut dyn Write) -> io::Result<Option<u8>> {
-        Ok(if self.fill(out)? {
-            Some(self.rbuf[self.rpos])
-        } else {
-            None
-        })
-    }
-
-    /// Read up to `n` bytes into `into`.
-    fn read_bytes(
-        &mut self,
-        mut n: usize,
-        into: &mut Vec<u8>,
-        out: &mut dyn Write,
-    ) -> io::Result<()> {
-        while n > 0 && self.fill(out)? {
-            let avail = &self.rbuf[self.rpos..];
-            let k = avail.len().min(n);
-            append(into, &avail[..k])?;
-            self.rpos += k;
-            n -= k;
-        }
-        Ok(())
-    }
-
-    /// Read through the next newline (kept in `into` if `keep`). Returns
-    /// whether anything was read, newline included.
-    fn read_line(
-        &mut self,
-        keep: bool,
-        into: &mut Vec<u8>,
-        out: &mut dyn Write,
-    ) -> io::Result<bool> {
-        let mut any = false;
-        while self.fill(out)? {
-            any = true;
-            let avail = &self.rbuf[self.rpos..];
-            match avail.iter().position(|&b| b == b'\n') {
-                Some(i) => {
-                    append(into, &avail[..if keep { i + 1 } else { i }])?;
-                    self.rpos += i + 1;
-                    return Ok(true);
-                }
-                None => {
-                    append(into, avail)?;
-                    self.rpos = self.rbuf.len();
-                }
-            }
-        }
-        Ok(any)
-    }
-
-    fn read_all(&mut self, into: &mut Vec<u8>, out: &mut dyn Write) -> io::Result<()> {
-        while self.fill(out)? {
-            append(into, &self.rbuf[self.rpos..])?;
-            self.rpos = self.rbuf.len();
-        }
-        Ok(())
-    }
-
-    /// Read a numeral as `read("n")` does: the longest prefix that can
-    /// start a numeral, at most [`MAX_NUMERAL`] bytes, looking one byte
-    /// ahead. The decimal point is `.` or the locale's `point`. Returns the
-    /// bytes, or `None` if they ran too long.
-    fn read_numeral(&mut self, point: u8, out: &mut dyn Write) -> io::Result<Option<Vec<u8>>> {
-        let mut buf = Vec::new();
-        let mut too_long = false;
-        while let Some(c) = self.peek(out)? {
-            if !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
-                break;
-            }
-            self.rpos += 1;
-        }
-        // Take the next byte if `accept` likes it.
-        let mut take =
-            |s: &mut Stream, buf: &mut Vec<u8>, accept: &dyn Fn(u8) -> bool| -> io::Result<bool> {
-                match s.peek(out)? {
-                    Some(c) if accept(c) && !too_long => {
-                        if buf.len() >= MAX_NUMERAL {
-                            too_long = true;
-                            return Ok(false);
-                        }
-                        buf.push(c);
-                        s.rpos += 1;
-                        Ok(true)
-                    }
-                    _ => Ok(false),
-                }
-            };
-        take(self, &mut buf, &|c| c == b'-' || c == b'+')?;
-        let mut count = 0;
-        let mut hex = false;
-        if take(self, &mut buf, &|c| c == b'0')? {
-            if take(self, &mut buf, &|c| c == b'x' || c == b'X')? {
-                hex = true;
-            } else {
-                count = 1;
-            }
-        }
-        let digit = move |c: u8| {
-            if hex {
-                c.is_ascii_hexdigit()
-            } else {
-                c.is_ascii_digit()
-            }
-        };
-        while take(self, &mut buf, &digit)? {
-            count += 1;
-        }
-        if take(self, &mut buf, &|c| c == b'.' || c == point)? {
-            while take(self, &mut buf, &digit)? {
-                count += 1;
-            }
-        }
-        if count > 0 {
-            let exp = move |c: u8| {
-                if hex {
-                    c == b'p' || c == b'P'
-                } else {
-                    c == b'e' || c == b'E'
-                }
-            };
-            if take(self, &mut buf, &exp)? {
-                take(self, &mut buf, &|c| c == b'-' || c == b'+')?;
-                while take(self, &mut buf, &|c: u8| c.is_ascii_digit())? {}
-            }
-        }
-        Ok(if too_long { None } else { Some(buf) })
-    }
-
-    fn seek(&mut self, from: SeekFrom, out: &mut dyn Write) -> io::Result<u64> {
-        self.flush(out)?;
-        match &mut self.kind {
-            Kind::File(_) => {
-                self.unread()?;
-                let Kind::File(f) = &mut self.kind else {
-                    unreachable!()
-                };
-                f.seek(from)
-            }
-            _ => Err(illegal_seek()),
-        }
-    }
-
-    /// Flush and close. Returns the child's status for a pipe.
-    fn close(&mut self, out: &mut dyn Write) -> io::Result<Option<std::process::ExitStatus>> {
-        let flushed = self.flush(out);
-        let kind = std::mem::replace(&mut self.kind, Kind::Closed);
-        self.rbuf.clear();
-        self.rpos = 0;
-        let status = match kind {
-            Kind::PipeRead(mut c) | Kind::PipeWrite(mut c) => {
-                // Closing our end first lets a writer or reader finish.
-                drop(c.stdin.take());
-                drop(c.stdout.take());
-                Some(c.wait()?)
-            }
-            Kind::File(f) => {
-                drop(f);
-                None
-            }
-            _ => None,
-        };
-        flushed?;
-        Ok(status)
     }
 }
 
-impl Drop for Stream {
-    fn drop(&mut self) {
-        // A collected handle is closed, as `__gc` does in the reference.
-        // Standard output's buffer belongs to the isolate, which flushes it.
-        if !matches!(self.kind, Kind::Stdout | Kind::Closed) {
-            let _ = self.close(&mut io::sink());
-        }
+/// The handle, which must be open.
+fn check_open(s: &mut Stack<'_>, h: &Handle) -> StackResult<()> {
+    if h.is_closed() {
+        return Err(s.error("attempt to use a closed file"));
     }
+    Ok(())
+}
+
+fn closed_error() -> io::Error {
+    crate::crt::system_error(libc::EBADF)
 }
 
 // ---- handles ---------------------------------------------------------------
-
-impl UserType for LuaFile {
-    const NAME: &'static str = FILE_TYPE;
-}
 
 /// The registry keys of the default input and output handles (`io.input`,
 /// `io.output`).
@@ -483,41 +268,49 @@ fn default_key(input: bool) -> &'static [u8] {
     }
 }
 
-/// Push a new `FILE*` handle for `stream`, and give its stream.
-fn push_file(s: &mut Stack<'_>, stream: Stream) -> StackResult<Shared> {
-    let rc = Rc::new(RefCell::new(stream));
-    OPEN.with(|open| {
-        let mut open = open.borrow_mut();
-        open.retain(|w| w.strong_count() > 0);
-        open.push(Rc::downgrade(&rc));
+/// Push a new handle for `file`.
+fn push_file(s: &mut Stack<'_>, file: CFile, kind: Kind) -> StackResult<Shared> {
+    let (closef, meta, early) = io_state(s, |io| {
+        if io.closef.get() == 0 {
+            io.closef.set(stdio::no_closef_address());
+        }
+        (
+            io.closef.get(),
+            io.meta.get(),
+            io.call_closef.get().is_none(),
+        )
     });
-    s.push_userdata(LuaFile(rc.clone()));
+    let raw = file.as_raw();
+    let st = Rc::new(RefCell::new(Stream {
+        file: Some(file),
+        kind,
+        block: 0,
+        meta,
+        spare: Vec::new(),
+    }));
+    let block = s.new_userdata_with_host(STREAM_BLOCK_SIZE, 0, st.clone())?;
+    st.borrow_mut().block = block as usize;
+    stdio::write_stream_block(block, raw, closef);
     s.raw_get_field(REGISTRY_INDEX, FILE_TYPE.as_bytes())?;
     s.set_metatable(-2)?;
-    Ok(rc)
-}
-
-/// The stream of the `FILE*` at `idx`, open or closed.
-fn stream_at(s: &mut Stack<'_>, idx: i32) -> Option<Shared> {
-    s.with_userdata::<LuaFile, _>(idx, |f| f.as_ref().map(|f| f.0.clone()))
-        .flatten()
-}
-
-/// The stream of a file, which must be open.
-fn open_stream(s: &mut Stack<'_>, file: &LuaFile) -> StackResult<Shared> {
-    if file.0.borrow().is_closed() {
-        return Err(s.error("attempt to use a closed file"));
+    if early {
+        io_state(s, |io| {
+            let mut early = io.early.borrow_mut();
+            // Forget closed handles now and then.
+            if early.len() == early.capacity() {
+                early.retain(|w| w.strong_count() > 0);
+            }
+            early.push(Rc::downgrade(&st));
+        });
     }
-    Ok(file.0.clone())
+    Ok(st)
 }
 
-/// Push the default input or output handle, and give its stream, which
-/// must be open.
-fn push_default(s: &mut Stack<'_>, input: bool) -> StackResult<Shared> {
+/// Push the default input or output handle, which must be open.
+fn push_default(s: &mut Stack<'_>, input: bool) -> StackResult<Handle> {
     s.raw_get_field(REGISTRY_INDEX, default_key(input))?;
-    let stream = stream_at(s, -1).filter(|st| !st.borrow().is_closed());
-    match stream {
-        Some(st) => Ok(st),
+    match handle_at(s, -1).filter(|h| !h.is_closed()) {
+        Some(h) => Ok(h),
         None => {
             let what = if input { "input" } else { "output" };
             Err(s.error(format!("default {what} file is closed").as_str()))
@@ -525,9 +318,9 @@ fn push_default(s: &mut Stack<'_>, input: bool) -> StackResult<Shared> {
     }
 }
 
-/// `io.open`'s mode: `[rwa]%+?b*`. Gives the options and whether the
-/// stream reads and writes.
-fn open_options(mode: &[u8]) -> Option<(OpenOptions, bool, bool)> {
+/// `io.open`'s mode: `[rwa]%+?b*`. Gives the options and the mode for the
+/// C library, `b` and all.
+fn open_options(mode: &[u8]) -> Option<(OpenOptions, CString)> {
     let (&first, rest) = mode.split_first()?;
     let (plus, rest) = match rest.first() {
         Some(b'+') => (true, &rest[1..]),
@@ -537,28 +330,32 @@ fn open_options(mode: &[u8]) -> Option<(OpenOptions, bool, bool)> {
         return None;
     }
     let mut o = OpenOptions::new();
-    let (r, w) = match first {
-        b'r' => {
-            o.read(true).write(plus);
-            (true, plus)
-        }
-        b'w' => {
-            o.write(true).create(true).truncate(true).read(plus);
-            (plus, true)
-        }
-        b'a' => {
-            o.append(true).create(true).read(plus);
-            (plus, true)
-        }
+    match first {
+        b'r' => o.read(true).write(plus),
+        b'w' => o.write(true).create(true).truncate(true).read(plus),
+        b'a' => o.append(true).create(true).read(plus),
         _ => return None,
     };
-    Some((o, r, w))
+    let c_mode = CString::new(mode).ok()?;
+    Some((o, c_mode))
+}
+
+/// Hand `f`, opened by Rust, to the C library with `mode`.
+fn c_stream(f: File, mode: &std::ffi::CStr, text: bool) -> io::Result<CFile> {
+    #[cfg(unix)]
+    {
+        CFile::from_fd(f.into(), mode, text)
+    }
+    #[cfg(windows)]
+    {
+        CFile::from_handle(f.into(), mode, text)
+    }
 }
 
 /// Open `name` with `io.open`'s `mode`; `None` for a bad mode. Without `b`
 /// the stream is a text stream.
-fn open_file(name: &[u8], mode: &[u8], line_endings: LineEndings) -> Option<io::Result<Stream>> {
-    let (o, r, w) = open_options(mode)?;
+fn open_file(name: &[u8], mode: &[u8], line_endings: LineEndings) -> Option<io::Result<CFile>> {
+    let (o, c_mode) = open_options(mode)?;
     let text = !mode.contains(&b'b') && line_endings.translates();
     let path = os_path(name);
     if text && mode.starts_with(b"a+") {
@@ -572,7 +369,7 @@ fn open_file(name: &[u8], mode: &[u8], line_endings: LineEndings) -> Option<io::
         }
     }
     let opened = o.open(&path).map_err(|e| windows_directory_error(e, name));
-    Some(opened.map(|f| Stream::new(Kind::File(f), r, w).text(text, line_endings)))
+    Some(opened.and_then(|f| c_stream(f, &c_mode, text)))
 }
 
 /// Remove a Ctrl-Z that ends `f`, as the C library does when it opens a
@@ -627,8 +424,8 @@ fn io_open(s: &mut Stack<'_>, name: Vec<u8>, mode: Option<Vec<u8>>) -> StackResu
     let mode = mode.unwrap_or_else(|| b"r".to_vec());
     match open_file(&name, &mode, s.line_endings()) {
         None => Err(s.arg_error(2, "invalid mode")),
-        Some(Ok(stream)) => {
-            push_file(s, stream)?;
+        Some(Ok(f)) => {
+            push_file(s, f, Kind::File)?;
             Ok(Return::values(1))
         }
         Some(Err(e)) => push_failure(s, &e, Some(&name)),
@@ -643,31 +440,59 @@ fn io_popen(s: &mut Stack<'_>, cmd: Vec<u8>, mode: Option<Vec<u8>>) -> StackResu
         _ => return Err(s.arg_error(2, "invalid mode")),
     };
     // The child may read files we wrote and writes to the same terminal:
-    // flush every open file, then standard output, then the C library's
-    // streams that C modules write through, first, as `lua5.4` and
-    // `lua5.5` do (`os.execute` flushes nothing, in both).
-    flush_all();
+    // flush every C stream (our files and C modules' alike) and the
+    // isolate's standard output first, as `lua5.4` and `lua5.5` do
+    // (`os.execute` flushes nothing, in both).
     flush_stdout(s);
-    crate::crt::flush_c_streams();
+    flush_all();
     let mut command = shell(os_path(&cmd).as_os_str());
     if reading {
         command.stdout(Stdio::piped());
     } else {
         command.stdin(Stdio::piped());
     }
-    match command.spawn() {
-        Ok(child) => {
-            let stream = if reading {
-                Stream::new(Kind::PipeRead(child), true, false)
-            } else {
-                Stream::new(Kind::PipeWrite(child), false, true)
-            };
-            let stream = stream.text(true, s.line_endings());
-            push_file(s, stream)?;
+    let text = s.line_endings().translates();
+    let spawned = command.spawn().and_then(|mut child| {
+        let file = if reading {
+            let out = child.stdout.take().ok_or_else(closed_error)?;
+            pipe_stream(out, stdio::mode(b"r\0"), text)
+        } else {
+            let inp = child.stdin.take().ok_or_else(closed_error)?;
+            pipe_stream(inp, stdio::mode(b"w\0"), text)
+        };
+        match file {
+            Ok(f) => Ok((f, child)),
+            Err(e) => {
+                let _ = child.wait();
+                Err(e)
+            }
+        }
+    });
+    match spawned {
+        Ok((f, child)) => {
+            push_file(s, f, Kind::Pipe(child))?;
             Ok(Return::values(1))
         }
         Err(e) => push_failure(s, &e, Some(&cmd)),
     }
+}
+
+#[cfg(unix)]
+fn pipe_stream(
+    end: impl Into<std::os::fd::OwnedFd>,
+    mode: &std::ffi::CStr,
+    text: bool,
+) -> io::Result<CFile> {
+    CFile::from_fd(end.into(), mode, text)
+}
+
+#[cfg(windows)]
+fn pipe_stream(
+    end: impl Into<std::os::windows::io::OwnedHandle>,
+    mode: &std::ffi::CStr,
+    text: bool,
+) -> io::Result<CFile> {
+    CFile::from_handle(end.into(), mode, text)
 }
 
 #[native(name = "io.tmpfile")]
@@ -676,11 +501,11 @@ fn io_tmpfile(s: &mut Stack<'_>) -> StackResult<Return> {
     let opened = crate::sys::temp_file().and_then(|(path, _)| {
         let opened = OpenOptions::new().read(true).write(true).open(&path);
         let _ = std::fs::remove_file(&path);
-        opened
+        opened.and_then(|f| c_stream(f, stdio::mode(b"w+b\0"), false))
     });
     match opened {
         Ok(f) => {
-            push_file(s, Stream::new(Kind::File(f), true, true))?;
+            push_file(s, f, Kind::File)?;
             Ok(Return::values(1))
         }
         Err(e) => push_failure(s, &e, None),
@@ -689,11 +514,8 @@ fn io_tmpfile(s: &mut Stack<'_>) -> StackResult<Return> {
 
 #[native(name = "io.type")]
 fn io_type(s: &mut Stack<'_>, v: Any) -> Option<&'static str> {
-    let closed = s.with_userdata::<LuaFile, _>(v.0, |f| Some(f.as_ref()?.0.borrow().is_closed()));
-    match closed.flatten()? {
-        true => Some("closed file"),
-        false => Some("file"),
-    }
+    let h = handle_at(s, v.0)?;
+    Some(if h.is_closed() { "closed file" } else { "file" })
 }
 
 #[native(name = "io.input")]
@@ -715,16 +537,16 @@ fn set_default(s: &mut Stack<'_>, input: bool) -> StackResult<Return> {
             let name = s.check_string(1)?.to_vec();
             let mode: &[u8] = if input { b"r" } else { b"w" };
             match open_file(&name, mode, s.line_endings()).expect("valid mode") {
-                Ok(stream) => {
-                    push_file(s, stream)?;
+                Ok(f) => {
+                    push_file(s, f, Kind::File)?;
                 }
                 Err(e) => return Err(s.error(&cannot_open(&name, &e))),
             }
             s.raw_set_field(REGISTRY_INDEX, default_key(input))?;
         }
         _ => {
-            let file = Ud::<LuaFile>::arg(s, 1)?;
-            open_stream(s, &file)?;
+            let FileArg(h) = FileArg::arg(s, 1)?;
+            check_open(s, &h)?;
             s.push_copy(1);
             s.raw_set_field(REGISTRY_INDEX, default_key(input))?;
         }
@@ -736,49 +558,88 @@ fn set_default(s: &mut Stack<'_>, input: bool) -> StackResult<Return> {
 #[native(name = "io.close")]
 fn io_close(s: &mut Stack<'_>) -> StackResult<Return> {
     if matches!(s.type_at(1), Type::None | Type::Nil) {
-        let stream = push_default(s, false)?;
-        return close(s, &stream);
+        let h = push_default(s, false)?;
+        let at = s.top();
+        return close(s, &h, at);
     }
-    let file = Ud::<LuaFile>::arg(s, 1)?;
-    f_close(s, file)
+    let FileArg(h) = FileArg::arg(s, 1)?;
+    check_open(s, &h)?;
+    close(s, &h, 1)
 }
 
 // Methods are unnamed in messages, as in the reference: `bad argument #2
 // to '?'` when no call names them.
 
 #[native(name = "?")]
-fn f_close(s: &mut Stack<'_>, file: Ud<LuaFile>) -> StackResult<Return> {
-    let stream = open_stream(s, &file)?;
-    close(s, &stream)
+fn f_close(s: &mut Stack<'_>, file: FileArg) -> StackResult<Return> {
+    check_open(s, &file.0)?;
+    close(s, &file.0, 1)
 }
 
-fn close(s: &mut Stack<'_>, stream: &Shared) -> StackResult<Return> {
-    if stream.borrow().is_std() {
+/// Close the open handle `h`, which is at `idx`: `true`, a pipe's exit
+/// results, or `nil, message, code`.
+fn close(s: &mut Stack<'_>, h: &Handle, idx: i32) -> StackResult<Return> {
+    let st = match h {
+        Handle::Ours(st) => st.clone(),
+        Handle::Foreign(block) => return close_foreign(s, *block, idx),
+    };
+    if h.is_std() {
         return (Nil, "cannot close standard file").push_results(s);
     }
-    match s.with_stdout(|out| stream.borrow_mut().close(out)) {
-        Ok(Some(status)) => exit_results(status).push_results(s),
-        Ok(None) => true.push_results(s),
-        Err(e) => push_failure(s, &e, None),
+    let (file, kind, block) = {
+        let mut st = st.borrow_mut();
+        let kind = std::mem::replace(&mut st.kind, Kind::File);
+        (st.file.take(), kind, st.block)
+    };
+    if let Some(f) = &file {
+        stdio::write_stream_block(block as *mut c_void, f.as_raw(), 0);
     }
+    let closed = file.map_or(Ok(()), CFile::close);
+    match kind {
+        Kind::Pipe(mut child) => match child.wait() {
+            Ok(status) => exit_results(status).push_results(s),
+            Err(e) => push_failure(s, &e, None),
+        },
+        _ => match closed {
+            Ok(()) => true.push_results(s),
+            Err(e) => push_failure(s, &e, None),
+        },
+    }
+}
+
+/// Close a stream C code made, through its `closef`, which gets it at
+/// index 1, as Lua calls it.
+fn close_foreign(s: &mut Stack<'_>, block: usize, idx: i32) -> StackResult<Return> {
+    let (f, closef) = stdio::read_stream_block(block as *mut c_void);
+    let Some(call) = io_state(s, |io| io.call_closef.get()) else {
+        return Err(s.error("attempt to use a closed file"));
+    };
+    stdio::write_stream_block(block as *mut c_void, f, 0);
+    call(s, idx, closef)
 }
 
 #[native(name = "io.flush")]
 fn io_flush(s: &mut Stack<'_>) -> StackResult<Return> {
-    let stream = push_default(s, false)?;
-    flush_result(s, &stream)
+    let h = push_default(s, false)?;
+    flush_result(s, &h)
 }
 
 #[native(name = "?")]
-fn f_flush(s: &mut Stack<'_>, file: Ud<LuaFile>) -> StackResult<Return> {
-    let stream = open_stream(s, &file)?;
+fn f_flush(s: &mut Stack<'_>, file: FileArg) -> StackResult<Return> {
+    check_open(s, &file.0)?;
     s.push_copy(1);
-    flush_result(s, &stream)
+    flush_result(s, &file.0)
 }
 
-/// Flush `stream`: the file on top, or `nil, message, code`.
-fn flush_result(s: &mut Stack<'_>, stream: &Shared) -> StackResult<Return> {
-    match s.with_stdout(|out| stream.borrow_mut().flush(out)) {
+/// Flush `h`: the file on top, or `nil, message, code`.
+fn flush_result(s: &mut Stack<'_>, h: &Handle) -> StackResult<Return> {
+    let r = if h.routed_stdout(s) {
+        s.with_stdout(|out| out.flush())
+    } else {
+        h.with_file(CFile::flush)
+            .unwrap_or_else(|| Err(closed_error()))
+    };
+    match r {
         Ok(()) => Ok(Return::values(1)),
         Err(e) => push_failure(s, &e, None),
     }
@@ -786,102 +647,137 @@ fn flush_result(s: &mut Stack<'_>, stream: &Shared) -> StackResult<Return> {
 
 #[native(name = "io.write")]
 fn io_write(s: &mut Stack<'_>, args: Rest) -> StackResult<Return> {
-    let stream = push_default(s, false)?;
-    write(s, &stream, args)
+    let h = push_default(s, false)?;
+    write(s, &h, args)
 }
 
 #[native(name = "?")]
-fn f_write(s: &mut Stack<'_>, file: Ud<LuaFile>, args: Rest) -> StackResult<Return> {
-    let stream = open_stream(s, &file)?;
+fn f_write(s: &mut Stack<'_>, file: FileArg, args: Rest) -> StackResult<Return> {
+    check_open(s, &file.0)?;
     s.push_copy(1);
-    write(s, &stream, args)
+    write(s, &file.0, args)
 }
 
-/// Write `args` (strings or numbers) to `stream`. Returns the file on top,
-/// or `nil, message, code, bytes written` (5.4: without the count).
-fn write(s: &mut Stack<'_>, stream: &Shared, args: Rest) -> StackResult<Return> {
+/// Write `args` (strings or numbers) to `h`. Returns the file on top, or
+/// `nil, message, code, bytes written` (5.4: without the count).
+fn write(s: &mut Stack<'_>, h: &Handle, args: Rest) -> StackResult<Return> {
     let mut written = 0usize;
-    let mut bytes = Vec::new();
-    for i in args.indices() {
-        bytes.clear();
-        match s.type_at(i) {
-            Type::String => bytes.extend_from_slice(&s.string_at(i).unwrap_or_default()),
-            // With the locale's decimal point, as `tostring` writes it.
-            Type::Number => {
-                bytes.extend_from_slice(s.number_text(i).unwrap_or_default().as_bytes())
+    let stop = if h.routed_stdout(s) {
+        write_routed(s, args, &mut written)
+    } else {
+        let s = &*s;
+        // One lock of the stream for all the arguments. Nothing in here
+        // can run a script (no allocation, no error raised), which could
+        // reach this handle again.
+        h.with_file(|f| {
+            let mut f = f.lock();
+            for i in args.indices() {
+                let r = match s.type_at(i) {
+                    Type::String => {
+                        let bytes = s.string_at(i).unwrap_or_default();
+                        f.write(&bytes).map(|()| bytes.len())
+                    }
+                    // With the locale's decimal point, as `tostring` writes it.
+                    Type::Number => {
+                        let text = s.number_text(i).unwrap_or_default();
+                        f.write(text.as_bytes()).map(|()| text.len())
+                    }
+                    _ => return Err(WriteStop::NotString(i)),
+                };
+                written += r.map_err(WriteStop::Failed)?;
             }
-            _ => return Err(s.type_error(i, "string")),
-        }
-        if let Err(e) = s.with_stdout(|out| stream.borrow_mut().write(&bytes, out)) {
+            Ok(())
+        })
+        .unwrap_or_else(|| Err(WriteStop::Failed(closed_error())))
+    };
+    match stop {
+        Ok(()) => Ok(Return::values(1)),
+        Err(WriteStop::NotString(i)) => Err(s.type_error(i, "string")),
+        Err(WriteStop::Failed(e)) => {
             let (msg, code) = (os_error_text(&e), os_error_code(&e));
             // Lua 5.4 doesn't report the bytes written (ADR-14).
             if orbit::LUA.is_5_4() {
                 return (Nil, msg, code).push_results(s);
             }
-            return (Nil, msg, code, written as i64).push_results(s);
+            (Nil, msg, code, written as i64).push_results(s)
         }
-        written += bytes.len();
     }
-    Ok(Return::values(1))
+}
+
+/// Why `write` stopped before the last argument.
+enum WriteStop {
+    /// The argument there is neither a string nor a number.
+    NotString(i32),
+    Failed(io::Error),
+}
+
+/// `write`'s arguments to the isolate's standard output.
+fn write_routed(s: &mut Stack<'_>, args: Rest, written: &mut usize) -> Result<(), WriteStop> {
+    for i in args.indices() {
+        let bytes = match s.type_at(i) {
+            Type::String => s.string_at(i).unwrap_or_default().to_vec(),
+            Type::Number => s.number_text(i).unwrap_or_default().into_bytes(),
+            _ => return Err(WriteStop::NotString(i)),
+        };
+        s.with_stdout(|out| out.write_all(&bytes))
+            .map_err(WriteStop::Failed)?;
+        *written += bytes.len();
+    }
+    Ok(())
 }
 
 #[native(name = "?")]
 fn f_seek(
     s: &mut Stack<'_>,
-    file: Ud<LuaFile>,
+    file: FileArg,
     whence: Option<Vec<u8>>,
     off: Option<i64>,
 ) -> StackResult<Return> {
-    let stream = open_stream(s, &file)?;
+    check_open(s, &file.0)?;
     let off = off.unwrap_or(0);
-    let from = match whence.as_deref().unwrap_or(b"cur") {
-        b"set" => {
-            if off < 0 {
-                // What the system says for a negative offset.
-                return push_failure(s, &crate::crt::system_error(libc::EINVAL), None);
-            }
-            SeekFrom::Start(off as u64)
-        }
-        b"cur" => SeekFrom::Current(off),
-        b"end" => SeekFrom::End(off),
+    let whence = match whence.as_deref().unwrap_or(b"cur") {
+        b"set" => Whence::Set,
+        b"cur" => Whence::Cur,
+        b"end" => Whence::End,
         other => {
             let msg = OrbitString::concat(&[b"invalid option '", other, b"'"]);
             return Err(s.arg_error(2, &msg));
         }
     };
-    match s.with_stdout(|out| stream.borrow_mut().seek(from, out)) {
-        Ok(p) => (p as i64).push_results(s),
-        Err(e) => push_failure(s, &e, None),
+    if file.0.routed_stdout(s) {
+        s.with_stdout(|out| {
+            let _ = out.flush();
+        });
+    }
+    match file.0.with_file(|f| f.seek(whence, off)) {
+        Some(Ok(p)) => (p as i64).push_results(s),
+        Some(Err(e)) => push_failure(s, &e, None),
+        None => push_failure(s, &closed_error(), None),
     }
 }
 
 #[native(name = "?")]
 fn f_setvbuf(
     s: &mut Stack<'_>,
-    file: Ud<LuaFile>,
+    file: FileArg,
     mode: Vec<u8>,
     size: Option<i64>,
 ) -> StackResult<Return> {
-    let stream = open_stream(s, &file)?;
+    check_open(s, &file.0)?;
     let size = size.unwrap_or(BUFSIZ as i64).max(0) as usize;
     let b = match &mode[..] {
         b"no" => Buffering::No,
-        b"line" => Buffering::Line(size),
-        b"full" => Buffering::Full(size),
+        b"line" => Buffering::Line,
+        b"full" => Buffering::Full,
         _ => {
             let msg = OrbitString::concat(&[b"invalid option '", &mode, b"'"]);
             return Err(s.arg_error(2, &msg));
         }
     };
-    let r = s.with_stdout(|out| {
-        let mut st = stream.borrow_mut();
-        let r = st.flush(out);
-        st.buffering = b;
-        r
-    });
-    match r {
-        Ok(()) => true.push_results(s),
-        Err(e) => push_failure(s, &e, None),
+    match file.0.with_file(|f| f.set_buffering(b, size)) {
+        Some(Ok(())) => true.push_results(s),
+        Some(Err(e)) => push_failure(s, &e, None),
+        None => push_failure(s, &closed_error(), None),
     }
 }
 
@@ -889,21 +785,21 @@ fn f_setvbuf(
 
 #[native(name = "io.read")]
 fn io_read(s: &mut Stack<'_>, formats: Rest) -> StackResult<Return> {
-    let stream = push_default(s, true)?;
+    let h = push_default(s, true)?;
     let fmts = format_args(s, formats);
-    read(s, &stream, &fmts, formats.first)
+    read(s, &h, &fmts, formats.first)
 }
 
 #[native(name = "?")]
-fn f_read(s: &mut Stack<'_>, file: Ud<LuaFile>, formats: Rest) -> StackResult<Return> {
-    let stream = open_stream(s, &file)?;
+fn f_read(s: &mut Stack<'_>, file: FileArg, formats: Rest) -> StackResult<Return> {
+    check_open(s, &file.0)?;
     let fmts = format_args(s, formats);
-    read(s, &stream, &fmts, formats.first)
+    read(s, &file.0, &fmts, formats.first)
 }
 
 /// `read`: the values, or `nil, message, code` on an I/O error.
-fn read(s: &mut Stack<'_>, stream: &Shared, fmts: &[FormatArg], arg: i32) -> StackResult<Return> {
-    match read_values(s, stream, fmts, arg)? {
+fn read(s: &mut Stack<'_>, h: &Handle, fmts: &[FormatArg], arg: i32) -> StackResult<Return> {
+    match read_values(s, h, fmts, arg)? {
         Ok(n) => Ok(Return::values(n)),
         Err(e) => push_failure(s, &e, None),
     }
@@ -972,38 +868,32 @@ fn format(s: &mut Stack<'_>, v: &FormatArg, arg: i32) -> StackResult<Format> {
     }
 }
 
-/// Append `bytes` to a read buffer. A buffer that can't grow fails with
-/// [`io::ErrorKind::OutOfMemory`], which `read` raises as Lua's
-/// "not enough memory".
-fn append(into: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
-    into.try_reserve(bytes.len())
-        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
-    into.extend_from_slice(bytes);
-    Ok(())
-}
-
-/// Read with formats `fmts` (none: one line) from `stream`, pushing one
-/// value per format and stopping after the first that fails (nil). `arg` is
-/// the argument number of the first format, for messages. As in lua5.5,
-/// each format is checked when its turn comes, so formats after a failed
-/// read are never looked at. Gives how many values it pushed, or the I/O
-/// error, with the values taken off again.
+/// Read with formats `fmts` (none: one line) from `h`, pushing one value
+/// per format and stopping after the first that fails (nil). `arg` is the
+/// argument number of the first format, for messages. As in lua5.5, each
+/// format is checked when its turn comes, so formats after a failed read
+/// are never looked at. Gives how many values it pushed, or the I/O error
+/// the stream reports afterwards, with the values taken off again.
 fn read_values(
     s: &mut Stack<'_>,
-    stream: &Shared,
+    h: &Handle,
     fmts: &[FormatArg],
     arg: i32,
 ) -> StackResult<io::Result<usize>> {
     let top = s.top();
     let n = fmts.len().max(1);
+    let mut pushed = n;
     for i in 0..n {
         let fmt = match fmts.get(i) {
             Some(f) => format(s, f, arg + i as i32)?,
             None => Format::Line { keep: false },
         };
-        match read_one(s, stream, fmt) {
+        match read_one(s, h, fmt, i == 0) {
             Ok(true) => {}
-            Ok(false) => return Ok(Ok(i + 1)),
+            Ok(false) => {
+                pushed = i + 1;
+                break;
+            }
             Err(e) if e.kind() == io::ErrorKind::OutOfMemory => return Err(s.memory_error()),
             Err(e) => {
                 s.set_top(top)?;
@@ -1011,18 +901,22 @@ fn read_values(
             }
         }
     }
-    Ok(Ok(n))
+    Ok(Ok(pushed))
 }
 
 /// What one format read.
 enum ReadOutcome {
-    Bytes(Vec<u8>),
+    /// The bytes are in the buffer.
+    Bytes,
     Numeral(Option<Vec<u8>>),
     Nothing,
 }
 
-/// Push one format's value, or nil if it fails. Gives whether it read.
-fn read_one(s: &mut Stack<'_>, stream: &Shared, fmt: Format) -> io::Result<bool> {
+/// Push one format's value, or nil if it fails. Gives whether it read, or
+/// the error the stream reports after reading. `first` forgets an earlier
+/// error or end of file first. The stream is locked once for all of it,
+/// and not while values are pushed (which can run finalizers).
+fn read_one(s: &mut Stack<'_>, h: &Handle, fmt: Format, first: bool) -> io::Result<bool> {
     // The first byte of the locale's decimal point, as lua5.5 reads it.
     let point = s
         .decimal_point()
@@ -1030,39 +924,127 @@ fn read_one(s: &mut Stack<'_>, stream: &Shared, fmt: Format) -> io::Result<bool>
         .first()
         .copied()
         .unwrap_or(b'.');
-    let read = s.with_stdout(|out| -> io::Result<ReadOutcome> {
-        let mut st = stream.borrow_mut();
-        let mut buf = Vec::new();
-        let ok = match fmt {
-            Format::Count(0) => st.fill(out)?,
-            Format::Count(n) => {
-                st.read_bytes(n, &mut buf, out)?;
-                !buf.is_empty()
+    let mut buf = h.take_buffer();
+    let read = h
+        .with_file(|f| -> io::Result<ReadOutcome> {
+            let mut f = f.lock();
+            if first {
+                f.clear_error();
             }
-            Format::Line { keep } => st.read_line(keep, &mut buf, out)?,
-            Format::All => {
-                st.read_all(&mut buf, out)?;
-                true
+            let ok = match fmt {
+                Format::Count(0) => match f.getc() {
+                    Some(c) => {
+                        f.ungetc(c);
+                        true
+                    }
+                    None => false,
+                },
+                Format::Count(n) => f.read_into(n, &mut buf)?,
+                Format::Line { keep } => f.read_line(keep, &mut buf)?,
+                Format::All => {
+                    f.read_into(usize::MAX, &mut buf)?;
+                    true
+                }
+                Format::Number => {
+                    let numeral = read_numeral(&mut f, point);
+                    return f.error().map_or(Ok(ReadOutcome::Numeral(numeral)), Err);
+                }
+            };
+            if let Some(e) = f.error() {
+                return Err(e);
             }
-            Format::Number => return Ok(ReadOutcome::Numeral(st.read_numeral(point, out)?)),
-        };
-        Ok(if ok {
-            ReadOutcome::Bytes(buf)
-        } else {
-            ReadOutcome::Nothing
+            Ok(if ok {
+                ReadOutcome::Bytes
+            } else {
+                ReadOutcome::Nothing
+            })
         })
-    })?;
-    Ok(match read {
-        ReadOutcome::Bytes(b) => {
-            s.push_bytes(&b[..]);
-            true
+        .unwrap_or_else(|| Err(closed_error()));
+    let pushed = match read {
+        Ok(ReadOutcome::Bytes) => {
+            s.push_bytes(&buf[..]);
+            Ok(true)
         }
-        ReadOutcome::Numeral(Some(d)) if s.push_numeral(&d[..]) != 0 => true,
-        ReadOutcome::Numeral(_) | ReadOutcome::Nothing => {
+        Ok(ReadOutcome::Numeral(Some(d))) if s.push_numeral(&d[..]) != 0 => Ok(true),
+        Ok(ReadOutcome::Numeral(_) | ReadOutcome::Nothing) => {
             s.push_nil();
-            false
+            Ok(false)
         }
-    })
+        Err(e) => Err(e),
+    };
+    h.give_back_buffer(buf);
+    pushed
+}
+
+/// Read a numeral as `read("n")` does: the longest prefix that can start a
+/// numeral, at most [`MAX_NUMERAL`] bytes, looking one byte ahead (which
+/// goes back to the stream). The decimal point is `.` or the locale's
+/// `point`. Returns the bytes, or `None` if they ran too long.
+fn read_numeral(f: &mut Locked<'_>, point: u8) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut c = f.getc();
+    while matches!(c, Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)) {
+        c = f.getc();
+    }
+    let mut too_long = false;
+    // Take the current byte if `accept` likes it, and move on.
+    let mut take =
+        |f: &mut Locked<'_>, c: &mut Option<u8>, buf: &mut Vec<u8>, accept: &dyn Fn(u8) -> bool| {
+            match *c {
+                Some(b) if accept(b) && !too_long => {
+                    if buf.len() >= MAX_NUMERAL {
+                        too_long = true;
+                        return false;
+                    }
+                    buf.push(b);
+                    *c = f.getc();
+                    true
+                }
+                _ => false,
+            }
+        };
+    take(f, &mut c, &mut buf, &|b| b == b'-' || b == b'+');
+    let mut count = 0;
+    let mut hex = false;
+    if take(f, &mut c, &mut buf, &|b| b == b'0') {
+        if take(f, &mut c, &mut buf, &|b| b == b'x' || b == b'X') {
+            hex = true;
+        } else {
+            count = 1;
+        }
+    }
+    let digit = move |b: u8| {
+        if hex {
+            b.is_ascii_hexdigit()
+        } else {
+            b.is_ascii_digit()
+        }
+    };
+    while take(f, &mut c, &mut buf, &digit) {
+        count += 1;
+    }
+    if take(f, &mut c, &mut buf, &|b| b == b'.' || b == point) {
+        while take(f, &mut c, &mut buf, &digit) {
+            count += 1;
+        }
+    }
+    if count > 0 {
+        let exp = move |b: u8| {
+            if hex {
+                b == b'p' || b == b'P'
+            } else {
+                b == b'e' || b == b'E'
+            }
+        };
+        if take(f, &mut c, &mut buf, &exp) {
+            take(f, &mut c, &mut buf, &|b| b == b'-' || b == b'+');
+            while take(f, &mut c, &mut buf, &|b: u8| b.is_ascii_digit()) {}
+        }
+    }
+    if let Some(b) = c {
+        f.ungetc(b);
+    }
+    if too_long { None } else { Some(buf) }
 }
 
 // ---- lines -----------------------------------------------------------------
@@ -1073,8 +1055,8 @@ fn io_lines(s: &mut Stack<'_>, formats: Rest) -> StackResult<Return> {
     if close {
         let name = s.check_string(1)?.to_vec();
         match open_file(&name, b"r", s.line_endings()).expect("valid mode") {
-            Ok(stream) => {
-                push_file(s, stream)?;
+            Ok(f) => {
+                push_file(s, f, Kind::File)?;
             }
             Err(e) => return Err(s.error(&cannot_open(&name, &e))),
         }
@@ -1104,8 +1086,8 @@ fn io_lines(s: &mut Stack<'_>, formats: Rest) -> StackResult<Return> {
 }
 
 #[native(name = "?")]
-fn f_lines(s: &mut Stack<'_>, file: Ud<LuaFile>, formats: Rest) -> StackResult<Return> {
-    open_stream(s, &file)?;
+fn f_lines(s: &mut Stack<'_>, file: FileArg, formats: Rest) -> StackResult<Return> {
+    check_open(s, &file.0)?;
     push_lines_iterator(s, 1, formats.first, formats.count, false)?;
     Ok(Return::values(1))
 }
@@ -1135,22 +1117,24 @@ fn push_lines_iterator(
 fn lines_next(s: &mut Stack<'_>) -> StackResult<Return> {
     let data = s.closure_data();
     let (n, close) = ((data >> 1) as i32, data & 1 != 0);
-    let Some(stream) = stream_at(s, upvalue_index(1)) else {
-        return Err(s.error("file is already closed"));
+    let h = match handle_at(s, upvalue_index(1)) {
+        Some(h) if !h.is_closed() => h,
+        _ => return Err(s.error("file is already closed")),
     };
-    if stream.borrow().is_closed() {
-        return Err(s.error("file is already closed"));
-    }
     let fmts: Vec<FormatArg> = (2..n + 2)
         .map(|i| FormatArg::at(s, upvalue_index(i)))
         .collect();
     let top = s.top();
-    match read_values(s, &stream, &fmts, 2)? {
+    match read_values(s, &h, &fmts, 2)? {
         Ok(n) if s.to_boolean(top + 1) => Ok(Return::values(n)),
         Ok(_) => {
             // The end: no values, and the file closes if `lines` opened it.
             if close {
-                let _ = s.with_stdout(|out| stream.borrow_mut().close(out));
+                s.set_top(top)?;
+                s.push_copy(upvalue_index(1));
+                let at = s.top();
+                close_quietly(s, &h, at);
+                s.set_top(top)?;
             }
             Ok(Return::values(0))
         }
@@ -1158,202 +1142,165 @@ fn lines_next(s: &mut Stack<'_>) -> StackResult<Return> {
     }
 }
 
+/// Close the file handle at `idx` as its `close` method does, pushing what
+/// that returns: for `orbit-capi`'s `closef`.
+pub fn close_file(s: &mut Stack<'_>, idx: i32) -> StackResult<Return> {
+    let idx = s.abs_index(idx);
+    let FileArg(h) = FileArg::arg(s, idx)?;
+    check_open(s, &h)?;
+    close(s, &h, idx)
+}
+
+/// Close `h` (at `idx`) for `__gc`, `__close` or a finished `lines`,
+/// ignoring the outcome; standard streams stay open.
+fn close_quietly(s: &mut Stack<'_>, h: &Handle, idx: i32) {
+    if h.is_closed() || h.is_std() {
+        return;
+    }
+    let top = s.top();
+    let _ = close(s, h, idx);
+    let _ = s.set_top(top);
+}
+
 // ---- metamethods and opening ----------------------------------------------
 
 #[native(name = "?")]
-fn f_tostring(s: &mut Stack<'_>, file: Ud<LuaFile>) -> String {
-    if (file.0).0.borrow().is_closed() {
+fn f_tostring(s: &mut Stack<'_>, file: FileArg) -> String {
+    if file.0.is_closed() {
         "file (closed)".to_string()
     } else {
         format!("file (0x{:012x})", s.identity(1).unwrap_or(0))
     }
 }
 
-/// `__close` and `__gc`: close the file unless it is closed or standard.
+/// `__close`: close the file unless it is closed or standard.
 #[native(name = "?")]
-fn f_gc(s: &mut Stack<'_>, file: Ud<LuaFile>) {
-    let stream = &(file.0).0;
-    let open = !stream.borrow().is_closed() && !stream.borrow().is_std();
-    if open {
-        let _ = s.with_stdout(|out| stream.borrow_mut().close(out));
-    }
+fn f_close_metamethod(s: &mut Stack<'_>, file: FileArg) {
+    close_quietly(s, &file.0, 1);
 }
 
-/// Open the library: the `io` table, the `FILE*` class and the standard
-/// files, which are also the default input and output. Returns the table.
-pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
-    let class = s.define_class::<LuaFile>(FILE_TYPE, |b| {
-        b.native::<f_close>("close")?
-            .native::<f_flush>("flush")?
-            .native::<f_lines>("lines")?
-            .native::<f_read>("read")?
-            .native::<f_seek>("seek")?
-            .native::<f_setvbuf>("setvbuf")?
-            .native::<f_write>("write")?
-            .native_metamethod::<f_tostring>("__tostring")?
-            .native_metamethod::<f_gc>("__close")?;
-        Ok(())
-    })?;
-    // `T`'s `Drop` would close a collected file too, but Lua's metatable
-    // has a `__gc` scripts can see and call.
-    let meta = class.metatable(s)?;
-    meta.raw_set("__gc", s.create_native::<f_gc>())?;
-    s.registry().raw_set(FILE_TYPE, meta)?;
-    let io = s.create_table();
-    let line_endings = s.line_endings();
-    for (name, kind, r, w) in [
-        ("stdin", Kind::Stdin, true, false),
-        ("stdout", Kind::Stdout, false, true),
-        ("stderr", Kind::Stderr, false, true),
+/// `__gc`: close the file unless it is closed or standard.
+#[native(name = "?")]
+fn f_gc(s: &mut Stack<'_>, file: FileArg) {
+    close_quietly(s, &file.0, 1);
+}
+
+/// Flush every C stream, our files among them, as the C library does at
+/// exit.
+pub fn flush_all() {
+    crate::crt::flush_c_streams();
+}
+
+/// Set each named native in the table at `idx`.
+macro_rules! set_natives {
+    ($s:expr, $idx:expr, [$($name:literal => $f:ident),* $(,)?]) => {{
+        let idx = $s.abs_index($idx);
+        $(
+            $s.push_native::<$f>();
+            $s.raw_set_field(idx, $name.as_bytes())?;
+        )*
+    }};
+}
+
+/// Build the library on the stack: the `FILE*` metatable and the standard
+/// files, which are also the default input and output. Leaves the `io`
+/// table on top.
+#[native(name = "?")]
+fn io_setup(s: &mut Stack<'_>) -> StackResult<Return> {
+    // The metatable, `__index` holding the methods: the one there is if
+    // the library is opened again, so earlier handles stay files.
+    if s.raw_get_field(REGISTRY_INDEX, FILE_TYPE.as_bytes())? == Type::Table {
+        let id = s.identity(-1).unwrap_or(0);
+        io_state(s, |io| io.meta.set(id));
+        s.set_top(-2)?;
+        return push_library(s);
+    }
+    s.set_top(-2)?;
+    s.create_table(0, 6);
+    let meta = s.top();
+    s.create_table(0, 7);
+    set_natives!(s, -1, [
+        "close" => f_close,
+        "flush" => f_flush,
+        "lines" => f_lines,
+        "read" => f_read,
+        "seek" => f_seek,
+        "setvbuf" => f_setvbuf,
+        "write" => f_write,
+    ]);
+    s.raw_set_field(meta, b"__index".as_slice())?;
+    set_natives!(s, meta, [
+        "__tostring" => f_tostring,
+        "__close" => f_close_metamethod,
+        "__gc" => f_gc,
+    ]);
+    s.push_bytes(FILE_TYPE.as_bytes());
+    s.raw_set_field(meta, b"__name".as_slice())?;
+    s.push_copy(meta);
+    s.raw_set_field(REGISTRY_INDEX, FILE_TYPE.as_bytes())?;
+    let id = s.identity(meta).unwrap_or(0);
+    io_state(s, |io| io.meta.set(id));
+    s.set_top(-2)?;
+    push_library(s)
+}
+
+/// Push the `io` table, with new standard files that are also the default
+/// input and output.
+fn push_library(s: &mut Stack<'_>) -> StackResult<Return> {
+    s.create_table(0, 14);
+    let io = s.top();
+    #[cfg(windows)]
+    let binary_std = !s.line_endings().translates();
+    for (name, which) in [
+        ("stdin", Std::In),
+        ("stdout", Std::Out),
+        ("stderr", Std::Err),
     ] {
-        // Standard output's writer translates for itself.
-        let text = !matches!(kind, Kind::Stdout);
-        let mut stream = Stream::new(kind, r, w).text(text, line_endings);
-        if name == "stderr" {
-            stream.buffering = Buffering::No;
-        }
-        let rc = Rc::new(RefCell::new(stream));
-        OPEN.with(|open| open.borrow_mut().push(Rc::downgrade(&rc)));
-        let f = class.instance(s, LuaFile(rc))?;
-        io.raw_set(name, f)?;
-        match name {
-            "stdin" => s.registry().raw_set(INPUT_KEY, f)?,
-            "stdout" => s.registry().raw_set(OUTPUT_KEY, f)?,
-            _ => {}
+        #[cfg(windows)]
+        let file = if binary_std {
+            CFile::standard_binary(which)
+        } else {
+            CFile::standard(which)
+        };
+        #[cfg(not(windows))]
+        let file = CFile::standard(which);
+        let Some(file) = file else { continue };
+        push_file(s, file, Kind::Std(which))?;
+        s.push_copy(-1);
+        s.raw_set_field(io, name.as_bytes())?;
+        match which {
+            Std::In => s.raw_set_field(REGISTRY_INDEX, default_key(true))?,
+            Std::Out => s.raw_set_field(REGISTRY_INDEX, default_key(false))?,
+            Std::Err => s.set_top(-2)?,
         }
     }
-    io.add_native::<io_close>()?;
-    io.add_native::<io_flush>()?;
-    io.add_native::<io_input>()?;
-    io.add_native::<io_lines>()?;
-    io.add_native::<io_open>()?;
-    io.add_native::<io_output>()?;
-    io.add_native::<io_popen>()?;
-    io.add_native::<io_read>()?;
-    io.add_native::<io_tmpfile>()?;
-    io.add_native::<io_type>()?;
-    io.add_native::<io_write>()?;
+    set_natives!(s, io, [
+        "close" => io_close,
+        "flush" => io_flush,
+        "input" => io_input,
+        "lines" => io_lines,
+        "open" => io_open,
+        "output" => io_output,
+        "popen" => io_popen,
+        "read" => io_read,
+        "tmpfile" => io_tmpfile,
+        "type" => io_type,
+        "write" => io_write,
+    ]);
     s.before_exit(flush_all);
-    Ok(io)
+    s.push_copy(io);
+    Ok(Return::values(1))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A text stream over a temporary file holding `raw`, translating on
-    /// every platform.
-    fn text_file(raw: &[u8], read: bool, write: bool) -> (Stream, std::path::PathBuf) {
-        let (path, _) = crate::sys::temp_file().unwrap();
-        std::fs::write(&path, raw).unwrap();
-        let f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        let mut st = Stream::new(Kind::File(f), read, write);
-        st.text = Some(TextDecoder::default());
-        (st, path)
-    }
-
-    fn line(st: &mut Stream, keep: bool) -> Option<Vec<u8>> {
-        let mut v = Vec::new();
-        st.read_line(keep, &mut v, &mut io::sink())
-            .unwrap()
-            .then_some(v)
-    }
-
-    fn bytes(st: &mut Stream, n: usize) -> Vec<u8> {
-        let mut v = Vec::new();
-        st.read_bytes(n, &mut v, &mut io::sink()).unwrap();
-        v
-    }
-
-    fn all(st: &mut Stream) -> Vec<u8> {
-        let mut v = Vec::new();
-        st.read_all(&mut v, &mut io::sink()).unwrap();
-        v
-    }
-
-    const R: &[u8] = b"l1\r\nl2\n\r\nl3\rX\x1aafter\r\nend";
-
-    #[test]
-    fn text_reads_translate_and_end_at_ctrl_z() {
-        let (mut st, path) = text_file(R, true, false);
-        assert_eq!(all(&mut st), b"l1\nl2\n\nl3\rX");
-        assert_eq!(all(&mut st), b"");
-        // The end stays until a seek.
-        assert_eq!(st.peek(&mut io::sink()).unwrap(), None);
-        st.seek(SeekFrom::Start(0), &mut io::sink()).unwrap();
-        assert_eq!(line(&mut st, false).unwrap(), b"l1");
-        assert_eq!(line(&mut st, true).unwrap(), b"l2\n");
-        assert_eq!(line(&mut st, false).unwrap(), b"");
-        assert_eq!(line(&mut st, false).unwrap(), b"l3\rX");
-        assert_eq!(line(&mut st, false), None);
-        st.seek(SeekFrom::Start(0), &mut io::sink()).unwrap();
-        assert_eq!(bytes(&mut st, 3), b"l1\n");
-        assert_eq!(bytes(&mut st, 3), b"l2\n");
-        assert_eq!(bytes(&mut st, 3), b"\nl3");
-        // A seek between `\r` and `\n` reads the `\n`.
-        st.seek(SeekFrom::Start(2), &mut io::sink()).unwrap();
-        assert_eq!(bytes(&mut st, 2), b"\nl");
-        assert_eq!(st.seek(SeekFrom::End(0), &mut io::sink()).unwrap(), 24);
-        drop(st);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn unread_gives_back_raw_bytes() {
-        // After reading "l1\n", the position is past the raw "l1\r\n".
-        let (mut st, path) = text_file(R, true, true);
-        assert_eq!(line(&mut st, true).unwrap(), b"l1\n");
-        assert_eq!(st.seek(SeekFrom::Current(0), &mut io::sink()).unwrap(), 4);
-        assert_eq!(bytes(&mut st, 5), b"l2\n\nl");
-        assert_eq!(st.seek(SeekFrom::Current(0), &mut io::sink()).unwrap(), 10);
-        // At the end, the position is the Ctrl-Z's, which ends input again.
-        assert_eq!(all(&mut st), b"3\rX");
-        assert_eq!(st.seek(SeekFrom::Current(0), &mut io::sink()).unwrap(), 13);
-        assert_eq!(all(&mut st), b"");
-        drop(st);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn crlf_across_buffers_is_joined() {
-        let mut raw = vec![b'x'; BUFSIZ - 1];
-        raw.extend_from_slice(b"\r\n");
-        raw.extend(std::iter::repeat(b'y').take(BUFSIZ - 2));
-        raw.extend_from_slice(b"\r\nz\r");
-        let (mut st, path) = text_file(&raw, true, false);
-        let got = all(&mut st);
-        assert_eq!(got.len(), raw.len() - 2);
-        assert_eq!(got.iter().filter(|&&b| b == b'\r').count(), 1);
-        assert!(got.ends_with(b"\nz\r"));
-        drop(st);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn text_writes_translate() {
-        let (mut st, path) = text_file(b"", false, true);
-        st.write(b"a\nb\r\nc\rd\x1ae\n", &mut io::sink()).unwrap();
-        st.close(&mut io::sink()).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\r\r\nc\rd\x1ae\r\n");
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn append_plus_drops_a_final_ctrl_z() {
-        let (path, _) = crate::sys::temp_file().unwrap();
-        std::fs::write(&path, b"x\x1a").unwrap();
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        drop_end_of_text(&mut f).unwrap();
-        drop(f);
-        assert_eq!(std::fs::read(&path).unwrap(), b"x");
-        let _ = std::fs::remove_file(path);
-    }
+/// Open the library: the `io` table, the `FILE*` metatable and the
+/// standard files, which are also the default input and output. Returns
+/// the table.
+pub fn open<'s>(s: &'s Scope<'s>) -> Result<Table<'s>, Error> {
+    let setup = s.create_native::<io_setup>();
+    let made = setup.call(())?;
+    Ok(made
+        .into_iter()
+        .next()
+        .and_then(|v| v.as_table())
+        .expect("io_setup returns the io table"))
 }

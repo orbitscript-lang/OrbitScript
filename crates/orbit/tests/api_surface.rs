@@ -238,6 +238,7 @@ fn host_exit_ends_the_process() {
         let mut iso = isolate();
         iso.before_exit(|| println!("before exit"));
         let _ = iso.scope(|s| {
+            s.before_exit(|| println!("scope hook"));
             let g = s.globals();
             g.set("quit", s.create_function(|call| call.exit(7, true)))?;
             g.set(
@@ -261,7 +262,11 @@ fn host_exit_ends_the_process() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(7), "{stdout}");
-    assert!(stdout.contains("closed\nbefore exit"), "{stdout}");
+    assert!(stdout.contains("closed\n"), "{stdout}");
+    assert!(
+        stdout.contains("before exit") && stdout.contains("scope hook"),
+        "{stdout}"
+    );
 }
 
 /// The stack API's codes and threads.

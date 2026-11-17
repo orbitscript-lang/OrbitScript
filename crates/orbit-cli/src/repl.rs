@@ -3,7 +3,7 @@
 //! gets [`editor`]'s line editing, history and completion; anything else
 //! is read as plain lines.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::sync::atomic::Ordering;
 
 use orbit::{Chunk, Function, Pinned, Value};
@@ -87,9 +87,8 @@ impl Runner {
         let _ = out.write_all(&prompt);
         let _ = out.flush();
         let mut line = Vec::new();
-        let read = awaiting_input(&self.iso.interrupt(), || {
-            std::io::stdin().lock().read_until(b'\n', &mut line)
-        });
+        let mut input = self.stdin();
+        let read = awaiting_input(&self.iso.interrupt(), || input.read_line(&mut line));
         match read {
             Ok(0) | Err(_) => None,
             Ok(_) => {
@@ -187,17 +186,26 @@ impl Runner {
 }
 
 impl Runner {
+    /// Standard input as this isolate reads it: the stream behind
+    /// `io.stdin`, so the prompt and scripts share one buffer.
+    fn stdin(&mut self) -> orbit_std::StandardInput {
+        orbit_std::stdin(self.iso.scope(|s| s.line_endings()))
+    }
+}
+
+impl Runner {
     /// On a terminal with line editing, read a line with [`editor`];
     /// `None` when there's no editor, or it can't work this terminal and
     /// plain lines are read from now on.
     fn edit_line(&mut self, prompt: &[u8]) -> Option<Option<Vec<u8>>> {
         let mut le = self.repl.editor.take()?;
+        let mut input = self.stdin();
         let interrupt = self.iso.interrupt();
         let r = awaiting_input(&interrupt, || {
             le.editor.read_line(
                 prompt,
                 &mut *le.term,
-                &mut std::io::stdin().lock(),
+                &mut input,
                 &mut std::io::stdout(),
                 &mut |path, frag| self.completions(path, frag),
             )

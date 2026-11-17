@@ -18,6 +18,9 @@ pub struct Host {
     pub(crate) limits: Limits,
     /// Where `print` writes. Buffered; call [`Vm::flush`] before exiting.
     out: Box<dyn WriteDebug>,
+    /// Whether the host sent `out` elsewhere ([`Host::set_out`]) rather
+    /// than leaving it the process's standard output.
+    out_redirected: bool,
     /// Whether `warn` messages are shown (on stderr). Off at start, as in
     /// the reference interpreter; `warn("@on")` and `warn("@off")` switch it.
     warnings: bool,
@@ -48,6 +51,7 @@ impl Host {
         Host {
             limits: Limits::default(),
             out: process_stdout(LineEndings::default()),
+            out_redirected: false,
             line_endings: LineEndings::default(),
             warnings: false,
             warn_hook: None,
@@ -75,7 +79,28 @@ impl Host {
 
     /// Send `print` output to `out`.
     pub fn set_out(&mut self, out: Box<dyn WriteDebug>) {
+        let _ = self.out.flush();
         self.out = out;
+        self.out_redirected = true;
+    }
+
+    /// Write the process's standard output through `out` from now on,
+    /// unless the host redirected it ([`Host::set_out`]): a library's
+    /// writer for the same stream (`orbit-std`'s, over the C library's
+    /// `stdout`). Gives whether it took `out`.
+    pub fn set_process_out(&mut self, out: Box<dyn WriteDebug>) -> bool {
+        if self.out_redirected {
+            return false;
+        }
+        let _ = self.out.flush();
+        self.out = out;
+        true
+    }
+
+    /// Whether the host sent standard output somewhere other than the
+    /// process's standard output.
+    pub fn out_redirected(&self) -> bool {
+        self.out_redirected
     }
 
     /// How text streams treat line endings ([`LineEndings`]).
@@ -89,6 +114,7 @@ impl Host {
         let _ = self.out.flush();
         self.line_endings = line_endings;
         self.out = process_stdout(line_endings);
+        self.out_redirected = false;
     }
 
     /// Show `warn` messages or not, as `warn("@on")` and `warn("@off")` do.

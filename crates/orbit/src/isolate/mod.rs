@@ -276,6 +276,17 @@ impl Isolate {
         self.vm.host_mut().set_out(Box::new(out));
     }
 
+    /// Write the process's standard output through `out`, unless the host
+    /// sent it elsewhere with [`Isolate::set_stdout`]: for a library with
+    /// its own writer for the same stream, as `orbit-std` has for the C
+    /// library's `stdout`. Gives whether it took `out`.
+    pub fn set_process_stdout(
+        &mut self,
+        out: impl std::io::Write + std::fmt::Debug + 'static,
+    ) -> bool {
+        self.vm.host_mut().set_process_out(Box::new(out))
+    }
+
     /// Whether `os.setlocale` changes this isolate's own locale (the
     /// default) or the process's, as PUC Lua does (ADR-13). The locale
     /// scripts see doesn't change: a switch to the process's takes it on,

@@ -120,8 +120,10 @@ LUALIB_API void luaL_pushresultsize(luaL_Buffer *B, size_t sz);
 LUALIB_API char *luaL_buffinitsize(lua_State *L, luaL_Buffer *B, size_t sz);
 #define luaL_prepbuffer(B) luaL_prepbuffsize(B, LUAL_BUFFERSIZE)
 
-/* File handles. OrbitScript's io handles are not luaL_Streams yet:
-   luaL_checkudata(L, i, LUA_FILEHANDLE) raises "FILE* expected" for them. */
+/* File handles: the io library's handles are luaL_Streams, and a
+   luaL_Stream made here with the LUA_FILEHANDLE metatable is a file to io.
+   On Windows, f belongs to the C runtime OrbitScript uses (build modules
+   with /MD). */
 #define LUA_FILEHANDLE "FILE*"
 typedef struct luaL_Stream {
   FILE *f;

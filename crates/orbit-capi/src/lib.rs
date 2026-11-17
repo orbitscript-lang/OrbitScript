@@ -37,6 +37,18 @@ pub fn install(iso: &mut orbit::Isolate, lock_cpath: bool) {
 fn install_loader(s: &mut Stack<'_>) {
     ffi::install(s);
     s.extension(|d: &mut DynLoader| d.load = Some(ffi::load));
+    orbit_std::share_streams_with_c(s, ffi::io_closef_address(), call_closef);
+}
+
+/// Close a `luaL_Stream` a C module made, through its `closef`, with the
+/// handle at `idx` as the only argument.
+fn call_closef(s: &mut Stack<'_>, idx: i32, closef: usize) -> StackResult<Return> {
+    let idx = s.abs_index(idx);
+    let top = s.top();
+    push_c_function(s, closef as u64, 0)?;
+    s.push_copy(idx);
+    s.call(1, -1)?;
+    Ok(Return::values((s.top() - top) as usize))
 }
 
 /// The native behind every C function value. Its closure's data word

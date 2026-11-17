@@ -145,3 +145,15 @@ pub(crate) fn flush_c_streams() {
     // stream; no pointer of ours is passed or kept.
     unsafe { libc::fflush(std::ptr::null_mut()) };
 }
+
+#[cfg(all(test, feature = "io"))]
+mod tests {
+    /// An error we detect ourselves reads as the system's own: no script
+    /// path reaches one today, as `io` checks for closed files first.
+    #[test]
+    fn system_errors_read_as_the_systems() {
+        let e = super::system_error(libc::EBADF);
+        assert_eq!(super::errno(&e), Some(libc::EBADF));
+        assert_eq!(crate::os_error_text(&e), "Bad file descriptor");
+    }
+}

@@ -177,6 +177,20 @@ fn c_api_works_for_a_module() {
     check(&orbit(&[script.to_str().unwrap()], &cpath(dir)), "ok\n");
 }
 
+/// `print`, `io.write` and a C module's `printf` share C's `stdout`, so
+/// their output keeps its order, as in lua5.5 (ADR-15).
+#[test]
+fn print_and_c_printf_share_one_buffer() {
+    let Some(dir) = module_dir() else { return };
+    let code = "local t = require 'testmod'
+                t.printf('C1\\n') print('L1') t.printf('C2\\n') io.write('L2\\n')
+                io.stdout:write('L3\\n') t.printf('C3\\n')";
+    check(
+        &orbit(&["-e", code], &cpath(dir)),
+        "C1\nL1\nC2\nL2\nL3\nC3\n",
+    );
+}
+
 #[test]
 fn scripts_can_change_cpath_by_default() {
     let Some(dir) = module_dir() else { return };

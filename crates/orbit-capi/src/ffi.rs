@@ -44,6 +44,7 @@ extern "C" {
     fn orbit_capi_trampoline(l: *mut LState, f: CFn) -> c_int;
     fn orbit_capi_trampoline_k(l: *mut LState, k: KFn, status: c_int, ctx: isize) -> c_int;
     fn orbit_capi_set_wake(l: *mut LState, wake: *mut u8);
+    fn orbit_capi_io_closef(l: *mut LState) -> c_int;
     fn orbit_capi_take_hook(
         l: *mut LState,
         f: *mut Option<HookFn>,
@@ -739,6 +740,7 @@ struct RTable {
     gettable: extern "C" fn(*mut LState, c_int) -> c_int,
     gettop: extern "C" fn(*mut LState) -> c_int,
     getupvalue: extern "C" fn(*mut LState, c_int, c_int) -> *const c_char,
+    ioclose: extern "C" fn(*mut LState) -> c_int,
     iscfunction: extern "C" fn(*mut LState, c_int) -> c_int,
     isinteger: extern "C" fn(*mut LState, c_int) -> c_int,
     isnumber: extern "C" fn(*mut LState, c_int) -> c_int,
@@ -836,6 +838,7 @@ static TABLE: RTable = RTable {
     gettable: orbit_r_gettable,
     gettop: orbit_r_gettop,
     getupvalue: orbit_r_getupvalue,
+    ioclose: orbit_r_ioclose,
     iscfunction: orbit_r_iscfunction,
     isinteger: orbit_r_isinteger,
     isnumber: orbit_r_isnumber,
@@ -1356,6 +1359,21 @@ extern "C" fn orbit_r_load(
     entry!(l, abi::ERRSYNTAX, |_b, c| Ok(
         c.load(bytes, name, mode) as c_int
     ))
+}
+
+/// An `io` handle's `closef` ([`io_closef_address`]): close the file at
+/// index 1 as its `close` method does. Gives how many results it pushed.
+extern "C" fn orbit_r_ioclose(l: *mut LState) -> c_int {
+    entry!(l, 0, |_b, c| {
+        let top = c.top();
+        let _ = orbit_std::close_file(c, 1)?;
+        Ok(c.top() - top)
+    })
+}
+
+/// The C function every open `io` handle holds as its `closef`.
+pub(crate) fn io_closef_address() -> usize {
+    orbit_capi_io_closef as *const () as usize
 }
 
 extern "C" fn orbit_r_isrustudata(l: *mut LState, idx: c_int) -> c_int {
