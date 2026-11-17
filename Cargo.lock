@@ -145,6 +145,7 @@ name = "orbit-cli"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "libc",
  "orbit",
  "orbit-capi",
  "orbit-compiler",
