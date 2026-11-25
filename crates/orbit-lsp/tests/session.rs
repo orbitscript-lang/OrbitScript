@@ -532,3 +532,32 @@ fn scripts_check_clean() {
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
+
+/// A document too deeply nested to parse is reported, not a crash: `scope` statements and
+/// `?` types each nest a level, and every one counts against the parser's limit.
+#[test]
+fn deeply_nested_documents_get_a_diagnostic() {
+    let (mut s, dir) = Server::start("lsp-deep");
+    s.initialize(&dir, &["utf-16"]);
+    for (file, text) in [
+        (
+            "scopes.orb",
+            format!("fn f() {{ {}g(); }}\n", "scope ".repeat(40_000)),
+        ),
+        (
+            "optional.orb",
+            format!("let x: int{} = 1;\n", "?".repeat(100_000)),
+        ),
+    ] {
+        let doc = uri(&dir, file);
+        s.open(&doc, "orbitscript", &text);
+        let diags = s.diagnostics(&doc);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d["message"].as_str().unwrap().contains("nested too deeply")),
+            "{file}: {diags:?}"
+        );
+    }
+    assert_eq!(s.stop(), 0);
+}

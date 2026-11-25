@@ -193,13 +193,14 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Whether the checker's own diagnostic `d` already tells the user about the compile error
-/// `e`. The checker has rules of its own for a few things lowering also refuses (an unknown
-/// name, a missing field, an `as` target that can't be checked), reported under the same code
-/// and sometimes with what it knows about types in the message; when one of them is reported
-/// at the same place, the compile error would only repeat it.
-fn covers(d: &Diagnostic, e: &Diagnostic) -> bool {
-    d.code == e.code && d.span.start == e.span.start
+/// The checker's own diagnostic `d` already tells the user about the compile error `e` when
+/// the two have the same key. The checker has rules of its own for a few things lowering also
+/// refuses (an unknown name, a missing field, an `as` target that can't be checked), reported
+/// under the same code and sometimes with what it knows about types in the message; when one
+/// of them is reported at the same place, the compile error would only repeat it. Kept as a
+/// set of keys, so a module with many errors isn't checked in quadratic time.
+fn covers_key(d: &Diagnostic) -> (Code, u32) {
+    (d.code, d.span.start)
 }
 
 fn is_word_byte(b: u8) -> bool {
@@ -575,8 +576,9 @@ impl Workspace {
         }
         pragmas.apply(&ast.source, strict, &mut diagnostics);
         // Added after the pragmas so that none can hide them; see `covers`.
+        let mut covered: HashSet<_> = diagnostics.iter().map(covers_key).collect();
         for e in compile_errors {
-            if !diagnostics.iter().any(|d| covers(d, &e)) {
+            if covered.insert(covers_key(&e)) {
                 diagnostics.push(e);
             }
         }

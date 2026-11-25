@@ -67,6 +67,12 @@ const SHAPES: &[Shape] = &[
     ("functions", |n| {
         format!("{}{}", "fn f() {".repeat(n), "}".repeat(n))
     }),
+    ("scope statements", |n| {
+        format!("fn g() {{}} fn f() {{ {}g(); }}", "scope ".repeat(n))
+    }),
+    ("optional types", |n| {
+        format!("let x: int{} = 1;", "?".repeat(n))
+    }),
 ];
 
 /// Runs the whole front end and the compiler on `src`.
