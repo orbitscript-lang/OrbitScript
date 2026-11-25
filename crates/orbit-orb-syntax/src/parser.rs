@@ -804,7 +804,11 @@ impl Parser<'_> {
                 span,
             }
         } else {
-            match self.statement()? {
+            // `scope scope ...` nests a statement per `scope`, so each counts as a level.
+            self.enter()?;
+            let inner = self.statement()?;
+            self.leave();
+            match inner {
                 StmtOrTail::Stmt(s) => s,
                 StmtOrTail::Tail(_) => return Err(self.expected("`;`")),
             }
@@ -1478,13 +1482,18 @@ impl Parser<'_> {
         Ok(self.make_type(start, || TypeKind::Rest(t)))
     }
 
-    /// A type with any `?` suffixes.
+    /// A type with any `?` suffixes. Each nests the type a level deeper, and what walks the
+    /// tree (the checker, the formatter) recurses on it, so each counts against the depth.
     fn type_suffixed(&mut self, unions: bool) -> PResult<Type> {
         let start = self.tok.span.start;
         let mut t = self.type_primary(unions)?;
+        let mut levels = 0;
         while self.eat(Punct::Question)? {
+            self.enter()?;
+            levels += 1;
             t = self.make_type(start, || TypeKind::Optional(t));
         }
+        self.depth -= levels;
         Ok(t)
     }
 

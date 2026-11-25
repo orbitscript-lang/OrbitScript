@@ -29,6 +29,14 @@ pub fn current_encoding() -> string {
 pub struct Text {
     text: string,
     lines: [int],
+    /// No byte of `text` is past ASCII, so every column is a byte count.
+    ascii: bool,
+    /// The last count `columns` made: from offset `counted_from` to `counted_to`,
+    /// `counted` columns. Positions come in order (diagnostics are sorted), so the next
+    /// count along the same line carries on from it rather than starting the line again.
+    counted_from: int,
+    counted_to: int,
+    counted: int,
 }
 
 /// The offset each line starts at: `lines[1]` is 0.
@@ -68,12 +76,9 @@ fn utf16_units(len: int) -> int {
     if len == 4 { 2 } else { 1 }
 }
 
-/// How many columns the bytes `from` to `to` (offsets, `to` excluded) of
-/// `text` take.
-fn columns(text: string, from: int, to: int) -> int {
-    if encoding == "utf-8" || string::find(text, "[\x80-\xff]", from + 1) == nil {
-        return to - from;
-    }
+/// How many UTF-16 code units the bytes `from` to `to` (offsets, `to` excluded) of `text`
+/// take.
+fn utf16_columns(text: string, from: int, to: int) -> int {
     let mut n = 0;
     for i in from + 1..=to {
         let len = utf8_length(string::byte(text, i));
@@ -84,14 +89,49 @@ fn columns(text: string, from: int, to: int) -> int {
     n
 }
 
+/// Whether no byte of `text` is past ASCII.
+fn is_ascii(text: string) -> bool {
+    string::find(text, "[\x80-\xff]") == nil
+}
+
 impl Text {
     pub fn new(text: string) -> Text {
-        Text { text, lines: line_starts(text) }
+        Text {
+            text,
+            lines: line_starts(text),
+            ascii: is_ascii(text),
+            counted_from: 0,
+            counted_to: 0,
+            counted: 0,
+        }
     }
 
     pub fn set(self, text: string) {
         self.text = text;
         self.lines = line_starts(text);
+        self.ascii = is_ascii(text);
+        self.counted_from = 0;
+        self.counted_to = 0;
+        self.counted = 0;
+    }
+
+    /// How many columns the bytes `from` to `to` (offsets, `to` excluded) take. Each byte
+    /// is looked at once however many positions a line has, if they come in order: a
+    /// document with many diagnostics would otherwise be counted in quadratic time.
+    fn columns(self, from: int, to: int) -> int {
+        if encoding == "utf-8" || self.ascii {
+            return to - from;
+        }
+        let mut n = 0;
+        if from == self.counted_from && self.counted_to <= to {
+            n = self.counted + utf16_columns(self.text, self.counted_to, to);
+        } else {
+            n = utf16_columns(self.text, from, to);
+        }
+        self.counted_from = from;
+        self.counted_to = to;
+        self.counted = n;
+        n
     }
 
     /// The line (from 1) holding `offset`.
@@ -125,7 +165,7 @@ impl Text {
     pub fn position(self, offset: int) -> Position {
         let offset = math::min(math::max(offset, 0), #self.text);
         let line = self.line_of(offset);
-        #{ line: line - 1, character: columns(self.text, self.lines[line], offset) }
+        #{ line: line - 1, character: self.columns(self.lines[line], offset) }
     }
 
     pub fn range(self, start: int, end: int) -> Range {
@@ -174,8 +214,8 @@ impl Text {
         while from < end {
             let stop = math::min(self.line_end(line), end);
             if stop > from {
-                let column = columns(self.text, self.lines[line], from);
-                out[#out + 1] = [line - 1, column, columns(self.text, from, stop)];
+                let column = self.columns(self.lines[line], from);
+                out[#out + 1] = [line - 1, column, self.columns(from, stop)];
             }
             if line >= #self.lines {
                 break;

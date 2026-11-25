@@ -17,9 +17,10 @@
 //! values: `report` can only return the error, `?` always leaves, and the recovery code after
 //! it is unreachable, so none of it is in the compiler.
 
+use std::collections::HashSet;
 use std::marker::PhantomData;
 
-use orbit_hir::Diagnostic;
+use orbit_hir::{Code, Diagnostic, Span};
 
 use super::observe::{Nothing, Observer};
 
@@ -94,6 +95,9 @@ impl<'a, O: Observer<'a>> Mode<'a> for Check<O> {
 #[derive(Default)]
 pub(super) struct Collect {
     pub(super) found: Vec<Diagnostic>,
+    /// The code and span of each diagnostic in `found`, so a repeat is found without
+    /// searching them all: a module with many errors would make that quadratic.
+    seen: HashSet<(Code, Span)>,
 }
 
 impl Reporter for Collect {
@@ -103,11 +107,7 @@ impl Reporter for Collect {
     fn report(&mut self, error: Diagnostic) -> Result<(), Diagnostic> {
         // Lowering reads some nodes twice (a pattern for its test and again for its bindings,
         // a path for its kind and again for its value), and so finds their errors twice.
-        let repeated = self
-            .found
-            .iter()
-            .any(|d| d.code == error.code && d.span == error.span);
-        if !repeated {
+        if self.seen.insert((error.code, error.span)) {
             self.found.push(error);
         }
         Ok(())
