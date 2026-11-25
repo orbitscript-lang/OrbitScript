@@ -46,7 +46,10 @@ pub(crate) fn link(
         let mut linked: Vec<Option<Gc<Proto>>> = vec![None; n];
         // Equal long-string constants share one string across the chunk's functions, as in
         // lua5.5 (`string.format("%p")` shows it). Short strings are interned anyway.
+        // Constants sharing one allocation (a decoded chunk's back-references) are found by
+        // address, so a string used many times is hashed once rather than once per use.
         let mut long_strs: HashMap<&[u8], Gc<LuaStr>> = HashMap::new();
+        let mut long_by_address: HashMap<*const u8, Gc<LuaStr>> = HashMap::new();
         for i in (0..n).rev() {
             let u = &chunk.protos[i];
             let consts: Vec<Value> = u
@@ -58,11 +61,13 @@ pub(crate) fn link(
                     Constant::Str(b) if b.len() <= MAX_SHORT => {
                         Value::Str(rt.strings.intern(heap, b))
                     }
-                    Constant::Str(b) => Value::Str(
-                        *long_strs
-                            .entry(b)
-                            .or_insert_with(|| rt.strings.new_str(heap, b)),
-                    ),
+                    Constant::Str(b) => {
+                        Value::Str(*long_by_address.entry(b.as_ptr()).or_insert_with(|| {
+                            *long_strs
+                                .entry(b)
+                                .or_insert_with(|| rt.strings.new_str(heap, b))
+                        }))
+                    }
                 })
                 .collect();
             // Each cache gets its instruction's key. Indexes saturate in a

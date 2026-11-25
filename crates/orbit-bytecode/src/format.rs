@@ -22,6 +22,7 @@
 
 use core::fmt;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::{
     CaptureSource, Constant, DebugInfo, FunctionName, LocalInfo, LocalSlot, Op, OperandOrigin,
@@ -74,7 +75,7 @@ pub fn encode(chunk: &UnlinkedChunk, strip: bool) -> Vec<u8> {
     w.bytes(if strip { b"?" } else { chunk.name.as_bytes() });
     w.bytes(if strip { b"=?" } else { &chunk.source });
     w.uint(chunk.protos.len() as u64);
-    let mut strings = HashMap::new();
+    let mut strings = Written::default();
     for p in &chunk.protos {
         proto(&mut w, p, strip, &mut strings);
     }
@@ -167,8 +168,9 @@ impl Writer {
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
-    /// The string constants read so far, for back-references.
-    strings: Vec<Box<[u8]>>,
+    /// The string constants read so far, for back-references, which share
+    /// them rather than copying.
+    strings: Vec<Arc<[u8]>>,
 }
 
 impl Reader<'_> {
@@ -431,14 +433,31 @@ pub fn decode_op(bytes: &[u8]) -> Result<Op> {
     })
 }
 
-/// `strings` maps each string constant written so far to its position in
-/// that sequence.
-fn proto<'a>(
-    w: &mut Writer,
-    p: &'a UnlinkedProto,
-    strip: bool,
-    strings: &mut HashMap<&'a [u8], u64>,
-) {
+/// The string constants written so far, each with its position in that
+/// sequence. Constants sharing one allocation are found by address first,
+/// so a string referred to many times is hashed once, not once per use.
+#[derive(Default)]
+struct Written<'a> {
+    by_address: HashMap<*const u8, u64>,
+    by_content: HashMap<&'a [u8], u64>,
+}
+
+impl<'a> Written<'a> {
+    /// The position of a string equal to `s` written earlier, or `None`
+    /// after recording `s` as the next one.
+    fn find_or_add(&mut self, s: &'a Arc<[u8]>) -> Option<u64> {
+        let address = s.as_ptr();
+        if let Some(&i) = self.by_address.get(&address) {
+            return Some(i);
+        }
+        let next = self.by_content.len() as u64;
+        let i = *self.by_content.entry(s).or_insert(next);
+        self.by_address.insert(address, i);
+        (i != next).then_some(i)
+    }
+}
+
+fn proto<'a>(w: &mut Writer, p: &'a UnlinkedProto, strip: bool, strings: &mut Written<'a>) {
     match &p.name {
         FunctionName::Main => w.0.push(0),
         FunctionName::Anonymous => w.0.push(1),
@@ -466,15 +485,12 @@ fn proto<'a>(
                 w.0.push(1);
                 w.0.extend_from_slice(&f.to_bits().to_le_bytes());
             }
-            Constant::Str(s) => match strings.get(&**s) {
-                Some(&i) => {
+            Constant::Str(s) => match strings.find_or_add(s) {
+                Some(i) => {
                     w.0.push(3);
                     w.uint(i);
                 }
-                None => {
-                    strings.insert(s, strings.len() as u64);
-                    named(w, 2, s);
-                }
+                None => named(w, 2, s),
             },
         }
     }
@@ -577,8 +593,8 @@ fn read_proto(r: &mut Reader<'_>) -> Result<UnlinkedProto> {
                 Constant::Float(f64::from_bits(u64::from_le_bytes(b)))
             }
             2 => {
-                let s = r.bytes()?;
-                r.strings.push(s.clone());
+                let s: Arc<[u8]> = r.bytes()?.into();
+                r.strings.push(Arc::clone(&s));
                 Constant::Str(s)
             }
             3 => {
@@ -587,7 +603,7 @@ fn read_proto(r: &mut Reader<'_>) -> Result<UnlinkedProto> {
                     .ok()
                     .and_then(|i| r.strings.get(i))
                     .ok_or(FormatError::Malformed("string reference"))?;
-                Constant::Str(s.clone())
+                Constant::Str(Arc::clone(s))
             }
             _ => return Err(FormatError::Malformed("constant")),
         })
@@ -699,7 +715,7 @@ mod tests {
                 Op::Return0,
             ],
             consts: vec![
-                Constant::Str(s("print")),
+                Constant::Str(b"print".as_slice().into()),
                 Constant::Float(-0.0),
                 Constant::Int(i64::MIN),
             ],
@@ -800,15 +816,42 @@ mod tests {
     #[test]
     fn repeated_strings_are_written_once() {
         let mut c = sample();
-        let s: Box<[u8]> = b"a string written only once".as_slice().into();
+        let s: Arc<[u8]> = b"a string written only once".as_slice().into();
         let mut p = c.protos[0].clone();
-        p.consts.push(Constant::Str(s.clone()));
-        c.protos[0].consts.push(Constant::Str(s.clone()));
+        // Once sharing the first constant's bytes, once an equal copy.
+        p.consts.push(Constant::Str(Arc::clone(&s)));
+        p.consts.push(Constant::Str(s.to_vec().into()));
+        c.protos[0].consts.push(Constant::Str(Arc::clone(&s)));
         c.protos.push(p);
         let bytes = encode(&c, true);
         let count = bytes.windows(s.len()).filter(|w| *w == &*s).count();
         assert_eq!(count, 1);
         assert_eq!(decode(&bytes).unwrap().protos, encode_strip_round(&c));
+    }
+
+    /// A chunk of one long string and many back-references to it decodes
+    /// to constants sharing that string's bytes, so decoding costs no more
+    /// than the chunk's own size, and encoding it again writes them once.
+    #[test]
+    fn back_references_share_one_string() {
+        let long = vec![b'x'; 1 << 16];
+        let mut c = sample();
+        let s: Arc<[u8]> = long.as_slice().into();
+        c.protos[0].consts = (0..1000).map(|_| Constant::Str(Arc::clone(&s))).collect();
+        let bytes = encode(&c, true);
+        assert!(bytes.len() < 2 * long.len());
+        let decoded = decode(&bytes).unwrap();
+        let strs: Vec<&Arc<[u8]>> = decoded.protos[0]
+            .consts
+            .iter()
+            .map(|k| match k {
+                Constant::Str(s) => s,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(strs.len(), 1000);
+        assert!(strs.iter().all(|s| Arc::ptr_eq(s, strs[0])));
+        assert_eq!(encode(&decoded, true), bytes);
     }
 
     fn encode_strip_round(c: &UnlinkedChunk) -> Vec<UnlinkedProto> {

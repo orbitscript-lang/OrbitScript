@@ -1,7 +1,8 @@
 //! `string.dump`: a Lua function as a binary chunk in our own format
 //! (`orbit_bytecode::format`), which `load` reads back after verifying it.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use crate::object::{Gc, LuaHeap, Proto, Value};
 use crate::stack::{Buffer, LibraryRow, Stack, StackResult, library_row};
@@ -25,6 +26,9 @@ fn dump(s: &mut Stack<'_>) -> StackResult<Buffer> {
 pub(crate) fn unlink(heap: &LuaHeap, root: Gc<Proto>) -> UnlinkedChunk {
     let name: Box<str> = heap.get(root).chunk.as_ref().into();
     let mut protos = Vec::new();
+    // One copy of each string's bytes however many constants use it, so a
+    // dump costs no more memory than the function it copies.
+    let mut strings: HashMap<Gc<crate::object::LuaStr>, Arc<[u8]>> = HashMap::new();
     let mut queue = VecDeque::from([root]);
     while let Some(p) = queue.pop_front() {
         let p = heap.get(p);
@@ -50,7 +54,11 @@ pub(crate) fn unlink(heap: &LuaHeap, root: Gc<Proto>) -> UnlinkedChunk {
                 .map(|&k| match k {
                     Value::Int(i) => Constant::Int(i),
                     Value::Float(f) => Constant::Float(f),
-                    Value::Str(s) => Constant::Str(heap.get(s).as_bytes().into()),
+                    Value::Str(s) => Constant::Str(Arc::clone(
+                        strings
+                            .entry(s)
+                            .or_insert_with(|| heap.get(s).as_bytes().into()),
+                    )),
                     _ => unreachable!("constants are numbers and strings"),
                 })
                 .collect(),

@@ -16,6 +16,8 @@
 //!
 //! [VM design]: https://github.com/orbitscript-lang/OrbitScript/blob/main/docs/design/vm.md
 
+use std::sync::Arc;
+
 pub mod format;
 pub mod number;
 pub mod verify;
@@ -424,8 +426,11 @@ impl Op {
 pub enum Constant {
     Int(i64),
     Float(f64),
-    /// A string's bytes (interned when linked).
-    Str(Box<[u8]>),
+    /// A string's bytes (interned when linked). Shared: a chunk refers to
+    /// one string from many constants (format.rs writes the repeats as
+    /// back-references), and each must cost no more than the reference,
+    /// so a small chunk can't decode into a large one.
+    Str(Arc<[u8]>),
 }
 
 /// Where a new closure gets one of its captures from, in the frame that

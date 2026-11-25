@@ -119,7 +119,7 @@ impl Interp {
         match &self.chunk.protos[proto].consts[k as usize] {
             Constant::Int(i) => V::Int(*i),
             Constant::Float(x) => V::Float(*x),
-            Constant::Str(b) => V::Str(b.clone().into()),
+            Constant::Str(b) => V::Str(Rc::from(&b[..])),
         }
     }
 
