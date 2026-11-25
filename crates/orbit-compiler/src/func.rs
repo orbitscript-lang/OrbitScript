@@ -40,7 +40,7 @@ struct LabelState {
 enum ConstKey {
     Int(i64),
     Float(u64),
-    Str(Box<[u8]>),
+    Str(std::sync::Arc<[u8]>),
 }
 
 /// The function's constant table, each value in it once.
