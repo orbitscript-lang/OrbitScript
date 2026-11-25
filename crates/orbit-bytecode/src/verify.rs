@@ -18,13 +18,18 @@
 //!    that tracks, per register, the facts the VM assumes without checking:
 //!    that `SetList`'s target holds the table `NewTable` made, that a
 //!    `ForLoop`'s state was set up by its `ForPrep` and not overwritten since,
-//!    and that `top` was just set by an open call or `Vararg` starting at or
-//!    after the first register a `MULTI` operand counts from.
+//!    that `top` was just set by an open call or `Vararg` starting at or
+//!    after the first register a `MULTI` operand counts from, and that every
+//!    register an instruction reads was written on every path to it. A
+//!    register nothing has written still holds what an earlier frame left on
+//!    the VM stack, so reading one would hand the chunk values it was never
+//!    given.
 //!
 //! The data-flow layer assumes what the VM does: an instruction writes only
 //! the registers its documentation names (and `Concat` its operands, where
 //! `__concat` leaves partial results), a call clobbers every register from
-//! its function slot up (the callee's frame lives there), and metamethods
+//! its function slot up (the callee's frame lives there, and only the
+//! results it returns count as written), and metamethods
 //! run above the frame's registers.
 
 use core::fmt;

@@ -144,3 +144,115 @@ fn variables_to_close_stay_balanced() {
         }
     }
 }
+
+/// A binary chunk whose main function is `code`, with `nregs` registers and
+/// `nparams` parameters.
+fn chunk_with_frame(nregs: u8, nparams: u8, code: Vec<Op>) -> Vec<u8> {
+    let mut chunk = Compiler
+        .compile(b"local a = 1", "t", Language::Lua)
+        .unwrap();
+    let p = &mut chunk.protos[0];
+    p.code = code;
+    p.nregs = nregs;
+    p.nparams = nparams;
+    p.is_vararg = false;
+    p.debug = Default::default();
+    format::encode(&chunk, true)
+}
+
+/// A register no path has written holds whatever an earlier frame left on
+/// the VM stack, so reading one would hand a chunk values it was never
+/// given. Full verification rejects every such read.
+#[test]
+fn registers_are_written_before_they_are_read() {
+    let one = |dst| Op::LoadInt { dst, value: 1 };
+    let call = |func, nargs, nresults| Op::Call {
+        func,
+        nargs,
+        nresults,
+    };
+    let cases = [
+        // Parameters hold values on entry.
+        (1, vec![Op::Return1 { src: 0 }], None),
+        (0, vec![one(0), Op::Return { first: 0, count: 2 }], Some(())),
+        (0, vec![Op::Return1 { src: 0 }], Some(())),
+        (
+            0,
+            vec![one(0), Op::Move { dst: 1, src: 2 }, Op::Return0],
+            Some(()),
+        ),
+        // Written on one path only.
+        (
+            1,
+            vec![
+                Op::JumpIfTrue { src: 0, off: 1 },
+                one(1),
+                Op::Return1 { src: 1 },
+            ],
+            Some(()),
+        ),
+        // Written on both paths.
+        (
+            1,
+            vec![
+                Op::JumpIfTrue { src: 0, off: 2 },
+                one(1),
+                Op::Jump { off: 1 },
+                one(1),
+                Op::Return1 { src: 1 },
+            ],
+            None,
+        ),
+        // A call's results hold values; what its callee left above them doesn't.
+        (
+            1,
+            vec![one(1), call(0, 0, 2), Op::Return { first: 0, count: 2 }],
+            None,
+        ),
+        (
+            1,
+            vec![
+                one(1),
+                one(2),
+                call(0, 0, 1),
+                Op::Return { first: 0, count: 3 },
+            ],
+            Some(()),
+        ),
+        (1, vec![call(0, 0, MULTI), Op::Return1 { src: 0 }], Some(())),
+        // A numeric loop that never runs leaves its control variable unset.
+        (
+            3,
+            vec![
+                Op::ForPrep { base: 0, exit: 1 },
+                Op::ForLoop { base: 0, back: -1 },
+                Op::Return1 { src: 3 },
+            ],
+            Some(()),
+        ),
+        // The stale-register chunk the verifier once accepted.
+        (
+            0,
+            vec![Op::Return {
+                first: 1,
+                count: 240,
+            }],
+            Some(()),
+        ),
+    ];
+    let mut iso = isolate();
+    iso.set_binary_checks(Some(BinaryChecks::Full));
+    for (nparams, code, reject) in cases {
+        let r = load(&mut iso, &chunk_with_frame(250, nparams, code.clone()));
+        match reject {
+            None => assert_eq!(r, Ok(()), "{code:?}"),
+            Some(()) => {
+                let e = r.unwrap_err();
+                assert!(
+                    e.contains("read of a register no path has written"),
+                    "{code:?}: {e}"
+                );
+            }
+        }
+    }
+}
